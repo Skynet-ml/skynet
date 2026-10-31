@@ -184,7 +184,7 @@ body[data-progress] .setup {
 
 .check-ok::after,
 .check-ok + .check::before {
-  background: var(--success);
+  background: var(--primary-fill);
 }
 
 .dot {
@@ -205,8 +205,8 @@ body[data-progress] .setup {
 }
 
 .check-ok .dot {
-  border-color: var(--success);
-  background: var(--success);
+  border-color: var(--primary-fill);
+  background: var(--primary-fill);
 }
 
 .check-fail .dot {
