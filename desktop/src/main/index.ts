@@ -426,7 +426,7 @@ async function handleAppUrl(raw: string): Promise<void> {
     const result = await hostedLink.finish(callback.code, callback.state);
     if (result.ok) return void (await openApp());
     log(`sign-in finish failed: ${result.detail}`);
-    if (state.kind === "sign_in") setState({ ...state, signIn: "failed", error: result.detail });
+    if (state.kind === "sign_in") setState({ ...state, signIn: result.reason, error: result.reason === "failed" ? result.detail : undefined });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     log(`sign-in finish failed: ${detail}`);

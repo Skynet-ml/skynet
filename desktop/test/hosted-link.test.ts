@@ -25,6 +25,18 @@ describe("mintSessionToken", () => {
   });
 });
 
+describe("HostedLinkClient.finish", () => {
+  it("reports a timeout as unreachable", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new DOMException("The operation was aborted due to timeout", "TimeoutError"); }));
+    expect(await new HostedLinkClient("http://127.0.0.1:1", "s").finish("c", "s")).toMatchObject({ ok: false, reason: "unreachable" });
+  });
+
+  it("reports a 503 from the local API as unreachable", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ detail: "x" }), { status: 503 })));
+    expect(await new HostedLinkClient("http://127.0.0.1:1", "s").finish("c", "s")).toMatchObject({ ok: false, reason: "unreachable" });
+  });
+});
+
 describe("HostedLinkClient.start", () => {
   const respond = (status: number, body: unknown) =>
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(body), { status })));
@@ -69,6 +81,6 @@ describe("HostedLinkClient start and finish requests", () => {
 
   it("reports a refused finish with the backend detail", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ detail: "Start the link again." }), { status: 400 })));
-    expect(await new HostedLinkClient("http://127.0.0.1:1", "s").finish("c", "s")).toEqual({ ok: false, detail: "Start the link again." });
+    expect(await new HostedLinkClient("http://127.0.0.1:1", "s").finish("c", "s")).toEqual({ ok: false, reason: "failed", detail: "Start the link again." });
   });
 });
