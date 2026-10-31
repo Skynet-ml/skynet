@@ -41,6 +41,7 @@ interface Bridge {
   recheck(): Promise<void>;
   continueAnyway(): Promise<void>;
   copy(text: string): Promise<void>;
+  fit(height: number): Promise<void>;
   openLogs(): Promise<void>;
   openDockerDownload(): Promise<void>;
   signIn(): Promise<void>;
@@ -232,6 +233,14 @@ function render(state: State): void {
 for (const node of document.querySelectorAll<HTMLElement>("[data-i18n]")) {
   node.textContent = t(node.dataset.i18n as string);
 }
+
+// The window takes the height of the content, so no screen shows empty space.
+const shell = document.querySelector(".shell") as HTMLElement;
+const setup = document.querySelector(".setup") as HTMLElement;
+new ResizeObserver(() => {
+  const style = getComputedStyle(shell);
+  void window.skynetDesktop.fit(setup.offsetHeight + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom));
+}).observe(setup);
 
 window.skynetDesktop.onState(render);
 void window.skynetDesktop.getState().then(render);

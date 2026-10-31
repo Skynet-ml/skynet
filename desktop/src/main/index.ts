@@ -67,22 +67,16 @@ let hostedLink: HostedLinkClient | null = null;
 let signInUrl: string | null = null;
 let finishingSignIn = false;
 
-// Setup screens are small; the window grows for the web app. Progress screens
-// show only the timeline, so they are shorter than screens that ask for an action.
+// Setup screens are small; the window grows for the web app. The onboarding
+// page reports its content height, so each setup screen has no empty space.
 const SETUP_SIZE = { width: 600, height: 120 };
-const SETUP_ACTION_HEIGHT = 540;
-
-function setupHeight(s: OnboardingState): number {
-  const progress = s.kind === "checking" || s.kind === "starting" || s.kind === "ready";
-  return progress ? SETUP_SIZE.height : SETUP_ACTION_HEIGHT;
-}
+const SETUP_MAX_HEIGHT = 720;
+let setupHeight = SETUP_SIZE.height;
 
 const APP_SIZE = { width: 1440, height: 900, minWidth: 960, minHeight: 640 };
 
 function setState(next: OnboardingState): void {
-  const resize = win !== null && win.webContents.getURL().startsWith("file:") && setupHeight(next) !== setupHeight(state);
   state = next;
-  if (resize) useSetupSize();
   log(`state ${next.kind}${next.step ? ` (${next.step})` : ""}${next.error ? `: ${next.error}` : ""}`);
   win?.webContents.send("onboarding:state", state);
 }
@@ -96,7 +90,7 @@ function locale(): "en" | "he" {
 function useSetupSize(): void {
   if (!win) return;
   win.setMinimumSize(SETUP_SIZE.width, SETUP_SIZE.height);
-  win.setContentSize(SETUP_SIZE.width, setupHeight(state));
+  win.setContentSize(SETUP_SIZE.width, setupHeight);
   win.setResizable(false);
   win.setMaximizable(false);
   win.setFullScreenable(false);
@@ -554,6 +548,13 @@ ipcMain.handle("onboarding:continue", () => {
 });
 ipcMain.handle("onboarding:copy", (_event, text: unknown) => {
   if (typeof text === "string" && text.length < 500) clipboard.writeText(text);
+});
+ipcMain.handle("onboarding:fit", (_event, height: unknown) => {
+  if (typeof height !== "number" || !Number.isFinite(height)) return;
+  const next = Math.min(SETUP_MAX_HEIGHT, Math.max(SETUP_SIZE.height, Math.ceil(height)));
+  if (next === setupHeight || !win?.webContents.getURL().startsWith("file:")) return;
+  setupHeight = next;
+  useSetupSize();
 });
 ipcMain.handle("onboarding:open-logs", () => shell.openPath(logsDir));
 ipcMain.handle("onboarding:sign-in", () => {

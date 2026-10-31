@@ -104,25 +104,14 @@ body {
 }
 
 .shell {
-  height: 100%;
+  min-height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 32px;
+  justify-content: center;
   padding: 28px 32px;
 }
 
-/* Progress screens hold only the timeline, centred in the window. */
-body[data-progress] .shell {
-  justify-content: center;
-}
-
-body[data-progress] .setup {
-  flex: none;
-}
-
 .setup {
-  flex: 1;
-  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 28px;
@@ -135,7 +124,9 @@ body[data-progress] .setup {
 .intro {
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 6px;
+  text-align: center;
 }
 
 /* Horizontal timeline: one column per step, the dot above its label. */
@@ -250,12 +241,9 @@ body[data-progress] .setup {
 }
 
 .panel {
-  flex: 1;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  min-height: 0;
-  overflow-y: auto;
 }
 
 .panel[hidden] {
@@ -277,11 +265,18 @@ h1 {
   max-width: 52ch;
 }
 
+/* Centred, and every button as wide as the widest one. */
 .actions {
-  display: flex;
+  align-self: center;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   gap: 8px;
-  margin-top: auto;
   padding-top: 8px;
+}
+
+.actions .btn {
+  min-width: 132px;
 }
 
 .btn {
