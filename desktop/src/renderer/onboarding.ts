@@ -194,7 +194,7 @@ function panelBody(state: State): Node[] {
       } else {
         if (state.signIn === "declined") nodes.push(el("p", { className: "lead", text: t("sign_in.declined") }));
         if (state.signIn === "failed") nodes.push(el("pre", { className: "detail detail-error", text: state.error || t("sign_in.failed"), dir: "auto" }));
-        nodes.push(actions(button(t("action.retry"), "primary", () => void bridge.signIn()), skip));
+        nodes.push(actions(skip, button(t("action.retry"), "primary", () => void bridge.signIn())));
       }
       break;
     }

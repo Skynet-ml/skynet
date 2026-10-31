@@ -552,7 +552,9 @@ ipcMain.handle("onboarding:copy", (_event, text: unknown) => {
 ipcMain.handle("onboarding:fit", (_event, height: unknown) => {
   if (typeof height !== "number" || !Number.isFinite(height)) return;
   const next = Math.min(SETUP_MAX_HEIGHT, Math.max(SETUP_SIZE.height, Math.ceil(height)));
-  if (next === setupHeight || !win?.webContents.getURL().startsWith("file:")) return;
+  // openApp sends "ready" to this page before loadURL replaces it; a fit from that
+  // last render would shrink the app window back to the setup size.
+  if (state.kind === "ready" || next === setupHeight || !win?.webContents.getURL().startsWith("file:")) return;
   setupHeight = next;
   useSetupSize();
 });
