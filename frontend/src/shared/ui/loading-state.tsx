@@ -1,6 +1,6 @@
-import { CircleNotch } from "@/shared/ui/icons";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
+import { Spinner } from "@/shared/ui/spinner";
 
 interface LoadingStateProps {
   /** Visible caption under the spinner (also what screen readers announce). */
@@ -23,13 +23,7 @@ export function LoadingState({ label, srLabel, fullPage = false, className }: Lo
         className,
       )}
     >
-      <CircleNotch
-        className={cn(
-          "animate-spin text-primary motion-reduce:animate-none",
-          fullPage ? "size-8" : "size-6",
-        )}
-        aria-hidden="true"
-      />
+      <Spinner size={fullPage ? "xl" : "lg"} />
       {label ? (
         <p className="text-xs text-muted-foreground">{label}</p>
       ) : (

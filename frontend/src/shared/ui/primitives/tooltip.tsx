@@ -36,9 +36,12 @@ function useTooltipTriggerContext() {
   return React.useContext(TooltipTriggerContext);
 }
 
+// BoardUI tooltip (SKY-263): a light card surface with a hairline border, a
+// stroked caret, and a short scale-and-blur entrance (`.bui-tooltip` in
+// boardui.css). Radix rotates the caret for each side.
 function TooltipContent({
   className,
-  sideOffset = 0,
+  sideOffset = 10,
   collisionPadding = 8,
   children,
   ...props
@@ -50,18 +53,23 @@ function TooltipContent({
         sideOffset={sideOffset}
         collisionPadding={collisionPadding}
         className={cn(
-          "max-w-(--radix-tooltip-content-available-width) break-words",
-          "w-fit origin-(--radix-tooltip-content-transform-origin) animate-in rounded-md bg-foreground px-3 py-1.5 text-xs text-balance text-background fade-in-0 zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95",
+          "bui-tooltip max-w-[min(240px,var(--radix-tooltip-content-available-width))] break-words",
+          "w-fit origin-(--radix-tooltip-content-transform-origin) rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-balance text-foreground shadow-[var(--shadow-float)]",
           className,
         )}
         style={{ zIndex: 50 }}
         {...props}
       >
         {children}
-        <TooltipPrimitive.Arrow
-          className="size-2.5 rounded-[2px] bg-foreground fill-foreground"
-          style={{ zIndex: 50, transform: "translateY(calc(-50% - 2px)) rotate(45deg)" }}
-        />
+        <TooltipPrimitive.Arrow asChild width={12} height={7}>
+          <svg
+            viewBox="0 0 12 7"
+            className="overflow-visible fill-card stroke-border drop-shadow-[0_1px_1px_rgb(0_0_0/0.05)]"
+            style={{ zIndex: 50, transform: "translateY(-1px)" }}
+          >
+            <path d="M0 0 L6 6 L12 0" />
+          </svg>
+        </TooltipPrimitive.Arrow>
       </TooltipPrimitive.Content>
     </TooltipPrimitive.Portal>
   );

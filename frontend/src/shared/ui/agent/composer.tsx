@@ -14,6 +14,7 @@ import { cn } from "@/shared/lib/utils";
 import { MarkdownPreviewField } from "@/shared/ui/markdown-preview-field";
 
 import { autoResizeTextarea } from "./auto-resize";
+import { ComposerLoader } from "./composer-loader";
 import { MAX_ATTACHMENT_MB, readAttachments, splitClaimed } from "./file-attachments";
 import { PastedTextCard } from "./pasted-text-card";
 import {
@@ -296,6 +297,7 @@ export function Composer({
           onReorderSteering={midTurn.reorderSteering}
         />
       )}
+      <ComposerLoader active={Boolean(streaming)} radius={16}>
       <div
         className={cn(
           "rounded-2xl border border-border bg-muted/20 transition-colors",
@@ -524,6 +526,7 @@ export function Composer({
           </div>
         </div>
       </div>
+      </ComposerLoader>
     </form>
   );
 }

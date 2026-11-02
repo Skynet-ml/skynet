@@ -17,9 +17,9 @@ import {
   SheetTitle,
 } from "@/shared/ui/primitives/sheet";
 import {
-  SLIDING_PILL_TABS_INDICATOR_CLASS,
-  SLIDING_PILL_TABS_LIST_CLASS,
-  SLIDING_PILL_TABS_TRIGGER_CLASS,
+  UNDERLINE_TABS_INDICATOR_CLASS,
+  UNDERLINE_TABS_LIST_CLASS,
+  UNDERLINE_TABS_TRIGGER_CLASS,
   Tabs,
   TabsContent,
   TabsList,
@@ -36,7 +36,7 @@ import {
 } from "../lib/meta-harness";
 import { displayCandidateId, displayCaseId } from "../lib/types";
 import { AgentRunTranscript } from "./AgentRunTranscript";
-import { slidingPillStyle, Stat } from "./run-stat";
+import { underlineTabStyle, Stat } from "./run-stat";
 
 const POLL_MS = 2000;
 
@@ -214,14 +214,14 @@ function RunBody({ optimizationId, run }: { optimizationId: string; run: AgentRu
             onValueChange={(value) => setTab(value as RunTab)}
             className="min-h-0 flex-1"
           >
-            <TabsList className={SLIDING_PILL_TABS_LIST_CLASS}>
+            <TabsList className={UNDERLINE_TABS_LIST_CLASS}>
               <div
-                className={SLIDING_PILL_TABS_INDICATOR_CLASS}
-                style={slidingPillStyle(tabs.indexOf(tab), tabs.length)}
+                className={UNDERLINE_TABS_INDICATOR_CLASS}
+                style={underlineTabStyle(tabs.indexOf(tab), tabs.length)}
                 aria-hidden="true"
               />
               {tabs.map((value) => (
-                <TabsTrigger key={value} value={value} className={SLIDING_PILL_TABS_TRIGGER_CLASS}>
+                <TabsTrigger key={value} value={value} className={UNDERLINE_TABS_TRIGGER_CLASS}>
                   {msg(TAB_LABELS[value])}
                 </TabsTrigger>
               ))}

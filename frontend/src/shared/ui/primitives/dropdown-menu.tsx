@@ -5,25 +5,20 @@ import { DropdownMenu as DropdownMenuPrimitive } from "radix-ui";
 
 import { cn } from "@/shared/lib/utils";
 
-// Shared panel chrome for the root content and submenus — mirrors
-// PopoverContent so menus and popovers read as one family.
+// Shared panel chrome for the root content and submenus, in the BoardUI
+// style (SKY-263): a card surface with a hairline border, inset rounded rows,
+// and a short scale-and-blur entrance (`.bui-menu` in boardui.css).
 const panelClass = cn(
-  "origin-(--radix-dropdown-menu-content-transform-origin)",
-  "animate-in fade-in-0 zoom-in-95",
-  "data-[side=bottom]:slide-in-from-top-2",
-  "data-[side=left]:slide-in-from-right-2",
-  "data-[side=right]:slide-in-from-left-2",
-  "data-[side=top]:slide-in-from-bottom-2",
-  "data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95",
-  "rounded-xl border border-border/60 bg-background/95 py-1.5 backdrop-blur-xl shadow-[var(--shadow-float)]",
+  "bui-menu origin-(--radix-dropdown-menu-content-transform-origin)",
+  "flex flex-col gap-1 rounded-2xl border border-border bg-card p-2.5 shadow-[var(--shadow-float)] [&>*]:shrink-0",
   "outline-none",
   // Long menus scroll inside the space Radix measured instead of running off-screen.
   "max-h-(--radix-dropdown-menu-content-available-height) overflow-y-auto overscroll-contain",
 );
 
 const rowClass = cn(
-  "flex min-h-[44px] w-full cursor-pointer select-none items-center gap-2 px-3 py-2 text-start text-sm",
-  "outline-none data-[highlighted]:bg-accent/60 lg:min-h-0 any-pointer-coarse:min-h-[44px]",
+  "flex min-h-[44px] w-full cursor-pointer select-none items-center gap-2 rounded-[10px] p-2 text-start text-sm text-foreground",
+  "outline-none transition-colors data-[highlighted]:bg-accent lg:min-h-0 any-pointer-coarse:min-h-[44px]",
   "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
 );
 
@@ -80,7 +75,7 @@ function DropdownMenuLabel({
     <DropdownMenuPrimitive.Label
       data-slot="dropdown-menu-label"
       className={cn(
-        "px-3 pb-1 pt-2 text-[0.6875rem] font-medium uppercase tracking-wide text-muted-foreground/70",
+        "px-2 pb-0.5 pt-1 text-xs font-medium text-muted-foreground",
         className,
       )}
       {...props}
@@ -95,7 +90,7 @@ function DropdownMenuSeparator({
   return (
     <DropdownMenuPrimitive.Separator
       data-slot="dropdown-menu-separator"
-      className={cn("my-1 h-px bg-border/60", className)}
+      className={cn("-mx-2.5 my-1.5 h-px bg-border", className)}
       {...props}
     />
   );
@@ -112,7 +107,7 @@ function DropdownMenuSubTrigger({
   return (
     <DropdownMenuPrimitive.SubTrigger
       data-slot="dropdown-menu-sub-trigger"
-      className={cn(rowClass, "data-[state=open]:bg-accent/60", className)}
+      className={cn(rowClass, "data-[state=open]:bg-accent", className)}
       {...props}
     />
   );

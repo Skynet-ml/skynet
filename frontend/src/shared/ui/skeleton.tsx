@@ -19,7 +19,7 @@ export function Ghost({ children }: { children: ReactNode }) {
 // Tokens, so the bones follow the light/dark theme (see globals.css).
 const BASE_COLOR = "var(--skeleton-base)";
 const HIGHLIGHT_COLOR = "var(--skeleton-highlight)";
-const DURATION_SECONDS = 1.4;
+const DURATION_SECONDS = 2.2;
 const BORDER_RADIUS = 6;
 
 interface AppSkeletonThemeProps {
