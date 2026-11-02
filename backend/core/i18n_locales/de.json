@@ -393,7 +393,6 @@
     "email.event.shared.reason": "Sie erhalten E-Mails, wenn jemand einen Lauf mit Ihnen teilt.",
     "email.account.status": "Konto",
     "email.account.expires": "Er läuft in {minutes} Minuten ab.",
-    "email.account.enter_code": "Geben Sie diesen Code in {term.appName} ein, um fortzufahren.",
     "email.account.verification.subject": "Bestätigen Sie Ihre E-Mail-Adresse für {term.appName}",
     "email.account.verification.intro": "Ihr {term.appName}-Bestätigungscode lautet {code}.",
     "email.account.verification.ignore": "Wenn Sie kein {term.appName}-Konto erstellt haben, können Sie diese E-Mail ignorieren.",

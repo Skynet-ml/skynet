@@ -393,7 +393,6 @@
     "email.event.shared.reason": "有人与你共享运行时，你会收到邮件。",
     "email.account.status": "账户",
     "email.account.expires": "{minutes} 分钟后过期。",
-    "email.account.enter_code": "在 {term.appName} 中输入此代码以继续。",
     "email.account.verification.subject": "确认你的 {term.appName} 邮箱",
     "email.account.verification.intro": "你的 {term.appName} 确认码是 {code}。",
     "email.account.verification.ignore": "如果你没有创建 {term.appName} 账户，可以忽略这封邮件。",

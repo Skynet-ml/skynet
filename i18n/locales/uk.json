@@ -393,7 +393,6 @@
     "email.event.shared.reason": "Ви отримуєте листи, коли хтось ділиться з вами запуском.",
     "email.account.status": "Обліковий запис",
     "email.account.expires": "Код дійсний {minutes} хв.",
-    "email.account.enter_code": "Введіть цей код у {term.appName}, щоб продовжити.",
     "email.account.verification.subject": "Підтвердьте адресу пошти в {term.appName}",
     "email.account.verification.intro": "Ваш код підтвердження {term.appName}: {code}.",
     "email.account.verification.ignore": "Якщо ви не створювали обліковий запис {term.appName}, просто проігноруйте цей лист.",

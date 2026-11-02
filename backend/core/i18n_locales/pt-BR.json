@@ -30,7 +30,6 @@
     "email.event.shared.headline": "{title} foi compartilhada com você",
     "email.event.shared.reason": "Você recebe emails quando alguém compartilha uma execução com você.",
     "email.account.expires": "Ele expira em {minutes} minutos.",
-    "email.account.enter_code": "Digite este código no {term.appName} para continuar.",
     "email.account.verification.subject": "Confirme seu email do {term.appName}",
     "email.account.verification.intro": "Seu código de confirmação do {term.appName} é {code}.",
     "email.account.verification.ignore": "Se você não criou uma conta {term.appName}, pode ignorar este email.",

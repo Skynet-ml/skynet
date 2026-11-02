@@ -393,7 +393,6 @@
     "email.event.shared.reason": "وقتی کسی اجرایی را با شما به اشتراک می‌گذارد، ایمیل دریافت می‌کنید.",
     "email.account.status": "حساب",
     "email.account.expires": "این کد تا {minutes} دقیقه دیگر منقضی می‌شود.",
-    "email.account.enter_code": "برای ادامه، این کد را در {term.appName} وارد کنید.",
     "email.account.verification.subject": "تأیید ایمیل شما در {term.appName}",
     "email.account.verification.intro": "کد تأیید شما در {term.appName} {code} است.",
     "email.account.verification.ignore": "اگر حساب {term.appName} نساخته‌اید، می‌توانید این ایمیل را نادیده بگیرید.",

@@ -393,7 +393,6 @@
     "email.event.shared.reason": "有人同你分享運行嘅時候，你會收到電郵。",
     "email.account.status": "帳戶",
     "email.account.expires": "{minutes} 分鐘後過期。",
-    "email.account.enter_code": "喺 {term.appName} 輸入呢個碼就可以繼續。",
     "email.account.verification.subject": "確認你嘅 {term.appName} 電郵",
     "email.account.verification.intro": "你嘅 {term.appName} 確認碼係 {code}。",
     "email.account.verification.ignore": "如果你冇開過 {term.appName} 帳戶，可以唔理呢封電郵。",

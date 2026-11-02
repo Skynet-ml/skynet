@@ -6,13 +6,12 @@ change vs baseline, spend, duration), exactly one button, and a footer saying
 why the recipient got the email. Each email also gets a plain-text twin.
 
 The HTML is built for real mail clients rather than browsers: table layout,
-inline styles, a 600px column, light colors inline (so clients that ignore
-``prefers-color-scheme`` still get a readable email) and dark overrides in a
-``<style>`` block for the clients that honour it. RTL locales get ``dir="rtl"``
-and mirrored alignment and padding throughout.
+inline styles, a 600px column, and light colors only. The HTML asks clients
+to keep the light scheme. :class:`EmailContent` still accepts a locale, and RTL
+locales get ``dir="rtl"`` and mirrored alignment and padding throughout.
 
-Copy is localized through :func:`core.i18n.t_locale`, so an email renders in
-the recipient's locale and falls back to English, then Hebrew, per key.
+The notification and account emails always render in English
+(:data:`EMAIL_LOCALE`), whatever the recipient's app locale.
 
 Public entry points:
 
@@ -36,6 +35,11 @@ from ..i18n import t_locale
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
 # The settings modal opens on the tab named by this query param on any page.
 NOTIFICATION_SETTINGS_PATH = "/?settings=notifications"
+
+# Product decision: every app email is English only, whatever the user's app
+# locale. The email.* keys stay in the shared catalogs: Hebrew is the i18n base
+# and must hold every key, and English reads from its overlay.
+EMAIL_LOCALE = "en"
 
 EventType = Literal["needs_input", "budget_near", "failed", "finished", "new_best", "stuck", "shared"]
 EVENT_TYPES: tuple[EventType, ...] = ("needs_input", "budget_near", "failed", "finished", "new_best", "stuck", "shared")
@@ -74,9 +78,8 @@ _RTL_LANGUAGES = frozenset({"he", "ar", "fa", "ur", "yi"})
 # CJK, so tracking is reserved for the Latin and Cyrillic locales.
 _TRACKED_LANGUAGES = frozenset({"en", "de", "es", "fr", "it", "pt", "ru", "uk", "tr"})
 
-# Light values are inlined so clients without dark-mode support (and Outlook
-# desktop, which drops <style>) always get a legible email; dark values only
-# arrive through the prefers-color-scheme / Outlook.com overrides below.
+# Emails are light only: values are inlined, so Outlook desktop, which drops
+# <style>, gets the same colors as every other client.
 _LIGHT = {
     "bg": "#ffffff",
     "ink": "#1c1612",
@@ -90,20 +93,6 @@ _LIGHT = {
     "warn": "#9a6a10",
     "bad": "#b04030",
     "neutral": "#8c7a6b",
-}
-_DARK = {
-    "bg": "#141110",
-    "ink": "#f3eee8",
-    "text": "#cbbfb2",
-    "muted": "#9a8b7d",
-    "rule": "#2e2722",
-    "panel": "#201b18",
-    "btn": "#f3eee8",
-    "btn_ink": "#1c1612",
-    "good": "#5cc282",
-    "warn": "#e0ac4a",
-    "bad": "#ec8170",
-    "neutral": "#9a8b7d",
 }
 
 # The app's faces load from Google Fonts: Onest for text, Bricolage Grotesque
@@ -364,7 +353,7 @@ def build_facts(
 
 
 def _style_block(tracked: bool) -> str:
-    """Return the ``<style>`` contents: responsive rules and dark-mode overrides.
+    """Return the ``<style>`` contents: light-only scheme and responsive rules.
 
     Args:
         tracked: Whether the locale takes letter-spacing (Latin/Cyrillic).
@@ -373,33 +362,9 @@ def _style_block(tracked: bool) -> str:
         CSS text. Every rule is an enhancement; the email reads correctly
         without it.
     """
-    color_classes = {
-        "sk-bg": ("background-color", "bg"),
-        "sk-ink": ("color", "ink"),
-        "sk-text": ("color", "text"),
-        "sk-muted": ("color", "muted"),
-        "sk-rule": ("border-color", "rule"),
-        "sk-panel": ("background-color", "panel"),
-        "sk-btn": ("background-color", "btn"),
-        "sk-btn-a": ("color", "btn_ink"),
-        **{f"sk-{tone}": ("color", tone) for tone in ("good", "warn", "bad", "neutral")},
-        **{f"sk-dot-{tone}": ("background-color", tone) for tone in ("good", "warn", "bad", "neutral")},
-    }
-    dark_rules = "".join(f".{cls}{{{prop}:{_DARK[token]}!important}}" for cls, (prop, token) in color_classes.items())
-    # Outlook.com tags its dark mode with data-ogsc (text) / data-ogsb (backgrounds).
-    ogsc_rules = "".join(
-        f"[data-ogsc] .{cls}{{{prop}:{_DARK[token]}!important}}"
-        for cls, (prop, token) in color_classes.items()
-        if prop != "background-color"
-    )
-    ogsb_rules = "".join(
-        f"[data-ogsb] .{cls}{{{prop}:{_DARK[token]}!important}}"
-        for cls, (prop, token) in color_classes.items()
-        if prop == "background-color"
-    )
     tracking = ".sk-status{letter-spacing:0.08em}" if tracked else ""
     return (
-        ":root{color-scheme:light dark;supported-color-schemes:light dark}"
+        ":root{color-scheme:light only;supported-color-schemes:light}"
         "body{margin:0!important;padding:0!important;width:100%!important;-webkit-text-size-adjust:100%;"
         "-ms-text-size-adjust:100%}"
         "table{border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0}"
@@ -413,8 +378,6 @@ def _style_block(tracked: bool) -> str:
         ".sk-h1{font-size:20px!important;line-height:28px!important}"
         ".sk-code{font-size:28px!important;letter-spacing:6px!important}"
         "}"
-        f"@media (prefers-color-scheme:dark){{{dark_rules}}}"
-        f"{ogsc_rules}{ogsb_rules}"
     )
 
 
@@ -484,8 +447,8 @@ def _code_rows(code: str, note: str | None, font: str, start: str) -> str:
     )
 
 
-def _button_row(label: str, url: str, font: str, start: str) -> str:
-    """Render the single call-to-action as a table-cell button.
+def _button_row(label: str, url: str, font: str) -> str:
+    """Render the single call-to-action as a centered table-cell button.
 
     The colored cell (not the link) carries the background so Outlook desktop,
     which ignores padding on ``<a>``, still draws a solid button.
@@ -494,15 +457,14 @@ def _button_row(label: str, url: str, font: str, start: str) -> str:
         label: Button text.
         url: Destination URL.
         font: Text font stack.
-        start: ``"left"`` or ``"right"`` for the reading direction.
 
     Returns:
         A ``<tr>`` holding the button.
     """
     href = html.escape(url, quote=True)
     return (
-        f'<tr><td align="{start}" style="padding-top:28px;text-align:{start};">'
-        f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="{start}"><tr>'
+        '<tr><td align="center" style="padding-top:28px;text-align:center;">'
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center"><tr>'
         f'<td class="sk-btn" bgcolor="{_LIGHT["btn"]}" style="border-radius:6px;background-color:{_LIGHT["btn"]};'
         'mso-padding-alt:12px 22px;">'
         f'<a class="sk-btn-a" href="{href}" target="_blank" style="display:inline-block;padding:12px 22px;'
@@ -560,7 +522,7 @@ def render_email_html(content: EmailContent) -> str:
     body_rows = (
         _code_rows(content.code, content.note, font, start) if content.code else _facts_row(content.facts, font, rtl)
     )
-    button_row = _button_row(*content.button, font, start) if content.button else ""
+    button_row = _button_row(*content.button, font) if content.button else ""
     settings_link = ""
     if content.settings:
         settings_label, settings_url = content.settings
@@ -577,8 +539,8 @@ def render_email_html(content: EmailContent) -> str:
         '<head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<meta http-equiv="X-UA-Compatible" content="IE=edge">'
-        '<meta name="color-scheme" content="light dark">'
-        '<meta name="supported-color-schemes" content="light dark">'
+        '<meta name="color-scheme" content="light only">'
+        '<meta name="supported-color-schemes" content="light">'
         '<meta name="format-detection" content="telephone=no,date=no,address=no,email=no">'
         f"<title>{esc(_strip_isolates(content.subject))}</title>"
         # Outlook desktop renders Times New Roman when the first family in a
@@ -658,7 +620,6 @@ def render_email_text(content: EmailContent) -> str:
 
 def render_notification_email(
     event_type: str,
-    locale: str | None,
     title: str,
     facts: Mapping[str, FactValue] | None,
     link: str,
@@ -667,14 +628,12 @@ def render_notification_email(
     detail: str | None = None,
     settings_url: str | None = None,
 ) -> RenderedEmail:
-    """Render a run or sharing notification in the recipient's locale.
+    """Render a run or sharing notification in English.
 
     Args:
         event_type: One of :data:`EVENT_TYPES` (``needs_input``,
             ``budget_near``, ``failed``, ``finished``, ``new_best``,
             ``stuck``, ``shared``).
-        locale: Recipient locale tag (``"en"``, ``"he"``, ``"pt-BR"``);
-            ``None`` renders the Hebrew base.
         title: The run's display name, inserted into the headline.
         facts: Optional ``score`` / ``delta`` / ``spent`` (+ ``limit``) /
             ``duration`` values; see :func:`build_facts`. Only the facts the
@@ -697,26 +656,26 @@ def render_notification_email(
     if event_type not in EVENT_TYPES:
         raise ValueError(f"Unknown notification event type: {event_type!r}")
     prefix = f"email.event.{event_type}"
-    headline = t_locale(locale, f"{prefix}.headline", title=f"{_FSI}{title}{_PDI}")
+    headline = t_locale(EMAIL_LOCALE, f"{prefix}.headline", title=f"{_FSI}{title}{_PDI}")
     content = EmailContent(
-        locale=locale,
+        locale=EMAIL_LOCALE,
         subject=_strip_isolates(headline),
         headline=headline,
-        footer=reason or t_locale(locale, f"{prefix}.reason"),
-        status=(t_locale(locale, f"{prefix}.status"), _EVENT_TONES[event_type]),
+        footer=reason or t_locale(EMAIL_LOCALE, f"{prefix}.reason"),
+        status=(t_locale(EMAIL_LOCALE, f"{prefix}.status"), _EVENT_TONES[event_type]),
         detail=detail,
-        facts=build_facts(facts, locale, _EVENT_FACTS[event_type]),
-        button=(t_locale(locale, f"{prefix}.button"), absolute_url(link)),
+        facts=build_facts(facts, EMAIL_LOCALE, _EVENT_FACTS[event_type]),
+        button=(t_locale(EMAIL_LOCALE, f"{prefix}.button"), absolute_url(link)),
         settings=(
-            t_locale(locale, "email.settings_link"),
+            t_locale(EMAIL_LOCALE, "email.settings_link"),
             absolute_url(settings_url or NOTIFICATION_SETTINGS_PATH),
         ),
     )
     return RenderedEmail(content.subject, render_email_html(content), render_email_text(content))
 
 
-def render_account_email(kind: str, locale: str | None, code: str, *, minutes: int | None = None) -> RenderedEmail:
-    """Render an account-security code email on the shared layout.
+def render_account_email(kind: str, code: str, *, minutes: int | None = None) -> RenderedEmail:
+    """Render an account-security code email in English on the shared layout.
 
     The plain-text body keeps the original wording ("Your Skynet confirmation
     code is 123456. It expires in 30 minutes." plus the ignore line). These
@@ -725,7 +684,6 @@ def render_account_email(kind: str, locale: str | None, code: str, *, minutes: i
     Args:
         kind: One of :data:`ACCOUNT_EMAIL_KINDS` (``verification``,
             ``password_reset``, ``sign_in``).
-        locale: Recipient locale tag; ``None`` renders the Hebrew base.
         code: The one-time code.
         minutes: Code lifetime; defaults to the kind's standard (30 or 10).
 
@@ -739,17 +697,17 @@ def render_account_email(kind: str, locale: str | None, code: str, *, minutes: i
         raise ValueError(f"Unknown account email kind: {kind!r}")
     prefix = f"email.account.{kind}"
     lifetime = minutes if minutes is not None else _ACCOUNT_CODE_MINUTES[kind]
-    subject = t_locale(locale, f"{prefix}.subject")
-    intro = t_locale(locale, f"{prefix}.intro", code=code)
-    expires = t_locale(locale, "email.account.expires", minutes=lifetime)
-    ignore = t_locale(locale, f"{prefix}.ignore")
+    subject = t_locale(EMAIL_LOCALE, f"{prefix}.subject")
+    intro = t_locale(EMAIL_LOCALE, f"{prefix}.intro", code=code)
+    expires = t_locale(EMAIL_LOCALE, "email.account.expires", minutes=lifetime)
+    ignore = t_locale(EMAIL_LOCALE, f"{prefix}.ignore")
     content = EmailContent(
-        locale=locale,
+        locale=EMAIL_LOCALE,
         subject=subject,
         headline=subject,
-        detail=t_locale(locale, "email.account.enter_code"),
+        detail=t_locale(EMAIL_LOCALE, "email.account.enter_code"),
         footer=ignore,
-        status=(t_locale(locale, "email.account.status"), "neutral"),
+        status=(t_locale(EMAIL_LOCALE, "email.account.status"), "neutral"),
         code=code,
         note=expires,
         preheader=f"{intro} {expires}",

@@ -393,7 +393,6 @@
     "email.event.shared.reason": "जब कोई आपके साथ रन साझा करता है, तब आपको ईमेल मिलता है।",
     "email.account.status": "खाता",
     "email.account.expires": "यह {minutes} मिनट में समाप्त हो जाएगा।",
-    "email.account.enter_code": "जारी रखने के लिए यह कोड {term.appName} में दर्ज करें।",
     "email.account.verification.subject": "अपना {term.appName} ईमेल पुष्टि करें",
     "email.account.verification.intro": "आपका {term.appName} पुष्टि कोड {code} है।",
     "email.account.verification.ignore": "अगर आपने {term.appName} खाता नहीं बनाया है, तो इस ईमेल को अनदेखा कर सकते हैं।",
