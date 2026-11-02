@@ -14,7 +14,7 @@
   "scripts": {
     "build": "node scripts/bundle-resources.mjs app",
     "bundle:stack": "node scripts/bundle-resources.mjs stack",
-    "start": "npm run build && electron .",
+    "start": "node scripts/bundle-resources.mjs start",
     "dev": "node scripts/bundle-resources.mjs dev",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
