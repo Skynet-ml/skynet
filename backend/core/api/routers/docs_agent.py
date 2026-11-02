@@ -21,9 +21,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, Request
@@ -57,6 +59,14 @@ _BUDGET_SERVICE = "docs_agent"
 _LM_TIMEOUT_SECONDS = 45.0
 _CHUNK_CHARS = 48
 _RATE_WINDOW_SECONDS = 3600
+_MAX_ACTIVE_ANSWERS = 4
+
+# Docs calls run on their own small pool, never the shared default executor: a
+# model call holds its thread up to the LM timeout even after the client goes,
+# so signed-out traffic could otherwise starve the agents' to_thread calls. A
+# slot is taken per answer and freed only when its worker call ends.
+_EXECUTOR = ThreadPoolExecutor(max_workers=_MAX_ACTIVE_ANSWERS, thread_name_prefix="docs-agent")
+_ANSWER_SLOTS = threading.BoundedSemaphore(_MAX_ACTIVE_ANSWERS)
 
 DOCS_AGENT_SYSTEM_PROMPT = """You are the Skynet docs assistant. You answer questions about Skynet using only the documentation passages in the <docs> block of the user message.
 
@@ -280,6 +290,15 @@ def _call_and_record(lm: Any, messages: list[dict[str, str]]) -> Any:
         _record_spend(lm)
 
 
+def _free_slot(_future: Future[Any]) -> None:
+    """Free one answer slot when a docs worker call ends.
+
+    Args:
+        _future: The finished worker call.
+    """
+    _ANSWER_SLOTS.release()
+
+
 def create_docs_agent_router(
     *,
     corpus: DocsCorpus | None = None,
@@ -317,27 +336,48 @@ def create_docs_agent_router(
 
         Raises:
             DomainError: 429 over the caller's hourly cap; 503 when the docs
-                cannot be loaded or the monthly budget is spent.
+                cannot be loaded, the monthly budget is spent, or every
+                answer slot is busy.
         """
         _enforce_rate_limit(request, user)
         if not budget_open(_BUDGET_SERVICE, settings.docs_agent_monthly_budget_usd):
             raise DomainError("docs_agent.unavailable", status=503)
+        if not _ANSWER_SLOTS.acquire(blocking=False):
+            raise DomainError("docs_agent.busy", status=503)
+        search = _EXECUTOR.submit(docs.search, req.question, req.locale, limit=TOP_PASSAGES)
         try:
-            hits = await asyncio.to_thread(docs.search, req.question, req.locale, limit=TOP_PASSAGES)
+            hits = await asyncio.wrap_future(search)
         except Exception as err:
+            _ANSWER_SLOTS.release()
             logger.warning("docs agent corpus unavailable: %s", err)
             raise DomainError("docs_agent.unavailable", status=503) from err
-        messages = build_messages(req.question, req.history, req.locale, [p for p, _ in hits])
+        except BaseException:
+            search.add_done_callback(_free_slot)
+            raise
         identity = f"chatcmpl-docs-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
+        # The call starts here, not in the stream: a stream that never starts
+        # (the client left first) would never free its slot.
+        call: Future[Any] | None = None
+        model = "docs-agent"
+        try:
+            messages = build_messages(req.question, req.history, req.locale, [p for p, _ in hits])
+            lm = lm_factory()
+            model = str(getattr(lm, "model", model))
+            call = _EXECUTOR.submit(_call_and_record, lm, messages)
+        except Exception:
+            logger.exception("docs agent answer could not start")
+            _ANSWER_SLOTS.release()
+        else:
+            call.add_done_callback(_free_slot)
 
         async def stream() -> AsyncIterator[str]:
-            """Run the model call, then relay its answer as chunks."""
+            """Wait for the model call, then relay its answer as chunks."""
             try:
-                lm = lm_factory()
-                model = str(getattr(lm, "model", "docs-agent"))
+                if call is None:
+                    raise RuntimeError("docs agent answer could not start")
                 yield _chunk(identity, model, created, {"role": "assistant", "content": ""})
-                outputs = await asyncio.to_thread(_call_and_record, lm, messages)
+                outputs = await asyncio.wrap_future(call)
                 text = _answer_text(outputs)
                 for start in range(0, len(text), _CHUNK_CHARS):
                     yield _chunk(identity, model, created, {"content": text[start : start + _CHUNK_CHARS]})

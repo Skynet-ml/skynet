@@ -68,12 +68,15 @@ export function chunkText(data: Record<string, unknown>): string {
 // /docs, /docs/<page>, /docs#x and /docs/he/<page>, but not /docs-search or /docs-md.
 const DOCS_PATH = /^\/docs(?:[/?#]|$)/;
 const MARKDOWN_LINK = /(!?)\[([^\]]*)\]\(\s*<?([^)\s>]*)>?(?:\s+"[^"]*")?\s*\)/g;
+// A reference definition needs no space after the colon: "[r]:https://x" is one.
+const REFERENCE_DEF = /^ {0,3}\[[^\]]+\]:[ \t]*<?([^\s>]*)>?.*$/gm;
 const ANGLE_LINK = /<(https?:\/\/[^>\s]+)>/g;
 const BARE_URL = /(^|[\s(])(https?:\/\/[^\s)<>]+)/g;
 
 /** Rewrite links outside fenced code: keep docs pages, show every other URL as text. */
 function rewriteLinks(text: string): string {
   return text
+    .replace(REFERENCE_DEF, (whole, href: string) => (DOCS_PATH.test(href) ? whole : ""))
     .replace(MARKDOWN_LINK, (whole, image: string, label: string, href: string) => {
       if (image) return label;
       return DOCS_PATH.test(href) ? whole : label;

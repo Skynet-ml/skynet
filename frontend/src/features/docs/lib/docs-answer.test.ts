@@ -26,6 +26,13 @@ test("keepDocsLinks turns other links into plain text", () => {
   assert.equal(keepDocsLinks("Visit https://example.com now"), "Visit `https://example.com` now");
 });
 
+test("keepDocsLinks drops reference definitions to other sites, with or without a space", () => {
+  const out = keepDocsLinks("See [a][r] and [b][s].\n\n[r]:https://evil.example/x\n[s]: <https://evil.example/y>");
+  assert.ok(!out.includes("evil.example"));
+  const docs = "See [a][d].\n\n[d]:/docs/billing";
+  assert.equal(keepDocsLinks(docs), docs);
+});
+
 test("keepDocsLinks leaves fenced code alone", () => {
   const text = "```bash\ncurl https://api.example.com\n```\nThen https://x.io";
   assert.equal(keepDocsLinks(text), "```bash\ncurl https://api.example.com\n```\nThen `https://x.io`");

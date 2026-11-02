@@ -346,38 +346,88 @@ def test_answer_spend_is_recorded(
     assert float(redis_double.get(key)) == pytest.approx(0.25)
 
 
+class _SlowLM(_FakeLM):
+    """Blocks until released, then adds its usage to the history."""
+
+    def __init__(self) -> None:
+        """Start with an empty history and closed gates."""
+        super().__init__()
+        self.history: list[str] = []
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, **kwargs: Any) -> list[str]:
+        """Wait for the release, then record usage like ``dspy.LM``.
+
+        Args:
+            **kwargs: The call's keyword arguments.
+
+        Returns:
+            One output.
+        """
+        self.started.set()
+        self.release.wait(5)
+        self.history.append("usage")
+        return super().__call__(**kwargs)
+
+
+def _ask_endpoint(docs_root: Path, lm_factory: Any) -> Any:
+    """Return the raw ``/docs-agent/ask`` endpoint, to drive it without a client.
+
+    Args:
+        docs_root: The docs content folder.
+        lm_factory: Builds the LM for each answer.
+
+    Returns:
+        The endpoint coroutine function.
+    """
+    router = create_docs_agent_router(corpus=DocsCorpus(docs_root), lm_factory=lm_factory)
+    return next(route.endpoint for route in router.routes if getattr(route, "path", "") == "/docs-agent/ask")
+
+
+def _request() -> Request:
+    """Build a bare signed-out request.
+
+    Returns:
+        The request.
+    """
+    return Request({"type": "http", "method": "POST", "headers": [], "client": ("203.0.113.9", 1)})
+
+
+def _slot_free() -> bool:
+    """Report whether an answer slot is free, without keeping it.
+
+    Returns:
+        ``True`` when a slot could be taken.
+    """
+    if not docs_agent._ANSWER_SLOTS.acquire(blocking=False):
+        return False
+    docs_agent._ANSWER_SLOTS.release()
+    return True
+
+
+async def _wait_for(check: Any) -> bool:
+    """Poll a check for up to five seconds.
+
+    Args:
+        check: Returns ``True`` when the wait is over.
+
+    Returns:
+        Whether the check passed in time.
+    """
+    for _ in range(500):
+        if check():
+            return True
+        await asyncio.sleep(0.01)
+    return False
+
+
 async def test_spend_is_recorded_once_after_a_cancelled_stream(
     monkeypatch: pytest.MonkeyPatch, docs_root: Path, redis_double: fakeredis.FakeStrictRedis
 ) -> None:
-    """A client that disconnects during the model call still pays: spend counts once, after the call."""
-
-    class _SlowLM(_FakeLM):
-        """Blocks until released, then adds its usage to the history."""
-
-        def __init__(self) -> None:
-            """Start with an empty history and closed gates."""
-            super().__init__()
-            self.history: list[str] = []
-            self.started = threading.Event()
-            self.release = threading.Event()
-
-        def __call__(self, **kwargs: Any) -> list[str]:
-            """Wait for the release, then record usage like ``dspy.LM``.
-
-            Args:
-                **kwargs: The call's keyword arguments.
-
-            Returns:
-                One output.
-            """
-            self.started.set()
-            self.release.wait(5)
-            self.history.append("usage")
-            return super().__call__(**kwargs)
-
-    recorded: list[float] = []
+    """A disconnected client still pays, and keeps its slot until the model call ends."""
+    recorded: list[int] = []
     record_spend = docs_agent._record_spend
-    done = threading.Event()
 
     def _spy(lm: Any) -> None:
         """Count each record and remember the history size it saw.
@@ -387,17 +437,14 @@ async def test_spend_is_recorded_once_after_a_cancelled_stream(
         """
         recorded.append(len(lm.history))
         record_spend(lm)
-        done.set()
 
     monkeypatch.setattr(settings, "docs_agent_monthly_budget_usd", 5.0)
     monkeypatch.setattr(docs_agent, "model_usages_from_history", lambda lm: list(lm.history))
     monkeypatch.setattr(docs_agent, "raw_cost_usd", lambda usages: 0.25 * len(usages))
     monkeypatch.setattr(docs_agent, "_record_spend", _spy)
+    monkeypatch.setattr(docs_agent, "_ANSWER_SLOTS", threading.BoundedSemaphore(1))
     lm = _SlowLM()
-    router = create_docs_agent_router(corpus=DocsCorpus(docs_root), lm_factory=lambda: lm)
-    ask = next(route.endpoint for route in router.routes if getattr(route, "path", "") == "/docs-agent/ask")
-    request = Request({"type": "http", "method": "POST", "headers": [], "client": ("203.0.113.9", 1)})
-    response = await ask(DocsAgentAskRequest(question="balance"), request, None)
+    response = await _ask_endpoint(docs_root, lambda: lm)(DocsAgentAskRequest(question="balance"), _request(), None)
     body = response.body_iterator
     await body.__anext__()
     pending = asyncio.ensure_future(body.__anext__())
@@ -406,11 +453,35 @@ async def test_spend_is_recorded_once_after_a_cancelled_stream(
     with pytest.raises(asyncio.CancelledError):
         await pending
     assert recorded == []
+    assert not _slot_free()
     lm.release.set()
-    assert await asyncio.to_thread(done.wait, 5)
+    assert await _wait_for(_slot_free)
     assert recorded == [1]
     key = next(k for k in redis_double.keys("skynet:platform-budget:docs_agent:*") if not k.endswith(":alerted"))
     assert float(redis_double.get(key)) == pytest.approx(0.25)
+
+
+async def test_full_pool_answers_503_and_leaves_the_default_executor_free(
+    docs_root: Path, redis_double: fakeredis.FakeStrictRedis
+) -> None:
+    """Blocked docs calls fill only their own slots: the next ask gets 503, other threads still run."""
+    lms = [_SlowLM() for _ in range(docs_agent._MAX_ACTIVE_ANSWERS)]
+    built = iter(lms)
+    extra = _FakeLM()
+    ask = _ask_endpoint(docs_root, lambda: next(built, extra))
+    try:
+        for _ in lms:
+            await ask(DocsAgentAskRequest(question="balance"), _request(), None)
+        assert all(await asyncio.gather(*(asyncio.to_thread(lm.started.wait, 5) for lm in lms)))
+        with pytest.raises(DomainError) as busy:
+            await ask(DocsAgentAskRequest(question="balance"), _request(), None)
+        assert (busy.value.code, busy.value.status_code) == ("docs_agent.busy", 503)
+        assert extra.calls == []
+        assert await asyncio.wait_for(asyncio.to_thread(lambda: "free"), timeout=1) == "free"
+    finally:
+        for lm in lms:
+            lm.release.set()
+    assert await _wait_for(lambda: docs_agent._ANSWER_SLOTS._value == docs_agent._MAX_ACTIVE_ANSWERS)
 
 
 def test_model_failure_streams_an_error_then_done(docs_root: Path, redis_double: fakeredis.FakeStrictRedis) -> None:
