@@ -20,7 +20,7 @@ export function mintSessionToken(secret: string, email: string, now = Date.now()
 }
 
 export type StartResult = { ok: true; url: string } | { ok: false; reason: "unavailable" | "failed"; detail: string };
-export type FinishResult = { ok: true } | { ok: false; detail: string };
+export type FinishResult = { ok: true } | { ok: false; reason: "unreachable" | "failed"; detail: string };
 
 /** Talks to the local backend's /local/hosted-link routes as the local user. */
 export class HostedLinkClient {
@@ -71,9 +71,16 @@ export class HostedLinkClient {
 
   /** Trade the code and state from the skynet:// URL for the link (the local API checks the state). */
   async finish(code: string, state: string): Promise<FinishResult> {
-    const res = await this.call("POST", "/local/hosted-link/finish", { code, state });
+    let res: Response;
+    try {
+      res = await this.call("POST", "/local/hosted-link/finish", { code, state });
+    } catch (err) {
+      // A DNS lookup that never answers holds the local API past this timeout.
+      if (err instanceof Error && err.name === "TimeoutError") return { ok: false, reason: "unreachable", detail: err.message };
+      throw err;
+    }
     if (res.ok) return { ok: true };
     const body = (await res.json().catch(() => ({}))) as { detail?: string };
-    return { ok: false, detail: body.detail ?? `HTTP ${res.status}` };
+    return { ok: false, reason: res.status === 503 ? "unreachable" : "failed", detail: body.detail ?? `HTTP ${res.status}` };
   }
 }

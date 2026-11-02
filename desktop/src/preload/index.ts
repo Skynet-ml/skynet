@@ -8,6 +8,7 @@ if (window.location.protocol === "file:") {
     recheck: () => ipcRenderer.invoke("onboarding:recheck"),
     continueAnyway: () => ipcRenderer.invoke("onboarding:continue"),
     copy: (text: string) => ipcRenderer.invoke("onboarding:copy", text),
+    fit: (height: number) => ipcRenderer.invoke("onboarding:fit", height),
     openLogs: () => ipcRenderer.invoke("onboarding:open-logs"),
     openDockerDownload: () => ipcRenderer.invoke("onboarding:open-docker"),
     signIn: () => ipcRenderer.invoke("onboarding:sign-in"),
