@@ -1168,6 +1168,74 @@ def test_recover_orphaned_jobs_waits_for_in_flight_usage(
     assert job["recovery"]["cause"] == WORKER_RESTART_CAUSE
 
 
+def test_recover_orphaned_jobs_stops_a_run_whose_usage_never_settles(
+    store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A run whose in-flight usage never settles stops as interrupted instead of staying "running".
+
+    Args:
+        store: Disposable job store.
+        monkeypatch: Pytest fixture used to bind the sandbox profile and hold usage pending.
+        caplog: Pytest fixture that captures the sweep's skip and stop logs.
+    """
+    store.create_job("stuck")
+    store.update_job(
+        "stuck",
+        status="running",
+        recovery={"state": "recovering", "phase": "requeue", "cause": WORKER_RESTART_CAUSE},
+    )
+    service = _fund_checkpoint(store, "stuck", monkeypatch)
+    reserved = service.get(store.get_job("stuck")["execution_budget_id"], "resume-owner")
+    monkeypatch.setattr(
+        BudgetService,
+        "get",
+        lambda self, budget_id, username, **kwargs: replace(reserved, pending_operations=1),
+    )
+    caplog.set_level("INFO", logger=remote_mod.__name__)
+    assert store.recover_orphaned_jobs() == 0
+    assert store.recover_orphaned_jobs() == 0
+    assert "Orphaned run stuck is not requeued yet" in caplog.text
+    job = store.get_job("stuck")
+    assert job["status"] == "running"
+
+    expired = dict(job["recovery"])
+    expired["waiting_since"] = (datetime.now(UTC) - remote_mod.ORPHANED_USAGE_WAIT).isoformat()
+    store.update_job("stuck", recovery=expired)
+    assert store.recover_orphaned_jobs() == 1
+    job = store.get_job("stuck")
+    assert job["status"] == "failed"
+    assert job["stop_reason"] == "interrupted"
+    assert job["message"] == remote_mod.ORPHANED_RUN_MESSAGE
+    assert job["recovery"] is None
+    assert "Orphaned run stuck waited" in caplog.text
+
+
+def test_recover_orphaned_jobs_stops_a_legacy_usage_wait(
+    store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A usage wait stored without a start time, as on runs stuck before this fix, stops at once.
+
+    Args:
+        store: Disposable job store.
+        monkeypatch: Pytest fixture used to bind the sandbox profile and hold usage pending.
+    """
+    store.create_job("legacy-wait")
+    store.update_job(
+        "legacy-wait",
+        status="running",
+        recovery={"state": "recovering", "phase": "waiting_for_usage", "cause": WORKER_RESTART_CAUSE},
+    )
+    service = _fund_checkpoint(store, "legacy-wait", monkeypatch)
+    reserved = service.get(store.get_job("legacy-wait")["execution_budget_id"], "resume-owner")
+    monkeypatch.setattr(
+        BudgetService,
+        "get",
+        lambda self, budget_id, username, **kwargs: replace(reserved, pending_operations=1),
+    )
+    assert store.recover_orphaned_jobs() == 1
+    assert store.get_job("legacy-wait")["status"] == "failed"
+
+
 def test_recover_orphaned_jobs_fails_unfunded_run(store: SQLiteJobStore) -> None:
     """An orphaned run without a cumulative budget keeps failing with the orphan message.
 

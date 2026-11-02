@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -154,6 +156,60 @@ def test_worker_orchestrator_skips_host_exec_and_dispatches_authored_source_to_o
     assert launched_payload["_protected_fixture"] is True
     assert launched_payload["workflow"] == payload["workflow"]
     assert launched_payload["metric_code"] == payload["metric_code"]
+
+
+def test_budget_gateway_closes_while_the_lease_renews(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep the claim alive while the gateway waits for in-flight usage, so the sweep cannot race it.
+
+    Args:
+        monkeypatch: Parent credential fixture.
+        tmp_path: Host-only marker path for the authored fixture.
+    """
+    store = FakeJobStore()
+    store.engine = object()
+    store.seed_job(
+        "lease-close",
+        payload=_payload(tmp_path / "marker", "vercel"),
+        payload_overview={"optimization_type": OPTIMIZATION_TYPE_RUN, "username": "alice", "token_source": "managed"},
+        execution_budget_id="budget",
+        execution_budget_generation=0,
+    )
+    worker = engine.BackgroundWorker(job_store=cast(JobStore, store), num_workers=1)
+    worker.enqueue_job("lease-close")
+    context, _process = make_mp_context(result_events=[make_result_event()])
+    monkeypatch.setattr(engine.settings, "openrouter_api_key", SecretStr("fixture-only"))
+    renewing: list[bool] = [False]
+    closed_while_renewing: list[bool] = []
+
+    @contextlib.contextmanager
+    def _renewing(_worker_id: int) -> Iterator[None]:
+        """Record that a lease renewal block is open."""
+        renewing[0] = True
+        try:
+            yield
+        finally:
+            renewing[0] = False
+
+    def _close(*_args: Any) -> tuple[dict[str, Any], None]:
+        """Record whether the lease renews while the gateway closes."""
+        closed_while_renewing.append(renewing[0])
+        return {}, None
+
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch("core.worker.engine.record_server_event"),
+        patch("core.worker.engine.bind_protected_sandbox"),
+        patch("core.worker.engine.payload_uses_token_source", return_value=False),
+        patch("core.worker.engine.ModelGateway", _Gateway),
+        patch("core.worker.engine.mp.get_context", return_value=context),
+        patch.object(worker, "_get_service", return_value=MagicMock()),
+        patch.object(worker, "_renewing_lease", _renewing),
+        patch.object(worker, "_close_budget_gateway", _close),
+        patch.object(worker, "_schedule_embedding_indexing"),
+    ):
+        worker._process_job("lease-close", 0)
+
+    assert closed_while_renewing == [True]
 
 
 def test_unprotected_stored_job_is_rejected_before_host_execution() -> None:

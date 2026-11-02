@@ -96,11 +96,36 @@ def _mark_resume_budget_stop(job: JobModel) -> None:
 
 logger = logging.getLogger(__name__)
 
+
+def _usage_wait_expired(recovery: Any, now: datetime) -> bool:
+    """Tell whether an orphaned run waited too long for its in-flight usage.
+
+    Args:
+        recovery: The run's stored recovery state.
+        now: Time of the current sweep.
+
+    Returns:
+        Whether the run waits for usage longer than ``ORPHANED_USAGE_WAIT``. A
+        wait recorded before ``waiting_since`` existed counts as expired.
+    """
+    if not isinstance(recovery, dict) or recovery.get("phase") != "waiting_for_usage":
+        return False
+    try:
+        since = datetime.fromisoformat(str(recovery["waiting_since"]))
+    except (KeyError, ValueError):
+        return True
+    return now - since >= ORPHANED_USAGE_WAIT
+
+
 MAX_PROGRESS_EVENTS = 5000
 ORPHANED_RUN_MESSAGE = "The run stopped because its worker went away. Resume, retry or clone it to continue."
 ORPHANED_RUN_RECOVERY_FAILED_MESSAGE = (
     "The run stopped because its worker went away, and it cannot continue by itself. Retry or clone it."
 )
+# Usage that the reconcilers cannot settle in this window may never settle, and
+# the run must not stay "running" with no worker while it waits. A manual
+# resume still waits for that usage, so ending the run charges nothing twice.
+ORPHANED_USAGE_WAIT = timedelta(minutes=15)
 # Guards each store's in-memory list of runs the orphan sweep ended; test
 # stores skip ``__init__``, so the list is created on first use.
 _ENDED_ORPHANS_LOCK = threading.Lock()
@@ -1786,6 +1811,7 @@ class RemoteDBJobStore:
                         "phase": "waiting_for_usage",
                         "reason": "Reconciling interrupted requests before resuming.",
                         "execution_generation": int(job.execution_generation or 0) + 1,
+                        "waiting_since": datetime.now(UTC).isoformat(),
                         **({"cause": cause} if cause else {}),
                     }
                     fenced_generation = job.execution_generation
@@ -2396,7 +2422,8 @@ class RemoteDBJobStore:
         it has none, on any live worker. A graceful worker restart does not count
         against the attempt cap; an expired lease does, so a run that crashes
         its worker cannot loop forever. A run that waits for in-flight usage to
-        settle stays active until a later sweep. A run that the sweep fails or
+        settle stays active until a later sweep, for at most
+        ``ORPHANED_USAGE_WAIT``; then it stops as interrupted. A run that the sweep fails or
         stops waits in :meth:`take_ended_orphans` for its notification.
 
         Returns:
@@ -2417,6 +2444,7 @@ class RemoteDBJobStore:
                     int(job.execution_generation or 0),
                     job.execution_budget_id is not None,
                     isinstance(job.recovery, dict) and job.recovery.get("cause") == WORKER_RESTART_CAUSE,
+                    _usage_wait_expired(job.recovery, now),
                 )
                 for job in session.query(JobModel)
                 .filter(
@@ -2429,7 +2457,7 @@ class RemoteDBJobStore:
         finally:
             session.close()
         handled = 0
-        for identifier, generation, funded, worker_restart in candidates:
+        for identifier, generation, funded, worker_restart, usage_wait_expired in candidates:
             message = ORPHANED_RUN_MESSAGE
             if funded:
                 try:
@@ -2451,7 +2479,18 @@ class RemoteDBJobStore:
                 else:
                     if attempt is not None:
                         handled += 1
-                    continue
+                        continue
+                    if not usage_wait_expired:
+                        logger.info(
+                            "Orphaned run %s is not requeued yet; it waits for in-flight usage or changed state",
+                            identifier,
+                        )
+                        continue
+                    logger.warning(
+                        "Orphaned run %s waited %s for in-flight usage; it stops as interrupted",
+                        identifier,
+                        ORPHANED_USAGE_WAIT,
+                    )
             if self.update_job_if_status(
                 identifier,
                 ("running", "validating"),

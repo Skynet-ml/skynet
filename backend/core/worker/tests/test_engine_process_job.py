@@ -321,6 +321,29 @@ def test_process_job_releases_run_when_worker_shuts_down_during_validating(
     notify.assert_not_called()
 
 
+def test_release_for_restart_logs_a_lost_generation_fence(
+    worker: BackgroundWorker,
+    store: FakeJobStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A release that loses its generation fence says so instead of claiming the run was released.
+
+    Args:
+        worker: Worker under test.
+        store: Fake store whose fenced update loses, as after an orphan sweep fence.
+        caplog: Pytest fixture that captures the worker logs.
+    """
+    store.seed_job("opt-lost-release", status="running", execution_generation=3)
+    store.update_job_if_status = MagicMock(return_value=False)  # type: ignore[attr-defined]
+    caplog.set_level("INFO", logger=engine_module.__name__)
+
+    worker._release_for_restart("opt-lost-release", 2)
+
+    store.update_job_if_status.assert_called_once()  # type: ignore[attr-defined]
+    assert "lost its generation 2 fence" in caplog.text
+    assert "released for recovery" not in caplog.text
+
+
 def test_process_job_releases_run_when_worker_shuts_down_during_running(
     worker: BackgroundWorker,
     store: FakeJobStore,
