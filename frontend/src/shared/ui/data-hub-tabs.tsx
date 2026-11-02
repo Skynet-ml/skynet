@@ -6,8 +6,8 @@ import { motion, useReducedMotion } from "framer-motion";
 import { Database, Tag } from "@/shared/ui/icons";
 
 import {
-  SLIDING_PILL_TABS_LIST_CLASS,
-  SLIDING_PILL_TABS_TRIGGER_CLASS,
+  UNDERLINE_TABS_LIST_CLASS,
+  UNDERLINE_TABS_TRIGGER_CLASS,
   Tabs,
   TabsList,
   TabsTrigger,
@@ -20,7 +20,7 @@ import { msg } from "@/shared/lib/messages";
  * only above those two list surfaces — deeper surfaces (dataset editor, live
  * tagging session) drop it. Uses the same tab system as the dashboard's
  * jobs/analytics tabs; selecting a tab navigates to the other route, with the
- * pill sliding optimistically before the route swap remounts the surface.
+ * underline sliding optimistically before the route swap remounts the surface.
  */
 export function DataHubTabs({ active }: { active: "datasets" | "sessions" }) {
   const router = useRouter();
@@ -50,14 +50,14 @@ export function DataHubTabs({ active }: { active: "datasets" | "sessions" }) {
       }}
       className="mb-5"
     >
-      <TabsList aria-label={msg("sidebar.nav.data")} className={SLIDING_PILL_TABS_LIST_CLASS}>
+      <TabsList aria-label={msg("sidebar.nav.data")} className={UNDERLINE_TABS_LIST_CLASS}>
         {tabs.map(({ key, label, Icon }) => (
-          <TabsTrigger key={key} value={key} className={SLIDING_PILL_TABS_TRIGGER_CLASS}>
+          <TabsTrigger key={key} value={key} className={UNDERLINE_TABS_TRIGGER_CLASS}>
             {value === key && (
               <motion.span
                 layoutId="dataHubTabPill"
                 transition={tabPillTransition}
-                className="absolute inset-0 z-0 rounded-md bg-primary-fill"
+                className="absolute inset-x-0 -bottom-px z-0 h-0.5 bg-primary"
                 aria-hidden="true"
               />
             )}

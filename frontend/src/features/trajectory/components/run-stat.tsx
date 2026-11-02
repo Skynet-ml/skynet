@@ -1,13 +1,12 @@
 import type { CSSProperties } from "react";
 import { cn } from "@/shared/lib/utils";
 
-// The list pads 4px around its triggers and gaps them by 4px, so each trigger
-// takes an equal share of what is left; the pill mirrors the active one.
-export function slidingPillStyle(index: number, count: number): CSSProperties {
-  const share = `((100% - ${8 + 4 * (count - 1)}px) / ${count})`;
+// The underline row has no padding or gaps, so each trigger takes an equal
+// share of the width; the underline mirrors the active one.
+export function underlineTabStyle(index: number, count: number): CSSProperties {
   return {
-    width: `calc${share}`,
-    insetInlineStart: `calc(4px + ${index} * (${share} + 4px))`,
+    width: `calc(100% / ${count})`,
+    insetInlineStart: `calc(${index} * 100% / ${count})`,
   };
 }
 

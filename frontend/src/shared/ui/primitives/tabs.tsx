@@ -37,12 +37,16 @@ const tabsListVariants = cva(
   },
 );
 
-const SLIDING_PILL_TABS_LIST_CLASS =
-  "relative inline-flex h-auto w-full gap-1 rounded-lg border border-border/60 bg-muted/50 p-1 ";
-const SLIDING_PILL_TABS_INDICATOR_CLASS =
-  "absolute top-1 bottom-1 z-0 rounded-md bg-primary-fill transition-[inset-inline-start] duration-200 ease-out motion-reduce:transition-none";
-const SLIDING_PILL_TABS_TRIGGER_CLASS =
-  "relative z-10 min-h-[44px] lg:min-h-10 rounded-md px-3 sm:px-4 py-2 text-sm font-medium cursor-pointer border-none bg-transparent text-foreground/65 shadow-none transition-[color,transform] data-[state=active]:bg-transparent data-[state=active]:text-primary-foreground data-[state=active]:shadow-none data-[state=active]:border-none hover:text-foreground data-[state=active]:hover:text-primary-foreground focus-visible:ring-2 focus-visible:ring-primary/45 gap-1.5";
+// BoardUI tabs (SKY-263): a hairline baseline under the row and a 2px
+// primary underline under the active tab. The underline is one element that
+// slides between equal-width slots (see `underlineTabStyle`), or a motion
+// layout span inside the active trigger.
+const UNDERLINE_TABS_LIST_CLASS =
+  "relative inline-flex h-auto w-full gap-0 rounded-none border-0 border-b border-border bg-transparent p-0 backdrop-blur-none";
+const UNDERLINE_TABS_INDICATOR_CLASS =
+  "pointer-events-none absolute -bottom-px z-0 h-0.5 bg-primary transition-[inset-inline-start] duration-200 ease-out motion-reduce:transition-none";
+const UNDERLINE_TABS_TRIGGER_CLASS =
+  "relative z-10 min-h-[44px] lg:min-h-10 rounded-none px-2.5 py-2 text-sm font-normal cursor-pointer border-none bg-transparent text-foreground/70 shadow-none transition-colors active:translate-y-0 active:scale-100 data-[state=active]:bg-transparent data-[state=active]:font-medium data-[state=active]:text-primary data-[state=active]:shadow-none data-[state=active]:border-none hover:text-foreground data-[state=active]:hover:text-primary focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-primary/45 gap-1.5";
 
 function TabsList({
   className,
@@ -88,7 +92,7 @@ export {
   TabsList,
   TabsTrigger,
   TabsContent,
-  SLIDING_PILL_TABS_LIST_CLASS,
-  SLIDING_PILL_TABS_INDICATOR_CLASS,
-  SLIDING_PILL_TABS_TRIGGER_CLASS,
+  UNDERLINE_TABS_LIST_CLASS,
+  UNDERLINE_TABS_INDICATOR_CLASS,
+  UNDERLINE_TABS_TRIGGER_CLASS,
 };

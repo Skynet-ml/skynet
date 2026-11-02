@@ -1524,7 +1524,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
 
       {(() => {
         const tabCls =
-          "relative min-h-[44px] shrink-0 flex-none px-2.5 sm:px-4 py-2.5 rounded-none border-b-2 border-transparent data-[state=active]:border-transparent data-[state=active]:border-b-primary data-[state=active]:text-foreground data-[state=active]:bg-transparent data-[state=active]:shadow-none transition-all duration-200 text-xs sm:text-sm";
+          "relative min-h-[44px] shrink-0 flex-none px-2.5 sm:px-4 py-2.5 rounded-none border-b-2 border-transparent text-foreground/70 hover:text-foreground data-[state=active]:border-transparent data-[state=active]:border-b-primary data-[state=active]:font-medium data-[state=active]:text-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none transition-all duration-200 text-xs sm:text-sm";
         // Pair view pings the trajectory/logs tabs only while the pair itself
         // is still running, matching the standalone run's behaviour exactly.
         const pingActive = isPairContext
@@ -1584,7 +1584,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
             />
             <TabsList
               variant="line"
-              className="w-full justify-start gap-0 overflow-x-auto border-b border-border/50 pb-0 no-scrollbar"
+              className="w-full justify-start gap-0 overflow-x-auto border-b border-border pb-0 no-scrollbar"
             >
               <TabsTrigger value="overview" className={tabCls}>
                 <TrendUp className="size-3.5" />

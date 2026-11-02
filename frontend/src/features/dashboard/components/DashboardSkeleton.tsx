@@ -24,7 +24,7 @@ import {
 } from "../lib/jobs-columns";
 import { typeBadge } from "../lib/status-badges";
 import { Card, CardContent } from "@/shared/ui/primitives/card";
-import { SLIDING_PILL_TABS_LIST_CLASS } from "@/shared/ui/primitives/tabs";
+import { UNDERLINE_TABS_LIST_CLASS } from "@/shared/ui/primitives/tabs";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
 import { cn } from "@/shared/lib/utils";
 import { WorkspaceStripSkeleton } from "./WorkspaceStrip";
@@ -243,12 +243,16 @@ export function DashboardSkeleton() {
         <WorkspaceStripSkeleton />
       </Card>
 
-      {/* Tabs root is flex-col gap-2; the pill list is a fixed 44px row. */}
+      {/* Tabs root is flex-col gap-2; the underline row is one trigger plus its 1px baseline. */}
       <div className="flex flex-col gap-2">
         {showTabs && (
-          <div className={cn(SLIDING_PILL_TABS_LIST_CLASS, "h-11")}>
-            <Skeleton containerClassName="flex flex-1" className="h-full" borderRadius={999} />
-            <Skeleton containerClassName="flex flex-1" className="h-full" borderRadius={999} />
+          <div className={cn(UNDERLINE_TABS_LIST_CLASS, "h-[45px] lg:h-[41px]")}>
+            <span className="flex flex-1 items-center justify-center">
+              <Skeleton width={96} height={14} />
+            </span>
+            <span className="flex flex-1 items-center justify-center">
+              <Skeleton width={96} height={14} />
+            </span>
           </div>
         )}
 
