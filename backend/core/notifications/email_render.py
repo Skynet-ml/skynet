@@ -405,6 +405,7 @@ def _style_block(tracked: bool) -> str:
     locks += "".join(f"[data-ogsc] .{cls}{{color:{COLORS[key]} !important}}" for cls, key in _INK_CLASSES.items())
     locks += f"[data-ogsc] .sk-rule{{border-color:{COLORS['rule']} !important}}"
     return (
+        ":root{color-scheme:dark;supported-color-schemes:dark}"
         "body{margin:0!important;padding:0!important;width:100%!important;-webkit-text-size-adjust:100%;"
         "-ms-text-size-adjust:100%}"
         "table{border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0}"
@@ -599,9 +600,11 @@ def render_email_html(content: EmailContent) -> str:
         '<head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<meta http-equiv="X-UA-Compatible" content="IE=edge">'
-        # "light only" asks Apple Mail and iOS Mail not to recolor: the email
-        # is dark already, and these clients leave it as authored.
-        '<meta name="color-scheme" content="light only">'
+        # The email is dark in every client and mode. Declaring "dark" tells
+        # Apple Mail, iOS Mail and Chromium-based clients that it supports
+        # dark already, so they leave it as authored instead of recoloring.
+        '<meta name="color-scheme" content="dark">'
+        '<meta name="supported-color-schemes" content="dark">'
         '<meta name="format-detection" content="telephone=no,date=no,address=no,email=no">'
         f"<title>{esc(_strip_isolates(content.subject))}</title>"
         # Outlook desktop renders Times New Roman when the first family in a

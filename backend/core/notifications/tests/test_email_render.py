@@ -78,9 +78,10 @@ def test_every_event_renders_html_and_text(event_type: str) -> None:
     assert reason in html
     assert settings in html
     assert "https://app.example/optimizations/abc" in html
-    assert html.count('<meta name="color-scheme" content="light only">') == 1
-    assert "supported-color-schemes" not in html
-    assert ":root" not in html
+    assert html.count('<meta name="color-scheme" content="dark">') == 1
+    assert html.count('<meta name="supported-color-schemes" content="dark">') == 1
+    assert ":root{color-scheme:dark;supported-color-schemes:dark}" in html
+    assert "light" not in html.split("</head>")[0].split("<style>")[0]
     assert "Heebo" not in html
     assert text.startswith(f"{APP_NAME.upper()}\n")
     assert f"{button}: https://app.example/optimizations/abc" in text
