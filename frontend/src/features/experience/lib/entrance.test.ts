@@ -80,3 +80,15 @@ test("the splash ends once per page load and tells its listeners", () => {
   assert.equal(readSplashState(), "handoff");
   assert.equal(calls, 1);
 });
+
+test("a fade marks the splash gone at once, so a setup that opens during the fade plays its glance", async () => {
+  // The splash state is per page load, so this case needs its own module instance.
+  const fade: typeof import("./entrance.ts") = await import("./entrance.ts?fade");
+  fade.commitSplashExit("fade");
+  assert.equal(fade.readSplashState(), "gone");
+  assert.equal(playsEntrance({ ...fresh, splash: fade.readSplashState() }), false);
+
+  const handoff: typeof import("./entrance.ts") = await import("./entrance.ts?handoff");
+  handoff.commitSplashExit("handoff");
+  assert.equal(handoff.readSplashState(), "handoff");
+});

@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useSession } from "next-auth/react";
 import {
   SPLASH_HOLD_MAX_MS,
+  commitSplashExit,
   endSplash,
   playsEntrance,
   readIntakeDraft,
@@ -74,16 +75,12 @@ export function SplashScreen() {
 
   useEffect(() => {
     if (phase !== "landed") return;
-    if (exit === "handoff") {
-      endSplash("handoff");
-      setPhase("done");
-      return;
-    }
     if (exit === "hold") {
       const timer = setTimeout(() => setHoldExpired(true), SPLASH_HOLD_MAX_MS);
       return () => clearTimeout(timer);
     }
-    setPhase("fading");
+    commitSplashExit(exit);
+    setPhase(exit === "handoff" ? "done" : "fading");
   }, [phase, exit]);
 
   useEffect(() => {

@@ -12,6 +12,7 @@ export {
 export { SETUP_SETTING_EVENT, type SetupSettingDetail } from "./lib/setup-tour";
 export {
   SPLASH_HOLD_MAX_MS,
+  commitSplashExit,
   endSplash,
   playsEntrance,
   readSplashState,

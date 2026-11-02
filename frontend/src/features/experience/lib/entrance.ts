@@ -70,6 +70,18 @@ export function endSplash(how: Exclude<SplashState, "playing">): void {
   listeners.forEach((l) => l());
 }
 
+/**
+ * Record the exit the landed splash commits to. A fade marks the splash gone
+ * at once, so a setup that opens during the fade plays its own glance and
+ * slide instead of the handoff entrance under a fading splash.
+ *
+ * Args:
+ *   exit: The exit the splash starts, never "hold".
+ */
+export function commitSplashExit(exit: Exclude<SplashExit, "hold">): void {
+  endSplash(exit === "handoff" ? "handoff" : "gone");
+}
+
 export function readSplashState(): SplashState {
   return splashState;
 }
