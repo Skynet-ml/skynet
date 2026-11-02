@@ -49,7 +49,7 @@ import {
   setupStops,
   type SetupSettingDetail,
 } from "../lib/setup-tour";
-import { readSplashState, setupCoversPath, subscribeSplash } from "../lib/entrance";
+import { playsEntrance, readSplashState, setupCoversPath, subscribeSplash } from "../lib/entrance";
 import { useExperienceOptional } from "../providers/experience-provider";
 import { LEVEL_KEYS } from "./level-keys";
 import { SetupTour } from "./SetupTour";
@@ -210,8 +210,11 @@ function IntakeSurface() {
       ? resumeAfterLanguageSwitch(stored, resume, locale)
       : (stored ?? emptyDraft());
     // While the app-load splash still plays, the setup's entrance is the splash itself.
-    const entrance =
-      !draft.answered.includes("language") && !experience.rerunning && readSplashState() !== "gone";
+    const entrance = playsEntrance({
+      languageAnswered: draft.answered.includes("language"),
+      rerunning: experience.rerunning,
+      splash: readSplashState(),
+    });
     // A setup already under way picks up where it was, without the entrance again.
     // Back from a language switch, the panel shows once more so it can slide up off the tour.
     const stage: Stage = draft.answered.includes("language")

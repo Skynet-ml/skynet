@@ -6,6 +6,9 @@ import { useSession } from "next-auth/react";
 import {
   SPLASH_HOLD_MAX_MS,
   endSplash,
+  playsEntrance,
+  readIntakeDraft,
+  readSplashState,
   setupCoversPath,
   splashExit,
   useExperienceOptional,
@@ -47,7 +50,15 @@ export function SplashScreen() {
   const exit = splashExit({
     session: status,
     loaded: !!experience?.loaded,
-    setupShows: !!experience?.intakeOpen && setupCoversPath(pathname),
+    // Hand off only to a setup that plays the entrance; a resumed one opens elsewhere, so fade.
+    setupShows:
+      !!experience?.intakeOpen &&
+      setupCoversPath(pathname) &&
+      playsEntrance({
+        languageAnswered: !!readIntakeDraft()?.answered.includes("language"),
+        rerunning: experience.rerunning,
+        splash: readSplashState(),
+      }),
     holdExpired,
   });
 

@@ -10,7 +10,15 @@ export {
   type Surface,
 } from "./lib/abstraction";
 export { SETUP_SETTING_EVENT, type SetupSettingDetail } from "./lib/setup-tour";
-export { SPLASH_HOLD_MAX_MS, endSplash, setupCoversPath, splashExit } from "./lib/entrance";
+export {
+  SPLASH_HOLD_MAX_MS,
+  endSplash,
+  playsEntrance,
+  readSplashState,
+  setupCoversPath,
+  splashExit,
+} from "./lib/entrance";
+export { readIntakeDraft } from "./lib/intake";
 export {
   ExperienceProvider,
   useExperienceLevel,

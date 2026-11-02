@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   endSplash,
+  playsEntrance,
   readSplashState,
   setupCoversPath,
   splashExit,
@@ -36,10 +37,37 @@ test("a signed-out visitor never waits for a setup", () => {
 });
 
 test("the setup never covers the sign-in or public pages", () => {
-  for (const path of ["/login", "/terms", "/privacy", "/share/abc"]) {
+  for (const path of [
+    "/login",
+    "/terms",
+    "/privacy",
+    "/share/abc",
+    "/docs",
+    "/docs/he/start",
+    "/desktop/link",
+    "/mcp/authorize",
+  ]) {
     assert.equal(setupCoversPath(path), false, path);
   }
-  for (const path of ["/", "/jobs", "/settings"]) assert.equal(setupCoversPath(path), true, path);
+  for (const path of ["/", "/jobs", "/settings", "/docsearch"]) {
+    assert.equal(setupCoversPath(path), true, path);
+  }
+});
+
+const fresh = { languageAnswered: false, rerunning: false, splash: "playing" } as const;
+
+test("a fresh setup under the playing splash plays the entrance", () => {
+  assert.equal(playsEntrance(fresh), true);
+});
+
+test("a resumed setup with the language answered skips the entrance, so the splash fades", () => {
+  assert.equal(playsEntrance({ ...fresh, languageAnswered: true }), false);
+  assert.equal(playsEntrance({ ...fresh, rerunning: true }), false);
+});
+
+test("a splash that already left never gives a later setup the entrance", () => {
+  assert.equal(playsEntrance({ ...fresh, splash: "handoff" }), false);
+  assert.equal(playsEntrance({ ...fresh, splash: "gone" }), false);
 });
 
 test("the splash ends once per page load and tells its listeners", () => {
