@@ -637,18 +637,27 @@ h3 {
     animation: none;
   }
 }
+/* The bar is a quiet countdown, not a brand accent: a thin line in the
+   toast's own tone, so error and success read apart at a glance. */
 .Toastify__progress-bar,
 .Toastify__progress-bar--success,
 .Toastify__progress-bar--error,
 .Toastify__progress-bar--warning,
 .Toastify__progress-bar--info,
-.Toastify__progress-bar--default,
-.Toastify__toast--success .Toastify__progress-bar,
-.Toastify__toast--error .Toastify__progress-bar,
-.Toastify__toast--warning .Toastify__progress-bar,
-.Toastify__toast--info .Toastify__progress-bar {
-  background: var(--blue) !important;
+.Toastify__progress-bar--default {
+  background: var(--text-3) !important;
   background-image: none !important;
+  height: 2px !important;
+  opacity: 0.5 !important;
+}
+.Toastify__toast--success .Toastify__progress-bar {
+  background: var(--success) !important;
+}
+.Toastify__toast--error .Toastify__progress-bar {
+  background: var(--danger) !important;
+}
+.Toastify__toast--warning .Toastify__progress-bar {
+  background: var(--warning) !important;
 }
 .Toastify__close-button {
   color: var(--text-3) !important;
@@ -656,6 +665,18 @@ h3 {
 .Toastify__toast-icon svg {
   fill: var(--text-2) !important;
   color: var(--text-2) !important;
+}
+.Toastify__toast--success .Toastify__toast-icon svg {
+  fill: var(--success) !important;
+  color: var(--success) !important;
+}
+.Toastify__toast--error .Toastify__toast-icon svg {
+  fill: var(--danger) !important;
+  color: var(--danger) !important;
+}
+.Toastify__toast--warning .Toastify__toast-icon svg {
+  fill: var(--warning) !important;
+  color: var(--warning) !important;
 }
 
 /* Custom scrollbars */

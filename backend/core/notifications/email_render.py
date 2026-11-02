@@ -83,6 +83,7 @@ _LIGHT = {
     "text": "#5c4d40",
     "muted": "#8c7a6b",
     "rule": "#e8e2da",
+    "panel": "#f6f2ed",
     "btn": "#3d2e22",
     "btn_ink": "#faf8f5",
     "good": "#1a7a3a",
@@ -96,6 +97,7 @@ _DARK = {
     "text": "#cbbfb2",
     "muted": "#9a8b7d",
     "rule": "#2e2722",
+    "panel": "#201b18",
     "btn": "#f3eee8",
     "btn_ink": "#1c1612",
     "good": "#5cc282",
@@ -377,6 +379,7 @@ def _style_block(tracked: bool) -> str:
         "sk-text": ("color", "text"),
         "sk-muted": ("color", "muted"),
         "sk-rule": ("border-color", "rule"),
+        "sk-panel": ("background-color", "panel"),
         "sk-btn": ("background-color", "btn"),
         "sk-btn-a": ("color", "btn_ink"),
         **{f"sk-{tone}": ("color", tone) for tone in ("good", "warn", "bad", "neutral")},
@@ -405,9 +408,10 @@ def _style_block(tracked: bool) -> str:
         f"{tracking}"
         "@media (max-width:520px){"
         ".sk-pad{padding:28px 20px 32px!important}"
-        ".sk-fact{display:inline-block!important;width:50%!important;box-sizing:border-box}"
+        ".sk-fact{display:inline-block!important;width:50%!important;box-sizing:border-box}.sk-fact-end{display:none!important}"
+        ".sk-fact-v{font-size:16px!important;line-height:24px!important;white-space:normal!important}"
         ".sk-h1{font-size:20px!important;line-height:28px!important}"
-        ".sk-code{font-size:26px!important;letter-spacing:4px!important}"
+        ".sk-code{font-size:28px!important;letter-spacing:6px!important}"
         "}"
         f"@media (prefers-color-scheme:dark){{{dark_rules}}}"
         f"{ogsc_rules}{ogsb_rules}"
@@ -428,13 +432,15 @@ def _facts_row(facts: tuple[tuple[str, str], ...], font: str, rtl: bool) -> str:
     if not facts:
         return ""
     start = "right" if rtl else "left"
-    width = f"{100 // len(facts)}%"
-    gap = "14px 0 14px 12px" if rtl else "14px 12px 14px 0"
+    # Cells size to their content (no fixed widths): a long value such as
+    # "$6.37 of $10.00" takes the room it needs instead of running into the
+    # next column.
+    gap = "16px 0 16px 28px" if rtl else "16px 28px 16px 0"
     cells = "".join(
-        f'<td class="sk-fact" width="{width}" valign="top" style="width:{width};padding:{gap};text-align:{start};">'
+        f'<td class="sk-fact" valign="top" style="padding:{gap};text-align:{start};">'
         f'<div class="sk-muted" style="font-family:{font};font-size:12px;line-height:16px;color:{_LIGHT["muted"]};'
-        f'text-align:{start};">{html.escape(label)}</div>'
-        f'<div class="sk-ink" style="font-family:{_MONO};font-size:18px;line-height:26px;font-weight:500;'
+        f'text-align:{start};white-space:nowrap;">{html.escape(label)}</div>'
+        f'<div class="sk-ink sk-fact-v" style="font-family:{_MONO};font-size:18px;line-height:26px;font-weight:500;'
         f'color:{_LIGHT["ink"]};padding-top:4px;text-align:{start};white-space:nowrap;">{_bidi_html(value)}</div>'
         "</td>"
         for label, value in facts
@@ -443,7 +449,7 @@ def _facts_row(facts: tuple[tuple[str, str], ...], font: str, rtl: bool) -> str:
         '<tr><td style="padding-top:24px;">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="sk-rule" '
         f'style="width:100%;border-top:1px solid {_LIGHT["rule"]};border-bottom:1px solid {_LIGHT["rule"]};">'
-        f"<tr>{cells}</tr></table></td></tr>"
+        f'<tr>{cells}<td class="sk-fact-end" width="100%" style="width:100%;"></td></tr></table></td></tr>'
     )
 
 
@@ -465,13 +471,16 @@ def _code_rows(code: str, note: str | None, font: str, start: str) -> str:
         if note
         else ""
     )
+    # The code sits on a tinted panel, centred, so it reads as the one thing
+    # to copy; the bgcolor attribute keeps the panel in Outlook desktop.
     return (
         '<tr><td style="padding-top:24px;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="sk-rule" '
-        f'style="width:100%;border-top:1px solid {_LIGHT["rule"]};border-bottom:1px solid {_LIGHT["rule"]};">'
-        f'<tr><td class="sk-ink sk-code" dir="ltr" style="padding:18px 0;font-family:{_MONO};font-size:30px;'
-        f'line-height:38px;font-weight:500;letter-spacing:6px;color:{_LIGHT["ink"]};text-align:{start};">'
-        f"{html.escape(code)}</td></tr></table></td></tr>{note_row}"
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
+        f'<tr><td class="sk-panel" bgcolor="{_LIGHT["panel"]}" align="center" '
+        f'style="border-radius:10px;background-color:{_LIGHT["panel"]};padding:22px 16px;">'
+        f'<span class="sk-ink sk-code" dir="ltr" style="font-family:{_MONO};font-size:34px;line-height:40px;'
+        f'font-weight:500;letter-spacing:8px;color:{_LIGHT["ink"]};">'
+        f"{html.escape(code)}</span></td></tr></table></td></tr>{note_row}"
     )
 
 
@@ -738,6 +747,7 @@ def render_account_email(kind: str, locale: str | None, code: str, *, minutes: i
         locale=locale,
         subject=subject,
         headline=subject,
+        detail=t_locale(locale, "email.account.enter_code"),
         footer=ignore,
         status=(t_locale(locale, "email.account.status"), "neutral"),
         code=code,

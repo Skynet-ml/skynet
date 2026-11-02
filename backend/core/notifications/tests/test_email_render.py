@@ -50,9 +50,9 @@ def _frontend_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(email_render, "FRONTEND_URL", "https://app.example")
 
 
-def _cell_widths(html: str) -> list[str]:
-    """Return the ``width`` attributes of the fact cells in ``html``."""
-    return re.findall(r'class="sk-fact" width="([^"]+)"', html)
+def _fact_cells(html: str) -> list[str]:
+    """Return the opening tags of the fact cells in ``html``."""
+    return re.findall(r'<td class="sk-fact"[^>]*>', html)
 
 
 @pytest.mark.parametrize("locale", ["en", "he"])
@@ -134,7 +134,7 @@ def test_hebrew_numbers_are_isolated_not_the_whole_value() -> None:
 
 @pytest.mark.parametrize("count", [1, 2, 3, 4])
 def test_fact_row_holds_one_to_four_facts(count: int) -> None:
-    """The fact row splits evenly for any number of facts from one to four.
+    """The fact row holds any number of facts from one to four, content-sized.
 
     Args:
         count: How many facts to pass.
@@ -142,14 +142,18 @@ def test_fact_row_holds_one_to_four_facts(count: int) -> None:
     facts = dict(list({"score": 0.5, "delta": 0.1, "spent": 1.0, "duration": 60}.items())[:count])
     _, html, _ = render_notification_email("finished", "en", "Run", facts, "/x")
 
-    assert _cell_widths(html) == [f"{100 // count}%"] * count
+    cells = _fact_cells(html)
+    assert len(cells) == count
+    # Fixed equal widths let a long value such as "$6.37 of $10.00" run into
+    # the next column, so cells size to their content.
+    assert not any("width=" in cell for cell in cells)
 
 
 def test_no_facts_omits_the_row() -> None:
     """An email without facts has no fact row at all."""
     _, html, text = render_notification_email("shared", "en", "Run", None, "/x")
 
-    assert _cell_widths(html) == []
+    assert _fact_cells(html) == []
     assert "Score:" not in text
 
 
@@ -157,7 +161,7 @@ def test_event_drops_facts_it_does_not_show() -> None:
     """A failed run shows spend and duration but never a score."""
     _, html, text = render_notification_email("failed", "en", "Run", ALL_FACTS, "/x")
 
-    assert len(_cell_widths(html)) == 2
+    assert len(_fact_cells(html)) == 2
     assert "Score:" not in text
     assert "Spent:" in text
 

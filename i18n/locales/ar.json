@@ -393,6 +393,7 @@
     "email.event.shared.reason": "تصلك رسائل عندما يشارك أحدهم تشغيلًا معك.",
     "email.account.status": "الحساب",
     "email.account.expires": "تنتهي صلاحيته خلال {minutes} دقيقة.",
+    "email.account.enter_code": "أدخل هذا الرمز في {term.appName} للمتابعة.",
     "email.account.verification.subject": "تأكيد بريدك الإلكتروني في {term.appName}",
     "email.account.verification.intro": "رمز التأكيد الخاص بك في {term.appName} هو {code}.",
     "email.account.verification.ignore": "إذا لم تنشئ حسابًا في {term.appName}، يمكنك تجاهل هذه الرسالة.",

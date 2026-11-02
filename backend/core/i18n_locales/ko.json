@@ -393,6 +393,7 @@
     "email.event.shared.reason": "누군가 실행을 공유하면 이메일을 받습니다.",
     "email.account.status": "계정",
     "email.account.expires": "{minutes}분 후에 만료됩니다.",
+    "email.account.enter_code": "계속하려면 {term.appName}에 이 코드를 입력하세요.",
     "email.account.verification.subject": "{term.appName} 이메일을 확인하세요",
     "email.account.verification.intro": "{term.appName} 확인 코드는 {code}입니다.",
     "email.account.verification.ignore": "{term.appName} 계정을 만들지 않았다면 이 이메일을 무시해도 됩니다.",

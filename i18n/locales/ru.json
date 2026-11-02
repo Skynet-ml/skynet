@@ -393,6 +393,7 @@
     "email.event.shared.reason": "Вы получаете письма, когда кто-то делится с вами запуском.",
     "email.account.status": "Аккаунт",
     "email.account.expires": "Код действует {minutes} мин.",
+    "email.account.enter_code": "Введите этот код в {term.appName}, чтобы продолжить.",
     "email.account.verification.subject": "Подтвердите адрес почты в {term.appName}",
     "email.account.verification.intro": "Ваш код подтверждения {term.appName}: {code}.",
     "email.account.verification.ignore": "Если вы не создавали аккаунт {term.appName}, просто проигнорируйте это письмо.",
