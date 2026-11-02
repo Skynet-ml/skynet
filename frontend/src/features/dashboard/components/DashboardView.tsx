@@ -19,6 +19,7 @@ import {
 } from "@/shared/ui/primitives/tabs";
 import { FadeIn } from "@/shared/ui/motion";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { sessionIdentity } from "@/shared/lib/session-identity";
 import { TERMS } from "@/shared/lib/terms";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
@@ -219,9 +220,7 @@ export function DashboardView() {
       window.dispatchEvent(new Event("optimizations-changed"));
     } catch (error) {
       toast.error(
-        error instanceof Error
-          ? error.message
-          : msg("auto.features.agent.panel.lib.tool.renderers.literal.16"),
+        userErrorMessage(error, msg("auto.features.agent.panel.lib.tool.renderers.literal.16")),
       );
     } finally {
       setSelectionAction(null);
@@ -249,9 +248,7 @@ export function DashboardView() {
       window.dispatchEvent(new Event("optimizations-changed"));
     } catch (error) {
       toast.error(
-        error instanceof Error
-          ? error.message
-          : msg("auto.features.agent.panel.lib.tool.renderers.literal.63"),
+        userErrorMessage(error, msg("auto.features.agent.panel.lib.tool.renderers.literal.63")),
       );
     } finally {
       setSelectionAction(null);
@@ -272,10 +269,24 @@ export function DashboardView() {
       const succeeded = results.filter((result) => result.status === "fulfilled").length;
       const failed = results.length - succeeded;
       if (succeeded > 0) {
-        toast.success(succeeded === 1 ? successMessage : `${succeeded} · ${successMessage}`);
+        toast.success(
+          succeeded === 1
+            ? successMessage
+            : formatMsg("dashboard.selection.count_result", {
+                message: successMessage,
+                count: succeeded,
+              }),
+        );
       }
       if (failed > 0) {
-        toast.warning(failed === 1 ? failureMessage : `${failed} · ${failureMessage}`);
+        toast.warning(
+          failed === 1
+            ? failureMessage
+            : formatMsg("dashboard.selection.count_result", {
+                message: failureMessage,
+                count: failed,
+              }),
+        );
       }
       await fetchJobs();
       window.dispatchEvent(new Event("optimizations-changed"));

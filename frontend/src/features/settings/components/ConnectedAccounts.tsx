@@ -8,8 +8,9 @@ import { Button } from "@/shared/ui/primitives/button";
 import { SettingsRow } from "@/shared/ui/settings-row";
 import { GoogleMark } from "@/shared/ui/google-mark";
 import { msg, formatMsg } from "@/shared/lib/messages";
+import { knownErrorCodeMessage, userErrorMessage } from "@/shared/lib/user-error";
 import { tI18n } from "@/shared/lib/i18n";
-import { ApiError, unlinkIdentity, type LinkedIdentity } from "@/shared/lib/api";
+import { unlinkIdentity, type LinkedIdentity } from "@/shared/lib/api";
 
 type LinkableProvider = "google" | "github";
 
@@ -34,7 +35,7 @@ function useLinkResultParam(onLinked: () => void) {
     const linked = url.searchParams.get("linked");
     const error = url.searchParams.get("link_error");
     if (!linked && !error) return;
-    if (error) toast.error(tI18n(error));
+    if (error) toast.error(knownErrorCodeMessage(error) ?? msg("errors.generic"));
     else {
       toast.success(msg("settings.security.connected.linked_toast"));
       onLinked();
@@ -94,9 +95,7 @@ export function ConnectedAccounts({
       toast.success(msg("settings.security.connected.unlinked_toast"));
       onChange();
     } catch (err) {
-      toast.error(
-        err instanceof ApiError && err.code ? tI18n(err.code) : msg("settings.security.error"),
-      );
+      toast.error(userErrorMessage(err, msg("settings.security.error")));
     } finally {
       setPending(null);
     }

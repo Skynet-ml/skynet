@@ -17,14 +17,7 @@ import {
 import { deleteConversation } from "@/features/agent-panel";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { Button } from "@/shared/ui/primitives/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/shared/ui/primitives/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/shared/ui/primitives/dialog";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/shared/ui/primitives/sheet";
 import { formatStorageSize } from "@/shared/lib/formatters";
 import { formatMsg, msg } from "@/shared/lib/messages";
@@ -32,6 +25,7 @@ import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { SelectCheckbox } from "@/shared/ui/select-checkbox";
 import { StorageItemRow } from "./StorageItemRow";
 import { categoryMeta } from "../lib/categories";
+import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
 
 /** Ids per bulk-delete request. The progress dialog advances one chunk at a time,
  *  and batches no larger than this delete in a single request (no progress bar). */
@@ -304,69 +298,51 @@ export function StorageCategoryDrawer({
         </SheetContent>
       </Sheet>
 
-      <Dialog
+      <ConfirmDialog
         open={pending !== null}
-        onOpenChange={(next) => !next && !deleting && setPending(null)}
-      >
-        <DialogContent className="w-[min(28rem,92vw)] max-w-[min(28rem,92vw)] sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{msg("storage.delete.title")}</DialogTitle>
-            <DialogDescription>
-              {pending ? (
-                <>
-                  {deleteBefore}
-                  <bdi className="font-semibold text-foreground">{pending.name}</bdi>
-                  {deleteMid}
-                  <bdi className="font-semibold text-foreground">
-                    {formatStorageSize(pending.bytes)}
-                  </bdi>
-                  {deleteTail}
-                </>
-              ) : (
-                ""
-              )}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setPending(null)} disabled={deleting}>
-              {msg("storage.delete.cancel")}
-            </Button>
-            <Button variant="destructive" onClick={confirmDelete} disabled={deleting}>
-              {msg("storage.delete.confirm")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={bulkConfirm}
-        onOpenChange={(next) => !next && !running && setBulkConfirm(false)}
-      >
-        <DialogContent className="w-[min(28rem,92vw)] max-w-[min(28rem,92vw)] sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>
-              {formatMsg("storage.bulk.confirm.title", { n: selected.size })}
-            </DialogTitle>
-            <DialogDescription>
-              {bulkBefore}
-              <bdi className="font-semibold text-foreground">{selected.size}</bdi>
-              {bulkMid}
+        onOpenChange={(next) => !next && setPending(null)}
+        variant="danger"
+        title={msg("storage.delete.title")}
+        description={
+          pending ? (
+            <>
+              {deleteBefore}
+              <bdi className="font-semibold text-foreground">{pending.name}</bdi>
+              {deleteMid}
               <bdi className="font-semibold text-foreground">
-                {formatStorageSize(selectedBytes)}
+                {formatStorageSize(pending.bytes)}
               </bdi>
-              {bulkTail}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setBulkConfirm(false)} disabled={running}>
-              {msg("storage.delete.cancel")}
-            </Button>
-            <Button variant="destructive" onClick={runBulkDelete} disabled={running}>
-              {msg("storage.delete.confirm")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+              {deleteTail}
+            </>
+          ) : (
+            ""
+          )
+        }
+        cancelLabel={msg("storage.delete.cancel")}
+        confirmLabel={msg("storage.delete.confirm")}
+        onConfirm={confirmDelete}
+        pending={deleting}
+      />
+
+      <ConfirmDialog
+        open={bulkConfirm}
+        onOpenChange={(next) => !next && setBulkConfirm(false)}
+        variant="danger"
+        title={formatMsg("storage.bulk.confirm.title", { n: selected.size })}
+        description={
+          <>
+            {bulkBefore}
+            <bdi className="font-semibold text-foreground">{selected.size}</bdi>
+            {bulkMid}
+            <bdi className="font-semibold text-foreground">{formatStorageSize(selectedBytes)}</bdi>
+            {bulkTail}
+          </>
+        }
+        cancelLabel={msg("storage.delete.cancel")}
+        confirmLabel={msg("storage.delete.confirm")}
+        onConfirm={runBulkDelete}
+        pending={running}
+      />
 
       <Dialog open={running && (progress?.total ?? 0) > CHUNK}>
         <DialogContent

@@ -43,6 +43,7 @@ import { EmptyState } from "@/shared/ui/empty-state";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { tI18n } from "@/shared/lib/i18n";
 import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import {
   deleteContinuous,
@@ -138,7 +139,7 @@ function formatScore(score: number | null): string {
 }
 
 function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : msg("continuous_tab.action_failed");
+  return userErrorMessage(err, msg("continuous_tab.action_failed"));
 }
 
 /**

@@ -161,6 +161,7 @@ class I18nKey(StrEnum):
     DATASET_SPLIT_RATIONALE_META_HARNESS_POOLED = 'dataset.split.rationale.meta_harness.pooled'
     DATASET_SPLIT_RATIONALE_SMALL = 'dataset.split.rationale.small'
     DATASET_SPLIT_RATIONALE_TINY = 'dataset.split.rationale.tiny'
+    EMAIL_ACCOUNT_ENTER_CODE = 'email.account.enter_code'
     EMAIL_ACCOUNT_EXPIRES = 'email.account.expires'
     EMAIL_ACCOUNT_PASSWORD_RESET_IGNORE = 'email.account.password_reset.ignore'
     EMAIL_ACCOUNT_PASSWORD_RESET_INTRO = 'email.account.password_reset.intro'

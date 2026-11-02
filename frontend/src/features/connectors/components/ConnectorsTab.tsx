@@ -23,8 +23,8 @@ import { Input } from "@/shared/ui/primitives/input";
 import { Label } from "@/shared/ui/primitives/label";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import type { ConnectorProvider, ConnectorStatus } from "@/shared/lib/api";
-import { tI18n } from "@/shared/lib/i18n";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { knownErrorCodeMessage, userErrorMessage } from "@/shared/lib/user-error";
 import { cn } from "@/shared/lib/utils";
 import { useSettingsModal } from "@/features/settings";
 import { useConnectors } from "../hooks/use-connectors";
@@ -82,7 +82,7 @@ function useConnectorErrorParam() {
     const url = new URL(window.location.href);
     const code = url.searchParams.get("connector_error");
     if (!code) return;
-    toast.error(tI18n(code), TOAST_OPTIONS);
+    toast.error(knownErrorCodeMessage(code) ?? msg("connectors.toast.failed"), TOAST_OPTIONS);
     url.searchParams.delete("connector_error");
     window.history.replaceState(
       window.history.state,
@@ -216,7 +216,7 @@ function ProviderCard({
       const { authorize_url } = await meta.startOAuth(oauthValues);
       window.location.assign(authorize_url);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("connectors.toast.failed"), TOAST_OPTIONS);
+      toast.error(userErrorMessage(err, msg("connectors.toast.failed")), TOAST_OPTIONS);
       setStarting(false);
     }
   };
@@ -234,7 +234,7 @@ function ProviderCard({
       closeForm();
       toast.success(meta.toastConnected, TOAST_OPTIONS);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("connectors.toast.failed"), TOAST_OPTIONS);
+      toast.error(userErrorMessage(err, msg("connectors.toast.failed")), TOAST_OPTIONS);
     } finally {
       setSaving(false);
     }
@@ -248,7 +248,7 @@ function ProviderCard({
       onChange(res.connectors);
       toast.success(meta.toastDisconnected, TOAST_OPTIONS);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("connectors.toast.failed"), TOAST_OPTIONS);
+      toast.error(userErrorMessage(err, msg("connectors.toast.failed")), TOAST_OPTIONS);
     } finally {
       setRemoving(false);
     }

@@ -50,6 +50,7 @@ import {
   type NotificationPreferencesPatch,
 } from "@/shared/lib/api";
 import { msg, type MessageKey } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { cn } from "@/shared/lib/utils";
 import {
   AppleLogo,
@@ -301,7 +302,7 @@ export function NotificationsTab() {
       window.location.assign(authorize_url);
     } catch (err) {
       setSlackConnecting(false);
-      toast.error(err instanceof Error ? err.message : msg("notifications.slack.connect_error"));
+      toast.error(userErrorMessage(err, msg("notifications.slack.connect_error")));
     }
   }, []);
 

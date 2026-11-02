@@ -1,18 +1,18 @@
 """Email rendering: one calm, status-line layout for every app email.
 
-Every email shares the same skeleton: a small upper-case wordmark, a status label,
+Every email shares the same skeleton: a centered logo, a status label,
 a one-line headline saying what happened, an optional row of facts (score,
-change vs baseline, spend, duration), exactly one button, and a footer saying
-why the recipient got the email. Each email also gets a plain-text twin.
+change vs baseline, spend, duration), exactly one button, and, for notifications, a small notification-settings
+link. Each email also gets a plain-text twin.
 
 The HTML is built for real mail clients rather than browsers: table layout,
-inline styles, a 600px column, light colors inline (so clients that ignore
-``prefers-color-scheme`` still get a readable email) and dark overrides in a
-``<style>`` block for the clients that honour it. RTL locales get ``dir="rtl"``
-and mirrored alignment and padding throughout.
+inline styles, a 600px card, and the app's dark colors only. The HTML asks
+clients not to recolor it, and adds the known per-client locks against forced
+dark-mode inversion. :class:`EmailContent` still accepts a locale, and RTL
+locales get ``dir="rtl"`` and mirrored alignment and padding throughout.
 
-Copy is localized through :func:`core.i18n.t_locale`, so an email renders in
-the recipient's locale and falls back to English, then Hebrew, per key.
+The notification and account emails always render in English
+(:data:`EMAIL_LOCALE`), whatever the recipient's app locale.
 
 Public entry points:
 
@@ -34,8 +34,21 @@ from ..brand import APP_NAME
 from ..i18n import t_locale
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+
+# The ivory hoatzin mark and the wordmark as one opaque PNG, drawn from the
+# app's dark-theme artwork at 2x on the card color: mail clients load neither
+# web fonts nor inline SVG, and an opaque image cannot pick up a client's own
+# background. The alt text carries the styles so the name still shows when
+# images are blocked.
+_LOGO_URL = f"{FRONTEND_URL}/brand/skynet-email-lockup@2x.png"
+_LOGO_SIZE = (300, 60)
 # The settings modal opens on the tab named by this query param on any page.
 NOTIFICATION_SETTINGS_PATH = "/?settings=notifications"
+
+# Product decision: every app email is English only, whatever the user's app
+# locale. The email.* keys stay in the shared catalogs: Hebrew is the i18n base
+# and must hold every key, and English reads from its overlay.
+EMAIL_LOCALE = "en"
 
 EventType = Literal["needs_input", "budget_near", "failed", "finished", "new_best", "stuck", "shared"]
 EVENT_TYPES: tuple[EventType, ...] = ("needs_input", "budget_near", "failed", "finished", "new_best", "stuck", "shared")
@@ -74,34 +87,48 @@ _RTL_LANGUAGES = frozenset({"he", "ar", "fa", "ur", "yi"})
 # CJK, so tracking is reserved for the Latin and Cyrillic locales.
 _TRACKED_LANGUAGES = frozenset({"en", "de", "es", "fr", "it", "pt", "ru", "uk", "tr"})
 
-# Light values are inlined so clients without dark-mode support (and Outlook
-# desktop, which drops <style>) always get a legible email; dark values only
-# arrive through the prefers-color-scheme / Outlook.com overrides below.
-_LIGHT = {
-    "bg": "#ffffff",
-    "ink": "#1c1612",
-    "text": "#5c4d40",
-    "muted": "#8c7a6b",
-    "rule": "#e8e2da",
-    "btn": "#3d2e22",
+# The one color table of every email: the app's dark-theme tokens
+# (frontend/src/app/globals.css, ``.dark``). Values are inlined, so Outlook
+# desktop, which drops <style>, gets the same colors as every other client.
+# No pure black or white: some clients invert exactly those values.
+COLORS: dict[str, str] = {
+    "bg": "#1c1814",  # --bg
+    "card": "#2c2621",  # --card
+    "ink": "#f3ede6",  # --text-1
+    "text": "#cdbfb1",  # --text-2
+    "muted": "#a89a8c",  # --muted-foreground
+    "rule": "#483d34",  # --border
+    "panel": "#382f28",  # --surface-3
+    "btn": "#b4521f",  # --primary-fill
     "btn_ink": "#faf8f5",
-    "good": "#1a7a3a",
-    "warn": "#9a6a10",
-    "bad": "#b04030",
-    "neutral": "#8c7a6b",
+    "good": "#6cc0a8",  # --success
+    "warn": "#e0a84a",  # --warning
+    "bad": "#ef8a6a",  # --danger
+    "neutral": "#a89a8c",  # --muted-foreground
 }
-_DARK = {
-    "bg": "#141110",
-    "ink": "#f3eee8",
-    "text": "#cbbfb2",
-    "muted": "#9a8b7d",
-    "rule": "#2e2722",
-    "btn": "#f3eee8",
-    "btn_ink": "#1c1612",
-    "good": "#5cc282",
-    "warn": "#e0ac4a",
-    "bad": "#ec8170",
-    "neutral": "#9a8b7d",
+# Each text color and the surface it sits on; the contrast test holds every
+# pair to WCAG AA (4.5:1).
+TEXT_PAIRS: tuple[tuple[str, str], ...] = (
+    *((ink, "card") for ink in ("ink", "text", "muted", "good", "warn", "bad", "neutral")),
+    ("ink", "panel"),
+    ("btn_ink", "btn"),
+)
+
+# Outlook.com and the Outlook apps mark recolored elements with data-ogsb
+# (background) and data-ogsc (text); these rules put the table's colors back.
+_BG_CLASSES: dict[str, str] = {
+    "sk-bg": "bg",
+    "sk-card": "card",
+    "sk-panel": "panel",
+    "sk-btn": "btn",
+    **{f"sk-dot-{tone}": tone for tone in ("good", "warn", "bad", "neutral")},
+}
+_INK_CLASSES: dict[str, str] = {
+    "sk-ink": "ink",
+    "sk-text": "text",
+    "sk-muted": "muted",
+    "sk-btn-a": "btn_ink",
+    **{f"sk-{tone}": tone for tone in ("good", "warn", "bad", "neutral")},
 }
 
 # The app's faces load from Google Fonts: Onest for text, Bricolage Grotesque
@@ -153,7 +180,6 @@ class EmailContent:
         locale: Recipient locale tag; drives ``lang``, direction and fonts.
         subject: Mail subject line (also the document ``<title>``).
         headline: One line saying what happened.
-        footer: Why the recipient got this email.
         status: Optional ``(label, tone)`` status line above the headline.
         detail: Optional supporting sentence under the headline.
         facts: Ordered ``(label, value)`` pairs for the fact row (0-4).
@@ -168,7 +194,6 @@ class EmailContent:
     locale: str | None
     subject: str
     headline: str
-    footer: str
     status: tuple[str, Tone] | None = None
     detail: str | None = None
     facts: tuple[tuple[str, str], ...] = ()
@@ -362,7 +387,7 @@ def build_facts(
 
 
 def _style_block(tracked: bool) -> str:
-    """Return the ``<style>`` contents: responsive rules and dark-mode overrides.
+    """Return the ``<style>`` contents: dark-mode color locks and responsive rules.
 
     Args:
         tracked: Whether the locale takes letter-spacing (Latin/Cyrillic).
@@ -371,79 +396,83 @@ def _style_block(tracked: bool) -> str:
         CSS text. Every rule is an enhancement; the email reads correctly
         without it.
     """
-    color_classes = {
-        "sk-bg": ("background-color", "bg"),
-        "sk-ink": ("color", "ink"),
-        "sk-text": ("color", "text"),
-        "sk-muted": ("color", "muted"),
-        "sk-rule": ("border-color", "rule"),
-        "sk-btn": ("background-color", "btn"),
-        "sk-btn-a": ("color", "btn_ink"),
-        **{f"sk-{tone}": ("color", tone) for tone in ("good", "warn", "bad", "neutral")},
-        **{f"sk-dot-{tone}": ("background-color", tone) for tone in ("good", "warn", "bad", "neutral")},
-    }
-    dark_rules = "".join(f".{cls}{{{prop}:{_DARK[token]}!important}}" for cls, (prop, token) in color_classes.items())
-    # Outlook.com tags its dark mode with data-ogsc (text) / data-ogsb (backgrounds).
-    ogsc_rules = "".join(
-        f"[data-ogsc] .{cls}{{{prop}:{_DARK[token]}!important}}"
-        for cls, (prop, token) in color_classes.items()
-        if prop != "background-color"
-    )
-    ogsb_rules = "".join(
-        f"[data-ogsb] .{cls}{{{prop}:{_DARK[token]}!important}}"
-        for cls, (prop, token) in color_classes.items()
-        if prop == "background-color"
-    )
     tracking = ".sk-status{letter-spacing:0.08em}" if tracked else ""
+    locks = "".join(
+        f"[data-ogsb] .{cls}{{background-color:{COLORS[key]} !important}}" for cls, key in _BG_CLASSES.items()
+    )
+    locks += "".join(f"[data-ogsc] .{cls}{{color:{COLORS[key]} !important}}" for cls, key in _INK_CLASSES.items())
+    locks += f"[data-ogsc] .sk-rule{{border-color:{COLORS['rule']} !important}}"
     return (
-        ":root{color-scheme:light dark;supported-color-schemes:light dark}"
+        ":root{color-scheme:dark;supported-color-schemes:dark}"
         "body{margin:0!important;padding:0!important;width:100%!important;-webkit-text-size-adjust:100%;"
         "-ms-text-size-adjust:100%}"
         "table{border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0}"
         "a{text-decoration:none}"
         ".sk-btn-a:hover{opacity:0.88}"
-        f"{tracking}"
+        f"{tracking}{locks}"
+        "[data-ogsc] img:hover,[data-ogsb] img:hover{background-color:transparent !important}"
+        # Gmail apps invert dark emails. Only Gmail puts a <u> before the
+        # body, so these rules match there alone: the blend layers undo the
+        # inversion of the text, and the gradient keeps the background.
+        f"u + .body .gmail-bg{{background-image:linear-gradient({COLORS['bg']},{COLORS['bg']})}}"
+        "u + .body .gmail-screen{background:#000;mix-blend-mode:screen}"
+        "u + .body .gmail-diff{background:#000;mix-blend-mode:difference}"
         "@media (max-width:520px){"
-        ".sk-pad{padding:28px 20px 32px!important}"
-        ".sk-fact{display:inline-block!important;width:50%!important;box-sizing:border-box}"
+        ".sk-outer{padding:12px 8px!important}"
+        ".sk-pad{padding:24px 20px 28px!important}"
+        ".sk-fact{display:block!important;width:100%!important;box-sizing:border-box;padding:12px 0!important}"
+        f".sk-fact+.sk-fact{{border-top:1px solid {COLORS['rule']}}}"
+        ".sk-fact-v{font-size:16px!important;line-height:24px!important;white-space:normal!important}"
         ".sk-h1{font-size:20px!important;line-height:28px!important}"
-        ".sk-code{font-size:26px!important;letter-spacing:4px!important}"
+        ".sk-code{font-size:28px!important;letter-spacing:6px!important}"
         "}"
-        f"@media (prefers-color-scheme:dark){{{dark_rules}}}"
-        f"{ogsc_rules}{ogsb_rules}"
     )
 
 
+def _mso_color(value: str) -> str:
+    """Escape a hex color for an Outlook text-fill stop list (``#abc`` -> ``\\#ABC``)."""
+    return "\\" + value.upper()
+
+
 def _facts_row(facts: tuple[tuple[str, str], ...], font: str, rtl: bool) -> str:
-    """Render the fact row as one table row of equal-width cells.
+    """Render the facts as inline blocks that wrap onto new lines when narrow.
 
     Args:
         facts: Ordered ``(label, value)`` pairs (1-4).
         font: Text font stack for the labels.
-        rtl: Whether to mirror alignment and the inter-cell padding.
+        rtl: Whether to mirror alignment and the gap between facts.
 
     Returns:
-        A ``<tr>`` holding the fact table, or ``""`` without facts.
+        A ``<tr>`` holding the facts, or ``""`` without facts.
     """
     if not facts:
         return ""
     start = "right" if rtl else "left"
-    width = f"{100 // len(facts)}%"
-    gap = "14px 0 14px 12px" if rtl else "14px 12px 14px 0"
-    cells = "".join(
-        f'<td class="sk-fact" width="{width}" valign="top" style="width:{width};padding:{gap};text-align:{start};">'
-        f'<div class="sk-muted" style="font-family:{font};font-size:12px;line-height:16px;color:{_LIGHT["muted"]};'
-        f'text-align:{start};">{html.escape(label)}</div>'
-        f'<div class="sk-ink" style="font-family:{_MONO};font-size:18px;line-height:26px;font-weight:500;'
-        f'color:{_LIGHT["ink"]};padding-top:4px;text-align:{start};white-space:nowrap;">{_bidi_html(value)}</div>'
-        "</td>"
+    gap = "16px 0 16px 28px" if rtl else "16px 28px 16px 0"
+    # Inline blocks, not table cells: a client that ignores the mobile media
+    # query (the Gmail app with non-Google accounts) wraps a fact that does
+    # not fit onto its own line instead of squeezing or overlapping it. The
+    # media query then stacks every fact on its own full-width line. Outlook
+    # desktop ignores inline-block, so a ghost table keeps its facts in a row.
+    blocks = '<!--[if mso]></td><td valign="top"><![endif]-->'.join(
+        f'<div class="sk-fact" style="display:inline-block;vertical-align:top;padding:{gap};text-align:{start};">'
+        f'<div class="sk-muted" style="font-family:{font};font-size:12px;line-height:16px;color:{COLORS["muted"]};'
+        f'text-align:{start};white-space:nowrap;">{html.escape(label)}</div>'
+        f'<div class="sk-ink sk-fact-v" style="font-family:{_MONO};font-size:18px;line-height:26px;font-weight:500;'
+        f'color:{COLORS["ink"]};padding-top:4px;text-align:{start};white-space:nowrap;">{_bidi_html(value)}</div>'
+        "</div>"
         for label, value in facts
     )
     return (
         '<tr><td style="padding-top:24px;">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="sk-rule" '
-        f'style="width:100%;border-top:1px solid {_LIGHT["rule"]};border-bottom:1px solid {_LIGHT["rule"]};">'
-        f"<tr>{cells}</tr></table></td></tr>"
+        f'style="width:100%;border-top:1px solid {COLORS["rule"]};border-bottom:1px solid {COLORS["rule"]};">'
+        f'<tr><td style="text-align:{start};font-size:0;line-height:0;">'
+        '<!--[if mso]><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+        '<td valign="top"><![endif]-->'
+        f"{blocks}"
+        "<!--[if mso]></td></tr></table><![endif]-->"
+        "</td></tr></table></td></tr>"
     )
 
 
@@ -461,22 +490,25 @@ def _code_rows(code: str, note: str | None, font: str, start: str) -> str:
     """
     note_row = (
         f'<tr><td class="sk-muted" style="padding-top:12px;font-family:{font};font-size:14px;line-height:20px;'
-        f'color:{_LIGHT["muted"]};text-align:{start};">{html.escape(note)}</td></tr>'
+        f'color:{COLORS["muted"]};text-align:{start};">{html.escape(note)}</td></tr>'
         if note
         else ""
     )
+    # The code sits on a tinted panel, centred, so it reads as the one thing
+    # to copy; the bgcolor attribute keeps the panel in Outlook desktop.
     return (
         '<tr><td style="padding-top:24px;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="sk-rule" '
-        f'style="width:100%;border-top:1px solid {_LIGHT["rule"]};border-bottom:1px solid {_LIGHT["rule"]};">'
-        f'<tr><td class="sk-ink sk-code" dir="ltr" style="padding:18px 0;font-family:{_MONO};font-size:30px;'
-        f'line-height:38px;font-weight:500;letter-spacing:6px;color:{_LIGHT["ink"]};text-align:{start};">'
-        f"{html.escape(code)}</td></tr></table></td></tr>{note_row}"
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
+        f'<tr><td class="sk-panel" bgcolor="{COLORS["panel"]}" align="center" '
+        f'style="border-radius:10px;background-color:{COLORS["panel"]};padding:22px 16px;">'
+        f'<span class="sk-ink sk-code" dir="ltr" style="font-family:{_MONO};font-size:34px;line-height:40px;'
+        f'font-weight:500;letter-spacing:8px;color:{COLORS["ink"]};">'
+        f"{html.escape(code)}</span></td></tr></table></td></tr>{note_row}"
     )
 
 
-def _button_row(label: str, url: str, font: str, start: str) -> str:
-    """Render the single call-to-action as a table-cell button.
+def _button_row(label: str, url: str, font: str) -> str:
+    """Render the single call-to-action as a centered table-cell button.
 
     The colored cell (not the link) carries the background so Outlook desktop,
     which ignores padding on ``<a>``, still draws a solid button.
@@ -485,19 +517,18 @@ def _button_row(label: str, url: str, font: str, start: str) -> str:
         label: Button text.
         url: Destination URL.
         font: Text font stack.
-        start: ``"left"`` or ``"right"`` for the reading direction.
 
     Returns:
         A ``<tr>`` holding the button.
     """
     href = html.escape(url, quote=True)
     return (
-        f'<tr><td align="{start}" style="padding-top:28px;text-align:{start};">'
-        f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="{start}"><tr>'
-        f'<td class="sk-btn" bgcolor="{_LIGHT["btn"]}" style="border-radius:6px;background-color:{_LIGHT["btn"]};'
+        '<tr><td align="center" style="padding-top:28px;text-align:center;">'
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center"><tr>'
+        f'<td class="sk-btn" bgcolor="{COLORS["btn"]}" style="border-radius:6px;background-color:{COLORS["btn"]};'
         'mso-padding-alt:12px 22px;">'
         f'<a class="sk-btn-a" href="{href}" target="_blank" style="display:inline-block;padding:12px 22px;'
-        f"font-family:{font};font-size:15px;line-height:20px;font-weight:600;color:{_LIGHT['btn_ink']};"
+        f"font-family:{font};font-size:15px;line-height:20px;font-weight:600;color:{COLORS['btn_ink']};"
         f'text-decoration:none;border-radius:6px;">{html.escape(label)}</a>'
         "</td></tr></table></td></tr>"
     )
@@ -519,12 +550,11 @@ def render_email_html(content: EmailContent) -> str:
     tracked = _language(content.locale) in _TRACKED_LANGUAGES
     lang = html.escape(content.locale or "he", quote=True)
     esc = html.escape
-    light = _LIGHT
 
     preheader_text = content.preheader or content.detail or " · ".join(f"{k} {v}" for k, v in content.facts)
     preheader = (
         f'<div style="display:none;max-height:0;max-width:0;overflow:hidden;opacity:0;mso-hide:all;'
-        f'font-size:1px;line-height:1px;color:{light["bg"]};">{esc(_strip_isolates(preheader_text))}'
+        f'font-size:1px;line-height:1px;color:{COLORS["bg"]};">{esc(_strip_isolates(preheader_text))}'
         f"{'&#8204;&nbsp;' * 40}</div>"
         if preheader_text
         else ""
@@ -536,28 +566,34 @@ def render_email_html(content: EmailContent) -> str:
         status_row = (
             f'<tr><td style="padding-bottom:10px;text-align:{start};">'
             f'<span class="sk-dot-{tone}" style="display:inline-block;width:7px;height:7px;border-radius:1px;'
-            f'background-color:{light[tone]};vertical-align:middle;font-size:0;line-height:0;">&nbsp;</span>'
+            f'background-color:{COLORS[tone]};vertical-align:middle;font-size:0;line-height:0;">&nbsp;</span>'
             f'<span class="sk-{tone} sk-status" style="{gap}font-family:{font};font-size:12px;line-height:16px;'
-            f'font-weight:600;text-transform:uppercase;color:{light[tone]};vertical-align:middle;">'
+            f'font-weight:600;text-transform:uppercase;color:{COLORS[tone]};vertical-align:middle;">'
             f"{esc(label)}</span></td></tr>"
         )
     headline_tracking = "letter-spacing:-0.01em;" if tracked else ""
     detail_row = (
         f'<tr><td class="sk-text" style="padding-top:8px;font-family:{font};font-size:15px;line-height:22px;'
-        f'color:{light["text"]};text-align:{start};">{esc(content.detail)}</td></tr>'
+        f'color:{COLORS["text"]};text-align:{start};">{esc(content.detail)}</td></tr>'
         if content.detail
         else ""
     )
     body_rows = (
         _code_rows(content.code, content.note, font, start) if content.code else _facts_row(content.facts, font, rtl)
     )
-    button_row = _button_row(*content.button, font, start) if content.button else ""
-    settings_link = ""
+    button_row = _button_row(*content.button, font) if content.button else ""
+    settings_row = ""
     if content.settings:
         settings_label, settings_url = content.settings
-        settings_link = (
-            f'<br><a class="sk-muted" href="{esc(settings_url, quote=True)}" target="_blank" '
-            f'style="color:{light["muted"]};text-decoration:underline;">{esc(settings_label)}</a>'
+        settings_row = (
+            f'<tr><td style="padding-top:40px;">'
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="sk-rule" '
+            f'style="width:100%;border-top:1px solid {COLORS["rule"]};"><tr>'
+            f'<td class="sk-muted" style="padding-top:16px;font-family:{font};font-size:12px;line-height:18px;'
+            f'color:{COLORS["muted"]};text-align:{start};">'
+            f'<a class="sk-muted" href="{esc(settings_url, quote=True)}" target="_blank" '
+            f'style="color:{COLORS["muted"]};text-decoration:underline;">{esc(settings_label)}</a></td>'
+            "</tr></table></td></tr>"
         )
     home = esc(FRONTEND_URL, quote=True)
 
@@ -568,46 +604,59 @@ def render_email_html(content: EmailContent) -> str:
         '<head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<meta http-equiv="X-UA-Compatible" content="IE=edge">'
-        '<meta name="color-scheme" content="light dark">'
-        '<meta name="supported-color-schemes" content="light dark">'
+        # The email is dark in every client and mode. Declaring "dark" tells
+        # Apple Mail, iOS Mail and Chromium-based clients that it supports
+        # dark already, so they leave it as authored instead of recoloring.
+        '<meta name="color-scheme" content="dark">'
+        '<meta name="supported-color-schemes" content="dark">'
         '<meta name="format-detection" content="telephone=no,date=no,address=no,email=no">'
         f"<title>{esc(_strip_isolates(content.subject))}</title>"
         # Outlook desktop renders Times New Roman when the first family in a
         # stack is a font it does not have, so it gets a plain stack instead.
         "<!--[if mso]><style>body,table,td,div,p,a,span,h1{font-family:'Segoe UI',Arial,sans-serif!important}"
         "</style><![endif]-->"
+        # New Outlook for Windows recolors text in dark mode but leaves a
+        # gradient text fill alone, so the button label keeps its color.
+        "<!--[if gte mso 16]><style>.sk-btn-a{mso-style-textfill-type:gradient;"
+        f'mso-style-textfill-fill-gradientfill-stoplist:"0 {_mso_color(COLORS["btn_ink"])} 0 100000\\,'
+        f'100000 {_mso_color(COLORS["btn_ink"])} 0 100000"}}</style><![endif]-->'
         f'<link href="{esc(_FONTS_URL, quote=True)}" rel="stylesheet">'
         f"<style>{_style_block(tracked)}</style>"
         "</head>"
-        f'<body class="sk-bg" dir="{direction}" style="margin:0;padding:0;background-color:{light["bg"]};">'
+        f'<body class="body sk-bg" dir="{direction}" bgcolor="{COLORS["bg"]}" '
+        f'style="margin:0;padding:0;background-color:{COLORS["bg"]};">'
+        # Outlook desktop paints the window behind the body only from VML.
+        '<!--[if gte mso 9]><v:background xmlns:v="urn:schemas-microsoft-com:vml" fill="t">'
+        f'<v:fill type="tile" color="{COLORS["bg"]}"/></v:background><![endif]-->'
+        '<div class="gmail-bg"><div class="gmail-screen"><div class="gmail-diff">'
         f"{preheader}"
         f'<table role="presentation" class="sk-bg" width="100%" cellpadding="0" cellspacing="0" border="0" '
-        f'dir="{direction}" bgcolor="{light["bg"]}" style="width:100%;background-color:{light["bg"]};">'
-        '<tr><td align="center" style="padding:0;">'
+        f'dir="{direction}" bgcolor="{COLORS["bg"]}" style="width:100%;background-color:{COLORS["bg"]};">'
+        '<tr><td class="sk-outer" align="center" style="padding:32px 16px;">'
         '<!--[if mso]><table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0">'
         "<tr><td><![endif]-->"
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" dir="{direction}" '
-        'style="width:100%;max-width:600px;">'
-        f'<tr><td class="sk-pad" style="padding:40px 32px 40px;text-align:{start};">'
+        # Separate borders: a collapsed border ignores border-radius and draws square corners.
+        'style="width:100%;max-width:600px;border-collapse:separate;">'
+        f'<tr><td class="sk-card sk-pad" bgcolor="{COLORS["card"]}" style="padding:28px 32px 36px;'
+        f'background-color:{COLORS["card"]};border:1px solid {COLORS["rule"]};border-radius:12px;text-align:{start};">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;">'
-        f'<tr><td style="padding-bottom:36px;text-align:{start};">'
-        f'<a class="sk-ink" href="{home}" target="_blank" dir="ltr" style="font-family:{_DISPLAY_LEAD}{font};font-size:13px;'
-        f'line-height:16px;font-weight:700;letter-spacing:0.24em;color:{light["ink"]};text-decoration:none;">'
-        f"{esc(APP_NAME.upper())}</a></td></tr>"
+        '<tr><td align="center" style="padding-bottom:20px;text-align:center;">'
+        f'<a href="{home}" target="_blank" style="text-decoration:none;">'
+        f'<img src="{esc(_LOGO_URL, quote=True)}" width="{_LOGO_SIZE[0]}" height="{_LOGO_SIZE[1]}" '
+        f'alt="{esc(APP_NAME, quote=True)}" '
+        f'style="display:block;margin:0 auto;border:0;outline:none;width:{_LOGO_SIZE[0]}px;height:{_LOGO_SIZE[1]}px;'
+        f"font-family:{_DISPLAY_LEAD}{font};font-size:18px;line-height:60px;font-weight:700;color:{COLORS['ink']};"
+        'text-align:center;"></a></td></tr>'
         f"{status_row}"
-        f'<tr><td style="text-align:{start};"><h1 class="sk-ink sk-h1" style="margin:0;font-family:{_DISPLAY_LEAD}{font};'
-        f"font-size:22px;line-height:30px;font-weight:600;{headline_tracking}color:{light['ink']};"
+        f'<tr><td style="text-align:{start};">'
+        f'<h1 class="sk-ink sk-h1" style="margin:0;font-family:{_DISPLAY_LEAD}{font};'
+        f"font-size:22px;line-height:30px;font-weight:600;{headline_tracking}color:{COLORS['ink']};"
         f'text-align:{start};">{_bidi_html(content.headline)}</h1></td></tr>'
-        f"{detail_row}{body_rows}{button_row}"
-        f'<tr><td style="padding-top:44px;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="sk-rule" '
-        f'style="width:100%;border-top:1px solid {light["rule"]};"><tr>'
-        f'<td class="sk-muted" style="padding-top:16px;font-family:{font};font-size:12px;line-height:18px;'
-        f'color:{light["muted"]};text-align:{start};">{esc(content.footer)}{settings_link}</td>'
-        "</tr></table></td></tr>"
+        f"{detail_row}{body_rows}{button_row}{settings_row}"
         "</table></td></tr></table>"
         "<!--[if mso]></td></tr></table><![endif]-->"
-        "</td></tr></table></body></html>"
+        "</td></tr></table></div></div></div></body></html>"
     )
 
 
@@ -637,10 +686,9 @@ def render_email_text(content: EmailContent) -> str:
     if content.button:
         label, url = content.button
         lines += ["", f"{label}: {url}"]
-    lines += ["", "--", content.footer]
     if content.settings:
         label, url = content.settings
-        lines.append(f"{label}: {url}")
+        lines += ["", "--", f"{label}: {url}"]
     body = "\n".join(lines) + "\n"
     # Isolates only matter when RTL text surrounds the numbers; in LTR bodies
     # they are noise that a few plain-text clients draw as boxes.
@@ -649,31 +697,25 @@ def render_email_text(content: EmailContent) -> str:
 
 def render_notification_email(
     event_type: str,
-    locale: str | None,
     title: str,
     facts: Mapping[str, FactValue] | None,
     link: str,
-    reason: str | None = None,
     *,
     detail: str | None = None,
     settings_url: str | None = None,
 ) -> RenderedEmail:
-    """Render a run or sharing notification in the recipient's locale.
+    """Render a run or sharing notification in English.
 
     Args:
         event_type: One of :data:`EVENT_TYPES` (``needs_input``,
             ``budget_near``, ``failed``, ``finished``, ``new_best``,
             ``stuck``, ``shared``).
-        locale: Recipient locale tag (``"en"``, ``"he"``, ``"pt-BR"``);
-            ``None`` renders the Hebrew base.
         title: The run's display name, inserted into the headline.
         facts: Optional ``score`` / ``delta`` / ``spent`` (+ ``limit``) /
             ``duration`` values; see :func:`build_facts`. Only the facts the
             event shows, and that are not ``None``, are rendered.
         link: Button target: an absolute URL or an app path such as
             ``/optimizations/<id>`` (resolved against ``FRONTEND_URL``).
-        reason: Footer line saying why this email was sent; ``None`` uses the
-            event's default ("You get emails when a run finishes.").
         detail: Optional sentence under the headline (an error summary, the
             question a paused run asks, who shared the run).
         settings_url: Notification-settings link; ``None`` uses the app's
@@ -688,26 +730,25 @@ def render_notification_email(
     if event_type not in EVENT_TYPES:
         raise ValueError(f"Unknown notification event type: {event_type!r}")
     prefix = f"email.event.{event_type}"
-    headline = t_locale(locale, f"{prefix}.headline", title=f"{_FSI}{title}{_PDI}")
+    headline = t_locale(EMAIL_LOCALE, f"{prefix}.headline", title=f"{_FSI}{title}{_PDI}")
     content = EmailContent(
-        locale=locale,
+        locale=EMAIL_LOCALE,
         subject=_strip_isolates(headline),
         headline=headline,
-        footer=reason or t_locale(locale, f"{prefix}.reason"),
-        status=(t_locale(locale, f"{prefix}.status"), _EVENT_TONES[event_type]),
+        status=(t_locale(EMAIL_LOCALE, f"{prefix}.status"), _EVENT_TONES[event_type]),
         detail=detail,
-        facts=build_facts(facts, locale, _EVENT_FACTS[event_type]),
-        button=(t_locale(locale, f"{prefix}.button"), absolute_url(link)),
+        facts=build_facts(facts, EMAIL_LOCALE, _EVENT_FACTS[event_type]),
+        button=(t_locale(EMAIL_LOCALE, f"{prefix}.button"), absolute_url(link)),
         settings=(
-            t_locale(locale, "email.settings_link"),
+            t_locale(EMAIL_LOCALE, "email.settings_link"),
             absolute_url(settings_url or NOTIFICATION_SETTINGS_PATH),
         ),
     )
     return RenderedEmail(content.subject, render_email_html(content), render_email_text(content))
 
 
-def render_account_email(kind: str, locale: str | None, code: str, *, minutes: int | None = None) -> RenderedEmail:
-    """Render an account-security code email on the shared layout.
+def render_account_email(kind: str, code: str, *, minutes: int | None = None) -> RenderedEmail:
+    """Render an account-security code email in English on the shared layout.
 
     The plain-text body keeps the original wording ("Your Skynet confirmation
     code is 123456. It expires in 30 minutes." plus the ignore line). These
@@ -716,7 +757,6 @@ def render_account_email(kind: str, locale: str | None, code: str, *, minutes: i
     Args:
         kind: One of :data:`ACCOUNT_EMAIL_KINDS` (``verification``,
             ``password_reset``, ``sign_in``).
-        locale: Recipient locale tag; ``None`` renders the Hebrew base.
         code: The one-time code.
         minutes: Code lifetime; defaults to the kind's standard (30 or 10).
 
@@ -730,18 +770,20 @@ def render_account_email(kind: str, locale: str | None, code: str, *, minutes: i
         raise ValueError(f"Unknown account email kind: {kind!r}")
     prefix = f"email.account.{kind}"
     lifetime = minutes if minutes is not None else _ACCOUNT_CODE_MINUTES[kind]
-    subject = t_locale(locale, f"{prefix}.subject")
-    intro = t_locale(locale, f"{prefix}.intro", code=code)
-    expires = t_locale(locale, "email.account.expires", minutes=lifetime)
-    ignore = t_locale(locale, f"{prefix}.ignore")
+    subject = t_locale(EMAIL_LOCALE, f"{prefix}.subject")
+    intro = t_locale(EMAIL_LOCALE, f"{prefix}.intro", code=code)
+    expires = t_locale(EMAIL_LOCALE, "email.account.expires", minutes=lifetime)
+    ignore = t_locale(EMAIL_LOCALE, f"{prefix}.ignore")
     content = EmailContent(
-        locale=locale,
+        locale=EMAIL_LOCALE,
         subject=subject,
         headline=subject,
-        footer=ignore,
-        status=(t_locale(locale, "email.account.status"), "neutral"),
+        detail=t_locale(EMAIL_LOCALE, "email.account.enter_code"),
+        status=(t_locale(EMAIL_LOCALE, "email.account.status"), "neutral"),
         code=code,
-        note=expires,
+        # The ignore line is a safety instruction, so it stays in the body
+        # text rather than in small print.
+        note=f"{expires} {ignore}",
         preheader=f"{intro} {expires}",
         text_body=f"{intro} {expires}\n\n{ignore}\n",
     )

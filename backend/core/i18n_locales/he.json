@@ -351,6 +351,7 @@
     "email.event.shared.reason": "מיילים נשלחים אליך כשמישהו משתף איתך אופטימיזציה.",
     "email.account.status": "חשבון",
     "email.account.expires": "תוקף הקוד יפוג בעוד {minutes} דקות.",
+    "email.account.enter_code": "יש להזין את הקוד הזה ב-{term.appName} כדי להמשיך.",
     "email.account.verification.subject": "אישור כתובת המייל שלך ב-{term.appName}",
     "email.account.verification.intro": "קוד האישור שלך ב-{term.appName} הוא {code}.",
     "email.account.verification.ignore": "אם לא יצרת חשבון {term.appName}, אפשר להתעלם מהמייל הזה.",

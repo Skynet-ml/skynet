@@ -40,6 +40,7 @@ import {
 } from "@/shared/lib/api";
 import { contractCheckMessage } from "@/shared/lib/i18n";
 import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import type { ContinuousEnableRequest } from "@/shared/types/continuous";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
@@ -570,7 +571,7 @@ export function WizardV2Provider({
   const submitFailed = (err: unknown) => {
     // The storage 409 and the balance 402 each open their own shared modal.
     if (!isStorageQuotaError(err) && !isInsufficientFundsError(err)) {
-      toast.error(err instanceof Error ? err.message : msg("submit.submit_failed"));
+      toast.error(userErrorMessage(err, msg("submit.submit_failed")));
     }
     submittingRef.current = false;
     setSubmitPhase("idle");
@@ -685,7 +686,7 @@ export function WizardV2Provider({
         await enableContinuous(result.optimization_id, scheduledRun).catch((err: unknown) => {
           toast.error(
             formatMsg("submit.v2.schedule.failed", {
-              error: err instanceof Error ? err.message : String(err),
+              error: userErrorMessage(err),
             }),
           );
         });

@@ -13,6 +13,7 @@ import {
 import { cn } from "@/shared/lib/utils";
 import { downloadProgramExport } from "@/shared/lib/api";
 import { msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
 import type {
   OptimizationLogEntry,
@@ -175,9 +176,7 @@ export function ExportMenu({
                     await downloadProgramExport(job.optimization_id, programPairIndex);
                     track(TelemetryEvent.ArtifactDownloaded, { kind: "program_zip" });
                   } catch (err) {
-                    toast.error(
-                      err instanceof Error ? err.message : msg("optimization.file.parse_error"),
-                    );
+                    toast.error(userErrorMessage(err, msg("optimization.file.parse_error")));
                   }
                 }}
                 className={itemCls}

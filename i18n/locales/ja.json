@@ -393,6 +393,7 @@
     "email.event.shared.reason": "誰かがあなたと実行を共有するとメールが届きます。",
     "email.account.status": "アカウント",
     "email.account.expires": "有効期限は{minutes}分です。",
+    "email.account.enter_code": "続行するには、このコードを {term.appName} に入力してください。",
     "email.account.verification.subject": "{term.appName} のメールアドレスを確認してください",
     "email.account.verification.intro": "{term.appName} の確認コードは {code} です。",
     "email.account.verification.ignore": "{term.appName} アカウントを作成していない場合は、このメールを無視してください。",

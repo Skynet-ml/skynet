@@ -218,7 +218,7 @@ function RegistryForm({ owner }: { owner: string }) {
               ? "animate-out fade-out-0 slide-out-to-top-1 fill-mode-forwards duration-300 ease-out"
               : "animate-in fade-in-0 slide-in-from-top-1",
             checkResult.ok
-              ? "border-[#4f9d5b]/40 bg-[#4f9d5b]/10 text-[#3a7d46] dark:text-[#8cd195] dark:text-[#7bc489]"
+              ? "border-[var(--success-border)] bg-[var(--success-dim)] text-[var(--success)]"
               : "border-destructive/30 bg-destructive/5 text-destructive",
           )}
         >

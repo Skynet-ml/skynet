@@ -18,6 +18,7 @@ import {
   type SlackConnection,
 } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { ArrowsClockwise, CircleNotch, SlackLogo, Trash } from "@/shared/ui/icons";
 import { SettingsRow } from "@/shared/ui/settings-row";
 import { StatusDot } from "@/shared/ui/status-badge";
@@ -25,20 +26,13 @@ import { TooltipButton } from "@/shared/ui/tooltip-button";
 import { TOUCH_FIELD_SM } from "@/shared/ui/touch";
 import { Button } from "@/shared/ui/primitives/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/shared/ui/primitives/dialog";
-import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@/shared/ui/primitives/select";
+import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
 
 interface SlackConnectionSectionProps {
   connection: SlackConnection;
@@ -85,7 +79,7 @@ export function SlackConnectionSection({
       onChange(await updateSlackTarget(slackChannelIdFor(value)));
       toast.success(msg("notifications.slack.target_saved"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("notifications.slack.target_error"));
+      toast.error(userErrorMessage(err, msg("notifications.slack.target_error")));
     } finally {
       setSaving(false);
     }
@@ -199,7 +193,7 @@ export function SlackConnectionSection({
               </div>
             )}
             {channelsError && (
-              <div className="px-2 py-1.5 text-xs text-destructive">
+              <div role="alert" className="px-2 py-1.5 text-xs text-destructive">
                 {msg("notifications.slack.channels_error")}
               </div>
             )}
@@ -244,26 +238,17 @@ export function SlackConnectionSection({
         </Button>
       </SettingsRow>
 
-      <Dialog open={confirmOpen} onOpenChange={(open) => !removing && setConfirmOpen(open)}>
-        <DialogContent className="w-[min(28rem,92vw)] max-w-[min(28rem,92vw)] sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{msg("notifications.slack.disconnect")}</DialogTitle>
-            <DialogDescription>{msg("notifications.slack.disconnect_confirm")}</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmOpen(false)} disabled={removing}>
-              {msg("notifications.slack.cancel")}
-            </Button>
-            <Button variant="destructive" onClick={() => void disconnect()} disabled={removing}>
-              {removing ? (
-                <CircleNotch className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
-              ) : (
-                msg("notifications.slack.disconnect_action")
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        variant="danger"
+        title={msg("notifications.slack.disconnect")}
+        description={msg("notifications.slack.disconnect_confirm")}
+        cancelLabel={msg("notifications.slack.cancel")}
+        confirmLabel={msg("notifications.slack.disconnect_action")}
+        onConfirm={() => void disconnect()}
+        pending={removing}
+      />
     </>
   );
 }

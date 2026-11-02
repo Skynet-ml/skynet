@@ -15,7 +15,6 @@ import {
   PushPin,
   Repeat,
   Pause,
-  CircleNotch,
   GridFour,
   CaretLeft,
   Copy,
@@ -35,14 +34,6 @@ import {
 import { rememberLayout, useLayoutHint } from "@/shared/lib/layout-hint";
 import { cn } from "@/shared/lib/utils";
 import { Button } from "@/shared/ui/primitives/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/shared/ui/primitives/dialog";
 import {
   listJobsSidebar,
   listJobsSharedWithMe,
@@ -71,6 +62,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/
 import { ShareDialog } from "@/features/optimizations";
 import { StorageMeter } from "@/features/storage";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { perLocale } from "@/shared/lib/per-locale";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { sessionIdentity } from "@/shared/lib/session-identity";
@@ -95,6 +87,7 @@ import {
 } from "./SidebarFolders";
 import { DEFAULT_RUN_VIEW, applyRunView, parseRunView, type RunView } from "../lib/run-view";
 import { ROW_MOTION, rowTransition } from "../lib/row-motion";
+import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
 
 const NAV_ITEMS = perLocale(() =>
   APP_PAGES.filter((page) => page.sidebar).map((page) => ({
@@ -828,46 +821,27 @@ export function Sidebar() {
         </div>
       </div>
 
-      <Dialog
+      <ConfirmDialog
         open={deleteConfirm !== null}
         onOpenChange={(open) => {
           if (!open) setDeleteConfirm(null);
         }}
-      >
-        <DialogContent className="w-[min(28rem,92vw)] max-w-[min(28rem,92vw)] sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>
-              {`${msg("auto.features.sidebar.components.sidebar.3")}${TERMS.optimization}`}
-            </DialogTitle>
-            <DialogDescription>
-              {`${msg("auto.features.sidebar.components.sidebar.4")}${TERMS.optimization}`}{" "}
-              <span className="font-semibold text-foreground break-words" dir="auto">
-                {deleteJobInfo?.name}
-              </span>
-              ? {msg("delete.irreversible")}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setDeleteConfirm(null)}
-              disabled={deleteLoading}
-            >
-              {msg("auto.features.sidebar.components.sidebar.5")}
-            </Button>
-            <Button variant="destructive" onClick={confirmDelete} disabled={deleteLoading}>
-              {deleteLoading ? (
-                <CircleNotch
-                  className="animate-spin motion-reduce:animate-none"
-                  aria-hidden="true"
-                />
-              ) : (
-                msg("auto.features.sidebar.components.sidebar.literal.10")
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        variant="danger"
+        title={`${msg("auto.features.sidebar.components.sidebar.3")}${TERMS.optimization}`}
+        description={
+          <>
+            {`${msg("auto.features.sidebar.components.sidebar.4")}${TERMS.optimization}`}{" "}
+            <span className="font-semibold text-foreground break-words" dir="auto">
+              {deleteJobInfo?.name}
+            </span>
+            ? {msg("delete.irreversible")}
+          </>
+        }
+        cancelLabel={msg("auto.features.sidebar.components.sidebar.5")}
+        confirmLabel={msg("auto.features.sidebar.components.sidebar.literal.10")}
+        onConfirm={confirmDelete}
+        pending={deleteLoading}
+      />
 
       <FolderDialogs
         dialog={folderDialog}
@@ -1069,7 +1043,7 @@ function JobRow({
     } catch (err) {
       // Surface the real backend reason (quota 429, wrong-status 409, …) like
       // the detail-view retry does, falling back to the generic message.
-      toast.error(err instanceof Error ? err.message : msg("sidebar.rerun.failed"));
+      toast.error(userErrorMessage(err, msg("sidebar.rerun.failed")));
     }
   };
 
@@ -1083,7 +1057,7 @@ function JobRow({
       window.dispatchEvent(new Event("optimizations-changed"));
       onRefresh();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("sidebar.resume.failed"));
+      toast.error(userErrorMessage(err, msg("sidebar.resume.failed")));
     }
   };
 
@@ -1095,7 +1069,7 @@ function JobRow({
       window.dispatchEvent(new Event("optimizations-changed"));
       onRefresh();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("optimization.pause.failed"));
+      toast.error(userErrorMessage(err, msg("optimization.pause.failed")));
     }
   };
 
@@ -1107,7 +1081,7 @@ function JobRow({
       window.dispatchEvent(new Event("optimizations-changed"));
       onRefresh();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("optimization.cancel.failed"));
+      toast.error(userErrorMessage(err, msg("optimization.cancel.failed")));
     }
   };
 
