@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { app, BrowserWindow, clipboard, ipcMain, nativeTheme, shell } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, nativeTheme, screen, shell } from "electron";
 import { APP_SCHEME, appUrlFromArgv, appWindowUrl, parseLinkCallback } from "./app-url";
 import { HostedLinkClient } from "./hosted-link";
 import { childPath, probeClis, probeDocker, readCliLimits, searchDirs } from "./cli-detect";
@@ -561,7 +561,12 @@ ipcMain.handle("onboarding:fit", (_event, height: unknown) => {
   const before = win.getBounds();
   win.setContentSize(SETUP_SIZE.width, setupHeight);
   const after = win.getBounds();
-  win.setPosition(before.x, Math.round(before.y - (after.height - before.height) / 2));
+  // A programmatic move skips the macOS on-screen constrain, so keep the grown
+  // window inside the work area (below the menu bar, above the Dock).
+  const area = screen.getDisplayMatching(before).workArea;
+  const centered = Math.round(before.y - (after.height - before.height) / 2);
+  const y = Math.max(area.y, Math.min(centered, area.y + area.height - after.height));
+  win.setPosition(before.x, y);
 });
 ipcMain.handle("onboarding:open-logs", () => shell.openPath(logsDir));
 ipcMain.handle("onboarding:sign-in", () => {
