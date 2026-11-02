@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appUrlFromArgv, appWindowUrl, LINK_CALLBACK, parseLinkCallback } from "../src/main/app-url";
+import { appUrlFromArgv, appWindowUrl, hostedAppOrigin, LINK_CALLBACK, parseLinkCallback, webDocsUrl } from "../src/main/app-url";
 
 describe("parseLinkCallback", () => {
   it("reads the code and the state of an approved link", () => {
@@ -61,5 +61,39 @@ describe("appWindowUrl", () => {
     expect(appWindowUrl("http://example.com:48120/", app)).toBeNull();
     expect(appWindowUrl("https://127.0.0.1:48120/", app)).toBeNull();
     expect(appWindowUrl("not a url", app)).toBeNull();
+  });
+});
+
+describe("hostedAppOrigin", () => {
+  it("links a staging stamp to staging and everything else to production", () => {
+    expect(hostedAppOrigin("staging\n")).toBe("https://staging.skynetml.com");
+    expect(hostedAppOrigin(" Staging ")).toBe("https://staging.skynetml.com");
+    expect(hostedAppOrigin("production")).toBe("https://skynetml.com");
+    expect(hostedAppOrigin(null)).toBe("https://skynetml.com");
+    expect(hostedAppOrigin("")).toBe("https://skynetml.com");
+  });
+});
+
+describe("webDocsUrl", () => {
+  const app = "http://127.0.0.1:48120";
+  const prod = "https://skynetml.com";
+
+  it("sends the app's docs pages to the web docs", () => {
+    expect(webDocsUrl("http://127.0.0.1:48120/docs", app, prod)).toBe("https://skynetml.com/docs");
+    expect(webDocsUrl("http://127.0.0.1:48120/docs/he/mcp?x=1#setup", app, prod)).toBe("https://skynetml.com/docs/he/mcp?x=1#setup");
+    expect(webDocsUrl("http://localhost:48120/docs/quickstart", app, prod)).toBe("https://skynetml.com/docs/quickstart");
+    expect(webDocsUrl("http://127.0.0.1:48120/docs.md", app, prod)).toBe("https://skynetml.com/docs.md");
+  });
+
+  it("uses the build's docs origin", () => {
+    expect(webDocsUrl("http://127.0.0.1:48120/docs/api", app, "https://staging.skynetml.com")).toBe("https://staging.skynetml.com/docs/api");
+  });
+
+  it("leaves other app pages and other origins alone", () => {
+    expect(webDocsUrl("http://127.0.0.1:48120/", app, prod)).toBeNull();
+    expect(webDocsUrl("http://127.0.0.1:48120/docs-search?q=a", app, prod)).toBeNull();
+    expect(webDocsUrl("http://127.0.0.1:48120/runs/docs", app, prod)).toBeNull();
+    expect(webDocsUrl("http://127.0.0.1:48100/docs", app, prod)).toBeNull();
+    expect(webDocsUrl("https://skynetml.com/docs", app, prod)).toBeNull();
   });
 });

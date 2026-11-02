@@ -26,6 +26,7 @@ import {
 } from "@/shared/ui/compact-popover-menu";
 import { useLocale } from "@/shared/providers";
 import { dirForLocale, docsPathForLocale } from "@/shared/lib/locale";
+import { docsLinkProps } from "@/shared/lib/docs-link";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { useSettingsModal } from "@/features/settings";
@@ -285,7 +286,7 @@ export function AccountMenu({
           {msg("app.shell.account.settings")}
         </button>
 
-        <Link href={docsPathForLocale(locale)} onClick={close} className={COMPACT_POPOVER_ITEM_CLASS}>
+        <Link {...docsLinkProps(docsPathForLocale(locale), local)} onClick={close} className={COMPACT_POPOVER_ITEM_CLASS}>
           <BookOpen className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
           {msg("app.shell.account.docs")}
         </Link>

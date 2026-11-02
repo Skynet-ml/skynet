@@ -32,6 +32,7 @@ import { DATASET_UPLOAD_ACCEPT, parseDatasetFile } from "@/shared/lib/parse-data
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
 import { cn } from "@/shared/lib/utils";
 import { ImportFromMenu } from "@/features/connectors";
+import { isLocalMode } from "@/shared/lib/runtime-env";
 import { useDatasets } from "../hooks/use-datasets";
 import { DatasetCard } from "./DatasetCard";
 import { DatasetRenameDialog } from "./DatasetRenameDialog";
@@ -339,9 +340,11 @@ export function DatasetsView() {
             >
               <Table className="size-4" />
             </SelectionAction>
-            <SelectionAction label={msg("share.button")} onClick={() => setShareOpen(true)}>
-              <Users className="size-4" />
-            </SelectionAction>
+            {!isLocalMode() && (
+              <SelectionAction label={msg("share.button")} onClick={() => setShareOpen(true)}>
+                <Users className="size-4" />
+              </SelectionAction>
+            )}
             <SelectionAction
               label={msg("datasets.action.rename")}
               onClick={() => setRenameOpen(true)}

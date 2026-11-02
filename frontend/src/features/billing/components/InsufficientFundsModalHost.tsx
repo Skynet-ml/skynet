@@ -7,7 +7,7 @@ import { Button } from "@/shared/ui/primitives/button";
 import { msg } from "@/shared/lib/messages";
 import { I18N_KEY, tI18n } from "@/shared/lib/i18n";
 import { INSUFFICIENT_FUNDS_EVENT } from "@/shared/lib/api";
-import { useSettingsModal } from "@/features/settings";
+import { useAddFundsAction } from "../hooks/use-add-funds-action";
 
 /**
  * Global paywall for the balance gate. Mounted once at the app root: the central
@@ -22,7 +22,7 @@ import { useSettingsModal } from "@/features/settings";
  */
 export function InsufficientFundsModalHost() {
   const [open, setOpen] = React.useState(false);
-  const { openTo } = useSettingsModal();
+  const addFunds = useAddFundsAction();
 
   React.useEffect(() => {
     const onBlocked = () => setOpen(true);
@@ -41,11 +41,11 @@ export function InsufficientFundsModalHost() {
         <Button
           onClick={() => {
             setOpen(false);
-            openTo("billing");
+            addFunds.run();
           }}
           className="w-full"
         >
-          {msg("billing.action.add_funds")}
+          {addFunds.label}
         </Button>
       </DialogContent>
     </Dialog>

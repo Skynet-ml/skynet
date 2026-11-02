@@ -62,6 +62,7 @@ import { TOUCH_FIELD } from "@/shared/ui/touch";
 import { SETUP_SETTING_EVENT, type SetupSettingDetail } from "@/features/experience";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { useLinkedAccount } from "@/shared/hooks/use-linked-account";
+import { hostedFeaturesAvailable } from "@/shared/lib/hosted-features";
 
 /** Localize a data-action failure: semantic backend codes when present. */
 function describeError(err: unknown, fallback: string): string {
@@ -340,19 +341,23 @@ export function PrivacyTab() {
           </Button>
         </SettingsRow>
 
-        <CopyValueRow
-          icon={User}
-          label={msg("settings.privacy.copy_username.label")}
-          value={copyName}
-          signedOut={copySignedOut}
-        />
+        {hostedFeaturesAvailable(local, linkedAccount?.linked) && (
+          <>
+            <CopyValueRow
+              icon={User}
+              label={msg("settings.privacy.copy_username.label")}
+              value={copyName}
+              signedOut={copySignedOut}
+            />
 
-        <CopyValueRow
-          icon={At}
-          label={msg("settings.privacy.copy_email.label")}
-          value={copyEmail}
-          signedOut={copySignedOut}
-        />
+            <CopyValueRow
+              icon={At}
+              label={msg("settings.privacy.copy_email.label")}
+              value={copyEmail}
+              signedOut={copySignedOut}
+            />
+          </>
+        )}
       </div>
 
       <Separator />

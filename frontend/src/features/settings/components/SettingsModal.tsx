@@ -91,6 +91,7 @@ import { ModelConfigModal, useRecentModelConfigs } from "@/features/submit";
 import { getActiveDir, getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { useLocale } from "@/shared/providers";
 import { docsPathForLocale } from "@/shared/lib/locale";
+import { docsLinkHref } from "@/shared/lib/docs-link";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
 import { LEGAL_CONFIG } from "@/features/legal";
 import { LanguageSwitcher } from "@/shared/ui/language-switcher";
@@ -121,6 +122,8 @@ import { SETTINGS_TABS, visibleSettingsTabs, type SettingsTab } from "../lib/tab
 import { SettingsRow } from "@/shared/ui/settings-row";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { linkedUsername, useLinkedAccount } from "@/shared/hooks/use-linked-account";
+import { useHostedFeaturesAvailable } from "@/shared/hooks/use-hosted-features";
+import { hostedFeaturesAvailable } from "@/shared/lib/hosted-features";
 import { AgentEngineSetting } from "./AgentEngineSetting";
 import { AgentLocalRunSetting } from "./AgentLocalRunSetting";
 import { useLocalAgentMenuModels } from "@/features/local-runtime";
@@ -322,11 +325,13 @@ function AccountTab() {
 
   return (
     <div className="space-y-1">
-      <SettingsRow icon={User} label={msg("settings.account.username.label")}>
-        <span className="text-sm font-mono text-foreground" dir="ltr">
-          {username || msg("settings.account.signed_out")}
-        </span>
-      </SettingsRow>
+      {hostedFeaturesAvailable(isLocalMode(), account?.linked) && (
+        <SettingsRow icon={User} label={msg("settings.account.username.label")}>
+          <span className="text-sm font-mono text-foreground" dir="ltr">
+            {username || msg("settings.account.signed_out")}
+          </span>
+        </SettingsRow>
+      )}
 
       <SettingsRow icon={ShieldCheck} label={msg("settings.account.role.label")}>
         <span className="text-xs uppercase tracking-wide font-semibold text-muted-foreground">
@@ -1296,7 +1301,7 @@ function ApiTab() {
           autoTooltip={false}
           aria-label={msg("settings.api.guide_action")}
         >
-          <a href={docsPathForLocale(locale, "api")} target="_blank" rel="noopener noreferrer">
+          <a href={docsLinkHref(docsPathForLocale(locale, "api"))} target="_blank" rel="noopener noreferrer">
             <ArrowSquareOut className="size-3.5" />
           </a>
         </Button>
@@ -1354,7 +1359,11 @@ export function SettingsModal() {
     setActiveTab(tab);
     track(TelemetryEvent.SettingsTabChanged, { tab });
   }, []);
-  const tabs = React.useMemo(() => visibleSettingsTabs(isAdmin), [isAdmin]);
+  const hostedAvailable = useHostedFeaturesAvailable();
+  const tabs = React.useMemo(
+    () => visibleSettingsTabs(isAdmin, hostedAvailable),
+    [isAdmin, hostedAvailable],
+  );
   React.useEffect(() => {
     if (!tabs.includes(activeTab)) setActiveTab(isPhone ? "account" : "wizard");
   }, [activeTab, tabs, isPhone]);
