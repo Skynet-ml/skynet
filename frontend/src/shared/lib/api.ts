@@ -231,6 +231,8 @@ if (typeof window !== "undefined") {
 
 /** Backend error code for the unified storage budget being exceeded (HTTP 409). */
 const STORAGE_QUOTA_CODE = I18N_KEY.USER_STORAGE_QUOTA_EXCEEDED;
+// A UI catalog key, not a backend code: request() sets it when the server has no such route.
+export const ROUTE_MISSING_CODE = "shared.api.route_missing";
 
 /** Browser event the central error path fires when a write hits the storage budget. */
 export const STORAGE_QUOTA_EVENT = "storage-quota-exceeded";
@@ -381,16 +383,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const missingRoute =
       (res.status === 404 && parsed.message === "Not Found") ||
       (res.status === 405 && parsed.message === "Method Not Allowed");
+    if (missingRoute) {
+      const params = { method: init?.method ?? "GET", path: endpointTag(path) };
+      throw new ApiError(msg(ROUTE_MISSING_CODE, params), {
+        status: res.status,
+        code: ROUTE_MISSING_CODE,
+        params,
+      });
+    }
     throw new ApiError(
-      missingRoute
-        ? msg("shared.api.route_missing", {
-            method: init?.method ?? "GET",
-            path: endpointTag(path),
-          })
-        : (parsed.message ?? formatMsg("auto.shared.lib.api.template.1", { p1: res.status })),
+      parsed.message ?? formatMsg("auto.shared.lib.api.template.1", { p1: res.status }),
       { status: res.status, code: parsed.code, params: parsed.params },
     );
   }
+  // A 204 has no body, so res.json() would throw on a successful call.
+  if (res.status === 204) return undefined as T;
   return res.json();
 }
 
@@ -895,9 +902,10 @@ export function submitMcpConsent(body: McpConsentRequest) {
 export async function revokeApiToken(): Promise<void> {
   const res = await fetchWithAuthRetry(`${apiBase()}/settings/api-token`, { method: "DELETE" });
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(
-      parseErrorMessage(text) ?? formatMsg("auto.shared.lib.api.template.1", { p1: res.status }),
+    const parsed = parseError(await res.text().catch(() => ""));
+    throw new ApiError(
+      parsed.message ?? formatMsg("auto.shared.lib.api.template.1", { p1: res.status }),
+      { status: res.status, code: parsed.code, params: parsed.params },
     );
   }
 }
@@ -988,6 +996,27 @@ export function renamePasskey(credentialId: string, nickname: string) {
 /** Remove one of the caller's passkeys. */
 export function deletePasskey(credentialId: string) {
   return request<{ ok: boolean }>(`/auth/security/passkeys/${encodeURIComponent(credentialId)}`, {
+    method: "DELETE",
+  });
+}
+
+/** One Mac linked to the caller's account, as Settings > Security lists it. */
+export interface DesktopLinkInfo {
+  link_id: string;
+  device_name: string;
+  scopes: string[];
+  created_at: string;
+  last_used_at: string | null;
+}
+
+/** List the Macs that are linked to the caller's account now. */
+export function listDesktopLinks() {
+  return request<DesktopLinkInfo[]>("/settings/desktop-links");
+}
+
+/** Remove a linked Mac. The Mac signs out on its next request. */
+export function removeDesktopLink(linkId: string) {
+  return request<void>(`/settings/desktop-links/${encodeURIComponent(linkId)}`, {
     method: "DELETE",
   });
 }
@@ -1810,9 +1839,10 @@ export async function deleteSavedSecret(id: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(
-      parseErrorMessage(text) ?? formatMsg("auto.shared.lib.api.template.1", { p1: res.status }),
+    const parsed = parseError(await res.text().catch(() => ""));
+    throw new ApiError(
+      parsed.message ?? formatMsg("auto.shared.lib.api.template.1", { p1: res.status }),
+      { status: res.status, code: parsed.code, params: parsed.params },
     );
   }
 }
@@ -2236,9 +2266,10 @@ export async function deleteContinuous(planId: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(
-      parseErrorMessage(text) ?? formatMsg("auto.shared.lib.api.template.1", { p1: res.status }),
+    const parsed = parseError(await res.text().catch(() => ""));
+    throw new ApiError(
+      parsed.message ?? formatMsg("auto.shared.lib.api.template.1", { p1: res.status }),
+      { status: res.status, code: parsed.code, params: parsed.params },
     );
   }
 }

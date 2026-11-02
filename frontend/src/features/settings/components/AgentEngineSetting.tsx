@@ -22,6 +22,7 @@ import {
 } from "@/features/local-runtime";
 import { useByokKeys } from "@/features/billing/providers/byok-provider";
 import { msg, type MessageKey } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { cn } from "@/shared/lib/utils";
 import { HarnessLogo } from "@/shared/ui/harness-logo";
@@ -330,22 +331,25 @@ export function AgentEngineSetting() {
     setSaving(true);
     save(next)
       .catch((err: unknown) => {
-        toast.error(err instanceof Error ? err.message : String(err));
+        toast.error(userErrorMessage(err));
       })
       .finally(() => setSaving(false));
   };
 
   return (
-    <AgentEngineSelect
-      local={local}
-      status={status}
-      failed={failed}
-      value={value}
-      keyVerified={keyVerified}
-      keysFailed={keysFailed}
-      automatic={local && stored === false}
-      saving={saving}
-      onChange={onChange}
-    />
+    // The setup's CLI stop frames this row: it lists each CLI and how to sign in.
+    <div data-setup="local-clis">
+      <AgentEngineSelect
+        local={local}
+        status={status}
+        failed={failed}
+        value={value}
+        keyVerified={keyVerified}
+        keysFailed={keysFailed}
+        automatic={local && stored === false}
+        saving={saving}
+        onChange={onChange}
+      />
+    </div>
   );
 }

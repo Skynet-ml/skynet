@@ -86,6 +86,7 @@ export function NumberInput({
 
   return (
     <div
+      data-slot="number-input"
       className={cn(
         "flex items-center rounded-xl border border-input/90 bg-background/75 backdrop-blur-sm overflow-hidden",
         size === "sm" ? TOUCH_FIELD_SM : TOUCH_FIELD,

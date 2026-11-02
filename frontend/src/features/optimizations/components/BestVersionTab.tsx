@@ -30,6 +30,7 @@ import { FadeIn } from "@/shared/ui/motion";
 import { HelpTip } from "@/shared/ui/help-tip";
 import type { BlackboxRunResult } from "@/shared/types/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { downloadRepositoryArchive } from "@/shared/lib/api";
 import { tip } from "@/shared/lib/tooltips";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
@@ -393,9 +394,7 @@ export function BestVersionTab({
         `${slug}-v${current.number}.zip`,
       );
     } catch (err) {
-      toast.error(
-        err instanceof Error ? err.message : msg("optimization.blackbox.versions.archive_failed"),
-      );
+      toast.error(userErrorMessage(err, msg("optimization.blackbox.versions.archive_failed")));
     } finally {
       setArchiving(false);
     }

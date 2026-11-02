@@ -3,6 +3,7 @@ import { toast } from "react-toastify";
 import { cancelJob, bulkDeleteJobs } from "@/shared/lib/api";
 import { ACTIVE_STATUSES } from "@/shared/constants/job-status";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { TERMS } from "@/shared/lib/terms";
 import type { PaginatedJobsResponse } from "@/shared/types/api";
 
@@ -125,7 +126,9 @@ export function useBulkDelete({
             : formatMsg("auto.features.dashboard.hooks.use.bulk.delete.template.5", {
                 p1: realSkips.length,
               });
-        toast.warning(`${delPart}, ${skipPart}`);
+        toast.warning(
+          formatMsg("dashboard.bulk_delete.partial", { deleted: delPart, skipped: skipPart }),
+        );
       } else {
         toast.error(
           realSkips.length === 1
@@ -142,7 +145,7 @@ export function useBulkDelete({
       await fetchJobs();
       window.dispatchEvent(new Event("optimizations-changed"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("dashboard.delete_failed"));
+      toast.error(userErrorMessage(err, msg("dashboard.delete_failed")));
       void fetchJobs();
     } finally {
       setBulkDeleting(false);

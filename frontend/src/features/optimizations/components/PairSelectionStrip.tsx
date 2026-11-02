@@ -2,10 +2,8 @@
 
 import { useState } from "react";
 import { toast } from "react-toastify";
-import { CaretLeft, CaretRight, CircleNotch, Crown, Trash, XCircle } from "@/shared/ui/icons";
+import { CaretLeft, CaretRight, Crown, Trash, XCircle } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
-import { Dialog, DialogContent, DialogFooter } from "@/shared/ui/primitives/dialog";
-import { DialogTitleRow } from "@/shared/ui/dialog-title-row";
 import { TooltipButton } from "@/shared/ui/tooltip-button";
 import { FadeIn } from "@/shared/ui/motion";
 import { BackLink } from "@/shared/ui/back-link";
@@ -13,9 +11,11 @@ import { ReasoningPill } from "./ui-primitives";
 import { pairLabel } from "./grid-overview-helpers";
 import { deleteGridPair } from "@/shared/lib/api";
 import { msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { arrowPageStep } from "@/shared/lib/arrow-paging";
 import type { OptimizationStatusResponse, PairResult } from "@/shared/types/api";
+import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
 
 export interface PairSelectionStripProps {
   job: OptimizationStatusResponse;
@@ -59,7 +59,7 @@ export function PairSelectionStrip({
       window.dispatchEvent(new Event("optimizations-changed"));
       onDeleted();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("optimization.delete.failed"));
+      toast.error(userErrorMessage(err, msg("optimization.delete.failed")));
     } finally {
       setDeleting(false);
     }
@@ -152,37 +152,25 @@ export function PairSelectionStrip({
         </div>
       </FadeIn>
 
-      <Dialog open={deleteOpen} onOpenChange={(open) => !open && setDeleteOpen(false)}>
-        <DialogContent className="w-[min(28rem,92vw)] max-w-[min(28rem,92vw)] sm:max-w-md">
-          <DialogTitleRow
-            title={msg("auto.features.optimizations.components.gridoverview.19")}
-            description={
-              <>
-                {msg("auto.features.optimizations.components.gridoverview.20")}{" "}
-                <span className="font-mono font-semibold text-foreground break-all">
-                  {pairLabel(activePair)}
-                </span>
-                {msg("auto.features.optimizations.components.gridoverview.21")}
-              </>
-            }
-          />
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteOpen(false)} disabled={deleting}>
-              {msg("auto.features.optimizations.components.gridoverview.22")}
-            </Button>
-            <Button variant="destructive" onClick={handleDeletePair} disabled={deleting}>
-              {deleting ? (
-                <CircleNotch
-                  className="animate-spin motion-reduce:animate-none"
-                  aria-hidden="true"
-                />
-              ) : (
-                msg("auto.features.optimizations.components.gridoverview.literal.30")
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        open={deleteOpen}
+        onOpenChange={(open) => !open && setDeleteOpen(false)}
+        variant="danger"
+        title={msg("auto.features.optimizations.components.gridoverview.19")}
+        description={
+          <>
+            {msg("auto.features.optimizations.components.gridoverview.20")}{" "}
+            <span className="font-mono font-semibold text-foreground break-all">
+              {pairLabel(activePair)}
+            </span>
+            {msg("auto.features.optimizations.components.gridoverview.21")}
+          </>
+        }
+        cancelLabel={msg("auto.features.optimizations.components.gridoverview.22")}
+        confirmLabel={msg("auto.features.optimizations.components.gridoverview.literal.30")}
+        onConfirm={handleDeletePair}
+        pending={deleting}
+      />
     </>
   );
 }

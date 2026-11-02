@@ -47,7 +47,7 @@ const SUMMARY_KEYS = {
   tool: "shared.agent.activity.tool",
 } as const;
 
-const ERROR_TONE = "text-[#7A1E13] dark:text-[#ffb2a0]";
+const ERROR_TONE = "text-[var(--danger)]";
 
 function Reveal({ open, children }: { open: boolean; children: React.ReactNode }) {
   const reduce = useReducedMotion();

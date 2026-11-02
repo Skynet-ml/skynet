@@ -93,14 +93,14 @@ function CheckResults({
 }) {
   if (emptyFile) {
     return (
-      <p className="px-4 py-2 text-xs text-destructive">
+      <p role="alert" className="px-4 py-2 text-xs text-destructive">
         {v2Msg("submit.v2.ide.check.empty", guided, { path: emptyFile })}
       </p>
     );
   }
   if (failed) {
     return (
-      <p className="px-4 py-2 text-xs text-destructive">
+      <p role="alert" className="px-4 py-2 text-xs text-destructive">
         {v2Msg("submit.v2.ide.check.failed", guided)}
       </p>
     );
