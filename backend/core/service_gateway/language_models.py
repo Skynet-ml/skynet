@@ -443,9 +443,15 @@ class MeteredLM(dspy.LM):
         LM would report no support and DSPy would drop native tools for every
         managed model. The proxy fronts OpenRouter, so ask about that id.
 
+        A subscription model reports no support: the local CLI bridge answers
+        in plain text and never returns native ``tool_calls``, so DSPy must use
+        its text tool protocol (SKY-245).
+
         Returns:
             Whether the underlying model supports native function calling.
         """
+        if self.subscription:
+            return False
         if isinstance(self.model, str) and self.model.startswith("litellm_proxy/"):
             return bool(litellm.supports_function_calling(model=f"openrouter/{canonical_model_id(self.model)}"))
         return super().supports_function_calling

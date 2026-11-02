@@ -6,6 +6,7 @@ import contextlib
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import dspy
 import pytest
 from pydantic import SecretStr
 
@@ -742,3 +743,17 @@ def test_metered_lm_judges_function_calling_on_the_proxied_model(proxied: str, s
     lm = MeteredLM(model=f"litellm_proxy/{proxied}", api_key="k", api_base="http://proxy")
 
     assert lm.supports_function_calling is supported
+
+
+def test_subscription_lm_reports_no_native_function_calling() -> None:
+    """A subscription LM runs on the text-only CLI bridge, so DSPy keeps the text tool protocol."""
+    lm = MeteredLM(model="litellm_proxy/anthropic/claude-sonnet-4.5", api_key="k", api_base="http://proxy")
+    lm.subscription = True
+
+    assert lm.supports_function_calling is False
+    adapter = dspy.ChatAdapter(use_native_function_calling=True)
+    signature = dspy.Signature("question, tools: list[dspy.Tool] -> answer, next: dspy.ToolCalls")
+    lm_kwargs: dict[str, object] = {}
+    adapted = adapter._call_preprocess(lm, lm_kwargs, signature, {"question": "q", "tools": []})
+    assert "tools" not in lm_kwargs
+    assert "next" in adapted.output_fields
