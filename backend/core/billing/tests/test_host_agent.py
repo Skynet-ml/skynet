@@ -6,6 +6,7 @@ import base64
 import io
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -1125,6 +1126,13 @@ def test_workspace_only_cannot_start_an_app_through_launchservices(tmp_path: Pat
                 "-u",
                 str(turn / "Probe.app"),
             ],
+            capture_output=True,
+            check=False,
+        )
+        # LaunchServices can spawn the probe stopped under launchd before the sandbox
+        # fails the open. That process never resumes or exits, so each run leaked one.
+        subprocess.run(
+            ["/usr/bin/pkill", "-KILL", "-f", re.escape(str(executable / "probe"))],
             capture_output=True,
             check=False,
         )
