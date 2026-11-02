@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { earliestStart, finishedTurnMs, turnStart, visibleThinking } from "./turn-timing.ts";
+import {
+  earliestStart,
+  finishedTurnMs,
+  nextTurnClock,
+  turnStart,
+  visibleThinking,
+} from "./turn-timing.ts";
 
 test("a thinking segment with no reasoning is no row", () => {
   const segments = [
@@ -26,4 +32,27 @@ test("a finished turn counts up to the coding tool's end, after the reply", () =
   assert.equal(finishedTurnMs(1000, [], steps, 2000), 8000);
   assert.equal(finishedTurnMs(1000, [], [{ call: { startedAt: 1000, endedAt: 1500 } }], 2000), 2000);
   assert.equal(finishedTurnMs(null, [], [], null), 0);
+});
+
+test("a retried turn's clock starts at the retry, not at the failed attempt", () => {
+  // Retry, regenerate and edit-and-resend put the new turn in the same
+  // transcript slot, so its header kept the failed attempt's clock.
+  const failed = { start: 1_000, streaming: false };
+  const retried = nextTurnClock(failed, 346_000, true);
+  assert.deepEqual(retried, { start: 346_000, streaming: true });
+  assert.equal(
+    finishedTurnMs(retried.start, [], [{ call: { startedAt: 346_000, endedAt: 367_000 } }]),
+    21_000,
+  );
+});
+
+test("a running turn's clock keeps its earliest start", () => {
+  const clock = { start: 1_000, streaming: true };
+  assert.equal(nextTurnClock(clock, 1_000, true), clock);
+  assert.equal(nextTurnClock(clock, 2_000, true), clock);
+  assert.deepEqual(nextTurnClock(clock, 2_000, false), { start: 1_000, streaming: false });
+  assert.deepEqual(nextTurnClock({ start: null, streaming: true }, 1_200, true), {
+    start: 1_200,
+    streaming: true,
+  });
 });
