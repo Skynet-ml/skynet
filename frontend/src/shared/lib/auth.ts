@@ -6,6 +6,7 @@ import GitHub from "next-auth/providers/github";
 import { createHmac, randomUUID } from "crypto";
 import { cookies } from "next/headers";
 import { ACCOUNT_LINK_COOKIE, LEGACY_ACCOUNT_LINK_COOKIE, decodeAccountLink } from "./account-link";
+import { saveSessionPicture, savablePicture } from "./session-picture";
 
 /**
  * Authentication configuration.
@@ -167,8 +168,7 @@ async function provisionBackendAccount(
   providerAccountId: string,
 ): Promise<BackendAccount | null> {
   if (!backendAuthSecret || !user.email) return null;
-  // The backend keeps only an https picture that fits its 2048-character column.
-  const image = user.image?.startsWith("https://") && user.image.length <= 2048 ? user.image : "";
+  const image = savablePicture(user.image) ?? "";
   try {
     const res = await fetch(`${backendBaseUrl}/auth/oauth/provision`, {
       method: "POST",
@@ -186,6 +186,21 @@ async function provisionBackendAccount(
     return (await res.json()) as BackendAccount;
   } catch {
     return null;
+  }
+}
+
+/** Save the session picture on the backend account; true when the backend took the call. */
+async function saveBackendPicture(email: string, image: string): Promise<boolean> {
+  if (!backendAuthSecret) return false;
+  try {
+    const res = await fetch(`${backendBaseUrl}/auth/oauth/picture`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Internal-Auth": backendAuthSecret },
+      body: JSON.stringify({ email, image }),
+    });
+    return res.ok;
+  } catch {
+    return false;
   }
 }
 
@@ -525,11 +540,18 @@ export const { handlers, auth } = NextAuth({
           if (linked) {
             token.email = linked.email;
             token.name = linked.name || token.name;
+            // Provision saved the picture already.
+            const image = savablePicture(user.image);
+            if (image) token.pictureSaved = image;
           }
           token.firstLogin = linked?.first_login === true;
         } else {
           token.firstLogin = user.firstLogin === true;
         }
+      } else {
+        // A session from before the backend saved pictures shows one that the
+        // backend lacks, and the Mac app shows only the backend's picture.
+        await saveSessionPicture(token, saveBackendPicture);
       }
       return token;
     },

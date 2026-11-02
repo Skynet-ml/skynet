@@ -115,6 +115,13 @@ class OAuthProvisionRequest(BaseModel):
     image: str = Field(default="", description="Profile picture URL from the provider profile.")
 
 
+# Provider picture of a session that provision never saw: the web session
+# started before ``users.image_url`` existed, or before the picture changed.
+class OAuthPictureRequest(BaseModel):
+    email: str = Field(description="The signed-in account.")
+    image: str = Field(default="", description="Profile picture URL from the provider profile.")
+
+
 # Links a provider account to the signed-in account from Settings.
 class OAuthLinkRequest(BaseModel):
     username: str = Field(description="The signed-in account the provider account joins.")
@@ -581,6 +588,36 @@ def create_accounts_router(*, job_store, login_throttle: LoginThrottle | None = 
             name = str(row.name)
             session.commit()
         return AccountInfo(email=email, name=name, role=_role_for(email), first_login=first_login)
+
+    @router.post("/auth/oauth/picture", include_in_schema=False)
+    def save_oauth_picture(
+        body: OAuthPictureRequest,
+        x_internal_auth: Annotated[str | None, Header()] = None,
+    ) -> dict[str, bool]:
+        """Save the provider picture of a signed-in session on its account.
+
+        Hosted whoami gives the Mac app ``users.image_url``, but the web app
+        shows the session picture. The frontend calls this once per session
+        so the two agree without a new sign-in or a new Mac link. Like
+        provision, only an https URL that fits the column is kept.
+
+        Args:
+            body: The account email and its session picture URL.
+            x_internal_auth: Shared-secret header proving the caller is the
+                trusted frontend.
+
+        Returns:
+            ``{"ok": True}``, also when there is no account or the URL is ignored.
+        """
+        _require_internal_auth(x_internal_auth)
+        if not (body.image.startswith("https://") and len(body.image) <= _IMAGE_URL_MAX_LENGTH):
+            return {"ok": True}
+        with Session(job_store.engine) as session:
+            row = session.get(UserModel, _normalise_email(body.email))
+            if row is not None and row.image_url != body.image:
+                row.image_url = body.image
+                session.commit()
+        return {"ok": True}
 
     @router.post(
         "/auth/oauth/link",
