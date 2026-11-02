@@ -19,4 +19,18 @@ if (window.location.protocol === "file:") {
       return () => ipcRenderer.removeListener("onboarding:state", handler);
     },
   });
+} else {
+  // The web app marks its dark theme with a "dark" class on <html>. The main
+  // process picks the Dock icon and the window background from it.
+  let sent: string | null = null;
+  const report = () => {
+    const theme = document.documentElement.classList.contains("dark") ? "dark" : "light";
+    if (theme === sent) return;
+    sent = theme;
+    ipcRenderer.send("theme:changed", theme);
+  };
+  window.addEventListener("DOMContentLoaded", () => {
+    report();
+    new MutationObserver(report).observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+  });
 }

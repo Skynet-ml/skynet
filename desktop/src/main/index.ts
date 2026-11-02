@@ -3,6 +3,7 @@ import path from "node:path";
 import { app, BrowserWindow, clipboard, ipcMain, nativeTheme, screen, shell } from "electron";
 import { APP_SCHEME, appUrlFromArgv, appWindowUrl, parseLinkCallback } from "./app-url";
 import { HostedLinkClient } from "./hosted-link";
+import { isOpenAppUrl, parseTheme, pickTheme, type Theme } from "./theme";
 import { childPath, probeClis, probeDocker, readCliLimits, searchDirs } from "./cli-detect";
 import { allocatePorts, type PortPlan } from "./ports";
 import { holdQuitUntilStopped } from "./quit";
@@ -107,8 +108,18 @@ function useAppSize(): void {
   win.center();
 }
 
+/**
+ * The theme the web app reports from its own setting. The setup page reports
+ * none, so the system appearance decides there. nativeTheme.themeSource stays
+ * untouched: it would change prefers-color-scheme and break the web app's
+ * "system" mode.
+ */
+let reportedTheme: Theme | null = null;
+
+const currentTheme = () => pickTheme(reportedTheme, nativeTheme.shouldUseDarkColors);
+
 // Matches --bg in onboarding.css and the web app, so no light flash shows in dark mode.
-const windowBackground = () => (nativeTheme.shouldUseDarkColors ? "#1c1814" : "#f5f0ea");
+const windowBackground = () => (currentTheme() === "dark" ? "#1c1814" : "#f5f0ea");
 
 /**
  * The Helper binary runs Node without a Dock icon (its bundle sets LSUIElement);
@@ -120,9 +131,9 @@ function nodeBinary(): string {
   return fs.existsSync(helper) ? helper : process.execPath;
 }
 
-/** The Dock icon follows the system appearance; the .icns in Finder stays light. */
+/** The Dock icon follows the app theme; the .icns in Finder stays light. */
 function applyTheme(): void {
-  app.dock?.setIcon(path.join(__dirname, "..", "icons", nativeTheme.shouldUseDarkColors ? "dock-dark.png" : "dock-light.png"));
+  app.dock?.setIcon(path.join(__dirname, "..", "icons", currentTheme() === "dark" ? "dock-dark.png" : "dock-light.png"));
   win?.setBackgroundColor(windowBackground());
 }
 
@@ -153,6 +164,8 @@ function watchOwnBuild(): void {
 /** Set the state first: the window size follows it, and getURL() still has the old page. */
 function showOnboarding(next?: OnboardingState): void {
   if (next) setState(next);
+  reportedTheme = null;
+  applyTheme();
   useSetupSize();
   void win?.loadFile(path.join(__dirname, "..", "renderer", "index.html"), { query: { lang: locale() } });
 }
@@ -402,7 +415,15 @@ async function openSignInPage(): Promise<void> {
 /** The browser opened skynet://link/callback: finish the link, or show the retry card. */
 async function handleAppUrl(raw: string): Promise<void> {
   const callback = parseLinkCallback(raw);
-  if (!callback) return log("ignored an unknown skynet:// URL");
+  if (!callback) {
+    // The local link callback page opens skynet://open to bring the app back.
+    if (isOpenAppUrl(raw)) {
+      if (win?.isMinimized()) win.restore();
+      win?.focus();
+      return;
+    }
+    return log("ignored an unknown skynet:// URL");
+  }
   if (win?.isMinimized()) win.restore();
   win?.focus();
   if (state.kind !== "sign_in" || state.signIn !== "waiting" || !hostedLink || finishingSignIn) {
@@ -576,6 +597,12 @@ ipcMain.handle("onboarding:sign-in", () => {
   void signIn();
 });
 ipcMain.handle("onboarding:skip-sign-in", () => skipSignIn());
+ipcMain.on("theme:changed", (event, value: unknown) => {
+  const theme = parseTheme(value);
+  if (event.sender !== win?.webContents || !theme || theme === reportedTheme) return;
+  reportedTheme = theme;
+  applyTheme();
+});
 ipcMain.handle("onboarding:open-docker", () => shell.openExternal("https://www.docker.com/products/docker-desktop/"));
 
 /**
