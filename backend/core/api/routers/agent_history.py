@@ -26,8 +26,10 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import or_, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, load_only
@@ -518,36 +520,59 @@ def create_agent_history_router(*, job_store) -> APIRouter:
         with Session(job_store.engine) as session:
             return _shared_summaries(session, user.username)
 
+    # The body is read by hand, so the byte cap applies before the JSON parse.
+    # A declared body parameter would make FastAPI buffer and parse it first.
     @router.post(
         _DESKTOP_SHARED_CHATS,
         response_model=ConversationShareResponse,
+        include_in_schema=False,
         summary="Publish a Mac app chat snapshot as a public read-only link",
     )
-    def import_shared_chat(body: SharedChatImportRequest, principal: DesktopSyncDep) -> ConversationShareResponse:
+    async def import_shared_chat(request: Request, principal: DesktopSyncDep) -> ConversationShareResponse:
         """Store the Mac chat snapshot as a shared conversation of the linked account.
 
         The hosted row id comes from the account and ``local_id``, so sharing the
         same Mac chat again replaces its messages and keeps the same token.
 
         Args:
-            body: The snapshot; it is masked again here.
+            request: The request whose body is the ``SharedChatImportRequest`` JSON.
             principal: Desktop principal with the ``sync`` scope.
 
         Returns:
             The share token of the hosted copy.
 
         Raises:
-            DomainError: 413 when the snapshot is larger than ``MAX_SHARED_BYTES``.
+            DomainError: 413 when the body is larger than ``MAX_SHARED_BYTES``.
+            RequestValidationError: 422 when the body is not a valid snapshot.
         """
-        _check_snapshot_size(body)
-        conversation_id = _published_chat_id(principal.username, body.local_id)
+        raw = await _read_capped_snapshot(request)
+        try:
+            body = SharedChatImportRequest.model_validate_json(raw)
+        except ValidationError as exc:
+            raise RequestValidationError(exc.errors(include_url=False, include_context=False)) from None
+        return await run_in_threadpool(_store_snapshot, principal.username, body)
+
+    def _store_snapshot(username: str, body: SharedChatImportRequest) -> ConversationShareResponse:
+        """Write a parsed Mac chat snapshot as the account's shared conversation.
+
+        Args:
+            username: The hosted account behind the desktop token.
+            body: The snapshot; it is masked again here.
+
+        Returns:
+            The share token of the hosted copy.
+
+        Raises:
+            DomainError: 403 when the derived row belongs to another account.
+        """
+        conversation_id = _published_chat_id(username, body.local_id)
         now = datetime.now(UTC)
         with Session(job_store.engine) as session:
             row = session.get(AgentConversationModel, conversation_id)
             if row is None:
-                row = AgentConversationModel(id=conversation_id, username=principal.username, created_at=now)
+                row = AgentConversationModel(id=conversation_id, username=username, created_at=now)
                 session.add(row)
-            elif row.username != principal.username:
+            elif row.username != username:
                 raise DomainError("agent.conversation.forbidden", status=403)
             row.title = cast(Any, mask_secrets(body.title.strip())[:200])
             row.updated_at = cast(Any, now)
@@ -784,6 +809,35 @@ def _published_chat_id(username: str, local_id: str) -> str:
         A UUID string that is the same for the same account and Mac chat.
     """
     return str(uuid.uuid5(_SHARED_CHAT_NAMESPACE, f"{username}\n{local_id}"))
+
+
+async def _read_capped_snapshot(request: Request) -> bytes:
+    """Read a snapshot body, stopping as soon as it passes ``MAX_SHARED_BYTES``.
+
+    The declared length is checked first and the stream is counted as it
+    arrives, so an oversized or lying upload is refused before it is buffered
+    whole or parsed.
+
+    Args:
+        request: The incoming import request.
+
+    Returns:
+        The raw body bytes.
+
+    Raises:
+        DomainError: 413 ``agent.share.too_large``.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > MAX_SHARED_BYTES:
+        raise DomainError("agent.share.too_large", status=413, limit=MAX_SHARED_BYTES)
+    chunks: list[bytes] = []
+    received = 0
+    async for chunk in request.stream():
+        received += len(chunk)
+        if received > MAX_SHARED_BYTES:
+            raise DomainError("agent.share.too_large", status=413, limit=MAX_SHARED_BYTES)
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _check_snapshot_size(snapshot: SharedChatImportRequest) -> None:

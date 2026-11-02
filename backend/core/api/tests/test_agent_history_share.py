@@ -11,6 +11,9 @@ exclusion for shared chats.
 
 from __future__ import annotations
 
+import asyncio
+import secrets
+import string
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -18,11 +21,13 @@ import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from ...config import settings
 from ...local import hosted_link
 from ...storage.models import AgentConversationModel, AgentMessageModel
-from ..auth import AuthenticatedUser
+from ..app import _cache_control_for
+from ..auth import AuthenticatedUser, generate_api_token
 from ..desktop_auth import DesktopPrincipal
 from ..errors import DomainError
 from ..routers import agent_history
@@ -348,3 +353,99 @@ def test_purge_keeps_shared_conversations() -> None:
     assert purge_stale_conversations(store.engine, threshold_days=30) == 1
     with store._session_factory() as session:
         assert [r.id for r in session.query(AgentConversationModel)] == ["old-shared"]
+
+
+def _secret_samples() -> dict[str, str]:
+    """Build one fresh value per credential format, at runtime, so the repo holds no literal.
+
+    Returns:
+        A map of format name to a random value in that format.
+    """
+    aws_body = "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(16))
+    return {
+        "skynet_pat": generate_api_token(),
+        "github_pat": "github_pat_" + secrets.token_hex(20),
+        "aws_key_id": "AKIA" + aws_body,
+        "jwt": ".".join(("eyJ" + secrets.token_hex(8), "eyJ" + secrets.token_hex(12), secrets.token_hex(16))),
+    }
+
+
+@pytest.mark.parametrize("kind", ["skynet_pat", "github_pat", "aws_key_id", "jwt"])
+def test_public_read_masks_each_token_format(kind: str) -> None:
+    """The public share page masks Skynet, GitHub, AWS and JWT credentials."""
+    secret = _secret_samples()[kind]
+    client, store = _client(_ALICE)
+    _seed(store, ("c-1", "alice"))
+    _add_message(store, "c-1", "user", f"use {secret} now")
+    token = client.post("/agent/conversations/c-1/share").json()["token"]
+
+    resp = _anon_client(store).get(f"/agent/shared-conversations/{token}")
+    assert resp.status_code == 200, resp.text
+    assert secret not in resp.text
+    assert "use " in resp.json()["messages"][0]["content"]
+
+
+@pytest.mark.parametrize("kind", ["skynet_pat", "github_pat", "aws_key_id", "jwt"])
+def test_desktop_import_masks_each_token_format(kind: str) -> None:
+    """A Mac snapshot import masks Skynet, GitHub, AWS and JWT credentials before it stores them."""
+    secret = _secret_samples()[kind]
+    client, store = _client(_ALICE)
+    _desktop(client)
+    resp = client.post("/desktop/v1/shared-chats", json=_snapshot(content=f"key {secret}"))
+    assert resp.status_code in (200, 201), resp.text
+
+    shared = _anon_client(store).get(f"/agent/shared-conversations/{resp.json()['token']}")
+    assert secret not in shared.text
+    with store._session_factory() as session:
+        assert all(secret not in m.content for m in session.query(AgentMessageModel))
+
+
+def test_masking_leaves_ordinary_words_alone() -> None:
+    """Words that only start like a token prefix stay readable."""
+    text = "skydiving and AKIA short"
+    assert agent_history.mask_secrets(text) == text
+
+
+def test_public_share_read_is_never_cached() -> None:
+    """A revoked link must stop at once, so the public read sends ``no-store``."""
+    assert _cache_control_for("/agent/shared-conversations/abc", b"") == "no-store"
+    assert _cache_control_for("/agent/conversations/abc", b"") is None
+
+
+def _import_request(chunks: list[bytes], declared: int | None) -> Request:
+    """Build an import request that streams ``chunks`` and declares ``declared`` bytes.
+
+    Args:
+        chunks: The body parts, in arrival order.
+        declared: The ``Content-Length`` value, or ``None`` to send no header.
+
+    Returns:
+        A request whose stream yields the chunks.
+    """
+    parts = list(chunks)
+    headers = [] if declared is None else [(b"content-length", str(declared).encode())]
+
+    async def receive() -> dict[str, Any]:
+        """Hand out the next chunk, as the ASGI server would."""
+        body = parts.pop(0) if parts else b""
+        return {"type": "http.request", "body": body, "more_body": bool(parts)}
+
+    return Request({"type": "http", "method": "POST", "path": "/", "headers": headers}, receive)
+
+
+def test_import_refuses_large_declared_length_before_reading() -> None:
+    """A body that declares more than the cap is refused without reading the stream."""
+    request = _import_request([b"x"], agent_history.MAX_SHARED_BYTES + 1)
+    with pytest.raises(DomainError) as caught:
+        asyncio.run(agent_history._read_capped_snapshot(request))
+    assert caught.value.status_code == 413
+
+
+def test_import_stops_a_stream_that_lies_about_its_length() -> None:
+    """A body that declares a small length but streams past the cap is cut off."""
+    half = b"x" * (agent_history.MAX_SHARED_BYTES // 2 + 1)
+    for declared in (10, None):
+        request = _import_request([half, half, half], declared)
+        with pytest.raises(DomainError) as caught:
+            asyncio.run(agent_history._read_capped_snapshot(request))
+        assert caught.value.status_code == 413

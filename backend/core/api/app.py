@@ -596,6 +596,9 @@ def _cache_control_for(path: str, query_string: bytes) -> str | None:
         return "private, max-age=5"
     if path == "/optimizations" and b"status" not in query_string:
         return "private, max-age=2, stale-while-revalidate=10"
+    # A revoked share link must stop working at once, so no cache may keep a copy.
+    if path.startswith("/agent/shared-conversations/"):
+        return "no-store"
     return None
 
 

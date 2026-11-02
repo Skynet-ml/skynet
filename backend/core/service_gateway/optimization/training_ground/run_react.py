@@ -87,6 +87,12 @@ budget stays ergonomic. Numbers are operator-tunable via an explicit
 
 _TOOL_SEVERITY_ATTR = "_app_severity"
 
+# A protected settings action (email codes, passkeys, linked sign-ins) must
+# never run without a person who confirms it. Optimization rollouts call tools
+# unattended, and a served react chat can rename tools or run in yolo, so
+# neither roster lists these tools (SKY-266).
+HUMAN_CONFIRM_ONLY_TOOLS: frozenset[str] = frozenset({"change_protected_setting"})
+
 
 def _severity_from_annotations(annotations: Any) -> str | None:
     """Map MCP tool annotations to an approval severity, or ``None`` if unstated.
@@ -152,8 +158,9 @@ def _list_live_tools(mcp_url: str, auth_header: str | None) -> list[dspy.Tool]:
         auth_header: Optional ``Authorization`` header to forward.
 
     Returns:
-        List of dspy.Tool objects, one per MCP-exposed tool, each carrying its
-        derived approval severity.
+        List of dspy.Tool objects, one per MCP-exposed tool except
+        :data:`HUMAN_CONFIRM_ONLY_TOOLS`, each carrying its derived approval
+        severity.
     """
     relay_token = app_env("APP_TOOL_RELAY_TOKEN")
     if relay_token:
@@ -167,6 +174,8 @@ def _list_live_tools(mcp_url: str, auth_header: str | None) -> list[dspy.Tool]:
         raise
     tools: list[dspy.Tool] = []
     for spec in specs:
+        if spec.name in HUMAN_CONFIRM_ONLY_TOOLS:
+            continue
         wrapped = _live_mcp_tool(mcp_url, headers, spec)
         set_tool_severity(wrapped, _severity_from_annotations(getattr(spec, "annotations", None)))
         tools.append(wrapped)

@@ -8,6 +8,9 @@ with no database. The approval tests drive the generalist's gate directly.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import dspy
@@ -15,7 +18,10 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from mcp.types import Tool as McpTool
+from mcp.types import ToolAnnotations
 
+from ...service_gateway.agents import react_serve
 from ...service_gateway.agents.generalist import (
     _ALWAYS_CONFIRM_TOOLS,
     _ALWAYS_TOOLS,
@@ -25,6 +31,7 @@ from ...service_gateway.agents.generalist import (
     _screen_needs_approval,
     _wrap_tool_with_approval,
 )
+from ...service_gateway.optimization.training_ground import run_react
 from ..errors import DomainError
 from ..routers import agent_settings as agent_settings_module
 from ..routers.agent_settings import MASK, create_agent_settings_router, mask_secrets
@@ -406,3 +413,78 @@ def test_protected_tool_refuses_billing_and_key_actions(action: str) -> None:
     resp = client.post("/agent/protected-settings", json={"action": action, "target": "c", "values": {"a": 1}})
     assert resp.status_code == 422
     assert calls == []
+
+
+def _mcp_specs() -> list[McpTool]:
+    """Build a live MCP listing with the protected tool and one ordinary tool.
+
+    Returns:
+        The MCP tool specs, as the ``/mcp`` mount lists them.
+    """
+    schema = {"type": "object", "properties": {}}
+    return [
+        McpTool(
+            name="change_protected_setting",
+            description="protected",
+            inputSchema=schema,
+            annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
+        ),
+        McpTool(name="list_settings", description="read", inputSchema=schema),
+    ]
+
+
+def test_training_ground_live_roster_drops_protected_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Optimization rollouts call tools with nobody to confirm, so the protected tool is never listed."""
+
+    async def listing(_url: str, _headers: dict[str, str] | None) -> list[McpTool]:
+        """Return the fake live listing without a network call."""
+        return _mcp_specs()
+
+    monkeypatch.delenv("SKYNET_TOOL_RELAY_TOKEN", raising=False)
+    monkeypatch.delenv("APP_TOOL_RELAY_TOKEN", raising=False)
+    monkeypatch.setattr(run_react, "_list_live_tool_specs", listing)
+    tools = run_react._list_live_tools("http://mcp.local/mcp", None)
+    assert [tool.name for tool in tools] == ["list_settings"]
+
+
+class _RosterSeenError(Exception):
+    """Stop the react-serve driver once it built its roster."""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["ask", "auto_safe", "yolo"])
+async def test_react_serve_roster_drops_protected_tool(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    """A served react chat can rename tools or run in YOLO, so it never gets the protected tool."""
+    seen: list[str] = []
+
+    @contextlib.asynccontextmanager
+    async def session(_url: str, auth_header: str | None = None) -> AsyncIterator[Any]:
+        """Yield a fake MCP session whose listing holds the protected tool."""
+
+        async def list_tools() -> Any:
+            """Return the fake listing."""
+            return SimpleNamespace(tools=_mcp_specs())
+
+        yield SimpleNamespace(list_tools=list_tools)
+
+    def capture(_hashes: Any, tools: list[dspy.Tool], strict: bool) -> None:
+        """Record the roster the driver built, then stop the turn."""
+        seen.extend(tool.name for tool in tools)
+        raise _RosterSeenError
+
+    monkeypatch.setattr(react_serve, "_mcp_session", session)
+    monkeypatch.setattr(react_serve, "_assert_tool_set_matches", capture)
+    with pytest.raises(_RosterSeenError):
+        await react_serve._drive_react_chat(
+            signature_cls=object,
+            program_state_json="{}",
+            react_overlay=SimpleNamespace(tool_source={}, tool_schema_hashes={}),
+            user_message="hi",
+            trust_mode=mode,
+            registry=ApprovalRegistry(),
+            emit=lambda _event: None,
+            lm=object(),
+            mcp_url="http://mcp.local/mcp",
+            auth_header=None,
+        )
+    assert seen == ["list_settings"]

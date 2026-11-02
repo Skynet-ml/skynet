@@ -82,8 +82,13 @@ _LINKED_ONLY_TABS = frozenset({"billing"})
 # readable because the settings UI already shows them.
 _SECRET_KEY = re.compile(r"secret|token|password|passwd|api_?key|private|otpauth|recovery|hash|cookie", re.IGNORECASE)
 # Credential-shaped strings under an innocent key name, such as a provider key
-# echoed back inside an error message.
-_SECRET_VALUE = re.compile(r"\b(?:sk|rk|pk|ghp|gho|ghs|xox[abpr]|AIza|hf)[-_][A-Za-z0-9_-]{12,}")
+# echoed back inside an error message. ``skyd_`` is Skynet's own personal
+# access token (``core.api.auth.API_TOKEN_PREFIX``).
+_SECRET_VALUE = re.compile(
+    r"\b(?:skyd|github_pat|sk|rk|pk|ghp|gho|ghs|xox[abpr]|AIza|hf)[-_][A-Za-z0-9_-]{12,}"
+    r"|\bAKIA[0-9A-Z]{16}\b"
+    r"|\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
+)
 _SAFE_PATH = re.compile(r"^/(?!/)[A-Za-z0-9/_-]{0,200}$")
 _THEMES = frozenset({"system", "light", "dark"})
 _LOCALE = re.compile(r"^[a-z]{2,3}(?:-[A-Za-z0-9]{2,4})?$")
