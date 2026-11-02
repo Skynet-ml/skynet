@@ -61,7 +61,7 @@ export function LiveMarker({ status }: { status: RunLogStreamStatus }) {
       <span
         aria-hidden="true"
         className={
-          live ? "size-1.5 rounded-full bg-[#1a7a3a]" : "size-1.5 rounded-full bg-[#9a6a10]"
+          live ? "size-1.5 rounded-full bg-[var(--success)]" : "size-1.5 rounded-full bg-[var(--warning)]"
         }
       />
       {live ? msg("optimizations.logs.live") : msg("optimizations.logs.reconnecting")}
