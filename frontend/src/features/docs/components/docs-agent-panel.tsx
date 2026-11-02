@@ -12,6 +12,7 @@ import {
   MAX_KEPT_MESSAGES,
   askBody,
   chunkText,
+  isDocsHref,
   keepDocsLinks,
   parseStoredHistory,
   trimHistory,
@@ -233,7 +234,7 @@ export function DocsAgentPanel({
             </p>
           ) : message.content ? (
             <div key={index} dir="auto" className="leading-relaxed text-foreground/90">
-              <MessageMarkdown content={keepDocsLinks(message.content)} />
+              <MessageMarkdown content={keepDocsLinks(message.content)} allowLink={isDocsHref} />
             </div>
           ) : null,
         )}

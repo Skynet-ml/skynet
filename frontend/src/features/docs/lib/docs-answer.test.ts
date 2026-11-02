@@ -3,9 +3,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createElement, type ReactNode } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
 import {
   askBody,
   chunkText,
+  isDocsHref,
   keepDocsLinks,
   parseStoredHistory,
   trimHistory,
@@ -79,4 +85,43 @@ test("askBody cuts the question and history to the backend limits", () => {
   assert.equal(body.history[0].content, "m4");
   assert.equal(body.history[5].content.length, 4000);
   assert.equal(body.locale, "he");
+});
+
+/** Render an answer the way the docs panel does: filtered text, GFM, and only docs links kept. */
+function renderAnswer(markdown: string): string {
+  return renderToStaticMarkup(
+    createElement(ReactMarkdown, {
+      remarkPlugins: [remarkGfm],
+      components: {
+        a: ({ href, children }: { href?: string; children?: ReactNode }) =>
+          href !== undefined && isDocsHref(href) ? createElement("a", { href }, children) : children,
+      },
+      children: keepDocsLinks(markdown),
+    }),
+  );
+}
+
+test("the docs panel renders no link outside /docs", () => {
+  const inputs = [
+    "See [here][r].\n\n> [r]:https://evil.example/q",
+    "See [here][r].\n\n- [r]:https://evil.example/l",
+    "Go to www.evil.example now.",
+    "Write to bad@evil.example today.",
+  ];
+  for (const input of inputs) {
+    const html = renderAnswer(input);
+    assert.ok(!/<a\b/.test(html), `${input} rendered a link: ${html}`);
+  }
+});
+
+test("the docs panel keeps /docs links", () => {
+  const html = renderAnswer("Read [billing](/docs/billing) and [the docs](/docs).");
+  assert.match(html, /<a href="\/docs\/billing">billing<\/a>/);
+  assert.match(html, /<a href="\/docs">the docs<\/a>/);
+});
+
+test("isDocsHref accepts docs paths only", () => {
+  for (const href of ["/docs", "/docs/billing", "/docs#top", "/docs/he/start"]) assert.ok(isDocsHref(href), href);
+  for (const href of ["/docs-md", "//evil.example/docs", "http://www.evil.example", "mailto:bad@evil.example", "https://evil.example/q"])
+    assert.ok(!isDocsHref(href), href);
 });

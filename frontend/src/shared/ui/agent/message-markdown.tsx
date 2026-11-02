@@ -210,14 +210,33 @@ export interface MessageMarkdownProps {
   content: string;
   className?: string;
   onRunCode?: (code: string, language: string) => void;
+  /** When set, a link whose href fails this check renders as plain text. */
+  allowLink?: (href: string) => boolean;
 }
 
-export function MessageMarkdown({ content, className, onRunCode }: MessageMarkdownProps) {
+const LinkRenderer = COMPONENTS.a as React.ComponentType<React.ComponentProps<"a">>;
+
+export function MessageMarkdown({ content, className, onRunCode, allowLink }: MessageMarkdownProps) {
   const ctx = React.useMemo<RunCodeContextValue>(() => ({ onRunCode }), [onRunCode]);
+  const components = React.useMemo<Components>(
+    () =>
+      allowLink
+        ? {
+            ...COMPONENTS,
+            a: ({ node: _node, ...props }) =>
+              props.href !== undefined && allowLink(props.href) ? (
+                <LinkRenderer {...props} />
+              ) : (
+                <>{props.children}</>
+              ),
+          }
+        : COMPONENTS,
+    [allowLink],
+  );
   return (
     <RunCodeContext.Provider value={ctx}>
       <div className={cn("break-words", className)}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={COMPONENTS}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
           {content}
         </ReactMarkdown>
       </div>
