@@ -551,19 +551,22 @@ ipcMain.handle("onboarding:copy", (_event, text: unknown) => {
 });
 ipcMain.handle("onboarding:fit", (_event, height: unknown) => {
   if (typeof height !== "number" || !Number.isFinite(height)) return;
-  const next = Math.min(SETUP_MAX_HEIGHT, Math.max(SETUP_SIZE.height, Math.ceil(height)));
   // openApp sends "ready" to this page before loadURL replaces it; a fit from that
   // last render would shrink the app window back to the setup size.
-  if (state.kind === "ready" || next === setupHeight || !win?.webContents.getURL().startsWith("file:")) return;
+  if (state.kind === "ready" || !win?.webContents.getURL().startsWith("file:")) return;
+  const before = win.getBounds();
+  // A programmatic move or resize skips the macOS on-screen constrain, so keep the
+  // window inside the work area (below the menu bar, above the Dock). The page
+  // scrolls when its content is taller than the window.
+  const area = screen.getDisplayMatching(before).workArea;
+  const frame = before.height - win.getContentBounds().height;
+  const next = Math.min(SETUP_MAX_HEIGHT, area.height - frame, Math.max(SETUP_SIZE.height, Math.ceil(height)));
+  if (next === setupHeight) return;
   setupHeight = next;
   // Grow or shrink around the window's own middle instead of centering it again,
   // so a window the user dragged aside stays where they put it.
-  const before = win.getBounds();
   win.setContentSize(SETUP_SIZE.width, setupHeight);
   const after = win.getBounds();
-  // A programmatic move skips the macOS on-screen constrain, so keep the grown
-  // window inside the work area (below the menu bar, above the Dock).
-  const area = screen.getDisplayMatching(before).workArea;
   const centered = Math.round(before.y - (after.height - before.height) / 2);
   const y = Math.max(area.y, Math.min(centered, area.y + area.height - after.height));
   win.setPosition(before.x, y);
