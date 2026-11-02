@@ -11,6 +11,8 @@
   "agent.composer.record_cancel": "ביטול ההקלטה",
   "agent.composer.record_finish": "סיום ההקלטה ותמלול",
   "agent.composer.recording": "מקליט...",
+  "agent.composer.suggestion_hint": "הודעה מוצעת: {text}. לחצו Tab כדי להשתמש בה, או Escape כדי לסגור אותה.",
+  "agent.composer.suggestion_key": "Tab",
   "agent.composer.transcribe_failed": "התמלול נכשל — אפשר לנסות שוב",
   "agent.composer.transcribing": "מתמלל...",
   "agent.pending.list_label": "הודעות ממתינות",

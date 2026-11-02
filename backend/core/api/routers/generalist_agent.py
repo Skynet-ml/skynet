@@ -22,7 +22,7 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header
@@ -30,15 +30,22 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from starlette.responses import StreamingResponse
 
+from ...billing.metering import meter_llm_run
+from ...config import settings
+from ...constants import TOKEN_SOURCE_MANAGED
+from ...service_gateway.agents.code import _reply_language
 from ...service_gateway.agents.generalist import (
     ThinkingTrail,
     TrustMode,
     WizardState,
     approval_key,
+    build_hosted_suggest_lm,
+    build_local_suggest_lm,
     fallback_summary,
     get_approval_registry,
     run_generalist_agent,
 )
+from ...service_gateway.agents.next_prompt import suggest_next_prompt
 from ...service_gateway.agents.steering import (
     STEER_APPLIED_EVENT,
     STEER_KEY_MAX_CHARS,
@@ -52,9 +59,14 @@ from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..model_catalog import ReasoningEffort
 from ..model_router import effective_reasoning_effort, metering_token_source, route_agent_model, route_local_byok_model
+from ..suggest_model import hosted_suggest_model
 from ._helpers import enforce_llm_balance, sse_from_events, stream_with_llm_metering
 
 logger = logging.getLogger(__name__)
+# A suggestion has a larger prompt than a thinking label, and on a CLI engine a
+# process start alone takes 3-7 s, so the label's 8 s limit made every CLI
+# suggestion time out. The CLI side stops its run at 25 s.
+_SUGGEST_TIMEOUT_SECONDS = 30.0
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 
@@ -71,6 +83,8 @@ HISTORY_MAX_TURNS = 24
 HISTORY_TURN_MAX_CHARS = 4000
 HISTORY_MAX_TOOL_CALLS = 8
 HISTORY_TOOL_RESULT_MAX_CHARS = 400
+NEXT_PROMPT_MAX_TURNS = 100
+NEXT_PROMPT_MAX_ACTIONS = 20
 
 
 # One tool call an earlier assistant turn made, as the panel recorded it.
@@ -220,6 +234,118 @@ class SteerWithdrawResponse(BaseModel):
     """Messages returned to the client, oldest first."""
 
     ids: list[str]
+
+
+class NextPromptTurn(BaseModel):
+    """One turn of the conversation a next-message suggestion reads."""
+
+    role: Literal["user", "assistant"] = Field(..., description="'user' or 'assistant'.")
+    content: str = Field(..., description="Message text; the server clips long turns.")
+
+
+class NextPromptRequest(BaseModel):
+    """Input for one next-message suggestion."""
+
+    turns: list[NextPromptTurn] = Field(
+        ...,
+        max_length=NEXT_PROMPT_MAX_TURNS,
+        description="The conversation, oldest first; the last turn is the agent's.",
+    )
+    actions: list[str] = Field(
+        default_factory=list,
+        max_length=NEXT_PROMPT_MAX_ACTIONS,
+        description="Short notes on what just happened (tool results, approvals, uploads), oldest first.",
+    )
+    locale: str | None = Field(default=None, description="UI locale code; sets the suggestion's language.")
+    model: str | None = Field(
+        default=None,
+        description="The composer's model pick. Only the Mac app reads it, to run the suggestion on the same engine.",
+    )
+
+
+class NextPromptResponse(BaseModel):
+    """The suggested next message, or an empty string when there is none."""
+
+    suggestion: str
+
+
+def _next_prompt_lm(job_store, username: str, model: str | None) -> tuple[Any | None, str]:
+    """Build the small model a suggestion runs on; never the composer, interview or agent model.
+
+    Hosted, it is the scored suggestion model (see
+    :func:`~core.api.suggest_model.hosted_suggest_model`). In the Mac app, the
+    composer pick only selects the engine; the suggestion runs on that
+    engine's smallest model.
+
+    Args:
+        job_store: Job store whose engine holds the caller's engine setting and saved keys.
+        username: The caller.
+        model: The composer's model pick.
+
+    Returns:
+        ``(lm, token_source)``; ``lm`` is ``None`` when no model can run it.
+
+    Raises:
+        DomainError: When the Mac app's pick cannot be routed.
+    """
+    if not settings.local_mode:
+        picked = hosted_suggest_model()
+        lm = build_hosted_suggest_lm(picked, _SUGGEST_TIMEOUT_SECONDS) if picked else None
+        return lm, TOKEN_SOURCE_MANAGED
+    picked = engine_agent_model(job_store, username, model)
+    config = route_local_byok_model(picked, job_store=job_store, username=username) or route_agent_model(picked)
+    return build_local_suggest_lm(config, _SUGGEST_TIMEOUT_SECONDS), metering_token_source(config)
+
+
+def next_prompt_suggestion(job_store, username: str, req: NextPromptRequest) -> str:
+    """Write the user's likely next message, or ``""`` on any block or failure.
+
+    A suggestion is optional help, so a blocked balance, an unroutable model
+    or a failed call returns nothing instead of an error.
+
+    Args:
+        job_store: Job store whose engine backs billing.
+        username: The caller, who pays for the call.
+        req: The conversation and recent actions.
+
+    Returns:
+        The suggestion, or ``""``.
+    """
+    if not req.turns or req.turns[-1].role != "assistant" or not req.turns[-1].content.strip():
+        return ""
+    try:
+        enforce_llm_balance(job_store, username)
+        lm, token_source = _next_prompt_lm(job_store, username, req.model)
+    except DomainError:
+        return ""
+    except Exception:
+        logger.warning("next-message suggestion model unavailable", exc_info=True)
+        return ""
+    if lm is None:
+        logger.info("next-message suggestion skipped: the engine has no model to run it")
+        return ""
+    # Subscription calls are metered under the legacy "managed" source at zero
+    # cost; the log names who really pays.
+    payer = "subscription" if getattr(lm, "subscription", False) else token_source
+    logger.info("next-message suggestion on %s (%s)", getattr(lm, "model", "?"), payer)
+    try:
+        return suggest_next_prompt(
+            lm,
+            [(turn.role, turn.content) for turn in req.turns],
+            req.actions,
+            _reply_language(req.locale),
+        )
+    except Exception:
+        logger.warning("next-message suggestion failed", exc_info=True)
+        return ""
+    finally:
+        meter_llm_run(
+            getattr(job_store, "engine", None),
+            username,
+            [lm],
+            description="Agent suggestion",
+            token_source=token_source,
+        )
 
 
 def _derive_title(user_message: str) -> str:
@@ -862,5 +988,28 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         """
         taken = get_steer_store().take(current_user.username, req.steer_key, req.ids)
         return SteerWithdrawResponse(ids=[message_id for message_id, _ in taken])
+
+    @router.post(
+        "/optimizations/agent-suggest",
+        response_model=NextPromptResponse,
+        summary="Suggest the user's next message to an agent",
+    )
+    async def suggest_next_message(req: NextPromptRequest, current_user: AuthenticatedUserDep) -> NextPromptResponse:
+        """Suggest what the user would likely send next, for the composer's Tab-to-accept hint.
+
+        Works for every agent composer: the generalist agent, the screen
+        interviews, the tagger interview and the code assistants. Runs on the
+        small model that labels thinking, metered like it, and returns an
+        empty suggestion instead of an error when anything blocks it.
+
+        Args:
+            req: The conversation, recent actions, locale and model pick.
+            current_user: The authenticated caller, who pays for the call.
+
+        Returns:
+            The suggestion, or an empty one.
+        """
+        suggestion = await asyncio.to_thread(next_prompt_suggestion, job_store, current_user.username, req)
+        return NextPromptResponse(suggestion=suggestion)
 
     return router

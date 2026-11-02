@@ -274,6 +274,7 @@ export function TaggerInterview({
             disabled={!busy && messages.length === 0}
             streaming={busy}
             midTurn={midTurn}
+            suggest={{ messages, model: interviewComposerModel(assist) }}
             placeholder={msg("tagger.assist.interview.placeholder")}
             modelMenu={
               <ComposerModelMenu

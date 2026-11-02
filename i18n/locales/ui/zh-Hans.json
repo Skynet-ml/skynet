@@ -1531,6 +1531,8 @@
   "agent.composer.record_cancel": "取消录音",
   "agent.composer.record_finish": "结束并转写",
   "agent.composer.recording": "正在录音…",
+  "agent.composer.suggestion_hint": "建议消息：{text}。按 Tab 使用，按 Esc 关闭。",
+  "agent.composer.suggestion_key": "Tab",
   "agent.composer.transcribe_failed": "转写失败——请重试",
   "agent.composer.transcribing": "正在转写…",
   "agent.pending.list_label": "待处理消息",

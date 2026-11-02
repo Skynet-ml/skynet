@@ -1531,6 +1531,8 @@
   "agent.composer.record_cancel": "Kaydı iptal et",
   "agent.composer.record_finish": "Bitir ve yazıya dök",
   "agent.composer.recording": "Kaydediliyor...",
+  "agent.composer.suggestion_hint": "Önerilen mesaj: {text}. Kullanmak için Tab'a, kapatmak için Escape'e basın.",
+  "agent.composer.suggestion_key": "Tab",
   "agent.composer.transcribe_failed": "Yazıya dökme başarısız oldu — tekrar deneyin",
   "agent.composer.transcribing": "Yazıya dökülüyor...",
   "agent.pending.list_label": "Bekleyen mesajlar",

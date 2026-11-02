@@ -126,6 +126,7 @@ export function ReactServeChat({ optimizationId }: ReactServeChatProps) {
         sendAriaLabel={msg("optimizations.react.chat_send_aria")}
         stopAriaLabel={msg("optimizations.react.chat_stop_aria")}
         layout="inline"
+        suggest={{ messages: agent.messages }}
       />
     </div>
   );

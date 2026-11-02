@@ -1531,6 +1531,8 @@
   "agent.composer.record_cancel": "Скасувати запис",
   "agent.composer.record_finish": "Завершити й транскрибувати",
   "agent.composer.recording": "Запис…",
+  "agent.composer.suggestion_hint": "Запропоноване повідомлення: {text}. Натисніть Tab, щоб використати його, або Escape, щоб закрити.",
+  "agent.composer.suggestion_key": "Tab",
   "agent.composer.transcribe_failed": "Не вдалося транскрибувати — спробуйте ще раз",
   "agent.composer.transcribing": "Транскрибування…",
   "agent.pending.list_label": "Повідомлення в очікуванні",

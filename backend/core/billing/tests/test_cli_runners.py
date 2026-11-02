@@ -36,26 +36,28 @@ CLAUDE_SUCCESS = {
         "output_tokens": 4,
     },
 }
-CODEX_EVENTS = [
-    {"type": "thread.started", "thread_id": "thread-fixture"},
-    {"type": "item.completed", "item": {"id": "item_0", "type": "error", "message": "hook trust warning"}},
-    {"type": "turn.started"},
-    {"type": "item.completed", "item": {"id": "item_3", "type": "agent_message", "text": "pong"}},
+# The notifications of one ``codex app-server`` turn (codex-cli 0.163.0), trimmed.
+CODEX_TURN = [
+    {"method": "turn/started", "params": {"threadId": "thr", "turn": {"id": "t1"}}},
+    {"method": "item/started", "params": {"item": {"id": "msg_1", "type": "agentMessage", "phase": "final_answer"}}},
+    {"method": "item/agentMessage/delta", "params": {"itemId": "msg_1", "delta": "po"}},
+    {"method": "item/agentMessage/delta", "params": {"itemId": "msg_1", "delta": "ng"}},
+    {"method": "item/completed", "params": {"item": {"id": "msg_1", "type": "agentMessage", "text": "pong"}}},
     {
-        "type": "turn.completed",
-        "usage": {
-            "input_tokens": 29250,
-            "cached_input_tokens": 13184,
-            "cache_write_input_tokens": 0,
-            "output_tokens": 43,
-            "reasoning_output_tokens": 36,
+        "method": "thread/tokenUsage/updated",
+        "params": {
+            "tokenUsage": {
+                "last": {"inputTokens": 29250, "cachedInputTokens": 13184, "outputTokens": 43},
+                "total": {"inputTokens": 29250, "cachedInputTokens": 13184, "outputTokens": 43},
+            }
         },
     },
+    {"method": "turn/completed", "params": {"turn": {"id": "t1", "status": "completed", "error": None}}},
 ]
 API_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY")
 
 
-def fake_cli(directory: Path, name: str, behavior: str) -> Path:
+def fake_cli(directory: Path, name: str, behavior: str, *, read_stdin: bool = True) -> Path:
     """Write an executable fake CLI that logs each call, then runs ``behavior``.
 
     The script appends ``{argv, env, stdin, cwd}`` to ``<directory>/<name>.log``
@@ -65,6 +67,8 @@ def fake_cli(directory: Path, name: str, behavior: str) -> Path:
         directory: Where the script and its log go.
         name: The script name.
         behavior: Python statements that write the CLI's output and exit.
+        read_stdin: Read stdin to its end before ``behavior``; the codex app
+            server's stdin stays open, so its fakes read it line by line.
 
     Returns:
         The script path.
@@ -75,7 +79,7 @@ def fake_cli(directory: Path, name: str, behavior: str) -> Path:
         f"#!{sys.executable}\n"
         "import json, os, sys, time\n"
         "argv = sys.argv[1:]\n"
-        "stdin = sys.stdin.read()\n"
+        f"stdin = sys.stdin.read() if {read_stdin!r} else ''\n"
         f"with open({str(log)!r}, 'a') as handle:\n"
         "    handle.write(json.dumps({'argv': argv, 'env': dict(os.environ), 'stdin': stdin, 'cwd': os.getcwd()}) + '\\n')\n"
         f"{behavior}\n",
@@ -83,6 +87,51 @@ def fake_cli(directory: Path, name: str, behavior: str) -> Path:
     )
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return script
+
+
+def fake_app_server(directory: Path, turn: str, *, setup: str = "") -> Path:
+    """Write a fake ``codex app-server`` that answers the JSON-RPC handshake, then runs ``turn``.
+
+    Each request the server reads is appended to ``<directory>/codex.requests``
+    as one JSON line. ``turn`` runs after the ``turn/start`` response, with
+    ``emit(message)`` to print one JSON-RPC message.
+
+    Args:
+        directory: Where the script, its log and its requests go.
+        turn: Python statements that send the turn's notifications.
+        setup: Python statements that run before the handshake.
+
+    Returns:
+        The script path.
+    """
+    requests = directory / "codex.requests"
+    behavior = (
+        "def emit(message):\n"
+        "    print(json.dumps(message), flush=True)\n"
+        f"{setup}\n"
+        "for line in sys.stdin:\n"
+        "    message = json.loads(line)\n"
+        f"    open({str(requests)!r}, 'a').write(json.dumps(message) + '\\n')\n"
+        "    if message.get('id') == 1:\n"
+        "        emit({'id': 1, 'result': {}})\n"
+        "    elif message.get('id') == 2:\n"
+        "        emit({'id': 2, 'result': {'thread': {'id': 'thr'}}})\n"
+        "    elif message.get('id') == 3:\n"
+        "        emit({'id': 3, 'result': {'turn': {'id': 't1'}}})\n"
+        + "".join(f"        {statement}\n" for statement in turn.splitlines())
+    )
+    return fake_cli(directory, "codex", behavior, read_stdin=False)
+
+
+def emitting(*messages: dict[str, Any]) -> str:
+    """Return app-server turn behavior that sends ``messages`` in order."""
+    return "".join(f"emit({message!r})\n" for message in messages)
+
+
+def requests(directory: Path) -> list[dict[str, Any]]:
+    """Return the JSON-RPC messages a fake app server read, oldest first."""
+    path = directory / "codex.requests"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
 def calls(directory: Path, name: str) -> list[dict[str, Any]]:
@@ -145,12 +194,34 @@ def test_claude_uses_the_subscription_and_reads_usage(tmp_path: Path) -> None:
     assert completion.model_ms == 1326
     [call] = calls(tmp_path, "claude")
     assert "--bare" not in call["argv"]
-    assert call["argv"][:3] == ["-p", "--output-format", "json"]
+    assert call["argv"][:5] == ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]
     assert call["argv"][call["argv"].index("--model") + 1] == "claude-haiku-4-5"
     for flag in ("--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"):
         assert flag in call["argv"]
     assert call["stdin"] == "ping"
     assert not set(API_KEYS) & set(call["env"])
+
+
+def test_claude_marks_the_repeated_prefix_for_the_cache(tmp_path: Path) -> None:
+    """Send the prompt as two stream-json text blocks with a cache mark after the repeated prefix."""
+    fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))
+    prefix = "### System\nThe fixed instructions."
+    prompt = f"{prefix}\n\n### User\nping"
+    settings = local_settings(tmp_path)
+    cli_runners.run_claude("claude-haiku-4-5", prompt, None, settings, tmp_path, cache_prefix=prefix)
+    cli_runners.run_claude("claude-haiku-4-5", prefix, None, settings, tmp_path, cache_prefix=prefix)
+    marked, whole = calls(tmp_path, "claude")
+    assert marked["argv"][marked["argv"].index("--input-format") + 1] == "stream-json"
+    message = json.loads(marked["stdin"])
+    assert message["type"] == "user"
+    assert message["message"]["role"] == "user"
+    first, rest = message["message"]["content"]
+    assert first == {"type": "text", "text": prefix, "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+    assert rest == {"type": "text", "text": "\n\n### User\nping"}
+    assert first["text"] + rest["text"] == prompt
+    # A prompt that is only the prefix leaves no second block, so it goes as plain text.
+    assert "--input-format" not in whole["argv"]
+    assert whole["stdin"] == prefix
 
 
 def test_claude_prefers_structured_output_for_a_schema(tmp_path: Path) -> None:
@@ -193,24 +264,182 @@ def test_claude_limit_result_is_a_rate_limit_with_its_reset(tmp_path: Path) -> N
     assert caught.value.reset_at == datetime.fromtimestamp(1893456000, UTC)
 
 
-def test_codex_reads_the_event_stream(tmp_path: Path) -> None:
-    """Read the last agent message and turn usage, in a read-only sandbox, with the prompt on stdin."""
-    events = "\n".join(json.dumps(event) for event in CODEX_EVENTS)
-    fake_cli(tmp_path, "codex", f"print({events!r})")
+def claude_delta(kind: str, text: str) -> dict[str, Any]:
+    """Return one ``stream-json`` partial-message event with a thinking or text delta.
+
+    Args:
+        kind: ``"thinking"`` or ``"text"``.
+        text: The delta text.
+
+    Returns:
+        The event, in the shape ``claude -p --include-partial-messages`` prints.
+    """
+    return {
+        "type": "stream_event",
+        "event": {"type": "content_block_delta", "index": 0, "delta": {"type": f"{kind}_delta", kind: text}},
+    }
+
+
+def waiting_for(marker: Path, *events: dict[str, Any]) -> str:
+    """Return fake-CLI behavior that prints ``events`` and then waits up to 10 s for ``marker``.
+
+    Args:
+        marker: The file the test's callback writes once it got the events.
+        *events: The events printed before the wait.
+
+    Returns:
+        Python statements; the script exits 3 when the marker never appears.
+    """
+    lines = "".join(f"print(json.dumps({event!r}), flush=True)\n" for event in events)
+    return (
+        f"{lines}deadline = time.time() + 10\n"
+        f"while not os.path.exists({str(marker)!r}):\n"
+        "    if time.time() > deadline:\n"
+        "        sys.exit(3)\n"
+        "    time.sleep(0.02)\n"
+    )
+
+
+def test_claude_streams_thinking_and_answer_text_before_it_exits(tmp_path: Path) -> None:
+    """Pass each thinking and text delta on while claude still runs, and keep the result's answer and usage."""
+    marker = tmp_path / "seen"
+    events = [{"type": "system", "subtype": "init"}, claude_delta("thinking", "Let me "), claude_delta("text", "po")]
+    behavior = waiting_for(marker, *events) + printing(claude_delta("text", "ng")) + "\n" + printing(CLAUDE_SUCCESS)
+    fake_cli(tmp_path, "claude", behavior)
+    deltas: list[tuple[str, str]] = []
+
+    def on_delta(kind: str, text: str) -> None:
+        """Record the delta, and let the fake CLI finish once two arrived."""
+        deltas.append((kind, text))
+        if len(deltas) == 2:
+            marker.write_text("1")
+
+    completion = cli_runners.run_claude("claude-haiku-4-5", "ping", None, local_settings(tmp_path), tmp_path, on_delta)
+    assert deltas == [("reasoning", "Let me "), ("content", "po"), ("content", "ng")]
+    assert (completion.text, completion.completion_tokens, completion.model_ms) == ("pong", 4, 1326)
+
+
+def test_claude_schema_call_streams_only_thinking(tmp_path: Path) -> None:
+    """Stream no answer text for a schema call, whose answer is the structured value."""
+    events = [claude_delta("thinking", "hmm"), claude_delta("text", "free text")]
+    result = {**CLAUDE_SUCCESS, "result": "", "structured_output": {"answer": 1}}
+    fake_cli(tmp_path, "claude", "\n".join(printing(event) for event in [*events, result]))
+    deltas: list[tuple[str, str]] = []
+    schema = {"type": "object", "properties": {"answer": {"type": "integer"}}}
+    completion = cli_runners.run_claude(
+        "claude-haiku-4-5", "q", schema, local_settings(tmp_path), tmp_path, lambda *d: deltas.append(d)
+    )
+    assert deltas == [("reasoning", "hmm")]
+    assert json.loads(completion.text) == {"answer": 1}
+
+
+def test_claude_stream_without_a_result_is_a_failure(tmp_path: Path) -> None:
+    """Fail with claude's stderr when the stream ends before its result event."""
+    fake_cli(
+        tmp_path, "claude", printing({"type": "system", "subtype": "init"}) + "\nsys.stderr.write('API Error: 500')"
+    )
+    with pytest.raises(CliRunError) as caught:
+        cli_runners.run_claude("claude-haiku-4-5", "ping", None, local_settings(tmp_path), tmp_path)
+    assert "API Error: 500" in caught.value.message
+    assert caught.value.transient
+
+
+def _summary(item: str, index: int, delta: str) -> dict[str, Any]:
+    """Return one ``item/reasoning/summaryTextDelta`` notification.
+
+    Args:
+        item: The reasoning item id.
+        index: The summary part index.
+        delta: The text piece.
+
+    Returns:
+        The notification.
+    """
+    return {
+        "method": "item/reasoning/summaryTextDelta",
+        "params": {"itemId": item, "summaryIndex": index, "delta": delta},
+    }
+
+
+def test_codex_streams_reasoning_and_answer_before_the_turn_ends(tmp_path: Path) -> None:
+    """Pass each reasoning summary and answer piece on while the turn still runs, and skip commentary."""
+    marker = tmp_path / "seen"
+    commentary = [
+        {"method": "item/started", "params": {"item": {"id": "c1", "type": "agentMessage", "phase": "commentary"}}},
+        {"method": "item/agentMessage/delta", "params": {"itemId": "c1", "delta": "Looking"}},
+    ]
+    first = [_summary("rs_1", 0, "**Plan**"), _summary("rs_1", 0, " now"), *commentary, _summary("rs_1", 1, "**Next**")]
+    wait = (
+        "deadline = time.time() + 10\n"
+        f"while not os.path.exists({str(marker)!r}):\n"
+        "    if time.time() > deadline:\n"
+        "        sys.exit(3)\n"
+        "    time.sleep(0.02)\n"
+    )
+    fake_app_server(tmp_path, emitting(*first) + wait + emitting(*CODEX_TURN))
+    deltas: list[tuple[str, str]] = []
+
+    def on_delta(kind: str, text: str) -> None:
+        """Record the delta, and let the fake server finish once the reasoning arrived."""
+        deltas.append((kind, text))
+        if len(deltas) == 3:
+            marker.write_text("1")
+
+    completion = cli_runners.run_codex("gpt-5.6-luna", "ping", None, local_settings(tmp_path), tmp_path, on_delta)
+    assert deltas == [
+        ("reasoning", "**Plan**"),
+        ("reasoning", " now"),
+        ("reasoning", "\n\n**Next**"),
+        ("content", "po"),
+        ("content", "ng"),
+    ]
+    assert completion.text == "pong"
+
+
+def test_codex_schema_call_streams_no_answer_text(tmp_path: Path) -> None:
+    """Send the schema with the turn, and stream only reasoning: the answer is the structured value."""
+    fake_app_server(tmp_path, emitting(_summary("rs_1", 0, "hmm"), *CODEX_TURN))
+    deltas: list[tuple[str, str]] = []
     schema = {"type": "object"}
-    completion = cli_runners.run_codex("gpt-5.6-luna", "ping", schema, local_settings(tmp_path), tmp_path)
+    cli_runners.run_codex(
+        "gpt-5.6-luna", "ping", schema, local_settings(tmp_path), tmp_path, lambda *d: deltas.append(d)
+    )
+    assert deltas == [("reasoning", "hmm")]
+    turn = next(message for message in requests(tmp_path) if message.get("method") == "turn/start")
+    assert turn["params"]["outputSchema"] == schema
+
+
+def test_codex_runs_one_turn_over_the_app_server(tmp_path: Path) -> None:
+    """Start a read-only ephemeral thread with the fixed prompt, send the prompt as the turn, and read usage."""
+    fake_app_server(tmp_path, emitting(*CODEX_TURN))
+    completion = cli_runners.run_codex("gpt-5.6-luna", "ping", None, local_settings(tmp_path), tmp_path)
     assert completion.text == "pong"
     assert (completion.prompt_tokens, completion.completion_tokens) == (29250, 43)
     assert completion.model_ms is not None
     [call] = calls(tmp_path, "codex")
-    assert call["argv"][:5] == ["exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check"]
-    for feature in ("shell_tool", "unified_exec", "code_mode_host", "view_image"):
-        assert call["argv"][call["argv"].index(feature) - 1] == "--disable"
-    assert 'web_search="disabled"' in call["argv"]
-    assert call["argv"][-1] == "-"
-    assert "--output-schema" in call["argv"]
-    assert call["stdin"] == "ping"
+    assert call["argv"][0] == "app-server"
     assert not set(API_KEYS) & set(call["env"])
+    sent = {message.get("method"): message.get("params") for message in requests(tmp_path)}
+    assert sent["thread/start"] == {
+        "model": "gpt-5.6-luna",
+        "baseInstructions": cli_runners.SYSTEM_PROMPT,
+        "sandbox": "read-only",
+        "approvalPolicy": "never",
+        "ephemeral": True,
+        "cwd": str(tmp_path),
+    }
+    assert sent["turn/start"] == {"input": [{"type": "text", "text": "ping"}], "summary": "auto", "threadId": "thr"}
+
+
+def test_codex_refuses_a_server_request(tmp_path: Path) -> None:
+    """Answer an approval request with an error, since no host tool may run."""
+    ask = {"id": 99, "method": "item/commandExecution/requestApproval", "params": {}}
+    # A real server waits for the answer; without the wait the fake can exit before it logs it.
+    wait = f"open({str(tmp_path / 'codex.requests')!r}, 'a').write(sys.stdin.readline())\n"
+    fake_app_server(tmp_path, emitting(ask) + wait + emitting(*CODEX_TURN))
+    assert cli_runners.run_codex("gpt-5.6-luna", "ping", None, local_settings(tmp_path), tmp_path).text == "pong"
+    [reply] = [message for message in requests(tmp_path) if message.get("id") == 99]
+    assert reply["error"]["code"] == -32601
 
 
 def test_codex_runs_in_private_homes_and_keeps_a_refreshed_login(
@@ -223,23 +452,20 @@ def test_codex_runs_in_private_homes_and_keeps_a_refreshed_login(
     (user_home / ".codex" / "AGENTS.md").write_text("personal instructions", encoding="utf-8")
     monkeypatch.setenv("HOME", str(user_home))
     monkeypatch.delenv("CODEX_HOME")
-    events = "\n".join(json.dumps(event) for event in CODEX_EVENTS)
-    fake_cli(
+    fake_app_server(
         tmp_path,
-        "codex",
-        "auth = os.path.join(os.environ['CODEX_HOME'], 'auth.json')\n"
+        emitting(*CODEX_TURN),
+        setup="auth = os.path.join(os.environ['CODEX_HOME'], 'auth.json')\n"
         "assert open(auth).read() == 'old-login'\n"
         "assert sorted(os.listdir(os.environ['CODEX_HOME'])) == ['auth.json']\n"
-        "open(auth, 'w').write('new-login')\n"
-        f"print({events!r})",
+        "open(auth, 'w').write('new-login')",
     )
     completion = cli_runners.run_codex("gpt-5.6-luna", "ping", None, local_settings(tmp_path), tmp_path)
     assert completion.text == "pong"
     [call] = calls(tmp_path, "codex")
     assert call["env"]["HOME"] != str(user_home)
     assert call["env"]["CODEX_HOME"] != str(user_home / ".codex")
-    for flag in ("--ignore-user-config", "--ignore-rules", "--ephemeral", "mcp_servers={}"):
-        assert flag in call["argv"]
+    assert "mcp_servers={}" in call["argv"]
     assert (user_home / ".codex" / "auth.json").read_text(encoding="utf-8") == "new-login"
     assert stat.S_IMODE((user_home / ".codex" / "auth.json").stat().st_mode) == 0o600
     assert not Path(call["env"]["CODEX_HOME"]).exists()
@@ -261,7 +487,9 @@ def test_claude_keeps_the_real_home_for_its_keychain_login(tmp_path: Path, monke
 CLAUDE_FLAGS = [
     "-p",
     "--output-format",
-    "json",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
     "--tools",
     "",
     "--system-prompt",
@@ -272,6 +500,8 @@ CLAUDE_FLAGS = [
     "--setting-sources",
     "",
     "--no-session-persistence",
+    "--settings",
+    '{"showThinkingSummaries": true}',
     "--model",
     "claude-haiku-4-5",
 ]
@@ -311,31 +541,13 @@ def test_claude_gets_the_exact_flags(tmp_path: Path) -> None:
     assert call["argv"] == CLAUDE_FLAGS
 
 
-def test_codex_gets_the_exact_flags_and_the_fixed_instructions(tmp_path: Path) -> None:
-    """Pass the isolation flags, every disabled feature, the context config, and the fixed prompt file."""
-    events = "\n".join(json.dumps(event) for event in CODEX_EVENTS)
-    seen = tmp_path / "instructions.seen"
-    fake_cli(
-        tmp_path,
-        "codex",
-        "value = argv[argv.index('-c', argv.index('tool_suggest')) + 1]\n"
-        "path = json.loads(value.split('=', 1)[1])\n"
-        f"open({str(seen)!r}, 'w').write(open(path).read())\n"
-        f"print({events!r})",
-    )
+def test_codex_gets_the_exact_flags(tmp_path: Path) -> None:
+    """Pass the isolation config, every disabled feature, and the context config to the app server."""
+    fake_app_server(tmp_path, emitting(*CODEX_TURN))
     cli_runners.run_codex("gpt-5.6-luna", "ping", None, local_settings(tmp_path), tmp_path)
     [call] = calls(tmp_path, "codex")
-    instructions = call["argv"][call["argv"].index("tool_suggest") + 2]
-    assert instructions.startswith("model_instructions_file=")
     assert call["argv"] == [
-        "exec",
-        "--json",
-        "--sandbox",
-        "read-only",
-        "--skip-git-repo-check",
-        "--ignore-user-config",
-        "--ignore-rules",
-        "--ephemeral",
+        "app-server",
         "-c",
         "mcp_servers={}",
         "-c",
@@ -345,15 +557,8 @@ def test_codex_gets_the_exact_flags_and_the_fixed_instructions(tmp_path: Path) -
         "-c",
         'web_search="disabled"',
         *(arg for feature in CODEX_DISABLED for arg in ("--disable", feature)),
-        "-c",
-        instructions,
         *(arg for setting in CODEX_CONFIG for arg in ("-c", setting)),
-        "--model",
-        "gpt-5.6-luna",
-        "-",
     ]
-    assert seen.read_text(encoding="utf-8") == cli_runners.SYSTEM_PROMPT
-    assert not Path(json.loads(instructions.split("=", 1)[1])).exists()
 
 
 def _plant_user_setup(home: Path, project: Path) -> None:
@@ -384,19 +589,19 @@ def test_codex_cannot_reach_the_user_setup(tmp_path: Path, monkeypatch: pytest.M
     _plant_user_setup(home, project)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("CODEX_HOME")
-    events = "\n".join(json.dumps(event) for event in CODEX_EVENTS)
-    fake_cli(
+    fake_app_server(
         tmp_path,
-        "codex",
-        "assert sorted(os.listdir(os.environ['CODEX_HOME'])) == ['auth.json']\n"
-        "assert os.listdir(os.environ['HOME']) == []\n"
-        f"print({events!r})",
+        emitting(*CODEX_TURN),
+        setup="assert sorted(os.listdir(os.environ['CODEX_HOME'])) == ['auth.json']\n"
+        "assert os.listdir(os.environ['HOME']) == []",
     )
     cli_runners.run_codex("gpt-5.6-luna", "ping", None, local_settings(tmp_path), project)
     [call] = calls(tmp_path, "codex")
     assert str(home) not in json.dumps(call["env"])
-    for flag in ("--ignore-user-config", "--ignore-rules", "mcp_servers={}", "project_doc_max_bytes=0"):
+    for flag in ("mcp_servers={}", "project_doc_max_bytes=0"):
         assert flag in call["argv"]
+    [thread] = [message["params"] for message in requests(tmp_path) if message.get("method") == "thread/start"]
+    assert thread["ephemeral"] is True
     assert ("--disable", "hooks") in zip(call["argv"], call["argv"][1:], strict=False)
 
 
@@ -414,16 +619,15 @@ def test_claude_loads_no_user_setup_through_its_flags(tmp_path: Path, monkeypatc
     assert argv[argv.index("--system-prompt") + 1] == cli_runners.SYSTEM_PROMPT
     assert {"--strict-mcp-config", "--disable-slash-commands"} <= set(argv)
     assert "--mcp-config" not in argv
-    assert "--settings" not in argv
+    # The one inline setting turns on thinking text; it loads no file, hook or server.
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"showThinkingSummaries": True}
 
 
 def test_codex_failed_turn_with_a_limit_is_a_rate_limit(tmp_path: Path) -> None:
     """Report a capped codex turn as a cap, not as a failed call."""
-    failed = {
-        "type": "turn.failed",
-        "error": {"message": "You've hit your usage limit. Try again at 2030-01-01T00:00:00Z."},
-    }
-    fake_cli(tmp_path, "codex", printing(failed) + "\nsys.exit(1)")
+    error = {"message": "You've hit your usage limit. Try again at 2030-01-01T00:00:00Z."}
+    failed = {"method": "turn/completed", "params": {"turn": {"id": "t1", "status": "failed", "error": error}}}
+    fake_app_server(tmp_path, emitting(failed))
     with pytest.raises(SubscriptionRateLimitedError) as caught:
         cli_runners.run_codex("gpt-5.6-luna", "ping", None, local_settings(tmp_path), tmp_path)
     assert caught.value.reset_at == datetime(2030, 1, 1, tzinfo=UTC)
@@ -482,6 +686,7 @@ def test_timeout_stops_the_child_of_a_wrapper(tmp_path: Path, name: str, runner:
         "child = subprocess.Popen(['sleep', '30'])\n"
         f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
         "child.wait()",
+        read_stdin=False,
     )
     started = time.monotonic()
     with pytest.raises(CliRunError) as caught:

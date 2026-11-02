@@ -10,10 +10,14 @@ list price so cost scores stay comparable with hosted runs.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
+import functools
 import json
 import random
+import re
 import secrets
+import shutil
 import tempfile
 import threading
 import time
@@ -38,6 +42,7 @@ from .operation_pricing import ChargePolicy, UnpricedOperationError, operation_q
 from .runtime import BudgetRuntime, PaidResult
 
 __all__ = [
+    "NEXT_PROMPT_ROLE",
     "THINKING_LABEL_ROLE",
     "CliDispatcher",
     "SubscriptionRateLimitedError",
@@ -56,12 +61,30 @@ _PRICE_TIMEOUT_SECONDS = 10
 # stopped soon after, as nobody will read its answer.
 THINKING_LABEL_ROLE = "thinking_label"
 _LABEL_CLI_TIMEOUT_SECONDS = 10.0
+# A next-message suggestion is a side call too, in its own one-call pool so it
+# never blocks a label or a turn. Its prompt is larger than a label's and a CLI
+# start alone takes 3-7 s, so it gets a longer limit than a label.
+NEXT_PROMPT_ROLE = "next_prompt"
+_NEXT_PROMPT_CLI_TIMEOUT_SECONDS = 25.0
+# A newer suggestion makes the running one stale, because the user has a new
+# reply to answer. The newer call marks the older one replaced, and the older
+# run stops at its next streamed piece. The pool holds the current call plus
+# one replaced call that has not streamed yet, so a new turn does not wait for
+# a stale run's CLI start.
+_NEXT_PROMPT_POOL_SIZE = 2
+_NEXT_PROMPT_SLOT_WAIT_SECONDS = 5.0
+_latest_suggestion_lock = threading.Lock()
+_latest_suggestion: dict[str, threading.Event] = {}
 # Seams for tests: the back-off sleep and the price lookup.
 _sleep: Callable[[float], None] = time.sleep
 _prices_lock = threading.Lock()
 _last_prices: dict[str, tuple[Decimal, Decimal]] = {}
 _semaphores_lock = threading.Lock()
 _semaphores: dict[tuple[str, int], threading.BoundedSemaphore] = {}
+_TOOL_KEY = '"tool_calls"'
+_TOOL_OBJECT = re.compile(r'\{\s*"tool_calls"')
+_FENCE_OPEN = re.compile(r"```[\w+-]*")
+_FENCE_BEFORE = re.compile(r"```[\w+-]*\s*$")
 
 
 def _semaphore(cli: str, size: int) -> threading.BoundedSemaphore:
@@ -76,6 +99,52 @@ def _semaphore(cli: str, size: int) -> threading.BoundedSemaphore:
     """
     with _semaphores_lock:
         return _semaphores.setdefault((cli, size), threading.BoundedSemaphore(size))
+
+
+def _replace_suggestion(pool: str) -> threading.Event:
+    """Mark the running suggestion in ``pool`` replaced and register a new one.
+
+    Args:
+        pool: The CLI's suggestion pool key.
+
+    Returns:
+        The new call's event, which a later call sets to replace it.
+    """
+    replaced = threading.Event()
+    with _latest_suggestion_lock:
+        older = _latest_suggestion.get(pool)
+        if older is not None:
+            older.set()
+        _latest_suggestion[pool] = replaced
+    return replaced
+
+
+def _stop_when_replaced(replaced: threading.Event, provider: str) -> Callable[[str, str], None]:
+    """Return a stream callback that stops a suggestion run once a newer one replaces it.
+
+    Args:
+        replaced: The run's event (see :func:`_replace_suggestion`).
+        provider: The CLI.
+
+    Returns:
+        An ``on_delta`` callback. It raises, and the runner then kills the CLI
+        process group, because the runners stop on any error in the callback.
+    """
+
+    def on_delta(_kind: str, _text: str) -> None:
+        """Raise when a newer suggestion replaced this run.
+
+        Args:
+            _kind: The streamed piece's kind.
+            _text: The streamed piece.
+
+        Raises:
+            CliRunError: When the run is replaced.
+        """
+        if replaced.is_set():
+            raise CliRunError(provider, "a newer suggestion replaced this one", transient=False)
+
+    return on_delta
 
 
 def _list_prices(model: str) -> tuple[Decimal, Decimal] | None:
@@ -101,6 +170,22 @@ def _list_prices(model: str) -> tuple[Decimal, Decimal] | None:
     return prices
 
 
+@functools.cache
+def _step_cwd() -> Path:
+    """Return one private, empty directory that every agent step call of this process runs in.
+
+    Claude Code and codex put the working directory into the request ahead of
+    the prompt, so a new directory per call made each step's request differ
+    from the start and the prompt cache never matched.
+
+    Returns:
+        The directory, removed when the process exits.
+    """
+    path = tempfile.mkdtemp(prefix="skynet-cli-")
+    atexit.register(shutil.rmtree, path, ignore_errors=True)
+    return Path(path)
+
+
 def _text(content: Any) -> str:
     """Flatten one OpenAI message content into plain text.
 
@@ -121,6 +206,40 @@ def _text(content: Any) -> str:
     return "" if content is None else json.dumps(content)
 
 
+def _render_turn(message: Mapping[str, Any]) -> str:
+    """Render one chat message as a labeled turn.
+
+    Args:
+        message: One OpenAI chat message.
+
+    Returns:
+        The role heading, then the text and any tool calls as JSON.
+    """
+    role = str(message.get("role") or "user")
+    body = _text(message.get("content"))
+    if message.get("tool_calls"):
+        body = f"{body}\n{json.dumps(message['tool_calls'])}".strip()
+    return f"### {role.capitalize()}\n{body}"
+
+
+def cache_prefix(request: Mapping[str, Any]) -> str:
+    """Return the start of :func:`render_prompt`'s prompt that agent steps repeat byte for byte.
+
+    An agent's system message holds its instructions and tool list, and stays
+    the same from step to step; the turns after it change.
+
+    Args:
+        request: The chat completion body.
+
+    Returns:
+        The rendered leading system turn, or ``""`` when the chat has none.
+    """
+    messages = [m for m in request.get("messages") or [] if isinstance(m, dict)]
+    if len(messages) < 2 or messages[0].get("role") != "system":
+        return ""
+    return _render_turn(messages[0])
+
+
 def render_prompt(request: Mapping[str, Any]) -> str:
     """Turn an OpenAI chat request into one prompt for a CLI.
 
@@ -135,13 +254,7 @@ def render_prompt(request: Mapping[str, Any]) -> str:
     tools = request.get("tools")
     if len(messages) == 1 and messages[0].get("role") == "user" and not tools:
         return _text(messages[0].get("content"))
-    parts = []
-    for message in messages:
-        role = str(message.get("role") or "user")
-        body = _text(message.get("content"))
-        if message.get("tool_calls"):
-            body = f"{body}\n{json.dumps(message['tool_calls'])}".strip()
-        parts.append(f"### {role.capitalize()}\n{body}")
+    parts = [_render_turn(message) for message in messages]
     if tools:
         parts.append(
             "### Tools\nThese tools are described for reference; reply in text and "
@@ -218,6 +331,115 @@ def _schema(request: Mapping[str, Any]) -> dict[str, Any] | None:
     return schema if isinstance(schema, dict) else None
 
 
+def _tool_call(item: Any, names: set[str]) -> dict[str, Any] | None:
+    """Turn one tool call a CLI wrote as JSON into an OpenAI tool call.
+
+    Args:
+        item: One entry of the written ``tool_calls`` list, either
+            ``{"name", "args"}`` (DSPy's text form) or the OpenAI
+            ``{"function": {"name", "arguments"}}`` form.
+        names: The tools the request declares.
+
+    Returns:
+        The OpenAI tool call, or ``None`` when the entry names no declared
+        tool or its arguments are not a JSON object.
+    """
+    if not isinstance(item, dict):
+        return None
+    call = item.get("function") if isinstance(item.get("function"), dict) else item
+    name = call.get("name")
+    arguments = call.get("arguments", call.get("args", {}))
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments or "{}")
+        except ValueError:
+            return None
+    if name not in names or not isinstance(arguments, dict):
+        return None
+    return {
+        "id": f"call_{uuid4().hex}",
+        "type": "function",
+        "function": {"name": name, "arguments": json.dumps(arguments)},
+    }
+
+
+def _text_tool_calls(request: Mapping[str, Any], text: str) -> tuple[list[dict[str, Any]], int] | None:
+    """Return the tool calls a CLI wrote as JSON text, as native OpenAI tool calls.
+
+    A CLI cannot call the guest's tools, so the prompt asks it to write any
+    call as JSON. DSPy's native function calling reads only the message's
+    ``tool_calls``, so a call left in the text fails to parse; after three
+    such failures ReAct forces a ``submit`` call. The JSON may sit in a code
+    fence or among other text, such as DSPy's ``[[ ## completed ## ]]``.
+    Only an object whose first key is ``"tool_calls"`` counts, so the live
+    stream can tell from a short prefix which text it must hold back.
+
+    Args:
+        request: The chat completion body; only its ``tools`` matter.
+        text: The CLI's answer.
+
+    Returns:
+        The tool calls and the index where their block (its code fence, if
+        any) starts, or ``None`` when the request declares no tools or the
+        text holds no ``{"tool_calls": [...]}`` object whose every call names
+        a declared tool.
+    """
+    names = {
+        str(tool["function"].get("name"))
+        for tool in request.get("tools") or []
+        if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
+    }
+    if not names:
+        return None
+    decoder = json.JSONDecoder()
+    for match in _TOOL_OBJECT.finditer(text):
+        try:
+            value, _ = decoder.raw_decode(text, match.start())
+        except ValueError:
+            continue
+        if isinstance(value, dict) and isinstance(value.get("tool_calls"), list) and value["tool_calls"]:
+            calls = [_tool_call(item, names) for item in value["tool_calls"]]
+            if all(calls):
+                fence = _FENCE_BEFORE.search(text, 0, match.start())
+                return calls, fence.start() if fence else match.start()  # type: ignore[return-value]
+    return None
+
+
+def _held_from(text: str, start: int) -> int:
+    """Return where the text that may still grow into a written tool call begins.
+
+    The live stream sends answer text as it comes, but never the text of a
+    tool call, which goes out as ``tool_calls`` at the end. So it holds back
+    a code fence or ``{`` that :func:`_text_tool_calls` could still accept,
+    and sends it once the next characters rule that out.
+
+    Args:
+        text: The answer text so far.
+        start: How much of it the client already has.
+
+    Returns:
+        The index from which text must wait, or ``len(text)`` to send all of it.
+    """
+    for index in range(start, len(text)):
+        if text[index] not in "`{":
+            continue
+        rest = text[index:]
+        if rest[0] == "`":
+            if "```".startswith(rest):
+                return index
+            fence = _FENCE_OPEN.match(rest)
+            if fence is None:
+                continue
+            rest = rest[fence.end() :].lstrip()
+            if not rest:
+                return index
+        if rest[0] == "{":
+            key = rest[1:].lstrip()
+            if key.startswith(_TOOL_KEY) or _TOOL_KEY.startswith(key):
+                return index
+    return len(text)
+
+
 def _error(status: int, code: str, message: str, **fields: Any) -> ModelHTTPResult:
     """Build a JSON error answer in the gateway's error shape.
 
@@ -253,6 +475,77 @@ def _future_reset(settings: Settings, cli: str) -> datetime | None:
         return None
     reset = reset if reset.tzinfo else reset.replace(tzinfo=UTC)
     return reset if reset > datetime.now(UTC) else None
+
+
+class _ChatStream:
+    """Write a streamed chat completion's chunks to the client as the CLI produces them.
+
+    Nothing reaches the client before the first piece of thinking or answer
+    text, so a call that fails before then still answers with its own status.
+    Answer text that may be a written tool call waits; see :func:`_held_from`.
+    """
+
+    def __init__(self, handler: BaseHTTPRequestHandler, model: str, *, holds_tool_calls: bool = True) -> None:
+        """Bind the stream to one HTTP request.
+
+        Args:
+            handler: The request's handler, whose ``wfile`` gets the chunks.
+            model: The model name the chunks carry.
+            holds_tool_calls: Hold back text that may be a written tool call.
+                Only a request that declares tools gets that text as native
+                ``tool_calls``; for any other request the text stays answer
+                text, and holding it would only delay it.
+        """
+        self.handler = handler
+        self.holds_tool_calls = holds_tool_calls
+        self.base = {
+            "id": f"cli-{uuid4()}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+        }
+        self.started = False
+        self.content = ""
+        self.sent = ""
+
+    def __call__(self, kind: str, text: str) -> None:
+        """Send one piece of thinking (``reasoning``) or answer (``content``) text.
+
+        Args:
+            kind: ``"reasoning"`` or ``"content"``.
+            text: The new text.
+        """
+        if kind == "content":
+            self.content += text
+            # DSPy's text tool protocol (subscription routes, SKY-245) declares
+            # no tools, so its streamed tool call and submit reply pass live.
+            held = _held_from(self.content, len(self.sent)) if self.holds_tool_calls else len(self.content)
+            ready = self.content[:held]
+            # Blank text before a tool call would leave a blank content field.
+            if not ready.strip():
+                return
+            text = ready[len(self.sent) :]
+            self.sent = ready
+            if not text:
+                return
+        field_name = "content" if kind == "content" else "reasoning_content"
+        chunk = {**self.base, "choices": [{"index": 0, "delta": {field_name: text}, "finish_reason": None}]}
+        self.write(f"data: {json.dumps(chunk)}\n\n".encode())
+
+    def write(self, data: bytes) -> None:
+        """Send bytes, sending the 200 event-stream headers first if they are not sent yet.
+
+        Args:
+            data: Raw SSE bytes.
+        """
+        if not self.started:
+            self.started = True
+            self.handler.send_response(200)
+            self.handler.send_header("Content-Type", "text/event-stream")
+            self.handler.send_header("Cache-Control", "no-cache")
+            self.handler.end_headers()
+        self.handler.wfile.write(data)
+        self.handler.wfile.flush()
 
 
 class CliDispatcher:
@@ -296,6 +589,7 @@ class CliDispatcher:
         operation_key: str | None = None,
         attempt: int = 0,
         protocol_headers: Mapping[str, str] | None = None,
+        stream: _ChatStream | None = None,
     ) -> ModelHTTPResult:
         """Answer one chat completion or Anthropic message and record it at zero cents.
 
@@ -305,6 +599,8 @@ class CliDispatcher:
             operation_key: Stable identity of this physical attempt, if any.
             attempt: Retry number within the logical operation.
             protocol_headers: Unused; kept for the dispatcher interface.
+            stream: For a streamed chat completion, the live stream that gets
+                the CLI's thinking and answer text as they arrive, or ``None``.
 
         Returns:
             The answer in the request's protocol, a 429 for a capped
@@ -322,14 +618,14 @@ class CliDispatcher:
         if path not in (_CHAT_PATH, _MESSAGES_PATH) or request.get("model") != self.model:
             raise UnpricedOperationError("This scoped route cannot dispatch a different model or API operation.")
         if self.runtime is None:
-            return self._answer(path, request)[0]
+            return self._answer(path, request, stream)[0]
         quote = operation_quote(
             request, Decimal(0), self.policy, {"provider": "subscription", "cli": self.cli, "model": self.model}
         )
 
         def send() -> PaidResult[ModelHTTPResult]:
             """Run the CLI and report a zero charge with its usage as evidence."""
-            result, evidence = self._answer(path, request)
+            result, evidence = self._answer(path, request, stream)
             return PaidResult(value=result, provider_usd=Decimal(0), evidence=evidence)
 
         return self.runtime.execute(
@@ -360,22 +656,29 @@ class CliDispatcher:
         order += [name for name in fallback if name in RUNNERS and name not in order]
         return order
 
-    def _answer(self, path: str, request: Mapping[str, Any]) -> tuple[ModelHTTPResult, dict[str, Any]]:
+    def _answer(
+        self, path: str, request: Mapping[str, Any], stream: _ChatStream | None = None
+    ) -> tuple[ModelHTTPResult, dict[str, Any]]:
         """Run the request on the first CLI that is not capped.
 
         Args:
             path: ``/chat/completions`` or ``/messages``.
             request: The request body.
+            stream: The live chat stream, or ``None``.
 
         Returns:
             The answer and the evidence to record with it.
         """
         chat = chat_request(request) if path == _MESSAGES_PATH else request
         prompt = render_prompt(chat)
+        prefix = cache_prefix(chat)
         schema = _schema(chat)
         capped: SubscriptionRateLimitedError | None = None
         evidence: dict[str, Any] = {"provider": "subscription", "model": self.model, "cli": self.cli}
         for provider in self._providers():
+            if stream is not None and stream.started:
+                # The client already has one CLI's text; another CLI's would mix into it.
+                break
             try:
                 model_arg = cli_model_arg(provider, self.model)  # type: ignore[arg-type]
             except ValueError:
@@ -388,7 +691,7 @@ class CliDispatcher:
                 continue
             started = time.monotonic()
             try:
-                completion = self._run(provider, model_arg, prompt, schema)
+                completion = self._run(provider, model_arg, prompt, schema, stream, prefix)
             except SubscriptionRateLimitedError as error:
                 capped = error
                 if error.reset_at is not None:
@@ -410,8 +713,8 @@ class CliDispatcher:
             )
             if path == _MESSAGES_PATH:
                 return self._message(request, completion.text, usage), evidence
-            return self._success(request, completion.text, usage), evidence
-        assert capped is not None or not self._providers()
+            return self._success(request, completion.text, usage, stream), evidence
+        assert capped is not None or not self._providers() or (stream is not None and stream.started)
         provider = capped.provider if capped else self.cli
         reset_at = capped.reset_at.isoformat() if capped and capped.reset_at else None
         message = capped.message if capped else "No subscription CLI can serve this model."
@@ -421,18 +724,30 @@ class CliDispatcher:
             evidence,
         )
 
-    def _run(self, provider: str, model_arg: str, prompt: str, schema: dict[str, Any] | None) -> CliCompletion:
+    def _run(
+        self,
+        provider: str,
+        model_arg: str,
+        prompt: str,
+        schema: dict[str, Any] | None,
+        stream: _ChatStream | None = None,
+        prefix: str = "",
+    ) -> CliCompletion:
         """Run one CLI call, retrying transient failures with jittered back-off.
 
         Every retry is free under a subscription, so retrying inside one
         recorded operation cannot double-charge the wallet. A timeout is not
-        transient, so one hung call holds a slot for one timeout only.
+        transient, so one hung call holds a slot for one timeout only. A call
+        that already streamed text to the client is not retried, as the
+        retry's text would repeat it.
 
         Args:
             provider: The CLI.
             model_arg: Its ``--model`` value.
             prompt: The full prompt.
             schema: A JSON schema for the answer, or ``None``.
+            stream: The live chat stream, or ``None``.
+            prefix: The start of ``prompt`` that later calls repeat, or ``""``.
 
         Returns:
             The completion.
@@ -442,21 +757,27 @@ class CliDispatcher:
             CliRunError: When the call still fails after the last retry.
         """
         runner = RUNNERS[provider]
-        if self.role == THINKING_LABEL_ROLE:
+        if self.role in (THINKING_LABEL_ROLE, NEXT_PROMPT_ROLE):
             return self._run_label(provider, model_arg, prompt, schema)
         slots = _semaphore(provider, self.settings.cli_max_concurrency)
+        # Only claude takes a cache mark from the caller.
+        cached = {"cache_prefix": prefix} if provider == "claude" and prefix else {}
         for retry in range(len(_RETRY_DELAYS_SECONDS) + 1):
+            if stream is not None and not stream.started:
+                # Held text of a failed attempt must not prefix the next one's.
+                stream.content = stream.sent = ""
             try:
-                with slots, tempfile.TemporaryDirectory(prefix="skynet-cli-") as cwd:
-                    return runner(model_arg, prompt, schema, self.settings, Path(cwd))
+                with slots:
+                    return runner(model_arg, prompt, schema, self.settings, _step_cwd(), stream, **cached)
             except CliRunError as error:
-                if not error.transient or retry == len(_RETRY_DELAYS_SECONDS):
+                streamed = stream is not None and stream.started
+                if not error.transient or streamed or retry == len(_RETRY_DELAYS_SECONDS):
                     raise
                 _sleep(_RETRY_DELAYS_SECONDS[retry] * random.uniform(0.75, 1.25))
         raise AssertionError("unreachable")
 
     def _run_label(self, provider: str, model_arg: str, prompt: str, schema: dict[str, Any] | None) -> CliCompletion:
-        """Run one thinking-label call in the label pool, or fail at once when it is busy.
+        """Run one side call (label or suggestion) in its role's pool, or fail at once when it is busy.
 
         Args:
             provider: The CLI.
@@ -469,18 +790,64 @@ class CliDispatcher:
 
         Raises:
             SubscriptionRateLimitedError: When the subscription is capped.
-            CliRunError: When another label runs on this CLI, or the call fails or times out.
+            CliRunError: When another call of this role runs on this CLI, or the call fails or times out.
         """
-        slot = _semaphore(f"{provider}:{THINKING_LABEL_ROLE}", 1)
-        if not slot.acquire(blocking=False):
-            raise CliRunError(provider, f"{provider} is already writing a thinking label", transient=False)
+        pool = f"{provider}:{self.role}"
+        if self.role != NEXT_PROMPT_ROLE:
+            slot = _semaphore(pool, 1)
+            if not slot.acquire(blocking=False):
+                raise CliRunError(provider, f"{provider} is already running a {self.role} call", transient=False)
+            try:
+                return self._run_side_call(provider, model_arg, prompt, schema, _LABEL_CLI_TIMEOUT_SECONDS, {})
+            finally:
+                slot.release()
+        replaced = _replace_suggestion(pool)
+        slot = _semaphore(pool, _NEXT_PROMPT_POOL_SIZE)
         try:
-            timeout = min(self.settings.cli_call_timeout_seconds, _LABEL_CLI_TIMEOUT_SECONDS)
-            label_settings = self.settings.model_copy(update={"cli_call_timeout_seconds": timeout})
-            with tempfile.TemporaryDirectory(prefix="skynet-cli-") as cwd:
-                return RUNNERS[provider](model_arg, prompt, schema, label_settings, Path(cwd))
+            if not slot.acquire(timeout=_NEXT_PROMPT_SLOT_WAIT_SECONDS):
+                raise CliRunError(provider, f"{provider} is still running older suggestions", transient=False)
+            try:
+                if replaced.is_set():
+                    raise CliRunError(provider, "a newer suggestion replaced this one", transient=False)
+                stop = {"on_delta": _stop_when_replaced(replaced, provider)}
+                return self._run_side_call(provider, model_arg, prompt, schema, _NEXT_PROMPT_CLI_TIMEOUT_SECONDS, stop)
+            finally:
+                slot.release()
         finally:
-            slot.release()
+            with _latest_suggestion_lock:
+                if _latest_suggestion.get(pool) is replaced:
+                    del _latest_suggestion[pool]
+
+    def _run_side_call(
+        self,
+        provider: str,
+        model_arg: str,
+        prompt: str,
+        schema: dict[str, Any] | None,
+        limit: float,
+        runner_kwargs: dict[str, Any],
+    ) -> CliCompletion:
+        """Run one side call with thinking off and a short time limit.
+
+        Args:
+            provider: The CLI.
+            model_arg: Its ``--model`` value.
+            prompt: The full prompt.
+            schema: A JSON schema for the answer, or ``None``.
+            limit: The most seconds the run may take.
+            runner_kwargs: Extra keyword arguments for the runner.
+
+        Returns:
+            The completion.
+        """
+        timeout = min(self.settings.cli_call_timeout_seconds, limit)
+        label_settings = self.settings.model_copy(update={"cli_call_timeout_seconds": timeout})
+        # A side call is a line or two; thinking would outlast its limit.
+        no_thinking = {"think": False} if provider == "claude" else {}
+        with tempfile.TemporaryDirectory(prefix="skynet-cli-") as cwd:
+            return RUNNERS[provider](
+                model_arg, prompt, schema, label_settings, Path(cwd), **no_thinking, **runner_kwargs
+            )
 
     def _usage(self, provider: str, completion: CliCompletion) -> dict[str, Any]:
         """Build the usage block, priced at the model's public list price.
@@ -510,35 +877,58 @@ class CliDispatcher:
             "cli_provider": provider,
         }
 
-    def _success(self, request: Mapping[str, Any], text: str, usage: dict[str, Any]) -> ModelHTTPResult:
-        """Build the chat completion answer, as JSON or as one-delta SSE.
+    def _success(
+        self, request: Mapping[str, Any], text: str, usage: dict[str, Any], stream: _ChatStream | None = None
+    ) -> ModelHTTPResult:
+        """Build the chat completion answer, as JSON or as SSE.
 
         Args:
             request: The chat completion body.
             text: The CLI's answer.
             usage: The usage block.
+            stream: The live chat stream; when it already sent text, the SSE
+                carries only the rest of the answer, in the same stream identity.
 
         Returns:
-            The answer.
+            The answer. Tool calls the CLI wrote as JSON text come back as
+            native ``tool_calls`` with ``finish_reason`` ``"tool_calls"``; the
+            text before their block stays the content, as the live stream
+            already sent it, and the block and any text after it are dropped.
         """
         identity = f"cli-{uuid4()}"
+        written = _text_tool_calls(request, text)
+        tool_calls = written[0] if written else None
+        content = text[: written[1]] if written else text
+        if tool_calls and not content.strip():
+            content = ""
+        finish_reason = "tool_calls" if tool_calls else "stop"
         if not request.get("stream"):
+            message: dict[str, Any] = {"role": "assistant", "content": content}
+            if tool_calls:
+                message = {"role": "assistant", "content": content or None, "tool_calls": tool_calls}
             body = {
                 "id": identity,
                 "object": "chat.completion",
                 "created": int(time.time()),
                 "model": self.model,
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+                "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
                 "usage": usage,
             }
             return ModelHTTPResult(200, "application/json", json.dumps(body).encode())
         base = {"id": identity, "object": "chat.completion.chunk", "created": int(time.time()), "model": self.model}
+        rest = content
+        if stream is not None and stream.started:
+            base = stream.base
+            # The streamed deltas are the answer's start; a final text that
+            # differs from them cannot be fixed in a stream, so it is dropped.
+            rest = content[len(stream.sent) :] if content.startswith(stream.sent) else ""
+        delta: dict[str, Any] = {"role": "assistant", "content": rest}
+        if tool_calls:
+            delta = {"role": "assistant", **({"content": rest} if rest else {})}
+            delta["tool_calls"] = [{"index": i, **call} for i, call in enumerate(tool_calls)]
         chunks = [
-            {
-                **base,
-                "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None}],
-            },
-            {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": usage},
+            {**base, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
+            {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}], "usage": usage},
         ]
         stream = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
         return ModelHTTPResult(200, "text/event-stream", stream.encode())
@@ -634,6 +1024,7 @@ class _LocalSubscriptionGateway:
                 if route is None:
                     self._reply(_error(401, "unauthorized", "Unknown scoped model route."))
                     return
+                stream: _ChatStream | None = None
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
                     if not 0 < length <= _MAX_REQUEST_BYTES:
@@ -642,9 +1033,22 @@ class _LocalSubscriptionGateway:
                     body = json.loads(self.rfile.read(length))
                     if not isinstance(body, dict):
                         raise TypeError("A JSON object is required.")
-                    self._reply(route.dispatch(self.path.removeprefix("/v1"), body))
+                    path = self.path.removeprefix("/v1")
+                    stream = (
+                        _ChatStream(self, route.model, holds_tool_calls=bool(body.get("tools")))
+                        if path == _CHAT_PATH and body.get("stream")
+                        else None
+                    )
+                    response = route.dispatch(path, body, stream=stream)
                 except (UnpricedOperationError, ValueError, TypeError) as error:
-                    self._reply(_error(422, "unpriced_operation", str(error)))
+                    response = _error(422, "unpriced_operation", str(error))
+                if stream is None or not stream.started:
+                    self._reply(response)
+                elif response.status == 200:
+                    stream.write(response.body)
+                else:
+                    # The 200 status is already sent; an error chunk makes the client raise.
+                    stream.write(b"data: " + response.body + b"\n\n")
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._server.daemon_threads = True

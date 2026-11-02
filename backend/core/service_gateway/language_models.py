@@ -606,7 +606,16 @@ def build_language_model(config: ModelConfig, *, disable_cache: bool = False) ->
     if config.max_tokens is not None:
         lm_kwargs["max_tokens"] = config.max_tokens
     lm_kwargs.update(config.extra)
-    if not lm_kwargs.get("reasoning_effort"):
+    extra_body = lm_kwargs.get("extra_body")
+    reasoning_off = (
+        isinstance(extra_body, dict)
+        and isinstance(extra_body.get("reasoning"), dict)
+        and extra_body["reasoning"].get("enabled") is False
+    )
+    # A side call (thinking label, next-message suggestion) turns reasoning
+    # off on purpose; a default effort would turn it back on, and the model
+    # would think past the side call's short timeout.
+    if not lm_kwargs.get("reasoning_effort") and not reasoning_off:
         # Auto and the optimizer roles send no effort, which leaves an
         # opt-in thinker (Claude Haiku, the best-value default) not thinking.
         effort = default_effort_for(model_name)

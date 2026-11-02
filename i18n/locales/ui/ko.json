@@ -1531,6 +1531,8 @@
   "agent.composer.record_cancel": "녹음 취소",
   "agent.composer.record_finish": "완료 후 텍스트 변환",
   "agent.composer.recording": "녹음 중...",
+  "agent.composer.suggestion_hint": "추천 메시지: {text}. Tab을 눌러 사용하거나 Esc를 눌러 닫으세요.",
+  "agent.composer.suggestion_key": "Tab",
   "agent.composer.transcribe_failed": "텍스트 변환 실패 — 다시 시도하세요",
   "agent.composer.transcribing": "텍스트 변환 중...",
   "agent.pending.list_label": "대기 중인 메시지",

@@ -1531,6 +1531,8 @@
   "agent.composer.record_cancel": "لغو ضبط",
   "agent.composer.record_finish": "پایان و رونویسی",
   "agent.composer.recording": "در حال ضبط…",
+  "agent.composer.suggestion_hint": "پیام پیشنهادی: {text}. برای استفاده Tab و برای بستن Escape را بزنید.",
+  "agent.composer.suggestion_key": "Tab",
   "agent.composer.transcribe_failed": "رونویسی ناموفق بود — دوباره تلاش کنید",
   "agent.composer.transcribing": "در حال رونویسی…",
   "agent.pending.list_label": "پیام‌های در انتظار",

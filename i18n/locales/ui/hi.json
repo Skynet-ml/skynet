@@ -1531,6 +1531,8 @@
   "agent.composer.record_cancel": "रिकॉर्डिंग रद्द करें",
   "agent.composer.record_finish": "समाप्त करें और ट्रांसक्राइब करें",
   "agent.composer.recording": "रिकॉर्ड हो रहा है...",
+  "agent.composer.suggestion_hint": "सुझाया गया संदेश: {text}. इसे इस्तेमाल करने के लिए Tab दबाएं, या हटाने के लिए Escape दबाएं।",
+  "agent.composer.suggestion_key": "Tab",
   "agent.composer.transcribe_failed": "ट्रांसक्रिप्शन विफल — फिर से कोशिश करें",
   "agent.composer.transcribing": "ट्रांसक्राइब हो रहा है...",
   "agent.pending.list_label": "लंबित संदेश",

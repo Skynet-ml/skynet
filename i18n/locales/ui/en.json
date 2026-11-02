@@ -11,6 +11,8 @@
   "agent.composer.record_cancel": "Cancel recording",
   "agent.composer.record_finish": "Finish and transcribe",
   "agent.composer.recording": "Recording...",
+  "agent.composer.suggestion_hint": "Suggested message: {text}. Press Tab to use it, or Escape to dismiss it.",
+  "agent.composer.suggestion_key": "Tab",
   "agent.composer.transcribe_failed": "Transcription failed — try again",
   "agent.composer.transcribing": "Transcribing...",
   "agent.pending.list_label": "Pending messages",

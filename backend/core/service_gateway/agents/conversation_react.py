@@ -21,6 +21,7 @@ import dspy
 from dspy.adapters.chat_adapter import ChatAdapter
 from dspy.adapters.types.tool import ToolCallResults, ToolCalls
 from dspy.adapters.utils import get_field_description_string
+from dspy.utils.exceptions import AdapterParseError
 
 from ..optimization.retrying_react import PARSE_RETRY_ATTEMPTS, RetryingReActV2
 
@@ -111,6 +112,38 @@ class AppendOnlyChatAdapter(ChatAdapter):
         if signature.output_fields:
             messages.append({"role": "user", "content": super().user_message_output_requirements(signature)})
         return messages
+
+    def parse(self, signature: type[dspy.Signature], completion: str) -> dict[str, Any]:
+        """Parse a text-protocol reply, accepting tool calls sent without their field header.
+
+        On the text protocol (a subscription CLI route has no native tools) the
+        tool calls are often the only output field, and their value is itself
+        ``{"tool_calls": [...]}``. Claude then sometimes writes that JSON
+        object and the closing marker but drops the ``[[ ## tool_calls ## ]]``
+        header, so every resample and the forced submit fail the same way and
+        the turn ends with no answer.
+
+        Args:
+            signature: The signature after native fields were removed.
+            completion: The raw LM text.
+
+        Returns:
+            The parsed output fields.
+
+        Raises:
+            AdapterParseError: When the reply does not parse even with the
+                missing tool-call header restored.
+        """
+        try:
+            return super().parse(signature, completion)
+        except AdapterParseError as err:
+            field = self._get_tool_call_output_field_name(signature)
+            if field is None or f"[[ ## {field} ## ]]" in completion or not completion.lstrip().startswith("{"):
+                raise
+            try:
+                return super().parse(signature, f"[[ ## {field} ## ]]\n{completion}")
+            except AdapterParseError:
+                raise err from None
 
 
 class ConversationReAct(RetryingReActV2):

@@ -1531,6 +1531,8 @@
   "agent.composer.record_cancel": "Cancelar gravação",
   "agent.composer.record_finish": "Concluir e transcrever",
   "agent.composer.recording": "A gravar...",
+  "agent.composer.suggestion_hint": "Mensagem sugerida: {text}. Prima Tab para a usar ou Escape para a dispensar.",
+  "agent.composer.suggestion_key": "Tab",
   "agent.composer.transcribe_failed": "A transcrição falhou — tente novamente",
   "agent.composer.transcribing": "A transcrever...",
   "agent.pending.list_label": "Mensagens pendentes",

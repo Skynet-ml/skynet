@@ -43,6 +43,7 @@ from functools import partial
 from typing import Any, Literal, TypedDict, cast
 
 import dspy
+import dspy.clients.lm as dspy_lm
 from dspy.streaming import StatusMessageProvider
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -51,7 +52,8 @@ from sqlalchemy.orm import Session
 
 from ...api.interview_model import interview_model_id
 from ...api.model_catalog import agent_model_id, catalog_snapshot
-from ...billing.cli_dispatch import THINKING_LABEL_ROLE
+from ...api.suggest_model import byok_suggest_model, cli_suggest_model
+from ...billing.cli_dispatch import NEXT_PROMPT_ROLE, THINKING_LABEL_ROLE
 from ...brand import APP_NAME
 from ...config import settings
 from ...constants import TOKEN_SOURCE_BYOK
@@ -71,6 +73,7 @@ from .conduct import with_conduct
 from .constants import REASONING_FIELD
 from .conversation_react import AppendOnlyChatAdapter, ConversationReAct, history_from_turns
 from .steering import STEER_APPLIED_EVENT, SteerInbox, attach_steering, get_steer_store
+from .tool_pending import TOOL_PENDING_CLEAR_EVENT, TOOL_PENDING_EVENT, ToolCallSpotter
 from .web_tools import build_web_tools
 
 logger = logging.getLogger(__name__)
@@ -2172,6 +2175,30 @@ class GeneralistStatusProvider(StatusMessageProvider):
     default provider would send English ones instead of none.
     """
 
+    def __init__(self, step_lm: dspy.LM | None = None) -> None:
+        """Bind the provider to the loop's LM.
+
+        Args:
+            step_lm: The LM each loop step calls; its call starts are marked
+                with :data:`STEP_START_STATUS`. ``None`` marks none.
+        """
+        self._step_lm = step_lm
+
+    def lm_start_status_message(self, instance: Any, inputs: dict[str, Any]) -> str | None:
+        """Mark the start of a loop step's model call.
+
+        A tool's own LM calls run under the same stream, so only the loop's
+        LM counts.
+
+        Args:
+            instance: The LM about to be called.
+            inputs: The call's inputs.
+
+        Returns:
+            :data:`STEP_START_STATUS` for the loop's LM, else ``None``.
+        """
+        return STEP_START_STATUS if self._step_lm is not None and instance is self._step_lm else None
+
     def tool_start_status_message(self, instance: Any, inputs: dict[str, Any]) -> None:
         """Send no line before a tool call.
 
@@ -2186,6 +2213,10 @@ class GeneralistStatusProvider(StatusMessageProvider):
         Args:
             outputs: The value returned by the completed tool call.
         """
+
+
+# A status line no provider writes; the loop turns it into an event, never text.
+STEP_START_STATUS = "\x00step_start"
 
 
 def _history_from_chat(chat_history: list[dict]) -> dspy.History:
@@ -2298,6 +2329,7 @@ _LOCAL_SUMMARY_MODELS: dict[CliProvider, str] = {
     "codex": "openai/gpt-5.6-luna",
     "claude": "anthropic/claude-haiku-4.5",
 }
+_SUGGEST_MAX_TOKENS = 60
 _SENTENCE_END = re.compile(r"(?<=[.!?。！？])\s+")
 # Stored labels put the heading on its own first line, which the row shows bold.
 _HEADING_BREAK = "\n"
@@ -2404,19 +2436,8 @@ def _build_local_summary_lm(turn_config: ModelConfig | None) -> Any | None:
         return None
     if turn_config.token_source == TOKEN_SOURCE_BYOK:
         model = interview_model_id() or agent_model_id()
-        # Keep the saved key, endpoint and connection params; drop the turn's
-        # own effort and any connection reasoning knobs, which a label must
-        # not think with.
-        extra = {k: v for k, v in turn_config.extra.items() if k not in {"reasoning_effort", "reasoning", "thinking"}}
-        # A connection's own reasoning body would make the label think; only
-        # the no-thinking settings below may set it.
-        if isinstance(extra.get("extra_body"), dict):
-            extra["extra_body"] = {k: v for k, v in extra["extra_body"].items() if k != "reasoning"}
-        no_thinking = _no_thinking_extra(model)
-        if isinstance(extra.get("extra_body"), dict) and "extra_body" in no_thinking:
-            no_thinking["extra_body"] = {**extra["extra_body"], **no_thinking["extra_body"]}
         config = apply_model_reasoning_config(
-            turn_config.model_copy(update={"name": model, "extra": {**extra, **no_thinking}})
+            turn_config.model_copy(update={"name": model, "extra": _byok_side_extra(turn_config, model)})
         )
     elif turn_config.token_source == "subscription" and turn_config.cli_provider is not None:
         cli = turn_config.cli_provider
@@ -2431,16 +2452,121 @@ def _build_local_summary_lm(turn_config: ModelConfig | None) -> Any | None:
     return _summary_lm_from(config)
 
 
-def _summary_lm_from(config: ModelConfig) -> Any:
-    """Build a summary LM from ``config`` with the label's timeout and no retries.
+def _byok_side_extra(turn_config: ModelConfig, model: str) -> dict[str, Any]:
+    """Return a BYOK turn's request extras for a side call on ``model``, with thinking off.
+
+    Args:
+        turn_config: The turn's BYOK config.
+        model: The side call's catalog model id.
+
+    Returns:
+        The saved key, endpoint and connection params, without the turn's own
+        effort or the connection's reasoning knobs, plus the no-thinking settings.
+    """
+    extra = {k: v for k, v in turn_config.extra.items() if k not in {"reasoning_effort", "reasoning", "thinking"}}
+    # A connection's own reasoning body would make the side call think; only
+    # the no-thinking settings below may set it.
+    if isinstance(extra.get("extra_body"), dict):
+        extra["extra_body"] = {k: v for k, v in extra["extra_body"].items() if k != "reasoning"}
+    no_thinking = _no_thinking_extra(model)
+    if isinstance(extra.get("extra_body"), dict) and "extra_body" in no_thinking:
+        no_thinking["extra_body"] = {**extra["extra_body"], **no_thinking["extra_body"]}
+    return {**extra, **no_thinking}
+
+
+def _suggest_max_tokens(model: str) -> int | None:
+    """Return the output cap for a suggestion on ``model``.
+
+    Args:
+        model: The model id the LM is built on.
+
+    Returns:
+        :data:`_SUGGEST_MAX_TOKENS`, or ``None`` for an OpenAI reasoning model,
+        which dspy refuses below 16000 tokens.
+    """
+    return None if dspy_lm._is_openai_reasoning_model(model) else _SUGGEST_MAX_TOKENS
+
+
+def build_hosted_suggest_lm(model: str, timeout: float) -> Any:
+    """Build the managed model that writes a next-message suggestion.
+
+    It skips :func:`apply_model_reasoning_config`, which raises the output cap
+    to thousands of tokens and gives OpenAI models a thinking effort.
+
+    Args:
+        model: The scored suggestion model (see ``suggest_model.hosted_suggest_model``).
+        timeout: Seconds before the call gives up.
+
+    Returns:
+        A metered side-call LM with thinking off and a one-line output cap.
+    """
+    config = ModelConfig(
+        name=model,
+        base_url=settings.generalist_agent_base_url or None,
+        max_tokens=_suggest_max_tokens(model),
+        extra=_no_thinking_extra(model),
+    )
+    return _summary_lm_from(config, timeout)
+
+
+def build_local_suggest_lm(turn_config: ModelConfig | None, timeout: float) -> Any | None:
+    """Build the Mac app's suggestion model on the turn's engine.
+
+    It never uses the composer, interview or agent model, and never the linked
+    hosted account. A saved OpenRouter key writes on the best-scored catalog
+    model, on that key; a CLI subscription writes on the best-scored model
+    that CLI runs (:func:`core.api.suggest_model.suggest_model_for`).
+
+    Args:
+        turn_config: The turn's resolved model config, or ``None``.
+        timeout: Seconds before the call gives up.
+
+    Returns:
+        The suggestion LM, or ``None`` when the turn has no BYOK key and no
+        CLI, or the route has no suggestion model.
+    """
+    if turn_config is None:
+        return None
+    if turn_config.token_source == TOKEN_SOURCE_BYOK:
+        model = byok_suggest_model()
+        if model is None:
+            return None
+        config = turn_config.model_copy(
+            update={
+                "name": model,
+                "max_tokens": _suggest_max_tokens(model),
+                "extra": _byok_side_extra(turn_config, model),
+            }
+        )
+    elif turn_config.token_source == "subscription" and turn_config.cli_provider is not None:
+        cli = turn_config.cli_provider
+        slug = cli_suggest_model(cli)
+        if slug is None:
+            return None
+        # The CLIs take no output cap, so the prompt alone keeps the reply to
+        # one line here.
+        config = ModelConfig(
+            name=slug,
+            token_source="subscription",
+            cli_provider=cli,
+            extra={SUBSCRIPTION_ROLE_KEY: NEXT_PROMPT_ROLE},
+        )
+    else:
+        return None
+    return _summary_lm_from(config, timeout)
+
+
+def _summary_lm_from(config: ModelConfig, timeout: float = _SUMMARY_TIMEOUT_SECONDS) -> Any:
+    """Build a summary LM from ``config`` with a short timeout and no retries.
 
     Args:
         config: The summary model's config, changed in place.
+        timeout: Seconds before the call gives up.
 
     Returns:
         The LM, marked as a side call so its tokens stay out of the reply's speed.
     """
-    config.extra["timeout"] = _SUMMARY_TIMEOUT_SECONDS
+    config.extra["timeout"] = timeout
     config.extra["num_retries"] = 0
     lm = build_language_model(config, disable_cache=True)
     lm.side_call = True
@@ -2615,6 +2741,10 @@ class ThinkingTrail:
         if name == STEER_APPLIED_EVENT and str(data.get("text") or "").strip():
             self._replying = False
             return self.close()
+        if name == "message_reset":
+            # As in the panel: thinking after a taken-back reply opens a new row.
+            self._replying = False
+            return None
         if name == "thinking_summary":
             index, text = data.get("index"), data.get("text")
             if isinstance(index, int) and 0 <= index < len(self._rows) and isinstance(text, str) and text.strip():
@@ -3023,12 +3153,13 @@ async def _drive_generalist_agent(
         # inside ``forward``; without this it would decode the text protocol.
         with dspy.context(adapter=AppendOnlyChatAdapter()):
             reply_stream = ReactReplyStream(react, "assistant_message", lm)
+        spotter = ToolCallSpotter(native=reply_stream.native, skip=frozenset({"submit", "finish", SHARE_PLAN_TOOL}))
         # ``is_async_program`` stays False so ``streamify`` wraps the sync
         # ``forward`` via ``asyncify``; ReActV2 defines no ``aforward``.
         program = dspy.streamify(
             react,
-            stream_listeners=reply_stream.listeners(),
-            status_message_provider=GeneralistStatusProvider(),
+            stream_listeners=reply_stream.listeners(tool_args=True),
+            status_message_provider=GeneralistStatusProvider(lm),
             async_streaming=True,
         )
 
@@ -3043,12 +3174,21 @@ async def _drive_generalist_agent(
         with dspy.context(lm=lm):
             async for chunk in program(**inputs):
                 if isinstance(chunk, dspy.streaming.StatusMessage):
-                    emit({"event": "status_patch", "data": {"chunk": chunk.message}})
+                    if chunk.message == STEP_START_STATUS:
+                        spotter.reset()
+                        emit({"event": TOOL_PENDING_CLEAR_EVENT, "data": {}})
+                    else:
+                        emit({"event": "status_patch", "data": {"chunk": chunk.message}})
                 elif isinstance(chunk, dspy.streaming.StreamResponse):
                     if chunk.signature_field_name == REASONING_FIELD:
                         emit({"event": "reasoning_patch", "data": {"chunk": chunk.chunk}})
                     else:
+                        for index, tool in spotter.feed(chunk):
+                            emit({"event": TOOL_PENDING_EVENT, "data": {"index": index, "tool": tool}})
                         delta = reply_stream.reply_delta(chunk)
+                        if reply_stream.take_retraction():
+                            reply_text = ""
+                            emit({"event": "message_reset", "data": {}})
                         if delta:
                             reply_text += delta
                             emit({"event": "message_patch", "data": {"chunk": delta}})
@@ -3086,9 +3226,15 @@ async def run_generalist_agent(
       of the turn's ``index``-th stretch of reasoning; a long stretch gets
       fresh ones while it is still open, and its closing label replaces them
     * ``plan`` — ``{text}``, what the agent said it will do this turn
+    * ``tool_pending`` — ``{index, tool}``, a tool call the model is still
+      writing; its ``tool_start`` follows once the step ends and the tool runs
+    * ``tool_pending_clear`` — ``{}``, a loop step's model call started; drop
+      every ``tool_pending`` row that has no ``tool_start`` yet
     * ``tool_start`` / ``tool_end`` — wrap each MCP tool call
     * ``status_patch`` — human-readable progress around each tool call
     * ``message_patch`` — per-token assistant reply
+    * ``message_reset`` — ``{}``, take back the reply streamed so far (its
+      submit was written beside another tool call and is dropped)
     * ``done`` — terminal event with the final assistant message and the model id used
     * ``error`` — terminal event carrying a user-facing error string
 
