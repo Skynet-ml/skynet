@@ -107,7 +107,7 @@ def _link(client: TestClient, hosted: FakeHosted) -> None:
     _redirect, code, state = hosted.authorize(url)
     response = client.get("/local/hosted-link/callback", params={"code": code, "state": state})
     assert response.status_code == 200
-    assert "go back to the" in response.text
+    assert html.escape(t_en("hosted_link.page_linked_title")) in response.text
 
 
 def test_routes_are_hidden_outside_local_mode(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -164,6 +164,8 @@ def test_callback_errors_render_a_page(client: TestClient, hosted: FakeHosted) -
 
     assert bad.status_code == 400
     assert "Start the link again" in bad.text
+    assert html.escape(t_en("hosted_link.page_failed_title")) in bad.text
+    assert "<script>" not in bad.text
     assert declined.status_code == 400
     assert hosted.calls == []
 
@@ -186,7 +188,7 @@ def test_revoked_link_answers_401(client: TestClient, hosted: FakeHosted) -> Non
 
 
 def test_success_page_uses_the_catalog(client: TestClient, hosted: FakeHosted) -> None:
-    """The success page text and title come from the catalog and the brand name.
+    """The success page shows the Mac, the account and a way back to the app.
 
     Args:
         client: The test client.
@@ -198,8 +200,12 @@ def test_success_page_uses_the_catalog(client: TestClient, hosted: FakeHosted) -
     page = client.get("/local/hosted-link/callback", params={"code": code, "state": state})
 
     assert page.status_code == 200
-    assert html.escape(t_en("hosted_link.linked", label="dana@example.test")) in page.text
     assert f"<title>{html.escape(APP_NAME)}</title>" in page.text
+    for key in ("page_linked_title", "page_linked_lead", "page_device_label", "page_account_label"):
+        assert html.escape(t_en(f"hosted_link.{key}")) in page.text
+    assert "<dd>dana@example.test</dd>" in page.text
+    assert f'href="skynet://open">{html.escape(t_en("hosted_link.page_open_app"))}</a>' in page.text
+    assert "location.href='skynet://open'" in page.text
 
 
 def test_connector_state_gives_the_state_invalid_page(client: TestClient, hosted: FakeHosted) -> None:
