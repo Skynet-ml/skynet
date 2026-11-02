@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
+import { COLOR_THEMES } from "../../../shared/lib/color-theme.ts";
 import { INTAKE_LLM_PHASES } from "./intake.ts";
 import {
   MAX_SETUP_STOPS,
   SETUP_STOPS,
+  THEME_OPTIONS,
   advancesOnAnswer,
   arrowStep,
   billingChoices,
@@ -35,7 +37,7 @@ test("the setup stays short and every stop is unique", () => {
 test("the level comes first and every settings question is asked once", () => {
   assert.equal(SETUP_STOPS[0]!.question, "level");
   const asked = SETUP_STOPS.flatMap((s) => (s.question ? [s.question] : []));
-  assert.deepEqual([...asked].sort(), ["level", ...INTAKE_LLM_PHASES].sort());
+  assert.deepEqual([...asked].sort(), ["level", "theme", ...INTAKE_LLM_PHASES].sort());
 });
 
 test("the last stop is the new-optimization entry finishing opens", () => {
@@ -140,7 +142,23 @@ test("the Mac app offers the coding CLI subscription as a billing answer; the ho
 
 test("an answer that changes how the app looks does not move the tour on", () => {
   assert.equal(advancesOnAnswer("level"), false);
+  assert.equal(advancesOnAnswer("theme"), false);
   for (const question of INTAKE_LLM_PHASES) assert.equal(advancesOnAnswer(question), true);
+});
+
+test("the theme stop follows the level and offers every Settings theme", () => {
+  assert.equal(SETUP_STOPS[1]!.question, "theme");
+  assert.deepEqual(
+    THEME_OPTIONS.map((o) => o.value),
+    [...COLOR_THEMES],
+  );
+  for (const locale of ["he", "en"]) {
+    const catalog = JSON.parse(readFileSync(join(CATALOG_DIR, `${locale}.json`), "utf8"));
+    for (const option of THEME_OPTIONS) {
+      assert.ok(catalog[option.label], `${locale}: missing ${option.label}`);
+      assert.ok(catalog[option.description], `${locale}: missing ${option.description}`);
+    }
+  }
 });
 
 test("a setup back from a sign-in picks up at the stop it left", () => {

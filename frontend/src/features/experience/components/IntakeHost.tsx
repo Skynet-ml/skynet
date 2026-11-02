@@ -16,7 +16,7 @@ import {
   isLocale,
   type Locale,
 } from "@/shared/lib/locale";
-import { useLocale } from "@/shared/providers";
+import { useColorTheme, useLocale } from "@/shared/providers";
 import { cn } from "@/shared/lib/utils";
 import { QuestionChoices } from "@/shared/ui/agent";
 import { AnimatedWordmark } from "@/shared/ui/animated-wordmark";
@@ -49,6 +49,7 @@ import {
   billingChoices,
   resumeStopIndex,
   setupStops,
+  THEME_OPTIONS,
   type SetupQuestion,
   type SetupSettingDetail,
 } from "../lib/setup-tour";
@@ -206,6 +207,7 @@ function IntakeSurface() {
   const experience = useExperienceOptional()!;
   const { setPref } = useUserPrefs();
   const { locale, setLocale } = useLocale();
+  const { theme, setTheme } = useColorTheme();
   const reduceMotion = useReducedMotion() ?? false;
   const router = useRouter();
 
@@ -426,6 +428,27 @@ function IntakeSurface() {
             onSelect={(_, index) => {
               const level = EXPERIENCE_LEVELS[index];
               if (level) chooseLevel(level);
+            }}
+          />
+        );
+      }
+      case "theme": {
+        // The live theme is the answer: Settings and this card share one store.
+        const options = THEME_OPTIONS.map((o) => ({
+          label: msg(o.label),
+          description: msg(o.description),
+        }));
+        const current = THEME_OPTIONS.findIndex((o) => o.value === theme);
+        return (
+          <Choices
+            options={options}
+            selected={current >= 0 ? options[current]!.label : []}
+            ariaLabel={msg("experience.setup.theme.title")}
+            className="sm:[&>div]:grid-cols-3"
+            onSelect={(_, index) => {
+              const next = THEME_OPTIONS[index];
+              if (next) setTheme(next.value);
+              landed("theme");
             }}
           />
         );
