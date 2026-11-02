@@ -25,6 +25,9 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "agent.approval.unknown_call_id": "No pending approval for the given call_id.",
     "agent.status.tool_end": "Tool finished.",
     "agent.status.tool_start": "Agent invoking tool…",
+    "agent_settings.hosted_only": (
+        "The {tab} settings are not available in this app. Link a hosted account to use billing; security settings are on the web only."
+    ),
     "accounts.email_delivery_unavailable": "Email delivery isn't configured on this server.",
     "accounts.email_not_verified": "Please verify your email before signing in.",
     "accounts.email_send_failed": "Couldn't send the verification email. Try again.",

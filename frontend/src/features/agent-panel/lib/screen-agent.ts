@@ -5,6 +5,20 @@
  * its buttons run.
  */
 
+import type { AgentMessage } from "@/shared/ui/agent/types";
+
+// Never shown, so not translated: the agent replies in the user's language
+// either way, and one fixed text lets a reopened chat recognize it.
+export const SCREEN_KICKOFF =
+  "[The wizard opened this screen; I typed nothing.] If what you know is enough, fill this screen in and continue; otherwise ask me the one thing you need.";
+
+/** A reopened chat stores the wizard's kickoff as a user turn; it stays unshown. */
+export function hideKickoffs(messages: AgentMessage[]): AgentMessage[] {
+  return messages.map((m) =>
+    m.role === "user" && m.content.trim() === SCREEN_KICKOFF ? { ...m, hidden: true } : m,
+  );
+}
+
 /** A move the screen agent asked for, read from its tool result. */
 export type ScreenNav =
   | { action: "continue"; from: string }

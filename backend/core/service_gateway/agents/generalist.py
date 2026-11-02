@@ -150,8 +150,16 @@ _DESTRUCTIVE_TOOLS: frozenset[str] = frozenset(
         "move_folder",
         "move_runs_to_folder",
         "update_folder",
+        # Ordinary account settings: profile, appearance, assistant engine,
+        # notifications and the model data policy.
+        "change_setting",
     }
 )
+
+# Passkeys, linked sign-ins and two-factor codes. These ask in every trust
+# mode, YOLO included, and in every approval policy, because one wrong call
+# can lock the user out.
+_ALWAYS_CONFIRM_TOOLS: frozenset[str] = frozenset({"change_protected_setting"})
 
 # Safe mutations — metadata toggles, local-only operations.
 # Confirm in Ask mode; auto-approve in Auto-safe and YOLO.
@@ -434,6 +442,8 @@ def _needs_approval(tool_name: str, trust_mode: TrustMode) -> bool:
     Returns:
         True when the call should be gated behind an approval prompt.
     """
+    if tool_name in _ALWAYS_CONFIRM_TOOLS:
+        return True
     if trust_mode == "yolo":
         return False
     if tool_name in _DESTRUCTIVE_TOOLS:
@@ -678,7 +688,9 @@ class _ApprovalGatedTool:
                     )
                     return order_error
             pending_key = approval_key(call_id, self._approval_owner)
-            if self._needs_approval(self._tool_name, self._trust_mode):
+            # An injected policy (react-serve gates by its own rules) must not
+            # be able to wave a protected settings action through.
+            if self._tool_name in _ALWAYS_CONFIRM_TOOLS or self._needs_approval(self._tool_name, self._trust_mode):
                 fut = self._registry.register(pending_key)
                 self._emit(
                     {
@@ -1009,6 +1021,14 @@ _ALWAYS_TOOLS = frozenset(
         # Generalized wizard patch — any editable field, partial updates.
         "update_wizard_state",
         "update_user_preferences",
+        # Account settings. change_setting asks in Ask and Auto-safe;
+        # change_protected_setting asks in every mode (_ALWAYS_CONFIRM_TOOLS).
+        "list_settings",
+        "get_setting",
+        "change_setting",
+        "change_protected_setting",
+        # UI trigger: the chat panel opens the settings tab or route it returns.
+        "open_page",
         # Semantic + structured search across every public optimization. The
         # agent uses it to surface comparable runs ("find me sentiment jobs
         # that beat 0.8 with GEPA") before the user has filled the wizard.
@@ -1897,6 +1917,19 @@ Capabilities worth knowing about:
   concise status.
   The tool updates this browser's device-scoped settings; it does not
   change server-wide configuration.
+* Account settings: call ``list_settings`` to see each settings area, its
+  tab, its fields and its actions; ``get_setting`` reads one area (secrets
+  come back masked; never ask for or repeat a secret). Change profile,
+  appearance (theme, locale), agent_engine, notifications or privacy with
+  ``change_setting`` and only the fields the user asked to change.
+  Passkeys, linked sign-ins and email codes go through
+  ``change_protected_setting``; the user always confirms those. You never
+  change billing, payment methods, credits, the API token or provider
+  keys. Never ask the user to type a password, card number, authenticator
+  code or provider key in the chat: for a ``page_only`` step (any card,
+  token or key change, 2FA setup, password change, deleting the account)
+  call ``open_page`` with the area's tab and tell the user what to do there.
+  Use ``open_page`` too when the user asks to see a settings tab.
 * When you NAME a run, describe it too: set ``job_description`` (one
   or two plain sentences — the task, the data, the goal, in
   ``reply_language``) in the SAME ``update_wizard_state`` patch as

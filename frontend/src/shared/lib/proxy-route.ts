@@ -53,8 +53,10 @@ export function isRefusedLocalHost(
 // gets the /login HTML back instead of the woff2. ``sw.js`` (the web push
 // service worker) is fetched by the browser itself on registration and
 // update checks, and a /login redirect would fail its registration.
+// ``share/chat/<token>`` is a read-only agent chat for anyone with the link;
+// the backend serves it without a session and checks only the token.
 export const AUTH_GATED_PATTERN =
-  "/((?!login|terms|privacy|docs|llms(?:-full)?\\.txt|optimizations|api/auth|api/register|api/webauthn|api/2fa|api/password-reset|api/email-verify|api/version|_next/static|_next/image|fonts/|brand/|licenses/|THIRD_PARTY_NOTICES\\.txt|favicon\\.png|favicon-dark\\.png|apple-icon\\.png|notification-icon\\.png|sw\\.js|robots\\.txt|sitemap\\.xml).*)";
+  "/((?!login|terms|privacy|docs|share/chat/|llms(?:-full)?\\.txt|optimizations|api/auth|api/register|api/webauthn|api/2fa|api/password-reset|api/email-verify|api/version|_next/static|_next/image|fonts/|brand/|licenses/|THIRD_PARTY_NOTICES\\.txt|favicon\\.png|favicon-dark\\.png|apple-icon\\.png|notification-icon\\.png|sw\\.js|robots\\.txt|sitemap\\.xml).*)";
 const authGated = new RegExp(`^${AUTH_GATED_PATTERN}$`);
 
 /**

@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { test } from "node:test";
 
 import {
   createLinkStore,
   hostedFeaturesAvailable,
+  LINKED_ONLY_SETTINGS_TABS,
+  WEB_ONLY_SETTINGS_TABS,
   withoutHostedOnlyTabs,
 } from "./hosted-features.ts";
 
@@ -31,6 +35,20 @@ test("a linked Mac app shows billing but never security", () => {
     "billing",
     "usage",
   ]);
+});
+
+test("the agent's settings tools hide the same tabs", () => {
+  const router = fs.readFileSync(
+    path.join(process.cwd(), "..", "backend", "core", "api", "routers", "agent_settings.py"),
+    "utf8",
+  );
+  const backendSet = (name: string): string[] => {
+    const match = router.match(new RegExp(`${name} = frozenset\\(\\{([^}]*)\\}\\)`));
+    assert.ok(match, `agent_settings.py defines ${name}`);
+    return [...match[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]).sort();
+  };
+  assert.deepEqual(backendSet("_WEB_ONLY_TABS"), [...WEB_ONLY_SETTINGS_TABS].sort());
+  assert.deepEqual(backendSet("_LINKED_ONLY_TABS"), [...LINKED_ONLY_SETTINGS_TABS].sort());
 });
 
 test("the link store reads once for many listeners and tells them about changes", async () => {

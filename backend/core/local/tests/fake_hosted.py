@@ -72,6 +72,7 @@ class FakeHosted:
     reuse_notices: int = 0
     revoke_bodies: list[dict[str, Any]] = field(default_factory=list)
     refresh_timeouts: list[dict[str, float | None]] = field(default_factory=list)
+    shared_chats: list[dict[str, Any]] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def transport(self) -> httpx.MockTransport:
@@ -296,4 +297,12 @@ class FakeHosted:
             return self._bearer(request) or httpx.Response(
                 200, json={"available_cents": self.balance_cents, "currency": "usd", "low_balance": False}
             )
+        if request.method == "POST" and path == "/desktop/v1/shared-chats":
+            denied = self._bearer(request)
+            if denied is not None:
+                return denied
+            self.shared_chats.append(json.loads(request.content))
+            return httpx.Response(200, json={"token": "fake-share-token"})
+        if request.method == "DELETE" and path.startswith("/desktop/v1/shared-chats/"):
+            return self._bearer(request) or httpx.Response(204)
         return httpx.Response(404, json={"code": "not_found"})

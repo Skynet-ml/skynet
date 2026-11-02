@@ -129,7 +129,7 @@ export function useReactServeChat(
 
       setMessages((m) => [
         ...m,
-        { role: "user", content: userMessage },
+        { role: "user", content: userMessage, createdAt: Date.now() },
         { role: "assistant", content: "", toolCalls: [] },
       ]);
 
@@ -218,6 +218,7 @@ export function useReactServeChat(
                 ...last,
                 content: result.assistant_message || fallback,
                 model: result.model,
+                createdAt: Date.now(),
               };
               return next;
             });

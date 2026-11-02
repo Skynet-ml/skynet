@@ -547,7 +547,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
                     : prev;
                 return [
                   ...kept,
-                  { role: "user", content: text },
+                  { role: "user", content: text, createdAt: Date.now() },
                   { role: "assistant", content: "", toolCalls: [] },
                 ];
               });
@@ -707,6 +707,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
                   model: result.model,
                   servedModel: result.served_model,
                   stats: parseTurnStats(result.stats),
+                  createdAt: Date.now(),
                 };
                 return next;
               });
@@ -885,7 +886,12 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
           ...cur,
           messages: [
             ...history,
-            { role: "user", content: userMessage, ...(hidden ? { hidden } : {}) },
+            {
+              role: "user",
+              content: userMessage,
+              createdAt: Date.now(),
+              ...(hidden ? { hidden } : {}),
+            },
             { role: "assistant", content: "", toolCalls: [] },
           ],
           error: null,

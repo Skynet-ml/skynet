@@ -930,3 +930,24 @@ def test_two_lost_refresh_responses_are_a_clear_error(engine: Engine, hosted: Fa
     assert exc.value.code == "hosted_link.unreachable"
     assert hosted.refresh_count == 2
     assert hosted_link.link_status(engine, _USER) is not None
+
+
+def test_hosted_request_posts_json_and_accepts_empty_answer(engine: Engine, hosted: FakeHosted) -> None:
+    """A POST sends the JSON body after one refresh; a 204 DELETE answers ``None``.
+
+    Args:
+        engine: Local database.
+        hosted: The fake hosted server.
+    """
+    _link(engine, hosted)
+    secret = ConnectorVault(engine).resolve(_USER, hosted_link.PROVIDER)
+    assert secret is not None
+    hosted.expired_access.add(secret.access_token)
+
+    body = {"local_id": "c-1", "title": "T", "messages": []}
+    answer = hosted_link.hosted_request(engine, _USER, "POST", "/desktop/v1/shared-chats", body)
+
+    assert answer == {"token": "fake-share-token"}
+    assert hosted.shared_chats == [body]
+    assert hosted.refresh_count == 1
+    assert hosted_link.hosted_request(engine, _USER, "DELETE", "/desktop/v1/shared-chats/c-1") is None
