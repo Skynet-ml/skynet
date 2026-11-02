@@ -6,7 +6,14 @@ import { useCompletionNotification } from "@/shared/hooks/use-completion-notific
 import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { ClockCounterClockwise, SidebarSimple, Plus, MagicWand } from "@/shared/ui/icons";
+import { toast } from "react-toastify";
+import {
+  ClockCounterClockwise,
+  SidebarSimple,
+  Plus,
+  MagicWand,
+  ShareNetwork,
+} from "@/shared/ui/icons";
 import { msg } from "@/shared/lib/messages";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/popover";
@@ -19,7 +26,7 @@ import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
 import { AppMark } from "@/shared/ui/app-mark";
 import { ComposerModelMenu } from "@/shared/ui/agent/composer-model-menu";
-import type { AgentMessage, AgentToolCall } from "@/shared/ui/agent/types";
+import type { AgentToolCall } from "@/shared/ui/agent/types";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { SubmitSplashOverlay, SUBMIT_SPLASH_HOLD_MS } from "@/shared/ui/submit-splash-overlay";
 import { cn } from "@/shared/lib/utils";
@@ -27,23 +34,32 @@ import { formatMsg } from "@/shared/lib/messages";
 
 import { useLocalAgentMenuModels } from "@/features/local-runtime";
 import {
+  SETTINGS_TABS,
   agentSubscriptionFor,
   parseAgentPreferencePatch,
   useSettingsModal,
   useUserPrefs,
 } from "@/features/settings";
 import { I18N_KEY } from "@/shared/lib/i18n";
+import { isColorTheme } from "@/shared/lib/color-theme";
+import { isLocale } from "@/shared/lib/locale";
+import { useLocale } from "@/shared/providers/locale-provider";
+import { useColorTheme } from "@/shared/providers/theme-provider";
 
 import { useConversationStore } from "../hooks/use-conversation-store";
 import { useGeneralistAgent, type SessionEventContext } from "../hooks/use-generalist-agent";
 import { useGeneralistPanelState } from "../hooks/use-panel-state";
-import { getConversation } from "../lib/conversation-api";
+import { createConversationShare, getConversation } from "../lib/conversation-api";
+import { useHostedFeaturesAvailable } from "@/shared/hooks/use-hosted-features";
+import { sharedChatUrl } from "@/shared/lib/share-link";
 import { TRUST_MODE_HUE, useTrustMode } from "../hooks/use-trust-mode";
 import { extractWizardPatch, useWizardStateOptional } from "../hooks/use-wizard-state";
 import {
   SCREEN_CHATS_KEY,
+  SCREEN_KICKOFF,
   decodeScreenChats,
   encodeScreenChats,
+  hideKickoffs,
   parseScreenNav,
   switchScreenChat,
 } from "../lib/screen-agent";
@@ -66,6 +82,7 @@ import { ToolsCarousel } from "./ToolsCarousel";
 import { TrustToggle } from "./TrustToggle";
 import { getToolKind, getToolRenderer } from "./tool-renderers";
 import { AGENT_PROMPT_EVENT, takeQueuedAgentPrompt } from "../lib/prompt-queue";
+import { parseAgentNavigation, parseAppearancePatch } from "../lib/settings-actions";
 
 const REQUEST_DATASET_TOOL = "request_user_dataset_datasets_request_upload_post";
 const REQUEST_LIBRARY_TOOL = "request_user_dataset_from_library";
@@ -104,18 +121,6 @@ function extractOptimizationId(result: unknown): string | null {
     top.result && typeof top.result === "object" ? (top.result as Record<string, unknown>) : top;
   const candidate = inner.optimization_id ?? inner.id;
   return typeof candidate === "string" && candidate.length > 0 ? candidate : null;
-}
-
-// Never shown, so not translated: the agent replies in the user's language
-// either way, and one fixed text lets a reopened chat recognize it.
-const SCREEN_KICKOFF =
-  "[The wizard opened this screen; I typed nothing.] If what you know is enough, fill this screen in and continue; otherwise ask me the one thing you need.";
-
-/** A reopened chat stores the wizard's kickoff as a user turn; it stays unshown. */
-function hideKickoffs(messages: AgentMessage[]): AgentMessage[] {
-  return messages.map((m) =>
-    m.role === "user" && m.content.trim() === SCREEN_KICKOFF ? { ...m, hidden: true } : m,
-  );
 }
 
 function getEffectiveMinWidth(): number {
@@ -244,6 +249,10 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     [router, wizardCtx],
   );
 
+  const { openTo: openSettingsTo } = useSettingsModal();
+  const { setTheme } = useColorTheme();
+  const { setLocale } = useLocale();
+
   const handleToolEnd = React.useCallback(
     (ev: ToolEndPayload, ctx: SessionEventContext) => {
       // Background chats keep streaming, but only the chat on screen may drive
@@ -254,6 +263,16 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       if (ev.status === "ok" && ev.tool === "update_user_preferences") {
         const patch = parseAgentPreferencePatch(ev.result);
         if (Object.keys(patch).length > 0) updatePrefs(patch);
+      }
+      if (ev.status === "ok" && ev.tool === "change_setting") {
+        const { theme, locale } = parseAppearancePatch(ev.result);
+        if (isColorTheme(theme)) setTheme(theme);
+        if (isLocale(locale)) setLocale(locale);
+      }
+      if (ev.status === "ok" && ev.tool === "open_page") {
+        const nav = parseAgentNavigation(ev.result);
+        if (nav?.kind === "settings" && Object.hasOwn(SETTINGS_TABS, nav.tab)) openSettingsTo(nav.tab);
+        else if (nav?.kind === "route") router.push(nav.path);
       }
       if (ev.status === "ok" && SUBMIT_TOOLS.has(ev.tool)) {
         const optimizationId = extractOptimizationId(ev.result);
@@ -268,7 +287,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         wizardCtx.navigateScreen(nav);
       }
     },
-    [updatePrefs, wizardCtx, startSubmitSplash],
+    [updatePrefs, wizardCtx, startSubmitSplash, setTheme, setLocale, openSettingsTo, router],
   );
 
   const store = useConversationStore({ enabled: open || panelDock !== null });
@@ -290,7 +309,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     [store, keepScreenChats],
   );
 
-  const { openTo: openSettingsTo } = useSettingsModal();
   const agent = useGeneralistAgent({
     wizardState: effectiveWizard,
     trustMode,
@@ -721,6 +739,27 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   }, []);
   const stepKind = React.useCallback((call: AgentToolCall) => getToolKind(call.tool), []);
 
+  // In the Mac app the local backend publishes the chat to the linked hosted
+  // account on each click, so the link opens for anyone and shows the latest
+  // messages. Without a linked account no link can work, so the button hides.
+  const canShare = useHostedFeaturesAvailable();
+  const handleShareConversation = React.useCallback(async () => {
+    const id = agent.conversationId;
+    if (!id) return;
+    const token = await createConversationShare(id);
+    const url = token ? sharedChatUrl(token) : null;
+    if (!url) {
+      toast.error(msg("share.error"));
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      toast.success(msg("share.link_copied"));
+    } catch {
+      toast.error(msg("clipboard.copy_failed"));
+    }
+  }, [agent.conversationId]);
+
   const emptyState = (
     <EmptyState
       icon={AppMark}
@@ -802,6 +841,23 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
               )}
             </TooltipContent>
           </Tooltip>
+          {canShare && agent.conversationId && agent.messages.length > 0 && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  onClick={() => void handleShareConversation()}
+                  className="text-muted-foreground hover:text-foreground"
+                  aria-label={msg("shared.agent.share_conversation")}
+                >
+                  <ShareNetwork className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">{msg("shared.agent.share_conversation")}</TooltipContent>
+            </Tooltip>
+          )}
           {agent.messages.length > 0 && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -910,9 +966,15 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         onChange={setDraft}
         onSubmit={handleSubmit}
         onStop={agent.stop}
-        placeholder={msg("auto.features.agent.panel.components.generalistpanel.literal.5")}
+        placeholder={msg(
+          // Hidden wizard kickoff turns run before the user types, so they do not count.
+          !agent.messages.some((m) => m.role === "user" && !m.hidden)
+            ? "agent.generalist.first_placeholder"
+            : "auto.features.agent.panel.components.generalistpanel.literal.5",
+        )}
         streaming={activeBusy}
         midTurn={agent.midTurn}
+        suggest={{ messages: agent.messages, model: agent.model, chatId: agent.conversationId }}
         modelMenu={
           <ComposerModelMenu
             value={agent.model}

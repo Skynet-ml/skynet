@@ -12,7 +12,13 @@ import { interleaveThinking, latestHeading } from "@/shared/lib/thinking-segment
 
 import { ActivityGroup } from "./activity-steps";
 import { RevealText } from "./reveal-text";
-import { earliestStart, finishedTurnMs, turnStart } from "./turn-timing";
+import {
+  earliestStart,
+  finishedTurnMs,
+  nextTurnClock,
+  turnStart,
+  type TurnClock,
+} from "./turn-timing";
 import type { AgentThinking, AgentToolCall } from "./types";
 
 /** One stretch of a turn's thinking, placed by the tool calls before it. */
@@ -33,8 +39,6 @@ interface TurnActivityProps {
   answering?: boolean;
   /** What the agent said it will do, the first line of the history. */
   plan?: string;
-  /** The plan arrived while the panel watched, so it writes itself in. */
-  animatePlan?: boolean;
   renderStep: (call: AgentToolCall, ctx: { isRetry: boolean }) => React.ReactNode;
   /** What kind of step a call is, for the burst's summary line. */
   stepKind?: (call: AgentToolCall) => ActivityKind;
@@ -57,7 +61,6 @@ export function TurnActivity({
   streaming,
   answering = false,
   plan,
-  animatePlan = false,
   renderStep,
   stepKind,
   durationMs,
@@ -76,11 +79,11 @@ export function TurnActivity({
   const [nowTs, setNowTs] = React.useState(() => Date.now());
   const [mountedAt] = React.useState(() => Date.now());
   // One start for the whole turn, so the live timer only ever counts up.
-  const [start, setStart] = React.useState<number | null>(() =>
-    earliestStart(startedAt, turnStart(thinking, steps)),
-  );
-  const nextStart = earliestStart(start, earliestStart(startedAt, turnStart(thinking, steps)));
-  if (nextStart !== start) setStart(nextStart);
+  const computedStart = earliestStart(startedAt, turnStart(thinking, steps));
+  const [clock, setClock] = React.useState<TurnClock>(() => ({ start: computedStart, streaming }));
+  const nextClock = nextTurnClock(clock, computedStart, streaming);
+  if (nextClock !== clock) setClock(nextClock);
+  const { start } = nextClock;
 
   React.useEffect(() => {
     if (!isLive) return;
@@ -119,7 +122,7 @@ export function TurnActivity({
     <RevealText
       key="plan"
       text={plan}
-      animate={animatePlan}
+      animate={false}
       className="block py-1 text-sm leading-relaxed text-foreground"
     />
   ) : null;

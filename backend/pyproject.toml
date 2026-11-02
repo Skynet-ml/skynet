@@ -16,6 +16,7 @@ include = ["core*"]
     "static/scalar/fonts/OFL.txt",
 ]
 "core.i18n_locales" = ["*.json"]
+"core.local" = ["assets/*.webp"]
 "core.service_gateway.optimization.blackbox" = ["shinka_requirements.txt"]
 
 [project]

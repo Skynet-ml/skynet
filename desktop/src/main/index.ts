@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { app, BrowserWindow, clipboard, ipcMain, nativeTheme, shell } from "electron";
-import { APP_SCHEME, appUrlFromArgv, appWindowUrl, parseLinkCallback } from "./app-url";
+import { app, BrowserWindow, clipboard, ipcMain, nativeTheme, screen, shell } from "electron";
+import { APP_SCHEME, appUrlFromArgv, appWindowUrl, HOSTED_APP_ORIGINS, hostedAppOrigin, parseLinkCallback, webDocsUrl } from "./app-url";
 import { HostedLinkClient } from "./hosted-link";
+import { isOpenAppUrl, parseTheme, pickTheme, type Theme } from "./theme";
 import { childPath, probeClis, probeDocker, readCliLimits, searchDirs } from "./cli-detect";
 import { allocatePorts, type PortPlan } from "./ports";
 import { holdQuitUntilStopped } from "./quit";
@@ -61,28 +62,24 @@ let api: ManagedProcess | null = null;
 let frontend: ManagedProcess | null = null;
 let postgresStarted = false;
 let frontendUrl: string | null = null;
+// The hosted app (docs links) for this build; replaced from the stamp when the stack starts.
+let hostedOrigin: string = HOSTED_APP_ORIGINS.production;
 let sweptOrphans = false;
 let sweptSandboxes = false;
 let hostedLink: HostedLinkClient | null = null;
 let signInUrl: string | null = null;
 let finishingSignIn = false;
 
-// Setup screens are small; the window grows for the web app. Progress screens
-// show only the timeline, so they are shorter than screens that ask for an action.
+// Setup screens are small; the window grows for the web app. The onboarding
+// page reports its content height, so each setup screen has no empty space.
 const SETUP_SIZE = { width: 600, height: 120 };
-const SETUP_ACTION_HEIGHT = 540;
-
-function setupHeight(s: OnboardingState): number {
-  const progress = s.kind === "checking" || s.kind === "starting" || s.kind === "ready";
-  return progress ? SETUP_SIZE.height : SETUP_ACTION_HEIGHT;
-}
+const SETUP_MAX_HEIGHT = 720;
+let setupHeight = SETUP_SIZE.height;
 
 const APP_SIZE = { width: 1440, height: 900, minWidth: 960, minHeight: 640 };
 
 function setState(next: OnboardingState): void {
-  const resize = win !== null && win.webContents.getURL().startsWith("file:") && setupHeight(next) !== setupHeight(state);
   state = next;
-  if (resize) useSetupSize();
   log(`state ${next.kind}${next.step ? ` (${next.step})` : ""}${next.error ? `: ${next.error}` : ""}`);
   win?.webContents.send("onboarding:state", state);
 }
@@ -96,7 +93,7 @@ function locale(): "en" | "he" {
 function useSetupSize(): void {
   if (!win) return;
   win.setMinimumSize(SETUP_SIZE.width, SETUP_SIZE.height);
-  win.setContentSize(SETUP_SIZE.width, setupHeight(state));
+  win.setContentSize(SETUP_SIZE.width, setupHeight);
   win.setResizable(false);
   win.setMaximizable(false);
   win.setFullScreenable(false);
@@ -113,8 +110,18 @@ function useAppSize(): void {
   win.center();
 }
 
+/**
+ * The theme the web app reports from its own setting. The setup page reports
+ * none, so the system appearance decides there. nativeTheme.themeSource stays
+ * untouched: it would change prefers-color-scheme and break the web app's
+ * "system" mode.
+ */
+let reportedTheme: Theme | null = null;
+
+const currentTheme = () => pickTheme(reportedTheme, nativeTheme.shouldUseDarkColors);
+
 // Matches --bg in onboarding.css and the web app, so no light flash shows in dark mode.
-const windowBackground = () => (nativeTheme.shouldUseDarkColors ? "#1c1814" : "#f5f0ea");
+const windowBackground = () => (currentTheme() === "dark" ? "#1c1814" : "#f5f0ea");
 
 /**
  * The Helper binary runs Node without a Dock icon (its bundle sets LSUIElement);
@@ -126,9 +133,9 @@ function nodeBinary(): string {
   return fs.existsSync(helper) ? helper : process.execPath;
 }
 
-/** The Dock icon follows the system appearance; the .icns in Finder stays light. */
+/** The Dock icon follows the app theme; the .icns in Finder stays light. */
 function applyTheme(): void {
-  app.dock?.setIcon(path.join(__dirname, "..", "icons", nativeTheme.shouldUseDarkColors ? "dock-dark.png" : "dock-light.png"));
+  app.dock?.setIcon(path.join(__dirname, "..", "icons", currentTheme() === "dark" ? "dock-dark.png" : "dock-light.png"));
   win?.setBackgroundColor(windowBackground());
 }
 
@@ -159,6 +166,8 @@ function watchOwnBuild(): void {
 /** Set the state first: the window size follows it, and getURL() still has the old page. */
 function showOnboarding(next?: OnboardingState): void {
   if (next) setState(next);
+  reportedTheme = null;
+  applyTheme();
   useSetupSize();
   void win?.loadFile(path.join(__dirname, "..", "renderer", "index.html"), { query: { lang: locale() } });
 }
@@ -254,6 +263,9 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
 
   step("runtime");
   const { backendDir, frontendDir, bundleId } = stageRuntime();
+  const stampFile = path.join(backendDir, "core", "hosted_target.txt");
+  hostedOrigin = hostedAppOrigin(fs.existsSync(stampFile) ? fs.readFileSync(stampFile, "utf8") : null);
+  log(`hosted app ${hostedOrigin}`);
 
   step("postgres");
   postgresStarted = true;
@@ -330,6 +342,7 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
       AUTH_SECRET: secrets.authSecret,
       BACKEND_AUTH_SECRET: secrets.backendAuthSecret,
       AUTH_URL: feOrigin,
+      APP_HOSTED_APP_URL: hostedOrigin,
     }),
     cwd: frontendDir,
     logFile: path.join(logsDir, "frontend.log"),
@@ -408,7 +421,15 @@ async function openSignInPage(): Promise<void> {
 /** The browser opened skynet://link/callback: finish the link, or show the retry card. */
 async function handleAppUrl(raw: string): Promise<void> {
   const callback = parseLinkCallback(raw);
-  if (!callback) return log("ignored an unknown skynet:// URL");
+  if (!callback) {
+    // The local link callback page opens skynet://open to bring the app back.
+    if (isOpenAppUrl(raw)) {
+      if (win?.isMinimized()) win.restore();
+      win?.focus();
+      return;
+    }
+    return log("ignored an unknown skynet:// URL");
+  }
   if (win?.isMinimized()) win.restore();
   win?.focus();
   if (state.kind !== "sign_in" || state.signIn !== "waiting" || !hostedLink || finishingSignIn) {
@@ -432,7 +453,7 @@ async function handleAppUrl(raw: string): Promise<void> {
     const result = await hostedLink.finish(callback.code, callback.state);
     if (result.ok) return void (await openApp());
     log(`sign-in finish failed: ${result.detail}`);
-    if (state.kind === "sign_in") setState({ ...state, signIn: "failed", error: result.detail });
+    if (state.kind === "sign_in") setState({ ...state, signIn: result.reason, error: result.reason === "failed" ? result.detail : undefined });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     log(`sign-in finish failed: ${detail}`);
@@ -490,10 +511,13 @@ function isAllowedUrl(target: string): boolean {
 
 function guardNavigation(event: Electron.Event, url: string): void {
   if (url.startsWith("file://")) return;
+  const docsUrl = frontendUrl === null ? null : webDocsUrl(url, frontendUrl, hostedOrigin);
   const appUrl = frontendUrl === null ? null : appWindowUrl(url, frontendUrl);
-  if (appUrl === url) return;
+  if (appUrl === url && docsUrl === null) return;
   event.preventDefault();
-  if (appUrl !== null) {
+  if (docsUrl !== null) {
+    void shell.openExternal(docsUrl);
+  } else if (appUrl !== null) {
     loadAppUrl(appUrl).catch((err) => log(`app page load failed: ${err instanceof Error ? err.message : String(err)}`));
   } else if (/^https?:\/\//.test(url)) void shell.openExternal(url);
 }
@@ -530,7 +554,9 @@ function createWindow(): void {
   });
   win.once("ready-to-show", () => win?.show());
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//.test(url) && !isAllowedUrl(url)) void shell.openExternal(url);
+    const docsUrl = frontendUrl === null ? null : webDocsUrl(url, frontendUrl, hostedOrigin);
+    if (docsUrl !== null) void shell.openExternal(docsUrl);
+    else if (/^https?:\/\//.test(url) && !isAllowedUrl(url)) void shell.openExternal(url);
     return { action: "deny" };
   });
   win.webContents.on("will-navigate", guardNavigation);
@@ -555,11 +581,39 @@ ipcMain.handle("onboarding:continue", () => {
 ipcMain.handle("onboarding:copy", (_event, text: unknown) => {
   if (typeof text === "string" && text.length < 500) clipboard.writeText(text);
 });
+ipcMain.handle("onboarding:fit", (_event, height: unknown) => {
+  if (typeof height !== "number" || !Number.isFinite(height)) return;
+  // openApp sends "ready" to this page before loadURL replaces it; a fit from that
+  // last render would shrink the app window back to the setup size.
+  if (state.kind === "ready" || !win?.webContents.getURL().startsWith("file:")) return;
+  const before = win.getBounds();
+  // A programmatic move or resize skips the macOS on-screen constrain, so keep the
+  // window inside the work area (below the menu bar, above the Dock). The page
+  // scrolls when its content is taller than the window.
+  const area = screen.getDisplayMatching(before).workArea;
+  const frame = before.height - win.getContentBounds().height;
+  const next = Math.min(SETUP_MAX_HEIGHT, area.height - frame, Math.max(SETUP_SIZE.height, Math.ceil(height)));
+  if (next === setupHeight) return;
+  setupHeight = next;
+  // Grow or shrink around the window's own middle instead of centering it again,
+  // so a window the user dragged aside stays where they put it.
+  win.setContentSize(SETUP_SIZE.width, setupHeight);
+  const after = win.getBounds();
+  const centered = Math.round(before.y - (after.height - before.height) / 2);
+  const y = Math.max(area.y, Math.min(centered, area.y + area.height - after.height));
+  win.setPosition(before.x, y);
+});
 ipcMain.handle("onboarding:open-logs", () => shell.openPath(logsDir));
 ipcMain.handle("onboarding:sign-in", () => {
   void signIn();
 });
 ipcMain.handle("onboarding:skip-sign-in", () => skipSignIn());
+ipcMain.on("theme:changed", (event, value: unknown) => {
+  const theme = parseTheme(value);
+  if (event.sender !== win?.webContents || !theme || theme === reportedTheme) return;
+  reportedTheme = theme;
+  applyTheme();
+});
 ipcMain.handle("onboarding:open-docker", () => shell.openExternal("https://www.docker.com/products/docker-desktop/"));
 
 /**

@@ -35,6 +35,7 @@ import dspy
 from dspy.utils.exceptions import AdapterParseError
 
 from ..agents.steering import deliver_steering
+from ..react_compat import without_text_reasoning
 from ..stable_roster_adapter import StableRosterChatAdapter
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,7 @@ class RetryingPredict(dspy.Predict):
                 kwargs if attempt == 0 else self._with_resample_id(kwargs, attempt)
             )
             call_kwargs = self._with_tool_call_policy(call_kwargs)
+            call_kwargs = without_text_reasoning(self.signature, call_kwargs)
             try:
                 prediction = super().forward(**call_kwargs)
                 return self._without_racing_submit(prediction)

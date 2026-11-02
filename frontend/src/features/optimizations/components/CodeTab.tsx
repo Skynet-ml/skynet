@@ -5,9 +5,9 @@ import dynamic from "next/dynamic";
 import { Code } from "@/shared/ui/icons";
 import { Card, CardContent, CardHeader, CardTitle } from "@/shared/ui/primitives/card";
 import {
-  SLIDING_PILL_TABS_INDICATOR_CLASS,
-  SLIDING_PILL_TABS_LIST_CLASS,
-  SLIDING_PILL_TABS_TRIGGER_CLASS,
+  UNDERLINE_TABS_INDICATOR_CLASS,
+  UNDERLINE_TABS_LIST_CLASS,
+  UNDERLINE_TABS_TRIGGER_CLASS,
   Tabs,
   TabsContent,
   TabsList,
@@ -112,20 +112,16 @@ export function CodeTab({
           <CardContent>
             <Tabs value={activeCodeTab} dir="ltr" onValueChange={setActiveCodeTab}>
               {tabs.length > 1 && (
-                <TabsList className={SLIDING_PILL_TABS_LIST_CLASS}>
+                <TabsList className={UNDERLINE_TABS_LIST_CLASS}>
                   <div
-                    className={SLIDING_PILL_TABS_INDICATOR_CLASS}
-                    style={{
-                      width: `calc(${share}% - 6px)`,
-                      insetInlineStart:
-                        activeIndex === 0 ? 4 : `calc(${share * activeIndex}% + 2px)`,
-                    }}
+                    className={UNDERLINE_TABS_INDICATOR_CLASS}
+                    style={{ width: `${share}%`, insetInlineStart: `${share * activeIndex}%` }}
                   />
                   {tabs.map((t) => (
                     <TabsTrigger
                       key={t.value}
                       value={t.value}
-                      className={SLIDING_PILL_TABS_TRIGGER_CLASS}
+                      className={UNDERLINE_TABS_TRIGGER_CLASS}
                     >
                       {t.label}
                     </TabsTrigger>

@@ -70,8 +70,39 @@ def native_tool_calling_active() -> bool:
     return bool(getattr(adapter, "use_native_function_calling", False))
 
 
+def without_text_reasoning(signature: type[dspy.Signature], kwargs: dict) -> dict:
+    """Drop the ``dspy.Reasoning`` output field when a call turns native reasoning off.
+
+    DSPy's forced submit sends ``reasoning_effort=None``. ``dspy.Reasoning``
+    then stays a text output field, so the prompt replays every earlier step's
+    native thinking as ``[[ ## next_thought ## ]]`` text and asks the model to
+    write its reasoning out. Anthropic's safeguards block that as reasoning
+    extraction (``[reasoning_extraction]``), which failed Claude Code
+    subscription turns once the CLI started streaming its thinking. The forced
+    submit only needs the ``submit`` call, so the field goes.
+
+    Args:
+        signature: The predictor's own signature.
+        kwargs: Predictor inputs and optional per-call LM config.
+
+    Returns:
+        The original kwargs unless the config sets ``reasoning_effort`` to
+        ``None``; otherwise a shallow copy with a per-call ``signature`` that
+        has no ``dspy.Reasoning`` output field.
+    """
+    config = kwargs.get("config") or {}
+    if "reasoning_effort" not in config or config["reasoning_effort"] is not None:
+        return kwargs
+    signature = kwargs.get("signature", signature)
+    for name, field in signature.output_fields.items():
+        if field.annotation is dspy.Reasoning:
+            signature = signature.delete(name)
+    return {**kwargs, "signature": signature}
+
+
 __all__ = [
     "configure_native_tool_calling",
     "native_react_adapter",
     "native_tool_calling_active",
+    "without_text_reasoning",
 ]

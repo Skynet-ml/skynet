@@ -121,11 +121,16 @@ export function ReactServeChat({ optimizationId }: ReactServeChatProps) {
         onChange={setDraft}
         onSubmit={handleSubmit}
         onStop={agent.stop}
-        placeholder={msg("optimizations.react.chat_placeholder")}
+        placeholder={msg(
+          agent.messages.length === 0
+            ? "optimizations.react.chat_first_placeholder"
+            : "optimizations.react.chat_placeholder",
+        )}
         streaming={streaming}
         sendAriaLabel={msg("optimizations.react.chat_send_aria")}
         stopAriaLabel={msg("optimizations.react.chat_stop_aria")}
         layout="inline"
+        suggest={{ messages: agent.messages }}
       />
     </div>
   );

@@ -1389,6 +1389,38 @@ class Settings(BaseSettings):
             "cost OpenRouter reports for each clip. Dictation answers a typed 503 once it is reached. 0 disables the cap."
         ),
     )
+    docs_agent_monthly_budget_usd: float = Field(
+        default=20.0,
+        ge=0,
+        description=(
+            "Platform-wide monthly cap on docs agent model spend in dollars, counted in Redis from the "
+            "priced token usage of each answer. The docs agent answers a typed 503 once it is reached. "
+            "0 disables the cap."
+        ),
+    )
+    rate_limit_docs_agent_anonymous_per_hour: int = Field(
+        default=20,
+        ge=0,
+        description=(
+            "Per-IP cap on docs agent questions per hour for signed-out callers, enforced across replicas "
+            "via Redis. 0 disables the cap."
+        ),
+    )
+    rate_limit_docs_agent_user_per_hour: int = Field(
+        default=60,
+        ge=0,
+        description=(
+            "Per-account cap on docs agent questions per hour for signed-in callers, enforced across "
+            "replicas via Redis. 0 disables the cap."
+        ),
+    )
+    docs_agent_content_dir: str = Field(
+        default="",
+        description=(
+            "Folder of docs Markdown pages (one sub-folder per locale) the docs agent searches. Empty uses "
+            "the repository's frontend docs folder, and without it the web app's /llms-full.txt."
+        ),
+    )
     embeddings_monthly_token_cap: int = Field(
         default=50_000_000,
         ge=0,
@@ -1600,6 +1632,22 @@ class Settings(BaseSettings):
     def is_preview_environment(self) -> bool:
         """Return whether this deployment is a PR preview environment."""
         return re.search(r"-pr-\d+$", self.app_environment) is not None
+
+    @property
+    def public_origins(self) -> tuple[str, str]:
+        """Return the public web app and API origins that links and docs should name.
+
+        The Mac app names the hosted Skynet of its build target. A hosted
+        deploy names staging when it is staging or a PR preview, and
+        production otherwise, so tests and dev servers keep production links.
+
+        Returns:
+            The web app origin and the API origin, without a trailing slash.
+        """
+        if self.local_mode:
+            return self.hosted_app_url, self.hosted_api_url
+        staging = self.app_environment == "staging" or self.is_preview_environment
+        return HOSTED_TARGET_URLS["staging" if staging else "production"]
 
     @property
     def is_stripe_configured(self) -> bool:

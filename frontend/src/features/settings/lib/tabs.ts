@@ -24,6 +24,8 @@ import {
 } from "@/shared/ui/icons";
 import type { Icon } from "@/shared/ui/icons";
 import type { msg } from "@/shared/lib/messages";
+import { withoutHostedOnlyTabs } from "@/shared/lib/hosted-features";
+import { isLocalMode } from "@/shared/lib/runtime-env";
 
 type MessageKey = Parameters<typeof msg>[0];
 
@@ -143,7 +145,14 @@ export const SETTINGS_TABS: Record<SettingsTab, SettingsTabMeta> = {
   },
 };
 
-/** List the tabs this user may open, in rail order. */
-export function visibleSettingsTabs(isAdmin: boolean): SettingsTab[] {
-  return SETTINGS_TAB_ORDER.filter((tab) => isAdmin || !SETTINGS_TABS[tab].adminOnly);
+/**
+ * List the tabs this user may open, in rail order. The Mac app leaves out the
+ * web-only tabs, and the linked-only tabs while no hosted account is linked.
+ */
+export function visibleSettingsTabs(isAdmin: boolean, hostedAvailable = true): SettingsTab[] {
+  return withoutHostedOnlyTabs(
+    SETTINGS_TAB_ORDER.filter((tab) => isAdmin || !SETTINGS_TABS[tab].adminOnly),
+    isLocalMode(),
+    hostedAvailable,
+  );
 }

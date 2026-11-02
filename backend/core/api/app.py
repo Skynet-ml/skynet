@@ -100,6 +100,7 @@ from .routers.admin_dashboard import create_admin_dashboard_router
 from .routers.agent_attachments import create_agent_attachments_router
 from .routers.agent_engine import create_agent_engine_router
 from .routers.agent_history import create_agent_history_router
+from .routers.agent_settings import create_agent_settings_router
 from .routers.analytics import create_analytics_router
 from .routers.api_tokens import create_api_tokens_router
 from .routers.billing import create_billing_router
@@ -112,6 +113,7 @@ from .routers.dataset_library import create_dataset_library_router
 from .routers.dataset_share import create_dataset_share_router
 from .routers.datasets import create_datasets_router
 from .routers.desktop_link import create_desktop_link_router
+from .routers.docs_agent import create_docs_agent_router
 from .routers.execution_budgets import create_execution_budgets_router
 from .routers.execution_runtimes import create_execution_runtimes_router
 from .routers.experience import create_experience_router
@@ -594,6 +596,9 @@ def _cache_control_for(path: str, query_string: bytes) -> str | None:
         return "private, max-age=5"
     if path == "/optimizations" and b"status" not in query_string:
         return "private, max-age=2, stale-while-revalidate=10"
+    # A revoked share link must stop working at once, so no cache may keep a copy.
+    if path.startswith("/agent/shared-conversations/"):
+        return "no-store"
     return None
 
 
@@ -922,7 +927,7 @@ def create_app(
             "their status, read the results, and run the optimized "
             "artifact. Send an API token "
             "from Settings > API as a Bearer token. Guides: "
-            "https://skynetml.com/docs/api"
+            f"{settings.public_origins[0]}/docs/api"
         ),
     )
 
@@ -1052,7 +1057,7 @@ def create_app(
             A :class:`JSONResponse` with media type ``application/problem+json``.
         """
         body: dict[str, Any] = {
-            "type": f"https://api.skynetml.com/errors/{code}" if code else "about:blank",
+            "type": f"{settings.public_origins[1]}/errors/{code}" if code else "about:blank",
             "title": title
             or (
                 code.replace("_", " ").replace(".", " ").capitalize()
@@ -1340,6 +1345,7 @@ def create_app(
     app.include_router(create_code_validation_router(), tags=["Code Validation"])
     app.include_router(create_mcp_probe_router(), tags=["Code Validation"])
     app.include_router(create_transcription_router(job_store=job_store), tags=["Transcription"])
+    app.include_router(create_docs_agent_router(), tags=["Docs"])
     app.include_router(create_agent_attachments_router(), tags=["Optimizations"])
     app.include_router(create_code_agent_router(job_store=job_store), tags=["Code Validation"])
     app.include_router(create_generalist_agent_router(job_store=job_store), tags=["Optimizations"])
@@ -1382,6 +1388,7 @@ def create_app(
     )
     app.include_router(create_usage_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_user_preferences_router(), tags=["Settings"])
+    app.include_router(create_agent_settings_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_telemetry_router(job_store=job_store), tags=["Telemetry"])
     app.include_router(create_wizard_router(), tags=["Wizard"])
     app.include_router(create_workflows_router(job_store=job_store), tags=["Workflows"])

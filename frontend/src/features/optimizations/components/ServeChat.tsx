@@ -94,7 +94,7 @@ export function ServeChat({
           return (
             <div key={run.ts} className="space-y-3">
               {isEditing ? (
-                <div className="flex justify-start">
+                <div className="flex justify-end">
                   <div className="w-full max-w-[95%] space-y-2 sm:max-w-[85%]">
                     {serveInfo.input_fields.map((field) => (
                       <div key={field}>
@@ -122,7 +122,7 @@ export function ServeChat({
                         />
                       </div>
                     ))}
-                    <div className="flex flex-wrap justify-start gap-1.5">
+                    <div className="flex flex-wrap justify-end gap-1.5">
                       <button
                         type="button"
                         onClick={() => setEditingRunTs(null)}
@@ -141,9 +141,10 @@ export function ServeChat({
                   </div>
                 </div>
               ) : (
-                <div className="flex justify-start group/user">
+                // Reversed so the bubble sits at the end side, edit button inward.
+                <div className="flex flex-row-reverse justify-start group/user">
                   <div
-                    className="max-w-[92%] rounded-2xl rounded-br-sm bg-primary-fill px-4 py-3 text-sm text-primary-foreground sm:max-w-[80%]"
+                    className="max-w-[92%] rounded-2xl rounded-ee-sm bg-primary-fill px-4 py-3 text-sm text-primary-foreground sm:max-w-[80%]"
                     dir="ltr"
                   >
                     <CollapsibleMessage>
@@ -169,7 +170,7 @@ export function ServeChat({
                       variant="ghost"
                       size="icon-xs"
                       onClick={() => setEditingRunTs(run.ts)}
-                      className="ms-1.5 self-center text-muted-foreground opacity-100 transition-opacity hover:text-foreground focus-visible:opacity-100 sm:opacity-0 sm:group-hover/user:opacity-100 any-pointer-coarse:opacity-100"
+                      className="me-1.5 self-center text-muted-foreground opacity-100 transition-opacity hover:text-foreground focus-visible:opacity-100 sm:opacity-0 sm:group-hover/user:opacity-100 any-pointer-coarse:opacity-100"
                       aria-label={msg("auto.features.optimizations.components.servechat.literal.1")}
                     >
                       <PencilSimple className="size-3.5" />
@@ -212,6 +213,7 @@ export function ServeChat({
                         )
                         .join("\n")}
                       model={run.model}
+                      createdAt={run.ts}
                       onRegenerate={
                         serveLoading
                           ? undefined
@@ -316,7 +318,11 @@ export function ServeChat({
               setSingleDraft("");
             }}
             onStop={handleStopServe}
-            placeholder={singleInputField}
+            placeholder={
+              runHistory.length === 0
+                ? msg("optimizations.serve.first_placeholder", { field: singleInputField })
+                : singleInputField
+            }
             streaming={serveLoading}
             sendAriaLabel={msg("auto.features.optimizations.components.servechat.literal.2")}
             layout="inline"

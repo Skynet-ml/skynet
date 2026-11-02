@@ -904,19 +904,30 @@ const MD_TEXT: Localized<{ install: string; unverified: string; source: string; 
   },
 };
 
-/** One client's setup steps as Markdown, without a heading. */
-export function mcpClientMarkdown(client: McpClient, locale: McpLocale): string {
+/** A client's install link for the MCP server at `url`. */
+function installUrlFor(client: McpClient, url: string): string | undefined {
+  if (client.installUrl === cursorInstallUrl()) return cursorInstallUrl(url);
+  if (client.installUrl === vscodeInstallUrl()) return vscodeInstallUrl(url);
+  return client.installUrl;
+}
+
+/**
+ * One client's setup steps as Markdown, without a heading. `url` is the MCP
+ * server the steps name: staging and PR previews pass their own server.
+ */
+export function mcpClientMarkdown(client: McpClient, locale: McpLocale, url: string = MCP_SERVER_URL): string {
   const t = MD_TEXT[locale] ?? MD_TEXT.en;
   const parts: string[] = [];
   if (!client.verified) parts.push(`> [!WARNING]\n> ${t.unverified}`);
   parts.push(client.steps.map((step, i) => `${i + 1}. ${mcpText(step, locale)}`).join("\n"));
-  if (client.installUrl) parts.push(`[${t.install}](${client.installUrl})`);
+  const installUrl = installUrlFor(client, url);
+  if (installUrl) parts.push(`[${t.install}](${installUrl})`);
   for (const snippet of client.snippets) {
     parts.push(`**${mcpText(snippet.label, locale)}**\n\n\`\`\`${snippet.language}\n${snippet.code}\n\`\`\``);
   }
   if (client.note) parts.push(`> [!NOTE]\n> ${mcpText(client.note, locale)}`);
   if (client.source) parts.push(`[${t.source}](${client.source})`);
-  return parts.join("\n\n");
+  return parts.join("\n\n").split(MCP_SERVER_URL).join(url);
 }
 
 /** The "last checked" line shown above the client steps. */
@@ -925,7 +936,7 @@ export function mcpClientsCheckedLine(locale: McpLocale): string {
 }
 
 /** Every client's setup steps as Markdown, one level-3 section per client. */
-export function mcpClientsMarkdown(locale: McpLocale): string {
-  const sections = MCP_CLIENTS.map((client) => `### ${mcpText(client.name, locale)}\n\n${mcpClientMarkdown(client, locale)}`);
+export function mcpClientsMarkdown(locale: McpLocale, url: string = MCP_SERVER_URL): string {
+  const sections = MCP_CLIENTS.map((client) => `### ${mcpText(client.name, locale)}\n\n${mcpClientMarkdown(client, locale, url)}`);
   return [`_${mcpClientsCheckedLine(locale)}_`, ...sections].join("\n\n");
 }

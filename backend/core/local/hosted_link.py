@@ -458,12 +458,14 @@ def access_token(engine: Engine, username: str) -> str:
     return refresh_after(engine, username, stale_access_token=secret.access_token)
 
 
-def _get(path: str, token: str) -> httpx.Response:
-    """Send one authenticated GET to the hosted desktop API.
+def _send(method: str, path: str, token: str, body: Any = None) -> httpx.Response:
+    """Send one authenticated request to the hosted desktop API.
 
     Args:
+        method: The HTTP verb.
         path: The ``/desktop/v1/...`` path.
         token: The desktop access token.
+        body: The JSON body, or ``None`` for none.
 
     Returns:
         The hosted response.
@@ -473,13 +475,13 @@ def _get(path: str, token: str) -> httpx.Response:
     """
     try:
         with _client() as client:
-            return client.get(path, headers={"Authorization": f"Bearer {token}"})
+            return client.request(method, path, json=body, headers={"Authorization": f"Bearer {token}"})
     except httpx.HTTPError as exc:
         raise DomainError("hosted_link.unreachable", status=503) from exc
 
 
-def hosted_get(engine: Engine, username: str, path: str) -> dict[str, Any]:
-    """Call a hosted ``/desktop/v1`` read route with the linked account.
+def hosted_request(engine: Engine, username: str, method: str, path: str, body: Any = None) -> Any:
+    """Call a hosted ``/desktop/v1`` route with the linked account.
 
     A 401 ``desktop.token_expired`` or ``auth.invalid_token`` refreshes once
     and retries once. An ``auth.invalid_token`` after that refresh means hosted
@@ -488,10 +490,12 @@ def hosted_get(engine: Engine, username: str, path: str) -> dict[str, Any]:
     Args:
         engine: Local database.
         username: The local user.
+        method: The HTTP verb.
         path: The hosted path, such as ``/desktop/v1/whoami``.
+        body: The JSON body, or ``None`` for none.
 
     Returns:
-        The JSON body.
+        The JSON body, or ``None`` for an empty 2xx answer.
 
     Raises:
         DomainError: 409 when not linked, 401 when the link is revoked (local
@@ -499,19 +503,36 @@ def hosted_get(engine: Engine, username: str, path: str) -> dict[str, Any]:
             hosted is unreachable.
     """
     token = access_token(engine, username)
-    response = _get(path, token)
+    response = _send(method, path, token, body)
     if response.status_code == 401 and _hosted_code(response) in _REFRESH_CODES:
         token = refresh_after(engine, username, stale_access_token=token)
-        response = _get(path, token)
-    if response.status_code == 200:
-        body = response.json()
-        return body if isinstance(body, dict) else {}
+        response = _send(method, path, token, body)
+    if 200 <= response.status_code < 300:
+        return response.json() if response.content else None
     hosted_code = _hosted_code(response)
     # Only reached after a refresh, so a fresh token that hosted does not know means a dead link.
     if response.status_code == 401 and (hosted_code in _GONE_CODES or hosted_code == "auth.invalid_token"):
         raise _gone(engine, username)
-    logger.warning("Hosted call %s failed (status %s, %s)", path, response.status_code, hosted_code)
+    logger.warning("Hosted call %s %s failed (status %s, %s)", method, path, response.status_code, hosted_code)
     raise DomainError("hosted_link.failed", status=502)
+
+
+def hosted_get(engine: Engine, username: str, path: str) -> dict[str, Any]:
+    """Call a hosted ``/desktop/v1`` read route that answers a JSON object.
+
+    Args:
+        engine: Local database.
+        username: The local user.
+        path: The hosted path, such as ``/desktop/v1/whoami``.
+
+    Returns:
+        The JSON body, or ``{}`` when it is not an object.
+
+    Raises:
+        DomainError: The errors of :func:`hosted_request`.
+    """
+    body = hosted_request(engine, username, "GET", path)
+    return body if isinstance(body, dict) else {}
 
 
 def unlink(engine: Engine, username: str) -> bool:

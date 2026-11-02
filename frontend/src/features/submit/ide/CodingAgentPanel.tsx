@@ -109,10 +109,20 @@ export function CodingAgentPanel({
         onChange={setDraft}
         onSubmit={send}
         onStop={agent.stop}
-        placeholder={disabledReason ?? v2Msg("submit.v2.ide.agent.placeholder", guided)}
+        placeholder={
+          disabledReason ??
+          v2Msg(
+            // Hidden kickoff turns run before the user types, so they do not count.
+            !agent.messages.some((m) => m.role === "user" && !m.hidden)
+              ? "submit.v2.ide.agent.first_placeholder"
+              : "submit.v2.ide.agent.placeholder",
+            guided,
+          )
+        }
         disabled={disabled || agent.limitReached}
         streaming={streaming}
         midTurn={agent.midTurn}
+        suggest={{ messages: agent.messages, model: coding.model }}
         modelMenu={
           <ComposerModelMenu
             value={coding.model}

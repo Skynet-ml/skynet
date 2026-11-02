@@ -2,11 +2,18 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { ArrowUpRight, FileText, Hash, MagnifyingGlass } from "@/shared/ui/icons";
+import {
+  ArrowUpRight,
+  FileText,
+  Hash,
+  MagnifyingGlass,
+  PaperPlaneTilt,
+  Sparkle,
+} from "@/shared/ui/icons";
 import type { Icon } from "@/shared/ui/icons";
 import { Kbd } from "@/shared/ui/kbd";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
-import { matchesQuery } from "@/shared/lib/app-pages";
+import { buildBm25Index, isStrongMatch, searchBm25, type Bm25Field } from "@/shared/lib/bm25";
 import { cn } from "@/shared/lib/utils";
 import {
   Dialog,
@@ -15,6 +22,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/primitives/dialog";
+import { fillChrome, type DocsChrome } from "../lib/chrome";
+import { DocsAgentPanel, type DocsAgentRequest } from "./docs-agent-panel";
 
 interface SearchEntry {
   href: string;
@@ -30,11 +39,15 @@ interface SearchItem {
   group: string;
   label: string;
   description: string;
-  keywords: string[];
+  fields: Bm25Field[];
   icon: Icon;
   href: string;
   isPage: boolean;
 }
+
+/** The most matches the box lists above the Ask row. */
+const MAX_MATCHES = 8;
+const ASK_ID = "docs-agent-ask";
 
 const indexes = new Map<string, Promise<SearchEntry[]>>();
 
@@ -60,7 +73,12 @@ function toItems(entries: SearchEntry[]): SearchItem[] {
       group: entry.section,
       label: entry.title,
       description: entry.section,
-      keywords: [entry.text],
+      fields: [
+        { text: entry.title, weight: 3 },
+        { text: entry.headings.map((heading) => heading.text).join(" "), weight: 2 },
+        { text: entry.section },
+        { text: entry.text },
+      ],
       icon: FileText,
       href: entry.href,
       isPage: true,
@@ -70,7 +88,7 @@ function toItems(entries: SearchEntry[]): SearchItem[] {
       group: entry.section,
       label: heading.text,
       description: entry.title,
-      keywords: [],
+      fields: [{ text: heading.text, weight: 3 }, { text: entry.title }],
       icon: Hash,
       href: `${entry.href}#${heading.id}`,
       isPage: false,
@@ -78,7 +96,10 @@ function toItems(entries: SearchEntry[]): SearchItem[] {
   ]);
 }
 
-/** The docs search: the app's search trigger, Cmd/Ctrl+K, and command palette. */
+/**
+ * The docs search and ask box: Cmd/Ctrl+K opens a palette that ranks pages and
+ * headings with BM25, and its last row sends the text to the docs agent.
+ */
 export function DocsSearch({
   locale,
   dir,
@@ -86,14 +107,25 @@ export function DocsSearch({
 }: {
   locale: string;
   dir: "ltr" | "rtl";
-  labels: {
-    search: string;
-    searchPlaceholder: string;
-    searchEmpty: string;
-    searchLoading: string;
-    searchError: string;
-    searchOpen: string;
-  };
+  labels: Pick<
+    DocsChrome,
+    | "search"
+    | "searchPlaceholder"
+    | "searchLoading"
+    | "searchError"
+    | "searchOpen"
+    | "askAgent"
+    | "askAgentHint"
+    | "ask"
+    | "agentTitle"
+    | "agentPlaceholder"
+    | "agentThinking"
+    | "agentRateLimited"
+    | "agentError"
+    | "agentClear"
+    | "agentClose"
+    | "agentSend"
+  >;
 }) {
   const router = useRouter();
   const [open, setOpen] = React.useState(false);
@@ -101,6 +133,8 @@ export function DocsSearch({
   const [entries, setEntries] = React.useState<SearchEntry[] | null>(null);
   const [failed, setFailed] = React.useState(false);
   const [activeIndex, setActiveIndex] = React.useState(0);
+  const [panelOpen, setPanelOpen] = React.useState(false);
+  const [request, setRequest] = React.useState<DocsAgentRequest | null>(null);
   const inputRef = React.useRef<HTMLInputElement | null>(null);
 
   React.useEffect(() => {
@@ -137,25 +171,50 @@ export function DocsSearch({
   }, [open, entries, locale]);
 
   const items = React.useMemo(() => (entries ? toItems(entries) : []), [entries]);
-
-  const filteredItems = React.useMemo(() => {
-    if (!query.trim()) return items.filter((item) => item.isPage);
-    return items.filter((item) =>
-      matchesQuery([item.label, item.description, ...item.keywords], query),
-    );
-  }, [items, query]);
-
-  const groups = React.useMemo(
-    () => [...new Set(filteredItems.map((item) => item.group))],
-    [filteredItems],
+  const index = React.useMemo(
+    () => buildBm25Index(items.map((item) => ({ item, fields: item.fields }))),
+    [items],
   );
 
+  const trimmed = query.trim();
+  const hits = React.useMemo(
+    () => (trimmed ? searchBm25(index, trimmed).slice(0, MAX_MATCHES) : []),
+    [index, trimmed],
+  );
+  const strongMatch = isStrongMatch(trimmed, hits[0]);
+
+  const askItem: SearchItem | null = trimmed
+    ? {
+        id: ASK_ID,
+        group: ASK_ID,
+        // Isolate the query so a Hebrew question keeps its order inside English copy.
+        label: fillChrome(labels.askAgent, { query: `\u2068${trimmed}\u2069` }),
+        description: labels.askAgentHint,
+        fields: [],
+        icon: Sparkle,
+        href: "",
+        isPage: false,
+      }
+    : null;
+
+  const matches = trimmed ? hits.map((hit) => hit.item) : items.filter((item) => item.isPage);
+  // Rows follow their group's best match, so the top match stays first.
+  const groups = [...new Set(matches.map((item) => item.group))];
+  const ordered = groups.flatMap((group) => matches.filter((item) => item.group === group));
+  const filteredItems = askItem ? [...ordered, askItem] : ordered;
+  const defaultIndex = askItem && !strongMatch ? filteredItems.length - 1 : 0;
+
   React.useEffect(() => {
-    setActiveIndex(0);
-  }, [filteredItems.length, query]);
+    setActiveIndex(defaultIndex);
+  }, [defaultIndex, query]);
 
   const selectItem = (item: SearchItem) => {
     setOpen(false);
+    if (item.id === ASK_ID) {
+      setPanelOpen(true);
+      setRequest({ question: trimmed, nonce: Date.now() });
+      return;
+    }
     router.push(item.href);
   };
 
@@ -173,13 +232,8 @@ export function DocsSearch({
     }
   };
 
-  const status = failed
-    ? labels.searchError
-    : !entries
-      ? labels.searchLoading
-      : filteredItems.length === 0
-        ? labels.searchEmpty
-        : null;
+  // The Ask row works without the index, so loading and errors only show alone.
+  const status = askItem ? null : failed ? labels.searchError : !entries ? labels.searchLoading : null;
 
   return (
     <>
@@ -266,26 +320,35 @@ export function DocsSearch({
             className="max-h-[min(28rem,60vh)] overflow-y-auto p-2"
           >
             {status === null ? (
-              groups.map((group) => {
+              [...groups, ...(askItem ? [ASK_ID] : [])].map((group) => {
                 const groupItems = filteredItems.filter((item) => item.group === group);
+                const isAsk = group === ASK_ID;
                 return (
-                  <section key={group} className="pb-2 last:pb-0">
-                    <p className="px-2 pb-1.5 pt-2 text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground/65">
-                      {group}
-                    </p>
+                  <section
+                    key={group}
+                    className={cn(
+                      "pb-2 last:pb-0",
+                      isAsk && groups.length > 0 && "mt-1 border-t border-border/60 pt-2",
+                    )}
+                  >
+                    {!isAsk && (
+                      <p className="px-2 pb-1.5 pt-2 text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground/65">
+                        {group}
+                      </p>
+                    )}
                     <div className="space-y-0.5">
                       {groupItems.map((item) => {
-                        const index = filteredItems.indexOf(item);
-                        const selected = activeIndex === index;
+                        const position = filteredItems.indexOf(item);
+                        const selected = activeIndex === position;
                         const ItemIcon = item.icon;
                         return (
                           <button
                             key={item.id}
-                            id={`docs-search-${index}`}
+                            id={`docs-search-${position}`}
                             type="button"
                             role="option"
                             aria-selected={selected}
-                            onMouseEnter={() => setActiveIndex(index)}
+                            onMouseEnter={() => setActiveIndex(position)}
                             onClick={() => selectItem(item)}
                             className={cn(
                               "group/item flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-start outline-none transition-[background-color,color] duration-100",
@@ -305,17 +368,24 @@ export function DocsSearch({
                               <ItemIcon className="size-[1.05rem]" aria-hidden="true" />
                             </span>
                             <span className="min-w-0 flex-1">
-                              <span className="block truncate text-sm font-medium">
+                              <span dir="auto" className="block truncate text-start text-sm font-medium">
                                 {item.label}
                               </span>
-                              <span className="mt-0.5 block truncate text-xs text-muted-foreground/75">
+                              <span
+                                dir="auto"
+                                className="mt-0.5 block truncate text-start text-xs text-muted-foreground/75"
+                              >
                                 {item.description}
                               </span>
                             </span>
                             {selected && (
                               <span className="hidden shrink-0 items-center gap-1.5 text-xs font-medium text-muted-foreground sm:flex">
-                                {labels.searchOpen}
-                                <ArrowUpRight className="size-3.5" aria-hidden="true" />
+                                {isAsk ? labels.ask : labels.searchOpen}
+                                {isAsk ? (
+                                  <PaperPlaneTilt className="size-3.5 rtl:-scale-x-100" aria-hidden="true" />
+                                ) : (
+                                  <ArrowUpRight className="size-3.5" aria-hidden="true" />
+                                )}
                               </span>
                             )}
                           </button>
@@ -334,6 +404,15 @@ export function DocsSearch({
           </div>
         </DialogContent>
       </Dialog>
+
+      <DocsAgentPanel
+        locale={locale}
+        dir={dir}
+        labels={labels}
+        request={request}
+        open={panelOpen}
+        onClose={() => setPanelOpen(false)}
+      />
     </>
   );
 }

@@ -21,6 +21,7 @@ _ENV_VARS = (
     "APP_HOSTED_APP_URL",
     "APP_HOSTED_API_URL",
     "APP_HOSTED_ALLOW_INSECURE_URL",
+    "APP_ENVIRONMENT",
 )
 _STAGING_APP = "https://staging.skynetml.com"
 _STAGING_API = "https://api-staging.skynetml.com"
@@ -189,3 +190,39 @@ def test_hosted_mode_ignores_the_link_urls(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("APP_HOSTED_API_URL", "http://api.example.test")
 
     assert Settings(_env_file=None).local_mode is False
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    [
+        ("", (_PRODUCTION_APP, _PRODUCTION_API)),
+        ("production", (_PRODUCTION_APP, _PRODUCTION_API)),
+        ("staging", (_STAGING_APP, _STAGING_API)),
+        ("skynet-pr-42", (_STAGING_APP, _STAGING_API)),
+    ],
+)
+def test_hosted_public_origins_follow_the_environment(
+    monkeypatch: pytest.MonkeyPatch, environment: str, expected: tuple[str, str]
+) -> None:
+    """A hosted deploy names staging origins on staging and previews, else production.
+
+    Args:
+        monkeypatch: Pytest fixture used to set the environment.
+        environment: The ``APP_ENVIRONMENT`` value of the deploy.
+        expected: The web app and API origins the deploy should name.
+    """
+    monkeypatch.setenv("APP_ENVIRONMENT", environment)
+
+    assert Settings(_env_file=None).public_origins == expected
+
+
+def test_local_public_origins_follow_the_build_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A staging Mac build names the staging origins.
+
+    Args:
+        monkeypatch: Pytest fixture used to set the environment.
+    """
+    _local(monkeypatch)
+    config_module.HOSTED_TARGET_STAMP.write_text("staging\n", encoding="utf-8")
+
+    assert Settings(_env_file=None).public_origins == (_STAGING_APP, _STAGING_API)

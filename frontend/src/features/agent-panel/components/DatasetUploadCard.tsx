@@ -274,28 +274,20 @@ export function DatasetUploadCard({
                 onDrop={onDrop}
                 disabled={disabled}
                 className={cn(
-                  "group w-full rounded-xl border-2 border-dashed",
-                  "px-4 py-5 flex flex-col items-center justify-center gap-2",
-                  "cursor-pointer transition-all duration-150 outline-none",
+                  "group flex h-[164px] w-full flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed px-4",
+                  "cursor-pointer bg-muted outline-none transition-colors duration-150",
                   "focus-visible:ring-2 focus-visible:ring-primary/45",
                   dragOver
-                    ? "border-primary-fill bg-primary-fill/10 scale-[1.01]"
-                    : "border-primary-fill/50 bg-white/50 dark:bg-white/5 hover:border-primary-fill/60 hover:bg-white/80 dark:hover:bg-white/10",
-                  "disabled:opacity-50 disabled:cursor-not-allowed",
+                    ? "border-primary bg-primary-fill/10"
+                    : "border-border hover:border-foreground/25",
+                  "disabled:cursor-not-allowed disabled:opacity-50",
                 )}
               >
-                <div
-                  className={cn(
-                    "size-9 rounded-full inline-flex items-center justify-center transition-colors",
-                    dragOver
-                      ? "bg-primary-fill text-primary-foreground"
-                      : "bg-primary-fill text-primary-foreground group-hover:bg-primary-hover",
-                  )}
-                >
-                  <UploadSimple className="size-4" />
+                <div className="inline-flex size-10 items-center justify-center rounded-full bg-border text-muted-foreground">
+                  <UploadSimple className="size-5" />
                 </div>
                 <div className="text-center">
-                  <div className="text-[0.8125rem] font-medium text-primary">
+                  <div className="text-sm font-medium text-primary">
                     {msg("auto.features.agent.panel.components.datasetuploadcard.drop_label")}
                   </div>
                 </div>

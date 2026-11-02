@@ -5,6 +5,7 @@ const TONE_CLASS = {
   primary: "bg-primary-fill",
   ai: "",
   success: "bg-[var(--success)]",
+  warning: "bg-[var(--warning)]",
   danger: "bg-destructive",
 } as const;
 
@@ -20,7 +21,7 @@ interface ProgressBarProps extends Omit<ComponentProps<"div">, "color"> {
   fillClassName?: string;
 }
 
-/** Linear progress bar or share meter. Extra children (e.g. a threshold marker) render inside the track. */
+/** Linear progress bar or share meter in the BoardUI style. Extra children (e.g. a threshold marker) render inside the track. */
 export function ProgressBar({
   value,
   max = 100,
@@ -41,7 +42,7 @@ export function ProgressBar({
       aria-valuemax={max}
       aria-valuenow={Math.round(value)}
       className={cn(
-        "relative w-full overflow-hidden rounded-full bg-muted",
+        "relative w-full overflow-hidden rounded-full bg-border",
         size === "sm" ? "h-1" : "h-1.5",
         className,
       )}
@@ -49,7 +50,7 @@ export function ProgressBar({
     >
       <div
         className={cn(
-          "h-full rounded-full transition-[width] duration-500 ease-out motion-reduce:transition-none",
+          "h-full rounded-full transition-[width] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
           color == null && TONE_CLASS[tone],
           fillClassName,
         )}
@@ -65,7 +66,7 @@ interface StorageUsageBarProps extends Omit<ProgressBarProps, "tone" | "color"> 
   over?: boolean;
 }
 
-/** Storage/quota usage meter: warm track, coffee fill, destructive when over quota. */
+/** Storage/quota usage meter: border-tone rail, primary fill, destructive when over quota. */
 export function StorageUsageBar({
   over = false,
   className,
@@ -74,8 +75,8 @@ export function StorageUsageBar({
 }: StorageUsageBarProps) {
   return (
     <ProgressBar
-      className={cn("bg-border-subtle", className)}
-      fillClassName={cn(over ? "bg-destructive" : "bg-primary-fill/70", fillClassName)}
+      className={className}
+      fillClassName={cn(over ? "bg-destructive" : "bg-primary-fill", fillClassName)}
       {...props}
     />
   );

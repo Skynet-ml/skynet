@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import socket
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -22,7 +21,7 @@ from sqlalchemy.pool import StaticPool
 
 from ... import config
 from ...billing import cli_dispatch
-from ...billing.tests.test_cli_runners import CODEX_EVENTS, calls, fake_cli, local_settings
+from ...billing.tests.test_cli_runners import CODEX_TURN, emitting, fake_app_server, local_settings, requests
 from ...local.cli_catalog import CLI_MODELS
 from ...local.cli_probe import CliStatus
 from ...service_gateway import language_models
@@ -135,7 +134,7 @@ def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[CliStatus]:
     Returns:
         The probe results the engine default reads; tests replace its items.
     """
-    fake_cli(tmp_path, "codex", f"print({chr(10).join(json.dumps(e) for e in CODEX_EVENTS)!r})")
+    fake_app_server(tmp_path, emitting(*CODEX_TURN))
     current = local_settings(tmp_path)
     for module in (config, agent_engine, engine_router_mod, model_router, language_models):
         monkeypatch.setattr(module, "settings", current)
@@ -402,8 +401,8 @@ def test_local_chat_turn_with_no_model_runs_on_codex_with_no_remote_call(
     )
     assert seen["reply"] == ["pong"]
     assert seen["cost"] == 0.0
-    [call] = calls(tmp_path, "codex")
-    assert call["argv"][call["argv"].index("--model") + 1] == CLI_MODELS["codex"][_CODEX_SLUG]
+    thread = next(message for message in requests(tmp_path) if message.get("method") == "thread/start")
+    assert thread["params"]["model"] == CLI_MODELS["codex"][_CODEX_SLUG]
     assert remote == []
 
 

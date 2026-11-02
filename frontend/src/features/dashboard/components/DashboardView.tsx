@@ -10,8 +10,8 @@ import { ChartBar, Table } from "@/shared/ui/icons";
 import { DashboardSkeleton } from "./DashboardSkeleton";
 import { Card } from "@/shared/ui/primitives/card";
 import {
-  SLIDING_PILL_TABS_LIST_CLASS,
-  SLIDING_PILL_TABS_TRIGGER_CLASS,
+  UNDERLINE_TABS_LIST_CLASS,
+  UNDERLINE_TABS_TRIGGER_CLASS,
   Tabs,
   TabsContent,
   TabsList,
@@ -435,13 +435,13 @@ export function DashboardView() {
           {mounted && (
             <Tabs value={activeTab} onValueChange={handleTabChange} data-setup="dashboard">
               {showAnalytics && (
-                <TabsList className={SLIDING_PILL_TABS_LIST_CLASS}>
-                  <TabsTrigger value="jobs" className={SLIDING_PILL_TABS_TRIGGER_CLASS}>
+                <TabsList className={UNDERLINE_TABS_LIST_CLASS}>
+                  <TabsTrigger value="jobs" className={UNDERLINE_TABS_TRIGGER_CLASS}>
                     {activeTab === "jobs" && (
                       <motion.span
                         layoutId="dashboardTabPill"
                         transition={tabPillTransition}
-                        className="absolute inset-0 z-0 rounded-md bg-primary-fill"
+                        className="absolute inset-x-0 -bottom-px z-0 h-0.5 bg-primary"
                         aria-hidden="true"
                       />
                     )}
@@ -450,12 +450,12 @@ export function DashboardView() {
                       {TERMS.optimizationPlural}
                     </span>
                   </TabsTrigger>
-                  <TabsTrigger value="analytics" className={SLIDING_PILL_TABS_TRIGGER_CLASS}>
+                  <TabsTrigger value="analytics" className={UNDERLINE_TABS_TRIGGER_CLASS}>
                     {activeTab === "analytics" && (
                       <motion.span
                         layoutId="dashboardTabPill"
                         transition={tabPillTransition}
-                        className="absolute inset-0 z-0 rounded-md bg-primary-fill"
+                        className="absolute inset-x-0 -bottom-px z-0 h-0.5 bg-primary"
                         aria-hidden="true"
                       />
                     )}

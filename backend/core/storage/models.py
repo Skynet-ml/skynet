@@ -1549,6 +1549,10 @@ class AgentConversationModel(Base):
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Unguessable public read-only link token; NULL when the chat is not shared.
+    share_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # When the current share link was made; NULL while the chat is not shared.
+    shared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
@@ -1559,6 +1563,7 @@ class AgentConversationModel(Base):
     __table_args__ = (
         Index("ix_agent_conversations_user_updated", "username", "updated_at"),
         Index("ix_agent_conversations_user_pinned", "username", "pinned"),
+        Index("ix_agent_conversations_share_token", "share_token", unique=True),
     )
 
 

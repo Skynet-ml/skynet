@@ -9,6 +9,7 @@ import {
   Database,
   FadersHorizontal,
   FileMagnifyingGlass,
+  Gear,
   ListChecks,
   MagicWand,
   MagnifyingGlass,
@@ -17,6 +18,7 @@ import {
   Play,
   PushPin,
   Scroll,
+  ShieldCheck,
   Sparkle,
   Square,
   Tag,
@@ -304,6 +306,21 @@ export const TOOL_META: Record<string, ToolMetaDef> = {
     severity: "info",
     icon: Books,
   },
+  change_setting: {
+    title: () => msg("agent.tool.change_setting.title"),
+    description: () => msg("agent.tool.change_setting.description"),
+    confirmLabel: () => msg("agent.tool.change_setting.confirm"),
+    severity: "warning",
+    icon: Gear,
+  },
+  // Asks in every trust mode, YOLO included (backend _ALWAYS_CONFIRM_TOOLS).
+  change_protected_setting: {
+    title: () => msg("agent.tool.change_protected_setting.title"),
+    description: () => msg("agent.tool.change_protected_setting.description"),
+    confirmLabel: () => msg("agent.tool.change_protected_setting.confirm"),
+    severity: "destructive",
+    icon: ShieldCheck,
+  },
 };
 
 // Read-only / lookup tools (no TOOL_META entry, no approval card) fall through
@@ -359,6 +376,9 @@ const TOOL_TITLES: Record<string, LocaleString> = {
   request_user_pair_inference: () => msg("auto.features.agent.panel.lib.tool.meta.literal.70"),
   get_grid_search_result_optimizations: () => msg("auto.features.agent.panel.lib.tool.meta.literal.77"),
   get_pair_test_results_optimizations: () => msg("auto.features.agent.panel.lib.tool.meta.literal.78"),
+  list_settings: () => msg("agent.tool.list_settings.title"),
+  get_setting: () => msg("agent.tool.get_setting.title"),
+  open_page: () => msg("agent.tool.open_page.title"),
 };
 
 function prettifyToolName(tool: string): string {

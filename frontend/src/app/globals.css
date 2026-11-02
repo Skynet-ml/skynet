@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "./boardui.css";
 
 /* Dark mode is class-driven: ThemeProvider (and the pre-paint script in
    layout.tsx) puts `.dark` on <html> for the Dark choice, or for System when
@@ -295,7 +296,7 @@
   --sidebar-border: #e6ded4;
   --sidebar-ring: #b4521f;
 
-  --skeleton-base: #ede6dd;
+  --skeleton-base: color-mix(in srgb, var(--text-1) 8%, transparent);
   --skeleton-highlight: #f6f2ed;
   --scrollbar-thumb: rgba(28, 22, 18, 0.18);
   --scrollbar-thumb-hover: rgba(28, 22, 18, 0.32);
@@ -413,7 +414,7 @@
   --sidebar-border: #483d34;
   --sidebar-ring: #e0935a;
 
-  --skeleton-base: #312a24;
+  --skeleton-base: color-mix(in srgb, var(--text-1) 8%, transparent);
   --skeleton-highlight: #3e342c;
   --scrollbar-thumb: rgba(255, 255, 255, 0.16);
   --scrollbar-thumb-hover: rgba(255, 255, 255, 0.3);

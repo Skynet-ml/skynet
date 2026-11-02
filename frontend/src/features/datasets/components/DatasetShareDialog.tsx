@@ -209,6 +209,9 @@ export function DatasetShareDialog({
     toast.success(msg("share.member_added"));
   };
 
+  // The Mac app cannot share these, linked or not, so it shows no share button at all.
+  if (isLocalMode()) return null;
+
   return (
     <>
       {!hideTrigger && (

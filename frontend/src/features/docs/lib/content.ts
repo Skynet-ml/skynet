@@ -10,7 +10,7 @@
 import { MCP_CLIENTS_BLOCK, searchText, extractHeadings } from "./markdown";
 import { DOCS_PAGES, docsHref, localizeDocsLinks, type DocsLocale, type DocsPage } from "./nav";
 import { mcpClientsMarkdown } from "@/shared/lib/mcp-clients";
-import { getSiteUrl } from "@/shared/lib/site-config";
+import { getSiteUrl, serviceUrls, withServiceUrls } from "@/shared/lib/site-config";
 
 // Whole modules, not `import: "default"`: with that option the production
 // build renames the text modules' default export but not the glob's lookup,
@@ -31,13 +31,13 @@ export function docsSource(page: DocsPage, locale: DocsLocale): string {
   const name = page.slug || "index";
   const source = SOURCES[`../content/${locale}/${name}.md`] ?? SOURCES[`../content/en/${name}.md`];
   if (source === undefined) throw new Error(`Missing docs source: ${name}.md`);
-  return localizeDocsLinks(source, locale);
+  return withServiceUrls(localizeDocsLinks(source, locale));
 }
 
 /** Replace the MCP clients placeholder with the generated client sections. */
 function expandBlocks(markdown: string, locale: DocsLocale): string {
   const block = new RegExp(`\`\`\`${MCP_CLIENTS_BLOCK}\\n\`\`\``, "g");
-  return markdown.replace(block, () => mcpClientsMarkdown(locale));
+  return markdown.replace(block, () => mcpClientsMarkdown(locale, serviceUrls().mcp));
 }
 
 /**

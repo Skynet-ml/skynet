@@ -62,6 +62,9 @@ import { TOUCH_FIELD } from "@/shared/ui/touch";
 import { SETUP_SETTING_EVENT, type SetupSettingDetail } from "@/features/experience";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { useLinkedAccount } from "@/shared/hooks/use-linked-account";
+import { hostedFeaturesAvailable } from "@/shared/lib/hosted-features";
+import { useHostedFeaturesAvailable } from "@/shared/hooks/use-hosted-features";
+import { SharedChatsSection } from "./SharedChatsSection";
 
 /** Localize a data-action failure: semantic backend codes when present. */
 function describeError(err: unknown, fallback: string): string {
@@ -148,6 +151,7 @@ export function PrivacyTab() {
   const local = isLocalMode();
   const linkedAccount = useLinkedAccount();
   const linked = linkedAccount?.linked ? linkedAccount : null;
+  const hostedAvailable = useHostedFeaturesAvailable();
   const copyName = local ? (linked?.name ?? linked?.email ?? "") : (session?.user?.name ?? "");
   const copyEmail = local ? (linked?.email ?? "") : email;
   const copySignedOut = local ? !linked : signedOut;
@@ -340,22 +344,34 @@ export function PrivacyTab() {
           </Button>
         </SettingsRow>
 
-        <CopyValueRow
-          icon={User}
-          label={msg("settings.privacy.copy_username.label")}
-          value={copyName}
-          signedOut={copySignedOut}
-        />
+        {hostedFeaturesAvailable(local, linkedAccount?.linked) && (
+          <>
+            <CopyValueRow
+              icon={User}
+              label={msg("settings.privacy.copy_username.label")}
+              value={copyName}
+              signedOut={copySignedOut}
+            />
 
-        <CopyValueRow
-          icon={At}
-          label={msg("settings.privacy.copy_email.label")}
-          value={copyEmail}
-          signedOut={copySignedOut}
-        />
+            <CopyValueRow
+              icon={At}
+              label={msg("settings.privacy.copy_email.label")}
+              value={copyEmail}
+              signedOut={copySignedOut}
+            />
+          </>
+        )}
       </div>
 
       <Separator />
+
+      {/* Hosted: signed-in users. Mac app: only while linked, since links live on the hosted account. */}
+      {hostedAvailable && (local || !signedOut) && (
+        <>
+          <SharedChatsSection />
+          <Separator />
+        </>
+      )}
 
       <div className="space-y-1">
         <SettingsRow

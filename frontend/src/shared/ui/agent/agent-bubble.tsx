@@ -58,9 +58,6 @@ export function AgentBubble({
   className,
 }: AgentBubbleProps) {
   const reduce = useReducedMotion();
-  // A plan there on mount belongs to a reopened chat and shows at once; one
-  // that streams in opens its line smoothly and writes itself in.
-  const [planOnMount] = React.useState(msg.plan);
   const visibleToolCalls = React.useMemo<
     Array<{ call: AgentToolCall; isRetry: boolean; index: number }>
   >(() => {
@@ -140,7 +137,6 @@ export function AgentBubble({
           streaming={turnStreaming}
           answering={hasText}
           plan={plan}
-          animatePlan={msg.plan !== planOnMount}
           renderStep={renderToolCall}
           stepKind={stepKind}
           durationMs={msg.stats?.durationMs}
@@ -176,7 +172,7 @@ export function AgentBubble({
           >
             <RevealText
               text={plan}
-              animate={msg.plan !== planOnMount}
+              animate={false}
               className="block text-sm leading-relaxed text-foreground/80"
             />
           </motion.div>

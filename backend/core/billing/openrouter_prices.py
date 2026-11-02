@@ -11,7 +11,9 @@ charge prices from this listing whenever a response did not report its own
 The listing is fetched lazily, refreshed hourly, and seeded by the model
 catalog build (which already downloads it). A failed fetch is retried at most
 once a minute so an OpenRouter outage never adds a network timeout to every
-charge. The module is a leaf: it imports nothing from the rest of ``core``.
+charge. When the listing is out of reach (the offline optimizer sandbox), the
+stored list prices of the offered models stand in for it. The module is a
+leaf: it imports nothing from the rest of ``core``.
 """
 
 from __future__ import annotations
@@ -54,6 +56,123 @@ _fetched_at = 0.0
 _failed_at = 0.0
 # Tests flip this off (see core/conftest.py) so pricing never depends on the network.
 fetch_enabled = True
+
+# The optimizer sandbox has no network, so it cannot fetch the listing, and
+# LiteLLM's bundled table lacks most offered slugs: without these rows every
+# proposer cap and cost there used the fallback rate (SKY-269). Copied from
+# MODELS_URL on 2026-11-02 for every model the catalog offers; a fresh
+# listing always wins.
+_LISTED: dict[str, dict[str, str]] = {
+    "anthropic/claude-haiku-5.5": {
+        "prompt": "0.0000001",
+        "completion": "0.0000005",
+        "input_cache_read": "0.00000001",
+        "input_cache_write": "0.000000125",
+    },
+    "anthropic/claude-opus-5.5": {
+        "prompt": "0.000004",
+        "completion": "0.00002",
+        "input_cache_read": "0.0000002",
+        "input_cache_write": "0.000005",
+    },
+    "anthropic/claude-sonnet-5.5": {
+        "prompt": "0.000002",
+        "completion": "0.00001",
+        "input_cache_read": "0.0000001",
+        "input_cache_write": "0.0000025",
+    },
+    "cohere/command-a-plus": {"prompt": "0.0000003", "completion": "0.0000015", "input_cache_read": "0.00000015"},
+    "deepseek/deepseek-v4-pro-0813": {
+        "prompt": "0.000000115",
+        "completion": "0.000004",
+        "input_cache_read": "0.00000011",
+    },
+    "google/gemini-3.5-flash-lite": {
+        "prompt": "0.0000003",
+        "completion": "0.0000025",
+        "input_cache_read": "0.00000003",
+        "input_cache_write": "0.0000000833333333333333",
+        "internal_reasoning": "0.0000025",
+    },
+    "google/gemini-3.8-flash": {
+        "prompt": "0.000000825",
+        "completion": "0.000004125",
+        "input_cache_read": "0.0000000825",
+        "input_cache_write": "0.0000000416666666666667",
+        "internal_reasoning": "0.000004125",
+    },
+    "google/gemini-4-argon": {
+        "prompt": "0.000002",
+        "completion": "0.00001",
+        "input_cache_read": "0.0000001",
+        "input_cache_write": "0.0000001875",
+        "internal_reasoning": "0.00001",
+    },
+    "meta/muse-glimmer-30b": {"prompt": "0.0000003", "completion": "0.0000012", "input_cache_read": "0.00000004"},
+    "meta/muse-spark-1.3": {"prompt": "0.00000125", "completion": "0.00000425", "input_cache_read": "0.00000015"},
+    "minimax/minimax-m3": {"prompt": "0.0000003", "completion": "0.0000012", "input_cache_read": "0.00000006"},
+    "minimax/minimax-m3.1-flash": {
+        "prompt": "0.000000075",
+        "completion": "0.0000003",
+        "input_cache_read": "0.0000000075",
+    },
+    "mistralai/mistral-large-4-0": {"prompt": "0.0000007", "completion": "0.0000021", "input_cache_read": "0.00000007"},
+    "mistralai/mistral-small-2603": {
+        "prompt": "0.00000015",
+        "completion": "0.0000006",
+        "input_cache_read": "0.000000015",
+    },
+    "moonshotai/kimi-k3": {"prompt": "0.000000192", "completion": "0.000015", "input_cache_read": "0.000000182"},
+    "moonshotai/kimi-k3.1-pro": {"prompt": "0.000002", "completion": "0.00001", "input_cache_read": "0.0000002"},
+    "nvidia/nemotron-3-ultra-550b-a55b": {
+        "prompt": "0.0000006",
+        "completion": "0.0000024",
+        "input_cache_read": "0.00000012",
+    },
+    "nvidia/nemotron-3.5-lightning": {
+        "prompt": "0.00000007",
+        "completion": "0.0000002",
+        "input_cache_read": "0.00000004",
+    },
+    "nvidia/nemotron-3.5-super-vl": {
+        "prompt": "0.00000015",
+        "completion": "0.0000005",
+        "input_cache_read": "0.00000002",
+    },
+    "openai/gpt-6-astra": {
+        "prompt": "0.00001",
+        "completion": "0.00005",
+        "input_cache_read": "0.000001",
+        "input_cache_write": "0.0000125",
+    },
+    "openai/gpt-6-luna": {
+        "prompt": "0.0000001",
+        "completion": "0.0000005",
+        "input_cache_read": "0.00000001",
+        "input_cache_write": "0.000000125",
+    },
+    "openai/gpt-6.1-sol": {
+        "prompt": "0.000002",
+        "completion": "0.00001",
+        "input_cache_read": "0.0000001",
+        "input_cache_write": "0.0000025",
+    },
+    "qwen/qwen3.8-27b": {"prompt": "0.00000015", "completion": "0.000001875", "input_cache_read": "0.0000000375"},
+    "qwen/qwen3.8-max-0902": {"prompt": "0.000002", "completion": "0.000006", "input_cache_read": "0.00000025"},
+    "stepfun/step-5-preview": {"prompt": "0.000001", "completion": "0.0000027", "input_cache_read": "0.0000001"},
+    "thinkingmachines/inkling": {"prompt": "0.000001", "completion": "0.00000405", "input_cache_read": "0.00000017"},
+    "thinkingmachines/inkling-small": {
+        "prompt": "0.00000045",
+        "completion": "0.0000012",
+        "input_cache_read": "0.0000001",
+    },
+    "upstage/solar-pro4": {"prompt": "0.00000015", "completion": "0.0000006", "input_cache_read": "0.00000003"},
+    "x-ai/grok-4.7": {"prompt": "0.000002", "completion": "0.000006", "input_cache_read": "0.0000005"},
+    "xiaomi/mimo-v2.6-flash": {"prompt": "0.00000014", "completion": "0.00000028", "input_cache_read": "0.0000000028"},
+    "xiaomi/mimo-v2.6-pro": {"prompt": "0.000000435", "completion": "0.00000087", "input_cache_read": "0.0000000036"},
+    "z-ai/glm-5.3": {"prompt": "0.00000008", "completion": "0.0000036", "input_cache_read": "0.000000076"},
+    "z-ai/glm-5.3-flash": {"prompt": "0.0000000285", "completion": "0.0000000923", "input_cache_read": "0.0000000285"},
+}
 
 
 def _rate(pricing: Mapping[str, Any], field: str) -> float | None:
@@ -169,14 +288,19 @@ def live_prices(model_id: str) -> TokenPrices | None:
         model_id: The model id as billed (LiteLLM or bare OpenRouter slug).
 
     Returns:
-        The model's prices, or ``None`` when the listing does not price it.
+        The model's prices, else its stored list prices, or ``None`` when
+        neither prices it.
     """
     _refresh_if_stale()
+    candidates = _slug_candidates(model_id)
     with _lock:
-        for slug in _slug_candidates(model_id):
+        for slug in candidates:
             prices = _prices.get(slug)
             if prices is not None:
                 return prices
+    for slug in candidates:
+        if slug in _LISTED:
+            return prices_from_pricing(_LISTED[slug])
     return None
 
 

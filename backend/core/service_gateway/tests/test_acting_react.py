@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 import dspy
+import litellm
 import pytest
+from dspy.adapters.chat_adapter import ChatAdapter
 from dspy.adapters.types.tool import ToolCalls
 from dspy.utils.exceptions import AdapterParseError
 
@@ -126,3 +131,66 @@ def test_program_uses_the_acting_predictor() -> None:
 
     assert isinstance(program.react, _ActingPredict)
     assert "tool_calls" in program.react.signature.output_fields
+
+
+class _ThinkingLM(dspy.BaseLM):
+    """An LM that thinks natively on its first step, then names no tool until forced to submit."""
+
+    def __init__(self) -> None:
+        """Start with no recorded requests."""
+        super().__init__(model="scripted")
+        self.requests: list[dict[str, Any]] = []
+
+    @property
+    def supports_function_calling(self) -> bool:
+        """Report native tool-call support."""
+        return True
+
+    @property
+    def supports_reasoning(self) -> bool:
+        """Report native reasoning support."""
+        return True
+
+    def forward(self, prompt=None, messages=None, **kwargs):
+        """Record the request and answer by step.
+
+        Args:
+            prompt: Unused legacy prompt.
+            messages: The rendered chat messages.
+            **kwargs: Provider kwargs, including ``tool_choice``.
+
+        Returns:
+            An OpenAI-shaped response.
+        """
+        self.requests.append({"messages": messages, **kwargs})
+        message: dict[str, Any] = {"role": "assistant", "content": "no tool"}
+        if len(self.requests) == 1:
+            call = {"id": "c1", "type": "function", "function": {"name": "alpha", "arguments": json.dumps({"x": "a"})}}
+            message = {"role": "assistant", "content": None, "tool_calls": [call], "reasoning_content": "PRIVATE"}
+        elif isinstance(kwargs.get("tool_choice"), dict):
+            call = {"id": "c9", "type": "function", "function": {"name": "submit", "arguments": '{"answer": "done"}'}}
+            message = {"role": "assistant", "content": None, "tool_calls": [call]}
+        return litellm.ModelResponse(
+            model="scripted",
+            choices=[{"index": 0, "finish_reason": "stop", "message": message}],
+            usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        )
+
+
+def test_forced_submit_never_replays_native_thinking() -> None:
+    """The forced submit neither replays earlier thinking nor asks for reasoning as text.
+
+    Anthropic's safeguards block that prompt as reasoning extraction.
+    """
+    lm = _ThinkingLM()
+    program = ActingReActV2(_Sig, tools=[dspy.Tool(func=lambda x: x, name="alpha", desc="echo")], max_iters=3)
+
+    with dspy.context(lm=lm, adapter=ChatAdapter(use_native_function_calling=True)):
+        prediction = program(question="q")
+
+    forced = lm.requests[-1]
+    assert forced["tool_choice"] == {"type": "function", "function": {"name": "submit"}}
+    rendered = json.dumps(forced["messages"])
+    assert "PRIVATE" not in rendered
+    assert "next_thought" not in rendered
+    assert prediction.answer == "done"

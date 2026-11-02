@@ -9,6 +9,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { getActiveDir, getActiveIntlLocale } from "@/shared/lib/runtime-locale";
+import { formatMessageTime } from "./message-time";
 import { outputTokensPerSecond } from "./turn-stats";
 import type { TurnStats } from "./types";
 
@@ -18,6 +19,8 @@ interface MessageActionsProps {
   /** Concrete model the Auto Router picked for this turn, when known. */
   servedModel?: string | null;
   stats?: TurnStats | null;
+  /** When the message was sent, in epoch ms; no time shows without it. */
+  createdAt?: number;
   onRegenerate?: () => void;
   className?: string;
 }
@@ -70,6 +73,7 @@ export function MessageActions({
   model,
   servedModel,
   stats,
+  createdAt,
   onRegenerate,
   className,
 }: MessageActionsProps) {
@@ -164,6 +168,23 @@ export function MessageActions({
           </TooltipContent>
         </Tooltip>
       )}
+      <MessageTime createdAt={createdAt} />
     </div>
+  );
+}
+
+/** The muted send time beside a message's actions; nothing when unknown. */
+export function MessageTime({ createdAt }: { createdAt?: number }) {
+  const label = formatMessageTime(createdAt, getActiveIntlLocale());
+  if (!label) return null;
+  return (
+    // dir="auto" keeps "8:05 AM" in order inside an RTL page.
+    <time
+      dir="auto"
+      dateTime={new Date(createdAt as number).toISOString()}
+      className="px-1 text-[0.6875rem] tabular-nums text-muted-foreground"
+    >
+      {label}
+    </time>
   );
 }

@@ -34,6 +34,7 @@ from ..optimization.tool_overlay import (
     _apply_tool_name_overrides,
     _assert_tool_set_matches,
 )
+from ..optimization.training_ground.run_react import HUMAN_CONFIRM_ONLY_TOOLS
 from .code import ReactReplyStream, ReasoningStreamListener, _format_agent_error
 from .constants import REASONING_FIELD
 from .generalist import (
@@ -126,7 +127,8 @@ async def _drive_react_chat(
 
     The serve materializer's cached program binds its roster to a dead session
     and is shared across requests, so we build a throwaway program here: source
-    the roster from a live MCP session, drift-check it against the training-time
+    the roster from a live MCP session (minus ``HUMAN_CONFIRM_ONLY_TOOLS``,
+    which no served chat may run), drift-check it against the training-time
     snapshot, re-apply the GEPA tool-wording overlay + renames, wrap each tool
     for approval, then construct ``ReActV2`` (which adds its own ``submit``) and
     load the optimized state.
@@ -156,7 +158,11 @@ async def _drive_react_chat(
         listing = await session.list_tools()
         tool_source = react_overlay.tool_source or {}
         tool_filter = tool_source.get("tool_filter") if isinstance(tool_source, dict) else None
-        tools = [dspy.Tool.from_mcp_tool(session, tool) for tool in listing.tools]
+        tools = [
+            dspy.Tool.from_mcp_tool(session, tool)
+            for tool in listing.tools
+            if tool.name not in HUMAN_CONFIRM_ONLY_TOOLS
+        ]
         tools = _filter_tools(tools, tool_filter)
 
         # Strict: the live chat must run against the exact tool surface the run

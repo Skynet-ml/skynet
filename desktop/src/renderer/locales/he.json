@@ -28,6 +28,7 @@
   "sign_in.skip": "להמשיך בלי להתחבר",
   "sign_in.unavailable": "ההתחברות לא זמינה בגרסה הזו.",
   "sign_in.failed": "ההתחברות לא הושלמה.",
+  "sign_in.unreachable": "ה-Mac הזה לא מצליח להגיע ל-skynetml.com. כדאי לבדוק את הרשת ולנסות שוב.",
   "sign_in.declined": "ה-Mac הזה לא קושר לחשבון. אפשר לנסות שוב או להמשיך בלי להתחבר.",
   "ready.title": "Skynet מוכן",
   "error.title": "Skynet לא הצליח לעלות",

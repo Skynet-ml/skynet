@@ -1376,6 +1376,13 @@ async def test_turn_replays_history_natively_and_streams_the_submit(monkeypatch:
     assert events[0]["event"] == "turn_metadata"
     assert events[0]["data"]["allowed_tools"] == ["list_models_for_agent", "share_plan"]
     assert [e["event"] for e in events if e["event"] in ("tool_start", "tool_end")] == ["tool_start", "tool_end"]
+    # One clear per loop step, so a pending row whose call never ran is dropped.
+    assert [e["event"] for e in events if e["event"] in ("tool_pending_clear", "tool_start")] == [
+        "tool_pending_clear",
+        "tool_start",
+        "tool_pending_clear",
+    ]
+    assert not [e for e in events if e["event"] == "status_patch"]
 
 
 class _ThinkingOnlyLM(_ScriptedLM):

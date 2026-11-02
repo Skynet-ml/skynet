@@ -5,8 +5,12 @@ import { AnimatePresence, motion } from "framer-motion";
 
 import type { ActivityKind } from "@/shared/lib/activity-summary";
 
+import { formatMsg } from "@/shared/lib/messages";
+import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
+
 import { AgentBubble } from "./agent-bubble";
 import { MessageActions } from "./message-actions";
+import { startsTimeGroup, timeDividerLabel } from "./message-time";
 import { TtftIndicator } from "./ttft-indicator";
 import { UserBubble, UserBubbleEditor } from "./user-bubble";
 import type { AgentMessage, AgentThinking, AgentToolCall } from "./types";
@@ -58,6 +62,8 @@ export function ChatTranscript({
   trailing,
 }: ChatTranscriptProps) {
   const [editingIndex, setEditingIndex] = React.useState<number | null>(null);
+  // "Today" and "Yesterday" on the dividers count from when the chat opened.
+  const [now] = React.useState(() => Date.now());
   const [editDraft, setEditDraft] = React.useState("");
   const isEditingAny = editingIndex !== null;
 
@@ -128,7 +134,7 @@ export function ChatTranscript({
     [streaming, editAndResend],
   );
 
-  const renderPairBody = (pair: Pair) => {
+  const renderPairBody = (pair: Pair, divider: string | null) => {
     const isEditing = pair.user !== null && editingIndex === pair.user.index;
     const agentMsg = pair.agent;
     const agentText = agentMsg?.content.trim() ?? "";
@@ -161,6 +167,11 @@ export function ChatTranscript({
 
     return (
       <>
+        {divider && (
+          <div className="flex justify-center pt-1">
+            <span dir="auto" className="text-[0.6875rem] tabular-nums text-muted-foreground">{divider}</span>
+          </div>
+        )}
         {pair.user &&
           (isEditing ? (
             <UserBubbleEditor
@@ -173,6 +184,7 @@ export function ChatTranscript({
           ) : (
             <UserBubble
               content={pair.user.msg.content}
+              createdAt={pair.user.msg.createdAt}
               editable={!streaming}
               onEdit={() => pair.user && startEdit(pair.user.index, pair.user.msg.content)}
             />
@@ -200,6 +212,7 @@ export function ChatTranscript({
                   model={agentMsg.model}
                   servedModel={agentMsg.servedModel}
                   stats={agentMsg.stats}
+                  createdAt={agentMsg.createdAt}
                   onRegenerate={
                     pair.user
                       ? () =>
@@ -222,9 +235,30 @@ export function ChatTranscript({
     return pair.user.index <= editingIndex;
   });
 
+  // A centered "Today 8:14 PM" opens each group of turns: the first timed
+  // turn, and any turn after a long quiet gap or on a new day.
+  const locale = getActiveIntlLocale();
+  // A chat left open past midnight reads its days from the newest turn.
+  const today = visiblePairs.reduce(
+    (latest, p) => Math.max(latest, p.user?.msg.createdAt ?? p.agent?.createdAt ?? 0),
+    now,
+  );
+  let prevTime: number | undefined;
+  const dividers = visiblePairs.map((pair) => {
+    const time = pair.user?.msg.createdAt ?? pair.agent?.createdAt;
+    const opens = startsTimeGroup(prevTime, time);
+    if (time != null) prevTime = time;
+    return opens && time != null
+      ? timeDividerLabel(time, today, locale, {
+          today: (t) => formatMsg("shared.agent.today_at", { time: t }),
+          yesterday: (t) => formatMsg("shared.agent.yesterday_at", { time: t }),
+        })
+      : null;
+  });
+
   const pairsNode = animatePairs ? (
     <AnimatePresence initial={false}>
-      {visiblePairs.map((pair) => (
+      {visiblePairs.map((pair, i) => (
         <motion.div
           key={pair.key}
           initial={{ opacity: 0, y: 4 }}
@@ -232,14 +266,14 @@ export function ChatTranscript({
           transition={{ duration: 0.18, ease: [0.2, 0.8, 0.2, 1] }}
           className="space-y-3"
         >
-          {renderPairBody(pair)}
+          {renderPairBody(pair, dividers[i] ?? null)}
         </motion.div>
       ))}
     </AnimatePresence>
   ) : (
-    visiblePairs.map((pair) => (
+    visiblePairs.map((pair, i) => (
       <div key={pair.key} className="space-y-3">
-        {renderPairBody(pair)}
+        {renderPairBody(pair, dividers[i] ?? null)}
       </div>
     ))
   );

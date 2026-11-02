@@ -23,6 +23,10 @@ export interface RuntimeEnv {
   // Present (and true) only when the server runs with APP_LOCAL_MODE=1, the
   // single-user desktop build; hosted deploys never serialize the key.
   localMode?: true;
+  // The hosted app the Mac app links to (docs, sign-in), from APP_HOSTED_APP_URL.
+  // The desktop sets it from the build's hosted target stamp; hosted deploys
+  // leave it unset.
+  hostedAppUrl?: string;
 }
 
 declare global {
@@ -45,6 +49,7 @@ export function getServerRuntimeEnv(): RuntimeEnv {
     appVersion:
       process.env.APP_VERSION ?? process.env.NEXT_PUBLIC_APP_VERSION ?? DEFAULT_APP_VERSION,
     ...(process.env.APP_LOCAL_MODE === "1" ? { localMode: true as const } : {}),
+    ...(process.env.APP_HOSTED_APP_URL ? { hostedAppUrl: process.env.APP_HOSTED_APP_URL } : {}),
   };
 }
 
@@ -66,6 +71,7 @@ export function getRuntimeEnv(): RuntimeEnv {
     appVersion:
       injected?.appVersion ?? process.env.NEXT_PUBLIC_APP_VERSION ?? DEFAULT_APP_VERSION,
     ...(injected?.localMode === true ? { localMode: true as const } : {}),
+    ...(injected?.hostedAppUrl ? { hostedAppUrl: injected.hostedAppUrl } : {}),
   };
 }
 

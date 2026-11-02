@@ -16,9 +16,9 @@ import {
   SheetTitle,
 } from "@/shared/ui/primitives/sheet";
 import {
-  SLIDING_PILL_TABS_INDICATOR_CLASS,
-  SLIDING_PILL_TABS_LIST_CLASS,
-  SLIDING_PILL_TABS_TRIGGER_CLASS,
+  UNDERLINE_TABS_INDICATOR_CLASS,
+  UNDERLINE_TABS_LIST_CLASS,
+  UNDERLINE_TABS_TRIGGER_CLASS,
   Tabs,
   TabsList,
   TabsTrigger,
@@ -32,7 +32,7 @@ import {
   type TerminalCommand,
   type TerminalEntry,
 } from "../lib/check-terminal";
-import { slidingPillStyle, Stat } from "./run-stat";
+import { underlineTabStyle, Stat } from "./run-stat";
 
 // Within this distance of the end the reader is following along, as in the agent transcript.
 const STICK_PX = 48;
@@ -413,17 +413,17 @@ export function CheckTerminalSheet({
             value={phase ?? undefined}
             onValueChange={(value) => onPhaseChange(value as CheckTerminalPhase)}
           >
-            <TabsList className={SLIDING_PILL_TABS_LIST_CLASS}>
+            <TabsList className={UNDERLINE_TABS_LIST_CLASS}>
               <div
-                className={SLIDING_PILL_TABS_INDICATOR_CLASS}
-                style={slidingPillStyle(Math.max(0, index), phases.length)}
+                className={UNDERLINE_TABS_INDICATOR_CLASS}
+                style={underlineTabStyle(Math.max(0, index), phases.length)}
                 aria-hidden="true"
               />
               {phases.map((row) => (
                 <TabsTrigger
                   key={row.key}
                   value={row.key}
-                  className={SLIDING_PILL_TABS_TRIGGER_CLASS}
+                  className={UNDERLINE_TABS_TRIGGER_CLASS}
                 >
                   <span className="truncate">{row.label}</span>
                 </TabsTrigger>

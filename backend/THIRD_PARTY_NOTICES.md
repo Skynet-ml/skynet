@@ -39,11 +39,9 @@ own virtual environment at `/opt/shinka/venv` only in sandbox images built with
 images do not contain it); outside such an image, a run installs it into
 a private virtual environment inside the run's sandbox.
 When bundled, each package's license text is in its `dist-info` folder. Most are MIT, BSD or
-Apache-2.0; certifi and tqdm are MPL-2.0, `Levenshtein` and
+Apache-2.0; certifi and tqdm are MPL-2.0, and `Levenshtein` and
 `python-Levenshtein` 0.27.5 are GPL-2.0-or-later
-(https://github.com/rapidfuzz/Levenshtein/tree/v0.27.5), and `imageio-ffmpeg`
-0.6.0 (BSD-2-Clause) carries a static FFmpeg 7.0.2 executable built as GPL-3.0-or-later
-(https://github.com/imageio/imageio-ffmpeg/tree/v0.6.0, FFmpeg source: https://ffmpeg.org/releases/ffmpeg-7.0.2.tar.xz).
+(https://github.com/rapidfuzz/Levenshtein/tree/v0.27.5).
 
 ## LGPL Python dependencies
 

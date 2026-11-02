@@ -325,6 +325,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       if (fresh) res = await send(fresh);
     }
   } catch (err) {
+    // A caller's own abort is not a network drop: pass it on unreported.
+    if (init?.signal?.aborted) throw err;
     // A network drop is caught and toasted upstream, so without this Sentry
     // would only ever hear about it if it escaped as an uncaught exception.
     reportHandledError(err, {
@@ -840,6 +842,8 @@ export interface DesktopLinkAuthorizeRequest {
   code_challenge_method: "S256";
   scope: string;
   device_name: string;
+  /** Session profile picture; hosted keeps it so the Mac app can show it. */
+  image?: string;
 }
 
 /** Approve a Mac link for the signed-in user; returns a 60 s single-use link code. */
@@ -4188,6 +4192,26 @@ export async function postAgentSteer(steerKey: string, text: string): Promise<st
     body: JSON.stringify({ steer_key: steerKey, text }),
   });
   return String(res.id);
+}
+
+/** Ask for the message the user would likely send next, for the composer's
+ *  Tab-to-accept hint. Resolves "" when there is none; the server returns ""
+ *  instead of an error when the balance or the model blocks it. */
+export async function fetchNextPromptSuggestion(
+  body: {
+    turns: Array<{ role: "user" | "assistant"; content: string }>;
+    actions: string[];
+    locale: string;
+    model?: string | null;
+  },
+  signal?: AbortSignal,
+): Promise<string> {
+  const res = await request<{ suggestion?: string }>("/optimizations/agent-suggest", {
+    method: "POST",
+    body: JSON.stringify(body),
+    signal,
+  });
+  return typeof res.suggestion === "string" ? res.suggestion : "";
 }
 
 /** Read a `steer_applied` event's payload. */

@@ -8,6 +8,7 @@ if (window.location.protocol === "file:") {
     recheck: () => ipcRenderer.invoke("onboarding:recheck"),
     continueAnyway: () => ipcRenderer.invoke("onboarding:continue"),
     copy: (text: string) => ipcRenderer.invoke("onboarding:copy", text),
+    fit: (height: number) => ipcRenderer.invoke("onboarding:fit", height),
     openLogs: () => ipcRenderer.invoke("onboarding:open-logs"),
     openDockerDownload: () => ipcRenderer.invoke("onboarding:open-docker"),
     signIn: () => ipcRenderer.invoke("onboarding:sign-in"),
@@ -17,5 +18,19 @@ if (window.location.protocol === "file:") {
       ipcRenderer.on("onboarding:state", handler);
       return () => ipcRenderer.removeListener("onboarding:state", handler);
     },
+  });
+} else {
+  // The web app marks its dark theme with a "dark" class on <html>. The main
+  // process picks the Dock icon and the window background from it.
+  let sent: string | null = null;
+  const report = () => {
+    const theme = document.documentElement.classList.contains("dark") ? "dark" : "light";
+    if (theme === sent) return;
+    sent = theme;
+    ipcRenderer.send("theme:changed", theme);
+  };
+  window.addEventListener("DOMContentLoaded", () => {
+    report();
+    new MutationObserver(report).observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
   });
 }

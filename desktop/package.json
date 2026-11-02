@@ -14,7 +14,7 @@
   "scripts": {
     "build": "node scripts/bundle-resources.mjs app",
     "bundle:stack": "node scripts/bundle-resources.mjs stack",
-    "start": "npm run build && electron .",
+    "start": "node scripts/bundle-resources.mjs start",
     "dev": "node scripts/bundle-resources.mjs dev",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
@@ -31,5 +31,12 @@
     "esbuild": "0.28.2",
     "typescript": "7.0.2",
     "vitest": "5.0.5"
+  },
+  "overrides": {
+    "@electron/asar": "4.3.1",
+    "@electron/universal": "3.0.6",
+    "filelist": "2.0.2",
+    "glob": "14.0.2",
+    "minimatch": "11.0.1"
   }
 }

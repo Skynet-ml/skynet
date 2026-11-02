@@ -1,0 +1,110 @@
+/* BoardUI motion for the shared components (SKY-263). Radix sets
+   data-state on tooltip and menu content; these keyframes replace the
+   tw-animate classes those components used before. */
+
+.bui-tooltip[data-state="delayed-open"],
+.bui-tooltip[data-state="instant-open"] {
+  animation: bui-tooltip-in 200ms ease-out;
+}
+.bui-tooltip[data-state="closed"] {
+  animation: bui-tooltip-out 150ms ease-in forwards;
+}
+@keyframes bui-tooltip-in {
+  from {
+    opacity: 0;
+    scale: 0.9;
+    filter: blur(4px);
+  }
+}
+@keyframes bui-tooltip-out {
+  to {
+    opacity: 0;
+    scale: 0.9;
+    filter: blur(4px);
+  }
+}
+
+.bui-menu[data-state="open"] {
+  animation: bui-menu-in 150ms ease-out;
+}
+.bui-menu[data-state="closed"] {
+  animation: bui-menu-out 150ms ease-in forwards;
+}
+@keyframes bui-menu-in {
+  from {
+    opacity: 0;
+    scale: 0.95;
+    filter: blur(2px);
+  }
+}
+@keyframes bui-menu-out {
+  to {
+    opacity: 0;
+    scale: 0.95;
+    filter: blur(2px);
+  }
+}
+
+@keyframes bui-composer-loader-dash {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -100;
+  }
+}
+
+/* react-loading-skeleton draws its own gradient sweep. The BoardUI sheen
+   replaces it: a thin bright line with a glow trailing behind it. */
+html .react-loading-skeleton {
+  --bui-skeleton-line: rgb(255 255 255 / 0.9);
+  --bui-skeleton-glow: rgb(255 255 255 / 0.55);
+  --bui-skeleton-bloom: rgb(255 255 255 / 0.35);
+  isolation: isolate;
+}
+html.dark .react-loading-skeleton {
+  --bui-skeleton-line: rgb(255 255 255 / 0.2);
+  --bui-skeleton-glow: rgb(255 255 255 / 0.08);
+  --bui-skeleton-bloom: rgb(255 255 255 / 0.04);
+}
+html .react-loading-skeleton::after {
+  background:
+    linear-gradient(90deg, transparent, var(--bui-skeleton-line)) right / 2px 100% no-repeat,
+    linear-gradient(90deg, transparent, var(--bui-skeleton-glow)) right / 72px 100% no-repeat,
+    linear-gradient(90deg, transparent, var(--bui-skeleton-bloom)) right / 240px 100% no-repeat;
+  transform: none;
+  translate: -100% 0;
+  animation: bui-skeleton-sheen 2.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+html[dir="rtl"] .react-loading-skeleton::after {
+  scale: -1 1;
+  animation-direction: reverse;
+}
+@keyframes bui-skeleton-sheen {
+  0% {
+    translate: -100% 0;
+  }
+  60%,
+  100% {
+    translate: 100% 0;
+  }
+}
+@keyframes bui-skeleton-pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bui-tooltip,
+  .bui-menu,
+  .bui-composer-loader-rect {
+    animation: none !important;
+  }
+  html .react-loading-skeleton::after {
+    display: none;
+  }
+  html .react-loading-skeleton {
+    animation: bui-skeleton-pulse 2s ease-in-out infinite;
+  }
+}

@@ -61,3 +61,9 @@ test("signed-out pages load the brand icons and artwork", () => {
     assert.equal(proxyRoute("staging.skynetml.com", path, {}), "pass", path);
   }
 });
+
+test("a shared agent chat opens signed-out; an optimization share link stays gated", () => {
+  assert.equal(proxyRoute("staging.skynetml.com", "/share/chat/abc123", {}), "pass");
+  assert.equal(proxyRoute("staging.skynetml.com", "/share/abc123", {}), "auth");
+  assert.equal(proxyRoute("staging.skynetml.com", "/share/chat", {}), "auth");
+});

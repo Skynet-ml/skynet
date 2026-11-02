@@ -37,6 +37,8 @@ export interface AgentMessage {
   thinkingSegments?: readonly ThinkingSegment[];
   /** What the agent said it would do this turn, shown above its activity. */
   plan?: string | null;
+  /** When the message was sent, in epoch ms. Older saved messages have none. */
+  createdAt?: number;
 }
 
 /** Token usage, cost and timing of one agent turn, as the backend measured it. */

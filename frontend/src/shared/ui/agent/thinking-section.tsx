@@ -10,6 +10,7 @@ import { formatMsg, msg } from "@/shared/lib/messages";
 import { splitSummary, thoughtSeconds } from "@/shared/lib/thinking-segments";
 
 import { RevealText } from "./reveal-text";
+import { ThinkingDots } from "./thinking-dots";
 import type { AgentThinking } from "./types";
 
 // Lazy for the same reason as in agent-bubble: the parser stays out of the
@@ -90,14 +91,18 @@ export function ThinkingSection({ thinking, compact = false }: ThinkingSectionPr
         className="group relative flex w-full items-start gap-2 py-1 text-start text-[0.8125rem] leading-5 text-muted-foreground transition-colors enabled:cursor-pointer enabled:hover:text-foreground"
       >
         {/* Rows align to the first line: a summary wraps in full, never cut. */}
-        <Brain className="mt-[3px] size-3.5 shrink-0" aria-hidden />
+        {isThinking ? (
+          <ThinkingDots className="mt-[3px] shrink-0 text-primary" />
+        ) : (
+          <Brain className="mt-[3px] size-3.5 shrink-0" aria-hidden />
+        )}
         {showSummary && summary && (
           <>
             <RevealText
               text={detail}
               lead={heading}
               leadClassName="font-medium text-foreground"
-              animate={summary !== summaryOnMount}
+              animate={false}
               className="min-w-0 break-words text-foreground/80"
             />
             <motion.span
