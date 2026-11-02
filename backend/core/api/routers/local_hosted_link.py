@@ -72,7 +72,8 @@ _MARK_LIGHT = base64.b64encode((_ASSETS / "hoatzin-light-112.webp").read_bytes()
 _MARK_DARK = base64.b64encode((_ASSETS / "hoatzin-dark-112.webp").read_bytes()).decode("ascii")
 
 # The desktop app has no route for this URL, so it only logs it. Opening any
-# skynet:// URL makes macOS bring the app to the front, which is all we need.
+# skynet:// URL makes macOS activate the app, which brings its window to the
+# front. A minimized window stays in the Dock until the desktop app restores it.
 _APP_URL = "skynet://open"
 
 _CHECK_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>'
