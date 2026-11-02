@@ -2,19 +2,30 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { afterEach, beforeEach, test } from "node:test";
 
-// The real modules pull in the generated catalogs and the fetch layer; the
-// helper only needs the error class, a code lookup and a key lookup.
+// The real fetch layer runs so the tests see the errors its helpers throw.
+// Its own imports, the catalogs and the message lookup are stubbed.
 const stubs: Record<string, string> = {
-  "@/shared/lib/api": `export class ApiError extends Error {
-    constructor(message, opts) { super(message); this.status = opts.status; this.code = opts.code; this.params = opts.params; }
-  }`,
-  "@/shared/lib/i18n": `const known = { "billing.insufficient_funds": "Add funds to continue.", "share.limit": "Limit is {n}." };
+  "@/shared/lib/i18n": `const known = { "billing.insufficient_funds": "Add funds to continue.", "share.limit": "Limit is {n}.", "continuous.not_found": "That continuous plan was not found." };
+  export const I18N_KEY = { USER_STORAGE_QUOTA_EXCEEDED: "user.storage_quota_exceeded", BILLING_INSUFFICIENT_FUNDS: "billing.insufficient_funds" };
   export const tI18n = (code, params) => known[code] ? known[code].replace("{n}", String(params?.n)) : code;`,
-  "@/shared/lib/messages": "export const msg = (key) => `msg:${key}`;",
+  "@/shared/lib/messages":
+    "export const msg = (key) => `msg:${key}`; export const formatMsg = (key) => `msg:${key}`;",
+  "@/shared/lib/agent-kickoff": "export const kickoffOpening = () => {};",
+  "@/shared/ui/agent/turn-stats": "export const parseTurnStats = () => null;",
+  "@/shared/lib/report-error": "export const reportHandledError = () => {};",
+  "@/shared/lib/account-missing": `export const ACCOUNT_MISSING_CODE = "auth.account_missing";
+  export const announceAccountMissing = () => {}; export const isAccountMissingResponse = () => false;`,
+  "@/shared/lib/runtime-env": `export const getRuntimeEnv = () => ({ apiUrl: "http://api.test" });`,
+  "@/shared/lib/runtime-locale": `export const getActiveLocale = () => "en";`,
+  "@/shared/lib/sse": "export const readServerSentEvents = async () => {};",
+  "@/shared/lib/resumable-turn": "export const streamResumableTurn = async () => {};",
 };
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
+    if (specifier === "@/shared/lib/api") {
+      return { shortCircuit: true, url: new URL("./api.ts", import.meta.url).href };
+    }
     const source = stubs[specifier];
     if (source !== undefined) {
       return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(source)}` };
@@ -23,12 +34,16 @@ registerHooks({
   },
 });
 
-const { ApiError } = (await import("@/shared/lib/api")) as unknown as {
+const api = (await import("@/shared/lib/api")) as unknown as {
   ApiError: new (
     message: string,
     opts: { status: number; code?: string; params?: Record<string, unknown> },
   ) => Error;
+  deleteContinuous: (planId: string) => Promise<void>;
+  revokeApiToken: () => Promise<void>;
+  removeDesktopLink: (linkId: string) => Promise<void>;
 };
+const { ApiError } = api;
 const { knownErrorCodeMessage, userErrorMessage } = await import("./user-error.ts");
 
 const originalConsoleError = console.error;
@@ -41,9 +56,21 @@ beforeEach(() => {
   };
 });
 
+const originalFetch = globalThis.fetch;
+
 afterEach(() => {
   console.error = originalConsoleError;
+  globalThis.fetch = originalFetch;
 });
+
+async function caught(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (err) {
+    return err;
+  }
+  throw new Error("expected the call to fail");
+}
 
 test("a known backend code shows its catalog copy with params", () => {
   const err = new ApiError("raw server text", {
@@ -85,6 +112,31 @@ test("an unknown code or validation error uses the call-site fallback, never the
 test("a failed fetch shows the network copy", () => {
   assert.equal(userErrorMessage(new TypeError("Failed to fetch"), "x"), "msg:errors.network");
   assert.equal(userErrorMessage(new TypeError("Load failed"), "x"), "msg:errors.network");
+});
+
+test("a request() helper that cannot reach the server shows the network copy", async () => {
+  globalThis.fetch = async () => {
+    throw new TypeError("Failed to fetch");
+  };
+  const err = await caught(api.removeDesktopLink("link-1"));
+  assert.equal(userErrorMessage(err, "Remove failed"), "msg:errors.network");
+});
+
+test("a wrapped error whose cause is not a network failure uses the fallback", () => {
+  const err = new Error("wrapped", { cause: new TypeError("x is undefined") });
+  assert.equal(userErrorMessage(err, "fallback"), "fallback");
+});
+
+test("helpers that read the response themselves keep the backend code", async () => {
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ code: "continuous.not_found", detail: "raw" }), { status: 404 });
+  const removed = await caught(api.deleteContinuous("plan-1"));
+  assert.equal(userErrorMessage(removed, "fallback"), "That continuous plan was not found.");
+
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ code: "share.limit", params: { n: 2 } }), { status: 409 });
+  const revoked = await caught(api.revokeApiToken());
+  assert.equal(userErrorMessage(revoked, "fallback"), "Limit is 2.");
 });
 
 test("without a fallback an unknown error shows the generic copy", () => {

@@ -40,6 +40,13 @@ export function knownErrorCodeMessage(
   return text === code ? undefined : text;
 }
 
+function isNetworkFailure(err: unknown): boolean {
+  if (err instanceof TypeError) return NETWORK_FAILURE.test(err.message);
+  // request() rethrows a failed fetch as a localized Error and keeps the
+  // browser's TypeError as its cause.
+  return err instanceof Error && err.cause instanceof TypeError && isNetworkFailure(err.cause);
+}
+
 function statusKey(status: number): MessageKey | undefined {
   if (status >= 500) return "errors.server";
   return STATUS_KEYS[status];
@@ -66,7 +73,7 @@ export function userErrorMessage(err: unknown, fallback?: string): string {
     if (known) return known;
     const key = statusKey(err.status);
     if (key) return msg(key);
-  } else if (err instanceof TypeError && NETWORK_FAILURE.test(err.message)) {
+  } else if (isNetworkFailure(err)) {
     return msg("errors.network");
   }
   return fallback ?? msg("errors.generic");

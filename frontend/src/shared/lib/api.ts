@@ -897,9 +897,10 @@ export function submitMcpConsent(body: McpConsentRequest) {
 export async function revokeApiToken(): Promise<void> {
   const res = await fetchWithAuthRetry(`${apiBase()}/settings/api-token`, { method: "DELETE" });
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(
-      parseErrorMessage(text) ?? formatMsg("auto.shared.lib.api.template.1", { p1: res.status }),
+    const parsed = parseError(await res.text().catch(() => ""));
+    throw new ApiError(
+      parsed.message ?? formatMsg("auto.shared.lib.api.template.1", { p1: res.status }),
+      { status: res.status, code: parsed.code, params: parsed.params },
     );
   }
 }
@@ -1833,9 +1834,10 @@ export async function deleteSavedSecret(id: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(
-      parseErrorMessage(text) ?? formatMsg("auto.shared.lib.api.template.1", { p1: res.status }),
+    const parsed = parseError(await res.text().catch(() => ""));
+    throw new ApiError(
+      parsed.message ?? formatMsg("auto.shared.lib.api.template.1", { p1: res.status }),
+      { status: res.status, code: parsed.code, params: parsed.params },
     );
   }
 }
@@ -2259,9 +2261,10 @@ export async function deleteContinuous(planId: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(
-      parseErrorMessage(text) ?? formatMsg("auto.shared.lib.api.template.1", { p1: res.status }),
+    const parsed = parseError(await res.text().catch(() => ""));
+    throw new ApiError(
+      parsed.message ?? formatMsg("auto.shared.lib.api.template.1", { p1: res.status }),
+      { status: res.status, code: parsed.code, params: parsed.params },
     );
   }
 }
