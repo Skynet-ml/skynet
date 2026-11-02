@@ -192,11 +192,27 @@ test("an agent menu lists only the CLI's models, as the ids the request sends", 
   assert.deepEqual(subscriptionMenuModels(undefined, []), []);
 });
 
-test("every CLI menu row takes the CLI's effort ladder, even one the catalog does not know", () => {
-  const models = subscriptionMenuModels(cli(), [
+test("each CLI menu row takes only the levels the CLI takes for that model", () => {
+  const full = ["low", "medium", "high", "xhigh", "max"];
+  const claude = cli({
+    models: [
+      "anthropic/claude-opus-5.5",
+      "anthropic/claude-sonnet-4.6",
+      "anthropic/claude-opus-4.5",
+      "anthropic/claude-haiku-4.5",
+    ],
+    efforts: {
+      "anthropic/claude-opus-5.5": full,
+      "anthropic/claude-sonnet-4.6": ["low", "medium", "high", "max"],
+      "anthropic/claude-opus-4.5": ["low", "medium", "high"],
+      "anthropic/claude-haiku-4.5": [],
+    },
+  });
+  // The catalog's ladder and default for a model never reach the CLI row.
+  const catalog = [
     {
-      value: "openrouter/anthropic/claude-sonnet-4.5",
-      label: "Claude Sonnet 4.5",
+      value: "openrouter/anthropic/claude-sonnet-4.6",
+      label: "Claude Sonnet 4.6",
       provider: "anthropic",
       supports_thinking: true,
       supports_vision: true,
@@ -205,14 +221,33 @@ test("every CLI menu row takes the CLI's effort ladder, even one the catalog doe
       reasoning_default_enabled: true,
       default_reasoning_effort: "high",
     },
-  ] as Parameters<typeof subscriptionMenuModels>[1]);
-  assert.equal(models[1]!.value, "subscription/claude/anthropic/claude-opus-4.1");
-  for (const row of models) {
-    assert.equal(row.supports_thinking, true);
-    assert.deepEqual(effortsFor(row.value, models), ["low", "medium", "high", "xhigh", "max"]);
+  ] as Parameters<typeof subscriptionMenuModels>[1];
+  const models = subscriptionMenuModels(claude, catalog);
+  const levels = (slug: string) => effortsFor(`subscription/claude/${slug}`, models);
+  const row = (slug: string) => models.find((m) => m.value === `subscription/claude/${slug}`)!;
+  assert.deepEqual(levels("anthropic/claude-opus-5.5"), full);
+  assert.deepEqual(levels("anthropic/claude-sonnet-4.6"), ["low", "medium", "high", "max"]);
+  assert.deepEqual(levels("anthropic/claude-opus-4.5"), ["low", "medium", "high"]);
+  // A model with no levels gets the menu's disabled Effort row.
+  assert.deepEqual(levels("anthropic/claude-haiku-4.5"), []);
+  assert.equal(row("anthropic/claude-haiku-4.5").supports_thinking, false);
+  for (const slug of ["anthropic/claude-opus-5.5", "anthropic/claude-sonnet-4.6", "anthropic/claude-opus-4.5"]) {
+    assert.equal(row(slug).supports_thinking, true);
     // An unpicked turn sends no effort, so "Default" is the CLI's own and names no level.
-    assert.equal(unpickedEffort(row), null);
+    assert.equal(unpickedEffort(row(slug)), null);
   }
+
+  const codex = subscriptionMenuModels(
+    cli({ id: "codex", models: ["openai/gpt-6.1-sol"], efforts: { "openai/gpt-6.1-sol": full } }),
+    [],
+  );
+  assert.deepEqual(effortsFor("subscription/codex/openai/gpt-6.1-sol", codex), full);
+});
+
+test("a CLI status with no effort table offers no effort", () => {
+  const [row] = subscriptionMenuModels(cli({ models: ["anthropic/claude-opus-5.5"] }), []);
+  assert.equal(row!.supports_thinking, false);
+  assert.deepEqual(row!.reasoning_efforts, []);
 });
 
 test("a subscription model config names its CLI", () => {

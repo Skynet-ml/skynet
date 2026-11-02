@@ -177,6 +177,9 @@ def test_missing_binary_reports_no_path(tmp_path: Path) -> None:
     assert status.logged_in is None
     assert "Install the claude CLI" in status.login_hint
     assert "anthropic/claude-sonnet-4.6" in status.models
+    assert set(status.efforts) == set(status.models)
+    assert status.efforts["anthropic/claude-sonnet-4.6"] == ["low", "medium", "high", "max"]
+    assert status.efforts["anthropic/claude-haiku-4.5"] == []
 
 
 def test_old_version_is_flagged(tmp_path: Path) -> None:

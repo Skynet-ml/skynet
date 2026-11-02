@@ -32,9 +32,9 @@ import httpx
 
 from .. import config
 from ..config import Settings
-from ..local.cli_catalog import CliProvider, cli_model_arg
+from ..local.cli_catalog import CliProvider, cli_efforts, cli_model_arg
 from ..local.cli_probe import read_cli_limits, write_cli_limit
-from .cli_runners import CLI_EFFORTS, RUNNERS, CliCompletion, CliRunError, SubscriptionRateLimitedError
+from .cli_runners import RUNNERS, CliCompletion, CliRunError, SubscriptionRateLimitedError
 from .model_dispatch import ModelHTTPResult
 from .openrouter_quotes import fetch_endpoint_prices
 from .operation_pricing import ChargePolicy, UnpricedOperationError, operation_quote
@@ -763,7 +763,8 @@ class CliDispatcher:
             stream: The live chat stream, or ``None``.
             prefix: The start of ``prompt`` that later calls repeat, or ``""``.
             effort: The turn's effort level from the request, or ``None``. A
-                side call ignores it, and a level the CLI cannot take is not sent.
+                side call ignores it, and a level this model does not take on
+                ``provider`` (:func:`cli_efforts`) is dropped.
 
         Returns:
             The completion.
@@ -778,7 +779,7 @@ class CliDispatcher:
         slots = _semaphore(provider, self.settings.cli_max_concurrency)
         # Only claude takes a cache mark from the caller.
         runner_kwargs: dict[str, Any] = {"cache_prefix": prefix} if provider == "claude" and prefix else {}
-        if isinstance(effort, str) and effort in CLI_EFFORTS:
+        if isinstance(effort, str) and effort in cli_efforts(provider, self.model):
             runner_kwargs["effort"] = effort
         for retry in range(len(_RETRY_DELAYS_SECONDS) + 1):
             if stream is not None and not stream.started:

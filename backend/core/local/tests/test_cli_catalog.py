@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from core.local.cli_catalog import CLI_MODELS, MIN_VERSIONS, cli_model_arg, parse_subscription_model_id
+from core.local.cli_catalog import (
+    CLI_EFFORTS,
+    CLI_MODELS,
+    MIN_VERSIONS,
+    cli_efforts,
+    cli_model_arg,
+    parse_subscription_model_id,
+)
 
 
 @pytest.mark.parametrize(
@@ -67,3 +74,39 @@ def test_every_cli_has_models_and_a_minimum_version() -> None:
     """The catalog and the version table cover the same two CLIs, and Droid is not one."""
     assert set(CLI_MODELS) == set(MIN_VERSIONS) == {"codex", "claude"}
     assert all(CLI_MODELS[cli] for cli in CLI_MODELS)
+
+
+def test_every_cli_model_has_an_effort_row() -> None:
+    """Every slug a CLI runs has its own effort levels, in ladder order, from the known ladder."""
+    ladder = ["low", "medium", "high", "xhigh", "max"]
+    for cli, models in CLI_MODELS.items():
+        assert set(CLI_EFFORTS[cli]) == set(models)
+        for levels in CLI_EFFORTS[cli].values():
+            assert list(levels) == [level for level in ladder if level in levels]
+
+
+@pytest.mark.parametrize(
+    ("cli", "slug", "levels"),
+    [
+        ("claude", "anthropic/claude-opus-5.5", ("low", "medium", "high", "xhigh", "max")),
+        ("claude", "anthropic/claude-haiku-5.5", ("low", "medium", "high", "xhigh", "max")),
+        ("claude", "anthropic/claude-opus-4.6", ("low", "medium", "high", "max")),
+        ("claude", "anthropic/claude-sonnet-4.6", ("low", "medium", "high", "max")),
+        ("claude", "anthropic/claude-opus-4.5", ("low", "medium", "high")),
+        ("claude", "anthropic/claude-sonnet-4.5", ()),
+        ("claude", "anthropic/claude-haiku-4.5", ()),
+        ("codex", "openai/gpt-6.1-sol", ("low", "medium", "high", "xhigh", "max")),
+        ("codex", "openai/gpt-5.6-luna", ("low", "medium", "high", "xhigh", "max")),
+        ("claude", "anthropic/claude-unknown", ()),
+        ("droid", "anthropic/claude-opus-5.5", ()),
+    ],
+)
+def test_cli_efforts_gives_the_levels_the_cli_takes(cli: str, slug: str, levels: tuple[str, ...]) -> None:
+    """Older Claude models take fewer levels, and an unknown CLI or slug takes none.
+
+    Args:
+        cli: The CLI.
+        slug: The catalog slug.
+        levels: The levels the CLI takes for it.
+    """
+    assert cli_efforts(cli, slug) == levels

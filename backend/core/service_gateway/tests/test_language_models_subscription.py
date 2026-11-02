@@ -58,8 +58,12 @@ def test_subscription_config_uses_the_local_route() -> None:
 @pytest.mark.usefixtures("local")
 def test_subscription_turn_effort_reaches_the_cli(tmp_path: Path) -> None:
     """Run the CLI at the turn's chosen effort, and send none when the turn has none."""
+    # Claude Haiku 4.5 takes no effort, so this turn runs on a model that takes xhigh.
     picked = ModelConfig(
-        name=MODEL, token_source="subscription", cli_provider="claude", extra={"reasoning_effort": "xhigh"}
+        name="anthropic/claude-opus-5.5",
+        token_source="subscription",
+        cli_provider="claude",
+        extra={"reasoning_effort": "xhigh"},
     )
     lm = build_language_model(picked, disable_cache=True)
     assert lm.kwargs["extra_body"][cli_dispatch.CLI_EFFORT_KEY] == "xhigh"

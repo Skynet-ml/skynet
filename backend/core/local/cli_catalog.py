@@ -51,7 +51,39 @@ CLI_MODELS: dict[CliProvider, dict[str, str]] = {
     },
 }
 
+_FULL_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# The effort levels each CLI takes for each slug in CLI_MODELS. Checked with
+# no model call against Claude Code 2.1.316 (its shipped model catalog and
+# effort gates) and codex-cli 0.163.0 (``codex app-server`` ``model/list``).
+# Claude Code ignores ``--effort`` for a model with no levels, and runs an
+# unsupported xhigh or max at high. Codex also lists ``ultra`` for some
+# models; Skynet does not offer it. Recheck this table when a CLI updates.
+CLI_EFFORTS: dict[CliProvider, dict[str, tuple[str, ...]]] = {
+    "codex": dict.fromkeys(CLI_MODELS["codex"], _FULL_EFFORTS),
+    "claude": {
+        **dict.fromkeys(CLI_MODELS["claude"], _FULL_EFFORTS),
+        "anthropic/claude-opus-4.6": ("low", "medium", "high", "max"),
+        "anthropic/claude-sonnet-4.6": ("low", "medium", "high", "max"),
+        "anthropic/claude-opus-4.5": ("low", "medium", "high"),
+        "anthropic/claude-sonnet-4.5": (),
+        "anthropic/claude-haiku-4.5": (),
+    },
+}
+
 _CLI_PROVIDERS: tuple[str, ...] = get_args(CliProvider)
+
+
+def cli_efforts(cli: str, slug: str) -> tuple[str, ...]:
+    """Return the effort levels ``cli`` takes for a catalog slug.
+
+    Args:
+        cli: The CLI that runs the call.
+        slug: OpenRouter catalog slug, such as ``anthropic/claude-sonnet-4.6``.
+
+    Returns:
+        The levels, lowest first; empty for an unknown CLI or slug.
+    """
+    return CLI_EFFORTS.get(cli, {}).get(slug, ())  # type: ignore[call-overload]
 
 
 def parse_subscription_model_id(model_id: str) -> tuple[CliProvider, str] | None:

@@ -432,20 +432,20 @@ def test_codex_runs_one_turn_over_the_app_server(tmp_path: Path) -> None:
 
 
 def test_claude_runs_at_the_turn_effort(tmp_path: Path) -> None:
-    """Pass the turn's effort to Claude Code, and drop a level it cannot take."""
+    """Pass the turn's effort to Claude Code, and send none when the turn has none."""
     fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))
-    cli_runners.run_claude("claude-haiku-4-5", "ping", None, local_settings(tmp_path), tmp_path, effort="max")
-    cli_runners.run_claude("claude-haiku-4-5", "ping", None, local_settings(tmp_path), tmp_path, effort="minimal")
+    cli_runners.run_claude("claude-opus-5-5", "ping", None, local_settings(tmp_path), tmp_path, effort="max")
+    cli_runners.run_claude("claude-opus-5-5", "ping", None, local_settings(tmp_path), tmp_path)
     first, second = calls(tmp_path, "claude")
     assert first["argv"][first["argv"].index("--effort") + 1] == "max"
     assert "--effort" not in second["argv"]
 
 
 def test_codex_runs_the_turn_at_its_effort(tmp_path: Path) -> None:
-    """Send the turn's effort with ``turn/start``, and drop a level Codex cannot take."""
+    """Send the turn's effort with ``turn/start``, and send none when the turn has none."""
     fake_app_server(tmp_path, emitting(*CODEX_TURN))
     cli_runners.run_codex("gpt-5.6-luna", "ping", None, local_settings(tmp_path), tmp_path, effort="xhigh")
-    cli_runners.run_codex("gpt-5.6-luna", "ping", None, local_settings(tmp_path), tmp_path, effort="none")
+    cli_runners.run_codex("gpt-5.6-luna", "ping", None, local_settings(tmp_path), tmp_path)
     first, second = (message for message in requests(tmp_path) if message.get("method") == "turn/start")
     assert first["params"]["effort"] == "xhigh"
     assert "effort" not in second["params"]
