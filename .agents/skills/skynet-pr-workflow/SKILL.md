@@ -248,9 +248,10 @@ path (the 2026-10-22 exception below).
 Any other PR (files outside `backend/` and `docs/**/*.md`, or no backend
 file) also waits for the user's approval.
 
-**`staging` → `main`** needs the user's approval every time. Each morning,
-send one card: the backend changes that landed, staging smoke status, and a
-60s video tour of the core flow on staging. Promote only on "promote".
+**`staging` → `main`**: a change in `staging` is approved for production.
+The orchestrator promotes `staging` to `main` when the staging checks pass.
+Do not send a promotion card or a video tour, and do not wait for "promote".
+A manual hold on a change or on a promotion still stops it.
 
 ### Backend-only merges (2026-10-19)
 

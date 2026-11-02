@@ -101,9 +101,10 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   America/Los_Angeles) or when Gilad asks. Implementation and review agents
   never merge, and never post `Approved for merge` or `Changes requested:`.
 - Backend-only PRs (`backend/**`, optional `docs/**/*.md`) merge when all
-  gates pass. UI PRs (`frontend/`), other PRs and every `staging` → `main`
-  promotion wait for the user's approval. Steps, gates, proof card and Linear
-  flow: the `skynet-pr-workflow` skill.
+  gates pass. UI PRs (`frontend/`) and other PRs wait for the user's approval.
+  A change in `staging` is approved for production. The orchestrator promotes
+  `staging` → `main` when the staging checks pass. A manual hold stops it.
+  Steps, gates, proof card and Linear flow: the `skynet-pr-workflow` skill.
 
 ## Test accounts and environments (MANDATORY)
 
