@@ -92,3 +92,36 @@ export function finishedTurnMs(
   }
   return Math.max(durationMs ?? 0, span);
 }
+
+/** A turn header's clock: the turn's start and whether it runs. */
+export interface TurnClock {
+  start: number | null;
+  streaming: boolean;
+}
+
+/**
+ * Move a turn header's clock on to what the turn shows now.
+ *
+ * Retry, regenerate and edit-and-resend reuse the failed turn's transcript
+ * slot, so the header outlives its turn. Keeping the earliest start across
+ * that made a 20s retry read "Worked for 5m 45s", counted from the first
+ * attempt. A turn that starts streaming again is a new turn and starts over.
+ *
+ * Args:
+ *   clock: The clock so far.
+ *   next: The turn's start computed now, or null.
+ *   streaming: Whether the turn is running now.
+ *
+ * Returns:
+ *   The next clock; the same object when nothing changed.
+ */
+export function nextTurnClock(
+  clock: TurnClock,
+  next: number | null,
+  streaming: boolean,
+): TurnClock {
+  if (streaming && !clock.streaming) return { start: next, streaming };
+  const start = earliestStart(clock.start, next);
+  if (start === clock.start && streaming === clock.streaming) return clock;
+  return { start, streaming };
+}

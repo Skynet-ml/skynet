@@ -97,7 +97,7 @@ export function ThinkingSection({ thinking, compact = false }: ThinkingSectionPr
               text={detail}
               lead={heading}
               leadClassName="font-medium text-foreground"
-              animate={summary !== summaryOnMount}
+              animate={false}
               className="min-w-0 break-words text-foreground/80"
             />
             <motion.span
