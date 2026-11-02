@@ -556,7 +556,12 @@ ipcMain.handle("onboarding:fit", (_event, height: unknown) => {
   // last render would shrink the app window back to the setup size.
   if (state.kind === "ready" || next === setupHeight || !win?.webContents.getURL().startsWith("file:")) return;
   setupHeight = next;
-  useSetupSize();
+  // Grow or shrink around the window's own middle instead of centering it again,
+  // so a window the user dragged aside stays where they put it.
+  const before = win.getBounds();
+  win.setContentSize(SETUP_SIZE.width, setupHeight);
+  const after = win.getBounds();
+  win.setPosition(before.x, Math.round(before.y - (after.height - before.height) / 2));
 });
 ipcMain.handle("onboarding:open-logs", () => shell.openPath(logsDir));
 ipcMain.handle("onboarding:sign-in", () => {
