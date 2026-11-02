@@ -75,7 +75,7 @@ void describe("ConfirmDialog", () => {
   });
 
   void it("renders extra content between the header and the buttons", () => {
-    const html = render({ children: <p data-testid="warn">Used by 3 runs</p> });
+    const html = render({ children: <p data-testid="warn">{"Used by 3 runs"}</p> });
     assert.ok(html.indexOf("Used by 3 runs") > html.indexOf("This cannot be undone."));
     assert.ok(html.indexOf("Used by 3 runs") < html.indexOf("<button"));
   });

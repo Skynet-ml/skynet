@@ -114,7 +114,7 @@ export function StorageMeter({ collapsed = false }: { collapsed?: boolean }) {
         {usageText}
       </p>
       {full && (
-        <p className="mt-0.5 text-start text-[0.6875rem] text-destructive">
+        <p role="status" className="mt-0.5 text-start text-[0.6875rem] text-destructive">
           {msg("storage.quota.full_warning")}
         </p>
       )}

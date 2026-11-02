@@ -253,14 +253,14 @@ export function DryRunDialog({
                 ))}
               </div>
               {result?.error && (
-                <p className="break-words text-xs text-destructive" dir="ltr">
+                <p role="alert" className="break-words text-xs text-destructive" dir="ltr">
                   {result.error}
                 </p>
               )}
             </div>
           )}
           {error && (
-            <p className="break-words text-xs text-destructive" dir="ltr">
+            <p role="alert" className="break-words text-xs text-destructive" dir="ltr">
               {error}
             </p>
           )}

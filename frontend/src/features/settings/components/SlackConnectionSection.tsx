@@ -193,7 +193,7 @@ export function SlackConnectionSection({
               </div>
             )}
             {channelsError && (
-              <div className="px-2 py-1.5 text-xs text-destructive">
+              <div role="alert" className="px-2 py-1.5 text-xs text-destructive">
                 {msg("notifications.slack.channels_error")}
               </div>
             )}

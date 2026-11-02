@@ -1487,7 +1487,10 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
 
       {isPairContext && activePair.error && (
         <FadeIn delay={0.05}>
-          <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4">
+          <div
+            role="alert"
+            className="rounded-xl border border-destructive/30 bg-destructive/5 p-4"
+          >
             <div className="text-sm font-medium text-destructive mb-1">
               {msg("auto.features.optimizations.components.pairdetailview.3")}
             </div>
