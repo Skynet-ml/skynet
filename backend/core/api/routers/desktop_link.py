@@ -19,7 +19,7 @@ import re
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated, Literal, NamedTuple
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, Request
 from pydantic import BaseModel, Field
@@ -27,6 +27,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ...billing.service import StripeBillingService
+from ...notifications.email_render import EmailContent, absolute_url, render_email_html
 from ...storage.models import DesktopLinkCodeModel, DesktopLinkModel, DesktopTokenModel, UserModel
 from ..auth import AuthenticatedUser, get_authenticated_user, hash_api_token
 from ..desktop_auth import (
@@ -291,7 +292,21 @@ def _revoke_for_reuse(session: Session, link: DesktopLinkModel, now: datetime) -
     raise DomainError("desktop.link_revoked", status=401)
 
 
-def _send_notice(to: str, subject: str, body: str) -> None:
+# The security tab of the settings modal, the closest page to Linked Macs.
+_SECURITY_SETTINGS_PATH = "/?settings=security"
+_NOTICE_FOOTER = "Skynet sends this email each time a Mac links to or leaves your account. You cannot turn it off."
+
+
+class LinkNotice(NamedTuple):
+    """A link security notice, unpackable as ``to, subject, body, html``."""
+
+    to: str
+    subject: str
+    body: str
+    html: str
+
+
+def _send_notice(to: str, subject: str, body: str, html_body: str) -> None:
     """Email the account owner a link security notice, best effort.
 
     A notice must never fail or change the token call that caused it.
@@ -300,46 +315,76 @@ def _send_notice(to: str, subject: str, body: str) -> None:
         to: Account email.
         subject: Subject line.
         body: Plain-text body.
+        html_body: HTML alternative on the shared email layout.
     """
     if not email_configured():
         return
     try:
-        send_email(to, subject, body)
+        send_email(to, subject, body, html_body=html_body)
     except Exception:  # A failed notice must not fail the token call.
         logger.warning("desktop link notice was not sent", exc_info=True)
 
 
-def _link_created_notice(link: DesktopLinkModel) -> tuple[str, str, str]:
+def _notice_html(subject: str, detail: str, tone: Literal["warn", "bad"], button: tuple[str, str] | None) -> str:
+    """Render a link notice on the shared email layout.
+
+    Args:
+        subject: Subject line, also the headline.
+        detail: The notice text, as in the plain-text body.
+        tone: Status color of the "Security" label.
+        button: Optional ``(label, url)`` call to action.
+
+    Returns:
+        The HTML alternative of the notice.
+    """
+    return render_email_html(
+        EmailContent(
+            locale="en",
+            subject=subject,
+            headline=subject,
+            footer=_NOTICE_FOOTER,
+            status=("Security", tone),
+            detail=detail,
+            button=button,
+        )
+    )
+
+
+def _link_created_notice(link: DesktopLinkModel) -> LinkNotice:
     """Build the notice for a new link.
 
     Args:
         link: The new link.
 
     Returns:
-        The ``(to, subject, body)`` of the notice.
+        The ``(to, subject, body, html)`` of the notice.
     """
-    body = (
-        f'The Mac "{link.device_name}" is now linked to your Skynet account.\n\n'
-        "If you did not link this Mac, open Settings > Linked Macs on the Skynet website and remove it."
-    )
-    return link.username, "A Mac was linked to your Skynet account", body
+    linked = f'The Mac "{link.device_name}" is now linked to your Skynet account.'
+    action = "If you did not link this Mac, open Settings > Linked Macs on the Skynet website and remove it."
+    subject = "A Mac was linked to your Skynet account"
+    button = ("Open Settings", absolute_url(_SECURITY_SETTINGS_PATH))
+    html_body = _notice_html(subject, f"{linked} {action}", "warn", button)
+    return LinkNotice(link.username, subject, f"{linked}\n\n{action}", html_body)
 
 
-def _link_reuse_notice(link: DesktopLinkModel) -> tuple[str, str, str]:
+def _link_reuse_notice(link: DesktopLinkModel) -> LinkNotice:
     """Build the notice for a link revoked for refresh-token reuse.
 
     Args:
         link: The revoked link.
 
     Returns:
-        The ``(to, subject, body)`` of the notice.
+        The ``(to, subject, body, html)`` of the notice.
     """
-    body = (
+    removed = (
         f'Skynet removed the link to the Mac "{link.device_name}". '
-        "An old sign-in token of this Mac was used again. Someone can have a copy of it.\n\n"
-        "To continue, link the Mac again from the Skynet app."
+        "An old sign-in token of this Mac was used again. Someone can have a copy of it."
     )
-    return link.username, "Skynet removed a linked Mac", body
+    action = "To continue, link the Mac again from the Skynet app."
+    subject = "Skynet removed a linked Mac"
+    # No button: the Mac links again from the Mac app, not from a web page.
+    html_body = _notice_html(subject, f"{removed} {action}", "bad", None)
+    return LinkNotice(link.username, subject, f"{removed}\n\n{action}", html_body)
 
 
 def _account(session: Session, username: str) -> LinkAccount:

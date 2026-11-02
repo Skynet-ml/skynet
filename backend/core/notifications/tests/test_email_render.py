@@ -12,8 +12,10 @@ from ...i18n import t_locale
 from .. import email_render
 from ..email_render import (
     ACCOUNT_EMAIL_KINDS,
+    COLORS,
     EMAIL_LOCALE,
     EVENT_TYPES,
+    TEXT_PAIRS,
     EmailContent,
     build_facts,
     render_account_email,
@@ -76,9 +78,9 @@ def test_every_event_renders_html_and_text(event_type: str) -> None:
     assert reason in html
     assert settings in html
     assert "https://app.example/optimizations/abc" in html
-    assert '<meta name="color-scheme" content="light only">' in html
-    assert '<meta name="supported-color-schemes" content="light">' in html
-    assert "color-scheme:light only" in html
+    assert html.count('<meta name="color-scheme" content="light only">') == 1
+    assert "supported-color-schemes" not in html
+    assert ":root" not in html
     assert "Heebo" not in html
     assert text.startswith(f"{APP_NAME.upper()}\n")
     assert f"{button}: https://app.example/optimizations/abc" in text
@@ -98,19 +100,65 @@ def test_emails_are_english_only() -> None:
     assert '<html lang="en" dir="ltr"' in html
 
 
+def _luminance(color: str) -> float:
+    """Return the WCAG relative luminance of a ``#rrggbb`` color.
+
+    Args:
+        color: Hex color.
+
+    Returns:
+        Luminance from 0 (black) to 1 (white).
+    """
+    channels = [int(color[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+    r, g, b = (c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+@pytest.mark.parametrize(("ink", "surface"), TEXT_PAIRS)
+def test_text_colors_meet_wcag_aa(ink: str, surface: str) -> None:
+    """Every text color of the table is at least 4.5:1 against the surface it sits on.
+
+    Args:
+        ink: Text color key.
+        surface: Background color key.
+    """
+    light, dark = sorted((_luminance(COLORS[ink]), _luminance(COLORS[surface])), reverse=True)
+    assert (light + 0.05) / (dark + 0.05) >= 4.5
+
+
+def test_color_table_has_no_pure_black_or_white() -> None:
+    """The authored colors avoid the exact values some clients invert."""
+    assert all(re.fullmatch(r"#[0-9a-f]{6}", value) for value in COLORS.values())
+    assert not {"#000000", "#ffffff"} & set(COLORS.values())
+
+
 @pytest.mark.parametrize("event_type", EVENT_TYPES)
-def test_emails_have_no_dark_mode_styles(event_type: str) -> None:
-    """Emails are light only: no dark-mode media query or Outlook.com dark overrides.
+def test_emails_are_dark_and_color_locked(event_type: str) -> None:
+    """Emails are dark only, with the per-client locks against forced recoloring.
 
     Args:
         event_type: Notification event under test.
     """
     _, html, _ = render_notification_email(event_type, "Run", ALL_FACTS, "/x")
+    style = html[html.index("<style>body") : html.index("</style></head>")]
 
     assert "prefers-color-scheme" not in html
-    assert "data-ogsc" not in html
-    assert "data-ogsb" not in html
     assert "light dark" not in html
+    assert f"[data-ogsb] .sk-bg{{background-color:{COLORS['bg']} !important}}" in style
+    assert f"[data-ogsb] .sk-card{{background-color:{COLORS['card']} !important}}" in style
+    assert f"[data-ogsb] .sk-btn{{background-color:{COLORS['btn']} !important}}" in style
+    for cls, key in (("sk-ink", "ink"), ("sk-text", "text"), ("sk-muted", "muted"), ("sk-btn-a", "btn_ink")):
+        assert f"[data-ogsc] .{cls}{{color:{COLORS[key]} !important}}" in style
+    assert "[data-ogsc] img:hover,[data-ogsb] img:hover{background-color:transparent !important}" in style
+    assert '<body class="body sk-bg"' in html
+    assert '<div class="gmail-bg"><div class="gmail-screen"><div class="gmail-diff">' in html
+    assert f'<v:fill type="tile" color="{COLORS["bg"]}"/>' in html
+    assert "mso-style-textfill-type:gradient" in html
+    for tag in re.findall(r"<(?:body|table|td)\b[^>]*>", html):
+        if "background-color:" in tag:
+            assert re.search(r'bgcolor="#[0-9a-f]{6}"', tag), tag
+    authored = re.sub(r"<style>.*?</style>", "", html, flags=re.DOTALL)
+    assert not re.search(r"#(?:000|fff)(?:fff|000)?\b", authored, flags=re.IGNORECASE)
 
 
 def test_button_is_centered() -> None:
@@ -127,7 +175,7 @@ def test_rtl_content_is_mirrored() -> None:
     html = render_email_html(EmailContent(locale="he", subject="S", headline="H", footer="F"))
 
     assert '<html lang="he" dir="rtl"' in html
-    assert '<body class="sk-bg" dir="rtl"' in html
+    assert '<body class="body sk-bg" dir="rtl"' in html
     assert "text-align:right" in html
     assert "text-align:left" not in html
 

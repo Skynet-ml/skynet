@@ -43,6 +43,8 @@ _SessionUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 _SyncDep = Annotated[DesktopPrincipal, Depends(get_desktop_principal("sync"))]
 
 ALL_SCOPES = "identity balance:read sync models connectors web"
+# One ``(to, subject, body, html)`` row per sent security notice.
+Mailbox = list[tuple[str, str, str, str]]
 REDIRECT = "http://127.0.0.1:54321/local/hosted-link/callback"
 
 
@@ -584,7 +586,7 @@ def test_refresh_retry_inside_grace_replaces_the_lost_pair(harness: Any) -> None
     assert _code(late) == "desktop.link_revoked"
 
 
-def test_honest_retry_inside_grace_keeps_the_link(harness: Any, mailbox: list[tuple[str, str, str]]) -> None:
+def test_honest_retry_inside_grace_keeps_the_link(harness: Any, mailbox: Mailbox) -> None:
     """A Mac that lost one or two refresh responses keeps a working link and gets no email."""
     client, engine, _ = harness
     pair = _link(client)
@@ -604,7 +606,7 @@ def test_honest_retry_inside_grace_keeps_the_link(harness: Any, mailbox: list[tu
     assert mailbox == []
 
 
-def test_replay_inside_grace_cannot_take_over_the_link(harness: Any, mailbox: list[tuple[str, str, str]]) -> None:
+def test_replay_inside_grace_cannot_take_over_the_link(harness: Any, mailbox: Mailbox) -> None:
     """A stolen refresh token replayed inside 30 s ends the link at the Mac's next refresh (R782A-1)."""
     client, engine, _ = harness
     pair = _link(client)
@@ -625,7 +627,7 @@ def test_replay_inside_grace_cannot_take_over_the_link(harness: Any, mailbox: li
     assert "removed" in mailbox[0][1].lower()
 
 
-def test_thief_first_then_mac_retry_still_detects_reuse(harness: Any, mailbox: list[tuple[str, str, str]]) -> None:
+def test_thief_first_then_mac_retry_still_detects_reuse(harness: Any, mailbox: Mailbox) -> None:
     """If the thief rotates first and the Mac retries, the thief's next refresh revokes the link."""
     client, _, _ = harness
     pair = _link(client)
@@ -669,34 +671,47 @@ def test_refresh_reuse_after_successor_was_used_revokes_the_link(harness: Any) -
 
 
 @pytest.fixture
-def mailbox(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, str]]:
+def mailbox(monkeypatch: pytest.MonkeyPatch) -> Mailbox:
     """Capture the security notices the router sends.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
 
     Returns:
-        The list that collects ``(to, subject, body)`` per sent notice.
+        The list that collects ``(to, subject, body, html)`` per sent notice.
     """
-    sent: list[tuple[str, str, str]] = []
+    sent: Mailbox = []
     monkeypatch.setattr(desktop_link, "email_configured", lambda: True)
-    monkeypatch.setattr(desktop_link, "send_email", lambda to, subject, body: sent.append((to, subject, body)))
+    monkeypatch.setattr(
+        desktop_link,
+        "send_email",
+        lambda to, subject, body, *, html_body: sent.append((to, subject, body, html_body)),
+    )
     return sent
 
 
-def test_new_link_sends_a_notice(harness: Any, mailbox: list[tuple[str, str, str]]) -> None:
+def test_new_link_sends_a_notice(harness: Any, mailbox: Mailbox) -> None:
     """A new link emails the account owner with the Mac name."""
     client, _, _ = harness
     _link(client)
     assert len(mailbox) == 1
-    to, subject, body = mailbox[0]
+    to, subject, body, html_body = mailbox[0]
     assert to == "alice@example.test"
     assert "linked" in subject.lower()
-    assert "Alice's MacBook Pro" in body
+    assert body == (
+        'The Mac "Alice\'s MacBook Pro" is now linked to your Skynet account.\n\n'
+        "If you did not link this Mac, open Settings > Linked Macs on the Skynet website and remove it."
+    )
     assert "skyl_" not in body
+    assert html_body.startswith("<!doctype html>")
+    assert "Alice&#x27;s MacBook Pro" in html_body
+    assert "Settings &gt; Linked Macs" in html_body
+    assert html_body.count('class="sk-btn-a"') == 1
+    assert "/?settings=security" in html_body
+    assert "skyl_" not in html_body
 
 
-def test_reuse_revocation_sends_a_notice(harness: Any, mailbox: list[tuple[str, str, str]]) -> None:
+def test_reuse_revocation_sends_a_notice(harness: Any, mailbox: Mailbox) -> None:
     """Revoking a link for refresh-token reuse emails the account owner."""
     client, _, _ = harness
     pair = _link(client)
@@ -705,13 +720,21 @@ def test_reuse_revocation_sends_a_notice(harness: Any, mailbox: list[tuple[str, 
     mailbox.clear()
     assert _refresh(client, pair["refresh_token"]).status_code == 401
     assert len(mailbox) == 1
-    to, subject, body = mailbox[0]
+    to, subject, body, html_body = mailbox[0]
     assert to == "alice@example.test"
     assert "removed" in subject.lower()
-    assert "Alice's MacBook Pro" in body
+    assert body == (
+        'Skynet removed the link to the Mac "Alice\'s MacBook Pro". '
+        "An old sign-in token of this Mac was used again. Someone can have a copy of it.\n\n"
+        "To continue, link the Mac again from the Skynet app."
+    )
+    assert html_body.startswith("<!doctype html>")
+    assert "Alice&#x27;s MacBook Pro" in html_body
+    assert "link the Mac again from the Skynet app" in html_body
+    assert 'class="sk-btn-a"' not in html_body
 
 
-def test_refresh_retry_inside_grace_sends_no_notice(harness: Any, mailbox: list[tuple[str, str, str]]) -> None:
+def test_refresh_retry_inside_grace_sends_no_notice(harness: Any, mailbox: Mailbox) -> None:
     """Normal rotation and a retry inside 30 s send no email."""
     client, _, _ = harness
     pair = _link(client)
@@ -725,13 +748,14 @@ def test_notice_failure_does_not_fail_the_call(harness: Any, monkeypatch: pytest
     """An SMTP failure is logged, and the token call still succeeds."""
     client, _, _ = harness
 
-    def _broken(to: str, subject: str, body: str) -> None:
+    def _broken(to: str, subject: str, body: str, *, html_body: str) -> None:
         """Fail like an unreachable relay.
 
         Args:
             to: Recipient.
             subject: Subject line.
             body: Message body.
+            html_body: HTML alternative.
 
         Raises:
             OSError: Always.
@@ -749,7 +773,7 @@ def test_no_notice_without_smtp(harness: Any, monkeypatch: pytest.MonkeyPatch) -
     client, _, _ = harness
     sent: list[str] = []
     monkeypatch.setattr(desktop_link, "email_configured", lambda: False)
-    monkeypatch.setattr(desktop_link, "send_email", lambda to, subject, body: sent.append(to))
+    monkeypatch.setattr(desktop_link, "send_email", lambda to, subject, body, *, html_body: sent.append(to))
     _link(client)
     assert sent == []
 

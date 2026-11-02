@@ -6,8 +6,9 @@ change vs baseline, spend, duration), exactly one button, and a footer saying
 why the recipient got the email. Each email also gets a plain-text twin.
 
 The HTML is built for real mail clients rather than browsers: table layout,
-inline styles, a 600px column, and light colors only. The HTML asks clients
-to keep the light scheme. :class:`EmailContent` still accepts a locale, and RTL
+inline styles, a 600px card, and the app's dark colors only. The HTML asks
+clients not to recolor it, and adds the known per-client locks against forced
+dark-mode inversion. :class:`EmailContent` still accepts a locale, and RTL
 locales get ``dir="rtl"`` and mirrored alignment and padding throughout.
 
 The notification and account emails always render in English
@@ -34,11 +35,13 @@ from ..i18n import t_locale
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
 
-# The hoatzin mark and the wordmark as one PNG, drawn from the app's own
-# artwork at 2x: mail clients load neither web fonts nor inline SVG. The alt
-# text carries the styles so the name still shows when images are blocked.
+# The ivory hoatzin mark and the wordmark as one opaque PNG, drawn from the
+# app's dark-theme artwork at 2x on the card color: mail clients load neither
+# web fonts nor inline SVG, and an opaque image cannot pick up a client's own
+# background. The alt text carries the styles so the name still shows when
+# images are blocked.
 _LOGO_URL = f"{FRONTEND_URL}/brand/skynet-email-lockup@2x.png"
-_LOGO_SIZE = (150, 30)
+_LOGO_SIZE = (300, 60)
 # The settings modal opens on the tab named by this query param on any page.
 NOTIFICATION_SETTINGS_PATH = "/?settings=notifications"
 
@@ -84,21 +87,48 @@ _RTL_LANGUAGES = frozenset({"he", "ar", "fa", "ur", "yi"})
 # CJK, so tracking is reserved for the Latin and Cyrillic locales.
 _TRACKED_LANGUAGES = frozenset({"en", "de", "es", "fr", "it", "pt", "ru", "uk", "tr"})
 
-# Emails are light only: values are inlined, so Outlook desktop, which drops
-# <style>, gets the same colors as every other client.
-_LIGHT = {
-    "bg": "#ffffff",
-    "ink": "#1c1612",
-    "text": "#5c4d40",
-    "muted": "#8c7a6b",
-    "rule": "#e8e2da",
-    "panel": "#f6f2ed",
-    "btn": "#3d2e22",
+# The one color table of every email: the app's dark-theme tokens
+# (frontend/src/app/globals.css, ``.dark``). Values are inlined, so Outlook
+# desktop, which drops <style>, gets the same colors as every other client.
+# No pure black or white: some clients invert exactly those values.
+COLORS: dict[str, str] = {
+    "bg": "#1c1814",  # --bg
+    "card": "#2c2621",  # --card
+    "ink": "#f3ede6",  # --text-1
+    "text": "#cdbfb1",  # --text-2
+    "muted": "#a89a8c",  # --muted-foreground
+    "rule": "#483d34",  # --border
+    "panel": "#382f28",  # --surface-3
+    "btn": "#b4521f",  # --primary-fill
     "btn_ink": "#faf8f5",
-    "good": "#1a7a3a",
-    "warn": "#9a6a10",
-    "bad": "#b04030",
-    "neutral": "#8c7a6b",
+    "good": "#6cc0a8",  # --success
+    "warn": "#e0a84a",  # --warning
+    "bad": "#ef8a6a",  # --danger
+    "neutral": "#a89a8c",  # --muted-foreground
+}
+# Each text color and the surface it sits on; the contrast test holds every
+# pair to WCAG AA (4.5:1).
+TEXT_PAIRS: tuple[tuple[str, str], ...] = (
+    *((ink, "card") for ink in ("ink", "text", "muted", "good", "warn", "bad", "neutral")),
+    ("ink", "panel"),
+    ("btn_ink", "btn"),
+)
+
+# Outlook.com and the Outlook apps mark recolored elements with data-ogsb
+# (background) and data-ogsc (text); these rules put the table's colors back.
+_BG_CLASSES: dict[str, str] = {
+    "sk-bg": "bg",
+    "sk-card": "card",
+    "sk-panel": "panel",
+    "sk-btn": "btn",
+    **{f"sk-dot-{tone}": tone for tone in ("good", "warn", "bad", "neutral")},
+}
+_INK_CLASSES: dict[str, str] = {
+    "sk-ink": "ink",
+    "sk-text": "text",
+    "sk-muted": "muted",
+    "sk-btn-a": "btn_ink",
+    **{f"sk-{tone}": tone for tone in ("good", "warn", "bad", "neutral")},
 }
 
 # The app's faces load from Google Fonts: Onest for text, Bricolage Grotesque
@@ -359,7 +389,7 @@ def build_facts(
 
 
 def _style_block(tracked: bool) -> str:
-    """Return the ``<style>`` contents: light-only scheme and responsive rules.
+    """Return the ``<style>`` contents: dark-mode color locks and responsive rules.
 
     Args:
         tracked: Whether the locale takes letter-spacing (Latin/Cyrillic).
@@ -369,23 +399,40 @@ def _style_block(tracked: bool) -> str:
         without it.
     """
     tracking = ".sk-status{letter-spacing:0.08em}" if tracked else ""
+    locks = "".join(
+        f"[data-ogsb] .{cls}{{background-color:{COLORS[key]} !important}}" for cls, key in _BG_CLASSES.items()
+    )
+    locks += "".join(f"[data-ogsc] .{cls}{{color:{COLORS[key]} !important}}" for cls, key in _INK_CLASSES.items())
+    locks += f"[data-ogsc] .sk-rule{{border-color:{COLORS['rule']} !important}}"
     return (
-        ":root{color-scheme:light only;supported-color-schemes:light}"
         "body{margin:0!important;padding:0!important;width:100%!important;-webkit-text-size-adjust:100%;"
         "-ms-text-size-adjust:100%}"
         "table{border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0}"
         "a{text-decoration:none}"
         ".sk-btn-a:hover{opacity:0.88}"
-        f"{tracking}"
+        f"{tracking}{locks}"
+        "[data-ogsc] img:hover,[data-ogsb] img:hover{background-color:transparent !important}"
+        # Gmail apps invert dark emails. Only Gmail puts a <u> before the
+        # body, so these rules match there alone: the blend layers undo the
+        # inversion of the text, and the gradient keeps the background.
+        f"u + .body .gmail-bg{{background-image:linear-gradient({COLORS['bg']},{COLORS['bg']})}}"
+        "u + .body .gmail-screen{background:#000;mix-blend-mode:screen}"
+        "u + .body .gmail-diff{background:#000;mix-blend-mode:difference}"
         "@media (max-width:520px){"
-        ".sk-pad{padding:28px 20px 32px!important}"
+        ".sk-outer{padding:12px 8px!important}"
+        ".sk-pad{padding:24px 20px 28px!important}"
         ".sk-fact{display:block!important;width:100%!important;box-sizing:border-box;padding:12px 0!important}"
-        f".sk-fact+.sk-fact{{border-top:1px solid {_LIGHT['rule']}}}"
+        f".sk-fact+.sk-fact{{border-top:1px solid {COLORS['rule']}}}"
         ".sk-fact-v{font-size:16px!important;line-height:24px!important;white-space:normal!important}"
         ".sk-h1{font-size:20px!important;line-height:28px!important}"
         ".sk-code{font-size:28px!important;letter-spacing:6px!important}"
         "}"
     )
+
+
+def _mso_color(value: str) -> str:
+    """Escape a hex color for an Outlook text-fill stop list (``#abc`` -> ``\\#ABC``)."""
+    return "\\" + value.upper()
 
 
 def _facts_row(facts: tuple[tuple[str, str], ...], font: str, rtl: bool) -> str:
@@ -410,17 +457,17 @@ def _facts_row(facts: tuple[tuple[str, str], ...], font: str, rtl: bool) -> str:
     # desktop ignores inline-block, so a ghost table keeps its facts in a row.
     blocks = '<!--[if mso]></td><td valign="top"><![endif]-->'.join(
         f'<div class="sk-fact" style="display:inline-block;vertical-align:top;padding:{gap};text-align:{start};">'
-        f'<div class="sk-muted" style="font-family:{font};font-size:12px;line-height:16px;color:{_LIGHT["muted"]};'
+        f'<div class="sk-muted" style="font-family:{font};font-size:12px;line-height:16px;color:{COLORS["muted"]};'
         f'text-align:{start};white-space:nowrap;">{html.escape(label)}</div>'
         f'<div class="sk-ink sk-fact-v" style="font-family:{_MONO};font-size:18px;line-height:26px;font-weight:500;'
-        f'color:{_LIGHT["ink"]};padding-top:4px;text-align:{start};white-space:nowrap;">{_bidi_html(value)}</div>'
+        f'color:{COLORS["ink"]};padding-top:4px;text-align:{start};white-space:nowrap;">{_bidi_html(value)}</div>'
         "</div>"
         for label, value in facts
     )
     return (
         '<tr><td style="padding-top:24px;">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="sk-rule" '
-        f'style="width:100%;border-top:1px solid {_LIGHT["rule"]};border-bottom:1px solid {_LIGHT["rule"]};">'
+        f'style="width:100%;border-top:1px solid {COLORS["rule"]};border-bottom:1px solid {COLORS["rule"]};">'
         f'<tr><td style="text-align:{start};font-size:0;line-height:0;">'
         '<!--[if mso]><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
         '<td valign="top"><![endif]-->'
@@ -444,7 +491,7 @@ def _code_rows(code: str, note: str | None, font: str, start: str) -> str:
     """
     note_row = (
         f'<tr><td class="sk-muted" style="padding-top:12px;font-family:{font};font-size:14px;line-height:20px;'
-        f'color:{_LIGHT["muted"]};text-align:{start};">{html.escape(note)}</td></tr>'
+        f'color:{COLORS["muted"]};text-align:{start};">{html.escape(note)}</td></tr>'
         if note
         else ""
     )
@@ -453,10 +500,10 @@ def _code_rows(code: str, note: str | None, font: str, start: str) -> str:
     return (
         '<tr><td style="padding-top:24px;">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
-        f'<tr><td class="sk-panel" bgcolor="{_LIGHT["panel"]}" align="center" '
-        f'style="border-radius:10px;background-color:{_LIGHT["panel"]};padding:22px 16px;">'
+        f'<tr><td class="sk-panel" bgcolor="{COLORS["panel"]}" align="center" '
+        f'style="border-radius:10px;background-color:{COLORS["panel"]};padding:22px 16px;">'
         f'<span class="sk-ink sk-code" dir="ltr" style="font-family:{_MONO};font-size:34px;line-height:40px;'
-        f'font-weight:500;letter-spacing:8px;color:{_LIGHT["ink"]};">'
+        f'font-weight:500;letter-spacing:8px;color:{COLORS["ink"]};">'
         f"{html.escape(code)}</span></td></tr></table></td></tr>{note_row}"
     )
 
@@ -479,10 +526,10 @@ def _button_row(label: str, url: str, font: str) -> str:
     return (
         '<tr><td align="center" style="padding-top:28px;text-align:center;">'
         '<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center"><tr>'
-        f'<td class="sk-btn" bgcolor="{_LIGHT["btn"]}" style="border-radius:6px;background-color:{_LIGHT["btn"]};'
+        f'<td class="sk-btn" bgcolor="{COLORS["btn"]}" style="border-radius:6px;background-color:{COLORS["btn"]};'
         'mso-padding-alt:12px 22px;">'
         f'<a class="sk-btn-a" href="{href}" target="_blank" style="display:inline-block;padding:12px 22px;'
-        f"font-family:{font};font-size:15px;line-height:20px;font-weight:600;color:{_LIGHT['btn_ink']};"
+        f"font-family:{font};font-size:15px;line-height:20px;font-weight:600;color:{COLORS['btn_ink']};"
         f'text-decoration:none;border-radius:6px;">{html.escape(label)}</a>'
         "</td></tr></table></td></tr>"
     )
@@ -504,12 +551,11 @@ def render_email_html(content: EmailContent) -> str:
     tracked = _language(content.locale) in _TRACKED_LANGUAGES
     lang = html.escape(content.locale or "he", quote=True)
     esc = html.escape
-    light = _LIGHT
 
     preheader_text = content.preheader or content.detail or " · ".join(f"{k} {v}" for k, v in content.facts)
     preheader = (
         f'<div style="display:none;max-height:0;max-width:0;overflow:hidden;opacity:0;mso-hide:all;'
-        f'font-size:1px;line-height:1px;color:{light["bg"]};">{esc(_strip_isolates(preheader_text))}'
+        f'font-size:1px;line-height:1px;color:{COLORS["bg"]};">{esc(_strip_isolates(preheader_text))}'
         f"{'&#8204;&nbsp;' * 40}</div>"
         if preheader_text
         else ""
@@ -521,15 +567,15 @@ def render_email_html(content: EmailContent) -> str:
         status_row = (
             f'<tr><td style="padding-bottom:10px;text-align:{start};">'
             f'<span class="sk-dot-{tone}" style="display:inline-block;width:7px;height:7px;border-radius:1px;'
-            f'background-color:{light[tone]};vertical-align:middle;font-size:0;line-height:0;">&nbsp;</span>'
+            f'background-color:{COLORS[tone]};vertical-align:middle;font-size:0;line-height:0;">&nbsp;</span>'
             f'<span class="sk-{tone} sk-status" style="{gap}font-family:{font};font-size:12px;line-height:16px;'
-            f'font-weight:600;text-transform:uppercase;color:{light[tone]};vertical-align:middle;">'
+            f'font-weight:600;text-transform:uppercase;color:{COLORS[tone]};vertical-align:middle;">'
             f"{esc(label)}</span></td></tr>"
         )
     headline_tracking = "letter-spacing:-0.01em;" if tracked else ""
     detail_row = (
         f'<tr><td class="sk-text" style="padding-top:8px;font-family:{font};font-size:15px;line-height:22px;'
-        f'color:{light["text"]};text-align:{start};">{esc(content.detail)}</td></tr>'
+        f'color:{COLORS["text"]};text-align:{start};">{esc(content.detail)}</td></tr>'
         if content.detail
         else ""
     )
@@ -542,7 +588,7 @@ def render_email_html(content: EmailContent) -> str:
         settings_label, settings_url = content.settings
         settings_link = (
             f'<br><a class="sk-muted" href="{esc(settings_url, quote=True)}" target="_blank" '
-            f'style="color:{light["muted"]};text-decoration:underline;">{esc(settings_label)}</a>'
+            f'style="color:{COLORS["muted"]};text-decoration:underline;">{esc(settings_label)}</a>'
         )
     home = esc(FRONTEND_URL, quote=True)
 
@@ -553,48 +599,63 @@ def render_email_html(content: EmailContent) -> str:
         '<head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<meta http-equiv="X-UA-Compatible" content="IE=edge">'
+        # "light only" asks Apple Mail and iOS Mail not to recolor: the email
+        # is dark already, and these clients leave it as authored.
         '<meta name="color-scheme" content="light only">'
-        '<meta name="supported-color-schemes" content="light">'
         '<meta name="format-detection" content="telephone=no,date=no,address=no,email=no">'
         f"<title>{esc(_strip_isolates(content.subject))}</title>"
         # Outlook desktop renders Times New Roman when the first family in a
         # stack is a font it does not have, so it gets a plain stack instead.
         "<!--[if mso]><style>body,table,td,div,p,a,span,h1{font-family:'Segoe UI',Arial,sans-serif!important}"
         "</style><![endif]-->"
+        # New Outlook for Windows recolors text in dark mode but leaves a
+        # gradient text fill alone, so the button label keeps its color.
+        "<!--[if gte mso 16]><style>.sk-btn-a{mso-style-textfill-type:gradient;"
+        f'mso-style-textfill-fill-gradientfill-stoplist:"0 {_mso_color(COLORS["btn_ink"])} 0 100000\\,'
+        f'100000 {_mso_color(COLORS["btn_ink"])} 0 100000"}}</style><![endif]-->'
         f'<link href="{esc(_FONTS_URL, quote=True)}" rel="stylesheet">'
         f"<style>{_style_block(tracked)}</style>"
         "</head>"
-        f'<body class="sk-bg" dir="{direction}" style="margin:0;padding:0;background-color:{light["bg"]};">'
+        f'<body class="body sk-bg" dir="{direction}" bgcolor="{COLORS["bg"]}" '
+        f'style="margin:0;padding:0;background-color:{COLORS["bg"]};">'
+        # Outlook desktop paints the window behind the body only from VML.
+        '<!--[if gte mso 9]><v:background xmlns:v="urn:schemas-microsoft-com:vml" fill="t">'
+        f'<v:fill type="tile" color="{COLORS["bg"]}"/></v:background><![endif]-->'
+        '<div class="gmail-bg"><div class="gmail-screen"><div class="gmail-diff">'
         f"{preheader}"
         f'<table role="presentation" class="sk-bg" width="100%" cellpadding="0" cellspacing="0" border="0" '
-        f'dir="{direction}" bgcolor="{light["bg"]}" style="width:100%;background-color:{light["bg"]};">'
-        '<tr><td align="center" style="padding:0;">'
+        f'dir="{direction}" bgcolor="{COLORS["bg"]}" style="width:100%;background-color:{COLORS["bg"]};">'
+        '<tr><td class="sk-outer" align="center" style="padding:32px 16px;">'
         '<!--[if mso]><table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0">'
         "<tr><td><![endif]-->"
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" dir="{direction}" '
-        'style="width:100%;max-width:600px;">'
-        f'<tr><td class="sk-pad" style="padding:40px 32px 40px;text-align:{start};">'
+        # Separate borders: a collapsed border ignores border-radius and draws square corners.
+        'style="width:100%;max-width:600px;border-collapse:separate;">'
+        f'<tr><td class="sk-card sk-pad" bgcolor="{COLORS["card"]}" style="padding:28px 32px 36px;'
+        f'background-color:{COLORS["card"]};border:1px solid {COLORS["rule"]};border-radius:12px;text-align:{start};">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;">'
-        '<tr><td align="center" style="padding-bottom:36px;text-align:center;">'
+        '<tr><td align="center" style="padding-bottom:20px;text-align:center;">'
         f'<a href="{home}" target="_blank" style="text-decoration:none;">'
-        f'<img src="{esc(_LOGO_URL, quote=True)}" width="{_LOGO_SIZE[0]}" height="{_LOGO_SIZE[1]}" alt="{esc(APP_NAME, quote=True)}" '
+        f'<img src="{esc(_LOGO_URL, quote=True)}" width="{_LOGO_SIZE[0]}" height="{_LOGO_SIZE[1]}" '
+        f'alt="{esc(APP_NAME, quote=True)}" '
         f'style="display:block;margin:0 auto;border:0;outline:none;width:{_LOGO_SIZE[0]}px;height:{_LOGO_SIZE[1]}px;'
-        f"font-family:{_DISPLAY_LEAD}{font};font-size:18px;line-height:30px;font-weight:700;color:{light['ink']};"
+        f"font-family:{_DISPLAY_LEAD}{font};font-size:18px;line-height:60px;font-weight:700;color:{COLORS['ink']};"
         'text-align:center;"></a></td></tr>'
         f"{status_row}"
-        f'<tr><td style="text-align:{start};"><h1 class="sk-ink sk-h1" style="margin:0;font-family:{_DISPLAY_LEAD}{font};'
-        f"font-size:22px;line-height:30px;font-weight:600;{headline_tracking}color:{light['ink']};"
+        f'<tr><td style="text-align:{start};">'
+        f'<h1 class="sk-ink sk-h1" style="margin:0;font-family:{_DISPLAY_LEAD}{font};'
+        f"font-size:22px;line-height:30px;font-weight:600;{headline_tracking}color:{COLORS['ink']};"
         f'text-align:{start};">{_bidi_html(content.headline)}</h1></td></tr>'
         f"{detail_row}{body_rows}{button_row}"
-        f'<tr><td style="padding-top:44px;">'
+        f'<tr><td style="padding-top:40px;">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="sk-rule" '
-        f'style="width:100%;border-top:1px solid {light["rule"]};"><tr>'
+        f'style="width:100%;border-top:1px solid {COLORS["rule"]};"><tr>'
         f'<td class="sk-muted" style="padding-top:16px;font-family:{font};font-size:12px;line-height:18px;'
-        f'color:{light["muted"]};text-align:{start};">{esc(content.footer)}{settings_link}</td>'
+        f'color:{COLORS["muted"]};text-align:{start};">{esc(content.footer)}{settings_link}</td>'
         "</tr></table></td></tr>"
         "</table></td></tr></table>"
         "<!--[if mso]></td></tr></table><![endif]-->"
-        "</td></tr></table></body></html>"
+        "</td></tr></table></div></div></div></body></html>"
     )
 
 
