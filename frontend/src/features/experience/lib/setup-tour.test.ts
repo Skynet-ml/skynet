@@ -7,7 +7,9 @@ import { INTAKE_LLM_PHASES } from "./intake.ts";
 import {
   MAX_SETUP_STOPS,
   SETUP_STOPS,
+  advancesOnAnswer,
   arrowStep,
+  billingChoices,
   resumeStopIndex,
   setupStops,
 } from "./setup-tour.ts";
@@ -24,7 +26,9 @@ function sources(dir: string): string[] {
 }
 
 test("the setup stays short and every stop is unique", () => {
-  assert.ok(SETUP_STOPS.length <= MAX_SETUP_STOPS);
+  for (const billing of ["platform", "byok", "subscription"] as const) {
+    assert.ok(setupStops(billing).length <= MAX_SETUP_STOPS, `${billing}: too many stops`);
+  }
   assert.equal(new Set(SETUP_STOPS.map((s) => s.id)).size, SETUP_STOPS.length);
 });
 
@@ -61,6 +65,7 @@ test("the privacy question frames its real control in Settings", () => {
 // The stops where the user sets the real controls, and the file that tags each anchor.
 const HANDS_ON: Record<string, string> = {
   providers: "features/billing/components/ByokKeysSection.tsx",
+  clis: "features/settings/components/AgentEngineSetting.tsx",
   connectors: "features/connectors/components/ConnectorsTab.tsx",
   notifications: "features/settings/components/NotificationsTab.tsx",
   channels: "features/settings/components/NotificationsTab.tsx",
@@ -106,6 +111,36 @@ test("the model key stop shows only after a bring-your-own-key answer", () => {
   assert.ok(setupStops("byok").some((s) => s.id === "providers"));
   assert.ok(!setupStops("platform").some((s) => s.id === "providers"));
   assert.ok(setupStops("byok").length <= MAX_SETUP_STOPS);
+});
+
+test("the CLI stop shows only after a CLI subscription answer", () => {
+  assert.ok(setupStops("subscription").some((s) => s.id === "clis"));
+  assert.ok(!setupStops("subscription").some((s) => s.id === "providers"));
+  assert.ok(!setupStops("platform").some((s) => s.id === "clis"));
+  assert.ok(!setupStops("byok").some((s) => s.id === "clis"));
+});
+
+test("the Mac app offers the coding CLI subscription as a billing answer; the hosted app does not", () => {
+  assert.deepEqual(
+    billingChoices(true).map((c) => c.value),
+    ["platform", "byok", "subscription"],
+  );
+  assert.deepEqual(
+    billingChoices(false).map((c) => c.value),
+    ["platform", "byok"],
+  );
+  for (const locale of ["he", "en"]) {
+    const catalog = JSON.parse(readFileSync(join(CATALOG_DIR, `${locale}.json`), "utf8"));
+    for (const choice of billingChoices(true)) {
+      assert.ok(catalog[choice.label], `${locale}: missing ${choice.label}`);
+      assert.ok(catalog[choice.description], `${locale}: missing ${choice.description}`);
+    }
+  }
+});
+
+test("an answer that changes how the app looks does not move the tour on", () => {
+  assert.equal(advancesOnAnswer("level"), false);
+  for (const question of INTAKE_LLM_PHASES) assert.equal(advancesOnAnswer(question), true);
 });
 
 test("a setup back from a sign-in picks up at the stop it left", () => {

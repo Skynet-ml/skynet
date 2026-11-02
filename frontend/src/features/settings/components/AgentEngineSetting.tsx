@@ -336,16 +336,19 @@ export function AgentEngineSetting() {
   };
 
   return (
-    <AgentEngineSelect
-      local={local}
-      status={status}
-      failed={failed}
-      value={value}
-      keyVerified={keyVerified}
-      keysFailed={keysFailed}
-      automatic={local && stored === false}
-      saving={saving}
-      onChange={onChange}
-    />
+    // The setup's CLI stop frames this row: it lists each CLI and how to sign in.
+    <div data-setup="local-clis">
+      <AgentEngineSelect
+        local={local}
+        status={status}
+        failed={failed}
+        value={value}
+        keyVerified={keyVerified}
+        keysFailed={keysFailed}
+        automatic={local && stored === false}
+        saving={saving}
+        onChange={onChange}
+      />
+    </div>
   );
 }

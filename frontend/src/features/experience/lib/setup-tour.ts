@@ -30,12 +30,15 @@ export interface SetupStop {
   above?: boolean;
   /** Shown only after the user chose to bring their own model key. */
   byokOnly?: boolean;
+  /** Shown only after the user chose their coding CLI subscription (the Mac app). */
+  subscriptionOnly?: boolean;
 }
 
 /*
  * The tour stays short: every stop past this is one the user would skip.
- * Ten covers the key stop a "my own key" answer adds and the three places
- * the user connects things (data sources, the update grid, Chrome and Slack).
+ * Ten covers the one stop a billing answer can add (the key, or the CLIs)
+ * and the three places the user connects things (data sources, the update
+ * grid, Chrome and Slack).
  */
 export const MAX_SETUP_STOPS = 10;
 
@@ -74,6 +77,15 @@ export const SETUP_STOPS: readonly SetupStop[] = [
     title: "experience.setup.providers.title",
     body: "experience.setup.providers.body",
     byokOnly: true,
+  },
+  // The Agent engine row lists each CLI on this computer, its state and its sign-in command.
+  {
+    id: "clis",
+    anchor: "local-clis",
+    settings: "agent",
+    title: "experience.setup.clis.title",
+    body: "experience.setup.clis.body",
+    subscriptionOnly: true,
   },
   {
     id: "privacy",
@@ -121,9 +133,57 @@ export const SETUP_STOPS: readonly SetupStop[] = [
   },
 ];
 
-/** The stops this user walks: the key stop only follows a "my own key" answer. */
+/**
+ * The stops this user walks: the key stop only follows a "my own key" answer,
+ * and the CLI stop only follows a "my CLI subscription" answer.
+ */
 export function setupStops(billing: IntakeAnswers["billing"]): readonly SetupStop[] {
-  return billing === "byok" ? SETUP_STOPS : SETUP_STOPS.filter((s) => !s.byokOnly);
+  return SETUP_STOPS.filter(
+    (s) =>
+      (!s.byokOnly || billing === "byok") && (!s.subscriptionOnly || billing === "subscription"),
+  );
+}
+
+const BILLING_OPTIONS: ReadonlyArray<{
+  value: IntakeAnswers["billing"];
+  label: MessageKey;
+  description: MessageKey;
+}> = [
+  {
+    value: "platform",
+    label: "experience.intake.q3.billing.platform",
+    description: "experience.intake.billing.platform_description",
+  },
+  {
+    value: "byok",
+    label: "experience.intake.q3.billing.byok",
+    description: "experience.intake.billing.byok_description",
+  },
+  {
+    value: "subscription",
+    label: "experience.intake.q3.billing.subscription",
+    description: "experience.intake.billing.subscription_description",
+  },
+];
+
+/*
+ * The billing answers this build offers. Runs on a coding CLI subscription
+ * need the CLIs on the user's computer, which only the Mac app (local mode)
+ * reaches; the hosted app offers credits and an own key.
+ */
+export function billingChoices(local: boolean): typeof BILLING_OPTIONS {
+  return local ? BILLING_OPTIONS : BILLING_OPTIONS.filter((o) => o.value !== "subscription");
+}
+
+/*
+ * Answers that change how the app looks apply at once but never move the
+ * tour on: the user looks at the change behind the card, then continues.
+ */
+const APPEARANCE_QUESTIONS: readonly SetupQuestion[] = ["level"];
+
+/** Whether picking an answer at this stop moves the tour on by itself. */
+export function advancesOnAnswer(question: SetupQuestion): boolean {
+  return !APPEARANCE_QUESTIONS.includes(question);
 }
 
 /**
