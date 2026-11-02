@@ -129,6 +129,20 @@ def test_summary_response_handles_unknown_recovery_state_defensively() -> None:
     }
 
 
+def test_summary_response_exposes_an_interrupted_stop_as_supported() -> None:
+    """Show a run the orphan sweep stopped as interrupted, with a reason that says how to continue."""
+    payload = _required_base_fields()
+    payload["recovery"] = {"state": "interrupted", "interrupted_budget_generation": 2}
+
+    response = OptimizationSummaryResponse.model_validate(payload)
+
+    assert response.recovery == {
+        "state": "interrupted",
+        "interrupted_budget_generation": 2,
+        "reason": "The run stopped because its worker went away. Resume it to continue in its own budget.",
+    }
+
+
 def test_optimization_summary_response_metric_fields_default_none() -> None:
     """Verify OptimizationSummaryResponse defaults metric fields to None."""
     resp = OptimizationSummaryResponse.model_validate(_required_base_fields())
