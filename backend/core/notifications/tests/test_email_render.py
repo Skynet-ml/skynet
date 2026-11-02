@@ -53,7 +53,7 @@ def _frontend_url(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _fact_cells(html: str) -> list[str]:
     """Return the opening tags of the fact cells in ``html``."""
-    return re.findall(r'<td class="sk-fact"[^>]*>', html)
+    return re.findall(r'<div class="sk-fact"[^>]*>', html)
 
 
 @pytest.mark.parametrize("event_type", EVENT_TYPES)
@@ -279,3 +279,14 @@ def test_frontend_url_falls_back_to_port_3000(monkeypatch: pytest.MonkeyPatch) -
     finally:
         monkeypatch.undo()
         importlib.reload(email_render)
+
+
+def test_header_logo_and_stacked_mobile_facts() -> None:
+    """The header shows the sized logo image, and narrow screens stack every fact on its own line."""
+    _, html, _ = render_notification_email("finished", "Run", ALL_FACTS, "/x")
+
+    assert re.search(
+        rf'<img src="[^"]+/brand/skynet-email-lockup@2x\.png" width="\d+" height="\d+" alt="{APP_NAME}"', html
+    )
+    assert ".sk-fact{display:block!important;width:100%!important" in html
+    assert all("display:inline-block" in cell for cell in _fact_cells(html))

@@ -1,6 +1,6 @@
 """Email rendering: one calm, status-line layout for every app email.
 
-Every email shares the same skeleton: a small upper-case wordmark, a status label,
+Every email shares the same skeleton: a centered logo, a status label,
 a one-line headline saying what happened, an optional row of facts (score,
 change vs baseline, spend, duration), exactly one button, and a footer saying
 why the recipient got the email. Each email also gets a plain-text twin.
@@ -33,6 +33,12 @@ from ..brand import APP_NAME
 from ..i18n import t_locale
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+
+# The hoatzin mark and the wordmark as one PNG, drawn from the app's own
+# artwork at 2x: mail clients load neither web fonts nor inline SVG. The alt
+# text carries the styles so the name still shows when images are blocked.
+_LOGO_URL = f"{FRONTEND_URL}/brand/skynet-email-lockup@2x.png"
+_LOGO_SIZE = (150, 30)
 # The settings modal opens on the tab named by this query param on any page.
 NOTIFICATION_SETTINGS_PATH = "/?settings=notifications"
 
@@ -373,7 +379,8 @@ def _style_block(tracked: bool) -> str:
         f"{tracking}"
         "@media (max-width:520px){"
         ".sk-pad{padding:28px 20px 32px!important}"
-        ".sk-fact{display:inline-block!important;width:50%!important;box-sizing:border-box}.sk-fact-end{display:none!important}"
+        ".sk-fact{display:block!important;width:100%!important;box-sizing:border-box;padding:12px 0!important}"
+        f".sk-fact+.sk-fact{{border-top:1px solid {_LIGHT['rule']}}}"
         ".sk-fact-v{font-size:16px!important;line-height:24px!important;white-space:normal!important}"
         ".sk-h1{font-size:20px!important;line-height:28px!important}"
         ".sk-code{font-size:28px!important;letter-spacing:6px!important}"
@@ -382,37 +389,44 @@ def _style_block(tracked: bool) -> str:
 
 
 def _facts_row(facts: tuple[tuple[str, str], ...], font: str, rtl: bool) -> str:
-    """Render the fact row as one table row of equal-width cells.
+    """Render the facts as inline blocks that wrap onto new lines when narrow.
 
     Args:
         facts: Ordered ``(label, value)`` pairs (1-4).
         font: Text font stack for the labels.
-        rtl: Whether to mirror alignment and the inter-cell padding.
+        rtl: Whether to mirror alignment and the gap between facts.
 
     Returns:
-        A ``<tr>`` holding the fact table, or ``""`` without facts.
+        A ``<tr>`` holding the facts, or ``""`` without facts.
     """
     if not facts:
         return ""
     start = "right" if rtl else "left"
-    # Cells size to their content (no fixed widths): a long value such as
-    # "$6.37 of $10.00" takes the room it needs instead of running into the
-    # next column.
     gap = "16px 0 16px 28px" if rtl else "16px 28px 16px 0"
-    cells = "".join(
-        f'<td class="sk-fact" valign="top" style="padding:{gap};text-align:{start};">'
+    # Inline blocks, not table cells: a client that ignores the mobile media
+    # query (the Gmail app with non-Google accounts) wraps a fact that does
+    # not fit onto its own line instead of squeezing or overlapping it. The
+    # media query then stacks every fact on its own full-width line. Outlook
+    # desktop ignores inline-block, so a ghost table keeps its facts in a row.
+    blocks = '<!--[if mso]></td><td valign="top"><![endif]-->'.join(
+        f'<div class="sk-fact" style="display:inline-block;vertical-align:top;padding:{gap};text-align:{start};">'
         f'<div class="sk-muted" style="font-family:{font};font-size:12px;line-height:16px;color:{_LIGHT["muted"]};'
         f'text-align:{start};white-space:nowrap;">{html.escape(label)}</div>'
         f'<div class="sk-ink sk-fact-v" style="font-family:{_MONO};font-size:18px;line-height:26px;font-weight:500;'
         f'color:{_LIGHT["ink"]};padding-top:4px;text-align:{start};white-space:nowrap;">{_bidi_html(value)}</div>'
-        "</td>"
+        "</div>"
         for label, value in facts
     )
     return (
         '<tr><td style="padding-top:24px;">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="sk-rule" '
         f'style="width:100%;border-top:1px solid {_LIGHT["rule"]};border-bottom:1px solid {_LIGHT["rule"]};">'
-        f'<tr>{cells}<td class="sk-fact-end" width="100%" style="width:100%;"></td></tr></table></td></tr>'
+        f'<tr><td style="text-align:{start};font-size:0;line-height:0;">'
+        '<!--[if mso]><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+        '<td valign="top"><![endif]-->'
+        f"{blocks}"
+        "<!--[if mso]></td></tr></table><![endif]-->"
+        "</td></tr></table></td></tr>"
     )
 
 
@@ -561,10 +575,12 @@ def render_email_html(content: EmailContent) -> str:
         'style="width:100%;max-width:600px;">'
         f'<tr><td class="sk-pad" style="padding:40px 32px 40px;text-align:{start};">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;">'
-        f'<tr><td style="padding-bottom:36px;text-align:{start};">'
-        f'<a class="sk-ink" href="{home}" target="_blank" dir="ltr" style="font-family:{_DISPLAY_LEAD}{font};font-size:13px;'
-        f'line-height:16px;font-weight:700;letter-spacing:0.24em;color:{light["ink"]};text-decoration:none;">'
-        f"{esc(APP_NAME.upper())}</a></td></tr>"
+        '<tr><td align="center" style="padding-bottom:36px;text-align:center;">'
+        f'<a href="{home}" target="_blank" style="text-decoration:none;">'
+        f'<img src="{esc(_LOGO_URL, quote=True)}" width="{_LOGO_SIZE[0]}" height="{_LOGO_SIZE[1]}" alt="{esc(APP_NAME, quote=True)}" '
+        f'style="display:block;margin:0 auto;border:0;outline:none;width:{_LOGO_SIZE[0]}px;height:{_LOGO_SIZE[1]}px;'
+        f"font-family:{_DISPLAY_LEAD}{font};font-size:18px;line-height:30px;font-weight:700;color:{light['ink']};"
+        'text-align:center;"></a></td></tr>'
         f"{status_row}"
         f'<tr><td style="text-align:{start};"><h1 class="sk-ink sk-h1" style="margin:0;font-family:{_DISPLAY_LEAD}{font};'
         f"font-size:22px;line-height:30px;font-weight:600;{headline_tracking}color:{light['ink']};"
