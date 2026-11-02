@@ -257,6 +257,29 @@ def _record_spend(lm: Any) -> None:
         logger.exception("docs agent spend could not be recorded")
 
 
+def _call_and_record(lm: Any, messages: list[dict[str, str]]) -> Any:
+    """Run the model call, then record its spend, in the same worker thread.
+
+    A client disconnect cancels the awaiting stream, but the thread keeps
+    running. Recording here, after the call returns, counts the spend even
+    then; recording in the stream's ``finally`` saw an empty history and
+    counted $0, so the monthly budget did not bound spend.
+
+    Args:
+        lm: The metered LM for this answer.
+        messages: The chat messages to send.
+
+    Returns:
+        The LM outputs.
+    """
+    try:
+        # The output cap goes on the call: dspy rejects a small max_tokens at
+        # construction for OpenAI reasoning models, but not per call.
+        return lm(messages=messages, max_tokens=MAX_OUTPUT_TOKENS)
+    finally:
+        _record_spend(lm)
+
+
 def create_docs_agent_router(
     *,
     corpus: DocsCorpus | None = None,
@@ -310,14 +333,11 @@ def create_docs_agent_router(
 
         async def stream() -> AsyncIterator[str]:
             """Run the model call, then relay its answer as chunks."""
-            lm = None
             try:
                 lm = lm_factory()
                 model = str(getattr(lm, "model", "docs-agent"))
                 yield _chunk(identity, model, created, {"role": "assistant", "content": ""})
-                # The output cap goes on the call: dspy rejects a small max_tokens at
-                # construction for OpenAI reasoning models, but not per call.
-                outputs = await asyncio.to_thread(lm, messages=messages, max_tokens=MAX_OUTPUT_TOKENS)
+                outputs = await asyncio.to_thread(_call_and_record, lm, messages)
                 text = _answer_text(outputs)
                 for start in range(0, len(text), _CHUNK_CHARS):
                     yield _chunk(identity, model, created, {"content": text[start : start + _CHUNK_CHARS]})
@@ -326,9 +346,6 @@ def create_docs_agent_router(
                 logger.exception("docs agent answer failed")
                 error = {"error": {"code": "docs_agent.failed", "message": "The docs assistant could not answer."}}
                 yield f"data: {json.dumps(error)}\n\n"
-            finally:
-                if lm is not None:
-                    _record_spend(lm)
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(

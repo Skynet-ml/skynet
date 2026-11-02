@@ -7,7 +7,9 @@ Redis double backs the rate limit and the monthly budget.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from ...config import settings
 from ...service_gateway.agents.docs_retrieval import (
@@ -30,7 +33,12 @@ from .. import platform_budget
 from ..auth import AuthenticatedUser
 from ..errors import DomainError
 from ..routers import docs_agent
-from ..routers.docs_agent import _optional_user, build_messages, create_docs_agent_router
+from ..routers.docs_agent import (
+    DocsAgentAskRequest,
+    _optional_user,
+    build_messages,
+    create_docs_agent_router,
+)
 
 _PAGES = {
     "en/concepts/billing.md": (
@@ -334,6 +342,73 @@ def test_answer_spend_is_recorded(
     monkeypatch.setattr(docs_agent, "model_usages_from_history", lambda lm: ["usage"])
     monkeypatch.setattr(docs_agent, "raw_cost_usd", lambda usages: 0.25)
     _client(docs_root, _FakeLM()).post("/docs-agent/ask", json={"question": "balance"})
+    key = next(k for k in redis_double.keys("skynet:platform-budget:docs_agent:*") if not k.endswith(":alerted"))
+    assert float(redis_double.get(key)) == pytest.approx(0.25)
+
+
+async def test_spend_is_recorded_once_after_a_cancelled_stream(
+    monkeypatch: pytest.MonkeyPatch, docs_root: Path, redis_double: fakeredis.FakeStrictRedis
+) -> None:
+    """A client that disconnects during the model call still pays: spend counts once, after the call."""
+
+    class _SlowLM(_FakeLM):
+        """Blocks until released, then adds its usage to the history."""
+
+        def __init__(self) -> None:
+            """Start with an empty history and closed gates."""
+            super().__init__()
+            self.history: list[str] = []
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def __call__(self, **kwargs: Any) -> list[str]:
+            """Wait for the release, then record usage like ``dspy.LM``.
+
+            Args:
+                **kwargs: The call's keyword arguments.
+
+            Returns:
+                One output.
+            """
+            self.started.set()
+            self.release.wait(5)
+            self.history.append("usage")
+            return super().__call__(**kwargs)
+
+    recorded: list[float] = []
+    record_spend = docs_agent._record_spend
+    done = threading.Event()
+
+    def _spy(lm: Any) -> None:
+        """Count each record and remember the history size it saw.
+
+        Args:
+            lm: The LM whose spend is recorded.
+        """
+        recorded.append(len(lm.history))
+        record_spend(lm)
+        done.set()
+
+    monkeypatch.setattr(settings, "docs_agent_monthly_budget_usd", 5.0)
+    monkeypatch.setattr(docs_agent, "model_usages_from_history", lambda lm: list(lm.history))
+    monkeypatch.setattr(docs_agent, "raw_cost_usd", lambda usages: 0.25 * len(usages))
+    monkeypatch.setattr(docs_agent, "_record_spend", _spy)
+    lm = _SlowLM()
+    router = create_docs_agent_router(corpus=DocsCorpus(docs_root), lm_factory=lambda: lm)
+    ask = next(route.endpoint for route in router.routes if getattr(route, "path", "") == "/docs-agent/ask")
+    request = Request({"type": "http", "method": "POST", "headers": [], "client": ("203.0.113.9", 1)})
+    response = await ask(DocsAgentAskRequest(question="balance"), request, None)
+    body = response.body_iterator
+    await body.__anext__()
+    pending = asyncio.ensure_future(body.__anext__())
+    assert await asyncio.to_thread(lm.started.wait, 5)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert recorded == []
+    lm.release.set()
+    assert await asyncio.to_thread(done.wait, 5)
+    assert recorded == [1]
     key = next(k for k in redis_double.keys("skynet:platform-budget:docs_agent:*") if not k.endswith(":alerted"))
     assert float(redis_double.get(key)) == pytest.approx(0.25)
 

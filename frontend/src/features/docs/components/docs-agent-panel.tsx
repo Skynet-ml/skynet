@@ -3,6 +3,7 @@
 import * as React from "react";
 import { ArrowCounterClockwise, PaperPlaneTilt, Sparkle, X } from "@/shared/ui/icons";
 import { MessageMarkdown } from "@/shared/ui/agent/message-markdown";
+import { fetchWithAuthRetry } from "@/shared/lib/api";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
 import { readServerSentEvents } from "@/shared/lib/sse";
 import { cn } from "@/shared/lib/utils";
@@ -112,7 +113,7 @@ export function DocsAgentPanel({
       setStreaming(true);
       let failed: Notice = null;
       try {
-        const res = await fetch(`${getRuntimeEnv().apiUrl}/docs-agent/ask`, {
+        const res = await fetchWithAuthRetry(`${getRuntimeEnv().apiUrl}/docs-agent/ask`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
           body: JSON.stringify(body),
