@@ -923,7 +923,7 @@ def create_app(
             "their status, read the results, and run the optimized "
             "artifact. Send an API token "
             "from Settings > API as a Bearer token. Guides: "
-            "https://skynetml.com/docs/api"
+            f"{settings.public_origins[0]}/docs/api"
         ),
     )
 
@@ -1053,7 +1053,7 @@ def create_app(
             A :class:`JSONResponse` with media type ``application/problem+json``.
         """
         body: dict[str, Any] = {
-            "type": f"https://api.skynetml.com/errors/{code}" if code else "about:blank",
+            "type": f"{settings.public_origins[1]}/errors/{code}" if code else "about:blank",
             "title": title
             or (
                 code.replace("_", " ").replace(".", " ").capitalize()

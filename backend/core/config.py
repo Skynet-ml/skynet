@@ -1634,6 +1634,22 @@ class Settings(BaseSettings):
         return re.search(r"-pr-\d+$", self.app_environment) is not None
 
     @property
+    def public_origins(self) -> tuple[str, str]:
+        """Return the public web app and API origins that links and docs should name.
+
+        The Mac app names the hosted Skynet of its build target. A hosted
+        deploy names staging when it is staging or a PR preview, and
+        production otherwise, so tests and dev servers keep production links.
+
+        Returns:
+            The web app origin and the API origin, without a trailing slash.
+        """
+        if self.local_mode:
+            return self.hosted_app_url, self.hosted_api_url
+        staging = self.app_environment == "staging" or self.is_preview_environment
+        return HOSTED_TARGET_URLS["staging" if staging else "production"]
+
+    @property
     def is_stripe_configured(self) -> bool:
         """Return whether a Stripe secret key is present (billing mutations enabled)."""
         return self.stripe_secret_key is not None
