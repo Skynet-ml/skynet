@@ -73,6 +73,11 @@ const REFERENCE_DEF = /^ {0,3}\[[^\]]+\]:[ \t]*<?([^\s>]*)>?.*$/gm;
 const ANGLE_LINK = /<(https?:\/\/[^>\s]+)>/g;
 const BARE_URL = /(^|[\s(])(https?:\/\/[^\s)<>]+)/g;
 
+/** Whether a rendered link may stay a link in a docs answer: only docs pages. */
+export function isDocsHref(href: string): boolean {
+  return DOCS_PATH.test(href);
+}
+
 /** Rewrite links outside fenced code: keep docs pages, show every other URL as text. */
 function rewriteLinks(text: string): string {
   return text
