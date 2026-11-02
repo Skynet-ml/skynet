@@ -122,8 +122,8 @@ RUN python -m venv /opt/prime-agent/kernel-venv \
 # Protected sandboxes have no network to build it at run time; the native
 # runtime uses this interpreter when present (native_runtime.SHINKA_IMAGE_PYTHON)
 # and the readiness probe reports shinka_ready from it.
-# Off by default: the layer is ~700 MB and carries GPL packages (Levenshtein,
-# imageio-ffmpeg's FFmpeg), so only the sandbox image build opts in with
+# Off by default: the layer is ~700 MB and carries a GPL package (Levenshtein),
+# so only the sandbox image build opts in with
 # --build-arg INCLUDE_SHINKA_EVOLVE=1; API/worker images stay without it.
 ARG INCLUDE_SHINKA_EVOLVE=false
 COPY core/service_gateway/optimization/blackbox/shinka_requirements.txt /opt/shinka/requirements.txt
