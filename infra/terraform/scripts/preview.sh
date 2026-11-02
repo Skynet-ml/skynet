@@ -3,8 +3,10 @@
 # preview-cleanup.yml run this script; an operator runs setup-db once.
 #
 #   preview.sh claim <pr> <sha>    take a slot (exit 3 when all are taken)
-#   preview.sh build <pr> <sha>    build and push the preview images
-#   preview.sh deploy <pr> <sha>   migrate, then create or update the services
+#   preview.sh build <pr> <sha>    build and push the preview images, and migrate
+#   preview.sh deploy <pr> <sha>   create or update the services
+#   preview.sh staging-backend <pr> <sha>
+#                                  print the staging backend image if backend/ matches
 #   preview.sh delete <pr>         delete the preview (not its task definitions)
 #   preview.sh list                print "<pr> <sha> <last-push-epoch>" per slot
 #   preview.sh revision-prs        print the PRs that have preview task definitions
@@ -28,6 +30,10 @@
 # delete leaves the task definitions ACTIVE: the preview role cannot
 # deregister revisions. prune runs from the scheduled cleanup on main, with
 # its own role, and removes them.
+#
+# A PR whose backend/ tree equals the one of the staging backend image runs
+# that image: the workflow sets BACKEND_IMAGE (from staging-backend) for
+# build and deploy, and build does not build a backend image.
 #
 # The tasks get the staging REMOTE_DB_URL and REDIS_URL. A wrapper command
 # points them at the preview database and Redis DB before the app starts, so
@@ -165,6 +171,28 @@ build_frontend() {
     "$repo_root/frontend"
 }
 
+# Migrates the preview database with the backend image. Args: image cfg
+migrate() {
+  local slot td
+  slot="$(slot_of "$pr")"
+  [[ -n "$slot" ]] || die "PR $pr holds no preview slot; run claim first"
+  td="$(register migrate "$1" "$(preview_env backend "$(jq -r .domain <<<"$2")")" "$slot" "$2" "$(account)")"
+  echo "creating the database if needed, then migrating"
+  run_migrate_task "$2" "$td"
+  echo "migration ok"
+}
+
+# Builds the backend image (not when the preview runs the staging image),
+# then migrates with it. Args: image cfg
+backend_and_migrate() {
+  if [[ -n "${BACKEND_IMAGE:-}" ]]; then
+    echo "skip: the preview runs the staging backend image $1"
+  else
+    build_backend "${1%:*}" "${1##*:}" || return 1
+  fi
+  migrate "$1" "$2"
+}
+
 build() {
   check_pr
   check_sha
@@ -173,19 +201,21 @@ build() {
   cfg="$(preview_config)"
   domain="$(jq -r .domain <<<"$cfg")"
   tag="$sha-pr-$pr"
-  backend="$(ecr_uri backend)"
+  backend="${BACKEND_IMAGE:-$(ecr_uri backend):$tag}"
   frontend="$(ecr_uri frontend)"
-  aws ecr get-login-password | docker login --username AWS --password-stdin "${backend%%/*}" >/dev/null
+  aws ecr get-login-password | docker login --username AWS --password-stdin "${frontend%%/*}" >/dev/null
 
-  # Both images build at the same time. Each output line starts with its image.
-  build_backend "$backend" "$tag" 2>&1 | sed -u 's/^/[backend] /' &
+  # The backend side and the frontend build run at the same time. The
+  # migration needs only the backend image, so it runs while the frontend
+  # still builds. Each output line starts with its side.
+  backend_and_migrate "$backend" "$cfg" 2>&1 | sed -u 's/^/[backend] /' &
   backend_pid=$!
   build_frontend "$frontend" "$tag" "$domain" 2>&1 | sed -u 's/^/[frontend] /' &
   frontend_pid=$!
   wait "$backend_pid" || failed+=" backend"
   wait "$frontend_pid" || failed+=" frontend"
-  [[ -z "$failed" ]] || die "image build failed:$failed"
-  echo "pushed: preview-backend:$tag preview-frontend:$tag"
+  [[ -z "$failed" ]] || die "image build or migration failed:$failed"
+  echo "ready: ${backend##*/} preview-frontend:$tag, database migrated"
 }
 
 # Runs before the app in the backend, worker and migrate containers. The
@@ -392,26 +422,63 @@ upsert_service() {
   echo "creating $name"
 }
 
-# Waits until the newest deployment of each service completes. Fails at once
-# when ECS marks one FAILED (the circuit breaker gave up).
+# Waits until the newest deployment of each service runs. A deployment runs
+# when ECS marks it COMPLETED, or when it runs the desired count of tasks
+# with no failed task for four checks in a row (30 seconds or more). ECS
+# marks a deployment COMPLETED only after the old tasks drain and stop, and
+# then only some minutes later for the worker, which has no health check.
+# The workflow's next step checks that the backend and the frontend serve the
+# commit through the ALB. Fails at once when ECS marks one FAILED (the
+# circuit breaker gave up).
 wait_services() {
-  local cluster="$1" i states
+  local cluster="$1" i states up=0
   shift
-  for ((i = 0; i < 120; i++)); do
+  for ((i = 0; i < 180; i++)); do
     states="$(aws ecs describe-services --cluster "$cluster" --services "$@" --output json |
-      jq -r '[.services[] | (.deployments[] | select(.status == "PRIMARY") | .rolloutState)] | join(" ")')"
+      jq -r '[.services[] | (.deployments[] | select(.status == "PRIMARY")
+        | if .rolloutState == "IN_PROGRESS" and .runningCount >= .desiredCount and .failedTasks == 0
+          then "RUNNING" else .rolloutState end)] | join(" ")')"
     [[ "$states" == *FAILED* ]] && die "a preview service failed to start ($states). See the ECS service events."
     [[ "$states" =~ ^(COMPLETED ?)+$ ]] && return 0
-    sleep 15
+    if [[ "$states" =~ ^((COMPLETED|RUNNING) ?)+$ ]]; then
+      if ((++up >= 4)); then
+        return 0
+      fi
+    else
+      up=0
+    fi
+    sleep 10
   done
-  die "preview services not stable after 30 minutes ($states)"
+  die "preview services not running after 30 minutes ($states)"
 }
 
+# Prints the environment of the backend (and worker and migrate) or the
+# frontend as JSON. Args: backend|frontend domain
+preview_env() {
+  local app="https://pr-$pr.$2" api="https://api-pr-$pr.$2" e="skynet-pr-$pr"
+  if [[ "$1" == backend ]]; then
+    # The remote MCP server (SKY-229) of a preview lives under its API host,
+    # because the *.<domain> wildcard certificate has no mcp-pr-<n> host.
+    jq -cn --arg e "$e" --arg sha "$sha" --arg app "$app" --arg mcp "$api/remote-mcp" '{
+      APP_ENVIRONMENT: $e, APP_GIT_SHA: $sha, SENTRY_ENVIRONMENT: $e, ALERT_ENVIRONMENT: $e,
+      ALLOWED_ORIGINS: $app, APP_PUBLIC_URL: $app, FRONTEND_URL: $app, MCP_RESOURCE_URL: $mcp,
+      DB_POOL_SIZE: "3", DB_POOL_MAX_OVERFLOW: "2"}'
+  else
+    # Google and GitHub know only staging's callback URL; staging forwards it here.
+    jq -cn --arg e "$e" --arg sha "$sha" --arg app "$app" --arg api "$api" \
+      --arg proxy "https://$2/api/auth" '{
+      APP_ENVIRONMENT: $e, APP_GIT_SHA: $sha, SENTRY_ENVIRONMENT: $e, NEXT_PUBLIC_SENTRY_ENVIRONMENT: $e,
+      API_URL: $api, NEXT_PUBLIC_API_URL: $api, NEXT_PUBLIC_SITE_URL: $app, AUTH_URL: $app,
+      AUTH_REDIRECT_PROXY_URL: $proxy}'
+  fi
+}
+
+# The migration ran in build, while the frontend image built.
 deploy() {
   check_pr
   check_sha
-  local cfg slot acct domain app api tag backend_img frontend_img app_env backend_env frontend_env
-  local migrate_td cluster tg_backend tg_frontend
+  local cfg slot acct domain app api tag backend_img frontend_img backend_env
+  local cluster tg_backend tg_frontend
   slot="$(slot_of "$pr")"
   [[ -n "$slot" ]] || die "PR $pr holds no preview slot; run claim first"
   cfg="$(preview_config)"
@@ -420,27 +487,9 @@ deploy() {
   app="pr-$pr.$domain"
   api="api-pr-$pr.$domain"
   tag="$sha-pr-$pr"
-  backend_img="$(ecr_uri backend):$tag"
+  backend_img="${BACKEND_IMAGE:-$(ecr_uri backend):$tag}"
   frontend_img="$(ecr_uri frontend):$tag"
-  app_env="skynet-pr-$pr"
-
-  # The remote MCP server (SKY-229) of a preview lives under its API host,
-  # because the *.<domain> wildcard certificate has no mcp-pr-<n> host.
-  backend_env="$(jq -cn --arg e "$app_env" --arg sha "$sha" --arg app "https://$app" --arg mcp "https://$api/remote-mcp" '{
-    APP_ENVIRONMENT: $e, APP_GIT_SHA: $sha, SENTRY_ENVIRONMENT: $e, ALERT_ENVIRONMENT: $e,
-    ALLOWED_ORIGINS: $app, APP_PUBLIC_URL: $app, FRONTEND_URL: $app, MCP_RESOURCE_URL: $mcp,
-    DB_POOL_SIZE: "3", DB_POOL_MAX_OVERFLOW: "2"}')"
-  # Google and GitHub know only staging's callback URL; staging forwards it here.
-  frontend_env="$(jq -cn --arg e "$app_env" --arg sha "$sha" --arg app "https://$app" --arg api "https://$api" \
-    --arg proxy "https://$domain/api/auth" '{
-    APP_ENVIRONMENT: $e, APP_GIT_SHA: $sha, SENTRY_ENVIRONMENT: $e, NEXT_PUBLIC_SENTRY_ENVIRONMENT: $e,
-    API_URL: $api, NEXT_PUBLIC_API_URL: $api, NEXT_PUBLIC_SITE_URL: $app, AUTH_URL: $app,
-    AUTH_REDIRECT_PROXY_URL: $proxy}')"
-
-  migrate_td="$(register migrate "$backend_img" "$backend_env" "$slot" "$cfg" "$acct")"
-  echo "creating the database if needed, then migrating"
-  run_migrate_task "$cfg" "$migrate_td"
-  echo "migration ok"
+  backend_env="$(preview_env backend "$domain")"
 
   cluster="$(jq -r .cluster <<<"$cfg")"
   tg_backend="$(slot_field "$cfg" "$slot" backend target_group)"
@@ -452,12 +501,38 @@ deploy() {
     "$(register backend "$backend_img" "$(jq -c --arg app "$app" '. + {WEBAUTHN_RP_ID: $app, WEBAUTHN_ORIGINS: .ALLOWED_ORIGINS}' <<<"$backend_env")" "$slot" "$cfg" "$acct")" \
     "$tg_backend" "$(jq -r .ports.backend <<<"$cfg")"
   upsert_service "$cfg" worker "$(register worker "$backend_img" "$backend_env" "$slot" "$cfg" "$acct")"
-  upsert_service "$cfg" frontend "$(register frontend "$frontend_img" "$frontend_env" "$slot" "$cfg" "$acct")" \
+  upsert_service "$cfg" frontend "$(register frontend "$frontend_img" "$(preview_env frontend "$domain")" "$slot" "$cfg" "$acct")" \
     "$tg_frontend" "$(jq -r .ports.frontend <<<"$cfg")"
 
   echo "waiting for the preview services"
   wait_services "$cluster" "pr-$pr-backend" "pr-$pr-worker" "pr-$pr-frontend"
-  echo "preview of PR $pr is live: https://$app (API https://$api)"
+  echo "preview of PR $pr runs: https://$app (API https://$api)"
+}
+
+# Prints the image of the newest staging backend revision when it was built
+# from the same backend/ tree as <sha>; prints nothing otherwise. Then the
+# preview can run that image: same code, same migrations. The image tag is
+# the staging commit. Needs a git checkout that can fetch that commit.
+staging_backend() {
+  check_pr
+  check_sha
+  local cfg img commit
+  cfg="$(preview_config)"
+  img="$(aws ecs describe-task-definition \
+    --task-definition "$(staging_revision backend "$(jq -r .families.backend <<<"$cfg")" "$(account)")" \
+    --query 'taskDefinition.containerDefinitions[0].image' --output text)"
+  commit="${img##*:}"
+  # Any doubt prints nothing, so the preview builds its own backend image.
+  if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "the staging backend image tag is not a commit: $img; the preview builds its own backend image" >&2
+  elif ! git -C "$repo_root" cat-file -e "$commit^{commit}" 2>/dev/null &&
+    ! git -C "$repo_root" fetch -q --depth=1 origin "$commit"; then
+    echo "cannot fetch staging commit $commit; the preview builds its own backend image" >&2
+  elif [[ "$(git -C "$repo_root" rev-parse "$sha:backend")" == "$(git -C "$repo_root" rev-parse "$commit:backend")" ]]; then
+    echo "$img"
+  else
+    echo "backend/ at ${sha:0:8} differs from staging ${commit:0:8}; the preview builds its own backend image" >&2
+  fi
 }
 
 delete() {
@@ -599,10 +674,11 @@ case "$cmd" in
   claim) claim ;;
   build) build ;;
   deploy) deploy ;;
+  staging-backend) staging_backend ;;
   delete) delete ;;
   list) list ;;
   revision-prs) revision_prs ;;
   prune) prune ;;
   setup-db) setup_db ;;
-  *) die "usage: preview.sh claim|build|deploy <pr> <sha> | delete|prune <pr> | list | revision-prs | setup-db" ;;
+  *) die "usage: preview.sh claim|build|deploy|staging-backend <pr> <sha> | delete|prune <pr> | list | revision-prs | setup-db" ;;
 esac

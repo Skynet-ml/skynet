@@ -1,9 +1,9 @@
 import type { SVGProps } from "react";
 
 /**
- * The app's brand mark: a colour Hoatzin (Opisthocomus hoazin) head on a transparent
- * background. The dark artwork adds buff edges so the darker feathers stay visible on a
- * dark surface; the `.dark` class on <html> picks it.
+ * The app's brand mark: a black and ivory Hoatzin (Opisthocomus hoazin) head with small blue
+ * and terracotta eye accents, on a transparent background. The dark artwork is the ivory
+ * version so the mark stays visible on a dark surface; the `.dark` class on <html> picks it.
  *
  * Two sizes, picked by rendered size:
  * - "full" (about 64px and up): the 512px artwork.

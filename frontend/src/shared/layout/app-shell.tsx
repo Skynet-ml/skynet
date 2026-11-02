@@ -76,8 +76,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     );
   }
 
-  // The Mac link consent page is a single focused decision, like /login.
-  if (pathname === "/login" || pathname === "/desktop/link") {
+  // The Mac link and MCP agent consent pages are single focused decisions, like /login.
+  if (pathname === "/login" || pathname === "/desktop/link" || pathname === "/mcp/authorize") {
     return (
       <main className="min-h-dvh" dir={dir}>
         {children}

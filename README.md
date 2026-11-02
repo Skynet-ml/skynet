@@ -1,159 +1,72 @@
 <p align="center">
-  <img src="docs/assets/skynet-wordmark.gif" width="480" alt="SKYNET" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="frontend/public/brand/hoatzin-dark-256.webp" />
+    <img src="frontend/public/brand/hoatzin-light-256.webp" width="128" alt="Skynet" />
+  </picture>
 </p>
 
-**A self-hostable platform for building, optimizing, and serving LLM programs — with prompt optimization (GEPA) at its core, priced per token with a flat markup.**
+<h1 align="center">Skynet</h1>
 
-Skynet turns "I have a dataset and a task" into an optimized, deployable LLM program. Upload data, describe the task, and the platform compiles a [DSPy](https://github.com/stanfordnlp/dspy) program, evolves its prompts with GEPA against your own metric, shows you the held-out lift it earned, and serves the result for inference — all through a web UI a non-engineer can drive, or a REST API.
+<p align="center"><b>Optimize Anything.</b> Give Skynet a prompt, code, a DSPy program or any text, plus a set of cases and a metric. Skynet finds a better version and shows you the score that proves it.</p>
 
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+<p align="center">
+  <a href="https://skynetml.com">skynetml.com</a> ·
+  <a href="https://skynetml.com/docs">Docs</a> ·
+  <a href="https://skynetml.com/docs/quickstart">Quickstart</a> ·
+  <a href="https://skynetml.com/docs/api">API</a> ·
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg" alt="License: AGPL v3" align="center" /></a>
+</p>
+
+## How it works
+
+You write two functions: `run(artifact, input)` and `score(input, output, expected)`. Skynet proposes new versions, runs each one on your cases in a sandbox and scores it with your metric. At the end you get the best version and its held-out score next to the score of the version you started with.
 
 ## Features
 
-- **Optimization runs** — a guided wizard (or an agent) builds the signature, metric, and column mapping; GEPA evolves the prompt with live streaming progress, resumable checkpoints, and a baseline-vs-optimized held-out score. Grid search compares model pairs side by side.
-- **AI co-tagging** — the tagger interviews you about your dataset, distills an editable labeling guide, calibrates against ~30 of your own labels (the AI guesses blind and reveals only after you commit), then earns the right to tag the rest through agreement-gated review rounds. Every label carries provenance (`human` / `ai_confirmed` / `ai_auto`), and one click turns your labels into a real optimized classifier.
-- **Dataset library** — save, share, clone, and edit datasets in place with a spreadsheet editor; hand any dataset to the tagger or the wizard by reference.
-- **Agents** — a generalist assistant (Cmd/Ctrl+J) that operates the whole wizard through tools with configurable trust modes, and a code agent that authors signatures, metrics, and multi-step workflow graphs on a visual canvas.
-- **Serving** — every successful run yields a program artifact: inspect the evolved instructions and demos, run inference against it, or export a runnable program.
-- **24 locales, RTL-first** — Hebrew is the base language; Arabic and Persian are first-class; the rest overlay with graceful fallback.
-- **Simple pricing** — a prepaid dollar balance; usage is metered at raw provider cost times a 1.15 markup (payment-processing fees, a small infra share, and margin). Bring your own API key and runs are charged only the small platform fee. Without Stripe keys, billing is simply off.
+- Engines: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler and ShinkaEvolve for prompts, code and text, and DSPy GEPA, MIPROv2 and BootstrapFewShot for DSPy programs. Auto picks one for you. [Engines](https://skynetml.com/docs/concepts/engines)
+- Your code runs in an isolated sandbox. Each run has a spending limit, and Skynet reserves it before any paid work starts. [Billing](https://skynetml.com/docs/concepts/billing) · [Security](https://skynetml.com/docs/security)
+- Claude, Codex and other MCP clients can check, start, follow and stop runs through the hosted MCP server (`https://mcp.skynetml.com/mcp`, OAuth 2.1). The [Skynet plugin](plugins/skynet) adds skills for Claude and Codex. [MCP](https://skynetml.com/docs/mcp)
+- Skynet for Mac runs the whole stack on your Mac. Model calls go through Claude Code or Codex, so your existing CLI plan pays for them. [Mac app](https://skynetml.com/docs/guides/mac-app) · [desktop/](desktop)
+- The agent panel sets up runs, reads files you attach and explains results. [Agent panel](https://skynetml.com/docs/guides/agent-panel)
+- You can edit datasets in place. The tagger learns your labels, then tags the rest in rounds you review. [Datasets](https://skynetml.com/docs/guides/datasets) · [Tagger](https://skynetml.com/docs/guides/tagger)
+- Compare versions, share a run and export the best artifact. [Results](https://skynetml.com/docs/guides/results)
+- Pay from a prepaid balance, or bring your own OpenRouter key and pay only the platform fee and sandbox usage.
+- The app is in 24 languages and Hebrew is the base locale, so RTL layouts get tested first. The docs are in 17 languages.
 
-## Quick Start (local)
+## Run it locally
 
-Prerequisites: Python 3.11, Node 20+ (22.6+ to run the frontend unit tests), PostgreSQL 15+, [`just`](https://github.com/casey/just), [`uv`](https://github.com/astral-sh/uv) (or pip), Docker (for the LiteLLM model gateway).
+You need Python 3.11, Node 20+, PostgreSQL 15+, Docker, [`just`](https://github.com/casey/just) and [`uv`](https://github.com/astral-sh/uv).
 
 ```bash
 git clone https://github.com/Skynet-ml/skynet.git && cd skynet
-just install-agent
+just setup      # installs deps, writes env files with fresh secrets, runs migrations
+just dev        # API on :8000, web app on :3000
 ```
 
-`just install-agent` runs the setup script (the same as `just setup`), then starts Claude Code with `/install`.
-`just setup` installs the backend and frontend deps and creates
-`backend/.env` and `frontend/.env.local` with fresh auth secrets. It also checks
-Postgres and LiteLLM, runs the migrations and checks i18n. It never overwrites
-an existing env file and never prints a secret. The agent reads the log in
-`.claude/logs/`, fixes known issues, runs the unit tests and tells you which
-secrets to enter. `just install-hil` does the same, but asks you before each
-choice. Without Claude Code, run `just setup` and follow
-`.claude/commands/install.md`.
+If you use Claude Code, `just install-agent` runs the same setup and fixes known problems as it goes. Open http://localhost:3000. The API reference is at http://localhost:8000/scalar. Run `just --list` for all recipes.
 
-Then start the app:
-
-```bash
-just backend    # FastAPI on :8000 — migrations apply automatically at boot
-just frontend   # Next.js on :3000
-```
-
-<details>
-<summary>Manual install</summary>
-
-```bash
-createdb skynet
-cp backend/.env.example backend/.env        # set REMOTE_DB_URL + model keys
-cp frontend/.env.example frontend/.env.local
-cd deploy/litellm && docker compose up -d && cd ../..   # model gateway
-just install
-```
-
-</details>
-
-Open http://localhost:3000. The API reference lives at http://localhost:8000/scalar.
-
-Useful recipes: `just test`, `just lint`, `just check-i18n`, `just maintain` (health report), `just --list` for everything.
-
-## Architecture
+## Repository
 
 ```
-frontend/   Next.js (App Router) · Tailwind v4 · shadcn/radix · SSE streaming UI
-backend/    FastAPI · SQLAlchemy + Alembic (boot-time migrations) · DSPy 3.3
-            └─ worker: multi-pod job fleet over Postgres (SELECT … FOR UPDATE
-               SKIP LOCKED leases, orphan recovery, resumable GEPA checkpoints)
-deploy/     litellm proxy (compose)
-i18n/       Hebrew base catalog + 23 overlay locales → generated typed catalogs
-docs/       operator guides (Stripe setup, design briefs)
-```
-
-All model traffic flows through a LiteLLM proxy, so any OpenAI-compatible provider works and keys live in one place. Billing (optional) is Stripe: prepaid balance top-ups, usage metered in cents at cost × markup, and a per-user encrypted BYOK vault.
-
-## Configuration
-
-### Backend (`backend/.env`)
-
-```bash
-# ── Required ──
-REMOTE_DB_URL=postgresql://user@localhost:5432/skynet
-LITELLM_PROXY_URL=http://localhost:4000/v1     # the model gateway
-LITELLM_PROXY_API_KEY=...                      # its master key
-
-# ── Server ──
-API_HOST=0.0.0.0
-API_PORT=8000
-ALLOWED_ORIGINS=http://localhost:3000          # comma-separated CORS origins
-
-# ── Worker ──
-WORKER_CONCURRENCY=4                           # parallel background jobs
-
-# ── Billing (optional — omit to disable charging entirely) ──
-# STRIPE_SECRET_KEY=...
-```
-
-See `backend/.env.example` for the full annotated list (agents' models, tagger assist models, notifications, and more).
-
-### Frontend (`frontend/.env.local`)
-
-```bash
-NEXT_PUBLIC_API_URL=http://localhost:8000
-AUTH_SECRET=generate-with-openssl-rand-base64-32
-
-# The login page offers email/password signup.
-# Google/GitHub OAuth: see frontend/.env.example.
-```
-
-## Serving optimized programs
-
-```bash
-# What inputs does the program expect?
-curl http://localhost:8000/serve/{optimization_id}/info
-
-# Run inference
-curl -X POST http://localhost:8000/serve/{optimization_id} \
-  -H 'Content-Type: application/json' \
-  -d '{"inputs": {"question": "What is 7+3?"}}'
-```
-
-The job detail page includes a built-in inference playground and a program export (runnable zip).
-
-## Deployment
-
-- **Anywhere with Postgres** — the backend migrates its own schema at boot and the worker fleet scales horizontally via DB-lease job claims (no external queue).
-- **Docker** — `cd backend && docker compose up --build` starts API + Postgres.
-- **Billing** — optional; set the Stripe keys in `backend/.env.example` to enable balance top-ups and metered usage.
-
-## Extensibility
-
-Register custom modules and optimizers in `main.py`:
-
-```python
-from core import ServiceRegistry, create_app
-
-registry = ServiceRegistry()
-registry.register_module("my_module", my_module_factory)
-registry.register_optimizer("my_optimizer", my_optimizer_factory)
-
-app = create_app(registry=registry)
+frontend/   Next.js web app and the public docs (/docs)
+backend/    FastAPI API, job workers, engines, MCP server
+desktop/    Skynet for Mac (Electron)
+plugins/    Skynet plugin for Claude and Codex
+i18n/       UI catalogs (Hebrew base + 23 locales)
+infra/      Terraform for AWS staging and production
 ```
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, the test-suite layout, i18n rules, and the migration discipline. PRs welcome. [MAINTENANCE.md](MAINTENANCE.md) covers what support to expect and how quickly issues and PRs get a response; report vulnerabilities through [SECURITY.md](SECURITY.md).
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests and i18n rules. [MAINTENANCE.md](MAINTENANCE.md) says what support to expect. Report vulnerabilities through [SECURITY.md](SECURITY.md).
 
 ## Citations
 
-Skynet runs these published methods. If you use them through Skynet in research, please cite the original work.
+If you use these methods through Skynet in research, cite the original work.
 
 - Lakshya A Agrawal et al. *GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning.* 2025. [arXiv:2507.19457](https://arxiv.org/abs/2507.19457)
 - Yoonho Lee et al. *Meta-Harness: End-to-End Optimization of Model Harnesses.* 2026. [arXiv:2603.28052](https://arxiv.org/abs/2603.28052)
 
 ## License
 
-[AGPL-3.0](LICENSE). Run it, fork it, self-host it — and if you offer a modified Skynet as a service, share your modifications back.
+Skynet is licensed under [AGPL-3.0](LICENSE). If you run a modified Skynet as a service, you must publish your changes.

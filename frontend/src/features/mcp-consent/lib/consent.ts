@@ -93,11 +93,6 @@ export function scopeMessageKey(scope: McpScope): string {
   return `mcp_consent.scope.${scope.replace(":", "_")}`;
 }
 
-/** Whether the card shows the spending-limit note: only an agent that may start runs can spend. */
-export function showsBudgetNote(scopes: readonly McpScope[]): boolean {
-  return scopes.includes("runs:write");
-}
-
 /** Message key for a request problem or a failed backend call. */
 export function errorMessageKey(code: string | undefined, status?: number): string {
   switch (code) {

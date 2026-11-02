@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 import { AnimatedWordmark } from "@/shared/ui/animated-wordmark";
 import { EvolutionMorph } from "@/shared/ui/evolution-morph";
 
@@ -22,9 +23,15 @@ const EASE = "cubic-bezier(0.16, 1, 0.3, 1)";
  * still human and letters and skips the hold.
  */
 export function SplashScreen() {
-  const [phase, setPhase] = useState<"active" | "fading" | "revealing" | "done">("active");
+  const pathname = usePathname();
+  // An agent's consent page is a single focused decision; the brand splash only delays it.
+  const skip = pathname === "/mcp/authorize";
+  const [phase, setPhase] = useState<"active" | "fading" | "revealing" | "done">(
+    skip ? "done" : "active",
+  );
 
   useEffect(() => {
+    if (skip) return;
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const fadeDelay = reduceMotion ? 0 : MORPH_MS;
     const revealDelay = reduceMotion ? 0 : MORPH_MS + CONTENT_FADE_MS;
@@ -36,7 +43,7 @@ export function SplashScreen() {
     ];
 
     return () => timers.forEach(clearTimeout);
-  }, []);
+  }, [skip]);
 
   if (phase === "done") return null;
 

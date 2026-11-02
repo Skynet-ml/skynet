@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
 from ..storage.models import NotificationModel
-from .catalog import FOCUSED_EVENTS
+from .catalog import FOCUSED_EVENTS, PRODUCT_NEWS
+from .news import live_news_keys
 
 InboxTab = Literal["focused", "everything"]
 
@@ -25,15 +26,29 @@ def _tab_filter(username: str, tab: InboxTab) -> list[ColumnElement[bool]]:
         tab: ``focused`` or ``everything``.
 
     Returns:
-        SQL conditions to AND together.
+        SQL conditions to AND together. Product news shows only while its
+        file is shipped and not expired.
     """
     clauses: list[ColumnElement[bool]] = [
         NotificationModel.username == username,
         NotificationModel.in_inbox.is_(True),
+        or_(NotificationModel.event_type != PRODUCT_NEWS, NotificationModel.dedupe_key.in_(live_news_keys())),
     ]
     if tab == "focused":
         clauses.append(NotificationModel.event_type.in_(sorted(FOCUSED_EVENTS)))
     return clauses
+
+
+def _withdrawn(row: NotificationModel) -> bool:
+    """Tell whether a row is product news whose file is gone or expired.
+
+    Args:
+        row: The item.
+
+    Returns:
+        Whether the inbox hides the row; see :func:`_tab_filter`.
+    """
+    return row.event_type == PRODUCT_NEWS and row.dedupe_key not in live_news_keys()
 
 
 def encode_cursor(row: NotificationModel) -> str:
@@ -136,11 +151,16 @@ def mark_read(session: Session, username: str, notification_id: str, now: dateti
         now: Clock override for tests.
 
     Returns:
-        Whether the item exists and belongs to ``username``.
+        Whether the item exists and belongs to ``username``. Withdrawn
+        product news counts as handled but is left unchanged.
     """
     row = session.get(NotificationModel, notification_id)
     if row is None or row.username != username:
         return False
+    # A tab opened before a deploy can still show withdrawn news; succeed without
+    # a write so the client drops the item instead of showing an error.
+    if _withdrawn(row):
+        return True
     if row.read_at is None:
         row.read_at = now or datetime.now(UTC)
         session.commit()
@@ -182,11 +202,16 @@ def remove(session: Session, username: str, notification_id: str) -> bool:
         notification_id: The item.
 
     Returns:
-        Whether the item exists and belongs to ``username``.
+        Whether the item exists and belongs to ``username``. Withdrawn
+        product news counts as handled but is left unchanged.
     """
     row = session.get(NotificationModel, notification_id)
     if row is None or row.username != username:
         return False
+    # A tab opened before a deploy can still show withdrawn news; succeed without
+    # a write so the client drops the item instead of showing an error.
+    if _withdrawn(row):
+        return True
     if row.in_inbox:
         row.in_inbox = False
         session.commit()

@@ -257,7 +257,7 @@
   --shadow-inset: none;
   --shadow-float: 0 8px 24px -6px rgba(19, 19, 19, 0.14), 0 2px 6px -2px rgba(19, 19, 19, 0.08);
 
-  /* Run-status palette (Light): success is teal, failed red, running the hoatzin's blue face
+  /* Run-status palette (Light): success is teal, failed red, running blue
      so it never reads as failure; crest-tinted pending and paused sit apart by lightness. */
   --status-success: var(--success);
   --status-running: #3f6faa;
@@ -375,7 +375,7 @@
 
   --shadow-float: 0 10px 28px -6px rgba(0, 0, 0, 0.6), 0 2px 8px -2px rgba(0, 0, 0, 0.45);
 
-  /* Run-status palette (Dark): success is teal, failed red, running the hoatzin's blue face
+  /* Run-status palette (Dark): success is teal, failed red, running blue
      so it never reads as failure; crest-tinted pending and paused sit apart by lightness. */
   --status-success: var(--success);
   --status-running: #82b8e6;

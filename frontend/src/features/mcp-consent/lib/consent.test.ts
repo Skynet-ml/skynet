@@ -7,7 +7,6 @@ import {
   returnHost,
   safeRedirect,
   scopeMessageKey,
-  showsBudgetNote,
 } from "./consent.ts";
 
 const CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
@@ -83,13 +82,4 @@ test("the return host is the real redirect host, also for a metadata-document cl
     "localhost:56369",
   );
   assert.equal(returnHost({ client_host: null, redirect_host: "claude.ai" }), "claude.ai");
-});
-
-test("shows the spending-limit note only when the agent may start runs", () => {
-  assert.equal(showsBudgetNote(["runs:read", "runs:write"]), true);
-  assert.equal(showsBudgetNote(["runs:write"]), true);
-  assert.equal(showsBudgetNote(["runs:read"]), false);
-  const readOnly = parseMcpRequest(query({ scope: "runs:read" }));
-  assert.ok(readOnly.ok);
-  assert.equal(showsBudgetNote(readOnly.request.scopes), false);
 });
