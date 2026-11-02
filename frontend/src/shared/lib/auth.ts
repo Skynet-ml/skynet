@@ -197,6 +197,8 @@ async function saveBackendPicture(email: string, image: string): Promise<boolean
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Internal-Auth": backendAuthSecret },
       body: JSON.stringify({ email, image }),
+      // The jwt callback awaits this on gated requests; a hung backend must not hold the page.
+      signal: AbortSignal.timeout(3000),
     });
     return res.ok;
   } catch {
