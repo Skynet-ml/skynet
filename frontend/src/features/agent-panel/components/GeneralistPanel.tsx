@@ -966,7 +966,12 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         onChange={setDraft}
         onSubmit={handleSubmit}
         onStop={agent.stop}
-        placeholder={msg("auto.features.agent.panel.components.generalistpanel.literal.5")}
+        placeholder={msg(
+          // Hidden wizard kickoff turns run before the user types, so they do not count.
+          !agent.messages.some((m) => m.role === "user" && !m.hidden)
+            ? "agent.generalist.first_placeholder"
+            : "auto.features.agent.panel.components.generalistpanel.literal.5",
+        )}
         streaming={activeBusy}
         midTurn={agent.midTurn}
         suggest={{ messages: agent.messages, model: agent.model, chatId: agent.conversationId }}
