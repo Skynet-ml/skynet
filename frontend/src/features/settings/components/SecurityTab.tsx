@@ -50,6 +50,7 @@ import {
 import { TOUCH_FIELD, TOUCH_FIELD_SM } from "@/shared/ui/touch";
 import { cn } from "@/shared/lib/utils";
 import { ConnectedAccounts } from "./ConnectedAccounts";
+import { LinkedMacsSection } from "./LinkedMacsSection";
 
 /** Localize a security API failure: semantic backend codes when present. */
 function describeError(err: unknown): string {
@@ -430,6 +431,8 @@ export function SecurityTab() {
       )}
 
       <ConnectedAccounts identities={status.identities ?? []} onChange={refresh} />
+
+      <LinkedMacsSection formatDate={formatDate} />
 
       <Dialog open={totpSetup !== null} onOpenChange={(open) => !open && closeTotpDialog()}>
         <DialogContent

@@ -391,6 +391,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       { status: res.status, code: parsed.code, params: parsed.params },
     );
   }
+  // A 204 has no body, so res.json() would throw on a successful call.
+  if (res.status === 204) return undefined as T;
   return res.json();
 }
 
@@ -988,6 +990,27 @@ export function renamePasskey(credentialId: string, nickname: string) {
 /** Remove one of the caller's passkeys. */
 export function deletePasskey(credentialId: string) {
   return request<{ ok: boolean }>(`/auth/security/passkeys/${encodeURIComponent(credentialId)}`, {
+    method: "DELETE",
+  });
+}
+
+/** One Mac linked to the caller's account, as Settings > Security lists it. */
+export interface DesktopLinkInfo {
+  link_id: string;
+  device_name: string;
+  scopes: string[];
+  created_at: string;
+  last_used_at: string | null;
+}
+
+/** List the Macs that are linked to the caller's account now. */
+export function listDesktopLinks() {
+  return request<DesktopLinkInfo[]>("/settings/desktop-links");
+}
+
+/** Remove a linked Mac. The Mac signs out on its next request. */
+export function removeDesktopLink(linkId: string) {
+  return request<void>(`/settings/desktop-links/${encodeURIComponent(linkId)}`, {
     method: "DELETE",
   });
 }
