@@ -8,7 +8,7 @@
  * the console so it is still there for debugging.
  */
 
-import { ApiError } from "@/shared/lib/api";
+import { ApiError, ROUTE_MISSING_CODE } from "@/shared/lib/api";
 import { tI18n } from "@/shared/lib/i18n";
 import { msg, type MessageKey } from "@/shared/lib/messages";
 
@@ -55,9 +55,10 @@ function statusKey(status: number): MessageKey | undefined {
 /**
  * Pick user-facing copy for a caught error and log the raw error.
  *
- * Order: a backend code the catalog knows, a detail that is itself a catalog
- * key, a status with its own copy (401, 403, 404, 413, 429, 5xx), a network
- * failure, then the caller's fallback, then a generic message.
+ * Order: a missing route (the server is older than the app), a backend code
+ * the catalog knows, a detail that is itself a catalog key, a status with its
+ * own copy (401, 403, 404, 413, 429, 5xx), a network failure, then the
+ * caller's fallback, then a generic message.
  *
  * Args:
  *   err: The caught value.
@@ -69,6 +70,9 @@ function statusKey(status: number): MessageKey | undefined {
 export function userErrorMessage(err: unknown, fallback?: string): string {
   console.error(err);
   if (err instanceof ApiError) {
+    // request() already rendered this copy from the UI catalog, which tI18n does
+    // not read; without this check the bare 404/405 status would win.
+    if (err.code === ROUTE_MISSING_CODE) return err.message;
     const known = knownErrorCodeMessage(err.code, err.params) ?? knownErrorCodeMessage(err.message);
     if (known) return known;
     const key = statusKey(err.status);

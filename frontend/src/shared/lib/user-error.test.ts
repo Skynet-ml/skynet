@@ -9,7 +9,7 @@ const stubs: Record<string, string> = {
   export const I18N_KEY = { USER_STORAGE_QUOTA_EXCEEDED: "user.storage_quota_exceeded", BILLING_INSUFFICIENT_FUNDS: "billing.insufficient_funds" };
   export const tI18n = (code, params) => known[code] ? known[code].replace("{n}", String(params?.n)) : code;`,
   "@/shared/lib/messages":
-    "export const msg = (key) => `msg:${key}`; export const formatMsg = (key) => `msg:${key}`;",
+    "export const msg = (key, params) => `msg:${key}${params ? ' ' + JSON.stringify(params) : ''}`; export const formatMsg = (key) => `msg:${key}`;",
   "@/shared/lib/agent-kickoff": "export const kickoffOpening = () => {};",
   "@/shared/ui/agent/turn-stats": "export const parseTurnStats = () => null;",
   "@/shared/lib/report-error": "export const reportHandledError = () => {};",
@@ -120,6 +120,29 @@ test("a request() helper that cannot reach the server shows the network copy", a
   };
   const err = await caught(api.removeDesktopLink("link-1"));
   assert.equal(userErrorMessage(err, "Remove failed"), "msg:errors.network");
+});
+
+test("a bare 404 or 405 from a server without the route shows the version-mismatch copy", async () => {
+  const cases: Array<[number, string]> = [
+    [404, "Not Found"],
+    [405, "Method Not Allowed"],
+  ];
+  for (const [status, detail] of cases) {
+    globalThis.fetch = async () => new Response(JSON.stringify({ detail }), { status });
+    const err = await caught(api.removeDesktopLink("link-1"));
+    assert.equal(
+      userErrorMessage(err, "Remove failed"),
+      'msg:shared.api.route_missing {"method":"DELETE","path":"/settings/desktop-links/link-1"}',
+      `status ${status}`,
+    );
+  }
+});
+
+test("a 404 with a real detail still shows the not-found copy", async () => {
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ detail: "Link not found" }), { status: 404 });
+  const err = await caught(api.removeDesktopLink("link-1"));
+  assert.equal(userErrorMessage(err, "Remove failed"), "msg:errors.not_found");
 });
 
 test("a wrapped error whose cause is not a network failure uses the fallback", () => {
