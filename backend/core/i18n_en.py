@@ -25,6 +25,15 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "agent.approval.unknown_call_id": "No pending approval for the given call_id.",
     "agent.status.tool_end": "Tool finished.",
     "agent.status.tool_start": "Agent invoking tool…",
+    "agent_settings.hosted_only": (
+        "The {tab} settings are not available in this app. Link a hosted account to use billing; security settings are on the web only."
+    ),
+    "agent_settings.invalid_page": "This page does not exist in the app.",
+    "agent_settings.invalid_value": "The value for {field} is not valid.",
+    "agent_settings.missing_target": "The {action} action needs a target.",
+    "agent_settings.not_writable": "The chat cannot change {key}. Change it on the {tab} tab.",
+    "agent.share.too_large": "This chat is too large to share.",
+    "agent.share.limit_reached": "You have {limit} shared chats. Revoke a link before you share another chat.",
     "accounts.email_delivery_unavailable": "Email delivery isn't configured on this server.",
     "accounts.email_not_verified": "Please verify your email before signing in.",
     "accounts.email_send_failed": "Couldn't send the verification email. Try again.",

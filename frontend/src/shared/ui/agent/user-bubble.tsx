@@ -15,6 +15,7 @@ import { Textarea } from "@/shared/ui/primitives/textarea";
 import { MarkdownPreviewField } from "@/shared/ui/markdown-preview-field";
 
 import { CollapsibleMessage } from "./collapsible-message";
+import { MessageTime } from "./message-actions";
 import { PastedTextCard } from "./pasted-text-card";
 import { joinPastes, shouldAttachPaste, splitPastes, type SplitMessage } from "./pasted-text";
 
@@ -42,14 +43,18 @@ interface UserBubbleProps {
   content: string;
   onEdit?: () => void;
   editable?: boolean;
+  /** When the message was sent, in epoch ms. */
+  createdAt?: number;
 }
 
-export function UserBubble({ content, onEdit, editable = true }: UserBubbleProps) {
+// The user's turns sit at the end side as bubbles; the agent's answers sit
+// at the start side with no bubble. Logical classes mirror both in RTL.
+export function UserBubble({ content, onEdit, editable = true, createdAt }: UserBubbleProps) {
   const { text, pastes, files } = splitSent(content);
 
   return (
-    <div className="flex justify-start group/user">
-      <div className="flex max-w-[80%] flex-col items-start gap-1.5">
+    <div className="flex justify-end group/user">
+      <div className="flex max-w-[80%] flex-col items-end gap-1.5">
         {pastes.length + files.length > 0 && (
           <div className="flex flex-wrap gap-2">
             {files.map((file, i) => (
@@ -62,7 +67,7 @@ export function UserBubble({ content, onEdit, editable = true }: UserBubbleProps
         )}
         {text && (
           <div
-            className="max-w-full rounded-[22px] rounded-es-[4px] bg-primary-fill text-primary-foreground px-4 py-2.5 text-sm leading-[1.45]"
+            className="max-w-full rounded-[22px] rounded-ee-[4px] bg-primary-fill text-primary-foreground px-4 py-2.5 text-sm leading-[1.45]"
             dir="auto"
           >
             <CollapsibleMessage>
@@ -72,35 +77,38 @@ export function UserBubble({ content, onEdit, editable = true }: UserBubbleProps
             </CollapsibleMessage>
           </div>
         )}
-      </div>
-      {/* Hover-revealed actions beside the bubble: copy (always) + edit (when
-          editable), mirroring the assistant reply's copy affordance. */}
-      <div
-        className={cn(
-          "self-center ms-1.5 flex items-center gap-0.5",
-          "opacity-0 group-hover/user:opacity-100 focus-within:opacity-100 transition-opacity",
-          // The global coarse-pointer reveal only matches the unnamed
-          // `group-hover:` spelling, so touch screens (iPad) need their own.
-          "any-pointer-coarse:opacity-100",
-        )}
-      >
-        <CopyButton
-          text={content}
-          ariaLabel={msg("shared.agent.copy")}
-          copiedAriaLabel={msg("shared.agent.copied")}
-        />
-        {editable && onEdit && (
-          <TooltipButton tooltip={msg("shared.agent.edit_and_resend")} side="top">
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              onClick={onEdit}
-              aria-label={msg("shared.agent.edit_and_resend")}
-            >
-              <PencilSimple className="size-3.5" />
-            </Button>
-          </TooltipButton>
-        )}
+        <div className="flex items-center gap-0.5 -me-1">
+          {/* Copy (always) + edit (when editable) show on hover, like the
+              assistant reply's actions; the send time stays visible. */}
+          <div
+            className={cn(
+              "flex items-center gap-0.5",
+              "opacity-0 group-hover/user:opacity-100 focus-within:opacity-100 transition-opacity",
+              // The global coarse-pointer reveal only matches the unnamed
+              // `group-hover:` spelling, so touch screens (iPad) need their own.
+              "any-pointer-coarse:opacity-100",
+            )}
+          >
+            <CopyButton
+              text={content}
+              ariaLabel={msg("shared.agent.copy")}
+              copiedAriaLabel={msg("shared.agent.copied")}
+            />
+            {editable && onEdit && (
+              <TooltipButton tooltip={msg("shared.agent.edit_and_resend")} side="top">
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  onClick={onEdit}
+                  aria-label={msg("shared.agent.edit_and_resend")}
+                >
+                  <PencilSimple className="size-3.5" />
+                </Button>
+              </TooltipButton>
+            )}
+          </div>
+          <MessageTime createdAt={createdAt} />
+        </div>
       </div>
     </div>
   );
@@ -129,7 +137,7 @@ export function UserBubbleEditor({
   }, [value]);
 
   return (
-    <div className="flex justify-start">
+    <div className="flex justify-end">
       <div className="max-w-[80%] w-full space-y-2">
         {draft.pastes.length + draft.files.length > 0 && (
           <div className="flex flex-wrap gap-2">
@@ -182,7 +190,7 @@ export function UserBubbleEditor({
             dir="auto"
           />
         </MarkdownPreviewField>
-        <div className="flex justify-start gap-1.5">
+        <div className="flex justify-end gap-1.5">
           <button type="button" onClick={onCancel} className={USER_BUBBLE_EDIT_CANCEL_CLASS}>
             {msg("shared.agent.cancel")}
           </button>

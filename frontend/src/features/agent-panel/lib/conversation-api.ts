@@ -7,6 +7,7 @@
 // missing data is fatal (drawer empty) or silent (no-op).
 
 import type { AgentMessage, AgentToolCall } from "@/shared/ui/agent/types";
+import { parseMessageTime } from "@/shared/ui/agent/message-time";
 import { parseTurnStats } from "@/shared/ui/agent/turn-stats";
 import { parseThinkingRows } from "@/shared/lib/thinking-segments";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
@@ -82,6 +83,7 @@ function toMessage(raw: RawMessage): AgentMessage {
     stats: parseTurnStats(raw.stats),
     plan: typeof raw.plan === "string" && raw.plan.trim() ? raw.plan : undefined,
     thinkingSegments: parseThinkingRows(raw.thinking),
+    createdAt: parseMessageTime(raw.created_at),
   };
 }
 
@@ -193,5 +195,80 @@ export async function deleteConversation(conversationId: string): Promise<boolea
     return res.ok;
   } catch {
     return false;
+  }
+}
+
+/** Create (or reuse) the conversation's public read-only link token; null on failure. */
+export async function createConversationShare(conversationId: string): Promise<string | null> {
+  try {
+    const res = await fetchWithAuthRetry(
+      `${apiBase()}/agent/conversations/${encodeURIComponent(conversationId)}/share`,
+      { method: "POST" },
+    );
+    if (!res.ok) return null;
+    const raw = (await res.json()) as { token?: unknown };
+    return typeof raw.token === "string" && raw.token ? raw.token : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One of the user's shared chats, as the settings list shows it. */
+export interface SharedConversationSummary {
+  id: string;
+  title: string;
+  sharedAt: string | null;
+  token: string;
+}
+
+/**
+ * List the user's chats that have a live public link, newest share first. In
+ * the Mac app the local backend reads the list from the linked hosted account.
+ * Throws on a failed request so the caller can show an error.
+ */
+export async function listSharedConversations(): Promise<SharedConversationSummary[]> {
+  const res = await fetchWithAuthRetry(`${apiBase()}/agent/shared-conversations`, { method: "GET" });
+  if (!res.ok) throw new Error(`shared chats list failed (${res.status})`);
+  const raw = (await res.json()) as Array<{ id: string; title: string; shared_at: string | null; token: string }>;
+  return raw.map((r) => ({ id: r.id, title: r.title, sharedAt: r.shared_at, token: r.token }));
+}
+
+/** Stop sharing a chat: its public link then answers "not found". Returns false on failure. */
+export async function revokeConversationShare(conversationId: string): Promise<boolean> {
+  try {
+    const res = await fetchWithAuthRetry(
+      `${apiBase()}/agent/conversations/${encodeURIComponent(conversationId)}/share`,
+      { method: "DELETE" },
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export interface SharedConversation {
+  title: string;
+  messages: AgentMessage[];
+}
+
+/**
+ * Read a shared conversation by its link token. The route is public, so this
+ * sends no credentials. Returns null for an unknown or revoked link and on any
+ * network failure.
+ */
+export async function getSharedConversation(
+  token: string,
+  signal?: AbortSignal,
+): Promise<SharedConversation | null> {
+  try {
+    const res = await fetch(
+      `${apiBase()}/agent/shared-conversations/${encodeURIComponent(token)}`,
+      { method: "GET", signal, credentials: "omit" },
+    );
+    if (!res.ok) return null;
+    const raw = (await res.json()) as { title: string; messages: RawMessage[] };
+    return { title: raw.title, messages: raw.messages.map(toMessage) };
+  } catch {
+    return null;
   }
 }

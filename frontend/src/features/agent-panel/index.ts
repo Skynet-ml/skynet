@@ -3,6 +3,7 @@ export { AgentPanelDock } from "./components/AgentPanelDock";
 export { AgentPillDock } from "./components/AgentPillDock";
 export { ApprovalCard } from "./components/ApprovalCard";
 export { ToolCallRow } from "./components/ToolCallRow";
+export { SharedChatView } from "./components/SharedChatView";
 export { CodingCallRows } from "./components/CodeAuthoringActivity";
 export { ToolsCarousel } from "./components/ToolsCarousel";
 export { Carousel, CarouselNav } from "./components/Carousel";
@@ -20,7 +21,13 @@ export {
   useWizardStateOptional,
 } from "./hooks/use-wizard-state";
 export { isGeneralistAgentEnabled } from "./lib/feature-flag";
-export { deleteConversation } from "./lib/conversation-api";
+export {
+  deleteConversation,
+  getSharedConversation,
+  listSharedConversations,
+  revokeConversationShare,
+} from "./lib/conversation-api";
+export type { SharedConversation, SharedConversationSummary } from "./lib/conversation-api";
 export type {
   ApprovalResolvedPayload,
   ChatTurn,

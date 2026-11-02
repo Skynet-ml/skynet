@@ -4,24 +4,38 @@ Backs the agent panel's history drawer. Each user owns their own threads;
 ownership is enforced on every read and write by comparing the
 authenticated principal to the row's ``username``. The companion writer
 that *populates* these tables lives in :mod:`generalist_agent` — this
-router only reads, renames, pins, and archives.
+router only reads, renames, pins, and archives. It also lets an owner
+share a thread as a public read-only link: the link reads the live
+conversation by an unguessable token until the owner revokes it.
+
+In the Mac app (local mode) a link on this computer cannot work for anyone
+else, so sharing publishes a masked snapshot of the local chat to the linked
+hosted account through the ``/desktop/v1/shared-chats`` routes. Each share
+click uploads the latest messages again and keeps the same link.
 
 Hidden from the public Scalar reference — wizard-internal flow.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import re
+import secrets
+import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 
-from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import or_, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, load_only
 
 from ...config import settings
+from ...local import hosted_link
 from ...models import (
     BulkDeleteByIdsRequest,
     BulkDeleteByIdsResponse,
@@ -30,14 +44,31 @@ from ...models import (
 from ...service_gateway.embedding_pipeline.embeddings import get_embedder
 from ...storage.models import AgentConversationModel, AgentMessageModel
 from ..auth import AuthenticatedUser, get_authenticated_user
+from ..desktop_auth import DesktopPrincipal, get_desktop_principal
 from ..errors import DomainError
+from .agent_settings import MASK, mask_secrets
 
 logger = logging.getLogger(__name__)
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
+# Module-level so tests can override the dependency by identity.
+desktop_sync_principal = get_desktop_principal("sync")
+DesktopSyncDep = Annotated[DesktopPrincipal, Depends(desktop_sync_principal)]
 
 MAX_LIST = 100
 DEFAULT_LIST = 50
+# Caps on a chat snapshot that the Mac app publishes to hosted.
+MAX_SHARED_MESSAGES = 1000
+MAX_SHARED_BYTES = 2_000_000
+# Each live link is a public page, so one account cannot publish without bound.
+MAX_SHARED_CHATS = 200
+# Fixed namespace: the hosted id of a published Mac chat is uuid5 of the hosted
+# username and the local chat id, so a re-share updates the same row and link.
+_SHARED_CHAT_NAMESPACE = uuid.UUID("6f1d2c4e-8a3b-5d7f-9e1a-2b4c6d8e0f13")
+_DESKTOP_SHARED_CHATS = "/desktop/v1/shared-chats"
+# A tool result (for example the account settings) can carry an email address,
+# and the public link must not show who owns the chat.
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 
 class ConversationSummary(BaseModel):
@@ -87,6 +118,51 @@ class ConversationPatchRequest(BaseModel):
 
     title: str | None = Field(default=None, min_length=1, max_length=200)
     pinned: bool | None = None
+
+
+class ConversationShareResponse(BaseModel):
+    """The public read-only link token for a shared conversation."""
+
+    token: str
+
+
+class SharedConversation(BaseModel):
+    """Public read-only view of a shared conversation, without owner or cost data."""
+
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    messages: list[ConversationMessage]
+
+
+class SharedConversationSummary(BaseModel):
+    """One of the owner's shared conversations, for the settings list."""
+
+    id: str
+    title: str
+    shared_at: datetime | None = None
+    token: str
+
+
+class SharedChatMessage(BaseModel):
+    """One turn of a chat snapshot published from the Mac app."""
+
+    role: Literal["user", "assistant"]
+    content: str = ""
+    tool_calls: list[dict[str, Any]] | None = None
+    model: str | None = Field(default=None, max_length=128)
+    served_model: str | None = Field(default=None, max_length=128)
+    plan: str | None = None
+    thinking: list[dict[str, Any]] | None = None
+    created_at: datetime
+
+
+class SharedChatImportRequest(BaseModel):
+    """A masked chat snapshot that the linked Mac app publishes as a public link."""
+
+    local_id: str = Field(min_length=1, max_length=64, description="Stable id of the chat on the Mac.")
+    title: str = Field(default="", max_length=200)
+    messages: list[SharedChatMessage] = Field(min_length=1, max_length=MAX_SHARED_MESSAGES)
 
 
 def _row_to_summary(row: AgentConversationModel, preview: str | None) -> ConversationSummary:
@@ -342,6 +418,272 @@ def create_agent_history_router(*, job_store) -> APIRouter:
             session.commit()
 
     @router.post(
+        "/agent/conversations/{conversation_id}/share",
+        response_model=ConversationShareResponse,
+        summary="Create (or return) the public read-only link of a conversation",
+    )
+    def share_conversation(conversation_id: str, user: AuthenticatedUserDep) -> ConversationShareResponse:
+        """Return the conversation's share token, minting one on the first call.
+
+        Args:
+            conversation_id: UUID of the conversation to share.
+            user: Authenticated caller; must own the row.
+
+        In the Mac app the token belongs to the linked hosted account: the
+        local chat is published there as a masked snapshot, again on each call.
+
+        Returns:
+            The token; repeated calls return the same token until revoked.
+
+        Raises:
+            DomainError: 404 when unknown, 403 when the caller does not own it,
+                413 when a Mac snapshot is too large, plus the hosted-link
+                errors (409 not linked, 502, 503) in the Mac app.
+        """
+        with Session(job_store.engine) as session:
+            row = session.get(AgentConversationModel, conversation_id)
+            if row is None:
+                raise DomainError("agent.conversation.not_found", status=404)
+            if row.username != user.username:
+                raise DomainError("agent.conversation.forbidden", status=403)
+            if settings.local_mode:
+                snapshot = _local_snapshot(session, row)
+            else:
+                if not row.share_token:
+                    row.share_token = cast(Any, secrets.token_urlsafe(24))
+                    row.shared_at = cast(Any, datetime.now(UTC))
+                    session.commit()
+                    session.refresh(row)
+                return ConversationShareResponse(token=cast(str, row.share_token))
+        published = hosted_link.hosted_request(
+            job_store.engine, user.username, "POST", _DESKTOP_SHARED_CHATS, snapshot.model_dump(mode="json")
+        )
+        token = published.get("token") if isinstance(published, dict) else None
+        if not isinstance(token, str) or not token:
+            raise DomainError("hosted_link.failed", status=502)
+        return ConversationShareResponse(token=token)
+
+    @router.delete(
+        "/agent/conversations/{conversation_id}/share",
+        status_code=204,
+        summary="Revoke the public read-only link of a conversation",
+    )
+    def unshare_conversation(conversation_id: str, user: AuthenticatedUserDep) -> None:
+        """Clear the conversation's share token so its link stops working.
+
+        In the Mac app the id is a local chat id or a hosted id from the
+        shared-chats list, and the linked hosted account revokes the link.
+
+        Args:
+            conversation_id: UUID of the conversation to unshare.
+            user: Authenticated caller; must own the row.
+
+        Raises:
+            DomainError: 404 when unknown, 403 when the caller does not own it,
+                plus the hosted-link errors in the Mac app.
+        """
+        if settings.local_mode:
+            hosted_link.hosted_request(
+                job_store.engine, user.username, "DELETE", f"{_DESKTOP_SHARED_CHATS}/{conversation_id}"
+            )
+            return
+        with Session(job_store.engine) as session:
+            row = session.get(AgentConversationModel, conversation_id)
+            if row is None:
+                raise DomainError("agent.conversation.not_found", status=404)
+            if row.username != user.username:
+                raise DomainError("agent.conversation.forbidden", status=403)
+            row.share_token = cast(Any, None)
+            row.shared_at = cast(Any, None)
+            session.commit()
+
+    @router.get(
+        "/agent/shared-conversations",
+        response_model=list[SharedConversationSummary],
+        summary="List the caller's shared conversations",
+    )
+    def list_shared_conversations(user: AuthenticatedUserDep) -> list[SharedConversationSummary]:
+        """Return the caller's conversations that have a live public link, newest share first.
+
+        In the Mac app the list comes from the linked hosted account.
+
+        Args:
+            user: Authenticated caller; only their conversations are listed.
+
+        Returns:
+            The id, title, share time and link token of each shared conversation.
+
+        Raises:
+            DomainError: The hosted-link errors in the Mac app.
+        """
+        if settings.local_mode:
+            rows = hosted_link.hosted_request(job_store.engine, user.username, "GET", _DESKTOP_SHARED_CHATS)
+            return [SharedConversationSummary.model_validate(item) for item in rows or []]
+        with Session(job_store.engine) as session:
+            return _shared_summaries(session, user.username)
+
+    # The body is read by hand, so the byte cap applies before the JSON parse.
+    # A declared body parameter would make FastAPI buffer and parse it first.
+    @router.post(
+        _DESKTOP_SHARED_CHATS,
+        response_model=ConversationShareResponse,
+        include_in_schema=False,
+        summary="Publish a Mac app chat snapshot as a public read-only link",
+    )
+    async def import_shared_chat(request: Request, principal: DesktopSyncDep) -> ConversationShareResponse:
+        """Store the Mac chat snapshot as a shared conversation of the linked account.
+
+        The hosted row id comes from the account and ``local_id``, so sharing the
+        same Mac chat again replaces its messages and keeps the same token.
+
+        Args:
+            request: The request whose body is the ``SharedChatImportRequest`` JSON.
+            principal: Desktop principal with the ``sync`` scope.
+
+        Returns:
+            The share token of the hosted copy.
+
+        Raises:
+            DomainError: 413 when the body is larger than ``MAX_SHARED_BYTES``.
+            RequestValidationError: 422 when the body is not a valid snapshot.
+        """
+        raw = await _read_capped_snapshot(request)
+        try:
+            body = SharedChatImportRequest.model_validate_json(raw)
+        except ValidationError as exc:
+            raise RequestValidationError(exc.errors(include_url=False, include_context=False)) from None
+        return await run_in_threadpool(_store_snapshot, principal.username, body)
+
+    def _store_snapshot(username: str, body: SharedChatImportRequest) -> ConversationShareResponse:
+        """Write a parsed Mac chat snapshot as the account's shared conversation.
+
+        Args:
+            username: The hosted account behind the desktop token.
+            body: The snapshot; it is masked again here.
+
+        Returns:
+            The share token of the hosted copy.
+
+        Raises:
+            DomainError: 403 when the derived row belongs to another account,
+                409 ``agent.share.limit_reached`` when a new link would pass
+                ``MAX_SHARED_CHATS``.
+        """
+        conversation_id = _published_chat_id(username, body.local_id)
+        now = datetime.now(UTC)
+        with Session(job_store.engine) as session:
+            row = session.get(AgentConversationModel, conversation_id)
+            if row is None:
+                row = AgentConversationModel(id=conversation_id, username=username, created_at=now)
+                session.add(row)
+            elif row.username != username:
+                raise DomainError("agent.conversation.forbidden", status=403)
+            row.title = cast(Any, mask_secrets(body.title.strip())[:200])
+            row.updated_at = cast(Any, now)
+            if not row.share_token:
+                live = (
+                    session.query(AgentConversationModel)
+                    .filter(
+                        AgentConversationModel.username == username,
+                        AgentConversationModel.share_token.isnot(None),
+                    )
+                    .count()
+                )
+                if live >= MAX_SHARED_CHATS:
+                    raise DomainError("agent.share.limit_reached", status=409, limit=MAX_SHARED_CHATS)
+                row.share_token = cast(Any, secrets.token_urlsafe(24))
+                row.shared_at = cast(Any, now)
+            session.query(AgentMessageModel).filter(AgentMessageModel.conversation_id == conversation_id).delete(
+                synchronize_session=False
+            )
+            session.add_all(_imported_message(conversation_id, m) for m in body.messages)
+            session.commit()
+            return ConversationShareResponse(token=cast(str, row.share_token))
+
+    @router.get(
+        _DESKTOP_SHARED_CHATS,
+        response_model=list[SharedConversationSummary],
+        summary="List the linked account's shared conversations",
+    )
+    def desktop_list_shared_chats(principal: DesktopSyncDep) -> list[SharedConversationSummary]:
+        """Return the linked account's shared conversations for the Mac settings list.
+
+        Args:
+            principal: Desktop principal with the ``sync`` scope.
+
+        Returns:
+            The same rows as ``GET /agent/shared-conversations``.
+        """
+        with Session(job_store.engine) as session:
+            return _shared_summaries(session, principal.username)
+
+    @router.delete(
+        _DESKTOP_SHARED_CHATS + "/{chat_id}",
+        status_code=204,
+        summary="Revoke the public link of one of the linked account's chats",
+    )
+    def desktop_revoke_shared_chat(chat_id: str, principal: DesktopSyncDep) -> None:
+        """Clear the share token of the account's chat named by ``chat_id``.
+
+        ``chat_id`` is a hosted conversation id (from the list) or a Mac chat id
+        (from the chat's own menu). An unknown or unshared id is a no-op.
+
+        Args:
+            chat_id: Hosted conversation id or Mac chat id.
+            principal: Desktop principal with the ``sync`` scope.
+        """
+        candidates = [chat_id[:36], _published_chat_id(principal.username, chat_id)]
+        with Session(job_store.engine) as session:
+            for row in session.query(AgentConversationModel).filter(
+                AgentConversationModel.id.in_(candidates),
+                AgentConversationModel.username == principal.username,
+            ):
+                row.share_token = cast(Any, None)
+                row.shared_at = cast(Any, None)
+            session.commit()
+
+    # Deliberately unauthenticated: the token is the capability. Every unknown,
+    # malformed or revoked token is the same 404 so a probe learns nothing.
+    @router.get(
+        "/agent/shared-conversations/{token}",
+        response_model=SharedConversation,
+        summary="Read a shared conversation by its public link token",
+    )
+    def get_shared_conversation(token: str) -> SharedConversation:
+        """Return the live, read-only, secret-masked view of a shared conversation.
+
+        Args:
+            token: The share token from the public link.
+
+        Returns:
+            The title and ordered messages. Owner identity, costs and token
+            usage are left out, and credentials and email addresses in text and
+            tool data are masked. At most ``MAX_SHARED_MESSAGES`` turns are returned.
+
+        Raises:
+            DomainError: 404 when no conversation carries the token.
+        """
+        if not token or len(token) > 64:
+            raise DomainError("agent.conversation.not_found", status=404)
+        with Session(job_store.engine) as session:
+            row = session.query(AgentConversationModel).filter(AgentConversationModel.share_token == token).first()
+            if row is None:
+                raise DomainError("agent.conversation.not_found", status=404)
+            msgs = (
+                session.query(AgentMessageModel)
+                .filter(AgentMessageModel.conversation_id == row.id)
+                .order_by(AgentMessageModel.created_at.asc(), AgentMessageModel.id.asc())
+                .limit(MAX_SHARED_MESSAGES)
+                .all()
+            )
+            return SharedConversation(
+                title=_mask_public(cast(str, row.title)),
+                created_at=cast(datetime, row.created_at),
+                updated_at=cast(datetime, row.updated_at),
+                messages=[_shared_message(m) for m in msgs],
+            )
+
+    @router.post(
         "/agent/conversations/bulk-delete",
         response_model=BulkDeleteByIdsResponse,
         summary="Delete many of the caller's conversations in one request",
@@ -396,11 +738,202 @@ def create_agent_history_router(*, job_store) -> APIRouter:
     return router
 
 
+def _shared_message(m: AgentMessageModel) -> ConversationMessage:
+    """Project one persisted turn into its public, secret-masked shape.
+
+    Args:
+        m: The loaded message row.
+
+    Returns:
+        The turn without its token usage or cost (``stats``), with every
+        credential and email address in its text, tool calls, plan and
+        thinking masked.
+    """
+    meta = m.router_metadata if isinstance(m.router_metadata, dict) else {}
+    return ConversationMessage(
+        role=cast(str, m.role),
+        content=_mask_public(cast(str, m.content)),
+        tool_calls=_mask_public(m.tool_calls) if m.tool_calls else None,
+        model=cast("str | None", m.model),
+        served_model=meta.get("served_model"),
+        plan=_mask_public(meta.get("plan")),
+        thinking=_mask_public(meta.get("thinking")),
+        created_at=cast(datetime, m.created_at),
+    )
+
+
+def _mask_public(value: Any) -> Any:
+    """Mask credentials and email addresses in a value that a public link shows.
+
+    Args:
+        value: Any JSON-like value from a stored turn.
+
+    Returns:
+        The same structure with secrets and email addresses replaced by the mask.
+    """
+    masked = mask_secrets(value)
+    if isinstance(masked, dict):
+        return {key: _mask_public(item) for key, item in masked.items()}
+    if isinstance(masked, list):
+        return [_mask_public(item) for item in masked]
+    if isinstance(masked, str):
+        return _EMAIL.sub(MASK, masked)
+    return masked
+
+
+def _shared_summaries(session: Session, username: str) -> list[SharedConversationSummary]:
+    """List the user's conversations that have a live share token.
+
+    Args:
+        session: Active SQLAlchemy session.
+        username: The owner.
+
+    Returns:
+        The rows, newest share first.
+    """
+    rows = (
+        session.query(AgentConversationModel)
+        .filter(
+            AgentConversationModel.username == username,
+            AgentConversationModel.share_token.is_not(None),
+        )
+        .order_by(AgentConversationModel.shared_at.desc(), AgentConversationModel.updated_at.desc())
+        .limit(MAX_LIST)
+        .all()
+    )
+    return [
+        SharedConversationSummary(
+            id=cast(str, row.id),
+            title=cast(str, row.title),
+            shared_at=cast("datetime | None", row.shared_at),
+            token=cast(str, row.share_token),
+        )
+        for row in rows
+    ]
+
+
+def _published_chat_id(username: str, local_id: str) -> str:
+    """Return the hosted conversation id of a Mac chat published by ``username``.
+
+    Args:
+        username: The hosted account.
+        local_id: The chat id on the Mac.
+
+    Returns:
+        A UUID string that is the same for the same account and Mac chat.
+    """
+    return str(uuid.uuid5(_SHARED_CHAT_NAMESPACE, f"{username}\n{local_id}"))
+
+
+async def _read_capped_snapshot(request: Request) -> bytes:
+    """Read a snapshot body, stopping as soon as it passes ``MAX_SHARED_BYTES``.
+
+    The declared length is checked first and the stream is counted as it
+    arrives, so an oversized or lying upload is refused before it is buffered
+    whole or parsed.
+
+    Args:
+        request: The incoming import request.
+
+    Returns:
+        The raw body bytes.
+
+    Raises:
+        DomainError: 413 ``agent.share.too_large``.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > MAX_SHARED_BYTES:
+        raise DomainError("agent.share.too_large", status=413, limit=MAX_SHARED_BYTES)
+    chunks: list[bytes] = []
+    received = 0
+    async for chunk in request.stream():
+        received += len(chunk)
+        if received > MAX_SHARED_BYTES:
+            raise DomainError("agent.share.too_large", status=413, limit=MAX_SHARED_BYTES)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _check_snapshot_size(snapshot: SharedChatImportRequest) -> None:
+    """Refuse a chat snapshot whose JSON is larger than ``MAX_SHARED_BYTES``.
+
+    Args:
+        snapshot: The snapshot to measure.
+
+    Raises:
+        DomainError: 413 ``agent.share.too_large``.
+    """
+    size = len(json.dumps(snapshot.model_dump(mode="json"), ensure_ascii=False).encode("utf-8"))
+    if size > MAX_SHARED_BYTES:
+        raise DomainError("agent.share.too_large", status=413, limit=MAX_SHARED_BYTES)
+
+
+def _local_snapshot(session: Session, row: AgentConversationModel) -> SharedChatImportRequest:
+    """Build the masked snapshot of a Mac chat that hosted publishes.
+
+    Args:
+        session: Active SQLAlchemy session.
+        row: The local conversation, already owner-checked.
+
+    Returns:
+        The title and the public, masked shape of each message.
+
+    Raises:
+        DomainError: 404 when the chat has no messages, 413 when it is too large.
+    """
+    msgs = (
+        session.query(AgentMessageModel)
+        .filter(AgentMessageModel.conversation_id == row.id)
+        .order_by(AgentMessageModel.created_at.asc(), AgentMessageModel.id.asc())
+        .limit(MAX_SHARED_MESSAGES + 1)
+        .all()
+    )
+    if not msgs:
+        raise DomainError("agent.conversation.not_found", status=404)
+    if len(msgs) > MAX_SHARED_MESSAGES:
+        raise DomainError("agent.share.too_large", status=413, limit=MAX_SHARED_MESSAGES)
+    snapshot = SharedChatImportRequest(
+        local_id=cast(str, row.id),
+        title=mask_secrets(cast(str, row.title))[:200],
+        messages=[SharedChatMessage.model_validate(_shared_message(m).model_dump(exclude={"stats"})) for m in msgs],
+    )
+    _check_snapshot_size(snapshot)
+    return snapshot
+
+
+def _imported_message(conversation_id: str, m: SharedChatMessage) -> AgentMessageModel:
+    """Turn one snapshot turn into a masked hosted message row.
+
+    Args:
+        conversation_id: The hosted conversation id.
+        m: The snapshot turn.
+
+    Returns:
+        The new row; plan, thinking and the served model go to ``router_metadata``
+        where the public read finds them.
+    """
+    created_at = m.created_at if m.created_at.tzinfo else m.created_at.replace(tzinfo=UTC)
+    return AgentMessageModel(
+        conversation_id=conversation_id,
+        role=m.role,
+        content=mask_secrets(m.content),
+        tool_calls=mask_secrets(m.tool_calls) if m.tool_calls else None,
+        model=m.model,
+        router_metadata={
+            "served_model": m.served_model,
+            "plan": mask_secrets(m.plan),
+            "thinking": mask_secrets(m.thinking),
+        },
+        created_at=created_at,
+    )
+
+
 def purge_stale_conversations(engine: Engine, *, threshold_days: int) -> int:
     """Delete unpinned conversations whose last activity is older than ``threshold_days``.
 
     Pinned conversations are preserved regardless of age — the user explicitly
-    marked them as worth keeping. Messages cascade via the ``ON DELETE CASCADE``
+    marked them as worth keeping. Shared conversations are preserved too, so a
+    public link keeps working until the owner stops sharing. Messages cascade via the ``ON DELETE CASCADE``
     FK on :class:`AgentMessageModel.conversation_id`.
 
     Args:
@@ -417,6 +950,7 @@ def purge_stale_conversations(engine: Engine, *, threshold_days: int) -> int:
             session.query(AgentConversationModel)
             .filter(
                 AgentConversationModel.pinned.is_(False),
+                AgentConversationModel.share_token.is_(None),
                 AgentConversationModel.updated_at < cutoff,
             )
             .delete(synchronize_session=False)

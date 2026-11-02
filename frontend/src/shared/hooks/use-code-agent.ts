@@ -140,6 +140,8 @@ export interface AgentMessage {
   stats?: TurnStats | null;
   /** A turn the app sent on the user's behalf; the transcript leaves its bubble out. */
   hidden?: boolean;
+  /** When the message was sent, in epoch ms. */
+  createdAt?: number;
 }
 
 export interface CodeAgentState {
@@ -579,7 +581,7 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
       if (isChat) {
         setMessages((m) => [
           ...m,
-          { role: "user", content: userMessage, ...(hidden ? { hidden } : {}) },
+          { role: "user", content: userMessage, createdAt: Date.now(), ...(hidden ? { hidden } : {}) },
           { role: "assistant", content: "", toolCalls: [] },
         ]);
       } else {
@@ -740,7 +742,7 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
                     : prev;
                 return [
                   ...kept,
-                  { role: "user", content: text },
+                  { role: "user", content: text, createdAt: Date.now() },
                   { role: "assistant", content: "", toolCalls: [] },
                 ];
               });
@@ -1106,6 +1108,7 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
                   model: result.model,
                   servedModel: result.served_model,
                   stats: result.stats,
+                  createdAt: Date.now(),
                 };
                 return next;
               });
