@@ -26,6 +26,14 @@ export function dispatchGeneralistEvent(
       if (text) handlers.onPlan?.(text);
       break;
     }
+    case "tool_pending": {
+      const tool = String(data.tool ?? "");
+      if (tool) handlers.onToolPending?.({ tool });
+      break;
+    }
+    case "tool_pending_clear":
+      handlers.onToolPendingClear?.();
+      break;
     case "tool_start":
       handlers.onToolStart?.({
         id: String(data.id ?? ""),

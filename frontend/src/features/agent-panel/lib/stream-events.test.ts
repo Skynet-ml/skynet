@@ -19,6 +19,8 @@ function recorder(): { calls: Call[]; handlers: GeneralistAgentHandlers } {
       onReasoningPatch: record("reasoning"),
       onThinkingSummary: record("thinkingSummary"),
       onPlan: record("plan"),
+      onToolPending: record("toolPending"),
+      onToolPendingClear: record("toolPendingClear"),
       onToolStart: record("toolStart"),
       onToolEnd: record("toolEnd"),
       onPendingApproval: record("pendingApproval"),
@@ -150,4 +152,20 @@ test("an error carries its code, and falls back to the generic text", () => {
 
 test("an unknown event is ignored", () => {
   assert.deepEqual(dispatch([["turn_metadata", { allowed_tools: [] }]]), []);
+});
+
+test("a pending tool call reaches its handler, a nameless one never", () => {
+  const calls = dispatch([
+    ["tool_pending", { index: 0, tool: "update_wizard_state" }],
+    ["tool_pending", { index: 1 }],
+  ]);
+  assert.deepEqual(calls, [["toolPending", { tool: "update_wizard_state" }]]);
+});
+
+test("a step start clears the pending tool rows", () => {
+  const calls = dispatch([
+    ["tool_pending", { index: 0, tool: "list_models" }],
+    ["tool_pending_clear", {}],
+  ]);
+  assert.deepEqual(calls, [["toolPending", { tool: "list_models" }], ["toolPendingClear"]]);
 });

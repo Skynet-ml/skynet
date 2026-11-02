@@ -191,3 +191,46 @@ def test_stored_history_renders_like_the_live_one() -> None:
     reloaded = adapter.format(signature, [], {"history": stored, "user_message": "next"})
 
     assert reloaded == live
+
+
+class _ThinkingLM(_ScriptedLM):
+    """A scripted LM whose first step thinks natively and whose second names no tool."""
+
+    def forward(self, prompt=None, messages=None, **kwargs):
+        """Think on the first step, skip the tool on the second, then follow the script.
+
+        Args:
+            prompt: Unused legacy prompt.
+            messages: The rendered chat messages.
+            **kwargs: Provider kwargs.
+
+        Returns:
+            An OpenAI-shaped response.
+        """
+        response = super().forward(prompt=prompt, messages=messages, **kwargs)
+        message = response.choices[0].message
+        if len(self.requests) == 1:
+            message.reasoning_content = "PRIVATE THINKING"
+        elif len(self.requests) == 2:
+            message.tool_calls = None
+            message.content = "no tool"
+        return response
+
+
+def test_forced_submit_never_replays_native_thinking() -> None:
+    """The forced submit neither replays earlier thinking nor asks for reasoning as text.
+
+    Anthropic's safeguards block that prompt as reasoning extraction.
+    """
+    lm = _ThinkingLM([("_lookup", {"name": "a"}), ("_lookup", {"name": "b"}), ("submit", {"reply": "done"})])
+
+    with dspy.context(lm=lm):
+        prediction = _program()(user_message="question")
+
+    forced = lm.requests[-1]
+    assert forced["tool_choice"] == {"type": "function", "function": {"name": "submit"}}
+    rendered = json.dumps(forced["messages"])
+    assert "PRIVATE THINKING" not in rendered
+    assert "next_thought" not in rendered
+    assert prediction.reply == "done"
+    assert prediction.history.messages[0]["next_thought"].content == "PRIVATE THINKING"

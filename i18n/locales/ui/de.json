@@ -1531,6 +1531,8 @@
   "agent.composer.record_cancel": "Aufnahme abbrechen",
   "agent.composer.record_finish": "Beenden und transkribieren",
   "agent.composer.recording": "Aufnahme läuft...",
+  "agent.composer.suggestion_hint": "Vorgeschlagene Nachricht: {text}. Drücke Tab, um sie zu übernehmen, oder Escape, um sie auszublenden.",
+  "agent.composer.suggestion_key": "Tab",
   "agent.composer.transcribe_failed": "Transkription fehlgeschlagen — versuchen Sie es erneut",
   "agent.composer.transcribing": "Transkription läuft...",
   "agent.pending.list_label": "Ausstehende Nachrichten",

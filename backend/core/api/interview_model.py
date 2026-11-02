@@ -289,6 +289,21 @@ def interview_model_id() -> str:
     return cheapest[0].value if cheapest else agent_model_id(settings.code_agent_model)
 
 
+def measured_speeds() -> dict[str, tuple[float, float]]:
+    """Return the last measured speed of each catalog model, without waiting.
+
+    Returns:
+        ``(tokens per second, milliseconds to the first token)`` by catalog id;
+        empty before the first measurement. A stale set starts a background
+        refresh and is still returned.
+    """
+    with _lock:
+        speeds, stale = dict(_speeds), time.monotonic() - _measured_at >= _STATS_TTL_SECONDS
+    if stale:
+        _kick_refresh()
+    return speeds
+
+
 def with_interview_default(catalog: ModelCatalogResponse) -> ModelCatalogResponse:
     """Flag the model interviews run by default and attach each model's measured speed.
 

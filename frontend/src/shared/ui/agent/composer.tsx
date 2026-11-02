@@ -24,8 +24,12 @@ import {
   type AttachedFile,
 } from "./pasted-text";
 import { PendingMessages } from "./pending-messages";
+import { suggestKeyAction } from "./next-prompt";
 import { appendToDraft, midTurnKeyAction, type MidTurnQueue } from "./steer-queue";
+import { SuggestionGhost } from "./suggestion-ghost";
+import type { AgentMessage } from "./types";
 import { formatRecSeconds, useDictation } from "./use-dictation";
+import { useNextPrompt } from "./use-next-prompt";
 
 interface ComposerProps {
   value: string;
@@ -60,6 +64,10 @@ interface ComposerProps {
   claimsFile?: (file: File) => boolean;
   /** Receives the one file `claimsFile` claimed. */
   onAttachFile?: (file: File) => void;
+  /** Opts an agent chat into next-message suggestions: after a turn ends,
+   *  the empty composer shows a greyed likely next message that Tab fills in
+   *  (never sends) and Escape dismisses. */
+  suggest?: { messages: readonly AgentMessage[]; model?: string | null; chatId?: string | null };
 }
 
 /**
@@ -90,6 +98,7 @@ export function Composer({
   acceptsMidTurn,
   claimsFile,
   onAttachFile,
+  suggest,
 }: ComposerProps) {
   const inline = layout === "inline";
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
@@ -123,6 +132,15 @@ export function Composer({
   // Without a mid-turn handler a streaming turn locks the input as before.
   const locked = Boolean(streaming && !midTurn);
   const hasDraft = value.trim().length > 0;
+  const { suggestion, dismiss: dismissSuggestion } = useNextPrompt({
+    messages: suggest?.messages,
+    model: suggest?.model,
+    chatId: suggest?.chatId,
+    draft: value,
+    streaming: Boolean(streaming),
+    disabled: Boolean(disabled || dictating),
+  });
+  const suggestionHintId = React.useId();
   // Long pastes live in `value` as tagged blocks; the textarea only edits
   // what was typed, and each block shows as a card above it.
   const draft = splitPastes(value);
@@ -216,6 +234,23 @@ export function Composer({
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+    const suggestAction = suggestKeyAction(e, {
+      suggestion,
+      draft: value,
+      streaming: Boolean(streaming),
+    });
+    if (suggestAction === "accept") {
+      e.preventDefault();
+      onChange(suggestion);
+      refocus();
+      return;
+    }
+    if (suggestAction === "dismiss") {
+      e.preventDefault();
+      e.stopPropagation();
+      dismissSuggestion();
+      return;
+    }
     if (midTurn && !disabled) {
       const action = midTurnKeyAction(e, {
         streaming: Boolean(streaming),
@@ -311,7 +346,8 @@ export function Composer({
               onKeyDown={handleKeyDown}
               disabled={disabled || locked}
               rows={1}
-              placeholder={placeholder}
+              placeholder={suggestion ? undefined : placeholder}
+              aria-describedby={suggestion ? suggestionHintId : undefined}
               className={cn(
                 "bg-transparent text-sm leading-[20px] resize-none overflow-hidden",
                 "max-h-[120px] outline-none ring-0 border-0 shadow-none",
@@ -323,6 +359,14 @@ export function Composer({
                   : "block h-[44px] w-full px-4 py-[11px] sm:h-[42px] [@media(hover:none)_and_(pointer:coarse)]:h-[44px]",
               )}
             />
+            {suggestion && (
+              <SuggestionGhost
+                key={suggestion}
+                text={suggestion}
+                hintId={suggestionHintId}
+                className={inline ? "px-3 py-2" : "px-4 py-[11px]"}
+              />
+            )}
           </MarkdownPreviewField>
         ) : (
           <div

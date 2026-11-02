@@ -113,6 +113,7 @@ export function CodingAgentPanel({
         disabled={disabled || agent.limitReached}
         streaming={streaming}
         midTurn={agent.midTurn}
+        suggest={{ messages: agent.messages, model: coding.model }}
         modelMenu={
           <ComposerModelMenu
             value={coding.model}

@@ -28,6 +28,7 @@ import { midTurnOf, SteerQueue, type MidTurnQueue } from "@/shared/ui/agent/stee
 import { agentSteerChannel, newSteerKey } from "@/shared/ui/agent/use-steer-queue";
 
 import { confirmGeneralistApproval, streamGeneralistAgent } from "../lib/stream";
+import { dropPendingToolCalls, pendingToolCall, placeToolCall } from "../lib/pending-tool-calls";
 import type {
   ChatTurn,
   PendingApprovalPayload,
@@ -377,7 +378,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         const last = prev[prev.length - 1];
         if (!last || last.role !== "assistant") return prev;
         const next = prev.slice();
-        next[next.length - 1] = { ...last, toolCalls: [...(last.toolCalls ?? []), call] };
+        next[next.length - 1] = { ...last, toolCalls: placeToolCall(last.toolCalls ?? [], call) };
         return next;
       });
     },
@@ -464,6 +465,19 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       const turnStart = rt.turnStart;
       // The reply `done` landed on; stats that arrive after it belong there.
       let replyAt: number | null = null;
+      let pendingSeq = 0;
+      // Rows for calls the model wrote but never ran (a failed parse, a
+      // denied step) must not outlive the turn as spinning pills.
+      const dropPendingRows = () =>
+        patchMessages(key, (prev) => {
+          const last = prev[prev.length - 1];
+          if (!last || last.role !== "assistant" || !last.toolCalls?.length) return prev;
+          const kept = dropPendingToolCalls(last.toolCalls);
+          if (kept.length === last.toolCalls.length) return prev;
+          const next = prev.slice();
+          next[next.length - 1] = { ...last, toolCalls: kept };
+          return next;
+        });
       streamingKeysRef.current.add(key);
 
       patchSession(key, {
@@ -511,6 +525,9 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
               if (controller.signal.aborted) return;
               steerQueue.applied(ids);
               if (!text.trim()) return;
+              // The bubble this steer closes keeps no row for a call that
+              // never ran; later clears only reach the new bubble.
+              dropPendingRows();
               replyBeforeSteer = (replyBeforeSteer ?? "") + rt.replyBuf;
               rt.replyBuf = "";
               patchThinking(key, (segments) => closeThinking(segments, Date.now()));
@@ -564,6 +581,21 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
                 next[next.length - 1] = { ...last, plan: text };
                 return next;
               });
+            },
+            onToolPending: ({ tool }) => {
+              if (controller.signal.aborted) return;
+              patchThinking(key, (segments) => closeThinking(segments, Date.now()));
+              patchSession(key, {
+                statusLabel: formatMsg(
+                  "auto.features.agent.panel.hooks.use.generalist.agent.template.1",
+                  { p1: tool },
+                ),
+              });
+              pushToolCall(key, pendingToolCall(tool, pendingSeq++, Date.now()));
+            },
+            onToolPendingClear: () => {
+              if (controller.signal.aborted) return;
+              dropPendingRows();
             },
             onToolStart: (ev) => {
               if (controller.signal.aborted) return;
@@ -642,6 +674,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             },
             onDone: (result) => {
               if (controller.signal.aborted) return;
+              dropPendingRows();
               patchSession(key, {
                 status: "done",
                 statusLabel: "",
@@ -694,6 +727,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             },
             onError: (message, code) => {
               if (controller.signal.aborted) return;
+              dropPendingRows();
               patchSession(key, {
                 status: "error",
                 statusLabel: msg("auto.features.agent.panel.hooks.use.generalist.agent.literal.6"),
@@ -707,6 +741,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
                       ? msg("agent.error.insufficient_funds")
                       : message),
                 errorCode: code ?? null,
+                // The stream that would act on the decision is gone.
+                pendingApproval: null,
               });
               patchThinking(key, (segments) => closeThinking(segments, Date.now()));
               patchMessages(key, (prev) => {

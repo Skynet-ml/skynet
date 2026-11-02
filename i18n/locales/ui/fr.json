@@ -1531,6 +1531,8 @@
   "agent.composer.record_cancel": "Annuler l'enregistrement",
   "agent.composer.record_finish": "Terminer et transcrire",
   "agent.composer.recording": "Enregistrement…",
+  "agent.composer.suggestion_hint": "Message suggéré : {text}. Appuyez sur Tab pour l'utiliser, ou sur Échap pour l'ignorer.",
+  "agent.composer.suggestion_key": "Tab",
   "agent.composer.transcribe_failed": "Échec de la transcription — réessayez",
   "agent.composer.transcribing": "Transcription…",
   "agent.pending.list_label": "Messages en attente",

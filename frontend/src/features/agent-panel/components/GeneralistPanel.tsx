@@ -913,6 +913,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         placeholder={msg("auto.features.agent.panel.components.generalistpanel.literal.5")}
         streaming={activeBusy}
         midTurn={agent.midTurn}
+        suggest={{ messages: agent.messages, model: agent.model, chatId: agent.conversationId }}
         modelMenu={
           <ComposerModelMenu
             value={agent.model}

@@ -1531,6 +1531,8 @@
   "agent.composer.record_cancel": "Отменить запись",
   "agent.composer.record_finish": "Завершить и расшифровать",
   "agent.composer.recording": "Запись...",
+  "agent.composer.suggestion_hint": "Предлагаемое сообщение: {text}. Нажмите Tab, чтобы использовать его, или Escape, чтобы закрыть.",
+  "agent.composer.suggestion_key": "Tab",
   "agent.composer.transcribe_failed": "Не удалось расшифровать — попробуйте снова",
   "agent.composer.transcribing": "Расшифровка...",
   "agent.pending.list_label": "Ожидающие сообщения",

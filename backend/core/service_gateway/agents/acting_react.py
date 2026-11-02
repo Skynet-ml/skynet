@@ -19,7 +19,7 @@ import logging
 import dspy
 from dspy.utils.exceptions import AdapterParseError
 
-from ..react_compat import native_tool_calling_active
+from ..react_compat import native_tool_calling_active, without_text_reasoning
 from .steering import deliver_steering
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,8 @@ class _ActingPredict(dspy.Predict):
         """Predict one loop step, retrying a step that ended without a tool call.
 
         The forced ``submit`` call already pins ``tool_choice``; it is passed
-        through untouched so its own fallback behaviour stays DSPy's.
+        through so its own fallback behaviour stays DSPy's, minus the text
+        reasoning field that would replay earlier thinking into the prompt.
 
         Args:
             **kwargs: The per-call inputs ReActV2 passes, optionally with a
@@ -90,7 +91,7 @@ class _ActingPredict(dspy.Predict):
         deliver_steering(self, kwargs)
         config = dict(kwargs.get("config") or {})
         if "tool_choice" in config:
-            return super().forward(**kwargs)
+            return super().forward(**without_text_reasoning(self.signature, kwargs))
         try:
             prediction = super().forward(**kwargs)
             if _has_tool_calls(prediction):

@@ -45,6 +45,10 @@ export interface GeneralistAgentHandlers {
   onThinkingSummary?: (ev: { index: number; text: string }) => void;
   /** What the agent said it will do this turn. */
   onPlan?: (text: string) => void;
+  /** The model is still writing a call to `tool`; its `tool_start` follows once the call runs. */
+  onToolPending?: (ev: { tool: string }) => void;
+  /** A new model step started; pending rows with no `tool_start` yet never run. */
+  onToolPendingClear?: () => void;
   onToolStart?: (ev: ToolStartPayload) => void;
   onToolEnd?: (ev: ToolEndPayload) => void;
   onPendingApproval?: (ev: PendingApprovalPayload) => void;

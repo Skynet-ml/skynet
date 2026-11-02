@@ -20,10 +20,9 @@ import os
 import re
 import signal
 import subprocess
-import tempfile
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -81,6 +80,9 @@ _CODEX_CONFIG = (
     "tools.experimental_request_user_input.enabled=false",
     'features.code_mode.excluded_tool_namespaces=["functions"]',
 )
+_CLAUDE_SETTINGS = json.dumps({"showThinkingSummaries": True})
+# ``codex exec`` flags from :data:`cli_isolation.CODEX_ARGS` that ``codex app-server`` rejects.
+_CODEX_EXEC_ONLY_ARGS = frozenset({"--ignore-user-config", "--ignore-rules", "--ephemeral"})
 _TRANSIENT_TEXT = re.compile(
     r"overloaded|timed? ?out|temporar|connection|network|econnreset|503|502|500|529", re.IGNORECASE
 )
@@ -269,77 +271,134 @@ def _close(process: subprocess.Popen[str]) -> None:
         process.wait(timeout=_KILL_GRACE_SECONDS)
 
 
-def _run(
-    provider: str, argv: list[str], prompt: str | None, env: Mapping[str, str], settings: Settings, cwd: Path
-) -> tuple[str, str]:
-    """Run a CLI once and return its stdout and stderr.
+def _stream(
+    provider: str,
+    argv: list[str],
+    prompt: str,
+    env: Mapping[str, str],
+    settings: Settings,
+    cwd: Path,
+    on_event: Callable[[dict[str, Any]], None],
+) -> tuple[list[str], str, bool]:
+    """Run a CLI and pass each JSON event line of its stdout to ``on_event`` as it arrives.
 
     Args:
         provider: The CLI, for error reports.
         argv: The full command.
-        prompt: Text sent on stdin, or ``None`` for none.
+        prompt: Text sent on stdin.
         env: The CLI's environment, from :func:`cli_isolation.isolated_cli`.
         settings: Application settings (timeout).
         cwd: The directory the CLI runs in.
+        on_event: Called with each JSON object line, in the reading thread.
 
     Returns:
-        ``(stdout, stderr)``.
+        ``(other_lines, stderr, timed_out)``: the stdout lines that are not
+        JSON objects, all of stderr, and whether the call timeout stopped the CLI.
 
     Raises:
-        CliRunError: When the binary is missing or the call times out. A
-            timeout is not transient: a hung call would hang again.
+        CliRunError: When the binary is missing.
     """
     process = _start(provider, argv, env, cwd)
-    try:
-        # communicate() ignores a broken stdin pipe, so a CLI that exits before
-        # it reads a long prompt still reports its own stderr below.
-        stdout, stderr = process.communicate(
-            prompt if prompt is not None else "", timeout=settings.cli_call_timeout_seconds
-        )
-    except subprocess.TimeoutExpired as error:
+    timed_out = threading.Event()
+
+    def expire() -> None:
+        """Stop the whole process group at the call timeout."""
+        timed_out.set()
         _kill_group(process)
-        _close(process)
-        raise CliRunError(provider, f"{provider} timed out", transient=False) from error
+
+    def feed() -> None:
+        """Write the prompt; a CLI that exits early only closes the pipe."""
+        assert process.stdin is not None
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError, OSError):
+            process.stdin.write(prompt)
+            process.stdin.close()
+
+    timer = threading.Timer(settings.cli_call_timeout_seconds, expire)
+    timer.start()
+    other: list[str] = []
+    stderr_lines: list[str] = []
+    reader = threading.Thread(target=lambda: stderr_lines.extend(process.stderr or ()), daemon=True)
+    reader.start()
+    writer = threading.Thread(target=feed, daemon=True)
+    writer.start()
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                event = None
+            if isinstance(event, dict):
+                on_event(event)
+            elif line.strip():
+                other.append(line)
+        process.wait()
     except BaseException:
         _kill_group(process)
-        _close(process)
         raise
-    # A child the CLI left behind must not outlive the call.
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(process.pid, signal.SIGKILL)
-    if process.returncode != 0 and not stdout.strip():
-        raise _failure(provider, stderr)
-    return stdout, stderr
+    finally:
+        timer.cancel()
+        writer.join(timeout=_KILL_GRACE_SECONDS)
+        reader.join(timeout=_KILL_GRACE_SECONDS)
+        # A child the CLI left behind must not outlive the call.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+        _close(process)
+    return other, "".join(stderr_lines), timed_out.is_set()
 
 
-def _json_object(provider: str, stdout: str, stderr: str) -> dict[str, Any]:
-    """Parse a CLI's single JSON result object.
+def _claude_delta(event: Mapping[str, Any]) -> tuple[str, str] | None:
+    """Return the thinking or answer text of one ``stream-json`` partial-message event.
 
     Args:
-        provider: The CLI, for error reports.
-        stdout: Its standard output.
-        stderr: Its standard error.
+        event: One event line from ``claude -p --output-format stream-json``.
 
     Returns:
-        The parsed object.
-
-    Raises:
-        SubscriptionRateLimitedError: When the output is a plain cap message.
-        CliRunError: When the output is not a JSON object.
+        ``("reasoning", text)`` for a ``thinking_delta``, ``("content", text)``
+        for a ``text_delta``, or ``None`` for any other event.
     """
-    try:
-        value = json.loads(stdout.strip().splitlines()[-1]) if stdout.strip() else None
-    except ValueError:
-        value = None
-    if not isinstance(value, dict):
-        raise _failure(provider, f"{stdout}\n{stderr}")
-    return value
+    inner = event.get("event") if event.get("type") == "stream_event" else None
+    if not isinstance(inner, dict) or inner.get("type") != "content_block_delta":
+        return None
+    delta = inner.get("delta")
+    if not isinstance(delta, dict):
+        return None
+    kind, key = {"thinking_delta": ("reasoning", "thinking"), "text_delta": ("content", "text")}.get(
+        str(delta.get("type")), ("", "")
+    )
+    text = delta.get(key) if kind else None
+    return (kind, text) if isinstance(text, str) and text else None
+
+
+def _claude_user_message(prefix: str, rest: str) -> dict[str, Any]:
+    """Build the stream-json user message that sends a prompt as two text blocks.
+
+    Args:
+        prefix: The start of the prompt that later calls repeat.
+        rest: The remaining text.
+
+    Returns:
+        The message, with a cache mark after ``prefix``.
+    """
+    # Claude Code marks its own blocks with a one-hour TTL, and the API refuses
+    # a five-minute mark placed before a one-hour one.
+    mark = {"type": "ephemeral", "ttl": "1h"}
+    blocks = [{"type": "text", "text": prefix, "cache_control": mark}, {"type": "text", "text": rest}]
+    return {"type": "user", "message": {"role": "user", "content": blocks}}
 
 
 def run_claude(
-    model_arg: str, prompt: str, json_schema: Mapping[str, Any] | None, settings: Settings, cwd: Path
+    model_arg: str,
+    prompt: str,
+    json_schema: Mapping[str, Any] | None,
+    settings: Settings,
+    cwd: Path,
+    on_delta: Callable[[str, str], None] | None = None,
+    *,
+    think: bool = True,
+    cache_prefix: str = "",
 ) -> CliCompletion:
-    """Answer one prompt with ``claude -p``.
+    """Answer one prompt with ``claude -p``, streaming its events.
 
     Args:
         model_arg: The CLI's ``--model`` value.
@@ -347,6 +406,11 @@ def run_claude(
         json_schema: A JSON schema the answer must match, or ``None``.
         settings: Application settings.
         cwd: The directory the CLI runs in.
+        on_delta: Called with ``(kind, text)`` for each piece of thinking
+            (``"reasoning"``) or answer (``"content"``) as it arrives, or ``None``.
+            A schema call streams no answer text: its answer is the structured value.
+        think: ``False`` turns Claude Code's default thinking off.
+        cache_prefix: The start of ``prompt`` that later calls repeat, or ``""``.
 
     Returns:
         The completion.
@@ -355,25 +419,63 @@ def run_claude(
         SubscriptionRateLimitedError: When the subscription is capped.
         CliRunError: When the call fails, or gives no structured output for a schema.
     """
+    results: list[dict[str, Any]] = []
+
+    def take(event: dict[str, Any]) -> None:
+        """Keep the result event, and pass thinking and answer text on as they arrive."""
+        if event.get("type") == "result":
+            results.append(event)
+            return
+        delta = _claude_delta(event)
+        if delta is None or on_delta is None or (delta[0] == "content" and json_schema is not None):
+            return
+        on_delta(*delta)
+
     # Without the isolation flags a large personal setup overflows the context.
     with cli_isolation.isolated_cli("claude") as isolation:
         argv = [
             cli_probe.cli_binary("claude", settings),
             "-p",
+            # stream-json needs --verbose; partial messages carry the thinking
+            # deltas. Its last event is the same result object ``json`` prints.
             "--output-format",
-            "json",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
             "--tools",
             "",
             "--system-prompt",
             SYSTEM_PROMPT,
             *isolation.args,
+            # Without it, recent models send thinking blocks with no text, and
+            # the chat shows nothing while the model thinks for many seconds.
+            "--settings",
+            _CLAUDE_SETTINGS,
             "--model",
             model_arg,
         ]
         if json_schema is not None:
             argv += ["--json-schema", json.dumps(json_schema)]
-        stdout, stderr = _run("claude", argv, prompt, isolation.env, settings, cwd)
-    raw = _json_object("claude", stdout, stderr)
+        stdin = prompt
+        if cache_prefix and prompt.startswith(cache_prefix) and prompt != cache_prefix:
+            # Claude Code marks only the end of the prompt for caching, so a
+            # one-block prompt that grows each step never matches the last
+            # step's cache entry. The same text in two blocks, with a mark
+            # after the repeated part, lets the next step read it.
+            argv += ["--input-format", "stream-json"]
+            stdin = json.dumps(_claude_user_message(cache_prefix, prompt[len(cache_prefix) :])) + "\n"
+        env = dict(isolation.env)
+        if not think:
+            # Claude Code thinks by default, even on Haiku: a one-line answer
+            # then took 2,700-5,500 output tokens and 25-48 s, against about
+            # 1.5 s with a zero thinking budget.
+            env["MAX_THINKING_TOKENS"] = "0"
+        other, stderr, timed_out = _stream("claude", argv, stdin, env, settings, cwd, take)
+    if not results:
+        if timed_out:
+            raise CliRunError("claude", "claude timed out", transient=False)
+        raise _failure("claude", "\n".join(part for part in ("".join(other), stderr) if part.strip()))
+    raw = results[-1]
     if raw.get("is_error"):
         raise _failure("claude", str(raw.get("result") or stderr))
     structured = raw.get("structured_output")
@@ -399,64 +501,151 @@ def run_claude(
 
 
 def run_codex(
-    model_arg: str, prompt: str, json_schema: Mapping[str, Any] | None, settings: Settings, cwd: Path
+    model_arg: str,
+    prompt: str,
+    json_schema: Mapping[str, Any] | None,
+    settings: Settings,
+    cwd: Path,
+    on_delta: Callable[[str, str], None] | None = None,
 ) -> CliCompletion:
-    """Answer one prompt with ``codex exec`` in a read-only sandbox, with its host tools and agent prompt off.
+    """Answer one prompt with ``codex app-server`` in a read-only sandbox, with its host tools and agent prompt off.
+
+    ``codex exec --json`` reports the answer only once it is complete; the app
+    server sends each piece of the answer and of the reasoning summary as the
+    model writes it, so the chat can show both live.
 
     Args:
-        model_arg: The CLI's ``--model`` value.
-        prompt: The full prompt, sent on stdin.
+        model_arg: The CLI's model value.
+        prompt: The full prompt, sent as the turn's one text input.
         json_schema: A JSON schema the answer must match, or ``None``.
         settings: Application settings.
         cwd: The directory the CLI runs in.
+        on_delta: Called with ``(kind, text)`` for each piece of reasoning
+            summary (``"reasoning"``) or answer (``"content"``) as it arrives, or
+            ``None``. A schema call streams no answer text: its answer is the structured value.
 
     Returns:
-        The completion; ``model_ms`` is the time from the first event to ``turn.completed``.
+        The completion; ``model_ms`` is the time from ``turn/start`` to ``turn/completed``.
 
     Raises:
         SubscriptionRateLimitedError: When the subscription is capped.
         CliRunError: When the call fails.
     """
-    with (
-        tempfile.TemporaryDirectory(prefix="skynet-codex-") as scratch,
-        cli_isolation.isolated_cli("codex") as isolation,
-    ):
-        instructions = Path(scratch) / "instructions.md"
-        instructions.write_text(SYSTEM_PROMPT, encoding="utf-8")
+    with cli_isolation.isolated_cli("codex") as isolation:
         argv = [
             cli_probe.cli_binary("codex", settings),
-            "exec",
-            "--json",
-            "--sandbox",
-            "read-only",
-            "--skip-git-repo-check",
-            *isolation.args,
+            "app-server",
+            # The app server has no exec-only flags. The private CODEX_HOME
+            # already holds no user config or rules, and the thread is ephemeral.
+            *(arg for arg in isolation.args if arg not in _CODEX_EXEC_ONLY_ARGS),
             "-c",
             'web_search="disabled"',
             *(arg for feature in _CODEX_DISABLED_FEATURES for arg in ("--disable", feature)),
-            "-c",
-            f"model_instructions_file={json.dumps(str(instructions))}",
             *(arg for setting in _CODEX_CONFIG for arg in ("-c", setting)),
-            "--model",
-            model_arg,
         ]
+        thread = {
+            "model": model_arg,
+            "baseInstructions": SYSTEM_PROMPT,
+            "sandbox": "read-only",
+            "approvalPolicy": "never",
+            "ephemeral": True,
+            "cwd": str(cwd),
+        }
+        # The server sends reasoning summaries only when the turn asks for them.
+        turn: dict[str, Any] = {"input": [{"type": "text", "text": prompt}], "summary": "auto"}
         if json_schema is not None:
-            schema_path = Path(scratch) / "schema.json"
-            schema_path.write_text(json.dumps(json_schema), encoding="utf-8")
-            argv += ["--output-schema", str(schema_path)]
-        argv.append("-")
-        return _stream_codex(argv, prompt, isolation.env, settings, cwd)
+            turn["outputSchema"] = dict(json_schema)
+        return _codex_turn(argv, thread, turn, isolation.env, settings, cwd, on_delta, json_schema is None)
 
 
-def _stream_codex(argv: list[str], prompt: str, env: Mapping[str, str], settings: Settings, cwd: Path) -> CliCompletion:
-    """Run codex, time its events as they arrive, and read the last answer.
+class _CodexTurn:
+    """Read the app server's notifications for one turn and keep what the completion needs."""
+
+    def __init__(self, on_delta: Callable[[str, str], None] | None, stream_answer: bool) -> None:
+        """Start with no answer.
+
+        Args:
+            on_delta: Called with ``(kind, text)`` for each streamed piece, or ``None``.
+            stream_answer: Whether answer pieces go to ``on_delta``.
+        """
+        self.on_delta = on_delta
+        self.stream_answer = stream_answer
+        self.answer = ""
+        self.usage: dict[str, Any] = {}
+        self.errors: list[str] = []
+        self.finished = False
+        self.commentary: set[str] = set()
+        self.reasoning_parts: set[tuple[str, int]] = set()
+
+    def _send(self, kind: str, text: str) -> None:
+        """Pass one piece of text on, when there is a listener and text."""
+        if self.on_delta is not None and text:
+            self.on_delta(kind, text)
+
+    def take(self, method: str, params: Mapping[str, Any]) -> None:
+        """Read one notification.
+
+        Args:
+            method: The notification method.
+            params: Its parameters.
+        """
+        item = params.get("item") if isinstance(params.get("item"), dict) else {}
+        if method == "item/started" and item.get("type") == "agentMessage" and item.get("phase") == "commentary":
+            # A progress note is not the answer; only the final message streams.
+            self.commentary.add(str(item.get("id")))
+        elif method == "item/agentMessage/delta":
+            if self.stream_answer and str(params.get("itemId")) not in self.commentary:
+                self._send("content", str(params.get("delta") or ""))
+        elif method == "item/reasoning/summaryTextDelta":
+            part = (str(params.get("itemId")), _int(params.get("summaryIndex")))
+            text = str(params.get("delta") or "")
+            if part not in self.reasoning_parts and text:
+                if self.reasoning_parts:
+                    text = "\n\n" + text
+                self.reasoning_parts.add(part)
+            self._send("reasoning", text)
+        elif method == "item/completed" and item.get("type") == "agentMessage":
+            if str(item.get("id")) not in self.commentary or not self.answer:
+                self.answer = str(item.get("text") or "")
+        elif method == "thread/tokenUsage/updated":
+            usage = params.get("tokenUsage")
+            last = usage.get("last") if isinstance(usage, dict) else None
+            self.usage = last if isinstance(last, dict) else {}
+        elif method == "error" and not params.get("willRetry"):
+            error = params.get("error")
+            self.errors.append(str(error.get("message") if isinstance(error, dict) else error))
+        elif method == "turn/completed":
+            turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+            error = turn.get("error")
+            if turn.get("status") == "failed" or isinstance(error, dict):
+                self.errors.append(str(error.get("message") if isinstance(error, dict) else "codex turn failed"))
+            else:
+                self.finished = True
+
+
+def _codex_turn(
+    argv: list[str],
+    thread: Mapping[str, Any],
+    turn: Mapping[str, Any],
+    env: Mapping[str, str],
+    settings: Settings,
+    cwd: Path,
+    on_delta: Callable[[str, str], None] | None,
+    stream_answer: bool,
+) -> CliCompletion:
+    """Run one turn on a fresh ``codex app-server`` over stdio JSON-RPC, then stop it.
+
+    The server stops when its stdin closes, so stdin stays open until the turn ends.
 
     Args:
         argv: The full command.
-        prompt: Text sent on stdin.
+        thread: The ``thread/start`` parameters.
+        turn: The ``turn/start`` parameters, without the thread id.
         env: The CLI's environment, from :func:`cli_isolation.isolated_cli`.
-        settings: Application settings.
+        settings: Application settings (timeout).
         cwd: The directory the CLI runs in.
+        on_delta: Called with ``(kind, text)`` for each streamed piece, or ``None``.
+        stream_answer: Whether answer pieces go to ``on_delta``.
 
     Returns:
         The completion.
@@ -469,71 +658,71 @@ def _stream_codex(argv: list[str], prompt: str, env: Mapping[str, str], settings
     timed_out = threading.Event()
 
     def expire() -> None:
-        """Stop the whole codex process group at the call timeout."""
+        """Stop the whole process group at the call timeout."""
         timed_out.set()
         _kill_group(process)
 
-    def feed() -> None:
-        """Write the prompt; a CLI that exits early only closes the pipe."""
+    def send(message: Mapping[str, Any]) -> None:
+        """Write one JSON-RPC message; a server that exited only closes the pipe."""
         assert process.stdin is not None
-        with contextlib.suppress(BrokenPipeError, ConnectionResetError, OSError):
-            process.stdin.write(prompt)
-            process.stdin.close()
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError, OSError, ValueError):
+            process.stdin.write(json.dumps(message) + "\n")
+            process.stdin.flush()
 
+    state = _CodexTurn(on_delta, stream_answer)
+    times: dict[str, float] = {}
+    other: list[str] = []
+    stderr_lines: list[str] = []
     timer = threading.Timer(settings.cli_call_timeout_seconds, expire)
     timer.start()
-    errors: list[str] = []
-    stderr_lines: list[str] = []
     reader = threading.Thread(target=lambda: stderr_lines.extend(process.stderr or ()), daemon=True)
     reader.start()
-    writer = threading.Thread(target=feed, daemon=True)
-    writer.start()
-    first: float | None = None
-    finished: float | None = None
-    text = ""
-    usage: dict[str, Any] = {}
     try:
+        send({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "skynet", "version": "1"}}})
+        send({"method": "initialized"})
+        send({"id": 2, "method": "thread/start", "params": dict(thread)})
         assert process.stdout is not None
         for line in process.stdout:
             try:
-                event = json.loads(line)
+                message = json.loads(line)
             except ValueError:
+                message = None
+            if not isinstance(message, dict):
+                if line.strip():
+                    other.append(line)
                 continue
-            if not isinstance(event, dict):
-                continue
-            first = first if first is not None else time.monotonic()
-            kind = event.get("type")
-            item = event.get("item") if isinstance(event.get("item"), dict) else {}
-            if kind == "item.completed" and item.get("type") == "agent_message":
-                text = str(item.get("text") or "")
-            elif kind == "turn.completed":
-                finished = time.monotonic()
-                usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
-            elif kind == "turn.failed":
-                error = event.get("error")
-                errors.append(str(error.get("message") if isinstance(error, dict) else error))
-            elif kind == "error":
-                errors.append(str(event.get("message") or ""))
-        process.wait()
-    except BaseException:
-        _kill_group(process)
-        raise
+            method, params = message.get("method"), message.get("params")
+            params = params if isinstance(params, dict) else {}
+            if "id" in message and method:
+                # No approval or tool request applies: the host tools are off.
+                send({"id": message["id"], "error": {"code": -32601, "message": "not supported"}})
+            elif "id" in message and isinstance(message.get("error"), dict):
+                state.errors.append(str(message["error"].get("message") or "codex request failed"))
+                break
+            elif message.get("id") == 2:
+                thread_id = ((message.get("result") or {}).get("thread") or {}).get("id")
+                times["started"] = time.monotonic()
+                send({"id": 3, "method": "turn/start", "params": {**turn, "threadId": thread_id}})
+            elif isinstance(method, str):
+                state.take(method, params)
+                if method == "turn/completed":
+                    times["finished"] = time.monotonic()
+                    break
     finally:
         timer.cancel()
-        writer.join(timeout=_KILL_GRACE_SECONDS)
+        _kill_group(process)
         reader.join(timeout=_KILL_GRACE_SECONDS)
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(process.pid, signal.SIGKILL)
         _close(process)
-    if timed_out.is_set() and finished is None:
-        raise CliRunError("codex", "codex timed out", transient=False)
-    if finished is None:
-        raise _failure("codex", "\n".join(errors) or "".join(stderr_lines))
+    if not state.finished:
+        if timed_out.is_set():
+            raise CliRunError("codex", "codex timed out", transient=False)
+        raise _failure("codex", "\n".join(state.errors) or "".join(other) + "".join(stderr_lines))
+    usage = state.usage
     return CliCompletion(
-        text=text,
-        prompt_tokens=_int(usage.get("input_tokens")),
-        completion_tokens=_int(usage.get("output_tokens")),
-        model_ms=round((finished - first) * 1000) if first is not None else None,
+        text=state.answer,
+        prompt_tokens=_int(usage.get("inputTokens")),
+        completion_tokens=_int(usage.get("outputTokens")),
+        model_ms=round((times["finished"] - times.get("started", times["finished"])) * 1000),
         raw={"usage": usage},
     )
 

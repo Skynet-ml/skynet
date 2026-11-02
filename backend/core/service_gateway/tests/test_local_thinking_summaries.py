@@ -12,7 +12,7 @@ import pytest
 from core import config
 from core.api import model_router
 from core.billing import cli_dispatch
-from core.billing.tests.test_cli_runners import CLAUDE_SUCCESS, fake_cli, local_settings, printing
+from core.billing.tests.test_cli_runners import CLAUDE_SUCCESS, calls, fake_cli, local_settings, printing
 from core.constants import TOKEN_SOURCE_BYOK
 from core.local.cli_catalog import CLI_MODELS, CliProvider
 from core.models import ModelConfig
@@ -302,3 +302,53 @@ def test_slow_cli_label_never_holds_the_turns_cli_slots(tmp_path: Path, monkeypa
     label_slot.release()
     labels = [line for line in (tmp_path / "claude.log").read_text().splitlines() if "Summarize" in line]
     assert len(labels) == 1
+
+
+def test_reasoning_off_side_call_gets_no_default_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the catalog's default effort off a side call that turned reasoning off, so it does not think."""
+    monkeypatch.setattr(language_models, "default_effort_for", lambda model: "low")
+    side = build_language_model(
+        ModelConfig(
+            name="openrouter/anthropic/claude-haiku-4.5", extra={"extra_body": {"reasoning": {"enabled": False}}}
+        ),
+        disable_cache=True,
+    )
+    turn = build_language_model(ModelConfig(name="openrouter/anthropic/claude-haiku-4.5"), disable_cache=True)
+
+    assert "reasoning_effort" not in side.kwargs
+    assert side.kwargs["extra_body"]["reasoning"] == {"enabled": False}
+    assert turn.kwargs["reasoning_effort"] == "low"
+
+
+def test_cli_suggestion_runs_while_a_label_holds_the_label_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run a next-message suggestion in its own CLI pool, with a longer limit than a label."""
+    fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))
+    current = local_settings(tmp_path)
+    for module in (config, language_models, model_router, generalist):
+        monkeypatch.setattr(module, "settings", current)
+    monkeypatch.setattr(cli_dispatch, "_gateway", None)
+    monkeypatch.setattr(cli_dispatch, "_list_prices", lambda model: None)
+    monkeypatch.setattr(generalist, "cli_suggest_model", lambda cli: "anthropic/claude-haiku-5.5")
+    turn = ModelConfig(name="anthropic/claude-opus-5.5", token_source="subscription", cli_provider="claude")
+    lm = generalist.build_local_suggest_lm(turn, timeout=30.0)
+    label_slot = cli_dispatch._semaphore(f"claude:{cli_dispatch.THINKING_LABEL_ROLE}", 1)
+    assert label_slot.acquire(blocking=False)
+    try:
+        answer = lm(messages=[{"role": "user", "content": "ping"}])
+    finally:
+        label_slot.release()
+
+    assert answer
+    assert answer[0]
+    assert lm.kwargs["timeout"] == 30.0
+    assert cli_dispatch._NEXT_PROMPT_CLI_TIMEOUT_SECONDS > cli_dispatch._LABEL_CLI_TIMEOUT_SECONDS
+    build_language_model(
+        ModelConfig(name="anthropic/claude-haiku-4.5", token_source="subscription", cli_provider="claude"),
+        disable_cache=True,
+    )("ping")
+    side, turn_call = calls(tmp_path, "claude")
+    # Claude Code thinks by default; a side call turns it off, a turn keeps it.
+    assert side["env"]["MAX_THINKING_TOKENS"] == "0"
+    assert "MAX_THINKING_TOKENS" not in turn_call["env"]

@@ -1531,6 +1531,8 @@
   "agent.composer.record_cancel": "録音をキャンセル",
   "agent.composer.record_finish": "終了して文字起こし",
   "agent.composer.recording": "録音中…",
+  "agent.composer.suggestion_hint": "提案メッセージ: {text}。Tab で入力、Esc で閉じます。",
+  "agent.composer.suggestion_key": "Tab",
   "agent.composer.transcribe_failed": "文字起こしに失敗しました — もう一度お試しください",
   "agent.composer.transcribing": "文字起こし中…",
   "agent.pending.list_label": "保留中のメッセージ",

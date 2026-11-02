@@ -1554,20 +1554,23 @@ class _SubmitArgExtractor:
             target_arg: Name of the ``submit`` arg to extract — e.g.
                 ``assistant_message`` for the generalist agent or
                 ``reply`` for the code agent.
-            exclusive_submit: Buffer until the field ends and suppress the
-                reply when submit appeared beside a non-submit tool.
+            exclusive_submit: Suppress the reply when submit appears beside
+                a non-submit tool, and flag already streamed text for
+                retraction (see :meth:`take_retraction`).
         """
         self._target_arg = target_arg
         self._exclusive_submit = exclusive_submit
         self._buffer = ""
         self._emitted_chars = 0
+        self._retract = False
 
     def feed(self, chunk: str, *, final: bool = False) -> str | None:
         """Append a chunk and return the newly streamed slice of the target arg.
 
         Args:
             chunk: Latest streaming chunk from the ``tool_calls`` listener.
-            final: Whether this is the field's terminal chunk.
+            final: Whether this is the field's terminal chunk. Unused: the
+                reply streams before the field ends.
 
         Returns:
             The new characters of ``args[target_arg]`` since the last
@@ -1577,8 +1580,6 @@ class _SubmitArgExtractor:
         if not chunk:
             return None
         self._buffer += chunk
-        if self._exclusive_submit and not final:
-            return None
         try:
             parsed = jiter.from_json(
                 self._buffer.encode("utf-8"),
@@ -1594,6 +1595,13 @@ class _SubmitArgExtractor:
         if self._exclusive_submit and any(
             isinstance(call, dict) and call.get("name") != "submit" for call in tool_calls
         ):
+            # The reply streams while submit is the only call so far, so the
+            # chat shows it as it is written; a sibling tool written after it
+            # makes the loop drop that submit, and the caller takes the
+            # streamed text back.
+            if self._emitted_chars:
+                self._retract = True
+                self._emitted_chars = 0
             return None
         for call in tool_calls:
             if not isinstance(call, dict) or call.get("name") != "submit":
@@ -1615,6 +1623,11 @@ class _SubmitArgExtractor:
         """Drop accumulated state between ReAct loop iterations."""
         self._buffer = ""
         self._emitted_chars = 0
+
+    def take_retraction(self) -> bool:
+        """Return whether streamed reply text must be taken back, and clear the flag."""
+        retract, self._retract = self._retract, False
+        return retract
 
 
 class _NativeSubmitArgExtractor:
@@ -2142,8 +2155,18 @@ class ReactReplyStream:
             _ToolArgDraftExtractor(tool_drafts, native=self._native, keys=tool_draft_keys) if tool_drafts else None
         )
 
-    def listeners(self) -> list[dspy.streaming.StreamListener]:
+    @property
+    def native(self) -> bool:
+        """Whether the loop's tool calls stream as native deltas rather than DSPy's text protocol."""
+        return self._native
+
+    def listeners(self, *, tool_args: bool = False) -> list[dspy.streaming.StreamListener]:
         """Return the reply + reasoning stream listeners for this program.
+
+        Args:
+            tool_args: Also forward every native tool-call delta on
+                :data:`TOOL_ARGS_FIELD`, as streamed tool drafts do, for a
+                caller that reads the calls while they are written.
 
         Returns:
             With native function calling: a :class:`NativeToolCallStreamListener`
@@ -2167,7 +2190,7 @@ class ReactReplyStream:
             reply_listener,
             ReasoningStreamListener(predict=self._program.react, allow_reuse=True),
         ]
-        if self._drafts is not None and self._native:
+        if (self._drafts is not None or tool_args) and self._native:
             listeners.append(NativeToolArgsStreamListener(predict=self._program.react, allow_reuse=True))
         return listeners
 
@@ -2209,6 +2232,20 @@ class ReactReplyStream:
         if chunk.is_last_chunk:
             self._extractor.reset()
         return delta
+
+    def take_retraction(self) -> bool:
+        """Return whether the reply streamed so far must be taken back.
+
+        Only a serial-tool loop on the text protocol streams a reply it can
+        later drop (a submit written before a sibling tool call). The caller
+        clears the shown reply when this returns ``True``.
+
+        Returns:
+            ``True`` once per retraction, else ``False``.
+        """
+        if isinstance(self._extractor, _SubmitArgExtractor):
+            return self._extractor.take_retraction()
+        return False
 
 
 def _build_agent_lm(

@@ -312,6 +312,7 @@ function TaskInterviewPanel({
         streaming={interview.busy}
         midTurn={midTurn}
         acceptsMidTurn={fitsInterview}
+        suggest={{ messages: interview.messages, model: interview.model }}
         placeholder={t("submit.v2.task.chat.placeholder")}
         modelMenu={
           <ComposerModelMenu

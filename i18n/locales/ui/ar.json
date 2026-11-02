@@ -1531,6 +1531,8 @@
   "agent.composer.record_cancel": "إلغاء التسجيل",
   "agent.composer.record_finish": "إنهاء ونسخ نصّي",
   "agent.composer.recording": "جارٍ التسجيل...",
+  "agent.composer.suggestion_hint": "رسالة مقترحة: {text}. اضغط Tab لاستخدامها، أو Escape لإغلاقها.",
+  "agent.composer.suggestion_key": "Tab",
   "agent.composer.transcribe_failed": "فشل النسخ النصّي — حاول مرة أخرى",
   "agent.composer.transcribing": "جارٍ النسخ النصّي...",
   "agent.pending.list_label": "رسائل معلّقة",

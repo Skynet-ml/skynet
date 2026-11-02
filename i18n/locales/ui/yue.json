@@ -954,6 +954,8 @@
   "agent.composer.record_cancel": "取消錄音",
   "agent.composer.record_finish": "完成並轉錄",
   "agent.composer.recording": "錄音中...",
+  "agent.composer.suggestion_hint": "建議訊息：{text}。㩒 Tab 使用，㩒 Esc 關閉。",
+  "agent.composer.suggestion_key": "Tab",
   "agent.composer.transcribe_failed": "語音轉錄失敗 — 請再試一次",
   "agent.composer.transcribing": "轉錄中...",
   "agent.pending.list_label": "待處理訊息",

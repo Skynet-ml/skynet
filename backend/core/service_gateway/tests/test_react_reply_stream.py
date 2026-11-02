@@ -120,6 +120,49 @@ def test_serial_submit_stream_suppresses_reply_that_races_a_tool() -> None:
     assert final == "You have 3."
 
 
+def _serial_stream() -> ReactReplyStream:
+    """Build a reply streamer on a serial-tool-call loop, as the generalist runs.
+
+    Returns:
+        A ``ReactReplyStream`` whose submit extractor is exclusive.
+    """
+    base = dspy.ReActV2(_Sig, tools=[_noop], max_iters=3)
+    base.react._serial_tool_calls = True
+    return ReactReplyStream(_SubmitProgram(base.react), "reply")
+
+
+def test_serial_submit_reply_streams_before_the_field_ends() -> None:
+    """A submit-only step streams its reply as it grows, then closes on an empty last chunk."""
+    stream = _serial_stream()
+
+    first = stream.reply_delta(_response("tool_calls", '{"tool_calls":[{"name":"submit","args":{"reply":"You have'))
+    second = stream.reply_delta(_response("tool_calls", ' 3."}}]}'))
+    closing = stream.reply_delta(_response("tool_calls", "", last=True))
+
+    assert first == "You have"
+    assert second == " 3."
+    assert closing is None
+    assert stream.take_retraction() is False
+
+
+def test_serial_submit_followed_by_a_tool_retracts_the_streamed_reply() -> None:
+    """A submit streamed before a sibling call is taken back once, and the step's real reply restarts."""
+    stream = _serial_stream()
+
+    first = stream.reply_delta(_response("tool_calls", '{"tool_calls":[{"name":"submit","args":{"reply":"Checking"}}'))
+    assert first == "Checking"
+    assert stream.take_retraction() is False
+
+    stream.reply_delta(_response("tool_calls", ',{"name":"count","args":{}}]}', last=True))
+    assert stream.take_retraction() is True
+    assert stream.take_retraction() is False
+
+    final = stream.reply_delta(
+        _response("tool_calls", '{"tool_calls":[{"name":"submit","args":{"reply":"You have 3."}}]}', last=True)
+    )
+    assert final == "You have 3."
+
+
 def _lm_chunk(tool_calls: list | None = None, finish: str | None = None) -> SimpleNamespace:
     """Build a stand-in LiteLLM streaming chunk.
 
