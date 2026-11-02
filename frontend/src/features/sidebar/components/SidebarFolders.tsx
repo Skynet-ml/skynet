@@ -22,6 +22,7 @@ import {
   Users,
 } from "@/shared/ui/icons";
 import { cn } from "@/shared/lib/utils";
+import { isLocalMode } from "@/shared/lib/runtime-env";
 import { msg } from "@/shared/lib/messages";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { Button } from "@/shared/ui/primitives/button";
@@ -454,7 +455,8 @@ function FolderNode({ folder, depth, ...props }: TreeProps & { folder: RunFolder
                 })}
               {editable &&
                 menuItem(PencilSimple, msg("folders.rename"), { kind: "rename", folder })}
-              {menuItem(ShareNetwork, msg("folders.share"), { kind: "share", folder })}
+              {!isLocalMode() &&
+                menuItem(ShareNetwork, msg("folders.share"), { kind: "share", folder })}
               {isOwner &&
                 menuItem(ArrowRight, msg("folders.move"), { kind: "move-folder", folder })}
               {isOwner && (

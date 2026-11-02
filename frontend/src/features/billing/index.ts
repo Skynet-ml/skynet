@@ -6,6 +6,7 @@ export { LinkAccountPrompt } from "./components/LinkAccountPrompt";
 export { UsageTab } from "./components/UsageTab";
 export { ByokKeysSection } from "./components/ByokKeysSection";
 export { InsufficientFundsModalHost } from "./components/InsufficientFundsModalHost";
+export { useAddFundsAction } from "./hooks/use-add-funds-action";
 export { BYOK_PROVIDERS, litellmProviderForByok } from "./lib/byok";
 export {
   centsToUsd,

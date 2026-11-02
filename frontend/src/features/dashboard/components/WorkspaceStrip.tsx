@@ -6,6 +6,7 @@ import Link from "next/link";
 import { CaretRight, Coins, Database, Tag } from "@/shared/ui/icons";
 import { formatCentsUsd, LinkAccountPrompt, useBalance } from "@/features/billing";
 import { useSettingsModal } from "@/features/settings";
+import { useHostedFeaturesAvailable } from "@/shared/hooks/use-hosted-features";
 import { formatBytes } from "@/shared/lib/formatters";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { isLocalMode } from "@/shared/lib/runtime-env";
@@ -181,6 +182,7 @@ export function WorkspaceStrip() {
   const { wallet, shown } = useBalance();
   const walletLoading = shown.loading;
   const { openTo } = useSettingsModal();
+  const hostedAvailable = useHostedFeaturesAvailable();
   const locale = getActiveIntlLocale();
 
   if (loading) return <WorkspaceStripSkeleton />;
@@ -255,9 +257,10 @@ export function WorkspaceStrip() {
   }
   // The local build runs on the user's CLI subscriptions; there is nothing to fund.
   const showFundHint = !isLocalMode();
-  if (walletLoading) {
+  // An unlinked Mac app has no wallet, so the strip leaves the balance tile out.
+  if (hostedAvailable && walletLoading) {
     sections.push(<BalanceSectionSkeleton key="balance" />);
-  } else {
+  } else if (hostedAvailable) {
     sections.push(
       <WorkspaceSection
         key="balance"
@@ -301,6 +304,7 @@ export function WorkspaceStrip() {
       </WorkspaceSection>,
     );
   }
+  if (sections.length === 0) return null;
 
   return (
     <div className="flex flex-col border-t border-border/50 first:border-t-0 lg:flex-row lg:items-stretch">

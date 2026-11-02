@@ -6,8 +6,10 @@ export {
   type LinkedAccount,
   linkedUsername,
   loadLinkedAccount,
+  onLinkChange,
   startHostedSignIn,
   unlinkHostedAccount,
+  wasLinked,
 } from "../../hooks/use-linked-account";
 
 export const mockAccount: { current: LinkedAccount | undefined } = { current: undefined };

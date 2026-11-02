@@ -8,6 +8,7 @@ import { msg, formatMsg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { useLocale } from "@/shared/providers";
 import { useSettingsModal } from "@/features/settings";
+import { useHostedFeaturesAvailable } from "@/shared/hooks/use-hosted-features";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/popover";
 import { useBalance } from "../providers/balance-provider";
 import { formatCentsUsd } from "../lib/wallet";
@@ -27,6 +28,10 @@ export function BalanceChip({ className }: { className?: string }) {
   const { locale } = useLocale();
   const { openTo } = useSettingsModal();
   const [open, setOpen] = React.useState(false);
+  const hostedAvailable = useHostedFeaturesAvailable();
+
+  // An unlinked Mac app has no wallet, so the header shows no chip at all.
+  if (!hostedAvailable) return null;
 
   if (loading) {
     return (

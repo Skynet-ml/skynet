@@ -57,3 +57,32 @@ export function appWindowUrl(target: string, frontendUrl: string): string | null
   url.hostname = app.hostname;
   return url.toString();
 }
+
+/** Hosted app origin for each build target. Same values as HOSTED_TARGET_URLS in backend/core/config.py. */
+export const HOSTED_APP_ORIGINS = {
+  production: "https://skynetml.com",
+  staging: "https://staging.skynetml.com",
+} as const;
+
+/**
+ * The hosted app origin this build links to (docs). Same rule as the
+ * backend's _resolve_hosted_link, which the Mac app drives only through the
+ * hosted_target.txt stamp (the child env drops APP_HOSTED_*). No stamp means
+ * a release build, so it links to production.
+ */
+export function hostedAppOrigin(stamp: string | null): string {
+  return stamp?.trim().toLowerCase() === "staging" ? HOSTED_APP_ORIGINS.staging : HOSTED_APP_ORIGINS.production;
+}
+
+/**
+ * The hosted web docs URL (on `docsOrigin`) for a navigation to the local
+ * app's docs pages, or null for any other target. The Mac app opens docs in
+ * the default browser, not in the app window.
+ */
+export function webDocsUrl(target: string, frontendUrl: string, docsOrigin: string): string | null {
+  const appUrl = appWindowUrl(target, frontendUrl);
+  if (appUrl === null) return null;
+  const url = new URL(appUrl);
+  if (!/^\/docs(?:[/.]|$)/.test(url.pathname)) return null;
+  return `${docsOrigin}${url.pathname}${url.search}${url.hash}`;
+}

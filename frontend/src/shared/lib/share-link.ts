@@ -8,10 +8,12 @@
  * the share dialogs show the hosted-account notice instead.
  */
 
-import { isLocalMode } from "@/shared/lib/runtime-env";
+import { getRuntimeEnv, isLocalMode } from "@/shared/lib/runtime-env";
 
 // The Mac app build sets neither NEXT_PUBLIC_HOSTED_APP_URL nor
-// NEXT_PUBLIC_SITE_URL, so the sign-in link needs its own hosted origin.
+// NEXT_PUBLIC_SITE_URL. The desktop passes the build's hosted origin at run
+// time (runtime env hostedAppUrl: staging for a staging build); this is the
+// last fallback.
 const FALLBACK_HOSTED_APP_URL = "https://skynetml.com";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
@@ -28,6 +30,26 @@ export function shareLinkUrl(path: string): string | null {
  * this computer.
  */
 export function hostedSignInUrl(): string | null {
-  const url = new URL("/login", process.env.NEXT_PUBLIC_HOSTED_APP_URL || FALLBACK_HOSTED_APP_URL);
+  return hostedAppUrl("/login");
+}
+
+/**
+ * Absolute URL of `path` (e.g. `/docs/mcp`) on the hosted app. Null when the
+ * configured hosted app URL is a loopback origin, so a link never points back
+ * at this computer.
+ */
+export function hostedAppUrl(path: string): string | null {
+  const base = getRuntimeEnv().hostedAppUrl || process.env.NEXT_PUBLIC_HOSTED_APP_URL || FALLBACK_HOSTED_APP_URL;
+  const url = new URL(path, base);
   return LOOPBACK_HOSTS.has(url.hostname) ? null : url.toString();
+}
+
+/**
+ * Public URL of a shared agent chat. The hosted app uses its own origin. In
+ * the Mac app the chat is published to the linked hosted account, so the link
+ * points at the hosted app. Null when no link can work.
+ */
+export function sharedChatUrl(token: string): string | null {
+  const path = `/share/chat/${encodeURIComponent(token)}`;
+  return isLocalMode() ? hostedAppUrl(path) : shareLinkUrl(path);
 }
