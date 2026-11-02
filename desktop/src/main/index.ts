@@ -3,6 +3,7 @@ import path from "node:path";
 import { app, BrowserWindow, clipboard, ipcMain, nativeTheme, screen, shell } from "electron";
 import { APP_SCHEME, appUrlFromArgv, appWindowUrl, parseLinkCallback } from "./app-url";
 import { HostedLinkClient } from "./hosted-link";
+import { isOpenAppUrl, parseTheme, pickTheme, type Theme } from "./theme";
 import { childPath, probeClis, probeDocker, readCliLimits, searchDirs } from "./cli-detect";
 import { allocatePorts, type PortPlan } from "./ports";
 import { holdQuitUntilStopped } from "./quit";
@@ -107,8 +108,6 @@ function useAppSize(): void {
   win.center();
 }
 
-type Theme = "light" | "dark";
-
 /**
  * The theme the web app reports from its own setting. The setup page reports
  * none, so the system appearance decides there. nativeTheme.themeSource stays
@@ -116,12 +115,6 @@ type Theme = "light" | "dark";
  * "system" mode.
  */
 let reportedTheme: Theme | null = null;
-
-/** A theme the web app reported wins over the system appearance; anything else is ignored. */
-function pickTheme(reported: unknown, systemDark: boolean): Theme {
-  if (reported === "light" || reported === "dark") return reported;
-  return systemDark ? "dark" : "light";
-}
 
 const currentTheme = () => pickTheme(reportedTheme, nativeTheme.shouldUseDarkColors);
 
@@ -419,16 +412,6 @@ async function openSignInPage(): Promise<void> {
   }
 }
 
-/** True for skynet://open, which only asks to show the app window. */
-function isOpenAppUrl(raw: string): boolean {
-  try {
-    const url = new URL(raw);
-    return url.protocol === `${APP_SCHEME}:` && url.host === "open" && (url.pathname === "" || url.pathname === "/");
-  } catch {
-    return false;
-  }
-}
-
 /** The browser opened skynet://link/callback: finish the link, or show the retry card. */
 async function handleAppUrl(raw: string): Promise<void> {
   const callback = parseLinkCallback(raw);
@@ -614,8 +597,9 @@ ipcMain.handle("onboarding:sign-in", () => {
   void signIn();
 });
 ipcMain.handle("onboarding:skip-sign-in", () => skipSignIn());
-ipcMain.on("theme:changed", (event, theme: unknown) => {
-  if (event.sender !== win?.webContents || (theme !== "light" && theme !== "dark") || theme === reportedTheme) return;
+ipcMain.on("theme:changed", (event, value: unknown) => {
+  const theme = parseTheme(value);
+  if (event.sender !== win?.webContents || !theme || theme === reportedTheme) return;
   reportedTheme = theme;
   applyTheme();
 });
