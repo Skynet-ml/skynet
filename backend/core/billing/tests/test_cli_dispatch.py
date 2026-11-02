@@ -8,6 +8,7 @@ import time
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -289,7 +290,12 @@ def test_turn_effort_reaches_the_cli(tmp_path: Path) -> None:
         ("claude", "anthropic/claude-haiku-4.5", "low", None),
         ("claude", "anthropic/claude-sonnet-4.5", "medium", None),
         ("codex", "openai/gpt-6.1-sol", "max", "max"),
-        ("codex", "openai/gpt-6.1-sol", "ultra", None),
+        ("codex", "openai/gpt-6.1-sol", "ultra", "ultra"),
+        ("codex", "openai/gpt-6-luna", "ultra", None),
+        ("codex", "openai/gpt-6.1-sol", "ultracode", None),
+        ("claude", "anthropic/claude-opus-5.5", "ultracode", "ultracode"),
+        ("claude", "anthropic/claude-sonnet-4.6", "ultracode", None),
+        ("claude", "anthropic/claude-opus-5.5", "ultra", None),
     ],
 )
 def test_turn_effort_follows_the_model_levels(
@@ -321,14 +327,56 @@ def test_turn_effort_follows_the_model_levels(
     assert got == sent
 
 
+@pytest.mark.parametrize(
+    ("cli", "model", "fast", "sent"),
+    [
+        ("claude", "anthropic/claude-opus-5.5", True, True),
+        ("claude", "anthropic/claude-opus-4.7", True, False),
+        ("claude", "anthropic/claude-opus-5.5", "yes", False),
+        ("claude", "anthropic/claude-opus-5.5", None, False),
+        ("codex", "openai/gpt-5.6-luna", True, True),
+        ("codex", "openai/gpt-5.6-luna", 1, False),
+    ],
+)
+def test_turn_fast_mode_follows_the_model(cli: str, model: str, fast: Any, sent: bool, tmp_path: Path) -> None:
+    """Send fast mode only when the request asks with ``True`` and the model takes it.
+
+    Args:
+        cli: The CLI the turn runs on.
+        model: The turn's catalog slug.
+        fast: The request's fast value.
+        sent: Whether the CLI gets fast mode.
+        tmp_path: Holds the fake CLI and its call log.
+    """
+    if cli == "claude":
+        fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))
+    else:
+        fake_app_server(tmp_path, emitting(*CODEX_TURN))
+    settings = local_settings(tmp_path, cli_fallback_order="")
+    CliDispatcher(None, cli, model, "agent", settings).dispatch(
+        "/chat/completions", {**REQUEST, "model": model, cli_dispatch.CLI_FAST_KEY: fast}
+    )
+    if cli == "claude":
+        [call] = calls(tmp_path, "claude")
+        argv = call["argv"]
+        got = "--fast-mode" in argv and argv[argv.index("--fast-mode") + 1] == "on"
+    else:
+        [turn] = (message for message in requests(tmp_path) if message.get("method") == "turn/start")
+        got = turn["params"].get("serviceTier") == "priority"
+    assert got is sent
+
+
 def test_side_call_ignores_the_turn_effort(tmp_path: Path) -> None:
-    """Keep a thinking label at no effort, because it runs without thinking."""
+    """Keep a thinking label at no effort and no fast mode, because it runs without thinking."""
     fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))
-    CliDispatcher(None, "claude", MODEL, cli_dispatch.THINKING_LABEL_ROLE, local_settings(tmp_path)).dispatch(
-        "/chat/completions", {**REQUEST, cli_dispatch.CLI_EFFORT_KEY: "max"}
+    model = "anthropic/claude-opus-5.5"
+    CliDispatcher(None, "claude", model, cli_dispatch.THINKING_LABEL_ROLE, local_settings(tmp_path)).dispatch(
+        "/chat/completions",
+        {**REQUEST, "model": model, cli_dispatch.CLI_EFFORT_KEY: "max", cli_dispatch.CLI_FAST_KEY: True},
     )
     [call] = calls(tmp_path, "claude")
     assert "--effort" not in call["argv"]
+    assert "--fast-mode" not in call["argv"]
 
 
 def test_agent_steps_share_one_empty_working_directory() -> None:

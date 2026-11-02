@@ -32,7 +32,7 @@ import httpx
 
 from .. import config
 from ..config import Settings
-from ..local.cli_catalog import CliProvider, cli_efforts, cli_model_arg
+from ..local.cli_catalog import CliProvider, cli_efforts, cli_fast, cli_model_arg
 from ..local.cli_probe import read_cli_limits, write_cli_limit
 from .cli_runners import RUNNERS, CliCompletion, CliRunError, SubscriptionRateLimitedError
 from .model_dispatch import ModelHTTPResult
@@ -58,6 +58,8 @@ _PRICE_TIMEOUT_SECONDS = 10
 # ``reasoning_effort`` cannot do it: dspy adds ``"low"`` to a call whose LM has
 # no effort, so it would override the CLI's default on turns with no pick.
 CLI_EFFORT_KEY = "skynet_cli_effort"
+# The request field that asks the CLI for fast mode on the turn's calls.
+CLI_FAST_KEY = "skynet_cli_fast"
 # A thinking label is a side call the turn never waits for. It runs in its
 # own one-call pool and never waits there, so labels cannot hold the slots of
 # the turn's own CLI calls; its client gives up after 8 s, so a longer run is
@@ -686,6 +688,7 @@ class CliDispatcher:
         prefix = cache_prefix(chat)
         schema = _schema(chat)
         effort = request.get(CLI_EFFORT_KEY)
+        fast = request.get(CLI_FAST_KEY) is True
         capped: SubscriptionRateLimitedError | None = None
         evidence: dict[str, Any] = {"provider": "subscription", "model": self.model, "cli": self.cli}
         for provider in self._providers():
@@ -704,7 +707,7 @@ class CliDispatcher:
                 continue
             started = time.monotonic()
             try:
-                completion = self._run(provider, model_arg, prompt, schema, stream, prefix, effort)
+                completion = self._run(provider, model_arg, prompt, schema, stream, prefix, effort, fast)
             except SubscriptionRateLimitedError as error:
                 capped = error
                 if error.reset_at is not None:
@@ -746,6 +749,7 @@ class CliDispatcher:
         stream: _ChatStream | None = None,
         prefix: str = "",
         effort: Any = None,
+        fast: bool = False,
     ) -> CliCompletion:
         """Run one CLI call, retrying transient failures with jittered back-off.
 
@@ -765,6 +769,9 @@ class CliDispatcher:
             effort: The turn's effort level from the request, or ``None``. A
                 side call ignores it, and a level this model does not take on
                 ``provider`` (:func:`cli_efforts`) is dropped.
+            fast: Whether the request asks for fast mode. A side call ignores
+                it, and a model without fast mode on ``provider``
+                (:func:`cli_fast`) drops it.
 
         Returns:
             The completion.
@@ -781,6 +788,8 @@ class CliDispatcher:
         runner_kwargs: dict[str, Any] = {"cache_prefix": prefix} if provider == "claude" and prefix else {}
         if isinstance(effort, str) and effort in cli_efforts(provider, self.model):
             runner_kwargs["effort"] = effort
+        if fast and cli_fast(provider, self.model):
+            runner_kwargs["fast"] = True
         for retry in range(len(_RETRY_DELAYS_SECONDS) + 1):
             if stream is not None and not stream.started:
                 # Held text of a failed attempt must not prefix the next one's.

@@ -271,7 +271,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       }
       if (ev.status === "ok" && ev.tool === "open_page") {
         const nav = parseAgentNavigation(ev.result);
-        if (nav?.kind === "settings" && Object.hasOwn(SETTINGS_TABS, nav.tab)) openSettingsTo(nav.tab);
+        if (nav?.kind === "settings" && Object.hasOwn(SETTINGS_TABS, nav.tab))
+          openSettingsTo(nav.tab);
         else if (nav?.kind === "route") router.push(nav.path);
       }
       if (ev.status === "ok" && SUBMIT_TOOLS.has(ev.tool)) {
@@ -316,6 +317,10 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     onConversationMeta: handleConversationMeta,
   });
   const localMenu = useLocalAgentMenuModels(agentSubscriptionFor("generalist"), agent.model);
+  // The model the menu shows runs the turn; only a Claude CLI route marks "ultracode".
+  const menuRoute =
+    localMenu.models?.find((m) => m.value === agent.model)?.value ?? localMenu.models?.[0]?.value;
+  const claudeCliRoute = !!menuRoute?.startsWith("subscription/claude/");
   const streaming = agent.status === "streaming";
   // Each conversation on view gets fresh turn components, so one chat's
   // timers and "already shown" text never carry into another. A new chat
@@ -855,7 +860,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                   <ShareNetwork className="size-3.5" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="bottom">{msg("shared.agent.share_conversation")}</TooltipContent>
+              <TooltipContent side="bottom">
+                {msg("shared.agent.share_conversation")}
+              </TooltipContent>
             </Tooltip>
           )}
           {agent.messages.length > 0 && (
@@ -970,12 +977,15 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         streaming={activeBusy}
         midTurn={agent.midTurn}
         suggest={{ messages: agent.messages, model: agent.model, chatId: agent.conversationId }}
+        markUltracode={claudeCliRoute}
         modelMenu={
           <ComposerModelMenu
             value={agent.model}
             onChange={agent.setModel}
             effort={agent.reasoningEffort}
             onEffortChange={agent.setReasoningEffort}
+            fast={agent.fastMode}
+            onFastChange={agent.setFastMode}
             models={localMenu.models}
             openRouterEngine={localMenu.openRouterEngine}
           />

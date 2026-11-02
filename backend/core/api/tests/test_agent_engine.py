@@ -339,9 +339,9 @@ def test_account_data_exports_and_deletes_the_engine() -> None:
 
 
 @pytest.mark.usefixtures("local")
-@pytest.mark.parametrize("effort", [None, "max"])
+@pytest.mark.parametrize(("effort", "fast"), [(None, False), ("max", False), ("ultra", True)])
 def test_local_chat_turn_with_no_model_runs_on_codex_with_no_remote_call(
-    effort: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    effort: str | None, fast: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Run a chat turn that picks no model on the codex engine, over loopback only.
 
@@ -353,6 +353,7 @@ def test_local_chat_turn_with_no_model_runs_on_codex_with_no_remote_call(
 
     Args:
         effort: The turn's picked effort, or ``None`` for no pick.
+        fast: Whether the turn asks for fast mode.
         tmp_path: Holds the fake codex and its call log.
         monkeypatch: Swaps the agent loop and guards sockets.
     """
@@ -408,6 +409,7 @@ def test_local_chat_turn_with_no_model_runs_on_codex_with_no_remote_call(
             "wizard_state": {},
             "trust_mode": "ask",
             "reasoning_effort": effort,
+            "fast_mode": fast,
         },
         headers={"Authorization": f"Bearer {_session_token(_USER)}"},
     )
@@ -425,7 +427,68 @@ def test_local_chat_turn_with_no_model_runs_on_codex_with_no_remote_call(
     assert thread["params"]["model"] == CLI_MODELS["codex"][_CODEX_SLUG]
     turn = next(message for message in requests(tmp_path) if message.get("method") == "turn/start")
     assert turn["params"].get("effort") == effort
+    assert (turn["params"].get("serviceTier") == "priority") is fast
     assert remote == []
+
+
+@pytest.mark.parametrize("effort", ["ultra", "ultracode"])
+def test_hosted_chat_turn_drops_cli_only_effort_and_fast_mode(effort: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run a hosted turn at the catalog default when it asks for a CLI-only level or fast mode.
+
+    Args:
+        effort: A level only a CLI takes.
+        monkeypatch: Swaps the agent loop and the catalog.
+    """
+    engine = _engine()
+    _fund(engine)
+    with Session(engine) as session:
+        session.add(UserModel(email=_USER, name=_USER, password_hash="x"))
+        session.commit()
+    monkeypatch.setattr(agent_mod, "queue_conversation_embed", lambda *a, **k: None)
+    slug = "anthropic/claude-opus-5.5"
+    ladder = CatalogModel(
+        value=slug,
+        label="Opus",
+        provider="anthropic",
+        available=True,
+        supports_thinking=True,
+        reasoning_efforts=["low", "medium", "high"],
+        default_reasoning_effort="medium",
+        reasoning_default_enabled=True,
+    )
+    monkeypatch.setattr(model_router, "get_catalog_cached", lambda: SimpleNamespace(models=[ladder]))
+    monkeypatch.setattr(model_router, "require_known_model", lambda model: None)
+    seen: dict[str, Any] = {}
+
+    async def record_config(**kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        """Record the turn's model config and finish the turn."""
+        seen["config"] = kwargs["model_config"]
+        yield {"event": "done", "data": {"assistant_message": "pong", "model": slug}}
+
+    monkeypatch.setattr(agent_mod, "run_generalist_agent", record_config)
+    monkeypatch.setattr(auth_mod.settings, "backend_auth_secret", SecretStr(_SECRET))
+    store = SimpleNamespace(engine=engine)
+    app = FastAPI()
+    app.state.job_store = store
+    app.include_router(create_generalist_agent_router(job_store=store))
+    response = TestClient(app).post(
+        "/optimizations/generalist-agent",
+        json={
+            "user_message": "hi",
+            "chat_history": [],
+            "wizard_state": {},
+            "trust_mode": "ask",
+            "model": slug,
+            "reasoning_effort": effort,
+            "fast_mode": True,
+        },
+        headers={"Authorization": f"Bearer {_session_token(_USER)}"},
+    )
+    assert response.status_code == 200, response.text
+    model_config = seen["config"]
+    assert model_config.token_source != "subscription"
+    assert model_config.extra.get("reasoning_effort") == "medium"
+    assert cli_dispatch.CLI_FAST_KEY not in (model_config.extra.get("extra_body") or {})
 
 
 # Each route, its routing function and its module, with a minimal valid body.

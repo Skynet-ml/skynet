@@ -231,7 +231,11 @@ test("each CLI menu row takes only the levels the CLI takes for that model", () 
   // A model with no levels gets the menu's disabled Effort row.
   assert.deepEqual(levels("anthropic/claude-haiku-4.5"), []);
   assert.equal(row("anthropic/claude-haiku-4.5").supports_thinking, false);
-  for (const slug of ["anthropic/claude-opus-5.5", "anthropic/claude-sonnet-4.6", "anthropic/claude-opus-4.5"]) {
+  for (const slug of [
+    "anthropic/claude-opus-5.5",
+    "anthropic/claude-sonnet-4.6",
+    "anthropic/claude-opus-4.5",
+  ]) {
     assert.equal(row(slug).supports_thinking, true);
     // An unpicked turn sends no effort, so "Default" is the CLI's own and names no level.
     assert.equal(unpickedEffort(row(slug)), null);
@@ -248,6 +252,24 @@ test("a CLI status with no effort table offers no effort", () => {
   const [row] = subscriptionMenuModels(cli({ models: ["anthropic/claude-opus-5.5"] }), []);
   assert.equal(row!.supports_thinking, false);
   assert.deepEqual(row!.reasoning_efforts, []);
+  assert.equal(row!.supports_fast, false);
+});
+
+test("a CLI row takes fast mode only when the CLI lists its model", () => {
+  const rows = subscriptionMenuModels(
+    cli({
+      models: ["anthropic/claude-opus-5.5", "anthropic/claude-sonnet-4.6"],
+      fast: ["anthropic/claude-opus-5.5"],
+    }),
+    [],
+  );
+  assert.deepEqual(
+    rows.map((row) => [row.value, row.supports_fast]),
+    [
+      ["subscription/claude/anthropic/claude-opus-5.5", true],
+      ["subscription/claude/anthropic/claude-sonnet-4.6", false],
+    ],
+  );
 });
 
 test("a subscription model config names its CLI", () => {

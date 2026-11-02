@@ -29,7 +29,17 @@ export function effortsFor(
   return DEFAULT_EFFORTS;
 }
 
-const EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const EFFORT_ORDER = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+  "ultracode",
+];
 
 interface UnpickedEffortSource {
   reasoning_efforts?: string[] | null;
@@ -64,6 +74,10 @@ export function effortLabel(level: string): string {
       return msg("agent.model_menu.effort_xhigh");
     case "max":
       return msg("agent.model_menu.effort_max");
+    case "ultra":
+      return msg("agent.model_menu.effort_ultra");
+    case "ultracode":
+      return msg("agent.model_menu.effort_ultracode");
     default:
       return level;
   }

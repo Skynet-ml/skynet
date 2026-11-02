@@ -451,6 +451,30 @@ def test_codex_runs_the_turn_at_its_effort(tmp_path: Path) -> None:
     assert "effort" not in second["params"]
 
 
+def test_claude_runs_ultracode_and_fast_mode(tmp_path: Path) -> None:
+    """Pass ``--effort ultracode`` and ``--fast-mode on``, and no fast flag when the turn has none."""
+    fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))
+    settings = local_settings(tmp_path)
+    cli_runners.run_claude("claude-opus-5-5", "ping", None, settings, tmp_path, effort="ultracode", fast=True)
+    cli_runners.run_claude("claude-opus-5-5", "ping", None, settings, tmp_path)
+    first, second = calls(tmp_path, "claude")
+    assert first["argv"][first["argv"].index("--effort") + 1] == "ultracode"
+    assert first["argv"][first["argv"].index("--fast-mode") + 1] == "on"
+    assert "--fast-mode" not in second["argv"]
+
+
+def test_codex_runs_the_turn_on_the_fast_tier(tmp_path: Path) -> None:
+    """Send the ``priority`` service tier with ``turn/start`` only in fast mode."""
+    fake_app_server(tmp_path, emitting(*CODEX_TURN))
+    settings = local_settings(tmp_path)
+    cli_runners.run_codex("gpt-6.1-sol", "ping", None, settings, tmp_path, effort="ultra", fast=True)
+    cli_runners.run_codex("gpt-6.1-sol", "ping", None, settings, tmp_path)
+    first, second = (message for message in requests(tmp_path) if message.get("method") == "turn/start")
+    assert first["params"]["effort"] == "ultra"
+    assert first["params"]["serviceTier"] == "priority"
+    assert "serviceTier" not in second["params"]
+
+
 def test_codex_refuses_a_server_request(tmp_path: Path) -> None:
     """Answer an approval request with an error, since no host tool may run."""
     ask = {"id": 99, "method": "item/commandExecution/requestApproval", "params": {}}

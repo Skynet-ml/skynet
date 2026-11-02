@@ -6,9 +6,11 @@ import pytest
 
 from core.local.cli_catalog import (
     CLI_EFFORTS,
+    CLI_FAST,
     CLI_MODELS,
     MIN_VERSIONS,
     cli_efforts,
+    cli_fast,
     cli_model_arg,
     parse_subscription_model_id,
 )
@@ -78,7 +80,7 @@ def test_every_cli_has_models_and_a_minimum_version() -> None:
 
 def test_every_cli_model_has_an_effort_row() -> None:
     """Every slug a CLI runs has its own effort levels, in ladder order, from the known ladder."""
-    ladder = ["low", "medium", "high", "xhigh", "max"]
+    ladder = ["low", "medium", "high", "xhigh", "max", "ultra", "ultracode"]
     for cli, models in CLI_MODELS.items():
         assert set(CLI_EFFORTS[cli]) == set(models)
         for levels in CLI_EFFORTS[cli].values():
@@ -88,15 +90,17 @@ def test_every_cli_model_has_an_effort_row() -> None:
 @pytest.mark.parametrize(
     ("cli", "slug", "levels"),
     [
-        ("claude", "anthropic/claude-opus-5.5", ("low", "medium", "high", "xhigh", "max")),
-        ("claude", "anthropic/claude-haiku-5.5", ("low", "medium", "high", "xhigh", "max")),
+        ("claude", "anthropic/claude-opus-5.5", ("low", "medium", "high", "xhigh", "max", "ultracode")),
+        ("claude", "anthropic/claude-haiku-5.5", ("low", "medium", "high", "xhigh", "max", "ultracode")),
         ("claude", "anthropic/claude-opus-4.6", ("low", "medium", "high", "max")),
         ("claude", "anthropic/claude-sonnet-4.6", ("low", "medium", "high", "max")),
         ("claude", "anthropic/claude-opus-4.5", ("low", "medium", "high")),
         ("claude", "anthropic/claude-sonnet-4.5", ()),
         ("claude", "anthropic/claude-haiku-4.5", ()),
-        ("codex", "openai/gpt-6.1-sol", ("low", "medium", "high", "xhigh", "max")),
+        ("codex", "openai/gpt-6.1-sol", ("low", "medium", "high", "xhigh", "max", "ultra")),
         ("codex", "openai/gpt-5.6-luna", ("low", "medium", "high", "xhigh", "max")),
+        ("codex", "openai/gpt-6-luna", ("low", "medium", "high", "xhigh", "max")),
+        ("claude", "anthropic/claude-opus-4.7", ("low", "medium", "high", "xhigh", "max", "ultracode")),
         ("claude", "anthropic/claude-unknown", ()),
         ("droid", "anthropic/claude-opus-5.5", ()),
     ],
@@ -110,3 +114,42 @@ def test_cli_efforts_gives_the_levels_the_cli_takes(cli: str, slug: str, levels:
         levels: The levels the CLI takes for it.
     """
     assert cli_efforts(cli, slug) == levels
+
+
+def test_only_a_model_that_takes_xhigh_takes_ultracode() -> None:
+    """Claude Code gates ultracode on xhigh, and Codex lists ultra only above max."""
+    for slug, levels in CLI_EFFORTS["claude"].items():
+        assert ("ultracode" in levels) == ("xhigh" in levels), slug
+        assert "ultra" not in levels
+    for levels in CLI_EFFORTS["codex"].values():
+        assert "ultracode" not in levels
+
+
+@pytest.mark.parametrize(
+    ("cli", "slug", "fast"),
+    [
+        ("claude", "anthropic/claude-opus-5.5", True),
+        ("claude", "anthropic/claude-opus-4.8", True),
+        ("claude", "anthropic/claude-opus-4.7", False),
+        ("claude", "anthropic/claude-sonnet-5.5", False),
+        ("codex", "openai/gpt-6.1-sol", True),
+        ("codex", "openai/gpt-5.6-luna", True),
+        ("codex", "openai/gpt-unknown", False),
+        ("droid", "anthropic/claude-opus-5.5", False),
+    ],
+)
+def test_cli_fast_names_the_models_with_fast_mode(cli: str, slug: str, fast: bool) -> None:
+    """Fast mode is on every Codex model and on Claude's Opus 4.8 and Opus 5 models only.
+
+    Args:
+        cli: The CLI.
+        slug: The catalog slug.
+        fast: Whether the model takes fast mode on ``cli``.
+    """
+    assert cli_fast(cli, slug) is fast
+
+
+def test_every_fast_model_is_a_cli_model() -> None:
+    """The fast table names only slugs the CLI runs."""
+    for cli, slugs in CLI_FAST.items():
+        assert slugs <= set(CLI_MODELS[cli])

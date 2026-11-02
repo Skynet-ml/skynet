@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from core.config import Settings
-from core.local.cli_catalog import CLI_EFFORTS, CLI_MODELS, MIN_VERSIONS, CliProvider
+from core.local.cli_catalog import CLI_EFFORTS, CLI_FAST, CLI_MODELS, MIN_VERSIONS, CliProvider
 
 CLI_IDS: tuple[CliProvider, ...] = ("codex", "claude")
 
@@ -93,6 +93,8 @@ class CliStatus:
     models: list[str]
     # The effort levels each model takes; a model with none takes no effort.
     efforts: dict[str, list[str]] = field(default_factory=dict)
+    # The models that take fast mode.
+    fast: list[str] = field(default_factory=list)
 
 
 def cli_child_env(source: Mapping[str, str]) -> dict[str, str]:
@@ -277,6 +279,7 @@ def probe_cli(cli: CliProvider, settings: Settings) -> CliStatus:
     min_version = MIN_VERSIONS[cli]
     models = sorted(CLI_MODELS[cli])
     efforts = {slug: list(levels) for slug, levels in CLI_EFFORTS[cli].items()}
+    fast = sorted(CLI_FAST[cli])
     rate_limited_until = _active_limit(read_cli_limits(settings), cli, datetime.now(UTC))
     path = shutil.which(cli_binary(cli, settings))
     if path is None:
@@ -291,6 +294,7 @@ def probe_cli(cli: CliProvider, settings: Settings) -> CliStatus:
             rate_limited_until=rate_limited_until,
             models=models,
             efforts=efforts,
+            fast=fast,
         )
     result = _run([path, "--version"])
     found = _version_tuple(result.stdout + result.stderr) if result is not None else None
@@ -307,6 +311,7 @@ def probe_cli(cli: CliProvider, settings: Settings) -> CliStatus:
         rate_limited_until=rate_limited_until,
         models=models,
         efforts=efforts,
+        fast=fast,
     )
 
 

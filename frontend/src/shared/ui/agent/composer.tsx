@@ -12,6 +12,7 @@ import { Button } from "@/shared/ui/primitives/button";
 import { TooltipButton } from "@/shared/ui/tooltip-button";
 import { cn } from "@/shared/lib/utils";
 import { MarkdownPreviewField } from "@/shared/ui/markdown-preview-field";
+import { ultracodeRanges } from "@/shared/lib/effort-slider";
 
 import { autoResizeTextarea } from "./auto-resize";
 import { ComposerLoader } from "./composer-loader";
@@ -27,6 +28,7 @@ import {
 import { PendingMessages } from "./pending-messages";
 import { suggestKeyAction } from "./next-prompt";
 import { appendToDraft, midTurnKeyAction, type MidTurnQueue } from "./steer-queue";
+import { KeywordMark } from "./keyword-mark";
 import { SuggestionGhost } from "./suggestion-ghost";
 import type { AgentMessage } from "./types";
 import { formatRecSeconds, useDictation } from "./use-dictation";
@@ -69,6 +71,9 @@ interface ComposerProps {
    *  the empty composer shows a greyed likely next message that Tab fills in
    *  (never sends) and Escape dismisses. */
   suggest?: { messages: readonly AgentMessage[]; model?: string | null; chatId?: string | null };
+  /** Marks the word "ultracode" in the draft with the rainbow, as Claude Code
+   *  does; set on Claude CLI routes only. */
+  markUltracode?: boolean;
 }
 
 /**
@@ -100,6 +105,7 @@ export function Composer({
   claimsFile,
   onAttachFile,
   suggest,
+  markUltracode = false,
 }: ComposerProps) {
   const inline = layout === "inline";
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
@@ -145,6 +151,7 @@ export function Composer({
   // Long pastes live in `value` as tagged blocks; the textarea only edits
   // what was typed, and each block shows as a card above it.
   const draft = splitPastes(value);
+  const keywordRanges = markUltracode ? ultracodeRanges(draft.text) : [];
   const setPastes = (pastes: string[], text = draft.text) =>
     onChange(joinPastes({ ...draft, text, pastes }));
   const setFiles = (files: AttachedFile[]) => onChange(joinPastes({ ...draft, files }));
@@ -298,234 +305,243 @@ export function Composer({
         />
       )}
       <ComposerLoader active={Boolean(streaming)} radius={16}>
-      <div
-        className={cn(
-          "rounded-2xl border border-border bg-muted/20 transition-colors",
-          "focus-within:border-primary-fill",
-          inline && "flex min-h-[44px] items-end gap-1 p-1",
-        )}
-      >
-        {draft.pastes.length + draft.files.length > 0 && !inline && (
-          <div className="flex flex-wrap gap-2 px-3 pt-3">
-            {draft.files.map((file, i) => (
-              <PastedTextCard
-                key={`file-${i}`}
-                name={file.name}
-                text={file.text}
-                onRemove={() => setFiles(draft.files.filter((_, j) => j !== i))}
-              />
-            ))}
-            {draft.pastes.map((paste, i) => (
-              <PastedTextCard
-                key={i}
-                text={paste}
-                onRemove={() => setPastes(draft.pastes.filter((_, j) => j !== i))}
-                onRestore={() => {
-                  setPastes(
-                    draft.pastes.filter((_, j) => j !== i),
-                    draft.text ? `${draft.text.replace(/\s+$/, "")}\n\n${paste}` : paste,
-                  );
-                  refocus();
-                }}
-              />
-            ))}
-          </div>
-        )}
-        {!dictating ? (
-          <MarkdownPreviewField
-            value={draft.text}
-            className={inline ? "min-w-0 flex-1" : undefined}
-            previewClassName={inline ? "px-3 py-2" : "px-4 py-[11px]"}
-          >
-            <textarea
-              ref={textareaRef}
-              value={draft.text}
-              onChange={(e) => {
-                onChange(joinPastes({ ...draft, text: e.target.value }));
-                autoResizeTextarea(e.target);
-              }}
-              onPaste={inline ? undefined : handlePaste}
-              onKeyDown={handleKeyDown}
-              disabled={disabled || locked}
-              rows={1}
-              placeholder={suggestion ? undefined : placeholder}
-              aria-describedby={suggestion ? suggestionHintId : undefined}
-              className={cn(
-                "bg-transparent text-sm leading-[20px] resize-none overflow-hidden",
-                "max-h-[120px] outline-none ring-0 border-0 shadow-none",
-                "focus:outline-none focus-visible:outline-none focus-visible:ring-0",
-                "placeholder:text-muted-foreground/40",
-                "disabled:opacity-50 disabled:cursor-not-allowed",
-                inline
-                  ? "block h-[44px] w-full px-3 py-2 sm:h-9 [@media(hover:none)_and_(pointer:coarse)]:h-[44px]"
-                  : "block h-[44px] w-full px-4 py-[11px] sm:h-[42px] [@media(hover:none)_and_(pointer:coarse)]:h-[44px]",
-              )}
-            />
-            {suggestion && (
-              <SuggestionGhost
-                key={suggestion}
-                text={suggestion}
-                hintId={suggestionHintId}
-                className={inline ? "px-3 py-2" : "px-4 py-[11px]"}
-              />
-            )}
-          </MarkdownPreviewField>
-        ) : (
-          <div
-            className={cn(
-              "flex items-center gap-2 text-sm",
-              inline
-                ? "h-[44px] min-w-0 flex-1 px-3 sm:h-9 [@media(hover:none)_and_(pointer:coarse)]:h-[44px]"
-                : "h-[44px] px-4 sm:h-[42px] [@media(hover:none)_and_(pointer:coarse)]:h-[44px]",
-            )}
-            role="status"
-            aria-live="polite"
-          >
-            {dictation.state.kind === "rec" && (
-              <>
-                <span className="size-2 shrink-0 rounded-full bg-[var(--danger)] motion-safe:animate-pulse" />
-                <span className="tabular-nums text-muted-foreground" dir="ltr">
-                  {formatRecSeconds(dictation.seconds)}
-                </span>
-                <span className="truncate text-muted-foreground">
-                  {msg("agent.composer.recording")}
-                </span>
-                <button
-                  type="button"
-                  onClick={dictation.cancel}
-                  aria-label={msg("agent.composer.record_cancel")}
-                  className="close-button ms-auto shrink-0"
-                >
-                  <X />
-                </button>
-              </>
-            )}
-            {dictation.state.kind === "busy" && (
-              <>
-                <CircleNotch className="size-4 shrink-0 animate-spin text-muted-foreground" />
-                <span className="truncate text-muted-foreground">
-                  {msg("agent.composer.transcribing")}
-                </span>
-              </>
-            )}
-            {dictation.state.kind === "err" && (
-              <span
-                className="line-clamp-2 text-xs leading-snug text-destructive"
-                title={dictation.state.message}
-              >
-                {dictation.state.message}
-              </span>
-            )}
-          </div>
-        )}
-
         <div
           className={cn(
-            "flex min-w-0 items-center gap-1.5",
-            inline ? "shrink-0" : "px-2 pb-2 pt-0.5",
+            "rounded-2xl border border-border bg-muted/20 transition-colors",
+            "focus-within:border-primary-fill",
+            inline && "flex min-h-[44px] items-end gap-1 p-1",
           )}
         >
-          {!inline && (
-            <>
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                className="hidden"
+          {draft.pastes.length + draft.files.length > 0 && !inline && (
+            <div className="flex flex-wrap gap-2 px-3 pt-3">
+              {draft.files.map((file, i) => (
+                <PastedTextCard
+                  key={`file-${i}`}
+                  name={file.name}
+                  text={file.text}
+                  onRemove={() => setFiles(draft.files.filter((_, j) => j !== i))}
+                />
+              ))}
+              {draft.pastes.map((paste, i) => (
+                <PastedTextCard
+                  key={i}
+                  text={paste}
+                  onRemove={() => setPastes(draft.pastes.filter((_, j) => j !== i))}
+                  onRestore={() => {
+                    setPastes(
+                      draft.pastes.filter((_, j) => j !== i),
+                      draft.text ? `${draft.text.replace(/\s+$/, "")}\n\n${paste}` : paste,
+                    );
+                    refocus();
+                  }}
+                />
+              ))}
+            </div>
+          )}
+          {!dictating ? (
+            <MarkdownPreviewField
+              value={draft.text}
+              className={inline ? "min-w-0 flex-1" : undefined}
+              previewClassName={inline ? "px-3 py-2" : "px-4 py-[11px]"}
+            >
+              <textarea
+                ref={textareaRef}
+                value={draft.text}
                 onChange={(e) => {
-                  const picked = Array.from(e.target.files ?? []);
-                  e.target.value = "";
-                  void attachFiles(picked);
+                  onChange(joinPastes({ ...draft, text: e.target.value }));
+                  autoResizeTextarea(e.target);
                 }}
+                onPaste={inline ? undefined : handlePaste}
+                onKeyDown={handleKeyDown}
+                disabled={disabled || locked}
+                rows={1}
+                placeholder={suggestion ? undefined : placeholder}
+                aria-describedby={suggestion ? suggestionHintId : undefined}
+                className={cn(
+                  "bg-transparent text-sm leading-[20px] resize-none overflow-hidden",
+                  keywordRanges.length > 0 && "text-transparent caret-foreground",
+                  "max-h-[120px] outline-none ring-0 border-0 shadow-none",
+                  "focus:outline-none focus-visible:outline-none focus-visible:ring-0",
+                  "placeholder:text-muted-foreground/40",
+                  "disabled:opacity-50 disabled:cursor-not-allowed",
+                  inline
+                    ? "block h-[44px] w-full px-3 py-2 sm:h-9 [@media(hover:none)_and_(pointer:coarse)]:h-[44px]"
+                    : "block h-[44px] w-full px-4 py-[11px] sm:h-[42px] [@media(hover:none)_and_(pointer:coarse)]:h-[44px]",
+                )}
               />
-              <TooltipButton tooltip={msg("agent.composer.attach")} side="top">
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="ghost"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={disabled || locked}
-                  className="shrink-0 rounded-full text-muted-foreground hover:text-foreground [@media(hover:none)_and_(pointer:coarse)]:size-11"
-                  aria-label={msg("agent.composer.attach")}
-                >
-                  {attaching > 0 ? (
-                    <CircleNotch className="size-4 animate-spin" />
-                  ) : (
-                    <Plus className="size-4" />
-                  )}
-                </Button>
-              </TooltipButton>
-            </>
-          )}
-          {modelMenu}
-          {leadingControls && (
-            <div className="flex min-w-0 items-center gap-1">{leadingControls}</div>
-          )}
-          <div className="ms-auto flex min-w-0 items-center justify-end gap-1.5">
-            {showMic &&
-              (dictation.state.kind === "rec" ? (
-                <TooltipButton tooltip={msg("agent.composer.record_finish")} side="top">
-                  <Button
+              {keywordRanges.length > 0 && (
+                <KeywordMark
+                  text={draft.text}
+                  ranges={keywordRanges}
+                  textareaRef={textareaRef}
+                  className={inline ? "px-3 py-2" : "px-4 py-[11px]"}
+                />
+              )}
+              {suggestion && (
+                <SuggestionGhost
+                  key={suggestion}
+                  text={suggestion}
+                  hintId={suggestionHintId}
+                  className={inline ? "px-3 py-2" : "px-4 py-[11px]"}
+                />
+              )}
+            </MarkdownPreviewField>
+          ) : (
+            <div
+              className={cn(
+                "flex items-center gap-2 text-sm",
+                inline
+                  ? "h-[44px] min-w-0 flex-1 px-3 sm:h-9 [@media(hover:none)_and_(pointer:coarse)]:h-[44px]"
+                  : "h-[44px] px-4 sm:h-[42px] [@media(hover:none)_and_(pointer:coarse)]:h-[44px]",
+              )}
+              role="status"
+              aria-live="polite"
+            >
+              {dictation.state.kind === "rec" && (
+                <>
+                  <span className="size-2 shrink-0 rounded-full bg-[var(--danger)] motion-safe:animate-pulse" />
+                  <span className="tabular-nums text-muted-foreground" dir="ltr">
+                    {formatRecSeconds(dictation.seconds)}
+                  </span>
+                  <span className="truncate text-muted-foreground">
+                    {msg("agent.composer.recording")}
+                  </span>
+                  <button
                     type="button"
-                    size="icon"
-                    onClick={dictation.finish}
-                    className="shrink-0 rounded-full"
-                    aria-label={msg("agent.composer.record_finish")}
+                    onClick={dictation.cancel}
+                    aria-label={msg("agent.composer.record_cancel")}
+                    className="close-button ms-auto shrink-0"
                   >
-                    <Check className="size-4" />
-                  </Button>
-                </TooltipButton>
-              ) : (
-                <TooltipButton tooltip={msg("agent.composer.record")} side="top">
+                    <X />
+                  </button>
+                </>
+              )}
+              {dictation.state.kind === "busy" && (
+                <>
+                  <CircleNotch className="size-4 shrink-0 animate-spin text-muted-foreground" />
+                  <span className="truncate text-muted-foreground">
+                    {msg("agent.composer.transcribing")}
+                  </span>
+                </>
+              )}
+              {dictation.state.kind === "err" && (
+                <span
+                  className="line-clamp-2 text-xs leading-snug text-destructive"
+                  title={dictation.state.message}
+                >
+                  {dictation.state.message}
+                </span>
+              )}
+            </div>
+          )}
+
+          <div
+            className={cn(
+              "flex min-w-0 items-center gap-1.5",
+              inline ? "shrink-0" : "px-2 pb-2 pt-0.5",
+            )}
+          >
+            {!inline && (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    const picked = Array.from(e.target.files ?? []);
+                    e.target.value = "";
+                    void attachFiles(picked);
+                  }}
+                />
+                <TooltipButton tooltip={msg("agent.composer.attach")} side="top">
                   <Button
                     type="button"
                     size="icon"
                     variant="ghost"
-                    onClick={() => void dictation.start()}
-                    disabled={disabled || locked || dictation.state.kind === "busy"}
-                    className="shrink-0 rounded-full text-muted-foreground hover:text-foreground"
-                    aria-label={msg("agent.composer.record")}
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={disabled || locked}
+                    className="shrink-0 rounded-full text-muted-foreground hover:text-foreground [@media(hover:none)_and_(pointer:coarse)]:size-11"
+                    aria-label={msg("agent.composer.attach")}
                   >
-                    <Microphone className="size-4" />
+                    {attaching > 0 ? (
+                      <CircleNotch className="size-4 animate-spin" />
+                    ) : (
+                      <Plus className="size-4" />
+                    )}
                   </Button>
                 </TooltipButton>
-              ))}
-            {(!streaming || !onStop || (midTurn && hasDraft)) && (
-              <Button
-                type="submit"
-                size="icon"
-                autoTooltip={false}
-                className="shrink-0 rounded-full"
-                disabled={disabled || dictating || attaching > 0 || !hasDraft}
-                aria-label={sendAriaLabel}
-              >
-                <svg viewBox="0 0 24 24" fill="none" className="size-4">
-                  <path
-                    d="M12 2L12 22M12 2L5 9M12 2L19 9"
-                    stroke="currentColor"
-                    strokeWidth="2.5"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </Button>
+              </>
             )}
-            {streaming && onStop && (
-              <TooltipButton tooltip={stopAriaLabel} side="top">
+            {modelMenu}
+            {leadingControls && (
+              <div className="flex min-w-0 items-center gap-1">{leadingControls}</div>
+            )}
+            <div className="ms-auto flex min-w-0 items-center justify-end gap-1.5">
+              {showMic &&
+                (dictation.state.kind === "rec" ? (
+                  <TooltipButton tooltip={msg("agent.composer.record_finish")} side="top">
+                    <Button
+                      type="button"
+                      size="icon"
+                      onClick={dictation.finish}
+                      className="shrink-0 rounded-full"
+                      aria-label={msg("agent.composer.record_finish")}
+                    >
+                      <Check className="size-4" />
+                    </Button>
+                  </TooltipButton>
+                ) : (
+                  <TooltipButton tooltip={msg("agent.composer.record")} side="top">
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      onClick={() => void dictation.start()}
+                      disabled={disabled || locked || dictation.state.kind === "busy"}
+                      className="shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+                      aria-label={msg("agent.composer.record")}
+                    >
+                      <Microphone className="size-4" />
+                    </Button>
+                  </TooltipButton>
+                ))}
+              {(!streaming || !onStop || (midTurn && hasDraft)) && (
                 <Button
-                  type="button"
+                  type="submit"
                   size="icon"
-                  onClick={onStop}
+                  autoTooltip={false}
                   className="shrink-0 rounded-full"
-                  aria-label={stopAriaLabel}
+                  disabled={disabled || dictating || attaching > 0 || !hasDraft}
+                  aria-label={sendAriaLabel}
                 >
-                  <Square className="size-3 fill-current" />
+                  <svg viewBox="0 0 24 24" fill="none" className="size-4">
+                    <path
+                      d="M12 2L12 22M12 2L5 9M12 2L19 9"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
                 </Button>
-              </TooltipButton>
-            )}
+              )}
+              {streaming && onStop && (
+                <TooltipButton tooltip={stopAriaLabel} side="top">
+                  <Button
+                    type="button"
+                    size="icon"
+                    onClick={onStop}
+                    className="shrink-0 rounded-full"
+                    aria-label={stopAriaLabel}
+                  >
+                    <Square className="size-3 fill-current" />
+                  </Button>
+                </TooltipButton>
+              )}
+            </div>
           </div>
         </div>
-      </div>
       </ComposerLoader>
     </form>
   );

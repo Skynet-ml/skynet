@@ -1008,6 +1008,8 @@ export interface CatalogModel {
   // sent; null when the provider did not say.
   reasoning_mandatory?: boolean | null;
   reasoning_default_enabled?: boolean | null;
+  // A local CLI row whose CLI takes fast mode for this model; absent elsewhere.
+  supports_fast?: boolean;
   // Newest headline model of a leading lab, derived from provider metadata.
   featured?: boolean;
   // The best-value default thinker that the composer's Auto mode runs.

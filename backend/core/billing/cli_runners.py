@@ -398,6 +398,7 @@ def run_claude(
     think: bool = True,
     cache_prefix: str = "",
     effort: str | None = None,
+    fast: bool = False,
 ) -> CliCompletion:
     """Answer one prompt with ``claude -p``, streaming its events.
 
@@ -414,7 +415,10 @@ def run_claude(
         cache_prefix: The start of ``prompt`` that later calls repeat, or ``""``.
         effort: The turn's effort level, already checked against the model's
             levels in :data:`cli_catalog.CLI_EFFORTS`, or ``None`` for Claude
-            Code's default.
+            Code's default. ``"ultracode"`` turns on Claude Code's parallel
+            agents for the call.
+        fast: ``True`` asks Claude Code for fast mode, already checked
+            against :data:`cli_catalog.CLI_FAST`.
 
     Returns:
         The completion.
@@ -460,6 +464,8 @@ def run_claude(
         ]
         if effort:
             argv += ["--effort", effort]
+        if fast:
+            argv += ["--fast-mode", "on"]
         if json_schema is not None:
             argv += ["--json-schema", json.dumps(json_schema)]
         stdin = prompt
@@ -515,6 +521,7 @@ def run_codex(
     on_delta: Callable[[str, str], None] | None = None,
     *,
     effort: str | None = None,
+    fast: bool = False,
 ) -> CliCompletion:
     """Answer one prompt with ``codex app-server`` in a read-only sandbox, with its host tools and agent prompt off.
 
@@ -534,6 +541,8 @@ def run_codex(
         effort: The turn's effort level, already checked against the model's
             levels in :data:`cli_catalog.CLI_EFFORTS`, or ``None`` for the
             model's default.
+        fast: ``True`` runs the turn on the ``priority`` ("Fast") service
+            tier, already checked against :data:`cli_catalog.CLI_FAST`.
 
     Returns:
         The completion; ``model_ms`` is the time from ``turn/start`` to ``turn/completed``.
@@ -566,6 +575,10 @@ def run_codex(
         turn: dict[str, Any] = {"input": [{"type": "text", "text": prompt}], "summary": "auto"}
         if effort:
             turn["effort"] = effort
+        if fast:
+            # Codex omits a tier the model does not advertise; every catalog
+            # model advertises ``priority``.
+            turn["serviceTier"] = "priority"
         if json_schema is not None:
             turn["outputSchema"] = dict(json_schema)
         return _codex_turn(argv, thread, turn, isolation.env, settings, cwd, on_delta, json_schema is None)

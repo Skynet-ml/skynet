@@ -56,6 +56,8 @@ export interface CliStatus {
   /** The effort levels the CLI takes for each slug in `models`; a slug with
    * none takes no effort. */
   efforts?: Record<string, string[]>;
+  /** The slugs in `models` that take fast mode. */
+  fast?: string[];
 }
 
 /** `GET /local/status`; the route exists only on a local-mode backend. */
@@ -195,6 +197,7 @@ export function subscriptionMenuModels(
     byok_provider: null,
     supports_thinking: (cli.efforts?.[model.value] ?? []).length > 0,
     reasoning_efforts: [...(cli.efforts?.[model.value] ?? [])],
+    supports_fast: (cli.fast ?? []).includes(model.value),
     // An unpicked turn sends no effort, so the CLI's own default runs and
     // "Default" names no level.
     reasoning_default_enabled: true,

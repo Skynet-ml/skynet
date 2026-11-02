@@ -52,22 +52,40 @@ CLI_MODELS: dict[CliProvider, dict[str, str]] = {
 }
 
 _FULL_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# The top level of each CLI, offered only on the models that list it. Claude
+# Code's ``--effort ultracode`` runs many parallel agents each turn; Codex's
+# ``ultra`` is one more reasoning level above max.
+CliTopEffort = Literal["ultra", "ultracode"]
+_CODEX_ULTRA = (*_FULL_EFFORTS, "ultra")
+_CLAUDE_ULTRACODE = (*_FULL_EFFORTS, "ultracode")
 # The effort levels each CLI takes for each slug in CLI_MODELS. Checked with
 # no model call against Claude Code 2.1.316 (its shipped model catalog and
-# effort gates) and codex-cli 0.163.0 (``codex app-server`` ``model/list``).
-# Claude Code ignores ``--effort`` for a model with no levels, and runs an
-# unsupported xhigh or max at high. Codex also lists ``ultra`` for some
-# models; Skynet does not offer it. Recheck this table when a CLI updates.
+# effort gates) and codex-cli 0.163.0 (``codex debug models``). Claude Code
+# ignores ``--effort`` for a model with no levels, and runs an unsupported
+# xhigh or max at high. Ultracode needs a model that takes xhigh. Recheck
+# this table when a CLI updates.
 CLI_EFFORTS: dict[CliProvider, dict[str, tuple[str, ...]]] = {
-    "codex": dict.fromkeys(CLI_MODELS["codex"], _FULL_EFFORTS),
+    "codex": {
+        **dict.fromkeys(CLI_MODELS["codex"], _CODEX_ULTRA),
+        "openai/gpt-6-luna": _FULL_EFFORTS,
+        "openai/gpt-5.6-luna": _FULL_EFFORTS,
+    },
     "claude": {
-        **dict.fromkeys(CLI_MODELS["claude"], _FULL_EFFORTS),
+        **dict.fromkeys(CLI_MODELS["claude"], _CLAUDE_ULTRACODE),
         "anthropic/claude-opus-4.6": ("low", "medium", "high", "max"),
         "anthropic/claude-sonnet-4.6": ("low", "medium", "high", "max"),
         "anthropic/claude-opus-4.5": ("low", "medium", "high"),
         "anthropic/claude-sonnet-4.5": (),
         "anthropic/claude-haiku-4.5": (),
     },
+}
+# The slugs that take fast mode, from the same check. Every Codex model
+# lists the ``priority`` ("Fast") service tier. Claude Code offers
+# ``--fast-mode`` only on Opus 4.8 and Opus 5 models, and only to accounts
+# with usage credits; Claude Code checks the account itself.
+CLI_FAST: dict[CliProvider, frozenset[str]] = {
+    "codex": frozenset(CLI_MODELS["codex"]),
+    "claude": frozenset({"anthropic/claude-opus-5.5", "anthropic/claude-opus-5", "anthropic/claude-opus-4.8"}),
 }
 
 _CLI_PROVIDERS: tuple[str, ...] = get_args(CliProvider)
@@ -84,6 +102,19 @@ def cli_efforts(cli: str, slug: str) -> tuple[str, ...]:
         The levels, lowest first; empty for an unknown CLI or slug.
     """
     return CLI_EFFORTS.get(cli, {}).get(slug, ())  # type: ignore[call-overload]
+
+
+def cli_fast(cli: str, slug: str) -> bool:
+    """Return whether ``cli`` takes fast mode for a catalog slug.
+
+    Args:
+        cli: The CLI that runs the call.
+        slug: OpenRouter catalog slug, such as ``anthropic/claude-opus-5.5``.
+
+    Returns:
+        ``True`` when the model takes fast mode on ``cli``.
+    """
+    return slug in CLI_FAST.get(cli, frozenset())  # type: ignore[call-overload]
 
 
 def parse_subscription_model_id(model_id: str) -> tuple[CliProvider, str] | None:
