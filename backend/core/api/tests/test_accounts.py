@@ -436,6 +436,52 @@ def test_oauth_provision_keeps_only_an_https_picture(accounts_client: TestClient
     assert picture() == "https://avatars.githubusercontent.com/u/1"
 
 
+def test_oauth_picture_fills_a_session_picture(accounts_client: TestClient) -> None:
+    """A session picture reaches an account that has none, so the Mac app shows it.
+
+    A web session from before ``users.image_url`` existed shows the provider
+    picture, but provision never saved it, so hosted whoami had none.
+    """
+    engine = accounts_client.app.state.job_store.engine
+    accounts_client.post(
+        "/auth/oauth/provision",
+        json={"email": "quinn@example.com", "name": "Quinn"},
+        headers=_AUTH_HEADER,
+    )
+
+    def picture() -> str | None:
+        """Return the saved picture of the test account."""
+        with Session(engine) as session:
+            row = session.get(UserModel, "quinn@example.com")
+            assert row is not None
+            return row.image_url
+
+    def sync(image: str) -> int:
+        """Send ``image`` as the session picture and return the status code."""
+        return accounts_client.post(
+            "/auth/oauth/picture",
+            json={"email": "Quinn@Example.com", "image": image},
+            headers=_AUTH_HEADER,
+        ).status_code
+
+    assert picture() is None
+    assert sync("https://lh3.googleusercontent.com/a/quinn") == 200
+    assert picture() == "https://lh3.googleusercontent.com/a/quinn"
+    for unsafe in ("http://example.test/a.png", "javascript:alert(1)", "https://x.test/" + "a" * 2048):
+        assert sync(unsafe) == 200
+    assert picture() == "https://lh3.googleusercontent.com/a/quinn"
+
+
+def test_oauth_picture_needs_the_secret_and_an_account(accounts_client: TestClient) -> None:
+    """The picture call needs the internal secret and never creates an account."""
+    body = {"email": "nobody@example.com", "image": "https://lh3.googleusercontent.com/a/x"}
+    assert accounts_client.post("/auth/oauth/picture", json=body).status_code == 403
+    assert accounts_client.post("/auth/oauth/picture", json=body, headers=_AUTH_HEADER).status_code == 200
+    engine = accounts_client.app.state.job_store.engine
+    with Session(engine) as session:
+        assert session.get(UserModel, "nobody@example.com") is None
+
+
 def test_oauth_provision_reuses_local_account(accounts_client: TestClient) -> None:
     """A provider sign-in with a registered email reuses that row, name intact."""
     accounts_client.post(

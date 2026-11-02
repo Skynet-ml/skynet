@@ -26,5 +26,7 @@ declare module "next-auth/jwt" {
     role?: string;
     groups?: string[];
     firstLogin?: boolean;
+    /** Session picture the backend account holds; the jwt callback sends a new one. */
+    pictureSaved?: string;
   }
 }
