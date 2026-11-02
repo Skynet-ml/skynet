@@ -162,8 +162,10 @@ ORPHANED_RUN_RECOVERY_FAILED_MESSAGE = (
 # Usage that makes no settlement progress in this window may never settle, and
 # the run must not stay "running" with no worker while it waits. The window
 # restarts each time the run's pending usage shrinks. The stopped run keeps the
-# interrupted budget generation, so a manual resume waits for that usage and
-# then waives the work the resume repeats, as the automatic requeue does.
+# interrupted budget generation. A manual resume of it waits for that usage, then
+# waives the work the resume repeats, as the automatic requeue does: the work
+# after the earliest checkpoint, or all of that generation when a top-level run
+# with no checkpoint starts again. Such a resume does not use up an attempt.
 ORPHANED_USAGE_WAIT = timedelta(minutes=15)
 # Guards each store's in-memory list of runs the orphan sweep ended; test
 # stores skip ``__init__``, so the list is created on first use.
@@ -1766,7 +1768,8 @@ class RemoteDBJobStore:
 
         An ``automatic`` requeue recovers a run whose worker went away: it takes
         a still-active row instead of a terminal one, and a top-level run with
-        no checkpoint yet starts again from the beginning.
+        no checkpoint yet starts again from the beginning. A manual resume of a
+        run the orphan sweep stopped as interrupted may start again the same way.
 
         Args:
             optimization_id: The job to resume.
@@ -1798,10 +1801,20 @@ class RemoteDBJobStore:
             ):
                 return None
             checkpoints = self._checkpoints.list_for_optimization(optimization_id)
+            # A run the orphan sweep stopped keeps its interrupted generation, so a
+            # manual resume of it may start again like the automatic requeue.
+            resumes_interrupted = (
+                not automatic
+                and isinstance(job.recovery, dict)
+                and job.recovery.get("interrupted_budget_generation") is not None
+            )
             # A grid pair or a child run needs its own checkpoint to rejoin its
             # parent's results, so only a whole top-level run may start again.
             fresh_restart = (
-                automatic and not checkpoints and pair_index_to_resume is None and job.parent_optimization_id is None
+                (automatic or resumes_interrupted)
+                and not checkpoints
+                and pair_index_to_resume is None
+                and job.parent_optimization_id is None
             )
             if not checkpoints and not fresh_restart:
                 raise CheckpointCompatibilityError("No completed compatible checkpoint is available.")
@@ -1949,9 +1962,9 @@ class RemoteDBJobStore:
             current = int(job.attempts or 0)
             next_attempt = current + 1 if bump_attempts else current
             job.attempts = next_attempt  # type: ignore[assignment]
-            if automatic and (job.sandbox_image is not None or fresh_restart):
-                # The sweep can run on a pod of the version a deploy is replacing;
-                # an unversioned row stays claimable by the workers that remain.
+            if fresh_restart or (automatic and job.sandbox_image is not None):
+                # The sweep or the API can run on a pod of the version a deploy is
+                # replacing; an unversioned row stays claimable by the workers that remain.
                 job.code_version = None  # type: ignore[assignment]
             elif job.sandbox_image is not None:
                 # Workers claim only their own version's jobs; a pinned image carries

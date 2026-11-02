@@ -14,9 +14,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ...config import settings
-from ...storage.tests.test_remote_jobstore import SQLiteJobStore, _fund_checkpoint
+from ...storage.tests.test_remote_jobstore import SQLiteJobStore, _fund_checkpoint, _fund_without_checkpoint
 from ..auth import AuthenticatedUser
-from ..routers._helpers import is_pausable, is_resumable, pausable_id_flags
+from ..routers._helpers import is_pausable, is_resumable, pausable_id_flags, resumable_id_flags
 from ..routers.optimizations import create_optimizations_router
 from .conftest import bypass_auth
 from .mocks import _BaseFakeJobStore
@@ -363,3 +363,93 @@ def test_resume_budget_projected_pause_requires_a_limit_above_the_projection(
     assert job["status"] == "pending"
     assert job["attempts"] == settings.job_max_attempts
     assert budgets.get(budget_id, "resume-owner").state == "attached"
+
+
+def _stop_as_interrupted(store: SQLiteJobStore, optimization_id: str) -> None:
+    """Leave a funded run as the orphan sweep leaves it when its usage never settles, at the attempt cap.
+
+    Args:
+        store: Private fixture database.
+        optimization_id: Funded run to stop.
+    """
+    store.update_job(
+        optimization_id,
+        status="failed",
+        stop_reason="interrupted",
+        attempts=settings.job_max_attempts,
+        recovery={"state": "interrupted", "interrupted_budget_generation": 0},
+    )
+
+
+def _owner_client(store: SQLiteJobStore, username: str) -> TestClient:
+    """Build a client over the real store, signed in as the run owner.
+
+    Args:
+        store: Private fixture database.
+        username: Owner of the funded run.
+
+    Returns:
+        A ``TestClient`` over a minimal FastAPI app.
+    """
+    app = FastAPI()
+    app.include_router(create_optimizations_router(job_store=store, get_worker_ref=lambda: None))
+    bypass_auth(app, user=AuthenticatedUser(username=username, role="admin", groups=()))
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_resume_restarts_an_interrupted_run_without_a_checkpoint_in_its_own_budget() -> None:
+    """An interrupted run with no checkpoint offers Resume and starts again without using an attempt."""
+    store = SQLiteJobStore()
+    store.create_job("restart-me")
+    _fund_without_checkpoint(store, "restart-me")
+    _stop_as_interrupted(store, "restart-me")
+    job = store.get_job("restart-me")
+    assert is_resumable(store, job) is True
+    assert resumable_id_flags(store, [job]) == {"restart-me"}
+
+    resp = _owner_client(store, "restart-owner").post("/optimizations/restart-me/resume")
+    assert resp.status_code == 202, resp.text
+    job = store.get_job("restart-me")
+    assert job["status"] == "pending"
+    assert job["attempts"] == settings.job_max_attempts
+    assert job["execution_budget_id"] is not None
+
+
+def test_resume_of_an_interrupted_run_with_a_checkpoint_does_not_use_an_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupted run at the attempt cap still resumes from its checkpoint, and keeps its attempt count.
+
+    Args:
+        monkeypatch: Fixture binding the checkpoint's immutable runtime profile.
+    """
+    store = SQLiteJobStore()
+    store.create_job("resume-me")
+    _fund_checkpoint(store, "resume-me", monkeypatch)
+    _stop_as_interrupted(store, "resume-me")
+    assert is_resumable(store, store.get_job("resume-me")) is True
+
+    resp = _owner_client(store, "resume-owner").post("/optimizations/resume-me/resume")
+    assert resp.status_code == 202, resp.text
+    job = store.get_job("resume-me")
+    assert job["status"] == "pending"
+    assert job["attempts"] == settings.job_max_attempts
+
+
+def test_resume_of_a_plain_failed_run_still_counts_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed run that the sweep did not stop as interrupted keeps the attempt cap and count.
+
+    Args:
+        monkeypatch: Fixture binding the checkpoint's immutable runtime profile.
+    """
+    store = SQLiteJobStore()
+    store.create_job("plain")
+    _fund_checkpoint(store, "plain", monkeypatch)
+    store.update_job("plain", status="failed", attempts=0)
+    client = _owner_client(store, "resume-owner")
+
+    resp = client.post("/optimizations/plain/resume")
+    assert resp.status_code == 202, resp.text
+    assert store.get_job("plain")["attempts"] == 1
+    store.update_job("plain", status="failed", attempts=settings.job_max_attempts)
+    assert client.post("/optimizations/plain/resume").status_code == 409

@@ -49,6 +49,7 @@ from .._helpers import (
     enforce_storage_quota,
     filter_ids_at_least,
     is_budget_stop,
+    is_interrupted_stop,
     is_pausable,
     load_job_for_user,
     require_role_at_least,
@@ -556,7 +557,12 @@ def register_lifecycle_routes(
             parse_overview(job_data).get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
         )
         has_checkpoint = getattr(job_store, "has_gepa_checkpoint", None)
-        if not (callable(has_checkpoint) and has_checkpoint(optimization_id)):
+        interrupted = is_interrupted_stop(job_data)
+        # An interrupted top-level run with no checkpoint starts again from the
+        # beginning in its own budget; the store refuses every other run without one.
+        if not (callable(has_checkpoint) and has_checkpoint(optimization_id)) and not (
+            interrupted and not job_data.get("parent_optimization_id")
+        ):
             raise DomainError("optimization.resume_not_resumable", status=409)
 
         # Continuing a projection pause under a limit the measured burn already
@@ -579,10 +585,10 @@ def register_lifecycle_routes(
                 )
 
         # A manual pause/resume or a continuation past the spending limit is
-        # user-driven, not failure recovery: it neither consumes an attempt nor is
-        # bounded by the cap. Only failed/cancelled resumes count against
-        # ``job_max_attempts``.
-        is_paused = status == OptimizationStatus.paused or budget_stop
+        # user-driven, and an interrupted stop is the worker's, not the run's:
+        # neither consumes an attempt nor is bounded by the cap. Only other
+        # failed/cancelled resumes count against ``job_max_attempts``.
+        is_paused = status == OptimizationStatus.paused or budget_stop or interrupted
         if not is_paused:
             attempts = int(job_data.get("attempts") or 0)
             if attempts >= settings.job_max_attempts:

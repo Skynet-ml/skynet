@@ -1370,6 +1370,51 @@ def test_manual_resume_after_a_usage_wait_stop_does_not_charge_repeated_work(
     assert service.get(budget_id, "resume-owner").billed_cents == 2
 
 
+def test_manual_resume_restarts_an_interrupted_run_without_a_checkpoint(
+    store: SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run stopped with no checkpoint starts again in its own budget, and none of its stopped work is charged.
+
+    Args:
+        store: Disposable job store.
+        monkeypatch: Pytest fixture used to hold usage pending.
+    """
+    store.create_job("no-checkpoint")
+    store.update_job(
+        "no-checkpoint",
+        status="running",
+        code_version="old-worker",
+        recovery={"state": "recovering", "phase": "requeue", "cause": WORKER_RESTART_CAUSE},
+    )
+    service = _fund_without_checkpoint(store, "no-checkpoint")
+    budget_id = store.get_job("no-checkpoint")["execution_budget_id"]
+    _bill_run_call(service, "restart-owner", budget_id, "stopped-work", 4)
+    holder = _hold_usage_pending(store, "no-checkpoint", service, monkeypatch)
+    assert store.recover_orphaned_jobs() == 0
+    _age_usage_wait(store, "no-checkpoint")
+    assert store.recover_orphaned_jobs() == 1
+    assert store.get_job("no-checkpoint")["status"] == "failed"
+    assert _balance_of(store, "restart-owner") == 46
+
+    generation = store.get_job("no-checkpoint")["execution_generation"]
+    assert store.requeue_for_resume("no-checkpoint", expected_generation=generation, budget_service=service) is None
+    holder["pending"] = 0
+    generation = store.get_job("no-checkpoint")["execution_generation"]
+    assert store.requeue_for_resume("no-checkpoint", expected_generation=generation, budget_service=service) is not None
+    job = store.get_job("no-checkpoint")
+    assert job["status"] == "pending"
+    assert job["code_version"] is None
+    assert job["message"] == "Starting again after a worker restart"
+    assert _balance_of(store, "restart-owner") == 50
+    assert service.get(budget_id, "restart-owner").billed_cents == 0
+
+    service.waive_interrupted_work(budget_id, "restart-owner", generation=0, settled_after=None)
+    assert _balance_of(store, "restart-owner") == 50
+    with Session(store.engine) as session:
+        keys = [row.settlement_key for row in session.query(WalletLedgerModel).filter_by(budget_id=budget_id)]
+    assert keys.count(f"restart:{budget_id}:g0") == 1
+
+
 def test_recover_orphaned_jobs_fails_unfunded_run(store: SQLiteJobStore) -> None:
     """An orphaned run without a cumulative budget keeps failing with the orphan message.
 
