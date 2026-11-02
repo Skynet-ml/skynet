@@ -16,6 +16,7 @@ import { liveLanesLast } from "@/shared/hooks/reasoning-order";
 import { appendVersion, type ArtifactVersion } from "@/shared/hooks/artifact-versions";
 import { createCodeDrafts, type DraftSource } from "@/shared/hooks/code-drafts";
 import { TERMS } from "@/shared/lib/terms";
+import { sentFastMode } from "@/shared/lib/effort-slider";
 import type { ParsedDataset } from "@/shared/lib/parse-dataset";
 import type { ValidateCodeResponse, WorkflowSpec } from "@/shared/types/api";
 import type { UnifiedAuthoringContext } from "@/shared/types/unified-run";
@@ -247,6 +248,8 @@ export interface UseCodeAgentArgs {
   reasoningEffort?: string | null;
   /** Maps the effort to the one a request sends with the resolved model (local CLI roles). */
   resolveEffort?: (model: string | null, effort: string | null, sent: string | null) => string | null;
+  /** Runs a local CLI model in its fast mode. Other models ignore it. */
+  fastMode?: boolean;
   /** The chat a reload brings back; read once, on mount. */
   initialMessages?: AgentMessage[];
 }
@@ -283,6 +286,7 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
     resolveModel,
     reasoningEffort,
     resolveEffort,
+    fastMode = false,
     unified = null,
     onBrief,
     files,
@@ -692,7 +696,10 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
         const effort = resolveEffort
           ? resolveEffort(model ?? null, reasoningEffort ?? null, sent ?? null)
           : reasoningEffort;
-        return effort ? { reasoning_effort: effort } : {};
+        return {
+          ...(effort ? { reasoning_effort: effort } : {}),
+          ...(sentFastMode(fastMode, sent ?? null) ? { fast_mode: true } : {}),
+        };
       };
       void (resolveModel ? resolveModel(model ?? null) : Promise.resolve(model)).then((sentModel) =>
         streamCodeAgent(
@@ -1206,6 +1213,7 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
       resolveModel,
       reasoningEffort,
       resolveEffort,
+      fastMode,
       setSignatureCode,
       setMetricCode,
       setSignatureValidation,

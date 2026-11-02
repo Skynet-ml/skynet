@@ -1,18 +1,11 @@
 "use client";
 
 import * as React from "react";
-import { effortFill, sliderStops, stepEffort, TOP_EFFORTS } from "@/shared/lib/effort-slider";
+import { effortFill, sliderStops, stepEffort } from "@/shared/lib/effort-slider";
 import { effortLabel } from "@/shared/lib/model-efforts";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { ArrowCounterClockwise, Lightning, Sparkle } from "@/shared/ui/icons";
-
-/** A rainbow built from theme tokens, so it follows light and dark. The
- * shimmer stops under reduced motion. */
-export const RAINBOW_CLASS = cn(
-  "bg-[linear-gradient(90deg,var(--danger),var(--chart-2),var(--chart-3),var(--success),var(--chart-4),var(--trust-ask),var(--danger))]",
-  "bg-[length:200%_100%] motion-safe:animate-[agent-shimmer_2.4s_linear_infinite]",
-);
 
 interface EffortSliderProps {
   efforts: readonly string[];
@@ -28,8 +21,7 @@ interface EffortSliderProps {
 /**
  * The effort picker for a local CLI model: a track from the model default to
  * the top level, with arrow keys, a reset to the default and, on models that
- * take it, a fast mode toggle. The fill and its glow grow with the level; the
- * top levels (ultra, ultracode) get the rainbow.
+ * take it, a fast mode toggle. The fill and its glow grow with the level.
  */
 export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
   function EffortSlider({ efforts, value, onChange, modelName, hintFor, fast }, ref) {
@@ -37,7 +29,6 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
     const index = Math.max(0, stops.indexOf(value));
     const level = stops[index] ?? null;
     const fill = effortFill(efforts, level);
-    const top = level !== null && TOP_EFFORTS.includes(level);
     const label = level ? effortLabel(level) : msg("agent.model_menu.effort_default");
     const hintId = React.useId();
     const trackRef = React.useRef<HTMLDivElement>(null);
@@ -82,7 +73,7 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
                 dir="auto"
                 className={cn(
                   "motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-bottom-1 motion-safe:duration-200",
-                  top ? cn(RAINBOW_CLASS, "bg-clip-text text-transparent") : "text-primary",
+                  "text-primary",
                 )}
               >
                 {label}
@@ -156,8 +147,7 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
           <div className="absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 overflow-hidden rounded-full bg-muted">
             <div
               className={cn(
-                "absolute inset-y-0 start-0 rounded-full transition-[width,box-shadow] duration-300 ease-out motion-reduce:transition-none",
-                top ? RAINBOW_CLASS : "bg-primary",
+                "absolute inset-y-0 start-0 rounded-full bg-primary transition-[width,box-shadow] duration-300 ease-out motion-reduce:transition-none",
               )}
               style={{
                 width: pct,

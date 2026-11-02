@@ -317,10 +317,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     onConversationMeta: handleConversationMeta,
   });
   const localMenu = useLocalAgentMenuModels(agentSubscriptionFor("generalist"), agent.model);
-  // The model the menu shows runs the turn; only a Claude CLI route marks "ultracode".
-  const menuRoute =
-    localMenu.models?.find((m) => m.value === agent.model)?.value ?? localMenu.models?.[0]?.value;
-  const claudeCliRoute = !!menuRoute?.startsWith("subscription/claude/");
   const streaming = agent.status === "streaming";
   // Each conversation on view gets fresh turn components, so one chat's
   // timers and "already shown" text never carry into another. A new chat
@@ -977,7 +973,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         streaming={activeBusy}
         midTurn={agent.midTurn}
         suggest={{ messages: agent.messages, model: agent.model, chatId: agent.conversationId }}
-        markUltracode={claudeCliRoute}
         modelMenu={
           <ComposerModelMenu
             value={agent.model}

@@ -163,6 +163,8 @@ export function TaggerView({ initialSession }: { initialSession?: TaggerSessionD
           onSetModel={tagger.setAssistModel}
           onSetInterviewModel={tagger.setInterviewModel}
           onSetInterviewEffort={tagger.setInterviewEffort}
+          interviewFast={tagger.interviewFast}
+          onSetInterviewFast={tagger.setInterviewFast}
           onSend={(content) => void tagger.sendInterviewMessage(content)}
           onEditResend={(index, content) => void tagger.sendInterviewMessage(content, index)}
           onStop={tagger.stopInterview}

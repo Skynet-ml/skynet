@@ -41,6 +41,7 @@ import { useSteerQueue } from "@/shared/ui/agent/use-steer-queue";
 import type { AgentMessage, AgentThinking } from "@/shared/ui/agent";
 import type { InterviewOption } from "@/shared/lib/api";
 import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
+import { liveEffort } from "@/shared/lib/effort-slider";
 import type { CatalogModel, ModelConfig } from "@/shared/types/api";
 import { ModelConfigModal, useRecentModelConfigs } from "@/features/submit";
 import { ModelChip } from "@/shared/ui/model-chip";
@@ -94,6 +95,9 @@ interface Props {
   onSetInterviewModel: (model: string | null) => void;
   /** Persist the interviewer's reasoning-effort level. */
   onSetInterviewEffort: (effort: string | null) => void;
+  /** Whether the interviewer runs a local CLI model in its fast mode. */
+  interviewFast: boolean;
+  onSetInterviewFast: (fast: boolean) => void;
   onSend: (content: string) => void;
   onEditResend: (index: number, content: string) => void;
   onStop: () => void;
@@ -129,6 +133,8 @@ export function TaggerInterview({
   onGenerateDataset,
   onSetInterviewModel,
   onSetInterviewEffort,
+  interviewFast,
+  onSetInterviewFast,
   onSend,
   onEditResend,
   onStop,
@@ -280,8 +286,10 @@ export function TaggerInterview({
               <ComposerModelMenu
                 value={interviewComposerModel(assist)}
                 onChange={onSetInterviewModel}
-                effort={interviewComposerEffort(assist)}
+                effort={liveEffort(interviewComposerEffort(assist))}
                 onEffortChange={onSetInterviewEffort}
+                fast={interviewFast}
+                onFastChange={onSetInterviewFast}
                 defaultFlag="is_interview_default"
                 models={localMenu.models}
                 openRouterEngine={localMenu.openRouterEngine}
@@ -495,7 +503,6 @@ function RubricCard({
     setCategories((prev) => [...prev, { id: crypto.randomUUID(), label: "" }]);
   };
   const cleanedCategories = categories.filter((c) => c.label.trim());
-
 
   const taskValid = mode !== "multiclass" || cleanedCategories.length >= 2;
 

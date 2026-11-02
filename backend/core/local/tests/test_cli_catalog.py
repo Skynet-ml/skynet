@@ -80,7 +80,7 @@ def test_every_cli_has_models_and_a_minimum_version() -> None:
 
 def test_every_cli_model_has_an_effort_row() -> None:
     """Every slug a CLI runs has its own effort levels, in ladder order, from the known ladder."""
-    ladder = ["low", "medium", "high", "xhigh", "max", "ultra", "ultracode"]
+    ladder = ["low", "medium", "high", "xhigh", "max"]
     for cli, models in CLI_MODELS.items():
         assert set(CLI_EFFORTS[cli]) == set(models)
         for levels in CLI_EFFORTS[cli].values():
@@ -90,17 +90,17 @@ def test_every_cli_model_has_an_effort_row() -> None:
 @pytest.mark.parametrize(
     ("cli", "slug", "levels"),
     [
-        ("claude", "anthropic/claude-opus-5.5", ("low", "medium", "high", "xhigh", "max", "ultracode")),
-        ("claude", "anthropic/claude-haiku-5.5", ("low", "medium", "high", "xhigh", "max", "ultracode")),
+        ("claude", "anthropic/claude-opus-5.5", ("low", "medium", "high", "xhigh", "max")),
+        ("claude", "anthropic/claude-haiku-5.5", ("low", "medium", "high", "xhigh", "max")),
         ("claude", "anthropic/claude-opus-4.6", ("low", "medium", "high", "max")),
         ("claude", "anthropic/claude-sonnet-4.6", ("low", "medium", "high", "max")),
         ("claude", "anthropic/claude-opus-4.5", ("low", "medium", "high")),
         ("claude", "anthropic/claude-sonnet-4.5", ()),
         ("claude", "anthropic/claude-haiku-4.5", ()),
-        ("codex", "openai/gpt-6.1-sol", ("low", "medium", "high", "xhigh", "max", "ultra")),
+        ("codex", "openai/gpt-6.1-sol", ("low", "medium", "high", "xhigh", "max")),
         ("codex", "openai/gpt-5.6-luna", ("low", "medium", "high", "xhigh", "max")),
         ("codex", "openai/gpt-6-luna", ("low", "medium", "high", "xhigh", "max")),
-        ("claude", "anthropic/claude-opus-4.7", ("low", "medium", "high", "xhigh", "max", "ultracode")),
+        ("claude", "anthropic/claude-opus-4.7", ("low", "medium", "high", "xhigh", "max")),
         ("claude", "anthropic/claude-unknown", ()),
         ("droid", "anthropic/claude-opus-5.5", ()),
     ],
@@ -116,13 +116,11 @@ def test_cli_efforts_gives_the_levels_the_cli_takes(cli: str, slug: str, levels:
     assert cli_efforts(cli, slug) == levels
 
 
-def test_only_a_model_that_takes_xhigh_takes_ultracode() -> None:
-    """Claude Code gates ultracode on xhigh, and Codex lists ultra only above max."""
-    for slug, levels in CLI_EFFORTS["claude"].items():
-        assert ("ultracode" in levels) == ("xhigh" in levels), slug
-        assert "ultra" not in levels
-    for levels in CLI_EFFORTS["codex"].values():
-        assert "ultracode" not in levels
+def test_no_cli_model_offers_a_retired_level() -> None:
+    """Ultra and ultracode only add subagents, so no CLI model lists them."""
+    for cli in CLI_EFFORTS:
+        for slug, levels in CLI_EFFORTS[cli].items():
+            assert not {"ultra", "ultracode"} & set(levels), slug
 
 
 @pytest.mark.parametrize(

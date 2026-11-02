@@ -25,14 +25,14 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 from uuid import uuid4
 
 import httpx
 
 from .. import config
 from ..config import Settings
-from ..local.cli_catalog import CliProvider, cli_efforts, cli_fast, cli_model_arg
+from ..local.cli_catalog import CliProvider, RetiredEffort, cli_efforts, cli_fast, cli_model_arg
 from ..local.cli_probe import read_cli_limits, write_cli_limit
 from .cli_runners import RUNNERS, CliCompletion, CliRunError, SubscriptionRateLimitedError
 from .model_dispatch import ModelHTTPResult
@@ -786,7 +786,11 @@ class CliDispatcher:
         slots = _semaphore(provider, self.settings.cli_max_concurrency)
         # Only claude takes a cache mark from the caller.
         runner_kwargs: dict[str, Any] = {"cache_prefix": prefix} if provider == "claude" and prefix else {}
-        if isinstance(effort, str) and effort in cli_efforts(provider, self.model):
+        levels = cli_efforts(provider, self.model)
+        # An old pick of a retired level runs at the model's top level.
+        if effort in get_args(RetiredEffort) and levels:
+            effort = levels[-1]
+        if isinstance(effort, str) and effort in levels:
             runner_kwargs["effort"] = effort
         if fast and cli_fast(provider, self.model):
             runner_kwargs["fast"] = True

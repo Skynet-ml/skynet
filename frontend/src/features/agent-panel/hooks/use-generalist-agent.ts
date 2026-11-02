@@ -12,7 +12,7 @@ import { agentSubscriptionFor, readPref } from "@/features/settings";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { I18N_KEY } from "@/shared/lib/i18n";
 import { getActiveLocale } from "@/shared/lib/runtime-locale";
-import { sentFastMode } from "@/shared/lib/effort-slider";
+import { liveEffort, sentFastMode } from "@/shared/lib/effort-slider";
 import {
   appendReasoning,
   closeThinking,
@@ -283,7 +283,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     setModelState(next);
   }, []);
   const [reasoningEffort, setReasoningEffortState] = React.useState<string | null>(() =>
-    readPref("composerEffort"),
+    liveEffort(readPref("composerEffort")),
   );
   const effortRef = React.useRef<string | null>(reasoningEffort);
   const setReasoningEffort = React.useCallback((next: string | null) => {

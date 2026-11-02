@@ -1,9 +1,13 @@
-// The effort slider's stops and keys, and the composer's "ultracode" keyword
-// mark. Kept free of React so `node --test` covers them.
+// The effort slider's stops and keys. Kept free of React so `node --test` covers them.
 
-/** The levels above "max" that only some CLI models take. They start many
- * agents (ultracode) or the CLI's top tier (ultra), so they cost the most. */
-export const TOP_EFFORTS: readonly string[] = ["ultra", "ultracode"];
+/**
+ * A saved effort, with a retired level read as "max". Codex's "ultra" and
+ * Claude Code's "ultracode" only added subagents, which Skynet keeps off; the
+ * backend also runs either one at the model's top level.
+ */
+export function liveEffort(effort: string | null): string | null {
+  return effort === "ultra" || effort === "ultracode" ? "max" : effort;
+}
 
 /** The slider's stops, weakest first: the model default (`null`), then each level. */
 export function sliderStops(efforts: readonly string[]): Array<string | null> {
@@ -46,24 +50,4 @@ export function effortFill(efforts: readonly string[], level: string | null): nu
  * model id the request runs). The backend drops it on a model without it. */
 export function sentFastMode(fast: boolean, sent: string | null): boolean {
   return fast && !!sent?.startsWith("subscription/");
-}
-
-const KEYWORD = /ultracode/gi;
-
-/**
- * The [start, end) ranges of the word "ultracode" in a draft, as Claude Code
- * marks it: a whole word, not part of a path or a flag, so a match right
- * after "/", "\" or "-" is skipped.
- */
-export function ultracodeRanges(text: string): Array<[number, number]> {
-  const ranges: Array<[number, number]> = [];
-  for (const match of text.matchAll(KEYWORD)) {
-    const start = match.index;
-    const end = start + match[0].length;
-    const before = text[start - 1] ?? "";
-    const after = text[end] ?? "";
-    if (/[\w/\\-]/.test(before) || /\w/.test(after)) continue;
-    ranges.push([start, end]);
-  }
-  return ranges;
 }

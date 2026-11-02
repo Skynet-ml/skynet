@@ -22,7 +22,7 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal, cast, get_args
+from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header
@@ -34,7 +34,7 @@ from ...billing.cli_dispatch import CLI_FAST_KEY
 from ...billing.metering import meter_llm_run
 from ...config import settings
 from ...constants import TOKEN_SOURCE_MANAGED
-from ...local.cli_catalog import CliTopEffort
+from ...local.cli_catalog import RetiredEffort
 from ...service_gateway.agents.code import _reply_language
 from ...service_gateway.agents.generalist import (
     ThinkingTrail,
@@ -182,12 +182,11 @@ class GeneralistAgentRequest(BaseModel):
             "default model."
         ),
     )
-    reasoning_effort: ReasoningEffort | CliTopEffort | None = Field(
+    reasoning_effort: ReasoningEffort | RetiredEffort | None = Field(
         default=None,
         description=(
             "Explicit reasoning-effort level for the chosen model; absent keeps the model's default. "
-            "``ultra`` (Codex) and ``ultracode`` (Claude Code) apply only to a local CLI model that "
-            "takes them; any other model ignores them."
+            "The retired levels ``ultra`` and ``ultracode`` run at the model's top level."
         ),
     )
     fast_mode: bool = Field(
@@ -892,11 +891,7 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         # pick it runs its own default. The CLI dispatcher drops a level or
         # fast mode the model does not take.
         on_cli = model_config.token_source == "subscription"
-        if on_cli:
-            effort = req.reasoning_effort
-        else:
-            hosted_pick = None if req.reasoning_effort in get_args(CliTopEffort) else req.reasoning_effort
-            effort = effective_reasoning_effort(model_config.name, hosted_pick)
+        effort = req.reasoning_effort if on_cli else effective_reasoning_effort(model_config.name, req.reasoning_effort)
         if effort:
             model_config = model_config.model_copy(update={"extra": {**model_config.extra, "reasoning_effort": effort}})
         if on_cli and req.fast_mode:

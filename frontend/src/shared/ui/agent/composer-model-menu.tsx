@@ -98,10 +98,6 @@ function effortHint(level: string | null): string {
       return msg("agent.model_menu.effort_xhigh_hint");
     case "max":
       return msg("agent.model_menu.effort_max_hint");
-    case "ultra":
-      return msg("agent.model_menu.effort_ultra_hint");
-    case "ultracode":
-      return msg("agent.model_menu.effort_ultracode_hint");
     default:
       return msg("agent.model_menu.effort_default_hint");
   }

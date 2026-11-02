@@ -290,18 +290,20 @@ def test_turn_effort_reaches_the_cli(tmp_path: Path) -> None:
         ("claude", "anthropic/claude-haiku-4.5", "low", None),
         ("claude", "anthropic/claude-sonnet-4.5", "medium", None),
         ("codex", "openai/gpt-6.1-sol", "max", "max"),
-        ("codex", "openai/gpt-6.1-sol", "ultra", "ultra"),
-        ("codex", "openai/gpt-6-luna", "ultra", None),
-        ("codex", "openai/gpt-6.1-sol", "ultracode", None),
-        ("claude", "anthropic/claude-opus-5.5", "ultracode", "ultracode"),
-        ("claude", "anthropic/claude-sonnet-4.6", "ultracode", None),
-        ("claude", "anthropic/claude-opus-5.5", "ultra", None),
+        ("codex", "openai/gpt-6.1-sol", "ultra", "max"),
+        ("codex", "openai/gpt-6-luna", "ultra", "max"),
+        ("codex", "openai/gpt-6.1-sol", "ultracode", "max"),
+        ("claude", "anthropic/claude-opus-5.5", "ultracode", "max"),
+        ("claude", "anthropic/claude-sonnet-4.6", "ultracode", "max"),
+        ("claude", "anthropic/claude-opus-5.5", "ultra", "max"),
+        ("claude", "anthropic/claude-opus-4.5", "ultracode", "high"),
+        ("claude", "anthropic/claude-haiku-4.5", "ultracode", None),
     ],
 )
 def test_turn_effort_follows_the_model_levels(
     cli: str, model: str, effort: str, sent: str | None, tmp_path: Path
 ) -> None:
-    """Send only a level the model takes on its CLI, and drop any other.
+    """Send only a level the model takes on its CLI, map a retired level to its top, and drop any other.
 
     Args:
         cli: The CLI the turn runs on.

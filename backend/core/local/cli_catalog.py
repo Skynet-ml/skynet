@@ -52,26 +52,23 @@ CLI_MODELS: dict[CliProvider, dict[str, str]] = {
 }
 
 _FULL_EFFORTS = ("low", "medium", "high", "xhigh", "max")
-# The top level of each CLI, offered only on the models that list it. Claude
-# Code's ``--effort ultracode`` runs many parallel agents each turn; Codex's
-# ``ultra`` is one more reasoning level above max.
-CliTopEffort = Literal["ultra", "ultracode"]
-_CODEX_ULTRA = (*_FULL_EFFORTS, "ultra")
-_CLAUDE_ULTRACODE = (*_FULL_EFFORTS, "ultracode")
+# Retired levels: Codex's ``ultra`` and Claude Code's ``ultracode``. They only
+# add subagents, which Skynet keeps off, so a stored or sent one runs at the
+# model's top level instead.
+RetiredEffort = Literal["ultra", "ultracode"]
 # The effort levels each CLI takes for each slug in CLI_MODELS. Checked with
 # no model call against Claude Code 2.1.316 (its shipped model catalog and
 # effort gates) and codex-cli 0.163.0 (``codex debug models``). Claude Code
 # ignores ``--effort`` for a model with no levels, and runs an unsupported
-# xhigh or max at high. Ultracode needs a model that takes xhigh. Recheck
-# this table when a CLI updates.
+# xhigh or max at high. Recheck this table when a CLI updates.
 CLI_EFFORTS: dict[CliProvider, dict[str, tuple[str, ...]]] = {
     "codex": {
-        **dict.fromkeys(CLI_MODELS["codex"], _CODEX_ULTRA),
+        **dict.fromkeys(CLI_MODELS["codex"], _FULL_EFFORTS),
         "openai/gpt-6-luna": _FULL_EFFORTS,
         "openai/gpt-5.6-luna": _FULL_EFFORTS,
     },
     "claude": {
-        **dict.fromkeys(CLI_MODELS["claude"], _CLAUDE_ULTRACODE),
+        **dict.fromkeys(CLI_MODELS["claude"], _FULL_EFFORTS),
         "anthropic/claude-opus-4.6": ("low", "medium", "high", "max"),
         "anthropic/claude-sonnet-4.6": ("low", "medium", "high", "max"),
         "anthropic/claude-opus-4.5": ("low", "medium", "high"),

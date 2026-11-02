@@ -56,6 +56,8 @@ _CODEX_DISABLED_FEATURES = (
     "apps",
     "plugins",
     "multi_agent",
+    # Codex delegates to subagents through this feature.
+    "multi_agent_v2",
     "memories",
     "browser_use",
     "computer_use",
@@ -80,7 +82,11 @@ _CODEX_CONFIG = (
     "tools.experimental_request_user_input.enabled=false",
     'features.code_mode.excluded_tool_namespaces=["functions"]',
 )
-_CLAUDE_SETTINGS = json.dumps({"showThinkingSummaries": True})
+# Workflows off, so no effort level, typed keyword or setting starts Claude
+# Code's multi-agent Workflow tool.
+_CLAUDE_SETTINGS = json.dumps(
+    {"showThinkingSummaries": True, "enableWorkflows": False, "workflowKeywordTriggerEnabled": False}
+)
 # ``codex exec`` flags from :data:`cli_isolation.CODEX_ARGS` that ``codex app-server`` rejects.
 _CODEX_EXEC_ONLY_ARGS = frozenset({"--ignore-user-config", "--ignore-rules", "--ephemeral"})
 _TRANSIENT_TEXT = re.compile(
@@ -415,8 +421,7 @@ def run_claude(
         cache_prefix: The start of ``prompt`` that later calls repeat, or ``""``.
         effort: The turn's effort level, already checked against the model's
             levels in :data:`cli_catalog.CLI_EFFORTS`, or ``None`` for Claude
-            Code's default. ``"ultracode"`` turns on Claude Code's parallel
-            agents for the call.
+            Code's default.
         fast: ``True`` asks Claude Code for fast mode, already checked
             against :data:`cli_catalog.CLI_FAST`.
 
@@ -477,6 +482,7 @@ def run_claude(
             argv += ["--input-format", "stream-json"]
             stdin = json.dumps(_claude_user_message(cache_prefix, prompt[len(cache_prefix) :])) + "\n"
         env = dict(isolation.env)
+        env["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
         if not think:
             # Claude Code thinks by default, even on Haiku: a one-line answer
             # then took 2,700-5,500 output tokens and 25-48 s, against about
