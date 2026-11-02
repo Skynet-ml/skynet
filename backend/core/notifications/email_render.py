@@ -2,8 +2,8 @@
 
 Every email shares the same skeleton: a centered logo, a status label,
 a one-line headline saying what happened, an optional row of facts (score,
-change vs baseline, spend, duration), exactly one button, and a footer saying
-why the recipient got the email. Each email also gets a plain-text twin.
+change vs baseline, spend, duration), exactly one button, and, for notifications, a small notification-settings
+link. Each email also gets a plain-text twin.
 
 The HTML is built for real mail clients rather than browsers: table layout,
 inline styles, a 600px card, and the app's dark colors only. The HTML asks
@@ -180,7 +180,6 @@ class EmailContent:
         locale: Recipient locale tag; drives ``lang``, direction and fonts.
         subject: Mail subject line (also the document ``<title>``).
         headline: One line saying what happened.
-        footer: Why the recipient got this email.
         status: Optional ``(label, tone)`` status line above the headline.
         detail: Optional supporting sentence under the headline.
         facts: Ordered ``(label, value)`` pairs for the fact row (0-4).
@@ -195,7 +194,6 @@ class EmailContent:
     locale: str | None
     subject: str
     headline: str
-    footer: str
     status: tuple[str, Tone] | None = None
     detail: str | None = None
     facts: tuple[tuple[str, str], ...] = ()
@@ -584,12 +582,18 @@ def render_email_html(content: EmailContent) -> str:
         _code_rows(content.code, content.note, font, start) if content.code else _facts_row(content.facts, font, rtl)
     )
     button_row = _button_row(*content.button, font) if content.button else ""
-    settings_link = ""
+    settings_row = ""
     if content.settings:
         settings_label, settings_url = content.settings
-        settings_link = (
-            f'<br><a class="sk-muted" href="{esc(settings_url, quote=True)}" target="_blank" '
-            f'style="color:{COLORS["muted"]};text-decoration:underline;">{esc(settings_label)}</a>'
+        settings_row = (
+            f'<tr><td style="padding-top:40px;">'
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="sk-rule" '
+            f'style="width:100%;border-top:1px solid {COLORS["rule"]};"><tr>'
+            f'<td class="sk-muted" style="padding-top:16px;font-family:{font};font-size:12px;line-height:18px;'
+            f'color:{COLORS["muted"]};text-align:{start};">'
+            f'<a class="sk-muted" href="{esc(settings_url, quote=True)}" target="_blank" '
+            f'style="color:{COLORS["muted"]};text-decoration:underline;">{esc(settings_label)}</a></td>'
+            "</tr></table></td></tr>"
         )
     home = esc(FRONTEND_URL, quote=True)
 
@@ -649,13 +653,7 @@ def render_email_html(content: EmailContent) -> str:
         f'<h1 class="sk-ink sk-h1" style="margin:0;font-family:{_DISPLAY_LEAD}{font};'
         f"font-size:22px;line-height:30px;font-weight:600;{headline_tracking}color:{COLORS['ink']};"
         f'text-align:{start};">{_bidi_html(content.headline)}</h1></td></tr>'
-        f"{detail_row}{body_rows}{button_row}"
-        f'<tr><td style="padding-top:40px;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="sk-rule" '
-        f'style="width:100%;border-top:1px solid {COLORS["rule"]};"><tr>'
-        f'<td class="sk-muted" style="padding-top:16px;font-family:{font};font-size:12px;line-height:18px;'
-        f'color:{COLORS["muted"]};text-align:{start};">{esc(content.footer)}{settings_link}</td>'
-        "</tr></table></td></tr>"
+        f"{detail_row}{body_rows}{button_row}{settings_row}"
         "</table></td></tr></table>"
         "<!--[if mso]></td></tr></table><![endif]-->"
         "</td></tr></table></div></div></div></body></html>"
@@ -688,10 +686,9 @@ def render_email_text(content: EmailContent) -> str:
     if content.button:
         label, url = content.button
         lines += ["", f"{label}: {url}"]
-    lines += ["", "--", content.footer]
     if content.settings:
         label, url = content.settings
-        lines.append(f"{label}: {url}")
+        lines += ["", "--", f"{label}: {url}"]
     body = "\n".join(lines) + "\n"
     # Isolates only matter when RTL text surrounds the numbers; in LTR bodies
     # they are noise that a few plain-text clients draw as boxes.
@@ -703,7 +700,6 @@ def render_notification_email(
     title: str,
     facts: Mapping[str, FactValue] | None,
     link: str,
-    reason: str | None = None,
     *,
     detail: str | None = None,
     settings_url: str | None = None,
@@ -720,8 +716,6 @@ def render_notification_email(
             event shows, and that are not ``None``, are rendered.
         link: Button target: an absolute URL or an app path such as
             ``/optimizations/<id>`` (resolved against ``FRONTEND_URL``).
-        reason: Footer line saying why this email was sent; ``None`` uses the
-            event's default ("You get emails when a run finishes.").
         detail: Optional sentence under the headline (an error summary, the
             question a paused run asks, who shared the run).
         settings_url: Notification-settings link; ``None`` uses the app's
@@ -741,7 +735,6 @@ def render_notification_email(
         locale=EMAIL_LOCALE,
         subject=_strip_isolates(headline),
         headline=headline,
-        footer=reason or t_locale(EMAIL_LOCALE, f"{prefix}.reason"),
         status=(t_locale(EMAIL_LOCALE, f"{prefix}.status"), _EVENT_TONES[event_type]),
         detail=detail,
         facts=build_facts(facts, EMAIL_LOCALE, _EVENT_FACTS[event_type]),
@@ -786,10 +779,11 @@ def render_account_email(kind: str, code: str, *, minutes: int | None = None) ->
         subject=subject,
         headline=subject,
         detail=t_locale(EMAIL_LOCALE, "email.account.enter_code"),
-        footer=ignore,
         status=(t_locale(EMAIL_LOCALE, "email.account.status"), "neutral"),
         code=code,
-        note=expires,
+        # The ignore line is a safety instruction, so it stays in the body
+        # text rather than in small print.
+        note=f"{expires} {ignore}",
         preheader=f"{intro} {expires}",
         text_body=f"{intro} {expires}\n\n{ignore}\n",
     )

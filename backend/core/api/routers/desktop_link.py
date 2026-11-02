@@ -134,7 +134,7 @@ class DesktopBalance(BaseModel):
     low_balance: bool
 
 
-# One row of Settings > Linked Macs.
+# One row of the linked Macs list in Settings > Security.
 class DesktopLinkInfo(BaseModel):
     link_id: str
     device_name: str
@@ -292,9 +292,8 @@ def _revoke_for_reuse(session: Session, link: DesktopLinkModel, now: datetime) -
     raise DomainError("desktop.link_revoked", status=401)
 
 
-# The security tab of the settings modal, the closest page to Linked Macs.
+# Settings > Security lists the linked Macs and removes them.
 _SECURITY_SETTINGS_PATH = "/?settings=security"
-_NOTICE_FOOTER = "Skynet sends this email each time a Mac links to or leaves your account. You cannot turn it off."
 
 
 class LinkNotice(NamedTuple):
@@ -342,7 +341,6 @@ def _notice_html(subject: str, detail: str, tone: Literal["warn", "bad"], button
             locale="en",
             subject=subject,
             headline=subject,
-            footer=_NOTICE_FOOTER,
             status=("Security", tone),
             detail=detail,
             button=button,
@@ -360,7 +358,7 @@ def _link_created_notice(link: DesktopLinkModel) -> LinkNotice:
         The ``(to, subject, body, html)`` of the notice.
     """
     linked = f'The Mac "{link.device_name}" is now linked to your Skynet account.'
-    action = "If you did not link this Mac, open Settings > Linked Macs on the Skynet website and remove it."
+    action = "If you did not link this Mac, open Settings > Security on the Skynet website and remove it."
     subject = "A Mac was linked to your Skynet account"
     button = ("Open Settings", absolute_url(_SECURITY_SETTINGS_PATH))
     html_body = _notice_html(subject, f"{linked} {action}", "warn", button)

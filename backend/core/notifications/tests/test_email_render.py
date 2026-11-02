@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import re
+from html import escape as esc
 
 import pytest
 
@@ -20,6 +21,7 @@ from ..email_render import (
     build_facts,
     render_account_email,
     render_email_html,
+    render_email_text,
     render_notification_email,
 )
 
@@ -38,7 +40,6 @@ FINISHED_EN_TEXT = (
     "Open optimization: https://app.example/optimizations/abc\n"
     "\n"
     "--\n"
-    "You get emails when an optimization finishes.\n"
     "Notification settings: https://app.example/?settings=notifications\n"
 )
 
@@ -60,7 +61,7 @@ def _fact_cells(html: str) -> list[str]:
 
 @pytest.mark.parametrize("event_type", EVENT_TYPES)
 def test_every_event_renders_html_and_text(event_type: str) -> None:
-    """Each event type renders a headline, one button, a reason and settings link in HTML and text.
+    """Each event type renders a headline, one button and a settings link, with no reason line.
 
     Args:
         event_type: Notification event under test.
@@ -75,7 +76,7 @@ def test_every_event_renders_html_and_text(event_type: str) -> None:
     assert html.startswith("<!doctype html>")
     assert html.count('class="sk-btn-a"') == 1
     assert button in html
-    assert reason in html
+    assert reason not in html
     assert settings in html
     assert "https://app.example/optimizations/abc" in html
     assert html.count('<meta name="color-scheme" content="dark">') == 1
@@ -85,7 +86,7 @@ def test_every_event_renders_html_and_text(event_type: str) -> None:
     assert "Heebo" not in html
     assert text.startswith(f"{APP_NAME.upper()}\n")
     assert f"{button}: https://app.example/optimizations/abc" in text
-    assert reason in text
+    assert reason not in text
     assert settings in text
     assert "<" not in text
 
@@ -173,7 +174,7 @@ def test_button_is_centered() -> None:
 
 def test_rtl_content_is_mirrored() -> None:
     """Content built with an RTL locale still sets RTL direction and right alignment."""
-    html = render_email_html(EmailContent(locale="he", subject="S", headline="H", footer="F"))
+    html = render_email_html(EmailContent(locale="he", subject="S", headline="H"))
 
     assert '<html lang="he" dir="rtl"' in html
     assert '<body class="body sk-bg" dir="rtl"' in html
@@ -245,13 +246,12 @@ def test_unknown_event_type_raises() -> None:
         render_notification_email("nope", "Run", None, "/x")
 
 
-def test_custom_reason_detail_and_absolute_link() -> None:
-    """A caller-supplied reason, detail and absolute link are used as given."""
+def test_custom_detail_and_absolute_link() -> None:
+    """A caller-supplied detail and absolute link are used as given."""
     _, html, text = render_notification_email(
-        "failed", "Run", None, "https://elsewhere.example/r/1", "Custom reason.", detail="Out of memory."
+        "failed", "Run", None, "https://elsewhere.example/r/1", detail="Out of memory."
     )
 
-    assert "Custom reason." in html
     assert "Out of memory." in text
     assert "https://elsewhere.example/r/1" in html
 
@@ -280,7 +280,10 @@ def test_account_emails_keep_their_content(kind: str) -> None:
     assert "482913" in text
     assert 'class="sk-btn-a"' not in html
     assert t_locale(locale, "email.settings_link") not in html
-    assert t_locale(locale, f"email.account.{kind}.ignore") in text
+    ignore = t_locale(locale, f"email.account.{kind}.ignore")
+    assert ignore in text
+    assert html.count(esc(ignore)) == 1
+    assert 'class="sk-rule"' not in html
 
 
 def test_account_email_english_text_matches_the_original_wording() -> None:
@@ -304,11 +307,13 @@ def test_account_email_subjects_name_the_app() -> None:
 
 def test_render_email_html_without_optional_parts() -> None:
     """A bare content object still renders a complete document."""
-    html = render_email_html(EmailContent(locale="en", subject="S", headline="H", footer="F"))
+    html = render_email_html(EmailContent(locale="en", subject="S", headline="H"))
+    text = render_email_text(EmailContent(locale="en", subject="S", headline="H"))
 
     assert "<h1" in html
-    assert "F</td>" in html
     assert 'class="sk-btn-a"' not in html
+    assert 'class="sk-rule"' not in html
+    assert "--" not in text
 
 
 def test_frontend_url_falls_back_to_port_3000(monkeypatch: pytest.MonkeyPatch) -> None:

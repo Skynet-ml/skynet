@@ -700,12 +700,13 @@ def test_new_link_sends_a_notice(harness: Any, mailbox: Mailbox) -> None:
     assert "linked" in subject.lower()
     assert body == (
         'The Mac "Alice\'s MacBook Pro" is now linked to your Skynet account.\n\n'
-        "If you did not link this Mac, open Settings > Linked Macs on the Skynet website and remove it."
+        "If you did not link this Mac, open Settings > Security on the Skynet website and remove it."
     )
     assert "skyl_" not in body
     assert html_body.startswith("<!doctype html>")
     assert "Alice&#x27;s MacBook Pro" in html_body
-    assert "Settings &gt; Linked Macs" in html_body
+    assert "Settings &gt; Security" in html_body
+    assert "Skynet sends this email" not in html_body
     assert html_body.count('class="sk-btn-a"') == 1
     assert "/?settings=security" in html_body
     assert "skyl_" not in html_body
