@@ -2,6 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
+import { useSession } from "next-auth/react";
+import {
+  SPLASH_HOLD_MAX_MS,
+  endSplash,
+  setupCoversPath,
+  splashExit,
+  useExperienceOptional,
+} from "@/features/experience";
 import { AnimatedWordmark } from "@/shared/ui/animated-wordmark";
 import { EvolutionMorph } from "@/shared/ui/evolution-morph";
 
@@ -21,29 +29,65 @@ const EASE = "cubic-bezier(0.16, 1, 0.3, 1)";
  * the human. The content fades before the backdrop so the page's own title
  * never shows through next to the splash letters. Reduced motion shows the
  * still human and letters and skips the hold.
+ *
+ * On a first login the splash is also the setup's entrance: once the figure
+ * lands and a setup waits, it hands the screen over with no fade, and the
+ * setup goes on from the same frame.
  */
 export function SplashScreen() {
   const pathname = usePathname();
   // An agent's consent page is a single focused decision; the brand splash only delays it.
   const skip = pathname === "/mcp/authorize";
-  const [phase, setPhase] = useState<"active" | "fading" | "revealing" | "done">(
+  const [phase, setPhase] = useState<"active" | "landed" | "fading" | "revealing" | "done">(
     skip ? "done" : "active",
   );
+  const [holdExpired, setHoldExpired] = useState(false);
+  const { status } = useSession();
+  const experience = useExperienceOptional();
+  const exit = splashExit({
+    session: status,
+    loaded: !!experience?.loaded,
+    setupShows: !!experience?.intakeOpen && setupCoversPath(pathname),
+    holdExpired,
+  });
 
   useEffect(() => {
-    if (skip) return;
+    if (skip) {
+      endSplash("gone");
+      return;
+    }
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const fadeDelay = reduceMotion ? 0 : MORPH_MS;
-    const revealDelay = reduceMotion ? 0 : MORPH_MS + CONTENT_FADE_MS;
-    const doneDelay = reduceMotion ? 0 : MORPH_MS + CONTENT_FADE_MS + BACKDROP_FADE_MS;
-    const timers = [
-      setTimeout(() => setPhase("fading"), fadeDelay),
-      setTimeout(() => setPhase("revealing"), revealDelay),
-      setTimeout(() => setPhase("done"), doneDelay),
-    ];
-
-    return () => timers.forEach(clearTimeout);
+    const timer = setTimeout(() => setPhase("landed"), reduceMotion ? 0 : MORPH_MS);
+    return () => clearTimeout(timer);
   }, [skip]);
+
+  useEffect(() => {
+    if (phase !== "landed") return;
+    if (exit === "handoff") {
+      endSplash("handoff");
+      setPhase("done");
+      return;
+    }
+    if (exit === "hold") {
+      const timer = setTimeout(() => setHoldExpired(true), SPLASH_HOLD_MAX_MS);
+      return () => clearTimeout(timer);
+    }
+    setPhase("fading");
+  }, [phase, exit]);
+
+  useEffect(() => {
+    if (phase !== "fading" && phase !== "revealing") return;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const next = phase === "fading" ? "revealing" : "done";
+    const timer = setTimeout(
+      () => {
+        if (next === "done") endSplash("gone");
+        setPhase(next);
+      },
+      reduceMotion ? 0 : phase === "fading" ? CONTENT_FADE_MS : BACKDROP_FADE_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [phase]);
 
   if (phase === "done") return null;
 
@@ -68,7 +112,7 @@ export function SplashScreen() {
       <div
         className="relative flex"
         style={
-          phase === "active"
+          phase === "active" || phase === "landed"
             ? undefined
             : { opacity: 0, transition: `opacity ${CONTENT_FADE_MS}ms ${EASE}` }
         }

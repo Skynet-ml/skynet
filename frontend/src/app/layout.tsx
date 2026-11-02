@@ -247,8 +247,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
                     <ThemeProvider>
                       <TooltipProvider>
                         <AppSkeletonTheme>
-                          <SplashScreen />
                           <ExperienceProvider>
+                            {/* Inside the provider: on a first login it hands off to the setup. */}
+                            <SplashScreen />
                             <SettingsModalProvider>
                               <AppShell>{children}</AppShell>
                               <SettingsModal />
