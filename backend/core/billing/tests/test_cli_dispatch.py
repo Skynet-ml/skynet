@@ -267,6 +267,16 @@ def test_agent_steps_share_one_empty_working_directory() -> None:
     assert not any(first.iterdir())
 
 
+def test_deleted_step_directory_is_made_again() -> None:
+    """Give an existing empty directory after something deletes the cached one, so the CLI can start."""
+    first = cli_dispatch._step_cwd()
+    first.rmdir()
+    again = cli_dispatch._step_cwd()
+    assert again.is_dir()
+    assert not any(again.iterdir())
+    assert cli_dispatch._step_cwd() == again
+
+
 def test_agent_step_marks_its_system_turn_for_the_cache(tmp_path: Path) -> None:
     """Mark the rendered system turn, which agent steps repeat, as claude's cache prefix."""
     fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))

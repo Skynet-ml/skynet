@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import atexit
 import contextlib
-import functools
 import json
 import random
 import re
@@ -170,7 +169,10 @@ def _list_prices(model: str) -> tuple[Decimal, Decimal] | None:
     return prices
 
 
-@functools.cache
+_step_cwd_lock = threading.Lock()
+_step_cwd_path: Path | None = None
+
+
 def _step_cwd() -> Path:
     """Return one private, empty directory that every agent step call of this process runs in.
 
@@ -179,11 +181,17 @@ def _step_cwd() -> Path:
     from the start and the prompt cache never matched.
 
     Returns:
-        The directory, removed when the process exits.
+        The directory, removed when the process exits. A new one replaces it
+        when it was deleted, because a missing working directory makes the CLI
+        start fail as "not installed" until a restart.
     """
-    path = tempfile.mkdtemp(prefix="skynet-cli-")
-    atexit.register(shutil.rmtree, path, ignore_errors=True)
-    return Path(path)
+    global _step_cwd_path
+    with _step_cwd_lock:
+        if _step_cwd_path is None or not _step_cwd_path.is_dir():
+            path = tempfile.mkdtemp(prefix="skynet-cli-")
+            atexit.register(shutil.rmtree, path, ignore_errors=True)
+            _step_cwd_path = Path(path)
+        return _step_cwd_path
 
 
 def _text(content: Any) -> str:
