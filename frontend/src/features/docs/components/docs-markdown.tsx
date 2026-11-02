@@ -16,6 +16,7 @@ import {
   mcpClientsCheckedLine,
   mcpText,
 } from "@/shared/lib/mcp-clients";
+import { serviceUrls } from "@/shared/lib/site-config";
 
 /** The text inside rendered Markdown children. */
 function textOf(node: React.ReactNode): string {
@@ -181,7 +182,7 @@ export function DocsMarkdown({
               panels={MCP_CLIENTS.map((client) => (
                 <DocsMarkdown
                   key={client.id}
-                  source={mcpClientMarkdown(client, locale)}
+                  source={mcpClientMarkdown(client, locale, serviceUrls().mcp)}
                   locale={locale}
                   chrome={chrome}
                 />

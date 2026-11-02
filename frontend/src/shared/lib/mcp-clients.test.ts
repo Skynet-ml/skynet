@@ -74,3 +74,12 @@ test("the server URL in every locale ends where the link should end", () => {
     }
   }
 });
+
+test("the client steps can name another MCP server", () => {
+  const staging = "https://mcp.staging.skynetml.com/mcp";
+  const md = mcpClientsMarkdown("en", staging);
+  assert.ok(!md.includes(MCP_SERVER_URL) && !md.includes(encodeURIComponent(MCP_SERVER_URL)));
+  assert.ok(md.includes(staging));
+  assert.ok(md.includes(cursorInstallUrl(staging)) && md.includes(vscodeInstallUrl(staging)));
+  assert.equal(mcpClientsMarkdown("he", MCP_SERVER_URL), mcpClientsMarkdown("he"));
+});
