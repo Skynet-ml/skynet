@@ -30,7 +30,7 @@ interface EmptyStateProps {
     label: string;
     onClick?: () => void;
     href?: string;
-    /** Optional leading icon for the action (used by the "list" CTA). */
+    /** Optional leading icon for the action. */
     icon?: Icon;
     /** Present simple recovery actions as the shared icon-and-tooltip control. */
     iconOnly?: boolean;
@@ -101,7 +101,6 @@ export function EmptyState({
             variant="outline"
             size="sm"
             onClick={action.onClick}
-            className="mt-2"
             {...(action.href ? { asChild: true } : {})}
           >
             {action.href ? (
@@ -152,7 +151,7 @@ export function EmptyState({
       >
         <div
           className={cn(
-            isCompact && description && "space-y-1.5",
+            description && (isCompact ? "space-y-1.5" : "space-y-1"),
             action?.iconOnly && "min-w-0 flex-1",
           )}
         >
@@ -191,10 +190,19 @@ export function EmptyState({
           variant="outline"
           size="sm"
           onClick={action.onClick}
-          className="mt-2"
           {...(action.href ? { asChild: true } : {})}
         >
-          {action.href ? <Link href={action.href}>{action.label}</Link> : action.label}
+          {action.href ? (
+            <Link href={action.href}>
+              {ActionIcon && <ActionIcon className="size-3.5" aria-hidden="true" />}
+              {action.label}
+            </Link>
+          ) : (
+            <>
+              {ActionIcon && <ActionIcon className="size-3.5" aria-hidden="true" />}
+              {action.label}
+            </>
+          )}
         </Button>
       )}
 
