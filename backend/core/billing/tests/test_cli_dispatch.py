@@ -259,6 +259,29 @@ def test_schema_request_reaches_the_cli(tmp_path: Path) -> None:
     assert json.loads(call["argv"][call["argv"].index("--json-schema") + 1]) == schema
 
 
+def test_turn_effort_reaches_the_cli(tmp_path: Path) -> None:
+    """Run a turn at the effort its request carries, and ignore a value that is no level."""
+    fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))
+    dispatcher = CliDispatcher(None, "claude", MODEL, "agent", local_settings(tmp_path))
+    dispatcher.dispatch("/chat/completions", {**REQUEST, cli_dispatch.CLI_EFFORT_KEY: "high"})
+    dispatcher.dispatch("/chat/completions", {**REQUEST, cli_dispatch.CLI_EFFORT_KEY: {"effort": "high"}})
+    dispatcher.dispatch("/chat/completions", {**REQUEST, "reasoning_effort": "low"})
+    first, second, third = calls(tmp_path, "claude")
+    assert first["argv"][first["argv"].index("--effort") + 1] == "high"
+    assert "--effort" not in second["argv"]
+    assert "--effort" not in third["argv"]
+
+
+def test_side_call_ignores_the_turn_effort(tmp_path: Path) -> None:
+    """Keep a thinking label at no effort, because it runs without thinking."""
+    fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))
+    CliDispatcher(None, "claude", MODEL, cli_dispatch.THINKING_LABEL_ROLE, local_settings(tmp_path)).dispatch(
+        "/chat/completions", {**REQUEST, cli_dispatch.CLI_EFFORT_KEY: "max"}
+    )
+    [call] = calls(tmp_path, "claude")
+    assert "--effort" not in call["argv"]
+
+
 def test_agent_steps_share_one_empty_working_directory() -> None:
     """Run every step in the same empty directory, because the CLI puts the path ahead of the prompt."""
     first = cli_dispatch._step_cwd()

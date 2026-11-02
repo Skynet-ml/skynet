@@ -174,8 +174,16 @@ export function subscriptionCatalogModels(
 }
 
 /**
+ * The effort levels both CLIs take (`claude --effort`, a Codex turn's
+ * `effort`); the backend drops any other level. Neither CLI takes "none" or
+ * "minimal", which the catalog lists for some OpenAI models.
+ */
+export const CLI_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+
+/**
  * The composer menu's list for an agent role that runs on `cli`: the CLI's
- * models as subscription ids, so the pick is the id the request sends.
+ * models as subscription ids, so the pick is the id the request sends. Every
+ * row takes the CLI's effort ladder, even one the catalog does not know.
  */
 export function subscriptionMenuModels(
   cli: CliStatus | undefined,
@@ -187,6 +195,12 @@ export function subscriptionMenuModels(
     value: subscriptionModelId(cli.id, model.value),
     // A catalog hit may name a BYOK provider; this row runs on the CLI.
     byok_provider: null,
+    supports_thinking: true,
+    reasoning_efforts: [...CLI_EFFORTS],
+    // An unpicked turn sends no effort, so the CLI's own default runs and
+    // "Default" names no level.
+    reasoning_default_enabled: true,
+    default_reasoning_effort: null,
   }));
 }
 

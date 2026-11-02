@@ -17,7 +17,7 @@ import httpx
 import litellm
 
 from ..api.model_catalog import default_effort_for
-from ..billing.cli_dispatch import local_subscription_route
+from ..billing.cli_dispatch import CLI_EFFORT_KEY, local_subscription_route
 from ..billing.model_gateway import ROUTE_KEY, raise_gateway_stop
 from ..billing.operation_pricing import UnpricedOperationError
 from ..billing.pricing import ModelUsage
@@ -148,7 +148,10 @@ def apply_model_reasoning_config(config: ModelConfig) -> ModelConfig:
     if is_native_minimax:
         model_extra["extra_body"] = {"reasoning_split": True}
     elif _is_openai_reasoning_model(config.name):
-        model_extra["reasoning_effort"] = "medium"
+        # A CLI route forwards its effort to the CLI, which has its own
+        # default, so only the user's pick may reach it.
+        if config.token_source != "subscription":
+            model_extra["reasoning_effort"] = "medium"
         floor = _OPENAI_REASONING_MAX_TOKENS
         if temperature is None:
             temperature = 1.0
@@ -537,6 +540,9 @@ def lm_call_count(language_model: object) -> int | None:
 def _apply_subscription_route(lm_kwargs: dict[str, object], config: ModelConfig, role: str) -> None:
     """Point an API-side subscription model at the local CLI endpoint.
 
+    The effort the user picked goes in :data:`CLI_EFFORT_KEY`, so the CLI
+    runs the turn at that effort. With no pick the CLI runs its own default.
+
     Args:
         lm_kwargs: The ``dspy.LM`` kwargs assembled so far, mutated in place.
         config: A ``token_source == "subscription"`` model config.
@@ -556,6 +562,10 @@ def _apply_subscription_route(lm_kwargs: dict[str, object], config: ModelConfig,
     lm_kwargs["base_url"] = route["url"]
     lm_kwargs["api_key"] = route["token"]
     lm_kwargs.pop("api_base", None)
+    effort = lm_kwargs.get("reasoning_effort")
+    if isinstance(effort, str) and effort:
+        body = lm_kwargs.get("extra_body")
+        lm_kwargs["extra_body"] = {**(body if isinstance(body, dict) else {}), CLI_EFFORT_KEY: effort}
 
 
 def build_language_model(config: ModelConfig, *, disable_cache: bool = False) -> dspy.LM:
@@ -615,7 +625,8 @@ def build_language_model(config: ModelConfig, *, disable_cache: bool = False) ->
     # A side call (thinking label, next-message suggestion) turns reasoning
     # off on purpose; a default effort would turn it back on, and the model
     # would think past the side call's short timeout.
-    if not lm_kwargs.get("reasoning_effort") and not reasoning_off:
+    # A CLI route forwards its effort to the CLI, which has its own default.
+    if not lm_kwargs.get("reasoning_effort") and not reasoning_off and config.token_source != "subscription":
         # Auto and the optimizer roles send no effort, which leaves an
         # opt-in thinker (Claude Haiku, the best-value default) not thinking.
         effort = default_effort_for(model_name)

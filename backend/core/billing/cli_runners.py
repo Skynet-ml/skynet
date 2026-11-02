@@ -81,6 +81,9 @@ _CODEX_CONFIG = (
     'features.code_mode.excluded_tool_namespaces=["functions"]',
 )
 _CLAUDE_SETTINGS = json.dumps({"showThinkingSummaries": True})
+# Both CLIs take these levels (``claude --effort``, a Codex turn's ``effort``).
+# Neither takes ``none`` or ``minimal``, and only some Codex models add ``ultra``.
+CLI_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 # ``codex exec`` flags from :data:`cli_isolation.CODEX_ARGS` that ``codex app-server`` rejects.
 _CODEX_EXEC_ONLY_ARGS = frozenset({"--ignore-user-config", "--ignore-rules", "--ephemeral"})
 _TRANSIENT_TEXT = re.compile(
@@ -397,6 +400,7 @@ def run_claude(
     *,
     think: bool = True,
     cache_prefix: str = "",
+    effort: str | None = None,
 ) -> CliCompletion:
     """Answer one prompt with ``claude -p``, streaming its events.
 
@@ -411,6 +415,8 @@ def run_claude(
             A schema call streams no answer text: its answer is the structured value.
         think: ``False`` turns Claude Code's default thinking off.
         cache_prefix: The start of ``prompt`` that later calls repeat, or ``""``.
+        effort: The turn's effort level, or ``None`` for Claude Code's default.
+            A level outside :data:`CLI_EFFORTS` is not sent.
 
     Returns:
         The completion.
@@ -454,6 +460,8 @@ def run_claude(
             "--model",
             model_arg,
         ]
+        if effort in CLI_EFFORTS:
+            argv += ["--effort", effort]
         if json_schema is not None:
             argv += ["--json-schema", json.dumps(json_schema)]
         stdin = prompt
@@ -507,6 +515,8 @@ def run_codex(
     settings: Settings,
     cwd: Path,
     on_delta: Callable[[str, str], None] | None = None,
+    *,
+    effort: str | None = None,
 ) -> CliCompletion:
     """Answer one prompt with ``codex app-server`` in a read-only sandbox, with its host tools and agent prompt off.
 
@@ -523,6 +533,8 @@ def run_codex(
         on_delta: Called with ``(kind, text)`` for each piece of reasoning
             summary (``"reasoning"``) or answer (``"content"``) as it arrives, or
             ``None``. A schema call streams no answer text: its answer is the structured value.
+        effort: The turn's effort level, or ``None`` for the model's default.
+            A level outside :data:`CLI_EFFORTS` is not sent.
 
     Returns:
         The completion; ``model_ms`` is the time from ``turn/start`` to ``turn/completed``.
@@ -553,6 +565,8 @@ def run_codex(
         }
         # The server sends reasoning summaries only when the turn asks for them.
         turn: dict[str, Any] = {"input": [{"type": "text", "text": prompt}], "summary": "auto"}
+        if effort in CLI_EFFORTS:
+            turn["effort"] = effort
         if json_schema is not None:
             turn["outputSchema"] = dict(json_schema)
         return _codex_turn(argv, thread, turn, isolation.env, settings, cwd, on_delta, json_schema is None)

@@ -11,16 +11,22 @@ import dspy
 import pytest
 
 from core import config
-from core.api import model_router
+from core.api import model_catalog, model_router
 from core.api.errors import DomainError
+from core.api.model_catalog import CatalogModel, ModelCatalogResponse
 from core.billing import cli_dispatch
 from core.billing.metering import estimate_run_cents
-from core.billing.tests.test_cli_runners import CLAUDE_SUCCESS, fake_cli, local_settings, printing
+from core.billing.tests.test_cli_runners import CLAUDE_SUCCESS, calls, fake_cli, local_settings, printing
 from core.exceptions import ServiceError
 from core.models import ModelConfig
 from core.service_gateway import language_models
-from core.service_gateway.agents import generalist
-from core.service_gateway.language_models import LmUsageTotals, MeteredLM, build_language_model
+from core.service_gateway.agents import code, generalist
+from core.service_gateway.language_models import (
+    LmUsageTotals,
+    MeteredLM,
+    apply_model_reasoning_config,
+    build_language_model,
+)
 from core.service_gateway.optimization.blackbox.workspace_harness import attempt_record
 
 MODEL = "anthropic/claude-haiku-4.5"
@@ -47,6 +53,54 @@ def test_subscription_config_uses_the_local_route() -> None:
     assert str(lm.kwargs["base_url"]).startswith("http://127.0.0.1:")
     route = cli_dispatch.local_subscription_route(MODEL, "claude", "agent")
     assert lm.kwargs["api_key"] == route["token"]
+
+
+@pytest.mark.usefixtures("local")
+def test_subscription_turn_effort_reaches_the_cli(tmp_path: Path) -> None:
+    """Run the CLI at the turn's chosen effort, and send none when the turn has none."""
+    picked = ModelConfig(
+        name=MODEL, token_source="subscription", cli_provider="claude", extra={"reasoning_effort": "xhigh"}
+    )
+    lm = build_language_model(picked, disable_cache=True)
+    assert lm.kwargs["extra_body"][cli_dispatch.CLI_EFFORT_KEY] == "xhigh"
+    assert lm("ping") == ["pong"]
+    [call] = calls(tmp_path, "claude")
+    assert call["argv"][call["argv"].index("--effort") + 1] == "xhigh"
+    unpicked = build_language_model(ModelConfig(name=MODEL, token_source="subscription", cli_provider="claude"))
+    assert cli_dispatch.CLI_EFFORT_KEY not in (unpicked.kwargs.get("extra_body") or {})
+
+
+@pytest.mark.usefixtures("local")
+def test_cli_route_gets_only_the_picked_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Send the CLI no default effort, in chat and in the code agent, so an unpicked turn runs the CLI default."""
+    slug = "openai/gpt-5.6-luna"
+    monkeypatch.setattr(
+        language_models,
+        "local_subscription_route",
+        lambda model, cli, role: {"model": model, "url": "http://127.0.0.1:1/v1", "token": "t"},
+    )
+    row = CatalogModel(
+        value=slug,
+        label=slug,
+        provider="openai",
+        available=True,
+        reasoning_efforts=["low", "medium", "high"],
+        default_reasoning_effort="high",
+        reasoning_default_enabled=True,
+    )
+    monkeypatch.setattr(model_catalog, "_cached_response", ModelCatalogResponse(providers=[], models=[row]))
+
+    def sent(extra: dict[str, object]) -> object:
+        """Return the effort a built Codex CLI route sends for ``extra``."""
+        config = ModelConfig(name=slug, token_source="subscription", cli_provider="codex", extra=extra)
+        lm = build_language_model(apply_model_reasoning_config(config))
+        return (lm.kwargs.get("extra_body") or {}).get(cli_dispatch.CLI_EFFORT_KEY)
+
+    assert sent({}) is None
+    assert sent({"reasoning_effort": "max"}) == "max"
+    for effort in (None, "max"):
+        lm = code._build_agent_lm(f"subscription/codex/{slug}", effort)
+        assert (lm.kwargs.get("extra_body") or {}).get(cli_dispatch.CLI_EFFORT_KEY) == effort
 
 
 @pytest.mark.usefixtures("local")

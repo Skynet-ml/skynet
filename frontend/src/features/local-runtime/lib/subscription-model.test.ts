@@ -59,6 +59,7 @@ const {
   withChosenCli,
   withSupportedHostCli,
 } = await import("./subscription-model.ts");
+const { effortsFor, unpickedEffort } = await import("../../../shared/lib/model-efforts.ts");
 
 type Status = Parameters<typeof subscriptionAgentModel>[2] & object;
 type Cli = Status["clis"][number];
@@ -189,6 +190,29 @@ test("an agent menu lists only the CLI's models, as the ids the request sends", 
     "subscription/codex/openai/gpt-5",
   );
   assert.deepEqual(subscriptionMenuModels(undefined, []), []);
+});
+
+test("every CLI menu row takes the CLI's effort ladder, even one the catalog does not know", () => {
+  const models = subscriptionMenuModels(cli(), [
+    {
+      value: "openrouter/anthropic/claude-sonnet-4.5",
+      label: "Claude Sonnet 4.5",
+      provider: "anthropic",
+      supports_thinking: true,
+      supports_vision: true,
+      available: true,
+      reasoning_efforts: ["none", "low", "medium", "high"],
+      reasoning_default_enabled: true,
+      default_reasoning_effort: "high",
+    },
+  ] as Parameters<typeof subscriptionMenuModels>[1]);
+  assert.equal(models[1]!.value, "subscription/claude/anthropic/claude-opus-4.1");
+  for (const row of models) {
+    assert.equal(row.supports_thinking, true);
+    assert.deepEqual(effortsFor(row.value, models), ["low", "medium", "high", "xhigh", "max"]);
+    // An unpicked turn sends no effort, so "Default" is the CLI's own and names no level.
+    assert.equal(unpickedEffort(row), null);
+  }
 });
 
 test("a subscription model config names its CLI", () => {

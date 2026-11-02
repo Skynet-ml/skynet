@@ -875,7 +875,13 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         model_config = await asyncio.to_thread(
             route_local_byok_model, picked, job_store=job_store, username=current_user.username
         ) or route_agent_model(picked)
-        effort = effective_reasoning_effort(model_config.name, req.reasoning_effort)
+        # A CLI takes its own effort ladder, not the catalog's, and with no
+        # pick it runs its own default.
+        effort = (
+            req.reasoning_effort
+            if model_config.token_source == "subscription"
+            else effective_reasoning_effort(model_config.name, req.reasoning_effort)
+        )
         if effort:
             model_config = model_config.model_copy(update={"extra": {**model_config.extra, "reasoning_effort": effort}})
         usage_sink: list = []

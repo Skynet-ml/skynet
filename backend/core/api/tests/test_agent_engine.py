@@ -32,6 +32,7 @@ from .. import auth as auth_mod
 from ..account_data_service import delete_account, export_account
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
+from ..model_catalog import CatalogModel
 from ..routers import agent_engine as engine_router_mod
 from ..routers import code_agent as code_agent_mod
 from ..routers import generalist_agent as agent_mod
@@ -338,16 +339,20 @@ def test_account_data_exports_and_deletes_the_engine() -> None:
 
 
 @pytest.mark.usefixtures("local")
+@pytest.mark.parametrize("effort", [None, "max"])
 def test_local_chat_turn_with_no_model_runs_on_codex_with_no_remote_call(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    effort: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Run a chat turn that picks no model on the codex engine, over loopback only.
 
     The agent loop itself is replaced by one model call on the turn's model
     config, built the way the agent builds it. Every non-loopback connection
-    is blocked and recorded, so an OpenRouter call fails the test.
+    is blocked and recorded, so an OpenRouter call fails the test. The catalog
+    gives the slug a shorter effort ladder and a default, which the CLI turn
+    must not take: it runs at the picked effort, or at the CLI's own default.
 
     Args:
+        effort: The turn's picked effort, or ``None`` for no pick.
         tmp_path: Holds the fake codex and its call log.
         monkeypatch: Swaps the agent loop and guards sockets.
     """
@@ -358,7 +363,16 @@ def test_local_chat_turn_with_no_model_runs_on_codex_with_no_remote_call(
         session.add(AgentEnginePreferenceModel(username=_USER, engine="codex"))
         session.commit()
     monkeypatch.setattr(agent_mod, "queue_conversation_embed", lambda *a, **k: None)
-    monkeypatch.setattr(model_router, "get_catalog_cached", lambda: SimpleNamespace(models=[]))
+    ladder = CatalogModel(
+        value=_CODEX_SLUG,
+        label="Codex",
+        provider="openai",
+        supports_thinking=True,
+        reasoning_efforts=["low", "medium", "high"],
+        default_reasoning_effort="medium",
+        reasoning_default_enabled=True,
+    )
+    monkeypatch.setattr(model_router, "get_catalog_cached", lambda: SimpleNamespace(models=[ladder]))
     seen: dict[str, Any] = {}
 
     async def one_model_call(**kwargs: Any) -> AsyncIterator[dict[str, Any]]:
@@ -388,7 +402,13 @@ def test_local_chat_turn_with_no_model_runs_on_codex_with_no_remote_call(
     app.include_router(create_generalist_agent_router(job_store=store))
     response = TestClient(app).post(
         "/optimizations/generalist-agent",
-        json={"user_message": "hi", "chat_history": [], "wizard_state": {}, "trust_mode": "ask"},
+        json={
+            "user_message": "hi",
+            "chat_history": [],
+            "wizard_state": {},
+            "trust_mode": "ask",
+            "reasoning_effort": effort,
+        },
         headers={"Authorization": f"Bearer {_session_token(_USER)}"},
     )
     assert response.status_code == 200, response.text
@@ -403,6 +423,8 @@ def test_local_chat_turn_with_no_model_runs_on_codex_with_no_remote_call(
     assert seen["cost"] == 0.0
     thread = next(message for message in requests(tmp_path) if message.get("method") == "thread/start")
     assert thread["params"]["model"] == CLI_MODELS["codex"][_CODEX_SLUG]
+    turn = next(message for message in requests(tmp_path) if message.get("method") == "turn/start")
+    assert turn["params"].get("effort") == effort
     assert remote == []
 
 
