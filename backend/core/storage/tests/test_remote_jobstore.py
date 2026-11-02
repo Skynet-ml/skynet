@@ -1250,7 +1250,11 @@ def test_recover_orphaned_jobs_stops_a_run_whose_usage_never_settles(
     assert job["status"] == "failed"
     assert job["stop_reason"] == "interrupted"
     assert job["message"] == remote_mod.ORPHANED_RUN_MESSAGE
-    assert job["recovery"] == {"state": "interrupted", "interrupted_budget_generation": 0}
+    assert job["recovery"] == {
+        "state": "interrupted",
+        "interrupted_budget_generation": 0,
+        "cause": WORKER_RESTART_CAUSE,
+    }
     assert "Orphaned run stuck had no usage settlement progress" in caplog.text
 
 
@@ -1314,7 +1318,11 @@ def test_recover_orphaned_jobs_gives_a_legacy_usage_wait_the_full_window(
     assert store.recover_orphaned_jobs() == 1
     job = store.get_job("legacy-wait")
     assert job["status"] == "failed"
-    assert job["recovery"] == {"state": "interrupted", "interrupted_budget_generation": 0}
+    assert job["recovery"] == {
+        "state": "interrupted",
+        "interrupted_budget_generation": 0,
+        "cause": WORKER_RESTART_CAUSE,
+    }
 
 
 def test_manual_resume_after_a_usage_wait_stop_does_not_charge_repeated_work(

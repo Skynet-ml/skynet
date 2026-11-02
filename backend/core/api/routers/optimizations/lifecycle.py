@@ -51,6 +51,7 @@ from .._helpers import (
     is_budget_stop,
     is_interrupted_stop,
     is_pausable,
+    is_worker_restart_stop,
     load_job_for_user,
     require_role_at_least,
 )
@@ -585,10 +586,10 @@ def register_lifecycle_routes(
                 )
 
         # A manual pause/resume or a continuation past the spending limit is
-        # user-driven, and an interrupted stop is the worker's, not the run's:
-        # neither consumes an attempt nor is bounded by the cap. Only other
-        # failed/cancelled resumes count against ``job_max_attempts``.
-        is_paused = status == OptimizationStatus.paused or budget_stop or interrupted
+        # user-driven, and a worker restart is not the run's fault: neither
+        # consumes an attempt nor is bounded by the cap. Other failed/cancelled
+        # resumes, an interrupted crash included, count against ``job_max_attempts``.
+        is_paused = status == OptimizationStatus.paused or budget_stop or is_worker_restart_stop(job_data)
         if not is_paused:
             attempts = int(job_data.get("attempts") or 0)
             if attempts >= settings.job_max_attempts:

@@ -165,7 +165,8 @@ ORPHANED_RUN_RECOVERY_FAILED_MESSAGE = (
 # interrupted budget generation. A manual resume of it waits for that usage, then
 # waives the work the resume repeats, as the automatic requeue does: the work
 # after the earliest checkpoint, or all of that generation when a top-level run
-# with no checkpoint starts again. Such a resume does not use up an attempt.
+# with no checkpoint starts again. Only a stop that a worker restart caused is
+# exempt from the attempt count and cap; a crash stop still counts.
 ORPHANED_USAGE_WAIT = timedelta(minutes=15)
 # Guards each store's in-memory list of runs the orphan sweep ended; test
 # stores skip ``__init__``, so the list is created on first use.
@@ -2570,7 +2571,13 @@ class RemoteDBJobStore:
                     interrupted = usage_wait.get("interrupted_budget_generation")
                     if interrupted is None:
                         interrupted = int(waiting.get("execution_budget_generation") or 0) - 1
-                    ended_recovery = {"state": "interrupted", "interrupted_budget_generation": int(interrupted)}
+                    # The cause decides whether a later resume counts an attempt.
+                    cause = usage_wait.get("cause")
+                    ended_recovery = {
+                        "state": "interrupted",
+                        "interrupted_budget_generation": int(interrupted),
+                        **({"cause": cause} if cause else {}),
+                    }
             if self.update_job_if_status(
                 identifier,
                 ("running", "validating"),
