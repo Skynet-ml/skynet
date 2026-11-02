@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { CircleNotch, MagnifyingGlass, Plus, Tag, WarningCircle } from "@/shared/ui/icons";
+import { MagnifyingGlass, Plus, Tag, WarningCircle } from "@/shared/ui/icons";
 import { toast } from "react-toastify";
 
 import {
@@ -12,8 +12,6 @@ import {
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import { Button } from "@/shared/ui/primitives/button";
-import { Dialog, DialogContent, DialogFooter } from "@/shared/ui/primitives/dialog";
-import { DialogTitleRow } from "@/shared/ui/dialog-title-row";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { Ghost, Skeleton } from "@/shared/ui/skeleton";
 import { ProgressBar } from "@/shared/ui/progress-bar";
@@ -27,6 +25,7 @@ import { SearchField } from "@/shared/ui/search-field";
 import { SelectionBar } from "@/shared/ui/selection-bar";
 import { TAGGER_SESSIONS_CHANGED } from "../hooks/use-tagger";
 import { TaggingSessionCard } from "./TaggingSessionCard";
+import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
 
 /**
  * Let the caller resume a saved labeling session or begin a new one.
@@ -230,34 +229,22 @@ export function TaggingSessionsPanel({ onStartNew }: { onStartNew: () => void })
         onDelete={() => setBulkOpen(true)}
       />
 
-      <Dialog open={bulkOpen} onOpenChange={setBulkOpen}>
-        <DialogContent className="w-[min(28rem,92vw)] max-w-[min(28rem,92vw)] sm:max-w-md">
-          <DialogTitleRow
-            title={msg("tagger.session.bulk_delete_title")}
-            description={
-              <>
-                {formatMsg("tagger.session.bulk_delete_body", { count: selectedIds.size })}{" "}
-                {msg("delete.irreversible")}
-              </>
-            }
-          />
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setBulkOpen(false)} disabled={bulkDeleting}>
-              {msg("datasets.delete.cancel")}
-            </Button>
-            <Button variant="destructive" onClick={confirmBulkDelete} disabled={bulkDeleting}>
-              {bulkDeleting ? (
-                <CircleNotch
-                  className="animate-spin motion-reduce:animate-none"
-                  aria-hidden="true"
-                />
-              ) : (
-                msg("datasets.delete.confirm")
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        open={bulkOpen}
+        onOpenChange={setBulkOpen}
+        variant="danger"
+        title={msg("tagger.session.bulk_delete_title")}
+        description={
+          <>
+            {formatMsg("tagger.session.bulk_delete_body", { count: selectedIds.size })}{" "}
+            {msg("delete.irreversible")}
+          </>
+        }
+        cancelLabel={msg("datasets.delete.cancel")}
+        confirmLabel={msg("datasets.delete.confirm")}
+        onConfirm={confirmBulkDelete}
+        pending={bulkDeleting}
+      />
     </section>
   );
 }

@@ -7,8 +7,6 @@ import { CircleNotch, Copy, Database, PencilSimple, Tag, Trash } from "@/shared/
 import { toast } from "react-toastify";
 import { Badge } from "@/shared/ui/primitives/badge";
 import { Button } from "@/shared/ui/primitives/button";
-import { Dialog, DialogContent, DialogFooter } from "@/shared/ui/primitives/dialog";
-import { DialogTitleRow } from "@/shared/ui/dialog-title-row";
 import { SelectCheckbox } from "@/shared/ui/select-checkbox";
 import { TooltipButton } from "@/shared/ui/tooltip-button";
 import {
@@ -34,6 +32,7 @@ import { formatBytes, formatRelativeTime } from "@/shared/lib/formatters";
 import { cn } from "@/shared/lib/utils";
 import { DatasetRenameDialog } from "./DatasetRenameDialog";
 import { DatasetShareDialog } from "./DatasetShareDialog";
+import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
 
 /**
  * One library dataset rendered as a clickable card: name, row/column
@@ -246,49 +245,38 @@ export function DatasetCard({
         onRenamed={onChanged}
       />
 
-      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
-        <DialogContent className="w-[min(28rem,92vw)] max-w-[min(28rem,92vw)] sm:max-w-md">
-          <DialogTitleRow
-            title={msg("datasets.delete.title")}
-            description={msg("datasets.delete.body")}
-          />
-          {usedCount !== null &&
-            usedCount > 0 &&
-            (() => {
-              // Bold the affected-run count to match how every other delete dialog
-              // emphasizes its key value.
-              const [warnBefore, warnAfter = ""] = msg("datasets.delete.used_warning").split(
-                "{count}",
-              );
-              return (
-                <InlineWarningRow
-                  message={
-                    <>
-                      {warnBefore}
-                      <span className="font-semibold">{usedCount}</span>
-                      {warnAfter}
-                    </>
-                  }
-                />
-              );
-            })()}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteOpen(false)} disabled={deleting}>
-              {msg("datasets.delete.cancel")}
-            </Button>
-            <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
-              {deleting ? (
-                <CircleNotch
-                  className="animate-spin motion-reduce:animate-none"
-                  aria-hidden="true"
-                />
-              ) : (
-                msg("datasets.delete.confirm")
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        variant="danger"
+        title={msg("datasets.delete.title")}
+        description={msg("datasets.delete.body")}
+        cancelLabel={msg("datasets.delete.cancel")}
+        confirmLabel={msg("datasets.delete.confirm")}
+        onConfirm={handleDelete}
+        pending={deleting}
+      >
+        {usedCount !== null &&
+          usedCount > 0 &&
+          (() => {
+            // Bold the affected-run count to match how every other delete dialog
+            // emphasizes its key value.
+            const [warnBefore, warnAfter = ""] = msg("datasets.delete.used_warning").split(
+              "{count}",
+            );
+            return (
+              <InlineWarningRow
+                message={
+                  <>
+                    {warnBefore}
+                    <span className="font-semibold">{usedCount}</span>
+                    {warnAfter}
+                  </>
+                }
+              />
+            );
+          })()}
+      </ConfirmDialog>
     </>
   );
 }

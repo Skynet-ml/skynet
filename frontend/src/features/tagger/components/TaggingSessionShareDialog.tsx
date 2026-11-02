@@ -8,14 +8,7 @@ import { useSession } from "next-auth/react";
 import { CircleNotch, Globe, Lock, User, UserPlus, Users, X } from "@/shared/ui/icons";
 import { toast } from "react-toastify";
 import { Button } from "@/shared/ui/primitives/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/shared/ui/primitives/dialog";
-import { DialogTitleRow } from "@/shared/ui/dialog-title-row";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/shared/ui/primitives/dialog";
 import { Input } from "@/shared/ui/primitives/input";
 import {
   Select,
@@ -50,6 +43,7 @@ import { isLocalMode } from "@/shared/lib/runtime-env";
 import { shareLinkUrl } from "@/shared/lib/share-link";
 import { shareDialogPlan } from "@/shared/lib/share-dialog-plan";
 import { LocalShareNotice } from "@/shared/ui/local-share-notice";
+import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
 
 const ROLE_OPTIONS: MemberRole[] = ["viewer", "editor"];
 
@@ -420,44 +414,24 @@ export function TaggingSessionShareDialog({ sessionId }: { sessionId: string }) 
         </DialogContent>
       </Dialog>
 
-      <Dialog
+      <ConfirmDialog
         open={transferTarget !== null}
         onOpenChange={(next) => {
           if (!next) setTransferTarget(null);
         }}
-      >
-        <DialogContent className="w-[min(28rem,92vw)] max-w-[min(28rem,92vw)] sm:max-w-md">
-          <DialogTitleRow
-            title={msg("share.transfer.confirm_title")}
-            description={
-              <>
-                {transferBodyBefore}
-                <bdi className="font-mono font-medium text-foreground">{transferTarget}</bdi>
-                {transferBodyAfter}
-              </>
-            }
-          />
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setTransferTarget(null)}
-              disabled={transferring}
-            >
-              {msg("share.transfer.cancel")}
-            </Button>
-            <Button onClick={handleTransfer} disabled={transferring}>
-              {transferring ? (
-                <CircleNotch
-                  className="animate-spin motion-reduce:animate-none"
-                  aria-hidden="true"
-                />
-              ) : (
-                msg("share.transfer.confirm_cta")
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        title={msg("share.transfer.confirm_title")}
+        description={
+          <>
+            {transferBodyBefore}
+            <bdi className="font-mono font-medium text-foreground">{transferTarget}</bdi>
+            {transferBodyAfter}
+          </>
+        }
+        cancelLabel={msg("share.transfer.cancel")}
+        confirmLabel={msg("share.transfer.confirm_cta")}
+        onConfirm={handleTransfer}
+        pending={transferring}
+      />
     </>
   );
 }

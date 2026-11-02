@@ -15,7 +15,6 @@ import {
   PushPin,
   Repeat,
   Pause,
-  CircleNotch,
   GridFour,
   CaretLeft,
   Copy,
@@ -35,14 +34,6 @@ import {
 import { rememberLayout, useLayoutHint } from "@/shared/lib/layout-hint";
 import { cn } from "@/shared/lib/utils";
 import { Button } from "@/shared/ui/primitives/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/shared/ui/primitives/dialog";
 import {
   listJobsSidebar,
   listJobsSharedWithMe,
@@ -96,6 +87,7 @@ import {
 } from "./SidebarFolders";
 import { DEFAULT_RUN_VIEW, applyRunView, parseRunView, type RunView } from "../lib/run-view";
 import { ROW_MOTION, rowTransition } from "../lib/row-motion";
+import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
 
 const NAV_ITEMS = perLocale(() =>
   APP_PAGES.filter((page) => page.sidebar).map((page) => ({
@@ -829,46 +821,27 @@ export function Sidebar() {
         </div>
       </div>
 
-      <Dialog
+      <ConfirmDialog
         open={deleteConfirm !== null}
         onOpenChange={(open) => {
           if (!open) setDeleteConfirm(null);
         }}
-      >
-        <DialogContent className="w-[min(28rem,92vw)] max-w-[min(28rem,92vw)] sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>
-              {`${msg("auto.features.sidebar.components.sidebar.3")}${TERMS.optimization}`}
-            </DialogTitle>
-            <DialogDescription>
-              {`${msg("auto.features.sidebar.components.sidebar.4")}${TERMS.optimization}`}{" "}
-              <span className="font-semibold text-foreground break-words" dir="auto">
-                {deleteJobInfo?.name}
-              </span>
-              ? {msg("delete.irreversible")}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setDeleteConfirm(null)}
-              disabled={deleteLoading}
-            >
-              {msg("auto.features.sidebar.components.sidebar.5")}
-            </Button>
-            <Button variant="destructive" onClick={confirmDelete} disabled={deleteLoading}>
-              {deleteLoading ? (
-                <CircleNotch
-                  className="animate-spin motion-reduce:animate-none"
-                  aria-hidden="true"
-                />
-              ) : (
-                msg("auto.features.sidebar.components.sidebar.literal.10")
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        variant="danger"
+        title={`${msg("auto.features.sidebar.components.sidebar.3")}${TERMS.optimization}`}
+        description={
+          <>
+            {`${msg("auto.features.sidebar.components.sidebar.4")}${TERMS.optimization}`}{" "}
+            <span className="font-semibold text-foreground break-words" dir="auto">
+              {deleteJobInfo?.name}
+            </span>
+            ? {msg("delete.irreversible")}
+          </>
+        }
+        cancelLabel={msg("auto.features.sidebar.components.sidebar.5")}
+        confirmLabel={msg("auto.features.sidebar.components.sidebar.literal.10")}
+        onConfirm={confirmDelete}
+        pending={deleteLoading}
+      />
 
       <FolderDialogs
         dialog={folderDialog}

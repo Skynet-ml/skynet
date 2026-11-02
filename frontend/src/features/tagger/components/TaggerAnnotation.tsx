@@ -27,7 +27,6 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "@/shared/ui/primitives/
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -56,6 +55,7 @@ import { userErrorMessage } from "@/shared/lib/user-error";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
 import { Textarea } from "@/shared/ui/primitives/textarea";
+import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
 
 interface Props {
   config: TaggerConfig;
@@ -626,38 +626,26 @@ export function TaggerAnnotation({
         </DialogContent>
       </Dialog>
 
-      <Dialog
+      <ConfirmDialog
         open={!!exportConfirm}
         onOpenChange={(open) => {
           if (!open) setExportConfirm(null);
         }}
-      >
-        <DialogContent className="w-[min(28rem,92vw)] max-w-[min(28rem,92vw)] sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{msg("auto.features.tagger.components.taggerannotation.15")}</DialogTitle>
-            <DialogDescription>
-              {msg("auto.features.tagger.components.taggerannotation.16")}{" "}
-              <span className="font-mono font-medium text-foreground">
-                {data.length - taggedCount}
-              </span>{" "}
-              {msg("auto.features.tagger.components.taggerannotation.17")}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setExportConfirm(null)}>
-              {msg("auto.features.tagger.components.taggerannotation.18")}
-            </Button>
-            <Button
-              onClick={() => {
-                if (exportConfirm) doExport(exportConfirm);
-                setExportConfirm(null);
-              }}
-            >
-              {msg("auto.features.tagger.components.taggerannotation.19")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        title={msg("auto.features.tagger.components.taggerannotation.15")}
+        description={
+          <>
+            {msg("auto.features.tagger.components.taggerannotation.16")}{" "}
+            <span className="font-mono font-medium text-foreground">{data.length - taggedCount}</span>{" "}
+            {msg("auto.features.tagger.components.taggerannotation.17")}
+          </>
+        }
+        cancelLabel={msg("auto.features.tagger.components.taggerannotation.18")}
+        confirmLabel={msg("auto.features.tagger.components.taggerannotation.19")}
+        onConfirm={() => {
+          if (exportConfirm) doExport(exportConfirm);
+          setExportConfirm(null);
+        }}
+      />
 
       <Dialog
         open={nameDialogOpen}

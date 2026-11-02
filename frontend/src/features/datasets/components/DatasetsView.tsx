@@ -3,7 +3,6 @@
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
-  CircleNotch,
   Database,
   MagnifyingGlass,
   PencilSimple,
@@ -14,8 +13,6 @@ import {
 } from "@/shared/ui/icons";
 import { toast } from "react-toastify";
 import { Button } from "@/shared/ui/primitives/button";
-import { Dialog, DialogContent, DialogFooter } from "@/shared/ui/primitives/dialog";
-import { DialogTitleRow } from "@/shared/ui/dialog-title-row";
 import { DataHubTabs } from "@/shared/ui/data-hub-tabs";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { SearchField } from "@/shared/ui/search-field";
@@ -40,6 +37,7 @@ import { DatasetRenameDialog } from "./DatasetRenameDialog";
 import { DatasetShareDialog } from "./DatasetShareDialog";
 import { DATASETS_LAYOUT_KEY, DatasetsSkeleton } from "./DatasetsSkeleton";
 import { rememberLayout } from "@/shared/lib/layout-hint";
+import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
 
 /**
  * Top-level /datasets page: the personal dataset library. Lists owned and
@@ -374,29 +372,17 @@ export function DatasetsView() {
         </>
       )}
 
-      <Dialog open={bulkOpen} onOpenChange={setBulkOpen}>
-        <DialogContent className="w-[min(28rem,92vw)] max-w-[min(28rem,92vw)] sm:max-w-md">
-          <DialogTitleRow
-            title={msg("datasets.delete.selected_title")}
-            description={formatMsg("datasets.delete.selected_body", { count: selectedIds.size })}
-          />
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setBulkOpen(false)} disabled={bulkDeleting}>
-              {msg("datasets.delete.cancel")}
-            </Button>
-            <Button variant="destructive" onClick={confirmBulkDelete} disabled={bulkDeleting}>
-              {bulkDeleting ? (
-                <CircleNotch
-                  className="animate-spin motion-reduce:animate-none"
-                  aria-hidden="true"
-                />
-              ) : (
-                msg("datasets.delete.confirm")
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        open={bulkOpen}
+        onOpenChange={setBulkOpen}
+        variant="danger"
+        title={msg("datasets.delete.selected_title")}
+        description={formatMsg("datasets.delete.selected_body", { count: selectedIds.size })}
+        cancelLabel={msg("datasets.delete.cancel")}
+        confirmLabel={msg("datasets.delete.confirm")}
+        onConfirm={confirmBulkDelete}
+        pending={bulkDeleting}
+      />
     </div>
   );
 }

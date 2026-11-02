@@ -1,15 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { CircleNotch, Trash } from "@/shared/ui/icons";
+import { Trash } from "@/shared/ui/icons";
 import { toast } from "react-toastify";
 import { Button } from "@/shared/ui/primitives/button";
-import { Dialog, DialogContent, DialogFooter } from "@/shared/ui/primitives/dialog";
-import { DialogTitleRow } from "@/shared/ui/dialog-title-row";
 import { deleteJob } from "@/shared/lib/api";
 import { msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import { TERMS } from "@/shared/lib/terms";
+import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
 
 export function DeleteJobDialog({
   optimizationId,
@@ -45,44 +44,31 @@ export function DeleteJobDialog({
       >
         <Trash className="size-4" />
       </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="w-[min(28rem,92vw)] max-w-[min(28rem,92vw)] sm:max-w-md">
-          <DialogTitleRow
-            title={
-              <>
-                {msg("auto.features.optimizations.components.deletejobdialog.2")}
-                {TERMS.optimization}
-              </>
-            }
-            description={
-              <>
-                {msg("auto.features.optimizations.components.deletejobdialog.3")}
-                {TERMS.optimization}{" "}
-                <span className="font-mono font-semibold text-foreground break-all">
-                  {optimizationId}
-                </span>
-                ? {msg("delete.irreversible")}
-              </>
-            }
-          />
-
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)} disabled={loading}>
-              {msg("auto.features.optimizations.components.deletejobdialog.4")}
-            </Button>
-            <Button variant="destructive" onClick={handleDelete} disabled={loading}>
-              {loading ? (
-                <CircleNotch
-                  className="animate-spin motion-reduce:animate-none"
-                  aria-hidden="true"
-                />
-              ) : (
-                msg("auto.features.optimizations.components.deletejobdialog.literal.2")
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        open={open}
+        onOpenChange={setOpen}
+        variant="danger"
+        title={
+          <>
+            {msg("auto.features.optimizations.components.deletejobdialog.2")}
+            {TERMS.optimization}
+          </>
+        }
+        description={
+          <>
+            {msg("auto.features.optimizations.components.deletejobdialog.3")}
+            {TERMS.optimization}{" "}
+            <span className="font-mono font-semibold text-foreground break-all">
+              {optimizationId}
+            </span>
+            ? {msg("delete.irreversible")}
+          </>
+        }
+        cancelLabel={msg("auto.features.optimizations.components.deletejobdialog.4")}
+        confirmLabel={msg("auto.features.optimizations.components.deletejobdialog.literal.2")}
+        onConfirm={handleDelete}
+        pending={loading}
+      />
     </>
   );
 }
