@@ -78,6 +78,22 @@ def test_live_openrouter_prices_win_over_static_table() -> None:
         assert model_token_costs("openrouter/test/cheap") == (2e-6, 8e-6)
 
 
+def test_offline_offered_model_bills_at_its_openrouter_list_price(caplog: pytest.LogCaptureFixture) -> None:
+    """The offline sandbox prices an offered model from the listed rates, not the fallback."""
+    with caplog.at_level(logging.WARNING):
+        assert model_token_costs("z-ai/glm-5.3-flash") == (2.85e-8, 9.23e-8)
+        assert model_token_costs("openrouter/z-ai/glm-5.3-flash") == (2.85e-8, 9.23e-8)
+    assert "No price known" not in caplog.text
+
+
+def test_live_openrouter_prices_win_over_listed_snapshot() -> None:
+    """A fresh listing replaces the stored rates of an offered model."""
+    openrouter_prices.remember(
+        [{"id": "z-ai/glm-5.3-flash", "pricing": {"prompt": "0.000001", "completion": "0.000002"}}]
+    )
+    assert model_token_costs("z-ai/glm-5.3-flash") == (1e-6, 2e-6)
+
+
 def test_cache_and_reasoning_tokens_bill_at_their_own_rates() -> None:
     """Cache reads, cache writes and reasoning tokens use their published rates."""
     openrouter_prices.remember(
