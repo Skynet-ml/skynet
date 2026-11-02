@@ -318,7 +318,11 @@ export function ServeChat({
               setSingleDraft("");
             }}
             onStop={handleStopServe}
-            placeholder={singleInputField}
+            placeholder={
+              runHistory.length === 0
+                ? msg("optimizations.serve.first_placeholder", { field: singleInputField })
+                : singleInputField
+            }
             streaming={serveLoading}
             sendAriaLabel={msg("auto.features.optimizations.components.servechat.literal.2")}
             layout="inline"
