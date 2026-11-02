@@ -48,6 +48,8 @@ from ..errors import DomainError
 from ..rate_limit import RateLimiter, shared_redis_client
 
 logger = logging.getLogger(__name__)
+# Width of ``users.image_url``; a longer picture URL is dropped, not rejected.
+_IMAGE_URL_MAX_LENGTH = 2048
 
 DESKTOP_CLIENT_ID = "skynet-desktop"
 LINK_CODE_TTL = timedelta(seconds=60)
@@ -75,6 +77,7 @@ class LinkAuthorizeRequest(BaseModel):
     code_challenge_method: Literal["S256"] = Field(description="Only S256 is accepted.")
     scope: str = Field(max_length=255, description="Space-separated desktop scopes.")
     device_name: str = Field(min_length=1, max_length=128, description="Mac name shown in Linked Macs.")
+    image: str = Field(default="", description="Profile picture URL of the browser session, if any.")
 
 
 class LinkAuthorizeResponse(BaseModel):
@@ -591,8 +594,14 @@ def create_desktop_link_router(*, job_store) -> APIRouter:
         with Session(job_store.engine) as session:
             # A session JWT outlives an account deletion until it expires. The
             # lock waits for an open deletion, so no code outlives it (R782E-1).
-            if session.get(UserModel, user.username, with_for_update=True) is None:
+            account = session.get(UserModel, user.username, with_for_update=True)
+            if account is None:
                 raise DomainError("auth.invalid_token", status=401)
+            # An account whose last provider sign-in predates the picture column
+            # has no image_url, so the Mac app showed initials (SKY-249). Same
+            # rule as /auth/oauth/provision; anything else is ignored, not rejected.
+            if body.image.startswith("https://") and len(body.image) <= _IMAGE_URL_MAX_LENGTH:
+                account.image_url = body.image
             if _live_link_count(session, user.username, now) >= MAX_LIVE_LINKS:
                 raise DomainError("desktop.too_many_links", status=409, limit=MAX_LIVE_LINKS)
             session.add(

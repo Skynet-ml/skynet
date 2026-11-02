@@ -840,6 +840,8 @@ export interface DesktopLinkAuthorizeRequest {
   code_challenge_method: "S256";
   scope: string;
   device_name: string;
+  /** Session profile picture; hosted keeps it so the Mac app can show it. */
+  image?: string;
 }
 
 /** Approve a Mac link for the signed-in user; returns a 60 s single-use link code. */
