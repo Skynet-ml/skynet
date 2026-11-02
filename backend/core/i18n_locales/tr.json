@@ -393,6 +393,7 @@
     "email.event.shared.reason": "Biri sizinle bir çalıştırma paylaştığında e-posta alırsınız.",
     "email.account.status": "Hesap",
     "email.account.expires": "{minutes} dakika içinde geçerliliğini yitirir.",
+    "email.account.enter_code": "Devam etmek için bu kodu {term.appName} içine girin.",
     "email.account.verification.subject": "{term.appName} e-postanızı onaylayın",
     "email.account.verification.intro": "{term.appName} onay kodunuz: {code}.",
     "email.account.verification.ignore": "Bir {term.appName} hesabı oluşturmadıysanız bu e-postayı yok sayabilirsiniz.",

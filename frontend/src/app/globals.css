@@ -772,17 +772,21 @@ h3 {
 }
 .on-primary
   :is(.text-foreground, .text-primary, [class*="text-primary/"], [class*="text-foreground/"]):not(
-    :is([data-slot="button"], input, textarea, select, [role="menu"]) *,
+    :is([data-slot="button"], [data-slot="number-input"], input, textarea, select, [role="menu"]) *,
     [data-slot="button"]
   ) {
   color: inherit;
 }
 .on-primary
   :is(.text-muted-foreground, [class*="text-muted-foreground/"]):not(
-    :is([data-slot="button"], input, textarea, select, [role="menu"]) *,
+    :is([data-slot="button"], [data-slot="number-input"], input, textarea, select, [role="menu"]) *,
     [data-slot="button"]
   ) {
   color: color-mix(in srgb, var(--primary-foreground) 80%, transparent);
+}
+/* A number field paints its own light fill, so it keeps the normal text color on the solid surface. */
+.on-primary [data-slot="number-input"] {
+  color: var(--foreground);
 }
 /* Opt-in (data-accent) actions keep the solid accent fill inside the outlined settings set. */
 [data-settings-text-buttons] [data-slot="button"][data-accent]:not([data-size^="icon"]) {

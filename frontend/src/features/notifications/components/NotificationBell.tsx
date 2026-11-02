@@ -13,6 +13,7 @@ import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
 import { Bell, Checks, GearSix, Stack, Target, Trash, X, type Icon } from "@/shared/ui/icons";
+import { InlineErrorRow } from "@/shared/ui/inline-error-row";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { TooltipButton } from "@/shared/ui/tooltip-button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/primitives/popover";
@@ -338,16 +339,19 @@ function PanelBody({
         {inbox.status === "loading" ? (
           <SkeletonRows />
         ) : inbox.status === "error" ? (
-          <p className="flex items-center justify-between gap-3 px-4 py-6 text-sm text-muted-foreground">
-            <span>{msg("notifications.load_error")}</span>
-            <button
-              type="button"
-              onClick={inbox.retry}
-              className="text-foreground underline-offset-4 hover:underline cursor-pointer"
-            >
-              {msg("notifications.retry")}
-            </button>
-          </p>
+          <InlineErrorRow
+            className="m-4"
+            message={msg("notifications.load_error")}
+            action={
+              <button
+                type="button"
+                onClick={inbox.retry}
+                className="shrink-0 cursor-pointer font-medium text-foreground underline-offset-4 hover:underline"
+              >
+                {msg("notifications.retry")}
+              </button>
+            }
+          />
         ) : (
           <AnimatePresence mode="wait" initial={false}>
             {inbox.items.length === 0 ? (
