@@ -188,7 +188,7 @@ def test_revoked_link_answers_401(client: TestClient, hosted: FakeHosted) -> Non
 
 
 def test_success_page_uses_the_catalog(client: TestClient, hosted: FakeHosted) -> None:
-    """The success page shows the Mac, the account and a way back to the app.
+    """The success page shows the Mac and the account, opens the app and has no button.
 
     Args:
         client: The test client.
@@ -204,7 +204,8 @@ def test_success_page_uses_the_catalog(client: TestClient, hosted: FakeHosted) -
     for key in ("page_linked_title", "page_linked_lead", "page_device_label", "page_account_label"):
         assert html.escape(t_en(f"hosted_link.{key}")) in page.text
     assert "<dd>dana@example.test</dd>" in page.text
-    assert f'href="skynet://open">{html.escape(t_en("hosted_link.page_open_app"))}</a>' in page.text
+    assert 'class="button"' not in page.text
+    assert html.escape(t_en("hosted_link.page_open_app")) not in page.text
     assert "location.href='skynet://open'" in page.text
 
 

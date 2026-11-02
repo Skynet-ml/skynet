@@ -3,6 +3,7 @@
 //   app:   compile main, preload and renderer into out/
 //   stack: stage the backend, the standalone frontend and a pinned uv binary into stage/
 //   dev:   build app, then rebuild on every save and run Electron (the app reloads itself)
+//   start: build app once, then run Electron
 // electron-builder copies stage/ into Skynet.app/Contents/Resources (see electron-builder.yml).
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -101,9 +102,18 @@ async function dev() {
   for (const file of ["index.html", "onboarding.css"]) {
     fs.watch(path.join(desktopDir, "src/renderer", file), () => copyStatic());
   }
-  const electron = process.platform === "darwin" ? devAppBinary() : path.join(desktopDir, "node_modules/.bin/electron");
-  spawn(electron, ["."], { cwd: desktopDir, stdio: "inherit", env: { ...process.env, SKYNET_DESKTOP_DEV: "1" } });
+  spawn(electronBinary(), ["."], { cwd: desktopDir, stdio: "inherit", env: { ...process.env, SKYNET_DESKTOP_DEV: "1" } });
   console.log("watching src/ (Ctrl+C stops the watcher; quit the app with Cmd+Q)");
+}
+
+/** Build out/ once and run Electron, named Skynet in the Dock and menu bar. */
+async function start() {
+  await buildApp();
+  spawn(electronBinary(), ["."], { cwd: desktopDir, stdio: "inherit" });
+}
+
+function electronBinary() {
+  return process.platform === "darwin" ? devAppBinary() : path.join(desktopDir, "node_modules/.bin/electron");
 }
 
 /**
@@ -218,7 +228,8 @@ const mode = process.argv[2];
 if (mode === "app") await buildApp();
 else if (mode === "stack") stageStack();
 else if (mode === "dev") await dev();
+else if (mode === "start") await start();
 else {
-  console.error("usage: bundle-resources.mjs app|stack|dev");
+  console.error("usage: bundle-resources.mjs app|stack|dev|start");
   process.exit(2);
 }

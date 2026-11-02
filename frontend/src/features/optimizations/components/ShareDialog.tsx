@@ -49,7 +49,7 @@ import { Label } from "@/shared/ui/primitives/label";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { shareLinkUrl } from "@/shared/lib/share-link";
 import { shareDialogPlan } from "@/shared/lib/share-dialog-plan";
-import { LocalShareNotice, LocalVisibilityStatus } from "@/shared/ui/local-share-notice";
+import { LocalVisibilityStatus } from "@/shared/ui/local-share-notice";
 
 const ROLE_OPTIONS: MemberRole[] = ["viewer", "editor"];
 
@@ -307,9 +307,9 @@ export function ShareDialog({
 
             {plan.showLocalNotice ? (
               <>
-                <LocalShareNotice />
+                {/* The Mac app cannot share, linked or not, so it keeps only the Explore row. */}
                 {plan.showExploreVisibility && (
-                  <div className="shrink-0 border-t border-border/40 px-4 py-4 sm:px-6">
+                  <div className="shrink-0 px-4 py-4 sm:px-6">
                     {visibilityRow || (
                       <LocalVisibilityStatus
                         failed={loadFailed}

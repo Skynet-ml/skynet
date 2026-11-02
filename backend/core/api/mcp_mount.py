@@ -246,6 +246,9 @@ def mount_mcp_on_app(app: FastAPI) -> None:
             RouteMap(mcp_type=MCPType.EXCLUDE),
         ],
         mcp_component_fn=_trim_tool_spec,
+        # Tool calls reach the API in process. FastMCP's default host
+        # ("fastapi") fails the local-mode TrustedHostMiddleware with a 400.
+        httpx_client_kwargs={"base_url": "http://127.0.0.1"},
     )
     mcp_app = mcp.http_app(path="/")
     app.mount("/mcp", mcp_app)

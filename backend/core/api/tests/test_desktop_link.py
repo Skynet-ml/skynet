@@ -285,6 +285,41 @@ def test_whoami_returns_the_profile_picture(harness: Any) -> None:
     assert who.json()["image"] == "https://lh3.googleusercontent.com/a/alice"
 
 
+def test_authorize_saves_the_session_picture(harness: Any) -> None:
+    """Approving a link saves the session picture, so whoami returns it (SKY-249)."""
+    client, _, _ = harness
+    response, verifier = _authorize(client, image="https://lh3.googleusercontent.com/a/alice")
+    pair = _exchange(client, response.json()["code"], verifier).json()
+
+    who = client.get("/desktop/v1/whoami", headers=_bearer(pair["access_token"]))
+
+    assert who.json()["image"] == "https://lh3.googleusercontent.com/a/alice"
+
+
+@pytest.mark.parametrize("image", ["http://example.test/a.png", "javascript:alert(1)", "https://x.test/" + "a" * 2048])
+def test_authorize_ignores_an_unsafe_picture(harness: Any, image: str) -> None:
+    """A non-https or too long picture is ignored, and the old picture stays.
+
+    Args:
+        harness: Test client, engine and settings.
+        image: The picture URL the consent page sends.
+    """
+    client, engine, _ = harness
+    with Session(engine) as session:
+        user = session.get(UserModel, "alice@example.test")
+        assert user is not None
+        user.image_url = "https://lh3.googleusercontent.com/a/old"
+        session.commit()
+
+    response, _ = _authorize(client, image=image)
+
+    assert response.status_code == 200
+    with Session(engine) as session:
+        user = session.get(UserModel, "alice@example.test")
+        assert user is not None
+        assert user.image_url == "https://lh3.googleusercontent.com/a/old"
+
+
 def test_database_holds_only_hashes(harness: Any) -> None:
     """No plaintext code or token is stored in any desktop table."""
     client, engine, _ = harness

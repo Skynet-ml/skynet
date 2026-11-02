@@ -5,6 +5,7 @@ import { Play } from "@/shared/ui/icons";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { docsLinkHref } from "@/shared/lib/docs-link";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { CopyButton } from "@/shared/ui/copy-button";
@@ -96,7 +97,7 @@ const COMPONENTS: Components = {
   a: ({ children, href, ...rest }) => (
     <a
       {...rest}
-      href={href}
+      href={href === undefined ? href : docsLinkHref(href)}
       target="_blank"
       rel="noreferrer noopener"
       className="underline underline-offset-2 hover:opacity-80 transition-opacity"

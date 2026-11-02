@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { app, BrowserWindow, clipboard, ipcMain, nativeTheme, screen, shell } from "electron";
-import { APP_SCHEME, appUrlFromArgv, appWindowUrl, parseLinkCallback } from "./app-url";
+import { APP_SCHEME, appUrlFromArgv, appWindowUrl, HOSTED_APP_ORIGINS, hostedAppOrigin, parseLinkCallback, webDocsUrl } from "./app-url";
 import { HostedLinkClient } from "./hosted-link";
 import { isOpenAppUrl, parseTheme, pickTheme, type Theme } from "./theme";
 import { childPath, probeClis, probeDocker, readCliLimits, searchDirs } from "./cli-detect";
@@ -62,6 +62,8 @@ let api: ManagedProcess | null = null;
 let frontend: ManagedProcess | null = null;
 let postgresStarted = false;
 let frontendUrl: string | null = null;
+// The hosted app (docs links) for this build; replaced from the stamp when the stack starts.
+let hostedOrigin: string = HOSTED_APP_ORIGINS.production;
 let sweptOrphans = false;
 let sweptSandboxes = false;
 let hostedLink: HostedLinkClient | null = null;
@@ -261,6 +263,9 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
 
   step("runtime");
   const { backendDir, frontendDir, bundleId } = stageRuntime();
+  const stampFile = path.join(backendDir, "core", "hosted_target.txt");
+  hostedOrigin = hostedAppOrigin(fs.existsSync(stampFile) ? fs.readFileSync(stampFile, "utf8") : null);
+  log(`hosted app ${hostedOrigin}`);
 
   step("postgres");
   postgresStarted = true;
@@ -337,6 +342,7 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
       AUTH_SECRET: secrets.authSecret,
       BACKEND_AUTH_SECRET: secrets.backendAuthSecret,
       AUTH_URL: feOrigin,
+      APP_HOSTED_APP_URL: hostedOrigin,
     }),
     cwd: frontendDir,
     logFile: path.join(logsDir, "frontend.log"),
@@ -505,10 +511,13 @@ function isAllowedUrl(target: string): boolean {
 
 function guardNavigation(event: Electron.Event, url: string): void {
   if (url.startsWith("file://")) return;
+  const docsUrl = frontendUrl === null ? null : webDocsUrl(url, frontendUrl, hostedOrigin);
   const appUrl = frontendUrl === null ? null : appWindowUrl(url, frontendUrl);
-  if (appUrl === url) return;
+  if (appUrl === url && docsUrl === null) return;
   event.preventDefault();
-  if (appUrl !== null) {
+  if (docsUrl !== null) {
+    void shell.openExternal(docsUrl);
+  } else if (appUrl !== null) {
     loadAppUrl(appUrl).catch((err) => log(`app page load failed: ${err instanceof Error ? err.message : String(err)}`));
   } else if (/^https?:\/\//.test(url)) void shell.openExternal(url);
 }
@@ -545,7 +554,9 @@ function createWindow(): void {
   });
   win.once("ready-to-show", () => win?.show());
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//.test(url) && !isAllowedUrl(url)) void shell.openExternal(url);
+    const docsUrl = frontendUrl === null ? null : webDocsUrl(url, frontendUrl, hostedOrigin);
+    if (docsUrl !== null) void shell.openExternal(docsUrl);
+    else if (/^https?:\/\//.test(url) && !isAllowedUrl(url)) void shell.openExternal(url);
     return { action: "deny" };
   });
   win.webContents.on("will-navigate", guardNavigation);

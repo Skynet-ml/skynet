@@ -3,6 +3,7 @@
 import { Coins } from "@/shared/ui/icons";
 import { useLocale } from "@/shared/providers";
 import { useSettingsModal } from "@/features/settings";
+import { useHostedFeaturesAvailable } from "@/shared/hooks/use-hosted-features";
 import { msg } from "@/shared/lib/messages";
 import { formatCentsUsd } from "@/features/billing";
 import type { JobExecutionBudget } from "@/shared/types/execution-budget";
@@ -30,8 +31,19 @@ export function RunCostChip({
 }) {
   const { locale } = useLocale();
   const { openTo } = useSettingsModal();
+  const hostedAvailable = useHostedFeaturesAvailable();
   const cents = runCostCents(details, budget, running);
   if (cents == null) return null;
+
+  // An unlinked Mac app has no wallet tab to open, so the cost is plain text there.
+  if (!onOpen && !hostedAvailable) {
+    return (
+      <span dir="ltr" className="flex items-center gap-1.5 tabular-nums">
+        <Coins className="size-3.5" aria-hidden="true" />
+        {formatCentsUsd(cents, locale)}
+      </span>
+    );
+  }
 
   return (
     <button

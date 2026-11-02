@@ -59,7 +59,8 @@ function announceLinkChange(): void {
   window.dispatchEvent(new Event(HOSTED_LINK_CHANGED_EVENT));
 }
 
-function wasLinked(): boolean {
+/** Whether the Mac app was last known to be linked, from memory or the identity cache. */
+export function wasLinked(): boolean {
   return knownLinked ?? readCache() !== null;
 }
 

@@ -91,13 +91,13 @@ _ACCOUNT_ICON = (
 # web app's CSS: the local API serves it, and the browser may have no frontend.
 _STYLE = """
 :root{color-scheme:light dark;--bg:#fcfaf7;--fg:#1c1612;--card:#fff;--muted:#f3eee8;--muted-fg:#706356;
---border:#e6ded4;--fill:#b4521f;--fill-hover:#8f4318;--danger:#d03b3b}
+--border:#e6ded4;--fill:#b4521f;--danger:#d03b3b}
 @media (prefers-color-scheme:dark){:root{--bg:#221d19;--fg:#f3ede6;--card:#2c2621;--muted:#382f28;
---muted-fg:#a89a8c;--border:#483d34;--fill:#b4521f;--fill-hover:#c9622a;--danger:#e66767}}
+--muted-fg:#a89a8c;--border:#483d34;--fill:#b4521f;--danger:#e66767}}
 *{box-sizing:border-box}
 body{margin:0;min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:1rem;
 background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
-main{width:100%;max-width:32rem;display:flex;flex-direction:column;gap:1.25rem;padding:2rem 1.5rem 1.5rem;
+main{width:100%;max-width:32rem;display:flex;flex-direction:column;gap:1.25rem;padding:2rem 1.5rem;
 background:var(--card);border:1px solid var(--border);border-radius:1rem;box-shadow:0 1px 2px rgb(0 0 0/.05);
 animation:rise .32s cubic-bezier(.2,.8,.2,1)}
 .mark{position:relative;width:56px;height:56px;margin:0 auto}
@@ -115,10 +115,6 @@ dl svg{grid-row:span 2;width:20px;height:20px;fill:none;stroke:var(--muted-fg);s
 stroke-linejoin:round}
 dt{font-size:.8125rem;color:var(--muted-fg)}
 dd{margin:0;font-weight:500;overflow-wrap:anywhere}
-.button{display:flex;align-items:center;justify-content:center;min-height:44px;border-radius:.625rem;
-background:var(--fill);color:#fff;font-weight:600;text-decoration:none;transition:background .16s}
-.button:hover{background:var(--fill-hover)}
-.button:focus-visible{outline:2px solid var(--fill);outline-offset:2px}
 @keyframes rise{from{opacity:0;transform:translateY(6px)}}
 @keyframes pop{from{opacity:0;transform:scale(.4)}}
 @media (prefers-reduced-motion:reduce){main,.badge{animation:none}}
@@ -129,7 +125,7 @@ def _page(title: str, message: str, *, status: int, rows: Sequence[tuple[str, st
     """Render the page the system browser shows after the callback.
 
     A 200 page also opens the Mac app by itself, so the browser asks once
-    whether to open it. Other pages keep only the button.
+    whether to open it. The page has no button (SKY-248).
 
     Args:
         title: Plain English heading.
@@ -156,7 +152,6 @@ def _page(title: str, message: str, *, status: int, rows: Sequence[tuple[str, st
         f'<span class="badge{"" if ok else " error"}">{_CHECK_ICON if ok else _ALERT_ICON}</span></div>'
         f"<h1>{html.escape(title)}</h1><p>{html.escape(message)}</p>"
         f"{f'<dl>{details}</dl>' if details else ''}"
-        f'<a class="button" href="{_APP_URL}">{html.escape(t_en("hosted_link.page_open_app"))}</a>'
         "</main>"
         f'{"<script>setTimeout(function(){location.href=" + repr(_APP_URL) + "},700)</script>" if ok else ""}'
         "</body></html>"

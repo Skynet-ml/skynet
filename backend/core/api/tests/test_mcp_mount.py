@@ -6,11 +6,14 @@ from types import SimpleNamespace
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastmcp import Client, FastMCP
 from fastmcp.server.providers.openapi.routing import MCPType, RouteMap
 from pydantic import BaseModel
 
+from core.api import mcp_mount
 from core.api.mcp_mount import AGENT_TAG, _annotations_for_method, _annotations_for_route, _trim_tool_spec
+from core.config import LOCAL_MODE_LOOPBACK_HOSTS
 
 
 def test_annotations_for_method_reads_are_read_only() -> None:
@@ -124,3 +127,34 @@ async def test_model_supplied_authorization_never_reaches_the_header() -> None:
             raise_on_error=False,
         )
     assert seen == [None]
+
+
+async def test_tool_call_passes_the_local_mode_host_check(monkeypatch) -> None:
+    """A tool call reaches a route behind the local-mode host allowlist.
+
+    FastMCP calls the API in process with its own Host header. The Mac app
+    refused FastMCP's default host with "400 Invalid host header".
+
+    Args:
+        monkeypatch: Records the FastMCP server that the mount builds.
+    """
+    built: list[FastMCP] = []
+    real = FastMCP.from_fastapi
+
+    def record(**kwargs: object) -> FastMCP:
+        server = real(**kwargs)
+        built.append(server)
+        return server
+
+    monkeypatch.setattr(mcp_mount.FastMCP, "from_fastapi", record)
+    app = FastAPI()
+
+    @app.get("/ping", operation_id="ping", tags=[AGENT_TAG])
+    def ping() -> dict[str, str]:
+        return {"ok": "yes"}
+
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(LOCAL_MODE_LOOPBACK_HOSTS))
+    mcp_mount.mount_mcp_on_app(app)
+    async with Client(built[0]) as client:
+        result = await client.call_tool("ping", {})
+    assert result.data == {"ok": "yes"} or result.structured_content == {"ok": "yes"}

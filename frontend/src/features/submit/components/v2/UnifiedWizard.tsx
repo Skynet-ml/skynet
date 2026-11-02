@@ -5,7 +5,7 @@ import { motion } from "framer-motion";
 import { toast } from "react-toastify";
 
 import { useHideAgentPill, useWizardStateOptional } from "@/features/agent-panel";
-import { useBalance } from "@/features/billing";
+import { useAddFundsAction, useBalance } from "@/features/billing";
 import { useSettingsModal } from "@/features/settings";
 import { msg } from "@/shared/lib/messages";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
@@ -147,6 +147,7 @@ function UnifiedWizardFrame() {
     [floorCents, budgetUncapped, maxCostCents, balance],
   );
   const { openTo } = useSettingsModal();
+  const addFunds = useAddFundsAction();
   const inputsOpen = canMoveForward(current, w.stepIssue("inputs"));
   // Until every model's one-call hold has loaded, the floor reads low and a
   // run the account can't fund would pass; a press made meanwhile waits.
@@ -237,7 +238,7 @@ function UnifiedWizardFrame() {
     detail: w.runFailure.detail,
     action:
       failureCause === "balance"
-        ? { label: msg("billing.action.add_funds"), onClick: () => openTo("billing") }
+        ? { label: addFunds.label, onClick: addFunds.run }
         : failureCause === "limit" && limitScreen
           ? { label: msg("submit.run.failure.raise_limit"), onClick: () => goToScreen(limitScreen) }
           : undefined,

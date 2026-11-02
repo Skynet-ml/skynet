@@ -74,6 +74,7 @@ export function DesktopLinkConsent({ query }: { query: string }) {
         code_challenge_method: "S256",
         scope: request.scopes.join(" "),
         device_name: request.deviceName,
+        image: session?.user?.image ?? undefined,
       });
       leave(approvedCallbackUrl(request, code));
     } catch (err) {
