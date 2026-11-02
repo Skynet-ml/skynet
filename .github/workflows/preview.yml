@@ -143,9 +143,21 @@ jobs:
       - uses: crazy-max/ghaction-github-runtime@v4
         if: steps.scope.outputs.skip != 'true' && steps.claim.outputs.full != 'true'
 
-      - name: Build and push the preview images
+      # A PR with the same backend/ tree as the staging backend image runs
+      # that image, so the backend does not build.
+      - name: Check if the staging backend image fits
+        id: backend
+        if: steps.scope.outputs.skip != 'true' && steps.claim.outputs.full != 'true'
+        run: |
+          image=$(infra/terraform/scripts/preview.sh staging-backend "$PR" "$SHA")
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      # The migration runs in this step too, as soon as the backend image is
+      # ready, while the frontend still builds.
+      - name: Build and push the preview images, and migrate
         if: steps.scope.outputs.skip != 'true' && steps.claim.outputs.full != 'true'
         env:
+          BACKEND_IMAGE: ${{ steps.backend.outputs.image }}
           NEXT_PUBLIC_SENTRY_DSN: ${{ vars.NEXT_PUBLIC_SENTRY_DSN }}
           NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE: ${{ vars.NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE }}
         run: infra/terraform/scripts/preview.sh build "$PR" "$SHA"
@@ -160,6 +172,8 @@ jobs:
 
       - name: Deploy the preview
         if: steps.scope.outputs.skip != 'true' && steps.claim.outputs.full != 'true'
+        env:
+          BACKEND_IMAGE: ${{ steps.backend.outputs.image }}
         run: infra/terraform/scripts/preview.sh deploy "$PR" "$SHA"
 
       - name: Wait for the preview to serve this commit
@@ -178,7 +192,7 @@ jobs:
               exit 1
             fi
             echo "Waiting: backend ${backend:0:8}, frontend ${frontend:0:8}"
-            sleep 15
+            sleep 5
           done
           echo "Preview is live: $APP_URL"
 

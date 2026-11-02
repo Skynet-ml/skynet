@@ -58,6 +58,9 @@ resource "aws_cloudwatch_log_group" "preview" {
 
 # One target group per slot and service. A preview service of the slot
 # registers its tasks here; the group stays when the preview is deleted.
+# The health check is faster than the service groups' one: a new preview task
+# serves after two passes 5 seconds apart, not 15. Ten failures (50 seconds)
+# mark it unhealthy, close to the 60 seconds of the earlier 4 x 15.
 resource "aws_lb_target_group" "preview" {
   for_each = local.preview_slot_targets
 
@@ -71,10 +74,10 @@ resource "aws_lb_target_group" "preview" {
   health_check {
     path                = each.value.key == "backend" ? "/health" : "/api/version"
     matcher             = "200"
-    interval            = 15
-    timeout             = 10
+    interval            = 5
+    timeout             = 4
     healthy_threshold   = 2
-    unhealthy_threshold = 4
+    unhealthy_threshold = 10
   }
 
   tags = {
