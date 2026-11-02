@@ -4427,5 +4427,20 @@
   "settings.privacy.shared_chats.shared_on": "تمت المشاركة {p1}",
   "settings.privacy.shared_chats.stop": "إيقاف المشاركة",
   "settings.privacy.shared_chats.stopped": "تم إيقاف المشاركة",
-  "settings.privacy.shared_chats.stop_error": "تعذر إيقاف المشاركة"
+  "settings.privacy.shared_chats.stop_error": "تعذر إيقاف المشاركة",
+  "errors.generic": "حدث خطأ ما. حاول مرة أخرى.",
+  "errors.network": "تعذّر الوصول إلى Skynet. تحقّق من الاتصال وحاول مرة أخرى.",
+  "errors.session_expired": "انتهت جلستك. سجّل الدخول مرة أخرى.",
+  "errors.forbidden": "ليس لديك صلاحية لتنفيذ هذا الإجراء.",
+  "errors.not_found": "لم نعثر على هذا العنصر. ربما تم حذفه.",
+  "errors.too_large": "هذا الملف كبير جدًا.",
+  "errors.rate_limit": "طلبات كثيرة جدًا. انتظر لحظة وحاول مرة أخرى.",
+  "errors.server": "واجه Skynet مشكلة. حاول مرة أخرى بعد قليل.",
+  "global_error.title": "حدث خطأ ما",
+  "global_error.description": "واجه Skynet خطأً غير متوقع. حاول مرة أخرى، أو عُد إلى الصفحة الرئيسية.",
+  "global_error.retry": "حاول مرة أخرى",
+  "global_error.home": "الانتقال إلى الصفحة الرئيسية",
+  "optimization.budget_stop.toast": "{title}. {result}",
+  "dashboard.bulk_delete.partial": "{deleted}، {skipped}",
+  "dashboard.selection.count_result": "{message} ({count})"
 }

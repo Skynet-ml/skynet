@@ -32,10 +32,9 @@ import { SettingsRow } from "@/shared/ui/settings-row";
 import { CopyButton } from "@/shared/ui/copy-button";
 import { TooltipButton } from "@/shared/ui/tooltip-button";
 import { msg, formatMsg } from "@/shared/lib/messages";
-import { tI18n } from "@/shared/lib/i18n";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import {
-  ApiError,
   deletePasskey,
   disableTotp,
   enableTotp,
@@ -54,8 +53,7 @@ import { ConnectedAccounts } from "./ConnectedAccounts";
 
 /** Localize a security API failure: semantic backend codes when present. */
 function describeError(err: unknown): string {
-  if (err instanceof ApiError && err.code) return tI18n(err.code);
-  return msg("settings.security.error");
+  return userErrorMessage(err, msg("settings.security.error"));
 }
 
 function formatDate(iso: string): string {

@@ -4427,5 +4427,20 @@
   "settings.privacy.shared_chats.shared_on": "साझा किया गया {p1}",
   "settings.privacy.shared_chats.stop": "साझा करना रोकें",
   "settings.privacy.shared_chats.stopped": "साझा करना रोका गया",
-  "settings.privacy.shared_chats.stop_error": "साझा करना रोका नहीं जा सका"
+  "settings.privacy.shared_chats.stop_error": "साझा करना रोका नहीं जा सका",
+  "errors.generic": "कुछ गलत हो गया। फिर से कोशिश करें।",
+  "errors.network": "Skynet से कनेक्ट नहीं हो पा रहा। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+  "errors.session_expired": "आपका सत्र समाप्त हो गया। फिर से साइन इन करें।",
+  "errors.forbidden": "आपको यह करने की अनुमति नहीं है।",
+  "errors.not_found": "यह आइटम नहीं मिला। हो सकता है इसे हटा दिया गया हो।",
+  "errors.too_large": "यह फ़ाइल बहुत बड़ी है।",
+  "errors.rate_limit": "बहुत ज़्यादा अनुरोध। थोड़ा रुकें और फिर से कोशिश करें।",
+  "errors.server": "Skynet में कोई समस्या आई। थोड़ी देर में फिर से कोशिश करें।",
+  "global_error.title": "कुछ गलत हो गया",
+  "global_error.description": "Skynet में एक अनपेक्षित त्रुटि हुई। फिर से कोशिश करें, या होम पेज पर वापस जाएँ।",
+  "global_error.retry": "फिर से कोशिश करें",
+  "global_error.home": "होम पेज पर जाएँ",
+  "optimization.budget_stop.toast": "{title}। {result}",
+  "dashboard.bulk_delete.partial": "{deleted}, {skipped}",
+  "dashboard.selection.count_result": "{message} ({count})"
 }

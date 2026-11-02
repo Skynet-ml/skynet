@@ -4427,5 +4427,20 @@
   "settings.privacy.shared_chats.shared_on": "שותף {p1}",
   "settings.privacy.shared_chats.stop": "הפסקת שיתוף",
   "settings.privacy.shared_chats.stopped": "השיתוף הופסק",
-  "settings.privacy.shared_chats.stop_error": "לא הצלחנו להפסיק את השיתוף"
+  "settings.privacy.shared_chats.stop_error": "לא הצלחנו להפסיק את השיתוף",
+  "errors.generic": "משהו השתבש. נסו שוב.",
+  "errors.network": "אין חיבור ל-Skynet. בדקו את החיבור ונסו שוב.",
+  "errors.session_expired": "פג תוקף ההתחברות. התחברו מחדש.",
+  "errors.forbidden": "אין לכם הרשאה לבצע פעולה זו.",
+  "errors.not_found": "לא מצאנו את הפריט. ייתכן שהוא נמחק.",
+  "errors.too_large": "הקובץ גדול מדי.",
+  "errors.rate_limit": "יותר מדי בקשות. המתינו רגע ונסו שוב.",
+  "errors.server": "אירעה תקלה ב-Skynet. נסו שוב בעוד רגע.",
+  "global_error.title": "משהו השתבש",
+  "global_error.description": "אירעה שגיאה לא צפויה ב-Skynet. נסו שוב, או חזרו לדף הבית.",
+  "global_error.retry": "נסו שוב",
+  "global_error.home": "לדף הבית",
+  "optimization.budget_stop.toast": "{title}. {result}",
+  "dashboard.bulk_delete.partial": "{deleted}, {skipped}",
+  "dashboard.selection.count_result": "{message} ({count})"
 }

@@ -13,9 +13,9 @@ import {
 } from "@/shared/ui/icons";
 import { toast } from "react-toastify";
 import { startOpenRouterOAuth } from "@/shared/lib/api";
-import { tI18n } from "@/shared/lib/i18n";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { msg, formatMsg } from "@/shared/lib/messages";
+import { knownErrorCodeMessage, userErrorMessage } from "@/shared/lib/user-error";
 import { useLocale } from "@/shared/providers";
 import { Button } from "@/shared/ui/primitives/button";
 import { Input } from "@/shared/ui/primitives/input";
@@ -50,7 +50,7 @@ function useByokErrorParam() {
     const url = new URL(window.location.href);
     const code = url.searchParams.get("byok_error");
     if (!code) return;
-    toast.error(tI18n(code));
+    toast.error(knownErrorCodeMessage(code) ?? msg("settings.keys.save_failed_toast"));
     url.searchParams.delete("byok_error");
     window.history.replaceState(
       window.history.state,
@@ -79,7 +79,7 @@ function ProviderKeyRow({ provider }: { provider: ByokProviderInfo }) {
       const { authorize_url } = await startOpenRouterOAuth();
       window.location.assign(authorize_url);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("settings.keys.save_failed_toast"));
+      toast.error(userErrorMessage(err, msg("settings.keys.save_failed_toast")));
       setStartingOAuth(false);
     }
   };

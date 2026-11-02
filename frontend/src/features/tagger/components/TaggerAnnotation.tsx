@@ -52,6 +52,7 @@ import type {
 import { BINARY_NO, BINARY_YES, isBinaryNo, isBinaryYes } from "../lib/types";
 import { isStorageQuotaError, saveDataset } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
 import { Textarea } from "@/shared/ui/primitives/textarea";
@@ -225,7 +226,7 @@ export function TaggerAnnotation({
       setNameDialogOpen(false);
     } catch (err) {
       if (!isStorageQuotaError(err)) {
-        toast.error(err instanceof Error ? err.message : msg("tagger.library.save_failed"));
+        toast.error(userErrorMessage(err, msg("tagger.library.save_failed")));
       }
     } finally {
       setSavingToLibrary(false);

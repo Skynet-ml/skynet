@@ -42,6 +42,7 @@ import {
   type ShareRole,
 } from "@/shared/lib/api";
 import { msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
 import { sessionIdentity } from "@/shared/lib/session-identity";
 import { Label } from "@/shared/ui/primitives/label";
@@ -105,7 +106,7 @@ export function TaggingSessionShareDialog({ sessionId }: { sessionId: string }) 
     if (next && state === null && plan.loadSharing) {
       getTaggerSessionSharing(sessionId)
         .then(setState)
-        .catch((err) => toast.error(err instanceof Error ? err.message : msg("share.error")));
+        .catch((err) => toast.error(userErrorMessage(err, msg("share.error"))));
     }
   };
 
@@ -117,7 +118,7 @@ export function TaggingSessionShareDialog({ sessionId }: { sessionId: string }) 
         track(TelemetryEvent.ShareCreated, { kind: "tagging_session", mode: "link" });
       toast.success(msg("share.access_updated"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     } finally {
       setSavingAccess(false);
     }
@@ -132,7 +133,7 @@ export function TaggingSessionShareDialog({ sessionId }: { sessionId: string }) 
       );
       toast.success(msg("share.access_updated"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     } finally {
       setSavingAccess(false);
     }
@@ -143,7 +144,7 @@ export function TaggingSessionShareDialog({ sessionId }: { sessionId: string }) 
       setState(await updateTaggerSessionShareMember(sessionId, username, { role }));
       toast.success(msg("share.member_updated"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     }
   };
 
@@ -168,7 +169,7 @@ export function TaggingSessionShareDialog({ sessionId }: { sessionId: string }) 
       setOpen(false);
       setState(null);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     } finally {
       setTransferring(false);
     }
@@ -179,7 +180,7 @@ export function TaggingSessionShareDialog({ sessionId }: { sessionId: string }) 
       setState(await removeTaggerSessionShareMember(sessionId, username));
       toast.success(msg("share.member_removed"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     }
   };
 
@@ -532,7 +533,7 @@ function InvitePeople({
       setResults([]);
       setOpen(false);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     } finally {
       setInviting(false);
     }

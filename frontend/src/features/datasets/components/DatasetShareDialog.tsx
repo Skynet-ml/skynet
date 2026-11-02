@@ -42,6 +42,7 @@ import {
   type ShareRole,
 } from "@/shared/lib/api";
 import { msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
 import { sessionIdentity } from "@/shared/lib/session-identity";
 import { Label } from "@/shared/ui/primitives/label";
@@ -124,7 +125,7 @@ export function DatasetShareDialog({
     if (!open || state !== null || !plan.loadSharing) return;
     getDatasetSharing(datasetId)
       .then(setState)
-      .catch((err) => toast.error(err instanceof Error ? err.message : msg("share.error")));
+      .catch((err) => toast.error(userErrorMessage(err, msg("share.error"))));
   }, [open, state, datasetId, plan.loadSharing]);
 
   const handleOpenChange = (next: boolean) => setOpen(next);
@@ -137,7 +138,7 @@ export function DatasetShareDialog({
         track(TelemetryEvent.ShareCreated, { kind: "dataset", mode: "link" });
       toast.success(msg("share.access_updated"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     } finally {
       setSavingAccess(false);
     }
@@ -152,7 +153,7 @@ export function DatasetShareDialog({
       );
       toast.success(msg("share.access_updated"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     } finally {
       setSavingAccess(false);
     }
@@ -163,7 +164,7 @@ export function DatasetShareDialog({
       setState(await updateDatasetShareMember(datasetId, username, { role }));
       toast.success(msg("share.member_updated"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     }
   };
 
@@ -188,7 +189,7 @@ export function DatasetShareDialog({
       setOpen(false);
       setState(null);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     } finally {
       setTransferring(false);
     }
@@ -199,7 +200,7 @@ export function DatasetShareDialog({
       setState(await removeDatasetShareMember(datasetId, username));
       toast.success(msg("share.member_removed"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     }
   };
 
@@ -554,7 +555,7 @@ export function InvitePeople({
       setResults([]);
       setOpen(false);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     } finally {
       setInviting(false);
     }

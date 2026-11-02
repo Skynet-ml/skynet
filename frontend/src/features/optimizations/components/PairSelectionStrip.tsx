@@ -13,6 +13,7 @@ import { ReasoningPill } from "./ui-primitives";
 import { pairLabel } from "./grid-overview-helpers";
 import { deleteGridPair } from "@/shared/lib/api";
 import { msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { arrowPageStep } from "@/shared/lib/arrow-paging";
 import type { OptimizationStatusResponse, PairResult } from "@/shared/types/api";
@@ -59,7 +60,7 @@ export function PairSelectionStrip({
       window.dispatchEvent(new Event("optimizations-changed"));
       onDeleted();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("optimization.delete.failed"));
+      toast.error(userErrorMessage(err, msg("optimization.delete.failed")));
     } finally {
       setDeleting(false);
     }

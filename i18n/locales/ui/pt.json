@@ -4427,5 +4427,20 @@
   "settings.privacy.shared_chats.shared_on": "Partilhado {p1}",
   "settings.privacy.shared_chats.stop": "Parar de partilhar",
   "settings.privacy.shared_chats.stopped": "Partilha parada",
-  "settings.privacy.shared_chats.stop_error": "Não foi possível parar a partilha"
+  "settings.privacy.shared_chats.stop_error": "Não foi possível parar a partilha",
+  "errors.generic": "Algo deu errado. Tente novamente.",
+  "errors.network": "Não foi possível acessar o Skynet. Verifique sua conexão e tente novamente.",
+  "errors.session_expired": "Sua sessão terminou. Entre novamente.",
+  "errors.forbidden": "Você não tem permissão para fazer isso.",
+  "errors.not_found": "Não encontramos este item. Ele pode ter sido excluído.",
+  "errors.too_large": "Este arquivo é grande demais.",
+  "errors.rate_limit": "Muitas solicitações. Aguarde um momento e tente novamente.",
+  "errors.server": "O Skynet teve um problema. Tente novamente em instantes.",
+  "global_error.title": "Algo deu errado",
+  "global_error.description": "O Skynet encontrou um erro inesperado. Tente novamente ou volte para a página inicial.",
+  "global_error.retry": "Tentar novamente",
+  "global_error.home": "Ir para a página inicial",
+  "optimization.budget_stop.toast": "{title}. {result}",
+  "dashboard.bulk_delete.partial": "{deleted}, {skipped}",
+  "dashboard.selection.count_result": "{message} ({count})"
 }

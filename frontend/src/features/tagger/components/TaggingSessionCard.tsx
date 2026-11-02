@@ -36,6 +36,7 @@ import {
   type TaggerSessionSummary,
 } from "@/shared/lib/api";
 import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { formatRelativeTime } from "@/shared/lib/formatters";
 import { cn } from "@/shared/lib/utils";
 import { TAGGER_SESSIONS_CHANGED } from "../hooks/use-tagger";
@@ -112,7 +113,7 @@ export function TaggingSessionCard({
       setRenameOpen(false);
       notifyChanged();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("datasets.toast.rename_failed"));
+      toast.error(userErrorMessage(err, msg("datasets.toast.rename_failed")));
     } finally {
       setRenaming(false);
     }
@@ -126,7 +127,7 @@ export function TaggingSessionCard({
       setDeleteOpen(false);
       notifyChanged();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("datasets.toast.delete_failed"));
+      toast.error(userErrorMessage(err, msg("datasets.toast.delete_failed")));
     } finally {
       setDeleting(false);
     }

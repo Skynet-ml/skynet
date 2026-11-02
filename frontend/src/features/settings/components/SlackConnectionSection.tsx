@@ -18,6 +18,7 @@ import {
   type SlackConnection,
 } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { ArrowsClockwise, CircleNotch, SlackLogo, Trash } from "@/shared/ui/icons";
 import { SettingsRow } from "@/shared/ui/settings-row";
 import { StatusDot } from "@/shared/ui/status-badge";
@@ -85,7 +86,7 @@ export function SlackConnectionSection({
       onChange(await updateSlackTarget(slackChannelIdFor(value)));
       toast.success(msg("notifications.slack.target_saved"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("notifications.slack.target_error"));
+      toast.error(userErrorMessage(err, msg("notifications.slack.target_error")));
     } finally {
       setSaving(false);
     }

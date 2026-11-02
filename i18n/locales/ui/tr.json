@@ -4427,5 +4427,20 @@
   "settings.privacy.shared_chats.shared_on": "Paylaşıldı {p1}",
   "settings.privacy.shared_chats.stop": "Paylaşmayı durdur",
   "settings.privacy.shared_chats.stopped": "Paylaşım durduruldu",
-  "settings.privacy.shared_chats.stop_error": "Paylaşım durdurulamadı"
+  "settings.privacy.shared_chats.stop_error": "Paylaşım durdurulamadı",
+  "errors.generic": "Bir sorun oluştu. Tekrar deneyin.",
+  "errors.network": "Skynet'e ulaşılamıyor. Bağlantınızı kontrol edip tekrar deneyin.",
+  "errors.session_expired": "Oturumunuz sona erdi. Tekrar giriş yapın.",
+  "errors.forbidden": "Bu işlemi yapma izniniz yok.",
+  "errors.not_found": "Bu öğe bulunamadı. Silinmiş olabilir.",
+  "errors.too_large": "Bu dosya çok büyük.",
+  "errors.rate_limit": "Çok fazla istek. Biraz bekleyip tekrar deneyin.",
+  "errors.server": "Skynet'te bir sorun oluştu. Birazdan tekrar deneyin.",
+  "global_error.title": "Bir sorun oluştu",
+  "global_error.description": "Skynet beklenmeyen bir hatayla karşılaştı. Tekrar deneyin veya ana sayfaya dönün.",
+  "global_error.retry": "Tekrar dene",
+  "global_error.home": "Ana sayfaya git",
+  "optimization.budget_stop.toast": "{title}. {result}",
+  "dashboard.bulk_delete.partial": "{deleted}, {skipped}",
+  "dashboard.selection.count_result": "{message} ({count})"
 }

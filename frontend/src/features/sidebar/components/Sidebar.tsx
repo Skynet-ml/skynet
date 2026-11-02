@@ -71,6 +71,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/
 import { ShareDialog } from "@/features/optimizations";
 import { StorageMeter } from "@/features/storage";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { perLocale } from "@/shared/lib/per-locale";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { sessionIdentity } from "@/shared/lib/session-identity";
@@ -1069,7 +1070,7 @@ function JobRow({
     } catch (err) {
       // Surface the real backend reason (quota 429, wrong-status 409, …) like
       // the detail-view retry does, falling back to the generic message.
-      toast.error(err instanceof Error ? err.message : msg("sidebar.rerun.failed"));
+      toast.error(userErrorMessage(err, msg("sidebar.rerun.failed")));
     }
   };
 
@@ -1083,7 +1084,7 @@ function JobRow({
       window.dispatchEvent(new Event("optimizations-changed"));
       onRefresh();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("sidebar.resume.failed"));
+      toast.error(userErrorMessage(err, msg("sidebar.resume.failed")));
     }
   };
 
@@ -1095,7 +1096,7 @@ function JobRow({
       window.dispatchEvent(new Event("optimizations-changed"));
       onRefresh();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("optimization.pause.failed"));
+      toast.error(userErrorMessage(err, msg("optimization.pause.failed")));
     }
   };
 
@@ -1107,7 +1108,7 @@ function JobRow({
       window.dispatchEvent(new Event("optimizations-changed"));
       onRefresh();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("optimization.cancel.failed"));
+      toast.error(userErrorMessage(err, msg("optimization.cancel.failed")));
     }
   };
 

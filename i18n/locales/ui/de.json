@@ -4427,5 +4427,20 @@
   "settings.privacy.shared_chats.shared_on": "Geteilt {p1}",
   "settings.privacy.shared_chats.stop": "Teilen beenden",
   "settings.privacy.shared_chats.stopped": "Teilen beendet",
-  "settings.privacy.shared_chats.stop_error": "Teilen konnte nicht beendet werden"
+  "settings.privacy.shared_chats.stop_error": "Teilen konnte nicht beendet werden",
+  "errors.generic": "Etwas ist schiefgelaufen. Versuchen Sie es erneut.",
+  "errors.network": "Skynet ist nicht erreichbar. Prüfen Sie Ihre Verbindung und versuchen Sie es erneut.",
+  "errors.session_expired": "Ihre Sitzung ist abgelaufen. Melden Sie sich erneut an.",
+  "errors.forbidden": "Sie haben keine Berechtigung für diese Aktion.",
+  "errors.not_found": "Dieses Element wurde nicht gefunden. Es wurde möglicherweise gelöscht.",
+  "errors.too_large": "Diese Datei ist zu groß.",
+  "errors.rate_limit": "Zu viele Anfragen. Warten Sie kurz und versuchen Sie es erneut.",
+  "errors.server": "Bei Skynet ist ein Problem aufgetreten. Versuchen Sie es gleich noch einmal.",
+  "global_error.title": "Etwas ist schiefgelaufen",
+  "global_error.description": "Bei Skynet ist ein unerwarteter Fehler aufgetreten. Versuchen Sie es erneut oder kehren Sie zur Startseite zurück.",
+  "global_error.retry": "Erneut versuchen",
+  "global_error.home": "Zur Startseite",
+  "optimization.budget_stop.toast": "{title}. {result}",
+  "dashboard.bulk_delete.partial": "{deleted}, {skipped}",
+  "dashboard.selection.count_result": "{message} ({count})"
 }

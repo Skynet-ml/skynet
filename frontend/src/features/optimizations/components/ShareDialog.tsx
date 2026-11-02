@@ -43,6 +43,7 @@ import {
   type SharingState,
 } from "@/shared/lib/api";
 import { msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
 import { sessionIdentity } from "@/shared/lib/session-identity";
 import { Label } from "@/shared/ui/primitives/label";
@@ -148,7 +149,7 @@ export function ShareDialog({
         .then(setState)
         .catch((err) => {
           setLoadFailed(true);
-          toast.error(err instanceof Error ? err.message : msg("share.error"));
+          toast.error(userErrorMessage(err, msg("share.error")));
         });
     }
   }, [open, state, loadFailed, optimizationId, plan.loadSharing]);
@@ -161,7 +162,7 @@ export function ShareDialog({
         track(TelemetryEvent.ShareCreated, { kind: "optimization", mode: "link" });
       toast.success(msg("share.access_updated"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     } finally {
       setSavingAccess(false);
     }
@@ -176,7 +177,7 @@ export function ShareDialog({
         isPrivate ? msg("share.visibility.now_private") : msg("share.visibility.now_public"),
       );
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     } finally {
       setSavingVisibility(false);
     }
@@ -219,7 +220,7 @@ export function ShareDialog({
       setState(await putSharing(optimizationId, { general_access: "anyone", general_role: role }));
       toast.success(msg("share.access_updated"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     } finally {
       setSavingAccess(false);
     }
@@ -230,7 +231,7 @@ export function ShareDialog({
       setState(await updateShareMember(optimizationId, username, { role }));
       toast.success(msg("share.member_updated"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     }
   };
 
@@ -256,7 +257,7 @@ export function ShareDialog({
       setOpen(false);
       setState(null);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     } finally {
       setTransferring(false);
     }
@@ -267,7 +268,7 @@ export function ShareDialog({
       setState(await removeShareMember(optimizationId, username));
       toast.success(msg("share.member_removed"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     }
   };
 
@@ -640,7 +641,7 @@ function InvitePeople({
       setResults([]);
       setOpen(false);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     } finally {
       setInviting(false);
     }

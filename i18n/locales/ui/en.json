@@ -4427,5 +4427,20 @@
   "settings.privacy.shared_chats.shared_on": "Shared {p1}",
   "settings.privacy.shared_chats.stop": "Stop sharing",
   "settings.privacy.shared_chats.stopped": "Sharing stopped",
-  "settings.privacy.shared_chats.stop_error": "Could not stop sharing"
+  "settings.privacy.shared_chats.stop_error": "Could not stop sharing",
+  "errors.generic": "Something went wrong. Try again.",
+  "errors.network": "Can't reach Skynet. Check your connection and try again.",
+  "errors.session_expired": "Your session ended. Sign in again.",
+  "errors.forbidden": "You don't have access to do this.",
+  "errors.not_found": "We couldn't find this item. It may have been deleted.",
+  "errors.too_large": "This file is too large.",
+  "errors.rate_limit": "Too many requests. Wait a moment and try again.",
+  "errors.server": "Skynet had a problem. Try again in a moment.",
+  "global_error.title": "Something went wrong",
+  "global_error.description": "Skynet hit an unexpected error. Try again, or go back to the home page.",
+  "global_error.retry": "Try again",
+  "global_error.home": "Go to home page",
+  "optimization.budget_stop.toast": "{title}. {result}",
+  "dashboard.bulk_delete.partial": "{deleted}, {skipped}",
+  "dashboard.selection.count_result": "{message} ({count})"
 }

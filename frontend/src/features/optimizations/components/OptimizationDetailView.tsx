@@ -57,6 +57,7 @@ import {
 import type { ServeInfoResponse, WorkflowNodeTrace, WorkflowSpec } from "@/shared/types/api";
 import { OptimizationDetailSkeleton } from "./OptimizationDetailSkeleton";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { formatBytes } from "@/shared/lib/formatters";
 import { TERMS } from "@/shared/lib/terms";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
@@ -673,7 +674,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
       toast.success(msg("optimization.cancel.sent"));
       void fetchJob();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("optimization.cancel.failed"));
+      toast.error(userErrorMessage(err, msg("optimization.cancel.failed")));
     }
   };
 
@@ -693,7 +694,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
       // navigating to a new id.
       void fetchJob();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("optimization.resume.failed"));
+      toast.error(userErrorMessage(err, msg("optimization.resume.failed")));
     } finally {
       setResuming(false);
     }
@@ -709,7 +710,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
       // Pause suspends the same run in place — refresh this view rather than navigating.
       void fetchJob();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("optimization.pause.failed"));
+      toast.error(userErrorMessage(err, msg("optimization.pause.failed")));
     } finally {
       setPausing(false);
     }

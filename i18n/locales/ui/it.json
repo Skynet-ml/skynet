@@ -4427,5 +4427,20 @@
   "settings.privacy.shared_chats.shared_on": "Condivisa {p1}",
   "settings.privacy.shared_chats.stop": "Interrompi condivisione",
   "settings.privacy.shared_chats.stopped": "Condivisione interrotta",
-  "settings.privacy.shared_chats.stop_error": "Impossibile interrompere la condivisione"
+  "settings.privacy.shared_chats.stop_error": "Impossibile interrompere la condivisione",
+  "errors.generic": "Si è verificato un errore. Riprova.",
+  "errors.network": "Impossibile raggiungere Skynet. Controlla la connessione e riprova.",
+  "errors.session_expired": "La sessione è scaduta. Accedi di nuovo.",
+  "errors.forbidden": "Non hai l'autorizzazione per questa azione.",
+  "errors.not_found": "Elemento non trovato. Potrebbe essere stato eliminato.",
+  "errors.too_large": "Questo file è troppo grande.",
+  "errors.rate_limit": "Troppe richieste. Attendi un momento e riprova.",
+  "errors.server": "Skynet ha riscontrato un problema. Riprova tra un momento.",
+  "global_error.title": "Si è verificato un errore",
+  "global_error.description": "Skynet ha riscontrato un errore imprevisto. Riprova o torna alla pagina iniziale.",
+  "global_error.retry": "Riprova",
+  "global_error.home": "Vai alla pagina iniziale",
+  "optimization.budget_stop.toast": "{title}. {result}",
+  "dashboard.bulk_delete.partial": "{deleted}, {skipped}",
+  "dashboard.selection.count_result": "{message} ({count})"
 }

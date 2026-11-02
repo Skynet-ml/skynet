@@ -4427,5 +4427,20 @@
   "settings.privacy.shared_chats.shared_on": "اشتراک‌گذاری‌شده {p1}",
   "settings.privacy.shared_chats.stop": "توقف اشتراک‌گذاری",
   "settings.privacy.shared_chats.stopped": "اشتراک‌گذاری متوقف شد",
-  "settings.privacy.shared_chats.stop_error": "توقف اشتراک‌گذاری ممکن نشد"
+  "settings.privacy.shared_chats.stop_error": "توقف اشتراک‌گذاری ممکن نشد",
+  "errors.generic": "مشکلی پیش آمد. دوباره تلاش کنید.",
+  "errors.network": "دسترسی به Skynet ممکن نیست. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+  "errors.session_expired": "نشست شما به پایان رسید. دوباره وارد شوید.",
+  "errors.forbidden": "اجازهٔ انجام این کار را ندارید.",
+  "errors.not_found": "این مورد را پیدا نکردیم. شاید حذف شده باشد.",
+  "errors.too_large": "این فایل خیلی بزرگ است.",
+  "errors.rate_limit": "درخواست‌ها بیش از حد است. کمی صبر کنید و دوباره تلاش کنید.",
+  "errors.server": "Skynet با مشکل روبه‌رو شد. چند لحظه بعد دوباره تلاش کنید.",
+  "global_error.title": "مشکلی پیش آمد",
+  "global_error.description": "Skynet با خطای غیرمنتظره‌ای روبه‌رو شد. دوباره تلاش کنید یا به صفحهٔ اصلی بروید.",
+  "global_error.retry": "تلاش دوباره",
+  "global_error.home": "رفتن به صفحهٔ اصلی",
+  "optimization.budget_stop.toast": "{title}. {result}",
+  "dashboard.bulk_delete.partial": "{deleted}، {skipped}",
+  "dashboard.selection.count_result": "{message} ({count})"
 }

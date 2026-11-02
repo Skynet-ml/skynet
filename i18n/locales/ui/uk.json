@@ -4427,5 +4427,20 @@
   "settings.privacy.shared_chats.shared_on": "Відкрито доступ {p1}",
   "settings.privacy.shared_chats.stop": "Закрити доступ",
   "settings.privacy.shared_chats.stopped": "Доступ закрито",
-  "settings.privacy.shared_chats.stop_error": "Не вдалося закрити доступ"
+  "settings.privacy.shared_chats.stop_error": "Не вдалося закрити доступ",
+  "errors.generic": "Щось пішло не так. Спробуйте ще раз.",
+  "errors.network": "Не вдається зв'язатися зі Skynet. Перевірте з'єднання та спробуйте ще раз.",
+  "errors.session_expired": "Сеанс завершено. Увійдіть знову.",
+  "errors.forbidden": "У вас немає дозволу на цю дію.",
+  "errors.not_found": "Елемент не знайдено. Можливо, його видалено.",
+  "errors.too_large": "Цей файл завеликий.",
+  "errors.rate_limit": "Забагато запитів. Зачекайте трохи й спробуйте ще раз.",
+  "errors.server": "У Skynet виникла проблема. Спробуйте ще раз за хвилину.",
+  "global_error.title": "Щось пішло не так",
+  "global_error.description": "У Skynet сталася неочікувана помилка. Спробуйте ще раз або поверніться на головну сторінку.",
+  "global_error.retry": "Спробувати ще раз",
+  "global_error.home": "На головну",
+  "optimization.budget_stop.toast": "{title}. {result}",
+  "dashboard.bulk_delete.partial": "{deleted}, {skipped}",
+  "dashboard.selection.count_result": "{message} ({count})"
 }

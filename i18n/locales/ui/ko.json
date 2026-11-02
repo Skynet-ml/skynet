@@ -4427,5 +4427,20 @@
   "settings.privacy.shared_chats.shared_on": "공유됨 {p1}",
   "settings.privacy.shared_chats.stop": "공유 중지",
   "settings.privacy.shared_chats.stopped": "공유를 중지했습니다",
-  "settings.privacy.shared_chats.stop_error": "공유를 중지하지 못했습니다"
+  "settings.privacy.shared_chats.stop_error": "공유를 중지하지 못했습니다",
+  "errors.generic": "문제가 발생했습니다. 다시 시도하세요.",
+  "errors.network": "Skynet에 연결할 수 없습니다. 연결을 확인하고 다시 시도하세요.",
+  "errors.session_expired": "세션이 종료되었습니다. 다시 로그인하세요.",
+  "errors.forbidden": "이 작업을 수행할 권한이 없습니다.",
+  "errors.not_found": "이 항목을 찾을 수 없습니다. 삭제되었을 수 있습니다.",
+  "errors.too_large": "이 파일이 너무 큽니다.",
+  "errors.rate_limit": "요청이 너무 많습니다. 잠시 후 다시 시도하세요.",
+  "errors.server": "Skynet에 문제가 발생했습니다. 잠시 후 다시 시도하세요.",
+  "global_error.title": "문제가 발생했습니다",
+  "global_error.description": "Skynet에서 예기치 않은 오류가 발생했습니다. 다시 시도하거나 홈페이지로 돌아가세요.",
+  "global_error.retry": "다시 시도",
+  "global_error.home": "홈페이지로 이동",
+  "optimization.budget_stop.toast": "{title}. {result}",
+  "dashboard.bulk_delete.partial": "{deleted}, {skipped}",
+  "dashboard.selection.count_result": "{message} ({count})"
 }

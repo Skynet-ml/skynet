@@ -29,6 +29,7 @@ import {
   type DatasetSummary,
 } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { formatBytes, formatRelativeTime } from "@/shared/lib/formatters";
 import { cn } from "@/shared/lib/utils";
 import { DatasetRenameDialog } from "./DatasetRenameDialog";
@@ -88,7 +89,7 @@ export function DatasetCard({
       setDeleteOpen(false);
       onChanged();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("datasets.toast.delete_failed"));
+      toast.error(userErrorMessage(err, msg("datasets.toast.delete_failed")));
     } finally {
       setDeleting(false);
     }
@@ -105,7 +106,7 @@ export function DatasetCard({
       onChanged();
     } catch (err) {
       if (!isStorageQuotaError(err)) {
-        toast.error(err instanceof Error ? err.message : msg("datasets.toast.clone_failed"));
+        toast.error(userErrorMessage(err, msg("datasets.toast.clone_failed")));
       }
     } finally {
       setCloning(false);

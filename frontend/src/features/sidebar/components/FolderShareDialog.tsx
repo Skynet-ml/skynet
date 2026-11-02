@@ -39,6 +39,7 @@ import {
   type MemberRole,
 } from "@/shared/lib/api";
 import { msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { shareLinkUrl } from "@/shared/lib/share-link";
 import { shareDialogPlan } from "@/shared/lib/share-dialog-plan";
@@ -93,7 +94,7 @@ export function FolderShareDialog({
       .then((next) => {
         if (!cancelled) setState(next);
       })
-      .catch((err) => toast.error(err instanceof Error ? err.message : msg("share.error")));
+      .catch((err) => toast.error(userErrorMessage(err, msg("share.error"))));
     return () => {
       cancelled = true;
     };
@@ -108,7 +109,7 @@ export function FolderShareDialog({
       toast.success(success);
       onChanged?.();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     } finally {
       setSaving(false);
     }
@@ -123,7 +124,7 @@ export function FolderShareDialog({
       toast.success(msg("share.access_updated"));
       onChanged?.();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     } finally {
       setSaving(false);
     }
@@ -150,7 +151,7 @@ export function FolderShareDialog({
       setTransferTarget(null);
       onChanged?.();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("share.save_failed"));
+      toast.error(userErrorMessage(err, msg("share.save_failed")));
     } finally {
       setTransferring(false);
     }

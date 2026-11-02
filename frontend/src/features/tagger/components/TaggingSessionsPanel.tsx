@@ -10,6 +10,7 @@ import {
   type TaggerSessionSummary,
 } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { Button } from "@/shared/ui/primitives/button";
 import { Dialog, DialogContent, DialogFooter } from "@/shared/ui/primitives/dialog";
 import { DialogTitleRow } from "@/shared/ui/dialog-title-row";
@@ -84,7 +85,7 @@ export function TaggingSessionsPanel({ onStartNew }: { onStartNew: () => void })
       setAnchorId(null);
       window.dispatchEvent(new Event(TAGGER_SESSIONS_CHANGED));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("datasets.toast.delete_failed"));
+      toast.error(userErrorMessage(err, msg("datasets.toast.delete_failed")));
     } finally {
       setBulkDeleting(false);
     }

@@ -39,6 +39,7 @@ import type { OptimizationStatusResponse, PairResult } from "@/shared/types/api"
 import { formatPercent } from "@/shared/lib";
 import { deleteGridPair } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { tip } from "@/shared/lib/tooltips";
 import { computePairScores } from "../lib/pair-scores";
@@ -106,7 +107,7 @@ function GridOverviewImpl({
       setPendingDelete(null);
       window.dispatchEvent(new Event("optimizations-changed"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("optimization.delete.failed"));
+      toast.error(userErrorMessage(err, msg("optimization.delete.failed")));
     } finally {
       setDeleting(false);
     }

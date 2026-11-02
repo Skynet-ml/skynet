@@ -28,6 +28,7 @@ import {
   type DatasetSummary,
 } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { DATASET_UPLOAD_ACCEPT, parseDatasetFile } from "@/shared/lib/parse-dataset";
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
 import { cn } from "@/shared/lib/utils";
@@ -104,7 +105,7 @@ export function DatasetsView() {
       setAnchorId(null);
       refetch();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("datasets.toast.delete_failed"));
+      toast.error(userErrorMessage(err, msg("datasets.toast.delete_failed")));
     } finally {
       setBulkDeleting(false);
     }
@@ -188,7 +189,7 @@ export function DatasetsView() {
         // The storage-budget 409 opens the shared quota modal centrally, so
         // suppress the redundant toast here (and at the other save producers).
         if (!isStorageQuotaError(err)) {
-          toast.error(err instanceof Error ? err.message : msg("datasets.toast.upload_failed"));
+          toast.error(userErrorMessage(err, msg("datasets.toast.upload_failed")));
         }
       } finally {
         setUploading(false);

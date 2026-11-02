@@ -24,6 +24,7 @@ import {
 import { cn } from "@/shared/lib/utils";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { Button } from "@/shared/ui/primitives/button";
 import { Input } from "@/shared/ui/primitives/input";
@@ -599,7 +600,7 @@ function FolderNameDialog({
       }
       onClose();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("folders.error"));
+      toast.error(userErrorMessage(err, msg("folders.error")));
     } finally {
       setSaving(false);
     }
@@ -673,7 +674,7 @@ function DeleteFolderDialog({
       onDone({ deletedIds: res.deleted });
       onClose();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("folders.error"));
+      toast.error(userErrorMessage(err, msg("folders.error")));
     } finally {
       setDeleting(false);
     }
@@ -776,7 +777,7 @@ function MoveDialog({
       onDone();
       onClose();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("folders.error"));
+      toast.error(userErrorMessage(err, msg("folders.error")));
     } finally {
       setSaving(false);
     }

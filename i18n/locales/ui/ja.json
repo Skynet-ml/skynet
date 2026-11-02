@@ -4427,5 +4427,20 @@
   "settings.privacy.shared_chats.shared_on": "共有日時: {p1}",
   "settings.privacy.shared_chats.stop": "共有を停止",
   "settings.privacy.shared_chats.stopped": "共有を停止しました",
-  "settings.privacy.shared_chats.stop_error": "共有を停止できませんでした"
+  "settings.privacy.shared_chats.stop_error": "共有を停止できませんでした",
+  "errors.generic": "問題が発生しました。もう一度お試しください。",
+  "errors.network": "Skynet に接続できません。接続を確認して、もう一度お試しください。",
+  "errors.session_expired": "セッションが終了しました。もう一度サインインしてください。",
+  "errors.forbidden": "この操作を行う権限がありません。",
+  "errors.not_found": "この項目が見つかりません。削除された可能性があります。",
+  "errors.too_large": "このファイルは大きすぎます。",
+  "errors.rate_limit": "リクエストが多すぎます。しばらく待ってから、もう一度お試しください。",
+  "errors.server": "Skynet で問題が発生しました。しばらくしてから、もう一度お試しください。",
+  "global_error.title": "問題が発生しました",
+  "global_error.description": "Skynet で予期しないエラーが発生しました。もう一度試すか、ホームページに戻ってください。",
+  "global_error.retry": "もう一度試す",
+  "global_error.home": "ホームページへ",
+  "optimization.budget_stop.toast": "{title}。{result}",
+  "dashboard.bulk_delete.partial": "{deleted}、{skipped}",
+  "dashboard.selection.count_result": "{message}（{count}）"
 }

@@ -4427,5 +4427,20 @@
   "settings.privacy.shared_chats.shared_on": "分享於 {p1}",
   "settings.privacy.shared_chats.stop": "停止分享",
   "settings.privacy.shared_chats.stopped": "已停止分享",
-  "settings.privacy.shared_chats.stop_error": "停止唔到分享"
+  "settings.privacy.shared_chats.stop_error": "停止唔到分享",
+  "errors.generic": "出咗啲問題，請再試。",
+  "errors.network": "連唔到 Skynet。請檢查網絡連線再試。",
+  "errors.session_expired": "你嘅登入已經結束，請重新登入。",
+  "errors.forbidden": "你冇權限做呢個操作。",
+  "errors.not_found": "搵唔到呢個項目，可能已經刪咗。",
+  "errors.too_large": "呢個檔案太大。",
+  "errors.rate_limit": "請求太多，請等一陣再試。",
+  "errors.server": "Skynet 出咗問題，請稍後再試。",
+  "global_error.title": "出咗啲問題",
+  "global_error.description": "Skynet 遇到意外錯誤。請再試，或者返去主頁。",
+  "global_error.retry": "再試",
+  "global_error.home": "返去主頁",
+  "optimization.budget_stop.toast": "{title}。{result}",
+  "dashboard.bulk_delete.partial": "{deleted}，{skipped}",
+  "dashboard.selection.count_result": "{message}（{count}）"
 }
