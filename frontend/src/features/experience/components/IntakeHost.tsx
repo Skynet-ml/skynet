@@ -9,13 +9,14 @@ import { useSettingsModal, useUserPrefs } from "@/features/settings";
 import { updateModelPrivacy, type InterviewOption } from "@/shared/lib/api";
 import { msg, type MessageKey } from "@/shared/lib/messages";
 import { APP_NAME } from "@/shared/lib/brand";
+import { isLocalMode } from "@/shared/lib/runtime-env";
 import {
   FULL_TRANSLATION_LOCALES,
   LOCALE_REGISTRY,
   isLocale,
   type Locale,
 } from "@/shared/lib/locale";
-import { useLocale } from "@/shared/providers";
+import { useColorTheme, useLocale } from "@/shared/providers";
 import { cn } from "@/shared/lib/utils";
 import { QuestionChoices } from "@/shared/ui/agent";
 import { AnimatedWordmark } from "@/shared/ui/animated-wordmark";
@@ -43,9 +44,13 @@ import {
 } from "../lib/intake";
 import {
   SETUP_SETTING_EVENT,
+  advancesOnAnswer,
   arrowStep,
+  billingChoices,
   resumeStopIndex,
   setupStops,
+  THEME_OPTIONS,
+  type SetupQuestion,
   type SetupSettingDetail,
 } from "../lib/setup-tour";
 import { useExperienceOptional } from "../providers/experience-provider";
@@ -121,8 +126,9 @@ const STEP_S = 0.35;
 const REDUCED_S = 0.2;
 /*
  * A picked answer stays marked this long before the tour moves on, so the
- * user sees it land (the level reshapes the dashboard behind the card). A
- * still hold, not motion, so it is the same under reduced motion.
+ * user sees it land. A still hold, not motion, so it is the same under
+ * reduced motion. An answer that changes how the app looks (the level) never
+ * moves on by itself: the user continues once they have seen it.
  */
 const ANSWER_HOLD_MS = 700;
 
@@ -201,6 +207,7 @@ function IntakeSurface() {
   const experience = useExperienceOptional()!;
   const { setPref } = useUserPrefs();
   const { locale, setLocale } = useLocale();
+  const { theme, setTheme } = useColorTheme();
   const reduceMotion = useReducedMotion() ?? false;
   const router = useRouter();
 
@@ -280,10 +287,15 @@ function IntakeSurface() {
     }));
   };
 
+  /** Move on once a picked answer has shown, unless it changes how the app looks. */
+  const landed = (question: SetupQuestion) => {
+    if (advancesOnAnswer(question)) setAnsweredStop(stopIndex);
+  };
+
   /** Record a tour stop's answer, then move on once it has shown. */
   const answerStop = (phase: IntakeLlmPhase, patch: Partial<IntakeAnswers> = {}) => {
     answer(phase, patch);
-    setAnsweredStop(stopIndex);
+    landed(phase);
   };
 
   /** Hand an answer to the setting Settings shows behind the card, which saves it. */
@@ -295,7 +307,7 @@ function IntakeSurface() {
     setDraft((prev) => ({ ...prev, answers: { ...prev.answers, level, level_chosen: true } }));
     // Saved at once so the page behind re-renders at the new level.
     void experience.save({ level });
-    setAnsweredStop(stopIndex);
+    landed("level");
   };
 
   /** Write what the user answered; an untouched setting keeps its value. */
@@ -420,32 +432,48 @@ function IntakeSurface() {
           />
         );
       }
+      case "theme": {
+        // The live theme is the answer: Settings and this card share one store.
+        const options = THEME_OPTIONS.map((o) => ({
+          label: msg(o.label),
+          description: msg(o.description),
+        }));
+        const current = THEME_OPTIONS.findIndex((o) => o.value === theme);
+        return (
+          <Choices
+            options={options}
+            selected={current >= 0 ? options[current]!.label : []}
+            ariaLabel={msg("experience.setup.theme.title")}
+            className="sm:[&>div]:grid-cols-3"
+            onSelect={(_, index) => {
+              const next = THEME_OPTIONS[index];
+              if (next) setTheme(next.value);
+              landed("theme");
+            }}
+          />
+        );
+      }
       case "billing": {
-        const options = [
-          {
-            label: msg("experience.intake.q3.billing.platform"),
-            description: msg("experience.intake.billing.platform_description"),
-          },
-          {
-            label: msg("experience.intake.q3.billing.byok"),
-            description: msg("experience.intake.billing.byok_description"),
-          },
-        ];
+        const choices = billingChoices(isLocalMode());
+        const options = choices.map((c) => ({
+          label: msg(c.label),
+          description: msg(c.description),
+        }));
+        const current = choices.findIndex((c) => c.value === answers.billing);
         return (
           <Choices
             options={options}
             selected={
-              draft.answered.includes("billing")
-                ? options[answers.billing === "byok" ? 1 : 0]!.label
-                : []
+              draft.answered.includes("billing") && current >= 0 ? options[current]!.label : []
             }
             ariaLabel={msg("experience.intake.billing.title")}
-            onSelect={(_, index) =>
+            onSelect={(_, index) => {
+              const billing = choices[index]?.value ?? "platform";
               answerStop(
                 "billing",
-                index === 1 ? { billing: "byok" } : { billing: "platform", byok_provider: null },
-              )
-            }
+                billing === "byok" ? { billing } : { billing, byok_provider: null },
+              );
+            }}
           />
         );
       }
