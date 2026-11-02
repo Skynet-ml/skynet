@@ -1389,6 +1389,38 @@ class Settings(BaseSettings):
             "cost OpenRouter reports for each clip. Dictation answers a typed 503 once it is reached. 0 disables the cap."
         ),
     )
+    docs_agent_monthly_budget_usd: float = Field(
+        default=20.0,
+        ge=0,
+        description=(
+            "Platform-wide monthly cap on docs agent model spend in dollars, counted in Redis from the "
+            "priced token usage of each answer. The docs agent answers a typed 503 once it is reached. "
+            "0 disables the cap."
+        ),
+    )
+    rate_limit_docs_agent_anonymous_per_hour: int = Field(
+        default=20,
+        ge=0,
+        description=(
+            "Per-IP cap on docs agent questions per hour for signed-out callers, enforced across replicas "
+            "via Redis. 0 disables the cap."
+        ),
+    )
+    rate_limit_docs_agent_user_per_hour: int = Field(
+        default=60,
+        ge=0,
+        description=(
+            "Per-account cap on docs agent questions per hour for signed-in callers, enforced across "
+            "replicas via Redis. 0 disables the cap."
+        ),
+    )
+    docs_agent_content_dir: str = Field(
+        default="",
+        description=(
+            "Folder of docs Markdown pages (one sub-folder per locale) the docs agent searches. Empty uses "
+            "the repository's frontend docs folder, and without it the web app's /llms-full.txt."
+        ),
+    )
     embeddings_monthly_token_cap: int = Field(
         default=50_000_000,
         ge=0,

@@ -112,6 +112,7 @@ from .routers.dataset_library import create_dataset_library_router
 from .routers.dataset_share import create_dataset_share_router
 from .routers.datasets import create_datasets_router
 from .routers.desktop_link import create_desktop_link_router
+from .routers.docs_agent import create_docs_agent_router
 from .routers.execution_budgets import create_execution_budgets_router
 from .routers.execution_runtimes import create_execution_runtimes_router
 from .routers.experience import create_experience_router
@@ -1340,6 +1341,7 @@ def create_app(
     app.include_router(create_code_validation_router(), tags=["Code Validation"])
     app.include_router(create_mcp_probe_router(), tags=["Code Validation"])
     app.include_router(create_transcription_router(job_store=job_store), tags=["Transcription"])
+    app.include_router(create_docs_agent_router(), tags=["Docs"])
     app.include_router(create_agent_attachments_router(), tags=["Optimizations"])
     app.include_router(create_code_agent_router(job_store=job_store), tags=["Code Validation"])
     app.include_router(create_generalist_agent_router(job_store=job_store), tags=["Optimizations"])
