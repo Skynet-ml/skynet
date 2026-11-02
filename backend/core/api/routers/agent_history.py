@@ -24,7 +24,7 @@ import re
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.concurrency import run_in_threadpool
@@ -60,6 +60,8 @@ DEFAULT_LIST = 50
 # Caps on a chat snapshot that the Mac app publishes to hosted.
 MAX_SHARED_MESSAGES = 1000
 MAX_SHARED_BYTES = 2_000_000
+# Each live link is a public page, so one account cannot publish without bound.
+MAX_SHARED_CHATS = 200
 # Fixed namespace: the hosted id of a published Mac chat is uuid5 of the hosted
 # username and the local chat id, so a re-share updates the same row and link.
 _SHARED_CHAT_NAMESPACE = uuid.UUID("6f1d2c4e-8a3b-5d7f-9e1a-2b4c6d8e0f13")
@@ -145,7 +147,7 @@ class SharedConversationSummary(BaseModel):
 class SharedChatMessage(BaseModel):
     """One turn of a chat snapshot published from the Mac app."""
 
-    role: str = Field(min_length=1, max_length=16)
+    role: Literal["user", "assistant"]
     content: str = ""
     tool_calls: list[dict[str, Any]] | None = None
     model: str | None = Field(default=None, max_length=128)
@@ -563,7 +565,9 @@ def create_agent_history_router(*, job_store) -> APIRouter:
             The share token of the hosted copy.
 
         Raises:
-            DomainError: 403 when the derived row belongs to another account.
+            DomainError: 403 when the derived row belongs to another account,
+                409 ``agent.share.limit_reached`` when a new link would pass
+                ``MAX_SHARED_CHATS``.
         """
         conversation_id = _published_chat_id(username, body.local_id)
         now = datetime.now(UTC)
@@ -577,6 +581,16 @@ def create_agent_history_router(*, job_store) -> APIRouter:
             row.title = cast(Any, mask_secrets(body.title.strip())[:200])
             row.updated_at = cast(Any, now)
             if not row.share_token:
+                live = (
+                    session.query(AgentConversationModel)
+                    .filter(
+                        AgentConversationModel.username == username,
+                        AgentConversationModel.share_token.isnot(None),
+                    )
+                    .count()
+                )
+                if live >= MAX_SHARED_CHATS:
+                    raise DomainError("agent.share.limit_reached", status=409, limit=MAX_SHARED_CHATS)
                 row.share_token = cast(Any, secrets.token_urlsafe(24))
                 row.shared_at = cast(Any, now)
             session.query(AgentMessageModel).filter(AgentMessageModel.conversation_id == conversation_id).delete(

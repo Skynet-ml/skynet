@@ -355,6 +355,19 @@ def test_purge_keeps_shared_conversations() -> None:
         assert [r.id for r in session.query(AgentConversationModel)] == ["old-shared"]
 
 
+_FORMATS = [
+    "skynet_pat",
+    "github_pat",
+    "aws_key_id",
+    "jwt",
+    "mac_link_access",
+    "mac_link_refresh",
+    "mcp_access",
+    "mcp_refresh",
+    "bearer",
+]
+
+
 def _secret_samples() -> dict[str, str]:
     """Build one fresh value per credential format, at runtime, so the repo holds no literal.
 
@@ -367,10 +380,15 @@ def _secret_samples() -> dict[str, str]:
         "github_pat": "github_pat_" + secrets.token_hex(20),
         "aws_key_id": "AKIA" + aws_body,
         "jwt": ".".join(("eyJ" + secrets.token_hex(8), "eyJ" + secrets.token_hex(12), secrets.token_hex(16))),
+        "mac_link_access": "skyl_at_" + secrets.token_urlsafe(24),
+        "mac_link_refresh": "skyl_rt_" + secrets.token_urlsafe(24),
+        "mcp_access": "skym_at_" + secrets.token_urlsafe(24),
+        "mcp_refresh": "skym_rt_" + secrets.token_urlsafe(24),
+        "bearer": "Bearer " + secrets.token_hex(20),
     }
 
 
-@pytest.mark.parametrize("kind", ["skynet_pat", "github_pat", "aws_key_id", "jwt"])
+@pytest.mark.parametrize("kind", _FORMATS)
 def test_public_read_masks_each_token_format(kind: str) -> None:
     """The public share page masks Skynet, GitHub, AWS and JWT credentials."""
     secret = _secret_samples()[kind]
@@ -385,7 +403,7 @@ def test_public_read_masks_each_token_format(kind: str) -> None:
     assert "use " in resp.json()["messages"][0]["content"]
 
 
-@pytest.mark.parametrize("kind", ["skynet_pat", "github_pat", "aws_key_id", "jwt"])
+@pytest.mark.parametrize("kind", _FORMATS)
 def test_desktop_import_masks_each_token_format(kind: str) -> None:
     """A Mac snapshot import masks Skynet, GitHub, AWS and JWT credentials before it stores them."""
     secret = _secret_samples()[kind]
@@ -402,7 +420,7 @@ def test_desktop_import_masks_each_token_format(kind: str) -> None:
 
 def test_masking_leaves_ordinary_words_alone() -> None:
     """Words that only start like a token prefix stay readable."""
-    text = "skydiving and AKIA short"
+    text = "skydiving, skyline_view_settings, AKIA short and Bearer authentication"
     assert agent_history.mask_secrets(text) == text
 
 
@@ -449,3 +467,32 @@ def test_import_stops_a_stream_that_lies_about_its_length() -> None:
         with pytest.raises(DomainError) as caught:
             asyncio.run(agent_history._read_capped_snapshot(request))
         assert caught.value.status_code == 413
+
+
+def test_desktop_import_accepts_only_user_and_assistant_turns() -> None:
+    """A snapshot with a system or tool turn is refused, so a share cannot fake other roles."""
+    client, _store = _client(_ALICE)
+    _desktop(client)
+    for role in ("system", "tool"):
+        snapshot = _snapshot()
+        snapshot["messages"][0]["role"] = role
+        assert client.post("/desktop/v1/shared-chats", json=snapshot).status_code == 422
+
+
+def test_desktop_import_caps_live_links_per_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new link past the cap is a 409; updating or re-sharing after a revoke still works."""
+    monkeypatch.setattr(agent_history, "MAX_SHARED_CHATS", 2)
+    client, _store = _client(_ALICE)
+    _desktop(client)
+    assert client.post("/desktop/v1/shared-chats", json=_snapshot("mac-1")).status_code in (200, 201)
+    assert client.post("/desktop/v1/shared-chats", json=_snapshot("mac-2")).status_code in (200, 201)
+
+    over = client.post("/desktop/v1/shared-chats", json=_snapshot("mac-3"))
+    assert over.status_code == 409
+    assert over.json()["code"] == "agent.share.limit_reached"
+    assert client.post("/desktop/v1/shared-chats", json=_snapshot("mac-1", content="again")).status_code in (200, 201)
+
+    assert client.delete("/desktop/v1/shared-chats/mac-1").status_code == 204
+    assert client.post("/desktop/v1/shared-chats", json=_snapshot("mac-3")).status_code in (200, 201)
+    _desktop(client, "bob")
+    assert client.post("/desktop/v1/shared-chats", json=_snapshot("mac-1")).status_code in (200, 201)

@@ -436,6 +436,7 @@
     "agent_settings.missing_target": "הפעולה {action} צריכה יעד.",
     "agent_settings.invalid_page": "הדף הזה לא קיים באפליקציה.",
     "agent.share.too_large": "הצ'אט גדול מדי לשיתוף.",
+    "agent.share.limit_reached": "יש לכם {limit} צ'אטים משותפים. בטלו קישור לפני שתשתפו צ'אט נוסף.",
     "hosted_link.failed": "האתר של {term.appName} לא אישר את הקישור. התחילו את הקישור שוב.",
     "hosted_link.unreachable": "אפליקציית ה-Mac לא מצליחה להתחבר לאתר של {term.appName}. בדקו את החיבור ונסו שוב.",
     "hosted_link.revoked": "ה-Mac הזה כבר לא מקושר לחשבון {term.appName} שלכם. קשרו אותו שוב כדי להמשיך.",

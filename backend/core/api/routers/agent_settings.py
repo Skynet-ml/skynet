@@ -83,11 +83,14 @@ _LINKED_ONLY_TABS = frozenset({"billing"})
 _SECRET_KEY = re.compile(r"secret|token|password|passwd|api_?key|private|otpauth|recovery|hash|cookie", re.IGNORECASE)
 # Credential-shaped strings under an innocent key name, such as a provider key
 # echoed back inside an error message. ``skyd_`` is Skynet's own personal
-# access token (``core.api.auth.API_TOKEN_PREFIX``).
+# access token (``core.api.auth.API_TOKEN_PREFIX``); ``skyl_`` and ``skym_`` are
+# the Mac link and MCP OAuth tokens. A bearer value must hold a digit, so prose
+# such as "Bearer authentication" stays readable.
 _SECRET_VALUE = re.compile(
-    r"\b(?:skyd|github_pat|sk|rk|pk|ghp|gho|ghs|xox[abpr]|AIza|hf)[-_][A-Za-z0-9_-]{12,}"
+    r"\b(?:skyd|skyl|skym|github_pat|sk|rk|pk|ghp|gho|ghs|xox[abpr]|AIza|hf)[-_][A-Za-z0-9_-]{12,}"
     r"|\bAKIA[0-9A-Z]{16}\b"
     r"|\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
+    r"|\b(?i:bearer)\s+(?=[A-Za-z0-9._~+/=-]*\d)[A-Za-z0-9._~+/=-]{8,}"
 )
 _SAFE_PATH = re.compile(r"^/(?!/)[A-Za-z0-9/_-]{0,200}$")
 _THEMES = frozenset({"system", "light", "dark"})
