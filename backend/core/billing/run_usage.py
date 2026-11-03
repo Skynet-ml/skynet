@@ -188,7 +188,7 @@ def _byok_provider_cents(record: OperationRecord) -> Decimal | None:
         return None
     input_tokens, output_tokens = _tokens(usage)
     cache_read = _int(usage.get("cache_read_input_tokens"))
-    if keys[0] == "prompt_tokens" or details_key in usage:
+    if details is not None:
         cache_read = cached_tokens
     cache_write = _int(usage.get("cache_creation_input_tokens"))
     return Decimal(

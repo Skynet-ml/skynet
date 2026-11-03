@@ -202,6 +202,27 @@ def test_byok_anthropic_cache_tokens_use_cache_price(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.parametrize(
+    "usage",
+    [
+        {"prompt_tokens": 2000000, "completion_tokens": 0},
+        {"prompt_tokens": 2000000, "completion_tokens": 0, "prompt_tokens_details": None},
+        {"input_tokens": 1000000, "output_tokens": 0},
+        {"input_tokens": 1000000, "output_tokens": 0, "input_tokens_details": None},
+    ],
+)
+def test_byok_usage_without_details_keeps_top_level_cache_tokens(usage: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Price top-level cache reads when usage has no cache details."""
+    monkeypatch.setattr(
+        "core.billing.run_usage.cached_token_prices",
+        lambda _model: TokenPrices(prompt=0.000003, completion=0.000015, cache_read=0.0000003),
+    )
+    evidence = {"provider": "openai", "model": "gpt-4o", "usage": {**usage, "cache_read_input_tokens": 1000000}}
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence=evidence)], proposer=False)
+    assert row.provider_cents == Decimal(330)
+    assert row.unpriced_calls == 0
+
+
+@pytest.mark.parametrize(
     ("details", "expected"),
     [
         ({"cached_tokens": 1000000}, Decimal(330)),
