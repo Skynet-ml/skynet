@@ -69,6 +69,11 @@ interface ComposerProps {
    *  the empty composer shows a greyed likely next message that Tab fills in
    *  (never sends) and Escape dismisses. */
   suggest?: { messages: readonly AgentMessage[]; model?: string | null; chatId?: string | null };
+  /** False hides the + attach button and turns off file paste. The upload
+   *  and transcribe endpoints need sign-in, so public pages (the docs) opt out. */
+  attachments?: boolean;
+  /** False hides the dictation mic, whatever the user pref says. */
+  dictation?: boolean;
 }
 
 /**
@@ -100,6 +105,8 @@ export function Composer({
   claimsFile,
   onAttachFile,
   suggest,
+  attachments = true,
+  dictation: dictationAllowed = true,
 }: ComposerProps) {
   const inline = layout === "inline";
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
@@ -129,7 +136,7 @@ export function Composer({
   const dictating = dictation.state.kind !== "idle";
   // A recording in flight keeps its controls even if the pref flips off in
   // the settings modal mid-take.
-  const showMic = prefs.dictationEnabled || dictating;
+  const showMic = dictationAllowed && (prefs.dictationEnabled || dictating);
   // Without a mid-turn handler a streaming turn locks the input as before.
   const locked = Boolean(streaming && !midTurn);
   const hasDraft = value.trim().length > 0;
@@ -344,7 +351,7 @@ export function Composer({
                 onChange(joinPastes({ ...draft, text: e.target.value }));
                 autoResizeTextarea(e.target);
               }}
-              onPaste={inline ? undefined : handlePaste}
+              onPaste={inline || !attachments ? undefined : handlePaste}
               onKeyDown={handleKeyDown}
               disabled={disabled || locked}
               rows={1}
@@ -425,7 +432,7 @@ export function Composer({
             inline ? "shrink-0" : "px-2 pb-2 pt-0.5",
           )}
         >
-          {!inline && (
+          {!inline && attachments && (
             <>
               <input
                 ref={fileInputRef}

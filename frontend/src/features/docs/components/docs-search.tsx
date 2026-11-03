@@ -119,7 +119,6 @@ export function DocsSearch({
     | "ask"
     | "agentTitle"
     | "agentPlaceholder"
-    | "agentThinking"
     | "agentRateLimited"
     | "agentError"
     | "agentClear"

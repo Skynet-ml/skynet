@@ -313,6 +313,8 @@ export function DocsAgentPanel({
                 placeholder={labels.agentPlaceholder}
                 streaming={streaming}
                 sendAriaLabel={labels.agentSend}
+                attachments={false}
+                dictation={false}
               />
             </div>
           </motion.aside>
