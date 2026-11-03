@@ -385,6 +385,10 @@ def run_protected_interaction(
                             allow_private_tools=settings.discover_allow_private,
                             authorize_tool=authorizer,
                             on_tool_event=on_event if kind == "react_chat" else None,
+                            # Interactions stay unbatched until SKY-283: a synchronous call
+                            # hits the 120 s ALB limit long before a batch answers, and a
+                            # batch that outlives the box leaves an unsettled hold.
+                            allow_batch=False,
                         )
                         run_vercel_dspy(protected, f"interaction-{document['id']}", events, "spawn")
                     except Exception as error:

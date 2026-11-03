@@ -776,6 +776,7 @@ class ModelGateway:
         allow_private_tools: bool = False,
         authorize_tool: Callable[[str, str, dict[str, Any]], bool] | None = None,
         on_tool_event: Callable[[dict[str, Any]], None] | None = None,
+        allow_batch: bool = True,
     ) -> dict[str, Any]:
         """Replace resolved provider credentials with fixed, metered model-role routes.
 
@@ -785,6 +786,7 @@ class ModelGateway:
             allow_private_tools: Explicit deployment opt-in for private MCP destinations.
             authorize_tool: Optional blocking approval gate for protected chat tools.
             on_tool_event: Optional lifecycle event receiver for protected chat tools.
+            allow_batch: Whether economy choices may route managed models through batches.
 
         Returns:
             A copied payload carrying opaque role routes and no model provider keys.
@@ -932,7 +934,7 @@ class ModelGateway:
             if not key:
                 raise UnpricedOperationError("This model role has no available provider credential.")
             # The run-level flag is the older form and still means every model.
-            batched = (economy or economy_model) and source == "managed"
+            batched = allow_batch and (economy or economy_model) and source == "managed"
             route = self.register(
                 model=model,
                 api_key=str(key),

@@ -230,6 +230,24 @@ def test_model_economy_never_batches_an_own_key_model(gateway: ModelGateway) -> 
     assert "timeout" not in config["extra"]
 
 
+def test_interaction_payload_never_batches_a_managed_economy_model(gateway: ModelGateway) -> None:
+    """Keep a completed-run interaction off batches and still strip the model's economy flag."""
+    protected = gateway.protect_payload(
+        {
+            "economy_mode": True,
+            "model_config": {"name": "fixture/text", "extra": {"economy_mode": True}},
+            "reflection_model_config": {"name": "fixture/text", "extra": {"economy_mode": True}},
+        },
+        managed_key="provider-secret",
+        allow_batch=False,
+    )
+    for key in ("model_config", "reflection_model_config"):
+        config = protected[key]
+        assert not gateway.batches(config["extra"][ROUTE_KEY]["token"])
+        assert "economy_mode" not in config["extra"]
+        assert "timeout" not in config["extra"]
+
+
 def test_byok_agent_task_uses_its_scoped_fee_metered_route(gateway: ModelGateway) -> None:
     """Route the evaluated agent through its own key while billing only the BYOK fee policy."""
     protected = gateway.protect_payload(
