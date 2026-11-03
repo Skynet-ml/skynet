@@ -9,6 +9,16 @@ export function liveEffort(effort: string | null): string | null {
   return effort === "ultra" || effort === "ultracode" ? "max" : effort;
 }
 
+/**
+ * The retired top level a CLI model's picker shows greyed out, or `null` for
+ * a model that is not a CLI model. It is never a stop, so it is never sent.
+ */
+export function retiredLevel(model: string | null): "ultra" | "ultracode" | null {
+  if (model?.startsWith("subscription/claude/")) return "ultracode";
+  if (model?.startsWith("subscription/codex/")) return "ultra";
+  return null;
+}
+
 /** The slider's stops, weakest first: the model default (`null`), then each level. */
 export function sliderStops(efforts: readonly string[]): Array<string | null> {
   return [null, ...efforts];

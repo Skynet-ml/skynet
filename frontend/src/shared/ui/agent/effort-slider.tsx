@@ -16,6 +16,8 @@ interface EffortSliderProps {
   hintFor: (level: string | null) => string;
   /** The fast mode toggle; absent when the model does not take fast mode. */
   fast?: { on: boolean; onChange: (on: boolean) => void; note: string } | null;
+  /** The CLI's retired top level, shown greyed out; it is never a stop. */
+  retired?: "ultra" | "ultracode" | null;
 }
 
 /**
@@ -24,7 +26,7 @@ interface EffortSliderProps {
  * take it, a fast mode toggle. The fill and its glow grow with the level.
  */
 export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
-  function EffortSlider({ efforts, value, onChange, modelName, hintFor, fast }, ref) {
+  function EffortSlider({ efforts, value, onChange, modelName, hintFor, fast, retired }, ref) {
     const stops = sliderStops(efforts);
     const index = Math.max(0, stops.indexOf(value));
     const level = stops[index] ?? null;
@@ -184,6 +186,24 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
         <p id={hintId} className="text-xs text-muted-foreground" dir="auto">
           {hintFor(level)}
         </p>
+
+        {retired && (
+          <div
+            aria-disabled="true"
+            className="flex cursor-not-allowed flex-col rounded-md border border-dashed border-border px-2.5 py-2 opacity-50 select-none"
+          >
+            <span className="text-sm font-medium">
+              {msg(
+                retired === "ultra"
+                  ? "agent.model_menu.effort_ultra"
+                  : "agent.model_menu.effort_ultracode",
+              )}
+            </span>
+            <span className="text-xs text-muted-foreground" dir="auto">
+              {msg("agent.model_menu.effort_unavailable_note")}
+            </span>
+          </div>
+        )}
 
         {fast && (
           <button

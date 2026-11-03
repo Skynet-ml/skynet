@@ -62,7 +62,10 @@ export function effortLabel(level: string): string {
       return msg("agent.model_menu.effort_high");
     case "xhigh":
       return msg("agent.model_menu.effort_xhigh");
+    // A saved retired level runs at the top level, so it reads as Max.
     case "max":
+    case "ultra":
+    case "ultracode":
       return msg("agent.model_menu.effort_max");
     default:
       return level;

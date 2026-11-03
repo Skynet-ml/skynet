@@ -11,6 +11,7 @@ import { Check, CaretDown, CaretRight, Lightning } from "@/shared/ui/icons";
 import { EffortSlider } from "@/shared/ui/agent/effort-slider";
 
 import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
+import { liveEffort, retiredLevel } from "@/shared/lib/effort-slider";
 import { effortLabel, effortsFor, unpickedEffort } from "@/shared/lib/model-efforts";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
@@ -116,7 +117,7 @@ function effortHint(level: string | null): string {
 export function ComposerModelMenu({
   value: rawValue,
   onChange,
-  effort,
+  effort: savedEffort,
   onEffortChange,
   fast = false,
   onFastChange,
@@ -126,6 +127,8 @@ export function ComposerModelMenu({
   openRouterEngine = false,
 }: ComposerModelMenuProps) {
   const savedValue = rawValue === RETIRED_AUTO_MODEL ? null : rawValue;
+  // A saved "ultra" or "ultracode" runs at Max, so the menu shows and keeps Max.
+  const effort = liveEffort(savedEffort);
   const [open, setOpen] = React.useState(false);
   // Starts empty on server and client alike: the cache lives in localStorage,
   // so seeding the first render from it would not match the SSR markup.
@@ -320,6 +323,7 @@ export function ComposerModelMenu({
                 onChange={onEffortChange}
                 modelName={displayName}
                 hintFor={effortHint}
+                retired={retiredLevel(effective)}
                 fast={
                   fastShown
                     ? {
