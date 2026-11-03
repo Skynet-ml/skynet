@@ -303,7 +303,6 @@ def test_unified_metric_model_gets_a_metered_route(
         "models": {
             "reflection_model": {"name": "fixture/text"},
             "task_model": {"name": "fixture/task"},
-            "metric_model": {"name": "fixture/judge"},
         },
         "workspace": {
             "run_code": "def run(artifact, input):\n    return artifact + input['question']\n",
