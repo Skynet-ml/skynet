@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Keys include Git context bytes, pinned sources, Buildx inputs, build args,
 # and a weekly version. Empty output means build; tree- omits GIT_SHA.
-# Only environment-scoped tags use ctx-key reuse; backend tree keys support previews.
-# Shared backend and LiteLLM tags get key tags only after a fresh build.
+# Frontend environment tags use ctx-key reuse; backend tree keys support previews.
+# Shared backend and LiteLLM tags never receive unused ctx-key tags.
 # The weekly cache rotation bounds unpinned RUN-time network inputs to one week;
 # the first build each week is cold, so this is a documented freshness gap.
 KEY_VERSION=6
@@ -549,13 +549,114 @@ find_by_key() {
   aws ecr describe-images --repository-name "$1" --image-ids "imageTag=$2" >/dev/null 2>&1
 }
 
+_image_reuse_warning() {
+  printf 'warning: cannot verify lifecycle position of %s:%s; building\n' "$1" "$2" >&2
+}
+
 find_fresh_by_key() {
-  local repo="$1" key="$2" pushed pushed_at
-  pushed="$(aws ecr describe-images --repository-name "$repo" --image-ids "imageTag=$key" \
-    --query 'imageDetails[0].imagePushedAt' --output text 2>/dev/null)" || return 1
+  local repo="$1" key="$2" pushed pushed_at source_digest now response next_token page_entries digest item_pushed source_seen=false newer
+  local -a page_args=() image_timestamps=()
+  local -A seen_digests=() seen_tokens=()
+  if ! pushed="$(aws ecr describe-images --repository-name "$repo" --image-ids "imageTag=$key" \
+    --query 'imageDetails[0].imagePushedAt' --output text 2>/dev/null)"; then
+    _image_reuse_warning "$repo" "$key"
+    return 1
+  fi
   [[ -n "$pushed" && "$pushed" != None && "$pushed" != null ]] || return 1
-  pushed_at="$(date_epoch "$pushed")" || return 1
-  (( $(date +%s) - pushed_at < 11 * 86400 ))
+  if ! source_digest="$(aws ecr describe-images --repository-name "$repo" --image-ids "imageTag=$key" \
+    --query 'imageDetails[0].imageDigest' --output text 2>/dev/null)"; then
+    _image_reuse_warning "$repo" "$key"
+    return 1
+  fi
+  [[ "$source_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+    _image_reuse_warning "$repo" "$key"
+    return 1
+  }
+  if ! pushed_at="$(date_epoch "$pushed")" || ! now="$(date +%s)" || [[ ! "$now" =~ ^[0-9]+$ ]]; then
+    _image_reuse_warning "$repo" "$key"
+    return 1
+  fi
+  ((now - pushed_at < 11 * 86400)) || return 1
+
+  next_token=""
+  while :; do
+    page_args=(ecr describe-images --repository-name "$repo" --filter tagStatus=TAGGED --max-results 1000 --output json)
+    [[ -z "$next_token" ]] || page_args+=(--starting-token "$next_token")
+    if ! response="$(aws "${page_args[@]}" 2>/dev/null)"; then
+      _image_reuse_warning "$repo" "$key"
+      return 1
+    fi
+    if ! jq -e '
+          type == "object" and
+          (.imageDetails | type == "array") and
+          all(.imageDetails[];
+            type == "object" and
+            (.imageDigest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+            (.imagePushedAt | type == "string" and length > 0)
+          ) and
+      ((.nextToken? == null) or (.nextToken | type == "string" and length > 0))
+    ' <<<"$response" >/dev/null 2>&1; then
+      _image_reuse_warning "$repo" "$key"
+      return 1
+    fi
+    if ! page_entries="$(jq -r '.imageDetails[] | [.imageDigest, .imagePushedAt] | @tsv' \
+      <<<"$response" 2>/dev/null)"; then
+      _image_reuse_warning "$repo" "$key"
+      return 1
+    fi
+    while IFS=$'\t' read -r digest item_pushed; do
+      [[ -n "$digest" ]] || continue
+      if [[ -z "${seen_digests[$digest]+x}" ]]; then
+        seen_digests["$digest"]=1
+        if [[ "$digest" == "$source_digest" ]]; then
+          source_seen=true
+        else
+          image_timestamps+=("$item_pushed")
+        fi
+      fi
+    done <<<"$page_entries"
+    if ! next_token="$(jq -r '.nextToken // empty' <<<"$response" 2>/dev/null)"; then
+      _image_reuse_warning "$repo" "$key"
+      return 1
+    fi
+    [[ -n "$next_token" ]] || break
+    if [[ -n "${seen_tokens[$next_token]+x}" ]]; then
+      _image_reuse_warning "$repo" "$key"
+      return 1
+    fi
+    seen_tokens["$next_token"]=1
+  done
+  [[ "$source_seen" == true ]] || {
+    _image_reuse_warning "$repo" "$key"
+    return 1
+  }
+  if ! newer="$(printf '%s\n' "${image_timestamps[@]+"${image_timestamps[@]}"}" |
+    python3 -c '
+from datetime import datetime
+import sys
+
+def parse(value):
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp has no timezone")
+    return parsed
+
+source = parse(sys.argv[1])
+count = 0
+for line in sys.stdin:
+    value = line.strip()
+    if value and parse(value) >= source:
+        count += 1
+print(count)
+' "$pushed" 2>/dev/null)"; then
+    _image_reuse_warning "$repo" "$key"
+    return 1
+  fi
+  [[ "$newer" =~ ^[0-9]+$ ]] || {
+    _image_reuse_warning "$repo" "$key"
+    return 1
+  }
+  ((newer < 50))
 }
 
 retag() {

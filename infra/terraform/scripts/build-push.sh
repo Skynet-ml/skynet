@@ -81,7 +81,7 @@ build() {
   if [[ -n "$cache_tag" ]]; then
     cache_from+=(--cache-from "type=registry,ref=$registry/$cache_repo:$cache_tag")
   fi
-  if [[ "$env" != production && -n "$key" ]]; then
+  if [[ "$env" != production && -n "$key" && ( "$name" == backend || "$name" == frontend ) ]]; then
     metadata_file="$(mktemp)" || return 1
     [[ -n "$metadata_file" ]] || return 1
     metadata_args+=(--metadata-file "$metadata_file")
@@ -115,12 +115,12 @@ build() {
     die "push failed: $url:$tag"
   fi
 
-  if [[ "$env" != production && -n "$key" ]]; then
+  if [[ "$env" != production && -n "$key" && -n "$metadata_file" ]]; then
     if verify_image_sources "$metadata_file"; then
       if ! refresh_aws_credentials; then
         echo "warning: cannot refresh AWS credentials after push; skipping image-key tags for $url:$tag" >&2
       else
-        if ! retag "skynet/$name" "$tag" "$key"; then
+        if [[ "$name" == frontend ]] && ! retag "skynet/frontend" "$tag" "$key"; then
           echo "warning: cannot add image-key tag $url:$key" >&2
         fi
         if [[ "$name" == backend && -n "$tree_key" ]] &&

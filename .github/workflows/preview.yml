@@ -142,7 +142,10 @@ jobs:
         id: backend
         if: steps.scope.outputs.skip != 'true' && steps.claim.outputs.full != 'true'
         run: |
-          image=$(infra/terraform/scripts/preview.sh backend-image "$PR" "$SHA")
+          if ! image="$(infra/terraform/scripts/preview.sh backend-image "$PR" "$SHA")"; then
+            echo "::warning::backend image lookup failed; building a new backend image"
+            image=""
+          fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       # Migration overlaps the frontend build; services roll only after both builds succeed.

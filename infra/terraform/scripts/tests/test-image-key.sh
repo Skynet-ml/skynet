@@ -183,6 +183,36 @@ case "${0##*/}" in
           fi
           exit 0
         fi
+        if [[ "$*" == *"--filter tagStatus=TAGGED"* && "${LIFECYCLE_COUNT_TEST:-}" == true ]]; then
+          [[ "${LIFECYCLE_LIST_ERROR:-}" != true ]] || {
+            printf '%s\n' 'AccessDeniedException' >&2
+            exit 254
+          }
+          [[ "${LIFECYCLE_PARTIAL_PAGE:-}" != true ]] || {
+            printf '%s\n' '{"nextToken":"page2"}'
+            exit 0
+          }
+          listing="$(jq -nc --arg source "$PUSHED_AT" --arg newer "$LIFECYCLE_NEWER_AT" \
+            --argjson count "$LIFECYCLE_NEWER_COUNT" '
+            {imageDetails: ([
+              {imageDigest:"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+               imagePushedAt:$source,imageTags:["ctx-test"]}
+            ] + [
+              range(0; $count) as $index |
+              {imageDigest:("sha256:" + ("0" * (64 - ($index | tostring | length))) + ($index | tostring)),
+               imagePushedAt:$newer,imageTags:["tag-\($index)"]}
+            ])}
+          ')"
+          if [[ "$*" == *"--starting-token page2"* ]]; then
+            jq -c '{imageDetails:.imageDetails[26:]}' <<<"$listing"
+          else
+            jq -c '{
+              imageDetails:.imageDetails[:26],
+              nextToken:(if (.imageDetails | length) > 26 then "page2" else null end)
+            }' <<<"$listing"
+          fi
+          exit 0
+        fi
         if [[ "${LATEST_CACHE_TEST:-}" == true ]]; then
           [[ "${CACHE_ERROR:-}" != true ]] || exit 254
           if [[ "$*" == *"--starting-token page2"* ]]; then
@@ -368,11 +398,33 @@ LATEST_CACHE_TEST=true
 CACHE_ERROR=true
 [[ -z "$(latest_cache_ref skynet/cache backend-)" ]] || fail "cache lookup error was not ignored"
 unset LATEST_CACHE_TEST CACHE_ERROR
-FRESHNESS_TEST=true
+export FRESHNESS_TEST=true
 PUSHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-DATE_PARSE_FAIL=true
+export PUSHED_AT
+export LIFECYCLE_COUNT_TEST=true
+LIFECYCLE_NEWER_AT="$(python3 -c 'from datetime import datetime, timedelta; import sys; print((datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00")) + timedelta(seconds=1)).isoformat())' "$PUSHED_AT")"
+export LIFECYCLE_NEWER_AT
+export DATE_PARSE_FAIL=true LIFECYCLE_NEWER_COUNT=49
 find_fresh_by_key skynet/backend "$key" || fail "fresh keyed image was not reused"
 unset DATE_PARSE_FAIL
+export LIFECYCLE_NEWER_COUNT=50
+if find_fresh_by_key skynet/backend "$key"; then fail "50 newer images did not block keyed reuse"; fi
+export LIFECYCLE_LIST_ERROR=true
+if find_fresh_by_key skynet/backend "$key" 2>"$tmp/lifecycle-list-error.log"; then
+  fail "lifecycle listing error allowed keyed reuse"
+fi
+[[ "$(wc -l <"$tmp/lifecycle-list-error.log")" -eq 1 ]] ||
+  fail "lifecycle listing error did not produce one warning line"
+grep -Fq 'warning: cannot verify lifecycle position of skynet/backend:' "$tmp/lifecycle-list-error.log" ||
+  fail "lifecycle listing error warning did not explain the build fallback"
+unset LIFECYCLE_LIST_ERROR
+export LIFECYCLE_PARTIAL_PAGE=true
+if find_fresh_by_key skynet/backend "$key" 2>"$tmp/lifecycle-partial-page.log"; then
+  fail "partial lifecycle page allowed keyed reuse"
+fi
+[[ "$(wc -l <"$tmp/lifecycle-partial-page.log")" -eq 1 ]] ||
+  fail "partial lifecycle page did not produce one warning line"
+unset LIFECYCLE_PARTIAL_PAGE LIFECYCLE_COUNT_TEST LIFECYCLE_NEWER_COUNT LIFECYCLE_NEWER_AT
 PUSHED_AT=2000-01-01T00:00:00Z
 if find_fresh_by_key skynet/backend "$key"; then fail "stale keyed image was reused"; fi
 unset FRESHNESS_TEST PUSHED_AT

@@ -34,7 +34,12 @@ case "$*" in
   *"ecr get-login-password"*) printf '%s\n' password ;;
   *"ecr describe-images"*)
     if [[ "$*" == *"--filter tagStatus=TAGGED"* ]]; then
-      printf '%s\n' '{"imageDetails":[]}'
+      if [[ "${TEST_CTX_HIT:-}" == true ]]; then
+        printf '{"imageDetails":[{"imageDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","imagePushedAt":"%s","imageTags":["ctx-test"]}]}\n' \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      else
+        printf '%s\n' '{"imageDetails":[]}'
+      fi
     elif [[ "$*" == *"imageTag=$TEST_SHA"* && "${TEST_EXISTING_BACKEND:-}" == true &&
       "$*" == *"repository-name skynet/backend"* ]]; then
       exit 0
@@ -59,6 +64,9 @@ case "$*" in
     elif [[ "$*" == *"--query imageDetails[0].imagePushedAt"* &&
       "${TEST_CTX_HIT:-}" == true ]]; then
       date -u +%Y-%m-%dT%H:%M:%SZ
+    elif [[ "$*" == *"--query imageDetails[0].imageDigest"* &&
+      "${TEST_CTX_HIT:-}" == true ]]; then
+      printf '%s\n' 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     else
       printf '%s\n' 'ImageNotFoundException' >&2
       exit 254
@@ -364,6 +372,8 @@ assert_no_match '^build:frontend$' "$TEST_EVENT_LOG" ||
   fail "staging frontend did not reuse its fresh context key"
 grep -Eq "put-image --repository-name skynet/frontend --image-tag $TEST_SHA-staging" "$TEST_AWS_LOG" ||
   fail "staging frontend context-key hit did not retag its environment-scoped tag"
+assert_no_match 'put-image.*repository-name skynet/(backend|litellm).*--image-tag ctx-' "$TEST_AWS_LOG" ||
+  fail "shared backend or LiteLLM tag received an unused context-key tag"
 
 unset TEST_CTX_HIT
 rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
@@ -502,5 +512,35 @@ if run_preview_lane preview-frontend build_frontend \
   >"$CURRENT_LOG" 2>&1; then
   fail "failed preview frontend build returned success"
 fi
+
+preview_lookup_step="$tmp/preview-backend-lookup.sh"
+awk '
+  $0 == "      - name: Find a reusable backend image" { in_step=1; next }
+  in_step && /^      - / { exit }
+  in_step && /^        run: \|$/ { in_run=1; next }
+  in_run && /^          / { print substr($0, 11); next }
+  in_run { exit }
+' "$TEST_REPO_ROOT/.github/workflows/preview.yml" >"$preview_lookup_step"
+[[ -s "$preview_lookup_step" ]] || fail "preview backend lookup workflow step was not found"
+cat >"$tmp/preview/infra/terraform/scripts/preview.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'simulated backend image lookup failure' >&2
+exit 17
+SH
+chmod +x "$tmp/preview/infra/terraform/scripts/preview.sh"
+preview_lookup_output="$tmp/preview-backend-image.txt"
+: >"$preview_lookup_output"
+CURRENT_LOG="$tmp/preview-backend-lookup.log"
+if ! (
+  cd "$tmp/preview"
+  export PR=123 SHA="$TEST_SHA" GITHUB_OUTPUT="$preview_lookup_output"
+  bash -e -o pipefail "$preview_lookup_step"
+) >"$CURRENT_LOG" 2>&1; then
+  fail "backend image lookup error failed the preview step"
+fi
+grep -Fxq 'image=' "$preview_lookup_output" ||
+  fail "backend image lookup error did not select a full backend build"
+grep -Fq '::warning::backend image lookup failed; building a new backend image' "$CURRENT_LOG" ||
+  fail "backend image lookup error did not emit a warning"
 
 printf '%s\n' 'lane failure stub tests passed'
