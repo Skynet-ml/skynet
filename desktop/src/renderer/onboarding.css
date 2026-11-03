@@ -508,6 +508,10 @@ h1 {
   padding: 2px 0 8px;
 }
 
+.tl-step:not(.tl-over) .tl-late {
+  display: none;
+}
+
 .tl-bar {
   position: relative;
   height: 4px;

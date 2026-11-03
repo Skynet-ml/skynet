@@ -1,6 +1,6 @@
 import en from "./locales/en.json";
 import he from "./locales/he.json";
-import { formatClock, remaining, shortSeconds, stepPhase, totalElapsed, type Timeline } from "./timeline";
+import { formatClock, remaining, runningView, stepPhase, stepTime as formatStepTime, totalElapsed, type Timeline } from "./timeline";
 
 type Kind =
   | "checking"
@@ -73,9 +73,10 @@ function t(key: string, vars: Record<string, string> = {}): string {
   return text.replace(/\{(\w+)\}/g, (_, name: string) => vars[name] ?? "");
 }
 
+const seconds = (n: string) => t("timeline.seconds", { n });
+
 function stepTime(ms: number): string {
-  const seconds = shortSeconds(ms);
-  return seconds === null ? formatClock(ms) : t("timeline.seconds", { n: seconds });
+  return formatStepTime(ms, seconds);
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -148,9 +149,6 @@ function renderChecklist(state: State): void {
 let tick: (() => void) | null = null;
 setInterval(() => tick?.(), 250);
 
-/** Steps shorter than this show no bar: it would fill before anyone sees it. */
-const MIN_BAR_MS = 1500;
-
 function timelinePanel(timeline: Timeline): HTMLElement {
   const elapsedNode = el("span", { className: "tl-elapsed", dir: "ltr" });
   const leftNode = el("span", { className: "tl-left" });
@@ -174,23 +172,25 @@ function timelinePanel(timeline: Timeline): HTMLElement {
     if (phase !== "active") return row;
 
     const startedAt = step.startedAt as number;
-    const hasBar = estimate !== undefined && estimate >= MIN_BAR_MS;
-    if (hasBar) {
-      const fill = el("div", { className: "tl-fill" });
-      // A CSS animation fills the bar; the negative delay resumes it after a re-render without a jump.
-      fill.style.animationDuration = `${estimate}ms`;
-      fill.style.animationDelay = `-${Math.min(Date.now() - startedAt, estimate)}ms`;
+    if (estimate !== undefined) {
+      const bar = el("div", { className: "tl-bar" }, [el("div", { className: "tl-sweep" })]);
+      const hasFill = runningView(0, estimate, seconds).fill;
+      if (hasFill) {
+        const fill = el("div", { className: "tl-fill" });
+        // A CSS animation fills the bar; the negative delay resumes it after a re-render without a jump.
+        fill.style.animationDuration = `${estimate}ms`;
+        fill.style.animationDelay = `-${Math.min(Date.now() - startedAt, estimate)}ms`;
+        bar.prepend(fill);
+      }
+      // Without a fill, the bar and note stay hidden until the step passes its estimate.
       row.append(
-        el("div", { className: "tl-extra" }, [
-          el("div", { className: "tl-bar" }, [fill, el("div", { className: "tl-sweep" })]),
-          el("div", { className: "tl-note", text: t("timeline.over") }),
-        ]),
+        el("div", { className: hasFill ? "tl-extra" : "tl-extra tl-late" }, [bar, el("div", { className: "tl-note", text: t("timeline.over") })]),
       );
     }
     updates.push((now) => {
-      const elapsed = now - startedAt;
-      time.textContent = estimate === undefined ? formatClock(elapsed) : `${formatClock(elapsed)} / ~${formatClock(estimate)}`;
-      row.classList.toggle("tl-over", hasBar && elapsed > (estimate as number));
+      const view = runningView(now - startedAt, estimate, seconds);
+      time.textContent = view.time;
+      row.classList.toggle("tl-over", view.over);
     });
     return row;
   });

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { finishSteps, loadStepTimes, newTimeline, saveStepTimes, startStep, STARTUP_STEPS } from "../src/main/step-timing";
-import { formatClock, remaining, shortSeconds, stepPhase, totalElapsed, type Timeline } from "../src/renderer/timeline";
+import { formatClock, remaining, runningView, shortSeconds, stepPhase, totalElapsed, type Timeline } from "../src/renderer/timeline";
 
 let dir: string;
 
@@ -93,5 +93,27 @@ describe("timeline display", () => {
   it("gives no time left when a step has no estimate", () => {
     const partial: Timeline = { ...timeline, steps: [...timeline.steps, { name: "api" }] };
     expect(remaining(partial, now)).toBeNull();
+  });
+});
+
+describe("running step view", () => {
+  const seconds = (n: string) => `${n}s`;
+
+  it("shows the over-estimate note for a step too short for a fill bar", () => {
+    expect(runningView(500, 800, seconds)).toEqual({ time: "0:00 / ~0.8s", fill: false, over: false });
+    expect(runningView(30_000, 800, seconds)).toEqual({ time: "0:30 / ~0.8s", fill: false, over: true });
+  });
+
+  it("keeps the decimal estimate while a sub-second step runs", () => {
+    expect(runningView(400, 600, seconds).time).toBe("0:00 / ~0.6s");
+  });
+
+  it("fills the bar from 1.5s and uses a clock from 10s", () => {
+    expect(runningView(1_000, 1_500, seconds)).toEqual({ time: "0:01 / ~1.5s", fill: true, over: false });
+    expect(runningView(150_000, 138_800, seconds)).toEqual({ time: "2:30 / ~2:18", fill: true, over: true });
+  });
+
+  it("shows only the clock when there is no estimate", () => {
+    expect(runningView(65_000, undefined, seconds)).toEqual({ time: "1:05", fill: false, over: false });
   });
 });

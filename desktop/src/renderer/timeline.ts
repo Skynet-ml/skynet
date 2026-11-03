@@ -56,3 +56,31 @@ export function remaining(timeline: Timeline, now: number): number | null {
 export function shortSeconds(ms: number): string | null {
   return ms < 10_000 ? (Math.max(0, ms) / 1000).toFixed(1) : null;
 }
+
+/** Steps shorter than this show no fill bar: it would fill before anyone sees it. */
+export const MIN_BAR_MS = 1500;
+
+/** A step time: "0.8s" under 10s, else m:ss. `seconds` adds the locale's unit to the number. */
+export function stepTime(ms: number, seconds: (n: string) => string): string {
+  const short = shortSeconds(ms);
+  return short === null ? formatClock(ms) : seconds(short);
+}
+
+export interface RunningView {
+  /** The time text, e.g. "0:30 / ~0.8s". */
+  time: string;
+  /** The estimate is long enough for a fill bar. */
+  fill: boolean;
+  /** The step runs past its estimate: show the sweep and the note. */
+  over: boolean;
+}
+
+/** What the running step shows after `elapsed` ms. Any exceeded estimate shows the note, also one too short for a fill bar. */
+export function runningView(elapsed: number, estimate: number | undefined, seconds: (n: string) => string): RunningView {
+  if (estimate === undefined) return { time: formatClock(elapsed), fill: false, over: false };
+  return {
+    time: `${formatClock(elapsed)} / ~${stepTime(estimate, seconds)}`,
+    fill: estimate >= MIN_BAR_MS,
+    over: elapsed > estimate,
+  };
+}
