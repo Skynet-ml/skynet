@@ -167,13 +167,14 @@ def _byok_provider_cents(record: OperationRecord) -> Decimal | None:
     )
     if not all(type(usage.get(key)) is int and usage[key] >= 0 for key in keys):
         return None
-    responses_cached = 0
-    if keys[0] == "input_tokens" and "input_tokens_details" in usage:
-        details = usage["input_tokens_details"]
+    details_key = "prompt_tokens_details" if keys[0] == "prompt_tokens" else "input_tokens_details"
+    details = usage.get(details_key)
+    cached_tokens = 0
+    if details is not None:
         if not isinstance(details, Mapping):
             return None
-        responses_cached = details.get("cached_tokens", 0)
-        if type(responses_cached) is not int or responses_cached < 0:
+        cached_tokens = details.get("cached_tokens", 0)
+        if type(cached_tokens) is not int or cached_tokens < 0:
             return None
     provider = str(record.evidence.get("provider") or "")
     if provider == "custom":
@@ -187,11 +188,8 @@ def _byok_provider_cents(record: OperationRecord) -> Decimal | None:
         return None
     input_tokens, output_tokens = _tokens(usage)
     cache_read = _int(usage.get("cache_read_input_tokens"))
-    prompt_details = usage.get("prompt_tokens_details")
-    if isinstance(prompt_details, Mapping) and "prompt_tokens" in usage:
-        cache_read = _int(prompt_details.get("cached_tokens"))
-    elif keys[0] == "input_tokens" and "input_tokens_details" in usage:
-        cache_read = responses_cached
+    if keys[0] == "prompt_tokens" or details_key in usage:
+        cache_read = cached_tokens
     cache_write = _int(usage.get("cache_creation_input_tokens"))
     return Decimal(
         str(

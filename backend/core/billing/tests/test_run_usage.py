@@ -203,10 +203,20 @@ def test_byok_anthropic_cache_tokens_use_cache_price(monkeypatch: pytest.MonkeyP
 
 @pytest.mark.parametrize(
     ("details", "expected"),
-    [({"cached_tokens": 1000000}, Decimal(330)), ({}, Decimal(600)), ("invalid", Decimal(600))],
+    [
+        ({"cached_tokens": 1000000}, Decimal(330)),
+        ({}, Decimal(600)),
+        (None, Decimal(600)),
+        ("invalid", None),
+        ({"cached_tokens": "1000000"}, None),
+        ({"cached_tokens": -5}, None),
+        ({"cached_tokens": 1e6}, None),
+        ({"cached_tokens": True}, None),
+        ({"cached_tokens": None}, None),
+    ],
 )
 def test_byok_openai_cached_tokens_use_cache_price(
-    details: object, expected: Decimal, monkeypatch: pytest.MonkeyPatch
+    details: object, expected: Decimal | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Price cached OpenAI prompt tokens at the cache-read rate."""
     monkeypatch.setattr(
@@ -220,16 +230,17 @@ def test_byok_openai_cached_tokens_use_cache_price(
     }
     (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence=evidence)], proposer=False)
     assert row.provider_cents == expected
+    assert row.unpriced_calls == (1 if expected is None else 0)
     assert row.input_tokens == 2000000
     assert row.charged_units == 0
 
 
 @pytest.mark.parametrize(
     ("details", "expected"),
-    [({"cached_tokens": 1000000}, Decimal(330)), ({}, Decimal(600))],
+    [({"cached_tokens": 1000000}, Decimal(330)), ({}, Decimal(600)), (None, Decimal(600))],
 )
 def test_byok_responses_cached_tokens_use_cache_price(
-    details: dict, expected: Decimal, monkeypatch: pytest.MonkeyPatch
+    details: dict | None, expected: Decimal, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Price Responses cached input separately from uncached input."""
     monkeypatch.setattr(
@@ -263,7 +274,6 @@ def test_byok_responses_without_details_uses_uncached_rate(monkeypatch: pytest.M
 @pytest.mark.parametrize(
     "details",
     [
-        None,
         "invalid",
         [],
         {"cached_tokens": None},
