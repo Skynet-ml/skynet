@@ -23,7 +23,14 @@ from ..exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, Inf
 from ..i18n_en import t_en
 from ..local.cli_catalog import CliProvider, parse_subscription_model_id
 from .budgets import BudgetError, BudgetInsufficientError
-from .byok_upstreams import OPENROUTER, ProviderUpstream, resolve_upstream, validate_byok_novelty, validate_custom_base
+from .byok_upstreams import (
+    OPENROUTER,
+    ProviderUpstream,
+    byok_model_prefix,
+    resolve_upstream,
+    validate_byok_novelty,
+    validate_custom_base,
+)
 from .cli_dispatch import CliDispatcher
 from .credential_safety import scrub_model_config
 from .data_policy import data_policy_for
@@ -272,22 +279,25 @@ class ModelGateway:
                     )
                 )
 
-            def _unpriced(self, error: Exception) -> None:
+            def _unpriced(self, error: Exception, route: OpenRouterDispatcher | CliDispatcher | None = None) -> None:
                 """Map known route refusals to stable localized error keys.
 
                 Args:
                     error: The route refusal to report.
+                    route: Scoped model route, if this request used one.
 
                 Returns:
                     None, after sending the error response.
                 """
                 message = str(error)
                 known = {
-                    "This scoped route cannot dispatch a different model or API operation.": "submission.byok_route_unsupported",
-                    "This provider does not support embeddings on this route.": "submission.byok_embeddings_unsupported",
-                    "This provider requires its canonical endpoint. Custom endpoints require an openai/ model prefix.": "submission.byok_provider_unsupported",
+                    "submission.byok_route_unsupported",
+                    "submission.byok_embeddings_unsupported",
+                    "submission.byok_provider_unsupported",
                 }
-                code = known.get(message)
+                code = error.code if isinstance(error, UnpricedOperationError) else None
+                if route is None or route.policy.kind != "byok_model" or code not in known:
+                    code = None
                 self._error(422, code or "unpriced_operation", t_en(code) if code else message)
 
             def do_GET(self) -> None:
@@ -380,7 +390,7 @@ class ModelGateway:
                 except (UsagePendingError, BudgetError):
                     self._error(424, "usage_pending", "Previous work must settle before another attempt is admitted.")
                 except (UnpricedOperationError, ValueError, TypeError) as error:
-                    self._unpriced(error)
+                    self._unpriced(error, route if not (is_tools or is_evaluator or is_packages) else None)
                 except httpx.HTTPError:
                     self._error(
                         502,
@@ -504,8 +514,14 @@ class ModelGateway:
             Scoped guest route containing no upstream credential.
         """
         if embeddings and not upstream.embeddings:
-            raise UnpricedOperationError("This provider does not support embeddings on this route.")
-        model = resolve_model_slug(model, client=self._client) if upstream == OPENROUTER else model.split("/", 1)[-1]
+            raise UnpricedOperationError(
+                "This provider does not support embeddings on this route.",
+                code="submission.byok_embeddings_unsupported",
+            )
+        if upstream == OPENROUTER:
+            model = resolve_model_slug(model, client=self._client)
+        elif byok_model_prefix(model, upstream.slug):
+            model = model.split("/", 1)[-1]
         client = self._client
         if upstream.slug == "custom":
             try:

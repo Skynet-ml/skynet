@@ -97,6 +97,25 @@ def validate_custom_base(base: str) -> None:
         raise ValueError("Custom provider endpoints require HTTPS without credentials, query or fragment.") from error
 
 
+def byok_model_prefix(name: str, explicit_provider: str | None) -> str | None:
+    """Identify a provider prefix without mistaking native namespaces for one.
+
+    Args:
+        name: Model identifier.
+        explicit_provider: Provider supplied independently of the model name.
+
+    Returns:
+        The prefix, or None when the identifier is bare.
+    """
+    stripped = (name or "").strip().strip("/")
+    if "/" not in stripped:
+        return None
+    prefix = stripped.split("/", 1)[0]
+    if explicit_provider and prefix not in UPSTREAMS and prefix not in LITELLM_TO_BYOK_PROVIDER:
+        return None
+    return prefix or None
+
+
 def resolve_upstream(config: Mapping[str, Any]) -> ProviderUpstream:
     """Resolve a BYOK model config to its fixed provider or custom OpenAI base.
 
@@ -127,7 +146,8 @@ def resolve_upstream(config: Mapping[str, Any]) -> ProviderUpstream:
             return UPSTREAMS[slug]
         if slug in UPSTREAMS and slug != "openai":
             raise UnpricedOperationError(
-                "This provider requires its canonical endpoint. Custom endpoints require an openai/ model prefix."
+                "This provider requires its canonical endpoint. Custom endpoints require an openai/ model prefix.",
+                code="submission.byok_provider_unsupported",
             )
         if prefix != "openai":
             raise UnpricedOperationError("Custom provider endpoints require an openai/ model prefix.")

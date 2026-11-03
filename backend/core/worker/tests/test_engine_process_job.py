@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from core.api.errors import DomainError
 from core.exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, ServiceError
 from core.i18n import CANCELLATION_REASON
 from core.storage.base import JobStore
@@ -783,6 +784,22 @@ _BLACKBOX_OVERVIEW: dict = {
     "model_name": "gpt-4o",
     "token_source": "managed",
 }
+
+
+def test_protected_blackbox_novelty_failure_has_plain_detail(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """Store the domain detail without an HTTP status prefix on legacy jobs."""
+    payload = {
+        **_BLACKBOX_PAYLOAD,
+        "reflection_model_config": {"name": "anthropic/claude-sonnet-4", "token_source": "byok"},
+        "strategy": {"mode": "single", "engine": "shinka_evolve"},
+        "shinka": {"novelty": True},
+    }
+    store.seed_job("novelty", payload=payload, payload_overview=_BLACKBOX_OVERVIEW, execution_budget_id="budget")
+    worker.enqueue_job("novelty")
+    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service"):
+        worker._process_job("novelty", 0)
+    assert store._jobs["novelty"]["status"] == "failed"
+    assert store._jobs["novelty"]["message"] == DomainError("submission.byok_novelty_unsupported").detail
 
 
 def test_process_job_blackbox_without_budget_requires_vercel(

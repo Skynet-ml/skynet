@@ -360,7 +360,10 @@ class ProviderDispatcher:
         if not self.embeddings and self.policy.kind == "managed_model" and self.upstream == OPENROUTER:
             paths.add("/messages")
         if path not in paths or request.get("model") != self.model:
-            raise UnpricedOperationError("This scoped route cannot dispatch a different model or API operation.")
+            raise UnpricedOperationError(
+                "This scoped route cannot dispatch a different model or API operation.",
+                code="submission.byok_route_unsupported",
+            )
         if self.policy.kind == "managed_model" and excluded_from_managed(self.model):
             return ModelHTTPResult(403, "application/json", managed_model_refusal(self.model))
         if self._refusal is not None:

@@ -382,6 +382,84 @@ def test_scoped_gateway_refusal_uses_localized_code(gateway: ModelGateway) -> No
     assert response.json()["error"]["code"] == "submission.byok_route_unsupported"
 
 
+def test_managed_scoped_refusal_keeps_unpriced_reason(gateway: ModelGateway) -> None:
+    """Keep the original unpriced error for a managed model mismatch."""
+    route = gateway.register(model="fixture/text", api_key="private", role="task", policy=ChargePolicy("managed_model"))
+    response = httpx.post(
+        f"{gateway.url}/chat/completions",
+        headers={"Authorization": f"Bearer {route['token']}"},
+        json={"model": "other/model"},
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "unpriced_operation"
+    assert (
+        response.json()["error"]["message"] == "This scoped route cannot dispatch a different model or API operation."
+    )
+
+
+def test_subscription_scoped_refusal_keeps_unpriced_reason(
+    gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the original unpriced error for a subscription model mismatch."""
+    monkeypatch.setattr(settings, "local_mode", True)
+    route = gateway.register_subscription("anthropic/claude-sonnet-4.6", "claude", "task")
+    response = httpx.post(
+        f"{gateway.url}/chat/completions",
+        headers={"Authorization": f"Bearer {route['token']}"},
+        json={"model": "other/model"},
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "unpriced_operation"
+    assert (
+        response.json()["error"]["message"] == "This scoped route cannot dispatch a different model or API operation."
+    )
+
+
+def test_byok_refusal_uses_structured_code_not_reason(gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Localize a coded BYOK refusal even if its English reason changes."""
+    route = gateway.register(model="fixture/text", api_key="private", role="task", policy=ChargePolicy("byok_model"))
+    error = UnpricedOperationError("New dispatcher wording", code="submission.byok_route_unsupported")
+
+    def refuse(*args, **kwargs):
+        """Reject the call with structured route evidence."""
+        raise error
+
+    monkeypatch.setattr(gateway._routes[route["token"]], "dispatch", refuse)
+    response = httpx.post(
+        f"{gateway.url}/chat/completions",
+        headers={"Authorization": f"Bearer {route['token']}"},
+        json={"model": "fixture/text"},
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "submission.byok_route_unsupported"
+    assert response.json()["error"]["message"] != "New dispatcher wording"
+
+
+def test_native_bare_slash_model_is_not_stripped(gateway: ModelGateway) -> None:
+    """Keep a native model's namespace when registering its protected route."""
+    name = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+    sent = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Record the model sent to the provider without network access."""
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"usage": {"prompt_tokens": 1, "completion_tokens": 1}, "choices": []})
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider))
+    route = gateway.register(
+        model=name, api_key="private", role="task", policy=ChargePolicy("byok_model"), upstream=UPSTREAMS["together"]
+    )
+    assert route["model"] == name
+    response = httpx.post(
+        f"{gateway.url}/chat/completions",
+        headers={"Authorization": f"Bearer {route['token']}"},
+        json={"model": name, "messages": [{"role": "user", "content": "hello"}]},
+    )
+    assert response.status_code == 200
+    assert sent[0]["model"] == name
+
+
 @pytest.mark.parametrize(("provider", "novelty"), [("openai", True), ("openrouter", True), ("anthropic", False)])
 def test_shinka_byok_novelty_allows_supported_routes(gateway: ModelGateway, provider: str, novelty: bool) -> None:
     """Allow embedding-capable providers and disabled novelty."""

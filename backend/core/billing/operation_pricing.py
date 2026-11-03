@@ -18,6 +18,16 @@ _BYOK_FEE = Decimal(str(BYOK_FEE_FRACTION))
 class UnpricedOperationError(ValueError):
     """Reject a request whose applicable billable categories cannot be bounded."""
 
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        """Keep a reason and an optional structured route refusal code.
+
+        Args:
+            message: Original reason for the refusal.
+            code: Stable translation key for the refusal, if available.
+        """
+        super().__init__(message)
+        self.code = code
+
 
 def exact_nonnegative(value: Any) -> Decimal:
     """Read a provider decimal without treating absent or invalid prices as zero.

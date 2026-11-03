@@ -62,6 +62,27 @@ def test_submit_and_worker_agree_on_saved_base(provider, base, accepted, monkeyp
         assert submission_error.value.code == worker_error.value.code == "billing.byok_model_not_served"
 
 
+@pytest.mark.parametrize(
+    "name", ["meta-llama/Llama-3.3-70B-Instruct-Turbo", "together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo"]
+)
+def test_together_slash_model_at_submit_and_worker(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Accept a native slash model with or without its LiteLLM provider prefix."""
+    view = SimpleNamespace(provider="together", api_base=None, status="verified")
+    resolved = SimpleNamespace(api_base=None, params={}, secret="fixture")
+    vault = SimpleNamespace(
+        has_verified_connection=lambda *_: True,
+        list_keys=lambda *_: SimpleNamespace(keys=[view]),
+        resolve_connection=lambda *_: resolved,
+    )
+    monkeypatch.setattr(submissions, "ProviderKeyVault", lambda **kwargs: vault)
+    config = ModelConfig(name=name, token_source="byok", byok_provider="together")
+    _enforce_byok_connections(SimpleNamespace(engine=object()), "user", [config])
+    payload = {"model_config": config.model_dump()}
+    inject_byok_connections(payload, username="user", vault=vault)
+    assert payload["model_config"]["name"] == name
+    assert payload["model_config"]["extra"]["api_key"] == "fixture"
+
+
 @pytest.fixture
 def engine() -> Iterator[object]:
     """Yield an in-memory SQLite engine with the billing tables created."""

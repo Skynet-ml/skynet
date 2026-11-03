@@ -234,6 +234,35 @@ def test_preflight_accepts_openai_custom_endpoint(setup_client, monkeypatch: pyt
     assert len(calls) == 1
 
 
+def test_preflight_accepts_together_bare_slash_model(setup_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Admit a namespaced Together model with an explicit provider."""
+    client, _engine, calls = setup_client
+    view = SimpleNamespace(provider="together", api_base=None, status="verified")
+    vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
+    monkeypatch.setattr(submission_router, "ProviderKeyVault", lambda **kwargs: vault)
+    budget = _budget(client)
+
+    def run(request, user, store):
+        """Record the admitted request without provider traffic."""
+        calls.append(request)
+        return wizard_preflight.WizardPreflightResponse(
+            id="test", fingerprint="test", status="succeeded", may_advance=True, checks=[], budget=budget
+        )
+
+    monkeypatch.setattr(preflight_router, "run_preflight", run)
+    payload = {
+        **PAYLOAD,
+        "reflection_model_config": {
+            "name": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            "token_source": "byok",
+            "byok_provider": "together",
+        },
+    }
+    response = client.post("/wizard/preflight", json=_request(budget, payload))
+    assert response.status_code == 200
+    assert len(calls) == 1
+
+
 def test_byok_continue_needs_no_managed_model_key(setup_client, monkeypatch: pytest.MonkeyPatch) -> None:
     """Resolve the owner's verified key and keep managed provider funding out of a BYOK setup."""
     client, engine, calls = setup_client

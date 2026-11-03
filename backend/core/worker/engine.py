@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import run_log
+from ..api.errors import DomainError, domain_service_error
 from ..billing import (
     OpenRouterKeyProvisioner,
     ProviderKeyVault,
@@ -772,10 +773,13 @@ class BackgroundWorker:
             if isinstance(execution_payload, UnifiedRunRequest):
                 validate_unified_payload(execution_payload)
             elif isinstance(execution_payload, BlackboxRunRequest):
-                validate_blackbox_payload(
-                    execution_payload,
-                    verify_scorer=not protected_execution,
-                )
+                try:
+                    validate_blackbox_payload(
+                        execution_payload,
+                        verify_scorer=not protected_execution,
+                    )
+                except DomainError as error:
+                    raise domain_service_error(error) from error
             elif optimization_type == OPTIMIZATION_TYPE_RUN and not protected_execution:
                 service.validate_payload(execution_payload)
 

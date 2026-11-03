@@ -31,12 +31,11 @@ from ...billing import (
     StripeBillingService,
     byok_provider_for_litellm,
     cost_ceiling_budget,
-    provider_slug_for_model,
 )
 from ...billing.budget_amounts import MAX_CENTS
 from ...billing.budgets import BudgetError, BudgetService
 from ...billing.byok_bridge import byok_upstream_routable
-from ...billing.byok_upstreams import UPSTREAMS, resolve_upstream, validate_byok_novelty
+from ...billing.byok_upstreams import UPSTREAMS, byok_model_prefix, resolve_upstream, validate_byok_novelty
 from ...billing.byok_vault import safe_connection_params
 from ...billing.operation_pricing import UnpricedOperationError
 from ...billing.protected_credentials import ProtectedCredentialVault, protect_execution_credentials
@@ -734,8 +733,8 @@ def _enforce_byok_connections(job_store, username: str, model_configs: list[Mode
         if config.token_source != TOKEN_SOURCE_BYOK:
             continue
         name = config.normalized_identifier()
-        prefix = provider_slug_for_model(name)
         provider = (config.byok_provider or "").strip()
+        prefix = byok_model_prefix(name, provider)
         if not provider and prefix is not None:
             provider = byok_provider_for_litellm(prefix)
         if not provider or (not config.byok_provider and provider not in UPSTREAMS):

@@ -22,7 +22,7 @@ from typing import Any
 from ..api.errors import DomainError
 from ..constants import TOKEN_SOURCE_BYOK
 from ..models.common import ModelConfig
-from .byok_upstreams import ProviderUpstream, resolve_upstream
+from .byok_upstreams import ProviderUpstream, byok_model_prefix, resolve_upstream
 from .byok_vault import ProviderKeyVault, byok_provider_for_litellm, safe_connection_params
 from .operation_pricing import UnpricedOperationError
 
@@ -192,8 +192,8 @@ def inject_byok_connections(
     for cfg in _model_config_dicts(payload_dict):
         if (cfg.get("token_source") or default_token_source) != TOKEN_SOURCE_BYOK:
             continue
-        prefix = provider_slug_for_model(cfg.get("name", ""))
         configured_provider = str(cfg.get("byok_provider") or "").strip() or None
+        prefix = byok_model_prefix(cfg.get("name", ""), configured_provider)
         if prefix is None and configured_provider is None:
             continue
         # The model id carries a LiteLLM prefix (``gemini``, ``together_ai``);
