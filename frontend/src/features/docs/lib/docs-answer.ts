@@ -33,7 +33,7 @@ export function isQuestionTooLong(question: string): boolean {
 export function askBody(question: string, earlier: readonly DocsAgentMessage[], locale: string) {
   return {
     question,
-    history: trimHistory(earlier, MAX_SENT_HISTORY).map((message) => ({
+    history: trimHistory(earlier.filter((message) => message.content.trim()), MAX_SENT_HISTORY).map((message) => ({
       role: message.role,
       content: message.content.slice(0, MAX_QUESTION_CHARS),
     })),
@@ -46,9 +46,10 @@ export function readSuggestion(data: unknown): string {
   return isRecord(data) && typeof data.suggestion === "string" ? data.suggestion.trim() : "";
 }
 
-/** Keep the newest messages, and drop empty ones (an answer that failed). */
+/** Keep the newest messages, including tool-only bubbles closed by a steer. */
 export function trimHistory(messages: readonly DocsAgentMessage[], max: number): DocsAgentMessage[] {
-  return messages.filter((message) => message.content.trim()).slice(-max);
+  return messages.filter((message) => message.content.trim() ||
+    message.toolCalls?.length || message.thinkingSegments?.length).slice(-max);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -23,7 +23,7 @@ Ajan çalışırken mesaj alanını kullanmaya devam edebilirsiniz:
 - **Durdur** mevcut turu durdurur ve kuyruğu duraklatır. Okunmamış yönlendirmeler listeye döner. Hiçbir şey otomatik başlamaz. Mesaj alanındaki **Esc** de aynı işi yapar; ancak açık menü veya IME ile metin oluşturma sırasında durdurmaz. Esc önce bu mesaj alanının önerisini veya menüsünü kapatır.
 - Etkin tur yokken **Şimdi gönder**, duraklatılmış kuyruğun ilk mesajını gönderir. Diğerleri sırayla devam eder. Normal tur bitişi de sonraki mesajı başlatır.
 - **Durdur ve şimdi gönder** turu durdurup tüm listeyi tek bir yeni tur olarak gönderir. Okunmamış yönlendirmelerin dönmesini bekler, ardından bunları kuyruktaki mesajların önüne koyup boş satırlarla birleştirir. Okunmuş yönlendirmeler yeniden gönderilmez. Doğrulanmamış mesajlar listede kalır ve bu tura eklenmez. Diğer mesajlar normal şekilde devam eder.
-- Belge asistanı ve sunulan programların korumalı sohbeti **yalnızca kuyruk** kullanır. Enter ve Tab kuyruğa ekler. Belge asistanı istek sınırına ulaşınca kalan mesajları duraklatır.
+- Oturum açıldığında, güvenli bir adım sınırı duyurulduktan sonra **Enter** belge asistanını yönlendirir. İleti, modelin zaten planlanan sonraki adımında okunur. **Tab** her zaman kuyruğa ekler. Duyurudan önce, oturum kapalıyken ve sunulan programların korumalı sohbetinde Enter ve Tab kuyruğa ekler. Belge asistanı istek sınırına ulaşınca kalan mesajları duraklatır.
 
 ## Ajan neler yapabilir
 

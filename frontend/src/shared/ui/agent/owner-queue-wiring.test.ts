@@ -10,10 +10,46 @@ import { REACT_CHAT_USER_MESSAGE_MAX_CHARS } from "../../../features/optimizatio
 import { handleComposerEscape } from "./composer-keys.ts";
 import { SteerQueue } from "./steer-queue.ts";
 import { visibleSuggestion } from "./next-prompt.ts";
+import { dispatchGeneralistEvent } from "../../../features/agent-panel/lib/stream-events.ts";
+import { closeThinking } from "../../lib/thinking-segments.ts";
 
 const docs = "src/features/docs/components/docs-agent-panel.tsx";
 const served = "src/features/optimizations/hooks/use-react-serve-chat.ts";
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+for (const ready of ["matching", "wrong", "absent"] as const) {
+  test(`docs opens a channel only for a ${ready} safe-boundary announcement`, async () => {
+    const store = new SteerQueue();
+    let body: any;
+    let saved: any[] = [];
+    const controller = { current: null as AbortController | null };
+    const callback = expression(docs, "ask", {
+      abortRef: controller, messagesRef: { current: [] }, locale: "en", MAX_KEPT_MESSAGES: 12,
+      AbortController, askBody, isQuestionTooLong, trimHistory, discardStaleDocsResponse, docsAskFailure,
+      setNotice: () => {}, setStreaming: () => {}, update: () => {}, saveHistory: (m: any[]) => { saved = m; },
+      getRuntimeEnv: () => ({ apiUrl: "local" }), steerStore: store,
+      labels: { agentError: "error" }, closeThinking, settle: (m: any) => m,
+      dispatchGeneralistEvent, newSteerKey: () => "docs-turn", agentSteerChannel: () => ({
+        post: async () => "pending", withdraw: async () => ({ ids: [], delivered: [] }),
+      }),
+      fetchWithAuthRetry: async (_url: string, init: any) => {
+        body = JSON.parse(init.body);
+        return new Response(new ReadableStream());
+      },
+      readServerSentEvents: async (_body: any, event: any) => {
+        assert.equal(store.getSnapshot().canSteer, false);
+        if (ready !== "absent") event({ event: "steer_ready", data: { steer_key: ready === "matching" ? body.steer_key : "wrong" } });
+        assert.equal(store.getSnapshot().canSteer, ready === "matching");
+        if (ready === "matching") event({ event: "steer_applied", data: { ids: ["pending"], text: "Focus on budgets" } });
+        event({ event: "done", data: { assistant_message: "Answer." } });
+      },
+    });
+    await callback("question");
+    assert.equal(body.steer_key, "docs-turn");
+    assert.deepEqual(saved.filter(m => m.role === "user").map(m => m.content),
+      ready === "matching" ? ["question", "Focus on budgets"] : ["question"]);
+  });
+}
 
 // Execute the owners' actual callback bodies without mounting their network-dependent screens.
 function expression(file: string, name: string, context: Record<string, unknown>): any {
@@ -98,6 +134,7 @@ for (const reason of ["stopped", "superseded"]) {
       abortRef, messagesRef: { current: [] }, locale: "en", MAX_KEPT_MESSAGES: 12,
       AbortController, askBody, isQuestionTooLong, trimHistory, discardStaleDocsResponse, docsAskFailure,
       setNotice: () => {}, setStreaming: () => {}, update: () => {}, saveHistory: () => {},
+      newSteerKey: () => "docs-turn",
       getRuntimeEnv: () => ({ apiUrl: "local" }), fetchWithAuthRetry: () => pending,
       readServerSentEvents: () => assert.fail("read stale stream"), steerStore: new SteerQueue(),
     });

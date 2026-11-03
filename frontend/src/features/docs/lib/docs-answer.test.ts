@@ -31,6 +31,19 @@ import {
   localeFromAcceptLanguage,
 } from "../../../shared/lib/locale.ts";
 
+test("docs retains a tool-only bubble closed by a steer without replaying an empty model turn", () => {
+  const messages = [
+    { role: "user" as const, content: "question" },
+    { role: "assistant" as const, content: "", toolCalls: [{
+      id: "search", tool: "search_docs", reason: "", status: "done" as const, startedAt: 1, endedAt: 2,
+    }] },
+    { role: "user" as const, content: "steered question" },
+  ];
+  assert.equal(trimHistory(messages, 12).length, 3);
+  assert.equal(parseStoredHistory(JSON.stringify(messages)).length, 3);
+  assert.deepEqual(askBody("next", messages, "en").history.map(m => m.content), ["question", "steered question"]);
+});
+
 test("keepDocsLinks keeps links to docs pages", () => {
   const text = "See [Engines](/docs/engines) and [Hebrew](/docs/he/quickstart#run).";
   assert.equal(keepDocsLinks(text), text);

@@ -8,7 +8,7 @@ import { AgentThread } from "@/shared/ui/agent/agent-thread";
 import { ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
-import { useSteerQueue } from "@/shared/ui/agent/use-steer-queue";
+import { agentSteerChannel, newSteerKey, useSteerQueue } from "@/shared/ui/agent/use-steer-queue";
 import { AppMark } from "@/shared/ui/app-mark";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { Button } from "@/shared/ui/primitives/button";
@@ -155,7 +155,7 @@ export function DocsAgentPanel({
     abortRef.current?.abort();
     abortRef.current = null;
     setStreaming(false);
-    const kept = trimHistory(messagesRef.current, MAX_KEPT_MESSAGES);
+    const kept = trimHistory(messagesRef.current.map(settle), MAX_KEPT_MESSAGES);
     update(kept);
     saveHistory(kept);
   }, [update]);
@@ -186,8 +186,9 @@ export function DocsAgentPanel({
       abortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
-      const body = askBody(text, before, locale);
-      const base: DocsAgentMessage[] = [
+      const steerKey = newSteerKey();
+      const body = { ...askBody(text, before, locale), steer_key: steerKey };
+      let base: DocsAgentMessage[] = [
         ...trimHistory(before, MAX_KEPT_MESSAGES),
         { role: "user", content: text, createdAt: Date.now() },
       ];
@@ -210,6 +211,12 @@ export function DocsAgentPanel({
       let done = false;
       // The same events, and the same thinking and tool rows, as the generalist agent.
       const handlers: GeneralistAgentHandlers = {
+        onSteerApplied: ({ ids, text }) => {
+          steerStore.applied(ids);
+          if (!text.trim()) return;
+          base = [...base, settle(turn), { role: "user", content: text, createdAt: Date.now() }];
+          show({ role: "assistant", content: "", toolCalls: [], thinkingSegments: [] });
+        },
         onReasoningPatch: (chunk) =>
           patchThinking((segments, toolCount, since) => appendReasoning(segments, chunk, Date.now(), toolCount, since)),
         onToolStart: (ev) => {
@@ -268,6 +275,10 @@ export function DocsAgentPanel({
         if (!failed && res.body) {
           await readServerSentEvents(res.body, (event) => {
             if (controller.signal.aborted || abortRef.current !== controller) return;
+            if (event.event === "steer_ready" && event.data.steer_key === steerKey) {
+              steerStore.openTurn(agentSteerChannel(steerKey));
+              return;
+            }
             dispatchGeneralistEvent(handlers, event.event, event.data, () => labels.agentError);
           });
           if (!failed && (!done || !turn.content.trim())) failed = "error";
