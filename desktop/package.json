@@ -1,7 +1,7 @@
 {
   "name": "skynet-desktop",
   "productName": "Skynet",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Skynet for Mac: runs the Skynet stack locally on your own model subscriptions.",
   "license": "AGPL-3.0-only",
