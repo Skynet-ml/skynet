@@ -10,7 +10,6 @@ export interface TimelineStep {
 export interface Timeline {
   steps: TimelineStep[];
   firstLaunch: boolean;
-  detail?: string;
 }
 
 export type StepPhase = "done" | "active" | "pending";

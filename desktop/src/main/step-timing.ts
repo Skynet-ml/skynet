@@ -18,8 +18,6 @@ export interface Timeline {
   steps: TimelineStep[];
   /** No earlier successful launch recorded a duration. */
   firstLaunch: boolean;
-  /** The latest output line of the running command, when it has one. */
-  detail?: string;
 }
 
 export type StepTimes = Record<string, number>;
@@ -57,7 +55,7 @@ export function newTimeline(times: StepTimes): Timeline {
 /** Finish the running step (if any) and start `name`. Returns a new timeline. */
 export function startStep(timeline: Timeline, name: string, now: number): Timeline {
   const done = finishSteps(timeline, now);
-  return { ...done, detail: undefined, steps: done.steps.map((s) => (s.name === name ? { ...s, startedAt: now } : s)) };
+  return { ...done, steps: done.steps.map((s) => (s.name === name ? { ...s, startedAt: now } : s)) };
 }
 
 /** Finish the running step. Returns a new timeline. */
@@ -68,14 +66,4 @@ export function finishSteps(timeline: Timeline, now: number): Timeline {
       s.startedAt !== undefined && s.durationMs === undefined ? { ...s, durationMs: Math.max(0, now - s.startedAt) } : s,
     ),
   };
-}
-
-// CSI sequences (colours, cursor moves) and carriage-return redraws from build tools.
-const ANSI = /\u001b\[[0-9;?]*[A-Za-z]/g;
-
-/** The last non-empty line of a chunk of command output, cleaned for display, or null. */
-export function latestLine(chunk: string): string | null {
-  const lines = chunk.replace(ANSI, "").split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean);
-  const line = lines.pop();
-  return line ? line.slice(0, 200) : null;
 }

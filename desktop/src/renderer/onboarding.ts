@@ -146,7 +146,6 @@ function renderChecklist(state: State): void {
 
 // The running step's clock and bar update from here; render() replaces it.
 let tick: (() => void) | null = null;
-let detailNode: HTMLElement | null = null;
 setInterval(() => tick?.(), 250);
 
 /** Steps shorter than this show no bar: it would fill before anyone sees it. */
@@ -160,7 +159,6 @@ function timelinePanel(timeline: Timeline): HTMLElement {
     el("span", { className: "tl-totals" }, [leftNode, elapsedNode]),
   ]);
   const updates: ((now: number) => void)[] = [];
-  detailNode = null;
 
   const rows = timeline.steps.map((step) => {
     const phase = stepPhase(step);
@@ -176,20 +174,19 @@ function timelinePanel(timeline: Timeline): HTMLElement {
     if (phase !== "active") return row;
 
     const startedAt = step.startedAt as number;
-    const extra = el("div", { className: "tl-extra" });
     const hasBar = estimate !== undefined && estimate >= MIN_BAR_MS;
     if (hasBar) {
       const fill = el("div", { className: "tl-fill" });
       // A CSS animation fills the bar; the negative delay resumes it after a re-render without a jump.
       fill.style.animationDuration = `${estimate}ms`;
       fill.style.animationDelay = `-${Math.min(Date.now() - startedAt, estimate)}ms`;
-      extra.append(el("div", { className: "tl-bar" }, [fill, el("div", { className: "tl-sweep" })]));
-      extra.append(el("div", { className: "tl-note", text: t("timeline.over") }));
+      row.append(
+        el("div", { className: "tl-extra" }, [
+          el("div", { className: "tl-bar" }, [fill, el("div", { className: "tl-sweep" })]),
+          el("div", { className: "tl-note", text: t("timeline.over") }),
+        ]),
+      );
     }
-    detailNode = el("div", { className: "tl-detail", dir: "ltr", text: timeline.detail ?? "" });
-    detailNode.hidden = !timeline.detail;
-    extra.append(detailNode);
-    row.append(extra);
     updates.push((now) => {
       const elapsed = now - startedAt;
       time.textContent = estimate === undefined ? formatClock(elapsed) : `${formatClock(elapsed)} / ~${formatClock(estimate)}`;
@@ -294,17 +291,7 @@ const PROGRESS: Kind[] = ["checking", "starting", "ready"];
 const isProgress = (state: State) =>
   PROGRESS.includes(state.kind) || (state.kind === "sign_in" && state.signIn === "waiting");
 
-let lastKey = "";
-
 function render(state: State): void {
-  // A new output line alone patches the detail text, so the spinner and the bar do not restart.
-  const key = JSON.stringify({ ...state, timeline: state.timeline && { ...state.timeline, detail: undefined } });
-  if (key === lastKey && detailNode && state.timeline?.detail) {
-    detailNode.textContent = state.timeline.detail;
-    detailNode.hidden = false;
-    return;
-  }
-  lastKey = key;
   tick = null;
   document.body.dataset.state = state.kind;
   document.body.toggleAttribute("data-progress", isProgress(state));

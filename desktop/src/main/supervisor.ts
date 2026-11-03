@@ -124,14 +124,7 @@ function tail(text: string): string {
 export function runCommand(
   file: string,
   args: string[],
-  opts: {
-    env: Record<string, string>;
-    cwd?: string;
-    timeoutMs?: number;
-    log?: fs.WriteStream;
-    /** Called with each chunk of stdout and stderr. */
-    onOutput?: (chunk: string) => void;
-  },
+  opts: { env: Record<string, string>; cwd?: string; timeoutMs?: number; log?: fs.WriteStream },
 ): Promise<RunOutput> {
   return new Promise((resolve) => {
     let stdout = "";
@@ -153,12 +146,10 @@ export function runCommand(
     child.stdout?.on("data", (d: Buffer) => {
       stdout = tail(stdout + d.toString());
       opts.log?.write(d);
-      opts.onOutput?.(d.toString());
     });
     child.stderr?.on("data", (d: Buffer) => {
       stderr = tail(stderr + d.toString());
       opts.log?.write(d);
-      opts.onOutput?.(d.toString());
     });
     child.on("error", (err) => {
       stderr += String(err);

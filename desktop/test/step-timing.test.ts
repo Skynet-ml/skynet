@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { finishSteps, latestLine, loadStepTimes, newTimeline, saveStepTimes, startStep, STARTUP_STEPS } from "../src/main/step-timing";
+import { finishSteps, loadStepTimes, newTimeline, saveStepTimes, startStep, STARTUP_STEPS } from "../src/main/step-timing";
 import { formatClock, remaining, shortSeconds, stepPhase, totalElapsed, type Timeline } from "../src/renderer/timeline";
 
 let dir: string;
@@ -48,21 +48,6 @@ describe("step history", () => {
     expect(estimate("sandbox")).toBe(220_000);
     // A step that did not run in the last launch has no estimate.
     expect(estimate("runtime")).toBeUndefined();
-  });
-
-  it("clears the output line when the next step starts", () => {
-    let timeline = startStep(newTimeline({}), "sandbox", 0);
-    timeline = { ...timeline, detail: "#8 [ 4/14] RUN pip install" };
-    expect(startStep(timeline, "python", 10).detail).toBeUndefined();
-  });
-});
-
-describe("latestLine", () => {
-  it("returns the last non-empty line without colour codes", () => {
-    expect(latestLine("#7 [3/12] COPY . .\n#8 [4/12] RUN uv sync\n\n")).toBe("#8 [4/12] RUN uv sync");
-    expect(latestLine("\u001b[32mInstalled 210 packages\u001b[0m\r")).toBe("Installed 210 packages");
-    expect(latestLine("\n  \n")).toBeNull();
-    expect(latestLine("x".repeat(500))?.length).toBe(200);
   });
 });
 

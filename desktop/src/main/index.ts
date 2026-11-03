@@ -10,7 +10,7 @@ import { holdQuitUntilStopped, stopServices } from "./quit";
 import { databaseUrl, removeSandboxContainers, startPostgres, stopPostgres, type DockerCtx } from "./postgres";
 import { ensureSandboxImage } from "./sandbox-image";
 import { ensurePrivateDir, loadOrCreateSecrets } from "./secrets";
-import { finishSteps, latestLine, loadStepTimes, newTimeline, saveStepTimes, startStep, type Timeline } from "./step-timing";
+import { finishSteps, loadStepTimes, newTimeline, saveStepTimes, startStep, type Timeline } from "./step-timing";
 import { clearPids, psStartOf, recordPid, sweepOrphans } from "./stack-pids";
 import { buildChildEnv, loginShellPath } from "./shell-env";
 import {
@@ -246,28 +246,11 @@ async function check(): Promise<void> {
 
 async function startStack(base: OnboardingState, loginPath: string): Promise<void> {
   let timeline: Timeline = newTimeline(loadStepTimes(dataDir));
-  // The latest output line goes to the window at most a few times a second, and not to desktop.log.
-  let pendingDetail: string | null = null;
-  let detailTimer: NodeJS.Timeout | null = null;
   const step = (name: string) => {
     // A quit during first-launch setup must not start the next service after shutdown ran.
     if (quitting) throw new Error("Skynet is quitting");
-    if (detailTimer) clearTimeout(detailTimer);
-    detailTimer = null;
-    pendingDetail = null;
     timeline = startStep(timeline, name, Date.now());
     setState({ ...base, kind: "starting", step: name, timeline });
-  };
-  const onOutput = (chunk: string) => {
-    pendingDetail = latestLine(chunk) ?? pendingDetail;
-    if (detailTimer || !pendingDetail) return;
-    detailTimer = setTimeout(() => {
-      detailTimer = null;
-      if (state.kind !== "starting" || !pendingDetail) return;
-      timeline = { ...timeline, detail: pendingDetail };
-      state = { ...state, timeline };
-      win?.webContents.send("onboarding:state", state);
-    }, 300);
   };
   const ctx = dockerCtx as DockerCtx;
   const binEnv: Record<string, string> = { APP_DOCKER_BIN: ctx.docker };
@@ -290,10 +273,10 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
 
   step("postgres");
   postgresStarted = true;
-  await startPostgres(ctx, ports.postgres, secrets.pgPassword, onOutput);
+  await startPostgres(ctx, ports.postgres, secrets.pgPassword);
 
   step("sandbox");
-  const sandboxImage = await ensureSandboxImage(ctx, backendDir, bundleId, path.join(logsDir, "sandbox-build.log"), onOutput);
+  const sandboxImage = await ensureSandboxImage(ctx, backendDir, bundleId, path.join(logsDir, "sandbox-build.log"));
 
   const feOrigin = `http://127.0.0.1:${ports.frontend}`;
   const apiOrigin = `http://127.0.0.1:${ports.api}`;
@@ -321,7 +304,7 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
   step("python");
   const migrateLog = fs.createWriteStream(path.join(logsDir, "migrate.log"), { flags: "a" });
   try {
-    const sync = await runCommand(uvBin, ["sync", "--frozen"], { env: uvEnv, cwd: backendDir, timeoutMs: 45 * 60_000, log: migrateLog, onOutput });
+    const sync = await runCommand(uvBin, ["sync", "--frozen"], { env: uvEnv, cwd: backendDir, timeoutMs: 45 * 60_000, log: migrateLog });
     if (sync.code !== 0) throw new Error(`uv sync failed; see ${path.join(logsDir, "migrate.log")}`);
     step("migrations");
     const migrate = await runCommand(uvBin, ["run", "--frozen", "alembic", "upgrade", "head"], {
@@ -329,7 +312,6 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
       cwd: backendDir,
       timeoutMs: 10 * 60_000,
       log: migrateLog,
-      onOutput,
     });
     if (migrate.code !== 0) throw new Error(`Database migrations failed; see ${path.join(logsDir, "migrate.log")}`);
   } finally {
@@ -378,7 +360,6 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
   });
 
   if (quitting) return;
-  if (detailTimer) clearTimeout(detailTimer);
   try {
     saveStepTimes(dataDir, finishSteps(timeline, Date.now()));
   } catch (err) {
