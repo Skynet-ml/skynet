@@ -984,6 +984,18 @@ class _ModelGateway:
         self.answer = answer
         self.finish_reason = finish_reason
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.batched: set[str] = set()
+
+    def batches(self, token: str) -> bool:
+        """Tell whether a route waits on batches.
+
+        Args:
+            token: Route token.
+
+        Returns:
+            True for a token the test marked as batched.
+        """
+        return token in self.batched
 
     def model_routes(self) -> list[dict[str, str]]:
         """List a task route and an optimization route."""
@@ -1065,6 +1077,16 @@ def test_inference_falls_back_to_the_lockfile(economy: bool, status: int, tmp_pa
     assert repo_staging.infer_repo_setup(payload, _repo_tree(tmp_path), gateway) == "uv sync --frozen"
     assert payload["target"]["setup_command"] == "uv sync --frozen"
     assert len(gateway.calls) == (0 if economy else 1)
+
+
+def test_an_economy_reflection_model_is_not_asked(tmp_path: Path) -> None:
+    """A reflection model set to economy waits on a batch too, so staging does not ask it."""
+    payload = _payload("a" * 40)
+    gateway = _ModelGateway()
+    gateway.batched = {"opt-token"}
+
+    assert repo_staging.infer_repo_setup(payload, _repo_tree(tmp_path), gateway) == "uv sync --frozen"
+    assert gateway.calls == []
 
 
 def test_a_cut_off_setup_answer_falls_back_to_the_lockfile(tmp_path: Path) -> None:

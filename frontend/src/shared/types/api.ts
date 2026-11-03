@@ -36,6 +36,11 @@ export interface ModelConfig {
   // (`features/submit/hooks/use-submit-wizard.ts`). Other keys flow through
   // unchanged.
   extra?: { api_key?: string; [k: string]: unknown };
+  /**
+   * Wizard state: run this managed model through the provider's batch queue at
+   * half price. A submit sends it as `extra.economy_mode` (see prepareModelConfig).
+   */
+  economy_mode?: boolean;
 }
 
 export interface ColumnMapping {

@@ -35,6 +35,7 @@ import { emptyModelConfig } from "../../constants";
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
 import { useModelCatalog, useRecentModelConfigs } from "../../hooks/use-submit-wizard-data";
 import { DEFAULT_PROPOSER, proposerKnobs, usesNativeProposer } from "../../lib/engine-contract";
+import { keepEconomy } from "../../lib/model-config";
 import {
   DEFAULT_SHINKA_SETTINGS,
   MAX_EXTRA_OPTIMIZATION_MODELS,
@@ -47,6 +48,7 @@ import { ModelRoleRow } from "../blackbox/ModelRoleRow";
 import { ShinkaSettingsPanel } from "../blackbox/ShinkaSettingsPanel";
 import { Field, StepCard } from "../blackbox/shared";
 import { v2Msg } from "./ArtifactConfirmCard";
+import { EconomySwitch } from "./EconomySwitch";
 
 const MOBILE_MODEL_CHIP_CLASS =
   "min-h-[44px] max-lg:[&_button]:min-h-[44px] max-lg:[&_button]:min-w-[44px] max-lg:[&_button]:opacity-100";
@@ -116,7 +118,10 @@ export function ModelsSection({ kind, choice }: { kind: ArtifactKind; choice: Op
           onClick={() =>
             setEditing({
               config: taskModel ?? emptyModelConfig(),
-              onSave: (next) => patchOptimizer({ taskModel: next.name.trim() ? next : null }),
+              onSave: (next) =>
+                patchOptimizer({
+                  taskModel: next.name.trim() ? keepEconomy(next, taskModel) : null,
+                }),
               label: taskLabel,
             })
           }
@@ -127,6 +132,13 @@ export function ModelsSection({ kind, choice }: { kind: ArtifactKind; choice: Op
             {t("submit.v2.optimizer.models.task.required")}
           </p>
         )}
+        <EconomySwitch
+          id="v2-task-economy"
+          config={taskModel}
+          onChange={(economy) =>
+            taskModel && patchOptimizer({ taskModel: { ...taskModel, economy_mode: economy } })
+          }
+        />
       </ModelRoleRow>
 
       <ModelRoleRow
@@ -151,7 +163,9 @@ export function ModelsSection({ kind, choice }: { kind: ArtifactKind; choice: Op
             setEditing({
               config: reflectionModel ?? emptyModelConfig(),
               onSave: (next) =>
-                patchOptimizer({ reflectionModel: next.name.trim() ? next : null }),
+                patchOptimizer({
+                  reflectionModel: next.name.trim() ? keepEconomy(next, reflectionModel) : null,
+                }),
               label: reflectionLabel,
               modelDefaultsOnly: nativeProposer,
             })
@@ -174,7 +188,7 @@ export function ModelsSection({ kind, choice }: { kind: ArtifactKind; choice: Op
                   onSave: (next) =>
                     patchOptimizer({
                       extraReflectionModels: extraReflectionModels.map((m, i) =>
-                        i === index ? next : m,
+                        i === index ? keepEconomy(next, m) : m,
                       ),
                     }),
                   label: reflectionLabel,
@@ -196,7 +210,12 @@ export function ModelsSection({ kind, choice }: { kind: ArtifactKind; choice: Op
                   config: emptyModelConfig(),
                   onSave: (next) => {
                     if (next.name.trim())
-                      patchOptimizer({ extraReflectionModels: [...extraReflectionModels, next] });
+                      patchOptimizer({
+                        extraReflectionModels: [
+                          ...extraReflectionModels,
+                          keepEconomy(next, reflectionModel),
+                        ],
+                      });
                   },
                   label: reflectionLabel,
                 })
@@ -209,6 +228,22 @@ export function ModelsSection({ kind, choice }: { kind: ArtifactKind; choice: Op
             {t("submit.v2.optimizer.models.reflection.required")}
           </p>
         )}
+        <EconomySwitch
+          id="v2-reflection-economy"
+          config={reflectionModel}
+          note={nativeProposer ? msg("submit.blackbox.economy.native_hint") : undefined}
+          onChange={(economy) =>
+            reflectionModel &&
+            patchOptimizer({
+              reflectionModel: { ...reflectionModel, economy_mode: economy },
+              // ShinkaEvolve's extra models share the reflection role, so they share its choice.
+              extraReflectionModels: extraReflectionModels.map((m) => ({
+                ...m,
+                economy_mode: economy,
+              })),
+            })
+          }
+        />
       </ModelRoleRow>
 
       {nativeProposer && (
@@ -335,7 +370,7 @@ export function ModelsSection({ kind, choice }: { kind: ArtifactKind; choice: Op
           config={editing.config}
           onSave={(config) => {
             editing.onSave(config);
-            if (config.name.trim()) saveToRecent(config);
+            if (config.name.trim()) saveToRecent(keepEconomy(config, null));
             setEditing(null);
           }}
           roleLabel={editing.label}

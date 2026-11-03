@@ -263,3 +263,35 @@ test("a clone restores the extra workspace files; an old payload has none", () =
   } as never);
   assert.deepEqual(old.workspace.files, {});
 });
+
+test("an older run-wide economy run turns economy on for each managed model", () => {
+  const slices = cloneToSlices("blackbox", {
+    payload_kind: "unified_v1",
+    economy_mode: true,
+    models: {
+      task_model: { name: "task", token_source: "byok", byok_provider: "openrouter" },
+      reflection_model: { name: "refl" },
+      extra_reflection_models: [{ name: "extra" }],
+      metric_model: { name: "judge" },
+    },
+  });
+  assert.equal(slices.optimizer.taskModel?.economy_mode, undefined);
+  assert.equal(slices.optimizer.reflectionModel?.economy_mode, true);
+  assert.equal(slices.optimizer.extraReflectionModels?.[0]?.economy_mode, true);
+  assert.equal(slices.workspace.metricModel?.economy_mode, true);
+  assert.equal("economyMode" in slices.meta, false);
+});
+
+test("a metric model that differs from the reflection model only in economy clones as picked", () => {
+  const slices = cloneToSlices("blackbox", {
+    payload_kind: "unified_v1",
+    models: {
+      reflection_model: { name: "refl", extra: { economy_mode: true, temperature_hint: 1 } },
+      metric_model: { name: "refl" },
+    },
+  });
+  assert.equal(slices.optimizer.reflectionModel?.economy_mode, true);
+  assert.deepEqual(slices.optimizer.reflectionModel?.extra, { temperature_hint: 1 });
+  assert.equal(slices.workspace.metricModelMode, "explicit");
+  assert.equal(slices.workspace.metricModel?.economy_mode, undefined);
+});
