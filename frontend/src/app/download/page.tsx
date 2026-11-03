@@ -1,4 +1,4 @@
-import { DownloadsPage, detectPlatform } from "@/features/downloads";
+import { DownloadsPage } from "@/features/downloads";
 import type { Metadata } from "next";
 import { cookies, headers } from "next/headers";
 import {
@@ -65,7 +65,6 @@ export async function generateMetadata(): Promise<Metadata> {
   };
 }
 
-export default async function DownloadPage() {
-  const userAgent = (await headers()).get("user-agent") ?? "";
-  return <DownloadsPage initialPlatform={detectPlatform(userAgent)} />;
+export default function DownloadPage() {
+  return <DownloadsPage />;
 }

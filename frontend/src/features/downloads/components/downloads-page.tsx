@@ -1,19 +1,22 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import {
   AppleLogo,
-  ArrowDown,
-  ArrowUpRight,
+  ArrowLeft,
+  ArrowRight,
   BookOpen,
   Desktop,
   DeviceMobile,
+  DownloadSimple,
   Globe,
-  Terminal,
+  Plug,
 } from "@/shared/ui/icons";
-import { AppMark } from "@/shared/ui/app-mark";
 import { Button } from "@/shared/ui/primitives/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/shared/ui/primitives/dialog";
+import { cn } from "@/shared/lib/utils";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { LanguageSwitcher } from "@/shared/ui/language-switcher";
 import { useLocale } from "@/shared/providers";
 import { DocsThemeToggle } from "@/features/docs/client";
@@ -21,32 +24,172 @@ import { docsPathForLocale } from "@/shared/lib/locale";
 import { docsLinkProps } from "@/shared/lib/docs-link";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { msg } from "@/shared/lib/messages";
-import { APP_NAME } from "@/shared/lib/brand";
 import {
   DOWNLOAD_PLATFORMS,
-  clientPlatform,
-  heroActionForPlatform,
-  type PlatformId,
+  detectMacArch,
+  macDownloadUrl,
+  type MacArch,
 } from "../lib/download-platforms";
 
-const ICONS = { apple: AppleLogo, desktop: Desktop, phone: DeviceMobile, terminal: Terminal };
+const ICONS = { desktop: Desktop, phone: DeviceMobile };
 
-export function DownloadsPage({ initialPlatform }: { initialPlatform: PlatformId | null }) {
+function FeaturedCard({
+  id,
+  icon,
+  title,
+  description,
+  children,
+}: {
+  id: string;
+  icon: ReactNode;
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
+  return (
+    <article
+      id={`platform-${id}`}
+      aria-labelledby={`platform-${id}-title`}
+      className="flex scroll-mt-20 flex-col rounded-2xl border border-primary/35 bg-primary/5 p-6"
+    >
+      <span className="mb-6 flex size-11 items-center justify-center rounded-xl border border-border bg-background">
+        {icon}
+      </span>
+      <h3 id={`platform-${id}-title`} className="text-xl font-semibold">
+        <bdi>{title}</bdi>
+      </h3>
+      <p className="mt-2 flex-1 text-sm leading-relaxed text-muted-foreground">{description}</p>
+      <div className="mt-6">{children}</div>
+    </article>
+  );
+}
+
+function DownloadsContent({
+  headingId,
+  compact = false,
+}: {
+  headingId: string;
+  compact?: boolean;
+}) {
   const { locale } = useLocale();
-  const [detected, setDetected] = useState<PlatformId | null>(initialPlatform);
+  const local = isLocalMode();
+  const [macArch, setMacArch] = useState<MacArch>("arm64");
+  useEffect(() => {
+    void detectMacArch(navigator as Parameters<typeof detectMacArch>[0]).then(setMacArch);
+  }, []);
+  const actionClass =
+    "h-auto min-h-10 w-full whitespace-normal py-2 text-center max-lg:min-h-[44px]";
+  const display = { fontFamily: "var(--font-display)" };
+  const Heading = compact ? "h2" : "h1";
+
+  return (
+    <>
+      <section
+        className={cn(
+          "relative text-center",
+          compact ? "pt-6 pb-6" : "pt-12 pb-10 sm:pt-16 sm:pb-12",
+        )}
+        aria-labelledby={headingId}
+      >
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_center,var(--primary)_0%,transparent_65%)] opacity-[0.06]"
+        />
+        <div className="relative mx-auto max-w-3xl">
+          <Heading
+            id={headingId}
+            className={cn(
+              "text-balance font-semibold leading-[1.08] tracking-tight",
+              compact ? "text-3xl sm:text-4xl" : "text-4xl sm:text-6xl",
+            )}
+            style={display}
+          >
+            {msg("downloads.hero")}
+          </Heading>
+        </div>
+      </section>
+      <section
+        id={compact ? undefined : "platforms"}
+        className={cn("scroll-mt-20", compact ? "pb-6" : "pb-12 sm:pb-16")}
+      >
+        <div className="grid gap-4 md:grid-cols-3">
+          <FeaturedCard
+            id="web"
+            icon={<Globe className="size-6" aria-hidden="true" />}
+            title={msg("downloads.web")}
+            description={msg("downloads.web_description")}
+          >
+            <Button asChild size="lg" className={actionClass}>
+              <Link {...docsLinkProps("/explore", local)}>
+                {msg("downloads.browser")}
+                <ArrowRight className="rtl:-scale-x-100" aria-hidden="true" />
+              </Link>
+            </Button>
+          </FeaturedCard>
+          <FeaturedCard
+            id="macos"
+            icon={<AppleLogo className="size-6" aria-hidden="true" />}
+            title={msg("downloads.mac_app")}
+            description={msg("downloads.mac_description")}
+          >
+            <Button asChild size="lg" className={actionClass}>
+              <a href={macDownloadUrl(macArch)}>
+                {msg("downloads.download_mac")}
+                <DownloadSimple aria-hidden="true" />
+              </a>
+            </Button>
+          </FeaturedCard>
+          <FeaturedCard
+            id="mcp"
+            icon={<Plug className="size-6" aria-hidden="true" />}
+            title={msg("downloads.agents")}
+            description={msg("downloads.agents_description")}
+          >
+            <Button asChild size="lg" className={actionClass}>
+              <Link {...docsLinkProps(docsPathForLocale(locale, "mcp"), local)}>
+                {msg("downloads.connect_agent")}
+                <ArrowRight className="rtl:-scale-x-100" aria-hidden="true" />
+              </Link>
+            </Button>
+          </FeaturedCard>
+        </div>
+        <div className="mt-4 grid gap-4 sm:grid-cols-3">
+          {DOWNLOAD_PLATFORMS.map((item) => {
+            const Icon = ICONS[item.icon];
+            return (
+              <article
+                id={`platform-${item.id}`}
+                aria-labelledby={`platform-${item.id}-title`}
+                key={item.id}
+                className="flex scroll-mt-20 flex-col rounded-2xl border border-border bg-card p-4"
+              >
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-background">
+                    <Icon className="size-5" aria-hidden="true" />
+                  </span>
+                  <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                    {msg("downloads.coming_soon")}
+                  </span>
+                </div>
+                <h3 id={`platform-${item.id}-title`} className="text-base font-semibold">
+                  <bdi>{msg(item.name)}</bdi>
+                </h3>
+                <p className="mt-1 text-sm leading-snug text-muted-foreground">
+                  {msg(item.description)}
+                </p>
+              </article>
+            );
+          })}
+        </div>
+      </section>
+    </>
+  );
+}
+
+export function DownloadsPage() {
+  const { locale } = useLocale();
   const docs = docsPathForLocale(locale);
   const local = isLocalMode();
-  const platform = DOWNLOAD_PLATFORMS.find((item) => item.id === detected);
-  const action = heroActionForPlatform(detected);
-  const PrimaryIcon = action.icon === "download" ? ArrowDown : ICONS[action.icon];
-  const PrimaryLink = action.href.startsWith("#") ? "a" : Link;
-  const platformHref = (href: string) => (href.startsWith("/guides/") ? `${docs}${href}` : href);
-  const platformLinkProps = (href: string) => docsLinkProps(platformHref(href), local);
-
-  useEffect(() => {
-    // iPad Safari's desktop UA looks like macOS; only the browser exposes touch points.
-    setDetected(clientPlatform(initialPlatform, navigator.userAgent, navigator.maxTouchPoints));
-  }, [initialPlatform]);
 
   return (
     <div className="min-h-dvh bg-background text-foreground">
@@ -56,20 +199,28 @@ export function DownloadsPage({ initialPlatform }: { initialPlatform: PlatformId
       >
         {msg("downloads.all_platforms")}
       </a>
-      <header className="border-b border-border/60">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-5 py-4 sm:px-8">
-          <Link
-            href="/"
-            className="flex items-center gap-2.5 rounded-md focus-visible:ring-[3px] focus-visible:ring-ring/50"
-            dir="ltr"
-            aria-label={APP_NAME}
-          >
-            <AppMark className="size-8" aria-hidden="true" />
-            <span className="text-sm font-bold uppercase tracking-[0.16em]">{APP_NAME}</span>
-          </Link>
-          <div className="flex flex-wrap items-center justify-end gap-1">
-            <LanguageSwitcher />
+      <header className="sticky top-0 z-40 border-b border-border bg-background/90 backdrop-blur">
+        <div className="flex min-h-12 flex-wrap items-center justify-between gap-3 px-3 py-1.5 sm:px-4">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Link
+                  href="/"
+                  aria-label={msg("downloads.back")}
+                  className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 max-lg:size-11"
+                >
+                  <ArrowLeft className="size-4 rtl:-scale-x-100" aria-hidden="true" />
+                </Link>
+              </TooltipTrigger>
+              <TooltipContent>{msg("downloads.back")}</TooltipContent>
+            </Tooltip>
+            <span className="truncate text-sm font-medium">{msg("downloads.title")}</span>
+          </div>
+          <div className="flex h-8 shrink-0 items-center rounded-md border border-border p-0.5">
+            <LanguageSwitcher className="h-7 min-h-0 min-w-0 rounded border-0 px-1.5 font-medium text-muted-foreground hover:bg-transparent hover:text-foreground lg:min-h-0" />
+            <span className="mx-0.5 h-4 w-px bg-border" aria-hidden="true" />
             <DocsThemeToggle
+              inline
               labels={{
                 theme: msg("settings.account.theme.title"),
                 themeLight: msg("settings.account.theme.light"),
@@ -77,207 +228,55 @@ export function DownloadsPage({ initialPlatform }: { initialPlatform: PlatformId
                 themeSystem: msg("settings.account.theme.system"),
               }}
             />
-            <Button variant="outline" size="sm" asChild className="ms-1 max-lg:min-h-[44px]">
-              <Link {...docsLinkProps(docs, local)}>{msg("downloads.docs")}</Link>
-            </Button>
+            <span className="mx-0.5 h-4 w-px bg-border" aria-hidden="true" />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Link
+                  {...docsLinkProps(docs, local)}
+                  aria-label={msg("downloads.docs")}
+                  className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                >
+                  <BookOpen className="size-3.5" aria-hidden="true" />
+                </Link>
+              </TooltipTrigger>
+              <TooltipContent>{msg("downloads.docs")}</TooltipContent>
+            </Tooltip>
           </div>
         </div>
       </header>
       <main className="mx-auto max-w-6xl px-5 sm:px-8">
-        <section className="relative py-16 text-center sm:py-24" aria-labelledby="download-title">
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_center,var(--primary)_0%,transparent_65%)] opacity-[0.06]"
-          />
-          <div className="relative mx-auto max-w-3xl">
-            <span className="mb-6 inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/5 px-3 py-1 text-xs font-medium text-primary">
-              <ArrowDown className="size-3.5" aria-hidden="true" />
-              {msg("downloads.title")}
-            </span>
-            <h1
-              id="download-title"
-              className="text-balance text-4xl font-semibold leading-[1.08] tracking-tight sm:text-6xl"
-              style={{ fontFamily: "var(--font-display)" }}
-            >
-              {msg("downloads.hero")}
-            </h1>
-            <p className="mx-auto mt-6 max-w-xl text-pretty text-base leading-relaxed text-muted-foreground sm:text-lg">
-              {msg("downloads.intro")}
-            </p>
-            <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-              <Button
-                asChild
-                size="lg"
-                className="h-auto min-h-10 min-w-[min(100%,18rem)] max-w-full whitespace-normal py-2 text-center max-lg:min-h-[44px]"
-              >
-                <PrimaryLink {...platformLinkProps(action.href)}>
-                  <PrimaryIcon aria-hidden="true" />
-                  {msg(
-                    action.label,
-                    action.platform ? { platform: msg(action.platform) } : undefined,
-                  )}
-                </PrimaryLink>
-              </Button>
-              <Button
-                variant="outline"
-                size="lg"
-                asChild
-                className="h-auto min-h-10 max-w-full whitespace-normal py-2 text-center max-lg:min-h-[44px]"
-              >
-                <Link href="/explore">
-                  <Globe aria-hidden="true" />
-                  {msg("downloads.browser")}
-                </Link>
-              </Button>
-            </div>
-            <p className="mt-4 min-h-5 text-sm text-muted-foreground" aria-live="polite">
-              {platform
-                ? msg(
-                    platform.status === "coming-soon"
-                      ? "downloads.detected_soon"
-                      : "downloads.detected",
-                    { platform: msg(platform.name) },
-                  )
-                : msg("downloads.fallback")}
-            </p>
-          </div>
-        </section>
-        <section id="platforms" className="scroll-mt-6 pb-16" aria-labelledby="platforms-title">
-          <div className="mb-6 flex flex-wrap items-end justify-between gap-3 border-b border-border pb-5">
-            <h2 id="platforms-title" className="text-2xl font-semibold tracking-tight">
-              {msg("downloads.choose")}
-            </h2>
-            <span className="text-sm text-muted-foreground">{msg("downloads.web_available")}</span>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {DOWNLOAD_PLATFORMS.map((item) => {
-              const Icon = ICONS[item.icon];
-              return (
-                <article
-                  id={`platform-${item.id}`}
-                  aria-labelledby={`platform-${item.id}-title`}
-                  key={item.id}
-                  className={`flex flex-col rounded-2xl border p-6 ${item.status !== "coming-soon" ? "border-primary/35 bg-primary/5" : "border-border bg-card"}`}
-                >
-                  <div className="mb-6 flex items-center justify-between gap-2">
-                    <span className="flex size-11 items-center justify-center rounded-xl border border-border bg-background">
-                      <Icon className="size-6" aria-hidden="true" />
-                    </span>
-                    <span
-                      className={`rounded-full px-2.5 py-1 text-xs font-medium ${item.status !== "coming-soon" ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}`}
-                    >
-                      {msg(
-                        item.status === "coming-soon"
-                          ? "downloads.coming_soon"
-                          : item.status === "guide"
-                            ? "downloads.guide"
-                            : "downloads.download",
-                      )}
-                    </span>
-                  </div>
-                  <h3 id={`platform-${item.id}-title`} className="text-xl font-semibold">
-                    <bdi>{msg(item.name)}</bdi>
-                  </h3>
-                  <p className="mb-6 mt-2 flex-1 text-sm leading-relaxed text-muted-foreground">
-                    {msg(item.description)}
-                  </p>
-                  {item.status !== "coming-soon" && (
-                    <div>
-                      <Button
-                        asChild
-                        className="h-auto min-h-9 w-full whitespace-normal text-center max-lg:min-h-[44px]"
-                      >
-                        <Link {...platformLinkProps(item.primary.href)}>
-                          {item.status === "download" ? (
-                            <ArrowDown aria-hidden="true" />
-                          ) : (
-                            <BookOpen aria-hidden="true" />
-                          )}
-                          {msg(item.primary.label)}
-                        </Link>
-                      </Button>
-                      {item.secondary?.map((link) => (
-                        <Link
-                          key={link.label}
-                          {...platformLinkProps(link.href)}
-                          className="mt-3 flex min-h-[44px] items-center justify-center rounded-md text-center text-xs leading-relaxed text-muted-foreground underline underline-offset-4 hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
-                        >
-                          {msg(link.label)}
-                        </Link>
-                      ))}
-                    </div>
-                  )}
-                </article>
-              );
-            })}
-          </div>
-        </section>
-        {DOWNLOAD_PLATFORMS.filter((item) => item.status !== "coming-soon" && item.setup).map(
-          (item) =>
-            item.setup && (
-              <section
-                key={item.id}
-                className="mb-16 grid gap-8 rounded-2xl border border-border bg-card p-6 sm:p-8 md:grid-cols-[1fr_1.5fr]"
-                aria-labelledby={`requirements-${item.id}-title`}
-              >
-                <div>
-                  <h2
-                    id={`requirements-${item.id}-title`}
-                    className="text-2xl font-semibold tracking-tight"
-                  >
-                    {msg(item.setup.title)}
-                  </h2>
-                  <Link
-                    {...platformLinkProps(item.setup.guide.href)}
-                    className="mt-4 inline-flex min-h-[44px] items-center gap-1 rounded-md text-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50"
-                  >
-                    {msg(item.setup.guide.label)}
-                    <ArrowUpRight className="size-4 rtl:-scale-x-100" aria-hidden="true" />
-                  </Link>
-                </div>
-                <ul className="space-y-4 text-sm leading-relaxed text-muted-foreground">
-                  {item.setup.items.map((key) => (
-                    <li key={key} className="flex gap-3">
-                      <span
-                        aria-hidden="true"
-                        className="mt-2 size-1.5 shrink-0 rounded-full bg-primary"
-                      />
-                      <span>{msg(key)}</span>
-                    </li>
-                  ))}
-                  {item.status === "guide" && item.guideNotice && (
-                    <li className="border-t border-border pt-4 text-xs">{msg(item.guideNotice)}</li>
-                  )}
-                </ul>
-              </section>
-            ),
-        )}
+        <DownloadsContent headingId="download-title" />
       </main>
-      <footer className="border-t border-border/60">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-5 py-6 text-sm text-muted-foreground sm:px-8">
-          <span>{APP_NAME}</span>
-          <div className="flex flex-wrap gap-5">
-            <Link
-              {...docsLinkProps(docs, local)}
-              className="inline-flex min-h-[44px] items-center rounded-md hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
-            >
-              {msg("downloads.docs")}
-            </Link>
-            <Link
-              href="/terms"
-              className="inline-flex min-h-[44px] items-center rounded-md hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
-            >
-              {msg("legal.terms_link")}
-            </Link>
-            <Link
-              href="/privacy"
-              className="inline-flex min-h-[44px] items-center rounded-md hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
-            >
-              {msg("legal.privacy_link")}
-            </Link>
-          </div>
-        </div>
-      </footer>
     </div>
+  );
+}
+
+// The desktop app shows Downloads in a dialog over the app instead of leaving the window.
+export function DownloadsDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        aria-describedby={undefined}
+        className="w-[calc(100vw-2rem)] gap-0 overflow-hidden p-0 sm:max-w-5xl"
+      >
+        <DialogHeader className="border-b border-border/40 px-4 py-3 pe-12 sm:px-5">
+          <DialogTitle
+            className="font-medium"
+            style={{ fontSize: "0.875rem", fontFamily: "var(--font-ui)" }}
+          >
+            {msg("downloads.title")}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="max-h-[calc(100dvh-6rem)] overflow-y-auto overscroll-contain px-5 sm:px-8">
+          <DownloadsContent headingId="downloads-dialog-hero" compact />
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -68,13 +68,15 @@ function menuItem(label: string): { onClick: () => void } {
 
 const ada: LinkedAccount = { linked: true, name: "Ada", email: "ada@example.com", offline: false };
 
-void it("shows Downloads on the web but hides it in the desktop app", () => {
+void it("links Downloads on the web and opens it in a dialog in the desktop app", () => {
   const previousMode = process.env.APP_LOCAL_MODE;
   try {
     process.env.APP_LOCAL_MODE = "0";
     assert.match(render(ada), /href="\/download"/);
     process.env.APP_LOCAL_MODE = "1";
-    assert.doesNotMatch(render(ada), /href="\/download"/);
+    const html = render(ada);
+    assert.doesNotMatch(html, /href="\/download"/);
+    assert.match(html, /<button\b[^>]*>(?:(?!<\/button>)[\s\S])*Downloads<\/button>/);
   } finally {
     if (previousMode === undefined) delete process.env.APP_LOCAL_MODE;
     else process.env.APP_LOCAL_MODE = previousMode;

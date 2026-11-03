@@ -40,12 +40,7 @@ dom.window.matchMedia = (query) => ({
   removeEventListener() {},
   dispatchEvent: () => true,
 });
-const messages = buildActiveCatalog("en");
-dom.window.__APP_MESSAGES__ = messages;
-const options = messages["downloads.platform_options"];
-const ios = messages["downloads.ios"];
-const macLabel = messages["downloads.apple_silicon"];
-assert.ok(options && ios && macLabel);
+dom.window.__APP_MESSAGES__ = buildActiveCatalog("en");
 
 const { createRoot } = await import("react-dom/client");
 const { LocaleProvider } = await import("@/shared/providers/locale-provider");
@@ -55,18 +50,20 @@ const { DownloadsPage } = await import("./downloads-page");
 
 after(() => dom.window.close());
 
-for (const [touches, href, label] of [
-  [5, "#platform-ios", options.replace("{platform}", ios)],
-  [0, "/docs/guides/mac-app", macLabel],
+const DMG = "https://github.com/Skynet-ml/skynet/releases/latest/download/Skynet-";
+
+for (const [name, userAgentData, arch] of [
+  [
+    "Chromium on an Intel Mac",
+    { getHighEntropyValues: () => Promise.resolve({ architecture: "x86" }) },
+    "x64",
+  ],
+  ["a browser without userAgentData", undefined, "arm64"],
 ] as const) {
-  void test(`mounted macOS page refines the hero with ${touches} touch points`, async () => {
-    Object.defineProperties(dom.window.navigator, {
-      userAgent: {
-        configurable: true,
-        value:
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-      },
-      maxTouchPoints: { configurable: true, value: touches },
+  void test(`mounted page links ${name} to the ${arch} Mac download`, async () => {
+    Object.defineProperty(dom.window.navigator, "userAgentData", {
+      configurable: true,
+      value: userAgentData,
     });
     const container = document.createElement("div");
     document.body.append(container);
@@ -77,16 +74,15 @@ for (const [touches, href, label] of [
           <LocaleProvider initialLocale="en">
             <ThemeProvider>
               <TooltipProvider>
-                <DownloadsPage initialPlatform="macos" />
+                <DownloadsPage />
               </TooltipProvider>
             </ThemeProvider>
           </LocaleProvider>,
         );
       });
-      const hero = container.querySelector('section[aria-labelledby="download-title"] a');
-      assert.ok(hero);
-      assert.equal(hero.getAttribute("href"), href);
-      assert.equal(hero.textContent, label);
+      const mac = container.querySelector("#platform-macos a");
+      assert.ok(mac);
+      assert.equal(mac.getAttribute("href"), `${DMG}${arch}.dmg`);
     } finally {
       await React.act(async () => root.unmount());
       container.remove();

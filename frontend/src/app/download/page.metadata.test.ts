@@ -15,9 +15,8 @@ const jiti = createJiti(import.meta.url, {
   jsx: true,
   alias: { "@/": `${path.join(frontend, "src")}/` },
 });
-const request: { locale: string | null; userAgent: string; acceptLanguage: string | null } = {
+const request: { locale: string | null; acceptLanguage: string | null } = {
   locale: "en",
-  userAgent: "",
   acceptLanguage: null,
 };
 const headersId = jiti.resolve("next/headers");
@@ -29,18 +28,14 @@ headersModule.exports = {
     }),
   headers: () =>
     Promise.resolve(
-      new Headers({
-        "user-agent": request.userAgent,
-        ...(request.acceptLanguage ? { "accept-language": request.acceptLanguage } : {}),
-      }),
+      new Headers(request.acceptLanguage ? { "accept-language": request.acceptLanguage } : {}),
     ),
 };
 headersModule.loaded = true;
 jiti.cache[headersId] = headersModule;
 
-const { generateMetadata, default: DownloadPage } = await jiti.import<{
+const { generateMetadata } = await jiti.import<{
   generateMetadata: () => Promise<Metadata>;
-  default: () => Promise<{ props: { initialPlatform: string | null } }>;
 }>(path.join(frontend, "src/app/download/page.tsx"));
 
 void test("Downloads social metadata uses the page locale and URL instead of the homepage", async () => {
@@ -66,6 +61,11 @@ void test("Downloads social metadata uses the page locale and URL instead of the
     assert.ok(metadata.twitter && "card" in metadata.twitter);
     assert.equal(metadata.twitter.card, "summary");
   }
+  request.locale = "en";
+  assert.equal(
+    (await generateMetadata()).description,
+    "Use Skynet in your browser, on your Mac, or from any agent.",
+  );
   for (const [locale, ogLocale] of [
     ["zh-Hans", "zh_CN"],
     ["es-419", "es_MX"],
@@ -98,17 +98,5 @@ void test("Downloads metadata falls back to Accept-Language and then English wit
     }
   } finally {
     Object.assign(request, previous);
-  }
-});
-
-void test("server page passes the user-agent platform to the hero", async () => {
-  for (const [userAgent, expected] of [
-    ["Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", "macos"],
-    ["Mozilla/5.0 (X11; Linux x86_64)", "linux"],
-    ["Mozilla/5.0 (Linux; Android 14; Pixel)", "android"],
-    ["", null],
-  ] as const) {
-    request.userAgent = userAgent;
-    assert.equal((await DownloadPage()).props.initialPlatform, expected);
   }
 });

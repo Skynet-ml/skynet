@@ -2,127 +2,39 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs";
 import path from "node:path";
-import {
-  DOWNLOAD_PLATFORMS,
-  clientPlatform,
-  detectPlatform,
-  heroActionForPlatform,
-} from "./download-platforms.ts";
+import { DOWNLOAD_PLATFORMS, detectMacArch, macDownloadUrl } from "./download-platforms.ts";
 
-test("detect desktop and mobile platforms, including iPad desktop mode", () => {
-  const cases = [
-    ["Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", 0, "macos"],
-    ["Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", 5, "ios"],
-    ["Mozilla/5.0 (Windows NT 10.0; Win64; x64)", 0, "windows"],
-    ["Mozilla/5.0 (X11; Linux x86_64)", 0, "linux"],
-    ["Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)", 5, "ios"],
-    ["Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X)", 5, "ios"],
-    ["Mozilla/5.0 (Linux; Android 14; Pixel)", 5, "android"],
-    ["Mozilla/5.0 (X11; CrOS x86_64)", 0, null],
-    ["", 0, null],
-  ] as const;
-  for (const [agent, touches, expected] of cases)
-    assert.equal(detectPlatform(agent, touches), expected, agent);
+test("the coming-soon list has the other desktop and mobile platforms and no CLI", () => {
+  assert.deepEqual(
+    DOWNLOAD_PLATFORMS.map((platform) => platform.id),
+    ["windows", "ios", "android"],
+  );
 });
 
-test("client platform refinement upgrades only server-detected macOS on iPad", () => {
-  const macUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)";
-  for (const [initial, touches, expected] of [
-    ["macos", 0, "macos"],
-    ["macos", 1, "macos"],
-    ["macos", 2, "ios"],
-    ["macos", 5, "ios"],
-    ["windows", 5, "windows"],
-    ["linux", 5, "linux"],
-    ["ios", 5, "ios"],
-    ["android", 5, "android"],
-    ["cli", 5, "cli"],
-    [null, 5, null],
-  ] as const) {
-    assert.equal(
-      clientPlatform(initial, macUserAgent, touches),
-      expected,
-      `${initial}: ${touches}`,
-    );
-  }
-  assert.equal(clientPlatform("macos", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", 5), "macos");
+test("the Mac download URL points to the latest release dmg for each architecture", () => {
+  assert.equal(
+    macDownloadUrl("arm64"),
+    "https://github.com/Skynet-ml/skynet/releases/latest/download/Skynet-arm64.dmg",
+  );
+  assert.equal(
+    macDownloadUrl("x64"),
+    "https://github.com/Skynet-ml/skynet/releases/latest/download/Skynet-x64.dmg",
+  );
 });
 
-test("Mac setup does not advertise nonexistent release assets", () => {
-  const mac = DOWNLOAD_PLATFORMS.find((platform) => platform.id === "macos");
-  assert.ok(mac && mac.status === "guide");
-  assert.equal(mac.primary.href, "/guides/mac-app");
-  assert.equal(mac.primary.label, "downloads.apple_silicon");
-  assert.equal(mac.secondary?.[0]?.label, "downloads.intel");
-  assert.equal(new Set(DOWNLOAD_PLATFORMS.map((platform) => platform.id)).size, 6);
-  for (const platform of DOWNLOAD_PLATFORMS.filter((item) => item.id !== "macos"))
-    assert.equal(platform.status, "coming-soon");
-});
-
-test("Linux detection does not depend on touchscreen capacity", () => {
-  for (const touches of [0, 1, 2, 5, 10]) {
-    assert.equal(detectPlatform("Mozilla/5.0 (X11; Linux x86_64)", touches), "linux");
-  }
-});
-
-test("the hero action follows each detected platform and the unknown fallback", () => {
-  for (const [id, expected] of [
-    ["macos", { href: "/guides/mac-app", label: "downloads.apple_silicon", icon: "apple" }],
-    [
-      "windows",
-      {
-        href: "#platform-windows",
-        label: "downloads.platform_options",
-        icon: "download",
-        platform: "downloads.windows",
-      },
-    ],
-    [
-      "linux",
-      {
-        href: "#platform-linux",
-        label: "downloads.platform_options",
-        icon: "download",
-        platform: "downloads.linux",
-      },
-    ],
-    [
-      "ios",
-      {
-        href: "#platform-ios",
-        label: "downloads.platform_options",
-        icon: "download",
-        platform: "downloads.ios",
-      },
-    ],
-    [
-      "android",
-      {
-        href: "#platform-android",
-        label: "downloads.platform_options",
-        icon: "download",
-        platform: "downloads.android",
-      },
-    ],
-    [
-      "cli",
-      {
-        href: "#platform-cli",
-        label: "downloads.platform_options",
-        icon: "download",
-        platform: "downloads.cli",
-      },
-    ],
-    [null, { href: "#platforms", label: "downloads.all_platforms", icon: "download" }],
-  ] as const) {
-    assert.deepEqual(heroActionForPlatform(id), expected);
-  }
-});
-
-test("Android Chrome desktop-site mode has an indistinguishable Linux user agent", () => {
-  const desktopSiteUA =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36";
-  assert.equal(detectPlatform(desktopSiteUA, 5), "linux");
+test("Mac architecture detection uses Chromium hints and falls back to Apple silicon", async () => {
+  const withArch = (architecture: string) => ({
+    userAgentData: { getHighEntropyValues: () => Promise.resolve({ architecture }) },
+  });
+  assert.equal(await detectMacArch(withArch("x86")), "x64");
+  assert.equal(await detectMacArch(withArch("arm")), "arm64");
+  assert.equal(await detectMacArch({}), "arm64");
+  assert.equal(
+    await detectMacArch({
+      userAgentData: { getHighEntropyValues: () => Promise.reject(new Error("blocked")) },
+    }),
+    "arm64",
+  );
 });
 
 const catalog = (locale: string): Record<string, string> =>
@@ -130,20 +42,10 @@ const catalog = (locale: string): Record<string, string> =>
     fs.readFileSync(path.resolve(process.cwd(), `../i18n/locales/ui/${locale}.json`), "utf8"),
   );
 
-test("release note does not promise source build instructions absent from the guide", () => {
-  assert.doesNotMatch(catalog("en")["downloads.release_note"], /build.from.source/i);
-});
-
-test("RTL minimum versions use words rather than a bidi-sensitive trailing plus", () => {
-  for (const locale of ["he", "ar", "fa"])
-    assert.doesNotMatch(catalog(locale)["downloads.requirements_cli"], /\d\+/);
-});
-
 test("regional copy follows existing spelling and terminology", () => {
-  assert.match(catalog("en-GB")["downloads.intro"] ?? "", /Optimise/);
+  assert.match(catalog("en-GB")["downloads.web_description"] ?? "", /Optimise/);
   assert.match(catalog("pt-BR")["downloads.browser"] ?? "", /aplicativo/);
-  assert.equal(catalog("pt-BR")["downloads.download"], "Baixar");
-  assert.match(catalog("es-419")["downloads.intro"] ?? "", /computadora/);
+  assert.match(catalog("es-419")["downloads.desktop_description"] ?? "", /computadora/);
   assert.doesNotMatch(
     Object.entries(catalog("de"))
       .filter(([key]) => key.startsWith("downloads."))
@@ -151,23 +53,6 @@ test("regional copy follows existing spelling and terminology", () => {
       .join(" "),
     /\b(du|dein\w*)\b/i,
   );
-});
-
-test("every configured guide exists in every full docs locale", () => {
-  const docsRoot = path.resolve(process.cwd(), "src/features/docs/content");
-  for (const locale of fs.readdirSync(docsRoot)) {
-    if (!fs.statSync(path.join(docsRoot, locale)).isDirectory()) continue;
-    for (const platform of DOWNLOAD_PLATFORMS) {
-      if (platform.status === "coming-soon") continue;
-      for (const link of [platform.primary, ...(platform.secondary ?? [])]) {
-        if (!link.href.startsWith("/guides/")) continue;
-        assert.ok(
-          fs.existsSync(path.join(docsRoot, locale, `${link.href.split("#")[0]}.md`)),
-          `${locale}: ${link.href}`,
-        );
-      }
-    }
-  }
 });
 
 test("every localized Mac guide links to Downloads", () => {
