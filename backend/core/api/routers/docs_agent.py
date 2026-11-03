@@ -19,6 +19,12 @@ The response is a Server-Sent Events stream in the generalist agent's
 contract: ``tool_start`` and ``tool_end`` for each search, ``reasoning_patch``
 for each step's thinking, ``message_patch`` for the answer, then ``done``, or
 one ``error`` event.
+
+``POST /docs-agent/suggest`` writes the composer's greyed next-question hint
+after an answer, like the generalist agent's. It runs on the small
+side-task model with thinking off, under the same signed-out access, its own
+hourly bucket of the same size, the same monthly budget and the same slots.
+Anything that blocks it returns an empty suggestion.
 """
 
 from __future__ import annotations
@@ -40,8 +46,11 @@ from pydantic import BaseModel, Field
 from ...billing.pricing import raw_cost_usd
 from ...config import settings
 from ...models import ModelConfig
+from ...service_gateway.agents.code import _reply_language
 from ...service_gateway.agents.docs_retrieval import DocsCorpus
 from ...service_gateway.agents.docs_tools import SEARCH_DOCS_TOOL, search_corpus
+from ...service_gateway.agents.generalist import build_hosted_suggest_lm
+from ...service_gateway.agents.next_prompt import suggest_next_prompt
 from ...service_gateway.language_models import (
     apply_model_reasoning_config,
     build_language_model,
@@ -53,6 +62,7 @@ from ..interview_model import interview_model_id
 from ..model_catalog import catalog_snapshot
 from ..platform_budget import budget_open, record_spend
 from ..rate_limit import RateLimiter, shared_redis_client
+from ..suggest_model import hosted_suggest_model
 
 logger = logging.getLogger("app.api.docs_agent")
 
@@ -77,6 +87,12 @@ _LM_TIMEOUT_SECONDS = 45.0
 _CHUNK_CHARS = 48
 _RATE_WINDOW_SECONDS = 3600
 _MAX_ACTIVE_ANSWERS = 4
+# The composer sends at most this many turns and actions (next-prompt.ts);
+# the suggestion prompt keeps only the last few of them.
+MAX_SUGGEST_TURNS = 40
+MAX_SUGGEST_ACTIONS = 20
+MAX_SUGGEST_ACTION_CHARS = 200
+_SUGGEST_TIMEOUT_SECONDS = 30.0
 
 # Docs calls run on their own small pool, never the shared default executor: a
 # model call holds its thread up to the LM timeout even after the client goes,
@@ -127,6 +143,18 @@ class DocsAgentAskRequest(BaseModel):
     locale: str = Field(default="en", max_length=16, pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$")
 
 
+class DocsAgentSuggestRequest(BaseModel):
+    turns: list[DocsAgentTurn] = Field(min_length=1, max_length=MAX_SUGGEST_TURNS)
+    actions: list[Annotated[str, Field(max_length=MAX_SUGGEST_ACTION_CHARS)]] = Field(
+        default_factory=list, max_length=MAX_SUGGEST_ACTIONS
+    )
+    locale: str = Field(default="en", max_length=16, pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$")
+
+
+class DocsAgentSuggestResponse(BaseModel):
+    suggestion: str
+
+
 def _optional_user(request: Request, authorization: str | None = Header(default=None)) -> AuthenticatedUser | None:
     """Resolve the caller from the auth header, or ``None`` when absent or invalid.
 
@@ -169,20 +197,22 @@ def _client_address(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _enforce_rate_limit(request: Request, user: AuthenticatedUser | None) -> None:
-    """Admit one question per caller bucket, or reject it as 429 with ``Retry-After``.
+def _enforce_rate_limit(request: Request, user: AuthenticatedUser | None, bucket: str = "docs-agent") -> None:
+    """Admit one call per caller bucket, or reject it as 429 with ``Retry-After``.
 
     Args:
         request: Incoming request (its address keys the signed-out bucket).
         user: The signed-in caller, or ``None``.
+        bucket: The key prefix; suggestions count apart, so a hint never
+            uses up a question.
 
     Raises:
         DomainError: 429 ``rate_limit.exceeded`` with a ``Retry-After`` header.
     """
     if user is not None:
-        key, limit = f"docs-agent:user:{user.username}", settings.rate_limit_docs_agent_user_per_hour
+        key, limit = f"{bucket}:user:{user.username}", settings.rate_limit_docs_agent_user_per_hour
     else:
-        key, limit = f"docs-agent:ip:{_client_address(request)}", settings.rate_limit_docs_agent_anonymous_per_hour
+        key, limit = f"{bucket}:ip:{_client_address(request)}", settings.rate_limit_docs_agent_anonymous_per_hour
     try:
         RateLimiter(shared_redis_client()).enforce(key, limit=limit, window_seconds=_RATE_WINDOW_SECONDS)
     except DomainError as exc:
@@ -228,6 +258,38 @@ def build_docs_agent_lm() -> Any:
     config.extra["timeout"] = _LM_TIMEOUT_SECONDS
     config.extra["num_retries"] = 0
     return build_language_model(config, disable_cache=True)
+
+
+def build_docs_suggest_lm() -> Any | None:
+    """Build the platform-paid side-task model for one next-question hint.
+
+    Returns:
+        The hosted suggestion model with thinking off and a one-line output
+        cap, or ``None`` when no suggestion model is configured.
+    """
+    picked = hosted_suggest_model()
+    return build_hosted_suggest_lm(picked, _SUGGEST_TIMEOUT_SECONDS) if picked else None
+
+
+def _run_suggestion(lm: Any, req: DocsAgentSuggestRequest) -> str:
+    """Write the next-question hint and count its cost against the docs budget.
+
+    Args:
+        lm: The side-task model.
+        req: The conversation, recent actions and locale.
+
+    Returns:
+        The suggestion, or ``""`` when the model fails or gives nothing usable.
+    """
+    try:
+        return suggest_next_prompt(
+            lm, [(turn.role, turn.content) for turn in req.turns], req.actions, _reply_language(req.locale)
+        )
+    except Exception:
+        logger.warning("docs agent suggestion failed", exc_info=True)
+        return ""
+    finally:
+        _record_spend(lm)
 
 
 def _escape(text: str) -> str:
@@ -478,15 +540,17 @@ def create_docs_agent_router(
     *,
     corpus: DocsCorpus | None = None,
     lm_factory: Callable[[], Any] = build_docs_agent_lm,
+    suggest_lm_factory: Callable[[], Any | None] = build_docs_suggest_lm,
 ) -> APIRouter:
     """Build the docs agent router.
 
     Args:
         corpus: The docs index; ``None`` builds the default lazy corpus.
         lm_factory: Builds the LM for one answer; tests pass a fake.
+        suggest_lm_factory: Builds the LM for one next-question hint; tests pass a fake.
 
     Returns:
-        The router with ``POST /docs-agent/ask``.
+        The router with ``POST /docs-agent/ask`` and ``POST /docs-agent/suggest``.
     """
     router = APIRouter()
     docs = corpus or DocsCorpus()
@@ -600,5 +664,48 @@ def create_docs_agent_router(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @router.post(
+        "/docs-agent/suggest",
+        response_model=DocsAgentSuggestResponse,
+        summary="Suggest the next docs question",
+    )
+    async def suggest(
+        req: DocsAgentSuggestRequest, request: Request, user: OptionalUserDep
+    ) -> DocsAgentSuggestResponse:
+        """Suggest the question the reader would likely ask next, for the Tab-to-accept hint.
+
+        Args:
+            req: The conversation, oldest first, ending with an answer.
+            request: Incoming request (its address keys the signed-out limit).
+            user: The signed-in caller, or ``None`` when signed out.
+
+        Returns:
+            The suggestion, or an empty one when the budget is spent, every
+            slot is busy, no model is configured or the call fails.
+
+        Raises:
+            DomainError: 429 over the caller's hourly suggestion cap.
+        """
+        empty = DocsAgentSuggestResponse(suggestion="")
+        last = req.turns[-1]
+        if last.role != "assistant" or not last.content.strip():
+            return empty
+        _enforce_rate_limit(request, user, bucket="docs-agent-suggest")
+        if not budget_open(_BUDGET_SERVICE, settings.docs_agent_monthly_budget_usd):
+            return empty
+        if not _ANSWER_SLOTS.acquire(blocking=False):
+            return empty
+        try:
+            lm = suggest_lm_factory()
+        except Exception:
+            logger.warning("docs agent suggestion model unavailable", exc_info=True)
+            lm = None
+        if lm is None:
+            _ANSWER_SLOTS.release()
+            return empty
+        job = _EXECUTOR.submit(_run_suggestion, lm, req)
+        job.add_done_callback(_free_slot)
+        return DocsAgentSuggestResponse(suggestion=await asyncio.wrap_future(job))
 
     return router

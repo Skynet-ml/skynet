@@ -29,6 +29,7 @@ import {
 } from "@/shared/lib/thinking-segments";
 import { cn } from "@/shared/lib/utils";
 import type { AgentToolCall } from "@/shared/ui/agent/types";
+import type { SuggestFetcher } from "@/shared/ui/agent/use-next-prompt";
 import { fillChrome, type DocsChrome } from "../lib/chrome";
 import {
   MAX_KEPT_MESSAGES,
@@ -37,6 +38,7 @@ import {
   isDocsHref,
   isQuestionTooLong,
   parseStoredHistory,
+  readSuggestion,
   toTranscript,
   trimHistory,
   type DocsAgentMessage,
@@ -309,6 +311,23 @@ export function DocsAgentPanel({
   };
 
   const transcript = React.useMemo(() => toTranscript(messages), [messages]);
+  // The docs route keeps the signed-out access, limits and budget of the ask
+  // route; the generalist's endpoint needs sign-in and bills the user.
+  const fetchSuggestion = React.useCallback<SuggestFetcher>(
+    async ({ turns, actions }) => {
+      const res = await fetchWithAuthRetry(`${getRuntimeEnv().apiUrl}/docs-agent/suggest`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ turns, actions, locale }),
+      });
+      return res.ok ? readSuggestion(await res.json()) : "";
+    },
+    [locale],
+  );
+  const suggest = React.useMemo(
+    () => ({ messages: transcript, fetcher: fetchSuggestion }),
+    [transcript, fetchSuggestion],
+  );
 
   if (!mounted) return null;
 
@@ -436,6 +455,7 @@ export function DocsAgentPanel({
                 sendAriaLabel={labels.agentSend}
                 attachments={false}
                 dictation={false}
+                suggest={suggest}
               />
             </div>
           </motion.aside>

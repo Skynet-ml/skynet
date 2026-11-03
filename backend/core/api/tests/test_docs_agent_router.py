@@ -37,6 +37,7 @@ from ..routers.docs_agent import (
     DocsAgentAskRequest,
     _low_thinking_extra,
     _optional_user,
+    build_docs_suggest_lm,
     build_messages,
     create_docs_agent_router,
 )
@@ -163,19 +164,26 @@ def redis_double(monkeypatch: pytest.MonkeyPatch) -> fakeredis.FakeStrictRedis:
     return client
 
 
-def _client(docs_root: Path, lm: _FakeLM, user: AuthenticatedUser | None = None) -> TestClient:
-    """Mount the docs agent router with a fake LM and an optional signed-in user.
+def _client(
+    docs_root: Path, lm: _FakeLM, user: AuthenticatedUser | None = None, suggest_lm: _FakeLM | None = None
+) -> TestClient:
+    """Mount the docs agent router with fake LMs and an optional signed-in user.
 
     Args:
         docs_root: The docs content folder.
         lm: The fake LM every answer runs on.
         user: The signed-in caller, or ``None`` for a signed-out caller.
+        suggest_lm: The fake LM every suggestion runs on, or ``None`` for no suggestion model.
 
     Returns:
         A test client.
     """
     app = FastAPI()
-    app.include_router(create_docs_agent_router(corpus=DocsCorpus(docs_root), lm_factory=lambda: lm))
+    app.include_router(
+        create_docs_agent_router(
+            corpus=DocsCorpus(docs_root), lm_factory=lambda: lm, suggest_lm_factory=lambda: suggest_lm
+        )
+    )
     app.dependency_overrides[_optional_user] = lambda: user
 
     @app.exception_handler(DomainError)
@@ -754,6 +762,119 @@ def test_missing_docs_answers_503(tmp_path: Path, redis_double: fakeredis.FakeSt
     resp = TestClient(app).post("/docs-agent/ask", json={"question": "balance"})
     assert resp.status_code == 503
     assert resp.json()["code"] == "docs_agent.unavailable"
+
+
+_SUGGEST_BODY = {
+    "turns": [
+        {"role": "user", "content": "how do i add funds"},
+        {"role": "assistant", "content": "Add funds in Settings. See [Billing](/docs/concepts/billing)."},
+    ],
+    "actions": ["search_docs done"],
+    "locale": "en",
+}
+
+
+def test_signed_out_suggestion_runs_on_the_side_task_model_and_records_spend(
+    monkeypatch: pytest.MonkeyPatch, docs_root: Path, redis_double: fakeredis.FakeStrictRedis
+) -> None:
+    """A signed-out reader gets a hint from the suggestion model, paid from the docs budget."""
+    monkeypatch.setattr(settings, "docs_agent_monthly_budget_usd", 5.0)
+    answer_lm, suggest_lm = _FakeLM(), _ScriptedLM("what about run budgets")
+    resp = _client(docs_root, answer_lm, suggest_lm=suggest_lm).post("/docs-agent/suggest", json=_SUGGEST_BODY)
+    assert resp.status_code == 200
+    assert resp.json() == {"suggestion": "what about run budgets"}
+    assert answer_lm.calls == []
+    assert len(suggest_lm.calls) == 1
+    prompt = json.dumps(suggest_lm.calls[0]["messages"])
+    assert "how do i add funds" in prompt
+    assert "search_docs done" in prompt
+    key = next(k for k in redis_double.keys("skynet:platform-budget:docs_agent:*") if not k.endswith(":alerted"))
+    assert float(redis_double.get(key)) > 0
+
+
+def test_suggestion_model_has_thinking_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hint runs on the hosted side-task model through the no-thinking builder, or not at all."""
+    built: list[tuple[str, float]] = []
+    monkeypatch.setattr(docs_agent, "build_hosted_suggest_lm", lambda model, timeout: built.append((model, timeout)))
+    monkeypatch.setattr(docs_agent, "hosted_suggest_model", lambda: "openrouter/small")
+    build_docs_suggest_lm()
+    assert built == [("openrouter/small", docs_agent._SUGGEST_TIMEOUT_SECONDS)]
+    monkeypatch.setattr(docs_agent, "hosted_suggest_model", lambda: None)
+    assert build_docs_suggest_lm() is None
+    assert len(built) == 1
+
+
+def test_suggestions_have_their_own_rate_bucket(
+    monkeypatch: pytest.MonkeyPatch, docs_root: Path, redis_double: fakeredis.FakeStrictRedis
+) -> None:
+    """Past the cap a hint gets 429, and hints never use up the reader's questions."""
+    monkeypatch.setattr(settings, "rate_limit_docs_agent_anonymous_per_hour", 1)
+    client = _client(docs_root, _FakeLM(), suggest_lm=_FakeLM("next question"))
+    headers = {"X-Forwarded-For": "203.0.113.9"}
+    assert client.post("/docs-agent/suggest", json=_SUGGEST_BODY, headers=headers).status_code == 200
+    blocked = client.post("/docs-agent/suggest", json=_SUGGEST_BODY, headers=headers)
+    assert blocked.status_code == 429
+    assert "Retry-After" in blocked.headers
+    assert client.post("/docs-agent/ask", json={"question": "balance"}, headers=headers).status_code == 200
+
+
+def test_spent_budget_gives_an_empty_suggestion_without_a_call(
+    monkeypatch: pytest.MonkeyPatch, docs_root: Path, redis_double: fakeredis.FakeStrictRedis
+) -> None:
+    """Once the monthly docs budget is spent, the hint is empty and no model runs."""
+    monkeypatch.setattr(settings, "docs_agent_monthly_budget_usd", 1.0)
+    platform_budget.record_spend("docs_agent", 1.0, 1.0, alert=False)
+    suggest_lm = _FakeLM("next")
+    resp = _client(docs_root, _FakeLM(), suggest_lm=suggest_lm).post("/docs-agent/suggest", json=_SUGGEST_BODY)
+    assert resp.json() == {"suggestion": ""}
+    assert suggest_lm.calls == []
+
+
+def test_suggestion_blocks_and_failures_return_empty_and_free_the_slot(
+    docs_root: Path, redis_double: fakeredis.FakeStrictRedis
+) -> None:
+    """A thread that does not end in an answer, a missing model or a failed call gives an empty hint."""
+    user_last = {**_SUGGEST_BODY, "turns": [{"role": "user", "content": "hi"}]}
+    suggest_lm = _FakeLM("next")
+    client = _client(docs_root, _FakeLM(), suggest_lm=suggest_lm)
+    assert client.post("/docs-agent/suggest", json=user_last).json() == {"suggestion": ""}
+    assert suggest_lm.calls == []
+    no_model = _client(docs_root, _FakeLM(), suggest_lm=None)
+    assert no_model.post("/docs-agent/suggest", json=_SUGGEST_BODY).json() == {"suggestion": ""}
+
+    class _Broken(_FakeLM):
+        """Fails every call."""
+
+        def __call__(self, **kwargs: Any) -> list[Any]:
+            """Raise like a provider timeout.
+
+            Args:
+                **kwargs: The call's keyword arguments.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            raise RuntimeError("provider down")
+
+    broken = _client(docs_root, _FakeLM(), suggest_lm=_Broken())
+    assert broken.post("/docs-agent/suggest", json=_SUGGEST_BODY).json() == {"suggestion": ""}
+    slots = docs_agent._ANSWER_SLOTS
+    taken = [slots.acquire(timeout=2) for _ in range(docs_agent._MAX_ACTIVE_ANSWERS)]
+    for _ in taken:
+        slots.release()
+    assert all(taken)
+
+
+def test_suggestion_input_is_capped(docs_root: Path, redis_double: fakeredis.FakeStrictRedis) -> None:
+    """Too many turns or an over-long action is rejected before the model."""
+    suggest_lm = _FakeLM("next")
+    client = _client(docs_root, _FakeLM(), suggest_lm=suggest_lm)
+    turns = [{"role": "assistant", "content": "a"}] * (docs_agent.MAX_SUGGEST_TURNS + 1)
+    assert client.post("/docs-agent/suggest", json={"turns": turns}).status_code == 422
+    long_action = {**_SUGGEST_BODY, "actions": ["x" * (docs_agent.MAX_SUGGEST_ACTION_CHARS + 1)]}
+    assert client.post("/docs-agent/suggest", json=long_action).status_code == 422
+    assert client.post("/docs-agent/suggest", json={"turns": []}).status_code == 422
+    assert suggest_lm.calls == []
 
 
 def test_router_registers_no_agent_tools() -> None:

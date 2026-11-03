@@ -15,9 +15,11 @@ import {
   keepDocsLinks,
   MAX_QUESTION_CHARS,
   parseStoredHistory,
+  readSuggestion,
   toTranscript,
   trimHistory,
 } from "./docs-answer.ts";
+import { buildSuggestPayload } from "../../../shared/ui/agent/next-prompt.ts";
 
 test("keepDocsLinks keeps links to docs pages", () => {
   const text = "See [Engines](/docs/engines) and [Hebrew](/docs/he/quickstart#run).";
@@ -184,4 +186,35 @@ test("toTranscript keeps docs links only in answers and leaves questions as type
     { role: "assistant", content: "Read [Runs](/docs/runs) or x." },
   ]);
   assert.equal(messages[1]?.content, "Read [Runs](/docs/runs) or [x](https://example.com).");
+});
+
+test("readSuggestion reads the hint and treats anything else as none", () => {
+  assert.equal(readSuggestion({ suggestion: "  what about run budgets " }), "what about run budgets");
+  assert.equal(readSuggestion({ suggestion: 3 }), "");
+  assert.equal(readSuggestion(null), "");
+  assert.equal(readSuggestion(["x"]), "");
+});
+
+test("a finished docs answer builds the shared suggestion payload with its searches", () => {
+  const search = {
+    id: "s1",
+    tool: "search_docs",
+    reason: "",
+    status: "done" as const,
+    startedAt: 1,
+    endedAt: 2,
+  };
+  const thread = [
+    { role: "user" as const, content: "how do i add funds", createdAt: 1 },
+    { role: "assistant" as const, content: "In Settings.", createdAt: 2, toolCalls: [search] },
+  ];
+  assert.deepEqual(buildSuggestPayload(toTranscript(thread)), {
+    turns: [
+      { role: "user", content: "how do i add funds" },
+      { role: "assistant", content: "In Settings." },
+    ],
+    actions: ["search_docs done"],
+  });
+  const running = [...thread.slice(0, 1), { ...thread[1], toolCalls: [{ ...search, status: "running" as const }] }];
+  assert.equal(buildSuggestPayload(running), null);
 });

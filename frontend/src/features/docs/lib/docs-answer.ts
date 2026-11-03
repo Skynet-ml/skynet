@@ -41,6 +41,11 @@ export function askBody(question: string, earlier: readonly DocsAgentMessage[], 
   };
 }
 
+/** Read the `/docs-agent/suggest` reply; anything malformed is no suggestion. */
+export function readSuggestion(data: unknown): string {
+  return isRecord(data) && typeof data.suggestion === "string" ? data.suggestion.trim() : "";
+}
+
 /** Keep the newest messages, and drop empty ones (an answer that failed). */
 export function trimHistory(messages: readonly DocsAgentMessage[], max: number): DocsAgentMessage[] {
   return messages.filter((message) => message.content.trim()).slice(-max);

@@ -30,7 +30,7 @@ import { appendToDraft, midTurnKeyAction, type MidTurnQueue } from "./steer-queu
 import { SuggestionGhost } from "./suggestion-ghost";
 import type { AgentMessage } from "./types";
 import { formatRecSeconds, useDictation } from "./use-dictation";
-import { useNextPrompt } from "./use-next-prompt";
+import { useNextPrompt, type SuggestFetcher } from "./use-next-prompt";
 
 interface ComposerProps {
   value: string;
@@ -68,7 +68,12 @@ interface ComposerProps {
   /** Opts an agent chat into next-message suggestions: after a turn ends,
    *  the empty composer shows a greyed likely next message that Tab fills in
    *  (never sends) and Escape dismisses. */
-  suggest?: { messages: readonly AgentMessage[]; model?: string | null; chatId?: string | null };
+  suggest?: {
+    messages: readonly AgentMessage[];
+    model?: string | null;
+    chatId?: string | null;
+    fetcher?: SuggestFetcher;
+  };
   /** False hides the + attach button and turns off file paste. The upload
    *  and transcribe endpoints need sign-in, so public pages (the docs) opt out. */
   attachments?: boolean;
@@ -144,6 +149,7 @@ export function Composer({
     messages: suggest?.messages,
     model: suggest?.model,
     chatId: suggest?.chatId,
+    fetcher: suggest?.fetcher,
     draft: value,
     streaming: Boolean(streaming),
     disabled: Boolean(disabled || dictating),
