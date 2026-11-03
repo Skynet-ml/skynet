@@ -169,12 +169,7 @@ function groupTabs(children: MdNode[]): MdNode[] {
     if (group.type !== "docsTabs") return group;
     const blocks = group.children ?? [];
     const single = blocks[0];
-    if (blocks.length === 1 && single) {
-      return {
-        ...single,
-        meta: single.meta?.replace(/(?:^|\s)tab="[^"]+"/, "").trim() || null,
-      };
-    }
+    if (blocks.length === 1 && single) return single;
     const labels = blocks.map((c) => tabLabel(c.meta) ?? "");
     group.data = { hName: "div", hProperties: { dataTabs: JSON.stringify(labels) } };
     return group;

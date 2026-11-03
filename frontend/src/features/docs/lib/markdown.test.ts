@@ -44,15 +44,6 @@ test("remarkDocs renders a single tabbed code block as plain code", () => {
   const html = renderMarkdown('```python tab="metric.py"\ndef score():\n    return 1\n```');
   assert.doesNotMatch(html, /data-tabs/);
   assert.match(html, /<pre><code class="language-python">def score\(\):\n    return 1\n<\/code><\/pre>/);
-
-  const tree = {
-    type: "root",
-    children: [{ type: "code", lang: "python", meta: 'title="Score" tab="metric.py"', value: "return 1" }],
-  };
-  remarkDocs({ headingIds: [] })(tree);
-  assert.deepEqual(tree.children, [
-    { type: "code", lang: "python", meta: 'title="Score"', value: "return 1" },
-  ]);
 });
 
 test("remarkDocs renders two adjacent tabbed blocks as one two-tab group", () => {
