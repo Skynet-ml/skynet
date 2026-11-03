@@ -52,3 +52,8 @@ export function remaining(timeline: Timeline, now: number): number | null {
   }
   return left;
 }
+
+/** Seconds with one decimal for a step under 10s ("0.8"), so short steps do not all read 0:00. Null from 10s. */
+export function shortSeconds(ms: number): string | null {
+  return ms < 10_000 ? (Math.max(0, ms) / 1000).toFixed(1) : null;
+}

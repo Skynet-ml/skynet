@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { finishSteps, latestLine, loadStepTimes, newTimeline, saveStepTimes, startStep, STARTUP_STEPS } from "../src/main/step-timing";
-import { formatClock, remaining, stepPhase, totalElapsed, type Timeline } from "../src/renderer/timeline";
+import { formatClock, remaining, shortSeconds, stepPhase, totalElapsed, type Timeline } from "../src/renderer/timeline";
 
 let dir: string;
 
@@ -84,6 +84,12 @@ describe("timeline display", () => {
     expect(formatClock(72_000)).toBe("1:12");
     expect(formatClock(3_725_000)).toBe("1:02:05");
     expect(formatClock(-5)).toBe("0:00");
+  });
+
+  it("gives short steps tenths of a second", () => {
+    expect(shortSeconds(800)).toBe("0.8");
+    expect(shortSeconds(5_500)).toBe("5.5");
+    expect(shortSeconds(10_000)).toBeNull();
   });
 
   it("tells each step's phase", () => {

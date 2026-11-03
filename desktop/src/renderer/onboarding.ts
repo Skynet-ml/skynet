@@ -1,6 +1,6 @@
 import en from "./locales/en.json";
 import he from "./locales/he.json";
-import { formatClock, remaining, stepPhase, totalElapsed, type Timeline } from "./timeline";
+import { formatClock, remaining, shortSeconds, stepPhase, totalElapsed, type Timeline } from "./timeline";
 
 type Kind =
   | "checking"
@@ -71,6 +71,11 @@ const INSTALL_COMMANDS: Record<Cli["id"], string> = {
 function t(key: string, vars: Record<string, string> = {}): string {
   const text = messages[key] ?? en[key as keyof typeof en] ?? key;
   return text.replace(/\{(\w+)\}/g, (_, name: string) => vars[name] ?? "");
+}
+
+function stepTime(ms: number): string {
+  const seconds = shortSeconds(ms);
+  return seconds === null ? formatClock(ms) : t("timeline.seconds", { n: seconds });
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -166,8 +171,8 @@ function timelinePanel(timeline: Timeline): HTMLElement {
       time,
     ]);
     const estimate = step.estimateMs;
-    if (phase === "done") time.textContent = formatClock(step.durationMs as number);
-    if (phase === "pending" && estimate !== undefined) time.textContent = `~${formatClock(estimate)}`;
+    if (phase === "done") time.textContent = stepTime(step.durationMs as number);
+    if (phase === "pending" && estimate !== undefined) time.textContent = `~${stepTime(estimate)}`;
     if (phase !== "active") return row;
 
     const startedAt = step.startedAt as number;
