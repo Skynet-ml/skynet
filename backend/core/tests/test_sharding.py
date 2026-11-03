@@ -75,7 +75,7 @@ def test_valid_duration_json_loads_file_prefixes(tmp_path: Path) -> None:
 def test_controller_writes_dispatched_and_collected_nodeids_with_phase_durations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Write sorted dispatched and collected nodeids with phase durations.
+    """Write dispatched and collected nodeids, preserving duplicate dispatches.
 
     Args:
         tmp_path: Temporary directory for the output files.
@@ -85,7 +85,7 @@ def test_controller_writes_dispatched_and_collected_nodeids_with_phase_durations
     collected_path = tmp_path / "collected.txt"
     durations_path = tmp_path / "durations.json"
     monkeypatch.setattr(conftest, "_is_controller", True)
-    monkeypatch.setattr(conftest, "_dispatched_nodeids", set())
+    monkeypatch.setattr(conftest, "_dispatched_nodeids", [])
     monkeypatch.setattr(conftest, "_file_durations", {})
     monkeypatch.setenv("SKYNET_TEST_DISPATCHED_OUT", str(dispatched_path))
     monkeypatch.setenv("SKYNET_TEST_COLLECTED_OUT", str(collected_path))
@@ -100,6 +100,7 @@ def test_controller_writes_dispatched_and_collected_nodeids_with_phase_durations
         SimpleNamespace(nodeid="core/z.py::test_z", when="setup", duration=0.5),
         SimpleNamespace(nodeid="core/a.py::test_a", when="call", duration=0.2),
         SimpleNamespace(nodeid="core/a.py::test_a", when="setup", duration=0.1),
+        SimpleNamespace(nodeid="core/a.py::test_a", when="setup", duration=0.0),
         SimpleNamespace(nodeid="core/a.py::test_a", when="teardown", duration=0.3),
         SimpleNamespace(nodeid="core/a.py::test_b", when="setup", duration=0.4),
     ]
@@ -109,6 +110,7 @@ def test_controller_writes_dispatched_and_collected_nodeids_with_phase_durations
     conftest.pytest_sessionfinish(SimpleNamespace(config=SimpleNamespace()))
 
     assert dispatched_path.read_text(encoding="utf-8").splitlines() == [
+        "core/a.py::test_a",
         "core/a.py::test_a",
         "core/a.py::test_b",
         "core/z.py::test_z",
@@ -133,7 +135,7 @@ def test_worker_does_not_write_dispatched_or_collected_outputs(tmp_path: Path, m
     collected_path = tmp_path / "collected.txt"
     durations_path = tmp_path / "durations.json"
     monkeypatch.setattr(conftest, "_is_controller", True)
-    monkeypatch.setattr(conftest, "_dispatched_nodeids", set())
+    monkeypatch.setattr(conftest, "_dispatched_nodeids", [])
     monkeypatch.setattr(conftest, "_file_durations", {})
     monkeypatch.setenv("SKYNET_TEST_DISPATCHED_OUT", str(dispatched_path))
     monkeypatch.setenv("SKYNET_TEST_COLLECTED_OUT", str(collected_path))

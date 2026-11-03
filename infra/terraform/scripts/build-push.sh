@@ -45,9 +45,11 @@ build() {
   shift 4
   local url key tree_key cache_tag cache_repo week metadata_file="" build_succeeded
   local -a build_args=("$@") pin_args=() cache_from=() metadata_args=()
-  url="$(jq -r --arg n "$name" '.ecr[$n]' <<<"$cfg")"
+  url="$(jq -r --arg n "$name" '.ecr[$n]' <<<"$cfg")" || return 1
+  [[ -n "$url" && "$url" != null ]] || return 1
   cache_repo="skynet/buildcache-$env"
-  week="$(date -u +%G-W%V)"
+  week="$(date -u +%G-W%V)" || return 1
+  [[ "$week" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || return 1
   image_inputs "$context" "$week" "${build_args[@]+"${build_args[@]}"}"
   key="$IMAGE_KEY_CTX"
   tree_key="$IMAGE_KEY_TREE"
@@ -68,17 +70,18 @@ build() {
   if [[ -z "$key" ]]; then
     echo "warning: image inputs could not be verified for $url; building without keyed image reuse" >&2
   fi
-  cache_tag="$(latest_cache_ref "$cache_repo" "$cache_name-$week-")"
+  cache_tag="$(latest_cache_ref "$cache_repo" "$cache_name-$week-")" || return 1
   if [[ -n "$cache_tag" ]]; then
     cache_from+=(--cache-from "type=registry,ref=$registry/$cache_repo:$cache_tag")
   fi
   if [[ -n "$key" ]]; then
-    metadata_file="$(mktemp)"
+    metadata_file="$(mktemp)" || return 1
+    [[ -n "$metadata_file" ]] || return 1
     metadata_args+=(--metadata-file "$metadata_file")
   fi
   refresh_aws_credentials || return 1
   aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null || return 1
-  if docker buildx build --platform linux/arm64 --provenance=false \
+  if BUILDX_METADATA_PROVENANCE=min docker buildx build --platform linux/arm64 --provenance=false \
     "${metadata_args[@]+"${metadata_args[@]}"}" \
     "${cache_from[@]+"${cache_from[@]}"}" \
     --cache-to "type=registry,ref=$registry/$cache_repo:$cache_name-$week-$sha,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
@@ -108,7 +111,7 @@ build() {
         echo "warning: cannot add tree image-key tag skynet/backend:$tree_key" >&2
       fi
     else
-      echo "warning: build metadata did not verify every pinned source; no image-key tags added for $url:$tag" >&2
+      echo "::warning::build metadata did not verify every pinned source; no image-key tags added for $url:$tag" >&2
     fi
   fi
   [[ -z "$metadata_file" ]] || rm -f "$metadata_file"
@@ -117,7 +120,7 @@ build() {
 build_backend_lane() {
   build backend "$sha" "$repo_root/backend" backend --build-arg "GIT_SHA=$sha" || return 1
   if [[ "$migrate_requested" == --migrate ]]; then
-    wait_for_lane_success litellm frontend ||
+    wait_for_lane_success litellm "$litellm_pid" frontend "$frontend_pid" ||
       return 1
     # Existing tasks stay live until deploy.sh rolls services, so migrations
     # must remain compatible with the previous application code.
@@ -135,18 +138,23 @@ run_image_lane() {
 }
 
 wait_for_lane_success() {
-  local lane
+  local lane pid state index all_done
+  local -a lane_pids=("$@")
   while :; do
-    for lane in "$@"; do
+    all_done=true
+    for ((index = 0; index < ${#lane_pids[@]}; index += 2)); do
+      lane="${lane_pids[index]}"
+      pid="${lane_pids[index + 1]:-}"
+      [[ -n "$lane" && "$pid" =~ ^[0-9]+$ ]] || return 1
       [[ ! -e "$lane_dir/$lane.failed" ]] || return 1
+      [[ -e "$lane_dir/$lane.ok" ]] && continue
+      all_done=false
+      kill -0 "$pid" 2>/dev/null || return 1
+      state="$(ps -o stat= -p "$pid" 2>/dev/null)" || return 1
+      [[ -n "$state" && "$state" != Z* ]] || return 1
     done
-    for lane in "$@"; do
-      [[ -e "$lane_dir/$lane.ok" ]] || {
-        sleep 1 || return 1
-        continue 2
-      }
-    done
-    return 0
+    [[ "$all_done" == true ]] && return 0
+    sleep 1 || return 1
   done
 }
 
@@ -164,8 +172,6 @@ _mark_lane_failure() {
   fi
 }
 
-run_lane backend run_image_lane backend build_backend_lane &
-backend_pid=$!
 run_lane litellm run_image_lane litellm build litellm "$sha" "$repo_root/deploy/litellm" litellm &
 litellm_pid=$!
 run_lane frontend run_image_lane frontend build frontend "$sha-$env" "$repo_root/frontend" "frontend-$env" \
@@ -177,6 +183,8 @@ run_lane frontend run_image_lane frontend build frontend "$sha-$env" "$repo_root
   --build-arg "APP_GIT_SHA=$sha" \
   --build-arg "APP_ENVIRONMENT=$env" &
 frontend_pid=$!
+run_lane backend run_image_lane backend build_backend_lane &
+backend_pid=$!
 
 failed=""
 wait "$backend_pid" || failed+=" backend"

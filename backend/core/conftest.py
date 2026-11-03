@@ -23,7 +23,7 @@ from core.config import app_env
 _DURATION_FILE = Path(__file__).with_name("test_durations.json")
 # xdist reports reach the controller, so only it may write the shared artifacts.
 _is_controller = False
-_dispatched_nodeids: set[str] = set()
+_dispatched_nodeids: list[str] = []
 _file_durations: dict[str, float] = {}
 
 
@@ -129,7 +129,7 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     if not _is_controller:
         return
     if report.when == "setup":
-        _dispatched_nodeids.add(report.nodeid)
+        _dispatched_nodeids.append(report.nodeid)
     path = report.nodeid.split("::", 1)[0]
     _file_durations[path] = _file_durations.get(path, 0.0) + report.duration
 

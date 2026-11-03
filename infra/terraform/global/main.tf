@@ -224,8 +224,10 @@ resource "aws_ecr_lifecycle_policy" "buildcache_production" {
   })
 }
 
-# Preview-to-preview cache poisoning cannot affect staging or production;
-# each PR reads only its own prefix.
+# Preview-to-preview cache poisoning cannot affect staging or production.
+# IAM grants writes to the shared repository, not to tag prefixes, so one PR
+# can publish a newer tag in another PR's prefix. Prefixes select cache inputs;
+# they are not a security boundary.
 resource "aws_ecr_repository" "preview_buildcache" {
   name = "skynet/preview-buildcache"
   # Checkov CKV_AWS_51 requires immutable cache tags.
@@ -347,8 +349,8 @@ locals {
   # Built from the names, not from the resources, so the deploy policies are
   # known at plan time and scripts/check-deploy-isolation.sh can test them
   # before the first apply.
-  # Preview builds use a separate cache so they cannot poison deploy layers.
   environments = toset(["staging", "production"])
+  # Preview builds use a separate cache so they cannot poison deploy layers.
   ecr_repository_arns = {
     staging = concat(
       [for r in var.image_repositories : "arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/${r}"],

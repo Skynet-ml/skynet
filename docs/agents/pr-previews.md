@@ -20,6 +20,11 @@ migration can overlap the frontend build, but backend and worker services roll
 only after both image lanes succeed. The deploy step upserts all three
 services; set `BACKEND_IMAGE` to the image used by the migration.
 
+Preview builds use a shared preview-cache repository. The preview role can
+write any tag in that repository, so one PR can publish a cache tag used by
+another PR. Each build selects its own prefix, but that prefix is not a
+security boundary. Preview cache writes cannot affect staging or production.
+
 The remote MCP server of a preview is at
 `https://api-pr-<n>.staging.skynetml.com/remote-mcp`. Staging uses
 `https://mcp.staging.skynetml.com/mcp` and production

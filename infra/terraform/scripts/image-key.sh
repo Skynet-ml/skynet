@@ -2,6 +2,8 @@
 # Keys include the clean Git tree, external FROM digests, linux/arm64, build
 # args, the UTC week, and the buildx/BuildKit versions. Empty output means build.
 # ctx- keeps every build arg; tree- drops only GIT_SHA for preview reuse.
+# Backend/frontend context keys retain commit args, so cross-commit reuse is
+# the backend tree key; the content-key hit is mainly useful for LiteLLM.
 # The weekly cache rotation bounds unpinned RUN-time network inputs to one week;
 # the first build each week is cold, so this is a documented freshness gap.
 KEY_VERSION=5
@@ -57,9 +59,10 @@ _image_inputs_impl() {
   shift 2
   local -a raw_build_args=("$@") build_args=() tree_args=() words=() base_digests=()
   local line trimmed logical instruction ref image_ref alias digest_json digest
+  local context_alias
   local stage_count=0 index from_ref source buildx_version builder_info buildkit_version
-  local continuation=0 context_hash
-  declare -A digest_by_ref=()
+  local continuation=0 context_hash instruction_seen=0 pin_context
+  declare -A digest_by_ref=() context_digest_by_ref=()
   _clear_image_inputs
   [[ "$week" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || return 1
   context_dir="$(cd "$context_dir" && pwd -P)" || return 1
@@ -91,8 +94,14 @@ _image_inputs_impl() {
     trimmed="${line%$'\r'}"
     trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
-    [[ "$trimmed" =~ ^#[[:space:]]*syntax= ]] && return 1
-    [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
+    [[ -z "$trimmed" ]] && continue
+    if [[ "$trimmed" == \#* ]]; then
+      if ((instruction_seen == 0)) && [[ "$trimmed" =~ ^#[[:space:]]*[[:alpha:]]+[[:space:]]*= ]]; then
+        return 1
+      fi
+      continue
+    fi
+    instruction_seen=1
     if ((continuation)); then
       logical+=" $trimmed"
     else
@@ -165,7 +174,25 @@ _image_inputs_impl() {
           fi
           base_digests+=("$image_ref@$digest")
           IMAGE_PINNED_DIGESTS+=("$digest")
-          IMAGE_BUILD_CONTEXT_ARGS+=("--build-context" "$image_ref=docker-image://$image_ref@$digest")
+          pin_context="docker-image://$image_ref@$digest"
+          if [[ -n "${context_digest_by_ref[$image_ref]:-}" &&
+            "${context_digest_by_ref[$image_ref]}" != "$digest" ]]; then
+            return 1
+          fi
+          context_digest_by_ref["$image_ref"]="$digest"
+          IMAGE_BUILD_CONTEXT_ARGS+=("--build-context" "$image_ref=$pin_context")
+          if [[ "$image_ref" == docker.io/* ]]; then
+            context_alias="${image_ref#docker.io/}"
+            context_alias="${context_alias#library/}"
+            if [[ "$context_alias" != "$image_ref" ]]; then
+              if [[ -n "${context_digest_by_ref[$context_alias]:-}" &&
+                "${context_digest_by_ref[$context_alias]}" != "$digest" ]]; then
+                return 1
+              fi
+              context_digest_by_ref["$context_alias"]="$digest"
+              IMAGE_BUILD_CONTEXT_ARGS+=("--build-context" "$context_alias=$pin_context")
+            fi
+          fi
         fi
         stage_count=$((stage_count + 1))
         if [[ "${words[index + 1]:-}" == [Aa][Ss] && -n "${words[index + 2]:-}" ]]; then
@@ -310,7 +337,8 @@ retag() {
 }
 
 latest_cache_ref() {
-  local repo="$1" prefix="$2" token="" response page next
+  local repo="$1" prefix="$2" token="" response page next all_items item pushed epoch
+  local fraction fraction_text best_epoch=-1 best_fraction=-1 best_tag=""
   local -a pages=()
   while :; do
     if [[ -n "$token" ]]; then
@@ -329,5 +357,20 @@ latest_cache_ref() {
     [[ -n "$next" ]] || break
     token="$next"
   done
-  printf '%s\n' "${pages[@]+"${pages[@]}"}" | jq -s -r 'add | sort_by(.pushedAt) | last.tag // empty'
+  all_items="$(printf '%s\n' "${pages[@]+"${pages[@]}"}" | jq -s -c 'add')" || return 0
+  while IFS= read -r item; do
+    pushed="$(jq -er '.pushedAt | select(type == "string")' <<<"$item" 2>/dev/null)" || return 0
+    epoch="$(date_epoch "$pushed")" || return 0
+    fraction=0
+    if [[ "$pushed" =~ \.([0-9]+) ]]; then
+      fraction_text="${BASH_REMATCH[1]}000000000"
+      fraction=$((10#${fraction_text:0:9}))
+    fi
+    if ((epoch > best_epoch || (epoch == best_epoch && fraction > best_fraction))); then
+      best_epoch="$epoch"
+      best_fraction="$fraction"
+      best_tag="$(jq -er '.tag | select(type == "string")' <<<"$item" 2>/dev/null)" || return 0
+    fi
+  done < <(jq -c '.[]' <<<"$all_items")
+  printf '%s\n' "$best_tag"
 }

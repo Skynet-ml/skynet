@@ -93,6 +93,10 @@ case "${0##*/}" in
           fi
           exit 0
         fi
+        if [[ "${CACHE_TIMESTAMP_TEST:-}" == true ]]; then
+          printf '%s\n' '{"imageDetails":[{"imageTags":["backend-2026-W02-offset-new"],"imagePushedAt":"2025-02-01T00:00:00.500-08:00"},{"imageTags":["backend-2026-W02-utc-old"],"imagePushedAt":"2025-02-01T01:00:00+00:00"}]}'
+          exit 0
+        fi
         if [[ "${RETAG_DIFF:-}" == true ]]; then
           printf '%s\n' '{"imageDetails":[{"imageDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}'
           exit 0
@@ -128,6 +132,7 @@ export PATH="$tmp/bin:$PATH"
 export TEST_REPO_ROOT="$repo_root"
 export TREE_HASH BASE_DIGEST DIRTY_TREE DIGEST_FAIL DESCRIBE_ERROR RETAG_FAIL RETAG_EXISTS
 export RETAG_ERROR RETAG_DIFF LATEST_CACHE_TEST CACHE_ERROR FRESHNESS_TEST PUSHED_AT
+export CACHE_TIMESTAMP_TEST
 export BUILDX_VERSION BUILDKIT_VERSION DATE_PARSE_FAIL OIDC_HEADER_PATH_OUT OIDC_TOKEN_PATH_OUT
 OIDC_HEADER_PATH_OUT="$tmp/oidc-header-path"
 OIDC_TOKEN_PATH_OUT="$tmp/oidc-token-path"
@@ -198,6 +203,12 @@ unset RETAG_DIFF
 LATEST_CACHE_TEST=true
 [[ "$(latest_cache_ref skynet/cache backend-2026-W02-)" == backend-2026-W02-new ]] ||
   fail "latest current-week cache tag lookup failed"
+unset LATEST_CACHE_TEST
+CACHE_TIMESTAMP_TEST=true
+[[ "$(latest_cache_ref skynet/cache backend-2026-W02-)" == backend-2026-W02-offset-new ]] ||
+  fail "cache timestamps were sorted as strings"
+CACHE_TIMESTAMP_TEST=false
+LATEST_CACHE_TEST=true
 CACHE_ERROR=true
 [[ -z "$(latest_cache_ref skynet/cache backend-)" ]] || fail "cache lookup error was not ignored"
 unset LATEST_CACHE_TEST CACHE_ERROR
@@ -247,6 +258,13 @@ image_inputs "$test_context" "$test_week" GIT_SHA=abc
   fail "one image_inputs call did not set both keys"
 ((${#IMAGE_BUILD_CONTEXT_ARGS[@]} == 2)) || fail "pinned build-context args were not set"
 [[ "$(wc -l <"$DIGEST_CALLS_OUT")" -eq 1 ]] || fail "FROM digest was resolved more than once"
+cat >"$test_context/Dockerfile" <<'DOCKERFILE'
+FROM docker.io/node:20-alpine
+DOCKERFILE
+image_inputs "$test_context" "$test_week" GIT_SHA=abc
+printf '%s\n' "${IMAGE_BUILD_CONTEXT_ARGS[@]}" |
+  rg -Fxq 'node:20-alpine=docker-image://docker.io/node:20-alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ||
+  fail "normalized docker.io build-context alias was not pinned"
 image_inputs "$test_context" "$test_week" --build-arg GIT_SHA=abc --build-arg FEATURE=on
 staging_ctx="$IMAGE_KEY_CTX"
 staging_tree="$IMAGE_KEY_TREE"
@@ -276,6 +294,16 @@ cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 DOCKERFILE
 [[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "syntax directive produced key"
+cat >"$test_context/Dockerfile" <<'DOCKERFILE'
+# escape=`
+FROM node:20-alpine
+DOCKERFILE
+[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "escape directive produced key"
+cat >"$test_context/Dockerfile" <<'DOCKERFILE'
+# check=skip=JSONArgsRecommended
+FROM node:20-alpine
+DOCKERFILE
+[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "check directive produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine \
   AS continued

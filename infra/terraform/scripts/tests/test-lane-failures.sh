@@ -56,7 +56,7 @@ case "$*" in
   "buildx version") printf '%s\n' 'github.com/docker/buildx v0.36.1' ;;
   "buildx inspect --bootstrap") printf '%s\n' 'BuildKit version: v0.32.2' ;;
   *"buildx imagetools inspect"*) printf '%s\n' '"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' ;;
-  *"login"*) ;;
+  *"login"*) cat >/dev/null ;;
   *"buildx build"*)
     target=""
     metadata=""
@@ -117,19 +117,23 @@ exit "${TEST_DEPLOY_STATUS:-0}"
 SH
 chmod +x "$tmp/build/deploy.sh"
 
+CURRENT_LOG=""
+
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
-  [[ ! -f "$tmp/run.log" ]] || tail -n 80 "$tmp/run.log" >&2
+  [[ -z "$CURRENT_LOG" || ! -f "$CURRENT_LOG" ]] || tail -n 80 "$CURRENT_LOG" >&2
   [[ ! -f "$TEST_AWS_LOG" ]] || tail -n 40 "$TEST_AWS_LOG" >&2
   exit 1
 }
 
 run_build() {
-  local output="$1"
+  local output="$1" log="$2"
   : >"$TEST_AWS_LOG"
   : >"$TEST_EVENT_LOG"
   : >"$output"
-  if "$tmp/build/build-push.sh" staging "$TEST_SHA" --migrate >"$tmp/run.log" 2>&1; then
+  CURRENT_LOG="$log"
+  : >"$CURRENT_LOG"
+  if "$tmp/build/build-push.sh" staging "$TEST_SHA" --migrate >"$CURRENT_LOG" 2>&1; then
     fail "build-push succeeded in failure test: $output"
   fi
   ! rg -q '^migrated=' "$output" || fail "failed lane wrote migrated output: $output"
@@ -137,24 +141,27 @@ run_build() {
 
 export GITHUB_OUTPUT="$tmp/migrated"
 export TEST_DEPLOY_STATUS=1
-run_build "$GITHUB_OUTPUT"
+run_build "$GITHUB_OUTPUT" "$tmp/migration.log"
 rg -q '^migrate$' "$TEST_EVENT_LOG" || fail "migration stub did not fail the deploy lane"
 
 export TEST_DEPLOY_STATUS=0 TEST_FAIL_CURL=true
 export ACTIONS_ID_TOKEN_REQUEST_URL=https://token.invalid/request
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN=test-request-token
 export AWS_DEPLOY_ROLE_ARN=arn:aws:iam::123456789012:role/test
-run_build "$GITHUB_OUTPUT"
+run_build "$GITHUB_OUTPUT" "$tmp/credentials.log"
 if rg -q '^build:' "$TEST_EVENT_LOG"; then fail "build ran after credential refresh failed"; fi
 
 unset TEST_FAIL_CURL ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_DEPLOY_ROLE_ARN
 export TEST_FAIL_BUILD=backend
-run_build "$GITHUB_OUTPUT"
+run_build "$GITHUB_OUTPUT" "$tmp/build.log"
 
 unset TEST_FAIL_BUILD
 export TEST_EXISTING_BACKEND=true
 : >"$TEST_AWS_LOG"
-"$tmp/build/build-push.sh" staging "$TEST_SHA" >"$tmp/skip.log" 2>&1 ||
+: >"$TEST_EVENT_LOG"
+CURRENT_LOG="$tmp/skip.log"
+: >"$CURRENT_LOG"
+"$tmp/build/build-push.sh" staging "$TEST_SHA" >"$CURRENT_LOG" 2>&1 ||
   fail "existing immutable backend tag did not skip"
 if rg -q 'put-image.*--image-tag tree-' "$TEST_AWS_LOG"; then
   fail "existing SHA tag received an unverified tree-key tag"
@@ -163,7 +170,10 @@ fi
 unset TEST_EXISTING_BACKEND
 export TEST_CTX_HIT=true
 : >"$TEST_AWS_LOG"
-"$tmp/build/build-push.sh" staging "$TEST_SHA" >"$tmp/reuse.log" 2>&1 ||
+: >"$TEST_EVENT_LOG"
+CURRENT_LOG="$tmp/reuse.log"
+: >"$CURRENT_LOG"
+"$tmp/build/build-push.sh" staging "$TEST_SHA" >"$CURRENT_LOG" 2>&1 ||
   fail "fresh context-key reuse failed"
 if rg -q 'put-image.*--image-tag tree-' "$TEST_AWS_LOG"; then
   fail "context-key reuse added a new tree-key tag"
@@ -171,6 +181,8 @@ fi
 
 unset TEST_CTX_HIT
 rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
+CURRENT_LOG="$tmp/preview-backend.log"
+: >"$CURRENT_LOG"
 # The source path points at a test copy in the temporary fixture.
 # shellcheck disable=SC1091
 source "$tmp/preview/infra/terraform/scripts/preview.sh" build 123 "$TEST_SHA"
@@ -182,7 +194,8 @@ export AWS_DEPLOY_ROLE_ARN=arn:aws:iam::123456789012:role/test
 export TEST_FAIL_BUILD=preview-backend
 cfg='{"domain":"staging.skynetml.com"}'
 if backend_and_migrate \
-  123456789012.dkr.ecr.us-east-2.amazonaws.com/skynet/preview-backend:"$sha-pr-$pr" "$cfg"; then
+  123456789012.dkr.ecr.us-east-2.amazonaws.com/skynet/preview-backend:"$sha-pr-$pr" "$cfg" \
+  >"$CURRENT_LOG" 2>&1; then
   fail "failed preview backend build returned success"
 fi
 rg -q '^refresh$' "$TEST_EVENT_LOG" || fail "preview build did not use the successful credential stub"
@@ -190,8 +203,12 @@ if rg -q 'ecs ' "$TEST_AWS_LOG"; then fail "preview migration ran after its back
 
 unset TEST_FAIL_BUILD
 export TEST_FAIL_BUILD=preview-frontend
+rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
+CURRENT_LOG="$tmp/preview-frontend.log"
+: >"$CURRENT_LOG"
 if build_frontend \
-  123456789012.dkr.ecr.us-east-2.amazonaws.com/skynet/preview-frontend "$sha-pr-$pr" staging.skynetml.com; then
+  123456789012.dkr.ecr.us-east-2.amazonaws.com/skynet/preview-frontend "$sha-pr-$pr" staging.skynetml.com \
+  >"$CURRENT_LOG" 2>&1; then
   fail "failed preview frontend build returned success"
 fi
 

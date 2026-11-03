@@ -78,6 +78,8 @@ jobs:
         run: uv run ruff check .
       - name: Image-key tests
         run: bash ../infra/terraform/scripts/tests/test-image-key.sh
+      - name: Lane failure tests
+        run: bash ../infra/terraform/scripts/tests/test-lane-failures.sh
       # requirements.txt is the pip install path's copy of uv.lock. When only
       # one of the two moves, the pip-path image silently ships a different
       # dependency set than CI ever tested — that drift is how starlette landed

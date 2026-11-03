@@ -77,8 +77,12 @@ for env in staging production; do
   expect "$policy" denied "read the $other deploy parameter" ssm:GetParameter "arn:aws:ssm:$region:$account:parameter/skynet/$other/deploy"
   expect "$policy" allowed "push to the $env build cache" ecr:PutImage \
     "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$env"
-  expect "$policy" denied "push to the $other build cache" ecr:PutImage \
-    "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$other"
+  for action in ecr:BatchDeleteImage ecr:CompleteLayerUpload ecr:DeleteRepository \
+    ecr:InitiateLayerUpload ecr:PutImage ecr:PutImageTagMutability \
+    ecr:PutLifecyclePolicy ecr:SetRepositoryPolicy ecr:UploadLayerPart; do
+    expect "$policy" denied "write $action to the $other build cache" "$action" \
+      "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$other"
+  done
   for action in ecr:BatchCheckLayerAvailability ecr:BatchGetImage ecr:DescribeImages \
     ecr:DescribeRepositories ecr:GetDownloadUrlForLayer; do
     expect "$policy" allowed "read the $env build cache with $action" "$action" \

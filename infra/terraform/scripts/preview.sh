@@ -35,8 +35,9 @@
 # Reusing an exact image key avoids rebuilding code already in ECR. The
 # staging-tree match remains a fallback for already-built compatible images.
 #
-# Preview builds can poison other preview cache tags, but not staging or
-# production. Each PR reads only its own preview-cache prefix.
+# The shared preview-cache policy allows writes to any tag, so one PR can
+# poison another PR's cache. Each PR selects its own prefix, not a security
+# boundary. Poisoning cannot reach staging or production.
 #
 # The tasks get the staging REMOTE_DB_URL and REDIS_URL. A wrapper command
 # points them at the preview database and Redis DB before the app starts, so
@@ -165,7 +166,7 @@ build_backend() {
   fi
   refresh_aws_credentials || return 1
   aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null || return 1
-  docker buildx build --platform linux/arm64 --provenance=false --progress=plain \
+  BUILDX_METADATA_PROVENANCE=min docker buildx build --platform linux/arm64 --provenance=false --progress=plain \
     "${cache_from[@]+"${cache_from[@]}"}" \
     "${pin_args[@]+"${pin_args[@]}"}" \
     --cache-to "type=registry,ref=$registry/skynet/preview-buildcache:preview-backend-pr${pr}-$week-$sha,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
@@ -212,7 +213,7 @@ build_frontend() {
   fi
   refresh_aws_credentials || return 1
   aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null || return 1
-  docker buildx build --platform linux/arm64 --provenance=false --progress=plain \
+  BUILDX_METADATA_PROVENANCE=min docker buildx build --platform linux/arm64 --provenance=false --progress=plain \
     "${cache_from[@]+"${cache_from[@]}"}" \
     "${pin_args[@]+"${pin_args[@]}"}" \
     --cache-to "type=registry,ref=$registry/skynet/preview-buildcache:preview-frontend-pr${pr}-$week-$sha,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
