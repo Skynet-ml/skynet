@@ -1,3 +1,5 @@
+[Tüm platformları gör](/download)
+
 Skynet Mac uygulaması Skynet'i kendi bilgisayarınızda çalıştırır. Model çağrılarını Mac'inizde oturum açılmış bir kodlama CLI'ı üzerinden gönderir; bu yüzden bu çağrıları CLI planınız öder. Uygulamayı barındırılan Skynet hesabınıza da bağlayabilirsiniz.
 
 ## Gereksinimler

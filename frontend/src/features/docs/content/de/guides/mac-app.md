@@ -1,3 +1,5 @@
+[Alle Plattformen anzeigen](/download)
+
 Die Skynet-Mac-App führt Skynet auf Ihrem eigenen Computer aus. Sie sendet Modellaufrufe über eine Coding-CLI, die auf Ihrem Mac angemeldet ist. So bezahlt Ihr CLI-Tarif diese Aufrufe. Sie können die App auch mit Ihrem gehosteten Skynet-Konto verknüpfen.
 
 ## Voraussetzungen
