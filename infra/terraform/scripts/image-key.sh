@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
 
-KEY_VERSION=1
+# A ctx- key includes the clean Git tree, resolved FROM digests, linux/arm64,
+# and sorted build args. A tree- key omits build args for preview reuse.
+# Empty output means the caller must build.
+KEY_VERSION=2
 
 image_key() {
-  local context_dir repo_root context_path status tree_hash dockerfile line
+  local context_dir prefix repo_root context_path status tree_hash dockerfile line
   local ref alias image_ref stages="" digest digest_json key
   local -a build_args=() digests=() words sorted_args
   context_dir="$(cd "$1" && pwd -P)" || return 0
-  shift
+  prefix="$2"
+  shift 2
+  [[ "$prefix" == ctx || "$prefix" == tree ]] || return 0
   build_args=("$@")
+  [[ "$prefix" != tree ]] || build_args=()
   repo_root="$(git -C "$context_dir" rev-parse --show-toplevel 2>/dev/null)" || return 0
   context_path="${context_dir#"$repo_root"/}"
   [[ "$context_path" != "$context_dir" && -n "$context_path" ]] || return 0
-  status="$(git -C "$repo_root" status --porcelain -- "$context_path" 2>/dev/null)" || return 0
+  status="$(git -C "$repo_root" status --porcelain --ignored -- "$context_path" 2>/dev/null)" || return 0
   [[ -z "$status" ]] || return 0
   tree_hash="$(git -C "$repo_root" rev-parse "HEAD:$context_path" 2>/dev/null)" || return 0
   dockerfile="$context_dir/Dockerfile"
@@ -46,12 +52,12 @@ image_key() {
   while IFS= read -r line; do sorted_args+=("$line"); done < <(printf '%s\n' "${build_args[@]}" | LC_ALL=C sort)
   key="$(
     {
-      printf 'version=%s\ncontext=%s\n' "$KEY_VERSION" "$tree_hash"
+      printf 'version=%s\nplatform=linux/arm64\ncontext=%s\n' "$KEY_VERSION" "$tree_hash"
       printf 'base=%s\n' "${digests[@]}"
       printf 'arg=%s\n' "${sorted_args[@]}"
       } | if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -c1-40
   )" || return 0
-  printf 'ctx-%s\n' "$key"
+  printf '%s-%s\n' "$prefix" "$key"
 }
 
 find_by_key() {

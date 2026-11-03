@@ -140,35 +140,32 @@ image_is_fresh() {
 
 # Builds and pushes the backend image unless a fresh one exists. Args: uri tag
 build_backend() {
-  local key registry cache_ref
+  local registry
   if image_is_fresh skynet/preview-backend "$2"; then
     echo "skip: $1:$2 exists"
     return 0
   fi
-  key="$(image_key "$repo_root/backend" "GIT_SHA=$sha")"
   registry="${1%%/*}"
-  cache_ref="$registry/skynet/buildcache:preview-backend"
   docker buildx build --platform linux/arm64 --provenance=false --progress=plain \
-    --cache-from "type=registry,ref=$cache_ref" \
-    --cache-to "type=registry,ref=$cache_ref,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
+    --cache-from "type=registry,ref=$registry/skynet/buildcache:backend" \
+    --cache-from "type=registry,ref=$registry/skynet/preview-buildcache:preview-backend" \
+    --cache-to "type=registry,ref=$registry/skynet/preview-buildcache:preview-backend,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
     -t "$1:$2" --push --build-arg "GIT_SHA=$sha" "$repo_root/backend"
-  if [[ -n "$key" ]] && ! retag skynet/preview-backend "$2" "$key"; then
-    echo "warning: cannot add image-key tag skynet/preview-backend:$key" >&2
-  fi
 }
 
+# Next.js bakes NEXT_PUBLIC_* into the bundle, so each PR gets its own build.
 # Args: uri tag domain
 build_frontend() {
-  local registry cache_ref
+  local registry
   if image_is_fresh skynet/preview-frontend "$2"; then
     echo "skip: $1:$2 exists"
     return 0
   fi
   registry="${1%%/*}"
-  cache_ref="$registry/skynet/buildcache:preview-frontend"
   docker buildx build --platform linux/arm64 --provenance=false --progress=plain \
-    --cache-from "type=registry,ref=$cache_ref" \
-    --cache-to "type=registry,ref=$cache_ref,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
+    --cache-from "type=registry,ref=$registry/skynet/buildcache:frontend-staging" \
+    --cache-from "type=registry,ref=$registry/skynet/preview-buildcache:preview-frontend" \
+    --cache-to "type=registry,ref=$registry/skynet/preview-buildcache:preview-frontend,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
     -t "$1:$2" --push \
     --build-arg "NEXT_PUBLIC_SITE_URL=https://pr-$pr.$3" \
     --build-arg "NEXT_PUBLIC_SENTRY_DSN=${NEXT_PUBLIC_SENTRY_DSN:-}" \
@@ -547,19 +544,15 @@ backend_image() {
   check_sha
   need docker git tr sort
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || die "missing command: sha256sum or shasum"
-  local key tag image
-  key="$(image_key "$repo_root/backend" "GIT_SHA=$sha")"
-  tag="$sha-pr-$pr"
+  local key image
+  # Previews may ignore GIT_SHA because staging_backend already runs a staging
+  # image built from another SHA when backend/ is identical. APP_GIT_SHA in
+  # the task environment supplies the served commit; staging and production
+  # keep GIT_SHA in ctx- keys and never reuse across commits.
+  key="$(image_key "$repo_root/backend" tree "GIT_SHA=$sha")"
   if [[ -n "$key" ]] && find_by_key skynet/backend "$key"; then
     echo "$(standard_ecr_uri backend):$key"
     return 0
-  fi
-  if [[ -n "$key" ]] && find_by_key skynet/preview-backend "$key"; then
-    if retag skynet/preview-backend "$key" "$tag"; then
-      echo "$(ecr_uri preview-backend):$tag"
-      return 0
-    fi
-    echo "warning: cannot retag skynet/preview-backend:$key as $tag" >&2
   fi
   image="$(staging_backend)" || return 0
   [[ -z "$image" ]] || echo "$image"

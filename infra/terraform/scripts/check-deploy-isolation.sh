@@ -118,6 +118,12 @@ expect "$policy" denied "change the priority of a preview slot rule" elasticload
 expect "$policy" denied "tag a staging rule" elasticloadbalancing:AddTags "$rule" --context-entries "$(tag preview)"
 expect "$policy" denied "create a target group" elasticloadbalancing:CreateTargetGroup "arn:aws:elasticloadbalancing:$region:$account:targetgroup/skynet-pr-1-backend/0" --context-entries "$(tag preview)"
 expect "$policy" denied "delete the staging backend target group" elasticloadbalancing:DeleteTargetGroup "arn:aws:elasticloadbalancing:$region:$account:targetgroup/skynet-staging-backend/0"
+for repository in buildcache backend frontend litellm; do
+  resource="arn:aws:ecr:$region:$account:repository/skynet/$repository"
+  for action in ecr:PutImage ecr:InitiateLayerUpload ecr:UploadLayerPart ecr:CompleteLayerUpload; do
+    expect "$policy" denied "write $action to skynet/$repository" "$action" "$resource"
+  done
+done
 expect "$policy" allowed "push a preview image" ecr:PutImage "arn:aws:ecr:$region:$account:repository/skynet/preview-backend"
 expect "$policy" denied "push a staging image" ecr:PutImage "arn:aws:ecr:$region:$account:repository/skynet/backend"
 expect "$policy" allowed "take a preview slot" ssm:PutParameter "arn:aws:ssm:$region:$account:parameter/skynet/preview/slots/1"

@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
-# Builds the three images for linux/arm64 and pushes them to ECR.
+# Builds the three images for linux/arm64 (Graviton) and pushes them to ECR.
+#
+#   infra/terraform/scripts/build-push.sh <staging|production> [git-sha]
+#
+# Tags: backend and litellm get <sha>; the frontend gets <sha>-<env>, because
+# Next.js bakes NEXT_PUBLIC_* values into the bundle at build time.
+# Application image tags are immutable in ECR, so an existing tag is skipped.
+#
+# Frontend build values come from the environment of this shell:
+#   NEXT_PUBLIC_SENTRY_DSN, NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE,
+#   NEXT_PUBLIC_FEATURE_GENERALIST_AGENT (optional)
 
 source "$(dirname "$0")/lib.sh"
 source "$(dirname "$0")/image-key.sh"
@@ -17,6 +27,7 @@ case "$env" in
   production) site_url="https://skynetml.com" ;;
 esac
 
+# ECR URLs come from the global stack, so this runs before the environment exists.
 cfg="$(aws ecr describe-repositories --repository-names skynet/backend skynet/frontend skynet/litellm \
   --query 'repositories[].[repositoryName,repositoryUri]' --output json |
   jq '{ecr: (map({key: (.[0] | ltrimstr("skynet/")), value: .[1]}) | from_entries)}')"
@@ -35,7 +46,7 @@ build() {
     return 0
   fi
 
-  key="$(image_key "$context" "${build_args[@]}")" || key=""
+  key="$(image_key "$context" ctx "${build_args[@]}")" || key=""
   if [[ -n "$key" ]] && find_by_key "skynet/$name" "$key"; then
     if retag "skynet/$name" "$key" "$tag"; then
       echo "reuse: $url:$key as $tag"
@@ -48,6 +59,8 @@ build() {
     --cache-from "type=registry,ref=$cache_ref" \
     --cache-to "type=registry,ref=$cache_ref,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
     -t "$url:$tag" --push "${build_args[@]}" "$context"; then
+    # Staging and production can build the same backend and litellm tag at
+    # once; the second push then fails on the immutable tag.
     find_by_key "skynet/$name" "$tag" || die "push failed: $url:$tag"
     echo "skip: $url:$tag was pushed by another run"
     return 0
@@ -59,7 +72,22 @@ build() {
 }
 
 build_backend_lane() {
+  local key
   build backend "$sha" "$repo_root/backend" backend --build-arg "GIT_SHA=$sha"
+  key="$(image_key "$repo_root/backend" tree)"
+  if [[ -n "$key" ]]; then
+    if find_by_key skynet/backend "$sha"; then
+      if ! retag skynet/backend "$sha" "$key"; then
+        echo "warning: cannot add tree image-key tag skynet/backend:$key" >&2
+      fi
+    else
+      echo "warning: cannot find skynet/backend:$sha to add tree image-key tag" >&2
+    fi
+  else
+    echo "warning: cannot compute backend tree image key" >&2
+  fi
+  # Old tasks serve during the rolling update, so migrations must work with
+  # their code. They can run before frontend and LiteLLM images finish.
   "$script_dir/deploy.sh" "$env" "$sha" --migrate-only
 }
 

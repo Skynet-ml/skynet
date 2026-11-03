@@ -19,7 +19,10 @@ case "${0##*/}" in
           printf '%s\n' "${TREE_HASH:-tree-one}"
         fi
         ;;
-      status) printf '%s' "${DIRTY_TREE:-}" ;;
+      status)
+        [[ "$*" == *--ignored* ]] || exit 4
+        printf '%s' "${DIRTY_TREE:-}"
+        ;;
       *) exit 2 ;;
     esac
     ;;
@@ -66,21 +69,27 @@ fail() {
   exit 1
 }
 
-key="$(image_key "$repo_root/backend" GIT_SHA=abc FEATURE=on)"
+key="$(image_key "$repo_root/backend" ctx GIT_SHA=abc FEATURE=on)"
 [[ "$key" =~ ^ctx-[0-9a-f]{40}$ ]] || fail "key format: $key"
-[[ "$key" == "$(image_key "$repo_root/backend" FEATURE=on GIT_SHA=abc)" ]] || fail "input order changed key"
+[[ "$key" == "$(image_key "$repo_root/backend" ctx FEATURE=on GIT_SHA=abc)" ]] || fail "input order changed key"
+tree_key="$(image_key "$repo_root/backend" tree GIT_SHA=abc FEATURE=on)"
+[[ "$tree_key" =~ ^tree-[0-9a-f]{40}$ ]] || fail "tree key format: $tree_key"
+[[ "$tree_key" == "$(image_key "$repo_root/backend" tree GIT_SHA=def FEATURE=off)" ]] ||
+  fail "tree key changed with build args"
 TREE_HASH=tree-two
-[[ "$key" != "$(image_key "$repo_root/backend" GIT_SHA=abc FEATURE=on)" ]] || fail "tree change kept key"
+[[ "$key" != "$(image_key "$repo_root/backend" ctx GIT_SHA=abc FEATURE=on)" ]] || fail "tree change kept key"
 TREE_HASH=tree-one
 BASE_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-[[ "$key" != "$(image_key "$repo_root/backend" GIT_SHA=abc FEATURE=on)" ]] || fail "base digest change kept key"
+[[ "$key" != "$(image_key "$repo_root/backend" ctx GIT_SHA=abc FEATURE=on)" ]] || fail "base digest change kept key"
 unset BASE_DIGEST
-[[ "$key" != "$(image_key "$repo_root/backend" GIT_SHA=abc FEATURE=off)" ]] || fail "build arg change kept key"
+[[ "$key" != "$(image_key "$repo_root/backend" ctx GIT_SHA=abc FEATURE=off)" ]] || fail "build arg change kept key"
 DIRTY_TREE=' M backend/Dockerfile'
-[[ -z "$(image_key "$repo_root/backend" GIT_SHA=abc)" ]] || fail "dirty tree produced key"
+[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "dirty tree produced key"
+DIRTY_TREE='!! backend/ignored-file'
+[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "ignored file produced key"
 unset DIRTY_TREE
 DIGEST_FAIL=true
-[[ -z "$(image_key "$repo_root/backend" GIT_SHA=abc)" ]] || fail "unresolved base produced key"
+[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "unresolved base produced key"
 unset DIGEST_FAIL
 DESCRIBE_ERROR=true
 if find_by_key skynet/backend "$key"; then fail "AccessDenied looked like a hit"; fi
