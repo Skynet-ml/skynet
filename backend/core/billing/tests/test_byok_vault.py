@@ -23,7 +23,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from core.api.errors import DomainError
-from core.billing.byok_upstreams import UPSTREAMS
+from core.billing.byok_upstreams import UPSTREAMS, resolve_upstream
 from core.billing.byok_vault import (
     _PROVIDER_PROBES,
     STATUS_INVALID,
@@ -101,7 +101,9 @@ def test_save_anthropic_canonical_base_uses_native_auth(engine: object, vault_ke
     assert get.call_args.kwargs["headers"] == {"x-api-key": "anthropic-secret", "anthropic-version": "2023-06-01"}
 
 
-@pytest.mark.parametrize("api_base", [None, "https://openrouter.ai", "https://openrouter.ai/api/v1"])
+@pytest.mark.parametrize(
+    "api_base", [None, "https://openrouter.ai", "https://openrouter.ai/api/v1", "https://OPENROUTER.AI:443/api/v1/"]
+)
 def test_save_openrouter_key_uses_credential_specific_probe(
     engine: object, vault_key: str, api_base: str | None
 ) -> None:
@@ -410,9 +412,41 @@ def test_probe_and_runtime_use_same_base(slug: str) -> None:
 
 
 def test_deepseek_probe_uses_root_endpoint() -> None:
-    """Use DeepSeek's root key probe while chat remains on beta."""
+    """Use DeepSeek's root key probe while chat uses v1."""
     assert _PROVIDER_PROBES["deepseek"]["url"] == "https://api.deepseek.com/models"
-    assert UPSTREAMS["deepseek"].base_url == "https://api.deepseek.com/beta"
+    assert UPSTREAMS["deepseek"].base_url == "https://api.deepseek.com/v1"
+
+
+@pytest.mark.parametrize(
+    ("base", "probe", "dispatch"),
+    [
+        (None, "https://api.deepseek.com/models", "https://api.deepseek.com/v1"),
+        ("https://api.deepseek.com", "https://api.deepseek.com/v1/models", "https://api.deepseek.com/v1"),
+        ("https://api.deepseek.com/v1", "https://api.deepseek.com/v1/models", "https://api.deepseek.com/v1"),
+        ("https://api.deepseek.com/beta", "https://api.deepseek.com/beta/models", "https://api.deepseek.com/beta"),
+    ],
+)
+def test_deepseek_probe_matches_dispatch(
+    engine: object, vault_key: str, base: str | None, probe: str, dispatch: str
+) -> None:
+    """Keep the saved DeepSeek endpoint and its model probe aligned."""
+    with (
+        patch("core.billing.byok_vault.httpx.get", return_value=_probe_response(200)) as direct,
+        patch("core.billing.byok_vault.httpx.Client.get", return_value=_probe_response(200)) as pinned,
+    ):
+        view = ProviderKeyVault(engine=engine).save_key("u@x.com", "deepseek", "secret", api_base=base)
+    assert view.status == STATUS_VERIFIED
+    assert (pinned if base else direct).call_args.args[0] == probe
+    assert resolve_upstream({"name": "deepseek/model", "base_url": base}).base_url == dispatch
+
+
+@pytest.mark.parametrize("base", ["https://API.ANTHROPIC.COM/v1", "https://api.anthropic.com:443/v1"])
+def test_canonical_anthropic_probe_normalizes_endpoint(engine: object, vault_key: str, base: str) -> None:
+    """Preserve native probe authentication for equivalent endpoint spellings."""
+    with patch("core.billing.byok_vault.httpx.Client.get", return_value=_probe_response(200)) as get:
+        view = ProviderKeyVault(engine=engine).save_key("u@x.com", "anthropic", "secret", api_base=base)
+    assert view.status == STATUS_VERIFIED
+    assert get.call_args.kwargs["headers"] == {"x-api-key": "secret", "anthropic-version": "2023-06-01"}
 
 
 @pytest.mark.parametrize("status", [200, 302])

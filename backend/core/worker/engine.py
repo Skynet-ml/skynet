@@ -40,6 +40,7 @@ from ..billing import (
 )
 from ..billing.budgets import BudgetService
 from ..billing.byok_bridge import provider_slug_for_model
+from ..billing.byok_upstreams import validate_byok_novelty
 from ..billing.byok_vault import byok_provider_for_litellm
 from ..billing.host_agent import (
     attach_host_agent_token,
@@ -80,7 +81,7 @@ from ..constants import (
 )
 from ..exceptions import INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
 from ..i18n import CANCELLATION_REASON, SAMPLE_DATASETS
-from ..models import BlackboxRunRequest, RunRequest, UnifiedRunRequest
+from ..models import BlackboxRunRequest, ModelConfig, RunRequest, UnifiedRunRequest
 from ..models.results import TerminalOutcome, result_scores
 from ..notifications import notify_job_completed
 from ..notifications.run_watcher import RunNotificationWatcher
@@ -292,6 +293,31 @@ def _raise_if_cancelled(cancel_event: threading.Event | None, optimization_id: s
     """
     if cancel_event and cancel_event.is_set():
         raise CancellationError(f"Optimization {optimization_id} cancelled by user")
+
+
+def _reflection_api_bases(
+    engine: Any, username: str, model: ModelConfig, token_source: str, novelty: bool
+) -> dict[str, str | None]:
+    """Resolve the saved reflection endpoint for novelty validation.
+
+    Args:
+        engine: The job store database engine, if available.
+        username: The owner of the provider connection.
+        model: The reflection model settings.
+        token_source: The run's default token source.
+        novelty: Whether novelty is enabled.
+
+    Returns:
+        The verified provider endpoint, if one is needed and available.
+    """
+    if engine is None or not novelty or (model.token_source or token_source) != TOKEN_SOURCE_BYOK:
+        return {}
+    prefix = provider_slug_for_model(model.name)
+    provider = model.byok_provider or (byok_provider_for_litellm(prefix) if prefix else "")
+    if not provider:
+        return {}
+    connection = ProviderKeyVault(engine=engine).resolve_connection(username, provider, verified_only=True)
+    return {provider: connection.api_base} if connection is not None else {}
 
 
 class BackgroundWorker:
@@ -773,26 +799,32 @@ class BackgroundWorker:
             # this job's selected sandbox. The legacy validators exec authored
             # modules in a broader subprocess, before that boundary exists.
             if isinstance(execution_payload, UnifiedRunRequest):
-                validate_unified_payload(execution_payload)
+                try:
+                    validate_unified_payload(execution_payload)
+                    model = execution_payload.models.reflection_model
+                    novelty = bool(execution_payload.optimizer.shinka and execution_payload.optimizer.shinka.novelty)
+                    api_bases = _reflection_api_bases(
+                        getattr(self._job_store, "engine", None),
+                        execution_payload.username,
+                        model,
+                        execution_payload.token_source,
+                        novelty,
+                    )
+                    reflection = model.model_dump()
+                    reflection["token_source"] = model.token_source or execution_payload.token_source
+                    validate_byok_novelty(reflection, novelty, api_bases=api_bases)
+                except DomainError as error:
+                    raise domain_service_error(error) from error
             elif isinstance(execution_payload, BlackboxRunRequest):
                 try:
-                    api_bases = {}
                     model = execution_payload.reflection_model_settings
-                    byok_engine = getattr(self._job_store, "engine", None)
-                    if (
-                        byok_engine is not None
-                        and execution_payload.shinka is not None
-                        and execution_payload.shinka.novelty
-                        and (model.token_source or execution_payload.token_source) == TOKEN_SOURCE_BYOK
-                    ):
-                        prefix = provider_slug_for_model(model.name)
-                        provider = model.byok_provider or (byok_provider_for_litellm(prefix) if prefix else "")
-                        if provider:
-                            connection = ProviderKeyVault(engine=byok_engine).resolve_connection(
-                                execution_payload.username, provider, verified_only=True
-                            )
-                            if connection is not None:
-                                api_bases[provider] = connection.api_base
+                    api_bases = _reflection_api_bases(
+                        getattr(self._job_store, "engine", None),
+                        execution_payload.username,
+                        model,
+                        execution_payload.token_source,
+                        bool(execution_payload.shinka and execution_payload.shinka.novelty),
+                    )
                     validate_blackbox_payload(
                         execution_payload,
                         verify_scorer=not protected_execution,

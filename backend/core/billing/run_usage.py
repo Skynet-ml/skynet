@@ -158,17 +158,14 @@ def _byok_provider_cents(record: OperationRecord) -> Decimal | None:
             return cents_from_units(record.wallet_units) / fraction
     except UnpricedOperationError:
         return None
-    if not isinstance(usage, Mapping) or not any(
-        isinstance(usage.get(key), int) and not isinstance(usage.get(key), bool) and usage[key] >= 0
-        for key in (
-            "prompt_tokens",
-            "completion_tokens",
-            "input_tokens",
-            "output_tokens",
-            "cache_read_input_tokens",
-            "cache_creation_input_tokens",
-        )
-    ):
+    if not isinstance(usage, Mapping):
+        return None
+    keys = (
+        ("prompt_tokens", "completion_tokens")
+        if "prompt_tokens" in usage or "completion_tokens" in usage
+        else ("input_tokens", "output_tokens")
+    )
+    if not all(type(usage.get(key)) is int and usage[key] >= 0 for key in keys):
         return None
     provider = str(record.evidence.get("provider") or "")
     if provider == "custom":

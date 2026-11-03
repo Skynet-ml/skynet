@@ -244,6 +244,31 @@ def test_byok_usage_without_token_counts_is_unpriced(usage: Any) -> None:
     assert row.unpriced_calls == 1
 
 
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {"cache_read_input_tokens": 0},
+        {"completion_tokens": 0},
+        {"prompt_tokens": "100", "completion_tokens": 0},
+        {"input_tokens": "100", "output_tokens": 0},
+        {"prompt_tokens": 100.0, "completion_tokens": 0},
+        {"prompt_tokens": None, "completion_tokens": 5},
+        {"input_tokens": 1, "output_tokens": True},
+        {"input_tokens": -1, "output_tokens": 0},
+    ],
+)
+def test_byok_incomplete_or_invalid_counts_are_unpriced(usage: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Require both valid token counts before estimating a provider cost."""
+    monkeypatch.setattr(
+        "core.billing.run_usage.cached_token_prices", lambda _: TokenPrices(prompt=0.001, completion=0.002)
+    )
+    (row,) = aggregate(
+        [_op(policy=_BYOK, cents="0", evidence={"model": "openai/model", "usage": usage})], proposer=False
+    )
+    assert row.provider_cents is None
+    assert row.unpriced_calls == 1
+
+
 def test_byok_estimate_does_not_refresh_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
     """Read token prices without refreshing the live catalog."""
 
@@ -252,7 +277,7 @@ def test_byok_estimate_does_not_refresh_catalog(monkeypatch: pytest.MonkeyPatch)
         raise AssertionError("catalog refreshed")
 
     monkeypatch.setattr("core.billing.openrouter_prices._refresh_if_stale", fail)
-    evidence = {"provider": "openai", "model": "gpt-4o-mini", "usage": {"prompt_tokens": 100}}
+    evidence = {"provider": "openai", "model": "gpt-4o-mini", "usage": {"prompt_tokens": 100, "completion_tokens": 0}}
     (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence=evidence)], proposer=False)
     assert row.provider_cents is not None
 

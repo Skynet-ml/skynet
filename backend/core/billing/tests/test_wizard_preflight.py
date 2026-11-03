@@ -202,6 +202,28 @@ def test_preflight_accepts_native_provider_namespace(
     assert calls
 
 
+def test_preflight_rejects_openrouter_prefix_with_native_provider(
+    setup_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject an OpenRouter prefix before starting setup with a native key."""
+    client, _engine, calls = setup_client
+    view = SimpleNamespace(provider="openai", api_base=None, status="verified")
+    vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
+    monkeypatch.setattr(submission_router, "ProviderKeyVault", lambda **kwargs: vault)
+    payload = {
+        **PAYLOAD,
+        "reflection_model_config": {
+            "name": "openrouter/openai/gpt-4o",
+            "token_source": "byok",
+            "byok_provider": "openai",
+        },
+    }
+    response = client.post("/wizard/preflight", json=_request(_budget(client), payload))
+    assert response.status_code == 400
+    assert response.json()["code"] == "billing.byok_model_not_served"
+    assert not calls
+
+
 def test_preflight_execution_preserves_domain_error(setup_client, monkeypatch: pytest.MonkeyPatch) -> None:
     """Preserve a domain error's message and code in setup evidence."""
     client, _engine, _calls = setup_client

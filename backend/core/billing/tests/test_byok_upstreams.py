@@ -60,6 +60,27 @@ def test_deepseek_base_aliases_are_canonical(base: str, suffix: str) -> None:
     assert resolve_upstream({"name": "deepseek/model", "base_url": base + suffix}) == UPSTREAMS["deepseek"]
 
 
+@pytest.mark.parametrize(
+    ("provider", "base"),
+    [
+        ("deepseek", "https://API.deepseek.com/v1"),
+        ("deepseek", "https://api.deepseek.com:443/v1"),
+        ("groq", "https://api.groq.com:443/openai/v1"),
+    ],
+)
+def test_canonical_endpoint_normalizes_host_and_port(provider: str, base: str) -> None:
+    """Match equivalent canonical host spelling and default HTTPS port."""
+    assert resolve_upstream({"name": f"{provider}/model", "base_url": base}) == UPSTREAMS[provider]
+
+
+def test_custom_endpoint_retains_original_spelling() -> None:
+    """Keep custom endpoint spelling and case-sensitive paths unchanged."""
+    base = "https://API.example.com:443/V1/"
+    upstream = resolve_upstream({"name": "openai/private", "base_url": base})
+    assert upstream.slug == "custom"
+    assert upstream.base_url == base.rstrip("/")
+
+
 @pytest.mark.parametrize(("slug", "prefix"), BYOK_PROVIDER_SLUGS)
 def test_resolve_provider(slug: str, prefix: str) -> None:
     """Select the provider that owns each model prefix."""

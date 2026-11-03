@@ -343,8 +343,8 @@ def test_inject_stamps_the_blackbox_scorer_model(vault: ProviderKeyVault) -> Non
     assert payload["scorer"]["model"]["extra"]["api_key"] == "sk-or-1111"
 
 
-def test_inject_preserves_openrouter_namespace_for_native_openai(vault: ProviderKeyVault) -> None:
-    """Treat another provider's namespace as part of a native model ID."""
+def test_inject_rejects_model_the_connection_cannot_route(vault: ProviderKeyVault) -> None:
+    """An OpenRouter-prefixed model cannot ride a direct OpenAI key."""
     with patch("core.billing.byok_vault.httpx.get", return_value=_ok_response()):
         vault.save_key("u@x.com", "openai", "sk-openai-6666")
     payload = {
@@ -355,8 +355,11 @@ def test_inject_preserves_openrouter_namespace_for_native_openai(vault: Provider
             "extra": {},
         }
     }
-    inject_byok_connections(payload, username="u@x.com", vault=vault)
-    assert payload["model_config"]["extra"]["api_key"] == "sk-openai-6666"
+    with pytest.raises(DomainError) as exc:
+        inject_byok_connections(payload, username="u@x.com", vault=vault)
+    assert exc.value.status_code == 400
+    assert exc.value.code == "billing.byok_model_not_served"
+    assert "api_key" not in payload["model_config"]["extra"]
 
 
 def test_inject_rejects_non_openai_custom_endpoint(vault: ProviderKeyVault, engine: object) -> None:
@@ -381,13 +384,15 @@ def test_inject_rejects_non_openai_custom_endpoint(vault: ProviderKeyVault, engi
     assert "api_key" not in payload["model_config"]["extra"]
 
 
-def test_enforce_byok_connections_accepts_native_namespace(vault: ProviderKeyVault, engine: object) -> None:
-    """An explicit native provider keeps a foreign namespace in the model ID."""
+def test_enforce_byok_connections_blocks_unroutable_model(vault: ProviderKeyVault, engine: object) -> None:
+    """Reject an OpenRouter-prefixed model with a native provider key."""
     with patch("core.billing.byok_vault.httpx.get", return_value=_ok_response()):
         vault.save_key("u@x.com", "openai", "sk-openai-8888")
     job_store = SimpleNamespace(engine=engine)
-    _enforce_byok_connections(
-        job_store,
-        "u@x.com",
-        [ModelConfig(name="openrouter/openai/gpt-4o", token_source="byok", byok_provider="openai")],
-    )
+    with pytest.raises(DomainError) as exc:
+        _enforce_byok_connections(
+            job_store,
+            "u@x.com",
+            [ModelConfig(name="openrouter/openai/gpt-4o", token_source="byok", byok_provider="openai")],
+        )
+    assert exc.value.code == "billing.byok_model_not_served"

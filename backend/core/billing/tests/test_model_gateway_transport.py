@@ -241,6 +241,39 @@ def test_openrouter_byok_dispatches_messages(gateway: ModelGateway) -> None:
     assert str(sent[0].url) == "https://openrouter.ai/api/v1/messages"
 
 
+@pytest.mark.parametrize(
+    ("base", "expected"),
+    [
+        (None, "https://api.deepseek.com/v1/chat/completions"),
+        ("https://api.deepseek.com", "https://api.deepseek.com/v1/chat/completions"),
+        ("https://api.deepseek.com/v1", "https://api.deepseek.com/v1/chat/completions"),
+        ("https://api.deepseek.com/beta", "https://api.deepseek.com/beta/chat/completions"),
+    ],
+)
+def test_deepseek_dispatch_uses_saved_endpoint(gateway: ModelGateway, base: str | None, expected: str) -> None:
+    """Dispatch stable aliases to v1 and keep explicit beta on beta."""
+    sent = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Capture the provider request."""
+        sent.append(str(request.url))
+        return httpx.Response(200, json={"usage": {}, "choices": []})
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider))
+    config = {
+        "name": "deepseek/deepseek-chat",
+        "byok_provider": "deepseek",
+        "token_source": "byok",
+        "extra": {"api_key": "fixture"},
+        "base_url": base,
+    }
+    route = gateway.protect_payload({"model_config": config}, managed_key="")["model_config"]["extra"][ROUTE_KEY]
+    result = gateway._routes[route["token"]].dispatch("/chat/completions", {"model": route["model"], "messages": []})
+    assert result.status == 200
+    assert sent == [expected]
+
+
 @pytest.mark.parametrize("name", ["openai/gpt-4o", "anthropic/claude-sonnet-4", "openrouter/openai/gpt-4o"])
 @pytest.mark.parametrize("base", [None, "https://openrouter.ai", "https://openrouter.ai/api/v1"])
 def test_openrouter_native_model_reaches_gateway(gateway: ModelGateway, name: str, base: str | None) -> None:

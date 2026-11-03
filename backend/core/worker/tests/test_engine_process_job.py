@@ -868,6 +868,47 @@ def test_gateway_domain_failure_has_plain_detail(worker: BackgroundWorker, store
     assert store._jobs["gateway-domain"]["message"] == DomainError("submission.byok_novelty_unsupported").detail
 
 
+def test_unified_custom_novelty_fails_before_sandbox(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """Reject unified custom BYOK novelty before binding a protected sandbox."""
+    payload = copy.deepcopy(REAL_UNIFIED_PAYLOAD)
+    payload["optimizer"] = {"choice": "shinka_evolve", "shinka": {"novelty": True}}
+    payload["models"] = {
+        "reflection_model": {"name": "openai/gpt-4o", "token_source": "byok", "byok_provider": "openai"}
+    }
+    payload["token_source"] = "byok"
+    store.engine = MagicMock()
+    store.seed_job(
+        "unified-custom",
+        payload=payload,
+        payload_overview={"optimization_type": "blackbox", "username": payload["username"]},
+        execution_budget_id="budget",
+        execution_budget_generation=0,
+    )
+    worker.enqueue_job("unified-custom")
+    vault = MagicMock()
+    vault.resolve_connection.return_value = MagicMock(api_base="https://custom.example/v1", secret="fixture", params={})
+    gateway = MagicMock()
+    gateway.protect_payload.side_effect = RuntimeError("reached gateway")
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch("core.worker.engine.record_server_event"),
+        patch.object(worker, "_get_service"),
+        patch("core.worker.engine.ProviderKeyVault", return_value=vault),
+        patch("core.worker.engine.ModelGateway", return_value=gateway),
+        patch("core.worker.engine.BudgetService"),
+        patch("core.worker.engine.BudgetRuntime"),
+        patch("core.worker.engine.bind_protected_sandbox") as bind,
+        patch("core.worker.engine.domain_service_error", wraps=engine_module.domain_service_error) as convert,
+        patch("core.worker.engine.protected_image", return_value=None),
+        patch("core.worker.engine.resolve_execution_credentials", side_effect=lambda payload, **kwargs: payload),
+        patch.object(worker, "_close_budget_gateway", return_value=(None, None)),
+    ):
+        worker._process_job("unified-custom", 0)
+    bind.assert_not_called()
+    assert convert.call_args.args[0].code == "submission.byok_novelty_unsupported"
+    assert store._jobs["unified-custom"]["message"] == DomainError("submission.byok_novelty_unsupported").detail
+
+
 def test_process_job_blackbox_without_budget_requires_vercel(
     worker: BackgroundWorker,
     store: FakeJobStore,

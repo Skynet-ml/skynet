@@ -37,7 +37,7 @@ from ..api.errors import DomainError
 from ..config import settings
 from ..provider_registry import LITELLM_TO_BYOK_PROVIDER
 from ..storage.models import BillingProviderKeyModel
-from .byok_upstreams import UPSTREAMS, validate_custom_base
+from .byok_upstreams import UPSTREAMS, canonical_base, deepseek_base, validate_custom_base
 from .mcp_broker import EndpointResolutionError, _pinned_address, _PinnedTransport
 
 # Verification states a stored key can carry. ``unverified`` is the default and
@@ -456,7 +456,7 @@ class ProviderKeyVault:
                 validate_custom_base(api_base)
                 if not (
                     provider == "openrouter"
-                    and api_base.rstrip("/") in {"https://openrouter.ai", "https://openrouter.ai/api/v1"}
+                    and canonical_base(api_base) in {"https://openrouter.ai", "https://openrouter.ai/api/v1"}
                 ):
                     _pinned_address(api_base, False, label="custom provider endpoint")
         except EndpointResolutionError:
@@ -658,14 +658,15 @@ class ProviderKeyVault:
             One of :data:`STATUS_VERIFIED`, :data:`STATUS_INVALID`, or
             :data:`STATUS_UNVERIFIED`.
         """
-        canonical_openrouter = provider == "openrouter" and (api_base or "").rstrip("/") in {
-            "https://openrouter.ai",
-            "https://openrouter.ai/api/v1",
-        }
+        canonical_openrouter = False
         address = None
         try:
             if api_base:
                 validate_custom_base(api_base)
+                canonical_openrouter = provider == "openrouter" and canonical_base(api_base) in {
+                    "https://openrouter.ai",
+                    "https://openrouter.ai/api/v1",
+                }
                 if not canonical_openrouter:
                     address = _pinned_address(api_base, False, label="custom provider endpoint")
         except EndpointResolutionError:
@@ -675,16 +676,20 @@ class ProviderKeyVault:
             return STATUS_INVALID
         probe = _PROVIDER_PROBES.get(provider)
         if probe is not None:
-            normalized_base = (api_base or "").rstrip("/")
+            normalized_base = canonical_base(api_base) if api_base else ""
             if provider == "openrouter" and normalized_base in {
                 "https://openrouter.ai",
                 "https://openrouter.ai/api/v1",
             }:
                 root = normalized_base if normalized_base.endswith("/v1") else normalized_base + "/api/v1"
                 urls = [f"{root}/key"]
+            elif provider == "deepseek" and (resolved := deepseek_base(api_base)):
+                urls = [f"{resolved}/models" if api_base else probe["url"]]
             else:
                 urls = self._model_probe_urls(api_base) if api_base else [probe["url"]]
-            canonical_provider = provider in UPSTREAMS and normalized_base == UPSTREAMS[provider].base_url.rstrip("/")
+            canonical_provider = provider in UPSTREAMS and normalized_base == canonical_base(
+                UPSTREAMS[provider].base_url
+            )
             if canonical_provider and not canonical_openrouter:
                 upstream = UPSTREAMS[provider]
                 headers = dict(upstream.extra_headers)

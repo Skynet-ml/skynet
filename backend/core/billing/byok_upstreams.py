@@ -47,7 +47,7 @@ UPSTREAMS = {
     "cohere": ProviderUpstream("cohere", "https://api.cohere.ai/compatibility/v1", "bearer", _CHAT, False),
     "xai": ProviderUpstream("xai", "https://api.x.ai/v1", "bearer", _CHAT, False),
     "groq": ProviderUpstream("groq", "https://api.groq.com/openai/v1", "bearer", _CHAT, False),
-    "deepseek": ProviderUpstream("deepseek", "https://api.deepseek.com/beta", "bearer", _CHAT, False),
+    "deepseek": ProviderUpstream("deepseek", "https://api.deepseek.com/v1", "bearer", _CHAT, False),
     "together": ProviderUpstream("together", "https://api.together.ai/v1", "bearer", _CHAT, False),
     "mistral": ProviderUpstream("mistral", "https://api.mistral.ai/v1", "bearer", _CHAT, False),
     "moonshot": ProviderUpstream("moonshot", "https://api.moonshot.ai/v1", "bearer", _CHAT, False),
@@ -117,8 +117,45 @@ def byok_model_prefix(name: str, explicit_provider: str | None, *, custom: bool 
     if explicit_provider == "openrouter":
         return prefix if prefix == "openrouter" else None
     if explicit_provider:
+        if prefix == "openrouter":
+            return prefix
         return prefix if LITELLM_TO_BYOK_PROVIDER.get(prefix, prefix) == explicit_provider else None
     return prefix or None
+
+
+def canonical_base(base: str) -> str:
+    """Normalize an endpoint for canonical comparisons.
+
+    Args:
+        base: An HTTPS endpoint URL.
+
+    Returns:
+        The normalized URL, preserving path case.
+    """
+    parsed = urlsplit(base)
+    host = parsed.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    port = parsed.port
+    netloc = host + (f":{port}" if port is not None and port != 443 else "")
+    return parsed._replace(scheme=parsed.scheme.lower(), netloc=netloc, path=parsed.path.rstrip("/")).geturl()
+
+
+def deepseek_base(base: str | None) -> str | None:
+    """Resolve supported DeepSeek saved bases to their dispatch endpoint.
+
+    Args:
+        base: The saved endpoint, or None for the default.
+
+    Returns:
+        The resolved endpoint, or None for an unsupported base.
+    """
+    normalized = canonical_base(base) if base else "https://api.deepseek.com"
+    if normalized in {"https://api.deepseek.com", "https://api.deepseek.com/v1"}:
+        return UPSTREAMS["deepseek"].base_url
+    if normalized == "https://api.deepseek.com/beta":
+        return "https://api.deepseek.com/beta"
+    return None
 
 
 def resolve_upstream(config: Mapping[str, Any]) -> ProviderUpstream:
@@ -143,13 +180,14 @@ def resolve_upstream(config: Mapping[str, Any]) -> ProviderUpstream:
             validate_custom_base(str(base))
         except ValueError as error:
             raise UnpricedOperationError(str(error)) from error
-        if slug == "openrouter" and str(base).rstrip("/") in {"https://openrouter.ai", OPENROUTER.base_url}:
+        normalized_base = canonical_base(str(base))
+        if slug == "openrouter" and normalized_base in {"https://openrouter.ai", OPENROUTER.base_url}:
             return OPENROUTER
-        if slug == "together" and str(base).rstrip("/") == "https://api.together.xyz/v1":
+        if slug == "together" and normalized_base == "https://api.together.xyz/v1":
             return UPSTREAMS["together"]
-        if slug == "deepseek" and str(base).rstrip("/") in {"https://api.deepseek.com", "https://api.deepseek.com/v1"}:
-            return UPSTREAMS["deepseek"]
-        if slug in UPSTREAMS and str(base).rstrip("/") == UPSTREAMS[slug].base_url.rstrip("/"):
+        if slug == "deepseek" and (resolved_base := deepseek_base(str(base))) is not None:
+            return replace(UPSTREAMS["deepseek"], base_url=resolved_base)
+        if slug in UPSTREAMS and normalized_base == canonical_base(UPSTREAMS[slug].base_url):
             return UPSTREAMS[slug]
         if slug in UPSTREAMS and slug != "openai":
             raise UnpricedOperationError(
@@ -163,6 +201,8 @@ def resolve_upstream(config: Mapping[str, Any]) -> ProviderUpstream:
         )
     if slug not in UPSTREAMS:
         raise UnpricedOperationError("This BYOK provider is not supported.")
+    if slug == "deepseek":
+        return replace(UPSTREAMS[slug], base_url=deepseek_base(None))
     return UPSTREAMS[slug]
 
 
