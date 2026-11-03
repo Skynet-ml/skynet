@@ -98,7 +98,7 @@ Yazma alanındaki model menüsünde şu gruplar vardır:
 
 Bazı modeller akıl yürütme düzeyini (reasoning effort) belirlemenize izin verir. Düzeyler **Yok**, **Asgari**, **Düşük**, **Orta**, **Yüksek**, **Çok yüksek** ve **Maksimum** düzeyleridir. **Varsayılan**, modelin varsayılan düzeyini kullanır.
 
-Yeni sohbetler için varsayılan bir model belirlemek üzere **Ayarlar** > **Aracı paneli** > **Varsayılan model** yolunu açın. **Sesli dikte** ayarı aynı sekmededir.
+Yeni sohbetler için varsayılan bir model belirlemek üzere **Ayarlar** > **Aracı paneli** > **Varsayılan model** yolunu açın.
 
 ### Maliyet
 

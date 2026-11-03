@@ -98,7 +98,7 @@ El menú de modelos del editor de mensajes tiene estos grupos:
 
 Algunos modelos te permiten fijar el esfuerzo de razonamiento. Los niveles son **Ninguno**, **Mínimo**, **Bajo**, **Medio**, **Alto**, **Muy alto** y **Máximo**. **Predeterminado** usa el nivel predeterminado del modelo.
 
-Para fijar un modelo predeterminado para los chats nuevos, abre **Ajustes** > **Panel del agente** > **Modelo predeterminado**. El ajuste **Dictado por voz** está en la misma pestaña.
+Para fijar un modelo predeterminado para los chats nuevos, abre **Ajustes** > **Panel del agente** > **Modelo predeterminado**.
 
 ### Coste
 

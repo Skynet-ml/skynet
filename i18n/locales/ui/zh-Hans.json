@@ -2920,8 +2920,6 @@
   "settings.admin.activity.title": "每周早期成果与使用情况",
   "settings.agent.default_model.description": "新的对话和访谈将以此模型和思考级别开始",
   "settings.agent.default_model.label": "默认模型",
-  "settings.agent.dictation.description": "在消息输入框中显示麦克风按钮",
-  "settings.agent.dictation.label": "语音听写",
   "settings.agent.trust.ask": "先询问",
   "settings.agent.trust.auto_safe": "仅对安全操作自动执行",
   "settings.agent.trust.description": "智能体无需每次请求批准即可执行的操作",

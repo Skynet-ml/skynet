@@ -44,7 +44,6 @@ const RENAMED_KEYS = [
   "prefs.agent.subscription",
   "prefs.agent.trust-mode",
   "prefs.color-theme",
-  "prefs.composer.dictation",
   "prefs.composer.effort",
   "prefs.composer.model",
   "prefs.optimizer.engine",

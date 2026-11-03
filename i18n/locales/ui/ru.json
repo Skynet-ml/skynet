@@ -2920,8 +2920,6 @@
   "settings.admin.activity.title": "Первые успехи и использование по неделям",
   "settings.agent.default_model.description": "Новые чаты и интервью начинаются с этой модели и уровня размышления",
   "settings.agent.default_model.label": "Модель по умолчанию",
-  "settings.agent.dictation.description": "Показывать кнопку микрофона в поле ввода сообщения",
-  "settings.agent.dictation.label": "Голосовой ввод",
   "settings.agent.trust.ask": "Спрашивать сначала",
   "settings.agent.trust.auto_safe": "Автоматически только для безопасных действий",
   "settings.agent.trust.description": "Какие действия агент может выполнять без запроса подтверждения каждый раз",

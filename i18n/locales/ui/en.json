@@ -1703,8 +1703,6 @@
   "settings.admin.storage.view_list": "Open the list",
   "settings.agent.default_model.description": "New chats and interviews start with this model and thinking level",
   "settings.agent.default_model.label": "Default model",
-  "settings.agent.dictation.description": "Show the microphone button in the message composer",
-  "settings.agent.dictation.label": "Voice dictation",
   "settings.agent.settings_tool.confirm": "Apply changes",
   "settings.agent.settings_tool.description": "Update your local {term.appName} preferences",
   "settings.agent.settings_tool.title": "Change settings",
