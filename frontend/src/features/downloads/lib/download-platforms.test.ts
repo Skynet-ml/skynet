@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs";
 import path from "node:path";
-import { DOWNLOAD_PLATFORMS, detectPlatform } from "./download-platforms.ts";
+import { DOWNLOAD_PLATFORMS, detectPlatform, heroActionForPlatform } from "./download-platforms.ts";
 
 test("detect desktop and mobile platforms, including iPad desktop mode", () => {
   const cases = [
@@ -35,6 +35,25 @@ test("Linux detection does not depend on touchscreen capacity", () => {
   for (const touches of [0, 1, 2, 5, 10]) {
     assert.equal(detectPlatform("Mozilla/5.0 (X11; Linux x86_64)", touches), "linux");
   }
+});
+
+test("the hero action follows each detected platform and the unknown fallback", () => {
+  for (const [id, expected] of [
+    ["macos", { href: "/guides/mac-app", label: "downloads.apple_silicon", icon: "apple" }],
+    ["windows", { href: "#platform-windows", label: "downloads.platform_options", icon: "download", platform: "downloads.windows" }],
+    ["linux", { href: "#platform-linux", label: "downloads.platform_options", icon: "download", platform: "downloads.linux" }],
+    ["ios", { href: "#platform-ios", label: "downloads.platform_options", icon: "download", platform: "downloads.ios" }],
+    ["android", { href: "#platform-android", label: "downloads.platform_options", icon: "download", platform: "downloads.android" }],
+    ["cli", { href: "#platform-cli", label: "downloads.platform_options", icon: "download", platform: "downloads.cli" }],
+    [null, { href: "#platforms", label: "downloads.all_platforms", icon: "download" }],
+  ] as const) {
+    assert.deepEqual(heroActionForPlatform(id), expected);
+  }
+});
+
+test("Android Chrome desktop-site mode has an indistinguishable Linux user agent", () => {
+  const desktopSiteUA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36";
+  assert.equal(detectPlatform(desktopSiteUA, 5), "linux");
 });
 
 const catalog = (locale: string): Record<string, string> =>

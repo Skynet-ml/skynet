@@ -1,16 +1,44 @@
-import { DownloadsPage } from "@/features/downloads";
+import { DownloadsPage, detectPlatform } from "@/features/downloads";
 import type { Metadata } from "next";
 import { cookies, headers } from "next/headers";
 import {
   DEFAULT_LOCALE,
   LEGACY_LOCALE_COOKIE,
   LOCALE_COOKIE,
+  type Locale,
   isLocale,
   localeFromAcceptLanguage,
 } from "@/shared/lib/locale";
 import { buildActiveCatalog } from "@/shared/lib/messages.server";
 import { formatTemplate } from "@/shared/lib/i18n";
 import { APP_NAME } from "@/shared/lib/brand";
+
+const OG_LOCALES = {
+  en: "en_US",
+  he: "he_IL",
+  ar: "ar_SA",
+  fa: "fa_IR",
+  "en-GB": "en_GB",
+  "en-IN": "en_IN",
+  "zh-Hans": "zh_CN",
+  yue: "zh_HK",
+  fr: "fr_FR",
+  "fr-CA": "fr_CA",
+  de: "de_DE",
+  "de-AT": "de_AT",
+  hi: "hi_IN",
+  it: "it_IT",
+  ja: "ja_JP",
+  ko: "ko_KR",
+  pt: "pt_PT",
+  "pt-BR": "pt_BR",
+  "pt-PT": "pt_PT",
+  ru: "ru_RU",
+  es: "es_ES",
+  "es-419": "es_MX",
+  tr: "tr_TR",
+  uk: "uk_UA",
+} as const satisfies Record<Locale, `${string}_${string}`>;
 
 export async function generateMetadata(): Promise<Metadata> {
   const jar = await cookies();
@@ -28,7 +56,7 @@ export async function generateMetadata(): Promise<Metadata> {
     openGraph: {
       type: "website",
       siteName: APP_NAME,
-      locale: locale.replace("-", "_"),
+      locale: OG_LOCALES[locale],
       title,
       description,
       url: "/download",
@@ -37,6 +65,7 @@ export async function generateMetadata(): Promise<Metadata> {
   };
 }
 
-export default function DownloadPage() {
-  return <DownloadsPage />;
+export default async function DownloadPage() {
+  const userAgent = (await headers()).get("user-agent") ?? "";
+  return <DownloadsPage initialPlatform={detectPlatform(userAgent)} />;
 }

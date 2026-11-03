@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { Module } from "node:module";
 import path from "node:path";
 import { test } from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { DOWNLOAD_PLATFORMS, type DownloadPlatform } from "../lib/download-platforms";
+import { createJiti } from "jiti";
+import { DOWNLOAD_PLATFORMS, type DownloadPlatform, type PlatformId } from "../lib/download-platforms";
 import { LocaleProvider } from "@/shared/providers/locale-provider";
+import type { Locale } from "@/shared/lib/locale";
 import { ThemeProvider } from "@/shared/providers/theme-provider";
 import { TooltipProvider } from "@/shared/ui/primitives/tooltip";
 import { buildActiveCatalog } from "@/shared/lib/messages.server";
@@ -13,14 +16,28 @@ import { setServerMessages } from "@/shared/lib/runtime-messages";
 
 (globalThis as { React?: typeof React }).React = React;
 setServerMessages(buildActiveCatalog("en"), "en");
-const { DownloadsPage } = await import("./downloads-page");
+const jiti = createJiti(import.meta.url, {
+  jsx: true,
+  alias: { "@/": `${path.join(process.cwd(), "src")}/` },
+});
+const nextLinkId = jiti.resolve("next/link");
+const nextLinkModule = new Module(nextLinkId);
+const TrackedLink = React.forwardRef<HTMLAnchorElement, React.ComponentPropsWithRef<"a">>(
+  (props, ref) => <a {...props} ref={ref} data-next-link="" />,
+);
+nextLinkModule.exports = { __esModule: true, default: TrackedLink };
+nextLinkModule.loaded = true;
+jiti.cache[nextLinkId] = nextLinkModule as unknown as (typeof jiti.cache)[string];
+const { DownloadsPage } = await jiti.import<{
+  DownloadsPage: React.ComponentType<{ initialPlatform: PlatformId | null }>;
+}>("./downloads-page");
 
-function render() {
+function render(initialPlatform: PlatformId | null = null, locale: Locale = "en") {
   return renderToStaticMarkup(
-    <LocaleProvider initialLocale="en">
+    <LocaleProvider initialLocale={locale}>
       <ThemeProvider>
         <TooltipProvider>
-          <DownloadsPage />
+          <DownloadsPage initialPlatform={initialPlatform} />
         </TooltipProvider>
       </ThemeProvider>
     </LocaleProvider>,
@@ -55,15 +72,28 @@ void test("theme control offers light, dark and system choices", () => {
   assert.match(system, /aria-checked="true"/);
 });
 
-void test("platform actions use Next Link for docs and native anchors for platform jumps", () => {
-  const source = readFileSync(
-    path.join(process.cwd(), "src/features/downloads/components/downloads-page.tsx"),
-    "utf8",
-  );
-  assert.match(source, /const PrimaryLink = primary \? Link : "a";/);
-  assert.match(source, /<PrimaryLink\s+href=\{\s*primary\s*\?/);
-  assert.match(source, /<Link href=\{platformHref\(item\.primary\.href\)\}>/);
-  assert.match(source, /<Link\s+key=\{link\.label\}\s+href=\{platformHref\(link\.href\)\}/);
+void test("the server hero renders the platform action, with Next Link only for routes", () => {
+  for (const [id, href, label, nextLink] of [
+    ["macos", "/docs/guides/mac-app", "Apple silicon · Setup guide", true],
+    ["windows", "#platform-windows", "View Windows options", false],
+    ["linux", "#platform-linux", "View Linux options", false],
+    ["ios", "#platform-ios", "View iOS options", false],
+    ["android", "#platform-android", "View Android options", false],
+    ["cli", "#platform-cli", "View CLI options", false],
+    [null, "#platforms", "See all platforms", false],
+  ] as const) {
+    const hero = render(id).match(/<section\b[^>]*aria-labelledby="download-title"[\s\S]*?(<a\b[^>]*>[\s\S]*?<\/a>)/)?.[1];
+    assert.ok(hero, `hero action for ${id}`);
+    assert.ok(hero.includes(`href="${href}"`), `${id}: ${hero}`);
+    assert.equal(hero.replace(/<[^>]*>/g, "").trim(), label, `${id}: ${hero}`);
+    assert.equal(hero.includes('data-next-link=""'), nextLink, `${id}: ${hero}`);
+  }
+
+  const mac = render("macos");
+  assert.match(mac, /href="\/docs\/guides\/mac-app"[^>]*data-next-link=""/);
+  assert.match(render("macos", "he"), /href="\/docs\/he\/guides\/mac-app"[^>]*data-next-link=""/);
+  assert.match(mac, /href="\/docs"[^>]*data-next-link=""/);
+  assert.match(mac, /href="#platforms"/);
 });
 
 void test("changing Mac to a real download hides the obsolete unpublished-installer note", () => {

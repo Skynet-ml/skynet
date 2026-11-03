@@ -20,23 +20,25 @@ import { DocsThemeToggle } from "@/features/docs/client";
 import { docsPathForLocale } from "@/shared/lib/locale";
 import { msg } from "@/shared/lib/messages";
 import { APP_NAME } from "@/shared/lib/brand";
-import { DOWNLOAD_PLATFORMS, detectPlatform, type PlatformId } from "../lib/download-platforms";
+import { DOWNLOAD_PLATFORMS, detectPlatform, heroActionForPlatform, type PlatformId } from "../lib/download-platforms";
 
 const ICONS = { apple: AppleLogo, desktop: Desktop, phone: DeviceMobile, terminal: Terminal };
 
-export function DownloadsPage() {
+export function DownloadsPage({ initialPlatform }: { initialPlatform: PlatformId | null }) {
   const { locale } = useLocale();
-  const [detected, setDetected] = useState<PlatformId | null>(null);
+  const [detected, setDetected] = useState<PlatformId | null>(initialPlatform);
   const docs = docsPathForLocale(locale);
   const platform = DOWNLOAD_PLATFORMS.find((item) => item.id === detected);
-  const primary = platform && platform.status !== "coming-soon" ? platform : null;
-  const PrimaryIcon = primary ? ICONS[primary.icon] : ArrowDown;
-  const PrimaryLink = primary ? Link : "a";
+  const action = heroActionForPlatform(detected);
+  const PrimaryIcon = action.icon === "download" ? ArrowDown : ICONS[action.icon];
+  const PrimaryLink = action.href.startsWith("#") ? "a" : Link;
   const platformHref = (href: string) => (href.startsWith("/guides/") ? `${docs}${href}` : href);
 
   useEffect(() => {
-    setDetected(detectPlatform(navigator.userAgent, navigator.maxTouchPoints));
-  }, []);
+    if (initialPlatform === "macos" && detectPlatform(navigator.userAgent, navigator.maxTouchPoints) === "ios") {
+      setDetected("ios");
+    }
+  }, [initialPlatform]);
 
   return (
     <div className="min-h-dvh bg-background text-foreground">
@@ -100,21 +102,9 @@ export function DownloadsPage() {
                 size="lg"
                 className="h-auto min-h-10 min-w-[min(100%,18rem)] max-w-full whitespace-normal py-2 text-center max-lg:min-h-[44px]"
               >
-                <PrimaryLink
-                  href={
-                    primary
-                      ? platformHref(primary.primary.href)
-                      : platform
-                        ? `#platform-${platform.id}`
-                        : "#platforms"
-                  }
-                >
+                <PrimaryLink href={platformHref(action.href)}>
                   <PrimaryIcon aria-hidden="true" />
-                  {primary
-                    ? msg(primary.primary.label)
-                    : platform
-                      ? msg("downloads.platform_options", { platform: msg(platform.name) })
-                      : msg("downloads.all_platforms")}
+                  {msg(action.label, action.platform ? { platform: msg(action.platform) } : undefined)}
                 </PrimaryLink>
               </Button>
               <Button

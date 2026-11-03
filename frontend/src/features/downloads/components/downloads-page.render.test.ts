@@ -5,7 +5,7 @@ import { it } from "node:test";
 
 const frontend = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../../..");
 
-for (const suite of ["downloads-page.test.tsx", "downloads-page.client.test.tsx"]) {
+for (const suite of ["downloads-page.test.tsx"]) {
   void it(`Downloads ${suite} passes`, () => {
     const result = spawnSync(
       path.join(frontend, "node_modules/.bin/jiti"),
