@@ -686,6 +686,9 @@ def _perform_preflight(
             payload,
             managed_key=settings.openrouter_api_key.get_secret_value() if settings.openrouter_api_key else "",
             allow_private_tools=settings.discover_allow_private,
+            # The setup check must answer in minutes. A batch can take hours,
+            # outlive the check's sandbox, and leave an unsettled hold.
+            allow_batch=False,
         )
         if request.workflow == "unified":
             strip_unified_model_aliases(protected)
