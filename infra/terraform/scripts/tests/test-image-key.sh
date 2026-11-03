@@ -21,6 +21,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin"
 real_stat="$(command -v stat)"
+real_find="$(command -v find)"
 cat >"$tmp/bin/stub" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -258,6 +259,10 @@ cat >"$tmp/bin/find" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 root="$1"
+if [[ -n "${TEST_CONTEXT_PATH:-}" &&
+  "$root" == "$TEST_REPO_ROOT/$TEST_CONTEXT_PATH" ]]; then
+  exec "$TEST_REAL_FIND" "$@"
+fi
 printf '%s\0%s/Dockerfile\0' "$root" "$root"
 SH
 cat >"$tmp/bin/stat" <<'SH'
@@ -273,6 +278,7 @@ SH
 chmod +x "$tmp/bin/"{find,stat}
 export PATH="$tmp/bin:$PATH"
 export TEST_REAL_STAT="$real_stat"
+export TEST_REAL_FIND="$real_find"
 export TEST_REPO_ROOT="$repo_root"
 export TEST_MULTIARCH_INDEX_FILE="$repo_root/infra/terraform/scripts/tests/python-3.12-slim-index.json"
 export TEST_MULTIARCH_METADATA_FILE="$repo_root/infra/terraform/scripts/tests/buildx-provenance-multiarch.json"
@@ -558,8 +564,18 @@ FROM node:20-alpine AS base
 FROM base AS final
 COPY --from=final /etc/os-release /os-release
 DOCKERFILE
-ignored_key="$(image_key "$test_context" tree GIT_SHA=abc)"
-[[ "$ignored_key" =~ ^tree-[0-9a-f]{40}$ ]] || fail "valid tree key: $ignored_key"
+clean_key="$(image_key "$test_context" tree GIT_SHA=abc)"
+[[ "$clean_key" =~ ^tree-[0-9a-f]{40}$ ]] || fail "clean tree produced no key: $clean_key"
+mkdir "$test_context/untracked-empty"
+empty_directory_key="$(image_key "$test_context" tree GIT_SHA=abc \
+  2>"$tmp/empty-directory-warning.log")"
+[[ -z "$empty_directory_key" ]] || fail "untracked empty directory produced key"
+[[ "$(wc -l <"$tmp/empty-directory-warning.log")" -eq 1 ]] ||
+  fail "untracked empty directory did not emit one warning"
+grep -Fq 'warning: image context directory is not a parent of tracked files; key disabled:' \
+  "$tmp/empty-directory-warning.log" ||
+  fail "untracked empty directory warning did not explain the fail-closed key"
+rmdir "$test_context/untracked-empty"
 chmod 0600 "$test_context/Dockerfile"
 [[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] ||
   fail "noncanonical tracked worktree mode produced key"

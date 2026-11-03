@@ -99,8 +99,9 @@ _hash_context_attributes() {
 
 _check_context_modes() {
   local repo_root="$1" context_dir="$2" context_path="$3"
-  local files_file paths_file entry metadata path relative index_mode mode expected status=0
-  local -A index_modes=()
+  local files_file paths_file entry metadata path relative index_mode mode expected parent status=0
+  local -A index_modes=() tracked_parents=()
+  tracked_parents["$context_dir"]=1
   files_file="$(mktemp)" || return 1
   paths_file="$(mktemp)" || {
     rm -f "$files_file"
@@ -119,6 +120,11 @@ _check_context_modes() {
       break
     }
     index_modes["$relative"]="${metadata%% *}"
+    parent="${relative%/*}"
+    while [[ "$parent" == "$context_path/"* ]]; do
+      tracked_parents["$repo_root/$parent"]=1
+      parent="${parent%/*}"
+    done
   done <"$files_file"
   if ((status == 0)); then
     while IFS= read -r -d '' path; do
@@ -128,6 +134,12 @@ _check_context_modes() {
         break
       }
       if [[ -d "$path" ]]; then
+        [[ -n "${tracked_parents["$path"]+x}" ]] || {
+          printf 'warning: image context directory is not a parent of tracked files; key disabled: %q\n' \
+            "$path" >&2
+          status=1
+          break
+        }
         [[ "$mode" == 755 ]] || {
           status=1
           break
