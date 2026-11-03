@@ -106,5 +106,8 @@ jobs:
             npm run build && npm run bundle:stack
             npx electron-builder --mac --publish always "-c.mac.identity=$APPLE_TEAM_ID" -c.mac.notarize=true
           else
-            CSC_IDENTITY_AUTO_DISCOVERY=false npm run release:mac
+            # A missing secret becomes an empty CSC_LINK variable, and
+            # electron-builder treats an explicitly empty CSC_LINK as a
+            # certificate path. Remove both variables for the ad-hoc path.
+            env -u CSC_LINK -u CSC_KEY_PASSWORD CSC_IDENTITY_AUTO_DISCOVERY=false npm run release:mac
           fi
