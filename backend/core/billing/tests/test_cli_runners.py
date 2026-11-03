@@ -362,11 +362,16 @@ def _summary(item: str, index: int, delta: str) -> dict[str, Any]:
 
 
 def test_codex_streams_reasoning_and_answer_before_the_turn_ends(tmp_path: Path) -> None:
-    """Pass each reasoning summary and answer piece on while the turn still runs, and skip commentary."""
+    """Pass each reasoning summary, commentary and answer piece on while the turn still runs."""
     marker = tmp_path / "seen"
     commentary = [
         {"method": "item/started", "params": {"item": {"id": "c1", "type": "agentMessage", "phase": "commentary"}}},
         {"method": "item/agentMessage/delta", "params": {"itemId": "c1", "delta": "Looking"}},
+        {"method": "item/agentMessage/delta", "params": {"itemId": "c1", "delta": " around"}},
+        {
+            "method": "item/completed",
+            "params": {"item": {"id": "c1", "type": "agentMessage", "text": "Looking around"}},
+        },
     ]
     first = [_summary("rs_1", 0, "**Plan**"), _summary("rs_1", 0, " now"), *commentary, _summary("rs_1", 1, "**Next**")]
     wait = (
@@ -382,14 +387,49 @@ def test_codex_streams_reasoning_and_answer_before_the_turn_ends(tmp_path: Path)
     def on_delta(kind: str, text: str) -> None:
         """Record the delta, and let the fake server finish once the reasoning arrived."""
         deltas.append((kind, text))
-        if len(deltas) == 3:
+        if len(deltas) == 5:
             marker.write_text("1")
 
     completion = cli_runners.run_codex("gpt-5.6-luna", "ping", None, local_settings(tmp_path), tmp_path, on_delta)
     assert deltas == [
         ("reasoning", "**Plan**"),
         ("reasoning", " now"),
+        ("reasoning", "\n\nLooking"),
+        ("reasoning", " around"),
         ("reasoning", "\n\n**Next**"),
+        ("content", "po"),
+        ("content", "ng"),
+    ]
+    assert completion.text == "pong"
+
+
+def _raw(item: str, index: int, delta: str) -> dict[str, Any]:
+    """Return one ``item/reasoning/textDelta`` notification.
+
+    Args:
+        item: The reasoning item id.
+        index: The content part index.
+        delta: The text piece.
+
+    Returns:
+        The notification.
+    """
+    return {"method": "item/reasoning/textDelta", "params": {"itemId": item, "contentIndex": index, "delta": delta}}
+
+
+def test_codex_streams_raw_reasoning_text_as_reasoning(tmp_path: Path) -> None:
+    """Pass raw reasoning text on as reasoning, a blank line between parts, and keep it out of the answer."""
+    raw = [_raw("rs_1", 0, "First"), _raw("rs_1", 0, " step"), _raw("rs_1", 1, "Second"), _summary("rs_1", 0, "Sum")]
+    fake_app_server(tmp_path, emitting(*raw, *CODEX_TURN))
+    deltas: list[tuple[str, str]] = []
+    completion = cli_runners.run_codex(
+        "gpt-5.6-luna", "ping", None, local_settings(tmp_path), tmp_path, lambda *d: deltas.append(d)
+    )
+    assert deltas == [
+        ("reasoning", "First"),
+        ("reasoning", " step"),
+        ("reasoning", "\n\nSecond"),
+        ("reasoning", "\n\nSum"),
         ("content", "po"),
         ("content", "ng"),
     ]

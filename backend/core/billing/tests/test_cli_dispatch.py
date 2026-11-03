@@ -18,8 +18,11 @@ from core.billing.cli_dispatch import CliDispatcher, local_subscription_route
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.tests.test_cli_runners import (
     CLAUDE_SUCCESS,
+    CODEX_TURN,
     calls,
     claude_delta,
+    emitting,
+    fake_app_server,
     fake_cli,
     local_settings,
     printing,
@@ -399,6 +402,36 @@ def test_local_route_streams_thinking_and_answer_while_the_cli_runs(
     assert len(content) >= 2
     assert "".join(content) == "pong"
     assert tail == ["usage", "[DONE]"]
+
+
+def test_codex_route_streams_commentary_and_raw_reasoning_as_thinking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Send Codex commentary and raw reasoning as ``reasoning_content``; only the final message is the answer."""
+    notes = [
+        {"method": "item/reasoning/textDelta", "params": {"itemId": "rs_1", "contentIndex": 0, "delta": "Think"}},
+        {"method": "item/started", "params": {"item": {"id": "c1", "type": "agentMessage", "phase": "commentary"}}},
+        {"method": "item/agentMessage/delta", "params": {"itemId": "c1", "delta": "Checking"}},
+        {"method": "item/completed", "params": {"item": {"id": "c1", "type": "agentMessage", "text": "Checking"}}},
+    ]
+    fake_app_server(tmp_path, emitting(*notes, *CODEX_TURN))
+    monkeypatch.setattr(config, "settings", local_settings(tmp_path))
+    monkeypatch.setattr(cli_dispatch, "_gateway", None)
+    model = "openai/gpt-5.6-luna"
+    route = local_subscription_route(model, "codex", "agent")
+    with httpx.Client(trust_env=False, timeout=30) as client:
+        answer = client.post(
+            f"{route['url']}/chat/completions",
+            json={**REQUEST, "model": model, "stream": True},
+            headers={"Authorization": f"Bearer {route['token']}"},
+        )
+    assert answer.status_code == 200
+    events = [line.removeprefix("data: ") for line in answer.text.split("\n\n") if line]
+    deltas = [json.loads(data)["choices"][0]["delta"] for data in events if data != "[DONE]"]
+    thinking = "".join(delta.get("reasoning_content") or "" for delta in deltas)
+    content = "".join(delta.get("content") or "" for delta in deltas)
+    assert thinking == "Think\n\nChecking"
+    assert content == "pong"
 
 
 def test_local_route_failure_after_streaming_ends_with_an_error_chunk(
