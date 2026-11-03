@@ -1,9 +1,14 @@
-"""Shared fixtures and file sharding for the core test suite."""
+"""Shared fixtures and file sharding for the core test suite.
+
+Regenerate measured durations with
+``SKYNET_TEST_DURATIONS_OUT=core/test_durations.json uv run pytest core/ -q -n auto``.
+"""
 
 from __future__ import annotations
 
 import json
 import math
+import os
 import statistics
 import zlib
 from pathlib import Path
@@ -16,6 +21,9 @@ from core.billing import openrouter_prices
 from core.config import app_env
 
 _DURATION_FILE = Path(__file__).with_name("test_durations.json")
+_is_controller = False
+_executed_nodeids: set[str] = set()
+_file_durations: dict[str, float] = {}
 
 
 def _load_test_durations(path: Path = _DURATION_FILE) -> dict[str, float] | None:
@@ -77,12 +85,60 @@ def _assign_test_files(paths: list[str], shard_count: int, durations: dict[str, 
 
     loads = [0.0] * shard_count
     assignments: dict[str, int] = {}
-    median = statistics.median(durations.values())
-    for path in sorted(files, key=lambda file: (-durations.get(file, median), file)):
+    for path in sorted(files, key=lambda file: (-_duration_for_path(file, durations), file)):
         shard = min(range(shard_count), key=lambda index: (loads[index], index))
         assignments[path] = shard
-        loads[shard] += durations.get(path, median)
+        loads[shard] += _duration_for_path(path, durations)
     return assignments
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Reset execution tracking on the controller process.
+
+    Args:
+        config: Pytest configuration for this process.
+    """
+    global _is_controller
+    _is_controller = not hasattr(config, "workerinput")
+    if _is_controller:
+        _executed_nodeids.clear()
+        _file_durations.clear()
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Record executed tests and their per-file phase durations on the controller.
+
+    Args:
+        report: A test report for one execution phase.
+    """
+    if not _is_controller:
+        return
+    if report.when == "setup":
+        _executed_nodeids.add(report.nodeid)
+    path = report.nodeid.split("::", 1)[0]
+    _file_durations[path] = _file_durations.get(path, 0.0) + report.duration
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    """Write optional execution and duration reports after the controller session.
+
+    Args:
+        session: The pytest session that is finishing.
+    """
+    if not _is_controller or hasattr(session.config, "workerinput"):
+        return
+    executed_out = os.environ.get("SKYNET_TEST_EXECUTED_OUT")
+    if executed_out:
+        Path(executed_out).write_text(
+            "".join(f"{nodeid}\n" for nodeid in sorted(_executed_nodeids)),
+            encoding="utf-8",
+        )
+    durations_out = os.environ.get("SKYNET_TEST_DURATIONS_OUT")
+    if durations_out:
+        Path(durations_out).write_text(
+            json.dumps(dict(sorted(_file_durations.items())), indent=2) + "\n",
+            encoding="utf-8",
+        )
 
 
 @pytest.fixture(autouse=True)

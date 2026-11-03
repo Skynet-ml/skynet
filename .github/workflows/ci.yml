@@ -6,7 +6,7 @@ on:
   pull_request:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -35,7 +35,14 @@ jobs:
       - name: Core test suite
         env:
           SKYNET_TEST_SHARD: ${{ matrix.shard }}/6
+          SKYNET_TEST_EXECUTED_OUT: executed-${{ matrix.shard }}.txt
         run: uv run pytest core/ -q -n auto
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: executed-${{ matrix.shard }}
+          path: backend/executed-${{ matrix.shard }}.txt
+          if-no-files-found: ignore
 
   backend-gates:
     name: backend · ruff + gates
@@ -68,6 +75,8 @@ jobs:
         run: uv sync --extra dev --frozen
       - name: Ruff lint
         run: uv run ruff check .
+      - name: Image-key tests
+        run: bash ../infra/terraform/scripts/tests/test-image-key.sh
       # requirements.txt is the pip install path's copy of uv.lock. When only
       # one of the two moves, the pip-path image silently ships a different
       # dependency set than CI ever tested — that drift is how starlette landed
@@ -104,44 +113,43 @@ jobs:
           enable-cache: true
       - name: Install dependencies (runtime + dev)
         run: uv sync --extra dev --frozen
-      - name: Six-shard collection union
+      - name: Collect full core suite
         run: |
           uv run python - <<'PY'
           import os
           import subprocess
           import sys
+          from pathlib import Path
 
-          def collect(shard=None):
-              env = os.environ.copy()
-              env.pop("APP_TEST_SHARD", None)
-              env.pop("SKYNET_TEST_SHARD", None)
-              if shard is not None:
-                  env["SKYNET_TEST_SHARD"] = shard
-              result = subprocess.run(
-                  [sys.executable, "-m", "pytest", "core/", "--collect-only", "-q"],
-                  check=True,
-                  capture_output=True,
-                  text=True,
-                  env=env,
-              )
-              return [line for line in result.stdout.splitlines() if line.startswith("core/") and "::" in line]
-
-          full = collect()
-          if not full:
+          env = os.environ.copy()
+          env.pop("APP_TEST_SHARD", None)
+          env.pop("SKYNET_TEST_SHARD", None)
+          result = subprocess.run(
+              [sys.executable, "-m", "pytest", "core/", "--collect-only", "-q"],
+              check=True,
+              capture_output=True,
+              text=True,
+              env=env,
+          )
+          nodeids = sorted(
+              line for line in result.stdout.splitlines() if line.startswith("core/") and "::" in line
+          )
+          if not nodeids:
               raise SystemExit("full collection produced no test nodeids")
-          shards = [collect(f"{index}/6") for index in range(6)]
-          union = [nodeid for shard in shards for nodeid in shard]
-          if len(union) != len(set(union)):
-              raise SystemExit("six-shard collection overlaps")
-          if set(union) != set(full):
-              raise SystemExit(f"six-shard collection differs: full={len(full)} union={len(union)}")
-          print(f"six shards cover {len(full)} tests with no overlap")
+          Path("collected.txt").write_text("\n".join(nodeids) + "\n", encoding="utf-8")
+          print(f"collected {len(nodeids)} core test nodeids")
           PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: collected
+          path: backend/collected.txt
+          if-no-files-found: ignore
 
   backend:
     name: backend · ruff + core tests (${{ matrix.shard }}/4)
     needs: [backend-core, backend-gates, backend-shard-coverage]
-    if: ${{ !cancelled() }}
+    if: always()
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -155,6 +163,43 @@ jobs:
           COVERAGE_RESULT: ${{ needs.backend-shard-coverage.result }}
         run: |
           [[ "$CORE_RESULT" == success && "$GATES_RESULT" == success && "$COVERAGE_RESULT" == success ]]
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: executed-*
+          path: artifacts/executed
+      - uses: actions/download-artifact@v4
+        with:
+          name: collected
+          path: artifacts/collected
+      - name: Verify executed shard coverage
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          expected = {f"executed-{index}" for index in range(6)}
+          files = sorted(Path("artifacts/executed").rglob("executed-*.txt"))
+          if len(files) != 6 or {path.parent.name for path in files} != expected:
+              raise SystemExit(f"expected six executed shard artifacts, found {[str(path) for path in files]}")
+
+          union = set()
+          for path in files:
+              nodeids = path.read_text(encoding="utf-8").splitlines()
+              shard = set(nodeids)
+              if len(nodeids) != len(shard):
+                  raise SystemExit(f"{path} contains duplicate executed nodeids")
+              if union & shard:
+                  raise SystemExit(f"{path} overlaps another executed shard")
+              union.update(shard)
+
+          collected = Path("artifacts/collected/collected.txt").read_text(encoding="utf-8").splitlines()
+          if len(collected) != len(set(collected)):
+              raise SystemExit("collected.txt contains duplicate nodeids")
+          if union != set(collected):
+              missing = sorted(set(collected) - union)
+              extra = sorted(union - set(collected))
+              raise SystemExit(f"executed shards differ from collection: missing={missing[:10]} extra={extra[:10]}")
+          print(f"six executed shards cover all {len(collected)} collected tests with no overlap")
+          PY
 
   # Everything above installs through uv. The Dockerfile's other path
   # (PKG_MANAGER=pip) installs the compiled requirements.txt with --no-deps,
@@ -178,6 +223,7 @@ jobs:
           load: true
           tags: skynet-backend:pip
           cache-from: type=gha,scope=pip
+          # Keep the repo Actions cache below its 10 GB limit.
           cache-to: type=gha,mode=min,scope=pip
       # `pip check` is the sharp end: --no-deps means pip installed the file
       # verbatim without ever validating it, so this is the first thing in the
@@ -284,7 +330,7 @@ jobs:
   frontend:
     name: frontend · typecheck + lint + unit
     needs: [frontend-typecheck, frontend-lint, frontend-unit]
-    if: ${{ !cancelled() }}
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Require all frontend checks

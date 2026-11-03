@@ -149,6 +149,7 @@ jobs:
       - name: Build and push the preview images, and migrate
         if: steps.scope.outputs.skip != 'true' && steps.claim.outputs.full != 'true'
         env:
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           BACKEND_IMAGE: ${{ steps.backend.outputs.image }}
           NEXT_PUBLIC_SENTRY_DSN: ${{ vars.NEXT_PUBLIC_SENTRY_DSN }}
           NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE: ${{ vars.NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE }}
@@ -165,6 +166,7 @@ jobs:
       - name: Deploy the frontend and wait for services
         if: steps.scope.outputs.skip != 'true' && steps.claim.outputs.full != 'true'
         env:
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           BACKEND_IMAGE: ${{ steps.backend.outputs.image }}
         run: infra/terraform/scripts/preview.sh deploy "$PR" "$SHA"
 

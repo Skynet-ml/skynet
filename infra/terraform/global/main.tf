@@ -132,9 +132,10 @@ resource "aws_ecr_lifecycle_policy" "this" {
   })
 }
 
-resource "aws_ecr_repository" "buildcache" {
-  name                 = "skynet/buildcache"
-  image_tag_mutability = "MUTABLE"
+resource "aws_ecr_repository" "buildcache_staging" {
+  name = "skynet/buildcache-staging"
+  # Checkov CKV_AWS_51 requires immutable cache tags.
+  image_tag_mutability = "IMMUTABLE"
 
   image_scanning_configuration {
     scan_on_push = true
@@ -145,29 +146,69 @@ resource "aws_ecr_repository" "buildcache" {
   }
 }
 
-resource "aws_ecr_lifecycle_policy" "buildcache" {
-  repository = aws_ecr_repository.buildcache.name
+resource "aws_ecr_lifecycle_policy" "buildcache_staging" {
+  repository = aws_ecr_repository.buildcache_staging.name
 
   policy = jsonencode({
-    rules = [
+    rules = concat([
       {
         rulePriority = 1
-        description  = "Delete untagged cache images after 3 days"
+        description  = "Delete untagged cache images after 1 day"
         selection = {
           tagStatus   = "untagged"
           countType   = "sinceImagePushed"
           countUnit   = "days"
-          countNumber = 3
+          countNumber = 1
         }
         action = { type = "expire" }
       },
-    ]
+      ], [
+      for index, prefix in ["backend-", "litellm-", "frontend-staging-"] : {
+        rulePriority = index + 2
+        description  = "Keep newest five ${prefix} cache images"
+        selection = {
+          tagStatus     = "tagged"
+          tagPrefixList = [prefix]
+          countType     = "imageCountMoreThan"
+          countNumber   = 5
+        }
+        action = { type = "expire" }
+      }
+    ])
+  })
+}
+
+resource "aws_ecr_repository" "buildcache_production" {
+  name = "skynet/buildcache-production"
+  # Checkov CKV_AWS_51 requires immutable cache tags.
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration { scan_on_push = true }
+  encryption_configuration { encryption_type = "KMS" }
+}
+
+resource "aws_ecr_lifecycle_policy" "buildcache_production" {
+  repository = aws_ecr_repository.buildcache_production.name
+  policy = jsonencode({
+    rules = concat([
+      { rulePriority = 1, description = "Delete untagged cache images after 1 day",
+        selection    = { tagStatus = "untagged", countType = "sinceImagePushed", countUnit = "days", countNumber = 1 },
+      action = { type = "expire" } },
+      ], [
+      for index, prefix in ["backend-", "litellm-", "frontend-production-"] : {
+        rulePriority = index + 2
+        description  = "Keep newest five ${prefix} cache images"
+        selection    = { tagStatus = "tagged", tagPrefixList = [prefix], countType = "imageCountMoreThan", countNumber = 5 }
+        action       = { type = "expire" }
+      }
+    ])
   })
 }
 
 resource "aws_ecr_repository" "preview_buildcache" {
-  name                 = "skynet/preview-buildcache"
-  image_tag_mutability = "MUTABLE"
+  name = "skynet/preview-buildcache"
+  # Checkov CKV_AWS_51 requires immutable cache tags.
+  image_tag_mutability = "IMMUTABLE"
 
   image_scanning_configuration {
     scan_on_push = true
@@ -185,12 +226,23 @@ resource "aws_ecr_lifecycle_policy" "preview_buildcache" {
     rules = [
       {
         rulePriority = 1
-        description  = "Delete untagged preview cache images after 3 days"
+        description  = "Delete untagged preview cache images after 1 day"
         selection = {
           tagStatus   = "untagged"
           countType   = "sinceImagePushed"
           countUnit   = "days"
-          countNumber = 3
+          countNumber = 1
+        }
+        action = { type = "expire" }
+      },
+      {
+        rulePriority = 2
+        description  = "Keep newest 40 preview cache images"
+        selection = {
+          tagStatus     = "tagged"
+          tagPrefixList = ["preview-"]
+          countType     = "imageCountMoreThan"
+          countNumber   = 40
         }
         action = { type = "expire" }
       },
@@ -275,11 +327,17 @@ locals {
   # known at plan time and scripts/check-deploy-isolation.sh can test them
   # before the first apply.
   # Preview builds use a separate cache so they cannot poison deploy layers.
-  ecr_repository_arns = concat(
-    [for r in var.image_repositories : "arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/${r}"],
-    ["arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/buildcache"],
-  )
   environments = toset(["staging", "production"])
+  ecr_repository_arns = {
+    staging = concat(
+      [for r in var.image_repositories : "arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/${r}"],
+      ["arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/buildcache-staging"],
+    )
+    production = concat(
+      [for r in var.image_repositories : "arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/${r}"],
+      ["arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/buildcache-production"],
+    )
+  }
 }
 
 # ---------------------------------------------------------------- deploy roles
@@ -355,7 +413,7 @@ data "aws_iam_policy_document" "github_deploy" {
       "ecr:PutImage",
       "ecr:UploadLayerPart",
     ]
-    resources = local.ecr_repository_arns
+    resources = local.ecr_repository_arns[each.key]
   }
 
   statement {
@@ -556,7 +614,7 @@ data "aws_iam_policy_document" "github_preview" {
       "ecr:DescribeImages",
       "ecr:GetDownloadUrlForLayer",
     ]
-    resources = ["arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/buildcache"]
+    resources = ["arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/buildcache-staging"]
   }
 
   statement {

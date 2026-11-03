@@ -75,6 +75,10 @@ for env in staging production; do
   expect "$policy" allowed "run the $env migrate task" ecs:RunTask "$td/skynet-$env-migrate:999" --context-entries "$(cluster "$env")"
   expect "$policy" denied "run the $other migrate task" ecs:RunTask "$td/skynet-$other-migrate:999" --context-entries "$(cluster "$other")"
   expect "$policy" denied "read the $other deploy parameter" ssm:GetParameter "arn:aws:ssm:$region:$account:parameter/skynet/$other/deploy"
+  expect "$policy" allowed "push to the $env build cache" ecr:PutImage \
+    "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$env"
+  expect "$policy" denied "push to the $other build cache" ecr:PutImage \
+    "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$other"
 done
 
 policy="$(policy_for data.aws_iam_policy_document.github_preview)"
@@ -118,12 +122,18 @@ expect "$policy" denied "change the priority of a preview slot rule" elasticload
 expect "$policy" denied "tag a staging rule" elasticloadbalancing:AddTags "$rule" --context-entries "$(tag preview)"
 expect "$policy" denied "create a target group" elasticloadbalancing:CreateTargetGroup "arn:aws:elasticloadbalancing:$region:$account:targetgroup/skynet-pr-1-backend/0" --context-entries "$(tag preview)"
 expect "$policy" denied "delete the staging backend target group" elasticloadbalancing:DeleteTargetGroup "arn:aws:elasticloadbalancing:$region:$account:targetgroup/skynet-staging-backend/0"
-for repository in buildcache backend frontend litellm; do
+for repository in buildcache-staging buildcache-production backend frontend litellm; do
   resource="arn:aws:ecr:$region:$account:repository/skynet/$repository"
-  for action in ecr:PutImage ecr:InitiateLayerUpload ecr:UploadLayerPart ecr:CompleteLayerUpload; do
+  for action in ecr:PutImage ecr:InitiateLayerUpload ecr:UploadLayerPart ecr:CompleteLayerUpload \
+    ecr:BatchDeleteImage ecr:PutLifecyclePolicy ecr:SetRepositoryPolicy \
+    ecr:DeleteRepository ecr:PutImageTagMutability; do
     expect "$policy" denied "write $action to skynet/$repository" "$action" "$resource"
   done
 done
+expect "$policy" allowed "read staging cache layers" ecr:BatchGetImage \
+  "arn:aws:ecr:$region:$account:repository/skynet/buildcache-staging"
+expect "$policy" allowed "push a preview cache image" ecr:PutImage \
+  "arn:aws:ecr:$region:$account:repository/skynet/preview-buildcache"
 expect "$policy" allowed "push a preview image" ecr:PutImage "arn:aws:ecr:$region:$account:repository/skynet/preview-backend"
 expect "$policy" denied "push a staging image" ecr:PutImage "arn:aws:ecr:$region:$account:repository/skynet/backend"
 expect "$policy" allowed "take a preview slot" ssm:PutParameter "arn:aws:ssm:$region:$account:parameter/skynet/preview/slots/1"

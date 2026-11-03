@@ -140,40 +140,57 @@ image_is_fresh() {
 
 # Builds and pushes the backend image unless a fresh one exists. Args: uri tag
 build_backend() {
-  local registry
+  local registry staging_cache preview_cache
+  local -a cache_from=() pin_args=()
   if image_is_fresh skynet/preview-backend "$2"; then
     echo "skip: $1:$2 exists"
     return 0
   fi
   registry="${1%%/*}"
+  image_inputs "$repo_root/backend" ctx "GIT_SHA=$sha"
+  pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]}")
+  staging_cache="$(latest_cache_ref skynet/buildcache-staging backend-)"
+  preview_cache="$(latest_cache_ref skynet/preview-buildcache "preview-backend-pr${pr}-")"
+  [[ -n "$staging_cache" ]] && cache_from+=(--cache-from "type=registry,ref=$registry/skynet/buildcache-staging:$staging_cache")
+  [[ -n "$preview_cache" ]] && cache_from+=(--cache-from "type=registry,ref=$registry/skynet/preview-buildcache:$preview_cache")
   docker buildx build --platform linux/arm64 --provenance=false --progress=plain \
-    --cache-from "type=registry,ref=$registry/skynet/buildcache:backend" \
-    --cache-from "type=registry,ref=$registry/skynet/preview-buildcache:preview-backend" \
-    --cache-to "type=registry,ref=$registry/skynet/preview-buildcache:preview-backend,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
+    "${cache_from[@]}" \
+    "${pin_args[@]}" \
+    --cache-to "type=registry,ref=$registry/skynet/preview-buildcache:preview-backend-pr${pr}-$sha,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
     -t "$1:$2" --push --build-arg "GIT_SHA=$sha" "$repo_root/backend"
 }
 
 # Next.js bakes NEXT_PUBLIC_* into the bundle, so each PR gets its own build.
 # Args: uri tag domain
 build_frontend() {
-  local registry
+  local registry staging_cache preview_cache build_arg
+  local -a cache_from=() pin_args=() build_args=() docker_args=()
   if image_is_fresh skynet/preview-frontend "$2"; then
     echo "skip: $1:$2 exists"
     return 0
   fi
   registry="${1%%/*}"
+  build_args=(
+    "NEXT_PUBLIC_SITE_URL=https://pr-$pr.$3"
+    "NEXT_PUBLIC_SENTRY_DSN=${NEXT_PUBLIC_SENTRY_DSN:-}"
+    "NEXT_PUBLIC_SENTRY_ENVIRONMENT=skynet-pr-$pr"
+    "NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE=${NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE:-}"
+    "NEXT_PUBLIC_FEATURE_GENERALIST_AGENT=${NEXT_PUBLIC_FEATURE_GENERALIST_AGENT:-}"
+    "APP_GIT_SHA=$sha"
+    "APP_ENVIRONMENT=skynet-pr-$pr"
+  )
+  image_inputs "$repo_root/frontend" ctx "${build_args[@]}"
+  pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]}")
+  for build_arg in "${build_args[@]}"; do docker_args+=(--build-arg "$build_arg"); done
+  staging_cache="$(latest_cache_ref skynet/buildcache-staging frontend-staging-)"
+  preview_cache="$(latest_cache_ref skynet/preview-buildcache "preview-frontend-pr${pr}-")"
+  [[ -n "$staging_cache" ]] && cache_from+=(--cache-from "type=registry,ref=$registry/skynet/buildcache-staging:$staging_cache")
+  [[ -n "$preview_cache" ]] && cache_from+=(--cache-from "type=registry,ref=$registry/skynet/preview-buildcache:$preview_cache")
   docker buildx build --platform linux/arm64 --provenance=false --progress=plain \
-    --cache-from "type=registry,ref=$registry/skynet/buildcache:frontend-staging" \
-    --cache-from "type=registry,ref=$registry/skynet/preview-buildcache:preview-frontend" \
-    --cache-to "type=registry,ref=$registry/skynet/preview-buildcache:preview-frontend,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
-    -t "$1:$2" --push \
-    --build-arg "NEXT_PUBLIC_SITE_URL=https://pr-$pr.$3" \
-    --build-arg "NEXT_PUBLIC_SENTRY_DSN=${NEXT_PUBLIC_SENTRY_DSN:-}" \
-    --build-arg "NEXT_PUBLIC_SENTRY_ENVIRONMENT=skynet-pr-$pr" \
-    --build-arg "NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE=${NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE:-}" \
-    --build-arg "NEXT_PUBLIC_FEATURE_GENERALIST_AGENT=${NEXT_PUBLIC_FEATURE_GENERALIST_AGENT:-}" \
-    --build-arg "APP_GIT_SHA=$sha" \
-    --build-arg "APP_ENVIRONMENT=skynet-pr-$pr" \
+    "${cache_from[@]}" \
+    "${pin_args[@]}" \
+    --cache-to "type=registry,ref=$registry/skynet/preview-buildcache:preview-frontend-pr${pr}-$sha,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
+    -t "$1:$2" --push "${docker_args[@]}" \
     "$repo_root/frontend"
 }
 
@@ -196,16 +213,18 @@ backend_and_migrate() {
   else
     build_backend "${1%:*}" "${1##*:}" || return 1
   fi
+  refresh_aws_credentials
   migrate "$1" "$2"
+  refresh_aws_credentials
   deploy_backend_worker "$1" "$2"
 }
 
 build() {
   check_pr
   check_sha
-  need docker git tr sort
+  need docker git tr sort date
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || die "missing command: sha256sum or shasum"
-  local cfg domain slot app api tag backend frontend backend_pid frontend_pid failed=""
+  local cfg domain slot app api tag backend frontend backend_pid frontend_pid failed="" migrated=false
   cfg="$(preview_config)"
   domain="$(jq -r .domain <<<"$cfg")"
   slot="$(slot_of "$pr")"
@@ -227,8 +246,17 @@ build() {
   backend_pid=$!
   build_frontend "$frontend" "$tag" "$domain" 2>&1 | sed -u 's/^/[frontend] /' &
   frontend_pid=$!
-  wait "$backend_pid" || failed+=" backend"
-  wait "$frontend_pid" || failed+=" frontend"
+  if wait "$backend_pid"; then
+    migrated=true
+  else
+    failed+=" backend"
+  fi
+  if ! wait "$frontend_pid"; then
+    failed+=" frontend"
+    if [[ "$migrated" == true ]]; then
+      echo "::error::preview inconsistent: backend/worker at $sha, frontend not updated" >&2
+    fi
+  fi
   [[ -z "$failed" ]] || die "image build or migration failed:$failed"
   echo "ready: ${backend##*/} preview-frontend:$tag, database migrated"
 }
@@ -492,7 +520,7 @@ preview_env() {
 deploy() {
   check_pr
   check_sha
-  local cfg slot acct domain app api tag frontend_img
+  local cfg slot acct domain app api tag frontend_img cluster tg_frontend tg_backend
   slot="$(slot_of "$pr")"
   [[ -n "$slot" ]] || die "PR $pr holds no preview slot; run claim first"
   cfg="$(preview_config)"
@@ -504,7 +532,10 @@ deploy() {
   frontend_img="$(ecr_uri frontend):$tag"
 
   cluster="$(jq -r .cluster <<<"$cfg")"
+  tg_backend="$(slot_field "$cfg" "$slot" backend target_group)"
   tg_frontend="$(slot_field "$cfg" "$slot" frontend target_group)"
+  route "$(slot_field "$cfg" "$slot" backend rule)" "$api" "$tg_backend"
+  route "$(slot_field "$cfg" "$slot" frontend rule)" "$app" "$tg_frontend"
   upsert_service "$cfg" frontend "$(register frontend "$frontend_img" "$(preview_env frontend "$domain")" "$slot" "$cfg" "$acct")" \
     "$tg_frontend" "$(jq -r .ports.frontend <<<"$cfg")"
 
@@ -542,20 +573,25 @@ staging_backend() {
 backend_image() {
   check_pr
   check_sha
-  need docker git tr sort
+  need docker git tr sort date
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || die "missing command: sha256sum or shasum"
   local key image
   # Previews may ignore GIT_SHA because staging_backend already runs a staging
   # image built from another SHA when backend/ is identical. APP_GIT_SHA in
   # the task environment supplies the served commit; staging and production
   # keep GIT_SHA in ctx- keys and never reuse across commits.
-  key="$(image_key "$repo_root/backend" tree "GIT_SHA=$sha")"
-  if [[ -n "$key" ]] && find_by_key skynet/backend "$key"; then
-    echo "$(standard_ecr_uri backend):$key"
+  key="$(image_key "$repo_root/backend" tree)"
+  if [[ -n "$key" ]] && find_fresh_by_key skynet/backend "$key"; then
+    image="$(standard_ecr_uri backend):$key"
+    echo "reuse $image (tree key)" >&2
+    echo "$image"
     return 0
   fi
   image="$(staging_backend)" || return 0
-  [[ -z "$image" ]] || echo "$image"
+  if [[ -n "$image" ]]; then
+    echo "reuse $image (staging match)" >&2
+    echo "$image"
+  fi
 }
 
 deploy_backend_worker() {
@@ -719,5 +755,5 @@ case "$cmd" in
   revision-prs) revision_prs ;;
   prune) prune ;;
   setup-db) setup_db ;;
-  *) die "usage: preview.sh claim|build|deploy|staging-backend <pr> <sha> | delete|prune <pr> | list | revision-prs | setup-db" ;;
+  *) die "usage: preview.sh claim|build|deploy|backend-image|staging-backend <pr> <sha> | delete|prune <pr> | list | revision-prs | setup-db" ;;
 esac

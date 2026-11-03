@@ -30,6 +30,10 @@ check_env "$env"
 [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]] || die "second argument must be a git SHA"
 [[ -z "$mode" || "$mode" == --migrate-only || "$mode" == --skip-migrate ]] ||
   die "mode must be --migrate-only or --skip-migrate"
+if [[ "$mode" == --skip-migrate ]]; then
+  [[ "${MIGRATED_SHA:-}" == "$sha" ]] ||
+    die "--skip-migrate requires MIGRATED_SHA to equal $sha"
+fi
 
 cfg="$(deploy_config "$env")"
 cluster="$(jq -r .cluster <<<"$cfg")"

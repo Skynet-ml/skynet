@@ -6,9 +6,11 @@ import json
 import statistics
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from core import conftest
 from core.conftest import _assign_test_files, _duration_for_path, _load_test_durations
 
 _PATHS = ["core/a.py", "core/b.py", "core/c.py", "core/d.py", "core/e.py"]
@@ -68,3 +70,66 @@ def test_valid_duration_json_loads_file_prefixes(tmp_path: Path) -> None:
     duration_file.write_text(json.dumps(_DURATIONS))
 
     assert _load_test_durations(duration_file) == _DURATIONS
+
+
+def test_controller_writes_executed_nodeids_and_phase_durations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Write sorted executed nodeids and summed per-file phase durations.
+
+    Args:
+        tmp_path: Temporary directory for the output files.
+        monkeypatch: Pytest's patch fixture.
+    """
+    executed_path = tmp_path / "executed.txt"
+    durations_path = tmp_path / "durations.json"
+    monkeypatch.setattr(conftest, "_is_controller", True)
+    monkeypatch.setattr(conftest, "_executed_nodeids", set())
+    monkeypatch.setattr(conftest, "_file_durations", {})
+    monkeypatch.setenv("SKYNET_TEST_EXECUTED_OUT", str(executed_path))
+    monkeypatch.setenv("SKYNET_TEST_DURATIONS_OUT", str(durations_path))
+
+    reports = [
+        SimpleNamespace(nodeid="core/z.py::test_z", when="setup", duration=0.5),
+        SimpleNamespace(nodeid="core/a.py::test_a", when="call", duration=0.2),
+        SimpleNamespace(nodeid="core/a.py::test_a", when="setup", duration=0.1),
+        SimpleNamespace(nodeid="core/a.py::test_a", when="teardown", duration=0.3),
+        SimpleNamespace(nodeid="core/a.py::test_b", when="setup", duration=0.4),
+    ]
+    for report in reports:
+        conftest.pytest_runtest_logreport(report)
+
+    conftest.pytest_sessionfinish(SimpleNamespace(config=SimpleNamespace()))
+
+    assert executed_path.read_text(encoding="utf-8").splitlines() == [
+        "core/a.py::test_a",
+        "core/a.py::test_b",
+        "core/z.py::test_z",
+    ]
+    durations = json.loads(durations_path.read_text(encoding="utf-8"))
+    assert list(durations) == ["core/a.py", "core/z.py"]
+    assert durations == pytest.approx({"core/a.py": 1.0, "core/z.py": 0.5})
+
+
+def test_worker_does_not_write_execution_outputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ignore worker reports because the controller receives every xdist report.
+
+    Args:
+        tmp_path: Temporary directory for the output files.
+        monkeypatch: Pytest's patch fixture.
+    """
+    executed_path = tmp_path / "executed.txt"
+    durations_path = tmp_path / "durations.json"
+    monkeypatch.setattr(conftest, "_is_controller", True)
+    monkeypatch.setattr(conftest, "_executed_nodeids", set())
+    monkeypatch.setattr(conftest, "_file_durations", {})
+    monkeypatch.setenv("SKYNET_TEST_EXECUTED_OUT", str(executed_path))
+    monkeypatch.setenv("SKYNET_TEST_DURATIONS_OUT", str(durations_path))
+
+    conftest.pytest_configure(SimpleNamespace(workerinput={}))
+    report = SimpleNamespace(nodeid="core/a.py::test_a", when="setup", duration=0.1)
+    conftest.pytest_runtest_logreport(report)
+    conftest.pytest_sessionfinish(SimpleNamespace(config=SimpleNamespace(workerinput={})))
+
+    assert not executed_path.exists()
+    assert not durations_path.exists()

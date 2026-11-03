@@ -22,6 +22,36 @@ need() {
   done
 }
 
+refresh_aws_credentials() {
+  local token_response token credentials access_key secret_key session_token
+  if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" &&
+    -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" &&
+    -z "${AWS_DEPLOY_ROLE_ARN:-}" ]]; then
+    return 0
+  fi
+  [[ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" && -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" &&
+    -n "${AWS_DEPLOY_ROLE_ARN:-}" ]] || die "incomplete GitHub OIDC credential configuration"
+  command -v curl >/dev/null 2>&1 || die "missing command: curl"
+  token_response="$(curl --fail --silent --show-error \
+    -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+    "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")" ||
+    die "cannot request GitHub OIDC token"
+  token="$(jq -er '.value' <<<"$token_response")" || die "GitHub OIDC response has no token"
+  credentials="$(aws sts assume-role-with-web-identity \
+    --role-arn "$AWS_DEPLOY_ROLE_ARN" --role-session-name skynet-deploy \
+    --web-identity-token "$token" --duration-seconds 900 --output json)" ||
+    die "cannot assume AWS deploy role with GitHub OIDC"
+  access_key="$(jq -er '.Credentials.AccessKeyId' <<<"$credentials")" ||
+    die "OIDC credentials have no access key"
+  secret_key="$(jq -er '.Credentials.SecretAccessKey' <<<"$credentials")" ||
+    die "OIDC credentials have no secret key"
+  session_token="$(jq -er '.Credentials.SessionToken' <<<"$credentials")" ||
+    die "OIDC credentials have no session token"
+  export AWS_ACCESS_KEY_ID="$access_key"
+  export AWS_SECRET_ACCESS_KEY="$secret_key"
+  export AWS_SESSION_TOKEN="$session_token"
+}
+
 check_env() {
   case "${1:-}" in
     staging | production) ;;
