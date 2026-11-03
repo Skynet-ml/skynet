@@ -512,6 +512,89 @@ def test_edit_with_no_matching_stored_turn_deletes_nothing(
     assert _stored_contents(engine) == ["u0", "שלום", "a", "שלום", "b", "שלום"]
 
 
+def test_edit_refused_by_model_routing_stores_nothing_and_its_retry_replaces_the_edited_turn(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A routing 4xx on an edit writes nothing, so a retry with the edit target leaves no duplicate."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["first", "second"])
+    real_route = agent_mod.route_agent_model
+
+    def refuse(*_args: Any, **_kwargs: Any) -> Any:
+        """Refuse the model the way an unknown catalog model is refused."""
+        raise agent_mod.DomainError("models.unknown_model", status=422)
+
+    monkeypatch.setattr(agent_mod, "route_agent_model", refuse)
+    refused = _post_turn(client, "edited", token, conversation_id=conversation_id, edit_user_text="second")
+
+    assert refused.status_code == 422
+    assert _stored_contents(engine) == ["first", "שלום", "second", "שלום"]
+
+    monkeypatch.setattr(agent_mod, "route_agent_model", real_route)
+    retried = _post_turn(client, "edited", token, conversation_id=conversation_id, edit_user_text="second")
+
+    assert retried.status_code == 200
+    assert _stored_contents(engine) == ["first", "שלום", "edited", "שלום"]
+
+
+def test_retry_of_a_saved_edit_with_the_edit_target_and_regenerate_leaves_no_duplicate(
+    persistence_client: tuple[TestClient, Engine],
+) -> None:
+    """An edit the server saved but the client never confirmed is replaced by its retry, not duplicated."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["first", "second"])
+    assert (
+        _post_turn(client, "edited", token, conversation_id=conversation_id, edit_user_text="second").status_code == 200
+    )
+
+    retried = _post_turn(
+        client, "edited", token, conversation_id=conversation_id, regenerate=True, edit_user_text="second"
+    )
+
+    assert retried.status_code == 200
+    assert _stored_contents(engine) == ["first", "שלום", "edited", "שלום"]
+
+
+def test_retry_of_a_refused_middle_edit_with_regenerate_deletes_only_from_the_edited_turn(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The found edit target wins over ``regenerate``, and an unmatched target never deletes another turn."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["first", "second", "third"])
+    real_balance = agent_mod.enforce_llm_balance
+
+    def refuse(*_args: Any, **_kwargs: Any) -> None:
+        """Refuse the turn the way a depleted balance is refused."""
+        raise agent_mod.DomainError("billing.insufficient_balance", status=402)
+
+    monkeypatch.setattr(agent_mod, "enforce_llm_balance", refuse)
+    refused = _post_turn(client, "second, edited", token, conversation_id=conversation_id, edit_user_text="second")
+    assert refused.status_code == 402
+    monkeypatch.setattr(agent_mod, "enforce_llm_balance", real_balance)
+
+    retried = _post_turn(
+        client, "second, edited", token, conversation_id=conversation_id, regenerate=True, edit_user_text="second"
+    )
+
+    assert retried.status_code == 200
+    assert _stored_contents(engine) == ["first", "שלום", "second, edited", "שלום"]
+
+    unmatched = _post_turn(
+        client, "new", token, conversation_id=conversation_id, regenerate=True, edit_user_text="missing"
+    )
+
+    assert unmatched.status_code == 200
+    assert _stored_contents(engine) == ["first", "שלום", "second, edited", "שלום", "new", "שלום"]
+
+
 _CONV_ID = "conv-1"
 
 

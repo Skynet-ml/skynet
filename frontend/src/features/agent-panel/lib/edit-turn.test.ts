@@ -21,9 +21,9 @@ test("a repeated text counts only earlier user messages with that text", () => {
   assert.deepEqual(editTarget(chat, 4), { text: "hi", occurrence: 1 });
 });
 
-test("a retry of an edit the server never saved resends the edit target", () => {
+test("a retry of an unconfirmed edit resends the edit target with regenerate", () => {
   const target = { text: "second", occurrence: 0 };
-  assert.deepEqual(retryMode(target), { regenerate: false, editUserTurn: target });
+  assert.deepEqual(retryMode(target), { regenerate: true, editUserTurn: target });
 });
 
 test("a retry of a saved turn regenerates the latest stored turn", () => {

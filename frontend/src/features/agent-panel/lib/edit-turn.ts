@@ -17,16 +17,18 @@ export function editTarget(
 }
 
 /**
- * How a retry resends the latest user turn. An edit that failed before the
- * server saved it must resend its edit target: `regenerate` would delete
- * only the latest stored turn, and the old edited turn and its replies
- * would come back after a reload.
+ * How a retry resends the latest user turn. An unconfirmed edit resends its
+ * edit target: `regenerate` alone would delete only the latest stored turn,
+ * and the old edited turn and its replies would come back after a reload.
+ * It also sends `regenerate`, because the server can save the edit before
+ * the stream breaks. Then the old turn is gone, and the server replaces the
+ * saved edit when it is the latest stored turn.
  */
 export function retryMode(unsavedEdit: { text: string; occurrence: number } | null): {
   regenerate: boolean;
   editUserTurn: { text: string; occurrence: number } | null;
 } {
   return unsavedEdit
-    ? { regenerate: false, editUserTurn: unsavedEdit }
+    ? { regenerate: true, editUserTurn: unsavedEdit }
     : { regenerate: true, editUserTurn: null };
 }

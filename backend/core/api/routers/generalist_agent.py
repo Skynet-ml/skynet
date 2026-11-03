@@ -469,7 +469,7 @@ def _persist_user_turn(job_store, conversation_id: str, content: str) -> None:
         session.commit()
 
 
-def _discard_latest_turn(job_store, conversation_id: str) -> None:
+def _discard_latest_turn(job_store, conversation_id: str, only_if_text: str | None = None) -> None:
     """Delete the final persisted user turn and every response after it.
 
     The regenerate UI replaces the latest assistant response in memory. Remove
@@ -481,6 +481,8 @@ def _discard_latest_turn(job_store, conversation_id: str) -> None:
     Args:
         job_store: Job-store instance whose engine backs the DB session.
         conversation_id: Conversation whose latest turn should be replaced.
+        only_if_text: When set, delete nothing unless the latest user turn has
+            exactly this text.
     """
     with Session(job_store.engine) as session:
         latest_user = (
@@ -492,7 +494,7 @@ def _discard_latest_turn(job_store, conversation_id: str) -> None:
             .order_by(AgentMessageModel.id.desc())
             .first()
         )
-        if latest_user is None:
+        if latest_user is None or (only_if_text is not None and latest_user.content != only_if_text):
             return
         session.query(AgentMessageModel).filter(
             AgentMessageModel.conversation_id == conversation_id,
@@ -501,7 +503,7 @@ def _discard_latest_turn(job_store, conversation_id: str) -> None:
         session.commit()
 
 
-def _discard_from_user_turn(job_store, conversation_id: str, user_text: str, occurrence: int) -> None:
+def _discard_from_user_turn(job_store, conversation_id: str, user_text: str, occurrence: int) -> bool:
     """Delete the stored copy of the edited user turn and every message after it.
 
     Edit-and-resend keeps only the turns before the edited one in memory, so the
@@ -517,6 +519,9 @@ def _discard_from_user_turn(job_store, conversation_id: str, user_text: str, occ
         conversation_id: Conversation whose history is cut.
         user_text: Original text of the edited turn.
         occurrence: How many earlier chat user turns have the same text.
+
+    Returns:
+        Whether a stored turn matched and was deleted with its suffix.
     """
     with Session(job_store.engine) as session:
         edited = (
@@ -531,12 +536,13 @@ def _discard_from_user_turn(job_store, conversation_id: str, user_text: str, occ
             .first()
         )
         if edited is None:
-            return
+            return False
         session.query(AgentMessageModel).filter(
             AgentMessageModel.conversation_id == conversation_id,
             AgentMessageModel.id >= edited.id,
         ).delete(synchronize_session=False)
         session.commit()
+        return True
 
 
 def _persist_assistant_turn(
@@ -923,7 +929,13 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             try:
                 cid, ttl = _ensure_conversation(job_store, req.conversation_id, current_user.username, req.user_message)
                 if req.edit_user_text is not None:
-                    _discard_from_user_turn(job_store, cid, req.edit_user_text, req.edit_user_occurrence)
+                    found = _discard_from_user_turn(job_store, cid, req.edit_user_text, req.edit_user_occurrence)
+                    # A retry of an edit the server saved, but whose
+                    # conversation_meta never reached the client, finds no old
+                    # turn. Replace the saved edit only when it is the latest
+                    # turn, so a missing target never deletes another turn.
+                    if not found and req.regenerate:
+                        _discard_latest_turn(job_store, cid, only_if_text=req.user_message)
                 elif req.regenerate:
                     _discard_latest_turn(job_store, cid)
                 _persist_user_turn(job_store, cid, req.user_message)
@@ -935,7 +947,6 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             return cid, ttl
 
         await asyncio.to_thread(enforce_llm_balance, job_store, current_user.username)
-        conversation_id, title = await asyncio.to_thread(_setup_turn)
 
         wizard_state: WizardState = {**req.wizard_state}  # type: ignore[typeddict-item]
         picked = await asyncio.to_thread(engine_agent_model, job_store, current_user.username, req.model)
@@ -953,6 +964,10 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             body = model_config.extra.get("extra_body")
             fast_body = {**(body if isinstance(body, dict) else {}), CLI_FAST_KEY: True}
             model_config = model_config.model_copy(update={"extra": {**model_config.extra, "extra_body": fast_body}})
+        # Model routing can refuse the turn with a 4xx. Store nothing before it
+        # passes: the client gets no conversation_meta for a refused turn and
+        # would resend it as a new edit.
+        conversation_id, title = await asyncio.to_thread(_setup_turn)
         usage_sink: list = []
         source = run_generalist_agent(
             wizard_state=wizard_state,
