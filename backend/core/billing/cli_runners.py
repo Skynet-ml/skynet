@@ -575,12 +575,25 @@ class _CodexTurn:
         self.errors: list[str] = []
         self.finished = False
         self.commentary: set[str] = set()
-        self.reasoning_parts: set[tuple[str, int]] = set()
+        self.reasoning_parts: set[tuple[str, str, int]] = set()
 
     def _send(self, kind: str, text: str) -> None:
         """Pass one piece of text on, when there is a listener and text."""
         if self.on_delta is not None and text:
             self.on_delta(kind, text)
+
+    def _send_reasoning(self, part: tuple[str, str, int], text: str) -> None:
+        """Pass one thinking piece on, with a blank line before each new part.
+
+        Args:
+            part: The source, item id and part index the piece belongs to.
+            text: The text piece.
+        """
+        if part not in self.reasoning_parts and text:
+            if self.reasoning_parts:
+                text = "\n\n" + text
+            self.reasoning_parts.add(part)
+        self._send("reasoning", text)
 
     def take(self, method: str, params: Mapping[str, Any]) -> None:
         """Read one notification.
@@ -591,21 +604,22 @@ class _CodexTurn:
         """
         item = params.get("item") if isinstance(params.get("item"), dict) else {}
         if method == "item/started" and item.get("type") == "agentMessage" and item.get("phase") == "commentary":
-            # A progress note is not the answer; only the final message streams.
+            # A progress note is not the answer. It shows with the thinking, so the user sees all the CLI sends.
             self.commentary.add(str(item.get("id")))
         elif method == "item/agentMessage/delta":
-            if self.stream_answer and str(params.get("itemId")) not in self.commentary:
+            item_id = str(params.get("itemId"))
+            if item_id in self.commentary:
+                self._send_reasoning(("commentary", item_id, 0), str(params.get("delta") or ""))
+            elif self.stream_answer:
                 self._send("content", str(params.get("delta") or ""))
         elif method == "item/reasoning/summaryTextDelta":
-            part = (str(params.get("itemId")), _int(params.get("summaryIndex")))
-            text = str(params.get("delta") or "")
-            if part not in self.reasoning_parts and text:
-                if self.reasoning_parts:
-                    text = "\n\n" + text
-                self.reasoning_parts.add(part)
-            self._send("reasoning", text)
+            part = ("summary", str(params.get("itemId")), _int(params.get("summaryIndex")))
+            self._send_reasoning(part, str(params.get("delta") or ""))
+        elif method == "item/reasoning/textDelta":
+            part = ("text", str(params.get("itemId")), _int(params.get("contentIndex")))
+            self._send_reasoning(part, str(params.get("delta") or ""))
         elif method == "item/completed" and item.get("type") == "agentMessage":
-            if str(item.get("id")) not in self.commentary or not self.answer:
+            if str(item.get("id")) not in self.commentary:
                 self.answer = str(item.get("text") or "")
         elif method == "thread/tokenUsage/updated":
             usage = params.get("tokenUsage")
