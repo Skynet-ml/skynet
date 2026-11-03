@@ -16,6 +16,9 @@ from ....local.cli_catalog import parse_subscription_model_id
 from ....models.common import ModelConfig
 from ....models.unified import UnifiedModels
 
+# Type parameter nodes exist only on Python 3.12+; the local backend still supports 3.11.
+_TYPE_PARAM_NODES = tuple(getattr(ast, name) for name in ("TypeVar", "ParamSpec", "TypeVarTuple") if hasattr(ast, name))
+
 
 @dataclass
 class MetricLLMScan:
@@ -112,7 +115,7 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
         bound: set[str] = set()
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)) and node not in allowed_fallbacks:
             bound.add(node.id)
-        elif isinstance(node, (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)):
+        elif isinstance(node, _TYPE_PARAM_NODES):
             bound.add(node.name)
         elif isinstance(node, ast.arg):
             bound.add(node.arg)

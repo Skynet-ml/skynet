@@ -29,6 +29,11 @@ from core.worker.unified_aliases import alias_blackbox_metric_model, alias_unifi
 @pytest.mark.parametrize("case", json.loads(Path(__file__).with_name("metric_model_parity.json").read_text()))
 def test_shared_metric_scan_parity(case: dict) -> None:
     """Apply the shared scanner cases."""
+    if not case.get("python_syntax_error"):
+        try:
+            ast.parse(case["code"])
+        except SyntaxError:
+            pytest.skip("case needs newer Python syntax than this interpreter")
     if case.get("python_syntax_error"):
         with pytest.raises(SyntaxError):
             ast.parse(case["code"])
