@@ -909,6 +909,40 @@ def test_unified_custom_novelty_fails_before_sandbox(worker: BackgroundWorker, s
     assert store._jobs["unified-custom"]["message"] == DomainError("submission.byok_novelty_unsupported").detail
 
 
+def test_unified_byok_injection_domain_error_before_sandbox(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """Record a plain domain error when the BYOK bridge rejects a model."""
+    name = "openrouter/anthropic/claude-sonnet-4"
+    payload = copy.deepcopy(REAL_UNIFIED_PAYLOAD)
+    payload["models"] = {"reflection_model": {"name": name, "token_source": "byok", "byok_provider": "anthropic"}}
+    payload["token_source"] = "byok"
+    store.engine = MagicMock()
+    store.seed_job(
+        "unified-inject",
+        payload=payload,
+        payload_overview={"optimization_type": "blackbox", "username": payload["username"], "token_source": "byok"},
+        execution_budget_id="budget",
+        execution_budget_generation=0,
+    )
+    worker.enqueue_job("unified-inject")
+    vault = MagicMock()
+    vault.resolve_connection.return_value = MagicMock(api_base=None, secret="fixture", params={})
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch("core.worker.engine.record_server_event"),
+        patch.object(worker, "_get_service"),
+        patch("core.worker.engine.ProviderKeyVault", return_value=vault),
+        patch("core.worker.engine.bind_protected_sandbox") as bind,
+    ):
+        worker._process_job("unified-inject", 0)
+    vault.resolve_connection.assert_called_with(payload["username"], "anthropic")
+    bind.assert_not_called()
+    assert store._jobs["unified-inject"]["status"] == "failed"
+    assert (
+        store._jobs["unified-inject"]["message"]
+        == DomainError("billing.byok_model_not_served", status=400, model=name, provider="anthropic").detail
+    )
+
+
 def test_process_job_blackbox_without_budget_requires_vercel(
     worker: BackgroundWorker,
     store: FakeJobStore,

@@ -167,6 +167,14 @@ def _byok_provider_cents(record: OperationRecord) -> Decimal | None:
     )
     if not all(type(usage.get(key)) is int and usage[key] >= 0 for key in keys):
         return None
+    responses_cached = 0
+    if keys[0] == "input_tokens" and "input_tokens_details" in usage:
+        details = usage["input_tokens_details"]
+        if not isinstance(details, Mapping):
+            return None
+        responses_cached = details.get("cached_tokens", 0)
+        if type(responses_cached) is not int or responses_cached < 0:
+            return None
     provider = str(record.evidence.get("provider") or "")
     if provider == "custom":
         return None
@@ -182,6 +190,8 @@ def _byok_provider_cents(record: OperationRecord) -> Decimal | None:
     prompt_details = usage.get("prompt_tokens_details")
     if isinstance(prompt_details, Mapping) and "prompt_tokens" in usage:
         cache_read = _int(prompt_details.get("cached_tokens"))
+    elif keys[0] == "input_tokens" and "input_tokens_details" in usage:
+        cache_read = responses_cached
     cache_write = _int(usage.get("cache_creation_input_tokens"))
     return Decimal(
         str(

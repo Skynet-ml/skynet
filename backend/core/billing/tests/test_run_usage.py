@@ -224,6 +224,70 @@ def test_byok_openai_cached_tokens_use_cache_price(
     assert row.charged_units == 0
 
 
+@pytest.mark.parametrize(
+    ("details", "expected"),
+    [({"cached_tokens": 1000000}, Decimal(330)), ({}, Decimal(600))],
+)
+def test_byok_responses_cached_tokens_use_cache_price(
+    details: dict, expected: Decimal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Price Responses cached input separately from uncached input."""
+    monkeypatch.setattr(
+        "core.billing.run_usage.cached_token_prices",
+        lambda _model: TokenPrices(prompt=0.000003, completion=0.000015, cache_read=0.0000003),
+    )
+    usage = {"input_tokens": 2000000, "output_tokens": 0, "input_tokens_details": details}
+    (row,) = aggregate(
+        [_op(policy=_BYOK, cents="0", evidence={"provider": "openai", "model": "gpt-4o", "usage": usage})],
+        proposer=False,
+    )
+    assert row.provider_cents == expected
+    assert row.unpriced_calls == 0
+
+
+def test_byok_responses_without_details_uses_uncached_rate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Price Responses input without details as uncached."""
+    monkeypatch.setattr(
+        "core.billing.run_usage.cached_token_prices",
+        lambda _model: TokenPrices(prompt=0.000003, completion=0.000015, cache_read=0.0000003),
+    )
+    usage = {"input_tokens": 2000000, "output_tokens": 0}
+    (row,) = aggregate(
+        [_op(policy=_BYOK, cents="0", evidence={"provider": "openai", "model": "gpt-4o", "usage": usage})],
+        proposer=False,
+    )
+    assert row.provider_cents == Decimal(600)
+    assert row.unpriced_calls == 0
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        None,
+        "invalid",
+        [],
+        {"cached_tokens": None},
+        {"cached_tokens": True},
+        {"cached_tokens": -1},
+        {"cached_tokens": 1.5},
+        {"cached_tokens": "1"},
+    ],
+)
+def test_byok_responses_malformed_cache_details_are_unpriced(details: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leave malformed Responses cache evidence unpriced."""
+    monkeypatch.setattr(
+        "core.billing.run_usage.cached_token_prices",
+        lambda _model: TokenPrices(prompt=0.000003, completion=0.000015, cache_read=0.0000003),
+    )
+    usage = {"input_tokens": 2000000, "output_tokens": 0, "input_tokens_details": details}
+    (row,) = aggregate(
+        [_op(policy=_BYOK, cents="0", evidence={"provider": "openai", "model": "gpt-4o", "usage": usage})],
+        proposer=False,
+    )
+    assert row.provider_cents is None
+    assert row.unpriced_calls == 1
+
+
 def test_byok_custom_provider_is_unpriced(monkeypatch: pytest.MonkeyPatch) -> None:
     """Do not use a catalog price for an unknown custom endpoint."""
     monkeypatch.setattr(

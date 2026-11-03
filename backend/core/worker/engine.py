@@ -901,12 +901,15 @@ class BackgroundWorker:
                     TOKEN_SOURCE_BYOK,
                     default_token_source=token_source,
                 ):
-                    inject_byok_connections(
-                        payload_dict,
-                        username=execution_payload.username,
-                        vault=ProviderKeyVault(engine=byok_engine),
-                        default_token_source=token_source,
-                    )
+                    try:
+                        inject_byok_connections(
+                            payload_dict,
+                            username=execution_payload.username,
+                            vault=ProviderKeyVault(engine=byok_engine),
+                            default_token_source=token_source,
+                        )
+                    except DomainError as error:
+                        raise domain_service_error(error) from error
                 # Managed-run mirror of the BYOK seam: when key provisioning is
                 # configured, dispatch under a per-user OpenRouter runtime key
                 # whose spend limit was just synced to the account's balance —
