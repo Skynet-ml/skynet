@@ -286,7 +286,8 @@ def test_turn_effort_reaches_the_cli(tmp_path: Path) -> None:
         ("claude", "anthropic/claude-sonnet-4.6", "max", "max"),
         ("claude", "anthropic/claude-sonnet-4.6", "xhigh", None),
         ("claude", "anthropic/claude-opus-4.5", "high", "high"),
-        ("claude", "anthropic/claude-opus-4.5", "max", None),
+        ("claude", "anthropic/claude-opus-4.5", "max", "high"),
+        ("claude", "anthropic/claude-haiku-4.5", "max", None),
         ("claude", "anthropic/claude-haiku-4.5", "low", None),
         ("claude", "anthropic/claude-sonnet-4.5", "medium", None),
         ("codex", "openai/gpt-6.1-sol", "max", "max"),
@@ -303,7 +304,7 @@ def test_turn_effort_reaches_the_cli(tmp_path: Path) -> None:
 def test_turn_effort_follows_the_model_levels(
     cli: str, model: str, effort: str, sent: str | None, tmp_path: Path
 ) -> None:
-    """Send only a level the model takes on its CLI, map a retired level to its top, and drop any other.
+    """Send only a level the model takes on its CLI, map Max or a retired level to its top, and drop any other.
 
     Args:
         cli: The CLI the turn runs on.

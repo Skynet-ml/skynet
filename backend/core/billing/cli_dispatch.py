@@ -787,8 +787,9 @@ class CliDispatcher:
         # Only claude takes a cache mark from the caller.
         runner_kwargs: dict[str, Any] = {"cache_prefix": prefix} if provider == "claude" and prefix else {}
         levels = cli_efforts(provider, self.model)
-        # An old pick of a retired level runs at the model's top level.
-        if effort in get_args(RetiredEffort) and levels:
+        # An old pick of a retired level, which the UI shows as Max, runs at the
+        # model's top level. So does Max on a model whose top is lower.
+        if (effort in get_args(RetiredEffort) or (effort == "max" and "max" not in levels)) and levels:
             effort = levels[-1]
         if isinstance(effort, str) and effort in levels:
             runner_kwargs["effort"] = effort
