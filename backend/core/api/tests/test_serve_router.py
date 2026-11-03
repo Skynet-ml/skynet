@@ -896,7 +896,7 @@ def test_serve_chat_streams_react_turn(serve_client: TestClient, serve_store: _F
     assert "text/event-stream" in resp.headers["content-type"]
     assert "event: done" in resp.text
     assert run_chat.call_args.kwargs["steer_key"] == "turn"
-    assert run_chat.call_args.kwargs["approval_owner"] == "alice"
+    assert run_chat.call_args.kwargs["steer_owner"] == "alice"
 
 
 def test_protected_serve_chat_ignores_steer_key(serve_client: TestClient, serve_store: _FakeJobStore) -> None:

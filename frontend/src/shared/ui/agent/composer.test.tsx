@@ -57,6 +57,7 @@ void describe("Composer", () => {
     const html = render({ midTurn: midTurnOf(() => store, store.getSnapshot()) });
     assert.ok(html.includes(msg("agent.pending.paused")), html);
     assert.ok(html.includes(msg("agent.pending.send_now")), html);
+    assert.ok(html.includes(`<span role="status">${msg("agent.pending.paused")}</span>`), html);
     assert.ok(!html.includes(msg("agent.pending.stop_and_send_now")), html);
   });
 
@@ -67,5 +68,8 @@ void describe("Composer", () => {
     const html = render({ streaming: true, onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
     assert.ok(html.includes(msg("agent.pending.stop_and_send_now")), html);
     assert.ok(!html.includes(msg("agent.pending.paused")), html);
+    assert.ok(html.includes("[@media(pointer:fine)]:opacity-0"), html);
+    assert.ok(html.includes("[@media(pointer:coarse)]:min-h-11"), html);
+    assert.ok(html.includes("[@media(pointer:coarse)]:min-w-11"), html);
   });
 });

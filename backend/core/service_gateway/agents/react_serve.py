@@ -124,7 +124,7 @@ async def _drive_react_chat(
     mcp_url: str,
     auth_header: str | None,
     steer_key: str | None = None,
-    approval_owner: str | None = None,
+    steer_owner: str | None = None,
 ) -> str:
     """Build a fresh live ReActV2 for this turn, run it, and return the reply.
 
@@ -150,7 +150,7 @@ async def _drive_react_chat(
         auth_header: Verbatim ``Authorization`` header forwarded to the MCP
             session so tool calls authenticate as the chatting owner.
         steer_key: Optional key for messages posted while this turn runs.
-        approval_owner: Authenticated owner of the steer mailbox.
+        steer_owner: Authenticated owner of the steer mailbox.
 
     Returns:
         The assistant reply assembled from the program's output fields.
@@ -203,11 +203,11 @@ async def _drive_react_chat(
 
         output_fields = list(signature_cls.output_fields)
         input_fields = list(signature_cls.input_fields)
-        if steer_key and approval_owner and input_fields:
+        if steer_key and steer_owner and input_fields:
             attach_steering(
                 program,
                 SteerInbox(
-                    owner=approval_owner,
+                    owner=steer_owner,
                     steer_key=steer_key,
                     input_field=input_fields[0],
                     emit=emit,
@@ -265,7 +265,7 @@ async def run_react_chat(
     auth_header: str | None = None,
     approval_registry: ApprovalRegistry | None = None,
     steer_key: str | None = None,
-    approval_owner: str | None = None,
+    steer_owner: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Stream one chat turn against a served, optimized ReActV2 program.
 
@@ -288,7 +288,7 @@ async def run_react_chat(
         approval_registry: Registry used for tool-approval coordination;
             defaults to the process-wide singleton.
         steer_key: Optional key for messages posted while this turn runs.
-        approval_owner: Authenticated owner of the steer mailbox.
+        steer_owner: Authenticated owner of the steer mailbox.
 
     Yields:
         SSE event dicts of shape ``{"event": str, "data": dict}``.
@@ -314,7 +314,7 @@ async def run_react_chat(
             mcp_url=mcp_url,
             auth_header=auth_header,
             steer_key=steer_key,
-            approval_owner=approval_owner,
+            steer_owner=steer_owner,
         )
     )
     try:

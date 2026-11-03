@@ -18,6 +18,7 @@
   "agent.pending.paused": "Queue paused",
   "agent.pending.send_now": "Send now",
   "agent.pending.stop_and_send_now": "Stop and send now",
+  "agent.pending.uncertain": "Not confirmed",
   "agent.pending.steering": "Will be read at the agent's next step",
   "agent.pending.steer": "Steer",
   "agent.pending.edit": "Edit message",

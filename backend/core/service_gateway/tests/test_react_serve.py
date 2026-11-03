@@ -270,7 +270,7 @@ async def test_live_chat_steers_next_step_without_extra_metered_calls(
         model_name="scripted",
         mcp_url="http://mcp.local",
         steer_key="turn" if steering else None,
-        approval_owner="alice",
+        steer_owner="alice",
     )
     with dspy.context(adapter=dspy.ChatAdapter(use_native_function_calling=True)):
         events = [

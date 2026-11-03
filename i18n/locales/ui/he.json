@@ -18,6 +18,7 @@
   "agent.pending.paused": "התור מושהה",
   "agent.pending.send_now": "שליחה עכשיו",
   "agent.pending.stop_and_send_now": "עצירה ושליחה עכשיו",
+  "agent.pending.uncertain": "לא אושר",
   "agent.pending.steering": "הסוכן יקרא את זה בשלב הבא שלו",
   "agent.pending.steer": "הכוונה",
   "agent.pending.edit": "עריכת ההודעה",

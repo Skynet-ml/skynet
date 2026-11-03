@@ -12,7 +12,8 @@ export interface UseSteerQueueArgs {
   /** A turn is running in this chat. */
   busy: boolean;
   /** Start a new turn with `text`; called for each queued follow-up in turn. */
-  send: (text: string) => void;
+  send: (text: string) => boolean | void;
+  maxLength?: number;
 }
 
 export interface SteerQueueHandle {
@@ -45,12 +46,13 @@ export function agentSteerChannel(steerKey: string): SteerChannel {
  * `busy` is applied after the render commits, so a queued follow-up is sent
  * against the finished turn's committed history.
  */
-export function useSteerQueue({ busy, send, stop }: UseSteerQueueArgs): SteerQueueHandle {
+export function useSteerQueue({ busy, send, stop, maxLength }: UseSteerQueueArgs): SteerQueueHandle {
   const [store] = React.useState(() => new SteerQueue(send));
   // Before the busy effect below, so a follow-up runs through the latest send.
   React.useEffect(() => {
     store.setSend(send);
-  }, [store, send]);
+    if (maxLength !== undefined) store.setMaxLength(maxLength);
+  }, [store, send, maxLength]);
   React.useEffect(() => {
     store.setBusy(busy);
   }, [store, busy]);

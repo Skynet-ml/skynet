@@ -1561,6 +1561,7 @@
   "agent.pending.paused": "대기열 일시 중지됨",
   "agent.pending.send_now": "지금 보내기",
   "agent.pending.stop_and_send_now": "중지하고 지금 보내기",
+  "agent.pending.uncertain": "확인되지 않음",
   "agent.pending.steering": "에이전트가 다음 단계에서 읽습니다",
   "agent.pending.steer": "방향 지시",
   "agent.pending.edit": "메시지 편집",

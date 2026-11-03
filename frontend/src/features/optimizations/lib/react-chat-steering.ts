@@ -1,5 +1,8 @@
 import type { AgentMessage } from "../../../shared/ui/agent/types";
 
+/** Matches ServeChatRequest.user_message's AGENT_MAX_TEXT limit. */
+export const REACT_CHAT_USER_MESSAGE_MAX_CHARS = 2000;
+
 /** Only the running non-protected turn announces its requested mailbox. */
 export function reactChatCanSteer(announcedKey: string | undefined, requestedKey: string): boolean {
   return Boolean(requestedKey && announcedKey === requestedKey);
@@ -17,4 +20,10 @@ export function appendReactChatSteer(messages: AgentMessage[], text: string): Ag
     { role: "user", content: text, createdAt: Date.now() },
     { role: "assistant", content: "", toolCalls: [] },
   ];
+}
+
+/** Remove the reply prefix repeated by a program after it accepts a steer. */
+export function removeReplyBeforeSteer(reply: string, beforeSteer: string): string {
+  if (!beforeSteer || !reply.startsWith(beforeSteer)) return reply;
+  return reply.slice(beforeSteer.length).trimStart();
 }

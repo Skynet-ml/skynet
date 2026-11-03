@@ -1561,6 +1561,7 @@
   "agent.pending.paused": "Cola en pausa",
   "agent.pending.send_now": "Enviar ahora",
   "agent.pending.stop_and_send_now": "Detener y enviar ahora",
+  "agent.pending.uncertain": "No confirmado",
   "agent.pending.steering": "Se leerá en el próximo paso del agente",
   "agent.pending.steer": "Orientar",
   "agent.pending.edit": "Editar mensaje",

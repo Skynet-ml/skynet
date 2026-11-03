@@ -19,9 +19,10 @@ Mentre l’agente lavora, il campo del messaggio resta disponibile:
 
 - **Invio** indirizza il lavoro corrente, dove supportato. L’agente legge il messaggio al passo successivo. **Tab** accoda un nuovo turno. Se non è possibile indirizzare, anche Invio accoda il messaggio.
 - In **Messaggi in attesa** puoi modificare, eliminare e trascinare i messaggi per riordinarli. **Indirizza**, quando disponibile, passa un messaggio dalla coda al lavoro corrente.
-- **Interrompi** ferma il turno e mette in pausa la coda. Le istruzioni non lette tornano nell’elenco. Nulla parte automaticamente. **Esc** nel campo fa lo stesso, salvo con un menu aperto o durante la composizione con IME.
+- Un messaggio con l’etichetta **Non confermato** non è stato ritirato con certezza. Invialo ora, modificalo o eliminalo esplicitamente.
+- **Interrompi** ferma il turno e mette in pausa la coda. Le istruzioni non lette tornano nell’elenco. Nulla parte automaticamente. **Esc** nel campo fa lo stesso, salvo con un menu aperto o durante la composizione con IME. Esc chiude prima un suggerimento o un menu di questo campo.
 - Senza un turno attivo, **Invia ora** invia il primo messaggio della coda in pausa. Gli altri proseguono in ordine. Anche la conclusione normale di un turno avvia il messaggio successivo.
-- **Interrompi e invia ora** ferma il turno e invia l’intero elenco come un unico nuovo turno. Attende il ritorno delle istruzioni non lette, poi le unisce prima dei messaggi in coda, separandoli con righe vuote. Non reinvia istruzioni già lette. Se il ritiro non è confermato, la coda resta in pausa.
+- **Interrompi e invia ora** ferma il turno e invia l’intero elenco come un unico nuovo turno. Attende il ritorno delle istruzioni non lette, poi le unisce prima dei messaggi in coda, separandoli con righe vuote. Non reinvia istruzioni già lette. I messaggi non confermati restano nell’elenco e non vengono inclusi. Gli altri continuano normalmente.
 - L’assistente della documentazione e la chat protetta dei programmi distribuiti usano **solo la coda**. Invio e Tab accodano i messaggi. L’assistente della documentazione mette in pausa quelli restanti dopo un limite di richieste.
 
 ## Che cosa può fare l'agente

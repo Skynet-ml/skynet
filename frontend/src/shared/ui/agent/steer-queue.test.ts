@@ -10,7 +10,7 @@ import {
   type SteerChannel,
 } from "./steer-queue.ts";
 
-const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 250));
 
 test("Stop pauses queued-only input; Send now resumes one turn at a time", async () => {
   const { queue, sent } = setup();
@@ -71,12 +71,13 @@ test("Stop and send now waits for withdrawal, skips delivered, and joins tray or
   finish();
   await flush();
   assert.deepEqual(sent, ["steer one\n\nsteer two\n\nqueue one\n\nqueue two"]);
-  assert.deepEqual(queue.getSnapshot().queued, []);
+  assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), ["delivered"]);
+  assert.equal(queue.getSnapshot().queued[0].uncertain, true);
 });
 
 test("Stop and send now keeps unknown withdrawal outcomes paused", async () => {
   const { queue, sent } = setup();
-  queue.openTurn({ post: async () => "srv-1", withdraw: async () => { throw new Error("offline"); } });
+  queue.openTurn({ post: async () => "srv-1", withdraw: async () => { throw new TypeError("offline"); } });
   queue.steer("uncertain");
   await flush();
   queue.stopAndSendNow(() => { queue.pause(); queue.setBusy(false); });
@@ -106,12 +107,12 @@ test("Stop and send now joins a queue-only tray, and an empty tray does not stop
   assert.deepEqual(sent, ["one\n\ntwo"]);
 });
 
-test("unknown withdrawal stays queued and paused instead of sending twice", async () => {
+test("unknown withdrawal stays uncertain and does not send twice", async () => {
   const { queue, sent } = setup();
   let attempts = 0;
   queue.openTurn({ post: async () => "read", withdraw: async () => {
     attempts += 1;
-    throw new Error("lost response");
+    throw new TypeError("lost response");
   } });
   queue.steer("only once");
   await flush();
@@ -128,7 +129,7 @@ test("withdraw retries explicit ids and treats missing rows as returned", async 
   queue.openTurn({ post: async () => "unread", withdraw: async (ids) => {
     assert.deepEqual(ids, ["unread"]);
     attempts += 1;
-    if (attempts === 1) throw new Error("lost response");
+    if (attempts === 1) throw new TypeError("lost response");
     return { ids: [], delivered: [] };
   } });
   queue.steer("retry safely");
@@ -159,7 +160,7 @@ for (const action of ["edit", "reorder"] as const) {
         post: async () => `srv-${++posts}`,
         withdraw: async (ids) => {
           assert.deepEqual(ids, ["srv-1"]);
-          if (outcome === "unknown") throw new Error("offline");
+          if (outcome === "unknown") throw new TypeError("offline");
           return { ids: [], delivered: outcome === "delivered" ? ids : [] };
         },
       });
@@ -176,7 +177,7 @@ for (const action of ["edit", "reorder"] as const) {
       if (outcome === "unknown") {
         queue.setBusy(false);
         await flush();
-        assert.equal(queue.getSnapshot().paused, true);
+        assert.equal(queue.getSnapshot().paused, false);
         assert.deepEqual(queue.getSnapshot().queued.map((q) => q.text), ["instruction"]);
       }
       assert.deepEqual(sent, []);
@@ -184,18 +185,56 @@ for (const action of ["edit", "reorder"] as const) {
   }
 }
 
-test("a user-started turn resumes the paused queue", async () => {
+test("a user-started turn keeps the paused queue held", async () => {
   const { queue, sent } = setup();
-  queue.openTurn({ post: async () => "srv-1", withdraw: async () => { throw new Error("offline"); } });
+  queue.openTurn({ post: async () => "srv-1", withdraw: async () => { throw new TypeError("offline"); } });
   queue.steer("held");
+  queue.pause();
   await flush();
   queue.setBusy(false);
   await flush();
   queue.setBusy(true);
-  assert.equal(queue.getSnapshot().paused, false);
+  assert.equal(queue.getSnapshot().paused, true);
   queue.setBusy(false);
   await flush();
-  assert.deepEqual(sent, ["held"]);
+  assert.deepEqual(sent, []);
+});
+
+test("unknown withdrawal is marked uncertain and does not join a later send", async () => {
+  const { queue, sent } = setup();
+  queue.openTurn({ post: async () => "srv-1", withdraw: async () => { throw new TypeError("offline"); } });
+  queue.steer("uncertain");
+  queue.enqueue("certain");
+  await flush();
+  queue.setBusy(false);
+  await flush();
+  assert.equal(queue.getSnapshot().queued[0].uncertain, true);
+  assert.deepEqual(sent, ["certain"]);
+  queue.sendNow();
+  assert.deepEqual(sent, ["certain", "uncertain"]);
+});
+
+test("a missing delivered field is treated as no delivered ids", async () => {
+  const { queue, sent } = setup();
+  queue.openTurn({ post: async () => "srv-1", withdraw: async () => ({ ids: ["srv-1"] } as never) });
+  queue.steer("old response");
+  await flush();
+  queue.setBusy(false);
+  await flush();
+  assert.deepEqual(sent, ["old response"]);
+});
+
+test("stop-and-send preserves the tray when the joined message is too long", async () => {
+  const { queue, sent } = setup();
+  queue.setMaxLength(5);
+  queue.enqueue("1234");
+  queue.enqueue("5678");
+  queue.setBusy(true);
+  queue.stopAndSendNow(() => queue.setBusy(false));
+  await flush();
+  assert.deepEqual(sent, []);
+  assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), ["1234", "5678"]);
+  assert.equal(queue.getSnapshot().paused, true);
 });
 
 test("turn end waits for editing so withdrawn text is not sent again", async () => {
@@ -233,9 +272,10 @@ test("turn end waits for reordering and does not return the same text twice", as
   const id = queue.getSnapshot().steering[0].id;
   queue.reorderSteering([id]);
   await flush();
-  assert.equal(await queue.edit(id), null);
+  const editing = queue.edit(id);
   queue.setBusy(false);
   finish();
+  assert.equal(await editing, null);
   await flush();
   assert.deepEqual(sent, ["once"]);
   assert.deepEqual(queue.getSnapshot().queued, []);
@@ -393,7 +433,7 @@ test("a failed withdraw keeps the user's steers rather than losing them", async 
   queue.openTurn({
     post: async () => "srv-1",
     withdraw: async () => {
-      throw new Error("network");
+      throw new TypeError("network");
     },
   });
   queue.steer("keep me");
@@ -401,7 +441,8 @@ test("a failed withdraw keeps the user's steers rather than losing them", async 
   queue.setBusy(false);
   await flush();
   assert.deepEqual(sent, []);
-  assert.equal(queue.getSnapshot().paused, true);
+  assert.equal(queue.getSnapshot().paused, false);
+  assert.equal(queue.getSnapshot().queued[0].uncertain, true);
 });
 
 test("a rejected steer POST moves the message to the queue", async () => {
@@ -515,4 +556,136 @@ test("appendToDraft appends an edited item to a non-empty draft", () => {
   assert.equal(appendToDraft("", "x"), "x");
   assert.equal(appendToDraft("  ", "x"), "x");
   assert.equal(appendToDraft("draft ", "x"), "draft\nx");
+});
+
+test("a later applied event removes an uncertain pulled message", async () => {
+  const { queue } = setup();
+  queue.openTurn({ post: async () => "server", withdraw: async () => { throw new TypeError("network"); } });
+  queue.steer("unknown");
+  await flush();
+  await queue.edit(queue.getSnapshot().steering[0].id);
+  assert.equal(queue.getSnapshot().queued[0].uncertain, true);
+  queue.applied(["server"]);
+  assert.deepEqual(queue.getSnapshot().queued, []);
+});
+
+test("two quick deletes both withdraw their messages", async () => {
+  const { queue } = setup();
+  const channel = fakeChannel();
+  queue.openTurn(channel);
+  queue.steer("one");
+  queue.steer("two");
+  await flush();
+  const [one, two] = queue.getSnapshot().steering;
+  queue.remove(one.id);
+  queue.remove(two.id);
+  await flush();
+  assert.equal(channel.unread.size, 0);
+});
+
+test("remove and edit wait for turn-end withdrawal", async () => {
+  const { queue, sent } = setup();
+  let finish = () => {};
+  let next = 0;
+  queue.openTurn({ post: async () => `s${++next}`, withdraw: (ids) => new Promise((resolve) => {
+    finish = () => resolve({ ids, delivered: [] });
+  }) });
+  queue.steer("remove");
+  queue.steer("edit");
+  await flush();
+  const [one, two] = queue.getSnapshot().steering;
+  queue.pause();
+  queue.setBusy(false);
+  await flush();
+  queue.remove(one.id);
+  const editing = queue.edit(two.id);
+  finish();
+  assert.equal(await editing, "edit");
+  await flush();
+  assert.deepEqual(queue.getSnapshot().queued, []);
+  assert.deepEqual(sent, []);
+});
+
+test("a steer delivered to a stopped turn stays visible", async () => {
+  const { queue } = setup();
+  queue.openTurn({ post: async () => "read", withdraw: async () => ({ ids: [], delivered: ["read"] }) });
+  queue.steer("visible");
+  await flush();
+  queue.pause();
+  queue.setBusy(false);
+  await flush();
+  assert.equal(queue.getSnapshot().queued[0].text, "visible");
+  assert.equal(queue.getSnapshot().queued[0].uncertain, true);
+});
+
+test("a send that starts no turn preserves the item and pauses", async () => {
+  const queue = new SteerQueue(() => false);
+  queue.enqueue("keep");
+  await flush();
+  assert.equal(queue.getSnapshot().paused, true);
+  assert.equal(queue.getSnapshot().queued[0].text, "keep");
+});
+
+test("a rejected post chain does not leave settling stuck", async () => {
+  const { queue, sent } = setup();
+  queue.openTurn({ post: () => { throw new Error("handler failed"); }, withdraw: async () => ({ ids: [], delivered: [] }) });
+  queue.steer("bad post");
+  queue.enqueue("next");
+  queue.setBusy(false);
+  await flush();
+  assert.deepEqual(sent, ["bad post"]);
+  assert.equal(queue.getSnapshot().queued[0].text, "next");
+});
+
+test("a new busy signal clears a stale stop-and-send intent without unpausing", async () => {
+  const { queue, sent } = setup();
+  queue.setBusy(true);
+  queue.enqueue("one");
+  queue.enqueue("two");
+  queue.stopAndSendNow(() => {});
+  queue.setBusy(true);
+  queue.setBusy(false);
+  await flush();
+  assert.deepEqual(sent, []);
+  assert.equal(queue.getSnapshot().queued.length, 2);
+});
+
+test("withdraw retries wait and do not retry a permanent HTTP error", async () => {
+  const { queue } = setup();
+  const times: number[] = [];
+  queue.openTurn({ post: async () => "s", withdraw: async (ids) => {
+    times.push(Date.now());
+    if (times.length === 1) throw new TypeError("network");
+    return { ids, delivered: [] };
+  } });
+  queue.steer("retry");
+  await flush();
+  queue.setBusy(false);
+  await flush();
+  assert.equal(times.length, 2);
+  assert.ok(times[1] - times[0] >= 40);
+  let attempts = 0;
+  queue.openTurn({ post: async () => "other", withdraw: async () => {
+    attempts += 1;
+    throw Object.assign(new Error("forbidden"), { status: 403 });
+  } });
+  queue.steer("hold");
+  await flush();
+  queue.setBusy(false);
+  await flush();
+  assert.equal(attempts, 1);
+});
+
+test("opening and steering a user turn preserves a paused tray", async () => {
+  const { queue, sent } = setup();
+  queue.setBusy(true);
+  queue.enqueue("held");
+  queue.pause();
+  queue.setBusy(false);
+  queue.openTurn(fakeChannel());
+  queue.steer("manual");
+  assert.equal(queue.getSnapshot().paused, true);
+  queue.setBusy(false);
+  await flush();
+  assert.deepEqual(sent, []);
 });

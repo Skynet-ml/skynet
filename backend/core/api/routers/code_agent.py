@@ -315,6 +315,7 @@ class CodeAgentRequest(BaseModel):
     )
     steer_key: str | None = Field(
         default=None,
+        min_length=1,
         max_length=STEER_KEY_MAX_CHARS,
         description=(
             "Client-chosen key for this turn. Messages posted to "

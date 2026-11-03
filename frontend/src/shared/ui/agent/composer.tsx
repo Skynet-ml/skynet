@@ -244,11 +244,16 @@ export function Composer({
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-    const popupOpen = Boolean(suggestion || e.currentTarget.getAttribute("aria-expanded") === "true" ||
-      e.currentTarget.ownerDocument.querySelector(
-        '[role="menu"][data-state="open"], [role="listbox"], [role="dialog"][data-state="open"], [data-radix-popper-content-wrapper] [data-state="open"]',
-      ));
-    if (handleComposerEscape(e, { streaming: Boolean(streaming), popupOpen, composing: false }, onStop)) return;
+    const controlledPopupId = e.currentTarget.getAttribute("aria-controls");
+    const controlledPopup = controlledPopupId
+      ? e.currentTarget.ownerDocument.getElementById(controlledPopupId)
+      : null;
+    const popupOpen = Boolean(
+      suggestion
+      || e.currentTarget.getAttribute("aria-expanded") === "true"
+      || controlledPopup?.getAttribute("data-state") === "open",
+    );
+    if (handleComposerEscape(e, { streaming: Boolean(streaming), popupOpen, composing: Boolean(e.nativeEvent.isComposing || e.keyCode === 229) }, onStop)) return;
     const suggestAction = suggestKeyAction(e, {
       suggestion,
       draft: value,

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { midTurnKeyAction, SteerQueue } from "../../../shared/ui/agent/steer-queue.ts";
-import { appendReactChatSteer, reactChatCanSteer } from "./react-chat-steering.ts";
+import { appendReactChatSteer, reactChatCanSteer, removeReplyBeforeSteer } from "./react-chat-steering.ts";
 
 test("protected turns and turns awaiting capability only queue", () => {
   const queue = new SteerQueue();
@@ -45,4 +45,29 @@ test("empty steers do not alter history; an unused placeholder is replaced", () 
   const before = [{ role: "assistant" as const, content: "" }];
   assert.equal(appendReactChatSteer(before, "  "), before);
   assert.deepEqual(appendReactChatSteer(before, "steer").map((m) => m.role), ["user", "assistant"]);
+});
+
+test("a reply repeated after a steer keeps only the post-steer tail", () => {
+  assert.equal(removeReplyBeforeSteer("before steer and after", "before steer"), "and after");
+  assert.equal(removeReplyBeforeSteer("unrelated", "before steer"), "unrelated");
+  assert.equal(removeReplyBeforeSteer("", "before steer"), "");
+  assert.equal(removeReplyBeforeSteer("reply", ""), "reply");
+});
+
+test("a retry or edited turn leaves old unread steers paused in the tray", async () => {
+  const sent: string[] = [];
+  const queue = new SteerQueue((text) => { sent.push(text); });
+  queue.openTurn({
+    post: async () => "old-steer",
+    withdraw: async (ids) => ({ ids, delivered: [] }),
+  });
+  queue.steer("old unread instruction");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  queue.pause();
+  queue.setBusy(false);
+  queue.setBusy(true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(queue.getSnapshot().paused, true);
+  assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), ["old unread instruction"]);
+  assert.deepEqual(sent, []);
 });

@@ -1561,6 +1561,7 @@
   "agent.pending.paused": "Чергу призупинено",
   "agent.pending.send_now": "Надіслати зараз",
   "agent.pending.stop_and_send_now": "Зупинити й надіслати зараз",
+  "agent.pending.uncertain": "Не підтверджено",
   "agent.pending.steering": "Агент прочитає це на наступному кроці",
   "agent.pending.steer": "Спрямувати",
   "agent.pending.edit": "Редагувати повідомлення",

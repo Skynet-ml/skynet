@@ -962,6 +962,7 @@
   "agent.pending.paused": "佇列已暫停",
   "agent.pending.send_now": "即刻傳送",
   "agent.pending.stop_and_send_now": "停止並即刻傳送",
+  "agent.pending.uncertain": "未確認",
   "agent.pending.steering": "Agent 會喺下一步讀取",
   "agent.pending.steer": "引導",
   "agent.pending.edit": "編輯訊息",

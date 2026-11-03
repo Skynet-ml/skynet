@@ -12,7 +12,12 @@ import type { MidTurnQueue } from "@/shared/ui/agent/steer-queue";
 import { agentSteerChannel, newSteerKey, useSteerQueue } from "@/shared/ui/agent/use-steer-queue";
 
 import { confirmReactServeApproval, streamReactServeChat } from "../lib/react-chat-stream";
-import { appendReactChatSteer, reactChatCanSteer } from "../lib/react-chat-steering";
+import {
+  appendReactChatSteer,
+  reactChatCanSteer,
+  REACT_CHAT_USER_MESSAGE_MAX_CHARS,
+  removeReplyBeforeSteer,
+} from "../lib/react-chat-steering";
 
 export interface ReactServeChatState {
   midTurn: MidTurnQueue;
@@ -50,7 +55,7 @@ export function useReactServeChat(
 
   const abortRef = React.useRef<AbortController | null>(null);
   const sendLatestRef = React.useRef<(text: string) => boolean>(() => false);
-  const sendQueued = React.useCallback((text: string) => { sendLatestRef.current(text); }, []);
+  const sendQueued = React.useCallback((text: string) => sendLatestRef.current(text), []);
   const stopTurn = React.useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
@@ -62,9 +67,11 @@ export function useReactServeChat(
     busy: status === "streaming",
     send: sendQueued,
     stop: stopTurn,
+    maxLength: REACT_CHAT_USER_MESSAGE_MAX_CHARS,
   });
   const reasoningBufRef = React.useRef("");
   const replyBufRef = React.useRef("");
+  const replyBeforeSteerRef = React.useRef<string | null>(null);
   const messagesRef = React.useRef<AgentMessage[]>(messages);
   React.useEffect(() => {
     messagesRef.current = messages;
@@ -139,6 +146,7 @@ export function useReactServeChat(
 
       reasoningBufRef.current = "";
       replyBufRef.current = "";
+      replyBeforeSteerRef.current = null;
 
       setStatus("streaming");
       setStatusLabel(msg("auto.features.agent.panel.hooks.use.generalist.agent.literal.1"));
@@ -177,6 +185,7 @@ export function useReactServeChat(
             if (controller.signal.aborted) return;
             steerStore.applied(ids);
             if (!text.trim()) return;
+            replyBeforeSteerRef.current = (replyBeforeSteerRef.current ?? "") + replyBufRef.current;
             replyBufRef.current = "";
             setMessages((prev) => appendReactChatSteer(prev, text));
           },
@@ -241,6 +250,11 @@ export function useReactServeChat(
             setMessages((prev) => {
               const last = prev[prev.length - 1];
               if (!last || last.role !== "assistant") return prev;
+              let reply = result.assistant_message;
+              if (replyBeforeSteerRef.current !== null) {
+                reply = last.content || removeReplyBeforeSteer(reply, replyBeforeSteerRef.current);
+                if (!reply && !last.toolCalls?.length) return prev.slice(0, -1);
+              }
               const fallback =
                 last.content ||
                 (last.toolCalls?.length
@@ -249,7 +263,7 @@ export function useReactServeChat(
               const next = prev.slice();
               next[next.length - 1] = {
                 ...last,
-                content: result.assistant_message || fallback,
+                content: reply || fallback,
                 model: result.model,
                 createdAt: Date.now(),
               };
@@ -287,7 +301,7 @@ export function useReactServeChat(
   const send = React.useCallback(
     (message: string) => {
       const trimmed = message.trim();
-      if (!trimmed) return false;
+      if (!trimmed || trimmed.length > REACT_CHAT_USER_MESSAGE_MAX_CHARS) return false;
       return runAgent(trimmed, messagesRef.current);
     },
     [runAgent],
@@ -299,7 +313,8 @@ export function useReactServeChat(
   const editAndResend = React.useCallback(
     (messageIndex: number, content: string) => {
       const trimmed = content.trim();
-      if (!trimmed) return;
+      if (!trimmed || trimmed.length > REACT_CHAT_USER_MESSAGE_MAX_CHARS) return;
+      steerStore.pause();
       abortRef.current?.abort();
       abortRef.current = null;
       const truncated = messagesRef.current.slice(0, messageIndex);
@@ -307,7 +322,7 @@ export function useReactServeChat(
       messagesRef.current = truncated;
       runAgent(trimmed, truncated);
     },
-    [runAgent],
+    [runAgent, steerStore],
   );
 
   const retry = React.useCallback(() => {
@@ -322,13 +337,14 @@ export function useReactServeChat(
     if (lastUserIndex === -1) return;
     const lastUser = current[lastUserIndex];
     if (!lastUser) return;
+    steerStore.pause();
     abortRef.current?.abort();
     abortRef.current = null;
     const truncated = current.slice(0, lastUserIndex);
     setMessages(truncated);
     messagesRef.current = truncated;
     runAgent(lastUser.content, truncated);
-  }, [runAgent]);
+  }, [runAgent, steerStore]);
 
   const confirmApproval = React.useCallback(
     async (approved: boolean) => {

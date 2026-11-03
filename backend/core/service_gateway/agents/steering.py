@@ -19,11 +19,12 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from hashlib import blake2b
 from typing import Any
 from uuid import uuid4
 
 import dspy
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from ...storage.models import AgentSteerMessageModel
@@ -33,9 +34,15 @@ logger = logging.getLogger(__name__)
 STEER_APPLIED_EVENT = "steer_applied"
 STEER_KEY_MAX_CHARS = 64
 STEER_TEXT_MAX_CHARS = 20_000
+STEER_PENDING_MAX_MESSAGES = 10
+STEER_PENDING_MAX_CHARS = 20_000
 # A turn never runs this long; older rows belong to turns that ended without
 # a withdraw (a closed tab) and are purged on the next post.
 _STALE_AFTER = timedelta(hours=6)
+
+
+class SteerLimitError(ValueError):
+    """Reject a steer that exceeds its turn's pending input allowance."""
 
 
 class SteerStore:
@@ -46,7 +53,34 @@ class SteerStore:
         self._engine: Any = None
         self._lock = threading.Lock()
         self._local: dict[tuple[str, str], list[tuple[str, str]]] = {}
-        self._delivered: dict[tuple[str, str], set[str]] = {}
+        self._delivered: dict[tuple[str, str], dict[str, None]] = {}
+        self._local_updated: dict[tuple[str, str], datetime] = {}
+
+    def _purge_local(self, now: datetime) -> None:
+        """Expire inactive fallback keys while the store lock is held.
+
+        Args:
+            now: Current UTC time.
+        """
+        stale = [key for key, updated in self._local_updated.items() if updated < now - _STALE_AFTER]
+        for key in stale:
+            self._local.pop(key, None)
+            self._delivered.pop(key, None)
+            self._local_updated.pop(key, None)
+
+    @staticmethod
+    def _check_pending(messages: list[str], text: str) -> None:
+        """Reject input that would exceed the pending count or character cap.
+
+        Args:
+            messages: Text of pending messages for this owner and key.
+            text: Proposed new message.
+
+        Raises:
+            SteerLimitError: The pending allowance would be exceeded.
+        """
+        if len(messages) >= STEER_PENDING_MAX_MESSAGES or sum(map(len, messages)) + len(text) > STEER_PENDING_MAX_CHARS:
+            raise SteerLimitError("The pending steer limit for this turn was reached; queue this message instead.")
 
     def bind_engine(self, engine: Any) -> None:
         """Attach the shared database engine that backs cross-replica delivery.
@@ -66,19 +100,39 @@ class SteerStore:
 
         Returns:
             The new message's id.
+
+        Raises:
+            SteerLimitError: The key's pending input allowance is full.
         """
         message_id = uuid4().hex
         if self._engine is None:
             with self._lock:
-                self._local.setdefault((owner, steer_key), []).append((message_id, text))
+                now = datetime.now(UTC)
+                self._purge_local(now)
+                key = (owner, steer_key)
+                self._check_pending([message for _, message in self._local.get(key, [])], text)
+                self._local.setdefault(key, []).append((message_id, text))
+                self._local_updated[key] = now
             return message_id
         now = datetime.now(UTC)
         with Session(self._engine) as session:
-            session.add(
-                AgentSteerMessageModel(id=message_id, steer_key=steer_key, owner=owner, text=text, created_at=now)
-            )
+            if session.get_bind().dialect.name == "postgresql":
+                # Serialize posts even when this key has no rows to lock yet.
+                lock_key = int.from_bytes(blake2b(f"{owner}\0{steer_key}".encode(), digest_size=8).digest(), signed=True)
+                session.execute(select(func.pg_advisory_xact_lock(lock_key)))
             session.execute(
                 delete(AgentSteerMessageModel).where(AgentSteerMessageModel.created_at < now - _STALE_AFTER)
+            )
+            pending = session.scalars(
+                select(AgentSteerMessageModel.text).where(
+                    AgentSteerMessageModel.owner == owner,
+                    AgentSteerMessageModel.steer_key == steer_key,
+                    AgentSteerMessageModel.taken_at.is_(None),
+                )
+            ).all()
+            self._check_pending(list(pending), text)
+            session.add(
+                AgentSteerMessageModel(id=message_id, steer_key=steer_key, owner=owner, text=text, created_at=now)
             )
             session.commit()
         return message_id
@@ -98,16 +152,18 @@ class SteerStore:
         """
         if self._engine is None:
             with self._lock:
-                waiting = self._local.pop((owner, steer_key), [])
-                if ids is None:
-                    self._delivered.setdefault((owner, steer_key), set()).update(m[0] for m in waiting)
-                    return waiting
-                wanted = set(ids)
-                kept = [m for m in waiting if m[0] not in wanted]
+                now = datetime.now(UTC)
+                self._purge_local(now)
+                key = (owner, steer_key)
+                waiting = self._local.pop(key, [])
+                wanted = set(ids) if ids is not None else None
+                kept = [m for m in waiting if wanted is not None and m[0] not in wanted]
                 if kept:
-                    self._local[(owner, steer_key)] = kept
-                taken = [m for m in waiting if m[0] in wanted]
-                self._delivered.setdefault((owner, steer_key), set()).update(m[0] for m in taken)
+                    self._local[key] = kept
+                taken = [m for m in waiting if wanted is None or m[0] in wanted]
+                if taken:
+                    self._delivered.setdefault(key, {}).update((mid, None) for mid, _ in taken)
+                    self._local_updated[key] = now
                 return taken
         conditions = [
             AgentSteerMessageModel.steer_key == steer_key,
@@ -149,13 +205,20 @@ class SteerStore:
         """
         if self._engine is None:
             with self._lock:
+                self._purge_local(datetime.now(UTC))
                 key = (owner, steer_key)
                 waiting = self._local.get(key, [])
                 wanted = set(ids) if ids is not None else None
                 withdrawn = [mid for mid, _ in waiting if wanted is None or mid in wanted]
-                self._local[key] = [m for m in waiting if m[0] not in withdrawn]
-                delivered = self._delivered.get(key, set())
-                return withdrawn, sorted(delivered if wanted is None else delivered & wanted)
+                kept = [m for m in waiting if m[0] not in withdrawn]
+                if kept:
+                    self._local[key] = kept
+                else:
+                    self._local.pop(key, None)
+                delivered = self._delivered.get(key, {})
+                if not kept and not delivered:
+                    self._local_updated.pop(key, None)
+                return withdrawn, [mid for mid in delivered if wanted is None or mid in wanted]
         conditions = [AgentSteerMessageModel.owner == owner, AgentSteerMessageModel.steer_key == steer_key]
         if ids is not None:
             conditions.append(AgentSteerMessageModel.id.in_(ids))

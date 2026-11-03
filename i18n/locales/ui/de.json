@@ -1561,6 +1561,7 @@
   "agent.pending.paused": "Warteschlange pausiert",
   "agent.pending.send_now": "Jetzt senden",
   "agent.pending.stop_and_send_now": "Stoppen und jetzt senden",
+  "agent.pending.uncertain": "Nicht bestätigt",
   "agent.pending.steering": "Wird im nächsten Schritt des Agenten gelesen",
   "agent.pending.steer": "Steuern",
   "agent.pending.edit": "Nachricht bearbeiten",

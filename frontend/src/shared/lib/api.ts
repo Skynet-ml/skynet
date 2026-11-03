@@ -4256,13 +4256,14 @@ export function parseSteerApplied(data: Record<string, unknown>): { ids: string[
 }
 
 /** Take back explicit ids and report which messages the agent already read. */
-export async function withdrawAgentSteers(steerKey: string, ids: string[]): Promise<{ ids: string[]; delivered: string[] }> {
-  const res = await request<{ ids: string[]; delivered: string[] }>("/optimizations/agent-steer/withdraw", {
+export async function withdrawAgentSteers(steerKey: string, ids: string[]): Promise<{ ids: string[]; delivered?: string[] }> {
+  const res = await request<{ ids: string[]; delivered?: string[] }>("/optimizations/agent-steer/withdraw", {
     method: "POST",
     body: JSON.stringify({ steer_key: steerKey, ids }),
   });
-  if (!Array.isArray(res.ids) || !Array.isArray(res.delivered)) throw new Error("Invalid withdrawal outcome");
-  return { ids: res.ids.map(String), delivered: res.delivered.map(String) };
+  if (!Array.isArray(res.ids)) throw new Error("Invalid withdrawal outcome");
+  if (res.delivered !== undefined && !Array.isArray(res.delivered)) throw new Error("Invalid withdrawal outcome");
+  return { ids: res.ids.map(String), ...(res.delivered === undefined ? {} : { delivered: res.delivered.map(String) }) };
 }
 
 /**

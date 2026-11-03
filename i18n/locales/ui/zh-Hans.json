@@ -1561,6 +1561,7 @@
   "agent.pending.paused": "队列已暂停",
   "agent.pending.send_now": "立即发送",
   "agent.pending.stop_and_send_now": "停止并立即发送",
+  "agent.pending.uncertain": "未确认",
   "agent.pending.steering": "智能体将在下一步读取",
   "agent.pending.steer": "引导",
   "agent.pending.edit": "编辑消息",

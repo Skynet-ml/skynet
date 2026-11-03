@@ -1561,6 +1561,7 @@
   "agent.pending.paused": "Очередь приостановлена",
   "agent.pending.send_now": "Отправить сейчас",
   "agent.pending.stop_and_send_now": "Остановить и отправить сейчас",
+  "agent.pending.uncertain": "Не подтверждено",
   "agent.pending.steering": "Агент прочтёт это на следующем шаге",
   "agent.pending.steer": "Направить",
   "agent.pending.edit": "Изменить сообщение",

@@ -52,6 +52,7 @@ from ...service_gateway.agents.steering import (
     STEER_APPLIED_EVENT,
     STEER_KEY_MAX_CHARS,
     STEER_TEXT_MAX_CHARS,
+    SteerLimitError,
     get_steer_store,
 )
 from ...service_gateway.embedding_pipeline import queue_conversation_embed
@@ -198,6 +199,7 @@ class GeneralistAgentRequest(BaseModel):
     )
     steer_key: str | None = Field(
         default=None,
+        min_length=1,
         max_length=STEER_KEY_MAX_CHARS,
         description=(
             "Client-chosen key for this turn. Messages posted to "
@@ -246,7 +248,7 @@ class SteerWithdrawResponse(BaseModel):
     """Messages returned to the client, oldest first."""
 
     ids: list[str]
-    delivered: list[str]
+    delivered: list[str] = Field(description="Ids already read by the agent, oldest first.")
 
 
 class NextPromptTurn(BaseModel):
@@ -986,7 +988,11 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         Returns:
             The stored message's id.
         """
-        return SteerMessageResponse(id=get_steer_store().post(current_user.username, req.steer_key, req.text))
+        try:
+            message_id = get_steer_store().post(current_user.username, req.steer_key, req.text)
+        except SteerLimitError as exc:
+            raise DomainError("rate_limit.exceeded", status=429, retry_after=1) from exc
+        return SteerMessageResponse(id=message_id)
 
     @router.post(
         "/optimizations/agent-steer/withdraw",

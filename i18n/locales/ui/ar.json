@@ -1561,6 +1561,7 @@
   "agent.pending.paused": "قائمة الانتظار متوقفة مؤقتًا",
   "agent.pending.send_now": "إرسال الآن",
   "agent.pending.stop_and_send_now": "إيقاف وإرسال الآن",
+  "agent.pending.uncertain": "غير مؤكد",
   "agent.pending.steering": "سيقرأها الوكيل في خطوته التالية",
   "agent.pending.steer": "توجيه",
   "agent.pending.edit": "تعديل الرسالة",

@@ -1561,6 +1561,7 @@
   "agent.pending.paused": "कतार रुकी हुई है",
   "agent.pending.send_now": "अभी भेजें",
   "agent.pending.stop_and_send_now": "रोकें और अभी भेजें",
+  "agent.pending.uncertain": "पुष्टि नहीं हुई",
   "agent.pending.steering": "एजेंट इसे अपने अगले चरण में पढ़ेगा",
   "agent.pending.steer": "दिशा दें",
   "agent.pending.edit": "संदेश संपादित करें",

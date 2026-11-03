@@ -330,6 +330,7 @@ class ServeChatRequest(BaseModel):
     user_message: str = Field(..., max_length=AGENT_MAX_TEXT)
     steer_key: str | None = Field(
         default=None,
+        min_length=1,
         max_length=STEER_KEY_MAX_CHARS,
         description=(
             "Client-chosen key for this turn. Messages posted to "
@@ -1777,7 +1778,7 @@ def create_serve_router(*, job_store) -> APIRouter:
                 mcp_url=mcp_url,
                 auth_header=authorization,
                 steer_key=req.steer_key,
-                approval_owner=current_user.username,
+                steer_owner=current_user.username,
             )
             metered = stream_with_llm_metering(
                 source,

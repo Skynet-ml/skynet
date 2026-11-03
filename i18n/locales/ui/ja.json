@@ -1561,6 +1561,7 @@
   "agent.pending.paused": "キューは一時停止中",
   "agent.pending.send_now": "今すぐ送信",
   "agent.pending.stop_and_send_now": "停止して今すぐ送信",
+  "agent.pending.uncertain": "未確認",
   "agent.pending.steering": "エージェントが次のステップで読み取ります",
   "agent.pending.steer": "指示",
   "agent.pending.edit": "メッセージを編集",

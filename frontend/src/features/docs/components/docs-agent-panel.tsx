@@ -44,7 +44,7 @@ import {
   trimHistory,
   type DocsAgentMessage,
 } from "../lib/docs-answer";
-import { docsAskFailure, type DocsAskNotice } from "../lib/docs-queue";
+import { discardStaleDocsResponse, docsAskFailure, type DocsAskNotice } from "../lib/docs-queue";
 
 const STORAGE_KEY = "docs-agent-history";
 
@@ -166,6 +166,7 @@ export function DocsAgentPanel({
     busy: streaming,
     send: sendQueued,
     stop: stopAnswer,
+    maxLength: MAX_QUESTION_CHARS,
   });
 
   const ask = React.useCallback(
@@ -254,11 +255,14 @@ export function DocsAgentPanel({
           body: JSON.stringify(body),
           signal: controller.signal,
         });
-        if (abortRef.current !== controller) return;
+        if (await discardStaleDocsResponse(
+          res,
+          controller.signal.aborted || abortRef.current !== controller,
+        )) return;
         failed = docsAskFailure(res.status, Boolean(res.body), () => steerStore.pause());
         if (!failed && res.body) {
           await readServerSentEvents(res.body, (event) => {
-            if (controller.signal.aborted) return;
+            if (controller.signal.aborted || abortRef.current !== controller) return;
             dispatchGeneralistEvent(handlers, event.event, event.data, () => labels.agentError);
           });
           if (!failed && (!done || !turn.content.trim())) failed = "error";

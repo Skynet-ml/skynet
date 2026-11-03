@@ -19,9 +19,10 @@ Während der Agent arbeitet, bleibt das Eingabefeld verfügbar:
 
 - **Enter** steuert die laufende Arbeit, sofern dies unterstützt wird. Der Agent liest die Nachricht beim nächsten Schritt. **Tab** stellt eine neue Runde in die Warteschlange. Ohne Steuerungsfunktion reiht auch Enter die Nachricht ein.
 - Unter **Ausstehende Nachrichten** können Sie Nachrichten bearbeiten, löschen und durch Ziehen neu anordnen. **Steuern** übergibt eine wartende Nachricht an die laufende Arbeit, sofern verfügbar.
-- **Stoppen** beendet die laufende Runde und pausiert die Warteschlange. Ungelesene Steuerungsnachrichten kehren zurück. Nichts startet automatisch. **Esc** im Eingabefeld bewirkt dasselbe, außer bei geöffnetem Menü oder während einer IME-Texteingabe.
+- Eine mit **Nicht bestätigt** markierte Nachricht wurde nicht sicher zurückgezogen. Senden Sie sie ausdrücklich, bearbeiten oder löschen Sie sie.
+- **Stoppen** beendet die laufende Runde und pausiert die Warteschlange. Ungelesene Steuerungsnachrichten kehren zurück. Nichts startet automatisch. **Esc** im Eingabefeld bewirkt dasselbe, außer bei geöffnetem Menü oder während einer IME-Texteingabe. Esc schließt zuerst einen Vorschlag oder ein Menü dieses Eingabefelds.
 - Im Ruhezustand sendet **Jetzt senden** die erste Nachricht der pausierten Warteschlange. Die übrigen folgen der Reihe nach. Auch ein normaler Rundenabschluss startet die nächste Nachricht.
-- **Stoppen und jetzt senden** stoppt die Runde und sendet den gesamten Wartebereich als eine neue Runde. Ungelesene Steuerungsnachrichten werden zuerst zurückgeholt und vor den übrigen Nachrichten mit Leerzeilen verbunden. Bereits gelesene Nachrichten werden nicht erneut gesendet. Bei unbestätigtem Rückruf bleibt die Warteschlange pausiert.
+- **Stoppen und jetzt senden** stoppt die Runde und sendet den gesamten Wartebereich als eine neue Runde. Ungelesene Steuerungsnachrichten werden zuerst zurückgeholt und vor den übrigen Nachrichten mit Leerzeilen verbunden. Bereits gelesene Nachrichten werden nicht erneut gesendet. Unbestätigte Nachrichten bleiben im Wartebereich und werden nicht mitgesendet. Andere Nachrichten laufen normal weiter.
 - Der Dokumentationsassistent und geschützte Chats mit bereitgestellten Programmen unterstützen **nur Warteschlangen**. Enter und Tab reihen dort Nachrichten ein. Nach einem Anfragelimit pausiert der Dokumentationsassistent die übrigen Nachrichten.
 
 ## Was der Agent kann

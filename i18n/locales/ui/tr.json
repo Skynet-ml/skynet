@@ -1561,6 +1561,7 @@
   "agent.pending.paused": "Kuyruk duraklatıldı",
   "agent.pending.send_now": "Şimdi gönder",
   "agent.pending.stop_and_send_now": "Durdur ve şimdi gönder",
+  "agent.pending.uncertain": "Doğrulanmadı",
   "agent.pending.steering": "Aracı bunu bir sonraki adımında okuyacak",
   "agent.pending.steer": "Yönlendir",
   "agent.pending.edit": "Mesajı düzenle",

@@ -27,7 +27,7 @@ import type { PendingMessage } from "./steer-queue";
 interface PendingMessagesProps {
   paused: boolean;
   streaming: boolean;
-  onSendNow: () => void;
+  onSendNow: (id?: string) => void;
   onStopAndSendNow?: () => void;
   queued: readonly PendingMessage[];
   steering: readonly PendingMessage[];
@@ -41,7 +41,7 @@ interface PendingMessagesProps {
 }
 
 const iconButtonClass = cn(
-  "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground",
+  "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11",
   "transition-colors hover:bg-accent/60 hover:text-foreground",
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
 );
@@ -54,6 +54,8 @@ function PendingRow({
   onEdit,
   onRemove,
   onDragEnd,
+  onSendNow,
+  canSendNow,
 }: {
   item: PendingMessage;
   steering: boolean;
@@ -62,6 +64,8 @@ function PendingRow({
   onEdit: (id: string) => void;
   onRemove: (id: string) => void;
   onDragEnd: () => void;
+  onSendNow: (id?: string) => void;
+  canSendNow: boolean;
 }) {
   const controls = useDragControls();
   const removeLabel = msg("agent.pending.remove");
@@ -72,20 +76,23 @@ function PendingRow({
       dragListener={false}
       dragControls={controls}
       onDragEnd={onDragEnd}
-      className="group relative flex h-9 items-center gap-1.5 rounded-lg ps-1 pe-1 hover:bg-accent/30"
+      className="group relative flex min-h-9 items-center gap-1.5 rounded-lg ps-1 pe-1 hover:bg-accent/30 [@media(pointer:coarse)]:min-h-11"
     >
       <button
         type="button"
         aria-label={msg("agent.pending.drag")}
         onPointerDown={(e) => controls.start(e)}
         className={cn(
-          "flex h-7 w-4 shrink-0 cursor-grab touch-none items-center justify-center text-muted-foreground",
+          "flex h-7 w-4 shrink-0 cursor-grab touch-none items-center justify-center text-muted-foreground [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11",
+          "[@media(pointer:fine)]:opacity-0 [@media(pointer:fine)]:group-hover:opacity-100 [@media(pointer:fine)]:group-focus-within:opacity-100",
           "active:cursor-grabbing",
         )}
       >
         <DotsSixVertical className="size-3.5" />
       </button>
-      {steering ? (
+      {item.uncertain ? (
+        <span className="shrink-0 px-1.5 text-xs text-muted-foreground">{msg("agent.pending.uncertain")}</span>
+      ) : steering ? (
         <TooltipButton tooltip={msg("agent.pending.steering")} side="top">
           <span className="inline-flex shrink-0 text-muted-foreground">
             <ArrowBendDownRight className="size-4 rtl:-scale-x-100" />
@@ -97,17 +104,17 @@ function PendingRow({
       <p className="min-w-0 flex-1 truncate text-sm" title={previewText(item.text)}>
         {previewText(item.text)}
       </p>
-      {steering ? (
+      {steering && !item.uncertain ? (
         <span className="shrink-0 px-1.5 text-xs text-muted-foreground">
           {msg("agent.pending.steering_badge")}
         </span>
       ) : (
-        canPromote && (
+        canPromote && !item.uncertain && (
           <button
             type="button"
             onClick={() => onPromote(item.id)}
             className={cn(
-              "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-sm text-muted-foreground",
+              "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-sm text-muted-foreground [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11",
               "transition-colors hover:bg-accent/60 hover:text-foreground",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
             )}
@@ -132,7 +139,12 @@ function PendingRow({
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" side="top">
-          <DropdownMenuItem onSelect={() => onEdit(item.id)}>
+          {item.uncertain && canSendNow && (
+            <DropdownMenuItem onSelect={() => onSendNow(item.id)} className="[@media(pointer:coarse)]:min-h-11">
+              {msg("agent.pending.send_now")}
+            </DropdownMenuItem>
+          )}
+          <DropdownMenuItem onSelect={() => onEdit(item.id)} className="[@media(pointer:coarse)]:min-h-11">
             <PencilSimple className="size-4" />
             {msg("agent.pending.edit")}
           </DropdownMenuItem>
@@ -158,7 +170,7 @@ function PendingSection({
   onReorder: (ids: string[]) => void;
   rowProps: Pick<
     React.ComponentProps<typeof PendingRow>,
-    "canPromote" | "onPromote" | "onEdit" | "onRemove"
+    "canPromote" | "onPromote" | "onEdit" | "onRemove" | "onSendNow" | "canSendNow"
   >;
 }) {
   const [dragOrder, setDragOrder] = React.useState<string[] | null>(null);
@@ -207,7 +219,7 @@ export function PendingMessages({
   onReorderSteering,
 }: PendingMessagesProps) {
   if (queued.length === 0 && steering.length === 0) return null;
-  const rowProps = { canPromote, onPromote, onEdit, onRemove };
+  const rowProps = { canPromote, onPromote, onEdit, onRemove, onSendNow, canSendNow: !streaming };
   return (
     <div
       aria-label={msg("agent.pending.list_label")}
@@ -216,13 +228,13 @@ export function PendingMessages({
     >
       {(paused || (streaming && onStopAndSendNow)) && (
         <div className="flex items-center justify-between gap-2 px-2 py-1 text-xs text-muted-foreground">
-          <span>{msg(paused ? "agent.pending.paused" : "agent.pending.list_label")}</span>
+          <span role={paused ? "status" : undefined}>{msg(paused ? "agent.pending.paused" : "agent.pending.list_label")}</span>
           {streaming && onStopAndSendNow ? (
-            <Button type="button" variant="ghost" size="sm" onClick={onStopAndSendNow}>
+            <Button type="button" variant="ghost" size="sm" className="[@media(pointer:coarse)]:min-h-11" onClick={onStopAndSendNow}>
               {msg("agent.pending.stop_and_send_now")}
             </Button>
           ) : !streaming && (
-            <Button type="button" variant="ghost" size="sm" onClick={onSendNow}>
+            <Button type="button" variant="ghost" size="sm" className="[@media(pointer:coarse)]:min-h-11" onClick={() => onSendNow()}>
               {msg("agent.pending.send_now")}
             </Button>
           )}
