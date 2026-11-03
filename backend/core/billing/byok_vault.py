@@ -96,7 +96,7 @@ _PROVIDER_PROBES: dict[str, dict[str, str]] = {
     },
     "xai": _bearer_probe("https://api.x.ai/v1/models"),
     "groq": _bearer_probe("https://api.groq.com/openai/v1/models"),
-    "deepseek": _bearer_probe(f"{UPSTREAMS['deepseek'].base_url}/models"),
+    "deepseek": _bearer_probe("https://api.deepseek.com/models"),
     "together": _bearer_probe(f"{UPSTREAMS['together'].base_url}/models"),
     "mistral": _bearer_probe("https://api.mistral.ai/v1/models"),
     "moonshot": _bearer_probe("https://api.moonshot.ai/v1/models"),

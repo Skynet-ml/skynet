@@ -10,7 +10,6 @@ from typing import Any
 
 import pytest
 
-from core.api.errors import DomainError
 from core.billing.signals import BudgetReached
 from core.constants import (
     DETAIL_BASELINE,
@@ -70,9 +69,18 @@ def test_byok_novelty_requires_embedding_provider() -> None:
         max_cost_cents=100,
         reflection_model_config={"name": "anthropic/claude-sonnet-4", "token_source": "byok"},
     )
-    with pytest.raises(DomainError) as error:
+    with pytest.raises(ServiceError) as error:
         validate_blackbox_payload(payload, verify_scorer=False)
-    assert error.value.code == "submission.byok_novelty_unsupported"
+    assert str(error.value) == "Novelty checking requires a BYOK provider that supports embeddings."
+
+
+def test_job_validation_rejects_saved_custom_base_as_service_error() -> None:
+    """Report unsupported novelty through the service error contract."""
+    payload = _payload(
+        shinka={"novelty": True}, reflection_model_config={"name": "openai/model", "token_source": "byok"}
+    )
+    with pytest.raises(ServiceError):
+        service_mod.validate_job(payload, api_bases={"openai": "https://public.example/v1"})
 
 
 class _RecordingScorer:
@@ -373,6 +381,56 @@ def test_legacy_byok_task_usage_does_not_consume_budget(
     monkeypatch.setattr(service_mod, "job_spec_from_payload", job_from_payload)
     monkeypatch.setattr(service_mod, "run_strategy", strategy)
     run_blackbox_optimization(_payload(max_cost_cents=1), artifact_id="byok-task", gepa_log_dir_path=str(tmp_path))
+
+
+@pytest.mark.parametrize("source", ["byok", "managed"])
+def test_legacy_judge_source_controls_budget(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    """Exclude only BYOK judge usage from the legacy ceiling."""
+    usage = ScorerUsage("openai/gpt-4o-mini")
+
+    class Scorer:
+        """Provide a fake judge ledger."""
+
+        def __init__(self) -> None:
+            """Attach usage."""
+            self.usage = usage
+
+        def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float, dict[str, Any]]:
+            """Score without network access."""
+            return vowel_scorer(candidate, case)
+
+        def close(self) -> None:
+            """Close the scorer."""
+
+    def strategy(_strategy: Any, _task: Task, _server: EvalServer, ctx: EngineContext, *_args: Any, **_kwargs: Any):
+        """Check the ceiling after judge usage."""
+        usage.record([{"prompt_tokens": 2000000, "completion_tokens": 2000000}])
+        if source == "byok":
+            service_mod.dspy.settings.callbacks[0]._check()
+            ctx.check_budget()
+        else:
+            with pytest.raises(BudgetReached):
+                service_mod.dspy.settings.callbacks[0]._check()
+            with pytest.raises(BudgetReached):
+                ctx.check_budget()
+        return Result(best_candidate="hello world", best_score=0.5, total_evals=0), []
+
+    monkeypatch.setattr(service_mod, "build_scorer", lambda *args, **kwargs: Scorer())
+    monkeypatch.setattr(service_mod, "run_strategy", strategy)
+    run_blackbox_optimization(
+        _payload(
+            max_cost_cents=100,
+            scorer={
+                "kind": "python",
+                "metric_code": VOWEL_SCORER_CODE,
+                "model": {"name": "openai/gpt-4o-mini", "token_source": source},
+            },
+        ),
+        artifact_id="judge",
+        gepa_log_dir_path=str(tmp_path),
+    )
 
 
 def test_legacy_byok_reflection_keeps_managed_scorer_budget(

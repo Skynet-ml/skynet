@@ -121,6 +121,8 @@ def resolve_upstream(config: Mapping[str, Any]) -> ProviderUpstream:
             raise UnpricedOperationError(str(error)) from error
         if slug == "openrouter" and str(base).rstrip("/") in {"https://openrouter.ai", OPENROUTER.base_url}:
             return OPENROUTER
+        if slug == "together" and str(base).rstrip("/") == "https://api.together.xyz/v1":
+            return UPSTREAMS["together"]
         if slug in UPSTREAMS and str(base).rstrip("/") == UPSTREAMS[slug].base_url.rstrip("/"):
             return UPSTREAMS[slug]
         if slug in UPSTREAMS and slug != "openai":
@@ -157,5 +159,9 @@ def validate_byok_novelty(
     slug = str(config.get("byok_provider") or LITELLM_TO_BYOK_PROVIDER.get(prefix, prefix))
     base = (api_bases or {}).get(slug)
     resolved = {**config, "base_url": base} if base else config
-    if not resolve_upstream(resolved).embeddings:
+    try:
+        upstream = resolve_upstream(resolved)
+    except UnpricedOperationError as error:
+        raise DomainError("submission.byok_provider_unsupported", status=400) from error
+    if not upstream.embeddings:
         raise DomainError("submission.byok_novelty_unsupported", status=400)

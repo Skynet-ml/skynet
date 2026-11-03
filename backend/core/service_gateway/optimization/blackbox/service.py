@@ -26,6 +26,7 @@ from typing import Any, Literal
 
 import dspy
 
+from ....api.errors import DomainError
 from ....billing.budgets import BudgetError
 from ....billing.byok_upstreams import validate_byok_novelty
 from ....billing.model_gateway import EMBEDDING_ROUTE_KEY, ROUTE_KEY, SHINKA_EMBEDDING_MODEL
@@ -245,6 +246,7 @@ class JobSpec:
     # Further metered models (the DSPy task model) whose usage the run bills.
     extra_lms: list[Any] = field(default_factory=list)
     extra_lm_sources: list[str | None] = field(default_factory=list)
+    scorer_token_source: str | None = None
 
 
 def job_spec_from_payload(payload: BlackboxRunRequest) -> JobSpec:
@@ -264,6 +266,7 @@ def job_spec_from_payload(payload: BlackboxRunRequest) -> JobSpec:
         budget=payload.budget,
         strategy=payload.strategy,
         reflection_model_settings=payload.reflection_model_settings,
+        scorer_token_source=payload.scorer.model.token_source if payload.scorer.model else None,
         target=payload.target,
         proposer=payload.proposer,
         proposer_runtime=payload.proposer_runtime,
@@ -342,38 +345,49 @@ def _shinka_embedding(payload: BlackboxRunRequest | JobSpec, gateway: GatewayCon
     return {"model": SHINKA_EMBEDDING_MODEL, "url": gateway.url, "token": gateway.api_key}
 
 
-def validate_blackbox_payload(payload: BlackboxRunRequest, *, verify_scorer: bool = True) -> None:
+def validate_blackbox_payload(
+    payload: BlackboxRunRequest, *, verify_scorer: bool = True, api_bases: dict[str, str | None] | None = None
+) -> None:
     """Reject a job before it is queued when it can never run.
 
     Args:
         payload: The submitted job.
         verify_scorer: Run legacy scorer loading; protected callers verify
             executable code inside the managed runtime.
+        api_bases: Available saved provider endpoints.
 
     Raises:
         ServiceError: When the job has an agent target but this deployment
             cannot run agents, the chosen engine is unknown/unavailable, or
             the python scorer code does not load.
     """
-    validate_job(payload)
+    validate_job(payload, api_bases=api_bases)
     if verify_scorer and payload.scorer.kind == "python":
         validate_scorer_code(str(payload.scorer.metric_code))
 
 
-def validate_job(payload: BlackboxRunRequest | JobSpec) -> None:
+def validate_job(payload: BlackboxRunRequest | JobSpec, *, api_bases: dict[str, str | None] | None = None) -> None:
     """Check that a job's engines can run here and its native proposer settings are usable.
 
     Args:
         payload: A legacy request or a unified run's job spec.
+        api_bases: Available saved provider endpoints.
 
     Raises:
         ServiceError: When the target cannot run here, the engine is unknown
             or unavailable, a native proposer gets custom model settings or no
             spending budget, or Auto has too few scorer runs.
     """
-    validate_byok_novelty(
-        payload.reflection_model_settings.model_dump(), bool(payload.shinka and payload.shinka.novelty)
-    )
+    try:
+        validate_byok_novelty(
+            payload.reflection_model_settings.model_dump(),
+            bool(payload.shinka and payload.shinka.novelty),
+            api_bases=api_bases,
+        )
+    except DomainError as error:
+        raise ServiceError(error.detail) from error
+    except UnpricedOperationError as error:
+        raise ServiceError(str(error)) from error
     caps = engine_capabilities(payload.target)
     if caps.agent_target and not caps.sandbox:
         raise ServiceError(f"Agent targets cannot run on this deployment: {caps.sandbox_reason}")
@@ -1114,7 +1128,7 @@ def _run_job(
             for index, extra_lm in enumerate(job.extra_lms)
             if index >= len(job.extra_lm_sources) or job.extra_lm_sources[index] != "byok"
         ]
-        + ([] if scorer_usage is None else [scorer_usage])
+        + ([] if scorer_usage is None or job.scorer_token_source == "byok" else [scorer_usage])
     )
     native_sources: dict[str, set[str]] = {}
     for config in (job.reflection_model_settings, *job.extra_reflection_model_settings):

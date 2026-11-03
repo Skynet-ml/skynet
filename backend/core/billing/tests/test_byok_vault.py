@@ -403,10 +403,16 @@ def test_vault_save_rejects_private_base(engine: object, vault_key: str, monkeyp
         assert session.query(BillingProviderKeyModel).count() == 0
 
 
-@pytest.mark.parametrize("slug", ["deepseek", "together"])
+@pytest.mark.parametrize("slug", ["together"])
 def test_probe_and_runtime_use_same_base(slug: str) -> None:
     """Keep verification and inference on the same provider endpoint."""
     assert _PROVIDER_PROBES[slug]["url"] == f"{UPSTREAMS[slug].base_url}/models"
+
+
+def test_deepseek_probe_uses_root_endpoint() -> None:
+    """Use DeepSeek's root key probe while chat remains on beta."""
+    assert _PROVIDER_PROBES["deepseek"]["url"] == "https://api.deepseek.com/models"
+    assert UPSTREAMS["deepseek"].base_url == "https://api.deepseek.com/beta"
 
 
 @pytest.mark.parametrize("status", [200, 302])

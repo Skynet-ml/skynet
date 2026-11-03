@@ -37,6 +37,22 @@ def test_novelty_validation_uses_saved_custom_base() -> None:
     assert error.value.code == "submission.byok_novelty_unsupported"
 
 
+@pytest.mark.parametrize("name", ["gpt-4o", "unknown/model"])
+def test_novelty_unknown_provider_is_domain_error(name: str) -> None:
+    """Return a client error for a BYOK model with no provider."""
+    with pytest.raises(DomainError) as error:
+        validate_byok_novelty({"name": name, "token_source": "byok"}, True)
+    assert error.value.code == "submission.byok_provider_unsupported"
+
+
+def test_together_xyz_is_canonical_alias() -> None:
+    """Route the catalog's Together endpoint with Together auth."""
+    assert (
+        resolve_upstream({"name": "together_ai/model", "base_url": "https://api.together.xyz/v1"})
+        == UPSTREAMS["together"]
+    )
+
+
 @pytest.mark.parametrize(("slug", "prefix"), BYOK_PROVIDER_SLUGS)
 def test_resolve_provider(slug: str, prefix: str) -> None:
     """Select the provider that owns each model prefix."""

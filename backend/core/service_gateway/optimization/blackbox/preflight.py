@@ -21,6 +21,7 @@ from ....models.unified import (
     UNIFIED_PAYLOAD_KIND,
     UnifiedRunRequest,
 )
+from ....provider_registry import LITELLM_TO_BYOK_PROVIDER
 from ..unified.contract import run_contract_check
 from ..unified.service import unified_job_spec
 from ..unified.split import split_seed
@@ -31,6 +32,22 @@ from .sandbox import SandboxRuntime, sandbox_runtime_context
 from .sandbox_scorer import SandboxPythonScorer, scorer_gateway
 from .scorer import build_scorer
 from .service import JobSpec, _agent_scorer, uses_native_runtime, validate_blackbox_payload, validate_job
+
+
+def _reflection_bases(config: Any) -> dict[str, str | None]:
+    """Retain an available reflection endpoint for setup validation.
+
+    Args:
+        config: Reflection model configuration.
+
+    Returns:
+        The provider's endpoint when available, otherwise an empty mapping.
+    """
+    name = config.name.split("/", 1)[0]
+    provider = config.byok_provider or LITELLM_TO_BYOK_PROVIDER.get(name, name)
+    base = config.base_url or config.extra.get("api_base") or config.extra.get("base_url")
+    return {provider: base} if provider and base else {}
+
 
 # What a scorer box needs around the evaluator's own timeout: booting and the install.
 _SCORER_BOX_OVERHEAD_SECONDS = 60.0
@@ -237,7 +254,9 @@ def verify_anything_in_sandbox(
             if scope == "execution":
                 public = {key: value for key, value in payload.items() if not key.startswith("_")}
                 typed = BlackboxRunRequest.model_validate(public)
-                validate_blackbox_payload(typed, verify_scorer=False)
+                validate_blackbox_payload(
+                    typed, verify_scorer=False, api_bases=_reflection_bases(typed.reflection_model_settings)
+                )
                 native = uses_native_runtime(typed)
                 if native:
                     route = typed.reflection_model_settings.extra[ROUTE_KEY]
@@ -379,7 +398,7 @@ def verify_unified_in_sandbox(
         checks.append(_check("metric.contract", "succeeded" if contract.ok else "failed", message, "workspace"))
         if scope == "execution" and contract.ok:
             job = unified_job_spec(typed, seed=split_seed(typed), task_lm=None)
-            validate_job(job)
+            validate_job(job, api_bases=_reflection_bases(typed.models.reflection_model))
             _check_native_readiness(job, runtime)
             checks.append(_check("optimizer", "succeeded"))
     return result

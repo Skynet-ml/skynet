@@ -20,6 +20,7 @@ import httpx
 from .. import config as app_config
 from ..config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, app_env
 from ..exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
+from ..i18n_en import t_en
 from ..local.cli_catalog import CliProvider, parse_subscription_model_id
 from .budgets import BudgetError, BudgetInsufficientError
 from .byok_upstreams import OPENROUTER, ProviderUpstream, resolve_upstream, validate_byok_novelty, validate_custom_base
@@ -271,6 +272,24 @@ class ModelGateway:
                     )
                 )
 
+            def _unpriced(self, error: Exception) -> None:
+                """Map known route refusals to stable localized error keys.
+
+                Args:
+                    error: The route refusal to report.
+
+                Returns:
+                    None, after sending the error response.
+                """
+                message = str(error)
+                known = {
+                    "This scoped route cannot dispatch a different model or API operation.": "submission.byok_route_unsupported",
+                    "This provider does not support embeddings on this route.": "submission.byok_embeddings_unsupported",
+                    "This provider requires its canonical endpoint. Custom endpoints require an openai/ model prefix.": "submission.byok_provider_unsupported",
+                }
+                code = known.get(message)
+                self._error(422, code or "unpriced_operation", t_en(code) if code else message)
+
             def do_GET(self) -> None:
                 """Return state only to a token already bound to this spending authority."""
                 token = self.headers.get("Authorization", "").removeprefix("Bearer ")
@@ -361,7 +380,7 @@ class ModelGateway:
                 except (UsagePendingError, BudgetError):
                     self._error(424, "usage_pending", "Previous work must settle before another attempt is admitted.")
                 except (UnpricedOperationError, ValueError, TypeError) as error:
-                    self._error(422, "unpriced_operation", str(error))
+                    self._unpriced(error)
                 except httpx.HTTPError:
                     self._error(
                         502,
@@ -396,7 +415,7 @@ class ModelGateway:
                 except (UsagePendingError, BudgetError):
                     self._error(424, "usage_pending", "Previous work must settle before another attempt is admitted.")
                 except (UnpricedOperationError, ValueError, TypeError) as error:
-                    self._error(422, "unpriced_operation", str(error))
+                    self._unpriced(error)
 
             def _sandbox_request(self) -> None:
                 """Serve guest control with a separate capability and streamed command output."""

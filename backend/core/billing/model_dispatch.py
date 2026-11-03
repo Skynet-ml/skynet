@@ -377,7 +377,8 @@ class ProviderDispatcher:
             priced = cached[1]
         else:
             routed = dict(request) if self._data_policy is None else apply_data_policy(request, self._data_policy)
-            routed = mark_prompt_cache(path, routed)
+            if self.upstream.slug in {"openrouter", "anthropic"}:
+                routed = mark_prompt_cache(path, routed)
             if self.policy.kind != "byok_model":
                 catalog = fetch_endpoint_prices(self.model, client=self._client)
                 pricer = {"/responses": price_responses_request, "/embeddings": price_embedding_request}

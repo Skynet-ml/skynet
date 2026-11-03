@@ -13,6 +13,7 @@ from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session
 
 from core.billing.budgets import BudgetInsufficientError, BudgetService
+from core.billing.byok_upstreams import resolve_upstream
 from core.billing.model_dispatch import (
     BYOK_FUNDS_EXHAUSTED,
     FUNDS_BUSY,
@@ -122,6 +123,31 @@ def test_openrouter_byok_anthropic_prompt_is_cacheable(database: Engine) -> None
         )
         dispatcher.dispatch("/chat/completions", {"model": model, "messages": [{"role": "system", "content": "hello"}]})
     assert sent[0]["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_custom_byok_does_not_mark_prompt_cache(database: Engine) -> None:
+    """Do not send Anthropic cache controls to custom endpoints."""
+    sent: list[dict] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Capture the routed request."""
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": []})
+
+    model = "anthropic/claude"
+    upstream = resolve_upstream({"name": "openai/anthropic/claude", "base_url": "https://example.com/v1"})
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+        dispatcher = OpenRouterDispatcher(
+            _runtime(database),
+            api_key="private",
+            model=model,
+            role="task",
+            policy=ChargePolicy("byok_model"),
+            client=client,
+            upstream=upstream,
+        )
+        dispatcher.dispatch("/chat/completions", {"model": model, "messages": [{"role": "system", "content": "hello"}]})
+    assert sent[0]["messages"][0]["content"] == "hello"
 
 
 @pytest.mark.parametrize("usage", [None, {"cost": "bad"}, {"cost": -1}, {"cost": "NaN"}])

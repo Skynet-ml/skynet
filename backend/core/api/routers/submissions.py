@@ -36,7 +36,9 @@ from ...billing import (
 )
 from ...billing.budget_amounts import MAX_CENTS
 from ...billing.budgets import BudgetError, BudgetService
-from ...billing.byok_upstreams import validate_byok_novelty
+from ...billing.byok_upstreams import UPSTREAMS, resolve_upstream, validate_byok_novelty
+from ...billing.byok_vault import safe_connection_params
+from ...billing.operation_pricing import UnpricedOperationError
 from ...billing.protected_credentials import ProtectedCredentialVault, protect_execution_credentials
 from ...config import settings
 from ...constants import (
@@ -706,8 +708,8 @@ def _enforce_byok_connections(job_store, username: str, model_configs: list[Mode
     connection for a model's provider, the run would have nothing to authenticate
     with, so reject it at submit with a clear, translated error rather than
     letting the job fail mid-run. Managed runs are exempt (they spend the
-    account balance). Models with no ``provider/`` prefix are skipped — there is no
-    provider to resolve a key for. A no-op when the store exposes no SQL engine.
+    account balance). Models without a resolvable provider are rejected.
+    Connection checks are skipped when the store exposes no SQL engine.
 
     Args:
         job_store: Job-store instance whose ORM engine backs the billing tables.
@@ -723,15 +725,11 @@ def _enforce_byok_connections(job_store, username: str, model_configs: list[Mode
             ``billing.byok_model_not_served`` when a model's prefix names a
             provider its chosen connection cannot route to.
     """
-    engine = getattr(job_store, "engine", None)
-    if engine is None or not username:
-        return {}
-    vault = ProviderKeyVault(engine=engine)
     # A model id carries a LiteLLM prefix (``gemini``, ``together_ai``) but the
     # key is saved under the vault slug (``google``, ``together``); bridge the two
     # exactly as the run path does so the gate sees the same connections it will.
     providers: set[str] = set()
-    routes: list[tuple[str, str | None, str]] = []
+    routes: list[tuple[ModelConfig, str, str | None, str]] = []
     for config in model_configs:
         if config.token_source != TOKEN_SOURCE_BYOK:
             continue
@@ -740,16 +738,33 @@ def _enforce_byok_connections(job_store, username: str, model_configs: list[Mode
         provider = (config.byok_provider or "").strip()
         if not provider and prefix is not None:
             provider = byok_provider_for_litellm(prefix)
-        if provider:
-            providers.add(provider)
-            routes.append((name, prefix, provider))
+        if not provider or (not config.byok_provider and provider not in UPSTREAMS):
+            raise DomainError("submission.byok_provider_unsupported", status=400)
+        providers.add(provider)
+        routes.append((config, name, prefix, provider))
+    engine = getattr(job_store, "engine", None)
+    if engine is None or not username:
+        return {}
+    vault = ProviderKeyVault(engine=engine)
     missing = sorted(provider for provider in providers if not vault.has_verified_connection(username, provider))
     if missing:
         raise DomainError("billing.byok_missing_connection", status=400, provider=", ".join(missing))
     api_bases = {view.provider: view.api_base for view in vault.list_keys(username).keys if view.status == "verified"}
-    for name, prefix, provider in routes:
+    for config, name, prefix, provider in routes:
         if not byok_prefix_routable(prefix, provider, api_base=api_bases.get(provider)):
             raise DomainError("billing.byok_model_not_served", status=400, model=name, provider=provider)
+        try:
+            resolve_upstream(
+                {
+                    **config.model_dump(),
+                    "name": name,
+                    "byok_provider": provider,
+                    "base_url": api_bases.get(provider),
+                    "extra": safe_connection_params(config.extra),
+                }
+            )
+        except UnpricedOperationError as error:
+            raise DomainError("submission.byok_provider_unsupported", status=400) from error
     return api_bases
 
 

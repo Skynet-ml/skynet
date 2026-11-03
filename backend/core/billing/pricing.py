@@ -28,7 +28,7 @@ from dataclasses import dataclass, fields, replace
 import litellm
 
 from ..config import settings
-from .openrouter_prices import TokenPrices, live_prices
+from .openrouter_prices import TokenPrices, cached_prices, live_prices
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +158,18 @@ def known_token_prices(model_id: str) -> TokenPrices | None:
         (never the fallback rates, which exist to bill safely, not to estimate).
     """
     return live_prices(model_id) or _static_prices(model_id)
+
+
+def cached_token_prices(model_id: str) -> TokenPrices | None:
+    """Return known prices without making a catalog request.
+
+    Args:
+        model_id: The model id as recorded.
+
+    Returns:
+        Cached or static prices, or None.
+    """
+    return cached_prices(model_id) or _static_prices(model_id)
 
 
 def model_token_costs(model_id: str) -> tuple[float, float]:

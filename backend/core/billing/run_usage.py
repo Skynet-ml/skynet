@@ -18,11 +18,12 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from ..provider_registry import BYOK_TO_LITELLM_PROVIDER
 from ..storage.models import ExecutionBudgetModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 from .budget_amounts import CENT_SCALE, cents_from_units
 from .model_dispatch import usage_charge
 from .operation_pricing import UnpricedOperationError, exact_nonnegative
-from .pricing import CENT_USD_VALUE, ModelUsage, known_token_prices, usage_cost_usd
+from .pricing import CENT_USD_VALUE, ModelUsage, cached_token_prices, known_token_prices, usage_cost_usd
 from .usage_tags import CALLER_PROPOSER, CALLER_REFLECTION
 
 ROLE_TASK = "task"
@@ -157,14 +158,44 @@ def _byok_provider_cents(record: OperationRecord) -> Decimal | None:
             return cents_from_units(record.wallet_units) / fraction
     except UnpricedOperationError:
         return None
+    if not isinstance(usage, Mapping) or not any(
+        isinstance(usage.get(key), int) and not isinstance(usage.get(key), bool) and usage[key] >= 0
+        for key in (
+            "prompt_tokens",
+            "completion_tokens",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        )
+    ):
+        return None
+    provider = str(record.evidence.get("provider") or "")
+    if provider == "custom":
+        return None
     model = str(record.evidence.get("model") or record.quoted_model or "")
-    prices = known_token_prices(model) if model else None
+    prefix = BYOK_TO_LITELLM_PROVIDER.get(provider, provider)
+    if prefix and prefix != "openrouter" and model and not model.startswith(f"{prefix}/"):
+        model = f"{prefix}/{model}"
+    prices = cached_token_prices(model) if model else None
     if prices is None:
         return None
     input_tokens, output_tokens = _tokens(usage)
-    return Decimal(str(usage_cost_usd(ModelUsage(model, input_tokens, output_tokens), prices=prices))) / Decimal(
-        str(CENT_USD_VALUE)
-    )
+    cache_read = _int(usage.get("cache_read_input_tokens"))
+    prompt_details = usage.get("prompt_tokens_details")
+    if isinstance(prompt_details, Mapping) and "prompt_tokens" in usage:
+        cache_read = _int(prompt_details.get("cached_tokens"))
+    cache_write = _int(usage.get("cache_creation_input_tokens"))
+    return Decimal(
+        str(
+            usage_cost_usd(
+                ModelUsage(
+                    model, input_tokens, output_tokens, cache_read_tokens=cache_read, cache_write_tokens=cache_write
+                ),
+                prices=prices,
+            )
+        )
+    ) / Decimal(str(CENT_USD_VALUE))
 
 
 def aggregate(

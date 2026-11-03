@@ -7,6 +7,7 @@ Both reuse the fake store and client factory defined here.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -20,6 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from ...config import Settings
+from ...models.common import ModelConfig
 from ...service_gateway.optimization.blackbox import service as _bb_service
 from ...storage.models import Base, BillingCustomerModel, BillingProviderKeyModel, WalletLedgerModel
 from ...storage.remote import RemoteDBJobStore
@@ -35,6 +37,54 @@ _METRIC_CODE = (
     "def score(input, output, expected=None):\n"
     '    return float(output == expected), {"feedback": "compare to the answer"}\n'
 )
+
+
+@pytest.mark.parametrize("name", ["gpt-4o", "unknown/model"])
+def test_byok_submission_rejects_unknown_provider(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject BYOK models without a resolvable provider."""
+    monkeypatch.setattr(_sub_mod, "ProviderKeyVault", lambda **kwargs: object())
+    with pytest.raises(DomainError) as error:
+        _sub_mod._enforce_byok_connections(
+            type("Store", (), {"engine": object()})(), "user", [ModelConfig(name=name, token_source="byok")]
+        )
+    assert error.value.code == "submission.byok_provider_unsupported"
+
+
+@pytest.mark.parametrize(
+    ("provider", "name", "base", "accepted"),
+    [
+        ("together", "together_ai/model", "https://api.together.xyz/v1", True),
+        ("groq", "openai/meta-llama/model", "https://custom.example/v1", False),
+    ],
+)
+def test_byok_submission_checks_saved_endpoint(
+    provider: str, name: str, base: str, accepted: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Validate saved endpoints against the actual provider route."""
+    view = SimpleNamespace(provider=provider, api_base=base, status="verified")
+    vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
+    monkeypatch.setattr(_sub_mod, "ProviderKeyVault", lambda **kwargs: vault)
+    store = SimpleNamespace(engine=object())
+    config = ModelConfig(name=name, token_source="byok", byok_provider=provider)
+    if accepted:
+        assert _sub_mod._enforce_byok_connections(store, "user", [config]) == {provider: base}
+    else:
+        with pytest.raises(DomainError) as error:
+            _sub_mod._enforce_byok_connections(store, "user", [config])
+        assert error.value.status_code == 400
+
+
+def test_byok_submission_ignores_caller_endpoint_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Use the verified connection rather than caller-supplied endpoint overrides."""
+    view = SimpleNamespace(provider="anthropic", api_base=None, status="verified")
+    vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
+    monkeypatch.setattr(_sub_mod, "ProviderKeyVault", lambda **kwargs: vault)
+    config = ModelConfig(
+        name="anthropic/claude-sonnet-4",
+        token_source="byok",
+        extra={"api_base": "https://x.example.com"},
+    )
+    assert _sub_mod._enforce_byok_connections(SimpleNamespace(engine=object()), "user", [config]) == {"anthropic": None}
 
 
 class _FakeJobStore:

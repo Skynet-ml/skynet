@@ -352,6 +352,36 @@ def test_shinka_byok_novelty_rejects_provider_without_embeddings(gateway: ModelG
     assert not gateway._routes
 
 
+def test_shinka_preflight_rejects_openai_custom_novelty(gateway: ModelGateway) -> None:
+    """Reject novelty for the resolved custom base before setup dispatch."""
+    with pytest.raises(DomainError) as error:
+        gateway.protect_payload(
+            {
+                "shinka": {"novelty": True},
+                "reflection_model_config": {
+                    "name": "openai/model",
+                    "token_source": "byok",
+                    "base_url": "https://public.example/v1",
+                    "extra": {"api_key": "private"},
+                },
+            },
+            managed_key="",
+        )
+    assert error.value.code == "submission.byok_novelty_unsupported"
+
+
+def test_scoped_gateway_refusal_uses_localized_code(gateway: ModelGateway) -> None:
+    """Return the stable translation key for a mismatched model."""
+    route = gateway.register(model="fixture/text", api_key="private", role="task", policy=ChargePolicy("byok_model"))
+    response = httpx.post(
+        f"{gateway.url}/chat/completions",
+        headers={"Authorization": f"Bearer {route['token']}"},
+        json={"model": "other/model"},
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "submission.byok_route_unsupported"
+
+
 @pytest.mark.parametrize(("provider", "novelty"), [("openai", True), ("openrouter", True), ("anthropic", False)])
 def test_shinka_byok_novelty_allows_supported_routes(gateway: ModelGateway, provider: str, novelty: bool) -> None:
     """Allow embedding-capable providers and disabled novelty."""
