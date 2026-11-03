@@ -11,7 +11,8 @@ from typing import Any
 
 import pytest
 from cryptography.fernet import Fernet
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import create_engine
@@ -19,7 +20,9 @@ from sqlalchemy.orm import Session
 
 from core.api import preflight_execution as wizard_preflight
 from core.api.auth import AuthenticatedUser, get_authenticated_user
+from core.api.errors import DomainError
 from core.api.model_billing import normalize_model_token_sources
+from core.api.routers import submissions as submission_router
 from core.api.routers import wizard_preflight as preflight_router
 from core.api.routers.execution_budgets import create_execution_budgets_router
 from core.billing.budgets import BudgetConflictError
@@ -32,6 +35,7 @@ from core.billing.protected_credentials import (
 )
 from core.billing.runtime import PaidResult, UsagePendingError
 from core.config import settings
+from core.i18n import t_locale
 from core.models import BlackboxRunRequest
 from core.storage.models import Base, BillingCustomerModel, BillingProviderKeyModel
 from core.storage.preflights import PreflightStore, setup_seed
@@ -98,6 +102,14 @@ def setup_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tu
     monkeypatch.setattr(preflight_router, "enforce_submission_rate", lambda username: None)
     monkeypatch.setattr(wizard_preflight.settings, "openrouter_api_key", SecretStr("test-only"))
     app = FastAPI()
+
+    @app.exception_handler(HTTPException)
+    async def http_error(_request: Request, error: HTTPException) -> JSONResponse:
+        """Expose the same domain error fields as the application."""
+        return JSONResponse(
+            status_code=error.status_code, content={"detail": error.detail, "code": getattr(error, "code", None)}
+        )
+
     store = SimpleNamespace(engine=engine)
     app.include_router(create_execution_budgets_router(job_store=store))
     app.include_router(preflight_router.create_wizard_preflight_router(job_store=store))
@@ -135,6 +147,90 @@ def test_continue_reuses_matching_success_and_preserves_setup_spend(setup_client
     second = client.post("/wizard/preflight", json=_request(budget, {**PAYLOAD, "name": "Renamed", "is_private": True}))
     assert second.json()["id"] == first.json()["id"]
     assert second.json()["budget"]["setup_spent_cents"] == "1"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("model", "base", "novelty", "expected"),
+    [
+        ("anthropic/claude-sonnet-4", None, True, "submission.byok_novelty_unsupported"),
+        ("openai/gpt-4o", "https://api.anthropic.com/v1", False, "billing.byok_model_not_served"),
+    ],
+)
+def test_preflight_rejects_invalid_byok_before_execution(
+    setup_client, monkeypatch: pytest.MonkeyPatch, model: str, base: str | None, novelty: bool, expected: str
+) -> None:
+    """Return localized BYOK admission errors before setup work starts."""
+    client, _engine, calls = setup_client
+    view = SimpleNamespace(provider="anthropic", api_base=base, status="verified")
+    vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
+    monkeypatch.setattr(submission_router, "ProviderKeyVault", lambda **kwargs: vault)
+    payload = {
+        **PAYLOAD,
+        "reflection_model_config": {"name": model, "token_source": "byok", "byok_provider": "anthropic"},
+        "strategy": {"mode": "single", "engine": "shinka_evolve"},
+        "shinka": {"novelty": novelty},
+    }
+    response = client.post("/wizard/preflight", json={**_request(_budget(client), payload), "locale": "he"})
+    assert response.status_code == 400
+    assert response.json()["code"] == expected
+    assert response.json()["detail"] == t_locale("he", expected, model=model, provider="anthropic")
+    assert not calls
+
+
+def test_preflight_execution_preserves_domain_error(setup_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Preserve a domain error's message and code in setup evidence."""
+    client, _engine, _calls = setup_client
+
+    def reject(*args, **kwargs):
+        """Simulate a domain refusal inside the protected setup."""
+        raise DomainError("submission.byok_novelty_unsupported", status=400)
+
+    monkeypatch.setattr(_Gateway, "protect_payload", reject)
+    response = client.post("/wizard/preflight", json={**_request(_budget(client)), "locale": "he"})
+    assert response.status_code == 200
+    check = response.json()["checks"][0]
+    assert check["message_code"] == "submission.byok_novelty_unsupported"
+    assert check["message"] == t_locale("he", "submission.byok_novelty_unsupported")
+
+
+def test_evaluation_preflight_checks_supplied_reflection_route(setup_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject unsupported novelty in a partial Anything evaluation payload."""
+    client, _engine, calls = setup_client
+    view = SimpleNamespace(provider="anthropic", api_base=None, status="verified")
+    vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
+    monkeypatch.setattr(submission_router, "ProviderKeyVault", lambda **kwargs: vault)
+    payload = {
+        **PAYLOAD,
+        "reflection_model_config": {"name": "anthropic/claude-sonnet-4", "token_source": "byok"},
+        "shinka": {"novelty": True},
+    }
+    response = client.post("/wizard/preflight", json={**_request(_budget(client), payload), "scope": "evaluation"})
+    assert response.status_code == 400
+    assert response.json()["code"] == "submission.byok_novelty_unsupported"
+    assert not calls
+
+
+def test_preflight_accepts_openai_custom_endpoint(setup_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Admit an OpenAI-compatible custom endpoint before setup."""
+    client, _engine, calls = setup_client
+    view = SimpleNamespace(provider="openai", api_base="https://custom.example/v1", status="verified")
+    vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
+    monkeypatch.setattr(submission_router, "ProviderKeyVault", lambda **kwargs: vault)
+    budget = _budget(client)
+
+    def run(request, user, store):
+        """Confirm the admitted setup reaches the executor."""
+        calls.append(request)
+        return wizard_preflight.WizardPreflightResponse(
+            id="test", fingerprint="test", status="succeeded", may_advance=True, checks=[], budget=budget
+        )
+
+    monkeypatch.setattr(preflight_router, "run_preflight", run)
+    payload = {**PAYLOAD, "reflection_model_config": {"name": "openai/custom-model", "token_source": "byok"}}
+    response = client.post("/wizard/preflight", json=_request(budget, payload))
+    assert response.status_code == 200
+    assert response.json()["status"] == "succeeded"
     assert len(calls) == 1
 
 

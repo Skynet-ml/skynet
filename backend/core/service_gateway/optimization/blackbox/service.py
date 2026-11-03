@@ -26,7 +26,6 @@ from typing import Any, Literal
 
 import dspy
 
-from ....api.errors import DomainError
 from ....billing.budgets import BudgetError
 from ....billing.byok_upstreams import validate_byok_novelty
 from ....billing.model_gateway import EMBEDDING_ROUTE_KEY, ROUTE_KEY, SHINKA_EMBEDDING_MODEL
@@ -384,8 +383,6 @@ def validate_job(payload: BlackboxRunRequest | JobSpec, *, api_bases: dict[str, 
             bool(payload.shinka and payload.shinka.novelty),
             api_bases=api_bases,
         )
-    except DomainError as error:
-        raise ServiceError(error.detail) from error
     except UnpricedOperationError as error:
         raise ServiceError(str(error)) from error
     caps = engine_capabilities(payload.target)

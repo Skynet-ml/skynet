@@ -166,7 +166,7 @@ def test_byok_missing_provider_cost_is_unavailable(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.parametrize(
-    ("state", "evidence"), [("settled", {"provider_failure": True}), ("reserved", {}), ("dispatched", {})]
+    ("state", "evidence"), [("settled", {"failure": "provider"}), ("reserved", {}), ("dispatched", {})]
 )
 def test_byok_missing_usage_is_unpriced(state: str, evidence: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     """Do not estimate a provider cost without usage."""

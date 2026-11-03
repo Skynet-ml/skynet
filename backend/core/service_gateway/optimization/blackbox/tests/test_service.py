@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from core.api.errors import DomainError
 from core.billing.signals import BudgetReached
 from core.constants import (
     DETAIL_BASELINE,
@@ -69,9 +70,9 @@ def test_byok_novelty_requires_embedding_provider() -> None:
         max_cost_cents=100,
         reflection_model_config={"name": "anthropic/claude-sonnet-4", "token_source": "byok"},
     )
-    with pytest.raises(ServiceError) as error:
+    with pytest.raises(DomainError) as error:
         validate_blackbox_payload(payload, verify_scorer=False)
-    assert str(error.value) == "Novelty checking requires a BYOK provider that supports embeddings."
+    assert error.value.code == "submission.byok_novelty_unsupported"
 
 
 def test_job_validation_rejects_saved_custom_base_as_service_error() -> None:
@@ -79,7 +80,7 @@ def test_job_validation_rejects_saved_custom_base_as_service_error() -> None:
     payload = _payload(
         shinka={"novelty": True}, reflection_model_config={"name": "openai/model", "token_source": "byok"}
     )
-    with pytest.raises(ServiceError):
+    with pytest.raises(DomainError):
         service_mod.validate_job(payload, api_bases={"openai": "https://public.example/v1"})
 
 

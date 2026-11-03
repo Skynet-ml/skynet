@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator
 from decimal import Decimal
@@ -100,6 +101,64 @@ def test_byok_model_and_sandbox_are_metered_separately(database: Engine) -> None
     snapshot = runtime.service.get(runtime.budget_id, "alice")
     assert snapshot.setup_spent_cents == sandbox.convert(Decimal("0.01")).total
     assert snapshot.reserved_cents == 0
+
+
+@pytest.mark.parametrize(
+    ("error", "failure"),
+    [
+        (httpx.ConnectError("offline"), "provider"),
+        (KeyboardInterrupt(), "interrupted"),
+        (asyncio.CancelledError(), "interrupted"),
+    ],
+)
+def test_byok_exception_releases_hold_with_failure_kind(database: Engine, error: BaseException, failure: str) -> None:
+    """Record the failure kind when a zero-fee dispatch fails."""
+    runtime = _runtime(database)
+    policy = ChargePolicy("byok_model")
+
+    def dispatch() -> PaidResult:
+        """Raise the requested failure."""
+        raise error
+
+    with pytest.raises(type(error)):
+        runtime.execute(
+            operation_quote({}, Decimal(0), policy, {}), policy, dispatch, operation_key="model", cost_kind="model"
+        )
+    with Session(database) as session:
+        assert session.scalars(select(ExecutionUsageEvidenceModel)).one().evidence == {"failure": failure}
+    assert runtime.service.get(runtime.budget_id, "alice").reserved_cents == 0
+
+
+def test_byok_settlement_failure_preserves_provider_usage(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retain successful provider usage when initial settlement fails."""
+    runtime = _runtime(database)
+    policy = ChargePolicy("byok_model")
+    settle = runtime.service.settle
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        """Fail the first settlement before persisting it."""
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("settlement failed")
+        return settle(*args, **kwargs)
+
+    monkeypatch.setattr(runtime.service, "settle", fail_once)
+    with pytest.raises(RuntimeError, match="settlement failed"):
+        runtime.execute(
+            operation_quote({}, Decimal(0), policy, {}),
+            policy,
+            lambda: PaidResult("ok", None, {"usage": {"prompt_tokens": 12}}),
+            operation_key="model",
+            cost_kind="model",
+        )
+    with Session(database) as session:
+        assert session.scalars(select(ExecutionUsageEvidenceModel)).one().evidence == {
+            "usage": {"prompt_tokens": 12},
+            "failure": "provider",
+        }
+    assert runtime.service.get(runtime.budget_id, "alice").reserved_cents == 0
 
 
 def test_openrouter_byok_anthropic_prompt_is_cacheable(database: Engine) -> None:

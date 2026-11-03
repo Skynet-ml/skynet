@@ -19,7 +19,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import Future, wait
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Literal, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header
@@ -751,10 +751,8 @@ def _enforce_byok_connections(job_store, username: str, model_configs: list[Mode
         raise DomainError("billing.byok_missing_connection", status=400, provider=", ".join(missing))
     api_bases = {view.provider: view.api_base for view in vault.list_keys(username).keys if view.status == "verified"}
     for config, name, prefix, provider in routes:
-        if not byok_prefix_routable(prefix, provider, api_base=api_bases.get(provider)):
-            raise DomainError("billing.byok_model_not_served", status=400, model=name, provider=provider)
         try:
-            resolve_upstream(
+            upstream = resolve_upstream(
                 {
                     **config.model_dump(),
                     "name": name,
@@ -765,7 +763,35 @@ def _enforce_byok_connections(job_store, username: str, model_configs: list[Mode
             )
         except UnpricedOperationError as error:
             raise DomainError("submission.byok_provider_unsupported", status=400) from error
+        if prefix is None or not byok_prefix_routable(
+            prefix, provider, api_base=api_bases.get(provider) if upstream.slug == "custom" else None
+        ):
+            raise DomainError("billing.byok_model_not_served", status=400, model=name, provider=provider)
     return api_bases
+
+
+def _admit_byok_models(
+    job_store: Any, username: str, configs: list[ModelConfig], reflection: ModelConfig | None, novelty: bool
+) -> dict[str, str | None]:
+    """Admit model connections and novelty before setup or submission.
+
+    Args:
+        job_store: Store holding verified connections.
+        username: Connection owner.
+        configs: Normalized executable model configurations.
+        reflection: Reflection model when the request has one.
+        novelty: Whether novelty checking is enabled.
+
+    Returns:
+        Verified provider endpoint bases.
+
+    Raises:
+        DomainError: When a connection or novelty route is unsupported.
+    """
+    bases = _enforce_byok_connections(job_store, username, configs)
+    if reflection is not None:
+        validate_byok_novelty(reflection.model_dump(), novelty, api_bases=bases)
+    return bases
 
 
 def rows_to_cases(rows: list[dict], *, input_fields: list[str], expected_field: str | None) -> list[dict]:
@@ -1036,12 +1062,12 @@ def submit_unified_payload(
         _spendable = _enforce_balance(job_store, payload.username, payload.token_source)
         if payload.execution_budget_id is None:
             _cap_cost_ceiling_to_balance(payload, _spendable, payload.token_source)
-    api_bases = _enforce_byok_connections(job_store, payload.username, _model_configs)
-
-    validate_byok_novelty(
-        payload.models.reflection_model.model_dump(),
+    _admit_byok_models(
+        job_store,
+        payload.username,
+        _model_configs,
+        payload.models.reflection_model,
         bool(payload.optimizer.shinka and payload.optimizer.shinka.novelty),
-        api_bases=api_bases,
     )
 
     try:
@@ -1239,12 +1265,12 @@ def create_submissions_router(*, service, job_store) -> APIRouter:
             _spendable = _enforce_balance(job_store, payload.username, payload.token_source)
             if payload.execution_budget_id is None:
                 _cap_cost_ceiling_to_balance(payload, _spendable, payload.token_source)
-        api_bases = _enforce_byok_connections(job_store, payload.username, _model_configs)
-
-        validate_byok_novelty(
-            payload.reflection_model_settings.model_dump(),
+        _admit_byok_models(
+            job_store,
+            payload.username,
+            _model_configs,
+            payload.reflection_model_settings,
             bool(payload.shinka and payload.shinka.novelty),
-            api_bases=api_bases,
         )
 
         _ensure_api_budget(

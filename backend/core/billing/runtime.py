@@ -340,6 +340,7 @@ class BudgetRuntime:
         if not claimed.dispatch_claimed:
             raise UsagePendingError("The attempt was already dispatched; do not repeat it.")
         zero_fee_byok = policy.kind == "byok_model" and policy.byok_fee_fraction == 0
+        result = None
         try:
             result = dispatch()
             if result.provider_request_id:
@@ -378,11 +379,14 @@ class BudgetRuntime:
             if not result.final and not zero_fee_byok:
                 raise UsagePendingError("Provider usage is incomplete; remaining coverage is retained.")
             return result.value
-        except BaseException:
+        except BaseException as exc:
             current = self.service.get_operation(operation.id, self.username)
             if current.state in {"dispatched", "pending"}:
                 if zero_fee_byok:
-                    evidence = {"provider_failure": True}
+                    evidence = {
+                        **(result.evidence if result is not None else {}),
+                        "failure": "provider" if isinstance(exc, Exception) else "interrupted",
+                    }
                     self.service.settle(
                         operation.id,
                         self.username,
