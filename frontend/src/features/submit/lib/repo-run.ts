@@ -66,7 +66,6 @@ export function repoRunRequest(
     shinka: shinka ? optimizer.shinka : null,
     token_source: tokenSource,
     is_private: meta.isPrivate,
-    ...(meta.economyMode && { economy_mode: true }),
     max_cost_cents: maxCostCents ?? undefined,
   };
 }

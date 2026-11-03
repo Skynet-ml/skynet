@@ -44,10 +44,18 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const text = (value: unknown): string | undefined =>
   typeof value === "string" && value.trim() ? value : undefined;
 
-const modelConfig = (value: unknown): ModelConfig | null =>
-  isRecord(value) && typeof value.name === "string" && value.name.trim()
-    ? (value as unknown as ModelConfig)
-    : null;
+/** A stored model config; its economy choice moves from `extra` back to the wizard's flag. */
+function modelConfig(value: unknown): ModelConfig | null {
+  if (!isRecord(value) || typeof value.name !== "string" || !value.name.trim()) return null;
+  const config = value as unknown as ModelConfig;
+  if (!isRecord(config.extra) || !("economy_mode" in config.extra)) return config;
+  const { economy_mode: economy, ...extra } = config.extra;
+  return {
+    ...config,
+    extra: Object.keys(extra).length > 0 ? extra : undefined,
+    ...(economy === true && { economy_mode: true }),
+  };
+}
 
 /** A starting version is text or a map of named text parts; anything else is dropped. */
 function startingVersion(value: unknown): string | Record<string, string> | undefined {
@@ -75,7 +83,6 @@ function cloneMeta(payload: ClonePayload, jobName?: string | null): Partial<Meta
   const description = text(payload.description);
   if (description) meta.description = description;
   if (typeof payload.is_private === "boolean") meta.isPrivate = payload.is_private;
-  if (payload.economy_mode === true) meta.economyMode = true;
   return meta;
 }
 
@@ -166,15 +173,22 @@ function cloneUnified(payload: ClonePayload): Omit<CloneSlices, "meta"> {
     optimizerSlice.choice = optimizer.choice as OptimizerChoice;
 
   const metricModel = modelConfig(models.metric_model);
-  const reflectionName = optimizerSlice.reflectionModel?.name ?? null;
+  const reflection = optimizerSlice.reflectionModel;
+  // A metric model that is the reflection model, economy choice included, was
+  // inherited, not picked.
+  const picked =
+    metricModel &&
+    (metricModel.name !== reflection?.name ||
+      Boolean(metricModel.economy_mode) !== Boolean(reflection?.economy_mode))
+      ? metricModel
+      : null;
   const workspaceSlice: Partial<WorkspaceSlice> = {
     runCode: typeof workspace.run_code === "string" ? workspace.run_code : "",
     metricCode: typeof workspace.metric_code === "string" ? workspace.metric_code : "",
     // A payload stored before extra files existed has none.
     files: extraFiles(workspace.files),
-    // A metric model that is the reflection model was inherited, not picked.
-    metricModelMode: metricModel && metricModel.name !== reflectionName ? "explicit" : "inherit",
-    metricModel: metricModel && metricModel.name !== reflectionName ? metricModel : null,
+    metricModelMode: picked ? "explicit" : "inherit",
+    metricModel: picked,
   };
   if (typeof workspace.metric_timeout_seconds === "number")
     workspaceSlice.metricTimeoutSeconds = workspace.metric_timeout_seconds;
@@ -324,5 +338,30 @@ export function cloneToSlices(
         : cloneLegacyDspy(payload);
   if (typeof payload.max_cost_cents === "number")
     body.optimizer = { ...body.optimizer, maxCostCents: payload.max_cost_cents };
+  if (payload.economy_mode === true) runEconomyToModels(body);
   return { ...body, meta: cloneMeta(payload, jobName) };
+}
+
+/**
+ * Older runs stored one economy flag for the whole run, which meant every
+ * managed model; the wizard now keeps the choice on each model.
+ */
+function runEconomyToModels(body: Omit<CloneSlices, "meta">): void {
+  const economy = <T extends ModelConfig | null | undefined>(config: T): T =>
+    config && (config.token_source ?? "managed") === "managed"
+      ? ({ ...config, economy_mode: true } as T)
+      : config;
+  const { optimizer, workspace } = body;
+  body.optimizer = {
+    ...optimizer,
+    ...(optimizer.taskModel !== undefined && { taskModel: economy(optimizer.taskModel) }),
+    ...(optimizer.reflectionModel !== undefined && {
+      reflectionModel: economy(optimizer.reflectionModel),
+    }),
+    ...(optimizer.extraReflectionModels && {
+      extraReflectionModels: optimizer.extraReflectionModels.map(economy),
+    }),
+  };
+  if (workspace.metricModel !== undefined)
+    body.workspace = { ...workspace, metricModel: economy(workspace.metricModel) };
 }

@@ -116,3 +116,15 @@ test("a repository run sends no stale CLI for its reflection models", () => {
   assert.equal(request.reflection_model_config?.cli_provider, null);
   assert.equal(request.extra_reflection_model_configs?.[0]?.cli_provider, null);
 });
+
+test("a repository run sends economy on the models that chose it, not for the run", () => {
+  const state = repoState();
+  state.optimizer.choice = "shinka_evolve";
+  state.optimizer.reflectionModel = { ...model, economy_mode: true };
+  state.optimizer.extraReflectionModels = [model];
+  const request = repoRunRequest(state, options);
+  assert.ok(request);
+  assert.equal(request.reflection_model_config?.extra?.economy_mode, true);
+  assert.equal(request.extra_reflection_model_configs?.[0]?.extra, undefined);
+  assert.equal("economy_mode" in request, false);
+});

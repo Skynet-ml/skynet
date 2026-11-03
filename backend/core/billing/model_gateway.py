@@ -50,6 +50,8 @@ from .usage_tags import USAGE_TAGS_HEADERS
 logger = logging.getLogger(__name__)
 
 ROUTE_KEY = "_skynet_budget_route"
+# Key, inside a model config's ``extra``, of that model's own economy choice.
+ECONOMY_KEY = "economy_mode"
 # Key, inside the first optimization model's route, of the embeddings route
 # ShinkaEvolve's duplicate rejection uses; it bills like the model beside it.
 EMBEDDING_ROUTE_KEY = "embedding"
@@ -573,6 +575,17 @@ class ModelGateway:
         if self.heartbeat is not None:
             self.heartbeat()
 
+    def batches(self, token: str) -> bool:
+        """Tell whether a route's chat calls wait on half-price batches.
+
+        Args:
+            token: The route token.
+
+        Returns:
+            True for an economy route.
+        """
+        return getattr(self._routes.get(token), "_batch", None) is not None
+
     def model_routes(self) -> list[dict[str, str]]:
         """Return only capabilities registered by this trusted parent for readiness probes."""
         # Callers send chat requests to these routes; an embeddings route
@@ -763,6 +776,7 @@ class ModelGateway:
         allow_private_tools: bool = False,
         authorize_tool: Callable[[str, str, dict[str, Any]], bool] | None = None,
         on_tool_event: Callable[[dict[str, Any]], None] | None = None,
+        allow_batch: bool = True,
     ) -> dict[str, Any]:
         """Replace resolved provider credentials with fixed, metered model-role routes.
 
@@ -772,6 +786,7 @@ class ModelGateway:
             allow_private_tools: Explicit deployment opt-in for private MCP destinations.
             authorize_tool: Optional blocking approval gate for protected chat tools.
             on_tool_event: Optional lifecycle event receiver for protected chat tools.
+            allow_batch: Whether economy choices may route managed models through batches.
 
         Returns:
             A copied payload carrying opaque role routes and no model provider keys.
@@ -890,6 +905,10 @@ class ModelGateway:
         for config, role in models:
             source = config.get("token_source") or result.get("token_source") or "managed"
             extra = config.get("extra") or {}
+            # A model's own economy choice rides in ``extra`` so the sandbox
+            # request shape stays fixed. Batching is decided here, so the flag
+            # never reaches the guest, whose model calls pass ``extra`` on.
+            economy_model = bool(extra.pop(ECONOMY_KEY, False))
             if source == "subscription":
                 route = self._register_subscription_config(config, role)
                 if config is target_config:
@@ -914,12 +933,14 @@ class ModelGateway:
             key = extra.get("api_key") if source == "byok" else managed_key
             if not key:
                 raise UnpricedOperationError("This model role has no available provider credential.")
+            # The run-level flag is the older form and still means every model.
+            batched = allow_batch and (economy or economy_model) and source == "managed"
             route = self.register(
                 model=model,
                 api_key=str(key),
                 role=role,
                 policy=ChargePolicy("byok_model" if source == "byok" else "managed_model"),
-                batch=economy and source == "managed",
+                batch=batched,
             )
             if config is target_config:
                 target_name = str(target.get("model") or "").strip("/")
@@ -942,7 +963,7 @@ class ModelGateway:
                     ),
                 }
             config["extra"][ROUTE_KEY] = route
-            if economy and source == "managed":
+            if batched:
                 # A batch can outlast any per-call timeout; a guest that gave up
                 # would retry as a second paid request while the first still runs.
                 config["extra"]["timeout"] = VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS

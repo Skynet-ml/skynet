@@ -129,7 +129,6 @@ export interface MetaSlice {
   isPrivate: boolean;
   folderId: string | null;
   tokenSource: "managed" | "byok" | "subscription";
-  economyMode: boolean;
 }
 
 export interface WizardV2State {
@@ -213,7 +212,6 @@ export function initialWizardV2State(
       isPrivate: false,
       folderId: null,
       tokenSource: "managed",
-      economyMode: false,
     },
   };
 }

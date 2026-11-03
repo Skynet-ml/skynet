@@ -42,7 +42,6 @@ import { contractCheckMessage } from "@/shared/lib/i18n";
 import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import type { ContinuousEnableRequest } from "@/shared/types/continuous";
-import { isLocalMode } from "@/shared/lib/runtime-env";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { getActiveMessages } from "@/shared/lib/runtime-messages";
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
@@ -516,8 +515,6 @@ export function WizardV2Provider({
       },
       token_source: tokenSource,
       is_private: meta.isPrivate,
-      // The local build runs no batch provider, so a restored economy choice is dropped.
-      ...(meta.economyMode && !isLocalMode() && { economy_mode: true }),
       max_cost_cents: budgetUncapped ? undefined : (maxCostCents ?? undefined),
     };
   }, [state, username, tokenSource, budgetUncapped, maxCostCents]);

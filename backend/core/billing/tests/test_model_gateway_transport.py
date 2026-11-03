@@ -190,6 +190,64 @@ def test_economy_mode_batches_every_optimize_anything_model(gateway: ModelGatewa
         assert config["extra"]["timeout"] == VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
 
 
+def test_economy_mode_batches_only_the_models_that_ask_for_it(gateway: ModelGateway) -> None:
+    """Batch each managed model whose own config asks for economy, and leave its siblings at full price."""
+    protected = gateway.protect_payload(
+        {
+            "target": {"kind": "text"},
+            "reflection_model_config": {"name": "fixture/text", "extra": {"economy_mode": True}},
+            "extra_reflection_model_configs": [{"name": "fixture/text"}],
+            "scorer": {"kind": "python", "metric_code": "def score(x): return 1", "model": {"name": "fixture/text"}},
+        },
+        managed_key="provider-secret",
+    )
+    reflection = protected["reflection_model_config"]
+    assert gateway.batches(reflection["extra"][ROUTE_KEY]["token"])
+    assert reflection["extra"]["timeout"] == VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
+    assert "economy_mode" not in reflection["extra"]
+    for config in (protected["extra_reflection_model_configs"][0], protected["scorer"]["model"]):
+        assert not gateway.batches(config["extra"][ROUTE_KEY]["token"])
+        assert "timeout" not in config["extra"]
+
+
+def test_model_economy_never_batches_an_own_key_model(gateway: ModelGateway) -> None:
+    """Keep an own-key model at its provider's price even when its config asks for economy."""
+    protected = gateway.protect_payload(
+        {
+            "model_config": {
+                "name": "openrouter/fixture/text",
+                "token_source": "byok",
+                "byok_provider": "openrouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "extra": {"api_key": "account-owned-key", "economy_mode": True},
+            },
+        },
+        managed_key="provider-secret",
+    )
+    config = protected["model_config"]
+    assert not gateway.batches(config["extra"][ROUTE_KEY]["token"])
+    assert "economy_mode" not in config["extra"]
+    assert "timeout" not in config["extra"]
+
+
+def test_interaction_payload_never_batches_a_managed_economy_model(gateway: ModelGateway) -> None:
+    """Keep a completed-run interaction off batches and still strip the model's economy flag."""
+    protected = gateway.protect_payload(
+        {
+            "economy_mode": True,
+            "model_config": {"name": "fixture/text", "extra": {"economy_mode": True}},
+            "reflection_model_config": {"name": "fixture/text", "extra": {"economy_mode": True}},
+        },
+        managed_key="provider-secret",
+        allow_batch=False,
+    )
+    for key in ("model_config", "reflection_model_config"):
+        config = protected[key]
+        assert not gateway.batches(config["extra"][ROUTE_KEY]["token"])
+        assert "economy_mode" not in config["extra"]
+        assert "timeout" not in config["extra"]
+
+
 def test_byok_agent_task_uses_its_scoped_fee_metered_route(gateway: ModelGateway) -> None:
     """Route the evaluated agent through its own key while billing only the BYOK fee policy."""
     protected = gateway.protect_payload(
