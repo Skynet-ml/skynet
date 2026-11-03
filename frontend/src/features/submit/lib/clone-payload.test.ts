@@ -67,6 +67,7 @@ test("a metric model equal to reflection is not pinned when cloning", () => {
   const slices = cloneToSlices("blackbox", {
     payload_kind: "unified_v1",
     models: { reflection_model: { name: "same" }, metric_model: { name: "same" } },
+    workspace: { metric_code: "llm()" },
   });
   assert.equal(slices.optimizer.reflectionModel?.name, "same");
   assert.equal(slices.workspace.metricModel, null);
@@ -75,7 +76,7 @@ test("a metric model equal to reflection is not pinned when cloning", () => {
 test("a code-derived metric model is not pinned when cloning", () => {
   const slices = cloneToSlices("blackbox", {
     payload_kind: "unified_v1",
-    models: { reflection_model: { name: "r" }, metric_model: { name: "a/b" } },
+    models: { reflection_model: { name: "r" }, task_model: { name: "a/b" }, metric_model: { name: "a/b" } },
     workspace: { metric_code: "llm(model='a/b')" },
   });
   assert.equal(slices.workspace.metricModel, null);
@@ -116,11 +117,29 @@ test("a black-box clone drops derived models and retains a distinct legacy model
       reflection_model_config: { name: reflection },
       scorer: { kind: "python", metric_code: code, model: { name: model } },
     }).workspace.metricModel;
-  assert.equal(clone("judge", "llm(model='judge')"), null);
+  assert.deepEqual(clone("judge", "llm(model='judge')"), { name: "judge" });
   assert.equal(clone("r", "llm()"), null);
   assert.deepEqual(clone("old", "llm(model='judge')"), { name: "old" });
   assert.deepEqual(clone("old", "llm()"), { name: "old" });
 });
+
+for (const shape of ["unified", "blackbox"] as const) {
+  test(`${shape} clone keeps same-name models with distinct settings`, () => {
+    const reflection = { name: "openai/r", token_source: "managed" };
+    const clone = (metric: Record<string, unknown>) =>
+      cloneToSlices("blackbox", shape === "unified"
+        ? { payload_kind: "unified_v1", models: { reflection_model: reflection, metric_model: metric }, workspace: { metric_code: "llm()" } }
+        : { reflection_model_config: reflection, scorer: { metric_code: "llm()", model: metric } },
+      ).workspace.metricModel;
+    for (const metric of [
+      { name: "openai/r", token_source: "byok" },
+      { name: "openai/r", token_source: "managed", byok_provider: "openrouter" },
+      { name: "openai/r", token_source: "managed", extra: { economy_mode: true } },
+      { name: "openai/r", token_source: "managed", temperature: 0.2 },
+    ]) assert.notEqual(clone(metric), null);
+    assert.equal(clone({ name: "openai/r" }), null);
+  });
+}
 
 test("a legacy DSPy run maps rows by the column mapping and keeps metric_code", () => {
   const slices = cloneToSlices("run", {
@@ -333,5 +352,22 @@ test("a legacy metric economy setting does not change the reflection model", () 
   });
   assert.equal(slices.optimizer.reflectionModel?.economy_mode, true);
   assert.deepEqual(slices.optimizer.reflectionModel?.extra, { temperature_hint: 1 });
-  assert.equal(slices.workspace.metricModel, null);
+  assert.deepEqual(slices.workspace.metricModel, { name: "refl" });
+});
+
+test("a clone compares the role actually copied by the resolver", () => {
+  const base = { name: "judge", token_source: "managed", extra: { b: 2, a: 1 } };
+  const clone = (metric: Record<string, unknown>, code = "llm(model='judge')") =>
+    cloneToSlices("blackbox", {
+      payload_kind: "unified_v1",
+      models: {
+        task_model: base,
+        reflection_model: { name: "judge", token_source: "byok" },
+        metric_model: metric,
+      },
+      workspace: { metric_code: code },
+    }).workspace.metricModel;
+  assert.equal(clone({ name: "judge", extra: { a: 1, b: 2 } }), null);
+  assert.notEqual(clone({ name: "judge", token_source: "byok" }), null);
+  assert.notEqual(clone(base, "llm()"), null);
 });

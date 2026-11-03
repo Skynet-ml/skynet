@@ -355,9 +355,7 @@ def resolve_blackbox_metric_model_dict(payload: dict[str, Any]) -> str | None:
             return "contract.metric_model_empty"
         if scan.non_literal or len(scan.names) > 1 or (scan.omitted and scan.names):
             return "contract.metric_model_declaration"
-        if len(scan.names) != 1:
-            return None
-        reflection = {"name": next(iter(scan.names))}
+        return None
     models = {
         "reflection_model": reflection,
         "metric_model": scorer.get("model"),

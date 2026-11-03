@@ -13,7 +13,7 @@ import type {
   TaskSlice,
   WorkspaceSlice,
 } from "./wizard-v2";
-import { declaredMetricModel } from "./run-floor";
+import { scanMetricDeclarations, scanMetricModel } from "./run-floor";
 
 /**
  * `?clone=` hydration for the wizard. A stored payload is one of three
@@ -54,6 +54,41 @@ function modelConfig(value: unknown): ModelConfig | null {
     extra: Object.keys(extra).length > 0 ? extra : undefined,
     ...(economy === true && { economy_mode: true }),
   };
+}
+
+function sameValue(left: unknown, right: unknown): boolean {
+  if (left == null || right == null) return left == null && right == null;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) &&
+      left.length === right.length && left.every((value, index) => sameValue(value, right[index]));
+  }
+  if (isRecord(left) && isRecord(right)) {
+    return [...new Set([...Object.keys(left), ...Object.keys(right)])]
+      .every((key) => sameValue(left[key], right[key]));
+  }
+  return left === right;
+}
+
+function retainedMetricModel(
+  metric: ModelConfig | null,
+  code: string,
+  task: ModelConfig | null,
+  reflection: ModelConfig | null,
+  extras: ModelConfig[],
+): ModelConfig | null {
+  if (!metric || !reflection) return metric;
+  const declaration = scanMetricDeclarations(code);
+  const scan = scanMetricModel(code, reflection.name);
+  if (!scan.uses || scan.unknown || declaration.unsafe || declaration.names.length > 1) return metric;
+  const name = scan.name;
+  if (declaration.names.length && !name) return metric;
+  const derived = name
+    ? [task, reflection, ...extras].find((role) => role?.name === name)
+    : reflection;
+  if (!derived) return metric;
+  const fields = ["name", "byok_provider", "cli_provider", "base_url", "temperature", "max_tokens", "extra", "economy_mode"] as const;
+  return (metric.token_source || "managed") === (derived.token_source || "managed") &&
+    fields.every((key) => sameValue(metric[key], derived[key])) ? null : metric;
 }
 
 /** A starting version is text or a map of named text parts; anything else is dropped. */
@@ -178,11 +213,10 @@ function cloneUnified(payload: ClonePayload): Omit<CloneSlices, "meta"> {
   const workspaceSlice: Partial<WorkspaceSlice> = {
     runCode: typeof workspace.run_code === "string" ? workspace.run_code : "",
     metricCode,
-    metricModel:
-      metricModel?.name !== reflection?.name &&
-      metricModel?.name !== declaredMetricModel(metricCode, reflection?.name)
-        ? metricModel
-        : null,
+    metricModel: retainedMetricModel(
+      metricModel, metricCode, optimizerSlice.taskModel ?? null, reflection,
+      optimizerSlice.extraReflectionModels ?? [],
+    ),
     // A payload stored before extra files existed has none.
     files: extraFiles(workspace.files),
   };
@@ -254,11 +288,10 @@ function cloneLegacyBlackbox(payload: ClonePayload): Omit<CloneSlices, "meta"> {
   const metricModel = modelConfig(scorer.model);
   const metricCode = typeof scorer.metric_code === "string" ? scorer.metric_code : "";
   const workspace: Partial<WorkspaceSlice> = {
-    metricModel:
-      metricModel?.name !== reflection?.name &&
-      metricModel?.name !== declaredMetricModel(metricCode, reflection?.name)
-        ? metricModel
-        : null,
+    metricModel: retainedMetricModel(
+      metricModel, metricCode, modelConfig(payload.task_model_config ?? payload.task_model_settings),
+      reflection, modelConfigs(payload.extra_reflection_model_configs ?? payload.extra_reflection_model_settings),
+    ),
   };
   if (typeof scorer.metric_code === "string") workspace.metricCode = scorer.metric_code;
   if (typeof scorer.timeout_seconds === "number")

@@ -105,7 +105,9 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
   let invalid = false;
   for (const decorator of decorators) {
     const position = decorator.index + decorator[1]!.length;
-    let statement: typeof tree.topNode | null = tree.resolve(position + 1, 1);
+    let expression = position + 1;
+    while (code[expression] === " " || code[expression] === "\t") expression++;
+    let statement: typeof tree.topNode | null = tree.resolve(expression, 1);
     let current: typeof tree.topNode | null = statement;
     while (current && !["String", "Comment"].includes(current.name)) current = current.parent;
     if (current) continue;

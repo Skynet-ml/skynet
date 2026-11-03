@@ -18,6 +18,7 @@ from core.provider_registry import BYOK_TO_LITELLM_PROVIDER
 from core.service_gateway.optimization.blackbox.runner import model_matches_bound
 from core.service_gateway.optimization.unified.metric_model import (
     MetricLLMScan,
+    resolve_blackbox_metric_model_dict,
     resolve_metric_model,
     resolve_metric_model_dict,
     scan_metric_llm,
@@ -40,6 +41,13 @@ def test_shared_metric_scan_parity(case: dict) -> None:
         "omitted": scan.omitted,
         "unsafe": scan.non_literal,
     } == case["expected"]
+
+
+def test_blackbox_without_reflection_defers_declared_byok_model() -> None:
+    """Do not synthesize a scorer model before reflection is available."""
+    payload = {"token_source": "byok", "scorer": {"kind": "python", "metric_code": "llm(model='openai/gpt-4o-mini')"}}
+    assert resolve_blackbox_metric_model_dict(payload) is None
+    assert "model" not in payload["scorer"]
 
 
 @pytest.mark.parametrize(
