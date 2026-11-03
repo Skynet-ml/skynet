@@ -138,13 +138,15 @@ export function DocsShell({
             <span className="mx-0.5 h-4 w-px bg-border" aria-hidden="true" />
             <Tooltip>
               <TooltipTrigger asChild>
-                <Link
+                {/* A plain link, not next/link: the app must load its catalog from
+                    the locale cookie again, not keep the docs page's language. */}
+                <a
                   href="/"
                   aria-label={t.openApp}
                   className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/45"
                 >
                   <LinkSimple className="size-3.5" aria-hidden="true" />
-                </Link>
+                </a>
               </TooltipTrigger>
               <TooltipContent>{t.openApp}</TooltipContent>
             </Tooltip>

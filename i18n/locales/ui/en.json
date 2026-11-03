@@ -535,6 +535,7 @@
   "agent.tool.list_samples.title": "Sample datasets",
   "agent.tool.validate_datasets.title": "Dataset split check",
   "agent.tool.web_search.title": "Search the web",
+  "agent.tool.search_docs.title": "Search the docs",
   "agent.tool.fetch_url.title": "Read a web page",
   "agent.tool.crawl_site.title": "Crawl a website",
   "agent.tool.blackbox_engines.title": "Available optimization engines",

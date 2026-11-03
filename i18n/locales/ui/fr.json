@@ -1032,6 +1032,7 @@
   "agent.tool.list_samples.title": "Jeux de données d'exemple",
   "agent.tool.validate_datasets.title": "Vérification du découpage du jeu de données",
   "agent.tool.web_search.title": "Rechercher sur le web",
+  "agent.tool.search_docs.title": "Rechercher dans la documentation",
   "agent.tool.fetch_url.title": "Lire une page web",
   "agent.tool.crawl_site.title": "Explorer un site web",
   "agent.tool.blackbox_engines.title": "Moteurs d'optimisation disponibles",

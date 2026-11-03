@@ -532,6 +532,7 @@
   "agent.tool.list_samples.title": "דאטאסטים לדוגמה",
   "agent.tool.validate_datasets.title": "בדיקת חלוקת הדאטאסט",
   "agent.tool.web_search.title": "חיפוש ברשת",
+  "agent.tool.search_docs.title": "חיפוש בתיעוד",
   "agent.tool.fetch_url.title": "קריאת דף אינטרנט",
   "agent.tool.crawl_site.title": "סריקת אתר",
   "agent.tool.blackbox_engines.title": "מנועי אופטימיזציה זמינים",

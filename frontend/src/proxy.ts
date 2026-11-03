@@ -16,10 +16,32 @@ export default function proxy(request: NextRequest, event: NextFetchEvent) {
     case "refuse":
       return new NextResponse("Forbidden", { status: 403 });
     case "pass":
-      return NextResponse.next();
+      return passThrough(request);
     case "auth":
       return authProxy(request, event);
   }
+}
+
+// Must equal DOCS_PATH_HEADER in features/docs/lib/docs-answer.ts (a unit test
+// checks this). The proxy does not
+// import the docs feature, so its pages and content stay out of this bundle.
+const DOCS_PATH_HEADER = "x-docs-path";
+
+/**
+ * Pass a request on, and give the root layout the path of a docs page.
+ *
+ * The docs page takes its language from the URL, but the root layout built
+ * the shared UI catalog from the cookie. So /docs/he showed the docs agent's
+ * shared strings and times in the cookie's language. A client copy of the
+ * header is dropped here. On login-gated routes it can only pick that
+ * client's own UI language, as the locale cookie can.
+ */
+function passThrough(request: NextRequest) {
+  const headers = new Headers(request.headers);
+  headers.delete(DOCS_PATH_HEADER);
+  const { pathname } = request.nextUrl;
+  if (pathname === "/docs" || pathname.startsWith("/docs/")) headers.set(DOCS_PATH_HEADER, pathname);
+  return NextResponse.next({ request: { headers } });
 }
 
 export const config = {

@@ -1032,6 +1032,7 @@
   "agent.tool.list_samples.title": "Примеры наборов данных",
   "agent.tool.validate_datasets.title": "Проверка разбиения набора данных",
   "agent.tool.web_search.title": "Поиск в интернете",
+  "agent.tool.search_docs.title": "Поиск по документации",
   "agent.tool.fetch_url.title": "Прочитать веб-страницу",
   "agent.tool.crawl_site.title": "Обойти сайт",
   "agent.tool.blackbox_engines.title": "Доступные движки оптимизации",

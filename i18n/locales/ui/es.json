@@ -1032,6 +1032,7 @@
   "agent.tool.list_samples.title": "Conjuntos de datos de ejemplo",
   "agent.tool.validate_datasets.title": "Comprobación de la división del conjunto de datos",
   "agent.tool.web_search.title": "Buscar en la web",
+  "agent.tool.search_docs.title": "Buscar en la documentación",
   "agent.tool.fetch_url.title": "Leer una página web",
   "agent.tool.crawl_site.title": "Rastrear un sitio web",
   "agent.tool.blackbox_engines.title": "Motores de optimización disponibles",

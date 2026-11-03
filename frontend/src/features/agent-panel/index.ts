@@ -38,3 +38,5 @@ export type {
   TrustMode,
 } from "./lib/types";
 export { queueAgentPrompt } from "./lib/prompt-queue";
+export { dispatchGeneralistEvent } from "./lib/stream-events";
+export type { GeneralistAgentHandlers } from "./lib/stream";

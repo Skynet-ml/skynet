@@ -1032,6 +1032,7 @@
   "agent.tool.list_samples.title": "مجموعات بيانات نموذجية",
   "agent.tool.validate_datasets.title": "فحص تقسيم مجموعة البيانات",
   "agent.tool.web_search.title": "البحث في الويب",
+  "agent.tool.search_docs.title": "البحث في الوثائق",
   "agent.tool.fetch_url.title": "قراءة صفحة ويب",
   "agent.tool.crawl_site.title": "زحف موقع ويب",
   "agent.tool.blackbox_engines.title": "محركات التحسين المتاحة",

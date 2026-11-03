@@ -1430,6 +1430,7 @@
   "agent.tool.list_samples.title": "範例資料集",
   "agent.tool.validate_datasets.title": "檢查資料集分割",
   "agent.tool.web_search.title": "搜尋網上資料",
+  "agent.tool.search_docs.title": "搜尋文件",
   "agent.tool.fetch_url.title": "閱讀網頁",
   "agent.tool.crawl_site.title": "爬取網站",
   "agent.tool.blackbox_engines.title": "可用嘅最佳化引擎",

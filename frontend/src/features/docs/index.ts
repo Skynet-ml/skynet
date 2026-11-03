@@ -3,6 +3,7 @@
 export { DocsMarkdown } from "./components/docs-markdown";
 export { DocsShell } from "./components/docs-shell";
 export { DOCS_CHROME } from "./lib/chrome";
+export { DOCS_PATH_HEADER, docsPathLocale, pickRequestLocale } from "./lib/docs-answer";
 export { docsMarkdownDocument, docsSearchIndex, docsSource } from "./lib/content";
 export { extractHeadings } from "./lib/markdown";
 export {

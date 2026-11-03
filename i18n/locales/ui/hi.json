@@ -1032,6 +1032,7 @@
   "agent.tool.list_samples.title": "नमूना डेटासेट",
   "agent.tool.validate_datasets.title": "डेटासेट विभाजन की जाँच",
   "agent.tool.web_search.title": "वेब पर खोजें",
+  "agent.tool.search_docs.title": "दस्तावेज़ खोजें",
   "agent.tool.fetch_url.title": "वेब पेज पढ़ें",
   "agent.tool.crawl_site.title": "वेबसाइट क्रॉल करें",
   "agent.tool.blackbox_engines.title": "उपलब्ध ऑप्टिमाइज़ेशन इंजन",

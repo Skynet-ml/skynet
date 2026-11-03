@@ -1032,6 +1032,7 @@
   "agent.tool.list_samples.title": "Örnek veri kümeleri",
   "agent.tool.validate_datasets.title": "Veri kümesi bölme denetimi",
   "agent.tool.web_search.title": "Web'de ara",
+  "agent.tool.search_docs.title": "Belgelerde ara",
   "agent.tool.fetch_url.title": "Bir web sayfasını oku",
   "agent.tool.crawl_site.title": "Bir web sitesini tara",
   "agent.tool.blackbox_engines.title": "Kullanılabilir optimizasyon motorları",

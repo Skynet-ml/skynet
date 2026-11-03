@@ -1032,6 +1032,7 @@
   "agent.tool.list_samples.title": "サンプルデータセット",
   "agent.tool.validate_datasets.title": "データセット分割の確認",
   "agent.tool.web_search.title": "ウェブを検索",
+  "agent.tool.search_docs.title": "ドキュメントを検索",
   "agent.tool.fetch_url.title": "ウェブページを読む",
   "agent.tool.crawl_site.title": "ウェブサイトをクロール",
   "agent.tool.blackbox_engines.title": "利用可能な最適化エンジン",
