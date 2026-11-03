@@ -593,6 +593,17 @@ export function scanMetricModel(
   return result;
 }
 
+/**
+ * A metric model stored by a clone or an old draft, or null when the metric
+ * code names another model: the backend refuses that pair as a conflict, and
+ * the wizard has no control left to clear the stored model.
+ */
+export function storedMetricModel(stored: ModelConfig | null, code: string): ModelConfig | null {
+  if (!stored) return null;
+  const { names } = scanMetricDeclarations(code);
+  return names.length === 0 || (names.length === 1 && names[0] === stored.name) ? stored : null;
+}
+
 export function declaredMetricModel(code: string, reflectionName?: string): string | null {
   return scanMetricModel(code, reflectionName).name;
 }

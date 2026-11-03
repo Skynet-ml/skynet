@@ -13,7 +13,7 @@ import type {
   TaskSlice,
   WorkspaceSlice,
 } from "./wizard-v2";
-import { scanMetricDeclarations, scanMetricModel } from "./run-floor";
+import { scanMetricDeclarations, scanMetricModel, storedMetricModel } from "./run-floor";
 
 /**
  * `?clone=` hydration for the wizard. A stored payload is one of three
@@ -76,6 +76,7 @@ function retainedMetricModel(
   reflection: ModelConfig | null,
   extras: ModelConfig[],
 ): ModelConfig | null {
+  metric = storedMetricModel(metric, code);
   if (!metric || !reflection) return metric;
   const declaration = scanMetricDeclarations(code);
   const scan = scanMetricModel(code, reflection.name);

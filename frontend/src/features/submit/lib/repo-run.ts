@@ -7,6 +7,7 @@
  */
 import type { BlackboxEngineId, BlackboxRunRequest, ModelConfig } from "@/shared/types/api";
 import { prepareModelConfig } from "./model-config";
+import { storedMetricModel } from "./run-floor";
 import type { WizardV2State } from "./wizard-v2";
 
 export interface RepoRunOptions {
@@ -30,6 +31,7 @@ export function repoRunRequest(
   const engine = optimizer.choice as BlackboxEngineId;
   const shinka = engine === "shinka_evolve";
   const editablePaths = repo.editablePaths.map((path) => path.trim()).filter(Boolean);
+  const metricModel = storedMetricModel(workspace.metricModel, workspace.metricCode);
   return {
     name: meta.name.trim() || undefined,
     description: meta.description.trim() || undefined,
@@ -40,7 +42,7 @@ export function repoRunRequest(
     scorer: {
       kind: "python",
       metric_code: workspace.metricCode,
-      ...(hasModel(workspace.metricModel) && { model: prepareModelConfig(workspace.metricModel) }),
+      ...(hasModel(metricModel) && { model: prepareModelConfig(metricModel) }),
       timeout_seconds: workspace.metricTimeoutSeconds,
     },
     budget: optimizer.budget,

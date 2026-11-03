@@ -81,6 +81,18 @@ test("a repository clone submits its stored scorer model", () => {
   );
 });
 
+test("a repository clone drops a stored scorer model the code replaces", () => {
+  const state = repoState();
+  state.workspace.metricModel = { name: "anthropic/legacy", token_source: "byok" };
+  state.workspace.metricCode = "llm('x', model='anthropic/judge')";
+  assert.equal(repoRunRequest(state, options)?.scorer.model, undefined);
+  state.workspace.metricCode = "llm('x', model='anthropic/legacy')";
+  assert.deepEqual(
+    repoRunRequest(state, options)?.scorer.model,
+    prepareModelConfig(state.workspace.metricModel),
+  );
+});
+
 test("a new repository scorer leaves its declared model to the backend", () => {
   const state = repoState();
   state.workspace.metricCode = "llm(model='anthropic/judge')";

@@ -95,10 +95,12 @@ def test_lm_helper_translates_new_gateway_reasoning(model: str) -> None:
         kwargs: dict[str, Any] = {}
 
         def __init__(self) -> None:
+            """Set the model under test and an empty call log."""
             self.model = model
             self.calls: list[dict[str, Any]] = []
 
         def __call__(self, **kwargs: Any) -> list[str]:
+            """Record the request options and return a fixed completion."""
             self.calls.append(kwargs)
             return ["ok"]
 

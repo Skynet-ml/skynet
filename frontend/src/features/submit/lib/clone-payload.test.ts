@@ -82,11 +82,20 @@ test("a code-derived metric model is not pinned when cloning", () => {
   assert.equal(slices.workspace.metricModel, null);
 });
 
-test("a distinct legacy metric model is pinned when cloning", () => {
+test("a legacy metric model the code replaces is dropped when cloning", () => {
   const slices = cloneToSlices("blackbox", {
     payload_kind: "unified_v1",
     models: { reflection_model: { name: "r" }, metric_model: { name: "old" } },
     workspace: { metric_code: "llm(model='a/b')" },
+  });
+  assert.equal(slices.workspace.metricModel, null);
+});
+
+test("a distinct legacy metric model is pinned when the code names no model", () => {
+  const slices = cloneToSlices("blackbox", {
+    payload_kind: "unified_v1",
+    models: { reflection_model: { name: "r" }, metric_model: { name: "old" } },
+    workspace: { metric_code: "llm('x')" },
   });
   assert.deepEqual(slices.workspace.metricModel, { name: "old" });
 });
@@ -119,7 +128,7 @@ test("a black-box clone drops derived models and retains a distinct legacy model
     }).workspace.metricModel;
   assert.deepEqual(clone("judge", "llm(model='judge')"), { name: "judge" });
   assert.equal(clone("r", "llm()"), null);
-  assert.deepEqual(clone("old", "llm(model='judge')"), { name: "old" });
+  assert.equal(clone("old", "llm(model='judge')"), null);
   assert.deepEqual(clone("old", "llm()"), { name: "old" });
 });
 

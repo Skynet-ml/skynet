@@ -290,6 +290,7 @@ def test_openrouter_gateway_translates_reasoning_effort(monkeypatch: pytest.Monk
     client = GatewayClient("https://openrouter.ai/api/v1", "anthropic/example")
 
     def post(data: bytes) -> dict[str, Any]:
+        """Record the request body and return a fixed completion."""
         requests.append(json.loads(data))
         return {"choices": [{"message": {"content": "ok"}}]}
 

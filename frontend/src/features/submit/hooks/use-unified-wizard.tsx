@@ -65,6 +65,7 @@ import {
   callHoldKey,
   isSubscriptionModel,
   metricModelUnpriced,
+  storedMetricModel,
   runFloor as computeRunFloor,
   runModels,
 } from "../lib/run-floor";
@@ -416,7 +417,7 @@ export function WizardV2Provider({
     state.optimizer,
     metricCallsModel,
     state.workspace.metricCode,
-    state.workspace.metricModel,
+    storedMetricModel(state.workspace.metricModel, state.workspace.metricCode),
   );
   // A CLI-subscription model bills to the user's own plan, so it has no
   // server hold to fetch and adds nothing to the floor.
@@ -473,6 +474,7 @@ export function WizardV2Provider({
     if (inputs.cases.length === 0 && !inputs.stagedDatasetId) return null;
     if (!hasModel(optimizer.reflectionModel)) return null;
     if (!workspace.runCode.trim() || !workspace.metricCode.trim()) return null;
+    const metricModel = storedMetricModel(workspace.metricModel, workspace.metricCode);
     return {
       payload_kind: "unified_v1",
       name: meta.name.trim() || undefined,
@@ -502,9 +504,7 @@ export function WizardV2Provider({
       models: {
         task_model: hasModel(optimizer.taskModel) ? prepareModelConfig(optimizer.taskModel) : null,
         reflection_model: prepareModelConfig(optimizer.reflectionModel),
-        metric_model: hasModel(workspace.metricModel)
-          ? prepareModelConfig(workspace.metricModel)
-          : null,
+        metric_model: hasModel(metricModel) ? prepareModelConfig(metricModel) : null,
         extra_reflection_models:
           optimizer.choice === "shinka_evolve"
             ? optimizer.extraReflectionModels.filter(hasModel).map(prepareModelConfig)
