@@ -50,9 +50,11 @@ from ..rate_limit import RateLimiter, shared_redis_client
 
 logger = logging.getLogger("app.api.docs_agent")
 
-MAX_QUESTION_CHARS = 1000
+MAX_QUESTION_CHARS = 8000
 MAX_HISTORY_TURNS = 6
-MAX_HISTORY_CHARS = 4000
+# A history turn may replay an earlier question, so it takes the same limit; a
+# lower one would turn a valid question into a 422 on the next follow-up.
+MAX_HISTORY_CHARS = MAX_QUESTION_CHARS
 MAX_OUTPUT_TOKENS = 700
 TOP_PASSAGES = 5
 _BUDGET_SERVICE = "docs_agent"

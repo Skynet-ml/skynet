@@ -314,11 +314,26 @@ def test_question_and_history_are_capped(docs_root: Path, redis_double: fakeredi
     """An over-long question or more than six history turns is rejected before the model."""
     lm = _FakeLM()
     client = _client(docs_root, lm)
+    assert docs_agent.MAX_QUESTION_CHARS == 8000
     long_q = client.post("/docs-agent/ask", json={"question": "x" * (docs_agent.MAX_QUESTION_CHARS + 1)})
     assert long_q.status_code == 422
     history = [{"role": "user", "content": "q"}] * (docs_agent.MAX_HISTORY_TURNS + 1)
     assert client.post("/docs-agent/ask", json={"question": "q", "history": history}).status_code == 422
     assert lm.calls == []
+
+
+def test_question_at_the_limit_is_answered_and_replays_as_history(
+    docs_root: Path, redis_double: fakeredis.FakeStrictRedis
+) -> None:
+    """A question of exactly the limit is answered, and it still fits when the next ask sends it as history."""
+    lm = _FakeLM()
+    client = _client(docs_root, lm)
+    question = "x" * docs_agent.MAX_QUESTION_CHARS
+    assert client.post("/docs-agent/ask", json={"question": question}).status_code == 200
+    history = [{"role": "user", "content": question}, {"role": "assistant", "content": "a"}]
+    assert client.post("/docs-agent/ask", json={"question": "more", "history": history}).status_code == 200
+    too_long = [{"role": "user", "content": question + "x"}]
+    assert client.post("/docs-agent/ask", json={"question": "q", "history": too_long}).status_code == 422
 
 
 def test_spent_budget_answers_503(

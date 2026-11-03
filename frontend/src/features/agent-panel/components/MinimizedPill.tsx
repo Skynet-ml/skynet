@@ -13,6 +13,9 @@ interface MinimizedPillProps {
   statusLabel?: string;
   /** Rendered inside an AgentPillDock: the dock places it, so don't float. */
   inline?: boolean;
+  /** Overrides the UI-locale name and side, for pages with their own locale (the docs). */
+  label?: string;
+  dir?: "ltr" | "rtl";
   className?: string;
 }
 
@@ -21,9 +24,11 @@ export function MinimizedPill({
   active,
   statusLabel,
   inline = false,
+  label,
+  dir,
   className,
 }: MinimizedPillProps) {
-  const ariaLabel = msg("auto.features.agent.panel.components.minimizedpill.literal.1");
+  const ariaLabel = label ?? msg("auto.features.agent.panel.components.minimizedpill.literal.1");
   const showLabel = active && Boolean(statusLabel);
 
   return (
@@ -35,7 +40,7 @@ export function MinimizedPill({
       // Set the writing direction on the pill itself so its logical `end-4`
       // follows the locale (right in LTR/English, left in RTL/Hebrew),
       // independent of whatever direction an ancestor or portal resolves to.
-      dir={getActiveDir()}
+      dir={dir ?? getActiveDir()}
       className={cn(
         inline ? "relative" : "fixed bottom-4 end-4 z-40",
         "inline-flex min-h-[44px] items-center gap-2 rounded-full",
@@ -59,7 +64,7 @@ export function MinimizedPill({
       <span className="truncate max-w-[18ch] leading-none">
         {showLabel
           ? statusLabel
-          : msg("auto.features.agent.panel.components.minimizedpill.literal.3")}
+          : (label ?? msg("auto.features.agent.panel.components.minimizedpill.literal.3"))}
       </span>
     </button>
   );

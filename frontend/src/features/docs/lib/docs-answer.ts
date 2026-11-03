@@ -16,16 +16,25 @@ export const MAX_KEPT_MESSAGES = 12;
 export const MAX_SENT_HISTORY = 6;
 
 // The backend rejects longer fields with 422 (backend/core/api/routers/docs_agent.py).
-const MAX_QUESTION_CHARS = 1000;
-const MAX_TURN_CHARS = 4000;
+// A history turn may be an earlier question, so it has the same limit.
+export const MAX_QUESTION_CHARS = 8000;
 
-/** The request body for one question, cut to the backend's limits. */
+/** Whether a question is over the backend's limit; the panel then refuses to send it. */
+export function isQuestionTooLong(question: string): boolean {
+  return question.trim().length > MAX_QUESTION_CHARS;
+}
+
+/**
+ * The request body for one question. The caller checks the question with
+ * `isQuestionTooLong` first; it is never cut. History turns are cut as a
+ * guard, but no question or short answer the panel keeps reaches the limit.
+ */
 export function askBody(question: string, earlier: readonly DocsAgentMessage[], locale: string) {
   return {
-    question: question.slice(0, MAX_QUESTION_CHARS),
+    question,
     history: trimHistory(earlier, MAX_SENT_HISTORY).map((message) => ({
       role: message.role,
-      content: message.content.slice(0, MAX_TURN_CHARS),
+      content: message.content.slice(0, MAX_QUESTION_CHARS),
     })),
     locale,
   };
@@ -72,6 +81,13 @@ const MARKDOWN_LINK = /(!?)\[([^\]]*)\]\(\s*<?([^)\s>]*)>?(?:\s+"[^"]*")?\s*\)/g
 const REFERENCE_DEF = /^ {0,3}\[[^\]]+\]:[ \t]*<?([^\s>]*)>?.*$/gm;
 const ANGLE_LINK = /<(https?:\/\/[^>\s]+)>/g;
 const BARE_URL = /(^|[\s(])(https?:\/\/[^\s)<>]+)/g;
+
+/** The messages as the shared chat transcript shows them, with only docs links kept. */
+export function toTranscript(messages: readonly DocsAgentMessage[]): DocsAgentMessage[] {
+  return messages.map((message) =>
+    message.role === "assistant" ? { ...message, content: keepDocsLinks(message.content) } : message,
+  );
+}
 
 /** Whether a rendered link may stay a link in a docs answer: only docs pages. */
 export function isDocsHref(href: string): boolean {
