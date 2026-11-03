@@ -10,7 +10,6 @@ import remarkGfm from "remark-gfm";
 
 import {
   askBody,
-  chunkText,
   isDocsHref,
   isQuestionTooLong,
   keepDocsLinks,
@@ -47,12 +46,6 @@ test("keepDocsLinks leaves fenced code alone", () => {
   assert.equal(keepDocsLinks(text), "```bash\ncurl https://api.example.com\n```\nThen `https://x.io`");
 });
 
-test("chunkText reads OpenAI-style deltas and ignores everything else", () => {
-  assert.equal(chunkText({ choices: [{ delta: { content: "Hi" } }] }), "Hi");
-  assert.equal(chunkText({ choices: [{ delta: {} }] }), "");
-  assert.equal(chunkText({ error: { message: "x" } }), "");
-});
-
 test("history keeps the newest non-empty messages", () => {
   const messages = [
     { role: "user" as const, content: "a" },
@@ -74,6 +67,51 @@ test("stored history ignores malformed data", () => {
     parseStoredHistory('[{"role":"user","content":"q"},{"role":"system","content":"x"},7]'),
     [{ role: "user", content: "q" }],
   );
+});
+
+test("stored history keeps times, closed thinking and finished tool calls", () => {
+  const stored = JSON.stringify([
+    { role: "user", content: "q", createdAt: 1000 },
+    {
+      role: "assistant",
+      content: "a",
+      createdAt: 2000,
+      thinkingSegments: [
+        { reasoning: "think", startedAt: 1100, endedAt: null, toolsBefore: 1 },
+        { reasoning: "", startedAt: 1200, endedAt: 1300, toolsBefore: 1 },
+        "bad",
+      ],
+      toolCalls: [
+        { id: "t1", tool: "search_docs", reason: "q", status: "done", startedAt: 1000, endedAt: 1050, payload: { result: { result_count: 2 } } },
+        { id: "t2", tool: "search_docs", reason: "q2", status: "running", startedAt: 1400, endedAt: null },
+        { id: 3, tool: "search_docs" },
+      ],
+    },
+  ]);
+  assert.deepEqual(parseStoredHistory(stored), [
+    { role: "user", content: "q", createdAt: 1000 },
+    {
+      role: "assistant",
+      content: "a",
+      createdAt: 2000,
+      thinkingSegments: [{ reasoning: "think", startedAt: 1100, endedAt: 1100, toolsBefore: 1 }],
+      toolCalls: [
+        { id: "t1", tool: "search_docs", reason: "q", status: "done", startedAt: 1000, endedAt: 1050, payload: { result: { result_count: 2 } } },
+        { id: "t2", tool: "search_docs", reason: "q2", status: "error", startedAt: 1400, endedAt: 1400 },
+      ],
+    },
+  ]);
+});
+
+test("askBody sends only the role and text of earlier turns", () => {
+  const earlier = [
+    { role: "user" as const, content: "q", createdAt: 1 },
+    { role: "assistant" as const, content: "a", createdAt: 2, toolCalls: [] },
+  ];
+  assert.deepEqual(askBody("next", earlier, "en").history, [
+    { role: "user", content: "q" },
+    { role: "assistant", content: "a" },
+  ]);
 });
 
 test("askBody never cuts the question, and keeps the newest history", () => {

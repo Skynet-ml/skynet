@@ -1032,6 +1032,7 @@
   "agent.tool.list_samples.title": "샘플 데이터셋",
   "agent.tool.validate_datasets.title": "데이터셋 분할 확인",
   "agent.tool.web_search.title": "웹 검색",
+  "agent.tool.search_docs.title": "문서 검색",
   "agent.tool.fetch_url.title": "웹 페이지 읽기",
   "agent.tool.crawl_site.title": "웹사이트 크롤링",
   "agent.tool.blackbox_engines.title": "사용 가능한 최적화 엔진",

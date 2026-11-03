@@ -1,28 +1,33 @@
 """Docs-only question answering for the docs ask box. [INTERNAL]
 
 ``POST /docs-agent/ask`` answers one question from the public Skynet docs.
-It works signed out. It has no tools and takes no app actions: a BM25 search
-picks the best docs passages, and one small model call answers from them only,
-with relative ``/docs/...`` links, or says it does not know.
+It works signed out and takes no app actions. It is a small, limited version
+of the generalist agent: its only tool is ``search_docs`` (the BM25 docs index
+of :mod:`...service_gateway.agents.docs_tools`, no model call). The route runs
+the first search on the question itself; the model, which thinks at a low
+effort, may then search again before it answers from the passages only, with
+relative ``/docs/...`` links, or says it does not know.
 
-The platform pays for every answer on the side-task model (the interview pick
-with thinking off, the same model that labels agent thinking). Nothing is
-debited from user balances. Three limits bound the spend: a per-IP hourly cap
-for signed-out callers, a per-account hourly cap for signed-in callers, and a
-platform-wide monthly dollar budget counted from each answer's priced usage.
-The question length and the answer's output tokens are capped too.
+The platform pays for every answer on the interview pick. Nothing is debited
+from user balances. Three limits bound the spend: a per-IP hourly cap for
+signed-out callers, a per-account hourly cap for signed-in callers, and a
+platform-wide monthly dollar budget counted from the priced usage of every
+model step, thinking tokens included. The question length, the model steps
+per answer and each step's output tokens are capped too.
 
-The response is a Server-Sent Events stream of OpenAI-style
-``chat.completion.chunk`` events that ends with ``data: [DONE]``.
+The response is a Server-Sent Events stream in the generalist agent's
+contract: ``tool_start`` and ``tool_end`` for each search, ``reasoning_patch``
+for each step's thinking, ``message_patch`` for the answer, then ``done``, or
+one ``error`` event.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import threading
-import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -35,8 +40,8 @@ from pydantic import BaseModel, Field
 from ...billing.pricing import raw_cost_usd
 from ...config import settings
 from ...models import ModelConfig
-from ...service_gateway.agents.docs_retrieval import DocsCorpus, Passage
-from ...service_gateway.agents.generalist import _no_thinking_extra
+from ...service_gateway.agents.docs_retrieval import DocsCorpus
+from ...service_gateway.agents.docs_tools import SEARCH_DOCS_TOOL, search_corpus
 from ...service_gateway.language_models import (
     apply_model_reasoning_config,
     build_language_model,
@@ -45,6 +50,7 @@ from ...service_gateway.language_models import (
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..interview_model import interview_model_id
+from ..model_catalog import catalog_snapshot
 from ..platform_budget import budget_open, record_spend
 from ..rate_limit import RateLimiter, shared_redis_client
 
@@ -55,8 +61,17 @@ MAX_HISTORY_TURNS = 6
 # A history turn may replay an earlier question, so it takes the same limit; a
 # lower one would turn a valid question into a 422 on the next follow-up.
 MAX_HISTORY_CHARS = MAX_QUESTION_CHARS
-MAX_OUTPUT_TOKENS = 700
+# Each step's cap leaves room for low-effort thinking plus a short answer. A
+# provider that sets the thinking budget from it (OpenRouter's Anthropic
+# route gives at least 1024 tokens) still keeps about 1000 for the answer.
+MAX_OUTPUT_TOKENS = 2000
+# Three model calls at most: the last step offers no tool, so it must answer.
+MAX_STEPS = 3
+# The route's first search plus at most two from the model.
+MAX_SEARCHES = 3
+MAX_QUERY_CHARS = 500
 TOP_PASSAGES = 5
+_THINKING_EFFORT = "low"
 _BUDGET_SERVICE = "docs_agent"
 _LM_TIMEOUT_SECONDS = 45.0
 _CHUNK_CHARS = 48
@@ -70,7 +85,9 @@ _MAX_ACTIVE_ANSWERS = 4
 _EXECUTOR = ThreadPoolExecutor(max_workers=_MAX_ACTIVE_ANSWERS, thread_name_prefix="docs-agent")
 _ANSWER_SLOTS = threading.BoundedSemaphore(_MAX_ACTIVE_ANSWERS)
 
-DOCS_AGENT_SYSTEM_PROMPT = """You are the Skynet docs assistant. You answer questions about Skynet using only the documentation passages in the <docs> block of the user message.
+DOCS_AGENT_SYSTEM_PROMPT = """You are the Skynet docs assistant. You answer questions about Skynet using only the documentation passages in the <docs> blocks of the messages.
+
+The first <docs> block holds a docs search for the question. If its passages do not answer the question, call the search_docs tool with better keywords; you may search twice at most. search_docs is your only tool.
 
 Rules:
 - Use only facts that appear in the passages. Do not use outside knowledge about Skynet.
@@ -85,6 +102,23 @@ Rules:
 class DocsAgentTurn(BaseModel):
     role: Literal["user", "assistant"]
     content: str = Field(max_length=MAX_HISTORY_CHARS)
+
+
+SEARCH_DOCS_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": SEARCH_DOCS_TOOL,
+        "description": (
+            "Search the Skynet docs and return the best passages with their page links. "
+            "Use it when the passages you have do not answer the question."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "The keywords or question to look up."}},
+            "required": ["query"],
+        },
+    },
+}
 
 
 class DocsAgentAskRequest(BaseModel):
@@ -157,19 +191,38 @@ def _enforce_rate_limit(request: Request, user: AuthenticatedUser | None) -> Non
         raise
 
 
-def build_docs_agent_lm() -> Any:
-    """Build the platform-paid side-task model for one answer.
+def _low_thinking_extra(model: str) -> dict[str, Any]:
+    """Return the request extras that make ``model`` think at a low effort.
+
+    Args:
+        model: Catalog model id.
 
     Returns:
-        A metered LM on the interview pick with thinking off and no retries,
-        so a failure costs one call at most.
+        ``reasoning_effort`` at ``low``, or at the weakest level above
+        ``none`` when the model has no ``low``; nothing for a model with no
+        effort levels, which keeps its default.
+    """
+    snapshot = catalog_snapshot()
+    entry = next((m for m in snapshot.models if m.value == model), None) if snapshot is not None else None
+    efforts = [e for e in (entry.reasoning_efforts or []) if e != "none"] if entry is not None else []
+    if _THINKING_EFFORT in efforts:
+        return {"reasoning_effort": _THINKING_EFFORT}
+    return {"reasoning_effort": efforts[0]} if efforts else {}
+
+
+def build_docs_agent_lm() -> Any:
+    """Build the platform-paid model for one answer.
+
+    Returns:
+        A metered LM on the interview pick with low-effort thinking and no
+        retries, so a failure costs one call at most.
     """
     model = interview_model_id()
     config = apply_model_reasoning_config(
         ModelConfig(
             name=model,
             base_url=settings.generalist_agent_base_url or None,
-            extra=_no_thinking_extra(model),
+            extra=_low_thinking_extra(model),
         )
     )
     config.extra["timeout"] = _LM_TIMEOUT_SECONDS
@@ -189,8 +242,24 @@ def _escape(text: str) -> str:
     return text.replace("<", "‹").replace(">", "›")
 
 
+def _docs_block(results: list[dict[str, Any]]) -> str:
+    """Frame search results as one ``<docs>`` block of escaped passages.
+
+    Args:
+        results: ``search_docs`` results (``title``, ``href``, ``text``).
+
+    Returns:
+        The block, with a placeholder when there are no results.
+    """
+    blocks = [
+        f'<passage href="{r["href"]}" heading="{_escape(r["title"])}">\n{_escape(r["text"])}\n</passage>'
+        for r in results
+    ]
+    return "<docs>\n" + ("\n".join(blocks) if blocks else "(no matching passages)") + "\n</docs>"
+
+
 def build_messages(
-    question: str, history: list[DocsAgentTurn], locale: str, passages: list[Passage]
+    question: str, history: list[DocsAgentTurn], locale: str, results: list[dict[str, Any]]
 ) -> list[dict[str, str]]:
     """Build the chat messages: rules, earlier turns, then docs plus question.
 
@@ -198,17 +267,13 @@ def build_messages(
         question: The user's question.
         history: Earlier turns of this ask-box conversation.
         locale: The UI locale.
-        passages: The retrieved docs passages, best first.
+        results: The first search's results, best first.
 
     Returns:
         OpenAI-style chat messages.
     """
-    blocks = [
-        f'<passage href="{p.href}" heading="{_escape(p.heading)}">\n{_escape(p.text)}\n</passage>' for p in passages
-    ]
-    docs = "\n".join(blocks) if blocks else "(no matching passages)"
     user = (
-        f"Locale: {locale}\n\n<docs>\n{docs}\n</docs>\n\n"
+        f"Locale: {locale}\n\n{_docs_block(results)}\n\n"
         f"<question>\n{_escape(question)}\n</question>\n\n"
         "Answer the question from the docs above only."
     )
@@ -218,42 +283,91 @@ def build_messages(
     return messages
 
 
-def _answer_text(outputs: Any) -> str:
-    """Return the answer text from a ``dspy.LM`` call result.
+def _first_output(outputs: Any) -> dict[str, Any]:
+    """Return the first output of a ``dspy.LM`` call as a dict.
 
     Args:
         outputs: The LM's list of outputs (strings, or dicts with ``text``).
 
     Returns:
-        The first output's text, or ``""``.
+        ``{text, reasoning_content?, tool_calls?}``.
     """
     first = outputs[0] if isinstance(outputs, list) and outputs else outputs
     if isinstance(first, dict):
-        first = first.get("text") or ""
-    return first if isinstance(first, str) else ""
+        return first
+    return {"text": first if isinstance(first, str) else ""}
 
 
-def _chunk(identity: str, model: str, created: int, delta: dict[str, str], finish: str | None = None) -> str:
-    """Format one OpenAI-style ``chat.completion.chunk`` SSE event.
+def _field(item: Any, name: str) -> Any:
+    """Read ``name`` from a dict or an object, as LiteLLM returns either.
 
     Args:
-        identity: The completion id shared by every chunk.
-        model: The model id to report.
-        created: Unix time of the completion.
-        delta: The chunk's delta.
-        finish: The finish reason on the last chunk.
+        item: A tool call or its function.
+        name: The field name.
 
     Returns:
-        The SSE ``data:`` line with its blank-line terminator.
+        The value, or ``None``.
     """
-    body = {
-        "id": identity,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+    return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+
+
+def _search_queries(output: dict[str, Any]) -> list[str]:
+    """Return the queries of the ``search_docs`` calls in one model output.
+
+    Args:
+        output: One model output.
+
+    Returns:
+        The non-empty queries, each cut to ``MAX_QUERY_CHARS``; calls to any
+        other tool or with unreadable arguments are dropped.
+    """
+    queries = []
+    for call in output.get("tool_calls") or []:
+        function = _field(call, "function")
+        if _field(function, "name") != SEARCH_DOCS_TOOL:
+            continue
+        arguments = _field(function, "arguments")
+        try:
+            parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
+        except ValueError:
+            continue
+        query = str(parsed.get("query", "")).strip() if isinstance(parsed, dict) else ""
+        if query:
+            queries.append(query[:MAX_QUERY_CHARS])
+    return queries
+
+
+Emit = Callable[[str, dict[str, Any]], None]
+
+
+def _search_events(query: str, search: Callable[[str], dict[str, Any]]) -> tuple[list[tuple[str, dict]], list]:
+    """Run one docs search and describe it as ``tool_start`` and ``tool_end`` events.
+
+    The ``tool_end`` result keeps only titles and links: the panel shows the
+    sources, and the passage text stays out of the stream and the browser.
+
+    Args:
+        query: The search query.
+        search: Runs the search and returns the ``search_docs`` result.
+
+    Returns:
+        The two events, and the results the model reads (empty on failure).
+    """
+    call_id = f"docs-{uuid.uuid4().hex[:12]}"
+    start = ("tool_start", {"id": call_id, "tool": SEARCH_DOCS_TOOL, "reason": query, "arguments": {"query": query}})
+    try:
+        found = search(query)
+    except Exception as err:
+        logger.warning("docs agent search failed: %s", err)
+        end = {"id": call_id, "tool": SEARCH_DOCS_TOOL, "status": "error", "result": {"query": query}}
+        return [start, ("tool_end", end)], []
+    results = found["results"]
+    shown = {
+        "query": query,
+        "results": [{"title": r["title"], "href": r["href"]} for r in results],
+        "result_count": len(results),
     }
-    return f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
+    return [start, ("tool_end", {"id": call_id, "tool": SEARCH_DOCS_TOOL, "status": "ok", "result": shown})], results
 
 
 def _record_spend(lm: Any) -> None:
@@ -269,27 +383,86 @@ def _record_spend(lm: Any) -> None:
         logger.exception("docs agent spend could not be recorded")
 
 
-def _call_and_record(lm: Any, messages: list[dict[str, str]]) -> Any:
-    """Run the model call, then record its spend, in the same worker thread.
+def _run_answer(
+    lm: Any,
+    messages: list[dict[str, str]],
+    search: Callable[[str], dict[str, Any]],
+    emit: Emit,
+    stop: threading.Event,
+) -> str:
+    """Run the bounded search-and-answer loop, then record its spend, in one worker thread.
+
+    Each step is one model call. A step before the last offers ``search_docs``
+    while searches remain; a step that calls it gets the results and goes on,
+    and a step without a call is the answer. Search results go back as a new
+    ``<docs>`` user message, not as native tool messages: a provider that
+    thinks then needs no signed thinking blocks replayed, and the passages
+    keep the same data framing as the first search.
 
     A client disconnect cancels the awaiting stream, but the thread keeps
-    running. Recording here, after the call returns, counts the spend even
-    then; recording in the stream's ``finally`` saw an empty history and
-    counted $0, so the monthly budget did not bound spend.
+    running until the current step ends. Recording here, after the last step,
+    counts the spend of every step even then; ``lm.history`` holds the usage
+    of each call, thinking tokens included.
 
     Args:
         lm: The metered LM for this answer.
-        messages: The chat messages to send.
+        messages: The chat messages for the first step.
+        search: Runs one docs search.
+        emit: Sends one stream event; safe to call from this thread.
+        stop: Set when the client has left; no new step starts after it.
 
     Returns:
-        The LM outputs.
+        The answer text, or ``""`` when the client left first.
     """
     try:
-        # The output cap goes on the call: dspy rejects a small max_tokens at
-        # construction for OpenAI reasoning models, but not per call.
-        return lm(messages=messages, max_tokens=MAX_OUTPUT_TOKENS)
+        searches = 1
+        for step in range(MAX_STEPS):
+            if stop.is_set():
+                return ""
+            offer = step < MAX_STEPS - 1 and searches < MAX_SEARCHES
+            kwargs: dict[str, Any] = {"messages": messages, "max_tokens": MAX_OUTPUT_TOKENS}
+            if offer:
+                kwargs["tools"] = [SEARCH_DOCS_SCHEMA]
+            # The output cap goes on the call: dspy rejects a small max_tokens at
+            # construction for OpenAI reasoning models, but not per call.
+            output = _first_output(lm(**kwargs))
+            reasoning = output.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning.strip():
+                emit("reasoning_patch", {"chunk": reasoning})
+            queries = _search_queries(output)[: MAX_SEARCHES - searches] if offer else []
+            if not queries:
+                text = output.get("text")
+                return text if isinstance(text, str) else ""
+            for query in queries:
+                searches += 1
+                events, results = _search_events(query, search)
+                for name, data in events:
+                    emit(name, data)
+                messages = [
+                    *messages,
+                    {"role": "assistant", "content": f"I searched the docs for: {_escape(query)}"},
+                    {
+                        "role": "user",
+                        "content": f"{_docs_block(results)}\n\nThese are the search_docs results. "
+                        "Answer the question from the docs only, or search again.",
+                    },
+                ]
+        return ""
     finally:
         _record_spend(lm)
+
+
+def _sse(name: str, data: dict[str, Any]) -> str:
+    """Format one named Server-Sent Event.
+
+    Args:
+        name: The event name.
+        data: The JSON payload.
+
+    Returns:
+        The ``event:`` and ``data:`` lines with the blank-line terminator.
+    """
+    return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 def _free_slot(_future: Future[Any]) -> None:
@@ -325,7 +498,7 @@ def create_docs_agent_router(
         responses={200: {"content": {"text/event-stream": {}}}},
     )
     async def ask(req: DocsAgentAskRequest, request: Request, user: OptionalUserDep) -> StreamingResponse:
-        """Stream a docs-grounded answer as OpenAI-style completion chunks.
+        """Stream a docs-grounded answer in the generalist agent's event contract.
 
         Args:
             req: The question, up to six earlier turns, and the UI locale.
@@ -333,8 +506,9 @@ def create_docs_agent_router(
             user: The signed-in caller, or ``None`` when signed out.
 
         Returns:
-            A ``text/event-stream`` of ``chat.completion.chunk`` events, then
-            ``[DONE]``. A model failure sends one ``error`` event before ``[DONE]``.
+            A ``text/event-stream`` of ``tool_start``/``tool_end`` per search,
+            ``reasoning_patch`` per thinking step, ``message_patch`` answer
+            chunks and ``done``. A model failure sends one ``error`` event.
 
         Raises:
             DomainError: 429 over the caller's hourly cap; 503 when the docs
@@ -346,49 +520,80 @@ def create_docs_agent_router(
             raise DomainError("docs_agent.unavailable", status=503)
         if not _ANSWER_SLOTS.acquire(blocking=False):
             raise DomainError("docs_agent.busy", status=503)
-        search = _EXECUTOR.submit(docs.search, req.question, req.locale, limit=TOP_PASSAGES)
+
+        def search(query: str) -> dict[str, Any]:
+            """Search this router's docs index in the request locale.
+
+            Args:
+                query: The search query.
+
+            Returns:
+                The ``search_docs`` result.
+            """
+            return search_corpus(docs, query, req.locale, TOP_PASSAGES)
+
+        # The first search runs before the stream, so missing docs still
+        # answer 503 before any model call is paid for.
+        first = _EXECUTOR.submit(_search_events, req.question[:MAX_QUERY_CHARS], search)
         try:
-            hits = await asyncio.wrap_future(search)
-        except Exception as err:
-            _ANSWER_SLOTS.release()
-            logger.warning("docs agent corpus unavailable: %s", err)
-            raise DomainError("docs_agent.unavailable", status=503) from err
+            opening, results = await asyncio.wrap_future(first)
         except BaseException:
-            search.add_done_callback(_free_slot)
+            first.add_done_callback(_free_slot)
             raise
-        identity = f"chatcmpl-docs-{uuid.uuid4().hex[:24]}"
-        created = int(time.time())
+        if opening[-1][1]["status"] == "error":
+            _ANSWER_SLOTS.release()
+            raise DomainError("docs_agent.unavailable", status=503)
+        loop = asyncio.get_running_loop()
+        events: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
+        stop = threading.Event()
+
+        def emit(item: tuple[str, dict[str, Any]] | None) -> None:
+            """Hand one event (``None`` ends the stream) from a worker thread to the stream.
+
+            Args:
+                item: The event name and payload, or ``None``.
+            """
+            # A closed event loop means nobody reads the stream any more.
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(events.put_nowait, item)
+
         # The call starts here, not in the stream: a stream that never starts
         # (the client left first) would never free its slot.
-        call: Future[Any] | None = None
+        call: Future[str] | None = None
         model = "docs-agent"
         try:
-            messages = build_messages(req.question, req.history, req.locale, [p for p, _ in hits])
+            messages = build_messages(req.question, req.history, req.locale, results)
             lm = lm_factory()
             model = str(getattr(lm, "model", model))
-            call = _EXECUTOR.submit(_call_and_record, lm, messages)
+            call = _EXECUTOR.submit(_run_answer, lm, messages, search, lambda n, d: emit((n, d)), stop)
         except Exception:
             logger.exception("docs agent answer could not start")
             _ANSWER_SLOTS.release()
         else:
             call.add_done_callback(_free_slot)
+            # Runs after the worker's last emit, so the end marker comes last.
+            call.add_done_callback(lambda _f: emit(None))
 
         async def stream() -> AsyncIterator[str]:
-            """Wait for the model call, then relay its answer as chunks."""
+            """Relay the searches, the thinking and then the answer as named events."""
             try:
                 if call is None:
                     raise RuntimeError("docs agent answer could not start")
-                yield _chunk(identity, model, created, {"role": "assistant", "content": ""})
-                outputs = await asyncio.wrap_future(call)
-                text = _answer_text(outputs)
+                for name, data in opening:
+                    yield _sse(name, data)
+                while (item := await events.get()) is not None:
+                    yield _sse(*item)
+                text = await asyncio.wrap_future(call)
+                if not text.strip():
+                    raise RuntimeError("docs agent answer was empty")
                 for start in range(0, len(text), _CHUNK_CHARS):
-                    yield _chunk(identity, model, created, {"content": text[start : start + _CHUNK_CHARS]})
-                yield _chunk(identity, model, created, {}, finish="stop")
+                    yield _sse("message_patch", {"chunk": text[start : start + _CHUNK_CHARS]})
+                yield _sse("done", {"assistant_message": text, "model": model, "served_model": None, "stats": None})
             except Exception:
                 logger.exception("docs agent answer failed")
-                error = {"error": {"code": "docs_agent.failed", "message": "The docs assistant could not answer."}}
-                yield f"data: {json.dumps(error)}\n\n"
-            yield "data: [DONE]\n\n"
+                yield _sse("error", {"error": "The docs assistant could not answer.", "code": "docs_agent.failed"})
+            finally:
+                stop.set()
 
         return StreamingResponse(
             stream(),

@@ -1032,6 +1032,7 @@
   "agent.tool.list_samples.title": "Приклади наборів даних",
   "agent.tool.validate_datasets.title": "Перевірка поділу набору даних",
   "agent.tool.web_search.title": "Пошук в інтернеті",
+  "agent.tool.search_docs.title": "Пошук у документації",
   "agent.tool.fetch_url.title": "Прочитати вебсторінку",
   "agent.tool.crawl_site.title": "Обійти вебсайт",
   "agent.tool.blackbox_engines.title": "Доступні рушії оптимізації",

@@ -1,14 +1,15 @@
 /**
- * Pure helpers for the docs agent answer panel: the history it keeps, the
- * stream chunks it reads, and the links it allows.
+ * Pure helpers for the docs agent answer panel: the history it keeps and the
+ * links it allows.
  *
- * Kept import-free so the Node unit test can load it directly.
+ * Kept free of runtime imports so the Node unit test can load it directly.
  */
 
-export interface DocsAgentMessage {
-  role: "user" | "assistant";
-  content: string;
-}
+import type { AgentMessage, AgentToolCall } from "@/shared/ui/agent/types";
+import type { ThinkingSegment } from "@/shared/lib/thinking-segments";
+
+/** A docs agent turn: the generalist message with only the parts the docs agent uses. */
+export type DocsAgentMessage = Pick<AgentMessage, "role" | "content" | "createdAt" | "thinkingSegments" | "toolCalls">;
 
 /** The most messages the panel keeps in the browser session. */
 export const MAX_KEPT_MESSAGES = 12;
@@ -45,33 +46,70 @@ export function trimHistory(messages: readonly DocsAgentMessage[], max: number):
   return messages.filter((message) => message.content.trim()).slice(-max);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isTime(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+/** Saved thinking rows, closed; malformed rows are dropped. */
+function readSegments(raw: unknown): ThinkingSegment[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const rows = raw.filter(isRecord).flatMap((row): ThinkingSegment[] => {
+    if (typeof row.reasoning !== "string" || !row.reasoning) return [];
+    const startedAt = isTime(row.startedAt) ? row.startedAt : null;
+    const endedAt = isTime(row.endedAt) ? row.endedAt : startedAt;
+    const toolsBefore = isTime(row.toolsBefore) ? row.toolsBefore : 0;
+    return [{ reasoning: row.reasoning, startedAt, endedAt, toolsBefore }];
+  });
+  return rows.length ? rows : undefined;
+}
+
+/** Saved tool calls; a call still running when the page closed ended with it. */
+function readToolCalls(raw: unknown): AgentToolCall[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const calls = raw.filter(isRecord).flatMap((call): AgentToolCall[] => {
+    if (typeof call.id !== "string" || typeof call.tool !== "string" || !isTime(call.startedAt)) return [];
+    const status = call.status === "done" ? "done" : "error";
+    return [
+      {
+        id: call.id,
+        tool: call.tool,
+        reason: typeof call.reason === "string" ? call.reason : "",
+        status,
+        startedAt: call.startedAt,
+        endedAt: isTime(call.endedAt) ? call.endedAt : call.startedAt,
+        ...(isRecord(call.payload) ? { payload: call.payload } : {}),
+      },
+    ];
+  });
+  return calls.length ? calls : undefined;
+}
+
 /** Read session history saved by an earlier page, ignoring anything malformed. */
 export function parseStoredHistory(raw: string | null): DocsAgentMessage[] {
   if (!raw) return [];
   try {
     const value: unknown = JSON.parse(raw);
     if (!Array.isArray(value)) return [];
-    return trimHistory(
-      value.filter(
-        (item): item is DocsAgentMessage =>
-          typeof item === "object" &&
-          item !== null &&
-          (item.role === "user" || item.role === "assistant") &&
-          typeof item.content === "string",
-      ),
-      MAX_KEPT_MESSAGES,
-    );
+    const messages = value.filter(isRecord).flatMap((item): DocsAgentMessage[] => {
+      if ((item.role !== "user" && item.role !== "assistant") || typeof item.content !== "string") return [];
+      const message: DocsAgentMessage = { role: item.role, content: item.content };
+      if (isTime(item.createdAt)) message.createdAt = item.createdAt;
+      if (item.role === "assistant") {
+        const thinkingSegments = readSegments(item.thinkingSegments);
+        const toolCalls = readToolCalls(item.toolCalls);
+        if (thinkingSegments) message.thinkingSegments = thinkingSegments;
+        if (toolCalls) message.toolCalls = toolCalls;
+      }
+      return [message];
+    });
+    return trimHistory(messages, MAX_KEPT_MESSAGES);
   } catch {
     return [];
   }
-}
-
-/** The text of one OpenAI-style stream chunk (`choices[0].delta.content`). */
-export function chunkText(data: Record<string, unknown>): string {
-  const choices = data.choices;
-  if (!Array.isArray(choices)) return "";
-  const delta = (choices[0] as { delta?: { content?: unknown } } | undefined)?.delta;
-  return typeof delta?.content === "string" ? delta.content : "";
 }
 
 // /docs, /docs/<page>, /docs#x and /docs/he/<page>, but not /docs-search or /docs-md.

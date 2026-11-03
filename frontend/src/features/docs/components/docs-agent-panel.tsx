@@ -12,17 +12,28 @@ import { AppMark } from "@/shared/ui/app-mark";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { Button } from "@/shared/ui/primitives/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
-import { MinimizedPill } from "@/features/agent-panel";
+import {
+  MinimizedPill,
+  ToolCallRow,
+  dispatchGeneralistEvent,
+  type GeneralistAgentHandlers,
+} from "@/features/agent-panel";
 import { fetchWithAuthRetry } from "@/shared/lib/api";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
 import { readServerSentEvents } from "@/shared/lib/sse";
+import {
+  appendReasoning,
+  closeThinking,
+  lastEventAt,
+  type ThinkingSegment,
+} from "@/shared/lib/thinking-segments";
 import { cn } from "@/shared/lib/utils";
+import type { AgentToolCall } from "@/shared/ui/agent/types";
 import { fillChrome, type DocsChrome } from "../lib/chrome";
 import {
   MAX_KEPT_MESSAGES,
   MAX_QUESTION_CHARS,
   askBody,
-  chunkText,
   isDocsHref,
   isQuestionTooLong,
   parseStoredHistory,
@@ -40,6 +51,23 @@ export interface DocsAgentRequest {
   question: string;
   nonce: number;
 }
+
+/** End a turn: close its thinking, and mark a search that never returned as failed. */
+function settle(message: DocsAgentMessage): DocsAgentMessage {
+  if (message.role !== "assistant") return message;
+  const now = Date.now();
+  return {
+    ...message,
+    thinkingSegments: message.thinkingSegments && closeThinking(message.thinkingSegments, now),
+    toolCalls: message.toolCalls?.map((call) =>
+      call.status === "running" ? { ...call, status: "error", endedAt: now } : call,
+    ),
+  };
+}
+
+const renderToolCall = (call: AgentToolCall) => <ToolCallRow call={call} />;
+const isStepCall = () => true;
+const stepKind = () => "search" as const;
 
 /** Load the session history; storage can be blocked, and then the panel starts empty. */
 function loadHistory(): DocsAgentMessage[] {
@@ -134,12 +162,71 @@ export function DocsAgentPanel({
       const controller = new AbortController();
       abortRef.current = controller;
       const body = askBody(text, before, locale);
-      let answer = "";
-      const base = [...trimHistory(before, MAX_KEPT_MESSAGES), { role: "user" as const, content: text }];
-      update([...base, { role: "assistant", content: "" }]);
+      const base: DocsAgentMessage[] = [
+        ...trimHistory(before, MAX_KEPT_MESSAGES),
+        { role: "user", content: text, createdAt: Date.now() },
+      ];
+      let turn: DocsAgentMessage = { role: "assistant", content: "", toolCalls: [], thinkingSegments: [] };
+      const show = (next: DocsAgentMessage) => {
+        turn = next;
+        update([...base, turn]);
+      };
+      const patchThinking = (
+        change: (segments: readonly ThinkingSegment[], toolCount: number, since: number | null) => readonly ThinkingSegment[],
+      ) => {
+        const segments = turn.thinkingSegments ?? [];
+        const calls = turn.toolCalls ?? [];
+        show({ ...turn, thinkingSegments: change(segments, calls.length, lastEventAt(segments, calls)) });
+      };
+      show(turn);
       setNotice(null);
       setStreaming(true);
       let failed: Notice = null;
+      let done = false;
+      // The same events, and the same thinking and tool rows, as the generalist agent.
+      const handlers: GeneralistAgentHandlers = {
+        onReasoningPatch: (chunk) =>
+          patchThinking((segments, toolCount, since) => appendReasoning(segments, chunk, Date.now(), toolCount, since)),
+        onToolStart: (ev) => {
+          patchThinking((segments) => closeThinking(segments, Date.now()));
+          const call: AgentToolCall = {
+            id: ev.id,
+            tool: ev.tool,
+            reason: ev.reason,
+            status: "running",
+            startedAt: Date.now(),
+            endedAt: null,
+            payload: { arguments: ev.arguments },
+          };
+          show({ ...turn, toolCalls: [...(turn.toolCalls ?? []), call] });
+        },
+        onToolEnd: (ev) =>
+          show({
+            ...turn,
+            toolCalls: turn.toolCalls?.map((call) =>
+              call.id === ev.id
+                ? {
+                    ...call,
+                    status: ev.status === "ok" ? "done" : "error",
+                    endedAt: Date.now(),
+                    payload: { ...call.payload, result: ev.result },
+                  }
+                : call,
+            ),
+          }),
+        onMessagePatch: (chunk) => {
+          if (!turn.content) patchThinking((segments) => closeThinking(segments, Date.now()));
+          show({ ...turn, content: turn.content + chunk });
+        },
+        onMessageReset: () => show({ ...turn, content: "" }),
+        onDone: (result) => {
+          done = true;
+          show({ ...turn, content: result.assistant_message || turn.content, createdAt: Date.now() });
+        },
+        onError: () => {
+          failed = "error";
+        },
+      };
       try {
         const res = await fetchWithAuthRetry(`${getRuntimeEnv().apiUrl}/docs-agent/ask`, {
           method: "POST",
@@ -152,16 +239,10 @@ export function DocsAgentPanel({
         else if (!res.ok || !res.body) failed = "error";
         else {
           await readServerSentEvents(res.body, (event) => {
-            if (event.event === "error" || "error" in event.data) {
-              failed = "error";
-              return;
-            }
-            const piece = chunkText(event.data);
-            if (!piece) return;
-            answer += piece;
-            update([...base, { role: "assistant", content: answer }]);
+            if (controller.signal.aborted) return;
+            dispatchGeneralistEvent(handlers, event.event, event.data, () => labels.agentError);
           });
-          if (!answer && !failed) failed = "error";
+          if (!failed && (!done || !turn.content.trim())) failed = "error";
         }
       } catch {
         if (controller.signal.aborted) return;
@@ -171,11 +252,11 @@ export function DocsAgentPanel({
       setStreaming(false);
       // A question refused while this answer streamed keeps its "too long" notice.
       setNotice((prev) => failed ?? (prev === "tooLong" ? prev : null));
-      const final = trimHistory([...base, { role: "assistant", content: answer }], MAX_KEPT_MESSAGES);
+      const final = trimHistory([...base, settle(turn)], MAX_KEPT_MESSAGES);
       update(final);
       saveHistory(final);
     },
-    [locale, update],
+    [labels.agentError, locale, update],
   );
 
   // Run each search-box question once; a locale change must not send it again.
@@ -193,7 +274,7 @@ export function DocsAgentPanel({
     abortRef.current?.abort();
     abortRef.current = null;
     setStreaming(false);
-    const kept = trimHistory(messagesRef.current, MAX_KEPT_MESSAGES);
+    const kept = trimHistory(messagesRef.current.map(settle), MAX_KEPT_MESSAGES);
     update(kept);
     saveHistory(kept);
   };
@@ -312,13 +393,22 @@ export function DocsAgentPanel({
                 className="overscroll-contain"
                 isEmpty={messages.length === 0}
                 emptyState={<EmptyState icon={AppMark} variant="compact" title={labels.askAgentHint} />}
-                scrollDeps={[messages.length, messages[messages.length - 1]?.content, notice]}
+                scrollDeps={[
+                  messages.length,
+                  messages[messages.length - 1]?.content,
+                  messages[messages.length - 1]?.toolCalls?.length,
+                  messages[messages.length - 1]?.thinkingSegments?.at(-1)?.reasoning,
+                  notice,
+                ]}
               >
                 <ChatTranscript
                   messages={transcript}
                   streaming={streaming}
                   editAndResend={editAndResend}
                   allowLink={isDocsHref}
+                  renderToolCall={renderToolCall}
+                  isStepCall={isStepCall}
+                  stepKind={stepKind}
                   animatePairs
                   trailing={() =>
                     notice && (

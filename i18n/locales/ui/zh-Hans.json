@@ -1032,6 +1032,7 @@
   "agent.tool.list_samples.title": "示例数据集",
   "agent.tool.validate_datasets.title": "检查数据集划分",
   "agent.tool.web_search.title": "搜索网页",
+  "agent.tool.search_docs.title": "搜索文档",
   "agent.tool.fetch_url.title": "读取网页",
   "agent.tool.crawl_site.title": "抓取网站",
   "agent.tool.blackbox_engines.title": "可用的优化引擎",

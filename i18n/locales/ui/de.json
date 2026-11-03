@@ -1032,6 +1032,7 @@
   "agent.tool.list_samples.title": "Beispieldatensätze",
   "agent.tool.validate_datasets.title": "Prüfung der Datensatzaufteilung",
   "agent.tool.web_search.title": "Im Web suchen",
+  "agent.tool.search_docs.title": "Dokumentation durchsuchen",
   "agent.tool.fetch_url.title": "Eine Webseite lesen",
   "agent.tool.crawl_site.title": "Eine Website durchsuchen",
   "agent.tool.blackbox_engines.title": "Verfügbare Optimierungs-Engines",
