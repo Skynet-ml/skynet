@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
-# Keys include the clean Git tree, external FROM digests, linux/arm64, build
-# args, the UTC week, and the buildx/BuildKit versions. Empty output means build.
-# ctx- keeps every build arg; tree- drops only GIT_SHA for preview reuse.
+# Keys include Git context bytes, pinned sources, Buildx inputs, build args,
+# and a weekly version. Empty output means build; ctx- keeps args, tree- omits GIT_SHA.
 # Backend/frontend context keys retain commit args, so cross-commit reuse is
 # the backend tree key; the content-key hit is mainly useful for LiteLLM.
 # The weekly cache rotation bounds unpinned RUN-time network inputs to one week;
 # the first build each week is cold, so this is a documented freshness gap.
-KEY_VERSION=5
+KEY_VERSION=6
 
 IMAGE_KEY_CTX=""
 IMAGE_KEY_TREE=""
 IMAGE_BUILD_CONTEXT_ARGS=()
 IMAGE_PINNED_DIGESTS=()
+IMAGE_CONTEXT_ATTRIBUTE_HASHES=()
+IMAGE_KEY_BUILD_FLAGS=()
+IMAGE_KEY_BUILD_DRIVER=""
 
 _clear_image_inputs() {
   IMAGE_KEY_CTX=""
   IMAGE_KEY_TREE=""
   IMAGE_BUILD_CONTEXT_ARGS=()
   IMAGE_PINNED_DIGESTS=()
+  IMAGE_CONTEXT_ATTRIBUTE_HASHES=()
+  IMAGE_KEY_BUILD_DRIVER=""
 }
 
 _is_stage() {
@@ -26,22 +30,100 @@ _is_stage() {
   [[ "$value" =~ ^[0-9]+$ ]] && ((value < stage_count))
 }
 
+_hash_context_attributes() {
+  local repo_root="$1" context_path="$2" files_file attrs_file path attr value full_path file_hash
+  local status=0
+  local -a attr_paths=()
+  declare -A seen_attr_paths=()
+  files_file="$(mktemp)" || return 1
+  attrs_file="$(mktemp)" || {
+    rm -f "$files_file"
+    return 1
+  }
+  if ! git -C "$repo_root" ls-files -z -- "$context_path" >"$files_file" ||
+    ! git -C "$repo_root" check-attr -z --stdin filter eol text ident working-tree-encoding \
+      <"$files_file" >"$attrs_file"; then
+    rm -f "$files_file" "$attrs_file"
+    return 1
+  fi
+  while IFS= read -r -d '' path; do
+    IFS= read -r -d '' attr || {
+      status=1
+      break
+    }
+    IFS= read -r -d '' value || {
+      status=1
+      break
+    }
+    case "$attr" in
+      filter|eol|text|ident|working-tree-encoding) ;;
+      *) status=1; break ;;
+    esac
+    if [[ "$value" != unspecified && "$value" != unset && -z "${seen_attr_paths[$path]:-}" ]]; then
+      attr_paths+=("$path")
+      seen_attr_paths["$path"]=1
+    fi
+  done <"$attrs_file"
+  if ((status != 0)); then
+    rm -f "$files_file" "$attrs_file"
+    return 1
+  fi
+  for path in "${attr_paths[@]+"${attr_paths[@]}"}"; do
+    full_path="$repo_root/$path"
+    [[ -f "$full_path" ]] || {
+      rm -f "$files_file" "$attrs_file"
+      return 1
+    }
+    file_hash="$(
+      set -o pipefail
+      { printf '%s\0' "$path"; cat -- "$full_path"; } |
+        if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi |
+        cut -c1-64
+    )" || {
+      rm -f "$files_file" "$attrs_file"
+      return 1
+    }
+    [[ "$file_hash" =~ ^[0-9a-f]{64}$ ]] || {
+      rm -f "$files_file" "$attrs_file"
+      return 1
+    }
+    IMAGE_CONTEXT_ATTRIBUTE_HASHES+=("$path:$file_hash")
+  done
+  rm -f "$files_file" "$attrs_file"
+}
+
 _hash_image_key() {
   local prefix="$1" context_hash="$2" buildx_version="$3" buildkit_version="$4" week="$5"
   shift 5
   local hash
   local -a args=("$@") sorted_args=()
-  local line digest
+  local line digest name value
   if ((${#args[@]})); then
     while IFS= read -r line; do sorted_args+=("$line"); done < <(
       printf '%s\n' "${args[@]+"${args[@]}"}" | LC_ALL=C sort
     )
   fi
+  local -a env_material=()
+  while IFS= read -r name; do
+    [[ "$name" == SOURCE_DATE_EPOCH || "$name" == BUILDX_* ]] || continue
+    value="${!name}"
+    env_material+=("$name=$value")
+  done < <(compgen -e | LC_ALL=C sort)
   hash="$(
     set -o pipefail
     {
       printf 'version=%s\nweek=%s\nplatform=linux/arm64\ncontext=%s\nbuildx=%s\nbuildkit=%s\n' \
         "$KEY_VERSION" "$week" "$context_hash" "$buildx_version" "$buildkit_version"
+      printf 'builder-driver=%s\n' "$IMAGE_KEY_BUILD_DRIVER"
+      for line in "${IMAGE_KEY_BUILD_FLAGS[@]+"${IMAGE_KEY_BUILD_FLAGS[@]}"}"; do
+        printf 'buildx-flag=%s\n' "$line"
+      done
+      for line in "${env_material[@]+"${env_material[@]}"}"; do
+        printf 'buildx-env=%s\n' "$line"
+      done
+      for line in "${IMAGE_CONTEXT_ATTRIBUTE_HASHES[@]+"${IMAGE_CONTEXT_ATTRIBUTE_HASHES[@]}"}"; do
+        printf 'attribute-file=%s\n' "$line"
+      done
       for digest in "${IMAGE_PINNED_DIGESTS[@]+"${IMAGE_PINNED_DIGESTS[@]}"}"; do
         printf 'base=%s\n' "$digest"
       done
@@ -60,7 +142,7 @@ _image_inputs_impl() {
   local -a raw_build_args=("$@") build_args=() tree_args=() words=() base_digests=()
   local line trimmed logical instruction ref image_ref alias digest_json digest
   local context_alias
-  local stage_count=0 index from_ref source buildx_version builder_info buildkit_version
+  local stage_count=0 index from_ref source buildx_version builder_info buildkit_version driver
   local continuation=0 context_hash instruction_seen=0 pin_context
   declare -A digest_by_ref=() context_digest_by_ref=()
   _clear_image_inputs
@@ -72,6 +154,7 @@ _image_inputs_impl() {
   status="$(git -C "$repo_root" status --porcelain --ignored -- "$context_path" 2>/dev/null)" || return 1
   [[ -z "$status" ]] || return 1
   context_hash="$(git -C "$repo_root" rev-parse "HEAD:$context_path" 2>/dev/null)" || return 1
+  _hash_context_attributes "$repo_root" "$context_path" || return 1
   dockerfile="$context_dir/Dockerfile"
   [[ -f "$dockerfile" ]] || return 1
 
@@ -221,6 +304,10 @@ _image_inputs_impl() {
   buildx_version="$(docker buildx version 2>/dev/null)" || return 1
   [[ -n "$buildx_version" ]] || return 1
   builder_info="$(docker buildx inspect --bootstrap 2>/dev/null)" || return 1
+  driver="$(awk '/Driver:/ {print $2}' <<<"$builder_info" | LC_ALL=C sort -u | tr '\n' ',')"
+  driver="${driver%,}"
+  [[ -n "$driver" ]] || return 1
+  IMAGE_KEY_BUILD_DRIVER="$driver"
   buildkit_version="$(awk '/BuildKit version:/ {print $3}' <<<"$builder_info" | LC_ALL=C sort -u | tr '\n' ',')"
   buildkit_version="${buildkit_version%,}"
   [[ -n "$buildkit_version" ]] || return 1
@@ -282,17 +369,22 @@ image_key() {
 }
 
 verify_image_sources() {
-  local metadata_file="$1" pinned_json
+  local metadata_file="$1" pinned_json non_image_prefixes='["file://"]'
+  # BuildKit's local context is non-image input; its bytes are hashed separately.
   [[ -s "$metadata_file" && ${#IMAGE_PINNED_DIGESTS[@]} -gt 0 ]] || return 1
   pinned_json="$(printf '%s\n' "${IMAGE_PINNED_DIGESTS[@]+"${IMAGE_PINNED_DIGESTS[@]}"}" |
     jq -R 'sub("^sha256:"; "")' | jq -s .)" || return 1
-  jq -e --argjson pinned "$pinned_json" '
+  jq -e --argjson pinned "$pinned_json" --argjson non_image "$non_image_prefixes" '
     (.["buildx.build.provenance"].materials // []) as $materials
     | ($materials | type == "array")
       and all($materials[];
         . as $material
-        | ((($material.uri // "") | startswith("pkg:docker/") | not)
-          or any($pinned[]; . == ($material.digest.sha256 // "")))
+        | ($material.uri // "") as $uri
+        | if ($uri | startswith("pkg:docker/")) then
+          any($pinned[]; . == ($material.digest.sha256 // ""))
+          else
+            any($non_image[]; . as $prefix | $uri | startswith($prefix))
+          end
       )
       and all($pinned[]; . as $digest | any($materials[]; .digest.sha256 == $digest))
   ' "$metadata_file" >/dev/null 2>&1

@@ -9,6 +9,9 @@ concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  CORE_SHARD_COUNT: 6
+
 jobs:
   backend-core:
     name: backend · core tests (${{ matrix.shard }}/6)
@@ -34,7 +37,7 @@ jobs:
       # nightly concern and is intentionally not gated here.
       - name: Core test suite
         env:
-          SKYNET_TEST_SHARD: ${{ matrix.shard }}/6
+          SKYNET_TEST_SHARD: ${{ matrix.shard }}/${{ env.CORE_SHARD_COUNT }}
           SKYNET_TEST_DISPATCHED_OUT: dispatched-${{ matrix.shard }}.txt
         run: uv run pytest core/ -q -n auto
       - uses: actions/upload-artifact@v4
@@ -174,13 +177,16 @@ jobs:
       - name: Verify dispatched shard coverage
         run: |
           python3 - <<'PY'
+          import os
           from pathlib import Path
 
-          # Keep the matrix, shard denominator, and coverage range aligned.
-          expected = {f"dispatched-{index}" for index in range(6)}
+          shard_count = int(os.environ["CORE_SHARD_COUNT"])
+          expected = {f"dispatched-{index}" for index in range(shard_count)}
           files = sorted(Path("artifacts/dispatched").rglob("dispatched-*.txt"))
-          if len(files) != 6 or {path.parent.name for path in files} != expected:
-              raise SystemExit(f"expected six dispatched shard artifacts, found {[str(path) for path in files]}")
+          if len(files) != shard_count or {path.parent.name for path in files} != expected:
+              raise SystemExit(
+                  f"expected {shard_count} dispatched shard artifacts, found {[str(path) for path in files]}"
+              )
 
           union = set()
           for path in files:
@@ -224,7 +230,7 @@ jobs:
           load: true
           tags: skynet-backend:pip
           cache-from: type=gha,scope=pip
-          # Keep the repo Actions cache below its 10 GB limit.
+          # Preview builds use ECR caches; keep the shared Actions cache below 10 GB.
           cache-to: type=gha,mode=min,scope=pip
       # `pip check` is the sharp end: --no-deps means pip installed the file
       # verbatim without ever validating it, so this is the first thing in the
@@ -252,7 +258,7 @@ jobs:
       # standing up.
       - name: Import smoke test
         run: |
-          docker run --rm skynet-backend:pip python3 -c "
+          docker run --rm skynet-backend:pip python -c "
           import core.api.app
           import core.billing.service
           import core.worker.subprocess_runner
@@ -266,7 +272,7 @@ jobs:
           "
       - name: Pinned native optimizer runtime is installed
         run: |
-          docker run --rm --network none skynet-backend:pip python3 -c "
+          docker run --rm --network none skynet-backend:pip python -c "
           import shutil, subprocess
           assert subprocess.check_output(['node', '--version'], text=True).strip() == 'v22.22.0'
           assert shutil.which('claude') is None

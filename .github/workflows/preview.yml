@@ -166,7 +166,6 @@ jobs:
       - name: Deploy services and wait
         if: steps.scope.outputs.skip != 'true' && steps.claim.outputs.full != 'true'
         env:
-          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           BACKEND_IMAGE: ${{ steps.backend.outputs.image }}
         run: infra/terraform/scripts/preview.sh deploy "$PR" "$SHA"
 

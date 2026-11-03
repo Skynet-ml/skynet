@@ -10,6 +10,7 @@ import json
 import math
 import os
 import statistics
+import sys
 import zlib
 from pathlib import Path
 from typing import Any
@@ -40,19 +41,25 @@ def _load_test_durations(path: Path = _DURATION_FILE) -> dict[str, float] | None
         values: Any = json.loads(path.read_text())
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
-    if not isinstance(values, dict) or not values:
+    if not isinstance(values, dict):
         return None
     durations: dict[str, float] = {}
+    invalid = 0
     for name, seconds in values.items():
         if not isinstance(name, str) or not name or isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
-            return None
+            invalid += 1
+            continue
         try:
             duration = float(seconds)
         except OverflowError:
-            return None
-        if not math.isfinite(duration) or duration <= 0:
-            return None
+            invalid += 1
+            continue
+        if not math.isfinite(duration) or duration < 0:
+            invalid += 1
+            continue
         durations[name] = duration
+    if invalid:
+        print(f"warning: ignored {invalid} invalid test duration entr{'y' if invalid == 1 else 'ies'}", file=sys.stderr)
     return durations
 
 
@@ -66,7 +73,7 @@ def _duration_for_path(path: str, durations: dict[str, float]) -> float:
     Returns:
         The measured duration or median fallback.
     """
-    return durations.get(path, statistics.median(durations.values()))
+    return durations.get(path, statistics.median(durations.values()) if durations else 1.0)
 
 
 def _assign_test_files(paths: list[str], shard_count: int, durations: dict[str, float] | None) -> dict[str, int]:
@@ -140,7 +147,7 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     Args:
         session: The pytest session that is finishing.
     """
-    if not _is_controller or hasattr(session.config, "workerinput"):
+    if not _is_controller:
         return
     dispatched_out = os.environ.get("SKYNET_TEST_DISPATCHED_OUT")
     if dispatched_out:

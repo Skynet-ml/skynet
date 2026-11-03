@@ -53,6 +53,12 @@ refresh_aws_credentials() {
     -z "${AWS_DEPLOY_ROLE_ARN:-}" ]]; then
     return 0
   fi
+  if [[ -z "${AWS_DEPLOY_ROLE_ARN:-}" &&
+    -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" &&
+    -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+    echo "notice: keeping GitHub action-provided AWS credentials; no deploy role is set"
+    return 0
+  fi
   [[ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" && -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" &&
     -n "${AWS_DEPLOY_ROLE_ARN:-}" ]] || die "incomplete GitHub OIDC credential configuration"
   command -v curl >/dev/null 2>&1 || die "missing command: curl"
@@ -99,6 +105,7 @@ refresh_aws_credentials() {
   export AWS_ACCESS_KEY_ID="$access_key"
   export AWS_SECRET_ACCESS_KEY="$secret_key"
   export AWS_SESSION_TOKEN="$session_token"
+  AWS_CREDENTIALS_REFRESHED_AT="$(date +%s)" || die "cannot read credential refresh time"
 }
 
 check_env() {
@@ -143,11 +150,21 @@ run_task() {
 
 # Waits for a task to stop and fails unless the container exit code is 0.
 wait_task_ok() {
-  local env="$1" arn="$2" cluster code reason
+  local env="$1" arn="$2" cluster code reason now
+  local last_refresh="${AWS_CREDENTIALS_REFRESHED_AT:-0}"
   cluster="$(deploy_config "$env" | jq -r .cluster)"
   # `aws ecs wait tasks-stopped` gives up after 10 minutes; migrations may run longer.
   local i status
   for ((i = 0; i < 360; i++)); do
+    if [[ -n "${AWS_DEPLOY_ROLE_ARN:-}" &&
+      -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" &&
+      -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+      now="$(date +%s)" || return 1
+      if (( now - last_refresh > 45 * 60 )); then
+        refresh_aws_credentials || return 1
+        last_refresh="${AWS_CREDENTIALS_REFRESHED_AT:-$now}"
+      fi
+    fi
     status="$(aws ecs describe-tasks --cluster "$cluster" --tasks "$arn" --query 'tasks[0].lastStatus' --output text)"
     [[ "$status" == "STOPPED" ]] && break
     sleep 10

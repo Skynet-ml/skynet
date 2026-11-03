@@ -54,7 +54,7 @@ cat >"$tmp/bin/docker" <<'SH'
 set -euo pipefail
 case "$*" in
   "buildx version") printf '%s\n' 'github.com/docker/buildx v0.36.1' ;;
-  "buildx inspect --bootstrap") printf '%s\n' 'BuildKit version: v0.32.2' ;;
+  "buildx inspect --bootstrap") printf '%s\n' 'Driver: docker-container' 'BuildKit version: v0.32.2' ;;
   *"buildx imagetools inspect"*) printf '%s\n' '"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' ;;
   *"login"*) cat >/dev/null ;;
   *"buildx build"*)
@@ -71,7 +71,9 @@ case "$*" in
     printf 'build:%s\n' "$name" >>"$TEST_EVENT_LOG"
     [[ "${TEST_FAIL_BUILD:-}" != "$name" ]] || exit 17
     if [[ -n "$metadata" ]]; then
-      printf '%s\n' '{"buildx.build.provenance":{"materials":[{"uri":"pkg:docker/node?digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]}}' >"$metadata"
+      printf '{"buildx.build.provenance":{"materials":[{"uri":"%s","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]}}\n' \
+        "${TEST_METADATA_URI:-pkg:docker/node?digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" \
+        >"$metadata"
     fi
     ;;
   *) exit 2 ;;
@@ -91,6 +93,17 @@ case "$1" in
     else
       printf '%s\n' tree-one
     fi
+    ;;
+  ls-files)
+    context="${*: -1}"
+    printf '%s\0' "$context/Dockerfile"
+    ;;
+  check-attr)
+    while IFS= read -r -d '' path; do
+      for attr in filter eol text ident working-tree-encoding; do
+        printf '%s\0%s\0unspecified\0' "$path" "$attr"
+      done
+    done
     ;;
   status) ;;
   *) exit 2 ;;
@@ -112,7 +125,7 @@ export GITHUB_ACTIONS=true
 
 cat >"$tmp/build/deploy.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'migrate\n' >>"$TEST_EVENT_LOG"
+printf 'migrate:%s\n' "${TEST_DEPLOY_STATUS:-unset}" >>"$TEST_EVENT_LOG"
 exit "${TEST_DEPLOY_STATUS:-0}"
 SH
 chmod +x "$tmp/build/deploy.sh"
@@ -123,6 +136,7 @@ fail() {
   printf 'FAIL: %s\n' "$*" >&2
   [[ -z "$CURRENT_LOG" || ! -f "$CURRENT_LOG" ]] || tail -n 80 "$CURRENT_LOG" >&2
   [[ ! -f "$TEST_AWS_LOG" ]] || tail -n 40 "$TEST_AWS_LOG" >&2
+  [[ ! -f "$TEST_EVENT_LOG" ]] || tail -n 40 "$TEST_EVENT_LOG" >&2
   exit 1
 }
 
@@ -142,7 +156,7 @@ run_build() {
 export GITHUB_OUTPUT="$tmp/migrated"
 export TEST_DEPLOY_STATUS=1
 run_build "$GITHUB_OUTPUT" "$tmp/migration.log"
-rg -q '^migrate$' "$TEST_EVENT_LOG" || fail "migration stub did not fail the deploy lane"
+rg -q '^migrate:1$' "$TEST_EVENT_LOG" || fail "migration stub did not fail the deploy lane"
 
 export TEST_DEPLOY_STATUS=0 TEST_FAIL_CURL=true
 export ACTIONS_ID_TOKEN_REQUEST_URL=https://token.invalid/request
@@ -181,6 +195,35 @@ fi
 
 unset TEST_CTX_HIT
 rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
+CURRENT_LOG="$tmp/production.log"
+: >"$CURRENT_LOG"
+"$tmp/build/build-push.sh" production "$TEST_SHA" >"$CURRENT_LOG" 2>&1 ||
+  fail "production build failed"
+if rg -q 'describe-images.*repository-name skynet/(backend|frontend|litellm)' "$TEST_AWS_LOG"; then
+  fail "production looked up a shared application image tag"
+fi
+if rg -q 'batch-get-image.*repository-name skynet/(backend|frontend|litellm)' "$TEST_AWS_LOG"; then
+  fail "production retagged a shared application image"
+fi
+if rg -q 'put-image.*--image-tag (ctx|tree)-' "$TEST_AWS_LOG"; then
+  fail "production added a shared image-key tag"
+fi
+[[ "$(rg -c '^build:' "$TEST_EVENT_LOG")" -eq 3 ]] ||
+  fail "production did not build all three application images"
+
+export TEST_METADATA_URI=unknown:material
+: >"$TEST_AWS_LOG"
+: >"$TEST_EVENT_LOG"
+CURRENT_LOG="$tmp/unverified-provenance.log"
+: >"$CURRENT_LOG"
+"$tmp/build/build-push.sh" staging "$TEST_SHA" >"$CURRENT_LOG" 2>&1 ||
+  fail "staging build failed when source metadata was unknown"
+if rg -q 'put-image.*--image-tag (ctx|tree)-' "$TEST_AWS_LOG"; then
+  fail "unverified source metadata received an image-key tag"
+fi
+unset TEST_METADATA_URI
+
+rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
 CURRENT_LOG="$tmp/preview-backend.log"
 : >"$CURRENT_LOG"
 # The source path points at a test copy in the temporary fixture.
@@ -193,7 +236,7 @@ export ACTIONS_ID_TOKEN_REQUEST_TOKEN=test-request-token
 export AWS_DEPLOY_ROLE_ARN=arn:aws:iam::123456789012:role/test
 export TEST_FAIL_BUILD=preview-backend
 cfg='{"domain":"staging.skynetml.com"}'
-if backend_and_migrate \
+if run_preview_lane preview-backend backend_and_migrate \
   123456789012.dkr.ecr.us-east-2.amazonaws.com/skynet/preview-backend:"$sha-pr-$pr" "$cfg" \
   >"$CURRENT_LOG" 2>&1; then
   fail "failed preview backend build returned success"
@@ -206,7 +249,7 @@ export TEST_FAIL_BUILD=preview-frontend
 rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
 CURRENT_LOG="$tmp/preview-frontend.log"
 : >"$CURRENT_LOG"
-if build_frontend \
+if run_preview_lane preview-frontend build_frontend \
   123456789012.dkr.ecr.us-east-2.amazonaws.com/skynet/preview-frontend "$sha-pr-$pr" staging.skynetml.com \
   >"$CURRENT_LOG" 2>&1; then
   fail "failed preview frontend build returned success"

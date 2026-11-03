@@ -72,6 +72,40 @@ def test_valid_duration_json_loads_file_prefixes(tmp_path: Path) -> None:
     assert _load_test_durations(duration_file) == _DURATIONS
 
 
+def test_invalid_duration_entries_are_skipped_once_and_zero_is_valid(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Keep valid entries while warning once about invalid values.
+
+    Args:
+        tmp_path: Temporary directory for valid and invalid duration data.
+        capsys: Capture standard error.
+    """
+    duration_file = tmp_path / "test_durations.json"
+    duration_file.write_text(
+        '{"core/zero.py":0,"core/negative.py":-1,"core/bad.py":"fast",'
+        '"core/nan.py":NaN,"core/positive-infinity.py":Infinity,'
+        '"core/negative-infinity.py":-Infinity}'
+    )
+
+    assert _load_test_durations(duration_file) == {"core/zero.py": 0.0}
+    assert capsys.readouterr().err == "warning: ignored 5 invalid test duration entries\n"
+
+
+def test_empty_valid_duration_data_uses_balanced_default_weights(tmp_path: Path) -> None:
+    """Keep valid JSON on duration-aware sharding when it has no entries.
+
+    Args:
+        tmp_path: Temporary directory for duration data.
+    """
+    duration_file = tmp_path / "test_durations.json"
+    duration_file.write_text("{}")
+
+    durations = _load_test_durations(duration_file)
+
+    assert durations == {}
+    assert _assign_test_files(_PATHS, 6, durations) == _assign_test_files(_PATHS, 6, durations)
+    assert len(set(_assign_test_files(_PATHS, 6, durations).values())) > 1
+
+
 def test_controller_writes_dispatched_and_collected_nodeids_with_phase_durations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

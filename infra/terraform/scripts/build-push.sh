@@ -5,7 +5,7 @@
 #
 # Tags: backend and litellm get <sha>; the frontend gets <sha>-<env>, because
 # Next.js bakes NEXT_PUBLIC_* values into the bundle at build time.
-# Application image tags are immutable in ECR, so an existing tag is skipped.
+# Staging skips existing immutable tags; production always builds and pushes.
 #
 # Frontend build values come from the environment of this shell:
 #   NEXT_PUBLIC_SENTRY_DSN, NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE,
@@ -13,7 +13,7 @@
 
 source "$(dirname "$0")/lib.sh"
 source "$(dirname "$0")/image-key.sh"
-need aws docker git jq sort tr date
+need aws docker git jq sort tr date curl ps sed awk cut mktemp
 command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || die "missing command: sha256sum or shasum"
 
 env="${1:-}"
@@ -40,26 +40,31 @@ cfg="$(aws ecr describe-repositories --repository-names skynet/backend skynet/fr
 registry="$(jq -r '.ecr.backend' <<<"$cfg" | cut -d/ -f1)"
 aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null
 
+# Production shares application repositories with staging, so staging can
+# write the same deterministic key tags. Production never reads or writes them.
+# It always builds its own image.
 build() {
   local name="$1" tag="$2" context="$3" cache_name="$4"
   shift 4
   local url key tree_key cache_tag cache_repo week metadata_file="" build_succeeded
   local -a build_args=("$@") pin_args=() cache_from=() metadata_args=()
+  local -a buildx_flags=(--platform linux/arm64 --provenance=false --progress=plain --file "$context/Dockerfile")
   url="$(jq -r --arg n "$name" '.ecr[$n]' <<<"$cfg")" || return 1
   [[ -n "$url" && "$url" != null ]] || return 1
   cache_repo="skynet/buildcache-$env"
+  if [[ "$env" != production ]] && find_by_key "skynet/$name" "$tag"; then
+    echo "skip: $url:$tag exists"
+    return 0
+  fi
   week="$(date -u +%G-W%V)" || return 1
   [[ "$week" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || return 1
+  IMAGE_KEY_BUILD_FLAGS=("${buildx_flags[@]}")
+  export BUILDX_METADATA_PROVENANCE=min
   image_inputs "$context" "$week" "${build_args[@]+"${build_args[@]}"}"
   key="$IMAGE_KEY_CTX"
   tree_key="$IMAGE_KEY_TREE"
   pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
-  if find_by_key "skynet/$name" "$tag"; then
-    echo "skip: $url:$tag exists"
-    return 0
-  fi
-
-  if [[ -n "$key" ]] && find_fresh_by_key "skynet/$name" "$key"; then
+  if [[ "$env" != production && -n "$key" ]] && find_fresh_by_key "skynet/$name" "$key"; then
     if retag "skynet/$name" "$key" "$tag"; then
       echo "reuse: $url:$key as $tag"
       return 0
@@ -74,14 +79,14 @@ build() {
   if [[ -n "$cache_tag" ]]; then
     cache_from+=(--cache-from "type=registry,ref=$registry/$cache_repo:$cache_tag")
   fi
-  if [[ -n "$key" ]]; then
+  if [[ "$env" != production && -n "$key" ]]; then
     metadata_file="$(mktemp)" || return 1
     [[ -n "$metadata_file" ]] || return 1
     metadata_args+=(--metadata-file "$metadata_file")
   fi
   refresh_aws_credentials || return 1
   aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null || return 1
-  if BUILDX_METADATA_PROVENANCE=min docker buildx build --platform linux/arm64 --provenance=false \
+  if docker buildx build "${buildx_flags[@]+"${buildx_flags[@]}"}" \
     "${metadata_args[@]+"${metadata_args[@]}"}" \
     "${cache_from[@]+"${cache_from[@]}"}" \
     --cache-to "type=registry,ref=$registry/$cache_repo:$cache_name-$week-$sha,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
@@ -96,12 +101,14 @@ build() {
     [[ -z "$metadata_file" ]] || rm -f "$metadata_file"
     # Staging and production can build the same backend and litellm tag at
     # once; the second push then fails on the immutable tag.
-    find_by_key "skynet/$name" "$tag" || die "push failed: $url:$tag"
-    echo "skip: $url:$tag was pushed by another run"
-    return 0
+    if [[ "$env" != production ]] && find_by_key "skynet/$name" "$tag"; then
+      echo "skip: $url:$tag was pushed by another run"
+      return 0
+    fi
+    die "push failed: $url:$tag"
   fi
 
-  if [[ -n "$key" ]]; then
+  if [[ "$env" != production && -n "$key" ]]; then
     if verify_image_sources "$metadata_file"; then
       if ! retag "skynet/$name" "$tag" "$key"; then
         echo "warning: cannot add image-key tag $url:$key" >&2
@@ -122,21 +129,22 @@ build_backend_lane() {
   if [[ "$migrate_requested" == --migrate ]]; then
     wait_for_lane_success litellm "$litellm_pid" frontend "$frontend_pid" ||
       return 1
-    # Existing tasks stay live until deploy.sh rolls services, so migrations
-    # must remain compatible with the previous application code.
+    # Migrations follow all image builds; old tasks stay live during rollout.
     refresh_aws_credentials || return 1
     "$script_dir/deploy.sh" "$env" "$sha" --migrate-only || return 1
     printf '%s\n' "$sha" >"$marker" || return 1
   fi
 }
 
+# Publish .ok only after success; EXIT marks every other lane result failed.
 run_image_lane() {
   local lane="$1"
   shift
-  "$@"
-  : >"$lane_dir/$lane.ok"
+  "$@" || return 1
+  : >"$lane_dir/$lane.ok" || return 1
 }
 
+# Require sibling lane success markers before the migration starts.
 wait_for_lane_success() {
   local lane pid state index all_done
   local -a lane_pids=("$@")
@@ -150,6 +158,7 @@ wait_for_lane_success() {
       [[ -e "$lane_dir/$lane.ok" ]] && continue
       all_done=false
       kill -0 "$pid" 2>/dev/null || return 1
+      # A finished child stays a zombie until the parent waits for it.
       state="$(ps -o stat= -p "$pid" 2>/dev/null)" || return 1
       [[ -n "$state" && "$state" != Z* ]] || return 1
     done
@@ -158,13 +167,33 @@ wait_for_lane_success() {
   done
 }
 
+# Keep a lane's final error ahead of the coordinator's failure message.
 run_lane() {
   local label="$1"
+  local log_fd log_pid status
   shift
-  trap '_mark_lane_failure "$?" "$label"' EXIT
-  "$@" > >(sed -u "s/^/[$label] /") 2>&1
+  exec {log_fd}> >(sed -u "s/^/[$label] /") || {
+    _mark_lane_failure 1 "$label" || return 1
+    return 1
+  }
+  log_pid=$!
+  if "$@" >&"$log_fd" 2>&1; then status=0; else status=$?; fi
+  if ! exec {log_fd}>&-; then
+    _mark_lane_failure 1 "$label" || return 1
+    return 1
+  fi
+  if ! wait "$log_pid"; then
+    _mark_lane_failure 1 "$label" || return 1
+    return 1
+  fi
+  if ((status != 0)); then
+    _mark_lane_failure "$status" "$label" || return 1
+    return "$status"
+  fi
+  return 0
 }
 
+# Record nonzero lane exits so the coordinator can fail before migration.
 _mark_lane_failure() {
   local status="$1" label="$2"
   if ((status != 0)); then

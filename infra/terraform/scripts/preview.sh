@@ -121,19 +121,21 @@ standard_ecr_uri() {
 # rule expires PR images 14 days after the push, and a preview may run up to
 # 48 hours after its last deploy. Args: repository tag
 image_is_fresh() {
-  local pushed pushed_at err
-  err="$(mktemp)"
+  local pushed pushed_at err now
+  err="$(mktemp)" || return 1
   # stderr goes to a file, so stdout holds only the timestamp.
   if ! pushed="$(aws ecr describe-images --repository-name "$1" --image-ids "imageTag=$2" \
     --query 'imageDetails[0].imagePushedAt' --output text 2>"$err")"; then
-    pushed="$(cat "$err")"
-    rm -f "$err"
+    pushed="$(cat "$err")" || die "cannot read describe-images error for $1:$2"
+    rm -f "$err" || die "cannot remove ECR error file"
     [[ "$pushed" == *ImageNotFoundException* ]] && return 1
     die "describe-images $1:$2: $pushed"
   fi
-  rm -f "$err"
+  rm -f "$err" || die "cannot remove ECR error file"
   pushed_at="$(date_epoch "$pushed")" || die "cannot parse imagePushedAt"
-  if (($(date +%s) - pushed_at < 11 * 86400)); then
+  now="$(date +%s)" || die "cannot read current time"
+  [[ "$now" =~ ^[0-9]+$ ]] || die "invalid current time"
+  if ((now - pushed_at < 11 * 86400)); then
     return 0
   fi
   echo "deleting $1:$2: pushed at $pushed"
@@ -146,18 +148,22 @@ image_is_fresh() {
 build_backend() {
   local registry staging_cache preview_cache week
   local -a cache_from=() pin_args=()
+  local -a buildx_flags=(--platform linux/arm64 --provenance=false --progress=plain --file "$repo_root/backend/Dockerfile")
   if image_is_fresh skynet/preview-backend "$2"; then
     echo "skip: $1:$2 exists"
     return 0
   fi
   registry="${1%%/*}"
   week="$(date -u +%G-W%V)" || return 1
+  [[ "$week" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || return 1
+  IMAGE_KEY_BUILD_FLAGS=("${buildx_flags[@]}")
+  export BUILDX_METADATA_PROVENANCE=min
   image_inputs "$repo_root/backend" "$week" "GIT_SHA=$sha"
   pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
   [[ -n "$IMAGE_KEY_CTX" ]] ||
     echo "warning: backend inputs could not be verified; building without pinned build contexts" >&2
-  staging_cache="$(latest_cache_ref skynet/buildcache-staging "backend-$week-")"
-  preview_cache="$(latest_cache_ref skynet/preview-buildcache "preview-backend-pr${pr}-$week-")"
+  staging_cache="$(latest_cache_ref skynet/buildcache-staging "backend-$week-")" || return 1
+  preview_cache="$(latest_cache_ref skynet/preview-buildcache "preview-backend-pr${pr}-$week-")" || return 1
   if [[ -n "$staging_cache" ]]; then
     cache_from+=(--cache-from "type=registry,ref=$registry/skynet/buildcache-staging:$staging_cache")
   fi
@@ -166,7 +172,7 @@ build_backend() {
   fi
   refresh_aws_credentials || return 1
   aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null || return 1
-  BUILDX_METADATA_PROVENANCE=min docker buildx build --platform linux/arm64 --provenance=false --progress=plain \
+  docker buildx build "${buildx_flags[@]+"${buildx_flags[@]}"}" \
     "${cache_from[@]+"${cache_from[@]}"}" \
     "${pin_args[@]+"${pin_args[@]}"}" \
     --cache-to "type=registry,ref=$registry/skynet/preview-buildcache:preview-backend-pr${pr}-$week-$sha,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
@@ -183,12 +189,14 @@ build_backend() {
 build_frontend() {
   local registry staging_cache preview_cache build_arg week
   local -a cache_from=() pin_args=() build_args=() docker_args=()
+  local -a buildx_flags=(--platform linux/arm64 --provenance=false --progress=plain --file "$repo_root/frontend/Dockerfile")
   if image_is_fresh skynet/preview-frontend "$2"; then
     echo "skip: $1:$2 exists"
     return 0
   fi
   registry="${1%%/*}"
   week="$(date -u +%G-W%V)" || return 1
+  [[ "$week" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || return 1
   build_args=(
     "NEXT_PUBLIC_SITE_URL=https://pr-$pr.$3"
     "NEXT_PUBLIC_SENTRY_DSN=${NEXT_PUBLIC_SENTRY_DSN:-}"
@@ -198,13 +206,15 @@ build_frontend() {
     "APP_GIT_SHA=$sha"
     "APP_ENVIRONMENT=skynet-pr-$pr"
   )
+  IMAGE_KEY_BUILD_FLAGS=("${buildx_flags[@]}")
+  export BUILDX_METADATA_PROVENANCE=min
   image_inputs "$repo_root/frontend" "$week" "${build_args[@]+"${build_args[@]}"}"
   pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
   [[ -n "$IMAGE_KEY_CTX" ]] ||
     echo "warning: frontend inputs could not be verified; building without pinned build contexts" >&2
   for build_arg in "${build_args[@]+"${build_args[@]}"}"; do docker_args+=(--build-arg "$build_arg"); done
-  staging_cache="$(latest_cache_ref skynet/buildcache-staging "frontend-staging-$week-")"
-  preview_cache="$(latest_cache_ref skynet/preview-buildcache "preview-frontend-pr${pr}-$week-")"
+  staging_cache="$(latest_cache_ref skynet/buildcache-staging "frontend-staging-$week-")" || return 1
+  preview_cache="$(latest_cache_ref skynet/preview-buildcache "preview-frontend-pr${pr}-$week-")" || return 1
   if [[ -n "$staging_cache" ]]; then
     cache_from+=(--cache-from "type=registry,ref=$registry/skynet/buildcache-staging:$staging_cache")
   fi
@@ -213,7 +223,7 @@ build_frontend() {
   fi
   refresh_aws_credentials || return 1
   aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null || return 1
-  BUILDX_METADATA_PROVENANCE=min docker buildx build --platform linux/arm64 --provenance=false --progress=plain \
+  docker buildx build "${buildx_flags[@]+"${buildx_flags[@]}"}" \
     "${cache_from[@]+"${cache_from[@]}"}" \
     "${pin_args[@]+"${pin_args[@]}"}" \
     --cache-to "type=registry,ref=$registry/skynet/preview-buildcache:preview-frontend-pr${pr}-$week-$sha,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
@@ -246,13 +256,13 @@ backend_and_migrate() {
     build_backend "${1%:*}" "${1##*:}" || return 1
   fi
   refresh_aws_credentials || return 1
-  migrate "$1" "$2"
+  migrate "$1" "$2" || return 1
 }
 
 build() {
   check_pr
   check_sha
-  need docker git tr sort date
+  need docker git tr sort date curl ps sed awk cut mktemp
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || die "missing command: sha256sum or shasum"
   local cfg domain slot tag backend frontend backend_pid frontend_pid failed=""
   cfg="$(preview_config)"
@@ -568,11 +578,11 @@ deploy() {
 staging_backend() {
   check_pr
   check_sha
-  local cfg img commit
-  cfg="$(preview_config)"
-  img="$(aws ecs describe-task-definition \
-    --task-definition "$(staging_revision backend "$(jq -r .families.backend <<<"$cfg")" "$(account)")" \
-    --query 'taskDefinition.containerDefinitions[0].image' --output text)"
+  local cfg img commit revision preview_tree staging_tree
+  cfg="$(preview_config)" || return 1
+  revision="$(staging_revision backend "$(jq -r .families.backend <<<"$cfg")" "$(account)")" || return 1
+  img="$(aws ecs describe-task-definition --task-definition "$revision" \
+    --query 'taskDefinition.containerDefinitions[0].image' --output text)" || return 1
   commit="${img##*:}"
   # Any doubt prints nothing, so the preview builds its own backend image.
   if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
@@ -580,7 +590,10 @@ staging_backend() {
   elif ! git -C "$repo_root" cat-file -e "$commit^{commit}" 2>/dev/null &&
     ! git -C "$repo_root" fetch -q --depth=1 origin "$commit"; then
     echo "cannot fetch staging commit $commit; the preview builds its own backend image" >&2
-  elif [[ "$(git -C "$repo_root" rev-parse "$sha:backend")" == "$(git -C "$repo_root" rev-parse "$commit:backend")" ]]; then
+  elif ! preview_tree="$(git -C "$repo_root" rev-parse "$sha:backend")" ||
+    ! staging_tree="$(git -C "$repo_root" rev-parse "$commit:backend")"; then
+    echo "cannot compare backend trees; the preview builds its own backend image" >&2
+  elif [[ "$preview_tree" == "$staging_tree" ]]; then
     echo "$img"
   else
     echo "backend/ at ${sha:0:8} differs from staging ${commit:0:8}; the preview builds its own backend image" >&2
@@ -592,18 +605,21 @@ staging_backend() {
 backend_image() {
   check_pr
   check_sha
-  need docker git tr sort date
+  need docker git tr sort date curl ps sed awk cut mktemp
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || die "missing command: sha256sum or shasum"
   local key image week
-  # Previews may ignore GIT_SHA because staging_backend already runs a staging
-  # image built from another SHA when backend/ is identical. APP_GIT_SHA in
-  # the task environment supplies the served commit; staging and production
-  # keep GIT_SHA in ctx- keys and never reuse across commits.
-  week="$(date -u +%G-W%V)"
+  # Previews may use a tree key because staging_backend already accepts a
+  # staging image built from another SHA when backend/ is identical.
+  # SKYNET_CODE_VERSION remains the image's build SHA; APP_GIT_SHA reports the
+  # preview checkout at /health. Staging keeps commit keys; production always builds.
+  week="$(date -u +%G-W%V)" || return 1
+  [[ "$week" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || return 1
   image_inputs "$repo_root/backend" "$week"
   key="$IMAGE_KEY_TREE"
   if [[ -n "$key" ]] && find_fresh_by_key skynet/backend "$key"; then
-    image="$(standard_ecr_uri backend):$key"
+    image="$(standard_ecr_uri backend)" || return 0
+    [[ -n "$image" && "$image" != None && "$image" != null ]] || return 0
+    image="$image:$key"
     echo "reuse $image (tree key)" >&2
     echo "$image"
     return 0
@@ -632,10 +648,17 @@ deploy_backend_worker() {
   upsert_service "$cfg" worker "$(register worker "$backend_img" "$backend_env" "$slot" "$cfg" "$acct")"
 }
 
+# Keep preview lane errors ahead of the coordinator's failure message.
 run_preview_lane() {
   local label="$1"
+  local log_fd log_pid status
   shift
-  "$@" > >(sed -u "s/^/[$label] /") 2>&1
+  exec {log_fd}> >(sed -u "s/^/[$label] /") || return 1
+  log_pid=$!
+  if "$@" >&"$log_fd" 2>&1; then status=0; else status=$?; fi
+  exec {log_fd}>&- || return 1
+  wait "$log_pid" || return 1
+  return "$status"
 }
 
 delete() {
