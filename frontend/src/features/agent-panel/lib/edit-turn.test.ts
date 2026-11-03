@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-const { editTarget } = await import("./edit-turn.ts");
+const { editTarget, retryMode } = await import("./edit-turn.ts");
 
 const chat = [
   { role: "user", content: "hi" },
@@ -19,4 +19,13 @@ test("a first-time text is occurrence 0", () => {
 
 test("a repeated text counts only earlier user messages with that text", () => {
   assert.deepEqual(editTarget(chat, 4), { text: "hi", occurrence: 1 });
+});
+
+test("a retry of an edit the server never saved resends the edit target", () => {
+  const target = { text: "second", occurrence: 0 };
+  assert.deepEqual(retryMode(target), { regenerate: false, editUserTurn: target });
+});
+
+test("a retry of a saved turn regenerates the latest stored turn", () => {
+  assert.deepEqual(retryMode(null), { regenerate: true, editUserTurn: null });
 });

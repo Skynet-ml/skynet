@@ -30,7 +30,7 @@ import { agentSteerChannel, newSteerKey } from "@/shared/ui/agent/use-steer-queu
 
 import { confirmGeneralistApproval, streamGeneralistAgent } from "../lib/stream";
 import { dropPendingToolCalls, pendingToolCall, placeToolCall } from "../lib/pending-tool-calls";
-import { editTarget } from "../lib/edit-turn";
+import { editTarget, retryMode } from "../lib/edit-turn";
 import type {
   ChatTurn,
   PendingApprovalPayload,
@@ -195,6 +195,8 @@ interface SessionRuntime {
   pendingRun: PendingRun | null;
   /** Index of the running turn's first assistant message; a steer adds more after it. */
   turnStart: number;
+  /** Edit target of the latest run until the server confirms it saved the turn. */
+  unsavedEdit: { text: string; occurrence: number } | null;
 }
 
 function blankSession(key: string): SessionView {
@@ -217,6 +219,7 @@ function blankRuntime(): SessionRuntime {
     persistentExtras: {},
     pendingRun: null,
     turnStart: 0,
+    unsavedEdit: null,
   };
 }
 
@@ -571,6 +574,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             onConversationMeta: (ev) => {
               if (controller.signal.aborted) return;
               if (!ev.conversation_id) return;
+              rt.unsavedEdit = null;
               patchSession(key, { conversationId: ev.conversation_id });
               callbacksRef.current.onConversationMeta?.(
                 ev.conversation_id,
@@ -692,6 +696,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             },
             onDone: (result) => {
               if (controller.signal.aborted) return;
+              rt.unsavedEdit = null;
               dropPendingRows();
               patchSession(key, {
                 status: "done",
@@ -869,6 +874,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       abortSession(key);
       const rt = getRuntime(key);
       rt.replyBuf = "";
+      rt.unsavedEdit = editUserTurn;
 
       const chatHistory: ChatTurn[] = history
         .filter((m) => m.content.trim().length > 0)
@@ -973,7 +979,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       const key = activeKeyRef.current;
       const current = sessionsRef.current.get(key)?.messages ?? [];
       const truncated = current.slice(0, messageIndex);
-      const editUserTurn = current[messageIndex]?.role === "user" ? editTarget(current, messageIndex) : null;
+      const editUserTurn =
+        current[messageIndex]?.role === "user" ? editTarget(current, messageIndex) : null;
       requestRun(key, trimmed, truncated, undefined, false, false, editUserTurn);
     },
     [requestRun],
@@ -996,7 +1003,18 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     const lastUser = current[lastUserIndex];
     if (!lastUser) return;
     const truncated = current.slice(0, lastUserIndex);
-    requestRun(key, lastUser.content, truncated, undefined, true, lastUser.hidden ?? false);
+    const { regenerate, editUserTurn } = retryMode(
+      runtimesRef.current.get(key)?.unsavedEdit ?? null,
+    );
+    requestRun(
+      key,
+      lastUser.content,
+      truncated,
+      undefined,
+      regenerate,
+      lastUser.hidden ?? false,
+      editUserTurn,
+    );
   }, [requestRun]);
 
   const stop = React.useCallback(() => {

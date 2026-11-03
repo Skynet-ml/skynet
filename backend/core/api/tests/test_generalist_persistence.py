@@ -400,6 +400,22 @@ def test_edit_and_resend_replaces_the_edited_turn_and_later_rows(
     assert _stored_contents(engine) == ["first", "שלום", "second, edited", "שלום"]
 
 
+def test_retry_of_an_unsaved_edit_with_the_edit_target_replaces_the_edited_turn(
+    persistence_client: tuple[TestClient, Engine],
+) -> None:
+    """A retry of an edit that failed before it was saved resends the edit target, not ``regenerate``."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["first", "second"])
+
+    # The failed edit stored nothing, so the retry is the first request that reaches the store.
+    retried = _post_turn(client, "second, edited", token, conversation_id=conversation_id, edit_user_text="second")
+
+    assert retried.status_code == 200
+    assert _stored_contents(engine) == ["first", "שלום", "second, edited", "שלום"]
+
+
 def test_edit_of_the_first_turn_keeps_only_the_new_turn(
     persistence_client: tuple[TestClient, Engine],
 ) -> None:

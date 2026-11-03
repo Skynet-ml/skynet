@@ -15,3 +15,18 @@ export function editTarget(
     .filter((m) => m.role === "user" && m.content === text).length;
   return { text, occurrence };
 }
+
+/**
+ * How a retry resends the latest user turn. An edit that failed before the
+ * server saved it must resend its edit target: `regenerate` would delete
+ * only the latest stored turn, and the old edited turn and its replies
+ * would come back after a reload.
+ */
+export function retryMode(unsavedEdit: { text: string; occurrence: number } | null): {
+  regenerate: boolean;
+  editUserTurn: { text: string; occurrence: number } | null;
+} {
+  return unsavedEdit
+    ? { regenerate: false, editUserTurn: unsavedEdit }
+    : { regenerate: true, editUserTurn: null };
+}
