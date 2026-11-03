@@ -61,6 +61,8 @@ export class SteerQueue {
   private busy = false;
   private paused = false;
   private sendTogether = false;
+  private sendIntent = 0;
+  private internalStop = false;
   private settling = 0;
   private turn = 0;
   private channel: SteerChannel | null = null;
@@ -115,6 +117,7 @@ export class SteerQueue {
    * (done, error, or stop) and then sends the queue's head.
    */
   setBusy(busy: boolean): void {
+    if (busy && !this.busy) this.sendIntent += 1;
     if (busy) this.sendTogether = false;
     if (!busy && this.channel) {
       this.endTurn();
@@ -129,6 +132,7 @@ export class SteerQueue {
 
   /** A steerable turn started; `channel` delivers messages into it. */
   openTurn(channel: SteerChannel): void {
+    this.sendIntent += 1;
     this.sendTogether = false;
     if (this.channel) this.endTurn();
     this.turn += 1;
@@ -460,6 +464,7 @@ export class SteerQueue {
 
   /** Drop everything (a new chat or a reset). */
   clear(): void {
+    this.sendIntent += 1;
     this.queued = [];
     this.steering = [];
     this.paused = false;
@@ -470,6 +475,7 @@ export class SteerQueue {
 
   /** Hold pending input after a user Stop, including steers still being withdrawn. */
   pause(): void {
+    if (!this.internalStop) this.sendIntent += 1;
     this.paused = true;
     this.sendTogether = false;
     this.emit();
@@ -477,8 +483,11 @@ export class SteerQueue {
 
   /** Resume the head through the owner's normal turn-start path. */
   sendNow(id?: string): void {
+    const intent = this.sendIntent;
     if (this.settling > 0) {
-      void Promise.allSettled([...this.settlingOperations.values()]).then(() => this.sendNow(id));
+      void Promise.allSettled([...this.settlingOperations.values()]).then(() => {
+        if (intent === this.sendIntent) this.sendNow(id);
+      });
       return;
     }
     const item = id ? this.queued.find((entry) => entry.id === id) : this.queued.find((entry) => !entry.uncertain);
@@ -501,18 +510,25 @@ export class SteerQueue {
   stopAndSendNow(stop: () => void): void {
     if (!this.busy || !this.hasPending()) return;
     const turn = this.turn;
+    const intent = ++this.sendIntent;
     if (this.settling > 0) {
       void Promise.allSettled([...this.settlingOperations.values()]).then(() => {
-        if (turn === this.turn) this.stopAndSendNow(stop);
+        if (turn === this.turn && intent === this.sendIntent) this.stopAndSendNow(stop);
       });
       return;
     }
     const finish = () => {
-      if (turn !== this.turn) return;
+      if (turn !== this.turn || intent !== this.sendIntent) return;
       const text = this.queued.filter((entry) => !entry.uncertain).map((entry) => entry.text).join("\n\n");
       if (!text || text.length > this.maxLength) return;
-      this.pause();
-      if (this.busy) stop();
+      this.internalStop = true;
+      try {
+        this.pause();
+        if (this.busy) stop();
+      } finally {
+        this.internalStop = false;
+      }
+      if (intent !== this.sendIntent) return;
       this.sendTogether = true;
       this.schedulePump();
     };
@@ -526,7 +542,7 @@ export class SteerQueue {
     for (const entry of entries) this.settlingOperations.set(entry.id, operation);
     void operation.then(() => {
       for (const entry of entries) this.settlingOperations.delete(entry.id);
-      if (this.turn !== turn) return;
+      if (this.turn !== turn || intent !== this.sendIntent) return;
       if (this.busy) this.channel = channel;
       this.emit();
       finish();
@@ -614,6 +630,7 @@ export class SteerQueue {
   }
 
   private startSend(text: string): boolean {
+    this.sendIntent += 1;
     this.busy = true;
     if (this.send(text) !== false) return true;
     this.busy = false;

@@ -54,7 +54,7 @@ def test_owner_character_cap_covers_new_keys(store: SteerStore) -> None:
         store.post("alice", str(index), "x" * 20_000)
     with pytest.raises(SteerLimitError):
         store.post("alice", "new-key", "x")
-    store.take("alice", "0")
+    store.mark_delivered("alice", "0", store.take("alice", "0"))
     store.post("alice", "new-key", "room restored")
 
 
@@ -89,7 +89,7 @@ def test_full_withdraw_retains_delivery_proof_for_a_retry(store: SteerStore) -> 
         store: An isolated mailbox store.
     """
     message_id = store.post("alice", "turn", "read")
-    store.take("alice", "turn")
+    store.mark_delivered("alice", "turn", store.take("alice", "turn"))
     assert store.withdraw("alice", "turn") == ([], [message_id])
     assert store.withdraw("alice", "turn") == ([], [message_id])
 

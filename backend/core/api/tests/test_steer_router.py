@@ -49,7 +49,7 @@ def test_withdraw_response_shape_and_omitted_ids(monkeypatch: pytest.MonkeyPatch
     bypass_auth(app)
     client = TestClient(app)
     delivered = store.post("alice", "turn", "read")
-    store.take("alice", "turn")
+    store.mark_delivered("alice", "turn", store.take("alice", "turn"))
     unread = store.post("alice", "turn", "unread")
     foreign = store.post("mallory", "turn", "private")
     response = client.post("/optimizations/agent-steer/withdraw", json={"steer_key": "turn"})

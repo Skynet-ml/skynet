@@ -61,6 +61,7 @@ class SteerStore:
         self._engine: Any = None
         self._lock = threading.Lock()
         self._local: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        self._claimed: dict[tuple[str, str], set[str]] = {}
         self._delivered: dict[tuple[str, str], dict[str, None]] = {}
         self._local_updated: dict[tuple[str, str], datetime] = {}
         self._limits: dict[tuple[str, str], int] = {}
@@ -85,6 +86,7 @@ class SteerStore:
         """
         if self._local_updated.get(key, now) < now - _STALE_AFTER:
             self._local.pop(key, None)
+            self._claimed.pop(key, None)
             self._delivered.pop(key, None)
             self._local_updated.pop(key, None)
             self._limits.pop(key, None)
@@ -258,7 +260,7 @@ class SteerStore:
     def take(
         self, owner: str, steer_key: str, ids: list[str] | None = None, *, max_chars: int | None = None,
     ) -> list[tuple[str, str]]:
-        """Take unread messages for ``steer_key``, oldest first.
+        """Claim unread messages for ``steer_key``, oldest first.
 
         The row lock serializes reads with withdrawal.
 
@@ -278,27 +280,27 @@ class SteerStore:
                 key = (owner, steer_key)
                 self._expire_local_key(key, now)
                 waiting = self._local.get(key, [])
+                claimed = self._claimed.get(key, set())
                 wanted = set(ids) if ids is not None else None
-                taken = self._fitting_prefix([m for m in waiting if wanted is None or m[0] in wanted], max_chars)
+                taken = self._fitting_prefix(
+                    [m for m in waiting if m[0] not in claimed and (wanted is None or m[0] in wanted)], max_chars,
+                )
                 taken_ids = {mid for mid, _ in taken}
-                kept = [m for m in waiting if m[0] not in taken_ids]
-                if kept:
-                    self._local[key] = kept
-                else:
-                    self._local.pop(key, None)
                 if taken:
-                    self._delivered.setdefault(key, {}).update((mid, None) for mid, _ in taken)
+                    self._claimed.setdefault(key, set()).update(taken_ids)
                     self._local_updated[key] = now
                 return taken
         conditions = [
             AgentSteerMessageModel.steer_key == steer_key,
             AgentSteerMessageModel.owner == owner,
             AgentSteerMessageModel.taken_at.is_(None),
+            AgentSteerMessageModel.claimed_at.is_(None),
             AgentSteerMessageModel.created_at >= datetime.now(UTC) - _STALE_AFTER,
         ]
         if ids is not None:
             conditions.append(AgentSteerMessageModel.id.in_(ids))
         with Session(self._engine) as session:
+            self._lock_owner(session, owner)
             rows = (
                 session.execute(
                     select(AgentSteerMessageModel)
@@ -317,9 +319,42 @@ class SteerStore:
             taken_ids = {mid for mid, _ in taken}
             for row in rows:
                 if row.id in taken_ids:
-                    row.taken_at = now
+                    row.claimed_at = now
             session.commit()
             return taken
+
+    def mark_delivered(self, owner: str, steer_key: str, messages: list[tuple[str, str]]) -> None:
+        """Commit delivery proof immediately before the model consumes claimed input.
+
+        Args:
+            owner: Mailbox owner.
+            steer_key: Running turn's key.
+            messages: Claimed messages passed to this model step.
+        """
+        ids = {mid for mid, _ in messages}
+        if self._engine is None:
+            with self._lock:
+                key = (owner, steer_key)
+                delivered = ids & self._claimed.get(key, set())
+                self._claimed.get(key, set()).difference_update(delivered)
+                if not self._claimed.get(key):
+                    self._claimed.pop(key, None)
+                waiting = [m for m in self._local.get(key, []) if m[0] not in delivered]
+                if waiting:
+                    self._local[key] = waiting
+                else:
+                    self._local.pop(key, None)
+                self._delivered.setdefault(key, {}).update((mid, None) for mid, _ in messages if mid in delivered)
+            return
+        with Session(self._engine) as session:
+            self._lock_owner(session, owner)
+            for row in session.scalars(select(AgentSteerMessageModel).where(
+                AgentSteerMessageModel.owner == owner, AgentSteerMessageModel.steer_key == steer_key,
+                AgentSteerMessageModel.id.in_(ids), AgentSteerMessageModel.claimed_at.is_not(None),
+                AgentSteerMessageModel.taken_at.is_(None)).with_for_update()):
+                row.taken_at = datetime.now(UTC)
+                row.claimed_at = None
+            session.commit()
 
     def return_unread(self, owner: str, steer_key: str, messages: list[tuple[str, str]]) -> None:
         """Restore text taken for a cancelled step that never called the model.
@@ -332,15 +367,17 @@ class SteerStore:
         if self._engine is None:
             with self._lock:
                 key = (owner, steer_key)
-                for mid, _ in messages:
-                    self._delivered.get(key, {}).pop(mid, None)
-                self._local[key] = [*messages, *self._local.get(key, [])]
+                self._claimed.get(key, set()).difference_update(mid for mid, _ in messages)
+                if not self._claimed.get(key):
+                    self._claimed.pop(key, None)
             return
         with Session(self._engine) as session:
+            self._lock_owner(session, owner)
             for row in session.scalars(select(AgentSteerMessageModel).where(
                 AgentSteerMessageModel.owner == owner, AgentSteerMessageModel.steer_key == steer_key,
-                AgentSteerMessageModel.id.in_([mid for mid, _ in messages])).with_for_update()):
-                row.taken_at = None
+                AgentSteerMessageModel.id.in_([mid for mid, _ in messages]),
+                AgentSteerMessageModel.taken_at.is_(None)).with_for_update()):
+                row.claimed_at = None
             session.commit()
 
     def withdraw(self, owner: str, steer_key: str, ids: list[str] | None = None) -> tuple[list[str], list[str]]:
@@ -352,7 +389,7 @@ class SteerStore:
             ids: Requested ids, or all messages when omitted.
 
         Returns:
-            Newly withdrawn ids and delivered ids. Missing ids were already withdrawn.
+            Newly withdrawn ids and delivered ids. Claimed or missing ids are unknown.
         """
         if self._engine is None:
             with self._lock:
@@ -361,7 +398,8 @@ class SteerStore:
                 self._expire_local_key(key, datetime.now(UTC))
                 waiting = self._local.get(key, [])
                 wanted = set(ids) if ids is not None else None
-                withdrawn = [mid for mid, _ in waiting if wanted is None or mid in wanted]
+                claimed = self._claimed.get(key, set())
+                withdrawn = [mid for mid, _ in waiting if mid not in claimed and (wanted is None or mid in wanted)]
                 kept = [m for m in waiting if m[0] not in withdrawn]
                 if kept:
                     self._local[key] = kept
@@ -375,6 +413,7 @@ class SteerStore:
         if ids is not None:
             conditions.append(AgentSteerMessageModel.id.in_(ids))
         with Session(self._engine) as session:
+            self._lock_owner(session, owner)
             rows = session.scalars(
                 select(AgentSteerMessageModel)
                 .where(*conditions)
@@ -386,7 +425,7 @@ class SteerStore:
             for row in rows:
                 if row.taken_at is not None:
                     delivered.append(row.id)
-                else:
+                elif row.claimed_at is None:
                     withdrawn.append(row.id)
                     session.delete(row)
             session.commit()
@@ -505,4 +544,5 @@ def deliver_steering(predictor: Any, kwargs: dict[str, Any]) -> None:
     text = "\n\n".join(message for _, message in taken)
     kwargs[inbox.input_field] = text
     inbox.unrecorded = text
+    inbox.store.mark_delivered(inbox.owner, inbox.steer_key, taken)
     inbox.emit({"event": STEER_APPLIED_EVENT, "data": {"ids": [message_id for message_id, _ in taken], "text": text}})

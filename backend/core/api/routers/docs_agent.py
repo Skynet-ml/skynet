@@ -490,6 +490,7 @@ def _run_answer(
         for step in range(MAX_STEPS):
             if stop.is_set():
                 return ""
+            taken = []
             if inbox is not None:
                 try:
                     taken = inbox.store.take(inbox.owner, inbox.steer_key, max_chars=inbox.max_chars)
@@ -503,11 +504,17 @@ def _run_answer(
                 if taken:
                     text = "\n\n".join(text for _, text in taken)
                     messages = [*messages, {"role": "user", "content": f"<question>\n{_escape(text)}\n</question>"}]
-                    inbox.emit({"event": STEER_APPLIED_EVENT, "data": {"ids": [mid for mid, _ in taken], "text": text}})
             offer = step < MAX_STEPS - 1 and searches < MAX_SEARCHES
             kwargs: dict[str, Any] = {"messages": messages, "max_tokens": MAX_OUTPUT_TOKENS}
             if offer:
                 kwargs["tools"] = [SEARCH_DOCS_SCHEMA]
+            if stop.is_set():
+                if inbox is not None and taken:
+                    inbox.store.return_unread(inbox.owner, inbox.steer_key, taken)
+                return ""
+            if inbox is not None and taken:
+                inbox.store.mark_delivered(inbox.owner, inbox.steer_key, taken)
+                inbox.emit({"event": STEER_APPLIED_EVENT, "data": {"ids": [mid for mid, _ in taken], "text": text}})
             # The output cap goes on the call: dspy rejects a small max_tokens at
             # construction for OpenAI reasoning models, but not per call.
             output = _first_output(lm(**kwargs))

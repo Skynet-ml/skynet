@@ -105,3 +105,40 @@ test("R3 missing delivery records are unknown, not certainly unread", async () =
   assert.equal(queue.getSnapshot().queued[0]?.uncertain, true);
   assert.deepEqual(sent, []);
 });
+
+for (const laterStop of [false, true]) {
+  test(`PR929 F1 later Stop=${laterStop} controls a pending joined send`, async () => {
+    const withdrawal = deferred<{ ids: string[]; delivered: string[] }>();
+    const { queue, sent } = setup({ post: async () => "id", withdraw: () => withdrawal.promise });
+    queue.steer("A");
+    queue.enqueue("B");
+    await flush();
+    queue.stopAndSendNow(() => { queue.pause(); queue.setBusy(false); });
+    await flush();
+    if (laterStop) { queue.pause(); queue.setBusy(false); }
+    withdrawal.resolve({ ids: ["id"], delivered: [] });
+    await flush();
+    assert.deepEqual(sent, laterStop ? [] : ["A\n\nB"]);
+    if (laterStop) {
+      assert.equal(queue.getSnapshot().paused, true);
+      assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), ["A", "B"]);
+    }
+  });
+}
+
+test("PR929 F2 a claimed withdrawal stays uncertain in the stopped tray", async () => {
+  const applied: unknown[] = [];
+  const { queue, sent } = setup({
+    post: async () => "claimed", withdraw: async () => ({ ids: [], delivered: [] }),
+    onApplied: (event) => applied.push(event),
+  });
+  queue.steer("not yet delivered");
+  await flush();
+  queue.pause(); queue.setBusy(false);
+  await flush();
+  assert.equal(queue.getSnapshot().paused, true);
+  assert.equal(queue.getSnapshot().queued[0]?.text, "not yet delivered");
+  assert.equal(queue.getSnapshot().queued[0]?.uncertain, true);
+  assert.deepEqual(applied, []);
+  assert.deepEqual(sent, []);
+});

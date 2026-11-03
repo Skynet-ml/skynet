@@ -28,7 +28,7 @@ _KEY = "turn-1"
 
 @pytest.mark.parametrize("database", [False, True])
 def test_pending_steer_count_and_character_caps(database: bool) -> None:
-    """Limit pending input by count and characters, releasing room after take.
+    """Limit pending input by count and characters, releasing room after delivery.
 
     Args:
         database: Exercise SQL storage instead of the local fallback.
@@ -43,7 +43,9 @@ def test_pending_steer_count_and_character_caps(database: bool) -> None:
         store.post(_OWNER, _KEY, "one")
     with pytest.raises(ValueError, match="pending steer"):
         store.post(_OWNER, _KEY, "over count")
-    assert len(store.take(_OWNER, _KEY)) == 10
+    taken = store.take(_OWNER, _KEY)
+    assert len(taken) == 10
+    store.mark_delivered(_OWNER, _KEY, taken)
     first = store.post(_OWNER, _KEY, "a" * 12000)
     store.post(_OWNER, _KEY, "b" * 8000)
     with pytest.raises(ValueError, match="pending steer"):
@@ -63,7 +65,7 @@ def test_local_withdraw_drops_empty_keys_and_keeps_delivery_order(monkeypatch: p
     monkeypatch.setattr(steering_mod, "uuid4", Mock(side_effect=[Mock(hex="b"), Mock(hex="a"), Mock(hex="c")]))
     first = store.post(_OWNER, _KEY, "one")
     second = store.post(_OWNER, _KEY, "two")
-    store.take(_OWNER, _KEY)
+    store.mark_delivered(_OWNER, _KEY, store.take(_OWNER, _KEY))
     unread = store.post(_OWNER, _KEY, "three")
     assert store.withdraw(_OWNER, _KEY) == ([unread], [first, second])
     assert (_OWNER, _KEY) not in store._local
@@ -83,7 +85,7 @@ def test_local_fallback_expires_old_waiting_and_delivery_records(monkeypatch: py
     monkeypatch.setattr(steering_mod, "datetime", clock)
     store = SteerStore()
     delivered = store.post(_OWNER, _KEY, "read")
-    store.take(_OWNER, _KEY)
+    store.mark_delivered(_OWNER, _KEY, store.take(_OWNER, _KEY))
     store.post(_OWNER, _KEY, "unread")
     assert store.withdraw(_OWNER, _KEY, [delivered]) == ([], [delivered])
     clock.now.return_value = now + timedelta(hours=7)
@@ -106,7 +108,7 @@ def test_withdraw_distinguishes_delivered_and_is_idempotent(database: bool) -> N
         AgentSteerTurnModel.__table__.create(engine)
         store.bind_engine(engine)
     delivered = store.post(_OWNER, _KEY, "read")
-    store.take(_OWNER, _KEY)
+    store.mark_delivered(_OWNER, _KEY, store.take(_OWNER, _KEY))
     unread = store.post(_OWNER, _KEY, "return")
     store.post("mallory", _KEY, "private")
     assert store.withdraw(_OWNER, _KEY, [unread, delivered, "missing"]) == ([unread], [delivered])
@@ -207,6 +209,7 @@ def test_steer_reaches_the_next_step_as_the_newest_user_message() -> None:
     assert [e["event"] for e in events] == [STEER_APPLIED_EVENT]
     assert events[0]["data"]["text"] == "use blue instead"
     assert len(events[0]["data"]["ids"]) == 1
+    assert store.withdraw(_OWNER, _KEY, events[0]["data"]["ids"]) == ([], events[0]["data"]["ids"])
     third_users = _user_texts(lm.requests[2]["messages"])
     assert sum("use blue instead" in text for text in third_users) == 1
     assert not any(m["role"] == "assistant" and not m.get("tool_calls") for m in lm.requests[2]["messages"])

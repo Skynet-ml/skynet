@@ -294,5 +294,6 @@ async def test_live_chat_steers_next_step_without_extra_metered_calls(
     assert any(event["event"] == "steer_ready" for event in events) is steering
     if steering:
         assert applied[0]["data"]["text"] == "use blue instead"
+        assert store.withdraw("alice", "turn", applied[0]["data"]["ids"]) == ([], applied[0]["data"]["ids"])
         assert lm.requests[1]["messages"][-1]["role"] == "user"
         assert "use blue instead" in lm.requests[1]["messages"][-1]["content"]

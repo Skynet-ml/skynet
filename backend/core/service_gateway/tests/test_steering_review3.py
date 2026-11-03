@@ -1,18 +1,112 @@
 """Check registered input bounds, cancellation, and bounded mailbox expiry."""
 
 import threading
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from ...api.routers import docs_agent, generalist_agent
 from ...api.tests.conftest import bypass_auth
-from ...storage.models import AgentSteerMessageModel, Base
-from ..agents.steering import SteerInbox, SteerStore
+from ...config import app_env
+from ...storage.models import AgentSteerMessageModel, AgentSteerTurnModel, Base
+from ..agents.steering import SteerInbox, SteerLimitError, SteerStore
+
+
+@pytest.fixture(params=["local", "sqlite", "postgres"])
+def claim_store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[SteerStore]:
+    """Isolate claims on each supported store and optional PostgreSQL fixture.
+
+    Args:
+        request: Selected storage backend.
+        tmp_path: Isolated SQLite database directory.
+
+    Yields:
+        Mailbox with no shared application data.
+    """
+    store = SteerStore()
+    if request.param == "local":
+        yield store
+        return
+    schema = None
+    if request.param == "postgres":
+        url = app_env("APP_BUDGET_TEST_DB_URL")
+        if not url or not url.startswith("postgresql"):
+            pytest.skip("Set APP_BUDGET_TEST_DB_URL to a disposable PostgreSQL database.")
+        engine = create_engine(url)
+        schema = f"steer_claim_{uuid4().hex}"
+        with engine.begin() as connection:
+            connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+        scoped = engine.execution_options(schema_translate_map={None: schema})
+    else:
+        engine = create_engine(f"sqlite:///{tmp_path / 'steers.db'}")
+        scoped = engine
+    try:
+        Base.metadata.create_all(scoped, tables=[AgentSteerMessageModel.__table__, AgentSteerTurnModel.__table__])
+        store.bind_engine(scoped)
+        yield store
+    finally:
+        if schema:
+            with engine.begin() as connection:
+                connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        engine.dispose()
+
+
+@pytest.mark.parametrize("owner_limit", [False, True])
+@pytest.mark.parametrize("characters", [False, True])
+def test_claimed_messages_keep_admission_reserved(claim_store: SteerStore, owner_limit: bool, characters: bool) -> None:
+    """Keep claimed input inside both pending quotas until delivery.
+
+    Args:
+        claim_store: Isolated mailbox store.
+        owner_limit: Fill every key allowed to one owner.
+        characters: Fill the character allowance instead of message count.
+    """
+    store = claim_store
+    for key in range(10 if owner_limit else 1):
+        for _ in range(2 if characters else 10):
+            store.post("alice", str(key), "x" * (10000 if characters else 1))
+    claimed = store.take("alice", "0")
+    def post(index: int) -> None:
+        """Attempt admission while the worker holds its claim.
+
+        Args:
+            index: Unique new key for owner-wide admission.
+        """
+        with pytest.raises(SteerLimitError):
+            store.post("alice", f"new-{index}" if owner_limit else "0", "y")
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(post, range(8)))
+    store.return_unread("alice", "0", claimed)
+    assert store.take("alice", "0") == claimed
+
+
+def test_claim_window_is_unknown_until_delivery(claim_store: SteerStore) -> None:
+    """Do not report a cancellable claim as delivered.
+
+    Args:
+        claim_store: Isolated mailbox store.
+    """
+    store = claim_store
+    mid = store.post("alice", "turn", "A")
+    claimed = store.take("alice", "turn")
+    assert store.withdraw("alice", "turn", [mid]) == ([], [])
+    store.return_unread("alice", "turn", claimed)
+    assert store.withdraw("alice", "turn", [mid]) == ([mid], [])
+    mid = store.post("alice", "turn", "B")
+    claimed = store.take("alice", "turn")
+    store.mark_delivered("alice", "turn", claimed)
+    store.return_unread("alice", "turn", claimed)
+    assert store.withdraw("alice", "turn", [mid]) == ([], [mid])
+    assert store.take("alice", "turn") == []
 
 
 @pytest.mark.parametrize("sql", [False, True])
@@ -66,6 +160,7 @@ def test_stop_during_docs_mailbox_read_restores_unread_text(monkeypatch: pytest.
     def blocked(*args, **kwargs):
         """Finish the read after cancellation arrives."""
         result = take(*args, **kwargs)
+        assert store.withdraw("alice", "turn", [mid]) == ([], [])
         stop.set()
         return result
 

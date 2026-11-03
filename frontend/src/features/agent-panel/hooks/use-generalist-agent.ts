@@ -997,8 +997,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     requestRun(key, lastUser.content, truncated, undefined, true, lastUser.hidden ?? false);
   }, [requestRun, steerQueueFor]);
 
-  const stop = React.useCallback(() => {
-    const key = activeKeyRef.current;
+  const stopSession = React.useCallback((key: string) => {
     steerQueueFor(key).pause();
     const wasQueued = sessionsRef.current.get(key)?.status === "queued";
     abortSession(key);
@@ -1016,6 +1015,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       });
     }
   }, [abortSession, patchMessages, patchSession, patchThinking, steerQueueFor]);
+
+  const stop = React.useCallback(() => stopSession(activeKeyRef.current), [stopSession]);
 
   /**
    * Drop background sessions that are safely re-openable: idle/done ones whose
@@ -1120,8 +1121,14 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     activeSteerQueue.getSnapshot,
   );
   const midTurn = React.useMemo(
-    () => midTurnOf(() => activeSteerQueue, steerSnapshot),
-    [activeSteerQueue, steerSnapshot],
+    () => ({
+      ...midTurnOf(() => activeSteerQueue, steerSnapshot),
+      stopAndSendNow: () => {
+        const key = activeKey;
+        activeSteerQueue.stopAndSendNow(() => stopSession(key));
+      },
+    }),
+    [activeKey, activeSteerQueue, steerSnapshot, stopSession],
   );
 
   const confirmApproval = React.useCallback(

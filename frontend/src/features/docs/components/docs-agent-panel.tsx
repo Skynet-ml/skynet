@@ -194,6 +194,7 @@ export function DocsAgentPanel({
         ...trimHistory(before, MAX_KEPT_MESSAGES),
         { role: "user", content: text, createdAt: Date.now() },
       ];
+      let anchor = base[base.length - 1];
       let turn: DocsAgentMessage = { role: "assistant", content: "", toolCalls: [], thinkingSegments: [] };
       const show = (next: DocsAgentMessage) => {
         turn = next;
@@ -217,16 +218,17 @@ export function DocsAgentPanel({
           if (!steerStore.applied(ids)) return;
           if (!text.trim()) return;
           if (abortRef.current !== controller) {
-            const anchor = [...base].reverse().find((message) => message.role === "user");
             const current = messagesRef.current;
             const index = anchor ? current.indexOf(anchor) : -1;
             if (index >= 0) {
               const end = current[index + 1]?.role === "assistant" ? index + 2 : index + 1;
-              update([...current.slice(0, end), { role: "user", content: text, createdAt: Date.now() }, ...current.slice(end)]);
+              anchor = { role: "user", content: text, createdAt: Date.now() };
+              update([...current.slice(0, end), anchor, ...current.slice(end)]);
             }
             return;
           }
           base = [...base, settle(turn), { role: "user", content: text, createdAt: Date.now() }];
+          anchor = base[base.length - 1];
           show({ role: "assistant", content: "", toolCalls: [], thinkingSegments: [] });
         },
         onReasoningPatch: (chunk) =>

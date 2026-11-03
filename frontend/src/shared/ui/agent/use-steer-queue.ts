@@ -53,6 +53,7 @@ export function useSteerQueue({ busy, send, stop, maxLength }: UseSteerQueueArgs
   React.useEffect(() => {
     store.setSend(send);
     if (maxLength !== undefined) store.setMaxLength(maxLength);
+    return () => store.setSend(() => false);
   }, [store, send, maxLength]);
   React.useEffect(() => {
     store.setBusy(busy);

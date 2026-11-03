@@ -8,7 +8,7 @@ import { askBody, isQuestionTooLong, trimHistory, MAX_QUESTION_CHARS } from "../
 import { INTERVIEW_TURN_MAX_CHARS } from "../../../features/submit/lib/interview-turn.ts";
 import { REACT_CHAT_USER_MESSAGE_MAX_CHARS } from "../../../features/optimizations/lib/react-chat-steering.ts";
 import { handleComposerEscape } from "./composer-keys.ts";
-import { SteerQueue } from "./steer-queue.ts";
+import { midTurnOf, SteerQueue } from "./steer-queue.ts";
 import { visibleSuggestion } from "./next-prompt.ts";
 import { dispatchGeneralistEvent } from "../../../features/agent-panel/lib/stream-events.ts";
 import { closeThinking } from "../../lib/thinking-segments.ts";
@@ -16,6 +16,110 @@ import { closeThinking } from "../../lib/thinking-segments.ts";
 const docs = "src/features/docs/components/docs-agent-panel.tsx";
 const served = "src/features/optimizations/hooks/use-react-serve-chat.ts";
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+test("PR929 F5 unmount disables the sender during settlement", async () => {
+  const effects: (() => void | (() => void))[] = [];
+  const sent: string[] = [];
+  const hook = expression("src/shared/ui/agent/use-steer-queue.ts", "useSteerQueue", {
+    SteerQueue, midTurnOf,
+    React: {
+      useState: (init: () => unknown) => [init()],
+      useEffect: (effect: () => void | (() => void)) => { effects.push(effect); },
+      useSyncExternalStore: (_subscribe: unknown, snapshot: () => unknown) => snapshot(),
+      useMemo: (init: () => unknown) => init(), useCallback: (callback: unknown) => callback,
+    },
+  });
+  const { store } = hook({ busy: true, send: (text: string) => { sent.push(text); return true; } });
+  const cleanups = effects.map((effect) => effect());
+  let resolve!: (result: { ids: string[]; delivered: string[] }) => void;
+  store.openTurn({ post: async () => "id", withdraw: () => new Promise((done) => { resolve = done; }) });
+  store.steer("unseen");
+  await flush();
+  store.setBusy(false);
+  await flush();
+  for (const cleanup of cleanups) if (cleanup) cleanup();
+  resolve({ ids: ["id"], delivered: [] });
+  await flush();
+  assert.deepEqual(sent, []);
+  assert.equal(store.getSnapshot().paused, true);
+  assert.equal(store.getSnapshot().queued[0]?.text, "unseen");
+});
+
+test("PR929 F4 a delayed joined send stops its clicked session", async () => {
+  const file = "src/features/agent-panel/hooks/use-generalist-agent.ts";
+  const activeKeyRef = { current: "A" };
+  const aborted: string[] = [];
+  let resolve!: (result: { ids: string[]; delivered: string[] }) => void;
+  const store = new SteerQueue(() => true);
+  store.openTurn({ post: async () => "id", withdraw: () => new Promise((done) => { resolve = done; }) });
+  store.steer("A"); store.enqueue("B");
+  await flush();
+  const context = {
+    activeKeyRef, steerQueueFor: () => store, sessionsRef: { current: new Map() },
+    abortSession: (key: string) => { aborted.push(key); store.setBusy(false); },
+    patchSession: () => {}, patchThinking: () => {}, patchMessages: () => {}, closeThinking,
+  };
+  const hasStopSession = readFileSync(new URL(`../../../../${file}`, import.meta.url), "utf8").includes("const stopSession");
+  const stopSession = hasStopSession ? expression(file, "stopSession", context) : undefined;
+  const stop = expression(file, "stop", { ...context, stopSession });
+  const midTurn = expression(file, "midTurn", {
+    midTurnOf, activeSteerQueue: store, steerSnapshot: store.getSnapshot(), activeKey: "A", stopSession,
+  })();
+  midTurn.stopAndSendNow(stop);
+  await flush();
+  activeKeyRef.current = "B";
+  resolve({ ids: ["id"], delivered: [] });
+  await flush();
+  assert.deepEqual(aborted, ["A"]);
+});
+
+for (const thinking of [false, true]) {
+  test(`PR929 F6 late docs proofs preserve history order thinking=${thinking}`, async () => {
+    const store = new SteerQueue();
+    const messagesRef: { current: any[] } = { current: [] };
+    const abortRef = { current: null as AbortController | null };
+    const settle = expression(docs, "settle", { closeThinking });
+    let proof!: (event: { ids: string[]; text: string }) => void;
+    let saved: any[] = [];
+    let body: any;
+    const ask = expression(docs, "ask", {
+      abortRef, messagesRef, locale: "en", MAX_KEPT_MESSAGES: 12, AbortController,
+      askBody, isQuestionTooLong, trimHistory, discardStaleDocsResponse, docsAskFailure,
+      setNotice: () => {}, setStreaming: () => {},
+      update: (messages: any[]) => { messagesRef.current = messages; },
+      saveHistory: (messages: any[]) => { saved = messages; },
+      getRuntimeEnv: () => ({ apiUrl: "local" }), steerStore: store, labels: { agentError: "error" },
+      closeThinking, settle, dispatchGeneralistEvent,
+      newSteerKey: () => "turn", agentSteerChannel: (_key: string, onApplied: typeof proof) => {
+        proof = onApplied;
+        return { post: async () => "id", withdraw: async () => ({ ids: [], delivered: [] }) };
+      },
+      fetchWithAuthRetry: async (_url: string, init: any) => {
+        body = JSON.parse(init.body);
+        return new Response(new ReadableStream());
+      },
+      readServerSentEvents: async (_body: unknown, event: any) => {
+        event({ event: "steer_ready", data: { steer_key: "turn" } });
+        if (thinking) messagesRef.current[1].thinkingSegments = [{ reasoning: "think", toolsBefore: 0, startedAt: 1, endedAt: null }];
+        event({ event: "done", data: { assistant_message: "answer" } });
+      },
+    });
+    await ask("Q");
+    expression(docs, "stopAnswer", {
+      abortRef, messagesRef, settle, trimHistory, MAX_KEPT_MESSAGES: 12,
+      setStreaming: () => {}, update: (messages: any[]) => { messagesRef.current = messages; },
+      saveHistory: (messages: any[]) => { saved = messages; },
+    })();
+    proof({ ids: ["a"], text: "A" });
+    proof({ ids: ["b"], text: "B" });
+    const users = (messages: any[]) => messages.filter((message) => message.role === "user").map((message) => message.content);
+    assert.deepEqual(users(messagesRef.current), ["Q", "A", "B"]);
+    assert.deepEqual(users(saved), ["Q", "A", "B"]);
+    assert.equal(messagesRef.current.some((message) => message.thinkingSegments?.length), thinking);
+    await ask("next");
+    assert.deepEqual(users(body.history), ["Q", "A", "B"]);
+  });
+}
 
 for (const failure of ["replacement", "network"] as const) {
   test(`R3 docs ${failure} closes or pauses the right steering channel`, async () => {

@@ -243,8 +243,8 @@ class AgentSteerMessageModel(Base):
     The steer POST and the streaming turn can land on different replicas, so
     the message waits here under the turn's client-chosen ``steer_key``. The
     running loop takes it at its next step; once the turn ends, the client
-    withdraws whatever the loop never read. Taking sets ``taken_at``, so a
-    message is either read by the agent or withdrawn, never both.
+    withdraws whatever the loop never read. Taking sets ``claimed_at``;
+    delivery sets ``taken_at`` at the model boundary.
     """
 
     __tablename__ = "agent_steer_messages"
@@ -262,6 +262,7 @@ class AgentSteerMessageModel(Base):
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
     taken_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AgentTurnModel(Base):
