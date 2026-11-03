@@ -21,12 +21,45 @@ from pydantic import SecretStr
 from sqlalchemy import create_engine
 
 from core.api.errors import DomainError
+from core.api.routers import submissions
 from core.api.routers.submissions import _enforce_byok_connections
 from core.billing.byok_bridge import inject_byok_connections, provider_slug_for_model
 from core.billing.byok_vault import ProviderKeyVault
 from core.config import settings
 from core.models.common import ModelConfig
 from core.storage.models import Base
+
+
+@pytest.mark.parametrize(
+    ("provider", "base", "accepted"),
+    [
+        ("openrouter", "https://openrouter.ai", False),
+        ("openrouter", "https://openrouter.ai/api/v1", False),
+        ("openai", "https://custom.example/v1", True),
+    ],
+)
+def test_submit_and_worker_agree_on_saved_base(provider, base, accepted, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Apply the same prefix rule at submission and key injection."""
+    view = SimpleNamespace(provider=provider, api_base=base, status="verified")
+    resolved = SimpleNamespace(api_base=base, params={}, secret="fixture")
+    vault = SimpleNamespace(
+        has_verified_connection=lambda *_: True,
+        list_keys=lambda *_: SimpleNamespace(keys=[view]),
+        resolve_connection=lambda *_: resolved,
+    )
+    monkeypatch.setattr(submissions, "ProviderKeyVault", lambda **kwargs: vault)
+    config = ModelConfig(name="openai/gpt-4o", token_source="byok", byok_provider=provider)
+    payload = {"model_config": config.model_dump()}
+    if accepted:
+        _enforce_byok_connections(SimpleNamespace(engine=object()), "user", [config])
+        inject_byok_connections(payload, username="user", vault=vault)
+        assert payload["model_config"]["base_url"] == base
+    else:
+        with pytest.raises(DomainError) as submission_error:
+            _enforce_byok_connections(SimpleNamespace(engine=object()), "user", [config])
+        with pytest.raises(DomainError) as worker_error:
+            inject_byok_connections(payload, username="user", vault=vault)
+        assert submission_error.value.code == worker_error.value.code == "billing.byok_model_not_served"
 
 
 @pytest.fixture
@@ -253,8 +286,8 @@ def test_inject_rejects_model_the_connection_cannot_route(vault: ProviderKeyVaul
     assert "api_key" not in payload["model_config"]["extra"]
 
 
-def test_inject_allows_openai_prefix_through_custom_endpoint(vault: ProviderKeyVault) -> None:
-    """A custom ``api_base`` connection is OpenAI-compatible, so ``openai/`` routes through it."""
+def test_inject_rejects_non_openai_custom_endpoint(vault: ProviderKeyVault, engine: object) -> None:
+    """Reject a noncanonical native provider base at submit and injection."""
     with patch("core.billing.byok_vault.httpx.get", return_value=_ok_response()):
         vault.save_key("u@x.com", "google", "sk-gw-7777", api_base="https://gateway.example/v1")
     payload = {
@@ -265,9 +298,14 @@ def test_inject_allows_openai_prefix_through_custom_endpoint(vault: ProviderKeyV
             "extra": {},
         }
     }
-    inject_byok_connections(payload, username="u@x.com", vault=vault)
-    assert payload["model_config"]["extra"]["api_key"] == "sk-gw-7777"
-    assert payload["model_config"]["base_url"] == "https://gateway.example/v1"
+    with pytest.raises(DomainError):
+        _enforce_byok_connections(
+            SimpleNamespace(engine=engine), "u@x.com", [ModelConfig.model_validate(payload["model_config"])]
+        )
+    with pytest.raises(DomainError) as error:
+        inject_byok_connections(payload, username="u@x.com", vault=vault)
+    assert error.value.code == "billing.byok_model_not_served"
+    assert "api_key" not in payload["model_config"]["extra"]
 
 
 def test_enforce_byok_connections_blocks_unroutable_model(vault: ProviderKeyVault, engine: object) -> None:

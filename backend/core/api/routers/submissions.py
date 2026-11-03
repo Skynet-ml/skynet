@@ -29,13 +29,13 @@ from pydantic import ValidationError
 from ...billing import (
     ProviderKeyVault,
     StripeBillingService,
-    byok_prefix_routable,
     byok_provider_for_litellm,
     cost_ceiling_budget,
     provider_slug_for_model,
 )
 from ...billing.budget_amounts import MAX_CENTS
 from ...billing.budgets import BudgetError, BudgetService
+from ...billing.byok_bridge import byok_upstream_routable
 from ...billing.byok_upstreams import UPSTREAMS, resolve_upstream, validate_byok_novelty
 from ...billing.byok_vault import safe_connection_params
 from ...billing.operation_pricing import UnpricedOperationError
@@ -763,9 +763,7 @@ def _enforce_byok_connections(job_store, username: str, model_configs: list[Mode
             )
         except UnpricedOperationError as error:
             raise DomainError("submission.byok_provider_unsupported", status=400) from error
-        if prefix is None or not byok_prefix_routable(
-            prefix, provider, api_base=api_bases.get(provider) if upstream.slug == "custom" else None
-        ):
+        if not byok_upstream_routable(prefix, provider, upstream):
             raise DomainError("billing.byok_model_not_served", status=400, model=name, provider=provider)
     return api_bases
 

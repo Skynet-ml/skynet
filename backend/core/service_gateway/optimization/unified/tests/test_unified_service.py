@@ -6,6 +6,8 @@ from typing import Any
 
 import pytest
 
+from core.api.errors import DomainError
+from core.exceptions import ServiceError
 from core.models.unified import UnifiedCase, UnifiedRunRequest
 from core.service_gateway.optimization.blackbox import service as blackbox_service
 from core.service_gateway.optimization.blackbox.harness import GatewayConfig
@@ -16,6 +18,20 @@ from core.service_gateway.optimization.unified.split import split_cases, split_s
 
 SEED = "Answer."
 OPTIMIZED = "Answer carefully."
+
+
+def test_worker_maps_novelty_domain_error_to_service_error() -> None:
+    """Preserve novelty error detail and code at the unified worker boundary."""
+    raw = _payload(choice="shinka_evolve").model_dump()
+    raw["optimizer"]["shinka"] = {"novelty": True}
+    raw["models"]["reflection_model"] = {"name": "anthropic/claude-sonnet-4", "token_source": "byok"}
+    payload = UnifiedRunRequest.model_validate(raw)
+    expected = DomainError("submission.byok_novelty_unsupported", status=400)
+    with pytest.raises(ServiceError) as error:
+        unified_service.run_unified_optimization(payload, artifact_id="test")
+    assert str(error.value) == expected.detail
+    assert error.value.code == expected.code
+    assert error.value.params == expected.params
 
 
 class _TableScorer:

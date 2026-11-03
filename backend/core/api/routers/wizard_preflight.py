@@ -45,7 +45,7 @@ from ...storage.preflights import setup_seed
 from ..agent_engine import fill_proposer_host_cli
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
-from ..model_billing import normalize_model_token_sources
+from ..model_billing import enforce_local_mode_sources, enforce_raw_local_mode_sources, normalize_model_token_sources
 from ..preflight_execution import (
     BUDGET_CHECK_KEY,
     WizardPreflightCheck,
@@ -286,7 +286,8 @@ def create_wizard_preflight_router(*, job_store: Any) -> APIRouter:
         try:
             response, spec = _checked_preflight(request, user)
         except DomainError as error:
-            error.detail = t_locale(request_locale(request.locale, accept_language), error.code, **error.params)
+            if error.code.startswith(("submission.byok_", "billing.byok_")):
+                error.detail = t_locale(request_locale(request.locale, accept_language), error.code, **error.params)
             raise
         return localize_preflight(response, spec, request_locale(request.locale, accept_language))
 
@@ -320,7 +321,9 @@ def create_wizard_preflight_router(*, job_store: Any) -> APIRouter:
                 raise RequestValidationError(error.errors()) from error
             # The dump below writes host_cli, so fill it first, as the submit route does.
             fill_proposer_host_cli(job_store, user.username, typed)
+            requested_source = typed.token_source
             configs, _ = normalize_model_token_sources(typed)
+            enforce_local_mode_sources(typed, requested_source, configs)
             if isinstance(typed, UnifiedRunRequest):
                 reflection = typed.models.reflection_model
                 novelty = bool(typed.optimizer.shinka and typed.optimizer.shinka.novelty)
@@ -341,6 +344,7 @@ def create_wizard_preflight_router(*, job_store: Any) -> APIRouter:
                 raise RequestValidationError(
                     [{**detail, "loc": ("scorer", *detail["loc"])} for detail in error.errors()]
                 ) from error
+            enforce_raw_local_mode_sources(payload)
             payload["scorer"] = scorer.model_dump(mode="json", by_alias=True)
             configs = []
             reflection = None

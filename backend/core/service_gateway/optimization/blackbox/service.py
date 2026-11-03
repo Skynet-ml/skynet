@@ -377,14 +377,11 @@ def validate_job(payload: BlackboxRunRequest | JobSpec, *, api_bases: dict[str, 
             or unavailable, a native proposer gets custom model settings or no
             spending budget, or Auto has too few scorer runs.
     """
-    try:
-        validate_byok_novelty(
-            payload.reflection_model_settings.model_dump(),
-            bool(payload.shinka and payload.shinka.novelty),
-            api_bases=api_bases,
-        )
-    except UnpricedOperationError as error:
-        raise ServiceError(str(error)) from error
+    validate_byok_novelty(
+        payload.reflection_model_settings.model_dump(),
+        bool(payload.shinka and payload.shinka.novelty),
+        api_bases=api_bases,
+    )
     caps = engine_capabilities(payload.target)
     if caps.agent_target and not caps.sandbox:
         raise ServiceError(f"Agent targets cannot run on this deployment: {caps.sandbox_reason}")

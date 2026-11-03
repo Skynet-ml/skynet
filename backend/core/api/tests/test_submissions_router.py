@@ -50,6 +50,15 @@ def test_byok_submission_rejects_unknown_provider(name: str, monkeypatch: pytest
     assert error.value.code == "submission.byok_provider_unsupported"
 
 
+def test_byok_submission_accepts_bare_model_with_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Accept a bare model when its explicit provider has a verified key."""
+    view = SimpleNamespace(provider="openai", api_base=None, status="verified")
+    vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
+    monkeypatch.setattr(_sub_mod, "ProviderKeyVault", lambda **kwargs: vault)
+    config = ModelConfig(name="gpt-4o", token_source="byok", byok_provider="openai")
+    assert _sub_mod._enforce_byok_connections(SimpleNamespace(engine=object()), "user", [config]) == {"openai": None}
+
+
 @pytest.mark.parametrize(
     ("provider", "name", "base", "accepted"),
     [
