@@ -31,7 +31,7 @@ test("tabLabel reads the tab name from a code block info string", () => {
   assert.equal(tabLabel(null), null);
 });
 
-test("remarkDocs groups adjacent tab code blocks once, and marks callouts and headings", () => {
+test("remarkDocs groups adjacent tab code blocks once, unwraps callouts and marks headings", () => {
   const code = (label: string) => ({
     type: "code",
     lang: "bash",
@@ -48,11 +48,27 @@ test("remarkDocs groups adjacent tab code blocks once, and marks callouts and he
         type: "blockquote",
         children: [{ type: "paragraph", children: [{ type: "text", value: "[!TIP]\nUse it." }] }],
       },
+      {
+        type: "blockquote",
+        children: [
+          { type: "paragraph", children: [{ type: "text", value: "[!WARNING]" }] },
+          {
+            type: "blockquote",
+            children: [
+              { type: "paragraph", children: [{ type: "text", value: "[!NOTE]\nSecond." }] },
+            ],
+          },
+        ],
+      },
+      {
+        type: "blockquote",
+        children: [{ type: "paragraph", children: [{ type: "text", value: "A quote." }] }],
+      },
       { type: "code", lang: "skynet-mcp-clients", value: "" },
     ],
   };
   remarkDocs({ headingIds: ["install"] })(tree);
-  const [heading, tabs, quote, mcp] = tree.children as Array<Record<string, any>>;
+  const [heading, tabs, tip, warning, quote, mcp] = tree.children as Array<Record<string, any>>;
   assert.equal(heading.data.hProperties.id, "install");
   assert.equal(tabs.type, "docsTabs");
   assert.equal(tabs.data.hProperties.dataTabs, '["A","B"]');
@@ -60,8 +76,39 @@ test("remarkDocs groups adjacent tab code blocks once, and marks callouts and he
     tabs.children.map((c: { type: string }) => c.type),
     ["code", "code"],
   );
-  assert.equal(quote.data.hProperties.dataCallout, "tip");
-  assert.equal(quote.children[0].children[0].value, "Use it.");
+  assert.equal(tip.type, "paragraph");
+  assert.equal(tip.children[0].value, "Use it.");
+  assert.equal(warning.type, "paragraph");
+  assert.equal(warning.children[0].value, "Second.");
+  assert.equal(quote.type, "blockquote");
+  assert.equal(quote.data, undefined);
   assert.equal(mcp.type, "docsMcpClients");
   assert.equal(mcp.value, undefined);
+});
+
+test("remarkDocs never joins tab groups across a callout boundary", () => {
+  const code = (label: string) => ({
+    type: "code",
+    lang: "bash",
+    meta: `tab="${label}"`,
+    value: label,
+  });
+  const callout = (...children: object[]) => ({
+    type: "blockquote",
+    children: [{ type: "paragraph", children: [{ type: "text", value: "[!NOTE]" }] }, ...children],
+  });
+  const tree = {
+    type: "root",
+    children: [code("macOS"), callout(code("Linux"), code("Windows")), code("Other")],
+  };
+  remarkDocs({ headingIds: [] })(tree);
+  const groups = (tree.children as Array<Record<string, any>>).map((c) => [
+    c.type,
+    c.data?.hProperties?.dataTabs,
+  ]);
+  assert.deepEqual(groups, [
+    ["docsTabs", '["macOS"]'],
+    ["docsTabs", '["Linux","Windows"]'],
+    ["docsTabs", '["Other"]'],
+  ]);
 });
