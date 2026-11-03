@@ -96,12 +96,16 @@ def score(input, output, expected=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
         input=f"Question: {input['question']}\nAnswer: {output}",
+        model="openai/gpt-4.1-mini",
+        temperature=0,
+        max_tokens=512,
+        reasoning_effort="low",
     )
     passed = str(verdict).strip().upper().startswith("PASS")
     return (1.0 if passed else 0.0), {"feedback": str(verdict)}
 ```
 
-**메트릭 모델**을 선택하지 않으면 메트릭은 리플렉션 모델과 같은 모델을 사용합니다.
+메트릭은 자체 `llm()` 호출에서 모델을 지정합니다. 표시된 네 인수는 모두 선택 사항입니다. `model=`을 생략하면 메트릭은 리플렉션 모델을 사용합니다.
 
 ## 정확도, 속도, 비용
 

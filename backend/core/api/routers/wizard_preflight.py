@@ -65,6 +65,7 @@ CONTRACT_CHECK_KEY = "metric.contract"
 # without a catalog code. Stored evidence keeps them as written, so they are
 # coded and worded here, at response time, for every caller's locale.
 FIXED_MESSAGE_CODES = {
+    "Set the model with llm(model=...) in the metric code.": "submit.preflight.scorer_model",
     "Evaluator loads; scoring waits for the first generated candidate.": "submit.preflight.scorer_ready",
     "Endpoint validated; its response will be checked with the first generated candidate.": (
         "submit.preflight.endpoint_ready"

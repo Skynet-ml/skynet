@@ -65,11 +65,14 @@
     "winningCandidate": "победивший кандидат"
   },
   "messages": {
+    "submit.preflight.scorer_model": "Укажите модель с помощью llm(model=...) в коде метрики.",
+    "contract.metric_model_empty": "Значение model= в llm() не может быть пустым или состоять только из пробелов.",
+    "contract.metric_model_conflict": "Сохранённая модель метрики не совпадает с model= в коде. Удалите сохранённую модель или измените код.",
     "contract.file_invalid": "Файл {path} недействителен: {error}",
     "contract.files_unsupported": "Оптимизаторы DSPy запускают только run.py и metric.py. Перенесите код из дополнительных файлов в run.py или выберите другой оптимизатор.",
     "contract.metric_error": "Метрика завершилась с ошибкой на примере {index}: {error}",
     "contract.metric_missing": "Код метрики не определяет функцию, которую вызывает этот оптимизатор.",
-    "contract.metric_model_missing": "Метрика вызывает модель, поэтому выберите модель метрики.",
+    "contract.metric_model_declaration": "В вызовах llm() можно указать не более одной модели строковым литералом, например model=\"openai/gpt-4.1-mini\". Без model= используется модель рефлексии. Вызывайте llm() напрямую. Передавайте настройки именованными аргументами, а не через **kwargs.",
     "contract.runner_outdated": "Среда запуска кода для проверки старше этого контракта и всё ещё ожидает прежний, поэтому её нужно пересобрать. Ваш код менять не нужно.",
     "contract.metric_signature.blackbox": "Этому оптимизатору нужна score(input, output, expected=None).",
     "contract.passed": "Код соответствует тому, что нужно оптимизатору.",

@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from gepa.image import Image
 
+from core.billing.model_gateway import ROUTE_KEY
 from core.exceptions import ServiceError
 from core.models.common import ModelConfig
 from core.service_gateway.language_models import lm_call_count, total_tokens_from_history, usage_by_model_from_history
@@ -19,6 +20,7 @@ from core.service_gateway.language_models import lm_call_count, total_tokens_fro
 from .. import sandbox_log
 from .. import sandbox_scorer as sandbox_scorer_mod
 from ..harness import GatewayConfig
+from ..runner import GatewayClient, ScorerError
 from ..sandbox import CommandResult, LocalSubprocessRuntime, OutputSink
 from ..sandbox_scorer import (
     CALLS_DIR,
@@ -42,6 +44,21 @@ _GATEWAY = ScorerGateway(
 )
 _OK = {"score": 0.5, "side_info": {}, "error": None, "usage": []}
 _LLM_SCORER = "def score(candidate, case=None):\n    return float(llm(candidate, case['input'])), 'judged'\n"
+
+
+def test_unprotected_byok_endpoint_accepts_declared_billing_name() -> None:
+    """A custom endpoint accepts its original provider-qualified declaration."""
+    with FakeGateway(reply="ok") as gateway:
+        config = ModelConfig(
+            name="openai/gpt-4.1-mini", token_source="byok", base_url=gateway.url, extra={"api_key": "test-key"}
+        )
+        bound = scorer_gateway(config, SimpleNamespace(lm_request_timeout_seconds=33.0))
+        payload = bound.runner_payload()
+        client = GatewayClient(payload["url"], payload["model"], declared_model=payload.get("declared_model"))
+        assert client("prompt", model="openai/gpt-4.1-mini") == "ok"
+        with pytest.raises(ScorerError, match="must match"):
+            client("prompt", model="openai/other")
+    assert gateway.requests[0]["body"]["model"] == "gpt-4.1-mini"
 
 
 class _RunnerSession(FakeSandboxSession):
@@ -234,6 +251,7 @@ def test_sandbox_scorer_installs_the_runner_once_and_runs_one_call_per_directory
     assert box.payloads[1]["gateway"] == {
         "url": "http://gw.example/v1",
         "model": "judge",
+        "declared_model": "fake/judge",
         "temperature": None,
         "max_tokens": None,
         "reasoning_effort": None,
@@ -463,14 +481,17 @@ def test_scorer_gateway_for_managed_models_uses_the_shared_gateway(monkeypatch: 
         max_tokens=50,
         reasoning_effort="high",
         timeout_seconds=33.0,
+        gateway_reasoning=True,
     )
     assert gateway.runner_payload() == {
         "url": "http://gw/v1",
         "model": "openai/gpt-4o",
+        "declared_model": "openrouter/openai/gpt-4o",
         "temperature": 0.3,
         "max_tokens": 50,
         "reasoning_effort": "high",
         "timeout_seconds": 33.0,
+        "gateway_reasoning": True,
     }
 
 
@@ -480,6 +501,20 @@ def test_scorer_gateway_for_managed_models_needs_a_gateway(monkeypatch: pytest.M
 
     with pytest.raises(ServiceError, match="LITELLM_PROXY_URL"):
         scorer_gateway(ModelConfig(name="openrouter/openai/gpt-4o"), SimpleNamespace(lm_request_timeout_seconds=33.0))
+
+
+def test_subscription_gateway_passes_cli_route_to_runner() -> None:
+    """Keep the source and billing name when the protected route changes the model name."""
+    config = ModelConfig(
+        name="subscription/claude/anthropic/claude-opus-5.5",
+        token_source="subscription",
+        cli_provider="claude",
+        extra={ROUTE_KEY: {"url": "http://gw/v1", "model": "anthropic/claude-opus-5.5", "token": "key"}},
+    )
+    payload = scorer_gateway(config, SimpleNamespace(lm_request_timeout_seconds=33.0)).runner_payload()
+    assert payload["subscription"] is True
+    assert payload["model"] == "anthropic/claude-opus-5.5"
+    assert payload["declared_model"] == config.name
 
 
 @pytest.mark.parametrize(
@@ -560,7 +595,7 @@ def test_probe_scorer_runs_the_real_runner_through_the_local_runtime() -> None:
         ("def score(c, case=None): return 'nope'", "must return feedback"),
         ("def score(c, case=None): return 1.0", "must return feedback"),
         ("def !!!", "scorer code has a syntax error"),
-        (_LLM_SCORER, "no model was chosen in the Scorer step"),
+        (_LLM_SCORER, "Add model= to llm() or check the reflection model"),
     ],
 )
 def test_probe_scorer_reports_failures_as_data(code: str, error: str) -> None:

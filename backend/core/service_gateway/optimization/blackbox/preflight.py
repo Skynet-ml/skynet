@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import time
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -12,6 +11,7 @@ from ....billing.model_gateway import ROUTE_KEY
 from ....billing.runtime import UsagePendingError
 from ....config import settings
 from ....exceptions import ServiceError
+from ....i18n_en import t_en
 from ....models import BlackboxRunRequest
 from ....models.blackbox import BlackboxScorer, BlackboxTarget
 from ....models.unified import (
@@ -23,6 +23,7 @@ from ....models.unified import (
 )
 from ....provider_registry import LITELLM_TO_BYOK_PROVIDER
 from ..unified.contract import run_contract_check
+from ..unified.metric_model import resolve_blackbox_metric_model_dict, scan_metric_llm
 from ..unified.service import unified_job_spec
 from ..unified.split import split_seed
 from .agent_eval import READINESS_LIFETIME_SECONDS, case_lifetime_seconds
@@ -125,8 +126,7 @@ def _sample(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 def _needs_model(code: str) -> bool:
     """Detect direct scorer model helper use before an inherited model is chosen."""
-    tree = ast.parse(code)
-    return any(isinstance(node, ast.Name) and node.id == "llm" for node in ast.walk(tree))
+    return scan_metric_llm(code).uses_llm
 
 
 def verify_anything_in_sandbox(
@@ -143,6 +143,9 @@ def verify_anything_in_sandbox(
     Returns:
         Real readiness checks and, when a seed exists, its actual scorer preview.
     """
+    error = resolve_blackbox_metric_model_dict(payload)
+    if error:
+        raise ValueError(t_en(error))
     scorer = BlackboxScorer.model_validate(payload.get("scorer") or {})
     remote = scorer.kind == "remote"
     code = str(scorer.metric_code)
@@ -152,7 +155,7 @@ def verify_anything_in_sandbox(
                 _check(
                     "scorer.model",
                     "pending",
-                    "Choose the model on Optimization to finish this evaluator check.",
+                    "Set the model with llm(model=...) in the metric code.",
                     "scorer.model",
                 )
             ]

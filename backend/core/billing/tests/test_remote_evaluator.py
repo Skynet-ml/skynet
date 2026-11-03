@@ -31,6 +31,7 @@ from core.billing.signals import BudgetReached
 from core.config import settings
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxScorer
+from core.service_gateway.optimization.blackbox import preflight
 from core.service_gateway.optimization.blackbox.preflight import verify_anything_in_sandbox
 from core.service_gateway.optimization.blackbox.sandbox import LocalSubprocessRuntime, SandboxSpec
 from core.service_gateway.optimization.blackbox.scorer import build_scorer
@@ -40,6 +41,37 @@ from core.worker.scoped_relay import model_forwarder
 from .test_model_gateway_transport import gateway as _gateway_fixture
 
 gateway = _gateway_fixture
+
+
+def test_scorer_model_pending_points_to_metric_code() -> None:
+    """Tell clients where to declare a model when no reflection model exists."""
+    result = verify_anything_in_sandbox(
+        {"scorer": {"kind": "python", "metric_code": "llm('x')"}},
+        scope="evaluation",
+        identity="test",
+        runtime=LocalSubprocessRuntime(),
+    )
+    assert result["checks"][0]["message"] == "Set the model with llm(model=...) in the metric code."
+
+
+def test_preflight_resolves_declared_scorer_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve the model before constructing the sandbox scorer."""
+    observed = []
+    monkeypatch.setattr(preflight, "scorer_gateway", lambda model, settings: observed.append(model.name))
+    monkeypatch.setattr(
+        preflight, "SandboxPythonScorer", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stop"))
+    )
+    with pytest.raises(RuntimeError, match="stop"):
+        verify_anything_in_sandbox(
+            {
+                "scorer": {"kind": "python", "metric_code": "llm(model='judge')"},
+                "reflection_model_config": {"name": "reflection"},
+            },
+            scope="evaluation",
+            identity="test",
+            runtime=LocalSubprocessRuntime(),
+        )
+    assert observed == ["judge"]
 
 
 @dataclass

@@ -65,11 +65,14 @@
     "winningCandidate": "candidato vencedor"
   },
   "messages": {
+    "submit.preflight.scorer_model": "Defina o modelo com llm(model=...) no código da métrica.",
+    "contract.metric_model_empty": "O valor model= em llm() não pode estar vazio nem conter apenas espaços.",
+    "contract.metric_model_conflict": "O modelo de métrica guardado não corresponde a model= no código. Remova o modelo guardado ou altere o código.",
     "contract.file_invalid": "O arquivo {path} não é válido: {error}",
     "contract.files_unsupported": "Os otimizadores DSPy executam apenas run.py e metric.py. Mova o código dos arquivos extras para run.py ou escolha outro otimizador.",
     "contract.metric_error": "A métrica falhou na amostra {index}: {error}",
     "contract.metric_missing": "O código da métrica não define a função que este otimizador chama.",
-    "contract.metric_model_missing": "A métrica chama um modelo, por isso escolha um modelo para a métrica.",
+    "contract.metric_model_declaration": "As chamadas llm() devem indicar no máximo um modelo como uma string literal, por exemplo model=\"openai/gpt-4.1-mini\". Sem model=, é usado o modelo de reflexão. Chame llm() diretamente. Passe as configurações como argumentos nomeados, não com **kwargs.",
     "contract.runner_outdated": "O executor de código da verificação é mais antigo do que este contrato e ainda espera o anterior, por isso precisa de ser reconstruído. O seu código não precisa de alterações.",
     "contract.metric_signature.blackbox": "Este otimizador precisa de score(input, output, expected=None).",
     "contract.passed": "O código corresponde ao que o otimizador precisa.",

@@ -65,6 +65,7 @@
     "winningCandidate": "winning candidate"
   },
   "messages": {
+    "submit.preflight.scorer_model": "Set the model with llm(model=...) in the metric code.",
     "accounts.email_delivery_unavailable": "Email delivery isn't configured on this server.",
     "accounts.email_not_verified": "Please verify your email before signing in.",
     "accounts.email_send_failed": "Couldn't send the verification email. Try again.",
@@ -403,7 +404,9 @@
     "contract.run_error": "The run code failed on sample {index}: {error}",
     "contract.metric_error": "The metric failed on sample {index}: {error}",
     "contract.shape.blackbox": "The score function must return (score, side_info), where side_info is a dict with a feedback string.",
-    "contract.metric_model_missing": "The metric calls a model, so choose a metric model.",
+    "contract.metric_model_declaration": "llm() calls must name at most one model as a string literal, like model=\"openai/gpt-4.1-mini\". Without model=, the reflection model is used. Call llm() directly. Pass settings as named arguments, not **kwargs.",
+    "contract.metric_model_empty": "The model= value in llm() must not be empty or contain only whitespace.",
+    "contract.metric_model_conflict": "The stored metric model conflicts with model= in the metric code. Remove the stored model or change the code to match it.",
     "contract.runner_outdated": "The check's code runner is older than this contract and still expects the retired one, so it needs a rebuild. Your code needs no change.",
     "contract.files_unsupported": "DSPy optimizers run only run.py and metric.py. Move the extra files' code into run.py, or pick another optimizer.",
     "contract.file_invalid": "The file {path} is not valid: {error}",

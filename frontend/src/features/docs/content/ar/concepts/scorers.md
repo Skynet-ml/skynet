@@ -96,12 +96,16 @@ def score(input, output, expected=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
         input=f"Question: {input['question']}\nAnswer: {output}",
+        model="openai/gpt-4.1-mini",
+        temperature=0,
+        max_tokens=512,
+        reasoning_effort="low",
     )
     passed = str(verdict).strip().upper().startswith("PASS")
     return (1.0 if passed else 0.0), {"feedback": str(verdict)}
 ```
 
-إذا لم تختر **نموذج المقياس**، يستخدم المقياس النموذج نفسه الذي يستخدمه نموذج التأمل.
+يحدد المقياس نموذجه في استدعاء `llm()` الخاص به. المعاملات الأربعة المعروضة اختيارية. من دون `model=`، يستخدم المقياس نموذج التأمل.
 
 ## الدقة والسرعة والتكلفة
 

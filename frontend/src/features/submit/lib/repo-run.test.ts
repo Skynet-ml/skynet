@@ -72,6 +72,44 @@ test("Auto cannot optimize a repository", () => {
   assert.equal(computeStepIssue(state, "optimizer", null), "submit.v2.optimizer.issue.choice");
 });
 
+test("a repository clone drops a stored scorer model the code does not name", () => {
+  const state = repoState();
+  state.workspace.metricModel = { name: "anthropic/legacy", token_source: "byok" };
+  assert.equal(repoRunRequest(state, options)?.scorer.model, undefined);
+  state.workspace.metricCode = "def score(repo_path, case=None):\n    return llm('x')";
+  assert.equal(repoRunRequest(state, options)?.scorer.model, undefined);
+});
+
+test("a repository clone drops a stored scorer model the code replaces", () => {
+  const state = repoState();
+  state.workspace.metricModel = { name: "anthropic/legacy", token_source: "byok" };
+  state.workspace.metricCode = "llm('x', model='anthropic/judge')";
+  assert.equal(repoRunRequest(state, options)?.scorer.model, undefined);
+  state.workspace.metricCode = "llm('x', model='anthropic/legacy')";
+  assert.deepEqual(
+    repoRunRequest(state, options)?.scorer.model,
+    prepareModelConfig(state.workspace.metricModel),
+  );
+});
+
+test("a new repository scorer leaves its declared model to the backend", () => {
+  const state = repoState();
+  state.workspace.metricCode = "llm(model='anthropic/judge')";
+  assert.equal(repoRunRequest(state, options)?.scorer.model, undefined);
+});
+
+test("a new repository scorer leaves reflection fallback to the backend", () => {
+  const state = repoState();
+  state.workspace.metricCode = "llm('x')";
+  assert.equal(repoRunRequest(state, options)?.scorer.model, undefined);
+});
+
+test("a repository run leaves ambiguous declarations for backend validation", () => {
+  const state = repoState();
+  state.workspace.metricCode = "llm('x'); llm('y', model='anthropic/judge')";
+  assert.equal(repoRunRequest(state, options)?.scorer.model, undefined);
+});
+
 test("a repository run skips inputs and needs only the scorer", () => {
   const state = repoState();
   state.inputs.mode = null;

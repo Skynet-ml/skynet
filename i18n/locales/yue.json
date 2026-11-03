@@ -65,11 +65,14 @@
     "program": "程式"
   },
   "messages": {
+    "submit.preflight.scorer_model": "喺指標程式碼用 llm(model=...) 設定模型。",
+    "contract.metric_model_empty": "llm() 入面嘅 model= 唔可以係空，亦唔可以只包含空格。",
+    "contract.metric_model_conflict": "已儲存嘅指標模型同程式碼入面嘅 model= 唔一致。請移除已儲存嘅模型，或者修改程式碼。",
     "contract.file_invalid": "檔案 {path} 無效：{error}",
     "contract.files_unsupported": "DSPy 優化器只會執行 run.py 同 metric.py。請將額外檔案嘅代碼搬去 run.py，或者揀第二個優化器。",
     "contract.metric_error": "指標喺示例 {index} 出錯：{error}",
     "contract.metric_missing": "指標程式碼冇定義呢個優化器會呼叫嘅函數。",
-    "contract.metric_model_missing": "你嘅指標會呼叫模型，請揀一個指標模型。",
+    "contract.metric_model_declaration": "llm() 呼叫最多只可以用字串常值指定一個模型，例如 model=\"openai/gpt-4.1-mini\"。唔指定 model= 就會用反思模型。 請直接呼叫 llm()。請用具名參數傳遞設定，唔好用 **kwargs。",
     "contract.runner_outdated": "檢查用嘅程式執行器比呢份合約舊，仲係預期舊合約，所以要重新建置。你嘅程式碼唔使改。",
     "contract.metric_signature.blackbox": "呢個優化器需要 score(input, output, expected=None)。",
     "contract.passed": "程式碼符合優化器嘅要求。",

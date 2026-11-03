@@ -23,12 +23,11 @@ import {
   keepSessionValue,
   readSessionValue,
 } from "../../lib/session-state";
-import { metricUsesModel as metricCallsModel, withScorerImports } from "../../lib/scorer-dependencies";
+import { withScorerImports } from "../../lib/scorer-dependencies";
 import { METRIC_FILE, RUN_FILE, isSingleAnswerTask, repoIssue } from "../../lib/wizard-v2";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { ScheduleRunScreen } from "./ScheduleRunScreen";
 import { ContractCheckScreen } from "./ContractCheckScreen";
-import { MetricModelRow } from "./MetricModelRow";
 import { RunOverview } from "./RunOverview";
 import { WizardScreen } from "./WizardScreen";
 
@@ -92,8 +91,6 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
   const repo = Boolean(task.repo);
   const t = (key: string) => v2Msg(key, guided);
 
-  const metricUsesModel = metricCallsModel(state);
-
   const repoDraft = task.repo && !repoIssue(task.repo) ? task.repo : null;
   const repoName = repoDraft?.repository.trim() ?? "";
   const repoRef = repoDraft ? repoDraft.commit.trim() || repoDraft.branch.trim() : "";
@@ -139,7 +136,7 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
       expected_field: inputs.expectedField,
       sample_cases: samples,
       optimizer: optimizer.choice,
-      metric_has_model: metricUsesModel,
+      reflection_name: optimizer.reflectionModel?.name ?? null,
       focus: repo ? "metric" : "run",
       ...(repo ? { target: "repo" as const } : {}),
       ...(repoPaths.length > 0 ? { repo_files: repoPaths } : {}),
@@ -147,7 +144,6 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
   }, [
     kind,
     repo,
-    metricUsesModel,
     repoPaths,
     task.objective,
     task.background,
@@ -158,6 +154,7 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
     inputs.inputFields,
     inputs.expectedField,
     optimizer.choice,
+    optimizer.reflectionModel?.name,
   ]);
 
   const setRunCode = React.useCallback(
@@ -313,17 +310,6 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
           repo={repoFiles}
           openRequests={openRequests}
           guided={guided}
-          strip={
-            metricUsesModel ? (
-              <MetricModelRow
-                mode={workspace.metricModelMode}
-                explicitModel={workspace.metricModel}
-                reflectionModel={optimizer.reflectionModel}
-                onChange={patchWorkspace}
-                guided={guided}
-              />
-            ) : null
-          }
           sidePanel={
             <CodingAgentPanel
               coding={coding}

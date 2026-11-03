@@ -28,6 +28,7 @@ from core.service_gateway.language_models import (
     build_language_model,
 )
 from core.service_gateway.optimization.blackbox.workspace_harness import attempt_record
+from core.service_gateway.optimization.unified.dspy_engine import lm_helper
 
 MODEL = "anthropic/claude-haiku-4.5"
 SUBSCRIPTION_ID = f"subscription/claude/{MODEL}"
@@ -72,6 +73,22 @@ def test_subscription_turn_effort_reaches_the_cli(tmp_path: Path) -> None:
     assert call["argv"][call["argv"].index("--effort") + 1] == "xhigh"
     unpicked = build_language_model(ModelConfig(name=MODEL, token_source="subscription", cli_provider="claude"))
     assert cli_dispatch.CLI_EFFORT_KEY not in (unpicked.kwargs.get("extra_body") or {})
+
+
+@pytest.mark.usefixtures("local")
+def test_subscription_metric_effort_override_reaches_the_cli(tmp_path: Path) -> None:
+    """Send the per-call effort to the CLI without changing the next call's default."""
+    model = "subscription/claude/anthropic/claude-opus-5.5"
+    lm = build_language_model(
+        ModelConfig(name=model, token_source="subscription", cli_provider="claude", extra={"reasoning_effort": "low"}),
+        disable_cache=True,
+    )
+    helper = lm_helper(lm)
+    assert helper("judge", model=model, reasoning_effort="high") == "pong"
+    assert helper("judge") == "pong"
+    first, second = calls(tmp_path, "claude")
+    assert first["argv"][first["argv"].index("--effort") + 1] == "high"
+    assert second["argv"][second["argv"].index("--effort") + 1] == "low"
 
 
 @pytest.mark.usefixtures("local")

@@ -65,6 +65,7 @@
     "pauseReason": "הושהתה על ידי המשתמש"
   },
   "messages": {
+    "submit.preflight.scorer_model": "יש להגדיר את המודל באמצעות llm(model=...) בקוד המדד.",
     "accounts.email_delivery_unavailable": "שליחת אימייל אינה מוגדרת בשרת הזה.",
     "accounts.email_not_verified": "יש לאמת את כתובת האימייל לפני ההתחברות.",
     "accounts.email_send_failed": "לא ניתן לשלוח את אימייל האימות. נסו שוב.",
@@ -403,7 +404,9 @@
     "contract.run_error": "קוד הריצה נכשל בדוגמה {index}: {error}",
     "contract.metric_error": "פונקציית המדידה נכשלה בדוגמה {index}: {error}",
     "contract.shape.blackbox": "פונקציית הציון חייבת להחזיר (score, side_info), כש־side_info הוא מילון עם מחרוזת feedback.",
-    "contract.metric_model_missing": "פונקציית המדידה קוראת למודל, לכן בחרו מודל לפונקציית המדידה.",
+    "contract.metric_model_declaration": "קריאות llm() יכולות לציין לכל היותר מודל אחד כמחרוזת קבועה, למשל model=\"openai/gpt-4.1-mini\". ללא model= ישמש מודל הרפלקציה. יש לקרוא ל-llm() ישירות. יש להעביר הגדרות כארגומנטים בעלי שם, ולא באמצעות **kwargs.",
+    "contract.metric_model_empty": "הערך model= בקריאת llm() אינו יכול להיות ריק או להכיל רווחים בלבד.",
+    "contract.metric_model_conflict": "מודל המדד השמור אינו תואם ל-model= בקוד המדד. יש להסיר את המודל השמור או לשנות את הקוד כך שיתאים לו.",
     "contract.runner_outdated": "סביבת ההרצה של הבדיקה ישנה יותר מהקוד ועדיין מצפה לחוזה הקודם, ולכן צריך לבנות אותה מחדש. הקוד שלכם לא צריך שינוי.",
     "contract.files_unsupported": "אופטימייזרים של DSPy מריצים רק את run.py ו־metric.py. העבירו את הקוד מהקבצים הנוספים אל run.py, או בחרו אופטימייזר אחר.",
     "contract.file_invalid": "הקובץ {path} לא תקין: {error}",
