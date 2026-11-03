@@ -254,7 +254,20 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
 
 
 def metric_declaration_unsafe(scan: MetricLLMScan, reflection_name: str | None) -> bool:
-    """Determine whether helper calls can select more than one model."""
+    """Determine whether helper calls can select more than one model.
+
+    Args:
+        scan: The static scan of the metric's ``llm`` calls.
+        reflection_name: The model a call without ``model=`` uses: a stored
+            metric model, else the reflection model. ``None`` means no such
+            model is known, so no call may omit ``model=`` next to a named one.
+
+    Returns:
+        True when the calls can reach more than one model: a non-literal
+        declaration, two or more named models, or a call that omits
+        ``model=`` next to a call that names a model other than
+        ``reflection_name``.
+    """
     if scan.non_literal or len(scan.names) > 1:
         return True
     return bool(scan.omitted and scan.names and (reflection_name is None or scan.names != {reflection_name}))

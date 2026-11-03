@@ -41,7 +41,7 @@ import { readRewardSpec } from "@/shared/lib/reward";
 import type { ModelConfig } from "@/shared/types/api";
 import type { ContractCheckState } from "../../hooks/use-contract-check";
 import { economyEligible } from "../../lib/model-config";
-import { aggregateTokenSource, runModels } from "../../lib/run-floor";
+import { aggregateTokenSource, runModels, storedMetricModel } from "../../lib/run-floor";
 import { metricUsesModel } from "../../lib/scorer-dependencies";
 import type { WizardV2State } from "../../lib/wizard-v2";
 import { ModelRoleRow } from "../blackbox/ModelRoleRow";
@@ -222,7 +222,14 @@ export function RunOverview({
   // Only the local build offers subscription models; a run on nothing else
   // bills the user's CLI plans, not the balance.
   const onSubscription =
-    aggregateTokenSource(runModels(optimizer, metricUsesModel(state), workspace.metricCode)) === "subscription";
+    aggregateTokenSource(
+      runModels(
+        optimizer,
+        metricUsesModel(state),
+        workspace.metricCode,
+        storedMetricModel(workspace.metricModel, workspace.metricCode),
+      ),
+    ) === "subscription";
   const economyRoles = [
     [t("submit.v2.optimizer.models.task.label"), optimizer.taskModel],
     [t("submit.v2.optimizer.models.reflection.label"), optimizer.reflectionModel],

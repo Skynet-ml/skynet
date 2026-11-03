@@ -474,7 +474,9 @@ export function WizardV2Provider({
     if (inputs.cases.length === 0 && !inputs.stagedDatasetId) return null;
     if (!hasModel(optimizer.reflectionModel)) return null;
     if (!workspace.runCode.trim() || !workspace.metricCode.trim()) return null;
-    const metricModel = storedMetricModel(workspace.metricModel, workspace.metricCode);
+    const metricModel = metricUsesModel(state)
+      ? storedMetricModel(workspace.metricModel, workspace.metricCode)
+      : null;
     return {
       payload_kind: "unified_v1",
       name: meta.name.trim() || undefined,

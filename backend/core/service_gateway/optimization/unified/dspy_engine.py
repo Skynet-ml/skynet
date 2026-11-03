@@ -112,7 +112,33 @@ def lm_helper(lm: Any) -> Callable[..., str]:
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
     ) -> str:
-        """Complete one request through the metered LM and return its text."""
+        """Complete one request through the metered LM and return its text.
+
+        Args:
+            prompt: The text to run. With ``input`` it is the system message;
+                alone it is the user message.
+            input: The case's input, sent as the user message when given.
+            images: One image or a list of images for the user message.
+            messages: Chat messages to send as they are, in place of
+                ``prompt``, ``input`` and ``images``.
+            model: The model the code declares. It only checks the bound
+                model and never changes the model that is called and billed.
+            temperature: Sampling temperature for this call, or ``None`` for
+                the LM default.
+            max_tokens: Output token limit for this call, or ``None`` for the
+                LM default. It is sent as ``max_completion_tokens`` when the
+                LM uses that key.
+            reasoning_effort: Reasoning effort for this call, or ``None`` for
+                the LM default. It goes in the request body only for a gateway
+                route, a native reasoning setting, or a CLI subscription.
+
+        Returns:
+            The text of the first completion, or an empty string.
+
+        Raises:
+            ScorerError: ``model`` does not match the bound or declared
+                model, or there is neither a prompt nor messages.
+        """
         route = getattr(lm, "budget_route", None)
         bound = route.get("model") if isinstance(route, dict) else getattr(lm, "model", "")
         declared = getattr(lm, "declared_model", None)

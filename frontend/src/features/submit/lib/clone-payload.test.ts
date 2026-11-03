@@ -43,7 +43,7 @@ test("a unified run clones every slice it stored", () => {
         reflection_model: { name: "gpt-x" },
         metric_model: { name: "judge-y" },
       },
-      workspace: { run_code: "def run(a, i): ...", metric_code: "def score(i, o): ..." },
+      workspace: { run_code: "def run(a, i): ...", metric_code: "def score(i, o): return llm('x')" },
     },
     "Job name",
   );
@@ -100,13 +100,22 @@ test("a distinct legacy metric model is pinned when the code names no model", ()
   assert.deepEqual(slices.workspace.metricModel, { name: "old" });
 });
 
+test("a legacy metric model is dropped when cloning a metric that never calls llm", () => {
+  const slices = cloneToSlices("blackbox", {
+    payload_kind: "unified_v1",
+    models: { reflection_model: { name: "r" }, metric_model: { name: "old" } },
+    workspace: { metric_code: "def score(example, output):\n    return 1.0\n" },
+  });
+  assert.equal(slices.workspace.metricModel, null);
+});
+
 test("a legacy black-box run maps objective, seed, cases and scorer", () => {
   const slices = cloneToSlices("blackbox", {
     objective: "Write emails",
     background: "B2B",
     seed_candidate: { system: "Be brief", user: "{brief}" },
     cases: [{ brief: "launch", expected: "Hi" }, { brief: "renewal" }],
-    scorer: { kind: "python", metric_code: "def score(c, o): ...", model: { name: "judge" } },
+    scorer: { kind: "python", metric_code: "def score(c, o): return llm('x')", model: { name: "judge" } },
     reflection_model_config: { name: "refl" },
   });
   assert.equal(slices.task.objective, "Write emails");
@@ -114,7 +123,7 @@ test("a legacy black-box run maps objective, seed, cases and scorer", () => {
   assert.equal(slices.inputs.mode, "pairs");
   assert.deepEqual(slices.inputs.cases?.[0], { input: { brief: "launch" }, expected: "Hi" });
   assert.deepEqual(slices.inputs.cases?.[1], { input: { brief: "renewal" }, expected: null });
-  assert.equal(slices.workspace.metricCode, "def score(c, o): ...");
+  assert.equal(slices.workspace.metricCode, "def score(c, o): return llm('x')");
   assert.deepEqual(slices.workspace.metricModel, { name: "judge" });
   assert.equal(slices.optimizer.reflectionModel?.name, "refl");
 });

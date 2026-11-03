@@ -56,11 +56,13 @@ for (const { code, expected, python_syntax_error } of parityCases) {
   });
 }
 
-test("a stored metric model survives only when the code does not name another model", () => {
+test("a stored metric model survives only when the code calls llm and names no other model", () => {
   const stored = { name: "old/judge" };
   assert.equal(storedMetricModel(null, "llm(model='old/judge')"), null);
   assert.equal(storedMetricModel(stored, "llm('x')"), stored);
-  assert.equal(storedMetricModel(stored, "def score(i, o): return 1"), stored);
+  assert.equal(storedMetricModel(stored, "def score(i, o): return 1"), null);
+  // Code the scanner cannot read may still call llm, so the stored model stays.
+  assert.equal(storedMetricModel(stored, "def broken("), stored);
   assert.equal(storedMetricModel(stored, "llm('x', model='old/judge')"), stored);
   assert.equal(storedMetricModel(stored, "llm('x', model='new/judge')"), null);
   assert.equal(storedMetricModel(stored, "llm(model='old/judge'); llm(model='new/judge')"), null);
@@ -339,7 +341,7 @@ test("the floor prices a stored metric model", () => {
   };
   const stored = { name: "anthropic/old", token_source: "byok" as const };
   assert.deepEqual(runModels(optimizer, true, "llm()", stored).at(-1), stored);
-  assert.deepEqual(runModels(optimizer, false, "pass", stored).at(-1), stored);
+  assert.deepEqual(runModels(optimizer, false, "pass", stored).at(-1), optimizer.reflectionModel);
 });
 
 test("a declared extra reflection model keeps its source for the floor", () => {
