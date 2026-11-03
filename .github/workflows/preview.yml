@@ -138,22 +138,14 @@ jobs:
       - uses: docker/setup-buildx-action@v3
         if: steps.scope.outputs.skip != 'true' && steps.claim.outputs.full != 'true'
 
-      # Gives the build step ACTIONS_RUNTIME_TOKEN and ACTIONS_RESULTS_URL for
-      # the gha layer cache, which a plain run step does not get.
-      - uses: crazy-max/ghaction-github-runtime@v4
-        if: steps.scope.outputs.skip != 'true' && steps.claim.outputs.full != 'true'
-
-      # A PR with the same backend/ tree as the staging backend image runs
-      # that image, so the backend does not build.
-      - name: Check if the staging backend image fits
+      - name: Find a reusable backend image
         id: backend
         if: steps.scope.outputs.skip != 'true' && steps.claim.outputs.full != 'true'
         run: |
-          image=$(infra/terraform/scripts/preview.sh staging-backend "$PR" "$SHA")
+          image=$(infra/terraform/scripts/preview.sh backend-image "$PR" "$SHA")
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
-      # The migration runs in this step too, as soon as the backend image is
-      # ready, while the frontend still builds.
+      # The backend and worker deploy after migration while the frontend builds.
       - name: Build and push the preview images, and migrate
         if: steps.scope.outputs.skip != 'true' && steps.claim.outputs.full != 'true'
         env:
@@ -162,15 +154,15 @@ jobs:
           NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE: ${{ vars.NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE }}
         run: infra/terraform/scripts/preview.sh build "$PR" "$SHA"
 
-      # The preview role allows one-hour sessions; a cold build can use most
-      # of that hour.
+      # A cold build can use most of the one-hour session, so refresh before
+      # the frontend update and final service wait.
       - uses: aws-actions/configure-aws-credentials@v4
         if: steps.scope.outputs.skip != 'true' && steps.claim.outputs.full != 'true'
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-east-2
 
-      - name: Deploy the preview
+      - name: Deploy the frontend and wait for services
         if: steps.scope.outputs.skip != 'true' && steps.claim.outputs.full != 'true'
         env:
           BACKEND_IMAGE: ${{ steps.backend.outputs.image }}

@@ -5,16 +5,38 @@ on:
     branches: [main, staging]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  backend:
-    name: backend · ruff + core tests (${{ matrix.shard }}/4)
+  backend-core:
+    name: backend · core tests (${{ matrix.shard }}/6)
     runs-on: ubuntu-latest
-    # The core suite takes over four minutes on one runner; four shards run
-    # side by side and the one-off gates below run on shard 0 only.
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5]
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install dependencies (runtime + dev)
+        run: uv sync --extra dev --frozen
+      - name: Core test suite
+        env:
+          SKYNET_TEST_SHARD: ${{ matrix.shard }}/6
+        run: uv run pytest core/ -q -n auto
+
+  backend-gates:
+    name: backend · ruff + gates
+    runs-on: ubuntu-latest
     services:
       postgres:
         image: postgres:16-alpine
@@ -42,31 +64,8 @@ jobs:
       - name: Install dependencies (runtime + dev)
         run: uv sync --extra dev --frozen
       - name: Ruff lint
-        if: matrix.shard == 0
         run: uv run ruff check .
-      # The credential-free `core/` tier runs without Postgres, an LLM, or a live
-      # server; the `tests/` integration tier (DB + paid LLM) is a separate,
-      # nightly concern and is intentionally not gated here.
-      - name: Core test suite
-        env:
-          SKYNET_TEST_SHARD: ${{ matrix.shard }}/4
-        run: uv run pytest core/ -q -n auto
-      - name: PostgreSQL budget concurrency and migration gates
-        if: matrix.shard == 0
-        env:
-          SKYNET_BUDGET_TEST_DB_URL: postgresql+psycopg2://budget_test:budget_test@127.0.0.1:5432/budget_test
-        run: uv run pytest core/billing/tests/test_budgets_postgres.py core/api/tests/test_run_sync_postgres.py -q
-      - name: Load-test release-gate unit tests
-        if: matrix.shard == 0
-        run: uv run pytest tests/unit/test_load_test_slo.py -q
-      # requirements.txt is the pip install path's copy of uv.lock. When only
-      # one of the two moves, the pip-path image silently ships a different
-      # dependency set than CI ever tested — that drift is how starlette landed
-      # on a version the pinned instrumentator rejects, and how `stripe` went
-      # missing from the export entirely. Compare pins only, so the hand-written
-      # header block above the export is free to differ.
-      - name: requirements.txt in sync with uv.lock
-        if: matrix.shard == 0
+      - name: Requirements sync
         run: |
           uv export --no-emit-project --no-hashes --no-header -o /tmp/req-expected.txt >/dev/null
           if ! diff -u <(grep -vE '^\s*#|^\s*$' requirements.txt) \
@@ -74,6 +73,62 @@ jobs:
             echo "::error::requirements.txt is out of sync with uv.lock. Regenerate: uv export --no-emit-project --no-hashes --no-header -o requirements.txt (then restore the header block)"
             exit 1
           fi
+      - name: PostgreSQL budget concurrency and migration gates
+        env:
+          SKYNET_BUDGET_TEST_DB_URL: postgresql+psycopg2://budget_test:budget_test@127.0.0.1:5432/budget_test
+        run: uv run pytest core/billing/tests/test_budgets_postgres.py core/api/tests/test_run_sync_postgres.py -q
+      - name: Load-test SLO gate
+        run: uv run pytest tests/unit/test_load_test_slo.py -q
+      - name: Six-shard collection union
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          import sys
+
+          def collect(shard=None):
+              env = os.environ.copy()
+              env.pop("APP_TEST_SHARD", None)
+              env.pop("SKYNET_TEST_SHARD", None)
+              if shard is not None:
+                  env["SKYNET_TEST_SHARD"] = shard
+              result = subprocess.run(
+                  [sys.executable, "-m", "pytest", "core/", "--collect-only", "-q"],
+                  check=True,
+                  capture_output=True,
+                  text=True,
+                  env=env,
+              )
+              return [line for line in result.stdout.splitlines() if line.startswith("core/") and "::" in line]
+
+          full = collect()
+          if not full:
+              raise SystemExit("full collection produced no test nodeids")
+          shards = [collect(f"{index}/6") for index in range(6)]
+          union = [nodeid for shard in shards for nodeid in shard]
+          if len(union) != len(set(union)):
+              raise SystemExit("six-shard collection overlaps")
+          if set(union) != set(full):
+              raise SystemExit(f"six-shard collection differs: full={len(full)} union={len(union)}")
+          print(f"six shards cover {len(full)} tests with no overlap")
+          PY
+
+  backend:
+    name: backend · ruff + core tests (${{ matrix.shard }}/4)
+    needs: [backend-core, backend-gates]
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - name: Require core shards and gates
+        env:
+          CORE_RESULT: ${{ needs.backend-core.result }}
+          GATES_RESULT: ${{ needs.backend-gates.result }}
+        run: |
+          [[ "$CORE_RESULT" == success && "$GATES_RESULT" == success ]]
 
   # Everything above installs through uv. The Dockerfile's other path
   # (PKG_MANAGER=pip) installs the compiled requirements.txt with --no-deps,
@@ -97,7 +152,7 @@ jobs:
           load: true
           tags: skynet-backend:pip
           cache-from: type=gha,scope=pip
-          cache-to: type=gha,mode=max,scope=pip
+          cache-to: type=gha,mode=min,scope=pip
       # `pip check` is the sharp end: --no-deps means pip installed the file
       # verbatim without ever validating it, so this is the first thing in the
       # pipeline that reads the wheels' own metadata. It catches both failure
@@ -144,8 +199,8 @@ jobs:
           assert shutil.which('claude') is None
           "
 
-  frontend:
-    name: frontend · typecheck + lint + unit
+  frontend-typecheck:
+    name: frontend · typecheck
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -162,7 +217,53 @@ jobs:
         run: npm ci
       - name: Typecheck
         run: npm run typecheck
+
+  frontend-lint:
+    name: frontend · lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
       - name: Lint
         run: npm run lint
+
+  frontend-unit:
+    name: frontend · unit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
       - name: Unit tests
         run: npm run test:unit
+
+  frontend:
+    name: frontend · typecheck + lint + unit
+    needs: [frontend-typecheck, frontend-lint, frontend-unit]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all frontend checks
+        env:
+          TYPECHECK_RESULT: ${{ needs.frontend-typecheck.result }}
+          LINT_RESULT: ${{ needs.frontend-lint.result }}
+          UNIT_RESULT: ${{ needs.frontend-unit.result }}
+        run: |
+          [[ "$TYPECHECK_RESULT" == success && "$LINT_RESULT" == success && "$UNIT_RESULT" == success ]]

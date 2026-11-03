@@ -5,7 +5,7 @@
 #   2. runs `python manage.py migrate` as a one-off task and stops on failure,
 #   3. updates the services and waits until they are stable.
 #
-#   infra/terraform/scripts/deploy.sh <staging|production> <git-sha> [--migrate-only]
+#   infra/terraform/scripts/deploy.sh <staging|production> <git-sha> [--migrate-only|--skip-migrate]
 #
 # Build and push the images first (scripts/build-push.sh).
 # Rollback: run this script again with the previous SHA. Migrations do not
@@ -28,6 +28,8 @@ sha="${2:-}"
 mode="${3:-}"
 check_env "$env"
 [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]] || die "second argument must be a git SHA"
+[[ -z "$mode" || "$mode" == --migrate-only || "$mode" == --skip-migrate ]] ||
+  die "mode must be --migrate-only or --skip-migrate"
 
 cfg="$(deploy_config "$env")"
 cluster="$(jq -r .cluster <<<"$cfg")"
@@ -41,7 +43,11 @@ image_for() {
   esac
 }
 
-for repo_tag in "backend:$sha" "litellm:$sha" "frontend:$sha$sfx"; do
+repo_tags=("backend:$sha")
+if [[ "$mode" != --migrate-only ]]; then
+  repo_tags+=("litellm:$sha" "frontend:$sha$sfx")
+fi
+for repo_tag in "${repo_tags[@]}"; do
   aws ecr describe-images --repository-name "skynet/${repo_tag%%:*}" --image-ids "imageTag=${repo_tag#*:}" >/dev/null 2>&1 ||
     die "image skynet/$repo_tag is not in ECR. Run scripts/build-push.sh first."
 done
@@ -88,11 +94,13 @@ register() {
   echo "$td"
 }
 
-migrate_td="$(register migrate)"
-echo "running migration"
-task="$(run_task "$env" migrate "" "$migrate_td")"
-wait_task_ok "$env" "$task"
-echo "migration ok"
+if [[ "$mode" != "--skip-migrate" ]]; then
+  migrate_td="$(register migrate)"
+  echo "running migration"
+  task="$(run_task "$env" migrate "" "$migrate_td")"
+  wait_task_ok "$env" "$task"
+  echo "migration ok"
+fi
 
 [[ "$mode" == "--migrate-only" ]] && exit 0
 

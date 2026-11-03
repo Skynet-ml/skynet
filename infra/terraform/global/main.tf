@@ -132,6 +132,39 @@ resource "aws_ecr_lifecycle_policy" "this" {
   })
 }
 
+resource "aws_ecr_repository" "buildcache" {
+  name                 = "skynet/buildcache"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "buildcache" {
+  repository = aws_ecr_repository.buildcache.name
+
+  policy = jsonencode({
+    rules = [
+      {
+        rulePriority = 1
+        description  = "Delete untagged cache images after 3 days"
+        selection = {
+          tagStatus   = "untagged"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 3
+        }
+        action = { type = "expire" }
+      },
+    ]
+  })
+}
+
 # PR preview images (SKY-164) live in their own repositories. The preview
 # role builds from any branch, so it must not push a tag that staging or
 # production could later deploy from skynet/backend or skynet/frontend.
@@ -183,6 +216,18 @@ resource "aws_ecr_lifecycle_policy" "preview" {
         }
         action = { type = "expire" }
       },
+      {
+        rulePriority = 3
+        description  = "Delete image-key tagged preview images after 14 days"
+        selection = {
+          tagStatus      = "tagged"
+          tagPatternList = ["ctx-*"]
+          countType      = "sinceImagePushed"
+          countUnit      = "days"
+          countNumber    = 14
+        }
+        action = { type = "expire" }
+      },
     ]
   })
 }
@@ -208,9 +253,10 @@ locals {
   # Built from the names, not from the resources, so the deploy policies are
   # known at plan time and scripts/check-deploy-isolation.sh can test them
   # before the first apply.
-  ecr_repository_arns = [
-    for r in var.image_repositories : "arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/${r}"
-  ]
+  ecr_repository_arns = concat(
+    [for r in var.image_repositories : "arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/${r}"],
+    ["arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/buildcache"],
+  )
   environments = toset(["staging", "production"])
 }
 
@@ -478,6 +524,28 @@ data "aws_iam_policy_document" "github_preview" {
       "ecr:UploadLayerPart",
     ]
     resources = [for r in ["backend", "frontend"] : "arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/preview-${r}"]
+  }
+
+  statement {
+    sid = "EcrBuildcache"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:BatchGetImage",
+      "ecr:CompleteLayerUpload",
+      "ecr:DescribeImages",
+      "ecr:DescribeRepositories",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:InitiateLayerUpload",
+      "ecr:PutImage",
+      "ecr:UploadLayerPart",
+    ]
+    resources = ["arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/buildcache"]
+  }
+
+  statement {
+    sid       = "EcrStagingBackendRead"
+    actions   = ["ecr:DescribeImages", "ecr:DescribeRepositories"]
+    resources = ["arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/backend"]
   }
 
   statement {
