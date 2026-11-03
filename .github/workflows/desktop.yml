@@ -64,8 +64,8 @@ jobs:
         with:
           name: skynet-desktop-mac
           path: |
-            desktop/dist/Skynet-*-arm64.dmg
-            desktop/dist/Skynet-*-x64.dmg
+            desktop/dist/Skynet-arm64.dmg
+            desktop/dist/Skynet-x64.dmg
           if-no-files-found: error
           retention-days: 14
 

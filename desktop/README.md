@@ -58,8 +58,8 @@ npm run build:mac
 
 `build:mac` compiles the shell, builds the frontend (`next build`, standalone output) when
 `frontend/.next/standalone` is missing, stages the tracked backend files, downloads the pinned
-`uv` release and checks its SHA-256, then writes `dist/Skynet-<version>-arm64.dmg` and
-`dist/mac-arm64/Skynet.app`, plus `dist/Skynet-<version>-x64.dmg` and `dist/mac/Skynet.app`. Set `SKYNET_DESKTOP_REBUILD_FRONTEND=1` to force a fresh frontend build.
+`uv` release and checks its SHA-256, then writes `dist/Skynet-arm64.dmg` and
+`dist/mac-arm64/Skynet.app`, plus `dist/Skynet-x64.dmg` and `dist/mac/Skynet.app`. Set `SKYNET_DESKTOP_REBUILD_FRONTEND=1` to force a fresh frontend build.
 
 Check the signature:
 
