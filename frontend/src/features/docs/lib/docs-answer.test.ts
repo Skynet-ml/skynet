@@ -12,7 +12,9 @@ import {
   askBody,
   chunkText,
   isDocsHref,
+  isQuestionTooLong,
   keepDocsLinks,
+  MAX_QUESTION_CHARS,
   parseStoredHistory,
   toTranscript,
   trimHistory,
@@ -74,18 +76,25 @@ test("stored history ignores malformed data", () => {
   );
 });
 
-test("askBody cuts the question and history to the backend limits", () => {
-  const long = "x".repeat(5000);
+test("askBody never cuts the question, and keeps the newest history", () => {
+  const long = "x".repeat(MAX_QUESTION_CHARS);
   const earlier = Array.from({ length: 10 }, (_, i) => ({
     role: (i % 2 ? "assistant" : "user") as "user" | "assistant",
-    content: i === 9 ? long : `m${i}`,
+    content: i === 8 ? long : `m${i}`,
   }));
   const body = askBody(long, earlier, "he");
-  assert.equal(body.question.length, 1000);
+  assert.equal(body.question, long);
   assert.equal(body.history.length, 6);
   assert.equal(body.history[0].content, "m4");
-  assert.equal(body.history[5].content.length, 4000);
+  assert.equal(body.history[4].content, long);
   assert.equal(body.locale, "he");
+});
+
+test("isQuestionTooLong allows the limit and refuses one character more", () => {
+  assert.equal(MAX_QUESTION_CHARS, 8000);
+  assert.equal(isQuestionTooLong("x".repeat(8000)), false);
+  assert.equal(isQuestionTooLong(` ${"x".repeat(8000)} `), false);
+  assert.equal(isQuestionTooLong("x".repeat(8001)), true);
 });
 
 /** Render an answer the way the docs panel does: filtered text, GFM, and only docs links kept. */

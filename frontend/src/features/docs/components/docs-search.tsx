@@ -121,6 +121,7 @@ export function DocsSearch({
     | "agentPlaceholder"
     | "agentRateLimited"
     | "agentError"
+    | "agentTooLong"
     | "agentClear"
     | "agentClose"
     | "agentSend"

@@ -17,12 +17,14 @@ import { fetchWithAuthRetry } from "@/shared/lib/api";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
 import { readServerSentEvents } from "@/shared/lib/sse";
 import { cn } from "@/shared/lib/utils";
-import type { DocsChrome } from "../lib/chrome";
+import { fillChrome, type DocsChrome } from "../lib/chrome";
 import {
   MAX_KEPT_MESSAGES,
+  MAX_QUESTION_CHARS,
   askBody,
   chunkText,
   isDocsHref,
+  isQuestionTooLong,
   parseStoredHistory,
   toTranscript,
   trimHistory,
@@ -31,7 +33,7 @@ import {
 
 const STORAGE_KEY = "docs-agent-history";
 
-type Notice = "rate" | "error" | null;
+type Notice = "rate" | "tooLong" | "error" | null;
 
 /** A question handed over from the search box; the nonce makes a repeat count. */
 export interface DocsAgentRequest {
@@ -86,6 +88,7 @@ export function DocsAgentPanel({
     | "agentPlaceholder"
     | "agentRateLimited"
     | "agentError"
+    | "agentTooLong"
     | "agentClear"
     | "agentClose"
     | "agentSend"
@@ -121,6 +124,11 @@ export function DocsAgentPanel({
     async (question: string, earlier?: readonly DocsAgentMessage[]) => {
       const text = question.trim();
       if (!text) return;
+      // Never send a cut question: keep the transcript as it is and tell the reader.
+      if (isQuestionTooLong(text)) {
+        setNotice("tooLong");
+        return;
+      }
       const before = earlier ?? messagesRef.current;
       abortRef.current?.abort();
       const controller = new AbortController();
@@ -140,6 +148,7 @@ export function DocsAgentPanel({
           signal: controller.signal,
         });
         if (res.status === 429) failed = "rate";
+        else if (res.status === 422) failed = "tooLong";
         else if (!res.ok || !res.body) failed = "error";
         else {
           await readServerSentEvents(res.body, (event) => {
@@ -193,12 +202,21 @@ export function DocsAgentPanel({
 
   const submit = () => {
     if (streaming || !draft.trim()) return;
+    // Keep the draft so the reader can shorten it.
+    if (isQuestionTooLong(draft)) {
+      setNotice("tooLong");
+      return;
+    }
     void ask(draft);
     setDraft("");
   };
 
   const editAndResend = (index: number, content: string) => {
     if (streaming) return false;
+    if (isQuestionTooLong(content)) {
+      setNotice("tooLong");
+      return false;
+    }
     void ask(content, messagesRef.current.slice(0, index));
   };
 
@@ -298,7 +316,13 @@ export function DocsAgentPanel({
                   trailing={() =>
                     notice && (
                       <ChatErrorBanner
-                        message={notice === "rate" ? labels.agentRateLimited : labels.agentError}
+                        message={
+                          notice === "rate"
+                            ? labels.agentRateLimited
+                            : notice === "tooLong"
+                              ? fillChrome(labels.agentTooLong, { limit: MAX_QUESTION_CHARS.toLocaleString(locale) })
+                              : labels.agentError
+                        }
                       />
                     )
                   }
