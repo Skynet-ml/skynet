@@ -11,6 +11,7 @@ import { handleComposerEscape } from "./composer-keys.ts";
 import { midTurnOf, SteerQueue } from "./steer-queue.ts";
 import { visibleSuggestion } from "./next-prompt.ts";
 import { dispatchGeneralistEvent } from "../../../features/agent-panel/lib/stream-events.ts";
+import { editMode, retryMode } from "../../../features/agent-panel/lib/edit-turn.ts";
 import { closeThinking } from "../../lib/thinking-segments.ts";
 
 const docs = "src/features/docs/components/docs-agent-panel.tsx";
@@ -344,6 +345,7 @@ for (const file of ["src/features/agent-panel/hooks/use-generalist-agent.ts", "s
     const messages = [{ role: "user", content: "previous" }];
     const callback = expression(file, action, {
       activeKeyRef: { current: "chat" }, sessionsRef: { current: new Map([["chat", { messages }]]) },
+      runtimesRef: { current: new Map() }, editMode, retryMode,
       steerQueueFor: () => queue, steerStore: queue, messages, setMessages: () => {},
       autoFixAttemptsRef: { current: 0 }, requestRun: () => {}, runAgent: () => {},
     });
