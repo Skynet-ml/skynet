@@ -71,8 +71,18 @@ void describe("localIdentity", () => {
 
   void it("falls back to the account label with no name or email", () => {
     setServerMessages(buildActiveCatalog("en"), "en");
-    const identity = localIdentity({ linked: true, name: null, email: null, offline: false });
-    assert.equal(identity.name, "Skynet account");
+    assert.deepEqual(localIdentity({ linked: true, name: null, email: null, offline: false }), {
+      name: "Skynet account",
+      detail: null,
+    });
+  });
+
+  void it("shows only the email when a linked account has no name", () => {
+    setServerMessages(buildActiveCatalog("en"), "en");
+    assert.deepEqual(
+      localIdentity({ linked: true, name: null, email: "ada@example.com", offline: false }),
+      { name: "ada@example.com", detail: null },
+    );
   });
 
   void it("marks a linked account offline when hosted does not answer", () => {
