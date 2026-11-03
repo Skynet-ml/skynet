@@ -51,9 +51,6 @@ export interface DocsChrome {
   themeLight: string;
   themeDark: string;
   themeSystem: string;
-  note: string;
-  tip: string;
-  warning: string;
 }
 
 export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
@@ -99,9 +96,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "Light",
     themeDark: "Dark",
     themeSystem: "System",
-    note: "Note",
-    tip: "Tip",
-    warning: "Warning",
   },
   he: {
     docs: "תיעוד",
@@ -145,9 +139,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "בהירה",
     themeDark: "כהה",
     themeSystem: "לפי המערכת",
-    note: "הערה",
-    tip: "טיפ",
-    warning: "אזהרה",
   },
   ar: {
     docs: "التوثيق",
@@ -191,9 +182,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "فاتح",
     themeDark: "داكن",
     themeSystem: "حسب النظام",
-    note: "ملاحظة",
-    tip: "نصيحة",
-    warning: "تحذير",
   },
   de: {
     docs: "Dokumentation",
@@ -237,9 +225,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "Hell",
     themeDark: "Dunkel",
     themeSystem: "System",
-    note: "Hinweis",
-    tip: "Tipp",
-    warning: "Warnung",
   },
   es: {
     docs: "Documentación",
@@ -283,9 +268,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "Claro",
     themeDark: "Oscuro",
     themeSystem: "Sistema",
-    note: "Nota",
-    tip: "Consejo",
-    warning: "Advertencia",
   },
   fa: {
     docs: "مستندات",
@@ -329,9 +311,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "روشن",
     themeDark: "تیره",
     themeSystem: "مطابق سیستم",
-    note: "نکته",
-    tip: "راهنمایی",
-    warning: "هشدار",
   },
   fr: {
     docs: "Documentation",
@@ -375,9 +354,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "Clair",
     themeDark: "Sombre",
     themeSystem: "Système",
-    note: "Remarque",
-    tip: "Astuce",
-    warning: "Avertissement",
   },
   hi: {
     docs: "दस्तावेज़",
@@ -421,9 +397,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "लाइट",
     themeDark: "डार्क",
     themeSystem: "सिस्टम",
-    note: "नोट",
-    tip: "सुझाव",
-    warning: "चेतावनी",
   },
   it: {
     docs: "Documentazione",
@@ -467,9 +440,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "Chiaro",
     themeDark: "Scuro",
     themeSystem: "Sistema",
-    note: "Nota",
-    tip: "Suggerimento",
-    warning: "Avviso",
   },
   ja: {
     docs: "ドキュメント",
@@ -513,9 +483,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "ライト",
     themeDark: "ダーク",
     themeSystem: "システム",
-    note: "注記",
-    tip: "ヒント",
-    warning: "警告",
   },
   ko: {
     docs: "문서",
@@ -559,9 +526,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "라이트",
     themeDark: "다크",
     themeSystem: "시스템",
-    note: "참고",
-    tip: "팁",
-    warning: "경고",
   },
   pt: {
     docs: "Documentação",
@@ -605,9 +569,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "Claro",
     themeDark: "Escuro",
     themeSystem: "Sistema",
-    note: "Observação",
-    tip: "Dica",
-    warning: "Aviso",
   },
   ru: {
     docs: "Документация",
@@ -651,9 +612,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "Светлая",
     themeDark: "Тёмная",
     themeSystem: "Как в системе",
-    note: "Примечание",
-    tip: "Совет",
-    warning: "Предупреждение",
   },
   tr: {
     docs: "Belgeler",
@@ -697,9 +655,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "Açık",
     themeDark: "Koyu",
     themeSystem: "Sistem",
-    note: "Not",
-    tip: "İpucu",
-    warning: "Uyarı",
   },
   uk: {
     docs: "Документація",
@@ -743,9 +698,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "Світла",
     themeDark: "Темна",
     themeSystem: "Як у системі",
-    note: "Примітка",
-    tip: "Порада",
-    warning: "Попередження",
   },
   yue: {
     docs: "文件",
@@ -789,9 +741,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "淺色",
     themeDark: "深色",
     themeSystem: "跟系統",
-    note: "注意",
-    tip: "提示",
-    warning: "警告",
   },
   "zh-Hans": {
     docs: "文档",
@@ -835,9 +784,6 @@ export const DOCS_CHROME: Record<DocsLocale, DocsChrome> = {
     themeLight: "浅色",
     themeDark: "深色",
     themeSystem: "跟随系统",
-    note: "注意",
-    tip: "提示",
-    warning: "警告",
   },
 };
 

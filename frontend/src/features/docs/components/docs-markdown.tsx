@@ -2,13 +2,12 @@ import * as React from "react";
 import Link from "next/link";
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Info, Lightbulb, Warning } from "@/shared/ui/icons";
 import { CopyButton } from "@/shared/ui/copy-button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { DocsTabs } from "./docs-tabs";
 import type { DocsChrome } from "../lib/chrome";
 import { highlightDocsCode } from "../lib/highlight";
-import { remarkDocs, type CalloutKind } from "../lib/markdown";
+import { remarkDocs } from "../lib/markdown";
 import type { DocsLocale } from "../lib/nav";
 import {
   MCP_CLIENTS,
@@ -83,23 +82,6 @@ async function CodeBlock({
   );
 }
 
-const CALLOUT_STYLE: Record<CalloutKind, { Icon: typeof Info; className: string }> = {
-  note: {
-    Icon: Info,
-    className: "border-sky-500/40 bg-sky-500/[0.06] [&_svg]:text-sky-600 dark:[&_svg]:text-sky-400",
-  },
-  tip: {
-    Icon: Lightbulb,
-    className:
-      "border-emerald-500/40 bg-emerald-500/[0.06] [&_svg]:text-emerald-600 dark:[&_svg]:text-emerald-400",
-  },
-  warning: {
-    Icon: Warning,
-    className:
-      "border-amber-500/50 bg-amber-500/[0.08] [&_svg]:text-amber-600 dark:[&_svg]:text-amber-400",
-  },
-};
-
 /** Render one docs page body (or one MCP client panel) from Markdown. */
 export function DocsMarkdown({
   source,
@@ -141,26 +123,11 @@ export function DocsMarkdown({
       const code = textOf(child.props.children).replace(/\n$/, "");
       return <CodeBlock language={language} code={code} copyLabel={chrome.copyCode} />;
     },
-    blockquote: ({ children, node, ...rest }) => {
-      const kind = (rest as Record<string, unknown>)["data-callout"] as CalloutKind | undefined;
-      void node;
-      if (!kind) {
-        return (
-          <blockquote className="my-4 border-s-2 border-border ps-4 text-muted-foreground">
-            {children}
-          </blockquote>
-        );
-      }
-      const { Icon, className } = CALLOUT_STYLE[kind];
-      return (
-        <aside
-          className={`my-5 flex gap-3 rounded-lg border px-4 py-3 text-[0.9375rem] ${className}`}
-        >
-          <Icon className="mt-1 size-4 shrink-0" aria-label={chrome[kind]} />
-          <div className="min-w-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">{children}</div>
-        </aside>
-      );
-    },
+    blockquote: ({ children }) => (
+      <blockquote className="my-4 border-s-2 border-border ps-4 text-muted-foreground">
+        {children}
+      </blockquote>
+    ),
     div: ({ children, node, ...rest }) => {
       void node;
       const props = rest as Record<string, unknown>;
