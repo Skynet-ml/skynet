@@ -10,6 +10,7 @@ import {
 } from "@/shared/lib/locale";
 import { buildActiveCatalog } from "@/shared/lib/messages.server";
 import { formatTemplate } from "@/shared/lib/i18n";
+import { APP_NAME } from "@/shared/lib/brand";
 
 export async function generateMetadata(): Promise<Metadata> {
   const jar = await cookies();
@@ -18,10 +19,21 @@ export async function generateMetadata(): Promise<Metadata> {
     ? cookieLocale
     : (localeFromAcceptLanguage((await headers()).get("accept-language")) ?? DEFAULT_LOCALE);
   const catalog = buildActiveCatalog(locale);
+  const title = formatTemplate(catalog["downloads.title"] ?? "", undefined, locale);
+  const description = formatTemplate(catalog["downloads.intro"] ?? "", undefined, locale);
   return {
-    title: formatTemplate(catalog["downloads.title"] ?? "", undefined, locale),
-    description: formatTemplate(catalog["downloads.intro"] ?? "", undefined, locale),
+    title,
+    description,
     alternates: { canonical: "/download" },
+    openGraph: {
+      type: "website",
+      siteName: APP_NAME,
+      locale: locale.replace("-", "_"),
+      title,
+      description,
+      url: "/download",
+    },
+    twitter: { card: "summary_large_image", title, description },
   };
 }
 

@@ -63,3 +63,21 @@ void test("primary navigation and install links keep 44px touch targets below de
     if (!target.includes('class="sr-only')) assert.match(target, /min-h-\[44px\]/);
   }
 });
+
+void test("hero and platform actions wrap long labels within their available width", () => {
+  const actions = [...render().matchAll(/<a\b[^>]*>/g)]
+    .map(([tag]) => tag)
+    .filter(
+      (tag) =>
+        tag.includes('data-slot="button"') &&
+        /href="(?:#platforms|\/explore|\/docs\/guides\/mac-app)"/.test(tag),
+    );
+  assert.equal(actions.length, 3);
+  for (const action of actions) {
+    assert.match(action, /\bh-auto\b/);
+    assert.match(action, /\bwhitespace-normal\b/);
+    assert.match(action, /\btext-center\b/);
+    assert.match(action, /\bpy-2\b/);
+    assert.doesNotMatch(action, /\bwhitespace-nowrap\b/);
+  }
+});

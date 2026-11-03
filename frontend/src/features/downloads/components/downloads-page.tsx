@@ -94,7 +94,11 @@ export function DownloadsPage() {
               {msg("downloads.intro")}
             </p>
             <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-              <Button asChild size="lg" className="min-w-[min(100%,18rem)] max-lg:min-h-[44px]">
+              <Button
+                asChild
+                size="lg"
+                className="h-auto min-h-10 min-w-[min(100%,18rem)] max-w-full whitespace-normal py-2 text-center max-lg:min-h-[44px]"
+              >
                 <a
                   href={
                     primary
@@ -112,7 +116,12 @@ export function DownloadsPage() {
                       : msg("downloads.all_platforms")}
                 </a>
               </Button>
-              <Button variant="outline" size="lg" asChild className="max-lg:min-h-[44px]">
+              <Button
+                variant="outline"
+                size="lg"
+                asChild
+                className="h-auto min-h-10 max-w-full whitespace-normal py-2 text-center max-lg:min-h-[44px]"
+              >
                 <Link href="/explore">
                   <Globe aria-hidden="true" />
                   {msg("downloads.browser")}
@@ -179,7 +188,10 @@ export function DownloadsPage() {
                     </div>
                   ) : (
                     <div>
-                      <Button asChild className="w-full max-lg:min-h-[44px]">
+                      <Button
+                        asChild
+                        className="h-auto min-h-9 w-full whitespace-normal text-center max-lg:min-h-[44px]"
+                      >
                         <a href={platformHref(item.primary.href)}>
                           {item.status === "download" ? (
                             <ArrowDown aria-hidden="true" />
