@@ -102,7 +102,7 @@ A configuração **Privacidade dos dados dos modelos** controla o que os provedo
 | **Sem retenção**    | Apenas endpoints com um acordo de retenção zero de dados. Alguns modelos podem ficar indisponíveis. |
 
 > [!NOTE]
-> Otimizações com a sua própria chave seguem as configurações de privacidade da sua conta OpenRouter.
+> Chamadas BYOK pelo OpenRouter seguem as configurações de privacidade da sua conta OpenRouter. Chamadas BYOK diretas seguem a política de dados do provedor.
 
 ## Visibilidade das execuções
 

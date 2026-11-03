@@ -176,6 +176,7 @@
     "webauthn.challenge_expired": "通行密钥请求已过期 — 请重试。",
     "webauthn.invalid_credential": "无法验证此通行密钥。",
     "webauthn.not_found": "未找到通行密钥。",
+    "billing.byok_invalid_endpoint": "自定义提供商端点不安全或无效。",
     "billing.insufficient_funds": "您的余额已用尽。请充值后再开始运行。",
     "wizard_agent.daily_limit_reached": "您已用完今天的 {limit} 次免费智能体回合。智能体明天将再次可用。",
     "billing.openrouter_oauth_failed": "OpenRouter 登录未完成。请重试。",

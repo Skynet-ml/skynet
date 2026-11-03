@@ -100,7 +100,7 @@ def test_debit_hook_prices_per_model_usage_when_present() -> None:
     )
 
 
-def test_debit_hook_charges_platform_fee_for_byok_run() -> None:
+def test_debit_hook_passes_byok_token_source() -> None:
     """A BYOK run debits with token_source='byok' and no model charge."""
     engine = object()
     worker = _worker(_Store(engine=engine))

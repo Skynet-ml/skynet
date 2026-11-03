@@ -19,12 +19,28 @@ from core.models.blackbox import BlackboxStrategy
 
 from ...budget_stop import BudgetReached
 from .. import auto
+from ..harness import GatewayConfig
+from ..native_runtime import NativeOptions
 from ..protocol import EngineContext, EvalServer, Result, ScorerAbortError, Task
 from ..registry import EngineCapabilities
 from ..upstream import AUTO_ENGINES, GEPA_SOURCE
 from .mocks import make_ctx
 
 CAPS = EngineCapabilities(proposer_available=True)
+
+
+def test_auto_uncapped_byok_native_respects_remaining_budget(tmp_path: Path, fixture_engines: None) -> None:
+    """Clamp an uncapped BYOK native lane to the remaining legacy budget."""
+    native = NativeOptions(
+        runtime="vercel",
+        model="openai/test",
+        gateway=GatewayConfig(url="https://example.com", api_key="key"),
+        max_token_cost=None,
+    )
+    ctx = make_ctx(str(tmp_path), native_options=native, remaining_cost_usd=lambda: 0.25)
+    server = EvalServer(score, max_evals=2 * (len(AUTO_ENGINES) + 1))
+    result, _ = auto.run_strategy(BlackboxStrategy(), Task("seed"), server, ctx, caps=CAPS)
+    assert result.best_candidate is not None
 
 
 class FixtureEngine:

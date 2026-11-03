@@ -31,7 +31,6 @@ from typing import Any
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from ..api.errors import DomainError
@@ -39,7 +38,7 @@ from ..config import settings
 from ..provider_registry import LITELLM_TO_BYOK_PROVIDER
 from ..storage.models import BillingProviderKeyModel
 from .byok_upstreams import UPSTREAMS, validate_custom_base
-from .mcp_broker import _pinned_address, _PinnedTransport
+from .mcp_broker import EndpointResolutionError, _pinned_address, _PinnedTransport
 
 # Verification states a stored key can carry. ``unverified`` is the default and
 # also the resting state after a probe that couldn't reach a verdict (network /
@@ -442,10 +441,8 @@ class ProviderKeyVault:
             The masked, verified view of the stored connection.
 
         Raises:
-            DomainError: 400 when ``provider`` is unknown and no ``api_base`` is
-                given, or ``secret`` is empty; 503 when the vault key is
-                unconfigured.
-            HTTPException: When a custom endpoint fails address validation.
+            DomainError: 400 when the provider or secret is invalid or the custom
+                endpoint is unsafe; 503 when the vault key is unconfigured.
         """
         secret = secret.strip()
         api_base = (api_base or "").strip() or None
@@ -453,6 +450,7 @@ class ProviderKeyVault:
             raise DomainError("billing.byok_unknown_provider", status=400, provider=provider)
         if not secret:
             raise DomainError("billing.byok_empty_secret", status=400, provider=provider)
+        resolution_failed = False
         try:
             if api_base:
                 validate_custom_base(api_base)
@@ -461,16 +459,14 @@ class ProviderKeyVault:
                     and api_base.rstrip("/") in {"https://openrouter.ai", "https://openrouter.ai/api/v1"}
                 ):
                     _pinned_address(api_base, False, label="custom provider endpoint")
+        except EndpointResolutionError:
+            resolution_failed = True
         except ValueError as error:
             logger.warning("Custom provider endpoint validation failed: %s", error)
-            raise HTTPException(status_code=400, detail="Invalid custom provider endpoint.") from error
+            raise DomainError("billing.byok_invalid_endpoint", status=400) from error
         cipher = self._cipher()
         ciphertext = cipher.encrypt(secret.encode("utf-8"))
-        try:
-            status = self._probe(provider, secret, api_base)
-        except ValueError as error:
-            logger.warning("Custom provider endpoint probe validation failed: %s", error)
-            raise HTTPException(status_code=400, detail="Invalid custom provider endpoint.") from error
+        status = STATUS_UNVERIFIED if resolution_failed else self._probe(provider, secret, api_base)
         safe_params = safe_connection_params(params)
         now = datetime.now(UTC)
         with Session(self._engine) as session:
@@ -661,19 +657,22 @@ class ProviderKeyVault:
         Returns:
             One of :data:`STATUS_VERIFIED`, :data:`STATUS_INVALID`, or
             :data:`STATUS_UNVERIFIED`.
-
-        Raises:
-            ValueError: When a custom endpoint fails address validation.
         """
         canonical_openrouter = provider == "openrouter" and (api_base or "").rstrip("/") in {
             "https://openrouter.ai",
             "https://openrouter.ai/api/v1",
         }
         address = None
-        if api_base:
-            validate_custom_base(api_base)
-            if not canonical_openrouter:
-                address = _pinned_address(api_base, False, label="custom provider endpoint")
+        try:
+            if api_base:
+                validate_custom_base(api_base)
+                if not canonical_openrouter:
+                    address = _pinned_address(api_base, False, label="custom provider endpoint")
+        except EndpointResolutionError:
+            return STATUS_UNVERIFIED
+        except ValueError as error:
+            logger.warning("Custom provider endpoint probe validation failed: %s", error)
+            return STATUS_INVALID
         probe = _PROVIDER_PROBES.get(provider)
         if probe is not None:
             normalized_base = (api_base or "").rstrip("/")

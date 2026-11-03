@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from core.api.preflight_execution import _verify_model_routes
 from core.billing import model_gateway as gateway_module
 from core.billing.budgets import BudgetInsufficientError, BudgetService
-from core.billing.byok_upstreams import OPENROUTER, UPSTREAMS
+from core.billing.byok_upstreams import UPSTREAMS
 from core.billing.model_dispatch import ModelHTTPResult
 from core.billing.model_gateway import (
     EMBEDDING_ROUTE_KEY,
@@ -157,8 +157,84 @@ def test_byok_provider_routes(gateway: ModelGateway, slug: str, prefix: str, rol
         assert "authorization" not in request.headers
     else:
         assert request.headers["authorization"] == "Bearer private-provider-key"
-    if upstream != OPENROUTER:
-        assert json.loads(request.content)["stream_options"]["include_usage"] is True
+    assert "stream_options" not in json.loads(request.content)
+
+
+@pytest.mark.parametrize(
+    ("beta", "expected"),
+    [
+        ("tools-2024-05-16,feature_2", "tools-2024-05-16,feature_2"),
+        ("bad value", None),
+        ("ok\r\nInjected: yes", None),
+        ("a" * 1025, None),
+    ],
+)
+def test_native_anthropic_beta_is_validated(gateway: ModelGateway, beta: str, expected: str | None) -> None:
+    """Forward only bounded Anthropic beta tokens and retain the fixed version."""
+    sent: list[httpx.Request] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Capture the provider request."""
+        sent.append(request)
+        return httpx.Response(200, json={"usage": {}, "content": []})
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider))
+    route = gateway.register(
+        model="fixture/text",
+        api_key="private",
+        role="task",
+        policy=ChargePolicy("byok_model"),
+        upstream=UPSTREAMS["anthropic"],
+    )
+    gateway._routes[route["token"]].dispatch(
+        "/messages",
+        {"model": route["model"], "max_tokens": 10},
+        protocol_headers={"anthropic-beta": beta, "anthropic-version": "wrong"},
+    )
+    assert sent[0].headers.get("anthropic-beta") == expected
+    assert sent[0].headers["anthropic-version"] == "2023-06-01"
+
+
+def test_byok_stream_options_are_preserved(gateway: ModelGateway) -> None:
+    """Leave caller-supplied stream options unchanged."""
+    sent: list[httpx.Request] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Capture the provider request."""
+        sent.append(request)
+        return httpx.Response(200, json={"usage": {}, "choices": []})
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider))
+    route = gateway.register(
+        model="fixture/text",
+        api_key="private",
+        role="task",
+        policy=ChargePolicy("byok_model"),
+        upstream=UPSTREAMS["mistral"],
+    )
+    gateway._routes[route["token"]].dispatch(
+        "/chat/completions", {"model": route["model"], "stream": True, "stream_options": {"include_usage": False}}
+    )
+    assert json.loads(sent[0].content)["stream_options"] == {"include_usage": False}
+
+
+def test_openrouter_byok_dispatches_messages(gateway: ModelGateway) -> None:
+    """Keep forwarding BYOK Messages requests to OpenRouter."""
+    sent: list[httpx.Request] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Capture the upstream request."""
+        sent.append(request)
+        return httpx.Response(200, json={"usage": {}, "content": []})
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider))
+    route = gateway.register(model="fixture/text", api_key="private", role="task", policy=ChargePolicy("byok_model"))
+    result = gateway._routes[route["token"]].dispatch("/messages", {"model": route["model"], "max_tokens": 10})
+    assert result.status == 200
+    assert str(sent[0].url) == "https://openrouter.ai/api/v1/messages"
 
 
 @pytest.mark.parametrize("slug", list(UPSTREAMS))
@@ -587,7 +663,7 @@ def test_interaction_payload_never_batches_a_managed_economy_model(gateway: Mode
         assert "timeout" not in config["extra"]
 
 
-def test_byok_agent_task_uses_its_scoped_fee_metered_route(gateway: ModelGateway) -> None:
+def test_byok_agent_task_uses_its_scoped_route(gateway: ModelGateway) -> None:
     """Route the evaluated agent through its own key with the BYOK policy."""
     protected = gateway.protect_payload(
         {

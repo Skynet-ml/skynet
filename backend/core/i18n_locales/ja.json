@@ -176,6 +176,7 @@
     "webauthn.challenge_expired": "パスキーのリクエストの有効期限が切れました。もう一度お試しください。",
     "webauthn.invalid_credential": "このパスキーを検証できませんでした。",
     "webauthn.not_found": "パスキーが見つかりません。",
+    "billing.byok_invalid_endpoint": "カスタムプロバイダーのエンドポイントが安全でないか、無効です。",
     "billing.insufficient_funds": "残高が空です。実行を開始するには入金してください。",
     "wizard_agent.daily_limit_reached": "本日の無料エージェントターン（{limit} 回）を使い切りました。エージェントは明日また利用できます。",
     "billing.openrouter_oauth_failed": "OpenRouter へのサインインが完了しませんでした。もう一度お試しください。",

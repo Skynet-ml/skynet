@@ -176,6 +176,7 @@
     "webauthn.challenge_expired": "La solicitud de clave de acceso ha caducado; inténtalo de nuevo.",
     "webauthn.invalid_credential": "No se pudo verificar esta clave de acceso.",
     "webauthn.not_found": "Clave de acceso no encontrada.",
+    "billing.byok_invalid_endpoint": "El endpoint personalizado del proveedor no es seguro o no es válido.",
     "billing.insufficient_funds": "Tu saldo está vacío. Añade fondos para iniciar una ejecución.",
     "wizard_agent.daily_limit_reached": "Has usado los {limit} turnos gratuitos del agente de hoy. El agente vuelve a estar disponible mañana.",
     "billing.openrouter_oauth_failed": "El inicio de sesión en OpenRouter no se completó. Inténtalo de nuevo.",

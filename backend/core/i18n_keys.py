@@ -56,6 +56,7 @@ class I18nKey(StrEnum):
     AUTH_INVALID_TOKEN = 'auth.invalid_token'
     AUTH_MISSING_TOKEN = 'auth.missing_token'
     AUTH_NOT_CONFIGURED = 'auth.not_configured'
+    BILLING_BYOK_INVALID_ENDPOINT = 'billing.byok_invalid_endpoint'
     BILLING_INSUFFICIENT_FUNDS = 'billing.insufficient_funds'
     BILLING_OPENROUTER_OAUTH_FAILED = 'billing.openrouter_oauth_failed'
     BILLING_OPENROUTER_OAUTH_STATE_INVALID = 'billing.openrouter_oauth_state_invalid'

@@ -102,7 +102,7 @@ Le paramètre **Confidentialité des données des modèles** détermine ce que l
 | **Aucune conservation**  | Uniquement les points de terminaison couverts par un accord de non-conservation des données. Certains modèles peuvent être indisponibles. |
 
 > [!NOTE]
-> Les optimisations effectuées avec votre propre clé suivent les paramètres de confidentialité de votre compte OpenRouter.
+> Les appels BYOK via OpenRouter suivent les paramètres de confidentialité de votre compte OpenRouter. Les appels BYOK directs suivent la politique de données du fournisseur.
 
 ## Visibilité des exécutions
 

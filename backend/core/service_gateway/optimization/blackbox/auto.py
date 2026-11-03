@@ -125,7 +125,12 @@ def _admit_context(ctx: EngineContext) -> EngineContext:
     native = (
         None
         if ctx.native_options is None
-        else replace(ctx.native_options, max_token_cost=min(ctx.native_options.max_token_cost, remaining))
+        else replace(
+            ctx.native_options,
+            max_token_cost=remaining
+            if ctx.native_options.max_token_cost is None
+            else min(ctx.native_options.max_token_cost, remaining),
+        )
     )
     return replace(ctx, native_options=native, proposer_token_budget_usd=budget)
 

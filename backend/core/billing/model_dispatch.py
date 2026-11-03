@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -402,8 +403,6 @@ class ProviderDispatcher:
                     limit = routed.get(field)
                     if field in routed and (isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0):
                         raise UnpricedOperationError("An explicit positive output token limit is required.")
-                if self.upstream != OPENROUTER and path == "/chat/completions" and routed.get("stream"):
-                    routed["stream_options"] = {**(routed.get("stream_options") or {}), "include_usage": True}
                 priced = PricedRequest(
                     routed,
                     operation_quote(
@@ -437,6 +436,15 @@ class ProviderDispatcher:
                 if self.upstream == OPENROUTER and name.lower() in {"anthropic-version", "anthropic-beta"}
             }
         )
+        if self.upstream.slug == "anthropic":
+            for name, value in (protocol_headers or {}).items():
+                if (
+                    name.lower() == "anthropic-beta"
+                    and isinstance(value, str)
+                    and len(value) <= 1024
+                    and re.fullmatch(r"[A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+)*", value)
+                ):
+                    headers["anthropic-beta"] = value
 
         # Batches reject streaming, and BYOK batches bill the user's own
         # provider under terms this ledger cannot split per request.

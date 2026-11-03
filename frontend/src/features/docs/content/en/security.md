@@ -102,7 +102,7 @@ The **Model data privacy** setting controls what model providers can do with you
 | **Zero retention** | Only endpoints with a zero-data-retention agreement. Some models can be unavailable.        |
 
 > [!NOTE]
-> Optimizations on your own key follow your OpenRouter account's privacy settings.
+> BYOK calls through OpenRouter follow your OpenRouter account's privacy settings. Native provider BYOK calls follow that provider's data policy.
 
 ## Visibility of runs
 

@@ -102,7 +102,7 @@ Bir belirteci devre dışı bırakmak için **Belirteci iptal et**'e tıklayın.
 | **Sıfır saklama**    | Yalnızca sıfır veri saklama sözleşmesi olan uç noktalar. Bazı modeller kullanılamayabilir.               |
 
 > [!NOTE]
-> Kendi anahtarınızla yapılan optimizasyonlar OpenRouter hesabınızın gizlilik ayarlarına uyar.
+> OpenRouter üzerinden BYOK çağrıları OpenRouter hesabınızın gizlilik ayarlarına uyar. Doğrudan sağlayıcıya yapılan BYOK çağrıları sağlayıcının veri politikasına uyar.
 
 ## Çalıştırmaların görünürlüğü
 

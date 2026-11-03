@@ -176,6 +176,7 @@
     "webauthn.challenge_expired": "La demande de clé d'accès a expiré — réessayez.",
     "webauthn.invalid_credential": "Cette clé d'accès n'a pas pu être vérifiée.",
     "webauthn.not_found": "Clé d'accès introuvable.",
+    "billing.byok_invalid_endpoint": "Le point de terminaison personnalisé du fournisseur est dangereux ou invalide.",
     "billing.insufficient_funds": "Votre solde est vide. Ajoutez des fonds pour lancer une exécution.",
     "wizard_agent.daily_limit_reached": "Vous avez utilisé les {limit} tours gratuits de l'agent pour aujourd'hui. L'agent sera de nouveau disponible demain.",
     "billing.openrouter_oauth_failed": "La connexion à OpenRouter n'a pas abouti. Réessayez.",

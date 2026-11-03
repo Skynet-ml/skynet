@@ -211,7 +211,7 @@ def test_only_verified_budget_attachments_avoid_legacy_double_count(engine: Engi
         assert legacy_job_committed_cents(session, "alice") == 57
 
 
-def test_legacy_commitments_count_active_roots_and_byok_fee_only(engine: Engine) -> None:
+def test_legacy_commitments_count_active_roots_and_byok_budget(engine: Engine) -> None:
     """Ignore terminal jobs, child duplicates, and other owners while retaining paused promises.
 
     Args:
@@ -384,26 +384,26 @@ def test_aggregate_rounding_and_phase_cost_dimensions(engine: Engine) -> None:
     assert _balance(engine) == 49
 
 
-def test_byok_scope_reserves_and_settles_platform_fee_only(engine: Engine) -> None:
+def test_byok_model_scope_settles_at_zero(engine: Engine) -> None:
     """Keep provider-paid token cost outside both Total and the Skynet wallet."""
     service = BudgetService(engine=engine)
     budget = service.create("alice", 100, idempotency_key="draft")
-    operation = _reserve(service, budget.id, max_cents=8, max_wallet_cents=8)
-    assert operation.budget.reserved_cents == 8
-    assert operation.budget.wallet_reserved_cents == 8
+    operation = _reserve(service, budget.id, max_cents=0, max_wallet_cents=0)
+    assert operation.budget.reserved_cents == 0
+    assert operation.budget.wallet_reserved_cents == 0
     service.mark_dispatched(operation.id, "alice")
     result = service.settle(
         operation.id,
         "alice",
         evidence_key="provider",
-        actual_cents=3,
-        actual_wallet_cents=3,
+        actual_cents=0,
+        actual_wallet_cents=0,
         evidence={"source": "byok", "provider_cost_cents": 27},
     )
     assert result.budget.external_spent_cents == 0
-    assert result.budget.billed_cents == 3
-    assert result.budget.available_cents == 97
-    assert _balance(engine) == 47
+    assert result.budget.billed_cents == 0
+    assert result.budget.available_cents == 100
+    assert _balance(engine) == 50
 
 
 def test_contention_differs_from_exhaustion(engine: Engine) -> None:

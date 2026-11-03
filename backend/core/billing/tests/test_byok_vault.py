@@ -18,7 +18,6 @@ from unittest.mock import patch
 import httpx
 import pytest
 from cryptography.fernet import Fernet
-from fastapi import HTTPException
 from pydantic import SecretStr
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -314,18 +313,82 @@ def test_save_key_unknown_provider_without_api_base_rejected(engine: object, vau
 def test_vault_probe_rejects_private_base(engine: object, monkeypatch: pytest.MonkeyPatch) -> None:
     """Refuse a private custom probe without sending a key."""
     monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [(0, 0, 0, "", ("10.1.2.3", 443))])
-    with pytest.raises(ValueError, match="private"):
-        ProviderKeyVault(engine=engine)._probe("custom", "private", "https://private.example/v1")
+    assert ProviderKeyVault(engine=engine)._probe("custom", "private", "https://private.example/v1") == STATUS_INVALID
+
+
+@pytest.mark.parametrize("base", ["http://public.example/v1", "https://public.example/v1?x=1"])
+def test_vault_probe_rejects_unsafe_shape(engine: object, base: str) -> None:
+    """Classify legacy unsafe endpoint shapes as invalid."""
+    assert ProviderKeyVault(engine=engine)._probe("custom", "secret", base) == STATUS_INVALID
+
+
+@pytest.mark.parametrize("failure", ["shape", "private", "dns"])
+def test_verify_key_classifies_legacy_endpoint_failures(
+    engine: object, vault_key: str, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """Return a verification status for unsafe legacy URLs and DNS outages."""
+    vault = ProviderKeyVault(engine=engine)
+    with patch("core.billing.byok_vault.httpx.Client.get", side_effect=httpx.ConnectError("offline")):
+        saved = vault.save_key("u@x.com", "custom", "secret", api_base="https://public.example/v1")
+    assert saved.status == STATUS_UNVERIFIED
+    with Session(engine) as session:
+        row = session.query(BillingProviderKeyModel).filter_by(username="u@x.com", provider="custom").one()
+        if failure == "shape":
+            row.api_base = "http://public.example/v1"
+        session.commit()
+
+    def resolve(*args: object, **kwargs: object) -> object:
+        """Simulate DNS failure or a rebind to a private address."""
+        if failure == "dns":
+            raise socket.gaierror("dns unavailable")
+        return [(0, 0, 0, "", ("10.0.0.1", 443))]
+
+    monkeypatch.setattr("core.billing.byok_vault._pinned_address", _pinned_address)
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    result = vault.verify_key("u@x.com", "custom")
+    assert result.status == (STATUS_UNVERIFIED if failure == "dns" else STATUS_INVALID)
+
+
+def test_vault_probe_unverified_on_dns_failure(engine: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Do not treat DNS outages as invalid keys."""
+
+    def fail(*args: object, **kwargs: object) -> object:
+        """Simulate a DNS outage."""
+        raise socket.gaierror("dns unavailable")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fail)
+    assert ProviderKeyVault(engine=engine)._probe("custom", "secret", "https://public.example/v1") == STATUS_UNVERIFIED
+
+
+def test_vault_save_unverified_on_dns_failure(engine: object, vault_key: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Save a safe endpoint when DNS is temporarily unavailable."""
+
+    def fail(*args: object, **kwargs: object) -> object:
+        """Simulate a DNS outage."""
+        raise socket.gaierror("dns unavailable")
+
+    monkeypatch.setattr("core.billing.byok_vault._pinned_address", _pinned_address)
+    monkeypatch.setattr(socket, "getaddrinfo", fail)
+    view = ProviderKeyVault(engine=engine).save_key("u@x.com", "custom", "secret", api_base="https://public.example/v1")
+    assert view.status == STATUS_UNVERIFIED
+
+
+def test_vault_save_rejects_unsafe_shape(engine: object, vault_key: str) -> None:
+    """Return an i18n domain error for an unsafe endpoint."""
+    with pytest.raises(DomainError) as error:
+        ProviderKeyVault(engine=engine).save_key("u@x.com", "custom", "secret", api_base="http://public.example/v1")
+    assert error.value.code == "billing.byok_invalid_endpoint"
+    assert error.value.status_code == 400
 
 
 def test_vault_save_rejects_private_base(engine: object, vault_key: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Reject a private custom base before storing or probing its key."""
     monkeypatch.setattr("core.billing.byok_vault._pinned_address", _pinned_address)
     monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [(0, 0, 0, "", ("127.0.0.1", 443))])
-    with pytest.raises(HTTPException) as error:
+    with pytest.raises(DomainError) as error:
         ProviderKeyVault(engine=engine).save_key("u@x.com", "custom", "private", api_base="https://private.example/v1")
     assert error.value.status_code == 400
-    assert error.value.detail == "Invalid custom provider endpoint."
+    assert error.value.code == "billing.byok_invalid_endpoint"
     with Session(engine) as session:
         assert session.query(BillingProviderKeyModel).count() == 0
 

@@ -25,6 +25,10 @@ from .signals import BudgetReached
 _METADATA_ADDRESSES = frozenset({ipaddress.ip_address("169.254.169.254"), ipaddress.ip_address("fd00:ec2::254")})
 
 
+class EndpointResolutionError(ValueError):
+    """Identify temporary endpoint DNS resolution failures."""
+
+
 def _pinned_address(url: str, allow_private: bool, *, label: str = "MCP endpoint") -> str:
     """Apply endpoint-discovery policy once and pin its permitted destination address.
 
@@ -35,6 +39,10 @@ def _pinned_address(url: str, allow_private: bool, *, label: str = "MCP endpoint
 
     Returns:
         A verified IP literal used for every connection to this endpoint.
+
+    Raises:
+        EndpointResolutionError: When DNS cannot resolve the hostname.
+        ValueError: When the endpoint or resolved address is unsafe.
     """
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
@@ -44,9 +52,9 @@ def _pinned_address(url: str, allow_private: bool, *, label: str = "MCP endpoint
     try:
         infos = socket.getaddrinfo(parsed.hostname, parsed.port, type=socket.SOCK_STREAM)
     except (socket.gaierror, ValueError) as error:
-        raise ValueError(f"The {label} hostname could not be resolved.") from error
+        raise EndpointResolutionError(f"The {label} hostname could not be resolved.") from error
     if not infos:
-        raise ValueError(f"The {label} hostname has no resolved addresses.")
+        raise EndpointResolutionError(f"The {label} hostname has no resolved addresses.")
     for info in infos:
         address = ipaddress.ip_address(info[4][0])
         if address in _METADATA_ADDRESSES:

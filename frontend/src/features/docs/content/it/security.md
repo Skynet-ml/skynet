@@ -102,7 +102,7 @@ L'impostazione **Privacy dei dati dei modelli** controlla che cosa possono fare 
 | **Nessuna conservazione**   | Solo endpoint con un accordo di conservazione zero dei dati. Alcuni modelli possono non essere disponibili. |
 
 > [!NOTE]
-> Le ottimizzazioni con la tua chiave seguono le impostazioni di privacy del tuo account OpenRouter.
+> Le chiamate BYOK tramite OpenRouter seguono le impostazioni di privacy del tuo account OpenRouter. Le chiamate BYOK dirette seguono la politica sui dati del provider.
 
 ## Visibilità delle esecuzioni
 

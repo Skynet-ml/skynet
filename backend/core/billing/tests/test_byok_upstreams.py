@@ -39,6 +39,25 @@ def test_openrouter_without_base() -> None:
     assert resolve_upstream({"name": "openrouter/openai/example"}) == OPENROUTER
 
 
+@pytest.mark.parametrize("slug", ["openai", "anthropic", "together"])
+def test_canonical_provider_base_preserves_protocol(slug: str) -> None:
+    """Use the fixed provider protocol when its canonical URL is saved."""
+    upstream = UPSTREAMS[slug]
+    assert resolve_upstream({"name": f"{slug}/example", "base_url": upstream.base_url + "/"}) == upstream
+
+
+@pytest.mark.parametrize("slug", ["anthropic", "together"])
+def test_noncanonical_provider_base_is_rejected(slug: str) -> None:
+    """Reject noncanonical URLs for native provider prefixes."""
+    with pytest.raises(UnpricedOperationError):
+        resolve_upstream({"name": f"{slug}/example", "base_url": "https://other.example/v1"})
+
+
+def test_openrouter_supports_messages() -> None:
+    """Preserve the OpenRouter Messages API for BYOK routes."""
+    assert "/messages" in OPENROUTER.paths
+
+
 @pytest.mark.parametrize(
     "base",
     [

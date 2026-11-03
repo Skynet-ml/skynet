@@ -42,17 +42,17 @@ Imposta **Visibilità** su **Privata** quando invii un'esecuzione per tenerla fu
 
 ### I provider di modelli si addestrano sui miei prompt?
 
-Per impostazione predefinita, no. L'opzione predefinita di **Privacy dei dati dei modelli** è **Nessun addestramento**. Invia i prompt solo ai provider che non li usano per l'addestramento e non li conservano. Questa impostazione si applica alle chiamate che Skynet addebita al tuo saldo. Le chiamate con la tua chiave seguono le impostazioni di privacy del tuo account OpenRouter. Vedi [Sicurezza](/docs/security).
+Per impostazione predefinita, no. L'opzione predefinita di **Privacy dei dati dei modelli** è **Nessun addestramento**. Invia i prompt solo ai provider che non li usano per l'addestramento e non li conservano. Questa impostazione si applica alle chiamate che Skynet addebita al tuo saldo. Le chiamate BYOK tramite OpenRouter seguono le impostazioni di privacy del tuo account OpenRouter. Le chiamate BYOK dirette seguono la politica sui dati del provider. Vedi [Sicurezza](/docs/security).
 
 ## Fatturazione
 
 ### Come addebita Skynet le esecuzioni?
 
-Skynet usa un saldo prepagato. L'uso dei modelli ospitati, la commissione di ricarica e l'uso della sandbox vengono misurati. Prima che inizi un lavoro a pagamento, Skynet riserva un margine nel tuo portafoglio e nel budget dell'esecuzione. Vedi [Fatturazione](/docs/concepts/billing).
+Skynet usa un saldo prepagato. L'uso dei modelli gestiti e il relativo ricarico, insieme all'uso della sandbox, sono misurati. La ricarica del saldo prevede una commissione. Prima che inizi un lavoro a pagamento, Skynet riserva un margine nel tuo portafoglio e nel budget dell'esecuzione. Vedi [Fatturazione](/docs/concepts/billing).
 
 ### Posso usare la chiave del mio provider di modelli?
 
-Sì. Con la tua chiave (BYOK), Il provider addebita i token del modello sulla tua chiave. Skynet non applica costi per il modello. Il budget dell’esecuzione copre solo l’uso della sandbox. Skynet cifra la tua chiave e non la mostra mai più. Vedi [Fatturazione](/docs/concepts/billing) e [Sicurezza](/docs/security).
+Sì. Con la tua chiave (BYOK), il provider addebita i token del modello sulla tua chiave. Skynet non applica costi per il modello. Il budget dell’esecuzione copre solo l’uso della sandbox. Skynet cifra la tua chiave e non la mostra mai più. Vedi [Fatturazione](/docs/concepts/billing) e [Sicurezza](/docs/security).
 
 ### Posso usare Skynet senza pagare le chiamate ai modelli?
 

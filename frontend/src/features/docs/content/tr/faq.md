@@ -42,17 +42,17 @@ Bir çalıştırmayı genel aramanın dışında tutmak için gönderirken **Gö
 
 ### Model sağlayıcıları istemlerimle model eğitiyor mu?
 
-Varsayılan olarak hayır. Varsayılan **Model veri gizliliği** seçeneği **Eğitim yok**'tur. İstemleri yalnızca bunlarla eğitim yapmayan ve bunları saklamayan sağlayıcılara gönderir. Bu ayar, Skynet'in bakiyenizden faturalandırdığı çağrılar için geçerlidir. Kendi anahtarınızla yapılan çağrılar OpenRouter hesabınızın gizlilik ayarlarına uyar. [Güvenlik](/docs/security) sayfasına bakın.
+Varsayılan olarak hayır. Varsayılan **Model veri gizliliği** seçeneği **Eğitim yok**'tur. İstemleri yalnızca bunlarla eğitim yapmayan ve bunları saklamayan sağlayıcılara gönderir. Bu ayar, Skynet'in bakiyenizden faturalandırdığı çağrılar için geçerlidir. OpenRouter üzerinden BYOK çağrıları OpenRouter hesabınızın gizlilik ayarlarına uyar. Doğrudan sağlayıcıya yapılan BYOK çağrıları sağlayıcının veri politikasına uyar. [Güvenlik](/docs/security) sayfasına bakın.
 
 ## Faturalandırma
 
 ### Skynet çalıştırmalar için nasıl ücret alır?
 
-Skynet ön ödemeli bir bakiye kullanır. Barındırılan model kullanımı, bakiye yükleme ücreti ve sandbox kullanımı ölçülür. Ücretli iş başlamadan önce Skynet cüzdanınızda ve çalıştırma bütçesinde pay ayırır. [Faturalandırma](/docs/concepts/billing) sayfasına bakın.
+Skynet ön ödemeli bir bakiye kullanır. Yönetilen model kullanımı ve ek ücreti ile sandbox kullanımı ölçülür. Bakiye yüklemede ücret alınır. Ücretli iş başlamadan önce Skynet cüzdanınızda ve çalıştırma bütçesinde pay ayırır. [Faturalandırma](/docs/concepts/billing) sayfasına bakın.
 
 ### Kendi model sağlayıcı anahtarımı kullanabilir miyim?
 
-Evet. Kendi anahtarınızla (BYOK) Sağlayıcınız model belirteçlerini kendi anahtarınıza faturalandırır. Skynet model ücreti almaz. Çalışma bütçesi yalnızca sandbox kullanımını kapsar. Skynet anahtarınızı şifreler ve bir daha asla göstermez. [Faturalandırma](/docs/concepts/billing) ve [Güvenlik](/docs/security) sayfalarına bakın.
+Evet. Kendi anahtarınızla (BYOK) sağlayıcınız model belirteçlerini kendi anahtarınıza faturalandırır. Skynet model ücreti almaz. Çalışma bütçesi yalnızca sandbox kullanımını kapsar. Skynet anahtarınızı şifreler ve bir daha asla göstermez. [Faturalandırma](/docs/concepts/billing) ve [Güvenlik](/docs/security) sayfalarına bakın.
 
 ### Skynet'i model çağrılarına ödeme yapmadan çalıştırabilir miyim?
 

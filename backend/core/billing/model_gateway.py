@@ -502,7 +502,7 @@ class ModelGateway:
             )
             self._provider_clients.append(client)
         token = secrets.token_urlsafe(32)
-        # BYOK traffic runs on the caller's own OpenRouter account, whose privacy settings apply there.
+        # BYOK traffic follows the selected provider's own data policy.
         data_policy = (
             data_policy_for(self.runtime.username)
             if policy.kind == "managed_model" and upstream == OPENROUTER

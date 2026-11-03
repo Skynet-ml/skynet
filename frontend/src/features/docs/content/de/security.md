@@ -66,7 +66,7 @@ Sie können Ihre eigenen Schlüssel für Modellanbieter hinzufügen.
 - Skynet speichert nur die letzten vier Zeichen und einen Status: nicht geprüft, geprüft oder ungültig.
 - Wenn Sie einen Schlüssel eingeben, sendet Skynet eine kleine Testanfrage, um ihn zu prüfen.
 
-Dein Anbieter rechnet Modell-Tokens über deinen Schlüssel ab. Skynet erhebt keine Modellgebühr. Das Laufbudget deckt nur die Nutzung der Sandbox ab.
+Ihr Anbieter rechnet Modell-Tokens über Ihren Schlüssel ab. Skynet erhebt keine Modellgebühr. Das Laufbudget deckt nur die Nutzung der Sandbox ab.
 
 Skynet entfernt außerdem Geheimnisse aus Logs und Fehlermeldungen. Es ersetzt sie durch `[REDACTED]`.
 
@@ -102,7 +102,7 @@ Die Einstellung **Datenschutz bei Modellen** legt fest, was Modellanbieter mit I
 | **Keine Speicherung** | Nur Endpunkte mit einer Vereinbarung ohne Datenspeicherung (Zero Data Retention). Einige Modelle sind dann eventuell nicht verfügbar. |
 
 > [!NOTE]
-> Optimierungen mit Ihrem eigenen Schlüssel folgen den Datenschutzeinstellungen Ihres OpenRouter-Kontos.
+> BYOK-Aufrufe über OpenRouter folgen den Datenschutzeinstellungen Ihres OpenRouter-Kontos. BYOK-Aufrufe direkt bei einem Anbieter folgen dessen Datenrichtlinie.
 
 ## Sichtbarkeit von Durchläufen
 

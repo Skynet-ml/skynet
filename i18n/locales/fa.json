@@ -176,6 +176,7 @@
     "webauthn.challenge_expired": "درخواست کلید عبور (passkey) منقضی شد — دوباره تلاش کنید.",
     "webauthn.invalid_credential": "تأیید این کلید عبور (passkey) ناموفق بود.",
     "webauthn.not_found": "کلید عبور (passkey) یافت نشد.",
+    "billing.byok_invalid_endpoint": "نشانی سفارشی ارائه‌دهنده ناامن یا نامعتبر است.",
     "billing.insufficient_funds": "موجودی شما خالی است. برای شروع یک اجرا، موجودی اضافه کنید.",
     "wizard_agent.daily_limit_reached": "{limit} نوبت رایگان امروز دستیار را استفاده کرده‌اید. دستیار فردا دوباره در دسترس است.",
     "billing.openrouter_oauth_failed": "ورود به OpenRouter کامل نشد. دوباره تلاش کنید.",

@@ -128,7 +128,7 @@ def test_batched_calls_count_without_a_response_time() -> None:
     assert (row.calls, row.latency_calls, row.latency_ms_total) == (2, 1, 400)
 
 
-def test_byok_calls_report_the_provider_charge_behind_the_fee() -> None:
+def test_byok_calls_report_the_provider_charge_from_usage() -> None:
     """Read provider cost from usage without charging the user's wallet."""
     evidence = {**_call(), "usage": {"cost": "0.10", "prompt_tokens": 3}}
     (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence=evidence)], proposer=False)
@@ -156,6 +156,13 @@ def test_openrouter_byok_invalid_cost_details_are_unavailable() -> None:
     usage = {"cost": "0.001", "is_byok": True, "cost_details": "invalid"}
     (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence={"usage": usage})], proposer=False)
     assert row.provider_cents is None
+
+
+def test_historical_byok_provider_cost_from_wallet_without_usage() -> None:
+    """Recover provider spend from an old fee-only operation."""
+    policy = {"kind": "byok_model", "byok_fee_fraction": "0.05"}
+    (row,) = aggregate([_op(policy=policy, cents="1", evidence={})], proposer=False)
+    assert row.provider_cents == Decimal(20)
 
 
 def test_subscription_calls_show_their_api_rate_without_a_charge() -> None:

@@ -102,7 +102,7 @@ Authorization: Bearer skyd_...
 | **보관 없음**    | 데이터 무보관(zero-data-retention) 계약이 있는 엔드포인트만. 일부 모델을 사용하지 못할 수 있습니다. |
 
 > [!NOTE]
-> 내 키로 하는 최적화는 내 OpenRouter 계정의 개인정보 설정을 따릅니다.
+> OpenRouter를 통한 BYOK 호출은 OpenRouter 계정의 개인정보 설정을 따릅니다. 제공업체에 직접 보내는 BYOK 호출은 해당 제공업체의 데이터 정책을 따릅니다.
 
 ## 실행의 공개 범위
 

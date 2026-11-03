@@ -558,7 +558,7 @@ def test_mixed_run_cost_prices_each_model_by_its_source() -> None:
         },
     )
 
-    assert cost == cents_for_usage([managed]) + platform_fee_cents_for_usage([byok])
+    assert cost == cents_for_usage([managed])
 
 
 def test_cost_ceiling_budget_managed_is_the_balance(engine: object) -> None:

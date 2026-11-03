@@ -317,6 +317,23 @@ def test_byok_reflection_budget_does_not_limit_model_calls(
     assert all(ctx.native_options.max_token_cost is None for _, ctx in fake_native_proposers)
 
 
+def test_legacy_auto_byok_reflection_with_cost_limit(
+    fake_lm: FakeReflectionLM, tmp_path: Path, fake_native_proposers: list[tuple[str, EngineContext]]
+) -> None:
+    """Run Auto with uncapped BYOK reflection and a legacy cost limit."""
+    payload = _payload(
+        strategy={"mode": "auto"},
+        budget={"max_scorer_runs": 24},
+        max_cost_cents=100,
+        reflection_model_config={"name": "fake/model", "token_source": "byok"},
+    )
+    assert not payload.execution_budget_id
+    response = run_blackbox_optimization(payload, artifact_id="legacy-auto-byok", gepa_log_dir_path=str(tmp_path))
+    assert response.strategy_mode == "auto"
+    assert fake_native_proposers
+    assert all(ctx.native_options.max_token_cost is not None for _, ctx in fake_native_proposers)
+
+
 def test_legacy_byok_reflection_keeps_managed_scorer_budget(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

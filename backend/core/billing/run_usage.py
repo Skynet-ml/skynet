@@ -140,12 +140,18 @@ def _byok_provider_cents(record: OperationRecord) -> Decimal | None:
     """
     try:
         usage = record.evidence.get("usage")
-        if not isinstance(usage, Mapping):
-            return None
-        if usage.get("is_byok") is True:
-            cost = usage_charge(usage)
-            return None if cost is None else cost / Decimal(str(CENT_USD_VALUE))
-        return exact_nonnegative(usage.get("cost")) / Decimal(str(CENT_USD_VALUE))
+        if isinstance(usage, Mapping):
+            if usage.get("is_byok") is True:
+                cost = usage_charge(usage)
+                if cost is not None:
+                    return cost / Decimal(str(CENT_USD_VALUE))
+            elif usage.get("cost") is not None:
+                return exact_nonnegative(usage.get("cost")) / Decimal(str(CENT_USD_VALUE))
+    except UnpricedOperationError:
+        return None
+    try:
+        fraction = exact_nonnegative(record.policy.get("byok_fee_fraction"))
+        return cents_from_units(record.wallet_units) / fraction if fraction > 0 else None
     except UnpricedOperationError:
         return None
 

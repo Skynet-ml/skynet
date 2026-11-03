@@ -164,6 +164,7 @@
     "webauthn.invalid_credential": "לא ניתן לאמת את מפתח הגישה הזה.",
     "webauthn.not_found": "מפתח הגישה לא נמצא.",
     "submit.no_models_available": "אין {term.modelPlural} זמינים בקטלוג — הגדר/הגדירי קודם API key של ספק.",
+    "billing.byok_invalid_endpoint": "כתובת הספק המותאמת אינה בטוחה או תקינה.",
     "billing.insufficient_funds": "היתרה שלך ריקה. יש להוסיף כסף כדי להריץ.",
     "wizard_agent.daily_limit_reached": "ניצלת את {limit} התורות החינמיות של הסוכן להיום. הסוכן יהיה זמין שוב מחר.",
     "billing.openrouter_oauth_failed": "ההתחברות ל-OpenRouter לא הושלמה. נסו שוב.",

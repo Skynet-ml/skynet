@@ -26,7 +26,7 @@ class ProviderUpstream:
 _CHAT = frozenset({"/chat/completions"})
 _RESPONSES = _CHAT | {"/responses"}
 _MESSAGES = _CHAT | {"/messages"}
-OPENROUTER = ProviderUpstream("openrouter", "https://openrouter.ai/api/v1", "bearer", _RESPONSES, True)
+OPENROUTER = ProviderUpstream("openrouter", "https://openrouter.ai/api/v1", "bearer", _RESPONSES | {"/messages"}, True)
 
 # These compatibility endpoints and embedding capabilities have not been tested with live keys.
 UPSTREAMS = {
@@ -120,6 +120,12 @@ def resolve_upstream(config: Mapping[str, Any]) -> ProviderUpstream:
             raise UnpricedOperationError(str(error)) from error
         if slug == "openrouter" and str(base).rstrip("/") in {"https://openrouter.ai", OPENROUTER.base_url}:
             return OPENROUTER
+        if slug in UPSTREAMS and str(base).rstrip("/") == UPSTREAMS[slug].base_url.rstrip("/"):
+            return UPSTREAMS[slug]
+        if slug in UPSTREAMS and slug != "openai":
+            raise UnpricedOperationError(
+                "This provider requires its canonical endpoint. Custom endpoints require an openai/ model prefix."
+            )
         if prefix != "openai":
             raise UnpricedOperationError("Custom provider endpoints require an openai/ model prefix.")
         return replace(

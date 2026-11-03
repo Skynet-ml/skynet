@@ -176,6 +176,7 @@
     "webauthn.challenge_expired": "Geçiş anahtarı isteğinin süresi doldu — tekrar deneyin.",
     "webauthn.invalid_credential": "Bu geçiş anahtarı doğrulanamadı.",
     "webauthn.not_found": "Geçiş anahtarı bulunamadı.",
+    "billing.byok_invalid_endpoint": "Özel sağlayıcı uç noktası güvenli değil veya geçersiz.",
     "billing.insufficient_funds": "Bakiyeniz boş. Bir çalıştırma başlatmak için bakiye ekleyin.",
     "wizard_agent.daily_limit_reached": "Bugünkü {limit} ücretsiz ajan turunu kullandınız. Ajan yarın yeniden kullanılabilir.",
     "billing.openrouter_oauth_failed": "OpenRouter oturum açma işlemi tamamlanmadı. Tekrar deneyin.",
