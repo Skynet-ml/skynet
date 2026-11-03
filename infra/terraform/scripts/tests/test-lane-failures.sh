@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-for command in awk find grep git jq sed timeout; do
+for command in awk find grep git jq mv ps sed sleep timeout; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'missing test command: %s\n' "$command" >&2
     exit 1
@@ -14,6 +14,8 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/build" "$tmp/preview/infra/terraform/scripts"
 real_rm="$(command -v rm)"
 real_find="$(command -v find)"
+real_mv="$(command -v mv)"
+real_ps="$(command -v ps)"
 real_sed="$(command -v sed)"
 real_stat="$(command -v stat)"
 cp "$repo_root/infra/terraform/scripts/"{build-push.sh,lib.sh,image-key.sh} "$tmp/build/"
@@ -33,14 +35,7 @@ case "$*" in
     ;;
   *"ecr get-login-password"*) printf '%s\n' password ;;
   *"ecr describe-images"*)
-    if [[ "$*" == *"--filter tagStatus=TAGGED"* ]]; then
-      if [[ "${TEST_CTX_HIT:-}" == true ]]; then
-        printf '{"imageDetails":[{"imageDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","imagePushedAt":"%s","imageTags":["ctx-test"]}]}\n' \
-          "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      else
-        printf '%s\n' '{"imageDetails":[]}'
-      fi
-    elif [[ "$*" == *"imageTag=$TEST_SHA"* && "${TEST_EXISTING_BACKEND:-}" == true &&
+    if [[ "$*" == *"imageTag=$TEST_SHA"* && "${TEST_EXISTING_BACKEND:-}" == true &&
       "$*" == *"repository-name skynet/backend"* ]]; then
       exit 0
     elif [[ "${TEST_EXISTING_TAGS:-}" == true &&
@@ -61,12 +56,6 @@ case "$*" in
     elif [[ "$*" == *"repository-name skynet/backend"* && "$*" == *"imageTag=$TEST_SHA"* &&
       "${TEST_PUSH_RACE:-}" == true && -e "$TEST_RACE_TAG_FLAG" ]]; then
       exit 0
-    elif [[ "$*" == *"--query imageDetails[0].imagePushedAt"* &&
-      "${TEST_CTX_HIT:-}" == true ]]; then
-      date -u +%Y-%m-%dT%H:%M:%SZ
-    elif [[ "$*" == *"--query imageDetails[0].imageDigest"* &&
-      "${TEST_CTX_HIT:-}" == true ]]; then
-      printf '%s\n' 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     else
       printf '%s\n' 'ImageNotFoundException' >&2
       exit 254
@@ -205,6 +194,44 @@ fi
 exec "$TEST_REAL_RM" "$@"
 SH
 chmod +x "$tmp/bin/"{sed,rm}
+cat >"$tmp/bin/mv" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+destination="${@: -1}"
+if [[ "${TEST_LANE_OK_RACE:-}" == litellm && "$destination" == */litellm.ok ]]; then
+  for ((attempt = 0; attempt < 500; attempt++)); do
+    [[ -e "$TEST_LANE_PS_ENTERED" ]] && break
+    sleep 0.01
+  done
+  [[ -e "$TEST_LANE_PS_ENTERED" ]] || exit 20
+fi
+exec "$TEST_REAL_MV" "$@"
+SH
+cat >"$tmp/bin/ps" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${TEST_LANE_OK_RACE:-}" == litellm && "${1:-}" == -o &&
+  "${2:-}" == stat= && "${3:-}" == -p ]]; then
+  pid="${4:-}"
+  lane_dir="$("$TEST_REAL_FIND" "$TEST_LANE_TMP" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+  [[ -n "$lane_dir" ]] || exit 21
+  : >"$TEST_LANE_PS_ENTERED"
+  for ((attempt = 0; attempt < 500; attempt++)); do
+    [[ -e "$lane_dir/litellm.ok" ]] && break
+    sleep 0.01
+  done
+  [[ -e "$lane_dir/litellm.ok" ]] || exit 22
+  for ((attempt = 0; attempt < 500; attempt++)); do
+    state="$("$TEST_REAL_PS" -o stat= -p "$pid" 2>/dev/null)" || break
+    [[ -n "$state" && "$state" != Z* ]] || break
+    sleep 0.01
+  done
+  printf 'Z\n'
+  exit 0
+fi
+exec "$TEST_REAL_PS" "$@"
+SH
+chmod +x "$tmp/bin/"{mv,ps}
 cat >"$tmp/bin/find" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -234,7 +261,7 @@ export TEST_REAL_STAT="$real_stat"
 export TEST_SHA=8d68a0de4ea55e3a1666860d947a622d3273e3f1
 export TEST_AWS_LOG="$tmp/aws.log" TEST_EVENT_LOG="$tmp/events.log"
 export TEST_RACE_TAG_FLAG="$tmp/pushed-by-race"
-export TEST_REAL_RM="$real_rm" TEST_REAL_SED="$real_sed"
+export TEST_REAL_RM="$real_rm" TEST_REAL_MV="$real_mv" TEST_REAL_PS="$real_ps" TEST_REAL_SED="$real_sed"
 export GITHUB_ACTIONS=true
 
 cat >"$tmp/build/deploy.sh" <<'SH'
@@ -346,6 +373,22 @@ assert_no_match '^migrate:' "$TEST_EVENT_LOG" ||
   fail "migration ran after a sibling lane process disappeared"
 unset TEST_KILL_LANE
 
+prepare_lane_tmp ok-race
+: >"$TEST_AWS_LOG"
+: >"$TEST_EVENT_LOG"
+: >"$GITHUB_OUTPUT"
+export TEST_LANE_OK_RACE=litellm TEST_LANE_PS_ENTERED="$tmp/lane-ok-ps-entered"
+CURRENT_LOG="$tmp/lane-ok-race.log"
+: >"$CURRENT_LOG"
+timeout 20 "$tmp/build/build-push.sh" staging "$TEST_SHA" --migrate \
+  >"$CURRENT_LOG" 2>&1 || fail "successful lane marker race blocked migration"
+TEST_LAST_LANE_DIR="$(lane_dir_for_test)"
+[[ -e "$TEST_LAST_LANE_DIR/litellm.ok" && ! -e "$TEST_LAST_LANE_DIR/litellm.failed" ]] ||
+  fail "lane success race did not preserve the successful marker"
+grep -Fq 'migrate:' "$TEST_EVENT_LOG" ||
+  fail "migration did not run after the successful lane marker race"
+unset TEST_LANE_OK_RACE TEST_LANE_PS_ENTERED
+
 export TEST_EXISTING_BACKEND=true
 : >"$TEST_AWS_LOG"
 : >"$TEST_EVENT_LOG"
@@ -357,25 +400,21 @@ assert_no_match 'put-image.*--image-tag tree-' "$TEST_AWS_LOG" ||
   fail "existing SHA tag received an unverified tree-key tag"
 
 unset TEST_EXISTING_BACKEND
-export TEST_CTX_HIT=true
 : >"$TEST_AWS_LOG"
 : >"$TEST_EVENT_LOG"
-CURRENT_LOG="$tmp/reuse.log"
+CURRENT_LOG="$tmp/staging-no-ctx-reuse.log"
 : >"$CURRENT_LOG"
 "$tmp/build/build-push.sh" staging "$TEST_SHA" >"$CURRENT_LOG" 2>&1 ||
-  fail "fresh context-key reuse failed"
-grep -Fxq 'build:backend' "$TEST_EVENT_LOG" ||
-  fail "backend shared tag reused a fresh context key"
-grep -Fxq 'build:litellm' "$TEST_EVENT_LOG" ||
-  fail "staging litellm reused a fresh context key"
-assert_no_match '^build:frontend$' "$TEST_EVENT_LOG" ||
-  fail "staging frontend did not reuse its fresh context key"
-grep -Eq "put-image --repository-name skynet/frontend --image-tag $TEST_SHA-staging" "$TEST_AWS_LOG" ||
-  fail "staging frontend context-key hit did not retag its environment-scoped tag"
-assert_no_match 'put-image.*repository-name skynet/(backend|litellm).*--image-tag ctx-' "$TEST_AWS_LOG" ||
-  fail "shared backend or LiteLLM tag received an unused context-key tag"
+  fail "staging build failed without frontend ctx reuse"
+[[ "$(grep -c '^build:' "$TEST_EVENT_LOG")" -eq 3 ]] ||
+  fail "staging did not build all images without existing SHA tags"
+assert_no_match '--query imageDetails\[0\]\.imagePushedAt' "$TEST_AWS_LOG" ||
+  fail "staging used a frontend context-key freshness lookup"
+assert_no_match 'batch-get-image.*repository-name skynet/frontend' "$TEST_AWS_LOG" ||
+  fail "staging retagged a frontend context key"
+grep -Eq 'put-image --repository-name skynet/backend --image-tag tree-' "$TEST_AWS_LOG" ||
+  fail "staging did not retain the backend tree-key tag"
 
-unset TEST_CTX_HIT
 rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
 CURRENT_LOG="$tmp/production.log"
 : >"$CURRENT_LOG"

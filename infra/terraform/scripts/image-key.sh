@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 # Keys include Git context bytes, pinned sources, Buildx inputs, build args,
-# and a weekly version. Empty output means build; tree- omits GIT_SHA.
-# Frontend environment tags use ctx-key reuse; backend tree keys support previews.
-# Shared backend and LiteLLM tags never receive unused ctx-key tags.
+# and a weekly version. Empty output means build; tree- omits only GIT_SHA.
+# APP_GIT_SHA and every other build argument remain in the key.
 # The weekly cache rotation bounds unpinned RUN-time network inputs to one week;
 # the first build each week is cold, so this is a documented freshness gap.
 KEY_VERSION=6
 
-IMAGE_KEY_CTX=""
 IMAGE_KEY_TREE=""
 IMAGE_BUILD_CONTEXT_ARGS=()
 IMAGE_PINNED_DIGESTS=()
@@ -17,7 +15,6 @@ IMAGE_KEY_BUILD_FLAGS=()
 IMAGE_KEY_BUILD_DRIVER=""
 
 _clear_image_inputs() {
-  IMAGE_KEY_CTX=""
   IMAGE_KEY_TREE=""
   IMAGE_BUILD_CONTEXT_ARGS=()
   IMAGE_PINNED_DIGESTS=()
@@ -215,7 +212,7 @@ _hash_image_key() {
 _image_inputs_impl() {
   local context_dir="$1" week="$2" repo_root context_path status dockerfile config_value config_status
   shift 2
-  local -a raw_build_args=("$@") build_args=() tree_args=() words=() base_digests=()
+  local -a raw_build_args=("$@") tree_args=() words=() base_digests=()
   local line trimmed logical instruction ref image_ref alias digest_json digest mount
   local context_alias
   local stage_count=0 index from_ref source buildx_version builder_info buildkit_version driver
@@ -293,7 +290,6 @@ _image_inputs_impl() {
       --build-arg=*) line="${line#--build-arg=}" ;;
     esac
     [[ "$line" == *=* && "${line%%=*}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 1
-    build_args+=("$line")
     [[ "$line" == GIT_SHA=* ]] || tree_args+=("$line")
   done
 
@@ -448,8 +444,6 @@ _image_inputs_impl() {
   [[ -n "$buildkit_version" ]] || return 1
   IMAGE_KNOWN_STAGES=""
 
-  IMAGE_KEY_CTX="$(_hash_image_key ctx "$context_hash" "$buildx_version" "$buildkit_version" \
-    "$week" "${build_args[@]+"${build_args[@]}"}")" || return 1
   IMAGE_KEY_TREE="$(_hash_image_key tree "$context_hash" "$buildx_version" "$buildkit_version" \
     "$week" "${tree_args[@]+"${tree_args[@]}"}")" || return 1
 }
@@ -480,7 +474,7 @@ image_key() {
   fi
   shift 2
   case "$prefix" in
-    ctx | tree) ;;
+    tree) ;;
     *)
       _clear_image_inputs
       printf '\n'
@@ -493,11 +487,7 @@ image_key() {
     return 0
   fi
   image_inputs "$context_dir" "$week" "$@"
-  case "$prefix" in
-    ctx) printf '%s\n' "$IMAGE_KEY_CTX" ;;
-    tree) printf '%s\n' "$IMAGE_KEY_TREE" ;;
-    *) printf '\n' ;;
-  esac
+  printf '%s\n' "$IMAGE_KEY_TREE"
 }
 
 verify_image_sources() {
@@ -554,9 +544,9 @@ _image_reuse_warning() {
 }
 
 find_fresh_by_key() {
-  local repo="$1" key="$2" pushed pushed_at source_digest now response next_token page_entries digest item_pushed source_seen=false newer
-  local -a page_args=() image_timestamps=()
-  local -A seen_digests=() seen_tokens=()
+  local repo="$1" key="$2" pushed pushed_at source_digest now response page_entries digest item_pushed source_seen=false newer
+  local -a image_timestamps=()
+  local -A seen_digests=()
   if ! pushed="$(aws ecr describe-images --repository-name "$repo" --image-ids "imageTag=$key" \
     --query 'imageDetails[0].imagePushedAt' --output text 2>/dev/null)"; then
     _image_reuse_warning "$repo" "$key"
@@ -578,54 +568,39 @@ find_fresh_by_key() {
   fi
   ((now - pushed_at < 11 * 86400)) || return 1
 
-  next_token=""
-  while :; do
-    page_args=(ecr describe-images --repository-name "$repo" --filter tagStatus=TAGGED --max-results 1000 --output json)
-    [[ -z "$next_token" ]] || page_args+=(--starting-token "$next_token")
-    if ! response="$(aws "${page_args[@]}" 2>/dev/null)"; then
-      _image_reuse_warning "$repo" "$key"
-      return 1
-    fi
-    if ! jq -e '
+  if ! response="$(aws ecr describe-images --repository-name "$repo" --filter tagStatus=TAGGED \
+    --page-size 1000 --output json 2>/dev/null)"; then
+    _image_reuse_warning "$repo" "$key"
+    return 1
+  fi
+  if ! jq -e '
+        type == "object" and
+        (.imageDetails | type == "array") and
+        all(.imageDetails[];
           type == "object" and
-          (.imageDetails | type == "array") and
-          all(.imageDetails[];
-            type == "object" and
-            (.imageDigest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
-            (.imagePushedAt | type == "string" and length > 0)
-          ) and
-      ((.nextToken? == null) or (.nextToken | type == "string" and length > 0))
-    ' <<<"$response" >/dev/null 2>&1; then
-      _image_reuse_warning "$repo" "$key"
-      return 1
-    fi
-    if ! page_entries="$(jq -r '.imageDetails[] | [.imageDigest, .imagePushedAt] | @tsv' \
-      <<<"$response" 2>/dev/null)"; then
-      _image_reuse_warning "$repo" "$key"
-      return 1
-    fi
-    while IFS=$'\t' read -r digest item_pushed; do
-      [[ -n "$digest" ]] || continue
-      if [[ -z "${seen_digests[$digest]+x}" ]]; then
-        seen_digests["$digest"]=1
-        if [[ "$digest" == "$source_digest" ]]; then
-          source_seen=true
-        else
-          image_timestamps+=("$item_pushed")
-        fi
+          (.imageDigest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+          (.imagePushedAt | type == "string" and length > 0)
+        )
+  ' <<<"$response" >/dev/null 2>&1; then
+    _image_reuse_warning "$repo" "$key"
+    return 1
+  fi
+  if ! page_entries="$(jq -r '.imageDetails[] | [.imageDigest, .imagePushedAt] | @tsv' \
+    <<<"$response" 2>/dev/null)"; then
+    _image_reuse_warning "$repo" "$key"
+    return 1
+  fi
+  while IFS=$'\t' read -r digest item_pushed; do
+    [[ -n "$digest" ]] || continue
+    if [[ -z "${seen_digests[$digest]+x}" ]]; then
+      seen_digests["$digest"]=1
+      if [[ "$digest" == "$source_digest" ]]; then
+        source_seen=true
+      else
+        image_timestamps+=("$item_pushed")
       fi
-    done <<<"$page_entries"
-    if ! next_token="$(jq -r '.nextToken // empty' <<<"$response" 2>/dev/null)"; then
-      _image_reuse_warning "$repo" "$key"
-      return 1
     fi
-    [[ -n "$next_token" ]] || break
-    if [[ -n "${seen_tokens[$next_token]+x}" ]]; then
-      _image_reuse_warning "$repo" "$key"
-      return 1
-    fi
-    seen_tokens["$next_token"]=1
-  done
+  done <<<"$page_entries"
   [[ "$source_seen" == true ]] || {
     _image_reuse_warning "$repo" "$key"
     return 1

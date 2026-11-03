@@ -160,7 +160,7 @@ build_backend() {
   buildx_flags=("${IMAGE_KEY_BUILD_FLAGS[@]}")
   image_inputs "$repo_root/backend" "$week" "GIT_SHA=$sha" || return 1
   pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
-  [[ -n "$IMAGE_KEY_CTX" ]] ||
+  [[ -n "$IMAGE_KEY_TREE" ]] ||
     echo "warning: backend inputs could not be verified; building without pinned build contexts" >&2
   staging_cache="$(latest_cache_ref skynet/buildcache-staging "backend-$week-")" || return 1
   preview_cache="$(latest_cache_ref skynet/preview-buildcache "preview-backend-pr${pr}-$week-")" || return 1
@@ -210,7 +210,7 @@ build_frontend() {
   buildx_flags=("${IMAGE_KEY_BUILD_FLAGS[@]}")
   image_inputs "$repo_root/frontend" "$week" "${build_args[@]+"${build_args[@]}"}" || return 1
   pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
-  [[ -n "$IMAGE_KEY_CTX" ]] ||
+  [[ -n "$IMAGE_KEY_TREE" ]] ||
     echo "warning: frontend inputs could not be verified; building without pinned build contexts" >&2
   for build_arg in "${build_args[@]+"${build_args[@]}"}"; do docker_args+=(--build-arg "$build_arg"); done
   staging_cache="$(latest_cache_ref skynet/buildcache-staging "frontend-staging-$week-")" || return 1

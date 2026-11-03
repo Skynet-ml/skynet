@@ -47,7 +47,7 @@ aws ecr get-login-password | docker login --username AWS --password-stdin "$regi
 build() {
   local name="$1" tag="$2" context="$3" cache_name="$4"
   shift 4
-  local url key tree_key cache_tag cache_repo week metadata_file="" build_succeeded
+  local url tree_key cache_tag cache_repo week metadata_file="" build_succeeded
   local -a build_args=("$@") pin_args=() cache_from=() metadata_args=() buildx_flags=()
   url="$(jq -r --arg n "$name" '.ecr[$n]' <<<"$cfg")" || return 1
   [[ -n "$url" && "$url" != null ]] || return 1
@@ -61,27 +61,16 @@ build() {
   image_build_flags "$context" || return 1
   buildx_flags=("${IMAGE_KEY_BUILD_FLAGS[@]}")
   image_inputs "$context" "$week" "${build_args[@]+"${build_args[@]}"}" || return 1
-  key="$IMAGE_KEY_CTX"
   tree_key="$IMAGE_KEY_TREE"
   pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
-  # Production consumes the plain <sha> tag, so shared tags need a fresh build.
-  if [[ "$env" != production && "$tag" == *-"$env" && -n "$key" ]] &&
-    find_fresh_by_key "skynet/$name" "$key"; then
-    if retag "skynet/$name" "$key" "$tag"; then
-      echo "reuse: $url:$key as $tag"
-      return 0
-    fi
-    echo "warning: cannot retag $url:$key as $tag; building" >&2
-  fi
-
-  if [[ -z "$key" ]]; then
-    echo "warning: image inputs could not be verified for $url; building without keyed image reuse" >&2
+  if [[ -z "$tree_key" ]]; then
+    echo "warning: image inputs could not be verified for $url; building without pinned build contexts" >&2
   fi
   cache_tag="$(latest_cache_ref "$cache_repo" "$cache_name-$week-")" || return 1
   if [[ -n "$cache_tag" ]]; then
     cache_from+=(--cache-from "type=registry,ref=$registry/$cache_repo:$cache_tag")
   fi
-  if [[ "$env" != production && -n "$key" && ( "$name" == backend || "$name" == frontend ) ]]; then
+  if [[ "$env" != production && "$name" == backend && -n "$tree_key" ]]; then
     metadata_file="$(mktemp)" || return 1
     [[ -n "$metadata_file" ]] || return 1
     metadata_args+=(--metadata-file "$metadata_file")
@@ -115,16 +104,12 @@ build() {
     die "push failed: $url:$tag"
   fi
 
-  if [[ "$env" != production && -n "$key" && -n "$metadata_file" ]]; then
+  if [[ "$env" != production && "$name" == backend && -n "$tree_key" && -n "$metadata_file" ]]; then
     if verify_image_sources "$metadata_file"; then
       if ! refresh_aws_credentials; then
         echo "warning: cannot refresh AWS credentials after push; skipping image-key tags for $url:$tag" >&2
       else
-        if [[ "$name" == frontend ]] && ! retag "skynet/frontend" "$tag" "$key"; then
-          echo "warning: cannot add image-key tag $url:$key" >&2
-        fi
-        if [[ "$name" == backend && -n "$tree_key" ]] &&
-          ! retag skynet/backend "$tag" "$tree_key"; then
+        if ! retag skynet/backend "$tag" "$tree_key"; then
           echo "warning: cannot add tree image-key tag skynet/backend:$tree_key" >&2
         fi
       fi
@@ -174,14 +159,30 @@ wait_for_lane_success() {
       [[ ! -e "$lane_dir/$lane.failed" ]] || return 1
       [[ -e "$lane_dir/$lane.ok" ]] && continue
       all_done=false
-      kill -0 "$pid" 2>/dev/null || return 1
+      if ! kill -0 "$pid" 2>/dev/null; then
+        _lane_status_after_exit "$lane" && continue
+        return 1
+      fi
       # A finished child stays a zombie until the parent waits for it.
-      state="$(ps -o stat= -p "$pid" 2>/dev/null)" || return 1
-      [[ -n "$state" && "$state" != Z* ]] || return 1
+      if ! state="$(ps -o stat= -p "$pid" 2>/dev/null)"; then
+        _lane_status_after_exit "$lane" && continue
+        return 1
+      fi
+      if [[ -z "$state" || "$state" == Z* ]]; then
+        _lane_status_after_exit "$lane" && continue
+        return 1
+      fi
     done
     [[ "$all_done" == true ]] && return 0
     sleep 1 || return 1
   done
+}
+
+_lane_status_after_exit() {
+  local lane="$1"
+  [[ -e "$lane_dir/$lane.ok" ]] && return 0
+  [[ -e "$lane_dir/$lane.failed" ]] && return 1
+  return 2
 }
 
 # A nested shell keeps die from bypassing final lane status publication.

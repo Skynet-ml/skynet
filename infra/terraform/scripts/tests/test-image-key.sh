@@ -184,33 +184,30 @@ case "${0##*/}" in
           exit 0
         fi
         if [[ "$*" == *"--filter tagStatus=TAGGED"* && "${LIFECYCLE_COUNT_TEST:-}" == true ]]; then
+          [[ "$*" == *"--page-size 1000"* && "$*" != *"--max-results"* &&
+            "$*" != *"--starting-token"* ]] || exit 16
+          [[ -z "${LIFECYCLE_CALLS_OUT:-}" ]] || printf 'list\n' >>"$LIFECYCLE_CALLS_OUT"
+          [[ -z "${LIFECYCLE_ARGS_OUT:-}" ]] || printf '%s\n' "$*" >"$LIFECYCLE_ARGS_OUT"
           [[ "${LIFECYCLE_LIST_ERROR:-}" != true ]] || {
             printf '%s\n' 'AccessDeniedException' >&2
             exit 254
           }
-          [[ "${LIFECYCLE_PARTIAL_PAGE:-}" != true ]] || {
-            printf '%s\n' '{"nextToken":"page2"}'
+          [[ "${LIFECYCLE_MALFORMED:-}" != true ]] || {
+            printf '%s\n' '{"imageDetails":"not-an-array"}'
             exit 0
           }
           listing="$(jq -nc --arg source "$PUSHED_AT" --arg newer "$LIFECYCLE_NEWER_AT" \
             --argjson count "$LIFECYCLE_NEWER_COUNT" '
             {imageDetails: ([
               {imageDigest:"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-               imagePushedAt:$source,imageTags:["ctx-test"]}
+               imagePushedAt:$source,imageTags:["tree-test"]}
             ] + [
               range(0; $count) as $index |
               {imageDigest:("sha256:" + ("0" * (64 - ($index | tostring | length))) + ($index | tostring)),
                imagePushedAt:$newer,imageTags:["tag-\($index)"]}
             ])}
           ')"
-          if [[ "$*" == *"--starting-token page2"* ]]; then
-            jq -c '{imageDetails:.imageDetails[26:]}' <<<"$listing"
-          else
-            jq -c '{
-              imageDetails:.imageDetails[:26],
-              nextToken:(if (.imageDetails | length) > 26 then "page2" else null end)
-            }' <<<"$listing"
-          fi
+          printf '%s\n' "$listing"
           exit 0
         fi
         if [[ "${LATEST_CACHE_TEST:-}" == true ]]; then
@@ -305,69 +302,68 @@ fail() {
   exit 1
 }
 
-key="$(image_key "$repo_root/backend" ctx GIT_SHA=abc FEATURE=on)"
-[[ "$key" =~ ^ctx-[0-9a-f]{40}$ ]] || fail "key format: $key"
-[[ "$key" == "$(image_key "$repo_root/backend" ctx FEATURE=on GIT_SHA=abc)" ]] || fail "input order changed key"
+key="$(image_key "$repo_root/backend" tree GIT_SHA=abc FEATURE=on)"
+[[ "$key" =~ ^tree-[0-9a-f]{40}$ ]] || fail "key format: $key"
+[[ "$key" == "$(image_key "$repo_root/backend" tree FEATURE=on GIT_SHA=abc)" ]] || fail "input order changed key"
 tree_key="$(image_key "$repo_root/backend" tree GIT_SHA=abc FEATURE=on)"
 [[ "$tree_key" =~ ^tree-[0-9a-f]{40}$ ]] || fail "tree key format: $tree_key"
 [[ "$tree_key" == "$(image_key "$repo_root/backend" tree GIT_SHA=def FEATURE=on)" ]] ||
   fail "tree key changed with GIT_SHA"
 [[ "$tree_key" != "$(image_key "$repo_root/backend" tree GIT_SHA=abc FEATURE=off)" ]] ||
   fail "tree key ignored a non-GIT_SHA build arg"
-[[ "$key" != "$(image_key "$repo_root/backend" ctx GIT_SHA=def FEATURE=on)" ]] || fail "ctx key ignored GIT_SHA"
 TREE_HASH=tree-two
-[[ "$key" != "$(image_key "$repo_root/backend" ctx GIT_SHA=abc FEATURE=on)" ]] || fail "tree change kept key"
+[[ "$key" != "$(image_key "$repo_root/backend" tree GIT_SHA=abc FEATURE=on)" ]] || fail "tree change kept key"
 TREE_HASH=tree-one
 BASE_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-[[ "$key" != "$(image_key "$repo_root/backend" ctx GIT_SHA=abc FEATURE=on)" ]] || fail "base digest change kept key"
+[[ "$key" != "$(image_key "$repo_root/backend" tree GIT_SHA=abc FEATURE=on)" ]] || fail "base digest change kept key"
 unset BASE_DIGEST
-[[ "$key" != "$(image_key "$repo_root/backend" ctx GIT_SHA=abc FEATURE=off)" ]] || fail "build arg change kept key"
+[[ "$key" != "$(image_key "$repo_root/backend" tree GIT_SHA=abc FEATURE=off)" ]] || fail "build arg change kept key"
 BUILDX_VERSION=v0.36.2
-[[ "$key" != "$(image_key "$repo_root/backend" ctx GIT_SHA=abc FEATURE=on)" ]] || fail "buildx version change kept key"
+[[ "$key" != "$(image_key "$repo_root/backend" tree GIT_SHA=abc FEATURE=on)" ]] || fail "buildx version change kept key"
 unset BUILDX_VERSION
 BUILDKIT_VERSION=v0.32.3
-[[ "$key" != "$(image_key "$repo_root/backend" ctx GIT_SHA=abc FEATURE=on)" ]] || fail "BuildKit version change kept key"
+[[ "$key" != "$(image_key "$repo_root/backend" tree GIT_SHA=abc FEATURE=on)" ]] || fail "BuildKit version change kept key"
 unset BUILDKIT_VERSION
 image_inputs "$repo_root/backend" 2026-W01 GIT_SHA=abc FEATURE=on
-week_one="$IMAGE_KEY_CTX"
+week_one="$IMAGE_KEY_TREE"
 image_inputs "$repo_root/backend" 2026-W02 GIT_SHA=abc FEATURE=on
-[[ "$week_one" != "$IMAGE_KEY_CTX" ]] || fail "week change kept key"
+[[ "$week_one" != "$IMAGE_KEY_TREE" ]] || fail "week change kept key"
 DIRTY_TREE=' M backend/Dockerfile'
-[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "dirty tree produced key"
+[[ -z "$(image_key "$repo_root/backend" tree GIT_SHA=abc)" ]] || fail "dirty tree produced key"
 DIRTY_TREE='!! backend/ignored-file'
-[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "ignored file produced key"
+[[ -z "$(image_key "$repo_root/backend" tree GIT_SHA=abc)" ]] || fail "ignored file produced key"
 unset DIRTY_TREE
 TEST_CORE_AUTOCRLF=true
-[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "non-default core.autocrlf produced key"
+[[ -z "$(image_key "$repo_root/backend" tree GIT_SHA=abc)" ]] || fail "non-default core.autocrlf produced key"
 unset TEST_CORE_AUTOCRLF
 TEST_CORE_EOL=crlf
-[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "non-default core.eol produced key"
+[[ -z "$(image_key "$repo_root/backend" tree GIT_SHA=abc)" ]] || fail "non-default core.eol produced key"
 unset TEST_CORE_EOL
 TEST_CORE_SYMLINKS=false
-[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "core.symlinks=false produced key"
+[[ -z "$(image_key "$repo_root/backend" tree GIT_SHA=abc)" ]] || fail "core.symlinks=false produced key"
 unset TEST_CORE_SYMLINKS
 TEST_CORE_FILEMODE=false
-[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "core.fileMode=false produced key"
+[[ -z "$(image_key "$repo_root/backend" tree GIT_SHA=abc)" ]] || fail "core.fileMode=false produced key"
 unset TEST_CORE_FILEMODE
 TEST_CORE_FSMONITOR=true
-[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "core.fsmonitor produced key"
+[[ -z "$(image_key "$repo_root/backend" tree GIT_SHA=abc)" ]] || fail "core.fsmonitor produced key"
 unset TEST_CORE_FSMONITOR
 TEST_CORE_UNTRACKEDCACHE=true
-[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "core.untrackedCache=true produced key"
+[[ -z "$(image_key "$repo_root/backend" tree GIT_SHA=abc)" ]] || fail "core.untrackedCache=true produced key"
 unset TEST_CORE_UNTRACKEDCACHE
 TEST_INDEX_FLAG=h
-[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "assume-unchanged file produced key"
+[[ -z "$(image_key "$repo_root/backend" tree GIT_SHA=abc)" ]] || fail "assume-unchanged file produced key"
 TEST_INDEX_FLAG=S
-[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "skip-worktree file produced key"
+[[ -z "$(image_key "$repo_root/backend" tree GIT_SHA=abc)" ]] || fail "skip-worktree file produced key"
 unset TEST_INDEX_FLAG
 TEST_SPARSE_CHECKOUT=true
-[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "sparse checkout produced key"
+[[ -z "$(image_key "$repo_root/backend" tree GIT_SHA=abc)" ]] || fail "sparse checkout produced key"
 unset TEST_SPARSE_CHECKOUT
 DOCKER_BUILDKIT=0
-[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "DOCKER_BUILDKIT=0 produced key"
+[[ -z "$(image_key "$repo_root/backend" tree GIT_SHA=abc)" ]] || fail "DOCKER_BUILDKIT=0 produced key"
 unset DOCKER_BUILDKIT
 DIGEST_FAIL=true
-[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "unresolved base produced key"
+[[ -z "$(image_key "$repo_root/backend" tree GIT_SHA=abc)" ]] || fail "unresolved base produced key"
 unset DIGEST_FAIL
 DESCRIBE_ERROR=true
 if find_by_key skynet/backend "$key"; then fail "AccessDenied looked like a hit"; fi
@@ -402,29 +398,43 @@ export FRESHNESS_TEST=true
 PUSHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 export PUSHED_AT
 export LIFECYCLE_COUNT_TEST=true
+export LIFECYCLE_CALLS_OUT="$tmp/lifecycle-calls" LIFECYCLE_ARGS_OUT="$tmp/lifecycle-args"
 LIFECYCLE_NEWER_AT="$(python3 -c 'from datetime import datetime, timedelta; import sys; print((datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00")) + timedelta(seconds=1)).isoformat())' "$PUSHED_AT")"
 export LIFECYCLE_NEWER_AT
 export DATE_PARSE_FAIL=true LIFECYCLE_NEWER_COUNT=49
+: >"$LIFECYCLE_CALLS_OUT"
 find_fresh_by_key skynet/backend "$key" || fail "fresh keyed image was not reused"
+[[ "$(wc -l <"$LIFECYCLE_CALLS_OUT")" -eq 1 ]] || fail "lifecycle listing did not use one CLI call"
+grep -Fq -- '--page-size 1000' "$LIFECYCLE_ARGS_OUT" ||
+  fail "lifecycle listing did not use --page-size 1000"
+if grep -Eq -- '--max-results|--starting-token' "$LIFECYCLE_ARGS_OUT"; then
+  fail "lifecycle listing used manual pagination arguments"
+fi
 unset DATE_PARSE_FAIL
 export LIFECYCLE_NEWER_COUNT=50
+: >"$LIFECYCLE_CALLS_OUT"
 if find_fresh_by_key skynet/backend "$key"; then fail "50 newer images did not block keyed reuse"; fi
+[[ "$(wc -l <"$LIFECYCLE_CALLS_OUT")" -eq 1 ]] || fail "50-image count used more than one listing call"
 export LIFECYCLE_LIST_ERROR=true
+: >"$LIFECYCLE_CALLS_OUT"
 if find_fresh_by_key skynet/backend "$key" 2>"$tmp/lifecycle-list-error.log"; then
   fail "lifecycle listing error allowed keyed reuse"
 fi
+[[ "$(wc -l <"$LIFECYCLE_CALLS_OUT")" -eq 1 ]] || fail "CLI error used more than one listing call"
 [[ "$(wc -l <"$tmp/lifecycle-list-error.log")" -eq 1 ]] ||
   fail "lifecycle listing error did not produce one warning line"
 grep -Fq 'warning: cannot verify lifecycle position of skynet/backend:' "$tmp/lifecycle-list-error.log" ||
   fail "lifecycle listing error warning did not explain the build fallback"
 unset LIFECYCLE_LIST_ERROR
-export LIFECYCLE_PARTIAL_PAGE=true
-if find_fresh_by_key skynet/backend "$key" 2>"$tmp/lifecycle-partial-page.log"; then
-  fail "partial lifecycle page allowed keyed reuse"
+export LIFECYCLE_MALFORMED=true
+: >"$LIFECYCLE_CALLS_OUT"
+if find_fresh_by_key skynet/backend "$key" 2>"$tmp/lifecycle-malformed.log"; then
+  fail "malformed lifecycle output allowed keyed reuse"
 fi
-[[ "$(wc -l <"$tmp/lifecycle-partial-page.log")" -eq 1 ]] ||
-  fail "partial lifecycle page did not produce one warning line"
-unset LIFECYCLE_PARTIAL_PAGE LIFECYCLE_COUNT_TEST LIFECYCLE_NEWER_COUNT LIFECYCLE_NEWER_AT
+[[ "$(wc -l <"$LIFECYCLE_CALLS_OUT")" -eq 1 ]] || fail "malformed output used more than one listing call"
+[[ "$(wc -l <"$tmp/lifecycle-malformed.log")" -eq 1 ]] ||
+  fail "malformed lifecycle output did not produce one warning line"
+unset LIFECYCLE_MALFORMED LIFECYCLE_COUNT_TEST LIFECYCLE_NEWER_COUNT LIFECYCLE_NEWER_AT
 PUSHED_AT=2000-01-01T00:00:00Z
 if find_fresh_by_key skynet/backend "$key"; then fail "stale keyed image was reused"; fi
 unset FRESHNESS_TEST PUSHED_AT
@@ -548,16 +558,16 @@ FROM node:20-alpine AS base
 FROM base AS final
 COPY --from=final /etc/os-release /os-release
 DOCKERFILE
-ignored_key="$(image_key "$test_context" ctx GIT_SHA=abc)"
-[[ "$ignored_key" =~ ^ctx-[0-9a-f]{40}$ ]] || fail "valid context key: $ignored_key"
+ignored_key="$(image_key "$test_context" tree GIT_SHA=abc)"
+[[ "$ignored_key" =~ ^tree-[0-9a-f]{40}$ ]] || fail "valid tree key: $ignored_key"
 chmod 0600 "$test_context/Dockerfile"
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] ||
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] ||
   fail "noncanonical tracked worktree mode produced key"
 chmod 0644 "$test_context/Dockerfile"
 : >"$DIGEST_CALLS_OUT"
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-[[ "$IMAGE_KEY_CTX" =~ ^ctx-[0-9a-f]{40}$ && "$IMAGE_KEY_TREE" =~ ^tree-[0-9a-f]{40}$ ]] ||
-  fail "one image_inputs call did not set both keys"
+[[ "$IMAGE_KEY_TREE" =~ ^tree-[0-9a-f]{40}$ ]] ||
+  fail "image_inputs did not set a tree key"
 ((${#IMAGE_BUILD_CONTEXT_ARGS[@]} == 2)) || fail "pinned build-context args were not set"
 [[ "$(wc -l <"$DIGEST_CALLS_OUT")" -eq 1 ]] || fail "FROM digest was resolved more than once"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
@@ -567,65 +577,62 @@ image_inputs "$test_context" "$test_week" GIT_SHA=abc
 printf '%s\n' "${IMAGE_BUILD_CONTEXT_ARGS[@]}" |
   grep -Fxq 'node:20-alpine=docker-image://docker.io/node:20-alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ||
   fail "normalized docker.io build-context alias was not pinned"
-image_inputs "$test_context" "$test_week" --build-arg GIT_SHA=abc --build-arg FEATURE=on
-staging_ctx="$IMAGE_KEY_CTX"
+image_inputs "$test_context" "$test_week" --build-arg GIT_SHA=abc --build-arg APP_GIT_SHA=abc --build-arg FEATURE=on
 staging_tree="$IMAGE_KEY_TREE"
-image_inputs "$test_context" "$test_week" GIT_SHA=abc FEATURE=off
-[[ "$staging_tree" != "$IMAGE_KEY_TREE" ]] || fail "tree key ignored a non-GIT_SHA build arg"
-image_inputs "$test_context" "$test_week" GIT_SHA=def FEATURE=on
-preview_ctx="$IMAGE_KEY_CTX"
-[[ "$staging_tree" == "$IMAGE_KEY_TREE" ]] || fail "tree key differs between staging and preview caller forms"
-[[ "$staging_ctx" != "$preview_ctx" ]] || fail "ctx key ignored the staging GIT_SHA argument"
-image_inputs "$test_context" "$test_week" GIT_SHA=abc FEATURE=on
-[[ "$staging_ctx" == "$IMAGE_KEY_CTX" ]] || fail "normalized build arguments changed the ctx key"
+image_inputs "$test_context" "$test_week" GIT_SHA=abc APP_GIT_SHA=def FEATURE=on
+[[ "$staging_tree" != "$IMAGE_KEY_TREE" ]] || fail "tree key omitted APP_GIT_SHA"
+image_inputs "$test_context" "$test_week" GIT_SHA=def APP_GIT_SHA=abc FEATURE=on
+[[ "$staging_tree" == "$IMAGE_KEY_TREE" ]] || fail "tree key changed with GIT_SHA"
+image_inputs "$test_context" "$test_week" GIT_SHA=abc APP_GIT_SHA=abc FEATURE=on
+[[ "$staging_tree" == "$IMAGE_KEY_TREE" ]] || fail "normalized build arguments changed the tree key"
 image_inputs "$test_context" "$test_week"
-[[ "$IMAGE_KEY_CTX" =~ ^ctx-[0-9a-f]{40}$ ]] || fail "empty build-arg array produced no key"
+[[ "$IMAGE_KEY_TREE" =~ ^tree-[0-9a-f]{40}$ ]] || fail "empty build-arg array produced no key"
 image_inputs "$test_context" 2026-W01 GIT_SHA=abc
-week_one_key="$IMAGE_KEY_CTX"
+week_one_key="$IMAGE_KEY_TREE"
 image_inputs "$test_context" 2026-W02 GIT_SHA=abc
-[[ "$week_one_key" != "$IMAGE_KEY_CTX" ]] || fail "week change kept the context key"
+[[ "$week_one_key" != "$IMAGE_KEY_TREE" ]] || fail "week change kept the tree key"
 old_umask="$(umask)"
 umask 022
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-umask_key="$IMAGE_KEY_CTX"
+umask_key="$IMAGE_KEY_TREE"
 umask 077
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-[[ "$umask_key" != "$IMAGE_KEY_CTX" ]] || fail "umask change kept the context key"
+[[ "$umask_key" != "$IMAGE_KEY_TREE" ]] || fail "umask change kept the tree key"
 umask "$old_umask"
 unset SOURCE_DATE_EPOCH BUILDX_METADATA_PROVENANCE
 IMAGE_KEY_BUILD_FLAGS=(--platform linux/arm64 --provenance=false --file "$test_context/Dockerfile")
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-flag_key="$IMAGE_KEY_CTX"
+flag_key="$IMAGE_KEY_TREE"
 IMAGE_KEY_BUILD_FLAGS+=(--target release)
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-[[ "$flag_key" != "$IMAGE_KEY_CTX" ]] || fail "Buildx flags did not change the key"
+[[ "$flag_key" != "$IMAGE_KEY_TREE" ]] || fail "Buildx flags did not change the key"
 IMAGE_KEY_BUILD_FLAGS=(--platform linux/arm64 --provenance=false --file "$test_context/Dockerfile")
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-epoch_key="$IMAGE_KEY_CTX"
+epoch_key="$IMAGE_KEY_TREE"
 export SOURCE_DATE_EPOCH=123
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-[[ "$epoch_key" != "$IMAGE_KEY_CTX" ]] || fail "SOURCE_DATE_EPOCH did not change the key"
+[[ "$epoch_key" != "$IMAGE_KEY_TREE" ]] || fail "SOURCE_DATE_EPOCH did not change the key"
 unset SOURCE_DATE_EPOCH
 export BUILDX_METADATA_PROVENANCE=attest
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-env_key="$IMAGE_KEY_CTX"
+env_key="$IMAGE_KEY_TREE"
 export BUILDX_METADATA_PROVENANCE=min
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-[[ "$env_key" != "$IMAGE_KEY_CTX" ]] || fail "BUILDX_* environment did not change the key"
+[[ "$env_key" != "$IMAGE_KEY_TREE" ]] || fail "BUILDX_* environment did not change the key"
 unset BUILDX_METADATA_PROVENANCE
 export BUILDX_GIT_LABELS=true BUILDX_GIT_INFO=true
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-env_key="$IMAGE_KEY_CTX"
+env_key="$IMAGE_KEY_TREE"
 export BUILDX_GIT_LABELS=false BUILDX_GIT_INFO=false
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-[[ "$env_key" != "$IMAGE_KEY_CTX" ]] || fail "Buildx Git environment did not change the key"
+[[ "$env_key" != "$IMAGE_KEY_TREE" ]] || fail "Buildx Git environment did not change the key"
 unset BUILDX_GIT_LABELS BUILDX_GIT_INFO
 export BUILDX_BUILDER=builder-one
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-builder_key="$IMAGE_KEY_CTX"
+builder_key="$IMAGE_KEY_TREE"
 export BUILDX_BUILDER=builder-two
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-[[ "$builder_key" == "$IMAGE_KEY_CTX" ]] || fail "builder identity changed the key"
+[[ "$builder_key" == "$IMAGE_KEY_TREE" ]] || fail "builder identity changed the key"
 unset BUILDX_BUILDER
 image_build_flags "$test_context"
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
@@ -638,11 +645,11 @@ image_inputs "$tmp/another-checkout/backend" "$test_week" GIT_SHA=abc
 # shellcheck disable=SC2034
 export BUILDKIT_DRIVER=docker
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-driver_key="$IMAGE_KEY_CTX"
+driver_key="$IMAGE_KEY_TREE"
 # shellcheck disable=SC2034
 export BUILDKIT_DRIVER=docker-container
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-[[ "$driver_key" != "$IMAGE_KEY_CTX" ]] || fail "builder driver did not change the key"
+[[ "$driver_key" != "$IMAGE_KEY_TREE" ]] || fail "builder driver did not change the key"
 unset BUILDKIT_DRIVER
 IMAGE_KEY_BUILD_FLAGS=()
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
@@ -652,133 +659,133 @@ FROM scratch
 COPY --from=node22 /etc/os-release /node22
 COPY --from=node20 /etc/os-release /node20
 DOCKERFILE
-[[ "$(image_key "$test_context" ctx GIT_SHA=abc)" =~ ^ctx-[0-9a-f]{40}$ ]] ||
+[[ "$(image_key "$test_context" tree GIT_SHA=abc)" =~ ^tree-[0-9a-f]{40}$ ]] ||
   fail "platform FROM alias offsets produced no key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 # syntax=docker/dockerfile:1
 FROM node:20-alpine
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "syntax directive produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "syntax directive produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 # escape=`
 FROM node:20-alpine
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "escape directive produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "escape directive produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 # check=skip=JSONArgsRecommended
 FROM node:20-alpine
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "check directive produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "check directive produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine \
   AS continued
 DOCKERFILE
-[[ "$(image_key "$test_context" ctx GIT_SHA=abc)" =~ ^ctx-[0-9a-f]{40}$ ]] ||
+[[ "$(image_key "$test_context" tree GIT_SHA=abc)" =~ ^tree-[0-9a-f]{40}$ ]] ||
   fail "valid continued FROM produced no key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 COPY --from=missing /etc/os-release /os-release
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "unknown COPY stage produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "unknown COPY stage produced key"
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-[[ -z "$IMAGE_KEY_CTX" && -z "$IMAGE_KEY_TREE" ]] || fail "failed key kept a partial image key"
+[[ -z "$IMAGE_KEY_TREE" ]] || fail "failed key kept a partial image key"
 ((${#IMAGE_BUILD_CONTEXT_ARGS[@]} == 0)) || fail "failed key kept partial build contexts"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 ADD --from=missing /etc/os-release /os-release
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "unknown ADD stage produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "unknown ADD stage produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 COPY --from missing /etc/os-release /os-release
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "unknown spaced COPY stage produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "unknown spaced COPY stage produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 RUN --mount=type=bind,from=missing true
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "unknown RUN mount stage produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "unknown RUN mount stage produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 COPY \
   --from=ghcr.io/x /etc/os-release /os-release
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "continued COPY source produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "continued COPY source produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 RUN \
   --mount=type=bind,from=ghcr.io/x,target=/source true
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "continued RUN source produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "continued RUN source produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 RUN --mount=type=secret,id=token true
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "secret mount produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "secret mount produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 RUN --mount=type=ssh true
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "ssh mount produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "ssh mount produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 RUN <<EOF
 echo unsafe
 EOF
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "RUN heredoc produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "RUN heredoc produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 COPY <<EOF /tmp/file
 unsafe
 EOF
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "COPY heredoc produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "COPY heredoc produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 RUN \
   --mount=type=bind,from=ghcr.io/x,target=/source true
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "continued RUN mount produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "continued RUN mount produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 ADD /etc/os-release /os-release \
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "continued ADD produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "continued ADD produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 ADD https://example.invalid/source /source
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "network ADD produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "network ADD produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 ADD git@github.com:owner/repo.git /source
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "Git ADD produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "Git ADD produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 COPY ["source", "/source"]
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "JSON COPY produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "JSON COPY produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 ADD ["source", "/source"]
 DOCKERFILE
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "JSON ADD produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "JSON ADD produced key"
 FILTER_ATTR_PATH="$TEST_CONTEXT_PATH/Dockerfile"
 FILTER_ATTR_NAME=filter
 FILTER_ATTR_VALUE=lfs
 export FILTER_ATTR_PATH FILTER_ATTR_NAME FILTER_ATTR_VALUE
 printf '%s\n' 'FROM node:20-alpine AS pointer-one' >"$test_context/Dockerfile"
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-filtered_key_one="$IMAGE_KEY_CTX"
+filtered_key_one="$IMAGE_KEY_TREE"
 printf '%s\n' 'FROM node:20-alpine AS pointer-two' >"$test_context/Dockerfile"
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-[[ "$filtered_key_one" != "$IMAGE_KEY_CTX" ]] || fail "filtered worktree bytes did not change the key"
+[[ "$filtered_key_one" != "$IMAGE_KEY_TREE" ]] || fail "filtered worktree bytes did not change the key"
 ATTR_FAIL=true
 export ATTR_FAIL
-[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "check-attr failure produced key"
+[[ -z "$(image_key "$test_context" tree GIT_SHA=abc)" ]] || fail "check-attr failure produced key"
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
-[[ -z "$IMAGE_KEY_CTX" && ${#IMAGE_BUILD_CONTEXT_ARGS[@]} -eq 0 ]] ||
+[[ -z "$IMAGE_KEY_TREE" && ${#IMAGE_BUILD_CONTEXT_ARGS[@]} -eq 0 ]] ||
   fail "check-attr failure kept image inputs"
 printf '%s\n' 'image-key tests passed'
