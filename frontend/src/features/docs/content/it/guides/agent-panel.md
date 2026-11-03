@@ -98,7 +98,7 @@ Il menu dei modelli nel compositore ha questi gruppi:
 
 Alcuni modelli ti permettono di impostare l'impegno di ragionamento. I livelli sono **Nessuno**, **Minimo**, **Basso**, **Medio**, **Alto**, **Molto alto** e **Massimo**. **Predefinito** usa il livello predefinito del modello.
 
-Per impostare un modello predefinito per le nuove chat, apri **Impostazioni** > **Pannello dell'agente** > **Modello predefinito**. L'impostazione **Dettatura vocale** si trova nella stessa scheda.
+Per impostare un modello predefinito per le nuove chat, apri **Impostazioni** > **Pannello dell'agente** > **Modello predefinito**.
 
 ### Costo
 

@@ -98,7 +98,7 @@ Das Modellmenü im Eingabebereich hat diese Gruppen:
 
 Bei einigen Modellen können Sie den Denkaufwand festlegen. Die Stufen sind **Ohne**, **Minimal**, **Niedrig**, **Mittel**, **Hoch**, **Besonders hoch** und **Max**. **Standard** verwendet die Standardstufe des Modells.
 
-Um ein Standardmodell für neue Chats festzulegen, öffnen Sie **Einstellungen** > **Agentenbereich** > **Standardmodell**. Die Einstellung **Sprachdiktat** befindet sich im selben Tab.
+Um ein Standardmodell für neue Chats festzulegen, öffnen Sie **Einstellungen** > **Agentenbereich** > **Standardmodell**.
 
 ### Kosten
 

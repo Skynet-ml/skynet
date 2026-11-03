@@ -3,6 +3,7 @@
 The tool reuses the docs agent's BM25 index (:mod:`.docs_retrieval`), so a
 search costs no model call. Like the web tools, it is a plain async callable
 handed to the ReAct loop next to the MCP roster, not a route on ``/mcp``.
+The docs agent route runs the same search through :func:`search_corpus`.
 """
 
 from __future__ import annotations
@@ -20,6 +21,30 @@ _MAX_RESULTS = 8
 _DEFAULT_RESULTS = 4
 
 _corpus = DocsCorpus()
+
+
+def search_corpus(corpus: DocsCorpus, query: str, locale: str, limit: int = _DEFAULT_RESULTS) -> dict[str, Any]:
+    """Search one docs index and shape the hits as the ``search_docs`` result.
+
+    Args:
+        corpus: The docs index to search.
+        query: The question or keywords to look up.
+        locale: The docs language code; English is the fallback.
+        limit: How many passages to return at most (1-8).
+
+    Returns:
+        ``{query, results: [{title, href, text}], result_count}``.
+
+    Raises:
+        httpx.HTTPError: When no docs source can be loaded.
+    """
+    count = max(1, min(int(limit), _MAX_RESULTS))
+    hits = corpus.search(query, (locale or DEFAULT_LOCALE).strip(), limit=count)
+    results = [
+        {"title": passage.heading or passage.slug or "Docs", "href": passage.href, "text": passage.text}
+        for passage, _ in hits
+    ]
+    return {"query": query, "results": results, "result_count": len(results)}
 
 
 async def search_docs(query: str, locale: str = DEFAULT_LOCALE, limit: int = _DEFAULT_RESULTS) -> dict[str, Any]:
@@ -40,14 +65,8 @@ async def search_docs(query: str, locale: str = DEFAULT_LOCALE, limit: int = _DE
         a relative ``/docs/...`` link. No results means the docs do not cover
         the question.
     """
-    count = max(1, min(int(limit), _MAX_RESULTS))
     # The first search may read the docs folder or fetch ``/llms-full.txt``.
-    hits = await asyncio.to_thread(_corpus.search, query, (locale or DEFAULT_LOCALE).strip(), limit=count)
-    results = [
-        {"title": passage.heading or passage.slug or "Docs", "href": passage.href, "text": passage.text}
-        for passage, _ in hits
-    ]
-    return {"query": query, "results": results, "result_count": len(results)}
+    return await asyncio.to_thread(search_corpus, _corpus, query, locale, limit)
 
 
 def build_docs_tools() -> list[dspy.Tool]:

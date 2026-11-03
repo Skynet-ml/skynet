@@ -382,9 +382,235 @@ h1 {
   color: var(--warning);
 }
 
+/* Startup timeline: one row per step, with the running step's clock and bar. */
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px 12px;
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  font-variant-numeric: tabular-nums;
+}
+
+.tl-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.tl-title {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.tl-totals {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  white-space: nowrap;
+}
+
+.tl-left {
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+.tl-elapsed {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-1);
+}
+
+.tl-first {
+  margin: -4px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+.tl-steps {
+  list-style: none;
+  margin: 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+}
+
+.tl-step {
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  column-gap: 12px;
+  align-items: center;
+  min-height: 27px;
+  font-size: 13px;
+}
+
+.tl-icon {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 1.5px solid var(--input);
+  display: grid;
+  place-items: center;
+  font-size: 8.5px;
+  font-weight: 800;
+  line-height: 1;
+  color: #fff;
+}
+
+.tl-done .tl-icon {
+  border-color: var(--primary-fill);
+  background: var(--primary-fill);
+}
+
+.tl-active .tl-icon {
+  border: 2px solid var(--border);
+  border-top-color: var(--primary);
+  border-inline-end-color: var(--primary);
+  animation: spin 0.9s linear infinite;
+}
+
+.tl-label {
+  color: var(--text-2);
+}
+
+.tl-active .tl-label {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.tl-pending .tl-label {
+  color: var(--text-3);
+}
+
+.tl-time {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.tl-active .tl-time {
+  color: var(--text-1);
+}
+
+.tl-extra {
+  grid-column: 2 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 0 8px;
+}
+
+.tl-step:not(.tl-over) .tl-late {
+  display: none;
+}
+
+.tl-bar {
+  position: relative;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+/* The bar grows from the inline start, so it fills right to left in Hebrew. */
+[dir="rtl"] .tl-bar {
+  transform: scaleX(-1);
+}
+
+.tl-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--primary-fill);
+  transform-origin: left center;
+  animation-name: tl-fill;
+  animation-timing-function: linear;
+  animation-fill-mode: both;
+  transition: opacity 400ms ease;
+}
+
+.tl-sweep {
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  width: 35%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, var(--primary-fill), transparent);
+  opacity: 0;
+}
+
+/* Past the estimate the bar stops claiming a fraction and only shows that work goes on. */
+.tl-over .tl-fill {
+  opacity: 0.3;
+}
+
+.tl-over .tl-sweep {
+  opacity: 1;
+  animation: tl-sweep 1.8s ease-in-out infinite;
+}
+
+.tl-note {
+  display: none;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.tl-over .tl-note {
+  display: block;
+}
+
+@keyframes tl-fill {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes tl-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(290%);
+  }
+}
+
+@keyframes tl-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tl-extra {
+    animation: tl-in 240ms ease-out;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .check-active .dot {
+  .check-active .dot,
+  .tl-active .tl-icon {
     animation: none;
     border-color: var(--primary);
+  }
+
+  .tl-over .tl-sweep {
+    animation: none;
+    opacity: 0;
+  }
+
+  .tl-fill {
+    transition: none;
   }
 }

@@ -98,7 +98,7 @@ Le menu des modèles de la zone de saisie comporte ces groupes :
 
 Certains modèles permettent de régler l'effort de raisonnement. Les niveaux sont **Aucun**, **Minimal**, **Faible**, **Moyen**, **Élevé**, **Très élevé** et **Max**. **Par défaut** utilise le niveau par défaut du modèle.
 
-Pour définir un modèle par défaut pour les nouvelles discussions, ouvrez **Paramètres** > **Panneau de l'agent** > **Modèle par défaut**. Le paramètre **Dictée vocale** se trouve dans le même onglet.
+Pour définir un modèle par défaut pour les nouvelles discussions, ouvrez **Paramètres** > **Panneau de l'agent** > **Modèle par défaut**.
 
 ### Coût
 

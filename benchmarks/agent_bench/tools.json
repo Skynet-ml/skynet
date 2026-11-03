@@ -4507,17 +4507,6 @@
        }
       ],
       "description": "Enable AI-assisted tagging in new labeling sessions."
-     },
-     "dictation_enabled": {
-      "anyOf": [
-       {
-        "type": "boolean"
-       },
-       {
-        "type": "null"
-       }
-      ],
-      "description": "Show voice dictation in the shared composer."
      }
     },
     "required": []

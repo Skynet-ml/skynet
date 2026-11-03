@@ -98,7 +98,7 @@ The model menu in the composer has these groups:
 
 Some models let you set the reasoning effort. The levels are **None**, **Minimal**, **Low**, **Medium**, **High**, **Extra high** and **Max**. **Default** uses the model's default level.
 
-To set a default model for new chats, open **Settings** > **Agent panel** > **Default model**. The **Voice dictation** setting is on the same tab.
+To set a default model for new chats, open **Settings** > **Agent panel** > **Default model**.
 
 ### Cost
 

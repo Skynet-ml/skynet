@@ -2190,7 +2190,6 @@ def base_state() -> dict[str, Any]:
             "wizard_code_assist": "auto",
             "wizard_split_mode": "auto",
             "tagger_assist": True,
-            "dictation_enabled": False,
         },
         "storage": {"used_bytes": 219400, "quota_bytes": 1073741824},
         "wizard": {},

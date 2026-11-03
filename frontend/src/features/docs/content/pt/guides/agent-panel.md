@@ -98,7 +98,7 @@ O menu de modelos no campo de mensagem tem estes grupos:
 
 Alguns modelos permitem definir o esforço de raciocínio. Os níveis são **Nenhum**, **Mínimo**, **Baixo**, **Médio**, **Elevado**, **Muito elevado** e **Máximo**. **Predefinição** usa o nível padrão do modelo.
 
-Para definir um modelo padrão para novas conversas, abra **Definições** > **Painel do agente** > **Modelo padrão**. A configuração **Ditado por voz** fica na mesma aba.
+Para definir um modelo padrão para novas conversas, abra **Definições** > **Painel do agente** > **Modelo padrão**.
 
 ### Custo
 

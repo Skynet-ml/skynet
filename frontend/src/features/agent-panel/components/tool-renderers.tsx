@@ -54,6 +54,7 @@ const TOOL_KINDS: Record<string, ActivityKind> = {
   validate_datasets_validate_post: "check",
   public_search_dashboard_search_post: "search",
   web_search: "search",
+  search_docs: "search",
   discover_models_models_discover_post: "search",
   crawl_site: "read",
   fetch_url: "read",
