@@ -520,7 +520,7 @@ class ModelGateway:
             )
         if upstream == OPENROUTER:
             model = resolve_model_slug(model, client=self._client)
-        elif byok_model_prefix(model, upstream.slug):
+        elif byok_model_prefix(model, upstream.slug, custom=upstream.slug == "custom"):
             model = model.split("/", 1)[-1]
         client = self._client
         if upstream.slug == "custom":
@@ -1009,6 +1009,8 @@ class ModelGateway:
                 batch=batched,
                 upstream=upstream,
             )
+            if upstream.slug == "custom":
+                route["byok_custom_endpoint"] = True
             if config is target_config:
                 target_name = str(target.get("model") or "").strip("/")
                 if not target_name or target_name != str(config.get("name") or "").strip("/"):

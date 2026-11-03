@@ -39,6 +39,8 @@ from ..billing import (
     payload_uses_token_source,
 )
 from ..billing.budgets import BudgetService
+from ..billing.byok_bridge import provider_slug_for_model
+from ..billing.byok_vault import byok_provider_for_litellm
 from ..billing.host_agent import (
     attach_host_agent_token,
     bind_host_agent,
@@ -774,9 +776,27 @@ class BackgroundWorker:
                 validate_unified_payload(execution_payload)
             elif isinstance(execution_payload, BlackboxRunRequest):
                 try:
+                    api_bases = {}
+                    model = execution_payload.reflection_model_settings
+                    byok_engine = getattr(self._job_store, "engine", None)
+                    if (
+                        byok_engine is not None
+                        and execution_payload.shinka is not None
+                        and execution_payload.shinka.novelty
+                        and (model.token_source or execution_payload.token_source) == TOKEN_SOURCE_BYOK
+                    ):
+                        prefix = provider_slug_for_model(model.name)
+                        provider = model.byok_provider or (byok_provider_for_litellm(prefix) if prefix else "")
+                        if provider:
+                            connection = ProviderKeyVault(engine=byok_engine).resolve_connection(
+                                execution_payload.username, provider, verified_only=True
+                            )
+                            if connection is not None:
+                                api_bases[provider] = connection.api_base
                     validate_blackbox_payload(
                         execution_payload,
                         verify_scorer=not protected_execution,
+                        api_bases=api_bases,
                     )
                 except DomainError as error:
                     raise domain_service_error(error) from error
@@ -922,15 +942,18 @@ class BackgroundWorker:
                         binding_id=job_data["execution_budget_id"],
                         vault=ProtectedCredentialVault(engine=byok_engine),
                     )
-                    payload_dict = budget_gateway.protect_payload(
-                        parent_payload,
-                        managed_key=(
-                            settings.openrouter_api_key.get_secret_value()
-                            if settings.openrouter_api_key is not None
-                            else ""
-                        ),
-                        allow_private_tools=settings.discover_allow_private,
-                    )
+                    try:
+                        payload_dict = budget_gateway.protect_payload(
+                            parent_payload,
+                            managed_key=(
+                                settings.openrouter_api_key.get_secret_value()
+                                if settings.openrouter_api_key is not None
+                                else ""
+                            ),
+                            allow_private_tools=settings.discover_allow_private,
+                        )
+                    except DomainError as error:
+                        raise domain_service_error(error) from error
                     host = host_proposer(payload_dict)
                     if host is not None:
                         # The CLI and permission come from the stored run settings,

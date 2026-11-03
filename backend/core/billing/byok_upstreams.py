@@ -97,12 +97,13 @@ def validate_custom_base(base: str) -> None:
         raise ValueError("Custom provider endpoints require HTTPS without credentials, query or fragment.") from error
 
 
-def byok_model_prefix(name: str, explicit_provider: str | None) -> str | None:
+def byok_model_prefix(name: str, explicit_provider: str | None, *, custom: bool = False) -> str | None:
     """Identify a provider prefix without mistaking native namespaces for one.
 
     Args:
         name: Model identifier.
         explicit_provider: Provider supplied independently of the model name.
+        custom: Whether the resolved route is a custom OpenAI-compatible endpoint.
 
     Returns:
         The prefix, or None when the identifier is bare.
@@ -111,6 +112,10 @@ def byok_model_prefix(name: str, explicit_provider: str | None) -> str | None:
     if "/" not in stripped:
         return None
     prefix = stripped.split("/", 1)[0]
+    if custom:
+        return prefix if prefix == "openai" else None
+    if explicit_provider and explicit_provider != "openrouter":
+        return prefix if LITELLM_TO_BYOK_PROVIDER.get(prefix, prefix) == explicit_provider else None
     if explicit_provider and prefix not in UPSTREAMS and prefix not in LITELLM_TO_BYOK_PROVIDER:
         return None
     return prefix or None
@@ -174,6 +179,10 @@ def validate_byok_novelty(
     """
     if not novelty or config.get("token_source") != "byok":
         return
+    extra = config.get("extra") or {}
+    route = extra.get("_skynet_budget_route") if isinstance(extra, Mapping) else None
+    if isinstance(route, Mapping) and route.get("byok_custom_endpoint") is True:
+        raise DomainError("submission.byok_novelty_unsupported", status=400)
     name = str(config.get("name") or "")
     prefix = name.split("/", 1)[0]
     slug = str(config.get("byok_provider") or LITELLM_TO_BYOK_PROVIDER.get(prefix, prefix))

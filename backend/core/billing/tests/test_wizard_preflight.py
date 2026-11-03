@@ -154,7 +154,6 @@ def test_continue_reuses_matching_success_and_preserves_setup_spend(setup_client
     ("model", "base", "novelty", "expected"),
     [
         ("anthropic/claude-sonnet-4", None, True, "submission.byok_novelty_unsupported"),
-        ("openai/gpt-4o", "https://api.anthropic.com/v1", False, "billing.byok_model_not_served"),
     ],
 )
 def test_preflight_rejects_invalid_byok_before_execution(
@@ -176,6 +175,29 @@ def test_preflight_rejects_invalid_byok_before_execution(
     assert response.json()["code"] == expected
     assert response.json()["detail"] == t_locale("he", expected, model=model, provider="anthropic")
     assert not calls
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [
+        ("groq", "openai/gpt-oss-120b"),
+        ("together", "google/gemma-3-27b-it"),
+        ("novita", "deepseek/deepseek-r1"),
+    ],
+)
+def test_preflight_accepts_native_provider_namespace(
+    setup_client, monkeypatch: pytest.MonkeyPatch, provider: str, model: str
+) -> None:
+    """Pass native provider IDs with foreign namespaces through admission."""
+    client, _engine, calls = setup_client
+    view = SimpleNamespace(provider=provider, api_base=None, status="verified")
+    vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
+    monkeypatch.setattr(submission_router, "ProviderKeyVault", lambda **kwargs: vault)
+    monkeypatch.setattr(wizard_preflight, "prepare_protected_credentials", lambda payload, **kwargs: payload)
+    payload = {**PAYLOAD, "reflection_model_config": {"name": model, "token_source": "byok", "byok_provider": provider}}
+    response = client.post("/wizard/preflight", json=_request(_budget(client), payload))
+    assert response.status_code == 200
+    assert calls
 
 
 def test_preflight_execution_preserves_domain_error(setup_client, monkeypatch: pytest.MonkeyPatch) -> None:

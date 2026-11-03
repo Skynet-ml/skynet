@@ -762,6 +762,7 @@ def _enforce_byok_connections(job_store, username: str, model_configs: list[Mode
             )
         except UnpricedOperationError as error:
             raise DomainError("submission.byok_provider_unsupported", status=400) from error
+        prefix = byok_model_prefix(name, config.byok_provider, custom=upstream.slug == "custom")
         if not byok_upstream_routable(prefix, provider, upstream):
             raise DomainError("billing.byok_model_not_served", status=400, model=name, provider=provider)
     return api_bases

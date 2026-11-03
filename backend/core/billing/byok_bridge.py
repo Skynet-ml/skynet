@@ -56,10 +56,8 @@ def provider_slug_for_model(name: str) -> str | None:
 def byok_prefix_routable(prefix: str | None, provider: str, *, api_base: str | None) -> bool:
     """Decide whether a model prefix can be served through a saved connection.
 
-    A native key only serves its own provider's models (``openrouter/...`` never
-    rides an ``openai`` key, and vice versa). A connection with a custom
-    ``api_base`` is an OpenAI-compatible endpoint, so it additionally accepts the
-    ``openai/`` prefix the custom catalog emits for it.
+    Native IDs can contain namespaces that resemble other providers. A custom
+    ``api_base`` accepts the ``openai/`` prefix the custom catalog emits.
 
     Args:
         prefix: The model string's LiteLLM provider prefix, or ``None`` for a
@@ -212,8 +210,9 @@ def inject_byok_connections(
             upstream = resolve_upstream(
                 {**cfg, "byok_provider": provider, "base_url": resolved.api_base, "extra": extra}
             )
-        except UnpricedOperationError:
-            upstream = None
+        except UnpricedOperationError as error:
+            raise DomainError(error.code or "submission.byok_provider_unsupported", status=400) from error
+        prefix = byok_model_prefix(cfg.get("name", ""), configured_provider, custom=upstream.slug == "custom")
         if not byok_upstream_routable(prefix, provider, upstream):
             raise DomainError(
                 "billing.byok_model_not_served",

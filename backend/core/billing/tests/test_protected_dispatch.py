@@ -209,6 +209,30 @@ def test_custom_byok_does_not_mark_prompt_cache(database: Engine) -> None:
     assert sent[0]["messages"][0]["content"] == "hello"
 
 
+def test_native_anthropic_does_not_mark_prompt_cache(database: Engine) -> None:
+    """Never add OpenRouter cache directives to the native Anthropic route."""
+    sent = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Capture the native request."""
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": []})
+
+    model = "anthropic/claude"
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+        dispatcher = OpenRouterDispatcher(
+            _runtime(database),
+            api_key="fixture",
+            model=model,
+            role="task",
+            policy=ChargePolicy("byok_model"),
+            client=client,
+            upstream=resolve_upstream({"name": model}),
+        )
+        dispatcher.dispatch("/chat/completions", {"model": model, "messages": [{"role": "system", "content": "hello"}]})
+    assert sent[0]["messages"][0]["content"] == "hello"
+
+
 @pytest.mark.parametrize("usage", [None, {"cost": "bad"}, {"cost": -1}, {"cost": "NaN"}])
 def test_byok_success_with_missing_or_invalid_usage_settles_zero(database: Engine, usage: object) -> None:
     """Settle a successful BYOK call even when usage is unavailable or malformed."""

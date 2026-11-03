@@ -83,6 +83,43 @@ def test_together_slash_model_at_submit_and_worker(name: str, monkeypatch: pytes
     assert payload["model_config"]["extra"]["api_key"] == "fixture"
 
 
+@pytest.mark.parametrize(
+    ("provider", "name"),
+    [
+        ("groq", "openai/gpt-oss-120b"),
+        ("together", "google/gemma-3-27b-it"),
+        ("novita", "deepseek/deepseek-r1"),
+    ],
+)
+def test_foreign_namespace_is_native_at_submit_and_worker(
+    provider: str, name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep foreign-looking namespaces in explicit native provider IDs."""
+    view = SimpleNamespace(provider=provider, api_base=None, status="verified")
+    resolved = SimpleNamespace(api_base=None, params={}, secret="fixture")
+    vault = SimpleNamespace(
+        has_verified_connection=lambda *_: True,
+        list_keys=lambda *_: SimpleNamespace(keys=[view]),
+        resolve_connection=lambda *_: resolved,
+    )
+    monkeypatch.setattr(submissions, "ProviderKeyVault", lambda **kwargs: vault)
+    config = ModelConfig(name=name, token_source="byok", byok_provider=provider)
+    _enforce_byok_connections(SimpleNamespace(engine=object()), "user", [config])
+    payload = {"model_config": config.model_dump()}
+    inject_byok_connections(payload, username="user", vault=vault)
+    assert payload["model_config"]["extra"]["api_key"] == "fixture"
+
+
+def test_inject_reports_unresolvable_saved_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail the bridge when a native provider has a noncanonical endpoint."""
+    resolved = SimpleNamespace(api_base="https://gateway.example/v1", params={}, secret="fixture")
+    vault = SimpleNamespace(resolve_connection=lambda *_: resolved)
+    payload = {"model_config": {"name": "gemini/gemini-2.5-flash", "token_source": "byok", "byok_provider": "google"}}
+    with pytest.raises(DomainError) as error:
+        inject_byok_connections(payload, username="user", vault=vault)
+    assert error.value.code == "submission.byok_provider_unsupported"
+
+
 @pytest.fixture
 def engine() -> Iterator[object]:
     """Yield an in-memory SQLite engine with the billing tables created."""
@@ -146,7 +183,7 @@ def test_inject_applies_custom_api_base_and_params(vault: ProviderKeyVault) -> N
             api_base="https://host.example/v1",
             params={"organization": "org-1"},
         )
-    payload = {"model_config": {"name": "custom/my-model", "extra": {}}}
+    payload = {"model_config": {"name": "openai/my-model", "byok_provider": "custom", "extra": {}}}
     inject_byok_connections(payload, username="u@x.com", vault=vault)
     cfg = payload["model_config"]
     assert cfg["extra"]["api_key"] == "sk-custom-3333"
@@ -288,8 +325,8 @@ def test_inject_stamps_the_blackbox_scorer_model(vault: ProviderKeyVault) -> Non
     assert payload["scorer"]["model"]["extra"]["api_key"] == "sk-or-1111"
 
 
-def test_inject_rejects_model_the_connection_cannot_route(vault: ProviderKeyVault) -> None:
-    """An OpenRouter-served model never rides a direct OpenAI key, and vice versa."""
+def test_inject_preserves_openrouter_namespace_for_native_openai(vault: ProviderKeyVault) -> None:
+    """Treat another provider's namespace as part of a native model ID."""
     with patch("core.billing.byok_vault.httpx.get", return_value=_ok_response()):
         vault.save_key("u@x.com", "openai", "sk-openai-6666")
     payload = {
@@ -300,11 +337,8 @@ def test_inject_rejects_model_the_connection_cannot_route(vault: ProviderKeyVaul
             "extra": {},
         }
     }
-    with pytest.raises(DomainError) as exc:
-        inject_byok_connections(payload, username="u@x.com", vault=vault)
-    assert exc.value.status_code == 400
-    assert exc.value.code == "billing.byok_model_not_served"
-    assert "api_key" not in payload["model_config"]["extra"]
+    inject_byok_connections(payload, username="u@x.com", vault=vault)
+    assert payload["model_config"]["extra"]["api_key"] == "sk-openai-6666"
 
 
 def test_inject_rejects_non_openai_custom_endpoint(vault: ProviderKeyVault, engine: object) -> None:
@@ -325,19 +359,17 @@ def test_inject_rejects_non_openai_custom_endpoint(vault: ProviderKeyVault, engi
         )
     with pytest.raises(DomainError) as error:
         inject_byok_connections(payload, username="u@x.com", vault=vault)
-    assert error.value.code == "billing.byok_model_not_served"
+    assert error.value.code == "submission.byok_provider_unsupported"
     assert "api_key" not in payload["model_config"]["extra"]
 
 
-def test_enforce_byok_connections_blocks_unroutable_model(vault: ProviderKeyVault, engine: object) -> None:
-    """The submit gate refuses a model whose prefix its chosen key cannot serve."""
+def test_enforce_byok_connections_accepts_native_namespace(vault: ProviderKeyVault, engine: object) -> None:
+    """An explicit native provider keeps a foreign namespace in the model ID."""
     with patch("core.billing.byok_vault.httpx.get", return_value=_ok_response()):
         vault.save_key("u@x.com", "openai", "sk-openai-8888")
     job_store = SimpleNamespace(engine=engine)
-    with pytest.raises(DomainError) as exc:
-        _enforce_byok_connections(
-            job_store,
-            "u@x.com",
-            [ModelConfig(name="openrouter/openai/gpt-4o", token_source="byok", byok_provider="openai")],
-        )
-    assert exc.value.code == "billing.byok_model_not_served"
+    _enforce_byok_connections(
+        job_store,
+        "u@x.com",
+        [ModelConfig(name="openrouter/openai/gpt-4o", token_source="byok", byok_provider="openai")],
+    )

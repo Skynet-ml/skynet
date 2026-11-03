@@ -377,8 +377,10 @@ def validate_job(payload: BlackboxRunRequest | JobSpec, *, api_bases: dict[str, 
             or unavailable, a native proposer gets custom model settings or no
             spending budget, or Auto has too few scorer runs.
     """
+    reflection = payload.reflection_model_settings.model_dump()
+    reflection["token_source"] = reflection.get("token_source") or getattr(payload, "token_source", None)
     validate_byok_novelty(
-        payload.reflection_model_settings.model_dump(),
+        reflection,
         bool(payload.shinka and payload.shinka.novelty),
         api_bases=api_bases,
     )

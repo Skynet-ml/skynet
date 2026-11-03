@@ -6,9 +6,11 @@ import base64
 import json
 import socket
 from collections.abc import Iterator
+from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -43,6 +45,7 @@ from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from core.config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, settings
 from core.exceptions import InfrastructureInterruptionError, ServiceError
 from core.provider_registry import BYOK_PROVIDER_SLUGS
+from core.service_gateway.optimization.blackbox import preflight as blackbox_preflight
 from core.service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
 from core.service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
@@ -370,6 +373,39 @@ def test_shinka_preflight_rejects_openai_custom_novelty(gateway: ModelGateway) -
     assert error.value.code == "submission.byok_novelty_unsupported"
 
 
+def test_guest_preflight_remembers_custom_reflection_route(
+    gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject custom reflection novelty after the parent removes its endpoint."""
+    monkeypatch.setattr(gateway_module, "_pinned_address", lambda *args, **kwargs: "8.8.8.8")
+    payload = {
+        "name": "bb",
+        "username": "alice",
+        "seed_candidate": None,
+        "scorer": {"kind": "python", "metric_code": "def score(candidate): return 1.0"},
+        "reflection_model_config": {
+            "name": "openai/gpt-4o",
+            "token_source": "byok",
+            "byok_provider": "openai",
+            "base_url": "https://public.example/v1",
+            "extra": {"api_key": "fixture"},
+        },
+        "shinka": {"novelty": False},
+        "strategy": {"mode": "single", "engine": "shinka_evolve"},
+        "max_cost_cents": 100,
+    }
+    protected = gateway.protect_payload(payload, managed_key="")
+    assert "base_url" not in protected["reflection_model_config"]
+    protected["shinka"]["novelty"] = True
+    monkeypatch.setattr(blackbox_preflight, "sandbox_runtime_context", lambda *_: nullcontext())
+    monkeypatch.setattr(blackbox_preflight, "SandboxPythonScorer", lambda *args, **kwargs: MagicMock())
+    with pytest.raises(DomainError) as error:
+        blackbox_preflight.verify_anything_in_sandbox(
+            protected, scope="execution", identity="fixture", runtime=MagicMock()
+        )
+    assert error.value.code == "submission.byok_novelty_unsupported"
+
+
 def test_scoped_gateway_refusal_uses_localized_code(gateway: ModelGateway) -> None:
     """Return the stable translation key for a mismatched model."""
     route = gateway.register(model="fixture/text", api_key="private", role="task", policy=ChargePolicy("byok_model"))
@@ -458,6 +494,40 @@ def test_native_bare_slash_model_is_not_stripped(gateway: ModelGateway) -> None:
     )
     assert response.status_code == 200
     assert sent[0]["model"] == name
+
+
+@pytest.mark.parametrize(
+    ("provider", "name", "expected"),
+    [
+        ("groq", "openai/gpt-oss-120b", "openai/gpt-oss-120b"),
+        ("together", "google/gemma-3-27b-it", "google/gemma-3-27b-it"),
+        ("novita", "deepseek/deepseek-r1", "deepseek/deepseek-r1"),
+        ("anthropic", "anthropic/claude-sonnet-4", "claude-sonnet-4"),
+    ],
+)
+def test_native_namespaces_reach_provider(gateway: ModelGateway, provider: str, name: str, expected: str) -> None:
+    """Strip only a native provider's own prefix on protected routes."""
+    sent = []
+
+    def provider_mock(request: httpx.Request) -> httpx.Response:
+        """Capture the upstream body."""
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"usage": {}, "choices": []})
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider_mock))
+    route = gateway.register(
+        model=name, api_key="fixture", role="task", policy=ChargePolicy("byok_model"), upstream=UPSTREAMS[provider]
+    )
+    response = httpx.post(
+        f"{gateway.url}/chat/completions",
+        headers={"Authorization": f"Bearer {route['token']}"},
+        json={"model": route["model"], "messages": [{"role": "user", "content": "hello"}]},
+    )
+    assert response.status_code == 200
+    assert sent[0]["model"] == expected
+    if provider == "anthropic":
+        assert sent[0]["messages"][0]["content"] == "hello"
 
 
 @pytest.mark.parametrize(("provider", "novelty"), [("openai", True), ("openrouter", True), ("anthropic", False)])

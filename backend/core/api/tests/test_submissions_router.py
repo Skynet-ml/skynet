@@ -64,7 +64,7 @@ def test_byok_submission_accepts_bare_model_with_provider(monkeypatch: pytest.Mo
     [
         ("together", "together_ai/model", "https://api.together.xyz/v1", True),
         ("groq", "openai/meta-llama/model", "https://custom.example/v1", False),
-        ("anthropic", "openai/gpt-4o", "https://api.anthropic.com/v1", False),
+        ("anthropic", "openai/gpt-4o", "https://api.anthropic.com/v1", True),
         ("openai", "openai/custom-model", "https://custom.example/v1", True),
     ],
 )
