@@ -183,6 +183,8 @@ def test_preflight_rejects_invalid_byok_before_execution(
         ("groq", "openai/gpt-oss-120b"),
         ("together", "google/gemma-3-27b-it"),
         ("novita", "deepseek/deepseek-r1"),
+        ("openrouter", "openai/gpt-4o"),
+        ("openrouter", "anthropic/claude-sonnet-4"),
     ],
 )
 def test_preflight_accepts_native_provider_namespace(

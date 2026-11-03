@@ -241,6 +241,29 @@ def test_openrouter_byok_dispatches_messages(gateway: ModelGateway) -> None:
     assert str(sent[0].url) == "https://openrouter.ai/api/v1/messages"
 
 
+@pytest.mark.parametrize("name", ["openai/gpt-4o", "anthropic/claude-sonnet-4", "openrouter/openai/gpt-4o"])
+@pytest.mark.parametrize("base", [None, "https://openrouter.ai", "https://openrouter.ai/api/v1"])
+def test_openrouter_native_model_reaches_gateway(gateway: ModelGateway, name: str, base: str | None) -> None:
+    """Forward OpenRouter model IDs with only its own prefix removed."""
+    sent = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Capture the outgoing request without network access."""
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"usage": {}, "choices": []})
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider))
+    config = {"name": name, "byok_provider": "openrouter", "token_source": "byok", "extra": {"api_key": "fixture"}}
+    if base:
+        config["base_url"] = base
+    protected = gateway.protect_payload({"model_config": config}, managed_key="")
+    route = protected["model_config"]["extra"][ROUTE_KEY]
+    result = gateway._routes[route["token"]].dispatch("/chat/completions", {"model": route["model"], "messages": []})
+    assert result.status == 200
+    assert sent[0]["model"] == name.removeprefix("openrouter/")
+
+
 @pytest.mark.parametrize("slug", list(UPSTREAMS))
 def test_byok_unsupported_paths_are_rejected(gateway: ModelGateway, slug: str) -> None:
     """Reject unsupported Responses and embedding calls before dispatch."""

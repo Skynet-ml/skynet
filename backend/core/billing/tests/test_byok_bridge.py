@@ -31,14 +31,14 @@ from core.storage.models import Base
 
 
 @pytest.mark.parametrize(
-    ("provider", "base", "accepted"),
+    ("provider", "base"),
     [
-        ("openrouter", "https://openrouter.ai", False),
-        ("openrouter", "https://openrouter.ai/api/v1", False),
-        ("openai", "https://custom.example/v1", True),
+        ("openrouter", "https://openrouter.ai"),
+        ("openrouter", "https://openrouter.ai/api/v1"),
+        ("openai", "https://custom.example/v1"),
     ],
 )
-def test_submit_and_worker_agree_on_saved_base(provider, base, accepted, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_submit_and_worker_agree_on_saved_base(provider, base, monkeypatch: pytest.MonkeyPatch) -> None:
     """Apply the same prefix rule at submission and key injection."""
     view = SimpleNamespace(provider=provider, api_base=base, status="verified")
     resolved = SimpleNamespace(api_base=base, params={}, secret="fixture")
@@ -50,16 +50,34 @@ def test_submit_and_worker_agree_on_saved_base(provider, base, accepted, monkeyp
     monkeypatch.setattr(submissions, "ProviderKeyVault", lambda **kwargs: vault)
     config = ModelConfig(name="openai/gpt-4o", token_source="byok", byok_provider=provider)
     payload = {"model_config": config.model_dump()}
-    if accepted:
+    _enforce_byok_connections(SimpleNamespace(engine=object()), "user", [config])
+    inject_byok_connections(payload, username="user", vault=vault)
+    assert payload["model_config"]["base_url"] == base
+
+
+@pytest.mark.parametrize("name", ["openai/gpt-4o", "anthropic/claude-sonnet-4", "google/gemini", "mistral/model"])
+@pytest.mark.parametrize("base", [None, "https://openrouter.ai", "https://openrouter.ai/api/v1"])
+@pytest.mark.parametrize("boundary", ["submit", "bridge"])
+def test_openrouter_native_namespaces_are_routable(
+    name: str, base: str | None, boundary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Accept OpenRouter-native model IDs with explicit OpenRouter credentials."""
+    view = SimpleNamespace(provider="openrouter", api_base=base, status="verified")
+    resolved = SimpleNamespace(api_base=base, params={}, secret="fixture")
+    vault = SimpleNamespace(
+        has_verified_connection=lambda *_: True,
+        list_keys=lambda *_: SimpleNamespace(keys=[view]),
+        resolve_connection=lambda *_: resolved,
+    )
+    monkeypatch.setattr(submissions, "ProviderKeyVault", lambda **kwargs: vault)
+    config = ModelConfig(name=name, token_source="byok", byok_provider="openrouter")
+    if boundary == "submit":
         _enforce_byok_connections(SimpleNamespace(engine=object()), "user", [config])
-        inject_byok_connections(payload, username="user", vault=vault)
-        assert payload["model_config"]["base_url"] == base
     else:
-        with pytest.raises(DomainError) as submission_error:
-            _enforce_byok_connections(SimpleNamespace(engine=object()), "user", [config])
-        with pytest.raises(DomainError) as worker_error:
-            inject_byok_connections(payload, username="user", vault=vault)
-        assert submission_error.value.code == worker_error.value.code == "billing.byok_model_not_served"
+        payload = {"model_config": config.model_dump()}
+        inject_byok_connections(payload, username="user", vault=vault)
+        assert payload["model_config"]["name"] == name
+        assert payload["model_config"]["extra"]["api_key"] == "fixture"
 
 
 @pytest.mark.parametrize(

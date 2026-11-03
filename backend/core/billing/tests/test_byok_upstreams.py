@@ -53,6 +53,13 @@ def test_together_xyz_is_canonical_alias() -> None:
     )
 
 
+@pytest.mark.parametrize("base", ["https://api.deepseek.com", "https://api.deepseek.com/v1"])
+@pytest.mark.parametrize("suffix", ["", "/"])
+def test_deepseek_base_aliases_are_canonical(base: str, suffix: str) -> None:
+    """Use DeepSeek's fixed protocol for either saved endpoint alias."""
+    assert resolve_upstream({"name": "deepseek/model", "base_url": base + suffix}) == UPSTREAMS["deepseek"]
+
+
 @pytest.mark.parametrize(("slug", "prefix"), BYOK_PROVIDER_SLUGS)
 def test_resolve_provider(slug: str, prefix: str) -> None:
     """Select the provider that owns each model prefix."""

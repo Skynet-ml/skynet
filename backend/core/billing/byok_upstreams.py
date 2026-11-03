@@ -114,10 +114,10 @@ def byok_model_prefix(name: str, explicit_provider: str | None, *, custom: bool 
     prefix = stripped.split("/", 1)[0]
     if custom:
         return prefix if prefix == "openai" else None
-    if explicit_provider and explicit_provider != "openrouter":
+    if explicit_provider == "openrouter":
+        return prefix if prefix == "openrouter" else None
+    if explicit_provider:
         return prefix if LITELLM_TO_BYOK_PROVIDER.get(prefix, prefix) == explicit_provider else None
-    if explicit_provider and prefix not in UPSTREAMS and prefix not in LITELLM_TO_BYOK_PROVIDER:
-        return None
     return prefix or None
 
 
@@ -147,6 +147,8 @@ def resolve_upstream(config: Mapping[str, Any]) -> ProviderUpstream:
             return OPENROUTER
         if slug == "together" and str(base).rstrip("/") == "https://api.together.xyz/v1":
             return UPSTREAMS["together"]
+        if slug == "deepseek" and str(base).rstrip("/") in {"https://api.deepseek.com", "https://api.deepseek.com/v1"}:
+            return UPSTREAMS["deepseek"]
         if slug in UPSTREAMS and str(base).rstrip("/") == UPSTREAMS[slug].base_url.rstrip("/"):
             return UPSTREAMS[slug]
         if slug in UPSTREAMS and slug != "openai":
