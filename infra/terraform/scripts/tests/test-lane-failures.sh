@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-for command in awk grep git jq sed; do
+for command in awk find grep git jq sed timeout; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'missing test command: %s\n' "$command" >&2
     exit 1
@@ -12,6 +12,8 @@ repo_root="$(cd "$(dirname "$0")/../../../.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/build" "$tmp/preview/infra/terraform/scripts"
+real_rm="$(command -v rm)"
+real_sed="$(command -v sed)"
 cp "$repo_root/infra/terraform/scripts/"{build-push.sh,lib.sh,image-key.sh} "$tmp/build/"
 cp "$repo_root/infra/terraform/scripts/"{preview.sh,lib.sh,image-key.sh} "$tmp/preview/infra/terraform/scripts/"
 ln -s "$repo_root/backend" "$tmp/preview/backend"
@@ -92,6 +94,11 @@ case "$*" in
       [[ "${TEST_PUSH_RACE:-}" != true ]] || : >"$TEST_RACE_TAG_FLAG"
       exit 17
     fi
+    if [[ "${TEST_KILL_LANE:-}" == "$name" ]]; then
+      lane_pid="$(ps -o ppid= -p "$PPID" | tr -d '[:space:]')"
+      [[ "$lane_pid" =~ ^[0-9]+$ ]] || exit 18
+      kill -KILL "$lane_pid"
+    fi
     if [[ -n "$metadata" ]]; then
       if [[ "${TEST_NO_MATERIALS:-}" == true ]]; then
         printf '%s\n' '{"buildx.build.provenance":{"materials":[]}}' >"$metadata"
@@ -149,10 +156,30 @@ printf 'refresh\n' >>"$TEST_EVENT_LOG"
 printf '%s\n' '{"value":"test-oidc-token"}'
 SH
 chmod +x "$tmp/bin/"{aws,docker,git,curl}
+cat >"$tmp/bin/sed" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${TEST_FAIL_LOGGER:-}" == true ]]; then
+  cat >/dev/null
+  exit 1
+fi
+exec "$TEST_REAL_SED" "$@"
+SH
+cat >"$tmp/bin/rm" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${TEST_PRESERVE_LANES:-}" == true && "${1:-}" == -rf &&
+  -n "${TEST_LANE_TMP:-}" && "${2:-}" == "$TEST_LANE_TMP/"* ]]; then
+  exit 0
+fi
+exec "$TEST_REAL_RM" "$@"
+SH
+chmod +x "$tmp/bin/"{sed,rm}
 export PATH="$tmp/bin:$PATH" TEST_REPO_ROOT="$repo_root"
 export TEST_SHA=8d68a0de4ea55e3a1666860d947a622d3273e3f1
 export TEST_AWS_LOG="$tmp/aws.log" TEST_EVENT_LOG="$tmp/events.log"
 export TEST_RACE_TAG_FLAG="$tmp/pushed-by-race"
+export TEST_REAL_RM="$real_rm" TEST_REAL_SED="$real_sed"
 export GITHUB_ACTIONS=true
 
 cat >"$tmp/build/deploy.sh" <<'SH'
@@ -163,6 +190,22 @@ SH
 chmod +x "$tmp/build/deploy.sh"
 
 CURRENT_LOG=""
+
+prepare_lane_tmp() {
+  TEST_LANE_TMP="$tmp/lane-$1"
+  mkdir -p "$TEST_LANE_TMP"
+  export TEST_LANE_TMP TMPDIR="$TEST_LANE_TMP" TEST_PRESERVE_LANES=true
+}
+
+lane_dir_for_test() {
+  find "$TEST_LANE_TMP" -mindepth 1 -maxdepth 1 -type d -print -quit
+}
+
+assert_lane_status() {
+  local lane="$1" result="$2"
+  [[ -n "${TEST_LAST_LANE_DIR:-}" && -e "$TEST_LAST_LANE_DIR/$lane.$result" ]] ||
+    fail "$lane lane did not publish .$result"
+}
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -183,7 +226,8 @@ assert_no_match() {
 }
 
 run_build() {
-  local output="$1" log="$2"
+  local output="$1" log="$2" lane_case="$3"
+  prepare_lane_tmp "$lane_case"
   : >"$TEST_AWS_LOG"
   : >"$TEST_EVENT_LOG"
   : >"$output"
@@ -193,25 +237,60 @@ run_build() {
     fail "build-push succeeded in failure test: $output"
   fi
   assert_no_match '^migrated=' "$output" || fail "failed lane wrote migrated output: $output"
+  TEST_LAST_LANE_DIR="$(lane_dir_for_test)"
 }
 
 export GITHUB_OUTPUT="$tmp/migrated"
 export TEST_DEPLOY_STATUS=1
-run_build "$GITHUB_OUTPUT" "$tmp/migration.log"
+run_build "$GITHUB_OUTPUT" "$tmp/migration.log" migration
 grep -Eq '^migrate:1$' "$TEST_EVENT_LOG" || fail "migration stub did not fail the deploy lane"
 
 export TEST_DEPLOY_STATUS=0 TEST_FAIL_CURL=true
 export ACTIONS_ID_TOKEN_REQUEST_URL=https://token.invalid/request
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN=test-request-token
 export AWS_DEPLOY_ROLE_ARN=arn:aws:iam::123456789012:role/test
-run_build "$GITHUB_OUTPUT" "$tmp/credentials.log"
+run_build "$GITHUB_OUTPUT" "$tmp/credentials.log" credentials
 assert_no_match '^build:' "$TEST_EVENT_LOG" || fail "build ran after credential refresh failed"
 
 unset TEST_FAIL_CURL ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_DEPLOY_ROLE_ARN
 export TEST_FAIL_BUILD=backend
-run_build "$GITHUB_OUTPUT" "$tmp/build.log"
+run_build "$GITHUB_OUTPUT" "$tmp/build.log" build
+assert_lane_status backend failed
+assert_no_match '^migrate:' "$TEST_EVENT_LOG" ||
+  fail "backend lane migrated after die terminated its build"
 
 unset TEST_FAIL_BUILD
+export TEST_FAIL_LOGGER=true
+run_build "$GITHUB_OUTPUT" "$tmp/logger.log" logger
+assert_lane_status litellm failed
+grep -Fxq 'build:backend' "$TEST_EVENT_LOG" ||
+  fail "logger failure test did not run the backend command"
+assert_no_match '^migrate:' "$TEST_EVENT_LOG" ||
+  fail "migration ran after the logger failed"
+unset TEST_FAIL_LOGGER
+
+prepare_lane_tmp dead-process
+: >"$TEST_AWS_LOG"
+: >"$TEST_EVENT_LOG"
+: >"$GITHUB_OUTPUT"
+CURRENT_LOG="$tmp/dead-process.log"
+: >"$CURRENT_LOG"
+export TEST_KILL_LANE=litellm
+if timeout 10 "$tmp/build/build-push.sh" staging "$TEST_SHA" --migrate \
+  >"$CURRENT_LOG" 2>&1; then
+  fail "dead lane process returned success"
+else
+  status=$?
+  [[ "$status" -ne 124 ]] || fail "dead lane process made wait_for_lane_success hang"
+fi
+TEST_LAST_LANE_DIR="$(lane_dir_for_test)"
+[[ -n "$TEST_LAST_LANE_DIR" ]] || fail "dead lane test did not preserve its lane directory"
+[[ ! -e "$TEST_LAST_LANE_DIR/litellm.ok" && ! -e "$TEST_LAST_LANE_DIR/litellm.failed" ]] ||
+  fail "dead lane process published a status marker"
+assert_no_match '^migrate:' "$TEST_EVENT_LOG" ||
+  fail "migration ran after a sibling lane process disappeared"
+unset TEST_KILL_LANE
+
 export TEST_EXISTING_BACKEND=true
 : >"$TEST_AWS_LOG"
 : >"$TEST_EVENT_LOG"
@@ -230,8 +309,14 @@ CURRENT_LOG="$tmp/reuse.log"
 : >"$CURRENT_LOG"
 "$tmp/build/build-push.sh" staging "$TEST_SHA" >"$CURRENT_LOG" 2>&1 ||
   fail "fresh context-key reuse failed"
-assert_no_match 'put-image.*--image-tag tree-' "$TEST_AWS_LOG" ||
-  fail "context-key reuse added a new tree-key tag"
+grep -Fxq 'build:backend' "$TEST_EVENT_LOG" ||
+  fail "backend shared tag reused a fresh context key"
+grep -Fxq 'build:litellm' "$TEST_EVENT_LOG" ||
+  fail "staging litellm reused a fresh context key"
+assert_no_match '^build:frontend$' "$TEST_EVENT_LOG" ||
+  fail "staging frontend did not reuse its fresh context key"
+grep -Eq "put-image --repository-name skynet/frontend --image-tag $TEST_SHA-staging" "$TEST_AWS_LOG" ||
+  fail "staging frontend context-key hit did not retag its environment-scoped tag"
 
 unset TEST_CTX_HIT
 rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"

@@ -57,6 +57,14 @@ case "${0##*/}" in
             [[ "${TEST_SPARSE_CHECKOUT:-}" == true ]] || exit 1
             printf 'true\n'
             ;;
+          core.symlinks)
+            [[ -n "${TEST_CORE_SYMLINKS:-}" ]] || exit 1
+            printf '%s\n' "$TEST_CORE_SYMLINKS"
+            ;;
+          core.fileMode)
+            [[ -n "${TEST_CORE_FILEMODE:-}" ]] || exit 1
+            printf '%s\n' "$TEST_CORE_FILEMODE"
+            ;;
           *) exit 2 ;;
         esac
         ;;
@@ -206,7 +214,8 @@ TEST_ALT_REPO_ROOT="$tmp/another-checkout"
 export TEST_ALT_REPO_ROOT
 export TREE_HASH BASE_DIGEST DIRTY_TREE DIGEST_FAIL DESCRIBE_ERROR RETAG_FAIL RETAG_EXISTS
 export RETAG_ERROR RETAG_DIFF LATEST_CACHE_TEST CACHE_ERROR FRESHNESS_TEST PUSHED_AT
-export CACHE_TIMESTAMP_TEST TEST_CORE_AUTOCRLF TEST_CORE_EOL TEST_SPARSE_CHECKOUT TEST_INDEX_FLAG
+export CACHE_TIMESTAMP_TEST TEST_CORE_AUTOCRLF TEST_CORE_EOL TEST_CORE_SYMLINKS TEST_CORE_FILEMODE
+export TEST_SPARSE_CHECKOUT TEST_INDEX_FLAG
 export BUILDX_VERSION BUILDKIT_VERSION DATE_PARSE_FAIL OIDC_HEADER_PATH_OUT OIDC_TOKEN_PATH_OUT
 OIDC_HEADER_PATH_OUT="$tmp/oidc-header-path"
 OIDC_TOKEN_PATH_OUT="$tmp/oidc-token-path"
@@ -233,8 +242,8 @@ tree_key="$(image_key "$repo_root/backend" tree GIT_SHA=abc FEATURE=on)"
 [[ "$tree_key" =~ ^tree-[0-9a-f]{40}$ ]] || fail "tree key format: $tree_key"
 [[ "$tree_key" == "$(image_key "$repo_root/backend" tree GIT_SHA=def FEATURE=on)" ]] ||
   fail "tree key changed with GIT_SHA"
-[[ "$tree_key" == "$(image_key "$repo_root/backend" tree GIT_SHA=abc FEATURE=off)" ]] ||
-  fail "tree key included a build arg"
+[[ "$tree_key" != "$(image_key "$repo_root/backend" tree GIT_SHA=abc FEATURE=off)" ]] ||
+  fail "tree key ignored a non-GIT_SHA build arg"
 [[ "$key" != "$(image_key "$repo_root/backend" ctx GIT_SHA=def FEATURE=on)" ]] || fail "ctx key ignored GIT_SHA"
 TREE_HASH=tree-two
 [[ "$key" != "$(image_key "$repo_root/backend" ctx GIT_SHA=abc FEATURE=on)" ]] || fail "tree change kept key"
@@ -264,6 +273,12 @@ unset TEST_CORE_AUTOCRLF
 TEST_CORE_EOL=crlf
 [[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "non-default core.eol produced key"
 unset TEST_CORE_EOL
+TEST_CORE_SYMLINKS=false
+[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "core.symlinks=false produced key"
+unset TEST_CORE_SYMLINKS
+TEST_CORE_FILEMODE=false
+[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "core.fileMode=false produced key"
+unset TEST_CORE_FILEMODE
 TEST_INDEX_FLAG=h
 [[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "assume-unchanged file produced key"
 TEST_INDEX_FLAG=S
@@ -435,6 +450,8 @@ printf '%s\n' "${IMAGE_BUILD_CONTEXT_ARGS[@]}" |
 image_inputs "$test_context" "$test_week" --build-arg GIT_SHA=abc --build-arg FEATURE=on
 staging_ctx="$IMAGE_KEY_CTX"
 staging_tree="$IMAGE_KEY_TREE"
+image_inputs "$test_context" "$test_week" GIT_SHA=abc FEATURE=off
+[[ "$staging_tree" != "$IMAGE_KEY_TREE" ]] || fail "tree key ignored a non-GIT_SHA build arg"
 image_inputs "$test_context" "$test_week" GIT_SHA=def FEATURE=on
 preview_ctx="$IMAGE_KEY_CTX"
 [[ "$staging_tree" == "$IMAGE_KEY_TREE" ]] || fail "tree key differs between staging and preview caller forms"
@@ -447,6 +464,14 @@ image_inputs "$test_context" 2026-W01 GIT_SHA=abc
 week_one_key="$IMAGE_KEY_CTX"
 image_inputs "$test_context" 2026-W02 GIT_SHA=abc
 [[ "$week_one_key" != "$IMAGE_KEY_CTX" ]] || fail "week change kept the context key"
+old_umask="$(umask)"
+umask 022
+image_inputs "$test_context" "$test_week" GIT_SHA=abc
+umask_key="$IMAGE_KEY_CTX"
+umask 077
+image_inputs "$test_context" "$test_week" GIT_SHA=abc
+[[ "$umask_key" != "$IMAGE_KEY_CTX" ]] || fail "umask change kept the context key"
+umask "$old_umask"
 unset SOURCE_DATE_EPOCH BUILDX_METADATA_PROVENANCE
 IMAGE_KEY_BUILD_FLAGS=(--platform linux/arm64 --provenance=false --file "$test_context/Dockerfile")
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
@@ -468,6 +493,13 @@ export BUILDX_METADATA_PROVENANCE=min
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
 [[ "$env_key" != "$IMAGE_KEY_CTX" ]] || fail "BUILDX_* environment did not change the key"
 unset BUILDX_METADATA_PROVENANCE
+export BUILDX_GIT_LABELS=true BUILDX_GIT_INFO=true
+image_inputs "$test_context" "$test_week" GIT_SHA=abc
+env_key="$IMAGE_KEY_CTX"
+export BUILDX_GIT_LABELS=false BUILDX_GIT_INFO=false
+image_inputs "$test_context" "$test_week" GIT_SHA=abc
+[[ "$env_key" != "$IMAGE_KEY_CTX" ]] || fail "Buildx Git environment did not change the key"
+unset BUILDX_GIT_LABELS BUILDX_GIT_INFO
 export BUILDX_BUILDER=builder-one
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
 builder_key="$IMAGE_KEY_CTX"
@@ -552,6 +584,36 @@ COPY \
   --from=ghcr.io/x /etc/os-release /os-release
 DOCKERFILE
 [[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "continued COPY source produced key"
+cat >"$test_context/Dockerfile" <<'DOCKERFILE'
+FROM node:20-alpine
+RUN \
+  --mount=type=bind,from=ghcr.io/x,target=/source true
+DOCKERFILE
+[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "continued RUN source produced key"
+cat >"$test_context/Dockerfile" <<'DOCKERFILE'
+FROM node:20-alpine
+RUN --mount=type=secret,id=token true
+DOCKERFILE
+[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "secret mount produced key"
+cat >"$test_context/Dockerfile" <<'DOCKERFILE'
+FROM node:20-alpine
+RUN --mount=type=ssh true
+DOCKERFILE
+[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "ssh mount produced key"
+cat >"$test_context/Dockerfile" <<'DOCKERFILE'
+FROM node:20-alpine
+RUN <<EOF
+echo unsafe
+EOF
+DOCKERFILE
+[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "RUN heredoc produced key"
+cat >"$test_context/Dockerfile" <<'DOCKERFILE'
+FROM node:20-alpine
+COPY <<EOF /tmp/file
+unsafe
+EOF
+DOCKERFILE
+[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "COPY heredoc produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 RUN \

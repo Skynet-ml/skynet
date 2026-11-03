@@ -250,7 +250,8 @@ The script runs `docker buildx build --platform linux/arm64 --push` for
 `backend` (`backend/`), `frontend` (`frontend/`) and `litellm` (`deploy/litellm/`). ECR tags are
 immutable; the script skips a tag that exists. Frontend build values
 (`NEXT_PUBLIC_SENTRY_DSN` and others) come from the shell. The frontend build
-does not generate or upload Sentry source maps.
+does not generate or upload Sentry source maps. ECR's 100-image count uses the
+original push time; adding a tag does not refresh an image's age.
 
 Manual equivalent for one image:
 

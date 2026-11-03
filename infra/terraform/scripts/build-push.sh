@@ -40,8 +40,8 @@ cfg="$(aws ecr describe-repositories --repository-names skynet/backend skynet/fr
 registry="$(jq -r '.ecr.backend' <<<"$cfg" | cut -d/ -f1)"
 aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null
 
-# Both environments can use the same immutable application tag. Keyed image
-# reuse and key-tag writes stay staging-only; production skips an existing tag.
+# Both environments can use the same immutable application tag. Shared backend
+# and litellm tags are built for their SHA; their key tags support preview reuse.
 build() {
   local name="$1" tag="$2" context="$3" cache_name="$4"
   shift 4
@@ -62,7 +62,9 @@ build() {
   key="$IMAGE_KEY_CTX"
   tree_key="$IMAGE_KEY_TREE"
   pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
-  if [[ "$env" != production && -n "$key" ]] && find_fresh_by_key "skynet/$name" "$key"; then
+  # Production consumes the plain <sha> tag, so shared tags need a fresh build.
+  if [[ "$env" != production && "$tag" == *-"$env" && -n "$key" ]] &&
+    find_fresh_by_key "skynet/$name" "$key"; then
     if retag "skynet/$name" "$key" "$tag"; then
       echo "reuse: $url:$key as $tag"
       return 0
@@ -142,12 +144,9 @@ build_backend_lane() {
   fi
 }
 
-# Publish .ok only after success; EXIT marks every other lane result failed.
 run_image_lane() {
-  local lane="$1"
   shift
   "$@" || return 1
-  : >"$lane_dir/$lane.ok" || return 1
 }
 
 # Require sibling lane success markers before the migration starts.
@@ -173,37 +172,50 @@ wait_for_lane_success() {
   done
 }
 
-# The EXIT trap writes .failed unless the lane published .ok.
+# A nested shell keeps die from bypassing final lane status publication.
 run_lane() {
   local label="$1"
-  local log_fd log_pid status
+  local log_fd log_pid status logger_status=0 lane_status
   shift
   exec {log_fd}> >(sed -u "s/^/[$label] /") || {
     _mark_lane_failure 1 "$label" || return 1
     return 1
   }
   log_pid=$!
-  if "$@" >&"$log_fd" 2>&1; then status=0; else status=$?; fi
+  if ("$@") >&"$log_fd" 2>&1; then status=0; else status=$?; fi
   if ! exec {log_fd}>&-; then
-    _mark_lane_failure 1 "$label" || return 1
-    return 1
+    logger_status=1
   fi
   if ! wait "$log_pid"; then
+    logger_status=1
+  fi
+  if ((status == 0 && logger_status == 0)); then
+    if _write_lane_status "$label" ok; then
+      return 0
+    fi
     _mark_lane_failure 1 "$label" || return 1
     return 1
   fi
-  if ((status != 0)); then
-    _mark_lane_failure "$status" "$label" || return 1
-    return "$status"
-  fi
-  return 0
+  lane_status="$status"
+  ((lane_status != 0)) || lane_status=1
+  _mark_lane_failure "$lane_status" "$label" || return 1
+  return "$lane_status"
 }
 
-# Record nonzero lane exits so the coordinator can fail before migration.
+_write_lane_status() {
+  local label="$1" result="$2" tmp
+  tmp="$(mktemp "$lane_dir/.$label.XXXXXX")" || return 1
+  if ! printf '%s\n' "$result" >"$tmp" ||
+    ! mv -f -- "$tmp" "$lane_dir/$label.$result"; then
+    rm -f "$tmp" || true
+    return 1
+  fi
+}
+
 _mark_lane_failure() {
   local status="$1" label="$2"
   if ((status != 0)); then
-    : >"$lane_dir/$label.failed"
+    _write_lane_status "$label" failed
   fi
 }
 

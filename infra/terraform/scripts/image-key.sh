@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Keys include Git context bytes, pinned sources, Buildx inputs, build args,
-# and a weekly version. Empty output means build; ctx- keeps args, tree- omits GIT_SHA.
-# Backend/frontend context keys retain commit args, so cross-commit reuse is
-# the backend tree key; the content-key hit is mainly useful for LiteLLM.
+# and a weekly version. Empty output means build; tree- omits GIT_SHA.
+# Only environment-scoped tags use ctx-key reuse; backend tree keys support previews.
+# Shared backend and LiteLLM tags get key tags only after a fresh build.
 # The weekly cache rotation bounds unpinned RUN-time network inputs to one week;
 # the first build each week is cold, so this is a documented freshness gap.
 KEY_VERSION=6
@@ -103,7 +103,8 @@ _hash_image_key() {
   shift 5
   local hash
   local -a args=("$@") sorted_args=()
-  local line digest name value previous=""
+  local line digest name value previous="" umask_value
+  umask_value="$(umask)" || return 1
   if ((${#args[@]})); then
     while IFS= read -r line; do sorted_args+=("$line"); done < <(
       printf '%s\n' "${args[@]+"${args[@]}"}" | LC_ALL=C sort
@@ -112,15 +113,16 @@ _hash_image_key() {
   local -a env_material=()
   while IFS= read -r name; do
     [[ "$name" == SOURCE_DATE_EPOCH || "$name" == DOCKER_DEFAULT_PLATFORM ||
-      "$name" == BUILDX_METADATA_PROVENANCE || "$name" == BUILDX_NO_DEFAULT_ATTESTATIONS ]] || continue
+      "$name" == BUILDX_METADATA_PROVENANCE || "$name" == BUILDX_NO_DEFAULT_ATTESTATIONS ||
+      "$name" == BUILDX_GIT_LABELS || "$name" == BUILDX_GIT_INFO ]] || continue
     value="${!name}"
     env_material+=("$name=$value")
   done < <(compgen -e | LC_ALL=C sort)
   hash="$(
     set -o pipefail
     {
-      printf 'version=%s\nweek=%s\nplatform=linux/arm64\ncontext=%s\nbuildx=%s\nbuildkit=%s\n' \
-        "$KEY_VERSION" "$week" "$context_hash" "$buildx_version" "$buildkit_version"
+      printf 'version=%s\nweek=%s\nplatform=linux/arm64\numask=%s\ncontext=%s\nbuildx=%s\nbuildkit=%s\n' \
+        "$KEY_VERSION" "$week" "$umask_value" "$context_hash" "$buildx_version" "$buildkit_version"
       # The pinned setup action supplies defaults; the BuildKit version is hashed.
       printf 'builder-driver=%s\n' "$IMAGE_KEY_BUILD_DRIVER"
       for line in "${IMAGE_KEY_BUILD_FLAGS[@]+"${IMAGE_KEY_BUILD_FLAGS[@]}"}"; do
@@ -154,7 +156,7 @@ _image_inputs_impl() {
   local context_dir="$1" week="$2" repo_root context_path status dockerfile config_value config_status
   shift 2
   local -a raw_build_args=("$@") build_args=() tree_args=() words=() base_digests=()
-  local line trimmed logical instruction ref image_ref alias digest_json digest
+  local line trimmed logical instruction ref image_ref alias digest_json digest mount
   local context_alias
   local stage_count=0 index from_ref source buildx_version builder_info buildkit_version driver
   local continuation=0 context_hash instruction_seen=0 pin_context
@@ -186,6 +188,18 @@ _image_inputs_impl() {
     config_status=$?
     ((config_status == 1)) || return 1
   fi
+  if config_value="$(git -C "$repo_root" config --bool --get core.symlinks 2>/dev/null)"; then
+    [[ "$config_value" != false ]] || return 1
+  else
+    config_status=$?
+    ((config_status == 1)) || return 1
+  fi
+  if config_value="$(git -C "$repo_root" config --bool --get core.fileMode 2>/dev/null)"; then
+    [[ "$config_value" != false ]] || return 1
+  else
+    config_status=$?
+    ((config_status == 1)) || return 1
+  fi
   status="$(git -C "$repo_root" ls-files -v -- "$context_path" 2>/dev/null)" || return 1
   while IFS= read -r line; do
     [[ "$line" =~ ^[a-z] || "${line:0:1}" == S ]] && return 1
@@ -207,6 +221,7 @@ _image_inputs_impl() {
     esac
     [[ "$line" == *=* && "${line%%=*}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 1
     build_args+=("$line")
+    [[ "$line" == GIT_SHA=* ]] || tree_args+=("$line")
   done
 
   logical=""
@@ -239,9 +254,13 @@ _image_inputs_impl() {
     continuation=0
     words=()
     read -r -a words <<<"$logical"
-    logical=""
     instruction="${words[0]:-}"
     instruction="${instruction,,}"
+    if [[ "$logical" == *'<<'* &&
+      ( "$instruction" == run || "$instruction" == copy ) ]]; then
+      return 1
+    fi
+    logical=""
     for ((index = 0; index < ${#words[@]}; index++)); do
       case "${words[index]}" in
         --from=*)
@@ -259,6 +278,11 @@ _image_inputs_impl() {
           )" "$stage_count" || return 1
           ;;
         --mount=*)
+          if [[ "$instruction" == run ]]; then
+            mount="${words[index]#--mount=}"
+            [[ ",$mount," != *,type=secret,* && ",$mount," != *,type=ssh,* ]] ||
+              return 1
+          fi
           if [[ "${words[index]}" == *from=* ]]; then
             if [[ "${words[index]}" =~ (^|,)from=([^,[:space:]]+) ]]; then
               from_ref="${BASH_REMATCH[2]}"
