@@ -57,13 +57,12 @@ Cuando un presupuesto ya tiene actividad, la tarjeta **Límite de gasto** del as
 
 ## Tarifas
 
-Skynet aplica tres cargos además del coste del proveedor.
+Skynet aplica dos cargos además del coste del proveedor.
 
 | Cargo                                    | Valor predeterminado actual                  | Se aplica a                                              |
 | ---------------------------------------- | -------------------------------------------- | -------------------------------------------------------- |
 | Tarifa de recarga                        | 12,5 % de la cantidad, más 0,35 $            | Cada recarga                                             |
 | Recargo por uso                          | Coste del proveedor × 1,15 (coste más 15 %)  | Llamadas al modelo con las claves de Skynet, y cómputo del sandbox |
-| Tarifa de plataforma con tu propia clave | 5 % del coste del modelo                     | Llamadas al modelo con tu propia clave de proveedor      |
 
 ### Tarifa de recarga
 
@@ -87,8 +86,8 @@ Puedes ejecutar llamadas al modelo con tu propia clave de proveedor. Añade clav
 Cuando una llamada al modelo usa tu clave:
 
 - Tu proveedor cobra los tokens del modelo a tu clave.
-- Skynet cobra de tu saldo una tarifa de plataforma del 5 % del coste del modelo. Skynet no añade el recargo por uso a esta tarifa.
-- El límite de gasto de la ejecución solo cubre la tarifa de plataforma y el uso del sandbox.
+- Skynet no cobra ninguna tarifa por el modelo.
+- El presupuesto de la ejecución solo cubre el uso del entorno aislado.
 
 Las tarifas de un evaluador externo o de un proveedor MCP van directamente a ese proveedor. No forman parte del límite de gasto de la ejecución.
 

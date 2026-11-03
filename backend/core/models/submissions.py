@@ -112,8 +112,8 @@ class _OptimizationRequestBase(BaseModel):
         default="managed",
         description=(
             f"How model calls are billed: 'managed' charges the marked-up provider cost to the {APP_NAME} balance; "
-            f"'byok' sends calls through the user's provider key and charges only {APP_NAME}'s platform fee to "
-            "the balance. Billable sandbox usage is charged at marked-up provider cost in both modes."
+            "'byok' sends calls through the user's provider key without a Skynet model fee. "
+            "Billable sandbox usage is charged at marked-up provider cost in both modes."
         ),
     )
     execution_runtime: Literal["vercel", "docker"] = "vercel"
@@ -161,7 +161,7 @@ class _OptimizationRequestBase(BaseModel):
             "Low end of the projected cost bracket (cents) the wizard showed at submit. Persisted so "
             "the post-run proof moment can reconcile the estimate against the actual charge. "
             "Carries the chargeable bracket for the run's token_source (managed: full per-model "
-            "cost; byok: platform fee). Advisory only — never gates or bills. Omit (null) when "
+            "cost; byok: no model fee). Advisory only — never gates or bills. Omit (null) when "
             "no estimate was computed."
         ),
     )

@@ -7,7 +7,6 @@ import { msg } from "@/shared/lib/messages";
 import { extractAttachmentText } from "@/shared/lib/api";
 
 import { useLocale } from "@/shared/providers";
-import { useUserPrefs } from "@/features/settings";
 import { Button } from "@/shared/ui/primitives/button";
 import { TooltipButton } from "@/shared/ui/tooltip-button";
 import { cn } from "@/shared/lib/utils";
@@ -15,6 +14,7 @@ import { MarkdownPreviewField } from "@/shared/ui/markdown-preview-field";
 
 import { autoResizeTextarea } from "./auto-resize";
 import { ComposerLoader } from "./composer-loader";
+import { handleComposerEscape } from "./composer-keys";
 import { MAX_ATTACHMENT_MB, readAttachments, splitClaimed } from "./file-attachments";
 import { PastedTextCard } from "./pasted-text-card";
 import {
@@ -30,7 +30,7 @@ import { appendToDraft, midTurnKeyAction, type MidTurnQueue } from "./steer-queu
 import { SuggestionGhost } from "./suggestion-ghost";
 import type { AgentMessage } from "./types";
 import { formatRecSeconds, useDictation } from "./use-dictation";
-import { useNextPrompt } from "./use-next-prompt";
+import { useNextPrompt, type SuggestFetcher } from "./use-next-prompt";
 
 interface ComposerProps {
   value: string;
@@ -68,7 +68,17 @@ interface ComposerProps {
   /** Opts an agent chat into next-message suggestions: after a turn ends,
    *  the empty composer shows a greyed likely next message that Tab fills in
    *  (never sends) and Escape dismisses. */
-  suggest?: { messages: readonly AgentMessage[]; model?: string | null; chatId?: string | null };
+  suggest?: {
+    messages: readonly AgentMessage[];
+    model?: string | null;
+    chatId?: string | null;
+    fetcher?: SuggestFetcher;
+  };
+  /** False hides the + attach button and turns off file paste. The upload
+   *  and transcribe endpoints need sign-in, so public pages (the docs) opt out. */
+  attachments?: boolean;
+  /** False hides the dictation mic. */
+  dictation?: boolean;
 }
 
 /**
@@ -100,11 +110,12 @@ export function Composer({
   claimsFile,
   onAttachFile,
   suggest,
+  attachments = true,
+  dictation: showMic = true,
 }: ComposerProps) {
   const inline = layout === "inline";
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   const { locale } = useLocale();
-  const { prefs } = useUserPrefs();
 
   const valueRef = React.useRef(value);
   React.useEffect(() => {
@@ -127,9 +138,6 @@ export function Composer({
     },
   });
   const dictating = dictation.state.kind !== "idle";
-  // A recording in flight keeps its controls even if the pref flips off in
-  // the settings modal mid-take.
-  const showMic = prefs.dictationEnabled || dictating;
   // Without a mid-turn handler a streaming turn locks the input as before.
   const locked = Boolean(streaming && !midTurn);
   const hasDraft = value.trim().length > 0;
@@ -137,6 +145,7 @@ export function Composer({
     messages: suggest?.messages,
     model: suggest?.model,
     chatId: suggest?.chatId,
+    fetcher: suggest?.fetcher,
     draft: value,
     streaming: Boolean(streaming),
     disabled: Boolean(disabled || dictating),
@@ -151,6 +160,13 @@ export function Composer({
 
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const [attaching, setAttaching] = React.useState(0);
+  const [lengthNotice, setLengthNotice] = React.useState<string | null>(null);
+  const maxLength = midTurn?.maxLength ?? 20_000;
+  const pendingLength = [...(midTurn?.queued ?? [])]
+    .filter((item) => !item.uncertain).map((item) => item.text).join("\n\n").length;
+  const hasCertainPending = [...(midTurn?.steering ?? []), ...(midTurn?.queued ?? [])].some((item) => !item.uncertain);
+  const headLength = midTurn?.queued.find((item) => !item.uncertain)?.text.length ?? 0;
+  const tooLong = (count: number) => msg("agent.pending.too_long", { count, max: maxLength });
   const attachFiles = async (picked: File[]) => {
     const {
       claimed,
@@ -208,7 +224,12 @@ export function Composer({
 
   const sendMidTurn = (mode: "steer" | "queue") => {
     if (!midTurn || disabled || dictating || attaching > 0 || !hasDraft) return;
+    if (value.trim().length > maxLength) {
+      setLengthNotice(value);
+      return;
+    }
     if (acceptsMidTurn && !acceptsMidTurn(value)) return;
+    setLengthNotice(null);
     if (mode === "steer") midTurn.steer(value);
     else midTurn.queue(value);
     onChange("");
@@ -235,6 +256,16 @@ export function Composer({
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+    const controlledPopupId = e.currentTarget.getAttribute("aria-controls");
+    const controlledPopup = controlledPopupId
+      ? e.currentTarget.ownerDocument.getElementById(controlledPopupId)
+      : null;
+    const popupOpen = Boolean(
+      suggestion
+      || e.currentTarget.getAttribute("aria-expanded") === "true"
+      || controlledPopup?.getAttribute("data-state") === "open",
+    );
+    if (handleComposerEscape(e, { streaming: Boolean(streaming), popupOpen, composing: Boolean(e.nativeEvent.isComposing || e.keyCode === 229) }, onStop)) return;
     const suggestAction = suggestKeyAction(e, {
       suggestion,
       draft: value,
@@ -285,11 +316,19 @@ export function Composer({
       onSubmit={handleSubmit}
       className={cn("border-t border-border/40 px-3 py-3 shrink-0", className)}
     >
+      {lengthNotice === value && <p role="alert" className="px-2 py-1 text-xs text-destructive">{tooLong(value.trim().length)}</p>}
       {midTurn && (
         <PendingMessages
           queued={midTurn.queued}
           steering={midTurn.steering}
           canPromote={midTurn.canSteer}
+          paused={midTurn.paused}
+          streaming={Boolean(streaming)}
+          stopAndSendDisabled={!hasCertainPending || pendingLength > maxLength}
+          lengthReason={pendingLength > maxLength ? tooLong(pendingLength) : undefined}
+          sendNowReason={headLength > maxLength ? tooLong(headLength) : undefined}
+          onSendNow={midTurn.sendNow}
+          onStopAndSendNow={onStop ? () => midTurn.stopAndSendNow(onStop) : undefined}
           onPromote={midTurn.promote}
           onEdit={(id) => void editPending(id)}
           onRemove={midTurn.remove}
@@ -344,7 +383,7 @@ export function Composer({
                 onChange(joinPastes({ ...draft, text: e.target.value }));
                 autoResizeTextarea(e.target);
               }}
-              onPaste={inline ? undefined : handlePaste}
+              onPaste={inline || !attachments ? undefined : handlePaste}
               onKeyDown={handleKeyDown}
               disabled={disabled || locked}
               rows={1}
@@ -425,7 +464,7 @@ export function Composer({
             inline ? "shrink-0" : "px-2 pb-2 pt-0.5",
           )}
         >
-          {!inline && (
+          {!inline && attachments && (
             <>
               <input
                 ref={fileInputRef}

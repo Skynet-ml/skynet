@@ -196,5 +196,5 @@ Applies to every `backend/` file you touch (not `.venv/`, `__pycache__/` or
   dispatch sandbox work.
 - **Protected execution** reserves wallet and run-budget headroom before paid
   work. Managed model usage, Skynet fees, and sandbox usage are metered. For
-  BYOK model routes, the Skynet budget covers the platform fee and sandbox
-  usage; the model provider charges the user's key directly.
+  BYOK model routes, the Skynet budget covers sandbox usage, with no model fee;
+  the model provider charges the user's key directly.

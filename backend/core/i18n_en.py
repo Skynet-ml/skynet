@@ -22,7 +22,9 @@ from __future__ import annotations
 from .brand import APP_NAME
 
 ENGLISH_MESSAGES: dict[str, str] = {
+    "submit.preflight.scorer_model": "Set the model with llm(model=...) in the metric code.",
     "agent.approval.unknown_call_id": "No pending approval for the given call_id.",
+    "agent.steer_pending_full": "The pending message limit is full. Queue this message instead.",
     "agent.status.tool_end": "Tool finished.",
     "agent.status.tool_start": "Agent invoking tool…",
     "agent_settings.hosted_only": (
@@ -61,6 +63,11 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "billing.insufficient_funds": "Your balance is empty. Add funds to start an optimization.",
     "wizard_agent.daily_limit_reached": "You've used today's {limit} free agent turns. The agent is available again tomorrow.",
     "billing.byok_not_configured": "The BYOK key vault is not configured on this deployment, so provider keys can't be saved.",
+    "billing.byok_invalid_endpoint": "The custom provider endpoint is unsafe or invalid.",
+    "submission.byok_novelty_unsupported": "Novelty checking requires a BYOK provider that supports embeddings.",
+    "submission.byok_provider_unsupported": "The BYOK provider does not support this model or endpoint.",
+    "submission.byok_route_unsupported": "This model route does not support the request.",
+    "submission.byok_embeddings_unsupported": "The provider does not support embeddings on this route.",
     "billing.byok_unknown_provider": "Unknown provider '{provider}'.",
     "billing.byok_empty_secret": "A provider key can't be empty.",
     "billing.byok_key_not_found": "No saved key for provider '{provider}'.",
@@ -269,7 +276,9 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "contract.run_error": "The run code failed on sample {index}: {error}",
     "contract.metric_error": "The metric failed on sample {index}: {error}",
     "contract.shape.blackbox": "The score function must return (score, side_info), where side_info is a dict with a feedback string.",
-    "contract.metric_model_missing": "The metric calls a model, so choose a metric model.",
+    "contract.metric_model_declaration": 'llm() calls must name at most one model as a string literal, like model="openai/gpt-4.1-mini". Without model=, the reflection model is used. Call llm() directly. Pass settings as named arguments, not **kwargs.',
+    "contract.metric_model_empty": "The model= value in llm() must not be empty or contain only whitespace.",
+    "contract.metric_model_conflict": "The stored metric model conflicts with model= in the metric code. Remove the stored model or change the code to match it.",
     "contract.passed": "The code matches what the optimizer needs.",
     "transcription.budget_exhausted": "Dictation is paused for the rest of the month. Type your message instead.",
     "transcription.failed": "Transcription failed on every configured provider.",

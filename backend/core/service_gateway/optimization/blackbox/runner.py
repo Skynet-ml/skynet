@@ -40,6 +40,7 @@ import sys
 import time
 import types
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -285,9 +286,9 @@ def missing_llm(prompt: Any = None, input: Any = None, **kwargs: Any) -> str:
         **kwargs: Ignored.
 
     Raises:
-        ScorerError: Always, naming the step that fixes it.
+        ScorerError: Always, with guidance for selecting a model.
     """
-    raise ScorerError("This scorer calls llm() but no model was chosen in the Scorer step.")
+    raise ScorerError("The metric calls llm() but has no model. Add model= to llm() or check the reflection model.")
 
 
 def side_info_json_default(value: Any) -> str:
@@ -557,6 +558,25 @@ def _completion_text(payload: Any) -> str:
     return "" if content is None else str(content)
 
 
+def model_matches_bound(model: str, bound: str, declared: str | None = None) -> bool:
+    """Compare a user model name with the model bound to its gateway route.
+
+    Args:
+        model: Model named by the helper call.
+        bound: Model identifier on the protected route.
+        declared: Original model identifier, before route normalization.
+
+    Returns:
+        Whether the model matches the bound or declared identifier.
+    """
+
+    def normalized(value: str) -> str:
+        """Remove transport prefixes without changing the provider model id."""
+        return value.strip().strip("/").removeprefix("litellm_proxy/").removeprefix("openrouter/")
+
+    return normalized(model) == normalized(bound) or bool(declared and normalized(model) == normalized(declared))
+
+
 class GatewayClient:
     """What the scorer sees as ``llm``: one chat completion per call, straight to the gateway."""
 
@@ -571,6 +591,9 @@ class GatewayClient:
         reasoning_effort: str | None = None,
         timeout_seconds: float = 120.0,
         protected: bool = False,
+        declared_model: str | None = None,
+        subscription: bool = False,
+        gateway_reasoning: bool = False,
     ) -> None:
         """Bind the helper to one endpoint and model.
 
@@ -584,12 +607,18 @@ class GatewayClient:
             reasoning_effort: Thinking level (``low``, ``high``, ...), when the Scorer step set one.
             timeout_seconds: Per-request timeout.
             protected: Whether the trusted parent owns dispatch and retry coverage.
+            declared_model: Original model identifier resolved by the protected gateway.
+            subscription: Whether the route dispatches to a local CLI.
+            gateway_reasoning: Whether the route fronts OpenRouter.
         """
         relay = env_value(ENV_BUDGET_RELAY_URL)
         self._url = (relay or url).rstrip("/") + "/chat/completions"
         self._protected = protected or bool(relay)
         self.control: dict[str, str] | None = None
         self._model = model
+        self._declared_model = declared_model
+        self._subscription = subscription
+        self._gateway_reasoning = gateway_reasoning or urllib.parse.urlsplit(url).hostname == "openrouter.ai"
         self._api_key = api_key
         self._temperature = temperature
         self._max_tokens = DEFAULT_MAX_TOKENS if max_tokens is None else max_tokens
@@ -605,6 +634,10 @@ class GatewayClient:
         *,
         images: Any = None,
         messages: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> str:
         """Complete ``prompt``, optionally over ``input`` and ``images``.
 
@@ -616,6 +649,10 @@ class GatewayClient:
                 screenshots, plots — attached to the user message.
             messages: Ready-made chat messages (OpenAI format, image parts
                 included); replaces ``prompt``/``input``/``images``.
+            model: The model declared by the metric, which must match the bound route.
+            temperature: Per-call sampling override.
+            max_tokens: Per-call output limit.
+            reasoning_effort: Per-call reasoning level.
 
         Returns:
             The model's first completion, as text.
@@ -626,17 +663,29 @@ class GatewayClient:
         """
         if self.control is not None:
             raise GatewayControl(**self.control)
+        if model is not None and not model_matches_bound(model, self._model, self._declared_model):
+            raise ScorerError("llm(model=...) must match the model bound to this code.")
         if messages is None:
             if prompt is None:
                 raise ScorerError("llm() needs a prompt, or messages=[...].")
             messages = scorer_messages(prompt, input, images)
         elif not isinstance(messages, list):
             raise ScorerError("llm(messages=...) takes a list of chat messages.")
-        body: dict[str, Any] = {"model": self._model, "messages": messages, "max_tokens": self._max_tokens}
-        if self._temperature is not None:
-            body["temperature"] = self._temperature
-        if self._reasoning_effort:
-            body["reasoning_effort"] = self._reasoning_effort
+        body: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "max_tokens": max_tokens if max_tokens is not None else self._max_tokens,
+        }
+        chosen_temperature = temperature if temperature is not None else self._temperature
+        chosen_effort = reasoning_effort if reasoning_effort is not None else self._reasoning_effort
+        if chosen_temperature is not None:
+            body["temperature"] = chosen_temperature
+        if chosen_effort is not None:
+            body["reasoning_effort"] = chosen_effort
+            if self._gateway_reasoning:
+                body["reasoning"] = {"effort": chosen_effort, "summary": "auto"}
+        if self._subscription and reasoning_effort is not None:
+            body["skynet_cli_effort"] = reasoning_effort
         payload = self._post(json.dumps(body).encode("utf-8"))
         usage = payload.get("usage") if isinstance(payload, dict) else None
         if isinstance(usage, dict):
@@ -733,6 +782,9 @@ def run_call(payload: dict[str, Any]) -> dict[str, Any]:
             reasoning_effort=gateway.get("reasoning_effort"),
             timeout_seconds=float(gateway.get("timeout_seconds") or 120.0),
             protected=bool(gateway.get("protected")),
+            declared_model=gateway.get("declared_model"),
+            subscription=bool(gateway.get("subscription")),
+            gateway_reasoning=bool(gateway.get("gateway_reasoning")),
         )
     helpers = {
         LLM_HELPER_NAME: llm if llm is not None else missing_llm,

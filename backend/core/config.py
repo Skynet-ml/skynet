@@ -548,7 +548,7 @@ class Settings(BaseSettings):
         default=1.15,
         ge=1.0,
         alias="USAGE_MARKUP",
-        description="Multiplier applied to the provider cost of every platform-paid metered charge (managed LLM tokens and Vercel sandbox compute) before converting to cents. 1.15 bills cost plus 15%. BYOK runs are unaffected: they pay only the 5% platform fee on model cost. Holds, pre-run estimates and displayed model prices include it.",
+        description="Multiplier applied to the provider cost of every platform-paid metered charge (managed LLM tokens and Vercel sandbox compute) before converting to cents. 1.15 bills cost plus 15%. BYOK model calls carry no Skynet fee. Holds, pre-run estimates and displayed model prices include it.",
     )
     openrouter_api_key: SecretStr | None = Field(
         default=None,
@@ -727,13 +727,16 @@ class Settings(BaseSettings):
         alias="CONNECTOR_IMPORT_MAX_ROWS",
         description="Row cap for connectors that import records rather than files (database tables, LLM traces, Notion databases).",
     )
+    # Free and Pro budgets match ChatGPT Free (500 MB) and Plus (20 GB) storage
+    # (SKY-289). Binary units because formatStorageSize divides by 1024, so the
+    # meter shows a round "500 MB" and "20 GB".
     user_storage_quota_bytes: int = Field(
-        default=250 * 1024 * 1024,
+        default=500 * 1024 * 1024,
         ge=1,
         description="Per-user unified storage budget in bytes across all of their Skynet data",
     )
     pro_storage_quota_bytes: int = Field(
-        default=10 * 1024 * 1024 * 1024,
+        default=20 * 1024 * 1024 * 1024,
         ge=1,
         description="Unified storage budget in bytes for an account on the Skynet Pro plan",
     )

@@ -37,6 +37,8 @@ interface ChatTranscriptProps {
   stepKind?: (call: AgentToolCall) => ActivityKind;
   toolCallsBeforeContent?: boolean;
   onRunCode?: (code: string, language: string) => void;
+  /** Which links in agent answers stay links; the rest render as plain text. */
+  allowLink?: (href: string) => boolean;
   /** What an agent message shows after its text, such as a tool's closing outcome. */
   renderAfterContent?: (msg: AgentMessage) => React.ReactNode;
   animatePairs?: boolean;
@@ -57,6 +59,7 @@ export function ChatTranscript({
   stepKind,
   toolCallsBeforeContent,
   onRunCode,
+  allowLink,
   renderAfterContent,
   animatePairs,
   trailing,
@@ -203,6 +206,7 @@ export function ChatTranscript({
                 stepKind={stepKind}
                 toolCallsBeforeContent={toolCallsBeforeContent}
                 onRunCode={onRunCode}
+                allowLink={allowLink}
                 afterContent={renderAfterContent?.(agentMsg)}
                 className="max-w-full"
               />

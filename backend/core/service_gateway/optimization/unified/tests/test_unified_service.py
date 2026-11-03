@@ -6,6 +6,8 @@ from typing import Any
 
 import pytest
 
+from core.api.errors import DomainError
+from core.exceptions import ServiceError
 from core.models.unified import UnifiedCase, UnifiedRunRequest
 from core.service_gateway.optimization.blackbox import service as blackbox_service
 from core.service_gateway.optimization.blackbox.harness import GatewayConfig
@@ -16,6 +18,20 @@ from core.service_gateway.optimization.unified.split import split_cases, split_s
 
 SEED = "Answer."
 OPTIMIZED = "Answer carefully."
+
+
+def test_worker_maps_novelty_domain_error_to_service_error() -> None:
+    """Preserve novelty error detail and code at the unified worker boundary."""
+    raw = _payload(choice="shinka_evolve").model_dump()
+    raw["optimizer"]["shinka"] = {"novelty": True}
+    raw["models"]["reflection_model"] = {"name": "anthropic/claude-sonnet-4", "token_source": "byok"}
+    payload = UnifiedRunRequest.model_validate(raw)
+    expected = DomainError("submission.byok_novelty_unsupported", status=400)
+    with pytest.raises(ServiceError) as error:
+        unified_service.run_unified_optimization(payload, artifact_id="test")
+    assert str(error.value) == expected.detail
+    assert error.value.code == expected.code
+    assert error.value.params == expected.params
 
 
 class _TableScorer:
@@ -266,6 +282,17 @@ def test_strategy_dispatch(resolved: str, mode: str, engine: str | None) -> None
     """
     strategy = unified_service.unified_strategy(resolved)
     assert (strategy.mode, strategy.engine) == (mode, engine)
+
+
+def test_job_spec_tracks_sources_for_each_extra_lm() -> None:
+    """Keep the task and metric source aligned with the supplied LMs."""
+    payload = _payload()
+    payload.models.reflection_model.token_source = "byok"
+    payload.models.metric_model = payload.models.reflection_model.model_copy(update={"token_source": "managed"})
+    job = unified_service.unified_job_spec(payload, seed=1, task_lm=object(), metric_lm=object())
+    assert job.extra_lm_sources == ["byok", "managed"]
+    metric_only = unified_service.unified_job_spec(payload, seed=1, task_lm=None, metric_lm=object())
+    assert metric_only.extra_lm_sources == ["managed"]
 
 
 def test_job_spec_keeps_metric_source_in_private_context() -> None:

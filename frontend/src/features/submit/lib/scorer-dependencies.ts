@@ -1,3 +1,5 @@
+import { scanMetricModel } from "./run-floor";
+
 /** Remove comments and strings before looking for executable helper calls. */
 function executablePython(code: string): string {
   return code.replace(
@@ -7,13 +9,10 @@ function executablePython(code: string): string {
 }
 
 /**
- * Mirrors the backend static check (`safe_exec._introspect_source`): any `llm`
- * name, `.llm` attribute or imported `llm` means the metric needs a model.
- * Over-matching only sends a model the run may not use; under-matching
- * leaves the backend failing `metric.model` with no picker to fix it.
+ * Estimate helper use with the same bindings used for model declarations.
  */
 export function scorerCallsModel(code: string): boolean {
-  return /\bllm\b/.test(executablePython(code));
+  return scanMetricModel(code).uses;
 }
 
 interface MetricModelEvidence {
@@ -37,10 +36,8 @@ function checkedMetricCode(snapshot: string | null): string | null {
 }
 
 /**
- * The one answer to "does the metric call a model" for the picker, gating,
- * cost and payload. The sandboxed check's `uses_llm` wins while it was run on
- * this exact metric code; only the metric code is compared (not the whole
- * snapshot) so picking a model after the check cannot flip the answer back.
+ * Estimate whether the metric calls a model for run costs. The sandboxed
+ * check's `uses_llm` wins while it was run on this exact metric code.
  */
 export function metricUsesModel(state: MetricModelEvidence): boolean {
   const { metricCode, lastCheck, lastCheckSnapshot } = state.workspace;

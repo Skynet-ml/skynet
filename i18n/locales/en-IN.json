@@ -5,6 +5,7 @@
     "modelCatalog": "model catalogue"
   },
   "messages": {
+    "contract.metric_model_declaration": "llm() calls must name at most one model as a string literal, like model=\"openai/gpt-4.1-mini\". Without model=, the reflection model is used. Call llm() directly. Pass settings as named arguments, not **kwargs.",
     "submit.no_models_available": "No models available in the catalogue — configure a provider API key first.",
     "budget.idempotency_required": "Send a unique Idempotency-Key for this request.",
     "serve.caller_tool_connection_required": "This run uses an owner-bound tool connection. Connect the tool to your account before invoking it.",

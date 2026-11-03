@@ -42,17 +42,17 @@ Defina **Visibilidade** como **Privada** ao enviar uma execução para mantê-la
 
 ### Os provedores de modelos treinam com os meus prompts?
 
-Por padrão, não. A opção padrão de **Privacidade dos dados dos modelos** é **Sem treino**. Ela envia prompts apenas para provedores que não treinam com eles e não os guardam. Essa configuração vale para chamadas que o Skynet cobra do seu saldo. Chamadas com a sua própria chave seguem as configurações de privacidade da sua conta OpenRouter. Veja [Segurança](/docs/security).
+Por padrão, não. A opção padrão de **Privacidade dos dados dos modelos** é **Sem treino**. Ela envia prompts apenas para provedores que não treinam com eles e não os guardam. Essa configuração vale para chamadas que o Skynet cobra do seu saldo. Chamadas BYOK pelo OpenRouter seguem as configurações de privacidade da sua conta OpenRouter. Chamadas BYOK diretas seguem a política de dados do provedor. Veja [Segurança](/docs/security).
 
 ## Cobrança
 
 ### Como o Skynet cobra pelas execuções?
 
-O Skynet usa um saldo pré-pago. O uso de modelos hospedados, as taxas do Skynet e o uso da sandbox são medidos. Antes de o trabalho pago começar, o Skynet reserva uma margem na sua carteira e no orçamento da execução. Veja [Cobrança](/docs/concepts/billing).
+O Skynet usa um saldo pré-pago. O uso de modelos gerenciados e sua margem, além do uso da sandbox, são medidos. Há uma taxa para recarregar o saldo. Antes de o trabalho pago começar, o Skynet reserva uma margem na sua carteira e no orçamento da execução. Veja [Cobrança](/docs/concepts/billing).
 
 ### Posso usar a minha própria chave de provedor de modelos?
 
-Sim. Com a sua própria chave (BYOK), o provedor cobra as chamadas de modelo diretamente na sua chave. O seu saldo no Skynet continua pagando a taxa da plataforma e o uso da sandbox. O Skynet criptografa a sua chave e nunca a mostra de novo. Veja [Cobrança](/docs/concepts/billing) e [Segurança](/docs/security).
+Sim. Com sua própria chave (BYOK), o provedor cobra os tokens do modelo na sua chave. Skynet não cobra taxa pelo modelo. O orçamento da execução cobre apenas o uso da sandbox. O Skynet criptografa a sua chave e nunca a mostra de novo. Veja [Cobrança](/docs/concepts/billing) e [Segurança](/docs/security).
 
 ### Posso usar o Skynet sem pagar pelas chamadas de modelo?
 

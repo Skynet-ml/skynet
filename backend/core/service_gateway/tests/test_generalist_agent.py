@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -19,9 +20,10 @@ from sqlalchemy.pool import StaticPool
 
 from core.api.routers.folders import create_folders_router
 from core.config import settings
+from core.service_gateway.agents import docs_tools, web_tools
 from core.service_gateway.agents import generalist as generalist_module
-from core.service_gateway.agents import web_tools
 from core.service_gateway.agents.code import AgentStoppedError, _agent_error_payload, _SubmitArgExtractor
+from core.service_gateway.agents.docs_retrieval import DocsCorpus
 from core.service_gateway.agents.generalist import (
     GENERALIST_SYSTEM_PROMPT,
     SCREEN_FOCUS,
@@ -1370,11 +1372,16 @@ async def test_turn_replays_history_natively_and_streams_the_submit(monkeypatch:
     assert first[4]["tool_calls"][0]["function"]["name"] == "submit"
     assert "which models?" in first[-1]["content"]
     assert "hello" not in first[1]["content"]
-    assert [t["function"]["name"] for t in lm.requests[0]["tools"]] == ["list_models_for_agent", "share_plan", "submit"]
+    assert [t["function"]["name"] for t in lm.requests[0]["tools"]] == [
+        "list_models_for_agent",
+        "search_docs",
+        "share_plan",
+        "submit",
+    ]
     # The second request only appends to the first: the cacheable prefix holds.
     assert lm.requests[1]["messages"][: len(first)] == first
     assert events[0]["event"] == "turn_metadata"
-    assert events[0]["data"]["allowed_tools"] == ["list_models_for_agent", "share_plan"]
+    assert events[0]["data"]["allowed_tools"] == ["list_models_for_agent", "search_docs", "share_plan"]
     assert [e["event"] for e in events if e["event"] in ("tool_start", "tool_end")] == ["tool_start", "tool_end"]
     # One clear per loop step, so a pending row whose call never ran is dropped.
     assert [e["event"] for e in events if e["event"] in ("tool_pending_clear", "tool_start")] == [
@@ -1487,10 +1494,55 @@ async def test_turn_offers_web_tools_when_firecrawl_is_configured(monkeypatch: p
     )
 
     assert reply == "found it"
-    assert events[0]["data"]["allowed_tools"] == sorted({*web_tools.WEB_TOOLS, "share_plan"})
+    assert events[0]["data"]["allowed_tools"] == sorted({*web_tools.WEB_TOOLS, "search_docs", "share_plan"})
     assert posted == [("/search", {"query": "dspy gepa", "limit": 5})]
     ends = [e["data"] for e in events if e["event"] == "tool_end"]
     assert [(e["tool"], e["status"]) for e in ends] == [("web_search", "ok")]
+
+
+@pytest.mark.asyncio
+async def test_turn_answers_from_the_docs_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The turn always offers ``search_docs`` and runs it through the gated wrapper."""
+    (tmp_path / "en").mkdir()
+    (tmp_path / "en" / "limits.md").write_text("## Spending limit\n\nEach run stops at its limit.\n", encoding="utf-8")
+    monkeypatch.setattr(docs_tools, "_corpus", DocsCorpus(tmp_path, remote_url="http://unused.invalid/llms-full.txt"))
+
+    @asynccontextmanager
+    async def fake_session(mcp_url: str, *, auth_header: str | None = None) -> AsyncIterator[_FakeSession]:
+        """Yield an empty fake session in place of a Streamable-HTTP client.
+
+        Args:
+            mcp_url: Ignored.
+            auth_header: Ignored.
+        """
+        yield _FakeSession([])
+
+    monkeypatch.setattr(generalist_module, "_mcp_session", fake_session)
+    lm = _ScriptedLM(
+        [
+            ("search_docs", {"query": "spending limit", "locale": "en"}),
+            ("submit", {"assistant_message": "See [Limits](/docs/limits)."}),
+        ]
+    )
+    events: list[dict] = []
+
+    reply = await generalist_module._drive_generalist_agent(
+        mcp_url="http://unused/mcp/",
+        wizard_state=WizardState(),
+        chat_history=[],
+        user_message="how do spending limits work?",
+        trust_mode="ask",
+        registry=ApprovalRegistry(),
+        emit=events.append,
+        lm=lm,
+        reply_language="English",
+    )
+
+    assert reply == "See [Limits](/docs/limits)."
+    assert "search_docs" in events[0]["data"]["allowed_tools"]
+    ends = [e["data"] for e in events if e["event"] == "tool_end"]
+    assert [(e["tool"], e["status"]) for e in ends] == [("search_docs", "ok")]
+    assert "/docs/limits" in json.dumps(lm.requests[1]["messages"])
 
 
 def test_share_plan_streams_a_plan_event_and_no_tool_row() -> None:

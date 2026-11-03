@@ -66,7 +66,7 @@ Puoi aggiungere le chiavi dei tuoi provider di modelli.
 - Skynet conserva solo gli ultimi quattro caratteri e uno stato: non verificata, verificata o non valida.
 - Quando inserisci una chiave, Skynet invia una piccola richiesta di prova per controllarla.
 
-Quando usi la tua chiave, il provider addebita direttamente sulla tua chiave. Skynet addebita comunque la commissione della piattaforma e l'uso della sandbox sul tuo saldo.
+Il provider addebita i token del modello sulla tua chiave. Skynet non applica costi per il modello. Il budget dell’esecuzione copre solo l’uso della sandbox.
 
 Skynet rimuove anche i segreti da log e messaggi di errore. Li sostituisce con `[REDACTED]`.
 
@@ -102,7 +102,7 @@ L'impostazione **Privacy dei dati dei modelli** controlla che cosa possono fare 
 | **Nessuna conservazione**   | Solo endpoint con un accordo di conservazione zero dei dati. Alcuni modelli possono non essere disponibili. |
 
 > [!NOTE]
-> Le ottimizzazioni con la tua chiave seguono le impostazioni di privacy del tuo account OpenRouter.
+> Le chiamate BYOK tramite OpenRouter seguono le impostazioni di privacy del tuo account OpenRouter. Le chiamate BYOK dirette seguono la politica sui dati del provider.
 
 ## Visibilità delle esecuzioni
 

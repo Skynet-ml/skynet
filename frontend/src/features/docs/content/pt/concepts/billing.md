@@ -57,13 +57,12 @@ Quando um orçamento já tem atividade, o cartão **Limite de gastos** no assist
 
 ## Taxas
 
-O Skynet tem três cobranças além do custo do provedor.
+O Skynet tem duas cobranças além do custo do provedor.
 
 | Cobrança                              | Padrão atual                              | Aplica-se a                                                  |
 | ------------------------------------- | ----------------------------------------- | ------------------------------------------------------------ |
 | Taxa de recarga                       | 12,5% do valor, mais US$ 0,35             | Cada recarga                                                 |
 | Acréscimo sobre o uso                 | Custo do provedor × 1,15 (custo mais 15%) | Chamadas de modelo com as chaves do Skynet e computação da sandbox |
-| Taxa da plataforma com a sua própria chave | 5% do custo do modelo                | Chamadas de modelo com a sua própria chave de provedor       |
 
 ### Taxa de recarga
 
@@ -87,8 +86,8 @@ Você pode fazer chamadas de modelo com a sua própria chave de provedor. Adicio
 Quando uma chamada de modelo usa a sua chave:
 
 - O seu provedor cobra os tokens do modelo na sua chave.
-- O Skynet cobra do seu saldo uma taxa da plataforma de 5% do custo do modelo. O Skynet não aplica o acréscimo sobre o uso a essa taxa.
-- O limite de gastos da execução cobre apenas a taxa da plataforma e o uso da sandbox.
+- Skynet não cobra taxa pelo modelo.
+- O orçamento da execução cobre apenas o uso da sandbox.
 
 Quaisquer taxas de um avaliador externo ou de um provedor MCP vão diretamente para esse provedor. Elas não fazem parte do limite de gastos da execução.
 

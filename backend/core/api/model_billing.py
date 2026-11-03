@@ -11,6 +11,8 @@ from ..local.cli_catalog import parse_subscription_model_id
 from ..models import BlackboxRunRequest, RunRequest, UnifiedRunRequest
 from ..models.common import ModelConfig
 from ..models.submissions import _OptimizationRequestBase
+from ..models.unified import UnifiedModels
+from ..service_gateway.optimization.unified.metric_model import resolve_metric_model
 from .errors import DomainError
 
 # The Mac app's own sandbox runtime; a hosted deployment runs only Vercel.
@@ -29,6 +31,19 @@ def request_model_configs(
         Model configs in execution order.
     """
     if isinstance(payload, BlackboxRunRequest):
+        if payload.scorer.kind == "python":
+            models = UnifiedModels(
+                reflection_model=payload.reflection_model_settings,
+                metric_model=payload.scorer.model,
+                task_model=payload.task_model_settings,
+                extra_reflection_models=payload.extra_reflection_model_settings,
+            )
+            if models.reflection_model.token_source is None:
+                models.reflection_model.token_source = payload.token_source
+            error = resolve_metric_model(models, str(payload.scorer.metric_code or ""))
+            if error:
+                raise DomainError(error, status=422)
+            payload.scorer.model = models.metric_model
         return [
             config
             for config in (
@@ -51,6 +66,11 @@ def request_model_configs(
         ]
     if isinstance(payload, UnifiedRunRequest):
         models = payload.models
+        if models.reflection_model.token_source is None:
+            models.reflection_model.token_source = payload.token_source
+        error = resolve_metric_model(models, payload.workspace.metric_code)
+        if error:
+            raise DomainError(error, status=422)
         return [
             config
             for config in (

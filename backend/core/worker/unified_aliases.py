@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..i18n_en import t_en
+from ..service_gateway.optimization.unified.metric_model import (
+    resolve_blackbox_metric_model_dict,
+    resolve_metric_model_dict,
+)
+
 # The BYOK and protected-route seams only walk the legacy top-level model
 # keys; a unified payload nests its models under ``models``, so the worker and
 # the setup check expose those same dict objects under the legacy keys
@@ -16,6 +22,20 @@ _UNIFIED_MODEL_ALIASES: tuple[tuple[str, str], ...] = (
 _UNIFIED_ALIAS_KEYS = ("task_model_config", "reflection_model_config", "extra_reflection_model_configs", "scorer")
 
 
+def alias_blackbox_metric_model(payload_dict: dict[str, Any]) -> None:
+    """Resolve a black-box scorer before its model credentials are bound.
+
+    Args:
+        payload_dict: The raw black-box payload, mutated in place.
+
+    Raises:
+        ValueError: When the metric declaration is invalid.
+    """
+    error = resolve_blackbox_metric_model_dict(payload_dict)
+    if error:
+        raise ValueError(t_en(error))
+
+
 def alias_unified_model_roles(payload_dict: dict[str, Any]) -> None:
     """Expose a unified payload's nested model configs under the legacy role keys.
 
@@ -25,6 +45,9 @@ def alias_unified_model_roles(payload_dict: dict[str, Any]) -> None:
     models = payload_dict.get("models")
     if not isinstance(models, dict):
         return
+    error = resolve_metric_model_dict(payload_dict)
+    if error:
+        raise ValueError(t_en(error))
     for nested_key, legacy_key in _UNIFIED_MODEL_ALIASES:
         if isinstance(models.get(nested_key), dict):
             payload_dict[legacy_key] = models[nested_key]
@@ -33,6 +56,8 @@ def alias_unified_model_roles(payload_dict: dict[str, Any]) -> None:
         payload_dict["extra_reflection_model_configs"] = extras
     if isinstance(models.get("metric_model"), dict):
         payload_dict["scorer"] = {"kind": "python", "model": models["metric_model"]}
+    else:
+        payload_dict.pop("scorer", None)
 
 
 def strip_unified_model_aliases(payload_dict: dict[str, Any]) -> None:

@@ -93,7 +93,7 @@ Schreiben Sie zwei Dateien:
 
 Der **Coding-Agent** kann jede Datei für Sie schreiben und ändern. Er prüft seinen Code und behebt, was fehlschlägt. Sie können bis zu 20 zusätzliche Dateien hinzufügen. Lesen Sie [Metriken und Scorer](/docs/concepts/scorers).
 
-Ruft Ihre Metrik `llm()` auf, legen Sie das **Metrikmodell** fest. Standardmäßig verwendet sie das Reflexionsmodell.
+Die Metrik legt ihr Modell in ihrem eigenen `llm()`-Aufruf fest. Ohne `model=` verwendet die Metrik das Reflexionsmodell.
 
 ### Vertragsprüfung
 

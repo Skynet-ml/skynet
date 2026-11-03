@@ -96,12 +96,16 @@ def score(input, output, expected=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
         input=f"Question: {input['question']}\nAnswer: {output}",
+        model="openai/gpt-4.1-mini",
+        temperature=0,
+        max_tokens=512,
+        reasoning_effort="low",
     )
     passed = str(verdict).strip().upper().startswith("PASS")
     return (1.0 if passed else 0.0), {"feedback": str(verdict)}
 ```
 
-अगर आप कोई **मेट्रिक मॉडल** नहीं चुनते, तो मेट्रिक वही मॉडल इस्तेमाल करता है जो रिफ़्लेक्शन मॉडल है।
+मेट्रिक अपने मॉडल को अपनी `llm()` कॉल में तय करता है। दिखाए गए चारों आर्ग्युमेंट वैकल्पिक हैं। `model=` के बिना मेट्रिक रिफ़्लेक्शन मॉडल का उपयोग करता है।
 
 ## सटीकता, गति और लागत
 

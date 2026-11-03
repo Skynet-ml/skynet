@@ -1,3 +1,5 @@
+[See all platforms](/download)
+
 The Skynet Mac app runs Skynet on your own computer. It sends model calls through a coding CLI that is signed in on your Mac, so your CLI plan pays for those calls. You can also link the app to your hosted Skynet account.
 
 ## Requirements
@@ -132,7 +134,7 @@ After the idle timeout or the maximum age, link the Mac again.
 
 ### Link status
 
-The app shows one of these states: **Local mode**, **Linked to this Mac**, **Sign in to sync** or **Linked (offline)**.
+The app shows one of these states: **Local mode**, **Sign in to sync**, your account email when the Mac is linked, or **Linked (offline)**.
 
 ## Local services and data
 

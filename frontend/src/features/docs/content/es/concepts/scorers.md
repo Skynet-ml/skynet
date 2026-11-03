@@ -96,12 +96,16 @@ def score(input, output, expected=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
         input=f"Question: {input['question']}\nAnswer: {output}",
+        model="openai/gpt-4.1-mini",
+        temperature=0,
+        max_tokens=512,
+        reasoning_effort="low",
     )
     passed = str(verdict).strip().upper().startswith("PASS")
     return (1.0 if passed else 0.0), {"feedback": str(verdict)}
 ```
 
-Si no seleccionas un **Modelo de la métrica**, la métrica usa el mismo modelo que el modelo de reflexión.
+La métrica define su modelo en su propia llamada a `llm()`. Los cuatro argumentos mostrados son opcionales. Sin `model=`, la métrica usa el modelo de reflexión.
 
 ## Precisión, velocidad y coste
 

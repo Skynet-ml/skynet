@@ -1,6 +1,7 @@
 export { GeneralistPanel } from "./components/GeneralistPanel.lazy";
 export { AgentPanelDock } from "./components/AgentPanelDock";
 export { AgentPillDock } from "./components/AgentPillDock";
+export { MinimizedPill } from "./components/MinimizedPill";
 export { ApprovalCard } from "./components/ApprovalCard";
 export { ToolCallRow } from "./components/ToolCallRow";
 export { SharedChatView } from "./components/SharedChatView";
@@ -37,3 +38,5 @@ export type {
   TrustMode,
 } from "./lib/types";
 export { queueAgentPrompt } from "./lib/prompt-queue";
+export { dispatchGeneralistEvent } from "./lib/stream-events";
+export type { GeneralistAgentHandlers } from "./lib/stream";

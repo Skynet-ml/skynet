@@ -10,6 +10,7 @@
     "optimizer": "optimiser"
   },
   "messages": {
+    "contract.metric_model_declaration": "llm() calls must name at most one model as a string literal, like model=\"openai/gpt-4.1-mini\". Without model=, the reflection model is used. Call llm() directly. Pass settings as named arguments, not **kwargs.",
     "dataset.split.rationale.large": "Dataset is large ({total} examples). Capped val at {val_count} and test at {test_count} examples — enough for stable scores without wasting optimisation time.",
     "dataset.split.rationale.tiny": "Dataset is very small ({total} examples). Not enough for separate val/test sets — GEPA will train on all examples and reuse them as judges during optimisation.",
     "filter.invalid_optimization_type": "Invalid optimisation-type filter '{value}'. Allowed values: {allowed}",

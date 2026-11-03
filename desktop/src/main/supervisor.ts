@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import type { CliId, CliLimit, CliStatus, DockerStatus } from "./cli-detect";
+import type { Timeline } from "./step-timing";
 
 export const STOP_GRACE_MS = 15_000;
 
@@ -34,6 +35,8 @@ export interface OnboardingState {
   limitMessage?: string;
   /** Short progress step while starting, e.g. "postgres". */
   step?: string;
+  /** Step timings while starting. */
+  timeline?: Timeline;
   error?: string;
   url?: string;
   signIn?: SignInPhase;

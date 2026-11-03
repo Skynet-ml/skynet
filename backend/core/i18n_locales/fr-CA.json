@@ -3,6 +3,7 @@
   "locale": "fr-CA",
   "terms": {},
   "messages": {
+    "contract.metric_model_declaration": "Les appels llm() doivent indiquer au plus un modèle sous forme de chaîne littérale, par exemple model=\"openai/gpt-4.1-mini\". Sans model=, le modèle de réflexion est utilisé. Appelez llm() directement. Passez les paramètres comme arguments nommés, pas avec **kwargs.",
     "accounts.email_taken": "Cette adresse de courriel est déjà enregistrée.",
     "accounts.invalid_credentials": "Courriel ou mot de passe incorrect.",
     "accounts.invalid_email": "Adresse de courriel invalide.",

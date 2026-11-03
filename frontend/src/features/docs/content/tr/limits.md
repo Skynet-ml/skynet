@@ -30,7 +30,7 @@ Kurtarma denemelerinin nasıl çalıştığını öğrenmek için [Çalıştırm
 
 | Limit            | Free    | Pro    |
 | ---------------- | ------- | ------ |
-| Toplam depolama  | 250 MiB | 10 GiB |
+| Toplam depolama  | 500 MiB | 20 GiB |
 
 Toplam depolama; çalıştırmalarınızı, veri kümelerinizi, günlükleri, ajan sohbetlerini, hazırlanan yüklemeleri ve arama verilerini içerir. Skynet, depolama limitinizi aşacak bir yazma işlemini reddeder.
 

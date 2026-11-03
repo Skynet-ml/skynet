@@ -9,14 +9,24 @@ from dataclasses import dataclass, field
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from typing import Any, Literal
 
-from .pricing import CENT_USD_VALUE, PLATFORM_FEE_FRACTION, usage_markup
+from .pricing import BYOK_FEE_FRACTION, CENT_USD_VALUE, usage_markup
 
 _CENT_QUANTUM = Decimal("0.000000001")
-_BYOK_FEE = Decimal(str(PLATFORM_FEE_FRACTION))
+_BYOK_FEE = Decimal(str(BYOK_FEE_FRACTION))
 
 
 class UnpricedOperationError(ValueError):
     """Reject a request whose applicable billable categories cannot be bounded."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        """Keep a reason and an optional structured route refusal code.
+
+        Args:
+            message: Original reason for the refusal.
+            code: Stable translation key for the refusal, if available.
+        """
+        super().__init__(message)
+        self.code = code
 
 
 def exact_nonnegative(value: Any) -> Decimal:
@@ -79,7 +89,7 @@ class ChargePolicy:
             # The user's own CLI subscription pays the provider; Skynet charges nothing.
             return OperationCharge(Decimal(0), Decimal(0))
         if self.kind == "byok_model":
-            # BYOK pays only the platform fee on the at-cost model price; the markup is for platform-paid spend.
+            # Retain the snapshot fraction for historical operations.
             wallet = total = raw * self.byok_fee_fraction
         else:
             wallet = total = raw * self.model_markup

@@ -72,6 +72,7 @@ from .code import ReactReplyStream, _agent_error_payload, _format_agent_error, _
 from .conduct import with_conduct
 from .constants import REASONING_FIELD
 from .conversation_react import AppendOnlyChatAdapter, ConversationReAct, history_from_turns
+from .docs_tools import build_docs_tools
 from .steering import STEER_APPLIED_EVENT, SteerInbox, attach_steering, get_steer_store
 from .tool_pending import TOOL_PENDING_CLEAR_EVENT, TOOL_PENDING_EVENT, ToolCallSpotter
 from .web_tools import build_web_tools
@@ -1718,9 +1719,15 @@ How a turn works:
   messages: each earlier ``user_message``, the tool calls you made that
   turn with their (clipped) results, and the ``submit`` call that
   delivered your reply.
-* Your tools are the {app_name} tools, ``submit``, and — when they are
-  listed — the web tools ``web_search``, ``fetch_url`` and
-  ``crawl_site``. You have no shell and no files.
+* Your tools are the {app_name} tools, ``search_docs``, ``submit``, and
+  — when they are listed — the web tools ``web_search``, ``fetch_url``
+  and ``crawl_site``. You have no shell and no files.
+* When the user asks how {app_name} works or how to do something in it,
+  call ``search_docs`` first and answer from its passages, with the
+  ``locale`` code of ``reply_language``. Cite each page you use as a
+  Markdown link with its relative ``href``, e.g.
+  [Billing](/docs/concepts/billing). If no passage answers it, say the
+  docs do not cover it; never guess product facts.
 * When the user gives a link, read it with ``fetch_url`` before acting on
   it, then use what it says (e.g. as the task brief or background). When
   one page is not enough — docs, a product site, a knowledge base — use
@@ -1912,7 +1919,7 @@ Capabilities worth knowing about:
 * User preferences: when the user explicitly asks to turn a local
   preference on or off, call ``update_user_preferences``. Supported fields
   are ``wizard_code_assist`` (``auto`` or ``manual``), ``wizard_split_mode``
-  (``auto`` or ``manual``), ``tagger_assist``, and ``dictation_enabled``.
+  (``auto`` or ``manual``), and ``tagger_assist``.
   Bundle all requested changes into one call and end the turn with a
   concise status.
   The tool updates this browser's device-scoped settings; it does not
@@ -3138,7 +3145,7 @@ async def _drive_generalist_agent(
                 authoring_flag=authoring_flag,
                 approval_owner=approval_owner,
             )
-            for tool in build_web_tools()
+            for tool in [*build_web_tools(), *build_docs_tools()]
         ]
         if screen is not None:
             dspy_tools += [

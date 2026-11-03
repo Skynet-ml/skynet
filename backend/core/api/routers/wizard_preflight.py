@@ -22,8 +22,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ValidationError
 
+from ...billing.byok_bridge import _model_config_dicts
+from ...billing.byok_vault import safe_connection_params
 from ...i18n import request_locale, t, t_locale
 from ...models import BlackboxRunRequest, BlackboxScorer
+from ...models.common import ModelConfig
 from ...models.unified import (
     ContractCheckItem,
     ContractCheckRequest,
@@ -41,6 +44,8 @@ from ...service_gateway.optimization.unified.contract import (
 from ...storage.preflights import setup_seed
 from ..agent_engine import fill_proposer_host_cli
 from ..auth import AuthenticatedUser, get_authenticated_user
+from ..errors import DomainError
+from ..model_billing import enforce_local_mode_sources, enforce_raw_local_mode_sources, normalize_model_token_sources
 from ..preflight_execution import (
     BUDGET_CHECK_KEY,
     WizardPreflightCheck,
@@ -50,7 +55,7 @@ from ..preflight_execution import (
 )
 from ..preflight_progress import progress_observer
 from ..rate_limit import enforce_submission_rate
-from .submissions import _default_unified_seed, _materialize_unified_cases
+from .submissions import _admit_byok_models, _default_unified_seed, _materialize_unified_cases
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 AcceptLanguageDep = Annotated[str | None, Header(include_in_schema=False)]
@@ -60,6 +65,7 @@ CONTRACT_CHECK_KEY = "metric.contract"
 # without a catalog code. Stored evidence keeps them as written, so they are
 # coded and worded here, at response time, for every caller's locale.
 FIXED_MESSAGE_CODES = {
+    "Set the model with llm(model=...) in the metric code.": "submit.preflight.scorer_model",
     "Evaluator loads; scoring waits for the first generated candidate.": "submit.preflight.scorer_ready",
     "Endpoint validated; its response will be checked with the first generated candidate.": (
         "submit.preflight.endpoint_ready"
@@ -174,11 +180,17 @@ def _coded_check(check: WizardPreflightCheck, locale: str) -> WizardPreflightChe
         locale: The caller's locale tag.
 
     Returns:
-        The check with its message in ``locale`` and its code attached, or the
-        check unchanged when it already has a code or its text is not known.
+        The localized check, or the unchanged check when its text is not known
+        or its existing code belongs to a non-setup check.
     """
     coded = _message_code(check.message)
-    if check.message_code is not None or coded is None:
+    if check.message_code is not None:
+        if check.key == "setup":
+            return check.model_copy(
+                update={"message": t_locale(locale, check.message_code, **(check.message_params or {}))}
+            )
+        return check
+    if coded is None:
         return check
     code, params = coded
     return check.model_copy(
@@ -272,7 +284,12 @@ def create_wizard_preflight_router(*, job_store: Any) -> APIRouter:
             Scoped checks, reusable evidence identity, and authoritative setup spend,
             worded in the caller's locale.
         """
-        response, spec = _checked_preflight(request, user)
+        try:
+            response, spec = _checked_preflight(request, user)
+        except DomainError as error:
+            if error.code.startswith(("submission.byok_", "billing.byok_")):
+                error.detail = t_locale(request_locale(request.locale, accept_language), error.code, **error.params)
+            raise
         return localize_preflight(response, spec, request_locale(request.locale, accept_language))
 
     def _checked_preflight(
@@ -305,10 +322,19 @@ def create_wizard_preflight_router(*, job_store: Any) -> APIRouter:
                 raise RequestValidationError(error.errors()) from error
             # The dump below writes host_cli, so fill it first, as the submit route does.
             fill_proposer_host_cli(job_store, user.username, typed)
+            requested_source = typed.token_source
+            configs, _ = normalize_model_token_sources(typed)
+            enforce_local_mode_sources(typed, requested_source, configs)
             if isinstance(typed, UnifiedRunRequest):
+                reflection = typed.models.reflection_model
+                novelty = bool(typed.optimizer.shinka and typed.optimizer.shinka.novelty)
                 _materialize_unified_cases(typed, job_store=job_store, username=user.username)
                 _default_unified_seed(typed)
                 spec = typed
+            else:
+                reflection = typed.reflection_model_settings
+                novelty = bool(typed.shinka and typed.shinka.novelty)
+            _admit_byok_models(job_store, user.username, configs, reflection, novelty)
             payload = typed.model_dump(mode="json", by_alias=True)
         else:
             # The evaluation check skips the full run request, but the sandbox
@@ -319,7 +345,24 @@ def create_wizard_preflight_router(*, job_store: Any) -> APIRouter:
                 raise RequestValidationError(
                     [{**detail, "loc": ("scorer", *detail["loc"])} for detail in error.errors()]
                 ) from error
+            enforce_raw_local_mode_sources(payload)
             payload["scorer"] = scorer.model_dump(mode="json", by_alias=True)
+            configs = []
+            reflection = None
+            for raw in _model_config_dicts(payload):
+                try:
+                    config = ModelConfig.model_validate(raw)
+                except ValidationError as error:
+                    raise RequestValidationError(error.errors()) from error
+                config.token_source = config.token_source or payload.get("token_source", "managed")
+                config.base_url = None
+                config.extra = safe_connection_params(config.extra)
+                configs.append(config)
+                if raw is payload.get("reflection_model_config"):
+                    reflection = config
+            shinka = payload.get("shinka")
+            novelty = bool(shinka.get("novelty")) if isinstance(shinka, dict) else False
+            _admit_byok_models(job_store, user.username, configs, reflection, novelty)
         return run_preflight(request.model_copy(update={"payload": payload}), user, job_store), spec
 
     @router.post("/wizard/preflight/stream", include_in_schema=False)
@@ -349,6 +392,18 @@ def create_wizard_preflight_router(*, job_store: Any) -> APIRouter:
             try:
                 result = preflight(request, user, accept_language)
                 events.put({"event": "result", "data": result.model_dump(mode="json", exclude_none=True)})
+            except DomainError as error:
+                events.put(
+                    {
+                        "event": "error",
+                        "data": {
+                            "detail": error.detail,
+                            "code": error.code,
+                            "params": error.params,
+                            "status": error.status_code,
+                        },
+                    }
+                )
             except HTTPException as error:
                 events.put({"event": "error", "data": {"detail": error.detail}})
             except RequestValidationError:

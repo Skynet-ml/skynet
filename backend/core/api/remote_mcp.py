@@ -43,6 +43,7 @@ from ..config import settings
 from ..i18n import DEFAULT_LOCALE, request_locale, t_locale, term
 from ..models.unified import UnifiedRunRequest
 from ..service_gateway.optimization.unified.contract import in_locale, static_contract_check
+from ..service_gateway.optimization.unified.metric_model import resolve_metric_model
 from .auth import AuthenticatedUser
 from .converters import job_owner
 from .errors import DomainError
@@ -167,6 +168,9 @@ def _effective_sources(spec: UnifiedRunRequest) -> list[tuple[str, str]]:
         One pair for each model the run names.
     """
     models = spec.models
+    if models.reflection_model.token_source is None:
+        models.reflection_model.token_source = spec.token_source
+    resolve_metric_model(models, spec.workspace.metric_code)
     roles = [models.task_model, models.reflection_model, *models.extra_reflection_models, models.metric_model]
     return [(model.name, model.token_source or spec.token_source) for model in roles if model is not None]
 

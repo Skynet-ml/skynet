@@ -64,6 +64,8 @@ import {
   aggregateTokenSource,
   callHoldKey,
   isSubscriptionModel,
+  metricModelUnpriced,
+  storedMetricModel,
   runFloor as computeRunFloor,
   runModels,
 } from "../lib/run-floor";
@@ -103,7 +105,6 @@ import {
   deleteWorkspaceFile,
   initialWizardV2State,
   presetEngine,
-  resolvedMetricModel,
   type InputsSlice,
   type MetaSlice,
   type OptimizerSlice,
@@ -235,7 +236,8 @@ function readWizardSession(): string | null {
 
 function forgetWizardSession() {
   try {
-    for (const key of [WIZARD_SESSION_KEY, ...WIZARD_VIEW_KEYS]) window.sessionStorage.removeItem(key);
+    for (const key of [WIZARD_SESSION_KEY, ...WIZARD_VIEW_KEYS])
+      window.sessionStorage.removeItem(key);
   } catch {}
 }
 
@@ -411,23 +413,23 @@ export function WizardV2Provider({
   );
 
   const metricCallsModel = metricUsesModel(state);
-  const metricModel = metricCallsModel ? resolvedMetricModel(state) : null;
-  const submittedModels = runModels(state.optimizer, metricModel);
+  const submittedModels = runModels(
+    state.optimizer,
+    metricCallsModel,
+    state.workspace.metricCode,
+    storedMetricModel(state.workspace.metricModel, state.workspace.metricCode),
+  );
   // A CLI-subscription model bills to the user's own plan, so it has no
   // server hold to fetch and adds nothing to the floor.
   const pricedModels = submittedModels.filter(
     (model): model is ModelConfig & { token_source?: "managed" | "byok" } =>
       !isSubscriptionModel(model),
   );
-  const {
-    holds: callHolds,
-    boxHoldCents,
-    settled: costSettled,
-  } = useModelCallHolds(pricedModels);
+  const { holds: callHolds, boxHoldCents, settled: costSettled } = useModelCallHolds(pricedModels);
   const tokenSource = aggregateTokenSource(submittedModels);
   // The floor waits for the server's box hold, since the boxes are most of it.
   const runFloor =
-    boxHoldCents == null
+    boxHoldCents == null || !costSettled
       ? null
       : computeRunFloor({
           boxHoldCents,
@@ -436,6 +438,7 @@ export function WizardV2Provider({
               callHolds.get(callHoldKey(model.name, model.token_source ?? "managed")) ?? null,
           ),
           tokenSource,
+          unknownModel: metricModelUnpriced(state.workspace.metricCode),
         });
 
   // The spending limit lives on the server budget, like the slice mirror the
@@ -471,7 +474,9 @@ export function WizardV2Provider({
     if (inputs.cases.length === 0 && !inputs.stagedDatasetId) return null;
     if (!hasModel(optimizer.reflectionModel)) return null;
     if (!workspace.runCode.trim() || !workspace.metricCode.trim()) return null;
-    const metric = metricUsesModel(state) ? resolvedMetricModel(state) : null;
+    const metricModel = metricUsesModel(state)
+      ? storedMetricModel(workspace.metricModel, workspace.metricCode)
+      : null;
     return {
       payload_kind: "unified_v1",
       name: meta.name.trim() || undefined,
@@ -501,11 +506,11 @@ export function WizardV2Provider({
       models: {
         task_model: hasModel(optimizer.taskModel) ? prepareModelConfig(optimizer.taskModel) : null,
         reflection_model: prepareModelConfig(optimizer.reflectionModel),
+        metric_model: hasModel(metricModel) ? prepareModelConfig(metricModel) : null,
         extra_reflection_models:
           optimizer.choice === "shinka_evolve"
             ? optimizer.extraReflectionModels.filter(hasModel).map(prepareModelConfig)
             : [],
-        metric_model: hasModel(metric) ? prepareModelConfig(metric) : null,
       },
       workspace: {
         run_code: workspace.runCode,

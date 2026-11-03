@@ -269,7 +269,7 @@ export function TotalBudgetCard({ w, mode }: { w: BudgetContext; mode: TokenSour
                     dir="auto"
                     className="self-start text-[13px] font-medium tabular-nums text-foreground sm:self-auto sm:text-end"
                   >
-                    {dollars(runFloor.floorCents)}
+                    {runFloor.unpriced ? msg("usage_tab.not_priced") : dollars(runFloor.floorCents)}
                   </span>
                 </div>
               </div>

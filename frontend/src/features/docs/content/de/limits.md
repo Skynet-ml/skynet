@@ -30,7 +30,7 @@ Wie Wiederherstellungsversuche funktionieren, lesen Sie unter [Durchläufe](/doc
 
 | Limit           | Free    | Pro    |
 | --------------- | ------- | ------ |
-| Gesamtspeicher  | 250 MiB | 10 GiB |
+| Gesamtspeicher  | 500 MiB | 20 GiB |
 
 Der Gesamtspeicher umfasst Ihre Durchläufe, Datensätze, Logs, Agenten-Chats, bereitgestellte Uploads und Suchdaten. Skynet lehnt einen Schreibvorgang ab, der Ihr Speicherlimit überschreiten würde.
 

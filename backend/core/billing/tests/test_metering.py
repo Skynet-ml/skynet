@@ -154,12 +154,13 @@ def test_estimate_run_cents_prices_without_debiting(engine: object) -> None:
     assert estimate == meter_llm_run(engine, "alice@x.io", [_FakeLm(history)], description="x")
 
 
-def test_estimate_run_cents_applies_byok_platform_fee() -> None:
-    """The live balance watch prices BYOK usage at the same reduced source rate."""
+def test_estimate_run_cents_excludes_byok_model_charge() -> None:
+    """The live balance watch does not charge BYOK model usage."""
     history = [{"usage": {"prompt_tokens": 100_000, "completion_tokens": 40_000}}]
     managed = estimate_run_cents([_FakeLm(history)], "managed")
     byok = estimate_run_cents([_FakeLm(history)], "byok")
-    assert 0 < byok < managed
+    assert byok == 0
+    assert managed > 0
 
 
 def test_estimate_run_cents_handles_empty_and_untracked_lms() -> None:

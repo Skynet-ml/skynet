@@ -1,0 +1,52 @@
+{
+  "buildx.build.provenance": {
+    "builder": {
+      "id": ""
+    },
+    "buildType": "https://mobyproject.org/buildkit@v1",
+    "materials": [
+      {
+        "uri": "pkg:docker/mirror.gcr.io/library/python@3.12-slim?digest=sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30\u0026platform=linux%2Farm64",
+        "digest": {
+          "sha256": "b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30"
+        }
+      }
+    ],
+    "invocation": {
+      "configSource": {
+        "entryPoint": "Dockerfile"
+      },
+      "parameters": {
+        "frontend": "dockerfile.v0",
+        "locals": [
+          {
+            "name": "context"
+          },
+          {
+            "name": "dockerfile"
+          }
+        ],
+        "compatibilityVersion": 30
+      },
+      "environment": {
+        "dockerfileVersion": "1.26.0",
+        "platform": "linux/amd64"
+      }
+    }
+  },
+  "buildx.build.ref": "default/default/5gue2kzxca3fddq2ghan55z2s",
+  "containerimage.config.digest": "sha256:215cde098475b00c0741a8dd3fd16c7995f23dd2c0f4bb8c58734ab8f49e4a50",
+  "containerimage.descriptor": {
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "digest": "sha256:3b3faa1c6df297013b6c7276804eaffbfecc3857d747605db4f258cd8da5cc66",
+    "size": 1055,
+    "annotations": {
+      "org.opencontainers.image.created": "2026-11-03T09:25:28Z"
+    },
+    "platform": {
+      "architecture": "arm64",
+      "os": "linux"
+    }
+  },
+  "containerimage.digest": "sha256:3b3faa1c6df297013b6c7276804eaffbfecc3857d747605db4f258cd8da5cc66"
+}

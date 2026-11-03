@@ -20,7 +20,6 @@ import {
   ArrowSquareOut,
   HardDrive,
   Translate,
-  Microphone,
   PaperPlaneTilt,
   PencilSimple,
   Plus,
@@ -277,17 +276,6 @@ function AgentTab() {
       </SettingsRow>
 
       <SettingsRow
-        icon={Microphone}
-        label={msg("settings.agent.dictation.label")}
-        description={msg("settings.agent.dictation.description")}
-      >
-        <Switch
-          checked={prefs.dictationEnabled}
-          onCheckedChange={(v) => setPref("dictationEnabled", v)}
-        />
-      </SettingsRow>
-
-      <SettingsRow
         icon={Shield}
         label={msg("settings.agent.trust.label")}
         description={msg("settings.agent.trust.description")}
@@ -521,10 +509,14 @@ function EditableBudgetCell({
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState<string>(toMb(bytes));
   const [saving, setSaving] = React.useState(false);
+  const [dirty, setDirty] = React.useState(false);
   const fieldRef = React.useRef<HTMLSpanElement | null>(null);
 
   React.useEffect(() => {
-    if (!editing) setDraft(toMb(bytes));
+    if (!editing) {
+      setDraft(toMb(bytes));
+      setDirty(false);
+    }
   }, [bytes, editing, toMb]);
 
   React.useEffect(() => {
@@ -537,6 +529,12 @@ function EditableBudgetCell({
   }, [bytes, toMb]);
 
   const commit = React.useCallback(async () => {
+    // An untouched draft is the rounded MB of an API-set value; saving it would silently change the override.
+    // A typed draft with the same digits is a deliberate round-down and still saves.
+    if (!dirty) {
+      setEditing(false);
+      return;
+    }
     const parsedMb = Number.parseInt(draft, 10);
     if (!Number.isFinite(parsedMb) || parsedMb < 1) {
       toast.error(msg("settings.admin.storage.budget_invalid"));
@@ -557,7 +555,7 @@ function EditableBudgetCell({
     } finally {
       setSaving(false);
     }
-  }, [bytes, cancel, draft, onSave]);
+  }, [bytes, cancel, dirty, draft, onSave]);
 
   if (editing) {
     return (
@@ -583,8 +581,14 @@ function EditableBudgetCell({
         <NumberInput
           min={1}
           value={draft === "" ? "" : Number(draft)}
-          onChange={(value) => setDraft(String(value))}
-          onClear={() => setDraft("")}
+          onChange={(value) => {
+            setDraft(String(value));
+            setDirty(true);
+          }}
+          onClear={() => {
+            setDraft("");
+            setDirty(true);
+          }}
           disabled={saving}
           className="h-7 w-28 rounded-md [&_button]:size-7 [&_input]:text-xs"
         />
@@ -601,7 +605,15 @@ function EditableBudgetCell({
       title={msg("settings.admin.storage.edit_hint")}
       className="group inline-flex items-center gap-1.5 rounded px-2 py-1 text-xs tabular-nums text-muted-foreground hover:bg-accent/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
     >
-      <span dir="ltr">{formatStorageSize(bytes)}</span>
+      {/* MB from 1 MB up, the unit the editor uses. An API-set value that is not a whole MB shows
+          one decimal instead of rounding; under 1 MB it shows KB or B so it does not read as 0. */}
+      <span dir="ltr">
+        {bytes % BYTES_PER_MB === 0
+          ? `${toMb(bytes)} MB`
+          : bytes < BYTES_PER_MB
+            ? formatStorageSize(bytes)
+            : `${(bytes / BYTES_PER_MB).toFixed(1)} MB`}
+      </span>
       <PencilSimple
         className="size-3 opacity-0 transition group-hover:opacity-50"
         aria-hidden="true"

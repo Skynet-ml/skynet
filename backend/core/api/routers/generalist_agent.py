@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from starlette.responses import StreamingResponse
@@ -52,6 +52,8 @@ from ...service_gateway.agents.steering import (
     STEER_APPLIED_EVENT,
     STEER_KEY_MAX_CHARS,
     STEER_TEXT_MAX_CHARS,
+    SteerInputError,
+    SteerLimitError,
     get_steer_store,
 )
 from ...service_gateway.embedding_pipeline import queue_conversation_embed
@@ -163,7 +165,24 @@ class GeneralistAgentRequest(BaseModel):
     regenerate: bool = Field(
         default=False,
         description=(
-            "Replace the existing conversation's final user/assistant turn instead of appending a duplicate turn."
+            "Replace the conversation's final user/assistant turn when its user text equals "
+            "``user_message``; otherwise append the turn. With ``edit_user_text``, apply only "
+            "when the edited turn is not found."
+        ),
+    )
+    edit_user_text: str | None = Field(
+        default=None,
+        description=(
+            "Original text of the user turn that this message edits. The stored copy of that turn and "
+            "every later message of the conversation are deleted before the new turn is saved."
+        ),
+    )
+    edit_user_occurrence: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "How many earlier user turns in the chat have the same text as the edited turn. It selects "
+            "the edited turn when several stored turns share its text."
         ),
     )
     locale: str | None = Field(
@@ -198,6 +217,7 @@ class GeneralistAgentRequest(BaseModel):
     )
     steer_key: str | None = Field(
         default=None,
+        min_length=1,
         max_length=STEER_KEY_MAX_CHARS,
         description=(
             "Client-chosen key for this turn. Messages posted to "
@@ -242,10 +262,12 @@ class SteerWithdrawRequest(BaseModel):
     )
 
 
+# Delivered ids preserve the outcome when a withdrawal response needs a retry.
 class SteerWithdrawResponse(BaseModel):
     """Messages returned to the client, oldest first."""
 
     ids: list[str]
+    delivered: list[str] = Field(default_factory=list, description="Ids already read by the agent, oldest first.")
 
 
 class NextPromptTurn(BaseModel):
@@ -454,7 +476,7 @@ def _persist_user_turn(job_store, conversation_id: str, content: str) -> None:
         session.commit()
 
 
-def _discard_latest_turn(job_store, conversation_id: str) -> None:
+def _discard_latest_turn(job_store, conversation_id: str, only_if_text: str | None = None) -> None:
     """Delete the final persisted user turn and every response after it.
 
     The regenerate UI replaces the latest assistant response in memory. Remove
@@ -466,6 +488,8 @@ def _discard_latest_turn(job_store, conversation_id: str) -> None:
     Args:
         job_store: Job-store instance whose engine backs the DB session.
         conversation_id: Conversation whose latest turn should be replaced.
+        only_if_text: When set, delete nothing unless the latest user turn has
+            exactly this text.
     """
     with Session(job_store.engine) as session:
         latest_user = (
@@ -477,13 +501,55 @@ def _discard_latest_turn(job_store, conversation_id: str) -> None:
             .order_by(AgentMessageModel.id.desc())
             .first()
         )
-        if latest_user is None:
+        if latest_user is None or (only_if_text is not None and latest_user.content != only_if_text):
             return
         session.query(AgentMessageModel).filter(
             AgentMessageModel.conversation_id == conversation_id,
             AgentMessageModel.id >= latest_user.id,
         ).delete(synchronize_session=False)
         session.commit()
+
+
+def _discard_from_user_turn(job_store, conversation_id: str, user_text: str, occurrence: int) -> bool:
+    """Delete the stored copy of the edited user turn and every message after it.
+
+    Edit-and-resend keeps only the turns before the edited one in memory, so the
+    stored history must lose the same suffix; otherwise a reload shows the old
+    turn and its replies with the edited copy appended after them. The turn is
+    found by its text, not its position: the chat can show turns that were never
+    stored (a send refused before it was saved), and the store can hold steered
+    turns that never reached the chat. When a missing turn shares the edited
+    text, no stored turn matches and nothing is deleted, never a wrong turn.
+
+    Args:
+        job_store: Job-store instance whose engine backs the DB session.
+        conversation_id: Conversation whose history is cut.
+        user_text: Original text of the edited turn.
+        occurrence: How many earlier chat user turns have the same text.
+
+    Returns:
+        Whether a stored turn matched and was deleted with its suffix.
+    """
+    with Session(job_store.engine) as session:
+        edited = (
+            session.query(AgentMessageModel.id)
+            .filter(
+                AgentMessageModel.conversation_id == conversation_id,
+                AgentMessageModel.role == "user",
+                AgentMessageModel.content == user_text,
+            )
+            .order_by(AgentMessageModel.id)
+            .offset(occurrence)
+            .first()
+        )
+        if edited is None:
+            return False
+        session.query(AgentMessageModel).filter(
+            AgentMessageModel.conversation_id == conversation_id,
+            AgentMessageModel.id >= edited.id,
+        ).delete(synchronize_session=False)
+        session.commit()
+        return True
 
 
 def _persist_assistant_turn(
@@ -869,8 +935,18 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                 return None, None
             try:
                 cid, ttl = _ensure_conversation(job_store, req.conversation_id, current_user.username, req.user_message)
-                if req.regenerate:
-                    _discard_latest_turn(job_store, cid)
+                if req.edit_user_text is not None:
+                    found = _discard_from_user_turn(job_store, cid, req.edit_user_text, req.edit_user_occurrence)
+                    # A retry of an edit the server saved, but whose
+                    # conversation_meta never reached the client, finds no old
+                    # turn. Replace the saved edit only when it is the latest
+                    # turn, so a missing target never deletes another turn.
+                    if not found and req.regenerate:
+                        _discard_latest_turn(job_store, cid, only_if_text=req.user_message)
+                elif req.regenerate:
+                    # A retry of a send refused before it was stored also
+                    # sends regenerate; the text check keeps the previous turn.
+                    _discard_latest_turn(job_store, cid, only_if_text=req.user_message)
                 _persist_user_turn(job_store, cid, req.user_message)
             except DomainError:
                 raise
@@ -880,7 +956,6 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             return cid, ttl
 
         await asyncio.to_thread(enforce_llm_balance, job_store, current_user.username)
-        conversation_id, title = await asyncio.to_thread(_setup_turn)
 
         wizard_state: WizardState = {**req.wizard_state}  # type: ignore[typeddict-item]
         picked = await asyncio.to_thread(engine_agent_model, job_store, current_user.username, req.model)
@@ -898,6 +973,10 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             body = model_config.extra.get("extra_body")
             fast_body = {**(body if isinstance(body, dict) else {}), CLI_FAST_KEY: True}
             model_config = model_config.model_copy(update={"extra": {**model_config.extra, "extra_body": fast_body}})
+        # Model routing can refuse the turn with a 4xx. Store nothing before it
+        # passes: the client gets no conversation_meta for a refused turn and
+        # would resend it as a new edit.
+        conversation_id, title = await asyncio.to_thread(_setup_turn)
         usage_sink: list = []
         source = run_generalist_agent(
             wizard_state=wizard_state,
@@ -984,8 +1063,18 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
 
         Returns:
             The stored message's id.
+
+        Raises:
+            HTTPException: Text cannot fit the turn (422).
+            DomainError: The pending allowance is full (429).
         """
-        return SteerMessageResponse(id=get_steer_store().post(current_user.username, req.steer_key, req.text))
+        try:
+            message_id = get_steer_store().post(current_user.username, req.steer_key, req.text)
+        except SteerInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except SteerLimitError as exc:
+            raise DomainError("agent.steer_pending_full", status=429) from exc
+        return SteerMessageResponse(id=message_id)
 
     @router.post(
         "/optimizations/agent-steer/withdraw",
@@ -1004,10 +1093,10 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             current_user: The authenticated caller.
 
         Returns:
-            The ids of the messages returned, oldest first.
+            Newly withdrawn ids and ids already read by the agent.
         """
-        taken = get_steer_store().take(current_user.username, req.steer_key, req.ids)
-        return SteerWithdrawResponse(ids=[message_id for message_id, _ in taken])
+        ids, delivered = get_steer_store().withdraw(current_user.username, req.steer_key, req.ids)
+        return SteerWithdrawResponse(ids=ids, delivered=delivered)
 
     @router.post(
         "/optimizations/agent-suggest",

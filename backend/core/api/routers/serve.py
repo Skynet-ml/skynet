@@ -44,6 +44,7 @@ from ...models import ModelConfig, ServeInfoResponse, ServeRequest, ServeRespons
 from ...models.serve import reject_model_override
 from ...service_gateway.agents.generalist import TrustMode, get_approval_registry
 from ...service_gateway.agents.react_serve import run_react_chat
+from ...service_gateway.agents.steering import STEER_KEY_MAX_CHARS
 from ...service_gateway.language_models import build_language_model
 from ...service_gateway.optimization.workflow import capture_node_traces
 from ...telemetry.server_events import record_server_event
@@ -327,6 +328,17 @@ class ServeChatRequest(BaseModel):
     """Request body for ``POST /serve/{id}/chat`` (live ReAct chat turn)."""
 
     user_message: str = Field(..., max_length=AGENT_MAX_TEXT)
+    steer_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=STEER_KEY_MAX_CHARS,
+        description=(
+            "Client-chosen key for this turn. Messages posted to "
+            "``/optimizations/agent-steer`` under it reach the non-protected agent "
+            "at its next step, announced by a ``steer_applied`` event. "
+            "Protected turns ignore this key and never announce ``steer_ready``."
+        ),
+    )
     chat_history: list[ServeChatTurn] = Field(default_factory=list)
     trust_mode: TrustMode = Field(
         default="ask",
@@ -1765,6 +1777,8 @@ def create_serve_router(*, job_store) -> APIRouter:
                 model_name=model_config.normalized_identifier(),
                 mcp_url=mcp_url,
                 auth_header=authorization,
+                steer_key=req.steer_key,
+                steer_owner=current_user.username,
             )
             metered = stream_with_llm_metering(
                 source,

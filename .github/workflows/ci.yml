@@ -5,16 +5,52 @@ on:
     branches: [main, staging]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CORE_SHARD_COUNT: 6
+
 jobs:
-  backend:
-    name: backend · ruff + core tests (${{ matrix.shard }}/4)
+  backend-core:
+    name: backend · core tests (${{ matrix.shard }}/6)
     runs-on: ubuntu-latest
-    # The core suite takes over four minutes on one runner; four shards run
-    # side by side and the one-off gates below run on shard 0 only.
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5]
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install dependencies (runtime + dev)
+        run: uv sync --extra dev --frozen
+      # The credential-free `core/` tier runs without Postgres, an LLM, or a live
+      # server; the `tests/` integration tier (DB + paid LLM) is a separate,
+      # nightly concern and is intentionally not gated here.
+      - name: Core test suite
+        env:
+          SKYNET_TEST_SHARD: ${{ matrix.shard }}/${{ env.CORE_SHARD_COUNT }}
+          SKYNET_TEST_DISPATCHED_OUT: dispatched-${{ matrix.shard }}.txt
+        run: uv run pytest core/ -q -n auto
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dispatched-${{ matrix.shard }}
+          path: backend/dispatched-${{ matrix.shard }}.txt
+          if-no-files-found: ignore
+          overwrite: true
+
+  backend-gates:
+    name: backend · ruff + gates
+    runs-on: ubuntu-latest
     services:
       postgres:
         image: postgres:16-alpine
@@ -42,31 +78,18 @@ jobs:
       - name: Install dependencies (runtime + dev)
         run: uv sync --extra dev --frozen
       - name: Ruff lint
-        if: matrix.shard == 0
         run: uv run ruff check .
-      # The credential-free `core/` tier runs without Postgres, an LLM, or a live
-      # server; the `tests/` integration tier (DB + paid LLM) is a separate,
-      # nightly concern and is intentionally not gated here.
-      - name: Core test suite
-        env:
-          SKYNET_TEST_SHARD: ${{ matrix.shard }}/4
-        run: uv run pytest core/ -q -n auto
-      - name: PostgreSQL budget concurrency and migration gates
-        if: matrix.shard == 0
-        env:
-          SKYNET_BUDGET_TEST_DB_URL: postgresql+psycopg2://budget_test:budget_test@127.0.0.1:5432/budget_test
-        run: uv run pytest core/billing/tests/test_budgets_postgres.py core/api/tests/test_run_sync_postgres.py -q
-      - name: Load-test release-gate unit tests
-        if: matrix.shard == 0
-        run: uv run pytest tests/unit/test_load_test_slo.py -q
+      - name: Image-key tests
+        run: bash ../infra/terraform/scripts/tests/test-image-key.sh
+      - name: Lane failure tests
+        run: bash ../infra/terraform/scripts/tests/test-lane-failures.sh
       # requirements.txt is the pip install path's copy of uv.lock. When only
       # one of the two moves, the pip-path image silently ships a different
       # dependency set than CI ever tested — that drift is how starlette landed
       # on a version the pinned instrumentator rejects, and how `stripe` went
       # missing from the export entirely. Compare pins only, so the hand-written
       # header block above the export is free to differ.
-      - name: requirements.txt in sync with uv.lock
-        if: matrix.shard == 0
+      - name: Requirements sync
         run: |
           uv export --no-emit-project --no-hashes --no-header -o /tmp/req-expected.txt >/dev/null
           if ! diff -u <(grep -vE '^\s*#|^\s*$' requirements.txt) \
@@ -74,6 +97,116 @@ jobs:
             echo "::error::requirements.txt is out of sync with uv.lock. Regenerate: uv export --no-emit-project --no-hashes --no-header -o requirements.txt (then restore the header block)"
             exit 1
           fi
+      - name: PostgreSQL budget concurrency and migration gates
+        env:
+          SKYNET_BUDGET_TEST_DB_URL: postgresql+psycopg2://budget_test:budget_test@127.0.0.1:5432/budget_test
+        run: uv run pytest core/billing/tests/test_budgets_postgres.py core/api/tests/test_run_sync_postgres.py -q
+      - name: Load-test SLO gate
+        run: uv run pytest tests/unit/test_load_test_slo.py -q
+
+  backend-shard-coverage:
+    name: backend · shard coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install dependencies (runtime + dev)
+        run: uv sync --extra dev --frozen
+      - name: Collect full core suite
+        env:
+          SKYNET_TEST_COLLECTED_OUT: collected.txt
+        run: |
+          unset APP_TEST_SHARD SKYNET_TEST_SHARD
+          uv run pytest core/ --collect-only -q
+          test -s collected.txt
+          python3 -c 'from pathlib import Path; print("collected", len(Path("collected.txt").read_text().splitlines()), "core test nodeids")'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: collected
+          path: backend/collected.txt
+          if-no-files-found: ignore
+          overwrite: true
+
+  backend:
+    # Keep the /4 names for required checks; shard coverage uses six shards.
+    name: backend · ruff + core tests (${{ matrix.shard }}/4)
+    needs: [backend-core, backend-gates, backend-shard-coverage]
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - name: Require core shards and gates
+        env:
+          CORE_RESULT: ${{ needs.backend-core.result }}
+          GATES_RESULT: ${{ needs.backend-gates.result }}
+          COVERAGE_RESULT: ${{ needs.backend-shard-coverage.result }}
+        run: |
+          failed=0
+          if [[ "$CORE_RESULT" != success ]]; then
+            echo "::error::backend-core completed with $CORE_RESULT"
+            failed=1
+          fi
+          if [[ "$GATES_RESULT" != success ]]; then
+            echo "::error::backend-gates completed with $GATES_RESULT"
+            failed=1
+          fi
+          if [[ "$COVERAGE_RESULT" != success ]]; then
+            echo "::error::backend-shard-coverage completed with $COVERAGE_RESULT"
+            failed=1
+          fi
+          exit "$failed"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dispatched-*
+          path: artifacts/dispatched
+      - uses: actions/download-artifact@v4
+        with:
+          name: collected
+          path: artifacts/collected
+      - name: Verify dispatched shard coverage
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          shard_count = int(os.environ["CORE_SHARD_COUNT"])
+          expected = {f"dispatched-{index}" for index in range(shard_count)}
+          files = sorted(Path("artifacts/dispatched").rglob("dispatched-*.txt"))
+          if len(files) != shard_count or {path.parent.name for path in files} != expected:
+              raise SystemExit(
+                  f"expected {shard_count} dispatched shard artifacts, found {[str(path) for path in files]}"
+              )
+
+          union = set()
+          for path in files:
+              nodeids = path.read_text(encoding="utf-8").splitlines()
+              shard = set(nodeids)
+              if len(nodeids) != len(shard):
+                  raise SystemExit(f"{path} contains duplicate dispatched nodeids")
+              if union & shard:
+                  raise SystemExit(f"{path} overlaps another dispatched shard")
+              union.update(shard)
+
+          collected = Path("artifacts/collected/collected.txt").read_text(encoding="utf-8").splitlines()
+          if len(collected) != len(set(collected)):
+              raise SystemExit("collected.txt contains duplicate nodeids")
+          if union != set(collected):
+              missing = sorted(set(collected) - union)
+              extra = sorted(union - set(collected))
+              raise SystemExit(f"dispatched shards differ from collection: missing={missing[:10]} extra={extra[:10]}")
+          print(f"six dispatched shards cover all {len(collected)} collected tests with no overlap")
+          PY
 
   # Everything above installs through uv. The Dockerfile's other path
   # (PKG_MANAGER=pip) installs the compiled requirements.txt with --no-deps,
@@ -97,7 +230,8 @@ jobs:
           load: true
           tags: skynet-backend:pip
           cache-from: type=gha,scope=pip
-          cache-to: type=gha,mode=max,scope=pip
+          # Preview builds use ECR caches; keep the shared Actions cache below 10 GB.
+          cache-to: type=gha,mode=min,scope=pip
       # `pip check` is the sharp end: --no-deps means pip installed the file
       # verbatim without ever validating it, so this is the first thing in the
       # pipeline that reads the wheels' own metadata. It catches both failure
@@ -144,8 +278,8 @@ jobs:
           assert shutil.which('claude') is None
           "
 
-  frontend:
-    name: frontend · typecheck + lint + unit
+  frontend-typecheck:
+    name: frontend · typecheck
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -162,7 +296,67 @@ jobs:
         run: npm ci
       - name: Typecheck
         run: npm run typecheck
+
+  frontend-lint:
+    name: frontend · lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
       - name: Lint
         run: npm run lint
+
+  frontend-unit:
+    name: frontend · unit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Node 22: the unit runner uses --experimental-strip-types (Node >= 22.6).
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
       - name: Unit tests
         run: npm run test:unit
+
+  frontend:
+    name: frontend · typecheck + lint + unit
+    needs: [frontend-typecheck, frontend-lint, frontend-unit]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all frontend checks
+        env:
+          TYPECHECK_RESULT: ${{ needs.frontend-typecheck.result }}
+          LINT_RESULT: ${{ needs.frontend-lint.result }}
+          UNIT_RESULT: ${{ needs.frontend-unit.result }}
+        run: |
+          failed=0
+          if [[ "$TYPECHECK_RESULT" != success ]]; then
+            echo "::error::frontend-typecheck completed with $TYPECHECK_RESULT"
+            failed=1
+          fi
+          if [[ "$LINT_RESULT" != success ]]; then
+            echo "::error::frontend-lint completed with $LINT_RESULT"
+            failed=1
+          fi
+          if [[ "$UNIT_RESULT" != success ]]; then
+            echo "::error::frontend-unit completed with $UNIT_RESULT"
+            failed=1
+          fi
+          exit "$failed"

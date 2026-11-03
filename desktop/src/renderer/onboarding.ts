@@ -1,5 +1,6 @@
 import en from "./locales/en.json";
 import he from "./locales/he.json";
+import { formatClock, remaining, runningView, stepPhase, stepTime as formatStepTime, totalElapsed, type Timeline } from "./timeline";
 
 type Kind =
   | "checking"
@@ -32,6 +33,7 @@ interface State {
   resetAt?: string;
   limitMessage?: string;
   step?: string;
+  timeline?: Timeline;
   error?: string;
   signIn?: "waiting" | "unavailable" | "unreachable" | "failed" | "declined";
 }
@@ -69,6 +71,12 @@ const INSTALL_COMMANDS: Record<Cli["id"], string> = {
 function t(key: string, vars: Record<string, string> = {}): string {
   const text = messages[key] ?? en[key as keyof typeof en] ?? key;
   return text.replace(/\{(\w+)\}/g, (_, name: string) => vars[name] ?? "");
+}
+
+const seconds = (n: string) => t("timeline.seconds", { n });
+
+function stepTime(ms: number): string {
+  return formatStepTime(ms, seconds);
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -137,6 +145,75 @@ function renderChecklist(state: State): void {
   );
 }
 
+// The running step's clock and bar update from here; render() replaces it.
+let tick: (() => void) | null = null;
+setInterval(() => tick?.(), 250);
+
+function timelinePanel(timeline: Timeline): HTMLElement {
+  const elapsedNode = el("span", { className: "tl-elapsed", dir: "ltr" });
+  const leftNode = el("span", { className: "tl-left" });
+  const head = el("div", { className: "tl-head" }, [
+    el("span", { className: "tl-title", text: t("starting.title") }),
+    el("span", { className: "tl-totals" }, [leftNode, elapsedNode]),
+  ]);
+  const updates: ((now: number) => void)[] = [];
+
+  const rows = timeline.steps.map((step) => {
+    const phase = stepPhase(step);
+    const time = el("span", { className: "tl-time", dir: "ltr" });
+    const row = el("li", { className: `tl-step tl-${phase}` }, [
+      el("span", { className: "tl-icon", text: phase === "done" ? "✓" : "" }),
+      el("span", { className: "tl-label", text: t(`step.${step.name}`) }),
+      time,
+    ]);
+    const estimate = step.estimateMs;
+    if (phase === "done") time.textContent = stepTime(step.durationMs as number);
+    if (phase === "pending" && estimate !== undefined) time.textContent = `~${stepTime(estimate)}`;
+    if (phase !== "active") return row;
+
+    const startedAt = step.startedAt as number;
+    if (estimate !== undefined) {
+      const bar = el("div", { className: "tl-bar" }, [el("div", { className: "tl-sweep" })]);
+      const hasFill = runningView(0, estimate, seconds).fill;
+      if (hasFill) {
+        const fill = el("div", { className: "tl-fill" });
+        // A CSS animation fills the bar; the negative delay resumes it after a re-render without a jump.
+        fill.style.animationDuration = `${estimate}ms`;
+        fill.style.animationDelay = `-${Math.min(Date.now() - startedAt, estimate)}ms`;
+        bar.prepend(fill);
+      }
+      // Without a fill, the bar and note stay hidden until the step passes its estimate.
+      row.append(
+        el("div", { className: hasFill ? "tl-extra" : "tl-extra tl-late" }, [bar, el("div", { className: "tl-note", text: t("timeline.over") })]),
+      );
+    }
+    updates.push((now) => {
+      const view = runningView(now - startedAt, estimate, seconds);
+      time.textContent = view.time;
+      row.classList.toggle("tl-over", view.over);
+    });
+    return row;
+  });
+
+  updates.push((now) => {
+    elapsedNode.textContent = formatClock(totalElapsed(timeline, now));
+    const left = remaining(timeline, now);
+    leftNode.textContent = left !== null && left >= 1000 ? t("timeline.left", { time: formatClock(left) }) : "";
+  });
+  tick = () => {
+    const now = Date.now();
+    for (const update of updates) update(now);
+  };
+  tick();
+
+  const card = el("div", { className: "timeline" }, [head]);
+  // The clock changes every second; screen readers hear the checklist, not every tick.
+  card.setAttribute("aria-live", "off");
+  if (timeline.firstLaunch) card.append(el("p", { className: "tl-first", text: t("timeline.first") }));
+  card.append(el("ol", { className: "tl-steps" }, rows));
+  return card;
+}
+
 function formatReset(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
@@ -183,6 +260,7 @@ function panelBody(state: State): Node[] {
       nodes.push(actions(button(t("rate_capped.continue"), "primary", () => void bridge.continueAnyway()), button(t("action.recheck"), "secondary", () => void bridge.recheck())));
       break;
     case "starting":
+      if (state.timeline) nodes.push(timelinePanel(state.timeline));
       break;
     case "sign_in": {
       const skip = button(t("sign_in.skip"), "secondary", () => void bridge.skipSignIn());
@@ -214,6 +292,7 @@ const isProgress = (state: State) =>
   PROGRESS.includes(state.kind) || (state.kind === "sign_in" && state.signIn === "waiting");
 
 function render(state: State): void {
+  tick = null;
   document.body.dataset.state = state.kind;
   document.body.toggleAttribute("data-progress", isProgress(state));
   renderChecklist(state);

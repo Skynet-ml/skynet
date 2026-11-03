@@ -1,4 +1,5 @@
 {
+  "downloads.desktop_description": "Un espacio de trabajo en tu computadora.",
   "app.shell.search.kw.about": "acerca de versión URL de API comentarios restablecer preferencias about version feedback reset",
   "app.shell.search.kw.account": "cuenta nombre de usuario rol idioma interfaz opciones avanzadas account username role language",
   "app.shell.search.kw.admin": "administración almacenamiento cuota presupuestos usuarios admin storage quota users",
@@ -22,7 +23,7 @@
   "submit.dataset.library_loaded": "Cargado “{name}” ({count} filas)",
   "tagger.library.saved": "“{name}” guardado en la biblioteca",
   "tooltip.submit.blackbox.scorer_install": "Se ejecuta una vez dentro del sandbox en la nube sin acceso a la red. Usa paquetes que ya estén en la imagen fijada o artefactos de paquetes gestionados por el despliegue; los registros públicos de apt y de paquetes no están disponibles.",
-  "submit.budget.byok_note": "Tu proveedor factura los tokens del modelo directamente a tu clave. Este límite cubre solo la tarifa de plataforma de {term.appName} y el uso del entorno de ejecución.",
+  "submit.budget.byok_note": "Tu proveedor factura los tokens del modelo a tu clave. {term.appName} no cobra ninguna tarifa por el modelo. El presupuesto de la ejecución solo cubre el uso del entorno aislado.",
   "submit.blackbox.roles.optimization.managed_hint": "Usa la configuración de muestreo predeterminada del modelo; puedes pagar con tu saldo de {term.appName} o con tu clave de OpenRouter.",
   "optimizations.grid.open_pair": "Abrir el par {pair}",
   "optimizations.grid.empty.title": "No hay resultados de pares",

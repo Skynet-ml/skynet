@@ -3,7 +3,8 @@
  * contents, search text, and one remark plugin for the docs-only syntax.
  *
  * Docs-only syntax, so plain Markdown readers still see sensible text:
- * - `> [!NOTE]`, `> [!TIP]`, `> [!WARNING]` start a callout (GitHub style).
+ * - `> [!NOTE]`, `> [!TIP]`, `> [!WARNING]` (GitHub style) mark text that the
+ *   docs show as plain paragraphs, with no box, icon or label.
  * - Adjacent fenced code blocks with `tab="Label"` in the info string show as
  *   one block with tabs.
  * - A fenced block in the `skynet-mcp-clients` language marks where the MCP
@@ -20,8 +21,7 @@ export interface DocsHeading {
 
 export const MCP_CLIENTS_BLOCK = "skynet-mcp-clients";
 
-const CALLOUT_KINDS = ["note", "tip", "warning"] as const;
-export type CalloutKind = (typeof CALLOUT_KINDS)[number];
+const CALLOUT_KINDS = ["note", "tip", "warning"];
 
 /** Remove inline Markdown (code ticks, links, emphasis) from a line of text. */
 export function stripInline(text: string): string {
@@ -116,51 +116,69 @@ interface MdNode {
   data?: { hName?: string; hProperties?: Record<string, unknown> };
 }
 
-/** Mark a blockquote that starts with `[!KIND]` as a callout. */
-function markCallout(node: MdNode): void {
+/**
+ * Remove the `[!KIND]` marker from a callout blockquote.
+ *
+ * Returns true when the blockquote was a callout, so the caller can show its
+ * children as plain page content.
+ */
+function stripCalloutMarker(node: MdNode): boolean {
   const paragraph = node.children?.[0];
   const first = paragraph?.type === "paragraph" ? paragraph.children?.[0] : undefined;
-  if (!paragraph || first?.type !== "text" || !first.value) return;
+  if (!paragraph || first?.type !== "text" || !first.value) return false;
   const match = first.value.match(/^\[!(\w+)\][ \t]*\n?/);
-  const kind = match?.[1]?.toLowerCase() as CalloutKind | undefined;
-  if (!match || !kind || !CALLOUT_KINDS.includes(kind)) return;
+  const kind = match?.[1]?.toLowerCase();
+  if (!match || !kind || !CALLOUT_KINDS.includes(kind)) return false;
   first.value = first.value.slice(match[0].length);
   if (!first.value) paragraph.children?.shift();
   if (!paragraph.children?.length) node.children?.shift();
-  node.data = { ...node.data, hProperties: { ...node.data?.hProperties, dataCallout: kind } };
+  return true;
 }
 
-/** Join adjacent `tab="…"` code blocks into one tab group node. */
+/**
+ * Join adjacent `tab="…"` code blocks into one tab group node, and replace
+ * each callout blockquote with its own children.
+ *
+ * A callout's children are grouped on their own, so a tab group never joins
+ * code blocks from both sides of a callout boundary.
+ */
 function groupTabs(children: MdNode[]): MdNode[] {
   const out: MdNode[] = [];
+  let open: MdNode | null = null;
   for (const child of children) {
-    const label = child.type === "code" ? tabLabel(child.meta) : null;
-    const last = out[out.length - 1];
-    if (label && last?.type === "docsTabs") {
-      last.children?.push(child);
+    if (child.type === "blockquote" && stripCalloutMarker(child)) {
+      out.push(...groupTabs(child.children ?? []));
+      open = null;
       continue;
     }
-    out.push(
-      label
-        ? {
-            type: "docsTabs",
-            data: { hName: "div", hProperties: { dataTabs: "" } },
-            children: [child],
-          }
-        : child,
-    );
+    const label = child.type === "code" ? tabLabel(child.meta) : null;
+    if (label && open) {
+      open.children?.push(child);
+      continue;
+    }
+    open = label
+      ? {
+          type: "docsTabs",
+          data: { hName: "div", hProperties: { dataTabs: "" } },
+          children: [child],
+        }
+      : null;
+    out.push(open ?? child);
   }
-  for (const group of out) {
-    if (group.type !== "docsTabs") continue;
-    const labels = (group.children ?? []).map((c) => tabLabel(c.meta) ?? "");
+  return out.map((group) => {
+    if (group.type !== "docsTabs") return group;
+    const blocks = group.children ?? [];
+    const single = blocks[0];
+    if (blocks.length === 1 && single) return single;
+    const labels = blocks.map((c) => tabLabel(c.meta) ?? "");
     group.data = { hName: "div", hProperties: { dataTabs: JSON.stringify(labels) } };
-  }
-  return out;
+    return group;
+  });
 }
 
 /**
  * The docs remark plugin: heading ids (from `extractHeadings`, in order),
- * callouts, code tab groups and the MCP clients block.
+ * plain callouts, code tab groups and the MCP clients block.
  */
 export function remarkDocs(options: { headingIds: readonly string[] }) {
   return (tree: MdNode): void => {
@@ -170,7 +188,6 @@ export function remarkDocs(options: { headingIds: readonly string[] }) {
         const id = options.headingIds[next++];
         if (id) node.data = { ...node.data, hProperties: { ...node.data?.hProperties, id } };
       }
-      if (node.type === "blockquote") markCallout(node);
       if (node.type === "code" && node.lang === MCP_CLIENTS_BLOCK) {
         node.type = "docsMcpClients";
         delete node.value;

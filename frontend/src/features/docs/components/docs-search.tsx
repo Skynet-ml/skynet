@@ -119,9 +119,9 @@ export function DocsSearch({
     | "ask"
     | "agentTitle"
     | "agentPlaceholder"
-    | "agentThinking"
     | "agentRateLimited"
     | "agentError"
+    | "agentTooLong"
     | "agentClear"
     | "agentClose"
     | "agentSend"
@@ -411,6 +411,7 @@ export function DocsSearch({
         labels={labels}
         request={request}
         open={panelOpen}
+        onOpen={() => setPanelOpen(true)}
         onClose={() => setPanelOpen(false)}
       />
     </>

@@ -508,8 +508,8 @@ test("the own-key hint names no platform fee in local mode", () => {
   assert.equal(byokHintKey(true), "billing.mode.byok_hint_local");
 });
 
-test("the run detail hides the fee estimate in local mode", () => {
-  assert.equal(runEstimateLabelKey("byok", false), "submit.summary.estimate_fee");
+test("the run detail hides the model estimate for BYOK and local runs", () => {
+  assert.equal(runEstimateLabelKey("byok", false), null);
   assert.equal(runEstimateLabelKey("managed", false), "submit.summary.estimate_cost");
   assert.equal(runEstimateLabelKey(null, false), "submit.summary.estimate_cost");
   assert.equal(runEstimateLabelKey("byok", true), null);

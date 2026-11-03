@@ -9,6 +9,7 @@ import pytest
 
 from core.models.unified import UnifiedRunRequest
 from core.service_gateway.language_models import usage_by_model_from_history
+from core.service_gateway.optimization.unified.metric_model import resolve_metric_model
 
 from ..harness import GatewayConfig
 from ..protocol import ScorerAbortError
@@ -29,7 +30,7 @@ def _payload(
     *, run_code: str = RUN_CODE, metric_code: str = METRIC_CODE, metric_model: str | None = None
 ) -> UnifiedRunRequest:
     """Build a pairs-mode prompt run on the blackbox metric shape."""
-    return UnifiedRunRequest.model_validate(
+    payload = UnifiedRunRequest.model_validate(
         {
             "task": {"objective": "o", "artifact": {"kind": "prompt", "starting_version": "p"}},
             "data": {
@@ -45,6 +46,8 @@ def _payload(
             "workspace": {"run_code": run_code, "metric_code": metric_code, "metric_timeout_seconds": 30},
         }
     )
+    assert resolve_metric_model(payload.models, payload.workspace.metric_code) is None
+    return payload
 
 
 class _RecordingRuntime(LocalSubprocessRuntime):
@@ -179,7 +182,7 @@ def test_run_and_metric_call_their_own_models_and_both_are_billed() -> None:
     metric = (
         "from skynet import llm\n"
         "def score(input, output):\n"
-        "    return float(llm('judge', output)), {'feedback': 'judged'}\n"
+        "    return float(llm('judge', output, model='openrouter/judge-model')), {'feedback': 'judged'}\n"
     )
 
     def reply(body: dict[str, Any]) -> str:

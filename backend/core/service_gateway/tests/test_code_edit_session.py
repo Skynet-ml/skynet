@@ -11,6 +11,7 @@ static run-code / metric contract checks are covered the same way.
 from __future__ import annotations
 
 import asyncio
+import inspect
 
 import pytest
 
@@ -230,24 +231,40 @@ def test_validate_run_code(code: str, fragment: str) -> None:
         (
             "from skynet import llm\n\ndef score(input, output, expected=None):\n    return 1, {}\n",
             False,
-            "no metric model",
+            "",
         ),
         ("from skynet import llm\n\ndef score(input, output, expected=None):\n    return 1, {}\n", True, ""),
-        # The trusted observation and reward helpers need no metric model; llm in reach does.
         ("from skynet import reward, observation\n\ndef score(input, output):\n    return 1, {}\n", False, ""),
         ("from skynet import service_cost\n\ndef score(input, output):\n    return 1, {}\n", False, ""),
-        ("from skynet import reward, llm\n\ndef score(input, output):\n    return 1, {}\n", False, "no metric model"),
-        ("import skynet\n\ndef score(input, output):\n    return 1, {}\n", False, "no metric model"),
-        ("from skynet import *\n\ndef score(input, output):\n    return 1, {}\n", False, "no metric model"),
+        ("from skynet import reward, llm\n\ndef score(input, output):\n    return 1, {}\n", False, ""),
+        ("import skynet\n\ndef score(input, output):\n    return 1, {}\n", False, ""),
+        ("from skynet import *\n\ndef score(input, output):\n    return 1, {}\n", False, ""),
     ],
 )
 def test_validate_unified_metric_code(code: str, has_model: bool, fragment: str) -> None:
-    """The metric check enforces score(input, output, expected=None) and the metric model."""
-    err = _validate_unified_metric_code(code, has_model)
+    """Enforce the metric signature regardless of the retired model flag."""
+    _, validate = _unified_validators(_unified(metric_has_model=has_model))
+    err = validate(code)
     if fragment:
         assert fragment in err
     else:
         assert err == ""
+
+
+def test_model_judge_allowed_without_legacy_model_flag() -> None:
+    """Allow a model judge when old clients omit the retired model flag."""
+    code = "from skynet import llm\ndef score(input, output):\n    return llm('judge', model='openai/gpt-5'), {}"
+    assert _validate_unified_metric_code(code) == ""
+    for value in (True, False):
+        _, validate = _unified_validators(_unified(metric_has_model=value))
+        assert validate(code) == ""
+    _, validate = _unified_validators({k: v for k, v in _unified().items() if k != "metric_has_model"})
+    assert validate(code) == ""
+
+
+def test_retired_metric_picker_argument_is_removed() -> None:
+    """Keep legacy request fields without exposing the retired validator argument."""
+    assert "metric_has_model" not in inspect.signature(_validate_unified_metric_code).parameters
 
 
 @pytest.mark.parametrize("optimizer", ["auto", "dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot", "gepa"])
@@ -265,10 +282,11 @@ def test_metric_contract_is_the_same_for_every_optimizer(optimizer: str) -> None
 
 
 @pytest.mark.parametrize("has_model", [True, False])
-def test_metric_contract_offers_llm_only_with_a_model(has_model: bool) -> None:
-    """The llm helper is described only when a metric model is attached."""
+def test_metric_contract_always_offers_llm(has_model: bool) -> None:
+    """Describe llm regardless of the retired model flag."""
     _, metric_contract = _unified_contracts(_unified(metric_has_model=has_model))
-    assert ("`from skynet import llm` calls it" in metric_contract) is has_model
+    assert "`from skynet import llm` calls it" in metric_contract
+    assert "cannot add it" not in metric_contract
 
 
 @pytest.mark.parametrize("has_model", [True, False])
@@ -576,6 +594,17 @@ def test_write_file_draft_to_an_unsafe_path_is_dropped(ws_session: _UnifiedEditS
     """A draft for a path write_file would refuse never reaches the tree."""
     ws_session.draft("write_file:../evil.py", 0, "x")
     assert u_events == []
+
+
+def test_unified_verifier_receives_reflection_model() -> None:
+    """Compare omitted and declared models against the authoring context."""
+    context = UnifiedAuthoringContext.model_validate(_unified(optimizer="gepa", reflection_name="x/y"))
+    verify = code_module._unified_verifier(context.model_dump())
+    metric = "from skynet import llm\ndef score(input, output):\n llm('a')\n llm('b', model='x/y')\n return 1, {}"
+    assert not any("at most one" in error for error in verify(_RUN, metric, {})[1]["errors"])
+    context.reflection_name = "other"
+    verify = code_module._unified_verifier(context.model_dump())
+    assert any("at most one" in error for error in verify(_RUN, metric, {})[1]["errors"])
 
 
 def test_real_unified_verifier_maps_lint_to_the_file() -> None:
