@@ -72,22 +72,29 @@ def test_valid_duration_json_loads_file_prefixes(tmp_path: Path) -> None:
     assert _load_test_durations(duration_file) == _DURATIONS
 
 
-def test_controller_writes_executed_nodeids_and_phase_durations(
+def test_controller_writes_dispatched_and_collected_nodeids_with_phase_durations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Write sorted executed nodeids and summed per-file phase durations.
+    """Write sorted dispatched and collected nodeids with phase durations.
 
     Args:
         tmp_path: Temporary directory for the output files.
         monkeypatch: Pytest's patch fixture.
     """
-    executed_path = tmp_path / "executed.txt"
+    dispatched_path = tmp_path / "dispatched.txt"
+    collected_path = tmp_path / "collected.txt"
     durations_path = tmp_path / "durations.json"
     monkeypatch.setattr(conftest, "_is_controller", True)
-    monkeypatch.setattr(conftest, "_executed_nodeids", set())
+    monkeypatch.setattr(conftest, "_dispatched_nodeids", set())
     monkeypatch.setattr(conftest, "_file_durations", {})
-    monkeypatch.setenv("SKYNET_TEST_EXECUTED_OUT", str(executed_path))
+    monkeypatch.setenv("SKYNET_TEST_DISPATCHED_OUT", str(dispatched_path))
+    monkeypatch.setenv("SKYNET_TEST_COLLECTED_OUT", str(collected_path))
     monkeypatch.setenv("SKYNET_TEST_DURATIONS_OUT", str(durations_path))
+    conftest.pytest_collection_finish(
+        SimpleNamespace(
+            items=[SimpleNamespace(nodeid="core/a.py::test_a"), SimpleNamespace(nodeid="core/z.py::test_z")]
+        )
+    )
 
     reports = [
         SimpleNamespace(nodeid="core/z.py::test_z", when="setup", duration=0.5),
@@ -101,9 +108,13 @@ def test_controller_writes_executed_nodeids_and_phase_durations(
 
     conftest.pytest_sessionfinish(SimpleNamespace(config=SimpleNamespace()))
 
-    assert executed_path.read_text(encoding="utf-8").splitlines() == [
+    assert dispatched_path.read_text(encoding="utf-8").splitlines() == [
         "core/a.py::test_a",
         "core/a.py::test_b",
+        "core/z.py::test_z",
+    ]
+    assert collected_path.read_text(encoding="utf-8").splitlines() == [
+        "core/a.py::test_a",
         "core/z.py::test_z",
     ]
     durations = json.loads(durations_path.read_text(encoding="utf-8"))
@@ -111,25 +122,30 @@ def test_controller_writes_executed_nodeids_and_phase_durations(
     assert durations == pytest.approx({"core/a.py": 1.0, "core/z.py": 0.5})
 
 
-def test_worker_does_not_write_execution_outputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_worker_does_not_write_dispatched_or_collected_outputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Ignore worker reports because the controller receives every xdist report.
 
     Args:
         tmp_path: Temporary directory for the output files.
         monkeypatch: Pytest's patch fixture.
     """
-    executed_path = tmp_path / "executed.txt"
+    dispatched_path = tmp_path / "dispatched.txt"
+    collected_path = tmp_path / "collected.txt"
     durations_path = tmp_path / "durations.json"
     monkeypatch.setattr(conftest, "_is_controller", True)
-    monkeypatch.setattr(conftest, "_executed_nodeids", set())
+    monkeypatch.setattr(conftest, "_dispatched_nodeids", set())
     monkeypatch.setattr(conftest, "_file_durations", {})
-    monkeypatch.setenv("SKYNET_TEST_EXECUTED_OUT", str(executed_path))
+    monkeypatch.setenv("SKYNET_TEST_DISPATCHED_OUT", str(dispatched_path))
+    monkeypatch.setenv("SKYNET_TEST_COLLECTED_OUT", str(collected_path))
     monkeypatch.setenv("SKYNET_TEST_DURATIONS_OUT", str(durations_path))
 
     conftest.pytest_configure(SimpleNamespace(workerinput={}))
+    monkeypatch.setattr(conftest, "_is_controller", False)
     report = SimpleNamespace(nodeid="core/a.py::test_a", when="setup", duration=0.1)
     conftest.pytest_runtest_logreport(report)
+    conftest.pytest_collection_finish(SimpleNamespace(items=[SimpleNamespace(nodeid="core/a.py::test_a")]))
     conftest.pytest_sessionfinish(SimpleNamespace(config=SimpleNamespace(workerinput={})))
 
-    assert not executed_path.exists()
+    assert not dispatched_path.exists()
+    assert not collected_path.exists()
     assert not durations_path.exists()

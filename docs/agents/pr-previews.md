@@ -14,6 +14,11 @@ is deleted. PRs from forks or Dependabot, and PRs whose files cannot change
 the running app (docs, `droid-wiki/`, `tools/reel-skynet/`, tests), get no
 preview; add the label `preview` to ask for one.
 
+Preview builds run the backend and frontend lanes in parallel. Backend
+migration can overlap the frontend build, but backend and worker services roll
+only after both image lanes succeed. The deploy step upserts all three
+services; set `BACKEND_IMAGE` to the image used by the migration.
+
 The remote MCP server of a preview is at
 `https://api-pr-<n>.staging.skynetml.com/remote-mcp`. Staging uses
 `https://mcp.staging.skynetml.com/mcp` and production

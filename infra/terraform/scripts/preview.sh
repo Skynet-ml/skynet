@@ -3,8 +3,8 @@
 # preview-cleanup.yml run this script; an operator runs setup-db once.
 #
 #   preview.sh claim <pr> <sha>    take a slot (exit 3 when all are taken)
-#   preview.sh build <pr> <sha>    build and push the preview images, and migrate
-#   preview.sh deploy <pr> <sha>   create or update the services
+#   preview.sh build <pr> <sha>    build and push images; migrate with backend
+#   preview.sh deploy <pr> <sha>   roll out services after both builds succeed
 #   preview.sh backend-image <pr> <sha>
 #                                  print a reusable backend image, if available
 #   preview.sh delete <pr>         delete the preview (not its task definitions)
@@ -33,6 +33,9 @@
 #
 # Reusing an exact image key avoids rebuilding code already in ECR. The
 # staging-tree match remains a fallback for already-built compatible images.
+#
+# Preview builds can poison other preview cache tags, but not staging or
+# production. Each PR reads only its own preview-cache prefix.
 #
 # The tasks get the staging REMOTE_DB_URL and REDIS_URL. A wrapper command
 # points them at the preview database and Redis DB before the app starts, so
@@ -113,9 +116,7 @@ standard_ecr_uri() {
 # Succeeds when the image exists and is fresh. An image older than 11 days is
 # deleted (the repositories are immutable), so build pushes it again: the ECR
 # rule expires PR images 14 days after the push, and a preview may run up to
-# 48 hours after its last deploy. The tag is deleted before the rebuild, so a
-# failed rebuild leaves the preview unable to replace tasks until the next good
-# build or the cleanup. Args: repository tag
+# 48 hours after its last deploy. Args: repository tag
 image_is_fresh() {
   local pushed pushed_at err
   err="$(mktemp)"
@@ -128,7 +129,7 @@ image_is_fresh() {
     die "describe-images $1:$2: $pushed"
   fi
   rm -f "$err"
-  pushed_at="$(date -d "$pushed" +%s)" || die "cannot parse imagePushedAt: $pushed"
+  pushed_at="$(date_epoch "$pushed")" || die "cannot parse imagePushedAt"
   if (($(date +%s) - pushed_at < 11 * 86400)); then
     return 0
   fi
@@ -140,36 +141,45 @@ image_is_fresh() {
 
 # Builds and pushes the backend image unless a fresh one exists. Args: uri tag
 build_backend() {
-  local registry staging_cache preview_cache
+  local registry staging_cache preview_cache week
   local -a cache_from=() pin_args=()
   if image_is_fresh skynet/preview-backend "$2"; then
     echo "skip: $1:$2 exists"
     return 0
   fi
   registry="${1%%/*}"
-  image_inputs "$repo_root/backend" ctx "GIT_SHA=$sha"
-  pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]}")
-  staging_cache="$(latest_cache_ref skynet/buildcache-staging backend-)"
-  preview_cache="$(latest_cache_ref skynet/preview-buildcache "preview-backend-pr${pr}-")"
-  [[ -n "$staging_cache" ]] && cache_from+=(--cache-from "type=registry,ref=$registry/skynet/buildcache-staging:$staging_cache")
-  [[ -n "$preview_cache" ]] && cache_from+=(--cache-from "type=registry,ref=$registry/skynet/preview-buildcache:$preview_cache")
+  week="$(date -u +%G-W%V)"
+  image_inputs "$repo_root/backend" "$week" "GIT_SHA=$sha"
+  pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
+  staging_cache="$(latest_cache_ref skynet/buildcache-staging "backend-$week-")"
+  preview_cache="$(latest_cache_ref skynet/preview-buildcache "preview-backend-pr${pr}-$week-")"
+  if [[ -n "$staging_cache" ]]; then
+    cache_from+=(--cache-from "type=registry,ref=$registry/skynet/buildcache-staging:$staging_cache")
+  fi
+  if [[ -n "$preview_cache" ]]; then
+    cache_from+=(--cache-from "type=registry,ref=$registry/skynet/preview-buildcache:$preview_cache")
+  fi
+  refresh_aws_credentials
+  aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null
   docker buildx build --platform linux/arm64 --provenance=false --progress=plain \
-    "${cache_from[@]}" \
-    "${pin_args[@]}" \
-    --cache-to "type=registry,ref=$registry/skynet/preview-buildcache:preview-backend-pr${pr}-$sha,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
+    "${cache_from[@]+"${cache_from[@]}"}" \
+    "${pin_args[@]+"${pin_args[@]}"}" \
+    --cache-to "type=registry,ref=$registry/skynet/preview-buildcache:preview-backend-pr${pr}-$week-$sha,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
     -t "$1:$2" --push --build-arg "GIT_SHA=$sha" "$repo_root/backend"
+  refresh_aws_credentials
 }
 
 # Next.js bakes NEXT_PUBLIC_* into the bundle, so each PR gets its own build.
 # Args: uri tag domain
 build_frontend() {
-  local registry staging_cache preview_cache build_arg
+  local registry staging_cache preview_cache build_arg week
   local -a cache_from=() pin_args=() build_args=() docker_args=()
   if image_is_fresh skynet/preview-frontend "$2"; then
     echo "skip: $1:$2 exists"
     return 0
   fi
   registry="${1%%/*}"
+  week="$(date -u +%G-W%V)"
   build_args=(
     "NEXT_PUBLIC_SITE_URL=https://pr-$pr.$3"
     "NEXT_PUBLIC_SENTRY_DSN=${NEXT_PUBLIC_SENTRY_DSN:-}"
@@ -179,19 +189,26 @@ build_frontend() {
     "APP_GIT_SHA=$sha"
     "APP_ENVIRONMENT=skynet-pr-$pr"
   )
-  image_inputs "$repo_root/frontend" ctx "${build_args[@]}"
-  pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]}")
-  for build_arg in "${build_args[@]}"; do docker_args+=(--build-arg "$build_arg"); done
-  staging_cache="$(latest_cache_ref skynet/buildcache-staging frontend-staging-)"
-  preview_cache="$(latest_cache_ref skynet/preview-buildcache "preview-frontend-pr${pr}-")"
-  [[ -n "$staging_cache" ]] && cache_from+=(--cache-from "type=registry,ref=$registry/skynet/buildcache-staging:$staging_cache")
-  [[ -n "$preview_cache" ]] && cache_from+=(--cache-from "type=registry,ref=$registry/skynet/preview-buildcache:$preview_cache")
+  image_inputs "$repo_root/frontend" "$week" "${build_args[@]+"${build_args[@]}"}"
+  pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
+  for build_arg in "${build_args[@]+"${build_args[@]}"}"; do docker_args+=(--build-arg "$build_arg"); done
+  staging_cache="$(latest_cache_ref skynet/buildcache-staging "frontend-staging-$week-")"
+  preview_cache="$(latest_cache_ref skynet/preview-buildcache "preview-frontend-pr${pr}-$week-")"
+  if [[ -n "$staging_cache" ]]; then
+    cache_from+=(--cache-from "type=registry,ref=$registry/skynet/buildcache-staging:$staging_cache")
+  fi
+  if [[ -n "$preview_cache" ]]; then
+    cache_from+=(--cache-from "type=registry,ref=$registry/skynet/preview-buildcache:$preview_cache")
+  fi
+  refresh_aws_credentials
+  aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null
   docker buildx build --platform linux/arm64 --provenance=false --progress=plain \
-    "${cache_from[@]}" \
-    "${pin_args[@]}" \
-    --cache-to "type=registry,ref=$registry/skynet/preview-buildcache:preview-frontend-pr${pr}-$sha,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
-    -t "$1:$2" --push "${docker_args[@]}" \
+    "${cache_from[@]+"${cache_from[@]}"}" \
+    "${pin_args[@]+"${pin_args[@]}"}" \
+    --cache-to "type=registry,ref=$registry/skynet/preview-buildcache:preview-frontend-pr${pr}-$week-$sha,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
+    -t "$1:$2" --push "${docker_args[@]+"${docker_args[@]}"}" \
     "$repo_root/frontend"
+  refresh_aws_credentials
 }
 
 # Migrates the preview database with the backend image. Args: image cfg
@@ -215,8 +232,6 @@ backend_and_migrate() {
   fi
   refresh_aws_credentials
   migrate "$1" "$2"
-  refresh_aws_credentials
-  deploy_backend_worker "$1" "$2"
 }
 
 build() {
@@ -224,7 +239,7 @@ build() {
   check_sha
   need docker git tr sort date
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || die "missing command: sha256sum or shasum"
-  local cfg domain slot app api tag backend frontend backend_pid frontend_pid failed="" migrated=false
+  local cfg domain slot app api tag backend frontend backend_pid frontend_pid failed=""
   cfg="$(preview_config)"
   domain="$(jq -r .domain <<<"$cfg")"
   slot="$(slot_of "$pr")"
@@ -234,28 +249,17 @@ build() {
   tag="$sha-pr-$pr"
   backend="${BACKEND_IMAGE:-$(ecr_uri backend):$tag}"
   frontend="$(ecr_uri frontend)"
-  aws ecr get-login-password | docker login --username AWS --password-stdin "${frontend%%/*}" >/dev/null
-
-  route "$(slot_field "$cfg" "$slot" backend rule)" "$api" "$(slot_field "$cfg" "$slot" backend target_group)"
-  route "$(slot_field "$cfg" "$slot" frontend rule)" "$app" "$(slot_field "$cfg" "$slot" frontend target_group)"
-
-  # The backend side and the frontend build run at the same time. The
-  # migration needs only the backend image, so it runs while the frontend
-  # still builds. Each output line starts with its side.
+  # Migration overlaps the frontend build, but services roll only after both
+  # image lanes succeed.
   backend_and_migrate "$backend" "$cfg" 2>&1 | sed -u 's/^/[backend] /' &
   backend_pid=$!
   build_frontend "$frontend" "$tag" "$domain" 2>&1 | sed -u 's/^/[frontend] /' &
   frontend_pid=$!
-  if wait "$backend_pid"; then
-    migrated=true
-  else
+  if ! wait "$backend_pid"; then
     failed+=" backend"
   fi
   if ! wait "$frontend_pid"; then
     failed+=" frontend"
-    if [[ "$migrated" == true ]]; then
-      echo "::error::preview inconsistent: backend/worker at $sha, frontend not updated" >&2
-    fi
   fi
   [[ -z "$failed" ]] || die "image build or migration failed:$failed"
   echo "ready: ${backend##*/} preview-frontend:$tag, database migrated"
@@ -520,7 +524,7 @@ preview_env() {
 deploy() {
   check_pr
   check_sha
-  local cfg slot acct domain app api tag frontend_img cluster tg_frontend tg_backend
+  local cfg slot acct domain app api tag backend_img frontend_img cluster tg_frontend tg_backend
   slot="$(slot_of "$pr")"
   [[ -n "$slot" ]] || die "PR $pr holds no preview slot; run claim first"
   cfg="$(preview_config)"
@@ -529,6 +533,7 @@ deploy() {
   app="pr-$pr.$domain"
   api="api-pr-$pr.$domain"
   tag="$sha-pr-$pr"
+  backend_img="${BACKEND_IMAGE:-$(ecr_uri backend):$tag}"
   frontend_img="$(ecr_uri frontend):$tag"
 
   cluster="$(jq -r .cluster <<<"$cfg")"
@@ -536,6 +541,7 @@ deploy() {
   tg_frontend="$(slot_field "$cfg" "$slot" frontend target_group)"
   route "$(slot_field "$cfg" "$slot" backend rule)" "$api" "$tg_backend"
   route "$(slot_field "$cfg" "$slot" frontend rule)" "$app" "$tg_frontend"
+  deploy_backend_worker "$backend_img" "$cfg"
   upsert_service "$cfg" frontend "$(register frontend "$frontend_img" "$(preview_env frontend "$domain")" "$slot" "$cfg" "$acct")" \
     "$tg_frontend" "$(jq -r .ports.frontend <<<"$cfg")"
 
@@ -575,12 +581,14 @@ backend_image() {
   check_sha
   need docker git tr sort date
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || die "missing command: sha256sum or shasum"
-  local key image
+  local key image week
   # Previews may ignore GIT_SHA because staging_backend already runs a staging
   # image built from another SHA when backend/ is identical. APP_GIT_SHA in
   # the task environment supplies the served commit; staging and production
   # keep GIT_SHA in ctx- keys and never reuse across commits.
-  key="$(image_key "$repo_root/backend" tree)"
+  week="$(date -u +%G-W%V)"
+  image_inputs "$repo_root/backend" "$week"
+  key="$IMAGE_KEY_TREE"
   if [[ -n "$key" ]] && find_fresh_by_key skynet/backend "$key"; then
     image="$(standard_ecr_uri backend):$key"
     echo "reuse $image (tree key)" >&2

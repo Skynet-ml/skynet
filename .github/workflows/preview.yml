@@ -145,7 +145,7 @@ jobs:
           image=$(infra/terraform/scripts/preview.sh backend-image "$PR" "$SHA")
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
-      # The backend and worker deploy after migration while the frontend builds.
+      # Migration overlaps the frontend build; services roll only after both builds succeed.
       - name: Build and push the preview images, and migrate
         if: steps.scope.outputs.skip != 'true' && steps.claim.outputs.full != 'true'
         env:

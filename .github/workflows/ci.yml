@@ -35,14 +35,15 @@ jobs:
       - name: Core test suite
         env:
           SKYNET_TEST_SHARD: ${{ matrix.shard }}/6
-          SKYNET_TEST_EXECUTED_OUT: executed-${{ matrix.shard }}.txt
+          SKYNET_TEST_DISPATCHED_OUT: dispatched-${{ matrix.shard }}.txt
         run: uv run pytest core/ -q -n auto
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: executed-${{ matrix.shard }}
-          path: backend/executed-${{ matrix.shard }}.txt
+          name: dispatched-${{ matrix.shard }}
+          path: backend/dispatched-${{ matrix.shard }}.txt
           if-no-files-found: ignore
+          overwrite: true
 
   backend-gates:
     name: backend · ruff + gates
@@ -114,37 +115,20 @@ jobs:
       - name: Install dependencies (runtime + dev)
         run: uv sync --extra dev --frozen
       - name: Collect full core suite
+        env:
+          SKYNET_TEST_COLLECTED_OUT: collected.txt
         run: |
-          uv run python - <<'PY'
-          import os
-          import subprocess
-          import sys
-          from pathlib import Path
-
-          env = os.environ.copy()
-          env.pop("APP_TEST_SHARD", None)
-          env.pop("SKYNET_TEST_SHARD", None)
-          result = subprocess.run(
-              [sys.executable, "-m", "pytest", "core/", "--collect-only", "-q"],
-              check=True,
-              capture_output=True,
-              text=True,
-              env=env,
-          )
-          nodeids = sorted(
-              line for line in result.stdout.splitlines() if line.startswith("core/") and "::" in line
-          )
-          if not nodeids:
-              raise SystemExit("full collection produced no test nodeids")
-          Path("collected.txt").write_text("\n".join(nodeids) + "\n", encoding="utf-8")
-          print(f"collected {len(nodeids)} core test nodeids")
-          PY
+          unset APP_TEST_SHARD SKYNET_TEST_SHARD
+          uv run pytest core/ --collect-only -q
+          test -s collected.txt
+          python3 -c 'from pathlib import Path; print("collected", len(Path("collected.txt").read_text().splitlines()), "core test nodeids")'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: collected
           path: backend/collected.txt
           if-no-files-found: ignore
+          overwrite: true
 
   backend:
     name: backend · ruff + core tests (${{ matrix.shard }}/4)
@@ -162,33 +146,47 @@ jobs:
           GATES_RESULT: ${{ needs.backend-gates.result }}
           COVERAGE_RESULT: ${{ needs.backend-shard-coverage.result }}
         run: |
-          [[ "$CORE_RESULT" == success && "$GATES_RESULT" == success && "$COVERAGE_RESULT" == success ]]
+          failed=0
+          if [[ "$CORE_RESULT" != success ]]; then
+            echo "::error::backend-core completed with $CORE_RESULT"
+            failed=1
+          fi
+          if [[ "$GATES_RESULT" != success ]]; then
+            echo "::error::backend-gates completed with $GATES_RESULT"
+            failed=1
+          fi
+          if [[ "$COVERAGE_RESULT" != success ]]; then
+            echo "::error::backend-shard-coverage completed with $COVERAGE_RESULT"
+            failed=1
+          fi
+          exit "$failed"
       - uses: actions/download-artifact@v4
         with:
-          pattern: executed-*
-          path: artifacts/executed
+          pattern: dispatched-*
+          path: artifacts/dispatched
       - uses: actions/download-artifact@v4
         with:
           name: collected
           path: artifacts/collected
-      - name: Verify executed shard coverage
+      - name: Verify dispatched shard coverage
         run: |
-          python - <<'PY'
+          python3 - <<'PY'
           from pathlib import Path
 
-          expected = {f"executed-{index}" for index in range(6)}
-          files = sorted(Path("artifacts/executed").rglob("executed-*.txt"))
+          # Keep the matrix, shard denominator, and coverage range aligned.
+          expected = {f"dispatched-{index}" for index in range(6)}
+          files = sorted(Path("artifacts/dispatched").rglob("dispatched-*.txt"))
           if len(files) != 6 or {path.parent.name for path in files} != expected:
-              raise SystemExit(f"expected six executed shard artifacts, found {[str(path) for path in files]}")
+              raise SystemExit(f"expected six dispatched shard artifacts, found {[str(path) for path in files]}")
 
           union = set()
           for path in files:
               nodeids = path.read_text(encoding="utf-8").splitlines()
               shard = set(nodeids)
               if len(nodeids) != len(shard):
-                  raise SystemExit(f"{path} contains duplicate executed nodeids")
+                  raise SystemExit(f"{path} contains duplicate dispatched nodeids")
               if union & shard:
-                  raise SystemExit(f"{path} overlaps another executed shard")
+                  raise SystemExit(f"{path} overlaps another dispatched shard")
               union.update(shard)
 
           collected = Path("artifacts/collected/collected.txt").read_text(encoding="utf-8").splitlines()
@@ -197,8 +195,8 @@ jobs:
           if union != set(collected):
               missing = sorted(set(collected) - union)
               extra = sorted(union - set(collected))
-              raise SystemExit(f"executed shards differ from collection: missing={missing[:10]} extra={extra[:10]}")
-          print(f"six executed shards cover all {len(collected)} collected tests with no overlap")
+              raise SystemExit(f"dispatched shards differ from collection: missing={missing[:10]} extra={extra[:10]}")
+          print(f"six dispatched shards cover all {len(collected)} collected tests with no overlap")
           PY
 
   # Everything above installs through uv. The Dockerfile's other path
@@ -251,7 +249,7 @@ jobs:
       # standing up.
       - name: Import smoke test
         run: |
-          docker run --rm skynet-backend:pip python -c "
+          docker run --rm skynet-backend:pip python3 -c "
           import core.api.app
           import core.billing.service
           import core.worker.subprocess_runner
@@ -265,7 +263,7 @@ jobs:
           "
       - name: Pinned native optimizer runtime is installed
         run: |
-          docker run --rm --network none skynet-backend:pip python -c "
+          docker run --rm --network none skynet-backend:pip python3 -c "
           import shutil, subprocess
           assert subprocess.check_output(['node', '--version'], text=True).strip() == 'v22.22.0'
           assert shutil.which('claude') is None
@@ -339,4 +337,17 @@ jobs:
           LINT_RESULT: ${{ needs.frontend-lint.result }}
           UNIT_RESULT: ${{ needs.frontend-unit.result }}
         run: |
-          [[ "$TYPECHECK_RESULT" == success && "$LINT_RESULT" == success && "$UNIT_RESULT" == success ]]
+          failed=0
+          if [[ "$TYPECHECK_RESULT" != success ]]; then
+            echo "::error::frontend-typecheck completed with $TYPECHECK_RESULT"
+            failed=1
+          fi
+          if [[ "$LINT_RESULT" != success ]]; then
+            echo "::error::frontend-lint completed with $LINT_RESULT"
+            failed=1
+          fi
+          if [[ "$UNIT_RESULT" != success ]]; then
+            echo "::error::frontend-unit completed with $UNIT_RESULT"
+            failed=1
+          fi
+          exit "$failed"

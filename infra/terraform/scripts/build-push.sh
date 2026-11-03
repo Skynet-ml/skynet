@@ -20,11 +20,13 @@ env="${1:-}"
 check_env "$env"
 repo_root="$(git rev-parse --show-toplevel)"
 sha="${2:-$(git -C "$repo_root" rev-parse HEAD)}"
+[[ "$sha" =~ ^[0-9a-f]{7,40}$ ]] || die "second argument must be a git SHA"
 [[ -z "${3:-}" || "${3:-}" == --migrate ]] || die "usage: build-push.sh <environment> [git-sha] [--migrate]"
 migrate_requested="${3:-}"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
-marker="$(mktemp)"
-trap 'rm -f "$marker"' EXIT
+lane_dir="$(mktemp -d)"
+marker="$lane_dir/migrated"
+trap 'rm -rf "$lane_dir"' EXIT
 
 case "$env" in
   staging) site_url="https://staging.skynetml.com" ;;
@@ -41,81 +43,141 @@ aws ecr get-login-password | docker login --username AWS --password-stdin "$regi
 build() {
   local name="$1" tag="$2" context="$3" cache_name="$4"
   shift 4
-  local url key cache_tag cache_repo
-  local -a build_args=("$@")
-  local -a cache_from=()
+  local url key tree_key cache_tag cache_repo week metadata_file="" build_succeeded
+  local -a build_args=("$@") pin_args=() cache_from=() metadata_args=()
   url="$(jq -r --arg n "$name" '.ecr[$n]' <<<"$cfg")"
   cache_repo="skynet/buildcache-$env"
+  week="$(date -u +%G-W%V)"
+  image_inputs "$context" "$week" "${build_args[@]+"${build_args[@]}"}"
+  key="$IMAGE_KEY_CTX"
+  tree_key="$IMAGE_KEY_TREE"
+  pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
   if find_by_key "skynet/$name" "$tag"; then
+    if [[ "$name" == backend && -n "$tree_key" ]] &&
+      ! retag skynet/backend "$tag" "$tree_key"; then
+      echo "warning: cannot add tree image-key tag skynet/backend:$tree_key" >&2
+    fi
     echo "skip: $url:$tag exists"
-    LAST_BUILD_BUILT=0
     return 0
   fi
 
-  image_inputs "$context" ctx "${build_args[@]}"
-  key="$IMAGE_KEY"
-  local -a pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]}")
   if [[ -n "$key" ]] && find_fresh_by_key "skynet/$name" "$key"; then
     if retag "skynet/$name" "$key" "$tag"; then
+      if [[ "$name" == backend && -n "$tree_key" ]] &&
+        ! retag skynet/backend "$tag" "$tree_key"; then
+        echo "warning: cannot add tree image-key tag skynet/backend:$tree_key" >&2
+      fi
       echo "reuse: $url:$key as $tag"
-      LAST_BUILD_BUILT=0
       return 0
     fi
     echo "warning: cannot retag $url:$key as $tag; building" >&2
   fi
 
-  cache_tag="$(latest_cache_ref "$cache_repo" "$cache_name-")"
-  [[ -n "$cache_tag" ]] && cache_from+=(--cache-from "type=registry,ref=$registry/$cache_repo:$cache_tag")
-  if ! docker buildx build --platform linux/arm64 --provenance=false \
-    "${cache_from[@]}" \
-    --cache-to "type=registry,ref=$registry/$cache_repo:$cache_name-$sha,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
-    -t "$url:$tag" --push "${pin_args[@]}" "${build_args[@]}" "$context"; then
+  cache_tag="$(latest_cache_ref "$cache_repo" "$cache_name-$week-")"
+  if [[ -n "$cache_tag" ]]; then
+    cache_from+=(--cache-from "type=registry,ref=$registry/$cache_repo:$cache_tag")
+  fi
+  if [[ -n "$key" ]]; then
+    metadata_file="$(mktemp)"
+    metadata_args+=(--metadata-file "$metadata_file")
+  fi
+  refresh_aws_credentials
+  aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null
+  if docker buildx build --platform linux/arm64 --provenance=false \
+    "${metadata_args[@]+"${metadata_args[@]}"}" \
+    "${cache_from[@]+"${cache_from[@]}"}" \
+    --cache-to "type=registry,ref=$registry/$cache_repo:$cache_name-$week-$sha,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
+    -t "$url:$tag" --push "${pin_args[@]+"${pin_args[@]}"}" \
+    "${build_args[@]+"${build_args[@]}"}" "$context"; then
+    build_succeeded=true
+  else
+    build_succeeded=false
+  fi
+  refresh_aws_credentials
+  if [[ "$build_succeeded" != true ]]; then
+    [[ -z "$metadata_file" ]] || rm -f "$metadata_file"
     # Staging and production can build the same backend and litellm tag at
     # once; the second push then fails on the immutable tag.
     find_by_key "skynet/$name" "$tag" || die "push failed: $url:$tag"
     echo "skip: $url:$tag was pushed by another run"
-    LAST_BUILD_BUILT=0
     return 0
   fi
 
-  LAST_BUILD_BUILT=1
-  if [[ -n "$key" ]] && ! retag "skynet/$name" "$tag" "$key"; then
-    echo "warning: cannot add image-key tag $url:$key" >&2
+  if [[ -n "$key" ]]; then
+    if verify_image_sources "$metadata_file"; then
+      if ! retag "skynet/$name" "$tag" "$key"; then
+        echo "warning: cannot add image-key tag $url:$key" >&2
+      fi
+      if [[ "$name" == backend && -n "$tree_key" ]] &&
+        ! retag skynet/backend "$tag" "$tree_key"; then
+        echo "warning: cannot add tree image-key tag skynet/backend:$tree_key" >&2
+      fi
+    else
+      echo "warning: build metadata did not verify every pinned source; no image-key tags added for $url:$tag" >&2
+    fi
   fi
+  [[ -z "$metadata_file" ]] || rm -f "$metadata_file"
 }
 
 build_backend_lane() {
-  local key
   build backend "$sha" "$repo_root/backend" backend --build-arg "GIT_SHA=$sha"
-  if ((LAST_BUILD_BUILT)); then
-    image_inputs "$repo_root/backend" tree
-    key="$IMAGE_KEY"
-    if [[ -n "$key" ]]; then
-      if ! retag skynet/backend "$sha" "$key"; then
-        echo "warning: cannot add tree image-key tag skynet/backend:$key" >&2
-      fi
-    fi
-  fi
   if [[ "$migrate_requested" == --migrate ]]; then
-    # deploy.sh's rollback path and old tasks serving during rolling updates
-    # require migrations to work with previous code before other images finish.
+    wait_for_lane_success litellm frontend ||
+      die "migration skipped because the litellm or frontend lane failed"
+    # Existing tasks stay live until deploy.sh rolls services, so migrations
+    # must remain compatible with the previous application code.
     refresh_aws_credentials
     "$script_dir/deploy.sh" "$env" "$sha" --migrate-only
     printf '%s\n' "$sha" >"$marker"
   fi
 }
 
+run_image_lane() {
+  local lane="$1"
+  shift
+  if "$@"; then
+    : >"$lane_dir/$lane.ok"
+  else
+    : >"$lane_dir/$lane.failed"
+    return 1
+  fi
+}
+
+wait_for_lane_success() {
+  local lane
+  while :; do
+    for lane in "$@"; do
+      [[ ! -e "$lane_dir/$lane.failed" ]] || return 1
+    done
+    for lane in "$@"; do
+      [[ -e "$lane_dir/$lane.ok" ]] || {
+        sleep 1
+        continue 2
+      }
+    done
+    return 0
+  done
+}
+
 run_lane() {
   local label="$1"
   shift
+  trap '_mark_lane_failure "$?" "$label"' EXIT
   "$@" 2>&1 | sed -u "s/^/[$label] /"
 }
 
-run_lane backend build_backend_lane &
+_mark_lane_failure() {
+  local status="$1" label="$2"
+  if ((status != 0)); then
+    : >"$lane_dir/$label.failed"
+  fi
+}
+
+run_lane backend run_image_lane backend build_backend_lane &
 backend_pid=$!
-run_lane litellm build litellm "$sha" "$repo_root/deploy/litellm" litellm &
+run_lane litellm run_image_lane litellm build litellm "$sha" "$repo_root/deploy/litellm" litellm &
 litellm_pid=$!
-run_lane frontend build frontend "$sha-$env" "$repo_root/frontend" "frontend-$env" \
+run_lane frontend run_image_lane frontend build frontend "$sha-$env" "$repo_root/frontend" "frontend-$env" \
   --build-arg "NEXT_PUBLIC_SITE_URL=$site_url" \
   --build-arg "NEXT_PUBLIC_SENTRY_DSN=${NEXT_PUBLIC_SENTRY_DSN:-}" \
   --build-arg "NEXT_PUBLIC_SENTRY_ENVIRONMENT=$env" \
@@ -131,10 +193,6 @@ if [[ -s "$marker" ]]; then migrated=true; else migrated=false; fi
 wait "$litellm_pid" || failed+=" litellm"
 wait "$frontend_pid" || failed+=" frontend"
 if [[ -n "$failed" ]]; then
-  if [[ "$migrated" == true &&
-    ( "$failed" == *" litellm"* || "$failed" == *" frontend"* ) ]]; then
-    echo "::error::database migrated to $sha; services not updated (old code runs against the new schema, as after a rollback)" >&2
-  fi
   die "image build or migration failed:$failed"
 fi
 if [[ "$migrated" == true && -n "${GITHUB_OUTPUT:-}" ]]; then

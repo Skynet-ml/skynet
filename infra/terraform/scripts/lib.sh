@@ -2,6 +2,11 @@
 # Shared helpers for the deploy scripts. Source this file; do not run it.
 # Never print secret values here: these scripts handle secret names only.
 
+if ((BASH_VERSINFO[0] < 4)); then
+  printf 'error: Bash 4 or newer is required\n' >&2
+  exit 1
+fi
+
 set -euo pipefail
 
 # Local runs use the `skynet` CLI profile; GitHub Actions uses OIDC credentials.
@@ -22,8 +27,27 @@ need() {
   done
 }
 
+date_epoch() {
+  local value="$1" epoch
+  if epoch="$(date -d "$value" +%s 2>/dev/null)"; then
+    printf '%s\n' "$epoch"
+    return 0
+  fi
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -c '
+from datetime import datetime, timezone
+import sys
+
+value = datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+if value.tzinfo is None:
+    value = value.replace(tzinfo=timezone.utc)
+print(int(value.timestamp()))
+' "$value"
+}
+
 refresh_aws_credentials() {
   local token_response token credentials access_key secret_key session_token
+  local token_dir header_file token_file
   if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" &&
     -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" &&
     -z "${AWS_DEPLOY_ROLE_ARN:-}" ]]; then
@@ -32,15 +56,40 @@ refresh_aws_credentials() {
   [[ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" && -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" &&
     -n "${AWS_DEPLOY_ROLE_ARN:-}" ]] || die "incomplete GitHub OIDC credential configuration"
   command -v curl >/dev/null 2>&1 || die "missing command: curl"
-  token_response="$(curl --fail --silent --show-error \
-    -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-    "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")" ||
+  token_dir="$(mktemp -d)" || die "cannot create GitHub OIDC temp directory"
+  chmod 700 "$token_dir" || {
+    rm -rf "$token_dir"
+    die "cannot secure GitHub OIDC temp directory"
+  }
+  header_file="$token_dir/curl-header"
+  token_file="$token_dir/web-identity-token"
+  if ! printf 'Authorization: bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" >"$header_file" ||
+    ! chmod 600 "$header_file"; then
+    rm -rf "$token_dir"
+    die "cannot secure GitHub OIDC request header"
+  fi
+  if ! token_response="$(curl --fail --silent --show-error \
+    -H "@$header_file" \
+    "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")"; then
+    rm -rf "$token_dir"
     die "cannot request GitHub OIDC token"
-  token="$(jq -er '.value' <<<"$token_response")" || die "GitHub OIDC response has no token"
-  credentials="$(aws sts assume-role-with-web-identity \
+  fi
+  if ! token="$(jq -er '.value' <<<"$token_response")"; then
+    rm -rf "$token_dir"
+    die "GitHub OIDC response has no token"
+  fi
+  if ! printf '%s' "$token" >"$token_file" || ! chmod 600 "$token_file"; then
+    rm -rf "$token_dir"
+    die "cannot secure GitHub OIDC token"
+  fi
+  if ! credentials="$(aws sts assume-role-with-web-identity \
     --role-arn "$AWS_DEPLOY_ROLE_ARN" --role-session-name skynet-deploy \
-    --web-identity-token "$token" --duration-seconds 3600 --output json)" ||
+    --web-identity-token "file://$token_file" --duration-seconds 3600 --output json)"; then
+    rm -rf "$token_dir"
     die "cannot assume AWS deploy role with GitHub OIDC"
+  fi
+  rm -f "$header_file" "$token_file"
+  rmdir "$token_dir"
   access_key="$(jq -er '.Credentials.AccessKeyId' <<<"$credentials")" ||
     die "OIDC credentials have no access key"
   secret_key="$(jq -er '.Credentials.SecretAccessKey' <<<"$credentials")" ||

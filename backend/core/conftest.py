@@ -21,8 +21,9 @@ from core.billing import openrouter_prices
 from core.config import app_env
 
 _DURATION_FILE = Path(__file__).with_name("test_durations.json")
+# xdist reports reach the controller, so only it may write the shared artifacts.
 _is_controller = False
-_executed_nodeids: set[str] = set()
+_dispatched_nodeids: set[str] = set()
 _file_durations: dict[str, float] = {}
 
 
@@ -93,7 +94,7 @@ def _assign_test_files(paths: list[str], shard_count: int, durations: dict[str, 
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Reset execution tracking on the controller process.
+    """Reset dispatched-test tracking on the controller process.
 
     Args:
         config: Pytest configuration for this process.
@@ -101,12 +102,26 @@ def pytest_configure(config: pytest.Config) -> None:
     global _is_controller
     _is_controller = not hasattr(config, "workerinput")
     if _is_controller:
-        _executed_nodeids.clear()
+        _dispatched_nodeids.clear()
         _file_durations.clear()
 
 
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Write collected nodeids from the controller.
+
+    Args:
+        session: The active pytest session.
+    """
+    collected_out = os.environ.get("SKYNET_TEST_COLLECTED_OUT")
+    if _is_controller and collected_out:
+        Path(collected_out).write_text(
+            "".join(f"{item.nodeid}\n" for item in session.items),
+            encoding="utf-8",
+        )
+
+
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
-    """Record executed tests and their per-file phase durations on the controller.
+    """Record dispatched tests and their per-file phase durations on the controller.
 
     Args:
         report: A test report for one execution phase.
@@ -114,23 +129,23 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     if not _is_controller:
         return
     if report.when == "setup":
-        _executed_nodeids.add(report.nodeid)
+        _dispatched_nodeids.add(report.nodeid)
     path = report.nodeid.split("::", 1)[0]
     _file_durations[path] = _file_durations.get(path, 0.0) + report.duration
 
 
 def pytest_sessionfinish(session: pytest.Session) -> None:
-    """Write optional execution and duration reports after the controller session.
+    """Write optional dispatch and duration reports after the controller session.
 
     Args:
         session: The pytest session that is finishing.
     """
     if not _is_controller or hasattr(session.config, "workerinput"):
         return
-    executed_out = os.environ.get("SKYNET_TEST_EXECUTED_OUT")
-    if executed_out:
-        Path(executed_out).write_text(
-            "".join(f"{nodeid}\n" for nodeid in sorted(_executed_nodeids)),
+    dispatched_out = os.environ.get("SKYNET_TEST_DISPATCHED_OUT")
+    if dispatched_out:
+        Path(dispatched_out).write_text(
+            "".join(f"{nodeid}\n" for nodeid in sorted(_dispatched_nodeids)),
             encoding="utf-8",
         )
     durations_out = os.environ.get("SKYNET_TEST_DURATIONS_OUT")

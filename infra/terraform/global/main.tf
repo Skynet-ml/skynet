@@ -224,6 +224,8 @@ resource "aws_ecr_lifecycle_policy" "buildcache_production" {
   })
 }
 
+# Preview-to-preview cache poisoning cannot affect staging or production;
+# each PR reads only its own prefix.
 resource "aws_ecr_repository" "preview_buildcache" {
   name = "skynet/preview-buildcache"
   # Checkov CKV_AWS_51 requires immutable cache tags.

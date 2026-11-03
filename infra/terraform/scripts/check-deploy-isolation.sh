@@ -79,14 +79,21 @@ for env in staging production; do
     "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$env"
   expect "$policy" denied "push to the $other build cache" ecr:PutImage \
     "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$other"
-  expect "$policy" allowed "read the $env build cache" ecr:BatchGetImage \
-    "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$env"
-  expect "$policy" allowed "describe the $env build cache" ecr:DescribeImages \
-    "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$env"
-  expect "$policy" denied "read the $other build cache" ecr:BatchGetImage \
-    "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$other"
-  expect "$policy" denied "describe the $other build cache" ecr:DescribeImages \
-    "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$other"
+  for action in ecr:BatchCheckLayerAvailability ecr:BatchGetImage ecr:DescribeImages \
+    ecr:DescribeRepositories ecr:GetDownloadUrlForLayer; do
+    expect "$policy" allowed "read the $env build cache with $action" "$action" \
+      "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$env"
+    expect "$policy" denied "read the $other build cache with $action" "$action" \
+      "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$other"
+    expect "$policy" denied "read the preview build cache with $action" "$action" \
+      "arn:aws:ecr:$region:$account:repository/skynet/preview-buildcache"
+  done
+  for action in ecr:BatchDeleteImage ecr:CompleteLayerUpload ecr:DeleteRepository \
+    ecr:InitiateLayerUpload ecr:PutImage ecr:PutImageTagMutability \
+    ecr:PutLifecyclePolicy ecr:SetRepositoryPolicy ecr:UploadLayerPart; do
+    expect "$policy" denied "write the preview build cache with $action" "$action" \
+      "arn:aws:ecr:$region:$account:repository/skynet/preview-buildcache"
+  done
 done
 
 policy="$(policy_for data.aws_iam_policy_document.github_preview)"
@@ -138,8 +145,13 @@ for repository in buildcache-staging buildcache-production backend frontend lite
     expect "$policy" denied "write $action to skynet/$repository" "$action" "$resource"
   done
 done
-expect "$policy" allowed "read staging cache layers" ecr:BatchGetImage \
-  "arn:aws:ecr:$region:$account:repository/skynet/buildcache-staging"
+for action in ecr:BatchCheckLayerAvailability ecr:BatchGetImage ecr:DescribeImages \
+  ecr:GetDownloadUrlForLayer; do
+  expect "$policy" allowed "read staging cache with $action" "$action" \
+    "arn:aws:ecr:$region:$account:repository/skynet/buildcache-staging"
+  expect "$policy" denied "read production cache with $action" "$action" \
+    "arn:aws:ecr:$region:$account:repository/skynet/buildcache-production"
+done
 expect "$policy" allowed "push a preview cache image" ecr:PutImage \
   "arn:aws:ecr:$region:$account:repository/skynet/preview-buildcache"
 expect "$policy" allowed "push a preview image" ecr:PutImage "arn:aws:ecr:$region:$account:repository/skynet/preview-backend"
