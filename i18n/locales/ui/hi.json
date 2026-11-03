@@ -2920,8 +2920,6 @@
   "settings.admin.activity.title": "शुरुआती सफलताएँ और साप्ताहिक उपयोग",
   "settings.agent.default_model.description": "नई चैट और इंटरव्यू इसी मॉडल और थिंकिंग स्तर से शुरू होते हैं",
   "settings.agent.default_model.label": "डिफ़ॉल्ट मॉडल",
-  "settings.agent.dictation.description": "संदेश बॉक्स में माइक्रोफ़ोन बटन दिखाएँ",
-  "settings.agent.dictation.label": "वॉइस डिक्टेशन",
   "settings.agent.trust.ask": "पहले पूछें",
   "settings.agent.trust.auto_safe": "केवल सुरक्षित क्रियाओं के लिए स्वचालित",
   "settings.agent.trust.description": "कौन-सी क्रियाएँ एजेंट हर बार अनुमोदन माँगे बिना कर सकता है",

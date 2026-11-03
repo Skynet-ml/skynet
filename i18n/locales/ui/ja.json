@@ -2920,8 +2920,6 @@
   "settings.admin.activity.title": "初期の成果と週ごとの利用状況",
   "settings.agent.default_model.description": "新しいチャットとインタビューはこのモデルと思考レベルで開始します",
   "settings.agent.default_model.label": "デフォルトモデル",
-  "settings.agent.dictation.description": "メッセージ入力欄にマイクボタンを表示します",
-  "settings.agent.dictation.label": "音声入力",
   "settings.agent.trust.ask": "毎回確認",
   "settings.agent.trust.auto_safe": "安全なアクションのみ自動",
   "settings.agent.trust.description": "エージェントが毎回承認を求めずに実行できるアクション",

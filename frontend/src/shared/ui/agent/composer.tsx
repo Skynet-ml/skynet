@@ -7,7 +7,6 @@ import { msg } from "@/shared/lib/messages";
 import { extractAttachmentText } from "@/shared/lib/api";
 
 import { useLocale } from "@/shared/providers";
-import { useUserPrefs } from "@/features/settings";
 import { Button } from "@/shared/ui/primitives/button";
 import { TooltipButton } from "@/shared/ui/tooltip-button";
 import { cn } from "@/shared/lib/utils";
@@ -72,7 +71,7 @@ interface ComposerProps {
   /** False hides the + attach button and turns off file paste. The upload
    *  and transcribe endpoints need sign-in, so public pages (the docs) opt out. */
   attachments?: boolean;
-  /** False hides the dictation mic, whatever the user pref says. */
+  /** False hides the dictation mic. */
   dictation?: boolean;
 }
 
@@ -106,12 +105,11 @@ export function Composer({
   onAttachFile,
   suggest,
   attachments = true,
-  dictation: dictationAllowed = true,
+  dictation: showMic = true,
 }: ComposerProps) {
   const inline = layout === "inline";
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   const { locale } = useLocale();
-  const { prefs } = useUserPrefs();
 
   const valueRef = React.useRef(value);
   React.useEffect(() => {
@@ -134,9 +132,6 @@ export function Composer({
     },
   });
   const dictating = dictation.state.kind !== "idle";
-  // A recording in flight keeps its controls even if the pref flips off in
-  // the settings modal mid-take.
-  const showMic = dictationAllowed && (prefs.dictationEnabled || dictating);
   // Without a mid-turn handler a streaming turn locks the input as before.
   const locked = Boolean(streaming && !midTurn);
   const hasDraft = value.trim().length > 0;

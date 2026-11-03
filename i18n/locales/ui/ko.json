@@ -2920,8 +2920,6 @@
   "settings.admin.activity.title": "주간 초기 성과 및 사용량",
   "settings.agent.default_model.description": "새 대화와 인터뷰는 이 모델과 사고 수준으로 시작합니다",
   "settings.agent.default_model.label": "기본 모델",
-  "settings.agent.dictation.description": "메시지 입력창에 마이크 버튼 표시",
-  "settings.agent.dictation.label": "음성 받아쓰기",
   "settings.agent.trust.ask": "먼저 묻기",
   "settings.agent.trust.auto_safe": "안전한 작업에만 자동 실행",
   "settings.agent.trust.description": "에이전트가 매번 승인을 요청하지 않고 수행할 수 있는 작업",
