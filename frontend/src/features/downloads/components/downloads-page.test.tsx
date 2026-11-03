@@ -26,6 +26,14 @@ void test("cards have accessible headings and mobile-sized links", () => {
   assert.match(html, /min-h-\[44px\]/);
 });
 
+void test("header navigation wraps long locale names within its available width", () => {
+  const nav = render().match(/<nav\b[^>]*>/)?.[0];
+  assert.ok(nav);
+  assert.match(nav, /\bflex-wrap\b/);
+  assert.match(nav, /\bjustify-end\b/);
+  assert.match(nav, /\bgap-1\b/);
+});
+
 void test("changing Mac to a real download hides the obsolete unpublished-installer note", () => {
   const platforms = DOWNLOAD_PLATFORMS as DownloadPlatform[];
   const original = platforms[0];

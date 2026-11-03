@@ -53,7 +53,7 @@ export function DownloadsPage() {
             <AppMark className="size-8" aria-hidden="true" />
             <span className="text-sm font-bold uppercase tracking-[0.16em]">{APP_NAME}</span>
           </Link>
-          <nav className="flex items-center gap-1" aria-label={msg("downloads.navigation")}>
+          <nav className="flex flex-wrap items-center justify-end gap-1" aria-label={msg("downloads.navigation")}>
             <LanguageSwitcher />
             <Button
               variant="ghost"
