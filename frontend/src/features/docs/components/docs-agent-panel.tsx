@@ -169,7 +169,8 @@ export function DocsAgentPanel({
       }
       if (abortRef.current !== controller) return;
       setStreaming(false);
-      setNotice(failed);
+      // A question refused while this answer streamed keeps its "too long" notice.
+      setNotice((prev) => failed ?? (prev === "tooLong" ? prev : null));
       const final = trimHistory([...base, { role: "assistant", content: answer }], MAX_KEPT_MESSAGES);
       update(final);
       saveHistory(final);
@@ -177,8 +178,14 @@ export function DocsAgentPanel({
     [locale, update],
   );
 
+  // Run each search-box question once; a locale change must not send it again.
+  const handledRequestRef = React.useRef<DocsAgentRequest | null>(null);
   React.useEffect(() => {
-    if (request) void ask(request.question);
+    if (!request || handledRequestRef.current === request) return;
+    handledRequestRef.current = request;
+    // ask() refuses a too-long question; put it in the composer so the reader can shorten it.
+    if (isQuestionTooLong(request.question.trim())) setDraft(request.question);
+    void ask(request.question);
   }, [ask, request]);
 
   /** End the answer in flight; keep the text that already arrived. */
