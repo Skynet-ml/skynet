@@ -185,6 +185,7 @@ export function TaggerInterview({
   // Answers typed while the interviewer is replying wait for it to finish.
   const { midTurn, stop } = useSteerQueue({
     busy,
+    failed: error !== null,
     stop: onStop,
     maxLength: 20_000,
     send: (text) => {

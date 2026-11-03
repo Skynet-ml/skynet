@@ -65,6 +65,7 @@ export function useReactServeChat(
   }, []);
   const { store: steerStore, midTurn, stop } = useSteerQueue({
     busy: status === "streaming",
+    failed: status === "error",
     send: sendQueued,
     stop: stopTurn,
     maxLength: REACT_CHAT_USER_MESSAGE_MAX_CHARS,
@@ -254,6 +255,8 @@ export function useReactServeChat(
           },
           onDone: (result) => {
             if (controller.signal.aborted) return;
+            // Steers the server reports late are placed after their anchor, not after this answer.
+            if (abortRef.current === controller) abortRef.current = null;
             setStatus("done");
             setStatusLabel("");
             if (result.cents_charged != null) {
@@ -288,6 +291,7 @@ export function useReactServeChat(
           },
           onError: (message) => {
             if (controller.signal.aborted) return;
+            if (abortRef.current === controller) abortRef.current = null;
             setStatus("error");
             setStatusLabel(msg("auto.features.agent.panel.hooks.use.generalist.agent.literal.6"));
             setError(message);

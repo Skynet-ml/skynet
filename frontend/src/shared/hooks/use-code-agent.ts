@@ -352,6 +352,7 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
   const sendQueued = React.useCallback((text: string) => sendLatestRef.current(text), []);
   const { store: steerStore, midTurn } = useSteerQueue({
     busy: status === "streaming",
+    failed: status === "error",
     send: sendQueued,
     maxLength: 20_000,
   });
@@ -1042,6 +1043,7 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
               // A chat turn that ends without a word is a failed turn, not a
               // finished one: the chat offers a retry instead of a bare "Done.".
               if (isChat && !result.assistant_message.trim() && !replyBufRef.current.trim()) {
+                if (abortRef.current === controller) abortRef.current = null;
                 setStatus("error");
                 setStatusLabel(msg("auto.features.submit.hooks.use.code.agent.literal.8"));
                 setSignatureStatus("idle");
@@ -1098,6 +1100,8 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
               }
               setSignatureStatus("done");
               setMetricStatus("done");
+              // Steers the server reports late are placed after their anchor, not after this answer.
+              if (abortRef.current === controller) abortRef.current = null;
               setStatus("done");
               setStatusLabel(msg("auto.features.submit.hooks.use.code.agent.literal.7"));
               if (reasoningBufRef.current) setReasoningEndedAt(Date.now());
@@ -1192,6 +1196,7 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
               dropDraft("signature");
               dropDraft("metric");
               setLimitReached(code === DAILY_LIMIT_CODE);
+              if (abortRef.current === controller) abortRef.current = null;
               setStatus("error");
               setStatusLabel(msg("auto.features.submit.hooks.use.code.agent.literal.8"));
               setSignatureStatus("idle");

@@ -705,3 +705,57 @@ test("opening and steering a user turn preserves a paused tray", async () => {
   await flush();
   assert.deepEqual(sent, []);
 });
+
+test("Stop, Retry or Edit on an empty tray does not hold later queued input", async () => {
+  const { queue, sent } = setup();
+  queue.setBusy(true);
+  queue.pause();
+  assert.equal(queue.getSnapshot().paused, false);
+  queue.setBusy(false);
+  await flush();
+  queue.setBusy(true);
+  queue.enqueue("later");
+  queue.setBusy(false);
+  await flush();
+  assert.deepEqual(sent, ["later"]);
+});
+
+test("input queued after the held tray is emptied is a new intent", async () => {
+  const { queue, sent } = setup();
+  queue.setBusy(true);
+  queue.enqueue("held");
+  queue.pause();
+  queue.setBusy(false);
+  await flush();
+  const id = queue.getSnapshot().queued[0]!.id;
+  assert.equal(queue.take(id), "held");
+  queue.setBusy(true);
+  queue.enqueue("fresh");
+  queue.setBusy(false);
+  await flush();
+  assert.deepEqual(sent, ["fresh"]);
+});
+
+test("a failed turn holds queued input instead of starting another paid turn", async () => {
+  const { queue, sent } = setup();
+  queue.setBusy(true);
+  queue.enqueue("next");
+  queue.setBusy(false, true);
+  await flush();
+  assert.deepEqual(sent, []);
+  assert.equal(queue.getSnapshot().paused, true);
+  queue.sendNow();
+  assert.deepEqual(sent, ["next"]);
+});
+
+test("a failed steerable turn returns unread steers to the held tray", async () => {
+  const { queue, sent } = setup();
+  queue.openTurn(fakeChannel());
+  queue.steer("unread");
+  await flush();
+  queue.setBusy(false, true);
+  await flush();
+  assert.deepEqual(sent, []);
+  assert.deepEqual(queue.getSnapshot().queued.map((q) => q.text), ["unread"]);
+  assert.equal(queue.getSnapshot().paused, true);
+});

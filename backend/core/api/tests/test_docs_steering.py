@@ -132,3 +132,49 @@ def test_docs_stop_preserves_unread_input_without_an_extra_call(monkeypatch: pyt
     assert len(lm.calls) == 1
     assert spent == [lm]
     assert store.withdraw("alice", "turn", None) == (pending, [])
+
+
+def test_docs_turn_runs_unsteerable_when_turn_registration_fails(
+    monkeypatch: pytest.MonkeyPatch, docs_root: Path, redis_double: fakeredis.FakeStrictRedis
+) -> None:
+    """Answer normally and announce no steering when the turn bound cannot be stored."""
+    store = SteerStore()
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        """Simulate a database error while the turn registers."""
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(store, "open_turn", fail)
+    monkeypatch.setattr(docs_agent, "get_steer_store", lambda: store, raising=False)
+    user = AuthenticatedUser(username="alice", role="user", groups=())
+    lm = _ScriptedLM({"text": "Answer."})
+    events = _events(_client(docs_root, lm, user=user).post(
+        "/docs-agent/ask", json={"question": "balance", "steer_key": "turn"}
+    ))
+    assert not any(n == "steer_ready" for n, _ in events)
+    assert events[-1][0] == "done"
+    assert len(lm.calls) == 1
+
+
+def test_docs_steer_stays_unread_when_delivery_cannot_be_recorded(
+    monkeypatch: pytest.MonkeyPatch, docs_root: Path, redis_double: fakeredis.FakeStrictRedis
+) -> None:
+    """Keep a steer out of the model call and give it back when it cannot be marked delivered."""
+    store = SteerStore()
+    pending = store.post("alice", "turn", "Focus on run budgets")
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        """Simulate a database error while the steer is marked delivered."""
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(store, "mark_delivered", fail)
+    monkeypatch.setattr(docs_agent, "get_steer_store", lambda: store, raising=False)
+    user = AuthenticatedUser(username="alice", role="user", groups=())
+    lm = _ScriptedLM({"text": "Answer."})
+    events = _events(_client(docs_root, lm, user=user).post(
+        "/docs-agent/ask", json={"question": "balance", "steer_key": "turn"}
+    ))
+    assert not any(n == "steer_applied" for n, _ in events)
+    assert events[-1][0] == "done"
+    assert "Focus on run budgets" not in str(lm.calls[0]["messages"])
+    assert store.withdraw("alice", "turn", None) == ([pending], [])

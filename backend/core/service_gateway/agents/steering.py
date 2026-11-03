@@ -14,6 +14,7 @@ runs without Postgres) an in-process store stands in.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from collections.abc import Callable
@@ -458,9 +459,65 @@ class SteerInbox:
     # event ReActV2 appends for that step.
     unrecorded: str | None = None
 
-    def __post_init__(self) -> None:
-        """Register this turn's bound before callers announce steering readiness."""
-        self.store.open_turn(self.owner, self.steer_key, self.max_chars or STEER_TEXT_MAX_CHARS)
+
+async def open_steer_inbox(
+    owner: str,
+    steer_key: str,
+    input_field: str,
+    emit: Callable[[dict[str, Any]], None],
+    store: SteerStore,
+    max_chars: int | None = None,
+) -> SteerInbox | None:
+    """Register a turn's steer bound and return its inbox.
+
+    The bound is written before the caller announces ``steer_ready``, so a
+    steer posted right after it meets the turn's limit. The write runs off
+    the event loop. A failed write leaves the turn unsteerable instead of
+    failing it: the caller sends no ``steer_ready`` and the client queues.
+
+    Args:
+        owner: The signed-in caller who owns the turn.
+        steer_key: The turn's steer key from the client.
+        input_field: The step input that carries a delivered steer.
+        emit: Sends one stream event.
+        store: The steer store.
+        max_chars: The turn's per-message bound, or ``None`` for the default.
+
+    Returns:
+        The inbox, or ``None`` when the turn could not be registered.
+    """
+    inbox = SteerInbox(owner, steer_key, input_field, emit, store, max_chars)
+    try:
+        await asyncio.to_thread(store.open_turn, owner, steer_key, max_chars or STEER_TEXT_MAX_CHARS)
+    except Exception:
+        logger.exception("Failed to open a steerable turn; the turn runs without steering")
+        return None
+    return inbox
+
+
+def claim_delivery(inbox: SteerInbox, taken: list[tuple[str, str]]) -> bool:
+    """Mark taken steers delivered, or give them back when that fails.
+
+    A steer the store cannot mark delivered must not reach the model: a later
+    withdraw would report it unread and the client would send it again.
+
+    Args:
+        inbox: The turn's inbox.
+        taken: The ``(id, text)`` pairs this step took.
+
+    Returns:
+        True when the step may use the steers.
+    """
+    try:
+        inbox.store.mark_delivered(inbox.owner, inbox.steer_key, taken)
+    except Exception:
+        logger.exception("Failed to mark steer messages delivered; returning them unread")
+        try:
+            inbox.store.return_unread(inbox.owner, inbox.steer_key, taken)
+        except Exception:
+            logger.exception("Failed to return undelivered steer messages")
+        return False
+    return True
 
 
 def attach_steering(react: dspy.Module, inbox: SteerInbox | None) -> None:
@@ -541,8 +598,9 @@ def deliver_steering(predictor: Any, kwargs: dict[str, Any]) -> None:
         return
     if not taken:
         return
+    if not claim_delivery(inbox, taken):
+        return
     text = "\n\n".join(message for _, message in taken)
     kwargs[inbox.input_field] = text
     inbox.unrecorded = text
-    inbox.store.mark_delivered(inbox.owner, inbox.steer_key, taken)
     inbox.emit({"event": STEER_APPLIED_EVENT, "data": {"ids": [message_id for message_id, _ in taken], "text": text}})

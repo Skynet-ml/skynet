@@ -11,6 +11,8 @@ export interface UseSteerQueueArgs {
   stop?: () => void;
   /** A turn is running in this chat. */
   busy: boolean;
+  /** The last turn ended in an error; queued input waits for the user. */
+  failed?: boolean;
   /** Start a new turn with `text`; called for each queued follow-up in turn. */
   send: (text: string) => boolean | void;
   maxLength?: number;
@@ -47,7 +49,7 @@ export function agentSteerChannel(steerKey: string, onApplied?: SteerChannel["on
  * `busy` is applied after the render commits, so a queued follow-up is sent
  * against the finished turn's committed history.
  */
-export function useSteerQueue({ busy, send, stop, maxLength }: UseSteerQueueArgs): SteerQueueHandle {
+export function useSteerQueue({ busy, failed = false, send, stop, maxLength }: UseSteerQueueArgs): SteerQueueHandle {
   const [store] = React.useState(() => new SteerQueue(send, maxLength));
   // Before the busy effect below, so a follow-up runs through the latest send.
   React.useEffect(() => {
@@ -56,8 +58,8 @@ export function useSteerQueue({ busy, send, stop, maxLength }: UseSteerQueueArgs
     return () => store.setSend(() => false);
   }, [store, send, maxLength]);
   React.useEffect(() => {
-    store.setBusy(busy);
-  }, [store, busy]);
+    store.setBusy(busy, failed);
+  }, [store, busy, failed]);
   const snapshot = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const midTurn = React.useMemo(() => midTurnOf(() => store, snapshot), [store, snapshot]);
   const stopTurn = React.useCallback(() => {

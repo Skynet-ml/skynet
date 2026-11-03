@@ -114,9 +114,12 @@ export class SteerQueue {
 
   /**
    * Report whether a turn is running. Going idle ends the open steerable turn
-   * (done, error, or stop) and then sends the queue's head.
+   * (done, error, or stop) and then sends the queue's head. A turn that
+   * `failed` holds pending input instead, so an error never starts more paid
+   * turns on its own.
    */
-  setBusy(busy: boolean): void {
+  setBusy(busy: boolean, failed = false): void {
+    if (!busy && failed && this.busy) this.pause();
     if (busy && !this.busy) this.sendIntent += 1;
     if (busy) this.sendTogether = false;
     if (!busy && this.channel) {
@@ -431,6 +434,8 @@ export class SteerQueue {
   enqueue(text: string): void {
     const trimmed = text.trim();
     if (!trimmed) return;
+    // A Stop held an earlier tray; once that tray is gone, new input is a new intent.
+    if (this.paused && !this.holdsInput()) this.paused = false;
     const item = { id: this.makeId(), text: trimmed };
     this.queued = [...this.queued, item];
     this.trayOrder.push(item.id);
@@ -476,7 +481,8 @@ export class SteerQueue {
   /** Hold pending input after a user Stop, including steers still being withdrawn. */
   pause(): void {
     if (!this.internalStop) this.sendIntent += 1;
-    this.paused = true;
+    // An empty tray has nothing to hold; pausing it would hold later Tab input.
+    if (this.holdsInput()) this.paused = true;
     this.sendTogether = false;
     this.emit();
   }
@@ -547,6 +553,10 @@ export class SteerQueue {
       this.emit();
       finish();
     });
+  }
+
+  private holdsInput(): boolean {
+    return this.hasPending() || this.settling > 0 || this.withdrawals.size > 0;
   }
 
   private makeId(): string {

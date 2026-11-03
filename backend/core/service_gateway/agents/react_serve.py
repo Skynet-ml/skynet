@@ -46,7 +46,7 @@ from .generalist import (
     _wrap_tool_with_approval,
     get_approval_registry,
 )
-from .steering import SteerInbox, attach_steering, get_steer_store
+from .steering import attach_steering, get_steer_store, open_steer_inbox
 
 logger = logging.getLogger(__name__)
 
@@ -204,18 +204,18 @@ async def _drive_react_chat(
 
         output_fields = list(signature_cls.output_fields)
         input_fields = list(signature_cls.input_fields)
+        inbox = None
         if steer_key and steer_owner and input_fields:
-            attach_steering(
-                program,
-                SteerInbox(
-                    owner=steer_owner,
-                    steer_key=steer_key,
-                    input_field=input_fields[0],
-                    emit=emit,
-                    store=get_steer_store(),
-                    max_chars=AGENT_MAX_TEXT,
-                ),
+            inbox = await open_steer_inbox(
+                owner=steer_owner,
+                steer_key=steer_key,
+                input_field=input_fields[0],
+                emit=emit,
+                store=get_steer_store(),
+                max_chars=AGENT_MAX_TEXT,
             )
+        if inbox is not None:
+            attach_steering(program, inbox)
             emit({"event": "steer_ready", "data": {"steer_key": steer_key}})
         primary_out = output_fields[0] if output_fields else None
 

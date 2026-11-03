@@ -960,7 +960,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         return true;
       });
       const session = sessions.get(key);
-      queue.setBusy(session ? isBusy(session) : false);
+      queue.setBusy(session ? isBusy(session) : false, session?.status === "error");
     }
   }, [sessions, steerQueues, requestRun, activeKey]);
 

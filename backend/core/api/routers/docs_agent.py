@@ -51,7 +51,14 @@ from ...service_gateway.agents.docs_retrieval import DocsCorpus
 from ...service_gateway.agents.docs_tools import SEARCH_DOCS_TOOL, search_corpus
 from ...service_gateway.agents.generalist import build_hosted_suggest_lm
 from ...service_gateway.agents.next_prompt import suggest_next_prompt
-from ...service_gateway.agents.steering import STEER_APPLIED_EVENT, STEER_KEY_MAX_CHARS, SteerInbox, get_steer_store
+from ...service_gateway.agents.steering import (
+    STEER_APPLIED_EVENT,
+    STEER_KEY_MAX_CHARS,
+    SteerInbox,
+    claim_delivery,
+    get_steer_store,
+    open_steer_inbox,
+)
 from ...service_gateway.language_models import (
     apply_model_reasoning_config,
     build_language_model,
@@ -501,20 +508,18 @@ def _run_answer(
                     if taken:
                         inbox.store.return_unread(inbox.owner, inbox.steer_key, taken)
                     return ""
-                if taken:
-                    text = "\n\n".join(text for _, text in taken)
-                    messages = [*messages, {"role": "user", "content": f"<question>\n{_escape(text)}\n</question>"}]
-            offer = step < MAX_STEPS - 1 and searches < MAX_SEARCHES
-            kwargs: dict[str, Any] = {"messages": messages, "max_tokens": MAX_OUTPUT_TOKENS}
-            if offer:
-                kwargs["tools"] = [SEARCH_DOCS_SCHEMA]
             if stop.is_set():
                 if inbox is not None and taken:
                     inbox.store.return_unread(inbox.owner, inbox.steer_key, taken)
                 return ""
-            if inbox is not None and taken:
-                inbox.store.mark_delivered(inbox.owner, inbox.steer_key, taken)
+            if inbox is not None and taken and claim_delivery(inbox, taken):
+                text = "\n\n".join(text for _, text in taken)
+                messages = [*messages, {"role": "user", "content": f"<question>\n{_escape(text)}\n</question>"}]
                 inbox.emit({"event": STEER_APPLIED_EVENT, "data": {"ids": [mid for mid, _ in taken], "text": text}})
+            offer = step < MAX_STEPS - 1 and searches < MAX_SEARCHES
+            kwargs: dict[str, Any] = {"messages": messages, "max_tokens": MAX_OUTPUT_TOKENS}
+            if offer:
+                kwargs["tools"] = [SEARCH_DOCS_SCHEMA]
             # The output cap goes on the call: dspy rejects a small max_tokens at
             # construction for OpenAI reasoning models, but not per call.
             output = _first_output(lm(**kwargs))
@@ -659,7 +664,7 @@ def create_docs_agent_router(
         try:
             inbox = None
             if user is not None and req.steer_key:
-                inbox = SteerInbox(
+                inbox = await open_steer_inbox(
                     owner=user.username,
                     steer_key=req.steer_key,
                     input_field="question",
@@ -667,6 +672,7 @@ def create_docs_agent_router(
                     store=get_steer_store(),
                     max_chars=MAX_QUESTION_CHARS,
                 )
+            if inbox is not None:
                 opening.insert(0, ("steer_ready", {"steer_key": req.steer_key}))
             messages = build_messages(req.question, req.history, req.locale, results)
             lm = lm_factory()

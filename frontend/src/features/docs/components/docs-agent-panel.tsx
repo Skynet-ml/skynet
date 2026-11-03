@@ -305,6 +305,8 @@ export function DocsAgentPanel({
         failed = "error";
       }
       if (abortRef.current !== controller) return;
+      // Steers the server reports late are placed after their anchor, not after this answer.
+      abortRef.current = null;
       if (failed && failed !== "tooLong") steerStore.pause();
       setStreaming(false);
       // A question refused while this answer streamed keeps its "too long" notice.

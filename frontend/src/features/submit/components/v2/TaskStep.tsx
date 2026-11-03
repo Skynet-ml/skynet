@@ -238,6 +238,7 @@ function TaskInterviewPanel({
   // Answers typed while the interviewer is replying wait for it to finish.
   const { midTurn, stop } = useSteerQueue({
     busy: interview.busy,
+    failed: interview.error,
     send: interview.send,
     stop: interview.stop,
     maxLength: INTERVIEW_TURN_MAX_CHARS,

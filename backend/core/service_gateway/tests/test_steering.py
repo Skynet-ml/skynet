@@ -257,6 +257,50 @@ def test_unread_steer_stays_for_the_client_to_withdraw() -> None:
     assert [text for _, text in store.take(_OWNER, _KEY)] == ["too late"]
 
 
+def test_steer_stays_unread_when_delivery_cannot_be_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A steer the store cannot mark delivered skips the step and goes back to the mailbox."""
+    store = SteerStore()
+    events: list[dict[str, Any]] = []
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        """Simulate a database error while the steer is marked delivered."""
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(store, "mark_delivered", fail)
+    lm = _ScriptedLM([("lookup", {"name": "a"}), ("lookup", {"name": "b"}), ("submit", {"reply": "done"})])
+    program = _steered_program(store, events, posts={"a": "use blue instead"}, conversation=False)
+
+    with dspy.context(lm=lm, adapter=dspy.ChatAdapter(use_native_function_calling=True)):
+        result = program(user_message="make it red")
+
+    assert result.reply == "done"
+    assert events == []
+    assert not any("use blue instead" in str(request["messages"]) for request in lm.requests)
+    assert [text for _, text in store.take(_OWNER, _KEY)] == ["use blue instead"]
+
+
+async def test_open_steer_inbox_returns_none_when_registration_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A turn whose bound cannot be stored runs without steering instead of failing."""
+    store = SteerStore()
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        """Simulate a database error while the turn registers."""
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(store, "open_turn", fail)
+    inbox = await steering_mod.open_steer_inbox(_OWNER, _KEY, "user_message", lambda event: None, store, 100)
+    assert inbox is None
+
+
+async def test_open_steer_inbox_registers_the_turn_bound() -> None:
+    """The bound is stored before the inbox is returned, so later posts meet it."""
+    store = SteerStore()
+    inbox = await steering_mod.open_steer_inbox(_OWNER, _KEY, "user_message", lambda event: None, store, 5)
+    assert inbox is not None
+    with pytest.raises(steering_mod.SteerInputError):
+        store.post(_OWNER, _KEY, "x" * 6)
+
+
 def test_loop_without_an_inbox_is_unchanged() -> None:
     """Attaching no inbox leaves the loop exactly as it was."""
     signature = dspy.Signature("user_message: str -> reply: str", "Be helpful.")

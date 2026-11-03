@@ -74,7 +74,7 @@ test("PR929 F4 a delayed joined send stops its clicked session", async () => {
 });
 
 for (const thinking of [false, true]) {
-  test(`PR929 F6 late docs proofs preserve history order thinking=${thinking}`, async () => {
+  test(`PR929 F6 late docs proofs preserve completed history thinking=${thinking}`, async () => {
     const store = new SteerQueue();
     const messagesRef: { current: any[] } = { current: [] };
     const abortRef = { current: null as AbortController | null };
@@ -105,16 +105,13 @@ for (const thinking of [false, true]) {
       },
     });
     await ask("Q");
-    expression(docs, "stopAnswer", {
-      abortRef, messagesRef, settle, trimHistory, MAX_KEPT_MESSAGES: 12,
-      setStreaming: () => {}, update: (messages: any[]) => { messagesRef.current = messages; },
-      saveHistory: (messages: any[]) => { saved = messages; },
-    })();
+    assert.equal(abortRef.current, null);
     proof({ ids: ["a"], text: "A" });
     proof({ ids: ["b"], text: "B" });
     const users = (messages: any[]) => messages.filter((message) => message.role === "user").map((message) => message.content);
     assert.deepEqual(users(messagesRef.current), ["Q", "A", "B"]);
     assert.deepEqual(users(saved), ["Q", "A", "B"]);
+    assert.deepEqual(messagesRef.current.filter((message) => message.role === "assistant").map((message) => message.content), ["answer"]);
     assert.equal(messagesRef.current.some((message) => message.thinkingSegments?.length), thinking);
     await ask("next");
     assert.deepEqual(users(body.history), ["Q", "A", "B"]);
@@ -125,6 +122,7 @@ for (const failure of ["replacement", "network"] as const) {
   test(`R3 docs ${failure} closes or pauses the right steering channel`, async () => {
     const store = new SteerQueue();
     store.openTurn({ post: async () => "old", withdraw: async (ids) => ({ ids, delivered: [] }) });
+    store.enqueue("keep after failure");
     let replacementCanSteer: boolean | undefined;
     const callback = expression(docs, "ask", {
       abortRef: { current: new AbortController() }, messagesRef: { current: [] }, locale: "en", MAX_KEPT_MESSAGES: 12,
@@ -149,7 +147,7 @@ for (const failure of ["replacement", "network"] as const) {
 test("R3 a completed tagger still accepts a queued correction", () => {
   const sent: string[] = [];
   const options = expression("src/features/tagger/components/TaggerInterview.tsx", "useSteerQueue", {
-    busy: false, done: true, onStop: () => {}, onSend: (text: string) => sent.push(text),
+    busy: false, done: true, error: null, onStop: () => {}, onSend: (text: string) => sent.push(text),
   });
   assert.equal(options.send("correct this contract"), true);
   assert.deepEqual(sent, ["correct this contract"]);
@@ -341,6 +339,8 @@ for (const file of ["src/features/agent-panel/hooks/use-generalist-agent.ts", "s
   for (const action of ["editAndResend", "retry"]) {
   test(`R2 ${file} pauses unread input before ${action}`, () => {
     const queue = new SteerQueue();
+    queue.setBusy(true);
+    queue.enqueue("keep after replacement");
     const messages = [{ role: "user", content: "previous" }];
     const callback = expression(file, action, {
       activeKeyRef: { current: "chat" }, sessionsRef: { current: new Map([["chat", { messages }]]) },
@@ -394,7 +394,7 @@ test("R2 a missing generalist session preserves queued input", () => {
 test("R3 a completed tagger interview can resume for a queued send", () => {
   let sent = false;
   const options = expression("src/features/tagger/components/TaggerInterview.tsx", "useSteerQueue", {
-    busy: false, done: true, onStop: () => {}, onSend: () => { sent = true; },
+    busy: false, done: true, error: null, onStop: () => {}, onSend: () => { sent = true; },
   });
   assert.equal(options.send("keep"), true);
   assert.equal(sent, true);
@@ -403,7 +403,7 @@ test("R3 a completed tagger interview can resume for a queued send", () => {
 test("R3 served post-steer final output replaces incomplete streamed text", () => {
   let messages = [{ role: "assistant", content: "Part" }];
   const callback = expression(served, "onDone", {
-    controller: new AbortController(), setStatus: () => {}, setStatusLabel: () => {},
+    controller: new AbortController(), abortRef: { current: null }, setStatus: () => {}, setStatusLabel: () => {},
     reasoningBufRef: { current: "" }, replyBeforeSteerRef: { current: "before" },
     removeReplyBeforeSteer: (reply: string, prefix: string) => reply.replace(prefix, ""),
     msg: () => "No reply", setReasoningEndedAt: () => {},
@@ -468,7 +468,7 @@ for (const owner of ["generalist", "code", "served"] as const) {
 test("R2 served post-steer empty replies keep the no-reply fallback", () => {
   let messages = [{ role: "assistant", content: "" }];
   const callback = expression(served, "onDone", {
-    controller: new AbortController(), setStatus: () => {}, setStatusLabel: () => {},
+    controller: new AbortController(), abortRef: { current: null }, setStatus: () => {}, setStatusLabel: () => {},
     reasoningBufRef: { current: "" }, replyBeforeSteerRef: { current: "before" },
     removeReplyBeforeSteer: () => "", msg: () => "No reply", setReasoningEndedAt: () => {},
     setMessages: (update: (previous: typeof messages) => typeof messages) => { messages = update(messages); },
