@@ -612,8 +612,13 @@ function IntakeSurface() {
                       ? "var(--background)"
                       : SPLASH_GROUND,
                   }}
+                  // Only the splash handoff mount (stage "title") stays still; Back from the tour slides in.
                   initial={
-                    initial.entrance ? false : reduceMotion ? { opacity: 0 } : { y: "-100%" }
+                    initial.entrance && stage === "title"
+                      ? false
+                      : reduceMotion
+                        ? { opacity: 0 }
+                        : { y: "-100%" }
                   }
                   animate={reduceMotion ? { opacity: 1 } : { y: 0 }}
                   exit={reduceMotion ? { opacity: 0 } : { y: "-100%" }}
