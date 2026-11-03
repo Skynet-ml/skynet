@@ -163,7 +163,9 @@ class GeneralistAgentRequest(BaseModel):
     regenerate: bool = Field(
         default=False,
         description=(
-            "Replace the existing conversation's final user/assistant turn instead of appending a duplicate turn."
+            "Replace the conversation's final user/assistant turn when its user text equals "
+            "``user_message``; otherwise append the turn. With ``edit_user_text``, apply only "
+            "when the edited turn is not found."
         ),
     )
     edit_user_text: str | None = Field(
