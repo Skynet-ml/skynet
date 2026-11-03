@@ -135,34 +135,35 @@ function stripCalloutMarker(node: MdNode): boolean {
   return true;
 }
 
-/** Replace each callout blockquote with its own children. */
-function unwrapCallouts(children: MdNode[]): MdNode[] {
-  return children.flatMap((child) =>
-    child.type === "blockquote" && stripCalloutMarker(child)
-      ? unwrapCallouts(child.children ?? [])
-      : [child],
-  );
-}
-
-/** Join adjacent `tab="…"` code blocks into one tab group node. */
+/**
+ * Join adjacent `tab="…"` code blocks into one tab group node, and replace
+ * each callout blockquote with its own children.
+ *
+ * A callout's children are grouped on their own, so a tab group never joins
+ * code blocks from both sides of a callout boundary.
+ */
 function groupTabs(children: MdNode[]): MdNode[] {
   const out: MdNode[] = [];
+  let open: MdNode | null = null;
   for (const child of children) {
-    const label = child.type === "code" ? tabLabel(child.meta) : null;
-    const last = out[out.length - 1];
-    if (label && last?.type === "docsTabs") {
-      last.children?.push(child);
+    if (child.type === "blockquote" && stripCalloutMarker(child)) {
+      out.push(...groupTabs(child.children ?? []));
+      open = null;
       continue;
     }
-    out.push(
-      label
-        ? {
-            type: "docsTabs",
-            data: { hName: "div", hProperties: { dataTabs: "" } },
-            children: [child],
-          }
-        : child,
-    );
+    const label = child.type === "code" ? tabLabel(child.meta) : null;
+    if (label && open) {
+      open.children?.push(child);
+      continue;
+    }
+    open = label
+      ? {
+          type: "docsTabs",
+          data: { hName: "div", hProperties: { dataTabs: "" } },
+          children: [child],
+        }
+      : null;
+    out.push(open ?? child);
   }
   for (const group of out) {
     if (group.type !== "docsTabs") continue;
@@ -192,7 +193,7 @@ export function remarkDocs(options: { headingIds: readonly string[] }) {
       }
       if (node.children) {
         // A tab group's own code blocks must not be grouped again.
-        if (node.type !== "docsTabs") node.children = groupTabs(unwrapCallouts(node.children));
+        if (node.type !== "docsTabs") node.children = groupTabs(node.children);
         node.children.forEach(visit);
       }
     };

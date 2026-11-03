@@ -85,3 +85,30 @@ test("remarkDocs groups adjacent tab code blocks once, unwraps callouts and mark
   assert.equal(mcp.type, "docsMcpClients");
   assert.equal(mcp.value, undefined);
 });
+
+test("remarkDocs never joins tab groups across a callout boundary", () => {
+  const code = (label: string) => ({
+    type: "code",
+    lang: "bash",
+    meta: `tab="${label}"`,
+    value: label,
+  });
+  const callout = (...children: object[]) => ({
+    type: "blockquote",
+    children: [{ type: "paragraph", children: [{ type: "text", value: "[!NOTE]" }] }, ...children],
+  });
+  const tree = {
+    type: "root",
+    children: [code("macOS"), callout(code("Linux"), code("Windows")), code("Other")],
+  };
+  remarkDocs({ headingIds: [] })(tree);
+  const groups = (tree.children as Array<Record<string, any>>).map((c) => [
+    c.type,
+    c.data?.hProperties?.dataTabs,
+  ]);
+  assert.deepEqual(groups, [
+    ["docsTabs", '["macOS"]'],
+    ["docsTabs", '["Linux","Windows"]'],
+    ["docsTabs", '["Other"]'],
+  ]);
+});
