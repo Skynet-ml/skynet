@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-for command in awk grep git jq sed; do
+for command in awk find grep git jq sed stat chmod; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'missing test command: %s\n' "$command" >&2
     exit 1
@@ -20,6 +20,7 @@ repo_root="$(cd "$(dirname "$0")/../../../.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin"
+real_stat="$(command -v stat)"
 cat >"$tmp/bin/stub" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -65,11 +66,24 @@ case "${0##*/}" in
             [[ -n "${TEST_CORE_FILEMODE:-}" ]] || exit 1
             printf '%s\n' "$TEST_CORE_FILEMODE"
             ;;
+          core.fsmonitor)
+            [[ -n "${TEST_CORE_FSMONITOR:-}" ]] || exit 1
+            printf '%s\n' "$TEST_CORE_FSMONITOR"
+            ;;
+          core.untrackedCache)
+            [[ -n "${TEST_CORE_UNTRACKEDCACHE:-}" ]] || exit 1
+            printf '%s\n' "$TEST_CORE_UNTRACKEDCACHE"
+            ;;
           *) exit 2 ;;
         esac
         ;;
       ls-files)
         context="${*: -1}"
+        if [[ "$*" == *" --stage "* ]]; then
+          printf '%s 0123456789abcdef0123456789abcdef01234567 0\t%s/Dockerfile\0' \
+            "${TEST_INDEX_MODE:-100644}" "$context"
+          exit 0
+        fi
         if [[ "$*" == *" -v "* ]]; then
           printf '%s %s\n' "${TEST_INDEX_FLAG:-H}" "$context/Dockerfile"
           exit 0
@@ -100,7 +114,12 @@ case "${0##*/}" in
     elif [[ "$1" == buildx && "$2" == imagetools ]]; then
       [[ "${DIGEST_FAIL:-}" != true ]] || exit 1
       [[ -n "${DIGEST_CALLS_OUT:-}" ]] && printf '%s\n' call >>"$DIGEST_CALLS_OUT"
-      printf '"%s"\n' "${BASE_DIGEST:-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+      if [[ "$*" == *" --raw "* ]]; then
+        [[ -z "${TEST_IMAGETOOLS_RAW_OUT:-}" ]] || printf '%s\n' "$*" >>"$TEST_IMAGETOOLS_RAW_OUT"
+        cat "$TEST_MULTIARCH_INDEX_FILE"
+      else
+        printf '"%s"\n' "${BASE_DIGEST:-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+      fi
     else
       exit 2
     fi
@@ -208,13 +227,34 @@ esac
 SH
 chmod +x "$tmp/bin/stub"
 for command in aws curl date docker git; do ln -s stub "$tmp/bin/$command"; done
+cat >"$tmp/bin/find" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+root="$1"
+printf '%s\0%s/Dockerfile\0' "$root" "$root"
+SH
+cat >"$tmp/bin/stat" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+target="${@: -1}"
+if [[ -d "$target" ]]; then
+  printf '755\n'
+else
+  exec "$TEST_REAL_STAT" "$@"
+fi
+SH
+chmod +x "$tmp/bin/"{find,stat}
 export PATH="$tmp/bin:$PATH"
+export TEST_REAL_STAT="$real_stat"
 export TEST_REPO_ROOT="$repo_root"
+export TEST_MULTIARCH_INDEX_FILE="$repo_root/infra/terraform/scripts/tests/python-3.12-slim-index.json"
+export TEST_MULTIARCH_METADATA_FILE="$repo_root/infra/terraform/scripts/tests/buildx-provenance-multiarch.json"
 TEST_ALT_REPO_ROOT="$tmp/another-checkout"
 export TEST_ALT_REPO_ROOT
 export TREE_HASH BASE_DIGEST DIRTY_TREE DIGEST_FAIL DESCRIBE_ERROR RETAG_FAIL RETAG_EXISTS
 export RETAG_ERROR RETAG_DIFF LATEST_CACHE_TEST CACHE_ERROR FRESHNESS_TEST PUSHED_AT
 export CACHE_TIMESTAMP_TEST TEST_CORE_AUTOCRLF TEST_CORE_EOL TEST_CORE_SYMLINKS TEST_CORE_FILEMODE
+export TEST_CORE_FSMONITOR TEST_CORE_UNTRACKEDCACHE
 export TEST_SPARSE_CHECKOUT TEST_INDEX_FLAG
 export BUILDX_VERSION BUILDKIT_VERSION DATE_PARSE_FAIL OIDC_HEADER_PATH_OUT OIDC_TOKEN_PATH_OUT
 OIDC_HEADER_PATH_OUT="$tmp/oidc-header-path"
@@ -279,6 +319,12 @@ unset TEST_CORE_SYMLINKS
 TEST_CORE_FILEMODE=false
 [[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "core.fileMode=false produced key"
 unset TEST_CORE_FILEMODE
+TEST_CORE_FSMONITOR=true
+[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "core.fsmonitor produced key"
+unset TEST_CORE_FSMONITOR
+TEST_CORE_UNTRACKEDCACHE=true
+[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "core.untrackedCache=true produced key"
+unset TEST_CORE_UNTRACKEDCACHE
 TEST_INDEX_FLAG=h
 [[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "assume-unchanged file produced key"
 TEST_INDEX_FLAG=S
@@ -330,21 +376,39 @@ unset DATE_PARSE_FAIL
 PUSHED_AT=2000-01-01T00:00:00Z
 if find_fresh_by_key skynet/backend "$key"; then fail "stale keyed image was reused"; fi
 unset FRESHNESS_TEST PUSHED_AT
-IMAGE_PINNED_DIGESTS=(sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)
-printf '%s\n' '{"buildx.build.provenance":{"materials":[{"uri":"pkg:docker/node?digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]}}' \
-  >"$tmp/metadata.json"
+index_digest=b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30
+arm64_digest=b224e2fe306f9d303251ada22961635e5b52a69c0414a0050611be31c59f5f5b
+IMAGE_PINNED_DIGESTS=("sha256:$index_digest")
+IMAGE_PINNED_SOURCES=("mirror.gcr.io/library/python:3.12-slim@sha256:$index_digest")
+export TEST_IMAGETOOLS_RAW_OUT="$tmp/imagetools-raw.log"
+cp "$TEST_MULTIARCH_METADATA_FILE" "$tmp/metadata.json"
 verify_image_sources "$tmp/metadata.json" || fail "pinned source digest was not verified"
-printf '%s\n' '{"buildx.build.provenance":{"materials":[{"uri":"pkg:docker/node?digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},{"uri":"file:///context","digest":{"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}]}}' \
-  >"$tmp/metadata.json"
+grep -Fq "buildx imagetools inspect --raw ${IMAGE_PINNED_SOURCES[0]}" "$TEST_IMAGETOOLS_RAW_OUT" ||
+  fail "pinned index was not resolved through imagetools inspect --raw"
+jq --arg digest "$arm64_digest" \
+  '.["buildx.build.provenance"].materials[0].digest.sha256 = $digest' \
+  "$TEST_MULTIARCH_METADATA_FILE" >"$tmp/metadata.json"
+verify_image_sources "$tmp/metadata.json" || fail "pinned arm64 manifest digest was not verified"
+jq --arg digest bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  '.["buildx.build.provenance"].materials[0].digest.sha256 = $digest' \
+  "$TEST_MULTIARCH_METADATA_FILE" >"$tmp/metadata.json"
+if verify_image_sources "$tmp/metadata.json"; then
+  fail "unrelated source digest was verified"
+fi
+jq '.["buildx.build.provenance"].materials +=
+  [{"uri":"file:///context","digest":{"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}]' \
+  "$TEST_MULTIARCH_METADATA_FILE" >"$tmp/metadata.json"
 verify_image_sources "$tmp/metadata.json" || fail "recognized local-file material was not verified"
-printf '%s\n' '{"buildx.build.provenance":{"materials":[]}}' >"$tmp/metadata.json"
+jq '.["buildx.build.provenance"].materials = []' \
+  "$TEST_MULTIARCH_METADATA_FILE" >"$tmp/metadata.json"
 if verify_image_sources "$tmp/metadata.json"; then fail "missing source digest was verified"; fi
-printf '%s\n' '{"buildx.build.provenance":{"materials":[{"uri":"pkg:docker/node?digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},{"uri":"pkg:docker/unknown?digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","digest":{"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}]}}' \
-  >"$tmp/metadata.json"
+jq '.["buildx.build.provenance"].materials +=
+  [{"uri":"pkg:docker/unknown?digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","digest":{"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}]' \
+  "$TEST_MULTIARCH_METADATA_FILE" >"$tmp/metadata.json"
 if verify_image_sources "$tmp/metadata.json"; then fail "unpinned Docker source was verified"; fi
 for uri in \
-  pkg:oci/node@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  docker-image://node@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  pkg:oci/node@sha256:$index_digest \
+  docker-image://node@sha256:$index_digest \
   unknown:node; do
   printf '{"buildx.build.provenance":{"materials":[{"uri":"%s","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]}}\n' \
     "$uri" >"$tmp/metadata.json"
@@ -352,7 +416,7 @@ for uri in \
     fail "unrecognized provenance material was verified: $uri"
   fi
 done
-unset IMAGE_PINNED_DIGESTS
+unset IMAGE_PINNED_DIGESTS IMAGE_PINNED_SOURCES
 
 export ACTIONS_ID_TOKEN_REQUEST_URL="https://token.invalid/request?value=1"
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN=request-token-secret
@@ -434,6 +498,10 @@ COPY --from=final /etc/os-release /os-release
 DOCKERFILE
 ignored_key="$(image_key "$test_context" ctx GIT_SHA=abc)"
 [[ "$ignored_key" =~ ^ctx-[0-9a-f]{40}$ ]] || fail "valid context key: $ignored_key"
+chmod 0600 "$test_context/Dockerfile"
+[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] ||
+  fail "noncanonical tracked worktree mode produced key"
+chmod 0644 "$test_context/Dockerfile"
 : >"$DIGEST_CALLS_OUT"
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
 [[ "$IMAGE_KEY_CTX" =~ ^ctx-[0-9a-f]{40}$ && "$IMAGE_KEY_TREE" =~ ^tree-[0-9a-f]{40}$ ]] ||

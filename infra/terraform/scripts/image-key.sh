@@ -11,6 +11,7 @@ IMAGE_KEY_CTX=""
 IMAGE_KEY_TREE=""
 IMAGE_BUILD_CONTEXT_ARGS=()
 IMAGE_PINNED_DIGESTS=()
+IMAGE_PINNED_SOURCES=()
 IMAGE_CONTEXT_ATTRIBUTE_HASHES=()
 IMAGE_KEY_BUILD_FLAGS=()
 IMAGE_KEY_BUILD_DRIVER=""
@@ -20,6 +21,7 @@ _clear_image_inputs() {
   IMAGE_KEY_TREE=""
   IMAGE_BUILD_CONTEXT_ARGS=()
   IMAGE_PINNED_DIGESTS=()
+  IMAGE_PINNED_SOURCES=()
   IMAGE_CONTEXT_ATTRIBUTE_HASHES=()
   IMAGE_KEY_BUILD_DRIVER=""
 }
@@ -96,6 +98,64 @@ _hash_context_attributes() {
     IMAGE_CONTEXT_ATTRIBUTE_HASHES+=("$path:$file_hash")
   done
   rm -f "$files_file" "$attrs_file"
+}
+
+_check_context_modes() {
+  local repo_root="$1" context_dir="$2" context_path="$3"
+  local files_file paths_file entry metadata path relative index_mode mode expected status=0
+  local -A index_modes=()
+  files_file="$(mktemp)" || return 1
+  paths_file="$(mktemp)" || {
+    rm -f "$files_file"
+    return 1
+  }
+  if ! git -C "$repo_root" ls-files --stage -z -- "$context_path" >"$files_file" ||
+    ! find "$context_dir" -print0 >"$paths_file"; then
+    rm -f "$files_file" "$paths_file"
+    return 1
+  fi
+  while IFS= read -r -d '' entry; do
+    metadata="${entry%%$'\t'*}"
+    relative="${entry#*$'\t'}"
+    [[ "$metadata" != "$entry" && "$metadata" =~ ^(100644|100755|120000)[[:space:]] ]] || {
+      status=1
+      break
+    }
+    index_modes["$relative"]="${metadata%% *}"
+  done <"$files_file"
+  if ((status == 0)); then
+    while IFS= read -r -d '' path; do
+      [[ ! -L "$path" ]] || continue
+      mode="$(stat -c %a -- "$path")" || {
+        status=1
+        break
+      }
+      if [[ -d "$path" ]]; then
+        [[ "$mode" == 755 ]] || {
+          status=1
+          break
+        }
+      elif [[ -f "$path" ]]; then
+        relative="${path#"$repo_root"/}"
+        index_mode="${index_modes[$relative]:-}"
+        [[ -n "$index_mode" ]] || continue
+        case "$index_mode" in
+          100644) expected=644 ;;
+          100755) expected=755 ;;
+          *) status=1; break ;;
+        esac
+        [[ "$mode" == "$expected" ]] || {
+          status=1
+          break
+        }
+      else
+        status=1
+        break
+      fi
+    done <"$paths_file"
+  fi
+  rm -f "$files_file" "$paths_file" || return 1
+  ((status == 0))
 }
 
 _hash_image_key() {
@@ -200,6 +260,19 @@ _image_inputs_impl() {
     config_status=$?
     ((config_status == 1)) || return 1
   fi
+  if git -C "$repo_root" config --get core.fsmonitor >/dev/null 2>&1; then
+    return 1
+  else
+    config_status=$?
+    ((config_status == 1)) || return 1
+  fi
+  if config_value="$(git -C "$repo_root" config --bool --get core.untrackedCache 2>/dev/null)"; then
+    [[ "$config_value" != true ]] || return 1
+  else
+    config_status=$?
+    ((config_status == 1)) || return 1
+  fi
+  _check_context_modes "$repo_root" "$context_dir" "$context_path" || return 1
   status="$(git -C "$repo_root" ls-files -v -- "$context_path" 2>/dev/null)" || return 1
   while IFS= read -r line; do
     [[ "$line" =~ ^[a-z] || "${line:0:1}" == S ]] && return 1
@@ -318,6 +391,7 @@ _image_inputs_impl() {
           fi
           base_digests+=("$image_ref@$digest")
           IMAGE_PINNED_DIGESTS+=("$digest")
+          IMAGE_PINNED_SOURCES+=("$image_ref@$digest")
           pin_context="docker-image://$image_ref@$digest"
           if [[ -n "${context_digest_by_ref[$image_ref]:-}" &&
             "${context_digest_by_ref[$image_ref]}" != "$digest" ]]; then
@@ -427,24 +501,47 @@ image_key() {
 }
 
 verify_image_sources() {
-  local metadata_file="$1" pinned_json non_image_prefixes='["file://"]'
+  local metadata_file="$1" accepted_json raw index_digest arm_digest source_ref
+  local non_image_prefixes='["file://"]'
+  local -a accepted_groups=()
   # BuildKit's local context is non-image input; its bytes are hashed separately.
-  [[ -s "$metadata_file" && ${#IMAGE_PINNED_DIGESTS[@]} -gt 0 ]] || return 1
-  pinned_json="$(printf '%s\n' "${IMAGE_PINNED_DIGESTS[@]+"${IMAGE_PINNED_DIGESTS[@]}"}" |
-    jq -R 'sub("^sha256:"; "")' | jq -s .)" || return 1
-  jq -e --argjson pinned "$pinned_json" --argjson non_image "$non_image_prefixes" '
+  [[ -s "$metadata_file" && ${#IMAGE_PINNED_SOURCES[@]} -gt 0 ]] || return 1
+  for source_ref in "${IMAGE_PINNED_SOURCES[@]}"; do
+    [[ "$source_ref" =~ ^(.+)@(sha256:[0-9a-f]{64})$ ]] || return 1
+    index_digest="${BASH_REMATCH[2]#sha256:}"
+    raw="$(docker buildx imagetools inspect --raw "$source_ref" 2>/dev/null)" || return 1
+    jq -e 'type == "object"' <<<"$raw" >/dev/null 2>&1 || return 1
+    arm_digest="$(jq -r '
+      [.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest]
+      | unique
+      | if length == 1 then .[0] else empty end
+    ' <<<"$raw")" || return 1
+    if [[ -n "$arm_digest" ]]; then
+      [[ "$arm_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+      accepted_groups+=("$index_digest ${arm_digest#sha256:}")
+    else
+      accepted_groups+=("$index_digest")
+    fi
+  done
+  accepted_json="$(printf '%s\n' "${accepted_groups[@]}" | jq -R 'split(" ")' | jq -s .)" || return 1
+  jq -e --argjson accepted "$accepted_json" --argjson non_image "$non_image_prefixes" '
     (.["buildx.build.provenance"].materials // []) as $materials
     | ($materials | type == "array")
       and all($materials[];
         . as $material
         | ($material.uri // "") as $uri
         | if ($uri | startswith("pkg:docker/")) then
-          any($pinned[]; . == ($material.digest.sha256 // ""))
+          any($accepted[][]; . == ($material.digest.sha256 // ""))
           else
             any($non_image[]; . as $prefix | $uri | startswith($prefix))
           end
       )
-      and all($pinned[]; . as $digest | any($materials[]; .digest.sha256 == $digest))
+      and all($accepted[];
+        . as $digests
+        | any($materials[];
+          .digest.sha256 as $digest | any($digests[]; . == $digest)
+        )
+      )
   ' "$metadata_file" >/dev/null 2>&1
 }
 

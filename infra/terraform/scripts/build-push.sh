@@ -5,7 +5,9 @@
 #
 # Tags: backend and litellm get <sha>; the frontend gets <sha>-<env>, because
 # Next.js bakes NEXT_PUBLIC_* values into the bundle at build time.
-# Staging skips existing immutable tags; production always builds and pushes.
+# Staging and production skip existing backend/litellm <sha> and frontend
+# <sha>-<env> tags, including production's <sha>-production frontend tag.
+# Production otherwise builds; it never does keyed lookup or retag.
 #
 # Frontend build values come from the environment of this shell:
 #   NEXT_PUBLIC_SENTRY_DSN, NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE,
@@ -40,8 +42,8 @@ cfg="$(aws ecr describe-repositories --repository-names skynet/backend skynet/fr
 registry="$(jq -r '.ecr.backend' <<<"$cfg" | cut -d/ -f1)"
 aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null
 
-# Both environments can use the same immutable application tag. Shared backend
-# and litellm tags are built for their SHA; their key tags support preview reuse.
+# Staging and production can push the same immutable tag at once. The loser
+# checks for the winner's tag before reporting a failed push.
 build() {
   local name="$1" tag="$2" context="$3" cache_name="$4"
   shift 4
@@ -56,9 +58,9 @@ build() {
   fi
   week="$(date -u +%G-W%V)" || return 1
   [[ "$week" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || return 1
-  image_build_flags "$context"
+  image_build_flags "$context" || return 1
   buildx_flags=("${IMAGE_KEY_BUILD_FLAGS[@]}")
-  image_inputs "$context" "$week" "${build_args[@]+"${build_args[@]}"}"
+  image_inputs "$context" "$week" "${build_args[@]+"${build_args[@]}"}" || return 1
   key="$IMAGE_KEY_CTX"
   tree_key="$IMAGE_KEY_TREE"
   pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
@@ -96,10 +98,16 @@ build() {
   else
     build_succeeded=false
   fi
-  refresh_aws_credentials || return 1
   if [[ "$build_succeeded" != true ]]; then
-    [[ -z "$metadata_file" ]] || rm -f "$metadata_file"
+    [[ -z "$metadata_file" ]] || rm -f "$metadata_file" || return 1
     # Another staging or production run may have written this immutable tag.
+    if find_by_key "skynet/$name" "$tag"; then
+      echo "skip: $url:$tag was pushed by another run"
+      return 0
+    fi
+    if ! refresh_aws_credentials; then
+      echo "warning: AWS credential refresh failed after build failure" >&2
+    fi
     if find_by_key "skynet/$name" "$tag"; then
       echo "skip: $url:$tag was pushed by another run"
       return 0
@@ -109,12 +117,16 @@ build() {
 
   if [[ "$env" != production && -n "$key" ]]; then
     if verify_image_sources "$metadata_file"; then
-      if ! retag "skynet/$name" "$tag" "$key"; then
-        echo "warning: cannot add image-key tag $url:$key" >&2
-      fi
-      if [[ "$name" == backend && -n "$tree_key" ]] &&
-        ! retag skynet/backend "$tag" "$tree_key"; then
-        echo "warning: cannot add tree image-key tag skynet/backend:$tree_key" >&2
+      if ! refresh_aws_credentials; then
+        echo "warning: cannot refresh AWS credentials after push; skipping image-key tags for $url:$tag" >&2
+      else
+        if ! retag "skynet/$name" "$tag" "$key"; then
+          echo "warning: cannot add image-key tag $url:$key" >&2
+        fi
+        if [[ "$name" == backend && -n "$tree_key" ]] &&
+          ! retag skynet/backend "$tag" "$tree_key"; then
+          echo "warning: cannot add tree image-key tag skynet/backend:$tree_key" >&2
+        fi
       fi
     else
       local reason
@@ -129,7 +141,7 @@ build() {
       echo "warning: no reusable key tag written: $reason ($url:$tag)" >&2
     fi
   fi
-  [[ -z "$metadata_file" ]] || rm -f "$metadata_file"
+  [[ -z "$metadata_file" ]] || rm -f "$metadata_file" || return 1
 }
 
 build_backend_lane() {

@@ -13,7 +13,9 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/build" "$tmp/preview/infra/terraform/scripts"
 real_rm="$(command -v rm)"
+real_find="$(command -v find)"
 real_sed="$(command -v sed)"
+real_stat="$(command -v stat)"
 cp "$repo_root/infra/terraform/scripts/"{build-push.sh,lib.sh,image-key.sh} "$tmp/build/"
 cp "$repo_root/infra/terraform/scripts/"{preview.sh,lib.sh,image-key.sh} "$tmp/preview/infra/terraform/scripts/"
 ln -s "$repo_root/backend" "$tmp/preview/backend"
@@ -43,6 +45,12 @@ case "$*" in
       "$*" == *"repository-name skynet/frontend"* && "$*" == *"imageTag=$TEST_SHA-production"* ]]; then
       exit 0
     elif [[ "${TEST_EXISTING_TAGS:-}" == true &&
+      "$*" == *"repository-name skynet/litellm"* && "$*" == *"imageTag=$TEST_SHA"* ]]; then
+      exit 0
+    elif [[ "${TEST_EXISTING_NON_BACKEND:-}" == true &&
+      "$*" == *"repository-name skynet/frontend"* && "$*" == *"imageTag=$TEST_SHA-staging"* ]]; then
+      exit 0
+    elif [[ "${TEST_EXISTING_NON_BACKEND:-}" == true &&
       "$*" == *"repository-name skynet/litellm"* && "$*" == *"imageTag=$TEST_SHA"* ]]; then
       exit 0
     elif [[ "$*" == *"repository-name skynet/backend"* && "$*" == *"imageTag=$TEST_SHA"* &&
@@ -76,7 +84,13 @@ set -euo pipefail
 case "$*" in
   "buildx version") printf '%s\n' 'github.com/docker/buildx v0.36.1' ;;
   "buildx inspect --bootstrap") printf '%s\n' 'Driver: docker-container' 'BuildKit version: v0.32.2' ;;
-  *"buildx imagetools inspect"*) printf '%s\n' '"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' ;;
+  *"buildx imagetools inspect"*)
+    if [[ "$*" == *" --raw "* ]]; then
+      cat "$TEST_MULTIARCH_INDEX_FILE"
+    else
+      printf '%s\n' '"sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30"'
+    fi
+    ;;
   *"login"*) cat >/dev/null ;;
   *"buildx build"*)
     target=""
@@ -103,8 +117,8 @@ case "$*" in
       if [[ "${TEST_NO_MATERIALS:-}" == true ]]; then
         printf '%s\n' '{"buildx.build.provenance":{"materials":[]}}' >"$metadata"
       else
-        printf '{"buildx.build.provenance":{"materials":[{"uri":"%s","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]}}\n' \
-          "${TEST_METADATA_URI:-pkg:docker/node?digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" \
+        printf '{"buildx.build.provenance":{"materials":[{"uri":"%s","digest":{"sha256":"b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30"}}]}}\n' \
+          "${TEST_METADATA_URI:-pkg:docker/node?digest=sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30}" \
           >"$metadata"
       fi
     fi
@@ -129,6 +143,10 @@ case "$1" in
     ;;
   ls-files)
     context="${*: -1}"
+    if [[ "$*" == *" --stage "* ]]; then
+      printf '100644 0123456789abcdef0123456789abcdef01234567 0\t%s/Dockerfile\0' "$context"
+      exit 0
+    fi
     if [[ "$*" == *" -v "* ]]; then
       printf 'H %s/Dockerfile\n' "$context"
       exit 0
@@ -153,6 +171,10 @@ cat >"$tmp/bin/curl" <<'SH'
 set -euo pipefail
 printf 'refresh\n' >>"$TEST_EVENT_LOG"
 [[ "${TEST_FAIL_CURL:-}" != true ]] || exit 1
+if [[ "${TEST_FAIL_CURL_AFTER_BACKEND:-}" == true ]] &&
+  grep -Fxq 'build:backend' "$TEST_EVENT_LOG"; then
+  exit 1
+fi
 printf '%s\n' '{"value":"test-oidc-token"}'
 SH
 chmod +x "$tmp/bin/"{aws,docker,git,curl}
@@ -175,7 +197,32 @@ fi
 exec "$TEST_REAL_RM" "$@"
 SH
 chmod +x "$tmp/bin/"{sed,rm}
+cat >"$tmp/bin/find" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+for arg in "$@"; do
+  [[ "$arg" != -mindepth ]] || exec "$TEST_REAL_FIND" "$@"
+done
+root="$1"
+printf '%s\0%s/Dockerfile\0' "$root" "$root"
+SH
+cat >"$tmp/bin/stat" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+target="${@: -1}"
+if [[ -d "$target" ]]; then
+  printf '755\n'
+elif [[ -e "$target" ]]; then
+  printf '644\n'
+else
+  exec "$TEST_REAL_STAT" "$@"
+fi
+SH
+chmod +x "$tmp/bin/"{find,stat}
 export PATH="$tmp/bin:$PATH" TEST_REPO_ROOT="$repo_root"
+export TEST_MULTIARCH_INDEX_FILE="$repo_root/infra/terraform/scripts/tests/python-3.12-slim-index.json"
+export TEST_REAL_FIND="$real_find"
+export TEST_REAL_STAT="$real_stat"
 export TEST_SHA=8d68a0de4ea55e3a1666860d947a622d3273e3f1
 export TEST_AWS_LOG="$tmp/aws.log" TEST_EVENT_LOG="$tmp/events.log"
 export TEST_RACE_TAG_FLAG="$tmp/pushed-by-race"
@@ -386,6 +433,25 @@ grep -Eq 'warning: no reusable key tag written: provenance materials missing' "$
   fail "empty provenance materials did not explain why no key tag was written"
 unset TEST_NO_MATERIALS
 
+export TEST_EXISTING_NON_BACKEND=true TEST_FAIL_CURL_AFTER_BACKEND=true
+export ACTIONS_ID_TOKEN_REQUEST_URL=https://token.invalid/request
+export ACTIONS_ID_TOKEN_REQUEST_TOKEN=test-request-token
+export AWS_DEPLOY_ROLE_ARN=arn:aws:iam::123456789012:role/test
+rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
+CURRENT_LOG="$tmp/post-push-refresh.log"
+: >"$CURRENT_LOG"
+"$tmp/build/build-push.sh" staging "$TEST_SHA" >"$CURRENT_LOG" 2>&1 ||
+  fail "post-push credential refresh failure made a successful build fail"
+grep -Fxq 'build:backend' "$TEST_EVENT_LOG" || fail "post-push refresh test did not build backend"
+assert_no_match '^build:(frontend|litellm)$' "$TEST_EVENT_LOG" ||
+  fail "post-push refresh test unexpectedly built an existing image"
+grep -Eq 'warning: cannot refresh AWS credentials after push; skipping image-key tags' "$CURRENT_LOG" ||
+  fail "post-push credential refresh failure did not warn and skip key tags"
+assert_no_match 'put-image.*--image-tag (ctx|tree)-' "$TEST_AWS_LOG" ||
+  fail "post-push credential refresh failure still wrote a key tag"
+unset TEST_EXISTING_NON_BACKEND TEST_FAIL_CURL_AFTER_BACKEND
+unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_DEPLOY_ROLE_ARN
+
 rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
 CURRENT_LOG="$tmp/preview-backend.log"
 : >"$CURRENT_LOG"
@@ -407,6 +473,24 @@ fi
 grep -Eq '^refresh$' "$TEST_EVENT_LOG" || fail "preview build did not use the successful credential stub"
 assert_no_match 'ecs ' "$TEST_AWS_LOG" ||
   fail "preview migration ran after its backend build failed"
+
+slot_of() { printf 'slot-1\n'; }
+preview_env() { printf '{}\n'; }
+account() { printf '123456789012\n'; }
+register() { echo "register stub failed" >&2; return 17; }
+export BACKEND_IMAGE=123456789012.dkr.ecr.us-east-2.amazonaws.com/skynet/backend:staging
+rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
+CURRENT_LOG="$tmp/preview-register.log"
+: >"$CURRENT_LOG"
+if run_preview_lane preview-backend backend_and_migrate "$BACKEND_IMAGE" "$cfg" \
+  >"$CURRENT_LOG" 2>&1; then
+  fail "preview backend lane accepted a failed register step"
+fi
+assert_no_match 'migration ok' "$CURRENT_LOG" ||
+  fail "preview lane reported migration ok after register failed"
+assert_no_match 'ecs (run-task|update-service|create-service)' "$TEST_AWS_LOG" ||
+  fail "preview lane rolled services after register failed"
+unset BACKEND_IMAGE
 
 unset TEST_FAIL_BUILD
 export TEST_FAIL_BUILD=preview-frontend

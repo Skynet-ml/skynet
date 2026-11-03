@@ -12,7 +12,7 @@
 #   preview.sh revision-prs        print the PRs that have preview task definitions
 #   preview.sh prune <pr>          delete the task definitions of a PR without a slot
 #   preview.sh setup-db            once, as an operator (skynet profile)
-# Bash 4 or newer is required; macOS's bundled Bash 3.2 is not supported.
+# Bash 5.1 or newer is required; macOS's bundled Bash 3.2 is not supported.
 #
 # A preview runs in the staging cluster with the staging secrets, task roles
 # and security groups. It shares the staging ALB, RDS, Valkey and LiteLLM:
@@ -66,7 +66,7 @@ check_sha() {
 }
 
 preview_config() {
-  aws ssm get-parameter --name "/skynet/$env/preview" --query Parameter.Value --output text
+  aws ssm get-parameter --name "/skynet/$env/preview" --query Parameter.Value --output text || return 1
 }
 
 # Prints one JSON object per held slot: {"slot":k,"pr":n,"sha":"...","at":epoch}.
@@ -74,11 +74,11 @@ slots() {
   local names=() k
   for ((k = 1; k <= max_slots; k++)); do names+=("$slot_prefix/$k"); done
   aws ssm get-parameters --names "${names[@]}" --query 'Parameters[].[Name,Value]' --output json |
-    jq -c '.[] | (.[1] | fromjson) + {slot: (.[0] | split("/") | last | tonumber)}'
+    jq -c '.[] | (.[1] | fromjson) + {slot: (.[0] | split("/") | last | tonumber)}' || return 1
 }
 
 slot_of() {
-  slots | jq -r --argjson pr "$1" 'select(.pr == $pr) | .slot' | sed -n 1p
+  slots | jq -r --argjson pr "$1" 'select(.pr == $pr) | .slot' | sed -n 1p || return 1
 }
 
 slot_value() {
@@ -156,9 +156,9 @@ build_backend() {
   registry="${1%%/*}"
   week="$(date -u +%G-W%V)" || return 1
   [[ "$week" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || return 1
-  image_build_flags "$repo_root/backend"
+  image_build_flags "$repo_root/backend" || return 1
   buildx_flags=("${IMAGE_KEY_BUILD_FLAGS[@]}")
-  image_inputs "$repo_root/backend" "$week" "GIT_SHA=$sha"
+  image_inputs "$repo_root/backend" "$week" "GIT_SHA=$sha" || return 1
   pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
   [[ -n "$IMAGE_KEY_CTX" ]] ||
     echo "warning: backend inputs could not be verified; building without pinned build contexts" >&2
@@ -206,9 +206,9 @@ build_frontend() {
     "APP_GIT_SHA=$sha"
     "APP_ENVIRONMENT=skynet-pr-$pr"
   )
-  image_build_flags "$repo_root/frontend"
+  image_build_flags "$repo_root/frontend" || return 1
   buildx_flags=("${IMAGE_KEY_BUILD_FLAGS[@]}")
-  image_inputs "$repo_root/frontend" "$week" "${build_args[@]+"${build_args[@]}"}"
+  image_inputs "$repo_root/frontend" "$week" "${build_args[@]+"${build_args[@]}"}" || return 1
   pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
   [[ -n "$IMAGE_KEY_CTX" ]] ||
     echo "warning: frontend inputs could not be verified; building without pinned build contexts" >&2
@@ -238,13 +238,19 @@ build_frontend() {
 
 # Migrates the preview database with the backend image. Args: image cfg
 migrate() {
-  local slot td
-  slot="$(slot_of "$pr")"
+  local slot td domain env_json acct
+  slot="$(slot_of "$pr")" || return 1
   [[ -n "$slot" ]] || die "PR $pr holds no preview slot; run claim first"
-  td="$(register migrate "$1" "$(preview_env backend "$(jq -r .domain <<<"$2")")" "$slot" "$2" "$(account)")"
-  echo "creating the database if needed, then migrating"
-  run_migrate_task "$2" "$td"
-  echo "migration ok"
+  domain="$(jq -er .domain <<<"$2")" || return 1
+  [[ -n "$domain" && "$domain" != None && "$domain" != null ]] || return 1
+  env_json="$(preview_env backend "$domain")" || return 1
+  [[ -n "$env_json" && "$env_json" != None && "$env_json" != null ]] || return 1
+  acct="$(account)" || return 1
+  [[ -n "$acct" && "$acct" != None && "$acct" != null ]] || return 1
+  td="$(register migrate "$1" "$env_json" "$slot" "$2" "$acct")" || return 1
+  echo "creating the database if needed, then migrating" || return 1
+  run_migrate_task "$2" "$td" || return 1
+  echo "migration ok" || return 1
 }
 
 # Builds the backend image (not when the preview runs the staging image),
@@ -265,13 +271,23 @@ build() {
   need docker git tr sort date curl ps sed awk cut mktemp
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || die "missing command: sha256sum or shasum"
   local cfg domain slot tag backend frontend backend_pid frontend_pid failed=""
-  cfg="$(preview_config)"
-  domain="$(jq -r .domain <<<"$cfg")"
-  slot="$(slot_of "$pr")"
+  cfg="$(preview_config)" || die "cannot read preview configuration"
+  domain="$(jq -er .domain <<<"$cfg")" || die "preview configuration has no domain"
+  [[ -n "$domain" && "$domain" != None && "$domain" != null ]] ||
+    die "preview configuration has no domain"
+  slot="$(slot_of "$pr")" || die "cannot read the PR slot"
   [[ -n "$slot" ]] || die "PR $pr holds no preview slot; run claim first"
   tag="$sha-pr-$pr"
-  backend="${BACKEND_IMAGE:-$(ecr_uri backend):$tag}"
-  frontend="$(ecr_uri frontend)"
+  backend="${BACKEND_IMAGE:-}"
+  if [[ -z "$backend" ]]; then
+    backend="$(ecr_uri backend)" || die "cannot read preview backend repository"
+    [[ -n "$backend" && "$backend" != None && "$backend" != null ]] ||
+      die "invalid preview backend repository"
+    backend="$backend:$tag"
+  fi
+  frontend="$(ecr_uri frontend)" || die "cannot read preview frontend repository"
+  [[ -n "$frontend" && "$frontend" != None && "$frontend" != null ]] ||
+    die "invalid preview frontend repository"
   # Migration overlaps the frontend build, but services roll only after both
   # image lanes succeed.
   run_preview_lane backend backend_and_migrate "$backend" "$cfg" &
@@ -351,48 +367,59 @@ PY
 SH
 
 account() {
-  aws sts get-caller-identity --query Account --output text
+  aws sts get-caller-identity --query Account --output text || return 1
 }
 
 # Prints the newest ACTIVE staging revision of a family whose roles are the
 # staging roles for that family and whose tag is Environment=staging (the
 # same rule as deploy.sh). The CLI pages through every ACTIVE revision.
 staging_revision() {
-  local key="$1" family="$2" acct="$3" arn roles want
+  local key="$1" family="$2" acct="$3" arn roles want revisions
   want="arn:aws:iam::$acct:role/skynet-$env-$key-exec"$'\t'"arn:aws:iam::$acct:role/skynet-$env-$key-task"$'\t'"$env"
-  for arn in $(aws ecs list-task-definitions --family-prefix "$family" --status ACTIVE \
-    --sort DESC --query 'taskDefinitionArns[]' --output text); do
+  revisions="$(aws ecs list-task-definitions --family-prefix "$family" --status ACTIVE \
+    --sort DESC --query 'taskDefinitionArns[]' --output text)" || return 1
+  for arn in $revisions; do
     [[ "${arn##*/}" == "$family:"* ]] || continue
     roles="$(aws ecs describe-task-definition --task-definition "$arn" --include TAGS \
-      --query "[taskDefinition.executionRoleArn, taskDefinition.taskRoleArn, tags[?key=='Environment'].value | [0]]" --output text)"
+      --query "[taskDefinition.executionRoleArn, taskDefinition.taskRoleArn, tags[?key=='Environment'].value | [0]]" --output text)" ||
+      return 1
     if [[ "$roles" == "$want" ]]; then
-      echo "$arn"
+      echo "$arn" || return 1
       return 0
     fi
   done
-  die "no ACTIVE revision of $family has the $env roles and tag"
+  echo "error: no ACTIVE revision of $family has the $env roles and tag" >&2
+  return 1
 }
 
 # Registers skynet-pr-<n>-<key> from the staging revision and prints its ARN.
 # Args: key image env-json slot cfg acct
 register() {
-  local key="$1" image="$2" env_json="$3" slot="$4" cfg="$5" acct="$6" src td args
-  src="$(staging_revision "$key" "$(jq -r --arg k "$key" '.families[$k]' <<<"$cfg")" "$acct")"
-  td="$(aws ecs describe-task-definition --task-definition "$src" --query taskDefinition --output json)"
+  local key="$1" image="$2" env_json="$3" slot="$4" cfg="$5" acct="$6" src td args family log_group
+  family="$(jq -er --arg k "$key" '.families[$k]' <<<"$cfg")" || return 1
+  [[ -n "$family" && "$family" != None && "$family" != null ]] || return 1
+  src="$(staging_revision "$key" "$family" "$acct")" || return 1
+  [[ "$src" == arn:* ]] || return 1
+  td="$(aws ecs describe-task-definition --task-definition "$src" --query taskDefinition --output json)" || return 1
+  [[ -n "$td" && "$td" != None && "$td" != null ]] || return 1
   args='null'
   if [[ "$key" != frontend ]]; then
     # The wrapper runs the command the container would run without it.
-    args="$(jq -c '.containerDefinitions[0].command // empty' <<<"$td")"
-    [[ -n "$args" ]] || args="$(sed -n 's/^CMD //p' "$repo_root/backend/Dockerfile" | tail -n1 | jq -c .)"
-    if [[ "$key" == migrate ]]; then
-      args="$(jq -c --arg w "$create_db"$'\n'"$url_wrapper" '["sh", "-c", $w, "preview"] + .' <<<"$args")"
-    else
-      args="$(jq -c --arg w "$url_wrapper" '["sh", "-c", $w, "preview"] + .' <<<"$args")"
+    args="$(jq -c '.containerDefinitions[0].command // empty' <<<"$td")" || return 1
+    if [[ -z "$args" ]]; then
+      args="$(sed -n 's/^CMD //p' "$repo_root/backend/Dockerfile" | tail -n1 | jq -c .)" || return 1
     fi
-    env_json="$(jq -c --arg db "skynet_pr_$pr" --arg slot "$slot" '. + {PREVIEW_DB: $db, PREVIEW_REDIS_DB: $slot}' <<<"$env_json")"
+    if [[ "$key" == migrate ]]; then
+      args="$(jq -c --arg w "$create_db"$'\n'"$url_wrapper" '["sh", "-c", $w, "preview"] + .' <<<"$args")" || return 1
+    else
+      args="$(jq -c --arg w "$url_wrapper" '["sh", "-c", $w, "preview"] + .' <<<"$args")" || return 1
+    fi
+    env_json="$(jq -c --arg db "skynet_pr_$pr" --arg slot "$slot" '. + {PREVIEW_DB: $db, PREVIEW_REDIS_DB: $slot}' <<<"$env_json")" || return 1
   fi
+  log_group="$(jq -er .log_group <<<"$cfg")" || return 1
+  [[ -n "$log_group" && "$log_group" != None && "$log_group" != null ]] || return 1
   td="$(jq --arg family "skynet-pr-$pr-$key" --arg img "$image" --argjson env "$env_json" --argjson cmd "$args" \
-    --arg group "$(jq -r .log_group <<<"$cfg")" --arg prefix "pr-$pr" '
+    --arg group "$log_group" --arg prefix "pr-$pr" '
       .family = $family
       | .containerDefinitions[0].image = $img
       | .containerDefinitions[0].environment =
@@ -404,43 +431,57 @@ register() {
       | (if $cmd == null then . else .containerDefinitions[0].command = $cmd end)
       | .tags = [{key: "Environment", value: "preview"}, {key: "Project", value: "skynet"}, {key: "ManagedBy", value: "preview.sh"}]
       | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities,
-            .registeredAt, .registeredBy, .deregisteredAt)' <<<"$td")"
+            .registeredAt, .registeredBy, .deregisteredAt)' <<<"$td")" || return 1
   td="$(aws ecs register-task-definition --cli-input-json "$td" \
-    --query taskDefinition.taskDefinitionArn --output text)"
-  echo "registered $td" >&2
+    --query taskDefinition.taskDefinitionArn --output text)" || return 1
+  [[ "$td" == arn:* ]] || return 1
+  echo "registered $td" >&2 || return 1
   echo "$td"
 }
 
 network_config() {
   local cfg="$1" key="$2"
-  jq -r --arg k "$key" '"awsvpcConfiguration={subnets=[\(.subnets | join(","))],securityGroups=[\(.security_groups[$k])],assignPublicIp=\(if .assign_public_ip then "ENABLED" else "DISABLED" end)}"' <<<"$cfg"
+  jq -r --arg k "$key" '"awsvpcConfiguration={subnets=[\(.subnets | join(","))],securityGroups=[\(.security_groups[$k])],assignPublicIp=\(if .assign_public_ip then "ENABLED" else "DISABLED" end)}"' <<<"$cfg" ||
+    return 1
 }
 
 wait_task() {
   local cluster="$1" arn="$2" i status code reason
   for ((i = 0; i < 180; i++)); do
-    status="$(aws ecs describe-tasks --cluster "$cluster" --tasks "$arn" --query 'tasks[0].lastStatus' --output text)"
+    status="$(aws ecs describe-tasks --cluster "$cluster" --tasks "$arn" --query 'tasks[0].lastStatus' --output text)" ||
+      return 1
+    [[ -n "$status" && "$status" != None && "$status" != null ]] || return 1
     [[ "$status" == "STOPPED" ]] && break
-    sleep 10
+    sleep 10 || return 1
   done
-  [[ "$status" == "STOPPED" ]] || die "task $arn still $status after 30 minutes"
-  code="$(aws ecs describe-tasks --cluster "$cluster" --tasks "$arn" --query 'tasks[0].containers[0].exitCode' --output text)"
-  reason="$(aws ecs describe-tasks --cluster "$cluster" --tasks "$arn" --query 'tasks[0].stoppedReason' --output text)"
-  [[ "$code" == "0" ]] || die "task $arn failed (exit=$code, reason=$reason). Logs: CloudWatch /ecs/skynet-$env/preview, streams pr-$pr/*"
+  [[ "$status" == "STOPPED" ]] || {
+    echo "error: task $arn still $status after 30 minutes" >&2
+    return 1
+  }
+  code="$(aws ecs describe-tasks --cluster "$cluster" --tasks "$arn" --query 'tasks[0].containers[0].exitCode' --output text)" ||
+    return 1
+  reason="$(aws ecs describe-tasks --cluster "$cluster" --tasks "$arn" --query 'tasks[0].stoppedReason' --output text)" ||
+    return 1
+  [[ "$code" == "0" ]] || {
+    echo "error: task $arn failed (exit=$code, reason=$reason). Logs: CloudWatch /ecs/skynet-$env/preview, streams pr-$pr/*" >&2
+    return 1
+  }
 }
 
 run_migrate_task() {
-  local cfg="$1" td="$2" overrides="${3:-}" cluster arn args
-  cluster="$(jq -r .cluster <<<"$cfg")"
+  local cfg="$1" td="$2" overrides="${3:-}" cluster arn network args
+  cluster="$(jq -er .cluster <<<"$cfg")" || return 1
+  network="$(network_config "$cfg" migrate)" || return 1
+  [[ -n "$network" && "$network" != None && "$network" != null ]] || return 1
   args=(
     --cluster "$cluster" --task-definition "$td" --launch-type FARGATE
-    --network-configuration "$(network_config "$cfg" migrate)"
+    --network-configuration "$network"
     --query 'tasks[0].taskArn' --output text
   )
   [[ -z "$overrides" ]] || args+=(--overrides "$overrides")
-  arn="$(aws ecs run-task "${args[@]}")"
-  [[ "$arn" == arn:* ]] || die "run-task did not start a task"
-  wait_task "$cluster" "$arn"
+  arn="$(aws ecs run-task "${args[@]}")" || return 1
+  [[ "$arn" == arn:* ]] || return 1
+  wait_task "$cluster" "$arn" || return 1
 }
 
 # Prints a field of the slot's target group and rule for a service.
@@ -532,14 +573,14 @@ preview_env() {
     jq -cn --arg e "$e" --arg sha "$sha" --arg app "$app" --arg mcp "$api/remote-mcp" '{
       APP_ENVIRONMENT: $e, APP_GIT_SHA: $sha, SENTRY_ENVIRONMENT: $e, ALERT_ENVIRONMENT: $e,
       ALLOWED_ORIGINS: $app, APP_PUBLIC_URL: $app, FRONTEND_URL: $app, MCP_RESOURCE_URL: $mcp,
-      DB_POOL_SIZE: "3", DB_POOL_MAX_OVERFLOW: "2"}'
+      DB_POOL_SIZE: "3", DB_POOL_MAX_OVERFLOW: "2"}' || return 1
   else
     # Google and GitHub know only staging's callback URL; staging forwards it here.
     jq -cn --arg e "$e" --arg sha "$sha" --arg app "$app" --arg api "$api" \
       --arg proxy "https://$2/api/auth" '{
       APP_ENVIRONMENT: $e, APP_GIT_SHA: $sha, SENTRY_ENVIRONMENT: $e, NEXT_PUBLIC_SENTRY_ENVIRONMENT: $e,
       API_URL: $api, NEXT_PUBLIC_API_URL: $api, NEXT_PUBLIC_SITE_URL: $app, AUTH_URL: $app,
-      AUTH_REDIRECT_PROXY_URL: $proxy}'
+      AUTH_REDIRECT_PROXY_URL: $proxy}' || return 1
   fi
 }
 
@@ -614,8 +655,8 @@ backend_image() {
   # preview checkout at /health. Staging keeps commit keys; production always builds.
   week="$(date -u +%G-W%V)" || return 1
   [[ "$week" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || return 1
-  image_build_flags "$repo_root/backend"
-  image_inputs "$repo_root/backend" "$week"
+  image_build_flags "$repo_root/backend" || return 1
+  image_inputs "$repo_root/backend" "$week" || return 1
   key="$IMAGE_KEY_TREE"
   if [[ -n "$key" ]] && find_fresh_by_key skynet/backend "$key"; then
     image="$(standard_ecr_uri backend)" || return 0
@@ -652,14 +693,15 @@ deploy_backend_worker() {
 # Keep preview lane errors ahead of the coordinator's failure message.
 run_preview_lane() {
   local label="$1"
-  local log_fd log_pid status
+  local log_fd log_pid status logger_status=0
   shift
   exec {log_fd}> >(sed -u "s/^/[$label] /") || return 1
   log_pid=$!
-  if "$@" >&"$log_fd" 2>&1; then status=0; else status=$?; fi
-  exec {log_fd}>&- || return 1
-  wait "$log_pid" || return 1
-  return "$status"
+  if ("$@") >&"$log_fd" 2>&1; then status=0; else status=$?; fi
+  exec {log_fd}>&- || logger_status=1
+  wait "$log_pid" || logger_status=1
+  ((status == 0)) || return "$status"
+  ((logger_status == 0)) || return 1
 }
 
 delete() {

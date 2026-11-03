@@ -239,7 +239,7 @@ every PR.
 
 ## Build and push images
 
-The scripts require Bash 4 or newer. macOS's bundled Bash 3.2 is not supported.
+The scripts require Bash 5.1 or newer. macOS's bundled Bash 3.2 is not supported.
 
 ```bash
 aws login --profile skynet

@@ -2,8 +2,8 @@
 # Shared helpers for the deploy scripts. Source this file; do not run it.
 # Never print secret values here: these scripts handle secret names only.
 
-if ((BASH_VERSINFO[0] < 4)); then
-  printf 'error: Bash 4 or newer is required\n' >&2
+if ((BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1))); then
+  printf 'error: Bash 5.1 or newer is required\n' >&2
   exit 1
 fi
 
