@@ -601,7 +601,8 @@ function EditableBudgetCell({
       title={msg("settings.admin.storage.edit_hint")}
       className="group inline-flex items-center gap-1.5 rounded px-2 py-1 text-xs tabular-nums text-muted-foreground hover:bg-accent/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
     >
-      <span dir="ltr">{formatStorageSize(bytes)}</span>
+      {/* Same MB unit as the editor, so the shown number is the number the admin edits. */}
+      <span dir="ltr">{toMb(bytes)} MB</span>
       <PencilSimple
         className="size-3 opacity-0 transition group-hover:opacity-50"
         aria-hidden="true"

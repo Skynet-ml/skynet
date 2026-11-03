@@ -15,3 +15,8 @@ test("formatStorageSize escalates to GB past 1024 MB and keeps small sizes", () 
   assert.equal(formatStorageSize(0), "0 B");
   assert.equal(formatStorageSize(null), "0 B");
 });
+
+test("formatStorageSize moves up a unit when rounding reaches 1024", () => {
+  assert.equal(formatStorageSize(1024 ** 3 - 1), "1 GB");
+  assert.equal(formatStorageSize(1024 ** 2 - 1), "1 MB");
+});
