@@ -30,7 +30,7 @@ Leia [Execuções](/docs/concepts/runs) para saber como funcionam as tentativas 
 
 | Limite                 | Free    | Pro    |
 | ---------------------- | ------- | ------ |
-| Armazenamento total    | 250 MiB | 10 GiB |
+| Armazenamento total    | 500 MiB | 20 GiB |
 
 O armazenamento total inclui as suas execuções, conjuntos de dados, logs, conversas com o agente, uploads preparados e dados de pesquisa. O Skynet recusa uma gravação que ultrapassaria o seu limite de armazenamento.
 

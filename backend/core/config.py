@@ -727,9 +727,9 @@ class Settings(BaseSettings):
         alias="CONNECTOR_IMPORT_MAX_ROWS",
         description="Row cap for connectors that import records rather than files (database tables, LLM traces, Notion databases).",
     )
-    # Free and Pro budgets follow ChatGPT Free (500 MB) and Plus (20 GB) storage,
-    # as Gilad chose on 2026-11-02 (SKY-289). Binary units keep the MB-only
-    # storage meter (formatStorageSize) showing a round "500 MB".
+    # Free and Pro budgets match ChatGPT Free (500 MB) and Plus (20 GB) storage
+    # (SKY-289). Binary units because formatStorageSize divides by 1024, so the
+    # meter shows a round "500 MB" and "20 GB".
     user_storage_quota_bytes: int = Field(
         default=500 * 1024 * 1024,
         ge=1,
