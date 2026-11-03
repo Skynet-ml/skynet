@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from ..i18n_en import t_en
-from ..service_gateway.optimization.unified.metric_model import resolve_metric_model_dict
+from ..service_gateway.optimization.unified.metric_model import (
+    resolve_blackbox_metric_model_dict,
+    resolve_metric_model_dict,
+)
 
 # The BYOK and protected-route seams only walk the legacy top-level model
 # keys; a unified payload nests its models under ``models``, so the worker and
@@ -19,17 +22,30 @@ _UNIFIED_MODEL_ALIASES: tuple[tuple[str, str], ...] = (
 _UNIFIED_ALIAS_KEYS = ("task_model_config", "reflection_model_config", "extra_reflection_model_configs", "scorer")
 
 
-def alias_unified_model_roles(payload_dict: dict[str, Any], *, preserve_metric_model: bool = False) -> None:
+def alias_blackbox_metric_model(payload_dict: dict[str, Any]) -> None:
+    """Resolve a black-box scorer before its model credentials are bound.
+
+    Args:
+        payload_dict: The raw black-box payload, mutated in place.
+
+    Raises:
+        ValueError: When the metric declaration is invalid.
+    """
+    error = resolve_blackbox_metric_model_dict(payload_dict)
+    if error:
+        raise ValueError(t_en(error))
+
+
+def alias_unified_model_roles(payload_dict: dict[str, Any]) -> None:
     """Expose a unified payload's nested model configs under the legacy role keys.
 
     Args:
         payload_dict: The raw unified payload, mutated in place.
-        preserve_metric_model: Retained for callers; stored models are always kept.
     """
     models = payload_dict.get("models")
     if not isinstance(models, dict):
         return
-    error = resolve_metric_model_dict(payload_dict, preserve_metric_model=preserve_metric_model)
+    error = resolve_metric_model_dict(payload_dict)
     if error:
         raise ValueError(t_en(error))
     for nested_key, legacy_key in _UNIFIED_MODEL_ALIASES:

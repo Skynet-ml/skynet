@@ -65,6 +65,7 @@
     "pauseReason": "הושהתה על ידי המשתמש"
   },
   "messages": {
+    "submit.preflight.scorer_model": "יש להגדיר את המודל באמצעות llm(model=...) בקוד המדד.",
     "accounts.email_delivery_unavailable": "שליחת אימייל אינה מוגדרת בשרת הזה.",
     "accounts.email_not_verified": "יש לאמת את כתובת האימייל לפני ההתחברות.",
     "accounts.email_send_failed": "לא ניתן לשלוח את אימייל האימות. נסו שוב.",

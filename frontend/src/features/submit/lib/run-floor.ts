@@ -12,6 +12,7 @@
  */
 
 import { python } from "@codemirror/lang-python";
+import type { SyntaxNode } from "@lezer/common";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import type { ModelConfig } from "@/shared/types/api";
 import type { TokenSourceMode } from "@/features/billing";
@@ -82,13 +83,27 @@ let lastModel:
 /** Read literal declarations from helper calls without executing Python. */
 export function scanMetricDeclarations(code: string): MetricDeclarations {
   if (lastScan?.code === code) return lastScan.declarations;
+  const originalTree = python().language.parser.parse(code);
+  const decorators = [...code.matchAll(/^([ \t]*)@(?=[^\n#]*\S)/gm)].filter((match) => {
+    const position = match.index + match[1]!.length;
+    let node: SyntaxNode | null = originalTree.resolve(position, 1);
+    while (node) {
+      if (node.name === "BinaryExpression" || node.name === "String" || node.name === "Comment")
+        return false;
+      node = node.parent;
+    }
+    return true;
+  });
+  const decoratorPositions = new Set(decorators.map((match) => match.index + match[1]!.length));
   const parserCode = code
-    .replace(/^([ \t]*)@(?=[^\n#]*\S)/gm, "$1 ")
+    .replace(/^([ \t]*)@(?=[^\n#]*\S)/gm, (match, indent: string, offset: number) =>
+      decoratorPositions.has(offset + indent.length) ? `${indent} ` : match,
+    )
     .replace(/(^[ \t]*(?:async\s+)?with\s+)\(([^()\n]*\bas\b[^()\n]*)\)(?=\s*:)/gm, "$1 $2 ")
     .replace(/(^[ \t]*(?:async\s+)?with\s+[^:\n]*\bas\s*)\(([\w\s,]+)\)(?=\s*:)/gm, "$1 $2 ");
   const tree = python().language.parser.parse(parserCode);
   let invalid = false;
-  for (const decorator of code.matchAll(/^([ \t]*)@(?=[^\n#]*\S)/gm)) {
+  for (const decorator of decorators) {
     const position = decorator.index + decorator[1]!.length;
     let statement: typeof tree.topNode | null = tree.resolve(position + 1, 1);
     let current: typeof tree.topNode | null = statement;
@@ -578,6 +593,10 @@ export function scanMetricModel(
 
 export function declaredMetricModel(code: string, reflectionName?: string): string | null {
   return scanMetricModel(code, reflectionName).name;
+}
+
+export function metricModelUnpriced(code: string): boolean {
+  return !!scanMetricModel(code).unknown || scanMetricDeclarations(code).unsafe;
 }
 
 /** The limit a budget starts at: the default, or the floor when that is higher. */

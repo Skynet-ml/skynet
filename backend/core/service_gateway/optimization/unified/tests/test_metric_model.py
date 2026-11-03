@@ -1,5 +1,7 @@
 """Tests for metric model discovery and pre-protection resolution."""
 
+import ast
+import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,17 +17,23 @@ from core.models.unified import UnifiedModels
 from core.provider_registry import BYOK_TO_LITELLM_PROVIDER
 from core.service_gateway.optimization.blackbox.runner import model_matches_bound
 from core.service_gateway.optimization.unified.metric_model import (
+    MetricLLMScan,
     resolve_metric_model,
     resolve_metric_model_dict,
     scan_metric_llm,
 )
-from core.worker.unified_aliases import alias_unified_model_roles
+from core.worker.unified_aliases import alias_blackbox_metric_model, alias_unified_model_roles
 
 
 @pytest.mark.parametrize("case", json.loads(Path(__file__).with_name("metric_model_parity.json").read_text()))
 def test_shared_metric_scan_parity(case: dict) -> None:
     """Apply the shared scanner cases."""
+    if case.get("python_syntax_error"):
+        with pytest.raises(SyntaxError):
+            ast.parse(case["code"])
     scan = scan_metric_llm(case["code"])
+    if case.get("python_syntax_error"):
+        assert scan == MetricLLMScan()
     assert {
         "uses": scan.uses_llm,
         "names": sorted(scan.names),
@@ -41,6 +49,22 @@ def test_metric_api_documents_arguments_and_return(function: object) -> None:
     """Document the public scanner and routing APIs."""
     assert "Args:" in function.__doc__
     assert "Returns:" in function.__doc__
+
+
+def test_no_obsolete_preserve_argument() -> None:
+    """Expose one stored-model policy to all callers."""
+    assert "preserve_metric_model" not in inspect.signature(resolve_metric_model_dict).parameters
+    assert "preserve_metric_model" not in inspect.signature(alias_unified_model_roles).parameters
+
+
+def test_worker_blackbox_alias_resolves_scorer_before_credentials() -> None:
+    """Expose the code-selected model to the worker's credential bridge."""
+    payload = {
+        "reflection_model_config": {"name": "reflection"},
+        "scorer": {"kind": "python", "metric_code": "llm(model='judge')"},
+    }
+    alias_blackbox_metric_model(payload)
+    assert payload["scorer"]["model"]["name"] == "judge"
 
 
 def test_injected_llm_uses_reflection_on_worker() -> None:
@@ -84,14 +108,13 @@ def test_submitted_legacy_metric_model_is_kept(code: str) -> None:
     assert payload["models"]["metric_model"]["name"] == "old"
 
 
-@pytest.mark.parametrize("preserve", [True, False])
-def test_legacy_model_conflict_is_rejected(preserve: bool) -> None:
+def test_legacy_model_conflict_is_rejected() -> None:
     """Reject a code declaration that disagrees with a stored model."""
     payload = {
         "models": {"reflection_model": {"name": "r"}, "metric_model": {"name": "old"}},
         "workspace": {"metric_code": "llm(model='new')"},
     }
-    assert resolve_metric_model_dict(payload, preserve_metric_model=preserve) == "contract.metric_model_conflict"
+    assert resolve_metric_model_dict(payload) == "contract.metric_model_conflict"
     assert payload["models"]["metric_model"]["name"] == "old"
 
 
@@ -268,10 +291,7 @@ def test_english_declaration_message_matches_catalog() -> None:
     assert ENGLISH_MESSAGES[key] == catalog["messages"][key]
 
 
-@pytest.mark.parametrize("preserve", [True, False])
-def test_declared_subscription_model_keeps_cli_on_worker_and_setup(
-    monkeypatch: pytest.MonkeyPatch, preserve: bool
-) -> None:
+def test_declared_subscription_model_keeps_cli_on_worker_and_setup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Resolve a local subscription declaration on both execution paths."""
     monkeypatch.setattr(settings, "local_mode", True)
     payload = {
@@ -289,7 +309,7 @@ def test_declared_subscription_model_keeps_cli_on_worker_and_setup(
         },
         "workspace": {"metric_code": "from skynet import llm\nllm(model='subscription/codex/gpt-5')"},
     }
-    assert resolve_metric_model_dict(payload, preserve_metric_model=preserve) is None
+    assert resolve_metric_model_dict(payload) is None
     assert payload["models"]["metric_model"]["token_source"] == "subscription"
     assert payload["models"]["metric_model"]["cli_provider"] == "codex"
 
@@ -505,7 +525,7 @@ def test_worker_alias_keeps_legacy_model(code: str) -> None:
         "models": {"reflection_model": {"name": "openai/reflection"}, "metric_model": old},
         "workspace": {"metric_code": code},
     }
-    alias_unified_model_roles(payload, preserve_metric_model=True)
+    alias_unified_model_roles(payload)
     assert payload["models"]["metric_model"] == old
     assert payload["scorer"]["model"] is old
     alias_unified_model_roles(payload)
@@ -519,8 +539,8 @@ def test_worker_alias_rejects_unsafe_or_conflicting_declarations() -> None:
         "workspace": {"metric_code": "from skynet import llm\nllm(model='new')"},
     }
     with pytest.raises(ValueError, match="conflicts"):
-        alias_unified_model_roles(payload, preserve_metric_model=True)
+        alias_unified_model_roles(payload)
     assert payload["models"]["metric_model"]["name"] == "old"
     payload["workspace"]["metric_code"] = "from skynet import llm\nllm(model=choice)"
     with pytest.raises(ValueError, match="string literal"):
-        alias_unified_model_roles(payload, preserve_metric_model=True)
+        alias_unified_model_roles(payload)

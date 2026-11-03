@@ -65,6 +65,7 @@
     "winningCandidate": "المرشّح الفائز"
   },
   "messages": {
+    "submit.preflight.scorer_model": "حدد النموذج باستخدام llm(model=...) في رمز المقياس.",
     "contract.metric_model_empty": "يجب ألا تكون قيمة model= في llm() فارغة أو مكونة من مسافات فقط.",
     "contract.metric_model_conflict": "يتعارض نموذج المقياس المحفوظ مع model= في رمز المقياس. أزل النموذج المحفوظ أو غيّر الرمز ليتطابق معه.",
     "contract.file_invalid": "الملف {path} غير صالح: {error}",

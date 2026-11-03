@@ -250,7 +250,16 @@ function cloneLegacyBlackbox(payload: ClonePayload): Omit<CloneSlices, "meta"> {
       })
     : [];
   const scorer = isRecord(payload.scorer) ? payload.scorer : {};
-  const workspace: Partial<WorkspaceSlice> = { metricModel: modelConfig(scorer.model) };
+  const reflection = modelConfig(payload.reflection_model_config ?? payload.reflection_model_settings);
+  const metricModel = modelConfig(scorer.model);
+  const metricCode = typeof scorer.metric_code === "string" ? scorer.metric_code : "";
+  const workspace: Partial<WorkspaceSlice> = {
+    metricModel:
+      metricModel?.name !== reflection?.name &&
+      metricModel?.name !== declaredMetricModel(metricCode, reflection?.name)
+        ? metricModel
+        : null,
+  };
   if (typeof scorer.metric_code === "string") workspace.metricCode = scorer.metric_code;
   if (typeof scorer.timeout_seconds === "number")
     workspace.metricTimeoutSeconds = scorer.timeout_seconds;

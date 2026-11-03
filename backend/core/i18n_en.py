@@ -22,6 +22,7 @@ from __future__ import annotations
 from .brand import APP_NAME
 
 ENGLISH_MESSAGES: dict[str, str] = {
+    "submit.preflight.scorer_model": "Set the model with llm(model=...) in the metric code.",
     "agent.approval.unknown_call_id": "No pending approval for the given call_id.",
     "agent.status.tool_end": "Tool finished.",
     "agent.status.tool_start": "Agent invoking tool…",

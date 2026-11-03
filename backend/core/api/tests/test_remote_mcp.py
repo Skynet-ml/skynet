@@ -584,6 +584,76 @@ def test_repo_submission_rejects_conflicting_stored_scorer_model() -> None:
     assert exc.value.code == "contract.metric_model_conflict"
 
 
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [("llm(model='anthropic/judge')", "anthropic/judge"), ("llm('x')", "openai/reflection")],
+)
+def test_blackbox_submission_derives_scorer_model(code: str, expected: str) -> None:
+    """Resolve an unconfigured scorer before billing."""
+    spec = BlackboxRunRequest.model_validate(
+        {
+            "objective": "optimize",
+            "reflection_model_config": {"name": "openai/reflection"},
+            "scorer": {"kind": "python", "metric_code": code},
+        }
+    )
+    assert request_model_configs(spec)[-1].name == expected
+    assert spec.scorer.model is not None
+    assert spec.scorer.model.name == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "provider"),
+    [("openai/reflection", "openrouter"), ("openai/task", "custom"), ("openai/judge", "openrouter")],
+)
+def test_blackbox_submission_uses_byok_role_connection(name: str, provider: str) -> None:
+    """Derive the scorer connection from the matching or compatible role."""
+    spec = BlackboxRunRequest.model_validate(
+        {
+            "objective": "optimize",
+            "reflection_model_config": {
+                "name": "openai/reflection",
+                "token_source": "byok",
+                "byok_provider": "openrouter",
+            },
+            "task_model_config": {"name": "openai/task", "token_source": "byok", "byok_provider": "custom"},
+            "target": {"kind": "agent", "harness": "custom", "model": "openai/task", "run_command": "run-agent"},
+            "scorer": {"kind": "python", "metric_code": f"llm(model='{name}')"},
+        }
+    )
+    request_model_configs(spec)
+    assert spec.scorer.model is not None
+    assert spec.scorer.model.byok_provider == provider
+
+
+def test_blackbox_submission_rejects_unsafe_scorer_without_stored_model() -> None:
+    """Reject ambiguous scorer declarations before billing."""
+    spec = BlackboxRunRequest.model_validate(
+        {
+            "objective": "optimize",
+            "reflection_model_config": {"name": "openai/reflection"},
+            "scorer": {"kind": "python", "metric_code": "llm(model=x)"},
+        }
+    )
+    with pytest.raises(DomainError) as exc:
+        request_model_configs(spec)
+    assert exc.value.code == "contract.metric_model_declaration"
+
+
+def test_blackbox_submission_rejects_mixed_model_declarations() -> None:
+    """Report ambiguous model use as a declaration error."""
+    spec = BlackboxRunRequest.model_validate(
+        {
+            "objective": "optimize",
+            "reflection_model_config": {"name": "openai/reflection"},
+            "scorer": {"kind": "python", "metric_code": "llm('x'); llm('y', model='anthropic/judge')"},
+        }
+    )
+    with pytest.raises(DomainError) as exc:
+        request_model_configs(spec)
+    assert exc.value.code == "contract.metric_model_declaration"
+
+
 def test_submission_rejects_conflicting_stored_metric_model() -> None:
     """Reject a conflicting metric model before billing."""
     spec = UnifiedRunRequest.model_validate(

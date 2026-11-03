@@ -311,12 +311,11 @@ def resolve_metric_model(models: UnifiedModels, metric_code: str) -> str | None:
     return None
 
 
-def resolve_metric_model_dict(payload: dict[str, Any], *, preserve_metric_model: bool = False) -> str | None:
+def resolve_metric_model_dict(payload: dict[str, Any]) -> str | None:
     """Resolve a raw unified payload before legacy aliases are made.
 
     Args:
         payload: Unified payload whose metric model is mutated in place.
-        preserve_metric_model: Retained for callers; stored models are always kept.
 
     Returns:
         The declaration error message key, or None.
@@ -333,4 +332,40 @@ def resolve_metric_model_dict(payload: dict[str, Any], *, preserve_metric_model:
     error = resolve_metric_model(typed, code)
     if error is None and not isinstance(stored, dict):
         models["metric_model"] = typed.metric_model.model_dump(mode="json") if typed.metric_model else None
+    return error
+
+
+def resolve_blackbox_metric_model_dict(payload: dict[str, Any]) -> str | None:
+    """Resolve a Python scorer model in a raw black-box payload.
+
+    Args:
+        payload: Black-box request whose scorer model is mutated in place.
+
+    Returns:
+        The declaration error message key, or None.
+    """
+    scorer = payload.get("scorer")
+    if not isinstance(scorer, dict) or scorer.get("kind", "python") != "python":
+        return None
+    code = str(scorer.get("metric_code") or "")
+    reflection = payload.get("reflection_model_config")
+    if not isinstance(reflection, dict):
+        scan = scan_metric_llm(code)
+        if scan.empty_model:
+            return "contract.metric_model_empty"
+        if scan.non_literal or len(scan.names) > 1 or (scan.omitted and scan.names):
+            return "contract.metric_model_declaration"
+        if len(scan.names) != 1:
+            return None
+        reflection = {"name": next(iter(scan.names))}
+    models = {
+        "reflection_model": reflection,
+        "metric_model": scorer.get("model"),
+        "task_model": payload.get("task_model_config"),
+        "extra_reflection_models": payload.get("extra_reflection_model_configs") or [],
+    }
+    raw = {"models": models, "workspace": {"metric_code": code}, "token_source": payload.get("token_source")}
+    error = resolve_metric_model_dict(raw)
+    if not error and models.get("metric_model") is not None:
+        scorer["model"] = models["metric_model"]
     return error

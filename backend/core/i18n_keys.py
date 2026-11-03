@@ -374,6 +374,7 @@ class I18nKey(StrEnum):
     SUBMIT_PREFLIGHT_NO_WALLET = 'submit.preflight.no_wallet'
     SUBMIT_PREFLIGHT_PREVIOUS_USAGE_PENDING = 'submit.preflight.previous_usage_pending'
     SUBMIT_PREFLIGHT_SANDBOX_USAGE_PENDING = 'submit.preflight.sandbox_usage_pending'
+    SUBMIT_PREFLIGHT_SCORER_MODEL = 'submit.preflight.scorer_model'
     SUBMIT_PREFLIGHT_SCORER_READY = 'submit.preflight.scorer_ready'
     SUBMIT_PREFLIGHT_TARGET_READY = 'submit.preflight.target_ready'
     SUBMIT_PREFLIGHT_USAGE_PENDING = 'submit.preflight.usage_pending'

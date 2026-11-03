@@ -65,6 +65,7 @@
     "program": "程式"
   },
   "messages": {
+    "submit.preflight.scorer_model": "喺指標程式碼用 llm(model=...) 設定模型。",
     "contract.metric_model_empty": "llm() 入面嘅 model= 唔可以係空，亦唔可以只包含空格。",
     "contract.metric_model_conflict": "已儲存嘅指標模型同程式碼入面嘅 model= 唔一致。請移除已儲存嘅模型，或者修改程式碼。",
     "contract.file_invalid": "檔案 {path} 無效：{error}",

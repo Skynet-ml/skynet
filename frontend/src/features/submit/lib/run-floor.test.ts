@@ -19,6 +19,7 @@ const {
   aggregateTokenSource,
   callHoldKey,
   declaredMetricModel,
+  metricModelUnpriced,
   scanMetricModel,
   scanMetricDeclarations,
   isSubscriptionModel,
@@ -38,10 +39,20 @@ const parityCases = JSON.parse(
 ) as {
   code: string;
   expected: { uses: boolean; names: string[]; omitted: boolean; unsafe: boolean };
+  python_syntax_error?: boolean;
 }[];
-for (const { code, expected } of parityCases) {
-  test(`shared scan parity: ${code}`, () =>
-    assert.deepEqual(scanMetricDeclarations(code), expected));
+for (const { code, expected, python_syntax_error } of parityCases) {
+  test(`shared scan parity: ${code}`, () => {
+    const scan = scanMetricDeclarations(code);
+    if (python_syntax_error) {
+      const model = scanMetricModel(code, "reflection");
+      assert.equal(model.uses, true);
+      assert.equal(model.name, null);
+      assert.ok(scan.unsafe || model.unknown);
+    } else {
+      assert.deepEqual(scan, expected);
+    }
+  });
 }
 
 test("reuses a scan for identical input", () => {
@@ -65,6 +76,28 @@ test("syntax errors make the model estimate unknown and unpriced", () => {
     }).unpriced,
     true,
   );
+});
+
+test("invalid named Unicode escapes never produce a priced model", () => {
+  const code = "llm(model='a\\N{NOT A NAME}b')";
+  const scan = scanMetricDeclarations(code);
+  const model = scanMetricModel(code, "r");
+  assert.equal(model.uses, true);
+  assert.equal(model.name, null);
+  assert.ok(scan.unsafe || model.unknown);
+});
+
+test("unsafe and unknown metric scans make the floor unpriced", () => {
+  for (const code of ["llm(model=choice)", "llm(model='a\\N{NOT A NAME}b')", "def broken("]) {
+    assert.equal(metricModelUnpriced(code), true);
+    assert.equal(
+      runFloor({ boxHoldCents: 10, callHoldCents: [1], unknownModel: metricModelUnpriced(code) })
+        .unpriced,
+      true,
+    );
+  }
+  assert.equal(metricModelUnpriced("llm(model='judge')"), false);
+  assert.equal(metricModelUnpriced(""), scanMetricModel("").unknown ?? false);
 });
 
 test("helper bindings are unsafe in every scope", () => {

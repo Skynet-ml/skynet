@@ -65,6 +65,7 @@
     "winningCandidate": "نامزد برنده"
   },
   "messages": {
+    "submit.preflight.scorer_model": "مدل را با llm(model=...) در کد معیار تنظیم کنید.",
     "contract.metric_model_empty": "مقدار model= در llm() نباید خالی باشد یا فقط فاصله داشته باشد.",
     "contract.metric_model_conflict": "مدل معیار ذخیره‌شده با model= در کد معیار مطابقت ندارد. مدل ذخیره‌شده را حذف کنید یا کد را تغییر دهید.",
     "contract.file_invalid": "فایل {path} معتبر نیست: {error}",

@@ -109,6 +109,19 @@ test("a legacy black-box run maps objective, seed, cases and scorer", () => {
   assert.equal(slices.optimizer.reflectionModel?.name, "refl");
 });
 
+test("a black-box clone drops derived models and retains a distinct legacy model", () => {
+  const clone = (model: string, code: string, reflection = "r") =>
+    cloneToSlices("blackbox", {
+      target: { kind: "repo", repo: { repository: "example/site" } },
+      reflection_model_config: { name: reflection },
+      scorer: { kind: "python", metric_code: code, model: { name: model } },
+    }).workspace.metricModel;
+  assert.equal(clone("judge", "llm(model='judge')"), null);
+  assert.equal(clone("r", "llm()"), null);
+  assert.deepEqual(clone("old", "llm(model='judge')"), { name: "old" });
+  assert.deepEqual(clone("old", "llm()"), { name: "old" });
+});
+
 test("a legacy DSPy run maps rows by the column mapping and keeps metric_code", () => {
   const slices = cloneToSlices("run", {
     dataset: [

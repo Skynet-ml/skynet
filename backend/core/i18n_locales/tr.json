@@ -65,6 +65,7 @@
     "winningCandidate": "kazanan aday"
   },
   "messages": {
+    "submit.preflight.scorer_model": "Modeli metrik kodunda llm(model=...) ile ayarlayın.",
     "contract.metric_model_empty": "llm() içindeki model= değeri boş veya yalnızca boşluklardan oluşamaz.",
     "contract.metric_model_conflict": "Kaydedilen metrik modeli, kodda belirtilen model= ile eşleşmiyor. Kaydedilen modeli kaldırın veya kodu değiştirin.",
     "contract.file_invalid": "{path} dosyası geçerli değil: {error}",

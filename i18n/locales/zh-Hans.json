@@ -65,6 +65,7 @@
     "winningCandidate": "胜出候选项"
   },
   "messages": {
+    "submit.preflight.scorer_model": "在指标代码中使用 llm(model=...) 设置模型。",
     "contract.metric_model_empty": "llm() 中的 model= 值不能为空或只包含空格。",
     "contract.metric_model_conflict": "保存的指标模型与代码中的 model= 不一致。请删除保存的模型或修改代码。",
     "contract.file_invalid": "文件 {path} 无效：{error}",

@@ -65,6 +65,7 @@
     "winningCandidate": "最良候補"
   },
   "messages": {
+    "submit.preflight.scorer_model": "メトリックコードで llm(model=...) を使ってモデルを設定してください。",
     "contract.metric_model_empty": "llm() の model= の値を空または空白のみにすることはできません。",
     "contract.metric_model_conflict": "保存済みの指標モデルがコード内の model= と一致しません。保存済みモデルを削除するか、コードを変更してください。",
     "contract.file_invalid": "ファイル {path} が無効です: {error}",

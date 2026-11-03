@@ -65,6 +65,7 @@
     "winningCandidate": "переможний кандидат"
   },
   "messages": {
+    "submit.preflight.scorer_model": "Укажіть модель за допомогою llm(model=...) у коді метрики.",
     "contract.metric_model_empty": "Значення model= у llm() не може бути порожнім або містити лише пробіли.",
     "contract.metric_model_conflict": "Збережена модель метрики не збігається з model= у коді. Видаліть збережену модель або змініть код.",
     "contract.file_invalid": "Файл {path} недійсний: {error}",

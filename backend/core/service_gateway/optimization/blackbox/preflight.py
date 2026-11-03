@@ -11,6 +11,7 @@ from ....billing.model_gateway import ROUTE_KEY
 from ....billing.runtime import UsagePendingError
 from ....config import settings
 from ....exceptions import ServiceError
+from ....i18n_en import t_en
 from ....models import BlackboxRunRequest
 from ....models.blackbox import BlackboxScorer, BlackboxTarget
 from ....models.unified import (
@@ -21,7 +22,7 @@ from ....models.unified import (
     UnifiedRunRequest,
 )
 from ..unified.contract import run_contract_check
-from ..unified.metric_model import scan_metric_llm
+from ..unified.metric_model import resolve_blackbox_metric_model_dict, scan_metric_llm
 from ..unified.service import unified_job_spec
 from ..unified.split import split_seed
 from .agent_eval import READINESS_LIFETIME_SECONDS, case_lifetime_seconds
@@ -125,6 +126,9 @@ def verify_anything_in_sandbox(
     Returns:
         Real readiness checks and, when a seed exists, its actual scorer preview.
     """
+    error = resolve_blackbox_metric_model_dict(payload)
+    if error:
+        raise ValueError(t_en(error))
     scorer = BlackboxScorer.model_validate(payload.get("scorer") or {})
     remote = scorer.kind == "remote"
     code = str(scorer.metric_code)
@@ -134,7 +138,7 @@ def verify_anything_in_sandbox(
                 _check(
                     "scorer.model",
                     "pending",
-                    "Choose the model on Optimization to finish this evaluator check.",
+                    "Set the model with llm(model=...) in the metric code.",
                     "scorer.model",
                 )
             ]

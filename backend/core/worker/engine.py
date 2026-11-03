@@ -132,7 +132,7 @@ from .repo_staging import (
 )
 from .subprocess_runner import run_service_in_subprocess, set_fork_service
 from .tagging_job import TaggingAutotagPayload, run_autotag_job
-from .unified_aliases import alias_unified_model_roles, strip_unified_model_aliases
+from .unified_aliases import alias_blackbox_metric_model, alias_unified_model_roles, strip_unified_model_aliases
 from .vercel_dspy import run_vercel_dspy
 
 logger = logging.getLogger(__name__)
@@ -839,7 +839,9 @@ class BackgroundWorker:
                 token_source = overview.get(PAYLOAD_OVERVIEW_TOKEN_SOURCE) or TOKEN_SOURCE_MANAGED
                 byok_engine = getattr(self._job_store, "engine", None)
                 if is_unified:
-                    alias_unified_model_roles(payload_dict, preserve_metric_model=True)
+                    alias_unified_model_roles(payload_dict)
+                elif optimization_type == OPTIMIZATION_TYPE_BLACKBOX:
+                    alias_blackbox_metric_model(payload_dict)
                 if byok_engine is not None and payload_uses_token_source(
                     payload_dict,
                     TOKEN_SOURCE_BYOK,

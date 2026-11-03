@@ -65,6 +65,7 @@
     "winningCandidate": "candidato vincente"
   },
   "messages": {
+    "submit.preflight.scorer_model": "Imposta il modello con llm(model=...) nel codice della metrica.",
     "contract.metric_model_empty": "Il valore model= in llm() non può essere vuoto o contenere solo spazi.",
     "contract.metric_model_conflict": "Il modello della metrica salvato non corrisponde a model= nel codice. Rimuovi il modello salvato o modifica il codice.",
     "contract.file_invalid": "Il file {path} non è valido: {error}",

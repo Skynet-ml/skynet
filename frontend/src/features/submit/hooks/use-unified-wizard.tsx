@@ -64,9 +64,9 @@ import {
   aggregateTokenSource,
   callHoldKey,
   isSubscriptionModel,
+  metricModelUnpriced,
   runFloor as computeRunFloor,
   runModels,
-  scanMetricModel,
 } from "../lib/run-floor";
 import { fileNewRun } from "../lib/file-new-run";
 import { inputsFromRoles, rowsToCases, singleInputCase, type Row } from "../lib/inputs-mode";
@@ -437,7 +437,7 @@ export function WizardV2Provider({
               callHolds.get(callHoldKey(model.name, model.token_source ?? "managed")) ?? null,
           ),
           tokenSource,
-          unknownModel: scanMetricModel(state.workspace.metricCode).unknown,
+          unknownModel: metricModelUnpriced(state.workspace.metricCode),
         });
 
   // The spending limit lives on the server budget, like the slice mirror the

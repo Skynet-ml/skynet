@@ -65,6 +65,7 @@
     "winningCandidate": "winning candidate"
   },
   "messages": {
+    "submit.preflight.scorer_model": "Set the model with llm(model=...) in the metric code.",
     "accounts.email_delivery_unavailable": "Email delivery isn't configured on this server.",
     "accounts.email_not_verified": "Please verify your email before signing in.",
     "accounts.email_send_failed": "Couldn't send the verification email. Try again.",

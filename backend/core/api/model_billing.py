@@ -31,13 +31,19 @@ def request_model_configs(
         Model configs in execution order.
     """
     if isinstance(payload, BlackboxRunRequest):
-        if payload.scorer.kind == "python" and payload.scorer.model is not None:
+        if payload.scorer.kind == "python":
             models = UnifiedModels(
-                reflection_model=payload.reflection_model_settings, metric_model=payload.scorer.model
+                reflection_model=payload.reflection_model_settings,
+                metric_model=payload.scorer.model,
+                task_model=payload.task_model_settings,
+                extra_reflection_models=payload.extra_reflection_model_settings,
             )
+            if models.reflection_model.token_source is None:
+                models.reflection_model.token_source = payload.token_source
             error = resolve_metric_model(models, str(payload.scorer.metric_code or ""))
             if error:
                 raise DomainError(error, status=422)
+            payload.scorer.model = models.metric_model
         return [
             config
             for config in (

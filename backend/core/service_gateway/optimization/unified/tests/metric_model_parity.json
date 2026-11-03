@@ -117,5 +117,8 @@
   {"code":"(import_module)('skynet')","expected":{"uses":true,"names":[],"omitted":false,"unsafe":true}},
   {"code":"llm(model=('a'\n  'b'))","expected":{"uses":true,"names":["ab"],"omitted":false,"unsafe":false}},
   {"code":"importlib . import_module('skynet')","expected":{"uses":true,"names":[],"omitted":false,"unsafe":true}},
-  {"code":"(globals().get)('llm')","expected":{"uses":true,"names":[],"omitted":false,"unsafe":true}}
+  {"code":"(globals().get)('llm')","expected":{"uses":true,"names":[],"omitted":false,"unsafe":true}},
+  {"code":"x = (a\n@ b)\nllm('x', model='m')","expected":{"uses":true,"names":["m"],"omitted":false,"unsafe":false}},
+  {"code":"llm(model='a\\N{NOT A NAME}b')","python_syntax_error":true,"expected":{"uses":false,"names":[],"omitted":false,"unsafe":false}},
+  {"code":"llm(model='\\\\\\N{NOT A NAME}')","python_syntax_error":true,"expected":{"uses":false,"names":[],"omitted":false,"unsafe":false}}
 ]

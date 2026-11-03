@@ -81,6 +81,24 @@ test("a repository clone submits its stored scorer model", () => {
   );
 });
 
+test("a new repository scorer leaves its declared model to the backend", () => {
+  const state = repoState();
+  state.workspace.metricCode = "llm(model='anthropic/judge')";
+  assert.equal(repoRunRequest(state, options)?.scorer.model, undefined);
+});
+
+test("a new repository scorer leaves reflection fallback to the backend", () => {
+  const state = repoState();
+  state.workspace.metricCode = "llm('x')";
+  assert.equal(repoRunRequest(state, options)?.scorer.model, undefined);
+});
+
+test("a repository run leaves ambiguous declarations for backend validation", () => {
+  const state = repoState();
+  state.workspace.metricCode = "llm('x'); llm('y', model='anthropic/judge')";
+  assert.equal(repoRunRequest(state, options)?.scorer.model, undefined);
+});
+
 test("a repository run skips inputs and needs only the scorer", () => {
   const state = repoState();
   state.inputs.mode = null;
