@@ -132,6 +132,147 @@ resource "aws_ecr_lifecycle_policy" "this" {
   })
 }
 
+resource "aws_ecr_repository" "buildcache_staging" {
+  name = "skynet/buildcache-staging"
+  # Checkov CKV_AWS_51 requires immutable cache tags.
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "buildcache_staging" {
+  repository = aws_ecr_repository.buildcache_staging.name
+
+  policy = jsonencode({
+    rules = concat([
+      {
+        rulePriority = 1
+        description  = "Delete untagged cache images after 1 day"
+        selection = {
+          tagStatus   = "untagged"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 1
+        }
+        action = { type = "expire" }
+      },
+      ], [
+      for index, prefix in ["backend-", "litellm-", "frontend-staging-"] : {
+        rulePriority = index + 2
+        description  = "Keep newest five ${prefix} cache images"
+        selection = {
+          tagStatus     = "tagged"
+          tagPrefixList = [prefix]
+          countType     = "imageCountMoreThan"
+          countNumber   = 5
+        }
+        action = { type = "expire" }
+      }
+    ])
+  })
+}
+
+resource "aws_ecr_repository" "buildcache_production" {
+  name = "skynet/buildcache-production"
+  # Checkov CKV_AWS_51 requires immutable cache tags.
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "buildcache_production" {
+  repository = aws_ecr_repository.buildcache_production.name
+
+  policy = jsonencode({
+    rules = concat([
+      {
+        rulePriority = 1
+        description  = "Delete untagged cache images after 1 day"
+        selection = {
+          tagStatus   = "untagged"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 1
+        }
+        action = { type = "expire" }
+      },
+      ], [
+      for index, prefix in ["backend-", "litellm-", "frontend-production-"] : {
+        rulePriority = index + 2
+        description  = "Keep newest five ${prefix} cache images"
+        selection = {
+          tagStatus     = "tagged"
+          tagPrefixList = [prefix]
+          countType     = "imageCountMoreThan"
+          countNumber   = 5
+        }
+        action = { type = "expire" }
+      }
+    ])
+  })
+}
+
+# Preview-to-preview cache poisoning cannot affect staging or production.
+# IAM grants writes to the shared repository, not to tag prefixes, so one PR
+# can publish a newer tag in another PR's prefix. Prefixes select cache inputs;
+# they are not a security boundary.
+resource "aws_ecr_repository" "preview_buildcache" {
+  name = "skynet/preview-buildcache"
+  # Checkov CKV_AWS_51 requires immutable cache tags.
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "preview_buildcache" {
+  repository = aws_ecr_repository.preview_buildcache.name
+
+  policy = jsonencode({
+    rules = [
+      {
+        rulePriority = 1
+        description  = "Delete untagged preview cache images after 1 day"
+        selection = {
+          tagStatus   = "untagged"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 1
+        }
+        action = { type = "expire" }
+      },
+      {
+        rulePriority = 2
+        description  = "Keep newest 40 preview cache images"
+        selection = {
+          tagStatus     = "tagged"
+          tagPrefixList = ["preview-"]
+          countType     = "imageCountMoreThan"
+          countNumber   = 40
+        }
+        action = { type = "expire" }
+      },
+    ]
+  })
+}
+
 # PR preview images (SKY-164) live in their own repositories. The preview
 # role builds from any branch, so it must not push a tag that staging or
 # production could later deploy from skynet/backend or skynet/frontend.
@@ -208,10 +349,18 @@ locals {
   # Built from the names, not from the resources, so the deploy policies are
   # known at plan time and scripts/check-deploy-isolation.sh can test them
   # before the first apply.
-  ecr_repository_arns = [
-    for r in var.image_repositories : "arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/${r}"
-  ]
   environments = toset(["staging", "production"])
+  # Preview builds use a separate cache so they cannot poison deploy layers.
+  ecr_repository_arns = {
+    staging = concat(
+      [for r in var.image_repositories : "arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/${r}"],
+      ["arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/buildcache-staging"],
+    )
+    production = concat(
+      [for r in var.image_repositories : "arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/${r}"],
+      ["arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/buildcache-production"],
+    )
+  }
 }
 
 # ---------------------------------------------------------------- deploy roles
@@ -287,7 +436,7 @@ data "aws_iam_policy_document" "github_deploy" {
       "ecr:PutImage",
       "ecr:UploadLayerPart",
     ]
-    resources = local.ecr_repository_arns
+    resources = local.ecr_repository_arns[each.key]
   }
 
   statement {
@@ -478,6 +627,39 @@ data "aws_iam_policy_document" "github_preview" {
       "ecr:UploadLayerPart",
     ]
     resources = [for r in ["backend", "frontend"] : "arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/preview-${r}"]
+  }
+
+  statement {
+    sid = "EcrBuildcacheRead"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:BatchGetImage",
+      "ecr:DescribeImages",
+      "ecr:GetDownloadUrlForLayer",
+    ]
+    resources = ["arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/buildcache-staging"]
+  }
+
+  statement {
+    sid = "EcrPreviewBuildcache"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:BatchGetImage",
+      "ecr:CompleteLayerUpload",
+      "ecr:DescribeImages",
+      "ecr:DescribeRepositories",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:InitiateLayerUpload",
+      "ecr:PutImage",
+      "ecr:UploadLayerPart",
+    ]
+    resources = ["arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/preview-buildcache"]
+  }
+
+  statement {
+    sid       = "EcrStagingBackendRead"
+    actions   = ["ecr:DescribeImages", "ecr:DescribeRepositories"]
+    resources = ["arn:aws:ecr:${var.region}:${local.account_id}:repository/skynet/backend"]
   }
 
   statement {

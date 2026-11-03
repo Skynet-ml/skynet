@@ -7,12 +7,23 @@ Reference for coding agents. The always-on rules are in `AGENTS.md`.
 Feature PRs target `staging`, never `main`. Each PR from this repository gets
 a PR environment (preview), a full copy of staging with an empty database, at
 `https://pr-<n>.staging.skynetml.com` (API `https://api-pr-<n>.staging.skynetml.com`).
+The preview helper scripts require Bash 5.1 or newer.
 Run the acceptance checks and record the videos there, before the merge.
 `.github/workflows/preview.yml` builds it on every push and deletes it when the
 PR closes. At most 4 previews run at once; a preview with no push for 48 hours
 is deleted. PRs from forks or Dependabot, and PRs whose files cannot change
 the running app (docs, `droid-wiki/`, `tools/reel-skynet/`, tests), get no
 preview; add the label `preview` to ask for one.
+
+Preview builds run the backend and frontend lanes in parallel. Backend
+migration can overlap the frontend build, but backend and worker services roll
+only after both image lanes succeed. The deploy step upserts all three
+services; set `BACKEND_IMAGE` to the image used by the migration.
+
+Preview builds use a shared preview-cache repository. The preview role can
+write any tag in that repository, so one PR can publish a cache tag used by
+another PR. Each build selects its own prefix, but that prefix is not a
+security boundary. Preview cache writes cannot affect staging or production.
 
 The remote MCP server of a preview is at
 `https://api-pr-<n>.staging.skynetml.com/remote-mcp`. Staging uses

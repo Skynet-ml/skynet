@@ -2,6 +2,11 @@
 # Shared helpers for the deploy scripts. Source this file; do not run it.
 # Never print secret values here: these scripts handle secret names only.
 
+if ((BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1))); then
+  printf 'error: Bash 5.1 or newer is required\n' >&2
+  exit 1
+fi
+
 set -euo pipefail
 
 # Local runs use the `skynet` CLI profile; GitHub Actions uses OIDC credentials.
@@ -20,6 +25,112 @@ need() {
   for c in "$@"; do
     command -v "$c" >/dev/null 2>&1 || die "missing command: $c"
   done
+}
+
+date_epoch() {
+  local value="$1" epoch
+  if epoch="$(date -d "$value" +%s 2>/dev/null)"; then
+    printf '%s\n' "$epoch"
+    return 0
+  fi
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -c '
+from datetime import datetime, timezone
+import sys
+
+value = datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+if value.tzinfo is None:
+    value = value.replace(tzinfo=timezone.utc)
+print(int(value.timestamp()))
+' "$value"
+}
+
+refresh_aws_credentials() {
+  local token_response token credentials access_key secret_key session_token
+  local token_dir header_file token_file
+  if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" &&
+    -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" &&
+    -z "${AWS_DEPLOY_ROLE_ARN:-}" ]]; then
+    return 0
+  fi
+  if [[ -z "${AWS_DEPLOY_ROLE_ARN:-}" &&
+    -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" &&
+    -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+    echo "notice: keeping GitHub action-provided AWS credentials; no deploy role is set"
+    return 0
+  fi
+  [[ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" && -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" &&
+    -n "${AWS_DEPLOY_ROLE_ARN:-}" ]] || {
+    echo "error: incomplete GitHub OIDC credential configuration" >&2
+    return 1
+  }
+  command -v curl >/dev/null 2>&1 || {
+    echo "error: missing command: curl" >&2
+    return 1
+  }
+  token_dir="$(mktemp -d)" || {
+    echo "error: cannot create GitHub OIDC temp directory" >&2
+    return 1
+  }
+  chmod 700 "$token_dir" || {
+    rm -rf "$token_dir"
+    echo "error: cannot secure GitHub OIDC temp directory" >&2
+    return 1
+  }
+  header_file="$token_dir/curl-header"
+  token_file="$token_dir/web-identity-token"
+  if ! printf 'Authorization: bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" >"$header_file" ||
+    ! chmod 600 "$header_file"; then
+    rm -rf "$token_dir"
+    echo "error: cannot secure GitHub OIDC request header" >&2
+    return 1
+  fi
+  if ! token_response="$(curl --fail --silent --show-error \
+    -H "@$header_file" \
+    "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")"; then
+    rm -rf "$token_dir"
+    echo "error: cannot request GitHub OIDC token" >&2
+    return 1
+  fi
+  if ! token="$(jq -er '.value' <<<"$token_response")"; then
+    rm -rf "$token_dir"
+    echo "error: GitHub OIDC response has no token" >&2
+    return 1
+  fi
+  if ! printf '%s' "$token" >"$token_file" || ! chmod 600 "$token_file"; then
+    rm -rf "$token_dir"
+    echo "error: cannot secure GitHub OIDC token" >&2
+    return 1
+  fi
+  if ! credentials="$(aws sts assume-role-with-web-identity \
+    --role-arn "$AWS_DEPLOY_ROLE_ARN" --role-session-name skynet-deploy \
+    --web-identity-token "file://$token_file" --duration-seconds 3600 --output json)"; then
+    rm -rf "$token_dir"
+    echo "error: cannot assume AWS deploy role with GitHub OIDC" >&2
+    return 1
+  fi
+  rm -f "$header_file" "$token_file" || {
+    echo "error: cannot remove GitHub OIDC temp files" >&2
+    return 1
+  }
+  rmdir "$token_dir" || {
+    echo "error: cannot remove GitHub OIDC temp directory" >&2
+    return 1
+  }
+  access_key="$(jq -er '.Credentials.AccessKeyId' <<<"$credentials")" ||
+    { echo "error: OIDC credentials have no access key" >&2; return 1; }
+  secret_key="$(jq -er '.Credentials.SecretAccessKey' <<<"$credentials")" ||
+    { echo "error: OIDC credentials have no secret key" >&2; return 1; }
+  session_token="$(jq -er '.Credentials.SessionToken' <<<"$credentials")" ||
+    { echo "error: OIDC credentials have no session token" >&2; return 1; }
+  export AWS_ACCESS_KEY_ID="$access_key"
+  export AWS_SECRET_ACCESS_KEY="$secret_key"
+  export AWS_SESSION_TOKEN="$session_token"
+  export AWS_CREDENTIALS_REFRESHED_AT
+  AWS_CREDENTIALS_REFRESHED_AT="$(date +%s)" || {
+    echo "error: cannot read credential refresh time" >&2
+    return 1
+  }
 }
 
 check_env() {
@@ -64,11 +175,31 @@ run_task() {
 
 # Waits for a task to stop and fails unless the container exit code is 0.
 wait_task_ok() {
-  local env="$1" arn="$2" cluster code reason
+  local env="$1" arn="$2" cluster code reason now
+  local last_refresh="${AWS_CREDENTIALS_REFRESHED_AT:-0}"
+  local next_refresh_attempt=0
   cluster="$(deploy_config "$env" | jq -r .cluster)"
   # `aws ecs wait tasks-stopped` gives up after 10 minutes; migrations may run longer.
   local i status
   for ((i = 0; i < 360; i++)); do
+    if [[ -n "${AWS_DEPLOY_ROLE_ARN:-}" &&
+      -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" &&
+      -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+      now="$(date +%s)" || return 1
+      if (( now - last_refresh >= 55 * 60 )); then
+        refresh_aws_credentials || return 1
+        last_refresh="${AWS_CREDENTIALS_REFRESHED_AT:-$now}"
+        next_refresh_attempt=0
+      elif (( now - last_refresh >= 45 * 60 && now >= next_refresh_attempt )); then
+        if refresh_aws_credentials; then
+          last_refresh="${AWS_CREDENTIALS_REFRESHED_AT:-$now}"
+          next_refresh_attempt=0
+        else
+          echo "warning: AWS credential refresh failed before the 55-minute limit" >&2
+          next_refresh_attempt=$((now + 60))
+        fi
+      fi
+    fi
     status="$(aws ecs describe-tasks --cluster "$cluster" --tasks "$arn" --query 'tasks[0].lastStatus' --output text)"
     [[ "$status" == "STOPPED" ]] && break
     sleep 10
