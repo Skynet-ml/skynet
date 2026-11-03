@@ -503,6 +503,20 @@ def test_hosted_execution_check_refuses_a_subscription_model(monkeypatch: pytest
     assert refused.value.code == "models.subscription_local_only"
 
 
+def test_hosted_execution_checks_local_mode_before_byok_admission(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the local-only refusal ahead of BYOK admission for a full request."""
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda *_: None)
+    app = FastAPI()
+    app.include_router(wizard_preflight.create_wizard_preflight_router(job_store=object()))
+    app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser("alice", "user", ())
+    models = {**_SUBSCRIPTION_MODELS, "task_model": {"name": "bare-model", "token_source": "byok"}}
+    with TestClient(app) as client:
+        response = client.post("/wizard/preflight", json=_execution_request(models=models).model_dump(mode="json"))
+    assert response.status_code == 422
+    assert response.json()["detail"] == DomainError("models.subscription_local_only").detail
+
+
 def test_local_execution_check_keeps_a_subscription_model(monkeypatch: pytest.MonkeyPatch) -> None:
     """Local mode accepts the same check and keeps its subscription source.
 

@@ -93,7 +93,7 @@ Write two files:
 
 The **Coding agent** can write and change any file for you. It checks its code and fixes what fails. You can add up to 20 extra files. Read [Metrics and scorers](/docs/concepts/scorers).
 
-If your metric calls `llm()`, set the **Metric model**. By default it uses the reflection model.
+The metric sets its model in its own `llm()` call. Without `model=`, the metric uses the reflection model.
 
 ### Contract check
 

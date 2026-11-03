@@ -17,6 +17,7 @@ from ..api.errors import DomainError
 from ..config import settings
 from ..storage.models import ExecutionBudgetModel, ProtectedCredentialModel
 from .byok_bridge import provider_slug_for_model
+from .byok_upstreams import UPSTREAMS
 from .byok_vault import STATUS_VERIFIED, ProviderKeyVault, byok_provider_for_litellm
 from .credential_safety import endpoint_has_private_components, public_endpoint, scrub_model_config
 from .operation_pricing import json_fingerprint
@@ -850,10 +851,11 @@ def prepare_protected_credentials(
         endpoint = connection.api_base
         if endpoint is None and provider == "openrouter":
             endpoint = OPENROUTER_API_BASE
-        if not endpoint:
+        if not endpoint and provider not in UPSTREAMS:
             raise ValueError("This BYOK provider has no saved execution endpoint.")
         config["byok_provider"] = provider
-        config["base_url"] = endpoint
+        if endpoint:
+            config["base_url"] = endpoint
         config["extra"].update(
             {key: value for key, value in connection.params.items() if key not in _CONNECTION_FIELDS | {"model"}}
         )

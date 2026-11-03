@@ -96,12 +96,16 @@ def score(input, output, expected=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
         input=f"Question: {input['question']}\nAnswer: {output}",
+        model="openai/gpt-4.1-mini",
+        temperature=0,
+        max_tokens=512,
+        reasoning_effort="low",
     )
     passed = str(verdict).strip().upper().startswith("PASS")
     return (1.0 if passed else 0.0), {"feedback": str(verdict)}
 ```
 
-如果你没有选择 **指标模型**，指标会使用与反思模型相同的模型。
+指标在自己的 `llm()` 调用中设置模型。示例中的四个参数均为可选参数。省略 `model=` 时，指标使用反思模型。
 
 ## 准确率、速度和成本
 

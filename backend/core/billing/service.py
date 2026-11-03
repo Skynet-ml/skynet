@@ -46,7 +46,7 @@ from ..telemetry import record_server_event
 from .budget_amounts import wallet_reserved_cents
 from .openrouter_float import check_float
 from .plans import PAST_DUE_STATUS, PLAN_FREE, PLAN_PRO, is_pro_status
-from .pricing import PLATFORM_FEE_FRACTION, ModelUsage, cents_for_cost_usd, cents_for_usage, raw_cost_usd
+from .pricing import ModelUsage, cents_for_usage
 
 logger = logging.getLogger("app.billing.service")
 
@@ -163,10 +163,6 @@ SUBSCRIPTION_EVENTS = frozenset(
     }
 )
 
-# Share of a run's full equivalent cost charged to a BYOK run — the
-# provider tokens are paid on the user's own key, so this fee is all the run
-# spends. Set by :data:`PLATFORM_FEE_FRACTION` to mirror OpenRouter's 5% BYOK
-# fee: the platform's cut for brokering a request paid on someone else's key.
 # Ceiling handed to fee-less BYOK runs: far above any real run's full cost,
 # small enough to stay a safe int everywhere cents are summed.
 _BYOK_UNCAPPED_CEILING = 10**9
@@ -410,20 +406,15 @@ def _stripe_id(value: Any) -> str | None:
 
 
 def platform_fee_cents_for_usage(usages: Iterable[ModelUsage]) -> int:
-    """Return the platform-fee portion of a run's per-model cost, rounding up.
-
-    The :data:`PLATFORM_FEE_FRACTION` share of the run's at-cost per-model price
-    (:func:`core.billing.pricing.raw_cost_usd`, without the usage markup). The
-    only amount a **BYOK** run is charged, since the provider tokens were paid on
-    the user's own key. At least one cent when the run cost anything.
+    """Return zero for model usage paid by the user's provider key.
 
     Args:
         usages: Per-model token usage for the run.
 
     Returns:
-        The non-negative platform fee in cents (``0`` when the run cost nothing).
+        Zero cents.
     """
-    return cents_for_cost_usd(raw_cost_usd(usages) * PLATFORM_FEE_FRACTION)
+    return 0
 
 
 def run_cost_cents(
@@ -431,12 +422,10 @@ def run_cost_cents(
     token_source: str,
     token_sources_by_model: Mapping[str, str] | None = None,
 ) -> int:
-    """Return the cents a run costs: full per-model cost, or the BYOK platform fee.
+    """Return the cents charged for managed model usage.
 
     A managed run is charged its marked-up per-model token cost
-    (:func:`core.billing.pricing.cents_for_usage`); a BYOK run is charged only
-    Skynet's platform fee (:func:`platform_fee_cents_for_usage`), since the
-    provider tokens were paid on the user's own key.
+    (:func:`core.billing.pricing.cents_for_usage`); BYOK model usage is not charged.
 
     Args:
         usages: Per-model token usage for the run.
@@ -461,15 +450,8 @@ def run_cost_cents(
 def cost_ceiling_budget(spendable: int, token_source: str) -> int:
     """Return the max per-run cost ceiling (full-cost cents) a balance can back.
 
-    A managed run spends its full per-token cost, so the balance backs a
-    ceiling of exactly ``spendable``. A BYOK run spends only Skynet's platform fee
-    (:data:`PLATFORM_FEE_FRACTION` of the full cost — the provider tokens are paid
-    on the user's own key), so the same balance backs a proportionally larger
-    ceiling: the largest full-cost budget whose platform fee still fits within
-    ``spendable``. Clamping ``max_cost_cents`` to this keeps a runaway BYOK run's
-    fee from ever exceeding the balance, mirroring the managed clamp. Computed by
-    over-estimating then stepping down against the real fee function so float
-    imprecision in the fraction can only err conservative (toward the balance).
+    A managed run spends its full per-token cost. BYOK model usage does not
+    consume the balance, so it has an effectively unlimited model ceiling.
 
     Args:
         spendable: The account's spendable cents; non-positive yields ``0``.
@@ -482,14 +464,7 @@ def cost_ceiling_budget(spendable: int, token_source: str) -> int:
         return 0
     if token_source != TOKEN_SOURCE_BYOK:
         return spendable
-    if PLATFORM_FEE_FRACTION <= 0:
-        # A fee-less BYOK run can never touch the balance, so any positive
-        # balance backs an effectively unlimited ceiling.
-        return _BYOK_UNCAPPED_CEILING
-    budget = math.ceil(spendable / PLATFORM_FEE_FRACTION)
-    while budget > 1 and max(1, math.ceil(budget * PLATFORM_FEE_FRACTION)) > spendable:
-        budget -= 1
-    return budget
+    return _BYOK_UNCAPPED_CEILING
 
 
 def committed_spend_cents(budget: int, token_source: str) -> int:
@@ -497,9 +472,8 @@ def committed_spend_cents(budget: int, token_source: str) -> int:
 
     The inverse of :func:`cost_ceiling_budget`: given a run's ``max_cost_cents``
     (a full-cost ceiling), how many cents of the account's balance it holds a
-    claim on. A managed run can debit up to the full budget; a BYOK run debits
-    only the platform fee of it (rounded up to at least one cent, matching
-    :func:`platform_fee_cents_for_usage`). Used at submit time to subtract the
+    claim on. A managed run can debit up to the full budget; BYOK model calls
+    do not debit it. Used at submit time to subtract the
     commitments of still-active runs from the balance, so concurrent submissions
     cannot collectively promise more than the account holds.
 
@@ -515,10 +489,7 @@ def committed_spend_cents(budget: int, token_source: str) -> int:
         return 0
     if token_source != TOKEN_SOURCE_BYOK:
         return budget
-    fee = budget * PLATFORM_FEE_FRACTION
-    if fee <= 0:
-        return 0
-    return max(1, math.ceil(fee))
+    return 0
 
 
 def legacy_job_committed_cents(session: Session, username: str, *, exclude_job_id: str | None = None) -> int:
@@ -530,7 +501,7 @@ def legacy_job_committed_cents(session: Session, username: str, *, exclude_job_i
         exclude_job_id: The same legacy root job currently settling its own usage.
 
     Returns:
-        Stamped managed ceilings or BYOK platform-fee ceilings for active legacy roots.
+        Stamped managed ceilings for active legacy roots; BYOK model commitments are zero.
     """
     attached = (
         select(ExecutionBudgetModel.id)
@@ -1389,10 +1360,9 @@ class StripeBillingService:
         Writes one signed negative ``run`` row to ``wallet_ledger`` and draws the
         cost from the free grant before the purchased balance, mirroring how
         :meth:`get_wallet` reports spendable cents (grant then paid). A **managed**
-        run is charged its full per-model token cost; a **BYOK** run is charged only
-        Skynet's platform fee (:func:`run_cost_cents`), since the provider tokens
-        were already paid on the user's own key — so the balance still meters the
-        platform on a BYOK run without double-charging for inference. The grant is
+        run is charged its full per-model token cost; a **BYOK** model call carries
+        no Skynet charge (:func:`run_cost_cents`). The provider bills the user's key.
+        The grant is
         resolved first (seeding a new account's one-time free grant) so the
         debit lands against a current grant. A caller that may retry passes a
         ``settlement_key``: a second debit with the same key charges nothing and
@@ -1415,8 +1385,8 @@ class StripeBillingService:
                 cost in cents.
             model: Model id stamped on the ledger row, or ``None``.
             description: Human label for the ledger row (typically the run name).
-            token_source: ``"managed"`` (full cost) or ``"byok"`` (platform fee
-                only); defaults to managed.
+            token_source: ``"managed"`` (full cost) or ``"byok"`` (no model charge);
+                defaults to managed.
             token_sources_by_model: Optional per-model source map for a mixed job.
             optimization_id: Finishing legacy root job, whose own held ceiling may be
                 consumed; also stamped on the ledger row so the charge is

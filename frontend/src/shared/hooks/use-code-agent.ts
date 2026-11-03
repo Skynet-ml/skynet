@@ -348,11 +348,13 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
   >(null);
   const messagesRef = React.useRef<AgentMessage[]>([]);
   // `send` is declared after `runAgent`, which needs the queue's store.
-  const sendLatestRef = React.useRef<(text: string) => void>(() => {});
+  const sendLatestRef = React.useRef<(text: string) => boolean>(() => false);
   const sendQueued = React.useCallback((text: string) => sendLatestRef.current(text), []);
   const { store: steerStore, midTurn } = useSteerQueue({
     busy: status === "streaming",
+    failed: status === "error",
     send: sendQueued,
+    maxLength: 20_000,
   });
 
   const flashClearRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -540,7 +542,7 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
   const runAgent = React.useCallback(
     (userMessage: string, history: AgentMessage[], hidden = false) => {
       const isChat = userMessage.length > 0;
-      if (!(isChat ? canChat : hasRequiredContext)) return;
+      if (!(isChat ? canChat : hasRequiredContext)) return false;
 
       abortRef.current?.abort();
       const controller = new AbortController();
@@ -582,10 +584,11 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
       setReasoningEndedAt(null);
       setError(null);
 
+      let steerAnchor: AgentMessage = { role: "user", content: userMessage, createdAt: Date.now(), ...(hidden ? { hidden } : {}) };
       if (isChat) {
         setMessages((m) => [
           ...m,
-          { role: "user", content: userMessage, createdAt: Date.now(), ...(hidden ? { hidden } : {}) },
+          steerAnchor,
           { role: "assistant", content: "", toolCalls: [] },
         ]);
       } else {
@@ -684,7 +687,32 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
 
       // Chat turns take messages the user sends while they run.
       const steerKey = isChat ? newSteerKey() : null;
-      if (steerKey) steerStore.openTurn(agentSteerChannel(steerKey));
+      const applySteer = ({ ids, text }: { ids: string[]; text: string }) => {
+        if (!steerStore.applied(ids)) return;
+        if (!text.trim()) return;
+        const message: AgentMessage = { role: "user", content: text, createdAt: Date.now() };
+        const previousAnchor = steerAnchor;
+        steerAnchor = message;
+        if (abortRef.current !== controller) {
+          setMessages((prev) => {
+            const index = prev.indexOf(previousAnchor);
+            if (index < 0) return prev;
+            let end = index + 1;
+            while (end < prev.length && prev[end]?.role !== "user") end++;
+            return [...prev.slice(0, end), message, ...prev.slice(end)];
+          });
+          return;
+        }
+        replyBeforeSteer = replyBufRef.current;
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          const kept = last && last.role === "assistant" && !last.content && !last.toolCalls?.length
+            ? prev.slice(0, -1) : prev;
+          return [...kept, message,
+            { role: "assistant", content: "", toolCalls: [] }];
+        });
+      };
+      if (steerKey) steerStore.openTurn(agentSteerChannel(steerKey, applySteer));
       // Reply text streamed before the latest applied steer, which the
       // finished turn's whole-reply `assistant_message` would repeat.
       let replyBeforeSteer: string | null = null;
@@ -736,23 +764,7 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
             signal: controller.signal,
             onSteerApplied: ({ ids, text }) => {
               if (controller.signal.aborted) return;
-              steerStore.applied(ids);
-              if (!text.trim()) return;
-              replyBeforeSteer = replyBufRef.current;
-              // The reply so far stays as its own bubble; the rest of the turn
-              // streams into a new one after the user's message.
-              setMessages((prev) => {
-                const last = prev[prev.length - 1];
-                const kept =
-                  last && last.role === "assistant" && !last.content && !last.toolCalls?.length
-                    ? prev.slice(0, -1)
-                    : prev;
-                return [
-                  ...kept,
-                  { role: "user", content: text, createdAt: Date.now() },
-                  { role: "assistant", content: "", toolCalls: [] },
-                ];
-              });
+              applySteer({ ids, text });
             },
             onReasoningPatch: (chunk, source) => {
               if (reasoningBufRef.current === "") {
@@ -1031,6 +1043,7 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
               // A chat turn that ends without a word is a failed turn, not a
               // finished one: the chat offers a retry instead of a bare "Done.".
               if (isChat && !result.assistant_message.trim() && !replyBufRef.current.trim()) {
+                if (abortRef.current === controller) abortRef.current = null;
                 setStatus("error");
                 setStatusLabel(msg("auto.features.submit.hooks.use.code.agent.literal.8"));
                 setSignatureStatus("idle");
@@ -1087,6 +1100,8 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
               }
               setSignatureStatus("done");
               setMetricStatus("done");
+              // Steers the server reports late are placed after their anchor, not after this answer.
+              if (abortRef.current === controller) abortRef.current = null;
               setStatus("done");
               setStatusLabel(msg("auto.features.submit.hooks.use.code.agent.literal.7"));
               if (reasoningBufRef.current) setReasoningEndedAt(Date.now());
@@ -1181,6 +1196,7 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
               dropDraft("signature");
               dropDraft("metric");
               setLimitReached(code === DAILY_LIMIT_CODE);
+              if (abortRef.current === controller) abortRef.current = null;
               setStatus("error");
               setStatusLabel(msg("auto.features.submit.hooks.use.code.agent.literal.8"));
               setSignatureStatus("idle");
@@ -1199,6 +1215,7 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
           },
       ),
       );
+      return true;
     },
     [
       parsedDataset,
@@ -1240,9 +1257,9 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
   const send = React.useCallback(
     (message: string, options?: { hidden?: boolean }) => {
       const trimmed = message.trim();
-      if (!trimmed) return;
+      if (!trimmed) return false;
       autoFixAttemptsRef.current = 0;
-      runAgent(trimmed, messages, options?.hidden ?? false);
+      return runAgent(trimmed, messages, options?.hidden ?? false);
     },
     [runAgent, messages],
   );
@@ -1255,11 +1272,12 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
       const trimmed = content.trim();
       if (!trimmed) return;
       const truncated = messages.slice(0, messageIndex);
+      steerStore.pause();
       setMessages(truncated);
       autoFixAttemptsRef.current = 0;
       runAgent(trimmed, truncated);
     },
-    [runAgent, messages],
+    [runAgent, messages, steerStore],
   );
 
   const retry = React.useCallback(() => {
@@ -1268,10 +1286,11 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
     const index = messages.length - 1 - lastUserIndex;
     const lastUser = messages[index];
     const truncated = messages.slice(0, index);
+    steerStore.pause();
     setMessages(truncated);
     autoFixAttemptsRef.current = 0;
     runAgent(lastUser?.content ?? "", truncated, lastUser?.hidden ?? false);
-  }, [messages, runAgent]);
+  }, [messages, runAgent, steerStore]);
 
   const goToSignatureVersion = React.useCallback(
     (index: number) => {
@@ -1298,13 +1317,14 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
   );
 
   const stop = React.useCallback(() => {
+    steerStore.pause();
     abortRef.current?.abort();
     abortRef.current = null;
     setStatus("idle");
     setStatusLabel("");
     setSignatureStatus("idle");
     setMetricStatus("idle");
-  }, []);
+  }, [steerStore]);
 
   const reset = React.useCallback(() => {
     abortRef.current?.abort();

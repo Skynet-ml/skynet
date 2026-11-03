@@ -93,7 +93,7 @@ Scrivi due file:
 
 L'**Agente di programmazione** può scrivere e modificare qualsiasi file per te. Controlla il proprio codice e corregge ciò che non funziona. Puoi aggiungere fino a 20 file aggiuntivi. Leggi [Metriche e scorer](/docs/concepts/scorers).
 
-Se la tua metrica chiama `llm()`, imposta il **Modello della metrica**. Per impostazione predefinita usa il modello di riflessione.
+La metrica imposta il proprio modello nella sua chiamata a `llm()`. Senza `model=`, la metrica usa il modello di riflessione.
 
 ### Controllo del contratto
 

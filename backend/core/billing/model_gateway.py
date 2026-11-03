@@ -20,13 +20,22 @@ import httpx
 from .. import config as app_config
 from ..config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, app_env
 from ..exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
+from ..i18n_en import t_en
 from ..local.cli_catalog import CliProvider, parse_subscription_model_id
 from .budgets import BudgetError, BudgetInsufficientError
+from .byok_upstreams import (
+    OPENROUTER,
+    ProviderUpstream,
+    byok_model_prefix,
+    resolve_upstream,
+    validate_byok_novelty,
+    validate_custom_base,
+)
 from .cli_dispatch import CliDispatcher
 from .credential_safety import scrub_model_config
 from .data_policy import data_policy_for
 from .dependency_lock import verify_dependency_lock
-from .mcp_broker import McpToolsBroker
+from .mcp_broker import McpToolsBroker, _pinned_address, _PinnedTransport
 from .model_batch import BatchCollector
 from .model_dispatch import MODEL_ATTEMPT_HEADER, ModelHTTPResult, OpenRouterDispatcher
 from .openrouter_quotes import resolve_model_slug
@@ -219,6 +228,7 @@ class ModelGateway:
         # and its type to tell the limit from the account balance.
         self.budget_refusal: BudgetInsufficientError | None = None
         self._client = httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False)
+        self._provider_clients: list[httpx.Client] = []
         self._routes: dict[str, OpenRouterDispatcher | CliDispatcher] = {}
         self._capabilities: dict[str, Callable[[bytes, dict[str, str]], ModelHTTPResult]] = {}
         self._capability_tokens: dict[str, str] = {}
@@ -268,6 +278,27 @@ class ModelGateway:
                         json.dumps({"error": {"type": code, "code": code, "message": message}}).encode(),
                     )
                 )
+
+            def _unpriced(self, error: Exception, route: OpenRouterDispatcher | CliDispatcher | None = None) -> None:
+                """Map known route refusals to stable localized error keys.
+
+                Args:
+                    error: The route refusal to report.
+                    route: Scoped model route, if this request used one.
+
+                Returns:
+                    None, after sending the error response.
+                """
+                message = str(error)
+                known = {
+                    "submission.byok_route_unsupported",
+                    "submission.byok_embeddings_unsupported",
+                    "submission.byok_provider_unsupported",
+                }
+                code = error.code if isinstance(error, UnpricedOperationError) else None
+                if route is None or route.policy.kind != "byok_model" or code not in known:
+                    code = None
+                self._error(422, code or "unpriced_operation", t_en(code) if code else message)
 
             def do_GET(self) -> None:
                 """Return state only to a token already bound to this spending authority."""
@@ -359,7 +390,7 @@ class ModelGateway:
                 except (UsagePendingError, BudgetError):
                     self._error(424, "usage_pending", "Previous work must settle before another attempt is admitted.")
                 except (UnpricedOperationError, ValueError, TypeError) as error:
-                    self._error(422, "unpriced_operation", str(error))
+                    self._unpriced(error, route if not (is_tools or is_evaluator or is_packages) else None)
                 except httpx.HTTPError:
                     self._error(
                         502,
@@ -394,7 +425,7 @@ class ModelGateway:
                 except (UsagePendingError, BudgetError):
                     self._error(424, "usage_pending", "Previous work must settle before another attempt is admitted.")
                 except (UnpricedOperationError, ValueError, TypeError) as error:
-                    self._error(422, "unpriced_operation", str(error))
+                    self._unpriced(error)
 
             def _sandbox_request(self) -> None:
                 """Serve guest control with a separate capability and streamed command output."""
@@ -465,6 +496,7 @@ class ModelGateway:
         batch: bool = False,
         embeddings: bool = False,
         parent_only: bool = False,
+        upstream: ProviderUpstream = OPENROUTER,
     ) -> dict[str, str]:
         """Register one fixed role without exposing its provider credential.
 
@@ -476,28 +508,56 @@ class ModelGateway:
             batch: Send this role's chat calls through half-price OpenRouter batches.
             embeddings: Serve only ``/embeddings`` for an embeddings model instead of chat.
             parent_only: Only the parent calls this route, so readiness probes skip it.
+            upstream: Fixed provider endpoint and permitted protocols.
 
         Returns:
             Scoped guest route containing no upstream credential.
         """
-        model = resolve_model_slug(model, client=self._client)
+        if embeddings and not upstream.embeddings:
+            raise UnpricedOperationError(
+                "This provider does not support embeddings on this route.",
+                code="submission.byok_embeddings_unsupported",
+            )
+        if upstream == OPENROUTER:
+            model = resolve_model_slug(model, client=self._client)
+        elif byok_model_prefix(model, upstream.slug, custom=upstream.slug == "custom"):
+            model = model.split("/", 1)[-1]
+        client = self._client
+        if upstream.slug == "custom":
+            try:
+                validate_custom_base(upstream.base_url)
+                address = _pinned_address(upstream.base_url, False, label="custom provider endpoint")
+            except ValueError as error:
+                raise UnpricedOperationError(str(error)) from error
+            client = httpx.Client(
+                transport=_PinnedTransport(upstream.base_url, address),
+                timeout=self._client.timeout,
+                follow_redirects=False,
+                trust_env=False,
+            )
+            self._provider_clients.append(client)
         token = secrets.token_urlsafe(32)
-        # BYOK traffic runs on the caller's own OpenRouter account, whose privacy settings apply there.
-        data_policy = data_policy_for(self.runtime.username) if policy.kind == "managed_model" else None
+        # BYOK traffic follows the selected provider's own data policy.
+        data_policy = (
+            data_policy_for(self.runtime.username)
+            if policy.kind == "managed_model" and upstream == OPENROUTER
+            else None
+        )
         self._routes[token] = OpenRouterDispatcher(
             self.runtime,
             api_key=api_key,
             model=model,
             role=role,
             policy=policy,
-            client=self._client,
+            client=client,
             data_policy=data_policy,
             batch=(
                 BatchCollector(api_key=api_key, model=model, client=self._client, heartbeat=self._beat)
-                if batch
+                if batch and upstream == OPENROUTER
                 else None
             ),
             embeddings=embeddings,
+            upstream=upstream,
         )
         if parent_only:
             self._parent_only.add(token)
@@ -731,7 +791,9 @@ class ModelGateway:
         """
         self._observers.setdefault(role, []).append(observer)
 
-    def _observe(self, route: OpenRouterDispatcher | CliDispatcher, body: Mapping[str, Any], response: ModelHTTPResult) -> None:
+    def _observe(
+        self, route: OpenRouterDispatcher | CliDispatcher, body: Mapping[str, Any], response: ModelHTTPResult
+    ) -> None:
         """Pass one answered model call to its role's observers.
 
         Args:
@@ -902,6 +964,11 @@ class ModelGateway:
         economy = bool(result.get("economy_mode"))
         shinka = result.get("shinka")
         novelty = isinstance(shinka, dict) and bool(shinka.get("novelty"))
+        reflection = result.get("reflection_model_config")
+        if isinstance(reflection, dict):
+            validate_byok_novelty(
+                {**reflection, "token_source": reflection.get("token_source") or result.get("token_source")}, novelty
+            )
         for config, role in models:
             source = config.get("token_source") or result.get("token_source") or "managed"
             extra = config.get("extra") or {}
@@ -925,8 +992,7 @@ class ModelGateway:
                 config.pop("base_url", None)
                 continue
             endpoint = extra.get("api_base") or extra.get("base_url") or config.get("base_url")
-            if source == "byok" and urlsplit(str(endpoint or "")).hostname != "openrouter.ai":
-                raise UnpricedOperationError("This BYOK endpoint has no verified operation budget adapter.")
+            upstream = resolve_upstream(config) if source == "byok" else OPENROUTER
             if source == "managed" and endpoint and urlsplit(str(endpoint)).hostname != "openrouter.ai":
                 raise UnpricedOperationError("An explicit custom endpoint cannot be silently rerouted.")
             model = str(extra.get("model") or config.get("name", "")).removeprefix("openrouter/")
@@ -941,7 +1007,10 @@ class ModelGateway:
                 role=role,
                 policy=ChargePolicy("byok_model" if source == "byok" else "managed_model"),
                 batch=batched,
+                upstream=upstream,
             )
+            if upstream.slug == "custom":
+                route["byok_custom_endpoint"] = True
             if config is target_config:
                 target_name = str(target.get("model") or "").strip("/")
                 if not target_name or target_name != str(config.get("name") or "").strip("/"):
@@ -960,6 +1029,7 @@ class ModelGateway:
                         role=role,
                         policy=ChargePolicy("byok_model" if source == "byok" else "managed_model"),
                         embeddings=True,
+                        upstream=upstream,
                     ),
                 }
             config["extra"][ROUTE_KEY] = route
@@ -1018,6 +1088,9 @@ class ModelGateway:
                 self._sandbox.close()
         finally:
             self._client.close()
+            for client in self._provider_clients:
+                client.close()
+            self._provider_clients.clear()
             self._routes.clear()
             self._capabilities.clear()
             self._tools = None

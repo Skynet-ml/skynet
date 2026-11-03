@@ -41,7 +41,7 @@ mac:
   artifactName: ${productName}-${version}-${arch}.${ext}
 dmg:
   sign: false
-  artifactName: ${productName}-${version}-${arch}.${ext}
+  artifactName: ${productName}-${arch}.${ext}
 publish:
   provider: github
   owner: Skynet-ml

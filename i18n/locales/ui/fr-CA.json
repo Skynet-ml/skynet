@@ -23,7 +23,7 @@
   "optimizations.serve.field_separator": ": ",
   "share.role.editor_desc": "Accès en lecture, plus l'exécution du modèle, le clavardage et le renommage",
   "tooltip.submit.blackbox.scorer_install": "S’exécute une fois dans la sandbox cloud hors ligne. Utilisez les paquets déjà présents dans l’image épinglée ou les artefacts de paquets gérés par le déploiement ; les dépôts apt et registres de paquets publics sont indisponibles.",
-  "submit.budget.byok_note": "Votre fournisseur facture directement les tokens du modèle sur votre clé. Ce plafond couvre uniquement les frais de plateforme {term.appName} et l’utilisation de l’environnement d’exécution.",
+  "submit.budget.byok_note": "Votre fournisseur facture les jetons du modèle sur votre clé. {term.appName} ne facture aucuns frais de modèle. Le budget de l’exécution couvre uniquement l’utilisation du bac à sable.",
   "submit.blackbox.roles.optimization.managed_hint": "Utilise les paramètres d'échantillonnage par défaut du modèle ; la facturation peut utiliser votre solde {term.appName} ou votre clé OpenRouter.",
   "optimizations.grid.open_pair": "Ouvrir la paire {pair}",
   "optimizations.grid.empty.title": "Aucun résultat de paire",

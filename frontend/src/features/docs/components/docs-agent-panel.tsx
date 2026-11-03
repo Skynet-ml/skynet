@@ -8,6 +8,7 @@ import { AgentThread } from "@/shared/ui/agent/agent-thread";
 import { ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
+import { agentSteerChannel, newSteerKey, useSteerQueue } from "@/shared/ui/agent/use-steer-queue";
 import { AppMark } from "@/shared/ui/app-mark";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { Button } from "@/shared/ui/primitives/button";
@@ -43,10 +44,9 @@ import {
   trimHistory,
   type DocsAgentMessage,
 } from "../lib/docs-answer";
+import { discardStaleDocsResponse, docsAskFailure, type DocsAskNotice } from "../lib/docs-queue";
 
 const STORAGE_KEY = "docs-agent-history";
-
-type Notice = "rate" | "tooLong" | "error" | null;
 
 /** A question handed over from the search box; the nonce makes a repeat count. */
 export interface DocsAgentRequest {
@@ -130,7 +130,7 @@ export function DocsAgentPanel({
 }) {
   const [messages, setMessages] = React.useState<DocsAgentMessage[]>([]);
   const [streaming, setStreaming] = React.useState(false);
-  const [notice, setNotice] = React.useState<Notice>(null);
+  const [notice, setNotice] = React.useState<DocsAskNotice>(null);
   const [draft, setDraft] = React.useState("");
   const [mounted, setMounted] = React.useState(false);
   const messagesRef = React.useRef<DocsAgentMessage[]>([]);
@@ -150,6 +150,29 @@ export function DocsAgentPanel({
     return () => abortRef.current?.abort();
   }, [update]);
 
+  /** End the answer in flight; keep the text that already arrived. */
+  const stopAnswer = React.useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setStreaming(false);
+    const kept = trimHistory(messagesRef.current.map(settle), MAX_KEPT_MESSAGES);
+    update(kept);
+    saveHistory(kept);
+  }, [update]);
+
+  const askLatestRef = React.useRef<((question: string) => Promise<void>) | null>(null);
+  const sendQueued = React.useCallback((text: string) => {
+    if (!askLatestRef.current || isQuestionTooLong(text)) return false;
+    void askLatestRef.current(text);
+    return true;
+  }, []);
+  const { store: steerStore, midTurn, stop } = useSteerQueue({
+    busy: streaming,
+    send: sendQueued,
+    stop: stopAnswer,
+    maxLength: MAX_QUESTION_CHARS,
+  });
+
   const ask = React.useCallback(
     async (question: string, earlier?: readonly DocsAgentMessage[]) => {
       const text = question.trim();
@@ -161,13 +184,17 @@ export function DocsAgentPanel({
       }
       const before = earlier ?? messagesRef.current;
       abortRef.current?.abort();
+      steerStore.setBusy(false);
+      steerStore.setBusy(true);
       const controller = new AbortController();
       abortRef.current = controller;
-      const body = askBody(text, before, locale);
-      const base: DocsAgentMessage[] = [
+      const steerKey = newSteerKey();
+      const body = { ...askBody(text, before, locale), steer_key: steerKey };
+      let base: DocsAgentMessage[] = [
         ...trimHistory(before, MAX_KEPT_MESSAGES),
         { role: "user", content: text, createdAt: Date.now() },
       ];
+      let anchor = base[base.length - 1];
       let turn: DocsAgentMessage = { role: "assistant", content: "", toolCalls: [], thinkingSegments: [] };
       const show = (next: DocsAgentMessage) => {
         turn = next;
@@ -183,10 +210,27 @@ export function DocsAgentPanel({
       show(turn);
       setNotice(null);
       setStreaming(true);
-      let failed: Notice = null;
+      let failed: DocsAskNotice = null;
       let done = false;
       // The same events, and the same thinking and tool rows, as the generalist agent.
       const handlers: GeneralistAgentHandlers = {
+        onSteerApplied: ({ ids, text }) => {
+          if (!steerStore.applied(ids)) return;
+          if (!text.trim()) return;
+          if (abortRef.current !== controller) {
+            const current = messagesRef.current;
+            const index = anchor ? current.indexOf(anchor) : -1;
+            if (index >= 0) {
+              const end = current[index + 1]?.role === "assistant" ? index + 2 : index + 1;
+              anchor = { role: "user", content: text, createdAt: Date.now() };
+              update([...current.slice(0, end), anchor, ...current.slice(end)]);
+            }
+            return;
+          }
+          base = [...base, settle(turn), { role: "user", content: text, createdAt: Date.now() }];
+          anchor = base[base.length - 1];
+          show({ role: "assistant", content: "", toolCalls: [], thinkingSegments: [] });
+        },
         onReasoningPatch: (chunk) =>
           patchThinking((segments, toolCount, since) => appendReasoning(segments, chunk, Date.now(), toolCount, since)),
         onToolStart: (ev) => {
@@ -236,12 +280,22 @@ export function DocsAgentPanel({
           body: JSON.stringify(body),
           signal: controller.signal,
         });
-        if (res.status === 429) failed = "rate";
-        else if (res.status === 422) failed = "tooLong";
-        else if (!res.ok || !res.body) failed = "error";
-        else {
+        // Stop or the replacement ask owns the streaming state.
+        if (await discardStaleDocsResponse(
+          res,
+          controller.signal.aborted || abortRef.current !== controller,
+        )) return;
+        failed = docsAskFailure(res.status, Boolean(res.body), () => steerStore.pause());
+        if (!failed && res.body) {
           await readServerSentEvents(res.body, (event) => {
-            if (controller.signal.aborted) return;
+            if (controller.signal.aborted || abortRef.current !== controller) return;
+            if (event.event === "steer_ready" && event.data.steer_key === steerKey) {
+              steerStore.openTurn(agentSteerChannel(steerKey, (event) => {
+                handlers.onSteerApplied?.(event);
+                saveHistory(messagesRef.current);
+              }));
+              return;
+            }
             dispatchGeneralistEvent(handlers, event.event, event.data, () => labels.agentError);
           });
           if (!failed && (!done || !turn.content.trim())) failed = "error";
@@ -251,6 +305,9 @@ export function DocsAgentPanel({
         failed = "error";
       }
       if (abortRef.current !== controller) return;
+      // Steers the server reports late are placed after their anchor, not after this answer.
+      abortRef.current = null;
+      if (failed && failed !== "tooLong") steerStore.pause();
       setStreaming(false);
       // A question refused while this answer streamed keeps its "too long" notice.
       setNotice((prev) => failed ?? (prev === "tooLong" ? prev : null));
@@ -258,8 +315,12 @@ export function DocsAgentPanel({
       update(final);
       saveHistory(final);
     },
-    [labels.agentError, locale, update],
+    [labels.agentError, locale, update, steerStore],
   );
+
+  React.useEffect(() => {
+    askLatestRef.current = ask;
+  }, [ask]);
 
   // Run each search-box question once; a locale change must not send it again.
   const handledRequestRef = React.useRef<DocsAgentRequest | null>(null);
@@ -271,17 +332,8 @@ export function DocsAgentPanel({
     void ask(request.question);
   }, [ask, request]);
 
-  /** End the answer in flight; keep the text that already arrived. */
-  const stop = () => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setStreaming(false);
-    const kept = trimHistory(messagesRef.current.map(settle), MAX_KEPT_MESSAGES);
-    update(kept);
-    saveHistory(kept);
-  };
-
   const clear = () => {
+    steerStore.clear();
     abortRef.current?.abort();
     abortRef.current = null;
     setStreaming(false);
@@ -452,6 +504,12 @@ export function DocsAgentPanel({
                 onStop={stop}
                 placeholder={labels.agentPlaceholder}
                 streaming={streaming}
+                midTurn={midTurn}
+                acceptsMidTurn={(text) => {
+                  if (!isQuestionTooLong(text)) return true;
+                  setNotice("tooLong");
+                  return false;
+                }}
                 sendAriaLabel={labels.agentSend}
                 attachments={false}
                 dictation={false}

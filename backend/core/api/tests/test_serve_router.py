@@ -886,13 +886,58 @@ def test_serve_chat_streams_react_turn(serve_client: TestClient, serve_store: _F
             return_value=(object, "{}", overlay, {"model_name": "openai/gpt-4o-mini"}),
         ),
         patch("core.api.routers.serve.build_language_model", return_value=MagicMock()),
-        patch("core.api.routers.serve.run_react_chat", side_effect=lambda **_kw: _fake_react_chat_stream()),
+        patch("core.api.routers.serve.run_react_chat", side_effect=lambda **_kw: _fake_react_chat_stream()) as run_chat,
     ):
-        resp = serve_client.post("/serve/anything/chat", json={"user_message": "hi", "trust_mode": "ask"})
+        resp = serve_client.post(
+            "/serve/anything/chat", json={"user_message": "hi", "trust_mode": "ask", "steer_key": "turn"}
+        )
 
     assert resp.status_code == 200
     assert "text/event-stream" in resp.headers["content-type"]
     assert "event: done" in resp.text
+    assert run_chat.call_args.kwargs["steer_key"] == "turn"
+    assert run_chat.call_args.kwargs["steer_owner"] == "alice"
+
+
+def test_protected_serve_chat_ignores_steer_key(serve_client: TestClient, serve_store: _FakeJobStore) -> None:
+    """Keep protected chat on its reservation path without a steering channel.
+
+    Args:
+        serve_client: Authenticated client for the serve router.
+        serve_store: Store containing the caller's optimized program.
+    """
+    _seed_run_job(serve_store, "protected-chat")
+    artifact = {
+        "react_overlay": {"tool_source": {"kind": "live_mcp"}},
+        "optimized_prompt": {"input_fields": ["question"], "output_fields": ["answer"]},
+    }
+    with (
+        patch("core.api.routers.serve._protected_api_runtime", return_value="vercel"),
+        patch(
+            "core.api.routers.serve.load_program_metadata",
+            return_value=(artifact, {}, "openai/gpt-4o-mini"),
+        ),
+        patch("core.api.routers.serve.run_react_chat") as local_chat,
+        patch(
+            "core.api.routers.serve._protected_result",
+            return_value={"assistant_message": "protected answer"},
+        ) as protected,
+    ):
+        resp = serve_client.post(
+            "/serve/protected-chat/chat",
+            json={"user_message": "hi", "steer_key": "must-not-open", "max_cost_cents": 25},
+            headers={"Idempotency-Key": "protected-turn"},
+        )
+    assert resp.status_code == 200, resp.text
+    assert "event: done" in resp.text
+    assert "steer_ready" not in resp.text
+    assert "steer_applied" not in resp.text
+    local_chat.assert_not_called()
+    protected.assert_called_once()
+    assert protected.call_args.kwargs["max_cost_cents"] == 25
+    assert protected.call_args.kwargs["idempotency_key"] == "protected-turn"
+    assert "steer_key" not in protected.call_args.kwargs
+    assert "steer_key" not in protected.call_args.kwargs["interaction"]
 
 
 def test_serve_chat_confirm_returns_404_for_unknown_id(serve_client: TestClient) -> None:
@@ -1061,8 +1106,8 @@ def test_serve_program_resolves_stored_custom_byok_connection(
         "byok_vault_key",
         SecretStr(Fernet.generate_key().decode("utf-8")),
     )
-    response = SimpleNamespace(status_code=200, is_success=True)
-    with patch("core.billing.byok_vault.httpx.get", return_value=response):
+    monkeypatch.setattr("core.billing.byok_vault._pinned_address", lambda *args, **kwargs: "8.8.8.8")
+    with patch("core.billing.byok_vault.ProviderKeyVault._probe", return_value="verified"):
         ProviderKeyVault(engine=metered_store.engine).save_key(
             "alice",
             "custom",

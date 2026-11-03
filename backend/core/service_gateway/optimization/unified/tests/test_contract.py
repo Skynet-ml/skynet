@@ -96,6 +96,25 @@ def _check(payload: UnifiedRunRequest, **kwargs: Any) -> Any:
         )
 
 
+@pytest.mark.parametrize("value", ["", "  "])
+def test_static_check_rejects_blank_model(value: str) -> None:
+    """Explain why a blank model literal is invalid."""
+    metric = f"def score(input, output):\n    return llm(model={value!r})\n"
+    result = static_contract_check(_payload(metric_code=metric))
+    check = next(item for item in result.checks if item.key == "metric.model")
+    assert check.status == "failed"
+    assert check.message_code == "contract.metric_model_empty"
+
+
+def test_static_check_rejects_conflicting_stored_model() -> None:
+    """Reject a literal model that differs from the stored model."""
+    metric = "def score(input, output):\n    return llm(model='new')\n"
+    result = static_contract_check(_payload(metric_code=metric, metric_model="old"))
+    check = next(item for item in result.checks if item.key == "metric.model")
+    assert check.status == "failed"
+    assert check.message_code == "contract.metric_model_conflict"
+
+
 def test_static_check_passes_a_matching_blackbox_workspace() -> None:
     """Run and score both fit, and no model is needed."""
     response = static_contract_check(_payload())
@@ -234,18 +253,45 @@ def test_blackbox_score_with_one_argument_fails_the_signature() -> None:
     assert _statuses(response)["metric.signature"] == "failed"
 
 
-def test_metric_calling_llm_needs_a_metric_model() -> None:
-    """A metric that calls ``llm`` without a metric model fails ``metric.model``."""
+def test_metric_calling_llm_defaults_to_reflection_and_rejects_ambiguity() -> None:
+    """The model is derived from code, not the submitted metric model."""
     metric = "from skynet import llm\ndef score(input, output):\n    return float(llm('j', output)), {}\n"
 
     without = static_contract_check(_payload(metric_code=metric))
     with_model = static_contract_check(_payload(metric_code=metric, metric_model="openrouter/judge"))
+    ambiguous = static_contract_check(_payload(metric_code=metric.replace("llm('j', output)", "llm('j', model=x)")))
 
-    assert _statuses(without)["metric.model"] == "failed"
+    assert _statuses(without)["metric.model"] == "passed"
     assert _statuses(with_model)["metric.model"] == "passed"
+    assert _statuses(ambiguous)["metric.model"] == "failed"
+    assert (
+        next(item.message_code for item in ambiguous.checks if item.key == "metric.model")
+        == "contract.metric_model_declaration"
+    )
     assert without.uses_llm
     assert with_model.uses_llm
     assert not static_contract_check(_payload()).uses_llm
+
+
+@pytest.mark.parametrize("expression", ["output.llm"])
+def test_unrelated_llm_names_do_not_mark_metric_as_calling_helper(expression: str) -> None:
+    """Ignore unrelated names in the model check and helper-use response."""
+    metric = f"def score(input, output):\n    {expression}\n    return 1.0, {{}}\n"
+    response = static_contract_check(_payload(metric_code=metric))
+    assert _statuses(response)["metric.model"] == "passed"
+    assert not response.uses_llm
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "openai"])
+def test_metric_byok_declaration_accepts_provider(provider: str) -> None:
+    """A literal model declaration does not depend on the reflection provider."""
+    raw = _payload(
+        metric_code="from skynet import llm\ndef score(input, output):\n    return llm(model='openai/a')\n"
+    ).model_dump(mode="json")
+    raw["models"]["reflection_model"].update(token_source="byok", byok_provider=provider)
+    result = static_contract_check(UnifiedRunRequest.model_validate(raw))
+    item = next(item for item in result.checks if item.key == "metric.model")
+    assert item.status == "passed"
 
 
 def test_fingerprint_tracks_the_code_and_the_data() -> None:
@@ -555,7 +601,6 @@ def test_verify_workspace_gives_each_file_its_own_verdict() -> None:
             "from helpers import join\n\ndef go(artifact, input):\n    return join(artifact)\n",
             BLACKBOX_METRIC,
             {"helpers.py": "def join(a):\n    return a + missing\n", "notes.md": "# notes"},
-            metric_has_model=False,
             optimizer_resolved="best_of_n",
         )
     }
@@ -566,6 +611,24 @@ def test_verify_workspace_gives_each_file_its_own_verdict() -> None:
     assert not verdicts["helpers.py"].ok
     assert "F821" in verdicts["helpers.py"].errors[0]
     assert verdicts["notes.md"].ok
+
+
+def test_verify_workspace_rejects_omitted_and_explicit_models() -> None:
+    """Reject mixed model declarations when reflection is not known."""
+    metric = "from skynet import llm\ndef score(input, output):\n llm('a')\n llm('b', model='x/y')\n return 1, {}"
+    verdicts = verify_workspace(RUN_CODE, metric, {}, optimizer_resolved="gepa")
+    assert any("at most one" in error for error in verdicts[1].errors)
+    same = verify_workspace(RUN_CODE, metric, {}, optimizer_resolved="gepa", reflection_name="x/y")
+    assert not any("at most one" in error for error in same[1].errors)
+    other = verify_workspace(RUN_CODE, metric, {}, optimizer_resolved="gepa", reflection_name="other")
+    assert any("at most one" in error for error in other[1].errors)
+
+
+def test_verify_workspace_explains_blank_model() -> None:
+    """Give the coding agent a clear blank-model error."""
+    metric = "from skynet import llm\ndef score(input, output):\n return llm(model='  ')"
+    verdicts = verify_workspace(RUN_CODE, metric, {}, optimizer_resolved="gepa")
+    assert any("empty" in error for error in verdicts[1].errors)
 
 
 def test_static_check_lints_each_python_file_on_its_own() -> None:

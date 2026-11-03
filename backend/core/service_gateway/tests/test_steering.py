@@ -7,10 +7,16 @@ was read, and goes either to the loop or back to the client, never both.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import Mock
 
 import dspy
+import pytest
+from sqlalchemy import create_engine
 
+from ...storage.models import AgentSteerMessageModel, AgentSteerTurnModel
+from ..agents import steering as steering_mod
 from ..agents.acting_react import ActingReActV2
 from ..agents.conversation_react import ConversationReAct
 from ..agents.steering import STEER_APPLIED_EVENT, SteerInbox, SteerStore, attach_steering
@@ -18,6 +24,98 @@ from .test_conversation_react import _ScriptedLM
 
 _OWNER = "alice"
 _KEY = "turn-1"
+
+
+@pytest.mark.parametrize("database", [False, True])
+def test_pending_steer_count_and_character_caps(database: bool) -> None:
+    """Limit pending input by count and characters, releasing room after delivery.
+
+    Args:
+        database: Exercise SQL storage instead of the local fallback.
+    """
+    store = SteerStore()
+    if database:
+        engine = create_engine("sqlite://")
+        AgentSteerMessageModel.__table__.create(engine)
+        AgentSteerTurnModel.__table__.create(engine)
+        store.bind_engine(engine)
+    for _ in range(10):
+        store.post(_OWNER, _KEY, "one")
+    with pytest.raises(ValueError, match="pending steer"):
+        store.post(_OWNER, _KEY, "over count")
+    taken = store.take(_OWNER, _KEY)
+    assert len(taken) == 10
+    store.mark_delivered(_OWNER, _KEY, taken)
+    first = store.post(_OWNER, _KEY, "a" * 12000)
+    store.post(_OWNER, _KEY, "b" * 8000)
+    with pytest.raises(ValueError, match="pending steer"):
+        store.post(_OWNER, _KEY, "c")
+    store.withdraw(_OWNER, _KEY, [first])
+    store.post(_OWNER, _KEY, "c")
+    assert len(store.take(_OWNER, _KEY)) == 2
+
+
+def test_local_withdraw_drops_empty_keys_and_keeps_delivery_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop empty waiting lists and preserve delivery order rather than UUID order.
+
+    Args:
+        monkeypatch: Supply ids whose lexical order differs from insertion order.
+    """
+    store = SteerStore()
+    monkeypatch.setattr(steering_mod, "uuid4", Mock(side_effect=[Mock(hex="b"), Mock(hex="a"), Mock(hex="c")]))
+    first = store.post(_OWNER, _KEY, "one")
+    second = store.post(_OWNER, _KEY, "two")
+    store.mark_delivered(_OWNER, _KEY, store.take(_OWNER, _KEY))
+    unread = store.post(_OWNER, _KEY, "three")
+    assert store.withdraw(_OWNER, _KEY) == ([unread], [first, second])
+    assert (_OWNER, _KEY) not in store._local
+    store.take(_OWNER, "missing")
+    assert (_OWNER, "missing") not in store._delivered
+
+
+def test_local_fallback_expires_old_waiting_and_delivery_records(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Expire inactive local keys while retaining recent delivery tombstones.
+
+    Args:
+        monkeypatch: Advance the storage clock without waiting six hours.
+    """
+    clock = Mock(wraps=datetime)
+    now = datetime.now(UTC)
+    clock.now.return_value = now
+    monkeypatch.setattr(steering_mod, "datetime", clock)
+    store = SteerStore()
+    delivered = store.post(_OWNER, _KEY, "read")
+    store.mark_delivered(_OWNER, _KEY, store.take(_OWNER, _KEY))
+    store.post(_OWNER, _KEY, "unread")
+    assert store.withdraw(_OWNER, _KEY, [delivered]) == ([], [delivered])
+    clock.now.return_value = now + timedelta(hours=7)
+    store.post(_OWNER, "fresh", "new")
+    assert (_OWNER, _KEY) not in store._local
+    assert (_OWNER, _KEY) not in store._delivered
+
+
+@pytest.mark.parametrize("database", [False, True])
+def test_withdraw_distinguishes_delivered_and_is_idempotent(database: bool) -> None:
+    """Return unread ids once and preserve delivered outcomes on retries.
+
+    Args:
+        database: Exercise SQL storage instead of the in-memory fallback.
+    """
+    store = SteerStore()
+    if database:
+        engine = create_engine("sqlite://")
+        AgentSteerMessageModel.__table__.create(engine)
+        AgentSteerTurnModel.__table__.create(engine)
+        store.bind_engine(engine)
+    delivered = store.post(_OWNER, _KEY, "read")
+    store.mark_delivered(_OWNER, _KEY, store.take(_OWNER, _KEY))
+    unread = store.post(_OWNER, _KEY, "return")
+    store.post("mallory", _KEY, "private")
+    assert store.withdraw(_OWNER, _KEY, [unread, delivered, "missing"]) == ([unread], [delivered])
+    assert store.withdraw(_OWNER, _KEY, [unread, delivered]) == ([], [delivered])
+    assert store.withdraw("mallory", "other", [delivered]) == ([], [])
+    assert store.take(_OWNER, _KEY) == []
+    assert store.withdraw(_OWNER, _KEY, []) == ([], [])
 
 
 def _user_texts(messages: list[dict[str, Any]]) -> list[str]:
@@ -111,6 +209,7 @@ def test_steer_reaches_the_next_step_as_the_newest_user_message() -> None:
     assert [e["event"] for e in events] == [STEER_APPLIED_EVENT]
     assert events[0]["data"]["text"] == "use blue instead"
     assert len(events[0]["data"]["ids"]) == 1
+    assert store.withdraw(_OWNER, _KEY, events[0]["data"]["ids"]) == ([], events[0]["data"]["ids"])
     third_users = _user_texts(lm.requests[2]["messages"])
     assert sum("use blue instead" in text for text in third_users) == 1
     assert not any(m["role"] == "assistant" and not m.get("tool_calls") for m in lm.requests[2]["messages"])
@@ -156,6 +255,50 @@ def test_unread_steer_stays_for_the_client_to_withdraw() -> None:
 
     assert events == []
     assert [text for _, text in store.take(_OWNER, _KEY)] == ["too late"]
+
+
+def test_steer_stays_unread_when_delivery_cannot_be_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A steer the store cannot mark delivered skips the step and goes back to the mailbox."""
+    store = SteerStore()
+    events: list[dict[str, Any]] = []
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        """Simulate a database error while the steer is marked delivered."""
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(store, "mark_delivered", fail)
+    lm = _ScriptedLM([("lookup", {"name": "a"}), ("lookup", {"name": "b"}), ("submit", {"reply": "done"})])
+    program = _steered_program(store, events, posts={"a": "use blue instead"}, conversation=False)
+
+    with dspy.context(lm=lm, adapter=dspy.ChatAdapter(use_native_function_calling=True)):
+        result = program(user_message="make it red")
+
+    assert result.reply == "done"
+    assert events == []
+    assert not any("use blue instead" in str(request["messages"]) for request in lm.requests)
+    assert [text for _, text in store.take(_OWNER, _KEY)] == ["use blue instead"]
+
+
+async def test_open_steer_inbox_returns_none_when_registration_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A turn whose bound cannot be stored runs without steering instead of failing."""
+    store = SteerStore()
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        """Simulate a database error while the turn registers."""
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(store, "open_turn", fail)
+    inbox = await steering_mod.open_steer_inbox(_OWNER, _KEY, "user_message", lambda event: None, store, 100)
+    assert inbox is None
+
+
+async def test_open_steer_inbox_registers_the_turn_bound() -> None:
+    """The bound is stored before the inbox is returned, so later posts meet it."""
+    store = SteerStore()
+    inbox = await steering_mod.open_steer_inbox(_OWNER, _KEY, "user_message", lambda event: None, store, 5)
+    assert inbox is not None
+    with pytest.raises(steering_mod.SteerInputError):
+        store.post(_OWNER, _KEY, "x" * 6)
 
 
 def test_loop_without_an_inbox_is_unchanged() -> None:

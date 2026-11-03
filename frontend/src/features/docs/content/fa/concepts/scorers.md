@@ -96,12 +96,16 @@ def score(input, output, expected=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
         input=f"Question: {input['question']}\nAnswer: {output}",
+        model="openai/gpt-4.1-mini",
+        temperature=0,
+        max_tokens=512,
+        reasoning_effort="low",
     )
     passed = str(verdict).strip().upper().startswith("PASS")
     return (1.0 if passed else 0.0), {"feedback": str(verdict)}
 ```
 
-اگر **مدل معیار** را انتخاب نکنید، معیار از همان مدلی استفاده می‌کند که مدل بازاندیشی است.
+معیار مدل خود را در فراخوانی `llm()` خودش تعیین می‌کند. هر چهار آرگومان نمایش‌داده‌شده اختیاری هستند. بدون `model=`، معیار از مدل بازاندیشی استفاده می‌کند.
 
 ## دقت، سرعت و هزینه
 

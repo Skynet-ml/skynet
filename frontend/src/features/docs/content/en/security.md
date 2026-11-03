@@ -66,7 +66,7 @@ You can add your own model provider keys.
 - Skynet keeps only the last four characters and a status: unverified, verified or invalid.
 - When you enter a key, Skynet sends a small test request to check it.
 
-When you use your own key, the provider charges your key directly. Skynet still charges its platform fee and sandbox usage from your balance.
+Your provider bills model tokens to your key. Skynet charges no model fee. The run budget covers sandbox usage only.
 
 Skynet also removes secrets from logs and error messages. It replaces them with `[REDACTED]`.
 
@@ -102,7 +102,7 @@ The **Model data privacy** setting controls what model providers can do with you
 | **Zero retention** | Only endpoints with a zero-data-retention agreement. Some models can be unavailable.        |
 
 > [!NOTE]
-> Optimizations on your own key follow your OpenRouter account's privacy settings.
+> BYOK calls through OpenRouter follow your OpenRouter account's privacy settings. Native provider BYOK calls follow that provider's data policy.
 
 ## Visibility of runs
 

@@ -93,7 +93,7 @@ Escreva dois arquivos:
 
 O **Agente de programação** pode escrever e alterar qualquer arquivo para você. Ele verifica o próprio código e corrige o que falha. Você pode adicionar até 20 arquivos extras. Leia [Métricas e avaliadores](/docs/concepts/scorers).
 
-Se a sua métrica chamar `llm()`, defina o **Modelo da métrica**. Por padrão, ela usa o modelo de reflexão.
+A métrica define seu modelo na própria chamada a `llm()`. Sem `model=`, a métrica usa o modelo de reflexão.
 
 ### Verificação do contrato
 

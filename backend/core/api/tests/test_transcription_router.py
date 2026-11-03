@@ -288,6 +288,8 @@ def test_openrouter_key_with_custom_base_is_not_sent_to_openrouter(
     monkeypatch: pytest.MonkeyPatch, billing_engine: Any
 ) -> None:
     """An OpenRouter connection pointed at another host keeps its key off openrouter.ai."""
+    monkeypatch.setattr("core.billing.byok_vault._pinned_address", lambda *args, **kwargs: "8.8.8.8")
+    monkeypatch.setattr(ProviderKeyVault, "_probe", lambda *args, **kwargs: "verified")
     _save_key(billing_engine, "openrouter", "proxy-secret", api_base="https://proxy.example.com/v1")
     keys = _seen_keys(monkeypatch)
     assert _post_audio(_client(_BillingStore(billing_engine))).status_code == 200

@@ -1,3 +1,5 @@
+[Ver todas las plataformas](/download)
+
 La app de Skynet para Mac ejecuta Skynet en tu propio ordenador. Envía las llamadas a los modelos a través de una CLI de programación con la sesión iniciada en tu Mac, de modo que el plan de tu CLI paga esas llamadas. También puedes vincular la app a tu cuenta alojada de Skynet.
 
 ## Requisitos

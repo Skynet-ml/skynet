@@ -4,12 +4,12 @@ import { test } from "node:test";
 
 import { decodeScheduledRun, decodeWizardSession, encodeWizardSession } from "./session-state.ts";
 
-const unifiedRunUrl = new URL("../../../shared/types/unified-run.ts", import.meta.url).href;
+const srcUrl = new URL("../../../", import.meta.url).href;
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (specifier === "@/shared/types/unified-run") {
-      return { shortCircuit: true, url: unifiedRunUrl };
+    if (specifier.startsWith("@/")) {
+      return { shortCircuit: true, url: new URL(`${specifier.slice(2)}.ts`, srcUrl).href };
     }
     return nextResolve(specifier, context);
   },
@@ -49,6 +49,50 @@ test("missing, broken or older setups are ignored", () => {
     decodeWizardSession(JSON.stringify({ account: "a", state: withoutInputs }), "a", STEPS),
     null,
   );
+});
+
+test("a draft with the retired metric picker still loads", () => {
+  const state = initialWizardV2State("guided");
+  const raw = JSON.stringify({
+    account: "a",
+    state: {
+      ...state,
+      workspace: {
+        ...state.workspace,
+        metricCode: "llm('score')",
+        metricModelMode: "explicit",
+        metricModel: { name: "old/judge" },
+      },
+    },
+  });
+  const restored = decodeWizardSession(raw, "a", STEPS);
+  assert.ok(restored);
+  assert.equal(restored.workspace.metricCode, "llm('score')");
+  assert.equal(restored.optimizer.reflectionModel, state.optimizer.reflectionModel);
+});
+
+test("a restored picker model is not sent when the metric code names another model", async () => {
+  const { storedMetricModel, runModels } = await import("./run-floor.ts");
+  const state = initialWizardV2State("guided");
+  const raw = JSON.stringify({
+    account: "a",
+    state: {
+      ...state,
+      workspace: {
+        ...state.workspace,
+        metricCode: "llm('score', model='new/judge')",
+        metricModelMode: "explicit",
+        metricModel: { name: "old/judge" },
+      },
+    },
+  });
+  const restored = decodeWizardSession(raw, "a", STEPS);
+  assert.ok(restored);
+  const { metricCode, metricModel } = restored.workspace;
+  assert.equal(storedMetricModel(metricModel, metricCode), null);
+  const names = runModels(restored.optimizer, true, metricCode, storedMetricModel(metricModel, metricCode))
+    .map((model) => model.name);
+  assert.equal(names.includes("old/judge"), false);
 });
 
 test("a saved spending limit survives any number of reloads", async () => {

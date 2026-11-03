@@ -31,6 +31,7 @@ import {
 } from "../../hooks/use-task-interview";
 import { useWizardV2, useWizardV2Shell } from "../../hooks/use-unified-wizard";
 import { taskAdvanceFrom } from "../../lib/auto-advance";
+import { INTERVIEW_TURN_MAX_CHARS } from "../../lib/interview-turn";
 import { emptyRepoDraft, taskIssue } from "../../lib/wizard-v2";
 import { AuthoringShell } from "../steps/AuthoringShell";
 import { ArtifactConfirmCard, v2Msg } from "./ArtifactConfirmCard";
@@ -235,7 +236,13 @@ function TaskInterviewPanel({
   };
 
   // Answers typed while the interviewer is replying wait for it to finish.
-  const { midTurn } = useSteerQueue({ busy: interview.busy, send: interview.send });
+  const { midTurn, stop } = useSteerQueue({
+    busy: interview.busy,
+    failed: interview.error,
+    send: interview.send,
+    stop: interview.stop,
+    maxLength: INTERVIEW_TURN_MAX_CHARS,
+  });
   const localMenu = useLocalAgentMenuModels(agentSubscriptionFor("interview"), interview.model);
 
   return (
@@ -308,7 +315,7 @@ function TaskInterviewPanel({
         value={draft}
         onChange={setDraft}
         onSubmit={submit}
-        onStop={interview.stop}
+        onStop={stop}
         streaming={interview.busy}
         midTurn={midTurn}
         acceptsMidTurn={fitsInterview}

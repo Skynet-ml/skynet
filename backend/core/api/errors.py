@@ -17,6 +17,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from ..exceptions import ServiceError
 from ..i18n_en import t_en
 from ..i18n_keys import I18nKey
 
@@ -62,3 +63,15 @@ class DomainError(HTTPException):
         self.params: dict[str, Any] = merged
         detail = t_en(key, **merged)
         super().__init__(status_code=status, detail=detail)
+
+
+def domain_service_error(error: DomainError) -> ServiceError:
+    """Convert an API domain error to a worker service error.
+
+    Args:
+        error: Domain error with its original detail and translation metadata.
+
+    Returns:
+        Service error carrying the same detail, code, and parameters.
+    """
+    return ServiceError(error.detail, code=error.code, params=error.params)

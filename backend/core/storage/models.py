@@ -225,18 +225,34 @@ class AgentApprovalModel(Base):
     )
 
 
+class AgentSteerTurnModel(Base):
+    """The input bound announced by one authenticated steering turn."""
+
+    __tablename__ = "agent_steer_turns"
+
+    owner: Mapped[str] = mapped_column(String(255), primary_key=True)
+    steer_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    max_chars: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (Index("ix_agent_steer_turns_created_at", "created_at"),)
+
+
 class AgentSteerMessageModel(Base):
     """A message the user sent into an agent turn that was still running.
 
     The steer POST and the streaming turn can land on different replicas, so
     the message waits here under the turn's client-chosen ``steer_key``. The
     running loop takes it at its next step; once the turn ends, the client
-    withdraws whatever the loop never read. Taking sets ``taken_at``, so a
-    message is either read by the agent or withdrawn, never both.
+    withdraws whatever the loop never read. Taking sets ``claimed_at``;
+    delivery sets ``taken_at`` at the model boundary.
     """
 
     __tablename__ = "agent_steer_messages"
-    __table_args__ = (Index("ix_agent_steer_messages_key", "steer_key", "owner"),)
+    __table_args__ = (
+        Index("ix_agent_steer_messages_key", "steer_key", "owner"),
+        Index("ix_agent_steer_messages_owner_pending", "owner", "taken_at"),
+        Index("ix_agent_steer_messages_created_at", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
     steer_key: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -246,6 +262,7 @@ class AgentSteerMessageModel(Base):
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
     taken_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AgentTurnModel(Base):
@@ -901,7 +918,7 @@ class BillingProviderKeyModel(Base):
     """One stored BYOK provider connection for an account, encrypted at rest.
 
     Backs BYOK mode: the user's provider key pays model usage while the Skynet balance
-    covers only the platform fee and sandbox usage. The secret is never stored
+    covers sandbox usage, with no BYOK model fee. The secret is never stored
     in plaintext — only ``secret_ciphertext`` (the Fernet-encrypted bytes) is
     persisted, so a database dump never leaks a usable key. ``last4`` is the
     recognizable tail kept for masked display, and ``status`` records whether the

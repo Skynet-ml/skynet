@@ -24,6 +24,10 @@ export interface GeneralistAgentRequest {
   trust_mode: TrustMode;
   conversation_id?: string | null;
   regenerate?: boolean;
+  /** Original text of the user turn this message edits; its stored copy and every later row are replaced. */
+  edit_user_text?: string;
+  /** How many earlier chat user turns have the same text as the edited one. */
+  edit_user_occurrence?: number;
   locale?: string;
   /** LiteLLM id of the catalog model to run the turn on; absent = default. */
   model?: string;

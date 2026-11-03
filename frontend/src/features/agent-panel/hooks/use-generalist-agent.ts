@@ -30,6 +30,7 @@ import { agentSteerChannel, newSteerKey } from "@/shared/ui/agent/use-steer-queu
 
 import { confirmGeneralistApproval, streamGeneralistAgent } from "../lib/stream";
 import { dropPendingToolCalls, pendingToolCall, placeToolCall } from "../lib/pending-tool-calls";
+import { editMode, retryMode } from "../lib/edit-turn";
 import type {
   ChatTurn,
   PendingApprovalPayload,
@@ -177,6 +178,8 @@ interface PendingRun {
   wizardState: WizardState;
   trustMode: TrustMode;
   regenerate: boolean;
+  /** User turn this message edits; the backend drops its stored copy and every later row. */
+  editUserTurn: { text: string; occurrence: number } | null;
 }
 
 /** Per-session mutable machinery that must never trigger a render. */
@@ -192,6 +195,8 @@ interface SessionRuntime {
   pendingRun: PendingRun | null;
   /** Index of the running turn's first assistant message; a steer adds more after it. */
   turnStart: number;
+  /** Edit target of the latest run until the server confirms it saved the turn. */
+  unsavedEdit: { text: string; occurrence: number } | null;
 }
 
 function blankSession(key: string): SessionView {
@@ -214,6 +219,7 @@ function blankRuntime(): SessionRuntime {
     persistentExtras: {},
     pendingRun: null,
     turnStart: 0,
+    unsavedEdit: null,
   };
 }
 
@@ -257,7 +263,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     (key: string): SteerQueue => {
       let queue = steerQueues.get(key);
       if (!queue) {
-        queue = new SteerQueue();
+        queue = new SteerQueue(undefined, 20_000);
         steerQueues.set(key, queue);
       }
       return queue;
@@ -473,6 +479,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       rt.turnStart = Math.max(0, (sessionsRef.current.get(key)?.messages.length ?? 1) - 1);
       // Labels can land after `done`, when the next turn may have moved rt on.
       const turnStart = rt.turnStart;
+      let steerAnchor = sessionsRef.current.get(key)?.messages[turnStart - 1];
       // The reply `done` landed on; stats that arrive after it belong there.
       let replyAt: number | null = null;
       let pendingSeq = 0;
@@ -506,7 +513,36 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
 
       const steerKey = newSteerKey();
       const steerQueue = steerQueueFor(key);
-      steerQueue.openTurn(agentSteerChannel(steerKey));
+      const applySteer = ({ ids, text }: { ids: string[]; text: string }) => {
+        if (!steerQueue.applied(ids)) return;
+        if (!text.trim()) return;
+        const message: AgentMessage = { role: "user", content: text, createdAt: Date.now() };
+        const previousAnchor = steerAnchor;
+        steerAnchor = message;
+        if (rt.controller !== controller) {
+          patchMessages(key, (prev) => {
+            const index = previousAnchor ? prev.indexOf(previousAnchor) : -1;
+            if (index < 0) return prev;
+            let end = index + 1;
+            while (end < prev.length && prev[end]?.role !== "user") end++;
+            return [...prev.slice(0, end), message, ...prev.slice(end)];
+          });
+          return;
+        }
+        dropPendingRows();
+        replyBeforeSteer = (replyBeforeSteer ?? "") + rt.replyBuf;
+        rt.replyBuf = "";
+        patchThinking(key, (segments) => closeThinking(segments, Date.now()));
+        patchMessages(key, (prev) => {
+          const last = prev[prev.length - 1];
+          const kept = last && last.role === "assistant" && !last.content &&
+            !last.toolCalls?.length && !last.thinkingSegments?.length && !last.plan
+            ? prev.slice(0, -1) : prev;
+          return [...kept, message,
+            { role: "assistant", content: "", toolCalls: [] }];
+        });
+      };
+      steerQueue.openTurn(agentSteerChannel(steerKey, applySteer));
       // The reply bubble closed by the latest applied steer, which the
       // finished turn's `assistant_message` may repeat.
       let replyBeforeSteer: string | null = null;
@@ -523,6 +559,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             trust_mode: run.trustMode,
             conversation_id: sessionsRef.current.get(key)?.conversationId ?? null,
             regenerate: run.regenerate,
+            edit_user_text: run.editUserTurn?.text,
+            edit_user_occurrence: run.editUserTurn?.occurrence,
             locale: getActiveLocale(),
             model: sentModel ?? undefined,
             reasoning_effort:
@@ -534,38 +572,12 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             signal: controller.signal,
             onSteerApplied: ({ ids, text }) => {
               if (controller.signal.aborted) return;
-              steerQueue.applied(ids);
-              if (!text.trim()) return;
-              // The bubble this steer closes keeps no row for a call that
-              // never ran; later clears only reach the new bubble.
-              dropPendingRows();
-              replyBeforeSteer = (replyBeforeSteer ?? "") + rt.replyBuf;
-              rt.replyBuf = "";
-              patchThinking(key, (segments) => closeThinking(segments, Date.now()));
-              // The reply so far stays as its own bubble, tool activity and
-              // all; the rest of the turn streams into a new one after the
-              // user's message.
-              patchMessages(key, (prev) => {
-                const last = prev[prev.length - 1];
-                const kept =
-                  last &&
-                  last.role === "assistant" &&
-                  !last.content &&
-                  !last.toolCalls?.length &&
-                  !last.thinkingSegments?.length &&
-                  !last.plan
-                    ? prev.slice(0, -1)
-                    : prev;
-                return [
-                  ...kept,
-                  { role: "user", content: text, createdAt: Date.now() },
-                  { role: "assistant", content: "", toolCalls: [] },
-                ];
-              });
+              applySteer({ ids, text });
             },
             onConversationMeta: (ev) => {
               if (controller.signal.aborted) return;
               if (!ev.conversation_id) return;
+              rt.unsavedEdit = null;
               patchSession(key, { conversationId: ev.conversation_id });
               callbacksRef.current.onConversationMeta?.(
                 ev.conversation_id,
@@ -687,6 +699,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             },
             onDone: (result) => {
               if (controller.signal.aborted) return;
+              rt.unsavedEdit = null;
               dropPendingRows();
               patchSession(key, {
                 status: "done",
@@ -857,12 +870,14 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       wizardStateOverride?: WizardState,
       regenerate = false,
       hidden = false,
+      editUserTurn: { text: string; occurrence: number } | null = null,
     ) => {
       // A resend within the same session replaces its own in-flight or queued
       // turn — other sessions' streams are untouched.
       abortSession(key);
       const rt = getRuntime(key);
       rt.replyBuf = "";
+      rt.unsavedEdit = editUserTurn;
 
       const chatHistory: ChatTurn[] = history
         .filter((m) => m.content.trim().length > 0)
@@ -890,6 +905,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         wizardState: ws,
         trustMode: tm,
         regenerate,
+        editUserTurn,
       };
 
       commit((draft) => {
@@ -952,10 +968,12 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     for (const [key, queue] of steerQueues) {
       queue.setSend((text) => {
         const session = sessionsRef.current.get(key);
-        if (session) requestRun(key, text, session.messages);
+        if (!session) return false;
+        requestRun(key, text, session.messages);
+        return true;
       });
       const session = sessions.get(key);
-      queue.setBusy(session ? isBusy(session) : false);
+      queue.setBusy(session ? isBusy(session) : false, session?.status === "error");
     }
   }, [sessions, steerQueues, requestRun, activeKey]);
 
@@ -964,10 +982,17 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       const trimmed = content.trim();
       if (!trimmed) return;
       const key = activeKeyRef.current;
-      const truncated = (sessionsRef.current.get(key)?.messages ?? []).slice(0, messageIndex);
-      requestRun(key, trimmed, truncated);
+      const current = sessionsRef.current.get(key)?.messages ?? [];
+      const truncated = current.slice(0, messageIndex);
+      const { regenerate, editUserTurn } = editMode(
+        current,
+        messageIndex,
+        runtimesRef.current.get(key)?.unsavedEdit ?? null,
+      );
+      steerQueueFor(key).pause();
+      requestRun(key, trimmed, truncated, undefined, regenerate, false, editUserTurn);
     },
-    [requestRun],
+    [requestRun, steerQueueFor],
   );
 
   // Re-run the most recent user turn (used by the error-banner retry button
@@ -987,11 +1012,23 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     const lastUser = current[lastUserIndex];
     if (!lastUser) return;
     const truncated = current.slice(0, lastUserIndex);
-    requestRun(key, lastUser.content, truncated, undefined, true, lastUser.hidden ?? false);
-  }, [requestRun]);
+    const { regenerate, editUserTurn } = retryMode(
+      runtimesRef.current.get(key)?.unsavedEdit ?? null,
+    );
+    steerQueueFor(key).pause();
+    requestRun(
+      key,
+      lastUser.content,
+      truncated,
+      undefined,
+      regenerate,
+      lastUser.hidden ?? false,
+      editUserTurn,
+    );
+  }, [requestRun, steerQueueFor]);
 
-  const stop = React.useCallback(() => {
-    const key = activeKeyRef.current;
+  const stopSession = React.useCallback((key: string) => {
+    steerQueueFor(key).pause();
     const wasQueued = sessionsRef.current.get(key)?.status === "queued";
     abortSession(key);
     patchSession(key, { status: "idle", statusLabel: "" });
@@ -1007,7 +1044,9 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         return prev;
       });
     }
-  }, [abortSession, patchMessages, patchSession, patchThinking]);
+  }, [abortSession, patchMessages, patchSession, patchThinking, steerQueueFor]);
+
+  const stop = React.useCallback(() => stopSession(activeKeyRef.current), [stopSession]);
 
   /**
    * Drop background sessions that are safely re-openable: idle/done ones whose
@@ -1112,8 +1151,14 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     activeSteerQueue.getSnapshot,
   );
   const midTurn = React.useMemo(
-    () => midTurnOf(() => activeSteerQueue, steerSnapshot),
-    [activeSteerQueue, steerSnapshot],
+    () => ({
+      ...midTurnOf(() => activeSteerQueue, steerSnapshot),
+      stopAndSendNow: () => {
+        const key = activeKey;
+        activeSteerQueue.stopAndSendNow(() => stopSession(key));
+      },
+    }),
+    [activeKey, activeSteerQueue, steerSnapshot, stopSession],
   );
 
   const confirmApproval = React.useCallback(

@@ -14,6 +14,7 @@ import { MarkdownPreviewField } from "@/shared/ui/markdown-preview-field";
 
 import { autoResizeTextarea } from "./auto-resize";
 import { ComposerLoader } from "./composer-loader";
+import { handleComposerEscape } from "./composer-keys";
 import { MAX_ATTACHMENT_MB, readAttachments, splitClaimed } from "./file-attachments";
 import { PastedTextCard } from "./pasted-text-card";
 import {
@@ -159,6 +160,13 @@ export function Composer({
 
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const [attaching, setAttaching] = React.useState(0);
+  const [lengthNotice, setLengthNotice] = React.useState<string | null>(null);
+  const maxLength = midTurn?.maxLength ?? 20_000;
+  const pendingLength = [...(midTurn?.queued ?? [])]
+    .filter((item) => !item.uncertain).map((item) => item.text).join("\n\n").length;
+  const hasCertainPending = [...(midTurn?.steering ?? []), ...(midTurn?.queued ?? [])].some((item) => !item.uncertain);
+  const headLength = midTurn?.queued.find((item) => !item.uncertain)?.text.length ?? 0;
+  const tooLong = (count: number) => msg("agent.pending.too_long", { count, max: maxLength });
   const attachFiles = async (picked: File[]) => {
     const {
       claimed,
@@ -216,7 +224,12 @@ export function Composer({
 
   const sendMidTurn = (mode: "steer" | "queue") => {
     if (!midTurn || disabled || dictating || attaching > 0 || !hasDraft) return;
+    if (value.trim().length > maxLength) {
+      setLengthNotice(value);
+      return;
+    }
     if (acceptsMidTurn && !acceptsMidTurn(value)) return;
+    setLengthNotice(null);
     if (mode === "steer") midTurn.steer(value);
     else midTurn.queue(value);
     onChange("");
@@ -243,6 +256,16 @@ export function Composer({
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+    const controlledPopupId = e.currentTarget.getAttribute("aria-controls");
+    const controlledPopup = controlledPopupId
+      ? e.currentTarget.ownerDocument.getElementById(controlledPopupId)
+      : null;
+    const popupOpen = Boolean(
+      suggestion
+      || e.currentTarget.getAttribute("aria-expanded") === "true"
+      || controlledPopup?.getAttribute("data-state") === "open",
+    );
+    if (handleComposerEscape(e, { streaming: Boolean(streaming), popupOpen, composing: Boolean(e.nativeEvent.isComposing || e.keyCode === 229) }, onStop)) return;
     const suggestAction = suggestKeyAction(e, {
       suggestion,
       draft: value,
@@ -293,11 +316,19 @@ export function Composer({
       onSubmit={handleSubmit}
       className={cn("border-t border-border/40 px-3 py-3 shrink-0", className)}
     >
+      {lengthNotice === value && <p role="alert" className="px-2 py-1 text-xs text-destructive">{tooLong(value.trim().length)}</p>}
       {midTurn && (
         <PendingMessages
           queued={midTurn.queued}
           steering={midTurn.steering}
           canPromote={midTurn.canSteer}
+          paused={midTurn.paused}
+          streaming={Boolean(streaming)}
+          stopAndSendDisabled={!hasCertainPending || pendingLength > maxLength}
+          lengthReason={pendingLength > maxLength ? tooLong(pendingLength) : undefined}
+          sendNowReason={headLength > maxLength ? tooLong(headLength) : undefined}
+          onSendNow={midTurn.sendNow}
+          onStopAndSendNow={onStop ? () => midTurn.stopAndSendNow(onStop) : undefined}
           onPromote={midTurn.promote}
           onEdit={(id) => void editPending(id)}
           onRemove={midTurn.remove}

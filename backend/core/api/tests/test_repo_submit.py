@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from ...constants import OPTIMIZATION_TYPE_BLACKBOX
+from ...i18n import t_locale
 from ...models.blackbox import BLACKBOX_MODULE_NAME
 from ..routers import submissions as _sub_mod
+from ..routers import wizard_preflight as _preflight
 from .test_submissions_router import _FakeJobStore, make_client
 
 
@@ -88,6 +91,39 @@ def test_non_repository_target_is_rejected(client_and_store: tuple[Any, _FakeJob
 
     assert resp.status_code == 400
     assert store._jobs == {}
+
+
+def test_novelty_byok_preflight_and_submit_agree(
+    client_and_store: tuple[Any, _FakeJobStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject the same unsupported reflection route at both HTTP boundaries."""
+    client, store = client_and_store
+    view = SimpleNamespace(provider="anthropic", api_base=None, status="verified")
+    vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
+    monkeypatch.setattr(_sub_mod, "ProviderKeyVault", lambda **kwargs: vault)
+    monkeypatch.setattr(_preflight, "enforce_submission_rate", lambda *_: None)
+    client.app.include_router(_preflight.create_wizard_preflight_router(job_store=store))
+    payload = repo_payload(
+        reflection_model_config={"name": "anthropic/claude-sonnet-4", "token_source": "byok"},
+        strategy={"mode": "single", "engine": "shinka_evolve"},
+        shinka={"novelty": True},
+    )
+    setup = client.post(
+        "/wizard/preflight",
+        json={
+            "workflow": "anything",
+            "scope": "execution",
+            "payload": payload,
+            "execution_budget_id": "draft",
+            "execution_budget_revision": 1,
+            "locale": "he",
+        },
+    )
+    submit = client.post("/blackbox/run", json=payload)
+    assert setup.status_code == submit.status_code == 400
+    assert setup.json()["code"] == submit.json()["code"] == "submission.byok_novelty_unsupported"
+    assert setup.json()["detail"] == t_locale("he", "submission.byok_novelty_unsupported")
+    assert not store._jobs
 
 
 def test_scorer_that_does_not_load_is_a_400(
