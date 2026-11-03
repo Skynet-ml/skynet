@@ -9,7 +9,7 @@ export function reactChatCanSteer(announcedKey: string | undefined, requestedKey
 }
 
 /** Keep the reply so far, then show the applied steer as a new user turn. */
-export function appendReactChatSteer(messages: AgentMessage[], text: string): AgentMessage[] {
+export function appendReactChatSteer(messages: AgentMessage[], text: string, message?: AgentMessage): AgentMessage[] {
   if (!text.trim()) return messages;
   const last = messages[messages.length - 1];
   const kept = last?.role === "assistant" && !last.content && !last.toolCalls?.length
@@ -17,7 +17,7 @@ export function appendReactChatSteer(messages: AgentMessage[], text: string): Ag
     : messages;
   return [
     ...kept,
-    { role: "user", content: text, createdAt: Date.now() },
+    message ?? { role: "user", content: text, createdAt: Date.now() },
     { role: "assistant", content: "", toolCalls: [] },
   ];
 }

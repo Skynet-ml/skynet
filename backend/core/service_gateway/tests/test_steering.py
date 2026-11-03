@@ -15,7 +15,7 @@ import dspy
 import pytest
 from sqlalchemy import create_engine
 
-from ...storage.models import AgentSteerMessageModel
+from ...storage.models import AgentSteerMessageModel, AgentSteerTurnModel
 from ..agents import steering as steering_mod
 from ..agents.acting_react import ActingReActV2
 from ..agents.conversation_react import ConversationReAct
@@ -37,6 +37,7 @@ def test_pending_steer_count_and_character_caps(database: bool) -> None:
     if database:
         engine = create_engine("sqlite://")
         AgentSteerMessageModel.__table__.create(engine)
+        AgentSteerTurnModel.__table__.create(engine)
         store.bind_engine(engine)
     for _ in range(10):
         store.post(_OWNER, _KEY, "one")
@@ -102,6 +103,7 @@ def test_withdraw_distinguishes_delivered_and_is_idempotent(database: bool) -> N
     if database:
         engine = create_engine("sqlite://")
         AgentSteerMessageModel.__table__.create(engine)
+        AgentSteerTurnModel.__table__.create(engine)
         store.bind_engine(engine)
     delivered = store.post(_OWNER, _KEY, "read")
     store.take(_OWNER, _KEY)

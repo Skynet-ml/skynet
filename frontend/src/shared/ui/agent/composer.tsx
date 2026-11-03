@@ -160,10 +160,11 @@ export function Composer({
 
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const [attaching, setAttaching] = React.useState(0);
-  const [lengthNotice, setLengthNotice] = React.useState<number | null>(null);
+  const [lengthNotice, setLengthNotice] = React.useState<string | null>(null);
   const maxLength = midTurn?.maxLength ?? 20_000;
-  const pendingLength = [...(midTurn?.steering ?? []), ...(midTurn?.queued ?? [])]
+  const pendingLength = [...(midTurn?.queued ?? [])]
     .filter((item) => !item.uncertain).map((item) => item.text).join("\n\n").length;
+  const hasCertainPending = [...(midTurn?.steering ?? []), ...(midTurn?.queued ?? [])].some((item) => !item.uncertain);
   const headLength = midTurn?.queued.find((item) => !item.uncertain)?.text.length ?? 0;
   const tooLong = (count: number) => msg("agent.pending.too_long", { count, max: maxLength });
   const attachFiles = async (picked: File[]) => {
@@ -224,7 +225,7 @@ export function Composer({
   const sendMidTurn = (mode: "steer" | "queue") => {
     if (!midTurn || disabled || dictating || attaching > 0 || !hasDraft) return;
     if (value.trim().length > maxLength) {
-      setLengthNotice(value.trim().length);
+      setLengthNotice(value);
       return;
     }
     if (acceptsMidTurn && !acceptsMidTurn(value)) return;
@@ -315,7 +316,7 @@ export function Composer({
       onSubmit={handleSubmit}
       className={cn("border-t border-border/40 px-3 py-3 shrink-0", className)}
     >
-      {lengthNotice !== null && <p role="alert" className="px-2 py-1 text-xs text-destructive">{tooLong(lengthNotice)}</p>}
+      {lengthNotice === value && <p role="alert" className="px-2 py-1 text-xs text-destructive">{tooLong(value.trim().length)}</p>}
       {midTurn && (
         <PendingMessages
           queued={midTurn.queued}
@@ -323,7 +324,7 @@ export function Composer({
           canPromote={midTurn.canSteer}
           paused={midTurn.paused}
           streaming={Boolean(streaming)}
-          stopAndSendDisabled={pendingLength === 0 || pendingLength > maxLength}
+          stopAndSendDisabled={!hasCertainPending || pendingLength > maxLength}
           lengthReason={pendingLength > maxLength ? tooLong(pendingLength) : undefined}
           sendNowReason={headLength > maxLength ? tooLong(headLength) : undefined}
           onSendNow={midTurn.sendNow}

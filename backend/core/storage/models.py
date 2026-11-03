@@ -225,6 +225,18 @@ class AgentApprovalModel(Base):
     )
 
 
+class AgentSteerTurnModel(Base):
+    """The input bound announced by one authenticated steering turn."""
+
+    __tablename__ = "agent_steer_turns"
+
+    owner: Mapped[str] = mapped_column(String(255), primary_key=True)
+    steer_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    max_chars: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (Index("ix_agent_steer_turns_created_at", "created_at"),)
+
+
 class AgentSteerMessageModel(Base):
     """A message the user sent into an agent turn that was still running.
 

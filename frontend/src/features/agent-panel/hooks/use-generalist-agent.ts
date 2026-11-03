@@ -473,6 +473,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       rt.turnStart = Math.max(0, (sessionsRef.current.get(key)?.messages.length ?? 1) - 1);
       // Labels can land after `done`, when the next turn may have moved rt on.
       const turnStart = rt.turnStart;
+      let steerAnchor = sessionsRef.current.get(key)?.messages[turnStart - 1];
       // The reply `done` landed on; stats that arrive after it belong there.
       let replyAt: number | null = null;
       let pendingSeq = 0;
@@ -506,7 +507,36 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
 
       const steerKey = newSteerKey();
       const steerQueue = steerQueueFor(key);
-      steerQueue.openTurn(agentSteerChannel(steerKey));
+      const applySteer = ({ ids, text }: { ids: string[]; text: string }) => {
+        if (!steerQueue.applied(ids)) return;
+        if (!text.trim()) return;
+        const message: AgentMessage = { role: "user", content: text, createdAt: Date.now() };
+        const previousAnchor = steerAnchor;
+        steerAnchor = message;
+        if (rt.controller !== controller) {
+          patchMessages(key, (prev) => {
+            const index = previousAnchor ? prev.indexOf(previousAnchor) : -1;
+            if (index < 0) return prev;
+            let end = index + 1;
+            while (end < prev.length && prev[end]?.role !== "user") end++;
+            return [...prev.slice(0, end), message, ...prev.slice(end)];
+          });
+          return;
+        }
+        dropPendingRows();
+        replyBeforeSteer = (replyBeforeSteer ?? "") + rt.replyBuf;
+        rt.replyBuf = "";
+        patchThinking(key, (segments) => closeThinking(segments, Date.now()));
+        patchMessages(key, (prev) => {
+          const last = prev[prev.length - 1];
+          const kept = last && last.role === "assistant" && !last.content &&
+            !last.toolCalls?.length && !last.thinkingSegments?.length && !last.plan
+            ? prev.slice(0, -1) : prev;
+          return [...kept, message,
+            { role: "assistant", content: "", toolCalls: [] }];
+        });
+      };
+      steerQueue.openTurn(agentSteerChannel(steerKey, applySteer));
       // The reply bubble closed by the latest applied steer, which the
       // finished turn's `assistant_message` may repeat.
       let replyBeforeSteer: string | null = null;
@@ -534,34 +564,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             signal: controller.signal,
             onSteerApplied: ({ ids, text }) => {
               if (controller.signal.aborted) return;
-              steerQueue.applied(ids);
-              if (!text.trim()) return;
-              // The bubble this steer closes keeps no row for a call that
-              // never ran; later clears only reach the new bubble.
-              dropPendingRows();
-              replyBeforeSteer = (replyBeforeSteer ?? "") + rt.replyBuf;
-              rt.replyBuf = "";
-              patchThinking(key, (segments) => closeThinking(segments, Date.now()));
-              // The reply so far stays as its own bubble, tool activity and
-              // all; the rest of the turn streams into a new one after the
-              // user's message.
-              patchMessages(key, (prev) => {
-                const last = prev[prev.length - 1];
-                const kept =
-                  last &&
-                  last.role === "assistant" &&
-                  !last.content &&
-                  !last.toolCalls?.length &&
-                  !last.thinkingSegments?.length &&
-                  !last.plan
-                    ? prev.slice(0, -1)
-                    : prev;
-                return [
-                  ...kept,
-                  { role: "user", content: text, createdAt: Date.now() },
-                  { role: "assistant", content: "", toolCalls: [] },
-                ];
-              });
+              applySteer({ ids, text });
             },
             onConversationMeta: (ev) => {
               if (controller.signal.aborted) return;

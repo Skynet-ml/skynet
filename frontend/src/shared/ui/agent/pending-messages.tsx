@@ -96,7 +96,7 @@ function PendingRow({
       </button>
       {item.uncertain ? (
         <TooltipButton tooltip={msg("agent.pending.uncertain_description")} side="top">
-          <span tabIndex={0} className="shrink-0 px-1.5 text-xs text-muted-foreground max-[400px]:max-w-16 max-[400px]:truncate">{msg("agent.pending.uncertain")}</span>
+          <button type="button" className="shrink-0 px-1.5 text-xs text-muted-foreground max-[400px]:max-w-16 max-[400px]:truncate">{msg("agent.pending.uncertain")}</button>
         </TooltipButton>
       ) : steering ? (
         <TooltipButton tooltip={msg("agent.pending.steering")} side="top">
@@ -134,6 +134,7 @@ function PendingRow({
       <button
         type="button"
         onClick={() => onRemove(item.id)}
+        disabled={item.pulling}
         aria-label={removeLabel}
         className={cn(iconButtonClass, "max-[400px]:hidden")}
       >
@@ -141,7 +142,7 @@ function PendingRow({
       </button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <button type="button" aria-label={moreLabel} className={iconButtonClass}>
+          <button type="button" aria-label={moreLabel} disabled={item.pulling} className={iconButtonClass}>
             <DotsThree className="size-4" />
           </button>
         </DropdownMenuTrigger>
@@ -249,7 +250,7 @@ export function PendingMessages({
               {msg("agent.pending.stop_and_send_now")}
             </Button>
           ) : !streaming && (
-            <Button type="button" variant="ghost" size="sm" disabled={Boolean(sendNowReason) || !queued.some((item) => !item.uncertain) && steering.length === 0} title={sendNowReason} className="h-auto max-w-full whitespace-normal py-2 [@media(pointer:coarse)]:min-h-[44px]" onClick={() => onSendNow()}>
+            <Button type="button" variant="ghost" size="sm" disabled={Boolean(sendNowReason) || (!queued.some((item) => !item.uncertain) && steering.length === 0)} title={sendNowReason} className="h-auto max-w-full whitespace-normal py-2 [@media(pointer:coarse)]:min-h-[44px]" onClick={() => onSendNow()}>
               {msg("agent.pending.send_now")}
             </Button>
           )}

@@ -30,8 +30,9 @@ export function newSteerKey(): string {
 }
 
 /** The backend steer mailbox of the turn started with `steerKey`. */
-export function agentSteerChannel(steerKey: string): SteerChannel {
+export function agentSteerChannel(steerKey: string, onApplied?: SteerChannel["onApplied"]): SteerChannel {
   return {
+    onApplied,
     post: (text) => postAgentSteer(steerKey, text),
     withdraw: (ids) => withdrawAgentSteers(steerKey, ids),
   };

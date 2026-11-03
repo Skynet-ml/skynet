@@ -4,7 +4,7 @@ import test from "node:test";
 import { midTurnKeyAction, SteerQueue } from "../../../shared/ui/agent/steer-queue.ts";
 import { discardStaleDocsResponse, docsAskFailure } from "./docs-queue.ts";
 
-const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 test("stopped and superseded docs responses cancel their unread body", async () => {
   for (const reason of ["stopped", "superseded"]) {

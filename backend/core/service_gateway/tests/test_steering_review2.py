@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
-from ...storage.models import AgentSteerMessageModel
+from ...storage.models import AgentSteerMessageModel, AgentSteerTurnModel
 from ..agents.steering import SteerLimitError, SteerStore
 
 
@@ -24,6 +24,7 @@ def store(request: pytest.FixtureRequest) -> SteerStore:
     if request.param:
         engine = create_engine("sqlite://")
         AgentSteerMessageModel.__table__.create(engine)
+        AgentSteerTurnModel.__table__.create(engine)
         result.bind_engine(engine)
     return result
 
@@ -61,6 +62,7 @@ def test_post_purges_only_a_bounded_stale_batch() -> None:
     """Keep a single post from deleting the whole stale table."""
     engine = create_engine("sqlite://")
     AgentSteerMessageModel.__table__.create(engine)
+    AgentSteerTurnModel.__table__.create(engine)
     stale = datetime.now(UTC) - timedelta(days=1)
     with Session(engine) as session:
         session.add_all([

@@ -17,6 +17,40 @@ const docs = "src/features/docs/components/docs-agent-panel.tsx";
 const served = "src/features/optimizations/hooks/use-react-serve-chat.ts";
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
+for (const failure of ["replacement", "network"] as const) {
+  test(`R3 docs ${failure} closes or pauses the right steering channel`, async () => {
+    const store = new SteerQueue();
+    store.openTurn({ post: async () => "old", withdraw: async (ids) => ({ ids, delivered: [] }) });
+    let replacementCanSteer: boolean | undefined;
+    const callback = expression(docs, "ask", {
+      abortRef: { current: new AbortController() }, messagesRef: { current: [] }, locale: "en", MAX_KEPT_MESSAGES: 12,
+      AbortController, askBody, isQuestionTooLong, trimHistory, discardStaleDocsResponse, docsAskFailure,
+      setNotice: () => {}, setStreaming: () => {}, update: () => {}, saveHistory: () => {},
+      getRuntimeEnv: () => ({ apiUrl: "local" }), steerStore: store,
+      labels: { agentError: "error" }, closeThinking, settle: (m: any) => m,
+      dispatchGeneralistEvent, newSteerKey: () => "replacement", agentSteerChannel: () => ({}),
+      fetchWithAuthRetry: async () => {
+        if (failure === "network") throw new Error("offline");
+        replacementCanSteer = store.getSnapshot().canSteer;
+        return new Response("", { status: 200 });
+      },
+      readServerSentEvents: async () => {},
+    });
+    await callback("question");
+    if (failure === "network") assert.equal(store.getSnapshot().paused, true);
+    else assert.equal(replacementCanSteer, false, "old channel must close before replacement fetch");
+  });
+}
+
+test("R3 a completed tagger still accepts a queued correction", () => {
+  const sent: string[] = [];
+  const options = expression("src/features/tagger/components/TaggerInterview.tsx", "useSteerQueue", {
+    busy: false, done: true, onStop: () => {}, onSend: (text: string) => sent.push(text),
+  });
+  assert.equal(options.send("correct this contract"), true);
+  assert.deepEqual(sent, ["correct this contract"]);
+});
+
 for (const ready of ["matching", "wrong", "absent"] as const) {
   test(`docs opens a channel only for a ${ready} safe-boundary announcement`, async () => {
     const store = new SteerQueue();
@@ -253,12 +287,79 @@ test("R2 a missing generalist session preserves queued input", () => {
   assert.equal(send("keep"), false);
 });
 
-test("R2 a completed tagger interview refuses a queued send", () => {
+test("R3 a completed tagger interview can resume for a queued send", () => {
+  let sent = false;
   const options = expression("src/features/tagger/components/TaggerInterview.tsx", "useSteerQueue", {
-    busy: false, done: true, onStop: () => {}, onSend: () => assert.fail("sent after done"),
+    busy: false, done: true, onStop: () => {}, onSend: () => { sent = true; },
   });
-  assert.equal(options.send("keep"), false);
+  assert.equal(options.send("keep"), true);
+  assert.equal(sent, true);
 });
+
+test("R3 served post-steer final output replaces incomplete streamed text", () => {
+  let messages = [{ role: "assistant", content: "Part" }];
+  const callback = expression(served, "onDone", {
+    controller: new AbortController(), setStatus: () => {}, setStatusLabel: () => {},
+    reasoningBufRef: { current: "" }, replyBeforeSteerRef: { current: "before" },
+    removeReplyBeforeSteer: (reply: string, prefix: string) => reply.replace(prefix, ""),
+    msg: () => "No reply", setReasoningEndedAt: () => {},
+    setMessages: (update: (previous: typeof messages) => typeof messages) => { messages = update(messages); },
+  });
+  callback({ assistant_message: "beforeComplete final answer", model: "model" });
+  assert.equal(messages.at(-1)?.content, "Complete final answer");
+});
+
+test("R3 Composer length checks allow steering proof to settle before Stop", () => {
+  const pending = expression("src/shared/ui/agent/composer.tsx", "pendingLength", {
+    midTurn: { steering: [{ text: "x".repeat(2000) }], queued: [{ text: "fits" }] },
+  });
+  assert.equal(pending, 4);
+});
+
+test("R3 a changed draft does not retain the old length alert", () => {
+  const file = "src/shared/ui/agent/composer.tsx";
+  const source = ts.createSourceFile(file, readFileSync(new URL(`../../../../${file}`, import.meta.url), "utf8"),
+    ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let condition = "";
+  const visit = (node: ts.Node) => {
+    if (ts.isJsxExpression(node) && node.expression && ts.isBinaryExpression(node.expression) &&
+      node.expression.left.getText(source).includes("lengthNotice")) condition = node.expression.left.getText(source);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  assert.ok(condition);
+  assert.equal(new Function("lengthNotice", "value", `return ${condition}`)("old rejected draft", "short"), false);
+});
+
+for (const owner of ["generalist", "code", "served"] as const) {
+  test(`R3 ${owner} delivery proof does not alter a replacement turn`, () => {
+    const oldQuestion = { role: "user", content: "old question" };
+    let messages = [oldQuestion, { role: "assistant", content: "old answer" },
+      { role: "user", content: "new question" }, { role: "assistant", content: "new answer" }];
+    const controller = new AbortController();
+    controller.abort();
+    const reply = { current: "new answer" };
+    const before = { current: null };
+    const patch = (update: (previous: typeof messages) => typeof messages) => { messages = update(messages); };
+    const file = owner === "generalist" ? "src/features/agent-panel/hooks/use-generalist-agent.ts" :
+      owner === "code" ? "src/shared/hooks/use-code-agent.ts" : served;
+    const store = { applied: () => true };
+    const callback = expression(file, "applySteer", {
+      controller, rt: { controller: new AbortController(), replyBuf: "new answer" },
+      abortRef: { current: new AbortController() }, steerAnchor: oldQuestion,
+      steerQueue: store, steerStore: store, key: "chat", patchMessages: (_key: string, update: Parameters<typeof patch>[0]) => patch(update),
+      setMessages: patch, dropPendingRows: () => assert.fail("cleared replacement tools"),
+      patchThinking: () => assert.fail("changed replacement thinking"), replyBeforeSteer: null,
+      replyBufRef: reply, replyBeforeSteerRef: before,
+      appendReactChatSteer: (previous: typeof messages, text: string) => [...previous, { role: "user", content: text }],
+    });
+    callback({ ids: ["read"], text: "read in old turn" });
+    assert.deepEqual(messages.map((message) => message.content),
+      ["old question", "old answer", "read in old turn", "new question", "new answer"]);
+    assert.equal(reply.current, "new answer");
+    assert.equal(before.current, null);
+  });
+}
 
 test("R2 served post-steer empty replies keep the no-reply fallback", () => {
   let messages = [{ role: "assistant", content: "" }];

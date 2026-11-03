@@ -6,7 +6,7 @@ import dspy
 import pytest
 
 from ..agents import react_serve
-from ..agents.steering import SteerInbox, deliver_steering
+from ..agents.steering import SteerInbox, SteerInputError, deliver_steering
 from .test_react_serve import test_live_chat_steers_next_step_without_extra_metered_calls as run_live_chat
 
 
@@ -36,6 +36,10 @@ async def test_served_steer_input_never_exceeds_user_message_limit(
     monkeypatch.setattr(react_serve, "attach_steering", capture)
     await run_live_chat(monkeypatch, True)
     program, inbox = attached[0]
+    if messages == ["x" * 2001]:
+        with pytest.raises(SteerInputError):
+            inbox.store.post("alice", "turn", messages[0])
+        return
     posted = [inbox.store.post("alice", "turn", message) for message in messages]
     kwargs: dict[str, Any] = {"history": dspy.History(messages=[])}
     deliver_steering(program.react, kwargs)

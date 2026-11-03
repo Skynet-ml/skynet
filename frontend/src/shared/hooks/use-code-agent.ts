@@ -583,10 +583,11 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
       setReasoningEndedAt(null);
       setError(null);
 
+      let steerAnchor: AgentMessage = { role: "user", content: userMessage, createdAt: Date.now(), ...(hidden ? { hidden } : {}) };
       if (isChat) {
         setMessages((m) => [
           ...m,
-          { role: "user", content: userMessage, createdAt: Date.now(), ...(hidden ? { hidden } : {}) },
+          steerAnchor,
           { role: "assistant", content: "", toolCalls: [] },
         ]);
       } else {
@@ -685,7 +686,32 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
 
       // Chat turns take messages the user sends while they run.
       const steerKey = isChat ? newSteerKey() : null;
-      if (steerKey) steerStore.openTurn(agentSteerChannel(steerKey));
+      const applySteer = ({ ids, text }: { ids: string[]; text: string }) => {
+        if (!steerStore.applied(ids)) return;
+        if (!text.trim()) return;
+        const message: AgentMessage = { role: "user", content: text, createdAt: Date.now() };
+        const previousAnchor = steerAnchor;
+        steerAnchor = message;
+        if (abortRef.current !== controller) {
+          setMessages((prev) => {
+            const index = prev.indexOf(previousAnchor);
+            if (index < 0) return prev;
+            let end = index + 1;
+            while (end < prev.length && prev[end]?.role !== "user") end++;
+            return [...prev.slice(0, end), message, ...prev.slice(end)];
+          });
+          return;
+        }
+        replyBeforeSteer = replyBufRef.current;
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          const kept = last && last.role === "assistant" && !last.content && !last.toolCalls?.length
+            ? prev.slice(0, -1) : prev;
+          return [...kept, message,
+            { role: "assistant", content: "", toolCalls: [] }];
+        });
+      };
+      if (steerKey) steerStore.openTurn(agentSteerChannel(steerKey, applySteer));
       // Reply text streamed before the latest applied steer, which the
       // finished turn's whole-reply `assistant_message` would repeat.
       let replyBeforeSteer: string | null = null;
@@ -737,23 +763,7 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
             signal: controller.signal,
             onSteerApplied: ({ ids, text }) => {
               if (controller.signal.aborted) return;
-              steerStore.applied(ids);
-              if (!text.trim()) return;
-              replyBeforeSteer = replyBufRef.current;
-              // The reply so far stays as its own bubble; the rest of the turn
-              // streams into a new one after the user's message.
-              setMessages((prev) => {
-                const last = prev[prev.length - 1];
-                const kept =
-                  last && last.role === "assistant" && !last.content && !last.toolCalls?.length
-                    ? prev.slice(0, -1)
-                    : prev;
-                return [
-                  ...kept,
-                  { role: "user", content: text, createdAt: Date.now() },
-                  { role: "assistant", content: "", toolCalls: [] },
-                ];
-              });
+              applySteer({ ids, text });
             },
             onReasoningPatch: (chunk, source) => {
               if (reasoningBufRef.current === "") {

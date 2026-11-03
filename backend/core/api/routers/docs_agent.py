@@ -51,7 +51,7 @@ from ...service_gateway.agents.docs_retrieval import DocsCorpus
 from ...service_gateway.agents.docs_tools import SEARCH_DOCS_TOOL, search_corpus
 from ...service_gateway.agents.generalist import build_hosted_suggest_lm
 from ...service_gateway.agents.next_prompt import suggest_next_prompt
-from ...service_gateway.agents.steering import STEER_KEY_MAX_CHARS, SteerInbox, get_steer_store
+from ...service_gateway.agents.steering import STEER_APPLIED_EVENT, STEER_KEY_MAX_CHARS, SteerInbox, get_steer_store
 from ...service_gateway.language_models import (
     apply_model_reasoning_config,
     build_language_model,
@@ -142,7 +142,12 @@ class DocsAgentAskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
     history: list[DocsAgentTurn] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS)
     locale: str = Field(default="en", max_length=16, pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$")
-    steer_key: str | None = Field(default=None, min_length=1, max_length=STEER_KEY_MAX_CHARS)
+    steer_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=STEER_KEY_MAX_CHARS,
+        description="The authenticated caller's running steering turn key.",
+    )
 
 
 class DocsAgentSuggestRequest(BaseModel):
@@ -491,10 +496,14 @@ def _run_answer(
                 except Exception:
                     logger.exception("Failed to read steer messages for a docs turn")
                     taken = []
+                if stop.is_set():
+                    if taken:
+                        inbox.store.return_unread(inbox.owner, inbox.steer_key, taken)
+                    return ""
                 if taken:
                     text = "\n\n".join(text for _, text in taken)
                     messages = [*messages, {"role": "user", "content": f"<question>\n{_escape(text)}\n</question>"}]
-                    inbox.emit({"event": "steer_applied", "data": {"ids": [mid for mid, _ in taken], "text": text}})
+                    inbox.emit({"event": STEER_APPLIED_EVENT, "data": {"ids": [mid for mid, _ in taken], "text": text}})
             offer = step < MAX_STEPS - 1 and searches < MAX_SEARCHES
             kwargs: dict[str, Any] = {"messages": messages, "max_tokens": MAX_OUTPUT_TOKENS}
             if offer:
@@ -585,6 +594,7 @@ def create_docs_agent_router(
 
         Returns:
             A ``text/event-stream`` of ``tool_start``/``tool_end`` per search,
+            ``steer_ready`` for a registered signed-in turn and ``steer_applied`` for consumed text,
             ``reasoning_patch`` per thinking step, ``message_patch`` answer
             chunks and ``done``. A model failure sends one ``error`` event.
 

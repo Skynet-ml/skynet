@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from starlette.responses import StreamingResponse
@@ -52,6 +52,7 @@ from ...service_gateway.agents.steering import (
     STEER_APPLIED_EVENT,
     STEER_KEY_MAX_CHARS,
     STEER_TEXT_MAX_CHARS,
+    SteerInputError,
     SteerLimitError,
     get_steer_store,
 )
@@ -249,7 +250,7 @@ class SteerWithdrawResponse(BaseModel):
     """Messages returned to the client, oldest first."""
 
     ids: list[str]
-    delivered: list[str] = Field(description="Ids already read by the agent, oldest first.")
+    delivered: list[str] = Field(default_factory=list, description="Ids already read by the agent, oldest first.")
 
 
 class NextPromptTurn(BaseModel):
@@ -988,9 +989,15 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
 
         Returns:
             The stored message's id.
+
+        Raises:
+            HTTPException: Text cannot fit the turn (422).
+            DomainError: The pending allowance is full (429).
         """
         try:
             message_id = get_steer_store().post(current_user.username, req.steer_key, req.text)
+        except SteerInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except SteerLimitError as exc:
             raise DomainError("agent.steer_pending_full", status=429) from exc
         return SteerMessageResponse(id=message_id)

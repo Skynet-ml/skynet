@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { beforeEach, type MockTimers } from "node:test";
 
 import { SteerQueue, type SteerChannel } from "./steer-queue.ts";
 
-const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+let timers: MockTimers;
+beforeEach((context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  timers = context.mock.timers;
+});
+const flush = async () => {
+  for (let index = 0; index < 5; index++) {
+    timers.tick(100);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+};
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
@@ -28,7 +38,7 @@ test("R2 wrapped network failures retry withdrawal", async () => {
   await flush();
   queue.pause();
   queue.setBusy(false);
-  await new Promise((resolve) => setTimeout(resolve, 180));
+  await flush();
   assert.equal(attempts, 3);
   assert.equal(queue.getSnapshot().queued[0]?.uncertain, false);
 });
@@ -60,14 +70,13 @@ test("R2 a started send reserves the busy gap before the owner effect", async ()
   assert.deepEqual(sent, ["one", "two"]);
 });
 
-test("R2 delivered but unannounced text survives a non-Stop turn end", async () => {
+test("R3 delivered but unannounced text cannot be resent after a non-Stop turn end", async () => {
   const { queue, sent } = setup({ post: async () => "read", withdraw: async () => ({ ids: [], delivered: ["read"] }) });
   queue.steer("keep me");
   await flush();
   queue.setBusy(false);
   await flush();
-  assert.equal(queue.getSnapshot().queued[0]?.text, "keep me");
-  assert.equal(queue.getSnapshot().queued[0]?.uncertain, true);
+  assert.equal(queue.hasPending(), false);
   assert.deepEqual(sent, []);
 });
 

@@ -184,6 +184,8 @@ export function DocsAgentPanel({
       }
       const before = earlier ?? messagesRef.current;
       abortRef.current?.abort();
+      steerStore.setBusy(false);
+      steerStore.setBusy(true);
       const controller = new AbortController();
       abortRef.current = controller;
       const steerKey = newSteerKey();
@@ -212,8 +214,18 @@ export function DocsAgentPanel({
       // The same events, and the same thinking and tool rows, as the generalist agent.
       const handlers: GeneralistAgentHandlers = {
         onSteerApplied: ({ ids, text }) => {
-          steerStore.applied(ids);
+          if (!steerStore.applied(ids)) return;
           if (!text.trim()) return;
+          if (abortRef.current !== controller) {
+            const anchor = [...base].reverse().find((message) => message.role === "user");
+            const current = messagesRef.current;
+            const index = anchor ? current.indexOf(anchor) : -1;
+            if (index >= 0) {
+              const end = current[index + 1]?.role === "assistant" ? index + 2 : index + 1;
+              update([...current.slice(0, end), { role: "user", content: text, createdAt: Date.now() }, ...current.slice(end)]);
+            }
+            return;
+          }
           base = [...base, settle(turn), { role: "user", content: text, createdAt: Date.now() }];
           show({ role: "assistant", content: "", toolCalls: [], thinkingSegments: [] });
         },
@@ -276,7 +288,10 @@ export function DocsAgentPanel({
           await readServerSentEvents(res.body, (event) => {
             if (controller.signal.aborted || abortRef.current !== controller) return;
             if (event.event === "steer_ready" && event.data.steer_key === steerKey) {
-              steerStore.openTurn(agentSteerChannel(steerKey));
+              steerStore.openTurn(agentSteerChannel(steerKey, (event) => {
+                handlers.onSteerApplied?.(event);
+                saveHistory(messagesRef.current);
+              }));
               return;
             }
             dispatchGeneralistEvent(handlers, event.event, event.data, () => labels.agentError);
@@ -288,6 +303,7 @@ export function DocsAgentPanel({
         failed = "error";
       }
       if (abortRef.current !== controller) return;
+      if (failed && failed !== "tooLong") steerStore.pause();
       setStreaming(false);
       // A question refused while this answer streamed keeps its "too long" notice.
       setNotice((prev) => failed ?? (prev === "tooLong" ? prev : null));

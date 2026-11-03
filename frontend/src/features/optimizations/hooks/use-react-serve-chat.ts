@@ -143,6 +143,27 @@ export function useReactServeChat(
       const steerKey = newSteerKey();
       const controller = new AbortController();
       abortRef.current = controller;
+      let steerAnchor: AgentMessage = { role: "user", content: userMessage, createdAt: Date.now() };
+      const applySteer = ({ ids, text }: { ids: string[]; text: string }) => {
+        if (!steerStore.applied(ids)) return;
+        if (!text.trim()) return;
+        const message: AgentMessage = { role: "user", content: text, createdAt: Date.now() };
+        const previousAnchor = steerAnchor;
+        steerAnchor = message;
+        if (abortRef.current !== controller) {
+          setMessages((prev) => {
+            const index = prev.indexOf(previousAnchor);
+            if (index < 0) return prev;
+            let end = index + 1;
+            while (end < prev.length && prev[end]?.role !== "user") end++;
+            return [...prev.slice(0, end), message, ...prev.slice(end)];
+          });
+          return;
+        }
+        replyBeforeSteerRef.current = (replyBeforeSteerRef.current ?? "") + replyBufRef.current;
+        replyBufRef.current = "";
+        setMessages((prev) => appendReactChatSteer(prev, text, message));
+      };
 
       reasoningBufRef.current = "";
       replyBufRef.current = "";
@@ -158,7 +179,7 @@ export function useReactServeChat(
 
       setMessages((m) => [
         ...m,
-        { role: "user", content: userMessage, createdAt: Date.now() },
+        steerAnchor,
         { role: "assistant", content: "", toolCalls: [] },
       ]);
 
@@ -179,15 +200,11 @@ export function useReactServeChat(
           signal: controller.signal,
           onSteerReady: (key) => {
             if (controller.signal.aborted || !reactChatCanSteer(key, steerKey)) return;
-            steerStore.openTurn(agentSteerChannel(steerKey));
+            steerStore.openTurn(agentSteerChannel(steerKey, applySteer));
           },
           onSteerApplied: ({ ids, text }) => {
             if (controller.signal.aborted) return;
-            steerStore.applied(ids);
-            if (!text.trim()) return;
-            replyBeforeSteerRef.current = (replyBeforeSteerRef.current ?? "") + replyBufRef.current;
-            replyBufRef.current = "";
-            setMessages((prev) => appendReactChatSteer(prev, text));
+            applySteer({ ids, text });
           },
           onReasoningPatch: (chunk) => {
             if (controller.signal.aborted) return;
@@ -252,7 +269,7 @@ export function useReactServeChat(
               if (!last || last.role !== "assistant") return prev;
               let reply = result.assistant_message;
               if (replyBeforeSteerRef.current !== null) {
-                reply = last.content || removeReplyBeforeSteer(reply, replyBeforeSteerRef.current);
+                reply = removeReplyBeforeSteer(reply, replyBeforeSteerRef.current);
               }
               const fallback =
                 last.content ||
