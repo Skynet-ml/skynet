@@ -21,6 +21,7 @@ class MetricLLMScan:
     uses_llm: bool = False
     names: set[str] = field(default_factory=set)
     non_literal: bool = False
+    omitted: bool = False
 
 
 def scan_metric_llm(code: str) -> MetricLLMScan:
@@ -30,10 +31,29 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
         tree = ast.parse(code)
     except (SyntaxError, ValueError):
         return result
-    bindings: set[str] = set()
-    imported: set[str] = set()
-    modules: set[str] = set()
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    scopes = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+    bindings_by_scope: dict[ast.AST, set[str]] = {}
+    imported_by_scope: dict[ast.AST, set[str]] = {}
+    modules_by_scope: dict[ast.AST, set[str]] = {}
+    globals_by_scope: dict[ast.AST, set[str]] = {}
+
+    def scope_of(node: ast.AST) -> ast.AST:
+        """Return the lexical scope containing a node."""
+        parent = parents.get(node)
+        while parent is not None and not isinstance(parent, scopes):
+            parent = parents.get(parent)
+        return parent or tree
+
     for node in ast.walk(tree):
+        if isinstance(node, ast.Global):
+            globals_by_scope.setdefault(scope_of(node), set()).update(node.names)
+
+    for node in ast.walk(tree):
+        scope = scope_of(node)
+        bindings = bindings_by_scope.setdefault(scope, set())
+        imported = imported_by_scope.setdefault(scope, set())
+        modules = modules_by_scope.setdefault(scope, set())
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             bindings.add(node.id)
         elif isinstance(node, ast.arg):
@@ -59,8 +79,14 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
             if isinstance(node, ast.Import):
                 modules.update(alias.asname or alias.name for alias in node.names if alias.name == "skynet")
 
+    for scope, names in globals_by_scope.items():
+        for mapping in (bindings_by_scope, imported_by_scope, modules_by_scope):
+            moved = mapping.get(scope, set()) & names
+            mapping.setdefault(tree, set()).update(moved)
+            mapping.setdefault(scope, set()).difference_update(moved)
     injected_rebound = any(
         isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr, ast.AugAssign))
+        and (scope_of(node) is tree or "llm" in globals_by_scope.get(scope_of(node), set()))
         and any(
             isinstance(child, ast.Name) and child.id == "llm" and isinstance(child.ctx, ast.Store)
             for child in ast.walk(node)
@@ -72,24 +98,51 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
         )
         for node in ast.walk(tree)
     )
-    aliases = set(imported)
-    if "llm" not in bindings or injected_rebound:
-        aliases.add("llm")
-    if imported & bindings or injected_rebound:
+    if (
+        any(imported_by_scope.get(scope, set()) & names for scope, names in bindings_by_scope.items())
+        or injected_rebound
+    ):
         result.uses_llm = True
         result.non_literal = True
 
+    def resolves(node: ast.AST, name: str, *, module: bool = False) -> bool:
+        """Resolve a helper or module binding through enclosing scopes."""
+        scope = scope_of(node)
+        while True:
+            if name in globals_by_scope.get(scope, set()):
+                scope = tree
+            found = modules_by_scope.get(scope, set()) if module else imported_by_scope.get(scope, set())
+            if name in found:
+                return True
+            if name in bindings_by_scope.get(scope, set()):
+                return False
+            if scope is tree:
+                return not module and name == "llm"
+            scope = scope_of(scope)
+
     def is_helper(node: ast.AST) -> bool:
         """Recognize injected or imported helper names and module attributes."""
-        return (isinstance(node, ast.Name) and node.id in aliases and isinstance(node.ctx, ast.Load)) or (
+        return (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and resolves(node, node.id)) or (
             isinstance(node, ast.Attribute)
             and node.attr == "llm"
             and isinstance(node.value, ast.Name)
-            and node.value.id in modules
+            and resolves(node.value, node.value.id, module=True)
         )
 
-    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
     for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and resolves(node, node.id, module=True):
+            parent = parents.get(node)
+            if not isinstance(parent, ast.Attribute) or parent.value is not node:
+                result.uses_llm = result.non_literal = True
+        if (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and node.slice.value == "llm") or (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) > 1
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "llm"
+        ):
+            result.uses_llm = result.non_literal = True
         if is_helper(node):
             result.uses_llm = True
             parent = parents.get(node)
@@ -99,11 +152,13 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
             continue
         if not is_helper(node.func):
             continue
+        result.omitted |= not any(keyword.arg == "model" for keyword in node.keywords)
         for keyword in node.keywords:
             if keyword.arg is None:
                 result.non_literal = True
             elif keyword.arg == "model":
                 if isinstance(keyword.value, ast.Constant) and keyword.value.value is None:
+                    result.omitted = True
                     continue
                 if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
                     result.names.add(keyword.value.value)
@@ -116,7 +171,8 @@ def resolve_metric_model(models: UnifiedModels, metric_code: str) -> str | None:
     """Derive the metric model, returning a message key for an unsafe declaration."""
     scan = scan_metric_llm(metric_code)
     models.metric_model = None
-    if scan.non_literal or len(scan.names) > 1:
+    names = scan.names | ({models.reflection_model.name} if scan.omitted else set())
+    if scan.non_literal or len(names) > 1:
         return "contract.metric_model_declaration"
     if not scan.uses_llm:
         return None

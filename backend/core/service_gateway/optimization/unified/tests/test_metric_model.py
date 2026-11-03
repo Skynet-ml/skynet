@@ -27,6 +27,78 @@ def test_injected_llm_uses_reflection_on_worker() -> None:
     assert scan_metric_llm(code).uses_llm
 
 
+@pytest.mark.parametrize("prefix", ["", "from skynet import llm\n"])
+def test_scoped_shadow_does_not_hide_global_helper(prefix: str) -> None:
+    """Keep parameter bindings local to their function."""
+    scan = scan_metric_llm(prefix + "def helper(llm): return llm\ndef score(): return llm('x', model='openai/a')")
+    assert (scan.uses_llm, scan.names, scan.non_literal) == (True, {"openai/a"}, False)
+
+
+@pytest.mark.parametrize(
+    "local", ["def helper():\n llm = other\n return llm('local')", "helper = lambda llm: llm('local')"]
+)
+def test_local_shadow_does_not_hide_global_helper(local: str) -> None:
+    """Ignore local calls while scanning a global helper in another scope."""
+    scan = scan_metric_llm(local + "\ndef score(): return llm('x', model='openai/a')")
+    assert (scan.uses_llm, scan.names, scan.non_literal) == (True, {"openai/a"}, False)
+
+
+def test_positional_model_name_is_not_keyword() -> None:
+    """Ignore positional arguments named model."""
+    scan = scan_metric_llm("llm(model, model='anthropic/expensive')")
+    assert (scan.names, scan.non_literal) == ({"anthropic/expensive"}, False)
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "import skynet\nf(skynet=1)\nllm(model='a')",
+        "from skynet import llm\ndef f():\n global llm\n return llm(model='a')",
+    ],
+)
+def test_keyword_and_global_declaration_are_not_value_uses(code: str) -> None:
+    """Ignore keyword names and global declarations."""
+    scan = scan_metric_llm(code)
+    assert (scan.uses_llm, scan.names, scan.non_literal) == (True, {"a"}, False)
+
+
+def test_global_helper_rebinding_is_ambiguous() -> None:
+    """Reject rebinding a module helper through a global declaration."""
+    scan = scan_metric_llm("from skynet import llm\ndef f():\n global llm\n llm = partial(llm)\nllm(model='a')")
+    assert scan.uses_llm
+    assert scan.non_literal
+
+
+@pytest.mark.parametrize("suffix", ["llm('again')", "llm('again', model=None)"])
+def test_omitted_and_distinct_model_are_ambiguous(suffix: str) -> None:
+    """Count the reflection model for omitted calls."""
+    code = "llm('judge', model='anthropic/a')\n" + suffix
+    scan = scan_metric_llm(code)
+    assert scan.omitted
+    models = UnifiedModels.model_validate({"reflection_model": {"name": "openai/r"}})
+    assert resolve_metric_model(models, code) == "contract.metric_model_declaration"
+    models.reflection_model.name = "anthropic/a"
+    assert resolve_metric_model(models, code) is None
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "getattr(skynet, 'llm')",
+        "getattr(x, 'llm')",
+        "globals()['llm']",
+        "vars(skynet)['llm']",
+        "skynet.__dict__['llm']",
+        "skynet",
+    ],
+)
+def test_dynamic_helper_access_is_ambiguous(expr: str) -> None:
+    """Reject dynamic access that can hide a helper call."""
+    scan = scan_metric_llm("import skynet\nx = " + expr)
+    assert scan.uses_llm
+    assert scan.non_literal
+
+
 def test_llm_keyword_name_is_not_helper_use() -> None:
     """Ignore an unrelated keyword named llm."""
     scan = scan_metric_llm(
@@ -331,8 +403,9 @@ def test_none_model_uses_reflection_and_does_not_conflict() -> None:
     models = UnifiedModels.model_validate({"reflection_model": {"name": "r"}})
     assert resolve_metric_model(models, "from skynet import llm\nllm(model=None)") is None
     assert models.metric_model == models.reflection_model
-    assert resolve_metric_model(models, "from skynet import llm\nllm(model=None); llm(model='a')") is None
-    assert models.metric_model.name == "a"
+    assert resolve_metric_model(models, "from skynet import llm\nllm(model=None); llm(model='a')") == (
+        "contract.metric_model_declaration"
+    )
 
 
 @pytest.mark.parametrize("provider", sorted(_PROVIDER_PROBES))

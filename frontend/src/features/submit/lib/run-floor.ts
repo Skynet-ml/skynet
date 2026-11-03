@@ -62,7 +62,10 @@ export function runFloor({ boxHoldCents, callHoldCents, tokenSource }: RunFloorI
 }
 
 /** Read literal declarations from helper calls without executing Python. */
-export function scanMetricModel(code: string): { uses: boolean; name: string | null } {
+export function scanMetricModel(
+  code: string,
+  reflectionName?: string,
+): { uses: boolean; name: string | null } {
   const tree = python().language.parser.parse(code);
   const literal = (node: typeof tree.topNode): string | null => {
     if (node.name === "ParenthesizedExpression") {
@@ -109,13 +112,51 @@ export function scanMetricModel(code: string): { uses: boolean; name: string | n
       return null;
     }
   };
-  const aliases = new Set<string>();
-  const bindings = new Set<string>();
-  const modules = new Set<string>();
+  type Node = typeof tree.topNode;
+  const scopeKey = (node: Node): string => {
+    let parent = node.parent;
+    if (
+      parent?.name === "FunctionDefinition" &&
+      parent.getChild("VariableName")?.from === node.from
+    )
+      parent = parent.parent;
+    while (
+      parent &&
+      !["FunctionDefinition", "LambdaExpression", "ClassDefinition", "Script"].includes(parent.name)
+    )
+      parent = parent.parent;
+    return parent ? `${parent.from}:${parent.to}` : "root";
+  };
+  const root = `${tree.topNode.from}:${tree.topNode.to}`;
+  const bindingsByScope = new Map<string, Set<string>>();
+  const aliasesByScope = new Map<string, Set<string>>();
+  const modulesByScope = new Map<string, Set<string>>();
+  const globalsByScope = new Map<string, Set<string>>();
+  const bucket = (map: Map<string, Set<string>>, key: string): Set<string> => {
+    let value = map.get(key);
+    if (!value) {
+      value = new Set();
+      map.set(key, value);
+    }
+    return value;
+  };
   let imported = false;
   let injectedRebound = false;
   tree.iterate({
     enter(node) {
+      if (node.name !== "ScopeStatement" || node.node.firstChild?.name !== "global") return;
+      for (let child: Node | null = node.node.firstChild; child; child = child.nextSibling) {
+        if (child.name === "VariableName")
+          bucket(globalsByScope, scopeKey(node.node)).add(code.slice(child.from, child.to));
+      }
+    },
+  });
+  tree.iterate({
+    enter(node) {
+      const scope = scopeKey(node.node);
+      const bindings = bucket(bindingsByScope, scope);
+      const aliases = bucket(aliasesByScope, scope);
+      const modules = bucket(modulesByScope, scope);
       if (node.name === "VariableName") {
         const name = code.slice(node.from, node.to);
         const current = node.node;
@@ -169,7 +210,7 @@ export function scanMetricModel(code: string): { uses: boolean; name: string | n
             bindings.add(name);
           }
         }
-        if (name === "llm") {
+        if (name === "llm" && (scope === root || globalsByScope.get(scope)?.has("llm"))) {
           let assignment = parent;
           while (assignment && assignment.name !== "AssignStatement")
             assignment = assignment.parent;
@@ -213,34 +254,88 @@ export function scanMetricModel(code: string): { uses: boolean; name: string | n
       }
     },
   });
-  const rebound = [...aliases].some((name) => bindings.has(name)) || injectedRebound;
-  if (!bindings.has("llm") || injectedRebound) aliases.add("llm");
+  for (const [scope, names] of globalsByScope) {
+    for (const map of [bindingsByScope, aliasesByScope, modulesByScope]) {
+      for (const name of names) {
+        if (map.get(scope)?.delete(name)) bucket(map, root).add(name);
+      }
+    }
+  }
+  const rebound =
+    [...aliasesByScope].some(([scope, aliases]) =>
+      [...aliases].some((name) => bindingsByScope.get(scope)?.has(name)),
+    ) || injectedRebound;
+  const resolves = (node: Node, name: string, module = false): boolean => {
+    let current: Node | null = node;
+    while (current) {
+      let key = scopeKey(current);
+      if (globalsByScope.get(key)?.has(name)) key = root;
+      if ((module ? modulesByScope : aliasesByScope).get(key)?.has(name)) return true;
+      if (bindingsByScope.get(key)?.has(name)) return false;
+      if (key === root) return !module && name === "llm";
+      let parent: Node | null = current.parent;
+      while (
+        parent &&
+        !["FunctionDefinition", "LambdaExpression", "ClassDefinition"].includes(parent.name)
+      )
+        parent = parent.parent;
+      current = parent;
+    }
+    return false;
+  };
   const isHelper = (node: typeof tree.topNode): boolean => {
     if (node.name === "ParenthesizedExpression") {
       const child = node.firstChild?.nextSibling;
       return !!child && isHelper(child);
     }
-    if (node.name === "VariableName") return aliases.has(code.slice(node.from, node.to));
+    if (node.name === "VariableName") return resolves(node, code.slice(node.from, node.to));
     if (node.name !== "MemberExpression") return false;
     const target = node.firstChild;
     const property = node.lastChild;
     return (
       !!target &&
       target.name === "VariableName" &&
-      modules.has(code.slice(target.from, target.to)) &&
+      resolves(target, code.slice(target.from, target.to), true) &&
       !!property &&
       code.slice(property.from, property.to) === "llm"
     );
   };
   const names = new Set<string>();
+  let omitted = false;
   let unsafe = rebound;
   let uses = imported || rebound;
   tree.iterate({
     enter(node) {
       const current = node.node;
+      if (node.name === "VariableName" && resolves(current, code.slice(node.from, node.to), true)) {
+        const parent = current.parent;
+        let ancestor = parent;
+        while (ancestor && ancestor.name !== "ImportStatement") ancestor = ancestor.parent;
+        if (
+          !ancestor &&
+          !(parent?.name === "ArgList" && current.nextSibling?.name === "AssignOp") &&
+          parent?.name !== "ScopeStatement" &&
+          !(
+            parent?.name === "MemberExpression" &&
+            parent.firstChild?.from === current.from &&
+            parent.getChild(".")
+          )
+        ) {
+          uses = true;
+          unsafe = true;
+        }
+      }
+      if (
+        node.name === "MemberExpression" &&
+        literal(current.getChild("[")?.nextSibling ?? current) === "llm"
+      ) {
+        uses = true;
+        unsafe = true;
+      }
       if (
         node.name !== "ParenthesizedExpression" &&
         isHelper(current) &&
+        current.parent?.name !== "ScopeStatement" &&
         !(current.parent?.name === "ArgList" && current.nextSibling?.name === "AssignOp")
       ) {
         let parent = current.parent;
@@ -265,14 +360,24 @@ export function scanMetricModel(code: string): { uses: boolean; name: string | n
       if (node.name !== "CallExpression") return;
       const func = node.node.firstChild;
       if (!func) return;
-      if (!isHelper(func)) return;
       const args = node.node.getChild("ArgList");
+      if (func.name === "VariableName" && code.slice(func.from, func.to) === "getattr") {
+        const second = args?.getChild(",")?.nextSibling;
+        if (second && literal(second) === "llm") {
+          uses = true;
+          unsafe = true;
+        }
+      }
+      if (!isHelper(func)) return;
+      let hasModel = false;
       for (let arg = args?.firstChild; arg; arg = arg.nextSibling) {
         if (code.slice(arg.from, arg.to) === "**") unsafe = true;
         if (arg.name !== "VariableName" || code.slice(arg.from, arg.to) !== "model") continue;
         const equals = arg.nextSibling;
         const value = equals?.nextSibling;
-        if (equals?.name !== "AssignOp" || !value) {
+        if (equals?.name !== "AssignOp") continue;
+        hasModel = true;
+        if (!value) {
           unsafe = true;
           continue;
         }
@@ -280,18 +385,23 @@ export function scanMetricModel(code: string): { uses: boolean; name: string | n
         while (unwrapped.name === "ParenthesizedExpression" && unwrapped.firstChild?.nextSibling) {
           unwrapped = unwrapped.firstChild.nextSibling;
         }
-        if (unwrapped.name === "None") continue;
+        if (unwrapped.name === "None") {
+          omitted = true;
+          continue;
+        }
         const name = literal(value);
         if (name === null) unsafe = true;
         else names.add(name);
       }
+      if (!hasModel) omitted = true;
     },
   });
-  return { uses, name: !unsafe && names.size === 1 ? ([...names][0] ?? null) : null };
+  const name = names.size === 1 ? ([...names][0] ?? null) : null;
+  return { uses, name: !unsafe && name && (!omitted || name === reflectionName) ? name : null };
 }
 
-export function declaredMetricModel(code: string): string | null {
-  return scanMetricModel(code).name;
+export function declaredMetricModel(code: string, reflectionName?: string): string | null {
+  return scanMetricModel(code, reflectionName).name;
 }
 
 /** The limit a budget starts at: the default, or the floor when that is higher. */
@@ -337,7 +447,9 @@ export function runModels(
   metricCallsModel: boolean,
   metricCode = "",
 ): ModelConfig[] {
-  const name = metricCallsModel ? declaredMetricModel(metricCode) : null;
+  const name = metricCallsModel
+    ? declaredMetricModel(metricCode, optimizer.reflectionModel?.name)
+    : null;
   const extraReflectionModels =
     optimizer.choice === "shinka_evolve" ? optimizer.extraReflectionModels : [];
   const matchingRole = [

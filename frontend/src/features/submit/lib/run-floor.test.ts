@@ -25,6 +25,78 @@ const {
   startingLimitCents,
 } = await import("./run-floor.ts");
 
+test("function shadow bindings stay local", () => {
+  for (const prefix of ["", "from skynet import llm\n"]) {
+    const code =
+      prefix + "def helper(llm): return llm\ndef score(): return llm('x', model='openai/a')";
+    assert.deepEqual(scanMetricModel(code), { uses: true, name: "openai/a" });
+  }
+  for (const local of [
+    "def helper():\n llm = other\n return llm('local')",
+    "helper = lambda llm: llm('local')",
+  ]) {
+    assert.deepEqual(scanMetricModel(local + "\ndef score(): return llm('x', model='openai/a')"), {
+      uses: true,
+      name: "openai/a",
+    });
+  }
+});
+
+test("positional model variable does not hide the keyword", () => {
+  assert.deepEqual(scanMetricModel("llm(model, model='anthropic/expensive')"), {
+    uses: true,
+    name: "anthropic/expensive",
+  });
+});
+
+test("module keyword names and global declarations are not value uses", () => {
+  for (const code of [
+    "import skynet\nf(skynet=1)\nllm(model='a')",
+    "from skynet import llm\ndef f():\n global llm\n return llm(model='a')",
+  ]) {
+    assert.deepEqual(scanMetricModel(code), { uses: true, name: "a" });
+  }
+});
+
+test("global helper rebinding is unsafe", () => {
+  const code = "from skynet import llm\ndef f():\n global llm\n llm = partial(llm)\nllm(model='a')";
+  assert.deepEqual(scanMetricModel(code), { uses: true, name: null });
+});
+
+test("omitted model conflicts with a distinct declared model", () => {
+  const optimizer = {
+    choice: "gepa" as const,
+    taskModel: null,
+    reflectionModel: { name: "openai/r" },
+    extraReflectionModels: [],
+  };
+  for (const suffix of ["llm('again')", "llm('again', model=None)"]) {
+    const code = "llm('judge', model='anthropic/a')\n" + suffix;
+    assert.equal(runModels(optimizer, true, code).at(-1)?.name, "openai/r");
+    assert.equal(
+      runModels({ ...optimizer, reflectionModel: { name: "anthropic/a" } }, true, code).at(-1)
+        ?.name,
+      "anthropic/a",
+    );
+  }
+});
+
+test("dynamic helper access is unsafe", () => {
+  for (const expr of [
+    "getattr(skynet, 'llm')",
+    "getattr(x, 'llm')",
+    "globals()['llm']",
+    "vars(skynet)['llm']",
+    "skynet.__dict__['llm']",
+    "skynet",
+  ]) {
+    assert.deepEqual(scanMetricModel("import skynet\nx = " + expr + "\nllm(model='a')"), {
+      uses: true,
+      name: null,
+    });
+  }
+});
+
 test("keyword names do not hide metric declarations", () => {
   const code =
     "from skynet import llm\ndef score(c):\n f(llm=1)\n return llm('x', model='openai/gpt-4.1-mini')";
@@ -246,7 +318,7 @@ test("metric model parsing ignores comments and reads aliases", () => {
   );
 });
 
-test("unsafe helper values fall back and None does not hide a safe declaration", () => {
+test("unsafe helper values and mixed None declarations fall back", () => {
   const optimizer = {
     choice: "gepa" as const,
     taskModel: null,
@@ -275,7 +347,7 @@ test("unsafe helper values fall back and None does not hide a safe declaration",
       true,
       "from skynet import llm\nllm(model=None); llm(model='openai/declared')",
     ).at(-1)?.name,
-    "openai/declared",
+    "openai/reflection",
   );
   assert.equal(
     runModels(
@@ -283,7 +355,7 @@ test("unsafe helper values fall back and None does not hide a safe declaration",
       true,
       "from skynet import llm\nllm(model=(None)); llm(model='openai/declared')",
     ).at(-1)?.name,
-    "openai/declared",
+    "openai/reflection",
   );
 });
 
