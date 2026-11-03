@@ -1158,7 +1158,7 @@
   "billing.popover.unavailable": "ウォレットを読み込めませんでした。請求設定を開いて再試行してください。",
   "billing.portal.error": "請求管理を開けませんでした。もう一度お試しください。",
   "billing.pro.title": "{term.appName} Pro",
-  "billing.pro.pitch": "ストレージ10GB、保存ジョブ1,000件、同時実行20件。利用料は引き続き残高から差し引かれます。",
+  "billing.pro.pitch": "ストレージ20GB、保存ジョブ1,000件、同時実行20件。利用料は引き続き残高から差し引かれます。",
   "billing.pro.upgrade": "アップグレード · 月額{p1}",
   "billing.pro.manage": "管理",
   "billing.pro.current": "有効",

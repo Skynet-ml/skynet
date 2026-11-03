@@ -1158,7 +1158,7 @@
   "billing.popover.unavailable": "Impossibile caricare il tuo wallet. Apri le impostazioni di fatturazione per riprovare.",
   "billing.portal.error": "Impossibile aprire la gestione della fatturazione. Riprova.",
   "billing.pro.title": "{term.appName} Pro",
-  "billing.pro.pitch": "10 GB di spazio, 1.000 job salvati e 20 esecuzioni in parallelo. L’utilizzo resta addebitato sul saldo.",
+  "billing.pro.pitch": "20 GB di spazio, 1.000 job salvati e 20 esecuzioni in parallelo. L’utilizzo resta addebitato sul saldo.",
   "billing.pro.upgrade": "Passa a Pro · {p1}/mese",
   "billing.pro.manage": "Gestisci",
   "billing.pro.current": "Attivo",

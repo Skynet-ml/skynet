@@ -1243,7 +1243,7 @@
   "billing.popover.unavailable": "לא הצלחנו לטעון את הארנק. אפשר לפתוח את הגדרות החיוב ולנסות שוב.",
   "billing.portal.error": "לא הצלחנו לפתוח את ניהול החיוב. כדאי לנסות שוב.",
   "billing.pro.title": "{term.appName} Pro",
-  "billing.pro.pitch": "10GB אחסון, עד 1,000 עבודות שמורות ו־20 אופטימיזציות במקביל. השימוש עדיין מחויב מהיתרה.",
+  "billing.pro.pitch": "20GB אחסון, עד 1,000 עבודות שמורות ו־20 אופטימיזציות במקביל. השימוש עדיין מחויב מהיתרה.",
   "billing.pro.upgrade": "שדרוג · {p1} לחודש",
   "billing.pro.manage": "ניהול",
   "billing.pro.current": "פעיל",
