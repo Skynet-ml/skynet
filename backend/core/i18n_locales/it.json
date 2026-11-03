@@ -196,6 +196,7 @@
     "admin.quota_save_failed": "Impossibile salvare l'override della quota.",
     "admin.user_not_found": "Nessun account trovato per '{email}'.",
     "agent.approval.unknown_call_id": "Nessuna approvazione in sospeso per il call_id indicato.",
+    "agent.steer_pending_full": "È stato raggiunto il limite dei messaggi in attesa. Aggiungi questo messaggio alla coda.",
     "agent.status.tool_end": "Strumento terminato.",
     "agent.status.tool_start": "L'agente sta invocando lo strumento…",
     "agent.turn.not_found": "Turno dell'agente non trovato o scaduto.",

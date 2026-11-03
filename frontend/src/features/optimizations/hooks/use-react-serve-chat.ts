@@ -253,7 +253,6 @@ export function useReactServeChat(
               let reply = result.assistant_message;
               if (replyBeforeSteerRef.current !== null) {
                 reply = last.content || removeReplyBeforeSteer(reply, replyBeforeSteerRef.current);
-                if (!reply && !last.toolCalls?.length) return prev.slice(0, -1);
               }
               const fallback =
                 last.content ||

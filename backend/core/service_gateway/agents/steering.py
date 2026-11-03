@@ -36,6 +36,9 @@ STEER_KEY_MAX_CHARS = 64
 STEER_TEXT_MAX_CHARS = 20_000
 STEER_PENDING_MAX_MESSAGES = 10
 STEER_PENDING_MAX_CHARS = 20_000
+STEER_OWNER_PENDING_MAX_MESSAGES = 100
+STEER_OWNER_PENDING_MAX_CHARS = 200_000
+_PURGE_BATCH_SIZE = 100
 # A turn never runs this long; older rows belong to turns that ended without
 # a withdraw (a closed tab) and are purged on the next post.
 _STALE_AFTER = timedelta(hours=6)
@@ -69,18 +72,43 @@ class SteerStore:
             self._local_updated.pop(key, None)
 
     @staticmethod
-    def _check_pending(messages: list[str], text: str) -> None:
+    def _check_pending(
+        messages: list[str], text: str, *, max_messages: int = STEER_PENDING_MAX_MESSAGES,
+        max_chars: int = STEER_PENDING_MAX_CHARS,
+    ) -> None:
         """Reject input that would exceed the pending count or character cap.
 
         Args:
             messages: Text of pending messages for this owner and key.
             text: Proposed new message.
+            max_messages: Maximum pending message count.
+            max_chars: Maximum pending character count.
 
         Raises:
             SteerLimitError: The pending allowance would be exceeded.
         """
-        if len(messages) >= STEER_PENDING_MAX_MESSAGES or sum(map(len, messages)) + len(text) > STEER_PENDING_MAX_CHARS:
+        if len(messages) >= max_messages or sum(map(len, messages)) + len(text) > max_chars:
             raise SteerLimitError("The pending steer limit for this turn was reached; queue this message instead.")
+
+    @staticmethod
+    def _fitting_prefix(messages: list[tuple[str, str]], max_chars: int | None) -> list[tuple[str, str]]:
+        """Keep the longest ordered prefix within one step's input allowance.
+
+        Args:
+            messages: Ordered unread messages.
+            max_chars: Maximum joined length, or no limit.
+
+        Returns:
+            Messages that fit without consuming or truncating the rest.
+        """
+        if max_chars is None:
+            return messages
+        length = 0
+        for index, (_, text) in enumerate(messages):
+            length += len(text) + (2 if index else 0)
+            if length > max_chars:
+                return messages[:index]
+        return messages
 
     def bind_engine(self, engine: Any) -> None:
         """Attach the shared database engine that backs cross-replica delivery.
@@ -110,6 +138,11 @@ class SteerStore:
                 now = datetime.now(UTC)
                 self._purge_local(now)
                 key = (owner, steer_key)
+                self._check_pending(
+                    [message for (username, _), waiting in self._local.items() if username == owner
+                     for _, message in waiting], text,
+                    max_messages=STEER_OWNER_PENDING_MAX_MESSAGES, max_chars=STEER_OWNER_PENDING_MAX_CHARS,
+                )
                 self._check_pending([message for _, message in self._local.get(key, [])], text)
                 self._local.setdefault(key, []).append((message_id, text))
                 self._local_updated[key] = now
@@ -117,27 +150,41 @@ class SteerStore:
         now = datetime.now(UTC)
         with Session(self._engine) as session:
             if session.get_bind().dialect.name == "postgresql":
-                # Serialize posts even when this key has no rows to lock yet.
-                lock_key = int.from_bytes(blake2b(f"{owner}\0{steer_key}".encode(), digest_size=8).digest(), signed=True)
+                # Production uses Postgres; SQLite is only a sequential test fallback.
+                # Serialize all this owner's keys, including keys with no rows yet.
+                lock_key = int.from_bytes(blake2b(owner.encode(), digest_size=8).digest(), signed=True)
                 session.execute(select(func.pg_advisory_xact_lock(lock_key)))
-            session.execute(
-                delete(AgentSteerMessageModel).where(AgentSteerMessageModel.created_at < now - _STALE_AFTER)
+            stale_ids = (
+                select(AgentSteerMessageModel.id)
+                .where(AgentSteerMessageModel.created_at < now - _STALE_AFTER)
+                .order_by(AgentSteerMessageModel.created_at)
+                .limit(_PURGE_BATCH_SIZE)
+                .with_for_update(skip_locked=True)
             )
-            pending = session.scalars(
-                select(AgentSteerMessageModel.text).where(
+            session.execute(
+                delete(AgentSteerMessageModel).where(AgentSteerMessageModel.id.in_(stale_ids))
+            )
+            pending = session.execute(
+                select(AgentSteerMessageModel.steer_key, AgentSteerMessageModel.text).where(
                     AgentSteerMessageModel.owner == owner,
-                    AgentSteerMessageModel.steer_key == steer_key,
                     AgentSteerMessageModel.taken_at.is_(None),
-                )
+                    AgentSteerMessageModel.created_at >= now - _STALE_AFTER,
+                ).limit(STEER_OWNER_PENDING_MAX_MESSAGES)
             ).all()
-            self._check_pending(list(pending), text)
+            self._check_pending(
+                [message for _, message in pending], text,
+                max_messages=STEER_OWNER_PENDING_MAX_MESSAGES, max_chars=STEER_OWNER_PENDING_MAX_CHARS,
+            )
+            self._check_pending([message for key, message in pending if key == steer_key], text)
             session.add(
                 AgentSteerMessageModel(id=message_id, steer_key=steer_key, owner=owner, text=text, created_at=now)
             )
             session.commit()
         return message_id
 
-    def take(self, owner: str, steer_key: str, ids: list[str] | None = None) -> list[tuple[str, str]]:
+    def take(
+        self, owner: str, steer_key: str, ids: list[str] | None = None, *, max_chars: int | None = None,
+    ) -> list[tuple[str, str]]:
         """Take unread messages for ``steer_key``, oldest first.
 
         The row lock serializes reads with withdrawal.
@@ -146,6 +193,7 @@ class SteerStore:
             owner: Username the turn belongs to.
             steer_key: The turn's steer key.
             ids: Take only these messages; ``None`` takes every unread one.
+            max_chars: Maximum joined input length; leave the remaining messages unread.
 
         Returns:
             ``(id, text)`` pairs, oldest first; empty when nothing is waiting.
@@ -155,12 +203,15 @@ class SteerStore:
                 now = datetime.now(UTC)
                 self._purge_local(now)
                 key = (owner, steer_key)
-                waiting = self._local.pop(key, [])
+                waiting = self._local.get(key, [])
                 wanted = set(ids) if ids is not None else None
-                kept = [m for m in waiting if wanted is not None and m[0] not in wanted]
+                taken = self._fitting_prefix([m for m in waiting if wanted is None or m[0] in wanted], max_chars)
+                taken_ids = {mid for mid, _ in taken}
+                kept = [m for m in waiting if m[0] not in taken_ids]
                 if kept:
                     self._local[key] = kept
-                taken = [m for m in waiting if wanted is None or m[0] in wanted]
+                else:
+                    self._local.pop(key, None)
                 if taken:
                     self._delivered.setdefault(key, {}).update((mid, None) for mid, _ in taken)
                     self._local_updated[key] = now
@@ -186,9 +237,11 @@ class SteerStore:
             if not rows:
                 return []
             now = datetime.now(UTC)
-            taken = [(row.id, row.text) for row in rows]
+            taken = self._fitting_prefix([(row.id, row.text) for row in rows], max_chars)
+            taken_ids = {mid for mid, _ in taken}
             for row in rows:
-                row.taken_at = now
+                if row.id in taken_ids:
+                    row.taken_at = now
             session.commit()
             return taken
 
@@ -262,6 +315,7 @@ class SteerInbox:
     input_field: str
     emit: Callable[[dict[str, Any]], None]
     store: SteerStore
+    max_chars: int | None = None
     # Text handed to a step as its input but not yet written into the history
     # event ReActV2 appends for that step.
     unrecorded: str | None = None
@@ -339,7 +393,7 @@ def deliver_steering(predictor: Any, kwargs: dict[str, Any]) -> None:
     if inbox.input_field in kwargs:
         return
     try:
-        taken = inbox.store.take(inbox.owner, inbox.steer_key)
+        taken = inbox.store.take(inbox.owner, inbox.steer_key, max_chars=inbox.max_chars)
     except Exception:
         logger.exception("Failed to read steer messages for an agent turn")
         return

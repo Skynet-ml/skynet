@@ -1562,6 +1562,8 @@
   "agent.pending.send_now": "إرسال الآن",
   "agent.pending.stop_and_send_now": "إيقاف وإرسال الآن",
   "agent.pending.uncertain": "غير مؤكد",
+  "agent.pending.too_long": "هذه الرسالة طويلة جدًا ({count} من {max} حرفًا). اختصرها قبل الإرسال.",
+  "agent.pending.uncertain_description": "قد تكون هذه الرسالة قد وصلت إلى الوكيل بالفعل.",
   "agent.pending.steering": "سيقرأها الوكيل في خطوته التالية",
   "agent.pending.steer": "توجيه",
   "agent.pending.edit": "تعديل الرسالة",

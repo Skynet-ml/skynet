@@ -1,7 +1,7 @@
 /** Tests for the agent chats' mid-turn steer/queue store and key mapping. */
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { beforeEach, type MockTimers } from "node:test";
 
 import {
   appendToDraft,
@@ -10,7 +10,17 @@ import {
   type SteerChannel,
 } from "./steer-queue.ts";
 
-const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 250));
+let timers: MockTimers;
+beforeEach((context) => {
+  context.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  timers = context.mock.timers;
+});
+const flush = async () => {
+  for (let i = 0; i < 5; i++) {
+    timers.tick(100);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+};
 
 test("Stop pauses queued-only input; Send now resumes one turn at a time", async () => {
   const { queue, sent } = setup();
@@ -140,7 +150,7 @@ test("withdraw retries explicit ids and treats missing rows as returned", async 
   assert.deepEqual(sent, ["retry safely"]);
 });
 
-test("delivered withdrawal never becomes a queued turn", async () => {
+test("delivered withdrawal stays uncertain without an applied event", async () => {
   const { queue, sent } = setup();
   queue.openTurn({ post: async () => "read", withdraw: async () => ({ ids: [], delivered: ["read"] }) });
   queue.steer("read already");
@@ -148,7 +158,7 @@ test("delivered withdrawal never becomes a queued turn", async () => {
   queue.setBusy(false);
   await flush();
   assert.deepEqual(sent, []);
-  assert.deepEqual(queue.getSnapshot().queued, []);
+  assert.equal(queue.getSnapshot().queued[0]?.uncertain, true);
 });
 
 for (const action of ["edit", "reorder"] as const) {
@@ -168,7 +178,9 @@ for (const action of ["edit", "reorder"] as const) {
       await flush();
       const id = queue.getSnapshot().steering[0].id;
       if (action === "edit") {
-        assert.equal(await queue.edit(id), outcome === "missing" ? "instruction" : null);
+        const editing = queue.edit(id);
+        await flush();
+        assert.equal(await editing, outcome === "missing" ? "instruction" : null);
       } else {
         queue.reorderSteering([id]);
         await flush();
@@ -210,7 +222,8 @@ test("unknown withdrawal is marked uncertain and does not join a later send", as
   await flush();
   assert.equal(queue.getSnapshot().queued[0].uncertain, true);
   assert.deepEqual(sent, ["certain"]);
-  queue.sendNow();
+  queue.setBusy(false);
+  queue.sendNow(queue.getSnapshot().queued[0].id);
   assert.deepEqual(sent, ["certain", "uncertain"]);
 });
 
@@ -234,7 +247,7 @@ test("stop-and-send preserves the tray when the joined message is too long", asy
   await flush();
   assert.deepEqual(sent, []);
   assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), ["1234", "5678"]);
-  assert.equal(queue.getSnapshot().paused, true);
+  assert.equal(queue.getSnapshot().paused, false);
 });
 
 test("turn end waits for editing so withdrawn text is not sent again", async () => {
@@ -563,7 +576,9 @@ test("a later applied event removes an uncertain pulled message", async () => {
   queue.openTurn({ post: async () => "server", withdraw: async () => { throw new TypeError("network"); } });
   queue.steer("unknown");
   await flush();
-  await queue.edit(queue.getSnapshot().steering[0].id);
+  const editing = queue.edit(queue.getSnapshot().steering[0].id);
+  await flush();
+  await editing;
   assert.equal(queue.getSnapshot().queued[0].uncertain, true);
   queue.applied(["server"]);
   assert.deepEqual(queue.getSnapshot().queued, []);
@@ -633,8 +648,9 @@ test("a rejected post chain does not leave settling stuck", async () => {
   queue.enqueue("next");
   queue.setBusy(false);
   await flush();
-  assert.deepEqual(sent, ["bad post"]);
-  assert.equal(queue.getSnapshot().queued[0].text, "next");
+  assert.deepEqual(sent, ["next"]);
+  assert.equal(queue.getSnapshot().queued[0].text, "bad post");
+  assert.equal(queue.getSnapshot().queued[0].uncertain, true);
 });
 
 test("a new busy signal clears a stale stop-and-send intent without unpausing", async () => {

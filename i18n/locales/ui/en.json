@@ -19,6 +19,8 @@
   "agent.pending.send_now": "Send now",
   "agent.pending.stop_and_send_now": "Stop and send now",
   "agent.pending.uncertain": "Not confirmed",
+  "agent.pending.too_long": "This message is too long ({count} of {max} characters). Shorten it before sending.",
+  "agent.pending.uncertain_description": "This message may already have reached the agent.",
   "agent.pending.steering": "Will be read at the agent's next step",
   "agent.pending.steer": "Steer",
   "agent.pending.edit": "Edit message",

@@ -196,6 +196,7 @@
     "admin.quota_save_failed": "保存配额覆盖设置失败。",
     "admin.user_not_found": "未找到 '{email}' 的账户。",
     "agent.approval.unknown_call_id": "没有与该 call_id 对应的待审批项。",
+    "agent.steer_pending_full": "待处理消息已达上限。请将这条消息加入队列。",
     "agent.status.tool_end": "工具已完成。",
     "agent.status.tool_start": "智能体正在调用工具…",
     "agent.turn.not_found": "未找到智能体回合，或已过期。",

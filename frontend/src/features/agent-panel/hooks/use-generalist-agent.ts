@@ -257,7 +257,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     (key: string): SteerQueue => {
       let queue = steerQueues.get(key);
       if (!queue) {
-        queue = new SteerQueue();
+        queue = new SteerQueue(undefined, 20_000);
         steerQueues.set(key, queue);
       }
       return queue;
@@ -952,7 +952,9 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     for (const [key, queue] of steerQueues) {
       queue.setSend((text) => {
         const session = sessionsRef.current.get(key);
-        if (session) requestRun(key, text, session.messages);
+        if (!session) return false;
+        requestRun(key, text, session.messages);
+        return true;
       });
       const session = sessions.get(key);
       queue.setBusy(session ? isBusy(session) : false);
@@ -965,9 +967,10 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       if (!trimmed) return;
       const key = activeKeyRef.current;
       const truncated = (sessionsRef.current.get(key)?.messages ?? []).slice(0, messageIndex);
+      steerQueueFor(key).pause();
       requestRun(key, trimmed, truncated);
     },
-    [requestRun],
+    [requestRun, steerQueueFor],
   );
 
   // Re-run the most recent user turn (used by the error-banner retry button
@@ -987,8 +990,9 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     const lastUser = current[lastUserIndex];
     if (!lastUser) return;
     const truncated = current.slice(0, lastUserIndex);
+    steerQueueFor(key).pause();
     requestRun(key, lastUser.content, truncated, undefined, true, lastUser.hidden ?? false);
-  }, [requestRun]);
+  }, [requestRun, steerQueueFor]);
 
   const stop = React.useCallback(() => {
     const key = activeKeyRef.current;

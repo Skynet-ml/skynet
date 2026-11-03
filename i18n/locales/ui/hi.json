@@ -1562,6 +1562,8 @@
   "agent.pending.send_now": "अभी भेजें",
   "agent.pending.stop_and_send_now": "रोकें और अभी भेजें",
   "agent.pending.uncertain": "पुष्टि नहीं हुई",
+  "agent.pending.too_long": "यह संदेश बहुत लंबा है ({max} में से {count} अक्षर)। भेजने से पहले इसे छोटा करें।",
+  "agent.pending.uncertain_description": "यह संदेश शायद एजेंट तक पहले ही पहुँच गया हो।",
   "agent.pending.steering": "एजेंट इसे अपने अगले चरण में पढ़ेगा",
   "agent.pending.steer": "दिशा दें",
   "agent.pending.edit": "संदेश संपादित करें",

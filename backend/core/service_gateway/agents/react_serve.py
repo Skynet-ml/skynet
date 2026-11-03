@@ -26,6 +26,7 @@ from typing import Any
 
 import dspy
 
+from ...api.response_limits import AGENT_MAX_TEXT
 from ...exceptions import ServiceError
 from ..optimization.retrying_react import RetryingReActV2
 from ..optimization.tool_overlay import (
@@ -212,6 +213,7 @@ async def _drive_react_chat(
                     input_field=input_fields[0],
                     emit=emit,
                     store=get_steer_store(),
+                    max_chars=AGENT_MAX_TEXT,
                 ),
             )
             emit({"event": "steer_ready", "data": {"steer_key": steer_key}})

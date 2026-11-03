@@ -196,6 +196,7 @@
     "admin.quota_save_failed": "Kota geçersiz kılma kaydedilemedi.",
     "admin.user_not_found": "'{email}' için hesap bulunamadı.",
     "agent.approval.unknown_call_id": "Verilen call_id için bekleyen bir onay yok.",
+    "agent.steer_pending_full": "Bekleyen mesaj sınırına ulaşıldı. Bu mesajı kuyruğa ekleyin.",
     "agent.status.tool_end": "Araç tamamlandı.",
     "agent.status.tool_start": "Aracı, aracı çağırıyor…",
     "agent.turn.not_found": "Aracı turu bulunamadı veya süresi doldu.",

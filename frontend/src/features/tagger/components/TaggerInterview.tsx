@@ -186,8 +186,11 @@ export function TaggerInterview({
   const { midTurn, stop } = useSteerQueue({
     busy,
     stop: onStop,
+    maxLength: 20_000,
     send: (text) => {
-      if (!done) onSend(text);
+      if (done) return false;
+      onSend(text);
+      return true;
     },
   });
 

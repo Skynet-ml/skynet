@@ -19,7 +19,7 @@ Enquanto o agente trabalha, o campo de mensagem continua disponível:
 
 - **Enter** orienta o trabalho atual, quando suportado. O agente lê a mensagem no passo seguinte. **Tab** coloca um novo turno na fila. Sem orientação disponível, Enter também coloca a mensagem na fila.
 - Em **Mensagens pendentes**, pode editar, eliminar e arrastar mensagens para alterar a ordem. **Orientar**, quando disponível, envia uma mensagem da fila para o trabalho atual.
-- Uma mensagem marcada como **Não confirmado** não foi retirada com confirmação. Envie-a agora, edite-a ou elimine-a explicitamente.
+- Uma mensagem marcada como **Não confirmado** pode já ter chegado ao agente. Quando estiver inativo, use o menu da mensagem para enviá-la explicitamente. Você pode editá-la ou excluí-la a qualquer momento. Outras mensagens na fila podem continuar antes dela.
 - **Parar** termina o turno atual e coloca a fila em pausa. As instruções por ler regressam à lista. Nada começa automaticamente. **Esc** no campo faz o mesmo, exceto com um menu aberto ou durante a composição com IME. Esc fecha primeiro uma sugestão ou um menu deste campo.
 - Sem um turno ativo, **Enviar agora** envia a primeira mensagem da fila em pausa. As restantes seguem pela ordem definida. O fim normal de um turno também inicia a mensagem seguinte.
 - **Parar e enviar agora** para o turno e envia toda a lista num único novo turno. Aguarda o regresso das instruções por ler e junta-as antes das mensagens da fila, separadas por linhas em branco. Não reenvia instruções já lidas. As mensagens não confirmadas ficam na lista e não são incluídas. As outras continuam normalmente.

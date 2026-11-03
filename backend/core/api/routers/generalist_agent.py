@@ -244,6 +244,7 @@ class SteerWithdrawRequest(BaseModel):
     )
 
 
+# Delivered ids preserve the outcome when a withdrawal response needs a retry.
 class SteerWithdrawResponse(BaseModel):
     """Messages returned to the client, oldest first."""
 
@@ -991,7 +992,7 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         try:
             message_id = get_steer_store().post(current_user.username, req.steer_key, req.text)
         except SteerLimitError as exc:
-            raise DomainError("rate_limit.exceeded", status=429, retry_after=1) from exc
+            raise DomainError("agent.steer_pending_full", status=429) from exc
         return SteerMessageResponse(id=message_id)
 
     @router.post(

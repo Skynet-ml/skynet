@@ -177,6 +177,7 @@
     "admin.forbidden": "執行此操作需要管理員權限。",
     "admin.invalid_username": "用戶名稱唔可以留空。",
     "agent.approval.unknown_call_id": "搵唔到指定 call_id 嘅待批核項目。",
+    "agent.steer_pending_full": "待處理訊息已達上限。請將呢條訊息加入佇列。",
     "agent.status.tool_end": "工具執行完成。",
     "agent.status.tool_start": "Agent 正在調用工具…",
     "agent.turn.not_found": "搵唔到 Agent 回合，或者已經過期。",

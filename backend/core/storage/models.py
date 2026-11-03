@@ -236,7 +236,11 @@ class AgentSteerMessageModel(Base):
     """
 
     __tablename__ = "agent_steer_messages"
-    __table_args__ = (Index("ix_agent_steer_messages_key", "steer_key", "owner"),)
+    __table_args__ = (
+        Index("ix_agent_steer_messages_key", "steer_key", "owner"),
+        Index("ix_agent_steer_messages_owner_pending", "owner", "taken_at"),
+        Index("ix_agent_steer_messages_created_at", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
     steer_key: Mapped[str] = mapped_column(String(64), nullable=False)

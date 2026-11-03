@@ -4222,6 +4222,7 @@ export async function streamCodeAgent(
 export async function postAgentSteer(steerKey: string, text: string): Promise<string> {
   const res = await request<{ id: string }>("/optimizations/agent-steer", {
     method: "POST",
+    signal: AbortSignal.timeout(30_000),
     body: JSON.stringify({ steer_key: steerKey, text }),
   });
   return String(res.id);
@@ -4259,6 +4260,7 @@ export function parseSteerApplied(data: Record<string, unknown>): { ids: string[
 export async function withdrawAgentSteers(steerKey: string, ids: string[]): Promise<{ ids: string[]; delivered?: string[] }> {
   const res = await request<{ ids: string[]; delivered?: string[] }>("/optimizations/agent-steer/withdraw", {
     method: "POST",
+    signal: AbortSignal.timeout(30_000),
     body: JSON.stringify({ steer_key: steerKey, ids }),
   });
   if (!Array.isArray(res.ids)) throw new Error("Invalid withdrawal outcome");

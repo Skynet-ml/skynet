@@ -19,7 +19,7 @@ Mientras el agente trabaja, puedes seguir escribiendo:
 
 - **Enter** orienta el trabajo actual cuando está permitido. El agente lee el mensaje en su siguiente paso. **Tab** añade un nuevo turno a la cola. Sin orientación disponible, Enter también añade el mensaje a la cola.
 - En **Mensajes pendientes** puedes editar, eliminar y arrastrar mensajes para reordenarlos. **Orientar**, cuando está disponible, envía un mensaje de la cola al trabajo actual.
-- Un mensaje marcado como **No confirmado** no se retiró de forma confirmada. Envíalo ahora, edítalo o elimínalo de forma explícita.
+- Un mensaje marcado como **No confirmado** puede haber llegado ya al agente. Cuando esté inactivo, usa su menú para enviarlo explícitamente. Puedes editarlo o eliminarlo en cualquier momento. Otros mensajes en cola pueden continuar antes.
 - **Detener** para el turno y pausa la cola. Las instrucciones no leídas vuelven a la bandeja. Nada empieza automáticamente. **Esc** en el campo hace lo mismo, salvo con un menú abierto o durante la composición con un IME. Esc primero cierra una sugerencia o un menú de este campo.
 - Cuando no hay un turno activo, **Enviar ahora** envía el primer mensaje de la cola pausada. Los demás siguen en orden. Un turno que termina normalmente también inicia el siguiente mensaje.
 - **Detener y enviar ahora** detiene el turno y envía la bandeja como un único turno nuevo. Espera a recuperar las instrucciones no leídas y las coloca antes de los mensajes en cola, separadas por líneas en blanco. No reenvía instrucciones ya leídas. Los mensajes no confirmados permanecen en la bandeja y no se incluyen. Los demás continúan normalmente.

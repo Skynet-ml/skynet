@@ -1562,6 +1562,8 @@
   "agent.pending.send_now": "立即发送",
   "agent.pending.stop_and_send_now": "停止并立即发送",
   "agent.pending.uncertain": "未确认",
+  "agent.pending.too_long": "此消息过长（{max} 个字符中有 {count} 个）。请缩短后再发送。",
+  "agent.pending.uncertain_description": "此消息可能已经送达代理。",
   "agent.pending.steering": "智能体将在下一步读取",
   "agent.pending.steer": "引导",
   "agent.pending.edit": "编辑消息",

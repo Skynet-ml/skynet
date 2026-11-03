@@ -47,7 +47,7 @@ export function agentSteerChannel(steerKey: string): SteerChannel {
  * against the finished turn's committed history.
  */
 export function useSteerQueue({ busy, send, stop, maxLength }: UseSteerQueueArgs): SteerQueueHandle {
-  const [store] = React.useState(() => new SteerQueue(send));
+  const [store] = React.useState(() => new SteerQueue(send, maxLength));
   // Before the busy effect below, so a follow-up runs through the latest send.
   React.useEffect(() => {
     store.setSend(send);

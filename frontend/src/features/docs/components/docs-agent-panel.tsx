@@ -161,7 +161,11 @@ export function DocsAgentPanel({
   }, [update]);
 
   const askLatestRef = React.useRef<((question: string) => Promise<void>) | null>(null);
-  const sendQueued = React.useCallback((text: string) => { void askLatestRef.current?.(text); }, []);
+  const sendQueued = React.useCallback((text: string) => {
+    if (!askLatestRef.current || isQuestionTooLong(text)) return false;
+    void askLatestRef.current(text);
+    return true;
+  }, []);
   const { store: steerStore, midTurn, stop } = useSteerQueue({
     busy: streaming,
     send: sendQueued,
@@ -255,6 +259,7 @@ export function DocsAgentPanel({
           body: JSON.stringify(body),
           signal: controller.signal,
         });
+        // Stop or the replacement ask owns the streaming state.
         if (await discardStaleDocsResponse(
           res,
           controller.signal.aborted || abortRef.current !== controller,

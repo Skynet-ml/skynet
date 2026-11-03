@@ -196,6 +196,7 @@
     "admin.quota_save_failed": "할당량 재정의를 저장하지 못했습니다.",
     "admin.user_not_found": "'{email}' 계정을 찾을 수 없습니다.",
     "agent.approval.unknown_call_id": "지정된 call_id에 대해 대기 중인 승인이 없습니다.",
+    "agent.steer_pending_full": "대기 중인 메시지 한도에 도달했습니다. 이 메시지를 대기열에 추가하세요.",
     "agent.status.tool_end": "도구 실행이 완료되었습니다.",
     "agent.status.tool_start": "에이전트가 도구를 호출하는 중…",
     "agent.turn.not_found": "에이전트 턴을 찾을 수 없거나 만료되었습니다.",

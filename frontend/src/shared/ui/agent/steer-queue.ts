@@ -15,6 +15,7 @@ export interface PendingMessage {
 }
 
 export interface SteerQueueSnapshot {
+  maxLength?: number;
   paused: boolean;
   /** Follow-ups waiting for the chat to go idle, sent in order. */
   queued: readonly PendingMessage[];
@@ -34,6 +35,7 @@ export interface SteerChannel {
 }
 
 interface SteerEntry extends PendingMessage {
+  discarded?: boolean;
   turn: number;
   serverId: string | null;
   posting: Promise<void>;
@@ -70,13 +72,14 @@ export class SteerQueue {
   private withdrawals = new Set<Promise<unknown>>();
   private send: (text: string) => boolean | void;
   private maxLength = 20_000;
-  private stoppedTurn: number | null = null;
   private pullOperations = new Map<string, Promise<boolean>>();
   private settlingOperations = new Map<string, Promise<void>>();
   private trayOrder: string[] = [];
 
-  constructor(send: (text: string) => boolean | void = () => {}) {
+  constructor(send: (text: string) => boolean | void = () => {}, maxLength = 20_000) {
     this.send = send;
+    this.maxLength = maxLength;
+    this.snapshot = { ...EMPTY, maxLength };
   }
 
   /** Replace what starts a follow-up's turn (the owner's latest `send`). */
@@ -120,7 +123,6 @@ export class SteerQueue {
   /** A steerable turn started; `channel` delivers messages into it. */
   openTurn(channel: SteerChannel): void {
     this.sendTogether = false;
-    this.stoppedTurn = null;
     if (this.channel) this.endTurn();
     this.turn += 1;
     this.channel = channel;
@@ -147,7 +149,7 @@ export class SteerQueue {
     }
     this.settling += 1;
     this.emit();
-    const operation = this.settle(entries, channel, this.postChain, this.stoppedTurn === turn);
+    const operation = this.settle(entries, channel, this.postChain);
     for (const entry of entries) this.settlingOperations.set(entry.id, operation);
     const finish = () => {
       for (const entry of entries) this.settlingOperations.delete(entry.id);
@@ -166,7 +168,7 @@ export class SteerQueue {
           : !result.delivered.includes(e.serverId as string));
       } catch (error) {
         const status = (error as { status?: number }).status;
-        const retryable = error instanceof TypeError || (status !== undefined && status >= 500);
+        const retryable = error instanceof TypeError || (error as { cause?: unknown }).cause instanceof TypeError || (status !== undefined && status >= 500);
         if (!retryable || attempt === 2) return null;
         await new Promise((resolve) => setTimeout(resolve, 50 * 2 ** attempt));
       }
@@ -174,7 +176,7 @@ export class SteerQueue {
     return null;
   }
 
-  private async settle(entries: SteerEntry[], channel: SteerChannel, postChain: Promise<void>, stopped: boolean): Promise<void> {
+  private async settle(entries: SteerEntry[], channel: SteerChannel, postChain: Promise<void>): Promise<void> {
     try {
       await Promise.allSettled([...this.withdrawals, postChain]);
       await Promise.allSettled(entries.map((e) => e.posting));
@@ -185,12 +187,12 @@ export class SteerQueue {
         const outcome = await this.withdraw(channel, live);
         returned = outcome ?? live;
         unknown = outcome === null;
-        if (stopped && outcome !== null) {
+        if (outcome !== null) {
           returned = [...returned, ...live.filter((entry) => !returned.includes(entry))];
           for (const entry of returned) entry.uncertain ||= !outcome.includes(entry);
         }
       }
-      returned = returned.filter((e) => this.steering.includes(e));
+      returned = returned.filter((e) => this.steering.includes(e) && !e.discarded);
       this.steering = this.steering.filter((e) => !entries.includes(e));
       this.returnToQueue(returned.map(({ id, text, serverId, uncertain }) => ({ id, text, serverId, uncertain: unknown || uncertain })));
     } finally {
@@ -227,21 +229,22 @@ export class SteerQueue {
       posting: Promise.resolve(),
       pulling: false,
     };
-    this.trayOrder.push(entry.id);
+    const queuedIndex = this.trayOrder.findIndex((id) => this.queued.some((item) => item.id === id));
+    this.trayOrder.splice(queuedIndex < 0 ? this.trayOrder.length : queuedIndex, 0, entry.id);
     this.post(entry, channel);
     this.steering = [...this.steering, entry];
     this.emit();
   }
 
-  private post(entry: SteerEntry, channel: SteerChannel): void {
-    const fallBack = () => {
+  private post(entry: SteerEntry, channel: SteerChannel, prior?: Promise<void>): void {
+    const fallBack = (uncertain = false) => {
       if (!this.steering.includes(entry)) return;
       this.steering = this.steering.filter((e) => e !== entry);
-      this.returnToQueue([{ id: entry.id, text: entry.text }]);
+      if (!entry.discarded) this.returnToQueue([{ id: entry.id, text: entry.text, uncertain }]);
       this.emit();
       this.schedulePump();
     };
-    entry.posting = this.postChain.catch(() => {}).then(() => channel.post(entry.text)).then(
+    entry.posting = (prior ?? this.postChain).catch(() => {}).then(() => channel.post(entry.text)).then(
         (serverId) => {
           if (!serverId) {
             fallBack();
@@ -250,9 +253,12 @@ export class SteerQueue {
           entry.serverId = serverId;
           if (this.appliedIds.has(serverId)) this.applied([serverId]);
         },
-        fallBack,
+        (error: unknown) => {
+          const status = (error as { status?: number }).status;
+          fallBack(!(status !== undefined && status >= 400 && status < 500));
+        },
     );
-    this.postChain = entry.posting;
+    if (prior === undefined) this.postChain = entry.posting;
   }
 
   /**
@@ -270,6 +276,7 @@ export class SteerQueue {
     try {
       return await operation;
     } finally {
+      entry.pulling = false;
       this.withdrawals.delete(operation);
       this.pullOperations.delete(entry.id);
     }
@@ -285,7 +292,7 @@ export class SteerQueue {
     if (entry.serverId !== null && this.steering.includes(entry)) {
       const back = await this.withdraw(channel, [entry]);
       if (back === null) {
-        if (this.steering.includes(entry)) {
+        if (this.steering.includes(entry) && !entry.discarded) {
           this.returnToQueue([{ id: entry.id, text: entry.text, serverId: entry.serverId, uncertain: true }]);
         }
       } else {
@@ -309,7 +316,10 @@ export class SteerQueue {
       return;
     }
     const entry = this.steering.find((e) => e.id === id);
-    if (entry) void (this.pullOperations.get(entry.id) ?? this.pull(entry));
+    if (entry) {
+      entry.discarded = true;
+      void (this.pullOperations.get(entry.id) ?? this.pull(entry));
+    }
   }
 
   /** Pull a pending message out for editing; resolves its text, or null when
@@ -323,14 +333,7 @@ export class SteerQueue {
       return this.take(id);
     }
     const entry = this.steering.find((e) => e.id === id);
-    if (!entry) {
-      const settling = this.settlingOperations.get(id);
-      if (settling) {
-        await settling;
-        return this.edit(id);
-      }
-      return null;
-    }
+    if (!entry) return null;
     if (entry.pulling) {
       await this.pullOperations.get(entry.id);
       return this.edit(id);
@@ -344,8 +347,8 @@ export class SteerQueue {
     const next = ids.map((id) => byId.get(id)).filter((q): q is PendingMessage => q !== undefined);
     if (next.length !== this.queued.length) return;
     this.queued = next;
-    const returnedIds = ids.filter((id) => this.trayOrder.includes(id));
-    this.trayOrder = [...returnedIds, ...this.trayOrder.filter((id) => !returnedIds.includes(id))];
+    let index = 0;
+    this.trayOrder = this.trayOrder.map((id) => byId.has(id) ? ids[index++]! : id);
     this.emit();
   }
 
@@ -373,7 +376,7 @@ export class SteerQueue {
       const live = this.steering.filter((e) => e.turn === turn && e.serverId !== null && !e.pulling);
       if (live.length === 0) return;
       const returned = await this.withdraw(channel, live);
-      const back = (returned ?? live).filter((e) => this.steering.includes(e));
+      const back = (returned ?? live).filter((e) => this.steering.includes(e) && !e.discarded);
       this.steering = this.steering.filter((e) => !live.includes(e) || back.includes(e));
       if (returned === null || this.channel !== channel || this.turn !== turn) {
         // Unknown outcomes stay paused; a finished turn returns unread input.
@@ -383,11 +386,13 @@ export class SteerQueue {
         this.schedulePump();
         return;
       }
-      this.postChain = Promise.resolve();
+      let chain = Promise.resolve();
       for (const entry of back) {
         entry.serverId = null;
-        this.post(entry, channel);
+        this.post(entry, channel, chain);
+        chain = entry.posting;
       }
+      await chain;
     };
     const operation = repost();
     this.withdrawals.add(operation);
@@ -400,7 +405,9 @@ export class SteerQueue {
   enqueue(text: string): void {
     const trimmed = text.trim();
     if (!trimmed) return;
-    this.queued = [...this.queued, { id: this.makeId(), text: trimmed }];
+    const item = { id: this.makeId(), text: trimmed };
+    this.queued = [...this.queued, item];
+    this.trayOrder.push(item.id);
     this.emit();
     this.schedulePump();
   }
@@ -417,6 +424,8 @@ export class SteerQueue {
   /** Move a queued follow-up into the running turn. */
   promote(id: string): void {
     if (!this.channel || !this.busy) return;
+    const item = this.queued.find((entry) => entry.id === id);
+    if (!item || item.uncertain || item.text.length > this.maxLength) return;
     const text = this.take(id);
     if (text !== null) this.steer(text);
   }
@@ -434,7 +443,6 @@ export class SteerQueue {
     this.paused = false;
     this.sendTogether = false;
     this.trayOrder = [];
-    this.stoppedTurn = null;
     this.emit();
   }
 
@@ -442,20 +450,23 @@ export class SteerQueue {
   pause(): void {
     this.paused = true;
     this.sendTogether = false;
-    if (this.busy) this.stoppedTurn = this.turn;
     this.emit();
   }
 
   /** Resume the head through the owner's normal turn-start path. */
   sendNow(id?: string): void {
-    const item = id ? this.queued.find((entry) => entry.id === id) : this.queued[0];
+    if (this.settling > 0) {
+      void Promise.allSettled([...this.settlingOperations.values()]).then(() => this.sendNow(id));
+      return;
+    }
+    const item = id ? this.queued.find((entry) => entry.id === id) : this.queued.find((entry) => !entry.uncertain);
     if (this.busy || (!this.paused && !item?.uncertain)) return;
     if (!item || item.text.length > this.maxLength) return;
     const queued = this.queued;
     this.paused = false;
     this.queued = this.queued.filter((entry) => entry !== item);
     this.emit();
-    if (this.send(item.text) === false) {
+    if (!this.startSend(item.text)) {
       this.queued = queued;
       this.paused = true;
       this.emit();
@@ -465,6 +476,8 @@ export class SteerQueue {
   /** Stop the active turn, then send the settled tray as one follow-up. */
   stopAndSendNow(stop: () => void): void {
     if (!this.busy || !this.hasPending()) return;
+    const text = [...this.steering, ...this.queued].filter((entry) => !entry.uncertain && !("discarded" in entry && entry.discarded)).map((entry) => entry.text).join("\n\n");
+    if (!text || text.length > this.maxLength) return;
     this.pause();
     stop();
     this.sendTogether = true;
@@ -484,7 +497,10 @@ export class SteerQueue {
   }
 
   private emit(): void {
+    const liveIds = new Set([...this.queued, ...this.steering].map((entry) => entry.id));
+    this.trayOrder = this.trayOrder.filter((id) => liveIds.has(id));
     this.snapshot = {
+      maxLength: this.maxLength,
       queued: this.queued,
       steering: this.steering.filter((e) => !e.pulling).map(({ id, text }) => ({ id, text })),
       canSteer: this.busy && this.channel !== null,
@@ -520,7 +536,7 @@ export class SteerQueue {
       this.sendTogether = false;
       this.paused = false;
       this.emit();
-      if (this.send(text) === false) {
+      if (!this.startSend(text)) {
         this.queued = queued;
         this.paused = true;
         this.emit();
@@ -537,11 +553,18 @@ export class SteerQueue {
     const queued = this.queued;
     this.queued = this.queued.filter((item) => item !== head);
     this.emit();
-    if (this.send(head.text) === false) {
+    if (!this.startSend(head.text)) {
       this.queued = queued;
       this.paused = true;
       this.emit();
     }
+  }
+
+  private startSend(text: string): boolean {
+    this.busy = true;
+    if (this.send(text) !== false) return true;
+    this.busy = false;
+    return false;
   }
 }
 

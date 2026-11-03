@@ -4,6 +4,7 @@ import * as React from "react";
 import { Reorder, useDragControls } from "framer-motion";
 import {
   ArrowBendDownRight,
+  ArrowRight,
   DotsSixVertical,
   DotsThree,
   PencilSimple,
@@ -25,6 +26,9 @@ import { Button } from "@/shared/ui/primitives/button";
 import type { PendingMessage } from "./steer-queue";
 
 interface PendingMessagesProps {
+  stopAndSendDisabled?: boolean;
+  lengthReason?: string;
+  sendNowReason?: string;
   paused: boolean;
   streaming: boolean;
   onSendNow: (id?: string) => void;
@@ -41,7 +45,7 @@ interface PendingMessagesProps {
 }
 
 const iconButtonClass = cn(
-  "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11",
+  "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground [@media(pointer:coarse)]:min-h-[44px] [@media(pointer:coarse)]:min-w-[44px]",
   "transition-colors hover:bg-accent/60 hover:text-foreground",
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
 );
@@ -76,14 +80,14 @@ function PendingRow({
       dragListener={false}
       dragControls={controls}
       onDragEnd={onDragEnd}
-      className="group relative flex min-h-9 items-center gap-1.5 rounded-lg ps-1 pe-1 hover:bg-accent/30 [@media(pointer:coarse)]:min-h-11"
+      className="group relative flex min-h-9 items-center gap-1.5 rounded-lg ps-1 pe-1 hover:bg-accent/30 [@media(pointer:coarse)]:min-h-[44px]"
     >
       <button
         type="button"
         aria-label={msg("agent.pending.drag")}
         onPointerDown={(e) => controls.start(e)}
         className={cn(
-          "flex h-7 w-4 shrink-0 cursor-grab touch-none items-center justify-center text-muted-foreground [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11",
+          "flex h-7 w-4 shrink-0 cursor-grab touch-none items-center justify-center text-muted-foreground [@media(pointer:coarse)]:min-h-[44px] [@media(pointer:coarse)]:min-w-[44px]",
           "[@media(pointer:fine)]:opacity-0 [@media(pointer:fine)]:group-hover:opacity-100 [@media(pointer:fine)]:group-focus-within:opacity-100",
           "active:cursor-grabbing",
         )}
@@ -91,7 +95,9 @@ function PendingRow({
         <DotsSixVertical className="size-3.5" />
       </button>
       {item.uncertain ? (
-        <span className="shrink-0 px-1.5 text-xs text-muted-foreground">{msg("agent.pending.uncertain")}</span>
+        <TooltipButton tooltip={msg("agent.pending.uncertain_description")} side="top">
+          <span tabIndex={0} className="shrink-0 px-1.5 text-xs text-muted-foreground max-[400px]:max-w-16 max-[400px]:truncate">{msg("agent.pending.uncertain")}</span>
+        </TooltipButton>
       ) : steering ? (
         <TooltipButton tooltip={msg("agent.pending.steering")} side="top">
           <span className="inline-flex shrink-0 text-muted-foreground">
@@ -99,7 +105,7 @@ function PendingRow({
           </span>
         </TooltipButton>
       ) : (
-        <TreeView className="size-4 shrink-0 text-muted-foreground rtl:-scale-x-100" />
+        <TreeView className="size-4 shrink-0 text-muted-foreground rtl:-scale-x-100 max-[400px]:hidden" />
       )}
       <p className="min-w-0 flex-1 truncate text-sm" title={previewText(item.text)}>
         {previewText(item.text)}
@@ -112,15 +118,16 @@ function PendingRow({
         canPromote && !item.uncertain && (
           <button
             type="button"
+            aria-label={msg("agent.pending.steer")}
             onClick={() => onPromote(item.id)}
             className={cn(
-              "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-sm text-muted-foreground [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11",
+              "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-sm text-muted-foreground [@media(pointer:coarse)]:min-h-[44px] [@media(pointer:coarse)]:min-w-[44px]",
               "transition-colors hover:bg-accent/60 hover:text-foreground",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
             )}
           >
             <ArrowBendDownRight className="size-3.5 rtl:-scale-x-100" />
-            {msg("agent.pending.steer")}
+            <span className="max-[400px]:hidden">{msg("agent.pending.steer")}</span>
           </button>
         )
       )}
@@ -128,7 +135,7 @@ function PendingRow({
         type="button"
         onClick={() => onRemove(item.id)}
         aria-label={removeLabel}
-        className={iconButtonClass}
+        className={cn(iconButtonClass, "max-[400px]:hidden")}
       >
         <Trash className="size-4" />
       </button>
@@ -140,13 +147,18 @@ function PendingRow({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" side="top">
           {item.uncertain && canSendNow && (
-            <DropdownMenuItem onSelect={() => onSendNow(item.id)} className="[@media(pointer:coarse)]:min-h-11">
+            <DropdownMenuItem onSelect={() => onSendNow(item.id)} className="[@media(pointer:coarse)]:min-h-[44px]">
+              <ArrowRight className="size-4 rtl:-scale-x-100" />
               {msg("agent.pending.send_now")}
             </DropdownMenuItem>
           )}
-          <DropdownMenuItem onSelect={() => onEdit(item.id)} className="[@media(pointer:coarse)]:min-h-11">
+          <DropdownMenuItem onSelect={() => onEdit(item.id)} className="[@media(pointer:coarse)]:min-h-[44px]">
             <PencilSimple className="size-4" />
             {msg("agent.pending.edit")}
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => onRemove(item.id)} className="[@media(pointer:coarse)]:min-h-[44px]">
+            <Trash className="size-4" />
+            {removeLabel}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -205,6 +217,9 @@ function PendingSection({
  * dragged to reorder, steered, deleted or pulled back for editing.
  */
 export function PendingMessages({
+  stopAndSendDisabled,
+  lengthReason,
+  sendNowReason,
   paused,
   streaming,
   onSendNow,
@@ -227,19 +242,20 @@ export function PendingMessages({
       className="mx-3 rounded-t-xl border border-b-0 border-border bg-muted/40 p-1"
     >
       {(paused || (streaming && onStopAndSendNow)) && (
-        <div className="flex items-center justify-between gap-2 px-2 py-1 text-xs text-muted-foreground">
-          <span role={paused ? "status" : undefined}>{msg(paused ? "agent.pending.paused" : "agent.pending.list_label")}</span>
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 px-2 py-1 text-xs text-muted-foreground">
+          {paused && <span role="status" className="me-auto">{msg("agent.pending.paused")}</span>}
           {streaming && onStopAndSendNow ? (
-            <Button type="button" variant="ghost" size="sm" className="[@media(pointer:coarse)]:min-h-11" onClick={onStopAndSendNow}>
+            <Button type="button" variant="ghost" size="sm" disabled={stopAndSendDisabled} title={lengthReason} className="h-auto max-w-full whitespace-normal py-2 [@media(pointer:coarse)]:min-h-[44px]" onClick={onStopAndSendNow}>
               {msg("agent.pending.stop_and_send_now")}
             </Button>
           ) : !streaming && (
-            <Button type="button" variant="ghost" size="sm" className="[@media(pointer:coarse)]:min-h-11" onClick={() => onSendNow()}>
+            <Button type="button" variant="ghost" size="sm" disabled={Boolean(sendNowReason) || !queued.some((item) => !item.uncertain) && steering.length === 0} title={sendNowReason} className="h-auto max-w-full whitespace-normal py-2 [@media(pointer:coarse)]:min-h-[44px]" onClick={() => onSendNow()}>
               {msg("agent.pending.send_now")}
             </Button>
           )}
         </div>
       )}
+      {(streaming ? lengthReason : sendNowReason) && <p role="status" className="px-2 py-1 text-xs text-destructive">{streaming ? lengthReason : sendNowReason}</p>}
       <PendingSection items={steering} steering onReorder={onReorderSteering} rowProps={rowProps} />
       <PendingSection
         items={queued}

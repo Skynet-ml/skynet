@@ -1562,6 +1562,8 @@
   "agent.pending.send_now": "Invia ora",
   "agent.pending.stop_and_send_now": "Interrompi e invia ora",
   "agent.pending.uncertain": "Non confermato",
+  "agent.pending.too_long": "Questo messaggio è troppo lungo ({count} di {max} caratteri). Accorcialo prima di inviarlo.",
+  "agent.pending.uncertain_description": "Questo messaggio potrebbe aver già raggiunto l'agente.",
   "agent.pending.steering": "Verrà letto al prossimo passo dell'agente",
   "agent.pending.steer": "Indirizza",
   "agent.pending.edit": "Modifica messaggio",

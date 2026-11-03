@@ -1562,6 +1562,8 @@
   "agent.pending.send_now": "Надіслати зараз",
   "agent.pending.stop_and_send_now": "Зупинити й надіслати зараз",
   "agent.pending.uncertain": "Не підтверджено",
+  "agent.pending.too_long": "Повідомлення задовге ({count} із {max} символів). Скоротіть його перед надсиланням.",
+  "agent.pending.uncertain_description": "Можливо, це повідомлення вже дійшло до агента.",
   "agent.pending.steering": "Агент прочитає це на наступному кроці",
   "agent.pending.steer": "Спрямувати",
   "agent.pending.edit": "Редагувати повідомлення",

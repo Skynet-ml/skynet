@@ -348,11 +348,12 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
   >(null);
   const messagesRef = React.useRef<AgentMessage[]>([]);
   // `send` is declared after `runAgent`, which needs the queue's store.
-  const sendLatestRef = React.useRef<(text: string) => void>(() => {});
+  const sendLatestRef = React.useRef<(text: string) => boolean>(() => false);
   const sendQueued = React.useCallback((text: string) => sendLatestRef.current(text), []);
   const { store: steerStore, midTurn } = useSteerQueue({
     busy: status === "streaming",
     send: sendQueued,
+    maxLength: 20_000,
   });
 
   const flashClearRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -540,7 +541,7 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
   const runAgent = React.useCallback(
     (userMessage: string, history: AgentMessage[], hidden = false) => {
       const isChat = userMessage.length > 0;
-      if (!(isChat ? canChat : hasRequiredContext)) return;
+      if (!(isChat ? canChat : hasRequiredContext)) return false;
 
       abortRef.current?.abort();
       const controller = new AbortController();
@@ -1199,6 +1200,7 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
           },
       ),
       );
+      return true;
     },
     [
       parsedDataset,
@@ -1240,9 +1242,9 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
   const send = React.useCallback(
     (message: string, options?: { hidden?: boolean }) => {
       const trimmed = message.trim();
-      if (!trimmed) return;
+      if (!trimmed) return false;
       autoFixAttemptsRef.current = 0;
-      runAgent(trimmed, messages, options?.hidden ?? false);
+      return runAgent(trimmed, messages, options?.hidden ?? false);
     },
     [runAgent, messages],
   );
@@ -1255,11 +1257,12 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
       const trimmed = content.trim();
       if (!trimmed) return;
       const truncated = messages.slice(0, messageIndex);
+      steerStore.pause();
       setMessages(truncated);
       autoFixAttemptsRef.current = 0;
       runAgent(trimmed, truncated);
     },
-    [runAgent, messages],
+    [runAgent, messages, steerStore],
   );
 
   const retry = React.useCallback(() => {
@@ -1268,10 +1271,11 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
     const index = messages.length - 1 - lastUserIndex;
     const lastUser = messages[index];
     const truncated = messages.slice(0, index);
+    steerStore.pause();
     setMessages(truncated);
     autoFixAttemptsRef.current = 0;
     runAgent(lastUser?.content ?? "", truncated, lastUser?.hidden ?? false);
-  }, [messages, runAgent]);
+  }, [messages, runAgent, steerStore]);
 
   const goToSignatureVersion = React.useCallback(
     (index: number) => {

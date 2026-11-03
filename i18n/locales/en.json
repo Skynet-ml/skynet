@@ -94,6 +94,7 @@
     "admin.quota_save_failed": "Failed to save quota override.",
     "admin.user_not_found": "No account found for '{email}'.",
     "agent.approval.unknown_call_id": "No pending approval for the given call_id.",
+    "agent.steer_pending_full": "The pending message limit is full. Queue this message instead.",
     "agent.status.tool_end": "Tool finished.",
     "agent.status.tool_start": "Agent invoking tool…",
     "agent.turn.not_found": "Agent turn not found or expired.",

@@ -19,7 +19,7 @@ Ajan çalışırken mesaj alanını kullanmaya devam edebilirsiniz:
 
 - Destekleniyorsa **Enter** mevcut işi yönlendirir. Ajan mesajı bir sonraki adımda okur. **Tab** yeni bir turu kuyruğa ekler. Yönlendirme yoksa Enter da kuyruğa ekler.
 - **Bekleyen mesajlar** bölümünde mesajları düzenleyebilir, silebilir ve sürükleyerek sıralayabilirsiniz. **Yönlendir**, kullanılabiliyorsa kuyruktaki mesajı mevcut işe gönderir.
-- **Doğrulanmadı** işaretli mesajın geri çekildiği doğrulanmamıştır. Açıkça şimdi gönderin, düzenleyin veya silin.
+- **Onaylanmadı** olarak işaretlenen mesaj aracıya zaten ulaşmış olabilir. Etkin tur yokken mesajın menüsünden açıkça gönderin. İstediğiniz zaman düzenleyebilir veya silebilirsiniz. Kuyruktaki diğer mesajlar önce devam edebilir.
 - **Durdur** mevcut turu durdurur ve kuyruğu duraklatır. Okunmamış yönlendirmeler listeye döner. Hiçbir şey otomatik başlamaz. Mesaj alanındaki **Esc** de aynı işi yapar; ancak açık menü veya IME ile metin oluşturma sırasında durdurmaz. Esc önce bu mesaj alanının önerisini veya menüsünü kapatır.
 - Etkin tur yokken **Şimdi gönder**, duraklatılmış kuyruğun ilk mesajını gönderir. Diğerleri sırayla devam eder. Normal tur bitişi de sonraki mesajı başlatır.
 - **Durdur ve şimdi gönder** turu durdurup tüm listeyi tek bir yeni tur olarak gönderir. Okunmamış yönlendirmelerin dönmesini bekler, ardından bunları kuyruktaki mesajların önüne koyup boş satırlarla birleştirir. Okunmuş yönlendirmeler yeniden gönderilmez. Doğrulanmamış mesajlar listede kalır ve bu tura eklenmez. Diğer mesajlar normal şekilde devam eder.
