@@ -6,6 +6,7 @@ import {
   BookOpen,
   Code,
   Desktop,
+  DownloadSimple,
   DotsThree,
   FileText,
   Gear,
@@ -288,6 +289,11 @@ export function AccountMenu({
         <Link {...docsLinkProps(docsPathForLocale(locale), local)} onClick={close} className={COMPACT_POPOVER_ITEM_CLASS}>
           <BookOpen className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
           {msg("app.shell.account.docs")}
+        </Link>
+
+        <Link href="/download" onClick={close} className={COMPACT_POPOVER_ITEM_CLASS}>
+          <DownloadSimple className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
+          {msg("downloads.title")}
         </Link>
 
         <div role="separator" className="my-1 h-px bg-border/60" />

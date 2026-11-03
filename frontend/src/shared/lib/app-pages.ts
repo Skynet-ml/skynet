@@ -18,6 +18,7 @@ export type AppPageId =
   | "submit"
   | "explore"
   | "storage"
+  | "download"
   | "terms"
   | "privacy";
 
@@ -101,6 +102,14 @@ export const APP_PAGES: readonly AppPage[] = [
     href: "/terms",
     label: { key: "legal.terms_link" },
     keywordsKey: "app.shell.search.kw.terms",
+    group: "navigate",
+  },
+  {
+    id: "download",
+    href: "/download",
+    label: { key: "downloads.title" },
+    descriptionKey: "downloads.intro",
+    keywordsKey: "downloads.search_keywords",
     group: "navigate",
   },
   {

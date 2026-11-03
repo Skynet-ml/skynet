@@ -4,6 +4,14 @@ import { isRefusedLocalHost, proxyRoute } from "./proxy-route.ts";
 
 const desktop = { APP_LOCAL_MODE: "1", AUTH_URL: "http://127.0.0.1:48120" };
 
+test("downloads open signed-out without exposing similarly named app routes", () => {
+  assert.equal(proxyRoute("staging.skynetml.com", "/download", {}), "pass");
+  assert.equal(proxyRoute("staging.skynetml.com", "/download/", {}), "pass");
+  assert.equal(proxyRoute("staging.skynetml.com", "/download-private", {}), "auth");
+  assert.equal(proxyRoute("staging.skynetml.com", "/download/history", {}), "auth");
+  assert.equal(proxyRoute("evil.example:48120", "/download", desktop), "refuse");
+});
+
 test("hosted builds refuse no host", () => {
   assert.equal(isRefusedLocalHost("evil.example", {}), false);
   assert.equal(isRefusedLocalHost(null, { AUTH_URL: "https://staging.skynetml.com" }), false);
@@ -57,7 +65,12 @@ test("hosted builds route by path only", () => {
 });
 
 test("signed-out pages load the brand icons and artwork", () => {
-  for (const path of ["/favicon.png", "/favicon-dark.png", "/apple-icon.png", "/brand/hoatzin-light-256.webp"]) {
+  for (const path of [
+    "/favicon.png",
+    "/favicon-dark.png",
+    "/apple-icon.png",
+    "/brand/hoatzin-light-256.webp",
+  ]) {
     assert.equal(proxyRoute("staging.skynetml.com", path, {}), "pass", path);
   }
 });
