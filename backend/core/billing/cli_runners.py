@@ -619,7 +619,7 @@ class _CodexTurn:
             part = ("text", str(params.get("itemId")), _int(params.get("contentIndex")))
             self._send_reasoning(part, str(params.get("delta") or ""))
         elif method == "item/completed" and item.get("type") == "agentMessage":
-            if str(item.get("id")) not in self.commentary or not self.answer:
+            if str(item.get("id")) not in self.commentary:
                 self.answer = str(item.get("text") or "")
         elif method == "thread/tokenUsage/updated":
             usage = params.get("tokenUsage")

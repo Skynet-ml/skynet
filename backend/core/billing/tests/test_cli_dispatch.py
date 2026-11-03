@@ -434,6 +434,35 @@ def test_codex_route_streams_commentary_and_raw_reasoning_as_thinking(
     assert content == "pong"
 
 
+def test_codex_route_does_not_repeat_commentary_as_the_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Show commentary once, as thinking, when a Codex turn has no final message."""
+    notes = [
+        CODEX_TURN[0],
+        {"method": "item/started", "params": {"item": {"id": "c1", "type": "agentMessage", "phase": "commentary"}}},
+        {"method": "item/agentMessage/delta", "params": {"itemId": "c1", "delta": "Checking"}},
+        {"method": "item/completed", "params": {"item": {"id": "c1", "type": "agentMessage", "text": "Checking"}}},
+        *CODEX_TURN[5:],
+    ]
+    fake_app_server(tmp_path, emitting(*notes))
+    monkeypatch.setattr(config, "settings", local_settings(tmp_path))
+    monkeypatch.setattr(cli_dispatch, "_gateway", None)
+    model = "openai/gpt-5.6-luna"
+    route = local_subscription_route(model, "codex", "agent")
+    with httpx.Client(trust_env=False, timeout=30) as client:
+        answer = client.post(
+            f"{route['url']}/chat/completions",
+            json={**REQUEST, "model": model, "stream": True},
+            headers={"Authorization": f"Bearer {route['token']}"},
+        )
+    assert answer.status_code == 200
+    events = [line.removeprefix("data: ") for line in answer.text.split("\n\n") if line]
+    deltas = [json.loads(data)["choices"][0]["delta"] for data in events if data != "[DONE]"]
+    thinking = "".join(delta.get("reasoning_content") or "" for delta in deltas)
+    content = "".join(delta.get("content") or "" for delta in deltas)
+    assert thinking == "Checking"
+    assert content == ""
+
+
 def test_local_route_failure_after_streaming_ends_with_an_error_chunk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
