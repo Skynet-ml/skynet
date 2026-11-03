@@ -76,7 +76,11 @@ build() {
     metadata_args+=(--metadata-file "$metadata_file")
   fi
   refresh_aws_credentials || return 1
-  aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null || return 1
+  # Only a role refresh changes credentials. Parallel lane logins can race on a
+  # local Docker credential store, so the top-level login covers other runs.
+  if [[ -n "${AWS_DEPLOY_ROLE_ARN:-}" ]]; then
+    aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null || return 1
+  fi
   if docker buildx build "${buildx_flags[@]+"${buildx_flags[@]}"}" \
     "${metadata_args[@]+"${metadata_args[@]}"}" \
     "${cache_from[@]+"${cache_from[@]}"}" \
