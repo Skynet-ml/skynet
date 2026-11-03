@@ -594,15 +594,18 @@ export function scanMetricModel(
 }
 
 /**
- * A metric model stored by a clone or an old draft, or null when the metric
- * never calls `llm` or names another model: the backend refuses a named
- * conflict, and the wizard has no control left to clear the stored model.
- * Code the scanner cannot read counts as calling `llm`.
+ * A metric model stored by a clone or an old draft, kept only when the code
+ * names exactly that model with `model=` or the scanner cannot read the code.
+ * Otherwise null: without `model=` the metric uses the reflection model, the
+ * backend refuses a named conflict, and the wizard has no control left to
+ * clear the stored model.
  */
 export function storedMetricModel(stored: ModelConfig | null, code: string): ModelConfig | null {
-  if (!stored || !scanMetricModel(code).uses) return null;
+  const scan = scanMetricModel(code);
+  if (!stored || !scan.uses) return null;
+  if (scan.unknown) return stored;
   const { names } = scanMetricDeclarations(code);
-  return names.length === 0 || (names.length === 1 && names[0] === stored.name) ? stored : null;
+  return names.length === 1 && names[0] === stored.name ? stored : null;
 }
 
 export function declaredMetricModel(code: string, reflectionName?: string): string | null {

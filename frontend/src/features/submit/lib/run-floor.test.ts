@@ -56,10 +56,12 @@ for (const { code, expected, python_syntax_error } of parityCases) {
   });
 }
 
-test("a stored metric model survives only when the code calls llm and names no other model", () => {
+test("a stored metric model survives only when the code names it or the scanner cannot read the code", () => {
   const stored = { name: "old/judge" };
   assert.equal(storedMetricModel(null, "llm(model='old/judge')"), null);
-  assert.equal(storedMetricModel(stored, "llm('x')"), stored);
+  // Without model= the metric uses the reflection model, so the stored model must not be sent.
+  assert.equal(storedMetricModel(stored, "llm('x')"), null);
+  assert.equal(storedMetricModel(stored, "llm('x', model=None)"), null);
   assert.equal(storedMetricModel(stored, "def score(i, o): return 1"), null);
   // Code the scanner cannot read may still call llm, so the stored model stays.
   assert.equal(storedMetricModel(stored, "def broken("), stored);

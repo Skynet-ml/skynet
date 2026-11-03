@@ -43,7 +43,7 @@ test("a unified run clones every slice it stored", () => {
         reflection_model: { name: "gpt-x" },
         metric_model: { name: "judge-y" },
       },
-      workspace: { run_code: "def run(a, i): ...", metric_code: "def score(i, o): return llm('x')" },
+      workspace: { run_code: "def run(a, i): ...", metric_code: "def score(i, o): return llm('x', model='judge-y')" },
     },
     "Job name",
   );
@@ -91,11 +91,20 @@ test("a legacy metric model the code replaces is dropped when cloning", () => {
   assert.equal(slices.workspace.metricModel, null);
 });
 
-test("a distinct legacy metric model is pinned when the code names no model", () => {
+test("a distinct legacy metric model is dropped when the code names no model", () => {
   const slices = cloneToSlices("blackbox", {
     payload_kind: "unified_v1",
     models: { reflection_model: { name: "r" }, metric_model: { name: "old" } },
     workspace: { metric_code: "llm('x')" },
+  });
+  assert.equal(slices.workspace.metricModel, null);
+});
+
+test("a distinct legacy metric model is pinned when the code names it", () => {
+  const slices = cloneToSlices("blackbox", {
+    payload_kind: "unified_v1",
+    models: { reflection_model: { name: "r" }, metric_model: { name: "old" } },
+    workspace: { metric_code: "llm('x', model='old')" },
   });
   assert.deepEqual(slices.workspace.metricModel, { name: "old" });
 });
@@ -124,11 +133,11 @@ test("a legacy black-box run maps objective, seed, cases and scorer", () => {
   assert.deepEqual(slices.inputs.cases?.[0], { input: { brief: "launch" }, expected: "Hi" });
   assert.deepEqual(slices.inputs.cases?.[1], { input: { brief: "renewal" }, expected: null });
   assert.equal(slices.workspace.metricCode, "def score(c, o): return llm('x')");
-  assert.deepEqual(slices.workspace.metricModel, { name: "judge" });
+  assert.equal(slices.workspace.metricModel, null);
   assert.equal(slices.optimizer.reflectionModel?.name, "refl");
 });
 
-test("a black-box clone drops derived models and retains a distinct legacy model", () => {
+test("a black-box clone drops derived models and retains a legacy model the code names", () => {
   const clone = (model: string, code: string, reflection = "r") =>
     cloneToSlices("blackbox", {
       target: { kind: "repo", repo: { repository: "example/site" } },
@@ -138,7 +147,8 @@ test("a black-box clone drops derived models and retains a distinct legacy model
   assert.deepEqual(clone("judge", "llm(model='judge')"), { name: "judge" });
   assert.equal(clone("r", "llm()"), null);
   assert.equal(clone("old", "llm(model='judge')"), null);
-  assert.deepEqual(clone("old", "llm()"), { name: "old" });
+  assert.equal(clone("old", "llm()"), null);
+  assert.deepEqual(clone("old", "llm(model='old')"), { name: "old" });
 });
 
 for (const shape of ["unified", "blackbox"] as const) {
@@ -146,8 +156,8 @@ for (const shape of ["unified", "blackbox"] as const) {
     const reflection = { name: "openai/r", token_source: "managed" };
     const clone = (metric: Record<string, unknown>) =>
       cloneToSlices("blackbox", shape === "unified"
-        ? { payload_kind: "unified_v1", models: { reflection_model: reflection, metric_model: metric }, workspace: { metric_code: "llm()" } }
-        : { reflection_model_config: reflection, scorer: { metric_code: "llm()", model: metric } },
+        ? { payload_kind: "unified_v1", models: { reflection_model: reflection, metric_model: metric }, workspace: { metric_code: "llm(model='openai/r')" } }
+        : { reflection_model_config: reflection, scorer: { metric_code: "llm(model='openai/r')", model: metric } },
       ).workspace.metricModel;
     for (const metric of [
       { name: "openai/r", token_source: "byok" },
@@ -387,5 +397,5 @@ test("a clone compares the role actually copied by the resolver", () => {
     }).workspace.metricModel;
   assert.equal(clone({ name: "judge", extra: { a: 1, b: 2 } }), null);
   assert.notEqual(clone({ name: "judge", token_source: "byok" }), null);
-  assert.notEqual(clone(base, "llm()"), null);
+  assert.equal(clone(base, "llm()"), null);
 });
