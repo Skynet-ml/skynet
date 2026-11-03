@@ -132,7 +132,7 @@ After the idle timeout or the maximum age, link the Mac again.
 
 ### Link status
 
-The app shows one of these states: **Local mode**, **Linked to this Mac**, **Sign in to sync** or **Linked (offline)**.
+The app shows one of these states: **Local mode**, **Sign in to sync**, your account email when the Mac is linked, or **Linked (offline)**.
 
 ## Local services and data
 

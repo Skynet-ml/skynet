@@ -53,8 +53,7 @@ export function localIdentity(account: LinkedAccount | undefined): {
     return { name: msg("local_identity.title"), detail: msg("settings.account.signed_out") };
   const name = account.name ?? account.email ?? msg("account.linked_fallback_name");
   if (account.offline) return { name, detail: msg("local_identity.linked_offline") };
-  const detail =
-    account.email && account.email !== name ? account.email : msg("local_identity.linked");
+  const detail = account.email && account.email !== name ? account.email : null;
   return { name, detail };
 }
 
