@@ -30,6 +30,7 @@ import { agentSteerChannel, newSteerKey } from "@/shared/ui/agent/use-steer-queu
 
 import { confirmGeneralistApproval, streamGeneralistAgent } from "../lib/stream";
 import { dropPendingToolCalls, pendingToolCall, placeToolCall } from "../lib/pending-tool-calls";
+import { editMode, retryMode } from "../lib/edit-turn";
 import type {
   ChatTurn,
   PendingApprovalPayload,
@@ -177,6 +178,8 @@ interface PendingRun {
   wizardState: WizardState;
   trustMode: TrustMode;
   regenerate: boolean;
+  /** User turn this message edits; the backend drops its stored copy and every later row. */
+  editUserTurn: { text: string; occurrence: number } | null;
 }
 
 /** Per-session mutable machinery that must never trigger a render. */
@@ -192,6 +195,8 @@ interface SessionRuntime {
   pendingRun: PendingRun | null;
   /** Index of the running turn's first assistant message; a steer adds more after it. */
   turnStart: number;
+  /** Edit target of the latest run until the server confirms it saved the turn. */
+  unsavedEdit: { text: string; occurrence: number } | null;
 }
 
 function blankSession(key: string): SessionView {
@@ -214,6 +219,7 @@ function blankRuntime(): SessionRuntime {
     persistentExtras: {},
     pendingRun: null,
     turnStart: 0,
+    unsavedEdit: null,
   };
 }
 
@@ -553,6 +559,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             trust_mode: run.trustMode,
             conversation_id: sessionsRef.current.get(key)?.conversationId ?? null,
             regenerate: run.regenerate,
+            edit_user_text: run.editUserTurn?.text,
+            edit_user_occurrence: run.editUserTurn?.occurrence,
             locale: getActiveLocale(),
             model: sentModel ?? undefined,
             reasoning_effort:
@@ -569,6 +577,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             onConversationMeta: (ev) => {
               if (controller.signal.aborted) return;
               if (!ev.conversation_id) return;
+              rt.unsavedEdit = null;
               patchSession(key, { conversationId: ev.conversation_id });
               callbacksRef.current.onConversationMeta?.(
                 ev.conversation_id,
@@ -690,6 +699,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             },
             onDone: (result) => {
               if (controller.signal.aborted) return;
+              rt.unsavedEdit = null;
               dropPendingRows();
               patchSession(key, {
                 status: "done",
@@ -860,12 +870,14 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       wizardStateOverride?: WizardState,
       regenerate = false,
       hidden = false,
+      editUserTurn: { text: string; occurrence: number } | null = null,
     ) => {
       // A resend within the same session replaces its own in-flight or queued
       // turn — other sessions' streams are untouched.
       abortSession(key);
       const rt = getRuntime(key);
       rt.replyBuf = "";
+      rt.unsavedEdit = editUserTurn;
 
       const chatHistory: ChatTurn[] = history
         .filter((m) => m.content.trim().length > 0)
@@ -893,6 +905,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         wizardState: ws,
         trustMode: tm,
         regenerate,
+        editUserTurn,
       };
 
       commit((draft) => {
@@ -969,9 +982,15 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       const trimmed = content.trim();
       if (!trimmed) return;
       const key = activeKeyRef.current;
-      const truncated = (sessionsRef.current.get(key)?.messages ?? []).slice(0, messageIndex);
+      const current = sessionsRef.current.get(key)?.messages ?? [];
+      const truncated = current.slice(0, messageIndex);
+      const { regenerate, editUserTurn } = editMode(
+        current,
+        messageIndex,
+        runtimesRef.current.get(key)?.unsavedEdit ?? null,
+      );
       steerQueueFor(key).pause();
-      requestRun(key, trimmed, truncated);
+      requestRun(key, trimmed, truncated, undefined, regenerate, false, editUserTurn);
     },
     [requestRun, steerQueueFor],
   );
@@ -993,8 +1012,19 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     const lastUser = current[lastUserIndex];
     if (!lastUser) return;
     const truncated = current.slice(0, lastUserIndex);
+    const { regenerate, editUserTurn } = retryMode(
+      runtimesRef.current.get(key)?.unsavedEdit ?? null,
+    );
     steerQueueFor(key).pause();
-    requestRun(key, lastUser.content, truncated, undefined, true, lastUser.hidden ?? false);
+    requestRun(
+      key,
+      lastUser.content,
+      truncated,
+      undefined,
+      regenerate,
+      lastUser.hidden ?? false,
+      editUserTurn,
+    );
   }, [requestRun, steerQueueFor]);
 
   const stopSession = React.useCallback((key: string) => {
