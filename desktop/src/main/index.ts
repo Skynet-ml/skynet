@@ -10,6 +10,7 @@ import { holdQuitUntilStopped, stopServices } from "./quit";
 import { databaseUrl, removeSandboxContainers, startPostgres, stopPostgres, type DockerCtx } from "./postgres";
 import { ensureSandboxImage } from "./sandbox-image";
 import { ensurePrivateDir, loadOrCreateSecrets } from "./secrets";
+import { finishSteps, loadStepTimes, newTimeline, saveStepTimes, startStep, type Timeline } from "./step-timing";
 import { clearPids, psStartOf, recordPid, sweepOrphans } from "./stack-pids";
 import { buildChildEnv, loginShellPath } from "./shell-env";
 import {
@@ -244,10 +245,12 @@ async function check(): Promise<void> {
 }
 
 async function startStack(base: OnboardingState, loginPath: string): Promise<void> {
+  let timeline: Timeline = newTimeline(loadStepTimes(dataDir));
   const step = (name: string) => {
     // A quit during first-launch setup must not start the next service after shutdown ran.
     if (quitting) throw new Error("Skynet is quitting");
-    setState({ ...base, kind: "starting", step: name });
+    timeline = startStep(timeline, name, Date.now());
+    setState({ ...base, kind: "starting", step: name, timeline });
   };
   const ctx = dockerCtx as DockerCtx;
   const binEnv: Record<string, string> = { APP_DOCKER_BIN: ctx.docker };
@@ -357,6 +360,11 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
   });
 
   if (quitting) return;
+  try {
+    saveStepTimes(dataDir, finishSteps(timeline, Date.now()));
+  } catch (err) {
+    log(`could not save step times: ${err instanceof Error ? err.message : String(err)}`);
+  }
   frontendUrl = feOrigin;
   watchForCrash(apiProc, "The API");
   watchForCrash(feProc, "The web app");
