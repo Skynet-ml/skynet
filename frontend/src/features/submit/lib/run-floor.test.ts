@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { test } from "node:test";
 
@@ -19,11 +20,35 @@ const {
   callHoldKey,
   declaredMetricModel,
   scanMetricModel,
+  scanMetricDeclarations,
   isSubscriptionModel,
   runFloor,
   runModels,
   startingLimitCents,
 } = await import("./run-floor.ts");
+
+const parityCases = JSON.parse(
+  readFileSync(
+    new URL(
+      "../../../../../backend/core/service_gateway/optimization/unified/tests/metric_model_parity.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+) as {
+  code: string;
+  expected: { uses: boolean; names: string[]; omitted: boolean; unsafe: boolean };
+}[];
+for (const { code, expected } of parityCases) {
+  test(`shared scan parity: ${code}`, () =>
+    assert.deepEqual(scanMetricDeclarations(code), expected));
+}
+
+test("reuses a scan for identical input", () => {
+  const first = scanMetricModel("llm(model='cached')", "r");
+  assert.strictEqual(scanMetricModel("llm(model='cached')", "r"), first);
+  assert.notStrictEqual(scanMetricModel("llm(model='cached')", "other"), first);
+});
 
 test("function shadow bindings stay local", () => {
   for (const prefix of ["", "from skynet import llm\n"]) {
@@ -84,7 +109,6 @@ test("omitted model conflicts with a distinct declared model", () => {
 test("dynamic helper access is unsafe", () => {
   for (const expr of [
     "getattr(skynet, 'llm')",
-    "getattr(x, 'llm')",
     "globals()['llm']",
     "vars(skynet)['llm']",
     "skynet.__dict__['llm']",

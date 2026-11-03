@@ -61,12 +61,27 @@ export function runFloor({ boxHoldCents, callHoldCents, tokenSource }: RunFloorI
   };
 }
 
+type MetricDeclarations = { uses: boolean; names: string[]; omitted: boolean; unsafe: boolean };
+let lastScan: { code: string; declarations: MetricDeclarations } | undefined;
+let lastModel:
+  | { code: string; reflectionName?: string; result: { uses: boolean; name: string | null } }
+  | undefined;
+
 /** Read literal declarations from helper calls without executing Python. */
-export function scanMetricModel(
-  code: string,
-  reflectionName?: string,
-): { uses: boolean; name: string | null } {
+export function scanMetricDeclarations(code: string): MetricDeclarations {
+  if (lastScan?.code === code) return lastScan.declarations;
   const tree = python().language.parser.parse(code);
+  let invalid = false;
+  tree.iterate({
+    enter(node) {
+      if (node.type.isError) invalid = true;
+    },
+  });
+  if (invalid) {
+    const declarations = { uses: false, names: [], omitted: false, unsafe: false };
+    lastScan = { code, declarations };
+    return declarations;
+  }
   const literal = (node: typeof tree.topNode): string | null => {
     if (node.name === "ParenthesizedExpression") {
       const child = node.firstChild?.nextSibling;
@@ -113,6 +128,9 @@ export function scanMetricModel(
     }
   };
   type Node = typeof tree.topNode;
+  const isScope = (name: string) =>
+    ["FunctionDefinition", "LambdaExpression", "ClassDefinition", "Script"].includes(name) ||
+    name.endsWith("ComprehensionExpression");
   const scopeKey = (node: Node): string => {
     let parent = node.parent;
     if (
@@ -120,14 +138,10 @@ export function scanMetricModel(
       parent.getChild("VariableName")?.from === node.from
     )
       parent = parent.parent;
-    while (
-      parent &&
-      !["FunctionDefinition", "LambdaExpression", "ClassDefinition", "Script"].includes(parent.name)
-    )
-      parent = parent.parent;
-    return parent ? `${parent.from}:${parent.to}` : "root";
+    while (parent && !isScope(parent.name)) parent = parent.parent;
+    return parent ? `${parent.name}:${parent.from}:${parent.to}` : "root";
   };
-  const root = `${tree.topNode.from}:${tree.topNode.to}`;
+  const root = `${tree.topNode.name}:${tree.topNode.from}:${tree.topNode.to}`;
   const bindingsByScope = new Map<string, Set<string>>();
   const aliasesByScope = new Map<string, Set<string>>();
   const modulesByScope = new Map<string, Set<string>>();
@@ -186,12 +200,19 @@ export function scanMetricModel(
             target = target.parent;
           const container = target.parent;
           if (container?.name === "AssignStatement" || container?.name === "NamedExpression") {
+            if (container.name === "AssignStatement" && target.nextSibling?.name === "TypeDef")
+              bindings.add(name);
             for (let sibling = target.nextSibling; sibling; sibling = sibling.nextSibling) {
               if (sibling.name === "AssignOp") {
                 bindings.add(name);
                 break;
               }
             }
+          } else if (
+            container?.name === "UpdateStatement" ||
+            (container?.name === "TypeDefinition" && target.prevSibling?.name === "type")
+          ) {
+            bindings.add(name);
           } else if (
             container?.name === "ForStatement" ||
             container?.name.endsWith("ComprehensionExpression")
@@ -212,7 +233,7 @@ export function scanMetricModel(
         }
         if (name === "llm" && (scope === root || globalsByScope.get(scope)?.has("llm"))) {
           let assignment = parent;
-          while (assignment && assignment.name !== "AssignStatement")
+          while (assignment && !["AssignStatement", "NamedExpression"].includes(assignment.name))
             assignment = assignment.parent;
           const target = assignment?.firstChild;
           const equals = assignment?.getChild("AssignOp");
@@ -274,11 +295,12 @@ export function scanMetricModel(
       if (bindingsByScope.get(key)?.has(name)) return false;
       if (key === root) return !module && name === "llm";
       let parent: Node | null = current.parent;
-      while (
-        parent &&
-        !["FunctionDefinition", "LambdaExpression", "ClassDefinition"].includes(parent.name)
-      )
-        parent = parent.parent;
+      while (parent && !isScope(parent.name)) parent = parent.parent;
+      if (parent && parent.name !== "ClassDefinition") {
+        let enclosing: Node | null = parent.parent;
+        while (enclosing && !isScope(enclosing.name)) enclosing = enclosing.parent;
+        if (enclosing?.name === "ClassDefinition") parent = enclosing;
+      }
       current = parent;
     }
     return false;
@@ -304,9 +326,34 @@ export function scanMetricModel(
   let omitted = false;
   let unsafe = rebound;
   let uses = imported || rebound;
+  const isNamespace = (node: Node | null): boolean => {
+    if (!node) return false;
+    if (node.name === "ParenthesizedExpression")
+      return isNamespace(node.firstChild?.nextSibling ?? null);
+    if (node.name === "VariableName") {
+      const name = code.slice(node.from, node.to);
+      return name === "builtins" || name === "__builtins__" || resolves(node, name, true);
+    }
+    if (node.name === "CallExpression") {
+      const func = node.firstChild;
+      return (
+        !!func &&
+        func.name === "VariableName" &&
+        ["globals", "vars"].includes(code.slice(func.from, func.to))
+      );
+    }
+    return (
+      node.name === "MemberExpression" &&
+      code.slice(node.lastChild?.from, node.lastChild?.to) === "__dict__" &&
+      isNamespace(node.firstChild)
+    );
+  };
   tree.iterate({
     enter(node) {
       const current = node.node;
+      let annotation = current.parent;
+      while (annotation && annotation.name !== "TypeDef") annotation = annotation.parent;
+      if (annotation) return false;
       if (node.name === "VariableName" && resolves(current, code.slice(node.from, node.to), true)) {
         const parent = current.parent;
         let ancestor = parent;
@@ -327,6 +374,7 @@ export function scanMetricModel(
       }
       if (
         node.name === "MemberExpression" &&
+        isNamespace(current.firstChild) &&
         literal(current.getChild("[")?.nextSibling ?? current) === "llm"
       ) {
         uses = true;
@@ -363,7 +411,8 @@ export function scanMetricModel(
       const args = node.node.getChild("ArgList");
       if (func.name === "VariableName" && code.slice(func.from, func.to) === "getattr") {
         const second = args?.getChild(",")?.nextSibling;
-        if (second && literal(second) === "llm") {
+        const first = args?.firstChild?.nextSibling;
+        if (first && isNamespace(first) && second && literal(second) === "llm") {
           uses = true;
           unsafe = true;
         }
@@ -396,8 +445,25 @@ export function scanMetricModel(
       if (!hasModel) omitted = true;
     },
   });
-  const name = names.size === 1 ? ([...names][0] ?? null) : null;
-  return { uses, name: !unsafe && name && (!omitted || name === reflectionName) ? name : null };
+  const declarations = { uses, names: [...names].sort(), omitted, unsafe };
+  lastScan = { code, declarations };
+  return declarations;
+}
+
+export function scanMetricModel(
+  code: string,
+  reflectionName?: string,
+): { uses: boolean; name: string | null } {
+  if (lastModel?.code === code && lastModel.reflectionName === reflectionName)
+    return lastModel.result;
+  const scan = scanMetricDeclarations(code);
+  const name = scan.names.length === 1 ? scan.names[0]! : null;
+  const result = {
+    uses: scan.uses,
+    name: !scan.unsafe && name && (!scan.omitted || name === reflectionName) ? name : null,
+  };
+  lastModel = { code, reflectionName, result };
+  return result;
 }
 
 export function declaredMetricModel(code: string, reflectionName?: string): string | null {

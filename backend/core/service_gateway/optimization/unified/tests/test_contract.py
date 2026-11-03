@@ -582,7 +582,6 @@ def test_verify_workspace_gives_each_file_its_own_verdict() -> None:
             "from helpers import join\n\ndef go(artifact, input):\n    return join(artifact)\n",
             BLACKBOX_METRIC,
             {"helpers.py": "def join(a):\n    return a + missing\n", "notes.md": "# notes"},
-            metric_has_model=False,
             optimizer_resolved="best_of_n",
         )
     }
@@ -593,6 +592,17 @@ def test_verify_workspace_gives_each_file_its_own_verdict() -> None:
     assert not verdicts["helpers.py"].ok
     assert "F821" in verdicts["helpers.py"].errors[0]
     assert verdicts["notes.md"].ok
+
+
+def test_verify_workspace_rejects_omitted_and_explicit_models() -> None:
+    """Reject mixed model declarations when reflection is not known."""
+    metric = "from skynet import llm\ndef score(input, output):\n llm('a')\n llm('b', model='x/y')\n return 1, {}"
+    verdicts = verify_workspace(RUN_CODE, metric, {}, optimizer_resolved="gepa")
+    assert any("at most one" in error for error in verdicts[1].errors)
+    same = verify_workspace(RUN_CODE, metric, {}, optimizer_resolved="gepa", reflection_name="x/y")
+    assert not any("at most one" in error for error in same[1].errors)
+    other = verify_workspace(RUN_CODE, metric, {}, optimizer_resolved="gepa", reflection_name="other")
+    assert any("at most one" in error for error in other[1].errors)
 
 
 def test_static_check_lints_each_python_file_on_its_own() -> None:

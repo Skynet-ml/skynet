@@ -320,12 +320,11 @@ def _validate_run_code(code: str) -> str:
     return ""
 
 
-def _validate_unified_metric_code(code: str, metric_has_model: bool) -> str:
+def _validate_unified_metric_code(code: str) -> str:
     """Statically check the wizard's metric against ``score(input, output, expected=None)``.
 
     Args:
         code: Metric source.
-        metric_has_model: Retired model-picker flag, ignored for compatibility.
 
     Returns:
         An empty string when the code fits the contract, otherwise a short error message.
@@ -3242,7 +3241,7 @@ def _unified_verifier(unified: dict[str, Any]) -> WorkspaceVerifier:
 
     def _verify(run_code: str, metric_code: str, files: dict[str, str]) -> list[dict[str, Any]]:
         """Check the workspace and return each file's verdict as plain data."""
-        verdicts = verify_workspace(run_code, metric_code, files, metric_has_model=True, optimizer_resolved=optimizer)
+        verdicts = verify_workspace(run_code, metric_code, files, optimizer_resolved=optimizer)
         return [v.as_dict() for v in verdicts]
 
     return _verify
@@ -4130,7 +4129,7 @@ def _unified_validators(unified: dict[str, Any]) -> tuple[Callable[[str], str], 
         return _accept_any_run_code, _validate_repo_metric_code
     return (
         _validate_run_code,
-        partial(_validate_unified_metric_code, metric_has_model=True),
+        _validate_unified_metric_code,
     )
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,14 +26,42 @@ class MetricLLMScan:
 
 
 def scan_metric_llm(code: str) -> MetricLLMScan:
-    """Extract literal model declarations without executing metric code."""
+    """Extract literal model declarations without executing metric code.
+
+    Args:
+        code: Python metric source.
+
+    Returns:
+        Helper usage, declared model names, omissions, and unsafe uses.
+    """
     result = MetricLLMScan()
     try:
         tree = ast.parse(code)
     except (SyntaxError, ValueError):
         return result
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-    scopes = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+    scopes = (
+        ast.Module,
+        ast.FunctionDef,
+        ast.AsyncFunctionDef,
+        ast.Lambda,
+        ast.ClassDef,
+        ast.ListComp,
+        ast.SetComp,
+        ast.DictComp,
+        ast.GeneratorExp,
+    )
+    annotations: set[ast.AST] = set()
+    for node in ast.walk(tree):
+        annotation = (
+            node.annotation
+            if isinstance(node, (ast.arg, ast.AnnAssign))
+            else node.returns
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            else None
+        )
+        if annotation is not None:
+            annotations.update(ast.walk(annotation))
     bindings_by_scope: dict[ast.AST, set[str]] = {}
     imported_by_scope: dict[ast.AST, set[str]] = {}
     modules_by_scope: dict[ast.AST, set[str]] = {}
@@ -119,6 +148,8 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
             if scope is tree:
                 return not module and name == "llm"
             scope = scope_of(scope)
+            if isinstance(scope, ast.ClassDef):
+                scope = scope_of(scope)
 
     def is_helper(node: ast.AST) -> bool:
         """Recognize injected or imported helper names and module attributes."""
@@ -129,16 +160,32 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
             and resolves(node.value, node.value.id, module=True)
         )
 
+    def is_namespace(node: ast.AST) -> bool:
+        """Recognize helper-bearing module and namespace expressions."""
+        if isinstance(node, ast.Name):
+            return node.id in {"builtins", "__builtins__"} or resolves(node, node.id, module=True)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            return node.func.id in {"globals", "vars"}
+        return isinstance(node, ast.Attribute) and node.attr == "__dict__" and is_namespace(node.value)
+
     for node in ast.walk(tree):
+        if node in annotations:
+            continue
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and resolves(node, node.id, module=True):
             parent = parents.get(node)
             if not isinstance(parent, ast.Attribute) or parent.value is not node:
                 result.uses_llm = result.non_literal = True
-        if (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and node.slice.value == "llm") or (
+        if (
+            isinstance(node, ast.Subscript)
+            and is_namespace(node.value)
+            and isinstance(node.slice, ast.Constant)
+            and node.slice.value == "llm"
+        ) or (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and node.func.id == "getattr"
             and len(node.args) > 1
+            and is_namespace(node.args[0])
             and isinstance(node.args[1], ast.Constant)
             and node.args[1].value == "llm"
         ):
@@ -161,18 +208,36 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
                     result.omitted = True
                     continue
                 if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
-                    result.names.add(keyword.value.value)
+                    source = ast.get_source_segment(code, keyword.value) or ""
+                    if re.search(r"\\N\{", source) and "\\N{" not in keyword.value.value:
+                        result.non_literal = True
+                    else:
+                        result.names.add(keyword.value.value)
                 else:
                     result.non_literal = True
     return result
 
 
+def metric_declaration_unsafe(scan: MetricLLMScan, reflection_name: str | None) -> bool:
+    """Determine whether helper calls can select more than one model."""
+    if scan.non_literal or len(scan.names) > 1:
+        return True
+    return bool(scan.omitted and scan.names and (reflection_name is None or scan.names != {reflection_name}))
+
+
 def resolve_metric_model(models: UnifiedModels, metric_code: str) -> str | None:
-    """Derive the metric model, returning a message key for an unsafe declaration."""
+    """Derive and set the metric model on the supplied models.
+
+    Args:
+        models: Run models, mutated in place at ``metric_model``.
+        metric_code: Python metric source.
+
+    Returns:
+        ``contract.metric_model_declaration`` for an unsafe declaration, else None.
+    """
     scan = scan_metric_llm(metric_code)
     models.metric_model = None
-    names = scan.names | ({models.reflection_model.name} if scan.omitted else set())
-    if scan.non_literal or len(names) > 1:
+    if metric_declaration_unsafe(scan, models.reflection_model.name):
         return "contract.metric_model_declaration"
     if not scan.uses_llm:
         return None
@@ -206,7 +271,15 @@ def resolve_metric_model(models: UnifiedModels, metric_code: str) -> str | None:
 
 
 def resolve_metric_model_dict(payload: dict[str, Any], *, preserve_metric_model: bool = False) -> str | None:
-    """Resolve a raw unified payload in place before legacy aliases are made."""
+    """Resolve a raw unified payload before legacy aliases are made.
+
+    Args:
+        payload: Unified payload whose metric model is mutated in place.
+        preserve_metric_model: Keep a stored model when no model is declared.
+
+    Returns:
+        The declaration error message key, or None.
+    """
     models = payload.get("models")
     workspace = payload.get("workspace")
     if not isinstance(models, dict) or not isinstance(workspace, dict):

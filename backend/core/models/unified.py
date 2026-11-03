@@ -548,7 +548,7 @@ class UnifiedAuthoringContext(BaseModel):
     expected_field: str | None = None
     sample_cases: list[dict[str, Any]] = Field(default_factory=list, max_length=5)
     optimizer: OptimizerChoice
-    metric_has_model: bool = False
+    metric_has_model: bool = False  # Accepted for old clients; no longer used.
     focus: Literal["run", "metric"] = "run"
     target: Literal["artifact", "repo"] = "artifact"
     repo_files: list[Annotated[str, StringConstraints(min_length=1, max_length=REPO_FILE_PATH_MAX)]] = Field(

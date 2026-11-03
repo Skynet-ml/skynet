@@ -559,7 +559,16 @@ def _completion_text(payload: Any) -> str:
 
 
 def model_matches_bound(model: str, bound: str, declared: str | None = None) -> bool:
-    """Compare a user model name with the model bound to its gateway route."""
+    """Compare a user model name with the model bound to its gateway route.
+
+    Args:
+        model: Model named by the helper call.
+        bound: Model identifier on the protected route.
+        declared: Original model identifier, before route normalization.
+
+    Returns:
+        Whether the model matches the bound or declared identifier.
+    """
 
     def normalized(value: str) -> str:
         """Remove transport prefixes without changing the provider model id."""

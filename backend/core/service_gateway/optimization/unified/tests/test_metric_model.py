@@ -13,12 +13,34 @@ from core.config import settings
 from core.i18n_en import ENGLISH_MESSAGES
 from core.models.unified import UnifiedModels
 from core.provider_registry import BYOK_TO_LITELLM_PROVIDER
+from core.service_gateway.optimization.blackbox.runner import model_matches_bound
 from core.service_gateway.optimization.unified.metric_model import (
     resolve_metric_model,
     resolve_metric_model_dict,
     scan_metric_llm,
 )
 from core.worker.unified_aliases import alias_unified_model_roles
+
+
+@pytest.mark.parametrize("case", json.loads(Path(__file__).with_name("metric_model_parity.json").read_text()))
+def test_shared_metric_scan_parity(case: dict) -> None:
+    """Apply the shared scanner cases."""
+    scan = scan_metric_llm(case["code"])
+    assert {
+        "uses": scan.uses_llm,
+        "names": sorted(scan.names),
+        "omitted": scan.omitted,
+        "unsafe": scan.non_literal,
+    } == case["expected"]
+
+
+@pytest.mark.parametrize(
+    "function", [scan_metric_llm, resolve_metric_model, resolve_metric_model_dict, model_matches_bound]
+)
+def test_metric_api_documents_arguments_and_return(function: object) -> None:
+    """Document the public scanner and routing APIs."""
+    assert "Args:" in function.__doc__
+    assert "Returns:" in function.__doc__
 
 
 def test_injected_llm_uses_reflection_on_worker() -> None:
@@ -85,7 +107,6 @@ def test_omitted_and_distinct_model_are_ambiguous(suffix: str) -> None:
     "expr",
     [
         "getattr(skynet, 'llm')",
-        "getattr(x, 'llm')",
         "globals()['llm']",
         "vars(skynet)['llm']",
         "skynet.__dict__['llm']",

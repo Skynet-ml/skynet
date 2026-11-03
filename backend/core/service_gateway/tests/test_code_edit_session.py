@@ -11,6 +11,7 @@ static run-code / metric contract checks are covered the same way.
 from __future__ import annotations
 
 import asyncio
+import inspect
 
 import pytest
 
@@ -242,7 +243,8 @@ def test_validate_run_code(code: str, fragment: str) -> None:
 )
 def test_validate_unified_metric_code(code: str, has_model: bool, fragment: str) -> None:
     """Enforce the metric signature regardless of the retired model flag."""
-    err = _validate_unified_metric_code(code, has_model)
+    _, validate = _unified_validators(_unified(metric_has_model=has_model))
+    err = validate(code)
     if fragment:
         assert fragment in err
     else:
@@ -252,12 +254,17 @@ def test_validate_unified_metric_code(code: str, has_model: bool, fragment: str)
 def test_model_judge_allowed_without_legacy_model_flag() -> None:
     """Allow a model judge when old clients omit the retired model flag."""
     code = "from skynet import llm\ndef score(input, output):\n    return llm('judge', model='openai/gpt-5'), {}"
-    assert _validate_unified_metric_code(code, False) == ""
+    assert _validate_unified_metric_code(code) == ""
     for value in (True, False):
         _, validate = _unified_validators(_unified(metric_has_model=value))
         assert validate(code) == ""
     _, validate = _unified_validators({k: v for k, v in _unified().items() if k != "metric_has_model"})
     assert validate(code) == ""
+
+
+def test_retired_metric_picker_argument_is_removed() -> None:
+    """Keep legacy request fields without exposing the retired validator argument."""
+    assert "metric_has_model" not in inspect.signature(_validate_unified_metric_code).parameters
 
 
 @pytest.mark.parametrize("optimizer", ["auto", "dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot", "gepa"])
