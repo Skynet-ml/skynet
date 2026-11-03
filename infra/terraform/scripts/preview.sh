@@ -12,6 +12,7 @@
 #   preview.sh revision-prs        print the PRs that have preview task definitions
 #   preview.sh prune <pr>          delete the task definitions of a PR without a slot
 #   preview.sh setup-db            once, as an operator (skynet profile)
+# Bash 4 or newer is required; macOS's bundled Bash 3.2 is not supported.
 #
 # A preview runs in the staging cluster with the staging secrets, task roles
 # and security groups. It shares the staging ALB, RDS, Valkey and LiteLLM:
@@ -41,14 +42,15 @@
 # points them at the preview database and Redis DB before the app starts, so
 # no secret passes through this script or the task definition.
 
-source "$(dirname "$0")/lib.sh"
-source "$(dirname "$0")/image-key.sh"
+script_path="${BASH_SOURCE[0]}"
+source "$(dirname "$script_path")/lib.sh"
+source "$(dirname "$script_path")/image-key.sh"
 need aws jq
 
 env=staging
 max_slots=4
 slot_prefix=/skynet/preview/slots
-repo_root="$(cd "$(dirname "$0")/../../.." && pwd)"
+repo_root="$(cd "$(dirname "$script_path")/../../.." && pwd)"
 
 cmd="${1:-}"
 pr="${2:-}"
@@ -148,9 +150,11 @@ build_backend() {
     return 0
   fi
   registry="${1%%/*}"
-  week="$(date -u +%G-W%V)"
+  week="$(date -u +%G-W%V)" || return 1
   image_inputs "$repo_root/backend" "$week" "GIT_SHA=$sha"
   pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
+  [[ -n "$IMAGE_KEY_CTX" ]] ||
+    echo "warning: backend inputs could not be verified; building without pinned build contexts" >&2
   staging_cache="$(latest_cache_ref skynet/buildcache-staging "backend-$week-")"
   preview_cache="$(latest_cache_ref skynet/preview-buildcache "preview-backend-pr${pr}-$week-")"
   if [[ -n "$staging_cache" ]]; then
@@ -159,14 +163,18 @@ build_backend() {
   if [[ -n "$preview_cache" ]]; then
     cache_from+=(--cache-from "type=registry,ref=$registry/skynet/preview-buildcache:$preview_cache")
   fi
-  refresh_aws_credentials
-  aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null
+  refresh_aws_credentials || return 1
+  aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null || return 1
   docker buildx build --platform linux/arm64 --provenance=false --progress=plain \
     "${cache_from[@]+"${cache_from[@]}"}" \
     "${pin_args[@]+"${pin_args[@]}"}" \
     --cache-to "type=registry,ref=$registry/skynet/preview-buildcache:preview-backend-pr${pr}-$week-$sha,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
-    -t "$1:$2" --push --build-arg "GIT_SHA=$sha" "$repo_root/backend"
-  refresh_aws_credentials
+    -t "$1:$2" --push --build-arg "GIT_SHA=$sha" "$repo_root/backend" || return 1
+  refresh_aws_credentials || return 1
+  image_is_fresh skynet/preview-backend "$2" || {
+    echo "error: pushed backend image is missing or stale: $1:$2" >&2
+    return 1
+  }
 }
 
 # Next.js bakes NEXT_PUBLIC_* into the bundle, so each PR gets its own build.
@@ -179,7 +187,7 @@ build_frontend() {
     return 0
   fi
   registry="${1%%/*}"
-  week="$(date -u +%G-W%V)"
+  week="$(date -u +%G-W%V)" || return 1
   build_args=(
     "NEXT_PUBLIC_SITE_URL=https://pr-$pr.$3"
     "NEXT_PUBLIC_SENTRY_DSN=${NEXT_PUBLIC_SENTRY_DSN:-}"
@@ -191,6 +199,8 @@ build_frontend() {
   )
   image_inputs "$repo_root/frontend" "$week" "${build_args[@]+"${build_args[@]}"}"
   pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
+  [[ -n "$IMAGE_KEY_CTX" ]] ||
+    echo "warning: frontend inputs could not be verified; building without pinned build contexts" >&2
   for build_arg in "${build_args[@]+"${build_args[@]}"}"; do docker_args+=(--build-arg "$build_arg"); done
   staging_cache="$(latest_cache_ref skynet/buildcache-staging "frontend-staging-$week-")"
   preview_cache="$(latest_cache_ref skynet/preview-buildcache "preview-frontend-pr${pr}-$week-")"
@@ -200,15 +210,19 @@ build_frontend() {
   if [[ -n "$preview_cache" ]]; then
     cache_from+=(--cache-from "type=registry,ref=$registry/skynet/preview-buildcache:$preview_cache")
   fi
-  refresh_aws_credentials
-  aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null
+  refresh_aws_credentials || return 1
+  aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null || return 1
   docker buildx build --platform linux/arm64 --provenance=false --progress=plain \
     "${cache_from[@]+"${cache_from[@]}"}" \
     "${pin_args[@]+"${pin_args[@]}"}" \
     --cache-to "type=registry,ref=$registry/skynet/preview-buildcache:preview-frontend-pr${pr}-$week-$sha,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true" \
     -t "$1:$2" --push "${docker_args[@]+"${docker_args[@]}"}" \
-    "$repo_root/frontend"
-  refresh_aws_credentials
+    "$repo_root/frontend" || return 1
+  refresh_aws_credentials || return 1
+  image_is_fresh skynet/preview-frontend "$2" || {
+    echo "error: pushed frontend image is missing or stale: $1:$2" >&2
+    return 1
+  }
 }
 
 # Migrates the preview database with the backend image. Args: image cfg
@@ -230,7 +244,7 @@ backend_and_migrate() {
   else
     build_backend "${1%:*}" "${1##*:}" || return 1
   fi
-  refresh_aws_credentials
+  refresh_aws_credentials || return 1
   migrate "$1" "$2"
 }
 
@@ -239,21 +253,19 @@ build() {
   check_sha
   need docker git tr sort date
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || die "missing command: sha256sum or shasum"
-  local cfg domain slot app api tag backend frontend backend_pid frontend_pid failed=""
+  local cfg domain slot tag backend frontend backend_pid frontend_pid failed=""
   cfg="$(preview_config)"
   domain="$(jq -r .domain <<<"$cfg")"
   slot="$(slot_of "$pr")"
   [[ -n "$slot" ]] || die "PR $pr holds no preview slot; run claim first"
-  app="pr-$pr.$domain"
-  api="api-pr-$pr.$domain"
   tag="$sha-pr-$pr"
   backend="${BACKEND_IMAGE:-$(ecr_uri backend):$tag}"
   frontend="$(ecr_uri frontend)"
   # Migration overlaps the frontend build, but services roll only after both
   # image lanes succeed.
-  backend_and_migrate "$backend" "$cfg" 2>&1 | sed -u 's/^/[backend] /' &
+  run_preview_lane backend backend_and_migrate "$backend" "$cfg" &
   backend_pid=$!
-  build_frontend "$frontend" "$tag" "$domain" 2>&1 | sed -u 's/^/[frontend] /' &
+  run_preview_lane frontend build_frontend "$frontend" "$tag" "$domain" &
   frontend_pid=$!
   if ! wait "$backend_pid"; then
     failed+=" backend"
@@ -550,10 +562,8 @@ deploy() {
   echo "preview of PR $pr runs: https://$app (API https://$api)"
 }
 
-# Prints the image of the newest staging backend revision when it was built
-# from the same backend/ tree as <sha>; prints nothing otherwise. Then the
-# preview can run that image: same code, same migrations. The image tag is
-# the staging commit. Needs a git checkout that can fetch that commit.
+# Prints a reusable backend image when its tree key or staging source tree
+# matches this PR. Args: PR number and full SHA.
 staging_backend() {
   check_pr
   check_sha
@@ -576,6 +586,8 @@ staging_backend() {
   fi
 }
 
+# Prints the best reusable backend image for this PR, if one is safe to use.
+# Args: PR number and full SHA.
 backend_image() {
   check_pr
   check_sha
@@ -602,6 +614,8 @@ backend_image() {
   fi
 }
 
+# Runs the backend and worker services with the image used for migration.
+# Args: backend image, preview configuration.
 deploy_backend_worker() {
   local backend_img="$1" cfg="$2" slot acct domain app backend_env backend_tg
   slot="$(slot_of "$pr")"
@@ -615,6 +629,12 @@ deploy_backend_worker() {
     "$(register backend "$backend_img" "$(jq -c --arg app "$app" '. + {WEBAUTHN_RP_ID: $app, WEBAUTHN_ORIGINS: .ALLOWED_ORIGINS}' <<<"$backend_env")" "$slot" "$cfg" "$acct")" \
     "$backend_tg" "$(jq -r .ports.backend <<<"$cfg")"
   upsert_service "$cfg" worker "$(register worker "$backend_img" "$backend_env" "$slot" "$cfg" "$acct")"
+}
+
+run_preview_lane() {
+  local label="$1"
+  shift
+  "$@" > >(sed -u "s/^/[$label] /") 2>&1
 }
 
 delete() {
@@ -752,16 +772,18 @@ SH
   echo "done. Output: CloudWatch log group /ecs/skynet-$env/dbadmin"
 }
 
-case "$cmd" in
-  claim) claim ;;
-  build) build ;;
-  deploy) deploy ;;
-  backend-image) backend_image ;;
-  staging-backend) staging_backend ;;
-  delete) delete ;;
-  list) list ;;
-  revision-prs) revision_prs ;;
-  prune) prune ;;
-  setup-db) setup_db ;;
-  *) die "usage: preview.sh claim|build|deploy|backend-image|staging-backend <pr> <sha> | delete|prune <pr> | list | revision-prs | setup-db" ;;
-esac
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  case "$cmd" in
+    claim) claim ;;
+    build) build ;;
+    deploy) deploy ;;
+    backend-image) backend_image ;;
+    staging-backend) staging_backend ;;
+    delete) delete ;;
+    list) list ;;
+    revision-prs) revision_prs ;;
+    prune) prune ;;
+    setup-db) setup_db ;;
+    *) die "usage: preview.sh claim|build|deploy|backend-image|staging-backend <pr> <sha> | delete|prune <pr> | list | revision-prs | setup-db" ;;
+  esac
+fi

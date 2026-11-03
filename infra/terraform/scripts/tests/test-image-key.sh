@@ -210,11 +210,14 @@ PUSHED_AT=2000-01-01T00:00:00Z
 if find_fresh_by_key skynet/backend "$key"; then fail "stale keyed image was reused"; fi
 unset FRESHNESS_TEST PUSHED_AT
 IMAGE_PINNED_DIGESTS=(sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)
-printf '%s\n' '{"buildx.build.provenance":{"materials":[{"digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]}}' \
+printf '%s\n' '{"buildx.build.provenance":{"materials":[{"uri":"pkg:docker/node?digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]}}' \
   >"$tmp/metadata.json"
 verify_image_sources "$tmp/metadata.json" || fail "pinned source digest was not verified"
 printf '%s\n' '{"buildx.build.provenance":{"materials":[]}}' >"$tmp/metadata.json"
 if verify_image_sources "$tmp/metadata.json"; then fail "missing source digest was verified"; fi
+printf '%s\n' '{"buildx.build.provenance":{"materials":[{"uri":"pkg:docker/node?digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},{"uri":"pkg:docker/unknown?digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","digest":{"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}]}}' \
+  >"$tmp/metadata.json"
+if verify_image_sources "$tmp/metadata.json"; then fail "unpinned Docker source was verified"; fi
 unset IMAGE_PINNED_DIGESTS
 
 export ACTIONS_ID_TOKEN_REQUEST_URL="https://token.invalid/request?value=1"
@@ -244,6 +247,15 @@ image_inputs "$test_context" "$test_week" GIT_SHA=abc
   fail "one image_inputs call did not set both keys"
 ((${#IMAGE_BUILD_CONTEXT_ARGS[@]} == 2)) || fail "pinned build-context args were not set"
 [[ "$(wc -l <"$DIGEST_CALLS_OUT")" -eq 1 ]] || fail "FROM digest was resolved more than once"
+image_inputs "$test_context" "$test_week" --build-arg GIT_SHA=abc --build-arg FEATURE=on
+staging_ctx="$IMAGE_KEY_CTX"
+staging_tree="$IMAGE_KEY_TREE"
+image_inputs "$test_context" "$test_week" GIT_SHA=def FEATURE=on
+preview_ctx="$IMAGE_KEY_CTX"
+[[ "$staging_tree" == "$IMAGE_KEY_TREE" ]] || fail "tree key differs between staging and preview caller forms"
+[[ "$staging_ctx" != "$preview_ctx" ]] || fail "ctx key ignored the staging GIT_SHA argument"
+image_inputs "$test_context" "$test_week" GIT_SHA=abc FEATURE=on
+[[ "$staging_ctx" == "$IMAGE_KEY_CTX" ]] || fail "normalized build arguments changed the ctx key"
 image_inputs "$test_context" "$test_week"
 [[ "$IMAGE_KEY_CTX" =~ ^ctx-[0-9a-f]{40}$ ]] || fail "empty build-arg array produced no key"
 image_inputs "$test_context" 2026-W01 GIT_SHA=abc

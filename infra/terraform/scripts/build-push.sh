@@ -53,26 +53,21 @@ build() {
   tree_key="$IMAGE_KEY_TREE"
   pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
   if find_by_key "skynet/$name" "$tag"; then
-    if [[ "$name" == backend && -n "$tree_key" ]] &&
-      ! retag skynet/backend "$tag" "$tree_key"; then
-      echo "warning: cannot add tree image-key tag skynet/backend:$tree_key" >&2
-    fi
     echo "skip: $url:$tag exists"
     return 0
   fi
 
   if [[ -n "$key" ]] && find_fresh_by_key "skynet/$name" "$key"; then
     if retag "skynet/$name" "$key" "$tag"; then
-      if [[ "$name" == backend && -n "$tree_key" ]] &&
-        ! retag skynet/backend "$tag" "$tree_key"; then
-        echo "warning: cannot add tree image-key tag skynet/backend:$tree_key" >&2
-      fi
       echo "reuse: $url:$key as $tag"
       return 0
     fi
     echo "warning: cannot retag $url:$key as $tag; building" >&2
   fi
 
+  if [[ -z "$key" ]]; then
+    echo "warning: image inputs could not be verified for $url; building without keyed image reuse" >&2
+  fi
   cache_tag="$(latest_cache_ref "$cache_repo" "$cache_name-$week-")"
   if [[ -n "$cache_tag" ]]; then
     cache_from+=(--cache-from "type=registry,ref=$registry/$cache_repo:$cache_tag")
@@ -81,8 +76,8 @@ build() {
     metadata_file="$(mktemp)"
     metadata_args+=(--metadata-file "$metadata_file")
   fi
-  refresh_aws_credentials
-  aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null
+  refresh_aws_credentials || return 1
+  aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null || return 1
   if docker buildx build --platform linux/arm64 --provenance=false \
     "${metadata_args[@]+"${metadata_args[@]}"}" \
     "${cache_from[@]+"${cache_from[@]}"}" \
@@ -93,7 +88,7 @@ build() {
   else
     build_succeeded=false
   fi
-  refresh_aws_credentials
+  refresh_aws_credentials || return 1
   if [[ "$build_succeeded" != true ]]; then
     [[ -z "$metadata_file" ]] || rm -f "$metadata_file"
     # Staging and production can build the same backend and litellm tag at
@@ -120,27 +115,23 @@ build() {
 }
 
 build_backend_lane() {
-  build backend "$sha" "$repo_root/backend" backend --build-arg "GIT_SHA=$sha"
+  build backend "$sha" "$repo_root/backend" backend --build-arg "GIT_SHA=$sha" || return 1
   if [[ "$migrate_requested" == --migrate ]]; then
     wait_for_lane_success litellm frontend ||
-      die "migration skipped because the litellm or frontend lane failed"
+      return 1
     # Existing tasks stay live until deploy.sh rolls services, so migrations
     # must remain compatible with the previous application code.
-    refresh_aws_credentials
-    "$script_dir/deploy.sh" "$env" "$sha" --migrate-only
-    printf '%s\n' "$sha" >"$marker"
+    refresh_aws_credentials || return 1
+    "$script_dir/deploy.sh" "$env" "$sha" --migrate-only || return 1
+    printf '%s\n' "$sha" >"$marker" || return 1
   fi
 }
 
 run_image_lane() {
   local lane="$1"
   shift
-  if "$@"; then
-    : >"$lane_dir/$lane.ok"
-  else
-    : >"$lane_dir/$lane.failed"
-    return 1
-  fi
+  "$@"
+  : >"$lane_dir/$lane.ok"
 }
 
 wait_for_lane_success() {
@@ -151,7 +142,7 @@ wait_for_lane_success() {
     done
     for lane in "$@"; do
       [[ -e "$lane_dir/$lane.ok" ]] || {
-        sleep 1
+        sleep 1 || return 1
         continue 2
       }
     done
@@ -163,7 +154,7 @@ run_lane() {
   local label="$1"
   shift
   trap '_mark_lane_failure "$?" "$label"' EXIT
-  "$@" 2>&1 | sed -u "s/^/[$label] /"
+  "$@" > >(sed -u "s/^/[$label] /") 2>&1
 }
 
 _mark_lane_failure() {

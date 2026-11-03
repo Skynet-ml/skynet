@@ -80,7 +80,7 @@ trusted_revision() {
   die "no ACTIVE revision of $family has the $env roles and tag; run terraform apply for $env"
 }
 
-# Prints the new task definition ARN. (No associative arrays: macOS bash 3.2.)
+# Prints the new task definition ARN. Bash 4+ is required by lib.sh.
 register() {
   local family_key="$1" image td src
   image="$(image_for "$family_key")"

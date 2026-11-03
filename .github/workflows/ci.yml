@@ -131,6 +131,7 @@ jobs:
           overwrite: true
 
   backend:
+    # Keep the /4 names for required checks; shard coverage uses six shards.
     name: backend · ruff + core tests (${{ matrix.shard }}/4)
     needs: [backend-core, backend-gates, backend-shard-coverage]
     if: always()

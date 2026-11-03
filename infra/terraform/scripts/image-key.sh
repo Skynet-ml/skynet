@@ -4,7 +4,7 @@
 # ctx- keeps every build arg; tree- drops only GIT_SHA for preview reuse.
 # The weekly cache rotation bounds unpinned RUN-time network inputs to one week;
 # the first build each week is cold, so this is a documented freshness gap.
-KEY_VERSION=4
+KEY_VERSION=5
 
 IMAGE_KEY_CTX=""
 IMAGE_KEY_TREE=""
@@ -27,6 +27,7 @@ _is_stage() {
 _hash_image_key() {
   local prefix="$1" context_hash="$2" buildx_version="$3" buildkit_version="$4" week="$5"
   shift 5
+  local hash
   local -a args=("$@") sorted_args=()
   local line digest
   if ((${#args[@]})); then
@@ -34,23 +35,27 @@ _hash_image_key() {
       printf '%s\n' "${args[@]+"${args[@]}"}" | LC_ALL=C sort
     )
   fi
-  {
-    printf 'version=%s\nweek=%s\nplatform=linux/arm64\ncontext=%s\nbuildx=%s\nbuildkit=%s\n' \
-      "$KEY_VERSION" "$week" "$context_hash" "$buildx_version" "$buildkit_version"
-    for digest in "${IMAGE_PINNED_DIGESTS[@]+"${IMAGE_PINNED_DIGESTS[@]}"}"; do
-      printf 'base=%s\n' "$digest"
-    done
-    for line in "${sorted_args[@]+"${sorted_args[@]}"}"; do
-      printf 'arg=%s\n' "$line"
-    done
-  } | if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -c1-40 |
-    { read -r line; printf '%s-%s\n' "$prefix" "$line"; }
+  hash="$(
+    set -o pipefail
+    {
+      printf 'version=%s\nweek=%s\nplatform=linux/arm64\ncontext=%s\nbuildx=%s\nbuildkit=%s\n' \
+        "$KEY_VERSION" "$week" "$context_hash" "$buildx_version" "$buildkit_version"
+      for digest in "${IMAGE_PINNED_DIGESTS[@]+"${IMAGE_PINNED_DIGESTS[@]}"}"; do
+        printf 'base=%s\n' "$digest"
+      done
+      for line in "${sorted_args[@]+"${sorted_args[@]}"}"; do
+        printf 'arg=%s\n' "$line"
+      done
+    } | if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -c1-40
+  )" || return 1
+  [[ "$hash" =~ ^[0-9a-f]{40}$ ]] || return 1
+  printf '%s-%s\n' "$prefix" "$hash"
 }
 
 _image_inputs_impl() {
   local context_dir="$1" week="$2" repo_root context_path status dockerfile
   shift 2
-  local -a build_args=("$@") tree_args=() words=() base_digests=()
+  local -a raw_build_args=("$@") build_args=() tree_args=() words=() base_digests=()
   local line trimmed logical instruction ref image_ref alias digest_json digest
   local stage_count=0 index from_ref source buildx_version builder_info buildkit_version
   local continuation=0 context_hash
@@ -66,6 +71,20 @@ _image_inputs_impl() {
   context_hash="$(git -C "$repo_root" rev-parse "HEAD:$context_path" 2>/dev/null)" || return 1
   dockerfile="$context_dir/Dockerfile"
   [[ -f "$dockerfile" ]] || return 1
+
+  for ((index = 0; index < ${#raw_build_args[@]}; index++)); do
+    line="${raw_build_args[index]}"
+    case "$line" in
+      --build-arg)
+        index=$((index + 1))
+        ((index < ${#raw_build_args[@]})) || return 1
+        line="${raw_build_args[index]}"
+        ;;
+      --build-arg=*) line="${line#--build-arg=}" ;;
+    esac
+    [[ "$line" == *=* && "${line%%=*}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 1
+    build_args+=("$line")
+  done
 
   logical=""
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -184,9 +203,9 @@ _image_inputs_impl() {
     [[ "$line" == GIT_SHA=* ]] || tree_args+=("$line")
   done
   IMAGE_KEY_CTX="$(_hash_image_key ctx "$context_hash" "$buildx_version" "$buildkit_version" \
-    "$week" "${build_args[@]+"${build_args[@]}"}")"
+    "$week" "${build_args[@]+"${build_args[@]}"}")" || return 1
   IMAGE_KEY_TREE="$(_hash_image_key tree "$context_hash" "$buildx_version" "$buildkit_version" \
-    "$week" "${tree_args[@]+"${tree_args[@]}"}")"
+    "$week" "${tree_args[@]+"${tree_args[@]}"}")" || return 1
 }
 
 image_inputs() {
@@ -236,14 +255,20 @@ image_key() {
 }
 
 verify_image_sources() {
-  local metadata_file="$1" digest
+  local metadata_file="$1" pinned_json
   [[ -s "$metadata_file" && ${#IMAGE_PINNED_DIGESTS[@]} -gt 0 ]] || return 1
-  for digest in "${IMAGE_PINNED_DIGESTS[@]+"${IMAGE_PINNED_DIGESTS[@]}"}"; do
-    jq -e --arg digest "${digest#sha256:}" '
-      (.["buildx.build.provenance"].materials // []) as $materials
-      | ($materials | type == "array") and any($materials[]; .digest.sha256 == $digest)
-    ' "$metadata_file" >/dev/null 2>&1 || return 1
-  done
+  pinned_json="$(printf '%s\n' "${IMAGE_PINNED_DIGESTS[@]+"${IMAGE_PINNED_DIGESTS[@]}"}" |
+    jq -R 'sub("^sha256:"; "")' | jq -s .)" || return 1
+  jq -e --argjson pinned "$pinned_json" '
+    (.["buildx.build.provenance"].materials // []) as $materials
+    | ($materials | type == "array")
+      and all($materials[];
+        . as $material
+        | ((($material.uri // "") | startswith("pkg:docker/") | not)
+          or any($pinned[]; . == ($material.digest.sha256 // "")))
+      )
+      and all($pinned[]; . as $digest | any($materials[]; .digest.sha256 == $digest))
+  ' "$metadata_file" >/dev/null 2>&1
 }
 
 find_by_key() {

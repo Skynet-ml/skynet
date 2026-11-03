@@ -163,7 +163,7 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-east-2
 
-      - name: Deploy the frontend and wait for services
+      - name: Deploy services and wait
         if: steps.scope.outputs.skip != 'true' && steps.claim.outputs.full != 'true'
         env:
           AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}

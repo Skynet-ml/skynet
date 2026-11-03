@@ -7,6 +7,7 @@ Reference for coding agents. The always-on rules are in `AGENTS.md`.
 Feature PRs target `staging`, never `main`. Each PR from this repository gets
 a PR environment (preview), a full copy of staging with an empty database, at
 `https://pr-<n>.staging.skynetml.com` (API `https://api-pr-<n>.staging.skynetml.com`).
+The preview helper scripts require Bash 4 or newer.
 Run the acceptance checks and record the videos there, before the merge.
 `.github/workflows/preview.yml` builds it on every push and deletes it when the
 PR closes. At most 4 previews run at once; a preview with no push for 48 hours
