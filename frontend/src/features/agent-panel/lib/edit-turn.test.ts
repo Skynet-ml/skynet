@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-const { editTarget, retryMode } = await import("./edit-turn.ts");
+const { editMode, editTarget, retryMode } = await import("./edit-turn.ts");
 
 const chat = [
   { role: "user", content: "hi" },
@@ -28,4 +28,31 @@ test("a retry of an unconfirmed edit resends the edit target with regenerate", (
 
 test("a retry of a saved turn regenerates the latest stored turn", () => {
   assert.deepEqual(retryMode(null), { regenerate: true, editUserTurn: null });
+});
+
+// The chat after an edit of "second" to "v2" that failed before the server saved it.
+const unsavedChat = [
+  { role: "user", content: "first" },
+  { role: "assistant", content: "r" },
+  { role: "user", content: "v2" },
+  { role: "assistant", content: "" },
+];
+const pending = { text: "second", occurrence: 0 };
+
+test("a new edit of an unconfirmed edit targets the stored old turn with regenerate", () => {
+  assert.deepEqual(editMode(unsavedChat, 2, pending), { regenerate: true, editUserTurn: pending });
+});
+
+test("a new edit of an earlier turn ignores the unconfirmed edit", () => {
+  assert.deepEqual(editMode(unsavedChat, 0, pending), {
+    regenerate: false,
+    editUserTurn: { text: "first", occurrence: 0 },
+  });
+});
+
+test("an edit with no unconfirmed edit targets the displayed turn", () => {
+  assert.deepEqual(editMode(unsavedChat, 2, null), {
+    regenerate: false,
+    editUserTurn: { text: "v2", occurrence: 0 },
+  });
 });

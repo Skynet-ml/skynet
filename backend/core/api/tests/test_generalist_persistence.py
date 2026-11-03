@@ -595,6 +595,34 @@ def test_retry_of_a_refused_middle_edit_with_regenerate_deletes_only_from_the_ed
     assert _stored_contents(engine) == ["first", "שלום", "second, edited", "שלום", "new", "שלום"]
 
 
+def test_new_edit_of_an_edit_refused_before_save_replaces_the_old_turn(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second edit after a refused first edit sends the old target with ``regenerate`` and leaves no duplicate."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["first", "second"])
+    real_balance = agent_mod.enforce_llm_balance
+
+    def refuse(*_args: Any, **_kwargs: Any) -> None:
+        """Refuse the turn the way a depleted balance is refused."""
+        raise agent_mod.DomainError("billing.insufficient_balance", status=402)
+
+    monkeypatch.setattr(agent_mod, "enforce_llm_balance", refuse)
+    refused = _post_turn(client, "v1", token, conversation_id=conversation_id, edit_user_text="second")
+    assert refused.status_code == 402
+    monkeypatch.setattr(agent_mod, "enforce_llm_balance", real_balance)
+
+    edited_again = _post_turn(
+        client, "v2", token, conversation_id=conversation_id, regenerate=True, edit_user_text="second"
+    )
+
+    assert edited_again.status_code == 200
+    assert _stored_contents(engine) == ["first", "שלום", "v2", "שלום"]
+
+
 _CONV_ID = "conv-1"
 
 

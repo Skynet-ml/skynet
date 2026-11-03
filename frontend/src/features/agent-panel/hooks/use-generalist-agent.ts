@@ -30,7 +30,7 @@ import { agentSteerChannel, newSteerKey } from "@/shared/ui/agent/use-steer-queu
 
 import { confirmGeneralistApproval, streamGeneralistAgent } from "../lib/stream";
 import { dropPendingToolCalls, pendingToolCall, placeToolCall } from "../lib/pending-tool-calls";
-import { editTarget, retryMode } from "../lib/edit-turn";
+import { editMode, retryMode } from "../lib/edit-turn";
 import type {
   ChatTurn,
   PendingApprovalPayload,
@@ -979,9 +979,12 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       const key = activeKeyRef.current;
       const current = sessionsRef.current.get(key)?.messages ?? [];
       const truncated = current.slice(0, messageIndex);
-      const editUserTurn =
-        current[messageIndex]?.role === "user" ? editTarget(current, messageIndex) : null;
-      requestRun(key, trimmed, truncated, undefined, false, false, editUserTurn);
+      const { regenerate, editUserTurn } = editMode(
+        current,
+        messageIndex,
+        runtimesRef.current.get(key)?.unsavedEdit ?? null,
+      );
+      requestRun(key, trimmed, truncated, undefined, regenerate, false, editUserTurn);
     },
     [requestRun],
   );

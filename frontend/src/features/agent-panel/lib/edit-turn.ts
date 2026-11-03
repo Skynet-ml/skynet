@@ -17,6 +17,26 @@ export function editTarget(
 }
 
 /**
+ * How an edit of the message at `messageIndex` targets its stored turn. A
+ * new edit of the latest user turn while an earlier edit is unconfirmed
+ * targets that earlier edit's turn, as a retry does: the displayed text was
+ * never stored when the earlier edit failed before the server saved it, so
+ * a target built from it finds nothing, and the old turn stays.
+ */
+export function editMode(
+  messages: ReadonlyArray<{ role: string; content: string }>,
+  messageIndex: number,
+  unsavedEdit: { text: string; occurrence: number } | null,
+): { regenerate: boolean; editUserTurn: { text: string; occurrence: number } | null } {
+  const isLatestUser = messages.slice(messageIndex + 1).every((m) => m.role !== "user");
+  if (unsavedEdit && isLatestUser) return retryMode(unsavedEdit);
+  return {
+    regenerate: false,
+    editUserTurn: messages[messageIndex]?.role === "user" ? editTarget(messages, messageIndex) : null,
+  };
+}
+
+/**
  * How a retry resends the latest user turn. An unconfirmed edit resends its
  * edit target: `regenerate` alone would delete only the latest stored turn,
  * and the old edited turn and its replies would come back after a reload.
