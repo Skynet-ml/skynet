@@ -393,6 +393,7 @@
     "email.event.shared.reason": "Ricevi email quando qualcuno condivide un'esecuzione con te.",
     "email.account.status": "Account",
     "email.account.expires": "Scade tra {minutes} minuti.",
+    "email.account.enter_code": "Inserisci questo codice in {term.appName} per continuare.",
     "email.account.verification.subject": "Conferma la tua email {term.appName}",
     "email.account.verification.intro": "Il tuo codice di conferma {term.appName} è {code}.",
     "email.account.verification.ignore": "Se non hai creato un account {term.appName}, puoi ignorare questa email.",

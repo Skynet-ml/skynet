@@ -41,13 +41,15 @@ export function InlineErrorRow({
     <div
       role="alert"
       className={cn(
-        "flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-[0.75rem] text-destructive",
+        "flex items-start gap-2 rounded-lg border border-[var(--danger-border)] bg-[var(--danger-dim)] px-3 py-2 text-xs text-foreground/85",
         className,
       )}
     >
-      {!hideIcon && <XCircle className="size-4 shrink-0 mt-0.5" />}
+      {!hideIcon && (
+        <XCircle className="mt-0.5 size-3.5 shrink-0 text-[var(--danger)]" aria-hidden="true" />
+      )}
       <div className="min-w-0 flex-1">
-        {title && <p className="font-semibold">{title}</p>}
+        {title && <p className="font-semibold text-[var(--danger)]">{title}</p>}
         <div className={cn("break-words", title && "mt-0.5")} dir="auto">
           {message}
         </div>

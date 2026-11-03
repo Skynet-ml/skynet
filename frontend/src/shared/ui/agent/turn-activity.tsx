@@ -221,7 +221,7 @@ function Header({
 }) {
   const content = (
     <>
-      {failed && <WarningCircle className="size-3.5 shrink-0 text-[#7A1E13] dark:text-[#ffb2a0]" />}
+      {failed && <WarningCircle className="size-3.5 shrink-0 text-[var(--danger)]" />}
       <span className="truncate">{label}</span>
       {onToggle && (
         <CaretRight

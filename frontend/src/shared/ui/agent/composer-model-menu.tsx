@@ -7,9 +7,11 @@ import {
   menuPickState,
   RETIRED_AUTO_MODEL,
 } from "@/features/local-runtime";
-import { Check, CaretDown, CaretRight } from "@/shared/ui/icons";
+import { Check, CaretDown, CaretRight, Lightning } from "@/shared/ui/icons";
+import { EffortSlider } from "@/shared/ui/agent/effort-slider";
 
 import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
+import { liveEffort, retiredLevel } from "@/shared/lib/effort-slider";
 import { effortLabel, effortsFor, unpickedEffort } from "@/shared/lib/model-efforts";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
@@ -39,6 +41,10 @@ interface ComposerModelMenuProps {
   /** Reasoning-effort level for the chosen model; ``null`` runs its default. */
   effort: string | null;
   onEffortChange: (effort: string | null) => void;
+  /** Fast mode for the next turn; menus without it show no toggle. Only a
+   * local CLI row that takes fast mode shows it. */
+  fast?: boolean;
+  onFastChange?: (on: boolean) => void;
   disabled?: boolean;
   /**
    * Catalog flag naming the model that runs with no pick. Interviews run the
@@ -111,14 +117,18 @@ function effortHint(level: string | null): string {
 export function ComposerModelMenu({
   value: rawValue,
   onChange,
-  effort,
+  effort: savedEffort,
   onEffortChange,
+  fast = false,
+  onFastChange,
   disabled,
   defaultFlag = "is_default",
   models,
   openRouterEngine = false,
 }: ComposerModelMenuProps) {
   const savedValue = rawValue === RETIRED_AUTO_MODEL ? null : rawValue;
+  // A saved "ultra" or "ultracode" runs at Max, so the menu shows and keeps Max.
+  const effort = liveEffort(savedEffort);
   const [open, setOpen] = React.useState(false);
   // Starts empty on server and client alike: the cache lives in localStorage,
   // so seeding the first render from it would not match the SSR markup.
@@ -196,6 +206,10 @@ export function ComposerModelMenu({
     efforts,
   );
   const shownEffort = effortStale ? null : effort;
+  // A local CLI row gets the slider; hosted and OpenRouter rows keep the list.
+  const cliRow = !!current && menuModelGroup(current) === "local";
+  const fastShown = cliRow && !!current?.supports_fast && !!onFastChange;
+  const sliderRef = React.useRef<HTMLDivElement>(null);
 
   const pick = (model: string | null) => {
     onChange(model);
@@ -210,6 +224,7 @@ export function ComposerModelMenu({
     ) {
       onEffortChange(null);
     }
+    if (fast && !available.find((m) => m.value === target)?.supports_fast) onFastChange?.(false);
   };
 
   return (
@@ -236,6 +251,13 @@ export function ComposerModelMenu({
           {/* With no model shown the request still sends the effort, so the chip names it too. */}
           {shownEffort && (
             <span className="shrink-0 text-muted-foreground">{effortLabel(shownEffort)}</span>
+          )}
+          {fastShown && fast && (
+            <Lightning
+              role="img"
+              aria-label={msg("agent.model_menu.fast_on")}
+              className="size-3.5 shrink-0 text-primary"
+            />
           )}
           <CaretDown className="size-3 shrink-0 text-muted-foreground" />
         </button>
@@ -286,24 +308,57 @@ export function ComposerModelMenu({
             </span>
             <CaretRight className="size-3.5 shrink-0 text-muted-foreground rtl:rotate-180" />
           </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent className="w-60">
-            {[null, ...efforts].map((level) => (
-              <MenuItem
-                key={level ?? "default"}
-                selected={shownEffort === level}
-                label={level ? effortLabel(level) : msg("agent.model_menu.effort_default")}
-                description={
-                  level === null && defaultEffort
-                    ? msg("agent.model_menu.effort_default_level", {
-                        level: effortLabel(defaultEffort),
-                      })
-                    : effortHint(level)
+          {cliRow ? (
+            <DropdownMenuSubContent
+              className="w-72 p-0"
+              // Radix focuses the panel when the keyboard opens it; the slider takes it.
+              onFocus={(e) => {
+                if (e.target === e.currentTarget) sliderRef.current?.focus();
+              }}
+            >
+              <EffortSlider
+                ref={sliderRef}
+                efforts={efforts}
+                value={shownEffort}
+                onChange={onEffortChange}
+                modelName={displayName}
+                hintFor={effortHint}
+                retired={retiredLevel(effective)}
+                fast={
+                  fastShown
+                    ? {
+                        on: fast,
+                        onChange: onFastChange!,
+                        note: msg(
+                          effective?.startsWith("subscription/claude/")
+                            ? "agent.model_menu.fast_claude_note"
+                            : "agent.model_menu.fast_codex_note",
+                        ),
+                      }
+                    : null
                 }
-                dir="auto"
-                onSelect={() => onEffortChange(level)}
               />
-            ))}
-          </DropdownMenuSubContent>
+            </DropdownMenuSubContent>
+          ) : (
+            <DropdownMenuSubContent className="w-60">
+              {[null, ...efforts].map((level) => (
+                <MenuItem
+                  key={level ?? "default"}
+                  selected={shownEffort === level}
+                  label={level ? effortLabel(level) : msg("agent.model_menu.effort_default")}
+                  description={
+                    level === null && defaultEffort
+                      ? msg("agent.model_menu.effort_default_level", {
+                          level: effortLabel(defaultEffort),
+                        })
+                      : effortHint(level)
+                  }
+                  dir="auto"
+                  onSelect={() => onEffortChange(level)}
+                />
+              ))}
+            </DropdownMenuSubContent>
+          )}
         </DropdownMenuSub>
       </DropdownMenuContent>
     </DropdownMenu>

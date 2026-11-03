@@ -320,6 +320,8 @@ function TaskInterviewPanel({
             onChange={interview.setModel}
             effort={interview.reasoningEffort}
             onEffortChange={interview.setReasoningEffort}
+            fast={interview.fastMode}
+            onFastChange={interview.setFastMode}
             defaultFlag="is_interview_default"
             models={localMenu.models}
             openRouterEngine={localMenu.openRouterEngine}

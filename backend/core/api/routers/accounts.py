@@ -51,9 +51,6 @@ _USE_CASES = frozenset({"classification", "extraction", "rag_agents", "generatio
 _JOB_ROLES = frozenset({"engineer", "researcher", "pm", "other"})
 # Width of ``users.image_url``; a longer picture URL is dropped, not rejected.
 _IMAGE_URL_MAX_LENGTH = 2048
-# Accounts store no language preference and these internal routes carry no
-# request locale, so code emails keep the English they were always sent in.
-ACCOUNT_EMAIL_LOCALE = "en"
 
 
 def _send_account_code(email: str, kind: str, code: str) -> None:
@@ -68,7 +65,7 @@ def _send_account_code(email: str, kind: str, code: str) -> None:
         OSError: When the SMTP relay is unreachable.
         RuntimeError: When the relay rejects the message.
     """
-    subject, html, text = render_account_email(kind, ACCOUNT_EMAIL_LOCALE, code)
+    subject, html, text = render_account_email(kind, code)
     send_email(email, subject, text, html_body=html)
 
 

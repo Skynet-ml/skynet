@@ -30,9 +30,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from starlette.responses import StreamingResponse
 
+from ...billing.cli_dispatch import CLI_FAST_KEY
 from ...billing.metering import meter_llm_run
 from ...config import settings
 from ...constants import TOKEN_SOURCE_MANAGED
+from ...local.cli_catalog import RetiredEffort
 from ...service_gateway.agents.code import _reply_language
 from ...service_gateway.agents.generalist import (
     ThinkingTrail,
@@ -180,9 +182,19 @@ class GeneralistAgentRequest(BaseModel):
             "default model."
         ),
     )
-    reasoning_effort: ReasoningEffort | None = Field(
+    reasoning_effort: ReasoningEffort | RetiredEffort | None = Field(
         default=None,
-        description=("Explicit reasoning-effort level for the chosen model; absent keeps the model's default."),
+        description=(
+            "Explicit reasoning-effort level for the chosen model; absent keeps the model's default. "
+            "The retired levels ``ultra`` and ``ultracode`` run at the model's top level."
+        ),
+    )
+    fast_mode: bool = Field(
+        default=False,
+        description=(
+            "Run this turn in the CLI's fast mode. Applies only to a local CLI model that takes "
+            "fast mode; any other model ignores it."
+        ),
     )
     steer_key: str | None = Field(
         default=None,
@@ -875,9 +887,17 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         model_config = await asyncio.to_thread(
             route_local_byok_model, picked, job_store=job_store, username=current_user.username
         ) or route_agent_model(picked)
-        effort = effective_reasoning_effort(model_config.name, req.reasoning_effort)
+        # A CLI takes its own effort ladder, not the catalog's, and with no
+        # pick it runs its own default. The CLI dispatcher drops a level or
+        # fast mode the model does not take.
+        on_cli = model_config.token_source == "subscription"
+        effort = req.reasoning_effort if on_cli else effective_reasoning_effort(model_config.name, req.reasoning_effort)
         if effort:
             model_config = model_config.model_copy(update={"extra": {**model_config.extra, "reasoning_effort": effort}})
+        if on_cli and req.fast_mode:
+            body = model_config.extra.get("extra_body")
+            fast_body = {**(body if isinstance(body, dict) else {}), CLI_FAST_KEY: True}
+            model_config = model_config.model_copy(update={"extra": {**model_config.extra, "extra_body": fast_body}})
         usage_sink: list = []
         source = run_generalist_agent(
             wizard_state=wizard_state,

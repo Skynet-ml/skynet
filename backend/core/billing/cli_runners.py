@@ -56,6 +56,8 @@ _CODEX_DISABLED_FEATURES = (
     "apps",
     "plugins",
     "multi_agent",
+    # Codex delegates to subagents through this feature.
+    "multi_agent_v2",
     "memories",
     "browser_use",
     "computer_use",
@@ -80,7 +82,11 @@ _CODEX_CONFIG = (
     "tools.experimental_request_user_input.enabled=false",
     'features.code_mode.excluded_tool_namespaces=["functions"]',
 )
-_CLAUDE_SETTINGS = json.dumps({"showThinkingSummaries": True})
+# Workflows off, so no effort level, typed keyword or setting starts Claude
+# Code's multi-agent Workflow tool.
+_CLAUDE_SETTINGS = json.dumps(
+    {"showThinkingSummaries": True, "enableWorkflows": False, "workflowKeywordTriggerEnabled": False}
+)
 # ``codex exec`` flags from :data:`cli_isolation.CODEX_ARGS` that ``codex app-server`` rejects.
 _CODEX_EXEC_ONLY_ARGS = frozenset({"--ignore-user-config", "--ignore-rules", "--ephemeral"})
 _TRANSIENT_TEXT = re.compile(
@@ -397,6 +403,8 @@ def run_claude(
     *,
     think: bool = True,
     cache_prefix: str = "",
+    effort: str | None = None,
+    fast: bool = False,
 ) -> CliCompletion:
     """Answer one prompt with ``claude -p``, streaming its events.
 
@@ -411,6 +419,11 @@ def run_claude(
             A schema call streams no answer text: its answer is the structured value.
         think: ``False`` turns Claude Code's default thinking off.
         cache_prefix: The start of ``prompt`` that later calls repeat, or ``""``.
+        effort: The turn's effort level, already checked against the model's
+            levels in :data:`cli_catalog.CLI_EFFORTS`, or ``None`` for Claude
+            Code's default.
+        fast: ``True`` asks Claude Code for fast mode, already checked
+            against :data:`cli_catalog.CLI_FAST`.
 
     Returns:
         The completion.
@@ -454,6 +467,10 @@ def run_claude(
             "--model",
             model_arg,
         ]
+        if effort:
+            argv += ["--effort", effort]
+        if fast:
+            argv += ["--fast-mode", "on"]
         if json_schema is not None:
             argv += ["--json-schema", json.dumps(json_schema)]
         stdin = prompt
@@ -465,6 +482,7 @@ def run_claude(
             argv += ["--input-format", "stream-json"]
             stdin = json.dumps(_claude_user_message(cache_prefix, prompt[len(cache_prefix) :])) + "\n"
         env = dict(isolation.env)
+        env["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
         if not think:
             # Claude Code thinks by default, even on Haiku: a one-line answer
             # then took 2,700-5,500 output tokens and 25-48 s, against about
@@ -507,6 +525,9 @@ def run_codex(
     settings: Settings,
     cwd: Path,
     on_delta: Callable[[str, str], None] | None = None,
+    *,
+    effort: str | None = None,
+    fast: bool = False,
 ) -> CliCompletion:
     """Answer one prompt with ``codex app-server`` in a read-only sandbox, with its host tools and agent prompt off.
 
@@ -523,6 +544,11 @@ def run_codex(
         on_delta: Called with ``(kind, text)`` for each piece of reasoning
             summary (``"reasoning"``) or answer (``"content"``) as it arrives, or
             ``None``. A schema call streams no answer text: its answer is the structured value.
+        effort: The turn's effort level, already checked against the model's
+            levels in :data:`cli_catalog.CLI_EFFORTS`, or ``None`` for the
+            model's default.
+        fast: ``True`` runs the turn on the ``priority`` ("Fast") service
+            tier, already checked against :data:`cli_catalog.CLI_FAST`.
 
     Returns:
         The completion; ``model_ms`` is the time from ``turn/start`` to ``turn/completed``.
@@ -553,6 +579,12 @@ def run_codex(
         }
         # The server sends reasoning summaries only when the turn asks for them.
         turn: dict[str, Any] = {"input": [{"type": "text", "text": prompt}], "summary": "auto"}
+        if effort:
+            turn["effort"] = effort
+        if fast:
+            # Codex omits a tier the model does not advertise; every catalog
+            # model advertises ``priority``.
+            turn["serviceTier"] = "priority"
         if json_schema is not None:
             turn["outputSchema"] = dict(json_schema)
         return _codex_turn(argv, thread, turn, isolation.env, settings, cwd, on_delta, json_schema is None)
@@ -575,12 +607,25 @@ class _CodexTurn:
         self.errors: list[str] = []
         self.finished = False
         self.commentary: set[str] = set()
-        self.reasoning_parts: set[tuple[str, int]] = set()
+        self.reasoning_parts: set[tuple[str, str, int]] = set()
 
     def _send(self, kind: str, text: str) -> None:
         """Pass one piece of text on, when there is a listener and text."""
         if self.on_delta is not None and text:
             self.on_delta(kind, text)
+
+    def _send_reasoning(self, part: tuple[str, str, int], text: str) -> None:
+        """Pass one thinking piece on, with a blank line before each new part.
+
+        Args:
+            part: The source, item id and part index the piece belongs to.
+            text: The text piece.
+        """
+        if part not in self.reasoning_parts and text:
+            if self.reasoning_parts:
+                text = "\n\n" + text
+            self.reasoning_parts.add(part)
+        self._send("reasoning", text)
 
     def take(self, method: str, params: Mapping[str, Any]) -> None:
         """Read one notification.
@@ -591,21 +636,22 @@ class _CodexTurn:
         """
         item = params.get("item") if isinstance(params.get("item"), dict) else {}
         if method == "item/started" and item.get("type") == "agentMessage" and item.get("phase") == "commentary":
-            # A progress note is not the answer; only the final message streams.
+            # A progress note is not the answer. It shows with the thinking, so the user sees all the CLI sends.
             self.commentary.add(str(item.get("id")))
         elif method == "item/agentMessage/delta":
-            if self.stream_answer and str(params.get("itemId")) not in self.commentary:
+            item_id = str(params.get("itemId"))
+            if item_id in self.commentary:
+                self._send_reasoning(("commentary", item_id, 0), str(params.get("delta") or ""))
+            elif self.stream_answer:
                 self._send("content", str(params.get("delta") or ""))
         elif method == "item/reasoning/summaryTextDelta":
-            part = (str(params.get("itemId")), _int(params.get("summaryIndex")))
-            text = str(params.get("delta") or "")
-            if part not in self.reasoning_parts and text:
-                if self.reasoning_parts:
-                    text = "\n\n" + text
-                self.reasoning_parts.add(part)
-            self._send("reasoning", text)
+            part = ("summary", str(params.get("itemId")), _int(params.get("summaryIndex")))
+            self._send_reasoning(part, str(params.get("delta") or ""))
+        elif method == "item/reasoning/textDelta":
+            part = ("text", str(params.get("itemId")), _int(params.get("contentIndex")))
+            self._send_reasoning(part, str(params.get("delta") or ""))
         elif method == "item/completed" and item.get("type") == "agentMessage":
-            if str(item.get("id")) not in self.commentary or not self.answer:
+            if str(item.get("id")) not in self.commentary:
                 self.answer = str(item.get("text") or "")
         elif method == "thread/tokenUsage/updated":
             usage = params.get("tokenUsage")

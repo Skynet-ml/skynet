@@ -7,8 +7,10 @@ import { ModelRoleRow } from "../blackbox/ModelRoleRow";
 import { ModelConfigModal } from "../ModelConfigModal";
 import { emptyModelConfig } from "../../constants";
 import { useModelCatalog, useRecentModelConfigs } from "../../hooks/use-submit-wizard-data";
+import { keepEconomy } from "../../lib/model-config";
 import { resolveScoringModel, type ScoringModelMode } from "../../lib/model-roles";
 import { v2Msg } from "./ArtifactConfirmCard";
+import { EconomySwitch } from "./EconomySwitch";
 
 const MOBILE_MODEL_CHIP_CLASS =
   "min-h-[44px] max-lg:[&_button]:min-h-[44px] max-lg:[&_button]:min-w-[44px] max-lg:[&_button]:opacity-100";
@@ -83,6 +85,20 @@ export function MetricModelRow({
           {v2Msg("submit.v2.metric.model.required", guided)}
         </p>
       )}
+      {/* An inherited metric model is the reflection model, so its switch decides. */}
+      {mode === "explicit" && (
+        <EconomySwitch
+          id="v2-metric-economy"
+          config={explicitModel}
+          onChange={(economy) =>
+            explicitModel &&
+            onChange({
+              metricModelMode: "explicit",
+              metricModel: { ...explicitModel, economy_mode: economy },
+            })
+          }
+        />
+      )}
       <ModelConfigModal
         open={editing}
         onOpenChange={setEditing}
@@ -90,8 +106,8 @@ export function MetricModelRow({
         // one field away, not from blank.
         config={resolved ?? emptyModelConfig()}
         onSave={(config) => {
-          onChange({ metricModelMode: "explicit", metricModel: config });
-          saveToRecent(config);
+          onChange({ metricModelMode: "explicit", metricModel: keepEconomy(config, resolved) });
+          saveToRecent(keepEconomy(config, null));
           setEditing(false);
         }}
         roleLabel={roleLabel}

@@ -161,6 +161,37 @@ def test_interaction_closes_caller_budget_and_replays_without_a_second_charge(
     assert harness.count(JobModel) == 0
 
 
+def test_interaction_never_allows_a_batched_model_route(
+    interactions: tuple[_Harness, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forbid batches for a completed-run call even when its reflection model asks for economy."""
+    harness, _state = interactions
+    options: list[dict[str, Any]] = []
+
+    class _RecordingGateway(_Gateway):
+        """Record the protection options the interaction path sends."""
+
+        def protect_payload(self, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            """Record the options, then protect like the fixture gateway."""
+            options.append(kwargs)
+            return super().protect_payload(payload, **kwargs)
+
+    monkeypatch.setattr(protected_interaction, "ModelGateway", _RecordingGateway)
+    payload = _payload()
+    payload["reflection_model_config"] = {"name": "fixture/model", "extra": {"economy_mode": True}}
+    protected_interaction.run_protected_interaction(
+        payload,
+        kind="serve",
+        max_cost_cents=10,
+        idempotency_key="economy-call",
+        user=AuthenticatedUser("alice", "user", ()),
+        job_store=harness.store,
+    )
+
+    assert [option.get("allow_batch") for option in options] == [False]
+
+
 def test_interaction_without_a_caller_maximum_draws_on_the_account(
     interactions: tuple[_Harness, dict[str, Any]],
 ) -> None:

@@ -45,6 +45,7 @@ import {
   type HubPreview,
 } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { cn } from "@/shared/lib/utils";
 import { useSettingsModal } from "@/features/settings";
 import { DatasetPreviewPanel } from "@/features/datasets";
@@ -315,7 +316,7 @@ export function ConnectorImportDialog({
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        toast.error(err instanceof Error ? err.message : msg("connector_import.browse_error"));
+        toast.error(userErrorMessage(err, msg("connector_import.browse_error")));
         setPreview({ columns: [], rows: [], num_rows_total: null });
       })
       .finally(() => {
@@ -368,7 +369,7 @@ export function ConnectorImportDialog({
         });
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("connector_import.pick_error"));
+      toast.error(userErrorMessage(err, msg("connector_import.pick_error")));
     } finally {
       setPicking(false);
     }
@@ -408,7 +409,7 @@ export function ConnectorImportDialog({
       onOpenChange(false);
     } catch (err) {
       if (!isStorageQuotaError(err)) {
-        toast.error(err instanceof Error ? err.message : msg("connector_import.toast.failed"));
+        toast.error(userErrorMessage(err, msg("connector_import.toast.failed")));
       }
     } finally {
       setImporting(false);

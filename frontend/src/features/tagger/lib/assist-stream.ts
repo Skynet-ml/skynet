@@ -65,6 +65,7 @@ export async function streamInterviewTurn(
     locale?: string;
     model?: string;
     reasoning_effort?: string;
+    fast_mode?: boolean;
   },
   handlers: InterviewStreamHandlers,
 ): Promise<void> {

@@ -351,6 +351,7 @@
     "email.event.shared.reason": "You get emails when someone shares an optimization with you.",
     "email.account.status": "Account",
     "email.account.expires": "It expires in {minutes} minutes.",
+    "email.account.enter_code": "Enter this code in {term.appName} to continue.",
     "email.account.verification.subject": "Confirm your {term.appName} email",
     "email.account.verification.intro": "Your {term.appName} confirmation code is {code}.",
     "email.account.verification.ignore": "If you didn't create a {term.appName} account, you can ignore this email.",

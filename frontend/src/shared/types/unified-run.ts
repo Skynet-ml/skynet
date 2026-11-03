@@ -313,6 +313,8 @@ export interface TaskInterviewRequest {
   locale?: string | null;
   model?: string | null;
   reasoning_effort?: string | null;
+  /** Runs a local CLI model in its fast mode; the backend ignores it elsewhere. */
+  fast_mode?: boolean;
 }
 
 export interface TaskInterviewTurnResult {

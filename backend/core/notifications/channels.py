@@ -111,7 +111,6 @@ class EmailChannel(NotificationChannel):
             facts = {key: value for key, value in delivery.facts.items() if key in _EMAIL_FACT_KEYS}
             rendered = render_notification_email(
                 delivery.event_type,
-                None,
                 delivery.title,
                 facts,
                 delivery.link or "/",

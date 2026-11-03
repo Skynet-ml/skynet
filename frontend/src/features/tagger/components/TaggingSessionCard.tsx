@@ -8,14 +8,7 @@ import { toast } from "react-toastify";
 
 import { Badge } from "@/shared/ui/primitives/badge";
 import { Button } from "@/shared/ui/primitives/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/shared/ui/primitives/dialog";
+import { Dialog, DialogContent, DialogFooter } from "@/shared/ui/primitives/dialog";
 import { Input } from "@/shared/ui/primitives/input";
 import { DialogTitleRow } from "@/shared/ui/dialog-title-row";
 import { SelectCheckbox } from "@/shared/ui/select-checkbox";
@@ -36,10 +29,12 @@ import {
   type TaggerSessionSummary,
 } from "@/shared/lib/api";
 import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { formatRelativeTime } from "@/shared/lib/formatters";
 import { cn } from "@/shared/lib/utils";
 import { TAGGER_SESSIONS_CHANGED } from "../hooks/use-tagger";
 import { TaggingSessionShareDialog } from "./TaggingSessionShareDialog";
+import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
 
 const MODE_LABEL_KEYS: Record<string, MessageKey> = {
   manual: "tagger.assist.setup.manual_label",
@@ -112,7 +107,7 @@ export function TaggingSessionCard({
       setRenameOpen(false);
       notifyChanged();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("datasets.toast.rename_failed"));
+      toast.error(userErrorMessage(err, msg("datasets.toast.rename_failed")));
     } finally {
       setRenaming(false);
     }
@@ -126,7 +121,7 @@ export function TaggingSessionCard({
       setDeleteOpen(false);
       notifyChanged();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("datasets.toast.delete_failed"));
+      toast.error(userErrorMessage(err, msg("datasets.toast.delete_failed")));
     } finally {
       setDeleting(false);
     }
@@ -281,35 +276,25 @@ export function TaggingSessionCard({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
-        <DialogContent className="w-[min(28rem,92vw)] max-w-[min(28rem,92vw)] sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{msg("tagger.session.delete_title")}</DialogTitle>
-            <DialogDescription>
-              {msg("tagger.session.delete_body")}{" "}
-              <span className="break-words font-semibold text-foreground" dir="auto">
-                {displayName}
-              </span>
-              ? {msg("delete.irreversible")}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteOpen(false)} disabled={deleting}>
-              {msg("datasets.delete.cancel")}
-            </Button>
-            <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
-              {deleting ? (
-                <CircleNotch
-                  className="animate-spin motion-reduce:animate-none"
-                  aria-hidden="true"
-                />
-              ) : (
-                msg("datasets.delete.confirm")
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        variant="danger"
+        title={msg("tagger.session.delete_title")}
+        description={
+          <>
+            {msg("tagger.session.delete_body")}{" "}
+            <span className="break-words font-semibold text-foreground" dir="auto">
+              {displayName}
+            </span>
+            ? {msg("delete.irreversible")}
+          </>
+        }
+        cancelLabel={msg("datasets.delete.cancel")}
+        confirmLabel={msg("datasets.delete.confirm")}
+        onConfirm={handleDelete}
+        pending={deleting}
+      />
     </>
   );
 }

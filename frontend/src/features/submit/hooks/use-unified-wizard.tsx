@@ -40,8 +40,8 @@ import {
 } from "@/shared/lib/api";
 import { contractCheckMessage } from "@/shared/lib/i18n";
 import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import type { ContinuousEnableRequest } from "@/shared/types/continuous";
-import { isLocalMode } from "@/shared/lib/runtime-env";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { getActiveMessages } from "@/shared/lib/runtime-messages";
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
@@ -515,8 +515,6 @@ export function WizardV2Provider({
       },
       token_source: tokenSource,
       is_private: meta.isPrivate,
-      // The local build runs no batch provider, so a restored economy choice is dropped.
-      ...(meta.economyMode && !isLocalMode() && { economy_mode: true }),
       max_cost_cents: budgetUncapped ? undefined : (maxCostCents ?? undefined),
     };
   }, [state, username, tokenSource, budgetUncapped, maxCostCents]);
@@ -570,7 +568,7 @@ export function WizardV2Provider({
   const submitFailed = (err: unknown) => {
     // The storage 409 and the balance 402 each open their own shared modal.
     if (!isStorageQuotaError(err) && !isInsufficientFundsError(err)) {
-      toast.error(err instanceof Error ? err.message : msg("submit.submit_failed"));
+      toast.error(userErrorMessage(err, msg("submit.submit_failed")));
     }
     submittingRef.current = false;
     setSubmitPhase("idle");
@@ -685,7 +683,7 @@ export function WizardV2Provider({
         await enableContinuous(result.optimization_id, scheduledRun).catch((err: unknown) => {
           toast.error(
             formatMsg("submit.v2.schedule.failed", {
-              error: err instanceof Error ? err.message : String(err),
+              error: userErrorMessage(err),
             }),
           );
         });

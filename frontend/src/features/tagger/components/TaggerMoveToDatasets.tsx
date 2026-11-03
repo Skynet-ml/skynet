@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogFooter } from "@/shared/ui/primitives/dial
 import { DialogTitleRow } from "@/shared/ui/dialog-title-row";
 import { isStorageQuotaError, moveTaggerSessionToLibrary } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { clearRecentSession } from "@/shared/lib/recent-session";
 import { buildLibraryRows } from "../lib/export-csv";
 import { TAGGER_SESSIONS_CHANGED } from "../hooks/use-tagger";
@@ -83,7 +84,7 @@ export function TaggerMoveToDatasets({
       router.push("/datasets");
     } catch (err) {
       if (!isStorageQuotaError(err)) {
-        toast.error(err instanceof Error ? err.message : msg("tagger.move.failed"));
+        toast.error(userErrorMessage(err, msg("tagger.move.failed")));
       }
       setMoving(false);
     }

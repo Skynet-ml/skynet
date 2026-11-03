@@ -12,6 +12,7 @@ import { agentSubscriptionFor, readPref } from "@/features/settings";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { I18N_KEY } from "@/shared/lib/i18n";
 import { getActiveLocale } from "@/shared/lib/runtime-locale";
+import { liveEffort, sentFastMode } from "@/shared/lib/effort-slider";
 import {
   appendReasoning,
   closeThinking,
@@ -61,6 +62,9 @@ export interface GeneralistAgentState {
   /** Reasoning-effort level for the chosen model; null runs its default. */
   reasoningEffort: string | null;
   setReasoningEffort: (effort: string | null) => void;
+  /** Fast mode for the next turns on a local CLI model that takes it. */
+  fastMode: boolean;
+  setFastMode: (on: boolean) => void;
   /** Send a chat turn; ``hidden`` sends it without a user bubble (a kickoff the app started). */
   send: (
     message: string,
@@ -279,12 +283,18 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     setModelState(next);
   }, []);
   const [reasoningEffort, setReasoningEffortState] = React.useState<string | null>(() =>
-    readPref("composerEffort"),
+    liveEffort(readPref("composerEffort")),
   );
   const effortRef = React.useRef<string | null>(reasoningEffort);
   const setReasoningEffort = React.useCallback((next: string | null) => {
     effortRef.current = next;
     setReasoningEffortState(next);
+  }, []);
+  const [fastMode, setFastModeState] = React.useState(false);
+  const fastRef = React.useRef(false);
+  const setFastMode = React.useCallback((next: boolean) => {
+    fastRef.current = next;
+    setFastModeState(next);
   }, []);
 
   // Effect ordering guarantees this snapshot is current at send time: this
@@ -517,6 +527,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             model: sentModel ?? undefined,
             reasoning_effort:
               localAgentEffort(modelRef.current, effortRef.current, sentModel) ?? undefined,
+            fast_mode: sentFastMode(fastRef.current, sentModel) || undefined,
             steer_key: steerKey,
           },
           {
@@ -653,7 +664,9 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
               if (controller.signal.aborted) return;
               if (rt.replyBuf === "") {
                 patchSession(key, {
-                  statusLabel: msg("auto.features.agent.panel.hooks.use.generalist.agent.literal.4"),
+                  statusLabel: msg(
+                    "auto.features.agent.panel.hooks.use.generalist.agent.literal.4",
+                  ),
                 });
                 patchThinking(key, (segments) => closeThinking(segments, Date.now()));
               }
@@ -771,7 +784,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
               releaseSlot();
             },
           },
-      ),
+        ),
       );
     },
     [
@@ -1149,6 +1162,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     setModel,
     reasoningEffort,
     setReasoningEffort,
+    fastMode,
+    setFastMode,
     send,
     midTurn,
     editAndResend,

@@ -218,8 +218,8 @@ export function DryRunDialog({
                 className={cn(
                   "flex items-center gap-1.5 text-[0.6875rem] font-medium",
                   running && "text-muted-foreground",
-                  !running && result && !result.error && "text-[#5A7247] dark:text-[#adc899]",
-                  !running && result?.error && "text-[#A3512B] dark:text-[#fea47d]",
+                  !running && result && !result.error && "text-[var(--success)]",
+                  !running && result?.error && "text-[var(--danger)]",
                 )}
                 role="status"
               >
@@ -253,14 +253,14 @@ export function DryRunDialog({
                 ))}
               </div>
               {result?.error && (
-                <p className="break-words text-xs text-destructive" dir="ltr">
+                <p role="alert" className="break-words text-xs text-destructive" dir="ltr">
                   {result.error}
                 </p>
               )}
             </div>
           )}
           {error && (
-            <p className="break-words text-xs text-destructive" dir="ltr">
+            <p role="alert" className="break-words text-xs text-destructive" dir="ltr">
               {error}
             </p>
           )}

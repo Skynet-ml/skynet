@@ -9,6 +9,7 @@ import { Input } from "@/shared/ui/primitives/input";
 import { DialogTitleRow } from "@/shared/ui/dialog-title-row";
 import { renameDataset, type DatasetSummary } from "@/shared/lib/api";
 import { msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 
 /**
  * Rename one library dataset. Shared by the card's rename button and the
@@ -42,7 +43,7 @@ export function DatasetRenameDialog({
       onOpenChange(false);
       onRenamed();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("datasets.toast.rename_failed"));
+      toast.error(userErrorMessage(err, msg("datasets.toast.rename_failed")));
     } finally {
       setRenaming(false);
     }

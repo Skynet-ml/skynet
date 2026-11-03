@@ -1077,9 +1077,10 @@ class BackgroundWorker:
 
                 if budget_gateway is not None:
                     closing_gateway, budget_gateway = budget_gateway, None
-                    execution_budget_snapshot, settlement_error = self._close_budget_gateway(
-                        optimization_id, closing_gateway, execution_generation
-                    )
+                    with self._renewing_lease(worker_id):
+                        execution_budget_snapshot, settlement_error = self._close_budget_gateway(
+                            optimization_id, closing_gateway, execution_generation
+                        )
                     host_failure = host_agent_failure(closing_gateway)
                     if host_failure is not None:
                         # A capped subscription stops every later turn, so the run
@@ -1253,9 +1254,13 @@ class BackgroundWorker:
                 if staged_repository is not None:
                     staged_repository.close_scorers()
                 if budget_gateway is not None:
-                    execution_budget_snapshot, settlement_error = self._close_budget_gateway(
-                        optimization_id, budget_gateway, execution_generation
-                    )
+                    # Closing waits for in-flight usage and can outlast the lease.
+                    # An expired lease lets the orphan sweep fence the run while
+                    # this worker still settles it, so the restart release loses.
+                    with self._renewing_lease(worker_id):
+                        execution_budget_snapshot, settlement_error = self._close_budget_gateway(
+                            optimization_id, budget_gateway, execution_generation
+                        )
                     budget_gateway = None
                     if settlement_error is not None:
                         logger.error(
@@ -1386,9 +1391,17 @@ class BackgroundWorker:
                 self._job_store.update_job(optimization_id, **fields)
             else:
                 fence = {} if generation is None else {"expected_generation": generation}
-                cas(optimization_id, ("validating", "running"), **fence, **fields)
+                if not cas(optimization_id, ("validating", "running"), **fence, **fields):
+                    logger.warning(
+                        "Optimization %s: the restart release lost its generation %s fence; "
+                        "the orphan sweep or another owner already changed the run",
+                        optimization_id,
+                        generation,
+                    )
+                    return
         except Exception:  # a failed release still leaves the lease to expire into the same sweep
             logger.exception("Optimization %s: could not release the run for a restart", optimization_id)
+            return
         logger.info("Optimization %s released for recovery after a worker shutdown", optimization_id)
 
     def _close_budget_gateway(

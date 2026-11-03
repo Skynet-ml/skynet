@@ -138,6 +138,10 @@ class _JobResponseBase(BaseModel):
         if state in {"waiting_for_usage", "resuming"}:
             normalized["state"] = "recovering"
             normalized.setdefault("phase", state)
+        elif state == "interrupted":
+            normalized.setdefault(
+                "reason", "The run stopped because its worker went away. Resume it to continue in its own budget."
+            )
         elif state not in {"recovering", "recovered", "unavailable"}:
             normalized["state"] = "unavailable"
             if isinstance(state, str) and state:

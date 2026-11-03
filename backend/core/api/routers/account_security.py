@@ -61,7 +61,6 @@ from ..two_factor import (
     verify_totp,
 )
 from .accounts import (
-    ACCOUNT_EMAIL_LOCALE,
     AccountInfo,
     OkResponse,
     _has_password,
@@ -706,7 +705,7 @@ def create_account_security_router(*, job_store) -> APIRouter:
             code = issue_email_code(session, email)
             session.commit()
         try:
-            subject, html, text = render_account_email("sign_in", ACCOUNT_EMAIL_LOCALE, code)
+            subject, html, text = render_account_email("sign_in", code)
             send_email(email, subject, text, html_body=html)
         except (OSError, RuntimeError) as exc:
             raise DomainError("accounts.email_send_failed", status=502) from exc

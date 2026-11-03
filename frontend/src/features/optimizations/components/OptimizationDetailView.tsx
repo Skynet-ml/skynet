@@ -57,6 +57,7 @@ import {
 import type { ServeInfoResponse, WorkflowNodeTrace, WorkflowSpec } from "@/shared/types/api";
 import { OptimizationDetailSkeleton } from "./OptimizationDetailSkeleton";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { formatBytes } from "@/shared/lib/formatters";
 import { TERMS } from "@/shared/lib/terms";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
@@ -673,7 +674,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
       toast.success(msg("optimization.cancel.sent"));
       void fetchJob();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("optimization.cancel.failed"));
+      toast.error(userErrorMessage(err, msg("optimization.cancel.failed")));
     }
   };
 
@@ -693,7 +694,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
       // navigating to a new id.
       void fetchJob();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("optimization.resume.failed"));
+      toast.error(userErrorMessage(err, msg("optimization.resume.failed")));
     } finally {
       setResuming(false);
     }
@@ -709,7 +710,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
       // Pause suspends the same run in place — refresh this view rather than navigating.
       void fetchJob();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("optimization.pause.failed"));
+      toast.error(userErrorMessage(err, msg("optimization.pause.failed")));
     } finally {
       setPausing(false);
     }
@@ -1440,7 +1441,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
               <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-destructive/10 text-destructive">
                 <XCircle className="size-5" />
               </span>
-              <p className="min-w-0 flex-1 text-sm font-semibold text-[#7A2A1E] dark:text-[#ffb1a0]">
+              <p className="min-w-0 flex-1 text-sm font-semibold text-foreground">
                 {msg("auto.app.optimizations.id.page.6")}
               </p>
             </div>
@@ -1448,22 +1449,22 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
               <div className="flex items-start gap-2" dir="ltr">
                 <div className="min-w-0 flex-1">
                   <pre
-                    className="text-xs text-[#8A3326] dark:text-[#ffa997] whitespace-pre-wrap break-words font-mono leading-relaxed"
+                    className="text-xs text-foreground/85 whitespace-pre-wrap break-words font-mono leading-relaxed"
                     dir="ltr"
                   >
                     {linkifyMessage(
                       job.message ?? "",
-                      "underline decoration-destructive/40 underline-offset-2 hover:text-[#7A2A1E] dark:hover:text-[#ffb1a0] transition-colors",
+                      "underline decoration-destructive/40 underline-offset-2 hover:decoration-destructive transition-colors",
                     )}
                   </pre>
                   {typeof metrics.error === "string" && !job.message?.includes(metrics.error) && (
                     <pre
-                      className="text-xs text-[#8A3326] dark:text-[#ffa997] whitespace-pre-wrap break-words font-mono leading-relaxed mt-2 border-t border-destructive/15 pt-2"
+                      className="text-xs text-foreground/85 whitespace-pre-wrap break-words font-mono leading-relaxed mt-2 border-t border-destructive/15 pt-2"
                       dir="ltr"
                     >
                       {linkifyMessage(
                         String(metrics.error),
-                        "underline decoration-destructive/40 underline-offset-2 hover:text-[#7A2A1E] dark:hover:text-[#ffb1a0] transition-colors",
+                        "underline decoration-destructive/40 underline-offset-2 hover:decoration-destructive transition-colors",
                       )}
                     </pre>
                   )}
@@ -1486,7 +1487,10 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
 
       {isPairContext && activePair.error && (
         <FadeIn delay={0.05}>
-          <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4">
+          <div
+            role="alert"
+            className="rounded-xl border border-destructive/30 bg-destructive/5 p-4"
+          >
             <div className="text-sm font-medium text-destructive mb-1">
               {msg("auto.features.optimizations.components.pairdetailview.3")}
             </div>

@@ -82,6 +82,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { ExportTableMenu } from "@/shared/ui/export-table-menu";
 import { msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { formatStorageSize } from "@/shared/lib/formatters";
 import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
 import type { CatalogModel } from "@/shared/types/api";
@@ -551,7 +552,7 @@ function EditableBudgetCell({
       await onSave(nextBytes);
       setEditing(false);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("settings.admin.storage.save_failed"));
+      toast.error(userErrorMessage(err, msg("settings.admin.storage.save_failed")));
       cancel();
     } finally {
       setSaving(false);
@@ -683,7 +684,7 @@ function AdminTab({ expanded }: { expanded: boolean }) {
       setOverrides(data.overrides);
       setDefaultBytes(data.default_bytes);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      toast.error(userErrorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -725,7 +726,7 @@ function AdminTab({ expanded }: { expanded: boolean }) {
       setPendingBudgetMb("");
       toast.success(msg("settings.admin.storage.saved"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("settings.admin.storage.save_failed"));
+      toast.error(userErrorMessage(err, msg("settings.admin.storage.save_failed")));
     } finally {
       setBusy(false);
     }
@@ -763,7 +764,7 @@ function AdminTab({ expanded }: { expanded: boolean }) {
         toast.success(msg("settings.admin.storage.deleted"));
       } catch (err) {
         setOverrides(before);
-        toast.error(err instanceof Error ? err.message : String(err));
+        toast.error(userErrorMessage(err));
       } finally {
         setBusy(false);
       }
@@ -1154,7 +1155,7 @@ function ApiTab() {
       setInfo({ last4: created.last4, created_at: created.created_at, last_used_at: null });
       toast.success(msg("settings.api.generated_toast"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("settings.api.generate_failed"));
+      toast.error(userErrorMessage(err, msg("settings.api.generate_failed")));
     } finally {
       setBusy(false);
     }
@@ -1168,7 +1169,7 @@ function ApiTab() {
       setRevealed(null);
       toast.success(msg("settings.api.revoked_toast"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("settings.api.revoke_failed"));
+      toast.error(userErrorMessage(err, msg("settings.api.revoke_failed")));
     } finally {
       setBusy(false);
     }

@@ -43,6 +43,7 @@ from ...constants import (
     PAYLOAD_OVERVIEW_TOOL_SOURCE,
     PAYLOAD_OVERVIEW_WORKFLOW,
     TOKEN_SOURCE_MANAGED,
+    WORKER_RESTART_CAUSE,
 )
 from ...exceptions import ServiceError
 from ...models import (
@@ -776,14 +777,16 @@ def enforce_storage_quota(job_store, username: str, incoming_bytes: int) -> None
 
 
 def is_resumable(job_store: Any, job_data: dict) -> bool:
-    """Return whether a stopped run can be resumed in place from its checkpoint.
+    """Return whether a stopped run can be resumed in place.
 
     True only for the narrow cases the Resume affordance targets: a terminal
     ``failed``/``cancelled`` run that still has attempts left under
     ``job_max_attempts``, a manually ``paused`` run, or a run ``stopped`` at
-    its spending limit, each with a saved GEPA checkpoint. The cheap, indexed
-    checkpoint lookup is gated behind the status/attempts checks so list pages
-    query only the few candidate rows, never the whole page.
+    its spending limit, each with a saved GEPA checkpoint. A top-level run the
+    orphan sweep stopped as interrupted needs no checkpoint: it starts again
+    from the beginning. The cheap, indexed checkpoint lookup is gated behind
+    the status/attempts checks so list pages query only the few candidate rows,
+    never the whole page.
 
     Args:
         job_store: The job store used to test for a saved checkpoint.
@@ -795,7 +798,56 @@ def is_resumable(job_store: Any, job_data: dict) -> bool:
     optimization_id = _resume_candidate_id(job_data)
     if not optimization_id:
         return False
-    return _has_resumable_state(job_store, optimization_id)
+    return _has_resumable_state(job_store, optimization_id) or _restarts_from_beginning(job_store, job_data)
+
+
+def is_interrupted_stop(job_data: dict) -> bool:
+    """Return whether the orphan sweep stopped the run because its usage did not settle.
+
+    A resume of such a run may start again without a checkpoint. The marker
+    stays while that resume waits for the usage.
+
+    Args:
+        job_data: Raw job row from the store.
+
+    Returns:
+        ``True`` when the run's recovery carries the interrupted budget generation.
+    """
+    recovery = job_data.get("recovery")
+    return isinstance(recovery, dict) and recovery.get("interrupted_budget_generation") is not None
+
+
+def is_worker_restart_stop(job_data: dict) -> bool:
+    """Return whether an interrupted stop came from a worker restart, not from the run.
+
+    Only then is a resume recovery that neither uses up an attempt nor meets
+    the cap. A crash also ends in an interrupted stop, and a marker without a
+    cause predates this check, so both still count, or a run that keeps
+    crashing its worker would loop forever.
+
+    Args:
+        job_data: Raw job row from the store.
+
+    Returns:
+        ``True`` for an interrupted stop whose recovery cause is a worker restart.
+    """
+    return is_interrupted_stop(job_data) and job_data["recovery"].get("cause") == WORKER_RESTART_CAUSE
+
+
+def _restarts_from_beginning(job_store: Any, job_data: dict) -> bool:
+    """Return whether an interrupted run with no checkpoint can start again from the beginning.
+
+    Args:
+        job_store: The job store used to test for a saved checkpoint.
+        job_data: Raw job row from the store.
+
+    Returns:
+        ``True`` for an interrupted top-level run that has no checkpoint.
+    """
+    if not is_interrupted_stop(job_data) or job_data.get("parent_optimization_id"):
+        return False
+    has_checkpoint = getattr(job_store, "has_gepa_checkpoint", None)
+    return callable(has_checkpoint) and not has_checkpoint(job_data["optimization_id"])
 
 
 def _resume_candidate_id(job_data: dict) -> str | None:
@@ -818,10 +870,10 @@ def _resume_candidate_id(job_data: dict) -> str | None:
     # Grid searches are retired: a stored grid stays readable but never resumes.
     if parse_overview(job_data).get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE) == OPTIMIZATION_TYPE_GRID_SEARCH:
         return None
-    # A manual pause or a budget stop is user-driven, not failure recovery, so it is
-    # exempt from the attempt cap; only failed/cancelled (auto-recovery) runs are
-    # bounded by it.
-    cap_exempt = status == OptimizationStatus.paused or budget_stop
+    # A manual pause or a budget stop is user-driven, and a worker restart is not
+    # the run's fault, so each is exempt from the attempt cap; only other
+    # failed/cancelled runs are bounded by it.
+    cap_exempt = status == OptimizationStatus.paused or budget_stop or is_worker_restart_stop(job_data)
     if not cap_exempt and int(job_data.get("attempts") or 0) >= settings.job_max_attempts:
         return None
     return job_data.get("optimization_id") or None
@@ -860,10 +912,15 @@ def resumable_id_flags(job_store: Any, rows: list[dict]) -> set[str]:
     candidates = [oid for row in rows if (oid := _resume_candidate_id(row))]
     if not candidates:
         return set()
+    restarts = {
+        row["optimization_id"]
+        for row in rows
+        if row.get("optimization_id") in candidates and _restarts_from_beginning(job_store, row)
+    }
     batch = getattr(job_store, "resumable_state_ids", None)
     if callable(batch):
-        return set(batch(candidates))
-    return {oid for oid in candidates if _has_resumable_state(job_store, oid)}
+        return set(batch(candidates)) | restarts
+    return {oid for oid in candidates if _has_resumable_state(job_store, oid)} | restarts
 
 
 def is_pausable(job_store: Any, job_data: dict) -> bool:

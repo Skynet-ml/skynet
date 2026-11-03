@@ -36,6 +36,11 @@ export interface ModelConfig {
   // (`features/submit/hooks/use-submit-wizard.ts`). Other keys flow through
   // unchanged.
   extra?: { api_key?: string; [k: string]: unknown };
+  /**
+   * Wizard state: run this managed model through the provider's batch queue at
+   * half price. A submit sends it as `extra.economy_mode` (see prepareModelConfig).
+   */
+  economy_mode?: boolean;
 }
 
 export interface ColumnMapping {
@@ -1008,6 +1013,8 @@ export interface CatalogModel {
   // sent; null when the provider did not say.
   reasoning_mandatory?: boolean | null;
   reasoning_default_enabled?: boolean | null;
+  // A local CLI row whose CLI takes fast mode for this model; absent elsewhere.
+  supports_fast?: boolean;
   // Newest headline model of a leading lab, derived from provider metadata.
   featured?: boolean;
   // The best-value default thinker that the composer's Auto mode runs.

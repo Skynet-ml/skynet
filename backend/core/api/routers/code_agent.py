@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from starlette.responses import StreamingResponse
 
 from ...config import settings
+from ...local.cli_catalog import RetiredEffort
 from ...models import (
     InputsInferenceRequest,
     InputsInferenceResponse,
@@ -41,6 +42,7 @@ from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..model_catalog import ReasoningEffort, get_catalog_cached
 from ..model_router import (
+    cli_fast_config,
     effective_reasoning_effort,
     metering_token_source,
     route_interview_model,
@@ -278,9 +280,19 @@ class CodeAgentRequest(BaseModel):
             "default model."
         ),
     )
-    reasoning_effort: ReasoningEffort | None = Field(
+    reasoning_effort: ReasoningEffort | RetiredEffort | None = Field(
         default=None,
-        description=("Explicit reasoning-effort level for the chosen model; absent keeps the model's default."),
+        description=(
+            "Explicit reasoning-effort level for the chosen model; absent keeps the model's default. "
+            "The retired levels ``ultra`` and ``ultracode`` run at the model's top level."
+        ),
+    )
+    fast_mode: bool = Field(
+        default=False,
+        description=(
+            "Run this turn in the CLI's fast mode. Applies only to a local CLI model that takes "
+            "fast mode; any other model ignores it."
+        ),
     )
     unified: UnifiedAuthoringContext | None = Field(
         default=None,
@@ -563,7 +575,7 @@ def create_code_agent_router(*, job_store=None) -> APIRouter:
             steer_owner=current_user.username,
             steer_key=req.steer_key,
             prior_files=req.prior_files,
-            model_config=byok_config,
+            model_config=byok_config or cli_fast_config(model, req.fast_mode),
         )
         metered = stream_with_llm_metering(
             source,
@@ -634,7 +646,7 @@ def create_code_agent_router(*, job_store=None) -> APIRouter:
                     model=model,
                     reasoning_effort=effective_reasoning_effort(model, req.reasoning_effort),
                     usage_sink=usage_sink,
-                    model_config=byok_config,
+                    model_config=byok_config or cli_fast_config(model, req.fast_mode),
                 ):
                     yield event
             except Exception:

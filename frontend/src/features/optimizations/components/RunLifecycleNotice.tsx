@@ -8,6 +8,7 @@ import { NumberInput } from "@/shared/ui/number-input";
 import type { OptimizationStatusResponse } from "@/shared/types/api";
 import { resumeJob, updateExecutionBudget } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { TERMS } from "@/shared/lib/terms";
 import { formatBlackboxScore, formatPercent } from "@/shared/lib/formatters";
 import { centsToUsd, formatBudgetUsd, usdToCents } from "@/features/billing";
@@ -65,9 +66,10 @@ export function RunLifecycleNotice({
     const before = previous.current;
     const sameRun = before?.runId === job.optimization_id;
     if (budgetStop && sameRun && !before.budgetStop) {
-      toast.info(`${stopTitle}. ${resultCopy}`, {
-        toastId: `run-budget:${job.optimization_id}`,
-      });
+      toast.info(
+        formatMsg("optimization.budget_stop.toast", { title: stopTitle, result: resultCopy }),
+        { toastId: `run-budget:${job.optimization_id}` },
+      );
     } else if (budgetPause && sameRun && !before.budgetPause) {
       toast.info(msg("optimization.budget_projected.title"), {
         toastId: `run-budget-pause:${job.optimization_id}`,
@@ -128,7 +130,7 @@ export function RunLifecycleNotice({
       await resumeJob(job.optimization_id);
       toast.success(msg("optimization.budget_raise.success"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("optimization.budget_raise.failed"));
+      toast.error(userErrorMessage(err, msg("optimization.budget_raise.failed")));
     } finally {
       setRaising(false);
       // The limit may have changed even when the resume itself failed, so the

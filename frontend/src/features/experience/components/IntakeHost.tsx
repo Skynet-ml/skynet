@@ -9,16 +9,18 @@ import { useSettingsModal, useUserPrefs } from "@/features/settings";
 import { updateModelPrivacy, type InterviewOption } from "@/shared/lib/api";
 import { msg, type MessageKey } from "@/shared/lib/messages";
 import { APP_NAME } from "@/shared/lib/brand";
+import { isLocalMode } from "@/shared/lib/runtime-env";
 import {
   FULL_TRANSLATION_LOCALES,
   LOCALE_REGISTRY,
   isLocale,
   type Locale,
 } from "@/shared/lib/locale";
-import { useLocale } from "@/shared/providers";
+import { useColorTheme, useLocale } from "@/shared/providers";
 import { cn } from "@/shared/lib/utils";
 import { QuestionChoices } from "@/shared/ui/agent";
 import { AnimatedWordmark } from "@/shared/ui/animated-wordmark";
+import { EvolutionMorph } from "@/shared/ui/evolution-morph";
 import { ArrowRight, X } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
 import { SubmitSplashOverlay, SUBMIT_SPLASH_HOLD_MS } from "@/shared/ui/submit-splash-overlay";
@@ -43,11 +45,16 @@ import {
 } from "../lib/intake";
 import {
   SETUP_SETTING_EVENT,
+  advancesOnAnswer,
   arrowStep,
+  billingChoices,
   resumeStopIndex,
   setupStops,
+  THEME_OPTIONS,
+  type SetupQuestion,
   type SetupSettingDetail,
 } from "../lib/setup-tour";
+import { playsEntrance, readSplashState, setupCoversPath, subscribeSplash } from "../lib/entrance";
 import { useExperienceOptional } from "../providers/experience-provider";
 import { LEVEL_KEYS } from "./level-keys";
 import { SetupTour } from "./SetupTour";
@@ -99,7 +106,9 @@ const TRUST_OPTIONS: ReadonlyArray<{
 
 /*
  * The setup moves like the splash that plays when an optimization is sent
- * (`SubmitSplashOverlay`). On a first login the app shows as normal for a
+ * (`SubmitSplashOverlay`). On a first login the app-load splash hands over
+ * on its last frame, and the title rises under its wordmark (`entrance.ts`).
+ * When the splash is already gone, the app shows as normal for a
  * moment, so the user sees what they are setting up; then the setup's warm
  * panel slides down over it with the wordmark scaling in, and the title
  * settles under the wordmark long enough to read before the language
@@ -121,8 +130,9 @@ const STEP_S = 0.35;
 const REDUCED_S = 0.2;
 /*
  * A picked answer stays marked this long before the tour moves on, so the
- * user sees it land (the level reshapes the dashboard behind the card). A
- * still hold, not motion, so it is the same under reduced motion.
+ * user sees it land. A still hold, not motion, so it is the same under
+ * reduced motion. An answer that changes how the app looks (the level) never
+ * moves on by itself: the user continues once they have seen it.
  */
 const ANSWER_HOLD_MS = 700;
 
@@ -184,15 +194,9 @@ export function IntakeHost() {
   const experience = useExperienceOptional();
   const open = !!experience?.intakeOpen;
   const pathname = usePathname();
-  // The setup never covers the sign-in or public pages.
-  const bare =
-    pathname === "/login" ||
-    pathname === "/terms" ||
-    pathname === "/privacy" ||
-    pathname.startsWith("/share/");
   return (
     <AnimatePresence>
-      {experience && open && !bare && <IntakeSurface key="intake" />}
+      {experience && open && setupCoversPath(pathname) && <IntakeSurface key="intake" />}
     </AnimatePresence>
   );
 }
@@ -201,6 +205,7 @@ function IntakeSurface() {
   const experience = useExperienceOptional()!;
   const { setPref } = useUserPrefs();
   const { locale, setLocale } = useLocale();
+  const { theme, setTheme } = useColorTheme();
   const reduceMotion = useReducedMotion() ?? false;
   const router = useRouter();
 
@@ -211,21 +216,34 @@ function IntakeSurface() {
     const draft = resume
       ? resumeAfterLanguageSwitch(stored, resume, locale)
       : (stored ?? emptyDraft());
+    // While the app-load splash still plays, the setup's entrance is the splash itself.
+    const entrance = playsEntrance({
+      languageAnswered: draft.answered.includes("language"),
+      rerunning: experience.rerunning,
+      splash: readSplashState(),
+    });
     // A setup already under way picks up where it was, without the entrance again.
     // Back from a language switch, the panel shows once more so it can slide up off the tour.
     const stage: Stage = draft.answered.includes("language")
       ? resume
         ? "language"
         : "tour"
-      : experience.rerunning
+      : experience.rerunning || entrance
         ? "title"
         : "glance";
     // Back from a sign-in that left the page (Slack, a connector): the same stop.
     const stopIndex = draft.answered.includes("language")
       ? resumeStopIndex(setupStops(draft.answers.billing), draft.stop)
       : 0;
-    return { draft, stage, stopIndex, resumed: !!resume };
+    return { draft, stage, stopIndex, resumed: !!resume, entrance };
   });
+  const splashState = React.useSyncExternalStore(
+    subscribeSplash,
+    readSplashState,
+    () => "playing" as const,
+  );
+  // The entrance waits under the splash until the splash hands over.
+  const revealed = !initial.entrance || splashState !== "playing";
   const [draft, setDraft] = React.useState<IntakeDraft>(initial.draft);
   const [stage, setStage] = React.useState<Stage>(initial.stage);
   const [stopIndex, setStopIndex] = React.useState(initial.stopIndex);
@@ -249,13 +267,16 @@ function IntakeSurface() {
 
   React.useEffect(() => {
     if (stage !== "glance" && stage !== "title") return;
-    const delay =
-      stage === "glance"
-        ? APP_GLANCE_MS
-        : (reduceMotion ? REDUCED_S * 1000 : TITLE_IN_MS) + TITLE_HOLD_MS;
+    if (!revealed) return;
+    const titleIn = reduceMotion
+      ? REDUCED_S * 1000
+      : initial.entrance
+        ? WORDMARK_S * 1000
+        : TITLE_IN_MS;
+    const delay = stage === "glance" ? APP_GLANCE_MS : titleIn + TITLE_HOLD_MS;
     const timer = setTimeout(() => setStage(stage === "glance" ? "title" : "language"), delay);
     return () => clearTimeout(timer);
-  }, [stage, reduceMotion]);
+  }, [stage, reduceMotion, revealed, initial.entrance]);
 
   // A stop about a setting Settings holds opens it there, framed behind the
   // card; moving on, going back, skipping or finishing closes it again.
@@ -280,10 +301,15 @@ function IntakeSurface() {
     }));
   };
 
+  /** Move on once a picked answer has shown, unless it changes how the app looks. */
+  const landed = (question: SetupQuestion) => {
+    if (advancesOnAnswer(question)) setAnsweredStop(stopIndex);
+  };
+
   /** Record a tour stop's answer, then move on once it has shown. */
   const answerStop = (phase: IntakeLlmPhase, patch: Partial<IntakeAnswers> = {}) => {
     answer(phase, patch);
-    setAnsweredStop(stopIndex);
+    landed(phase);
   };
 
   /** Hand an answer to the setting Settings shows behind the card, which saves it. */
@@ -295,7 +321,7 @@ function IntakeSurface() {
     setDraft((prev) => ({ ...prev, answers: { ...prev.answers, level, level_chosen: true } }));
     // Saved at once so the page behind re-renders at the new level.
     void experience.save({ level });
-    setAnsweredStop(stopIndex);
+    landed("level");
   };
 
   /** Write what the user answered; an untouched setting keeps its value. */
@@ -420,32 +446,48 @@ function IntakeSurface() {
           />
         );
       }
+      case "theme": {
+        // The live theme is the answer: Settings and this card share one store.
+        const options = THEME_OPTIONS.map((o) => ({
+          label: msg(o.label),
+          description: msg(o.description),
+        }));
+        const current = THEME_OPTIONS.findIndex((o) => o.value === theme);
+        return (
+          <Choices
+            options={options}
+            selected={current >= 0 ? options[current]!.label : []}
+            ariaLabel={msg("experience.setup.theme.title")}
+            className="sm:[&>div]:grid-cols-3"
+            onSelect={(_, index) => {
+              const next = THEME_OPTIONS[index];
+              if (next) setTheme(next.value);
+              landed("theme");
+            }}
+          />
+        );
+      }
       case "billing": {
-        const options = [
-          {
-            label: msg("experience.intake.q3.billing.platform"),
-            description: msg("experience.intake.billing.platform_description"),
-          },
-          {
-            label: msg("experience.intake.q3.billing.byok"),
-            description: msg("experience.intake.billing.byok_description"),
-          },
-        ];
+        const choices = billingChoices(isLocalMode());
+        const options = choices.map((c) => ({
+          label: msg(c.label),
+          description: msg(c.description),
+        }));
+        const current = choices.findIndex((c) => c.value === answers.billing);
         return (
           <Choices
             options={options}
             selected={
-              draft.answered.includes("billing")
-                ? options[answers.billing === "byok" ? 1 : 0]!.label
-                : []
+              draft.answered.includes("billing") && current >= 0 ? options[current]!.label : []
             }
             ariaLabel={msg("experience.intake.billing.title")}
-            onSelect={(_, index) =>
+            onSelect={(_, index) => {
+              const billing = choices[index]?.value ?? "platform";
               answerStop(
                 "billing",
-                index === 1 ? { billing: "byok" } : { billing: "platform", byok_provider: null },
-              )
-            }
+                billing === "byok" ? { billing } : { billing, byok_provider: null },
+              );
+            }}
           />
         );
       }
@@ -561,8 +603,23 @@ function IntakeSurface() {
                   className="fixed inset-0 isolate flex h-dvh flex-col overflow-hidden text-foreground outline-none"
                   dir="ltr"
                   lang="en"
-                  style={{ zIndex: 50, backgroundColor: SPLASH_GROUND, fontFamily: ENGLISH_FONT }}
-                  initial={reduceMotion ? { opacity: 0 } : { y: "-100%" }}
+                  style={{
+                    zIndex: 50,
+                    // The entrance continues the splash, so it keeps the splash's ground.
+                    backgroundColor: initial.entrance ? "var(--background)" : SPLASH_GROUND,
+                    fontFamily: ENGLISH_FONT,
+                    ["--evolution-ground" as string]: initial.entrance
+                      ? "var(--background)"
+                      : SPLASH_GROUND,
+                  }}
+                  // Only the splash handoff mount (stage "title") stays still; Back from the tour slides in.
+                  initial={
+                    initial.entrance && stage === "title"
+                      ? false
+                      : reduceMotion
+                        ? { opacity: 0 }
+                        : { y: "-100%" }
+                  }
                   animate={reduceMotion ? { opacity: 1 } : { y: 0 }}
                   exit={reduceMotion ? { opacity: 0 } : { y: "-100%" }}
                   transition={reduceMotion ? fade : { duration: PANEL_S, ease: SPLASH_EASE }}
@@ -572,7 +629,39 @@ function IntakeSurface() {
                   </DialogPrimitive.Title>
 
                   <AnimatePresence mode="wait" initial={false}>
-                    {stage === "title" ? (
+                    {stage === "title" && initial.entrance ? (
+                      <motion.div
+                        key="title"
+                        // The splash's exact layout, so the handover frame does not move.
+                        className="flex min-h-0 flex-1 items-center justify-center"
+                        exit={step.exit}
+                        transition={stepTransition}
+                      >
+                        <div className="relative flex">
+                          <EvolutionMorph
+                            still
+                            width={300}
+                            className="absolute bottom-full left-1/2 mb-2 -translate-x-1/2"
+                          />
+                          <div className="w-[min(86vw,372px)]">
+                            <AnimatedWordmark fluid morphSpeed={120} />
+                          </div>
+                          <div className="absolute top-full left-1/2 mt-[clamp(1rem,2.5dvh,1.5rem)] -translate-x-1/2">
+                            {revealed && (
+                              <motion.p
+                                aria-hidden
+                                className="whitespace-nowrap text-center [font-family:var(--font-display)] [font-optical-sizing:auto] text-[clamp(1rem,2.4vw,1.5rem)] font-medium leading-snug tracking-tight text-muted-foreground"
+                                initial={step.initial}
+                                animate={step.animate}
+                                transition={splash(0)}
+                              >
+                                {en("experience.intake.entrance.title")}
+                              </motion.p>
+                            )}
+                          </div>
+                        </div>
+                      </motion.div>
+                    ) : stage === "title" ? (
                       <motion.div
                         key="title"
                         // The bottom padding lifts the pair to the optical middle of the screen.
@@ -582,11 +671,17 @@ function IntakeSurface() {
                       >
                         <motion.div
                           // Fluid, so the wordmark narrows with a phone instead of overflowing it.
-                          className="w-[min(20.5rem,72vw)] [&_svg]:![color:var(--splash-ink)]"
+                          className="relative w-[min(20.5rem,72vw)] [&_svg]:![color:var(--splash-ink)]"
                           initial={reduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.8 }}
                           animate={{ opacity: 1, scale: 1 }}
                           transition={splash(WORDMARK_DELAY_S)}
                         >
+                          {/* A rerun has no app-load splash, so the figure evolves here. */}
+                          <EvolutionMorph
+                            durationMs={TITLE_IN_MS}
+                            width={240}
+                            className="absolute bottom-full left-1/2 mb-2 -translate-x-1/2"
+                          />
                           <AnimatedWordmark fluid autoMorph={!reduceMotion} morphSpeed={120} />
                         </motion.div>
                         <motion.p

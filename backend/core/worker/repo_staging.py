@@ -229,7 +229,7 @@ def _setup_asker(payload: dict[str, Any], gateway: Any) -> Callable[[str], str |
     if payload.get("economy_mode"):
         return None
     route = next((route for route in gateway.model_routes() if route["role"] == "optimization"), None)
-    if route is None:
+    if route is None or gateway.batches(route["token"]):
         return None
 
     def ask(prompt: str) -> str | None:

@@ -2,21 +2,11 @@
 
 import type { ModelConfig } from "@/shared/types/api";
 import type { ArtifactKind, OptimizerChoice } from "@/shared/types/unified-run";
-import { HelpTip } from "@/shared/ui/help-tip";
 import { NumberInput } from "@/shared/ui/number-input";
-import { Label } from "@/shared/ui/primitives/label";
-import { Switch } from "@/shared/ui/primitives/switch";
-import { msg } from "@/shared/lib/messages";
-import { isLocalMode } from "@/shared/lib/runtime-env";
-import { tip } from "@/shared/lib/tooltips";
 
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
 import { aggregateTokenSource } from "../../lib/run-floor";
-import {
-  minScorerRuns,
-  supportsIterationLimit,
-  usesNativeProposer,
-} from "../../lib/engine-contract";
+import { minScorerRuns, supportsIterationLimit } from "../../lib/engine-contract";
 import { TotalBudgetCard } from "../TotalBudgetCard";
 import { Field, StepCard } from "../blackbox/shared";
 import { v2Msg } from "./ArtifactConfirmCard";
@@ -28,7 +18,7 @@ import { v2Msg } from "./ArtifactConfirmCard";
  */
 export function BudgetSection({ kind, choice }: { kind: ArtifactKind; choice: OptimizerChoice }) {
   const ctx = useWizardV2();
-  const { state, patchOptimizer, patchMeta, guided } = ctx;
+  const { state, patchOptimizer, guided } = ctx;
   const t = (key: string, params?: Record<string, string>) => v2Msg(key, guided, params);
   const { budget, taskModel, reflectionModel, extraReflectionModels } = state.optimizer;
   const minRuns = minScorerRuns(choice, kind);
@@ -95,26 +85,6 @@ export function BudgetSection({ kind, choice }: { kind: ArtifactKind; choice: Op
           </Field>
         )}
       </div>
-
-      {/* Economy runs on the providers' batch APIs, which the local build does not use. */}
-      {!isLocalMode() && (
-        <div className="flex items-start justify-between gap-3">
-          <div className="space-y-1">
-            <Label htmlFor="v2-economy-mode" className="cursor-pointer text-sm font-semibold">
-              <HelpTip text={tip("submit.economy")}>{msg("submit.economy.label")}</HelpTip>
-            </Label>
-            <p className="text-xs text-muted-foreground">
-              {msg("submit.economy.hint")}
-              {usesNativeProposer(choice, kind) && ` ${msg("submit.blackbox.economy.native_hint")}`}
-            </p>
-          </div>
-          <Switch
-            id="v2-economy-mode"
-            checked={state.meta.economyMode}
-            onCheckedChange={(economyMode) => patchMeta({ economyMode })}
-          />
-        </div>
-      )}
 
       <TotalBudgetCard w={ctx} mode={aggregateTokenSource(models)} />
     </StepCard>

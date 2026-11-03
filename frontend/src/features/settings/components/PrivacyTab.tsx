@@ -24,9 +24,8 @@ import {
 } from "@/shared/ui/icons";
 
 import { msg, formatMsg, type MessageKey } from "@/shared/lib/messages";
-import { tI18n } from "@/shared/lib/i18n";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import {
-  ApiError,
   deleteAccount,
   exportAccountData,
   type AccountExportFormat,
@@ -68,8 +67,7 @@ import { SharedChatsSection } from "./SharedChatsSection";
 
 /** Localize a data-action failure: semantic backend codes when present. */
 function describeError(err: unknown, fallback: string): string {
-  if (err instanceof ApiError && err.code) return tI18n(err.code);
-  return fallback;
+  return userErrorMessage(err, fallback);
 }
 
 const MODEL_POLICY_KEYS = {

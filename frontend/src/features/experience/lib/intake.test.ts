@@ -27,3 +27,8 @@ test("parseIntakeAnswers round-trips stored answers and ignores a retired email 
   assert.equal(parseIntakeAnswers(null), null);
   assert.equal(parseIntakeAnswers([1]), null);
 });
+
+test("a stored CLI subscription answer reads back", () => {
+  assert.equal(parseIntakeAnswers({ billing: "subscription" })?.billing, "subscription");
+  assert.equal(parseIntakeAnswers({ billing: "other" })?.billing, "platform");
+});

@@ -45,6 +45,7 @@ import {
   type HubSplit,
 } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { cn } from "@/shared/lib/utils";
 import { useSettingsModal } from "@/features/settings";
 import { DatasetPreviewPanel } from "@/features/datasets";
@@ -191,7 +192,7 @@ export function HuggingFaceImportDialog({
           openConnectors();
           return;
         }
-        toast.error(err instanceof Error ? err.message : msg("hf_import.splits_error"));
+        toast.error(userErrorMessage(err, msg("hf_import.splits_error")));
         setRepoId(null);
       })
       .finally(() => {
@@ -245,7 +246,7 @@ export function HuggingFaceImportDialog({
       onOpenChange(false);
     } catch (err) {
       if (!isStorageQuotaError(err)) {
-        toast.error(err instanceof Error ? err.message : msg("hf_import.toast.failed"));
+        toast.error(userErrorMessage(err, msg("hf_import.toast.failed")));
       }
     } finally {
       setImporting(false);

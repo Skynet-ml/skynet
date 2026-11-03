@@ -6,7 +6,7 @@ import { HostedLinkClient } from "./hosted-link";
 import { isOpenAppUrl, parseTheme, pickTheme, type Theme } from "./theme";
 import { childPath, probeClis, probeDocker, readCliLimits, searchDirs } from "./cli-detect";
 import { allocatePorts, type PortPlan } from "./ports";
-import { holdQuitUntilStopped } from "./quit";
+import { holdQuitUntilStopped, stopServices } from "./quit";
 import { databaseUrl, removeSandboxContainers, startPostgres, stopPostgres, type DockerCtx } from "./postgres";
 import { ensureSandboxImage } from "./sandbox-image";
 import { ensurePrivateDir, loadOrCreateSecrets } from "./secrets";
@@ -57,6 +57,7 @@ let state: OnboardingState = { kind: "checking", clis: [], docker: null };
 let acceptedRateCap = false;
 let busy = false;
 let quitting = false;
+let relaunchAfterQuit = false;
 let dockerCtx: DockerCtx | null = null;
 let api: ManagedProcess | null = null;
 let frontend: ManagedProcess | null = null;
@@ -484,24 +485,42 @@ function recordStarted(role: string, pid: number | undefined): void {
   if (pid && started) recordPid(dataDir, { role, pgid: pid, started });
 }
 
-/** Stop in §1.7 order: frontend, API, Postgres, then sandbox containers. */
+// The web server keeps no state, so it gets a short grace period.
+const FRONTEND_STOP_GRACE_MS = 2_000;
+
+/** Stop the web server and the API, then Postgres and the sandbox containers. */
 async function stopStack(): Promise<void> {
   killActiveCommands();
   hostedLink = null;
   signInUrl = null;
   const fe = frontend;
   const be = api;
+  const ctx = postgresStarted ? dockerCtx : null;
   frontend = null;
   api = null;
   frontendUrl = null;
-  await fe?.stop();
-  await be?.stop();
-  if (dockerCtx && postgresStarted) {
-    await stopPostgres(dockerCtx);
-    await removeSandboxContainers(dockerCtx);
-  }
+  await stopServices({
+    frontend: async () => fe?.stop(FRONTEND_STOP_GRACE_MS),
+    api: async () => be?.stop(),
+    postgres: async () => {
+      if (ctx) await stopPostgres(ctx);
+    },
+    sandboxes: async () => {
+      if (ctx) await removeSandboxContainers(ctx);
+    },
+  });
   postgresStarted = false;
   clearPids(dataDir);
+}
+
+/**
+ * Close the window and hide the Dock icon at once. Closing the window also
+ * ends its open requests, so the web server does not wait for them to stop.
+ */
+function hideForQuit(): void {
+  for (const w of BrowserWindow.getAllWindows()) w.destroy();
+  win = null;
+  app.dock?.hide();
 }
 
 function isAllowedUrl(target: string): boolean {
@@ -638,6 +657,13 @@ if (!app.requestSingleInstanceLock()) {
     void handleAppUrl(url);
   });
   app.on("second-instance", (_event, argv) => {
+    // The window is already gone while the stack stops. Open a new app after
+    // the exit instead of dropping the launch.
+    if (quitting) {
+      if (!relaunchAfterQuit) app.relaunch();
+      relaunchAfterQuit = true;
+      return;
+    }
     if (win?.isMinimized()) win.restore();
     win?.focus();
     const url = appUrlFromArgv(argv);
@@ -659,14 +685,18 @@ if (!app.requestSingleInstanceLock()) {
   app.on("window-all-closed", () => app.quit());
   app.on(
     "before-quit",
-    holdQuitUntilStopped(() => {
-      quitting = true;
-      stopStack()
-        .catch((err: Error) => log(`shutdown error: ${err.message}`))
-        .finally(() => {
-          log("stopped");
-          desktopLog.end(() => app.exit(0));
-        });
-    }),
+    holdQuitUntilStopped(
+      () => {
+        quitting = true;
+        const started = Date.now();
+        stopStack()
+          .catch((err: Error) => log(`shutdown error: ${err.message}`))
+          .finally(() => {
+            log(`stopped in ${Date.now() - started} ms`);
+            desktopLog.end(() => app.exit(0));
+          });
+      },
+      hideForQuit,
+    ),
   );
 }

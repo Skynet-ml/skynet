@@ -24,6 +24,7 @@ import {
 import { cn } from "@/shared/lib/utils";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { Button } from "@/shared/ui/primitives/button";
 import { Input } from "@/shared/ui/primitives/input";
@@ -70,6 +71,7 @@ import {
 } from "../lib/run-view";
 import { ROW_MOTION, rowTransition } from "../lib/row-motion";
 import { FolderShareDialog } from "./FolderShareDialog";
+import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
 
 /** A folder action the sidebar opens a dialog for. */
 export type FolderDialogState =
@@ -599,7 +601,7 @@ function FolderNameDialog({
       }
       onClose();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("folders.error"));
+      toast.error(userErrorMessage(err, msg("folders.error")));
     } finally {
       setSaving(false);
     }
@@ -673,39 +675,32 @@ function DeleteFolderDialog({
       onDone({ deletedIds: res.deleted });
       onClose();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("folders.error"));
+      toast.error(userErrorMessage(err, msg("folders.error")));
     } finally {
       setDeleting(false);
     }
   };
 
   return (
-    <Dialog open={folder !== null} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent className="w-[min(28rem,92vw)] max-w-[min(28rem,92vw)] sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>{msg("folders.delete.title")}</DialogTitle>
-          <DialogDescription>
-            {before}
-            <span className="font-semibold text-foreground break-words" dir="auto">
-              {folder?.name}
-            </span>
-            {after}
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={deleting}>
-            {msg("folders.cancel")}
-          </Button>
-          <Button variant="destructive" onClick={confirm} disabled={deleting}>
-            {deleting ? (
-              <CircleNotch className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
-            ) : (
-              msg("folders.delete")
-            )}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <ConfirmDialog
+      open={folder !== null}
+      onOpenChange={(next) => !next && onClose()}
+      variant="danger"
+      title={msg("folders.delete.title")}
+      description={
+        <>
+          {before}
+          <span className="font-semibold text-foreground break-words" dir="auto">
+            {folder?.name}
+          </span>
+          {after}
+        </>
+      }
+      cancelLabel={msg("folders.cancel")}
+      confirmLabel={msg("folders.delete")}
+      onConfirm={confirm}
+      pending={deleting}
+    />
   );
 }
 
@@ -776,7 +771,7 @@ function MoveDialog({
       onDone();
       onClose();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : msg("folders.error"));
+      toast.error(userErrorMessage(err, msg("folders.error")));
     } finally {
       setSaving(false);
     }

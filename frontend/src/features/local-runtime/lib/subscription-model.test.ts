@@ -59,6 +59,7 @@ const {
   withChosenCli,
   withSupportedHostCli,
 } = await import("./subscription-model.ts");
+const { effortsFor, unpickedEffort } = await import("../../../shared/lib/model-efforts.ts");
 
 type Status = Parameters<typeof subscriptionAgentModel>[2] & object;
 type Cli = Status["clis"][number];
@@ -189,6 +190,86 @@ test("an agent menu lists only the CLI's models, as the ids the request sends", 
     "subscription/codex/openai/gpt-5",
   );
   assert.deepEqual(subscriptionMenuModels(undefined, []), []);
+});
+
+test("each CLI menu row takes only the levels the CLI takes for that model", () => {
+  const full = ["low", "medium", "high", "xhigh", "max"];
+  const claude = cli({
+    models: [
+      "anthropic/claude-opus-5.5",
+      "anthropic/claude-sonnet-4.6",
+      "anthropic/claude-opus-4.5",
+      "anthropic/claude-haiku-4.5",
+    ],
+    efforts: {
+      "anthropic/claude-opus-5.5": full,
+      "anthropic/claude-sonnet-4.6": ["low", "medium", "high", "max"],
+      "anthropic/claude-opus-4.5": ["low", "medium", "high"],
+      "anthropic/claude-haiku-4.5": [],
+    },
+  });
+  // The catalog's ladder and default for a model never reach the CLI row.
+  const catalog = [
+    {
+      value: "openrouter/anthropic/claude-sonnet-4.6",
+      label: "Claude Sonnet 4.6",
+      provider: "anthropic",
+      supports_thinking: true,
+      supports_vision: true,
+      available: true,
+      reasoning_efforts: ["none", "low", "medium", "high"],
+      reasoning_default_enabled: true,
+      default_reasoning_effort: "high",
+    },
+  ] as Parameters<typeof subscriptionMenuModels>[1];
+  const models = subscriptionMenuModels(claude, catalog);
+  const levels = (slug: string) => effortsFor(`subscription/claude/${slug}`, models);
+  const row = (slug: string) => models.find((m) => m.value === `subscription/claude/${slug}`)!;
+  assert.deepEqual(levels("anthropic/claude-opus-5.5"), full);
+  assert.deepEqual(levels("anthropic/claude-sonnet-4.6"), ["low", "medium", "high", "max"]);
+  assert.deepEqual(levels("anthropic/claude-opus-4.5"), ["low", "medium", "high"]);
+  // A model with no levels gets the menu's disabled Effort row.
+  assert.deepEqual(levels("anthropic/claude-haiku-4.5"), []);
+  assert.equal(row("anthropic/claude-haiku-4.5").supports_thinking, false);
+  for (const slug of [
+    "anthropic/claude-opus-5.5",
+    "anthropic/claude-sonnet-4.6",
+    "anthropic/claude-opus-4.5",
+  ]) {
+    assert.equal(row(slug).supports_thinking, true);
+    // An unpicked turn sends no effort, so "Default" is the CLI's own and names no level.
+    assert.equal(unpickedEffort(row(slug)), null);
+  }
+
+  const codex = subscriptionMenuModels(
+    cli({ id: "codex", models: ["openai/gpt-6.1-sol"], efforts: { "openai/gpt-6.1-sol": full } }),
+    [],
+  );
+  assert.deepEqual(effortsFor("subscription/codex/openai/gpt-6.1-sol", codex), full);
+});
+
+test("a CLI status with no effort table offers no effort", () => {
+  const [row] = subscriptionMenuModels(cli({ models: ["anthropic/claude-opus-5.5"] }), []);
+  assert.equal(row!.supports_thinking, false);
+  assert.deepEqual(row!.reasoning_efforts, []);
+  assert.equal(row!.supports_fast, false);
+});
+
+test("a CLI row takes fast mode only when the CLI lists its model", () => {
+  const rows = subscriptionMenuModels(
+    cli({
+      models: ["anthropic/claude-opus-5.5", "anthropic/claude-sonnet-4.6"],
+      fast: ["anthropic/claude-opus-5.5"],
+    }),
+    [],
+  );
+  assert.deepEqual(
+    rows.map((row) => [row.value, row.supports_fast]),
+    [
+      ["subscription/claude/anthropic/claude-opus-5.5", true],
+      ["subscription/claude/anthropic/claude-sonnet-4.6", false],
+    ],
+  );
 });
 
 test("a subscription model config names its CLI", () => {

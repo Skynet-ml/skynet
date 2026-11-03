@@ -22,7 +22,11 @@ export interface IntakeAnswers {
    * module stays free of runtime imports for the unit tests.
    */
   language: string | null;
-  billing: "platform" | "byok";
+  /*
+   * "subscription" is the Mac app's coding CLIs (Claude Code, Codex) on the
+   * user's own plan; only the local build offers it.
+   */
+  billing: "platform" | "byok" | "subscription";
   /** Vault provider slug of the key the user brought, when they did. */
   byok_provider: string | null;
   level: ExperienceLevel;
@@ -81,7 +85,7 @@ export function parseIntakeAnswers(value: unknown): IntakeAnswers | null {
   const level = raw.level;
   return {
     language: localeCode(raw.language),
-    billing: raw.billing === "byok" ? "byok" : "platform",
+    billing: raw.billing === "byok" || raw.billing === "subscription" ? raw.billing : "platform",
     byok_provider: typeof raw.byok_provider === "string" ? raw.byok_provider : null,
     level: level === "guided" || level === "expert" ? level : "standard",
     level_chosen: raw.level_chosen === true,

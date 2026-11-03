@@ -362,11 +362,16 @@ def _summary(item: str, index: int, delta: str) -> dict[str, Any]:
 
 
 def test_codex_streams_reasoning_and_answer_before_the_turn_ends(tmp_path: Path) -> None:
-    """Pass each reasoning summary and answer piece on while the turn still runs, and skip commentary."""
+    """Pass each reasoning summary, commentary and answer piece on while the turn still runs."""
     marker = tmp_path / "seen"
     commentary = [
         {"method": "item/started", "params": {"item": {"id": "c1", "type": "agentMessage", "phase": "commentary"}}},
         {"method": "item/agentMessage/delta", "params": {"itemId": "c1", "delta": "Looking"}},
+        {"method": "item/agentMessage/delta", "params": {"itemId": "c1", "delta": " around"}},
+        {
+            "method": "item/completed",
+            "params": {"item": {"id": "c1", "type": "agentMessage", "text": "Looking around"}},
+        },
     ]
     first = [_summary("rs_1", 0, "**Plan**"), _summary("rs_1", 0, " now"), *commentary, _summary("rs_1", 1, "**Next**")]
     wait = (
@@ -382,14 +387,49 @@ def test_codex_streams_reasoning_and_answer_before_the_turn_ends(tmp_path: Path)
     def on_delta(kind: str, text: str) -> None:
         """Record the delta, and let the fake server finish once the reasoning arrived."""
         deltas.append((kind, text))
-        if len(deltas) == 3:
+        if len(deltas) == 5:
             marker.write_text("1")
 
     completion = cli_runners.run_codex("gpt-5.6-luna", "ping", None, local_settings(tmp_path), tmp_path, on_delta)
     assert deltas == [
         ("reasoning", "**Plan**"),
         ("reasoning", " now"),
+        ("reasoning", "\n\nLooking"),
+        ("reasoning", " around"),
         ("reasoning", "\n\n**Next**"),
+        ("content", "po"),
+        ("content", "ng"),
+    ]
+    assert completion.text == "pong"
+
+
+def _raw(item: str, index: int, delta: str) -> dict[str, Any]:
+    """Return one ``item/reasoning/textDelta`` notification.
+
+    Args:
+        item: The reasoning item id.
+        index: The content part index.
+        delta: The text piece.
+
+    Returns:
+        The notification.
+    """
+    return {"method": "item/reasoning/textDelta", "params": {"itemId": item, "contentIndex": index, "delta": delta}}
+
+
+def test_codex_streams_raw_reasoning_text_as_reasoning(tmp_path: Path) -> None:
+    """Pass raw reasoning text on as reasoning, a blank line between parts, and keep it out of the answer."""
+    raw = [_raw("rs_1", 0, "First"), _raw("rs_1", 0, " step"), _raw("rs_1", 1, "Second"), _summary("rs_1", 0, "Sum")]
+    fake_app_server(tmp_path, emitting(*raw, *CODEX_TURN))
+    deltas: list[tuple[str, str]] = []
+    completion = cli_runners.run_codex(
+        "gpt-5.6-luna", "ping", None, local_settings(tmp_path), tmp_path, lambda *d: deltas.append(d)
+    )
+    assert deltas == [
+        ("reasoning", "First"),
+        ("reasoning", " step"),
+        ("reasoning", "\n\nSecond"),
+        ("reasoning", "\n\nSum"),
         ("content", "po"),
         ("content", "ng"),
     ]
@@ -429,6 +469,50 @@ def test_codex_runs_one_turn_over_the_app_server(tmp_path: Path) -> None:
         "cwd": str(tmp_path),
     }
     assert sent["turn/start"] == {"input": [{"type": "text", "text": "ping"}], "summary": "auto", "threadId": "thr"}
+
+
+def test_claude_runs_at_the_turn_effort(tmp_path: Path) -> None:
+    """Pass the turn's effort to Claude Code, and send none when the turn has none."""
+    fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))
+    cli_runners.run_claude("claude-opus-5-5", "ping", None, local_settings(tmp_path), tmp_path, effort="max")
+    cli_runners.run_claude("claude-opus-5-5", "ping", None, local_settings(tmp_path), tmp_path)
+    first, second = calls(tmp_path, "claude")
+    assert first["argv"][first["argv"].index("--effort") + 1] == "max"
+    assert "--effort" not in second["argv"]
+
+
+def test_codex_runs_the_turn_at_its_effort(tmp_path: Path) -> None:
+    """Send the turn's effort with ``turn/start``, and send none when the turn has none."""
+    fake_app_server(tmp_path, emitting(*CODEX_TURN))
+    cli_runners.run_codex("gpt-5.6-luna", "ping", None, local_settings(tmp_path), tmp_path, effort="xhigh")
+    cli_runners.run_codex("gpt-5.6-luna", "ping", None, local_settings(tmp_path), tmp_path)
+    first, second = (message for message in requests(tmp_path) if message.get("method") == "turn/start")
+    assert first["params"]["effort"] == "xhigh"
+    assert "effort" not in second["params"]
+
+
+def test_claude_runs_max_effort_and_fast_mode(tmp_path: Path) -> None:
+    """Pass ``--effort max`` and ``--fast-mode on``, and no fast flag when the turn has none."""
+    fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))
+    settings = local_settings(tmp_path)
+    cli_runners.run_claude("claude-opus-5-5", "ping", None, settings, tmp_path, effort="max", fast=True)
+    cli_runners.run_claude("claude-opus-5-5", "ping", None, settings, tmp_path)
+    first, second = calls(tmp_path, "claude")
+    assert first["argv"][first["argv"].index("--effort") + 1] == "max"
+    assert first["argv"][first["argv"].index("--fast-mode") + 1] == "on"
+    assert "--fast-mode" not in second["argv"]
+
+
+def test_codex_runs_the_turn_on_the_fast_tier(tmp_path: Path) -> None:
+    """Send the ``priority`` service tier with ``turn/start`` only in fast mode."""
+    fake_app_server(tmp_path, emitting(*CODEX_TURN))
+    settings = local_settings(tmp_path)
+    cli_runners.run_codex("gpt-6.1-sol", "ping", None, settings, tmp_path, effort="max", fast=True)
+    cli_runners.run_codex("gpt-6.1-sol", "ping", None, settings, tmp_path)
+    first, second = (message for message in requests(tmp_path) if message.get("method") == "turn/start")
+    assert first["params"]["effort"] == "max"
+    assert first["params"]["serviceTier"] == "priority"
+    assert "serviceTier" not in second["params"]
 
 
 def test_codex_refuses_a_server_request(tmp_path: Path) -> None:
@@ -501,7 +585,7 @@ CLAUDE_FLAGS = [
     "",
     "--no-session-persistence",
     "--settings",
-    '{"showThinkingSummaries": true}',
+    '{"showThinkingSummaries": true, "enableWorkflows": false, "workflowKeywordTriggerEnabled": false}',
     "--model",
     "claude-haiku-4-5",
 ]
@@ -512,6 +596,7 @@ CODEX_DISABLED = [
     "apps",
     "plugins",
     "multi_agent",
+    "multi_agent_v2",
     "memories",
     "browser_use",
     "computer_use",
@@ -559,6 +644,64 @@ def test_codex_gets_the_exact_flags(tmp_path: Path) -> None:
         *(arg for feature in CODEX_DISABLED for arg in ("--disable", feature)),
         *(arg for setting in CODEX_CONFIG for arg in ("-c", setting)),
     ]
+
+
+_EXTRA_FLAGS = ("--effort", "--fast-mode")
+
+
+def _without_effort_and_fast(argv: list[str]) -> list[str]:
+    """Return the argv with the ``--effort`` and ``--fast-mode`` pairs removed.
+
+    Args:
+        argv: The argv the fake CLI recorded.
+
+    Returns:
+        The argv without those two flags and their values.
+    """
+    kept: list[str] = []
+    skip = False
+    for arg in argv:
+        if skip:
+            skip = False
+        elif arg in _EXTRA_FLAGS:
+            skip = True
+        else:
+            kept.append(arg)
+    return kept
+
+
+# Effort and fast mode only raise effort or speed. They must never turn on a
+# tool, subagents or a workflow.
+@pytest.mark.parametrize("fast", [False, True])
+@pytest.mark.parametrize("effort", [None, "low", "xhigh", "max"])
+def test_claude_effort_and_fast_mode_keep_every_tool_and_workflow_off(
+    tmp_path: Path, effort: str | None, fast: bool
+) -> None:
+    """Keep ``--tools ""`` and the workflow switches off at every effort, the top level and fast mode included."""
+    fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))
+    cli_runners.run_claude(
+        "claude-haiku-4-5", "ping", None, local_settings(tmp_path), tmp_path, effort=effort, fast=fast
+    )
+    [call] = calls(tmp_path, "claude")
+    assert _without_effort_and_fast(call["argv"]) == CLAUDE_FLAGS
+    assert call["env"]["CLAUDE_CODE_DISABLE_WORKFLOWS"] == "1"
+
+
+@pytest.mark.parametrize("fast", [False, True])
+@pytest.mark.parametrize("effort", [None, "low", "xhigh", "max"])
+def test_codex_effort_and_fast_mode_keep_every_tool_feature_off(tmp_path: Path, effort: str | None, fast: bool) -> None:
+    """Keep the argv and thread exact at every effort, the top level and fast mode included; only the turn changes."""
+    fake_app_server(tmp_path, emitting(*CODEX_TURN))
+    cli_runners.run_codex("gpt-6.1-sol", "ping", None, local_settings(tmp_path), tmp_path)
+    cli_runners.run_codex("gpt-6.1-sol", "ping", None, local_settings(tmp_path), tmp_path, effort=effort, fast=fast)
+    plain, tuned = calls(tmp_path, "codex")
+    assert tuned["argv"] == plain["argv"]
+    disabled = {tuned["argv"][i + 1] for i, arg in enumerate(tuned["argv"]) if arg == "--disable"}
+    assert {"multi_agent", "multi_agent_v2", "shell_tool"} <= disabled
+    threads = [message["params"] for message in requests(tmp_path) if message.get("method") == "thread/start"]
+    assert threads[0] == threads[1]
+    turn = [message["params"] for message in requests(tmp_path) if message.get("method") == "turn/start"][1]
+    assert set(turn) <= {"input", "summary", "threadId", "effort", "serviceTier"}
 
 
 def _plant_user_setup(home: Path, project: Path) -> None:
@@ -619,8 +762,12 @@ def test_claude_loads_no_user_setup_through_its_flags(tmp_path: Path, monkeypatc
     assert argv[argv.index("--system-prompt") + 1] == cli_runners.SYSTEM_PROMPT
     assert {"--strict-mcp-config", "--disable-slash-commands"} <= set(argv)
     assert "--mcp-config" not in argv
-    # The one inline setting turns on thinking text; it loads no file, hook or server.
-    assert json.loads(argv[argv.index("--settings") + 1]) == {"showThinkingSummaries": True}
+    # The inline settings turn on thinking text and turn workflows off; they load no file, hook or server.
+    assert json.loads(argv[argv.index("--settings") + 1]) == {
+        "showThinkingSummaries": True,
+        "enableWorkflows": False,
+        "workflowKeywordTriggerEnabled": False,
+    }
 
 
 def test_codex_failed_turn_with_a_limit_is_a_rate_limit(tmp_path: Path) -> None:

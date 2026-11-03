@@ -96,11 +96,78 @@ def _mark_resume_budget_stop(job: JobModel) -> None:
 
 logger = logging.getLogger(__name__)
 
+
+def _usage_wait_start(recovery: dict[str, Any]) -> datetime | None:
+    """Read when a run's current usage wait window started.
+
+    Args:
+        recovery: The run's ``waiting_for_usage`` recovery state.
+
+    Returns:
+        The aware start time, or ``None`` when it is missing or invalid.
+    """
+    try:
+        since = datetime.fromisoformat(str(recovery["waiting_since"]))
+    except (KeyError, ValueError):
+        return None
+    return since if since.tzinfo is not None else None
+
+
+def _usage_wait_expired(recovery: Any, now: datetime) -> bool:
+    """Tell whether an orphaned run waited too long for its in-flight usage.
+
+    Args:
+        recovery: The run's stored recovery state.
+        now: Time of the current sweep.
+
+    Returns:
+        Whether the run's usage made no settlement progress for
+        ``ORPHANED_USAGE_WAIT``. A wait with no valid ``waiting_since`` is not
+        expired; the next requeue attempt records the start of its window.
+    """
+    if not isinstance(recovery, dict) or recovery.get("phase") != "waiting_for_usage":
+        return False
+    since = _usage_wait_start(recovery)
+    return since is not None and now - since >= ORPHANED_USAGE_WAIT
+
+
+def _track_usage_wait(recovery: dict[str, Any], budget: Any) -> dict[str, Any] | None:
+    """Record the in-flight usage a waiting run still has, and restart its window on progress.
+
+    Args:
+        recovery: The run's ``waiting_for_usage`` recovery state.
+        budget: Current snapshot of the run's budget.
+
+    Returns:
+        The updated recovery state, or ``None`` when nothing changed.
+    """
+    observed = [int(budget.pending_operations or 0), int(budget.reserved_cents or 0)]
+    previous = recovery.get("pending_usage")
+    progressed = (
+        isinstance(previous, list)
+        and len(previous) == 2
+        and any(now_value < before for now_value, before in zip(observed, previous, strict=True))
+    )
+    updated = {**recovery, "pending_usage": observed}
+    if progressed or _usage_wait_start(recovery) is None:
+        updated["waiting_since"] = datetime.now(UTC).isoformat()
+    return None if updated == recovery else updated
+
+
 MAX_PROGRESS_EVENTS = 5000
 ORPHANED_RUN_MESSAGE = "The run stopped because its worker went away. Resume, retry or clone it to continue."
 ORPHANED_RUN_RECOVERY_FAILED_MESSAGE = (
     "The run stopped because its worker went away, and it cannot continue by itself. Retry or clone it."
 )
+# Usage that makes no settlement progress in this window may never settle, and
+# the run must not stay "running" with no worker while it waits. The window
+# restarts each time the run's pending usage shrinks. The stopped run keeps the
+# interrupted budget generation. A manual resume of it waits for that usage, then
+# waives the work the resume repeats, as the automatic requeue does: the work
+# after the earliest checkpoint, or all of that generation when a top-level run
+# with no checkpoint starts again. Only a stop that a worker restart caused is
+# exempt from the attempt count and cap; a crash stop still counts.
+ORPHANED_USAGE_WAIT = timedelta(minutes=15)
 # Guards each store's in-memory list of runs the orphan sweep ended; test
 # stores skip ``__init__``, so the list is created on first use.
 _ENDED_ORPHANS_LOCK = threading.Lock()
@@ -1702,7 +1769,8 @@ class RemoteDBJobStore:
 
         An ``automatic`` requeue recovers a run whose worker went away: it takes
         a still-active row instead of a terminal one, and a top-level run with
-        no checkpoint yet starts again from the beginning.
+        no checkpoint yet starts again from the beginning. A manual resume of a
+        run the orphan sweep stopped as interrupted may start again the same way.
 
         Args:
             optimization_id: The job to resume.
@@ -1734,10 +1802,20 @@ class RemoteDBJobStore:
             ):
                 return None
             checkpoints = self._checkpoints.list_for_optimization(optimization_id)
+            # A run the orphan sweep stopped keeps its interrupted generation, so a
+            # manual resume of it may start again like the automatic requeue.
+            resumes_interrupted = (
+                not automatic
+                and isinstance(job.recovery, dict)
+                and job.recovery.get("interrupted_budget_generation") is not None
+            )
             # A grid pair or a child run needs its own checkpoint to rejoin its
             # parent's results, so only a whole top-level run may start again.
             fresh_restart = (
-                automatic and not checkpoints and pair_index_to_resume is None and job.parent_optimization_id is None
+                (automatic or resumes_interrupted)
+                and not checkpoints
+                and pair_index_to_resume is None
+                and job.parent_optimization_id is None
             )
             if not checkpoints and not fresh_restart:
                 raise CheckpointCompatibilityError("No completed compatible checkpoint is available.")
@@ -1780,13 +1858,21 @@ class RemoteDBJobStore:
                     job.execution_budget_generation = fenced.generation
                     job.execution_generation = int(job.execution_generation or 0) + 1
                     job.payload = {**(job.payload or {}), "execution_budget_generation": fenced.generation}
-                    cause = job.recovery.get("cause") if isinstance(job.recovery, dict) else None
+                    previous = job.recovery if isinstance(job.recovery, dict) else {}
+                    cause = previous.get("cause")
+                    # A manual resume of a run the orphan sweep stopped carries the
+                    # sweep's interrupted generation, not the one it fences now.
+                    interrupted = (
+                        int(fenced.generation) - 1 if automatic else previous.get("interrupted_budget_generation")
+                    )
                     job.recovery = {
                         "state": "recovering",
                         "phase": "waiting_for_usage",
                         "reason": "Reconciling interrupted requests before resuming.",
                         "execution_generation": int(job.execution_generation or 0) + 1,
+                        "waiting_since": datetime.now(UTC).isoformat(),
                         **({"cause": cause} if cause else {}),
+                        **({"interrupted_budget_generation": interrupted} if interrupted is not None else {}),
                     }
                     fenced_generation = job.execution_generation
                     previous_status = job.status
@@ -1806,8 +1892,15 @@ class RemoteDBJobStore:
                         return None
                 budget = budget_service.get(job.execution_budget_id, job.username)
                 if budget.pending_operations or budget.reserved_cents:
+                    tracked = _track_usage_wait(job.recovery, budget) if isinstance(job.recovery, dict) else None
+                    if tracked is not None:
+                        job.recovery = tracked
+                        session.commit()
                     return None
-                if automatic:
+                interrupted = (
+                    job.recovery.get("interrupted_budget_generation") if isinstance(job.recovery, dict) else None
+                )
+                if automatic or interrupted is not None:
                     # The earliest pair checkpoint bounds what every pair keeps;
                     # work that settled after it runs again and is not charged twice.
                     resumed_from = (
@@ -1820,7 +1913,11 @@ class RemoteDBJobStore:
                     budget_service.waive_interrupted_work(
                         job.execution_budget_id,
                         job.username,
-                        generation=int(job.execution_budget_generation or 0) - 1,
+                        generation=(
+                            int(interrupted)
+                            if interrupted is not None
+                            else int(job.execution_budget_generation or 0) - 1
+                        ),
                         settled_after=resumed_from,
                     )
                     budget = budget_service.get(job.execution_budget_id, job.username)
@@ -1866,9 +1963,9 @@ class RemoteDBJobStore:
             current = int(job.attempts or 0)
             next_attempt = current + 1 if bump_attempts else current
             job.attempts = next_attempt  # type: ignore[assignment]
-            if automatic and (job.sandbox_image is not None or fresh_restart):
-                # The sweep can run on a pod of the version a deploy is replacing;
-                # an unversioned row stays claimable by the workers that remain.
+            if fresh_restart or (automatic and job.sandbox_image is not None):
+                # The sweep or the API can run on a pod of the version a deploy is
+                # replacing; an unversioned row stays claimable by the workers that remain.
                 job.code_version = None  # type: ignore[assignment]
             elif job.sandbox_image is not None:
                 # Workers claim only their own version's jobs; a pinned image carries
@@ -2396,8 +2493,11 @@ class RemoteDBJobStore:
         it has none, on any live worker. A graceful worker restart does not count
         against the attempt cap; an expired lease does, so a run that crashes
         its worker cannot loop forever. A run that waits for in-flight usage to
-        settle stays active until a later sweep. A run that the sweep fails or
-        stops waits in :meth:`take_ended_orphans` for its notification.
+        settle stays active until a later sweep. When that usage makes no
+        settlement progress for ``ORPHANED_USAGE_WAIT``, the run stops as
+        interrupted and keeps its interrupted budget generation for a manual
+        resume. A run that the sweep fails or stops waits in
+        :meth:`take_ended_orphans` for its notification.
 
         Returns:
             Number of orphaned jobs requeued or marked failed.
@@ -2431,6 +2531,7 @@ class RemoteDBJobStore:
         handled = 0
         for identifier, generation, funded, worker_restart in candidates:
             message = ORPHANED_RUN_MESSAGE
+            ended_recovery: dict[str, Any] | None = None
             if funded:
                 try:
                     attempt = self.requeue_for_resume(
@@ -2451,7 +2552,32 @@ class RemoteDBJobStore:
                 else:
                     if attempt is not None:
                         handled += 1
-                    continue
+                        continue
+                    # The requeue attempt can restart the wait window, so the
+                    # decision reads the row it left behind.
+                    try:
+                        waiting = self.get_job(identifier, include_payload=False)
+                    except KeyError:
+                        continue
+                    usage_wait = waiting.get("recovery")
+                    if waiting.get("execution_generation") != generation or not _usage_wait_expired(
+                        usage_wait, datetime.now(UTC)
+                    ):
+                        logger.info(
+                            "Orphaned run %s is not requeued yet; it waits for in-flight usage or changed state",
+                            identifier,
+                        )
+                        continue
+                    interrupted = usage_wait.get("interrupted_budget_generation")
+                    if interrupted is None:
+                        interrupted = int(waiting.get("execution_budget_generation") or 0) - 1
+                    # The cause decides whether a later resume counts an attempt.
+                    cause = usage_wait.get("cause")
+                    ended_recovery = {
+                        "state": "interrupted",
+                        "interrupted_budget_generation": int(interrupted),
+                        **({"cause": cause} if cause else {}),
+                    }
             if self.update_job_if_status(
                 identifier,
                 ("running", "validating"),
@@ -2460,11 +2586,17 @@ class RemoteDBJobStore:
                 stop_reason="interrupted",
                 completed_at=now.isoformat(),
                 message=message,
-                recovery=None,
+                recovery=ended_recovery,
                 claimed_by=None,
                 claimed_at=None,
                 lease_expires_at=None,
             ):
+                if ended_recovery is not None:
+                    logger.warning(
+                        "Orphaned run %s had no usage settlement progress for %s; it stopped as interrupted",
+                        identifier,
+                        ORPHANED_USAGE_WAIT,
+                    )
                 self._note_ended_orphan(identifier, generation)
                 handled += 1
         return handled

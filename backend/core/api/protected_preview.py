@@ -350,6 +350,9 @@ def run_protected_preview(
                         if settings.openrouter_api_key
                         else "",
                         allow_private_tools=settings.discover_allow_private,
+                        # A debug preview waits for its answer inside one sandbox. A batch
+                        # can take hours, outlive that box, and leave an unsettled hold.
+                        allow_batch=False,
                     )
                     result = (_run_dependencies if kind == "dependencies" else _run_workflow)(
                         gateway, protected, document["id"], on_token

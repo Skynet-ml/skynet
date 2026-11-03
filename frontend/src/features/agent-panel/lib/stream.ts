@@ -29,6 +29,8 @@ export interface GeneralistAgentRequest {
   model?: string;
   /** Reasoning-effort level for the chosen model; absent = its default. */
   reasoning_effort?: string;
+  /** Fast mode for a local CLI model that takes it; the backend drops it elsewhere. */
+  fast_mode?: boolean;
   /** Client-generated id of this turn; `/agent-steer` messages posted with
    *  it are delivered into the running turn. */
   steer_key?: string;

@@ -13,6 +13,7 @@ import { useAgentKickoff } from "@/shared/hooks/use-agent-kickoff";
 import { useCompletionNotification } from "@/shared/hooks/use-completion-notification";
 import { streamTaskInterviewTurn } from "@/shared/lib/api";
 import { LOCALE_RELOAD_EVENT } from "@/shared/lib/locale";
+import { liveEffort, sentFastMode } from "@/shared/lib/effort-slider";
 import { msg } from "@/shared/lib/messages";
 import { getActiveLocale } from "@/shared/lib/runtime-locale";
 import type {
@@ -49,6 +50,9 @@ export interface TaskInterviewState {
   setModel: (model: string | null) => void;
   reasoningEffort: string | null;
   setReasoningEffort: (effort: string | null) => void;
+  /** Runs a local CLI model in its fast mode. */
+  fastMode: boolean;
+  setFastMode: (fast: boolean) => void;
   /** Send a user turn; false when it is too long and was not sent. */
   send: (content: string) => boolean;
   /** Resend an edited user turn; false when it is too long and was not sent. */
@@ -98,8 +102,9 @@ export function useTaskInterview(ctx: WizardV2Context, enabled: boolean): TaskIn
   const [served, setServed] = React.useState<Record<number, ServedTurn>>({});
   const [model, setModel] = React.useState<string | null>(() => readPref("composerModel"));
   const [reasoningEffort, setReasoningEffort] = React.useState<string | null>(() =>
-    readPref("composerEffort"),
+    liveEffort(readPref("composerEffort")),
   );
+  const [fastMode, setFastMode] = React.useState(false);
   const [dirty, setDirty] = React.useState<ReadonlySet<TaskInterviewField>>(() => new Set());
 
   const abortRef = React.useRef<AbortController | null>(null);
@@ -162,6 +167,7 @@ export function useTaskInterview(ctx: WizardV2Context, enabled: boolean): TaskIn
               locale: getActiveLocale(),
               model: sentModel ?? undefined,
               reasoning_effort: localAgentEffort(model, reasoningEffort, sentModel) ?? undefined,
+              ...(sentFastMode(fastMode, sentModel) ? { fast_mode: true } : {}),
             },
             {
               onReasoning: (chunk: string) =>
@@ -215,7 +221,7 @@ export function useTaskInterview(ctx: WizardV2Context, enabled: boolean): TaskIn
           if (abortRef.current === controller) abortRef.current = null;
         });
     },
-    [patchTask, model, reasoningEffort, clearStream],
+    [patchTask, model, reasoningEffort, fastMode, clearStream],
   );
 
   // The opening question fires once, while the transcript is empty; a
@@ -310,6 +316,8 @@ export function useTaskInterview(ctx: WizardV2Context, enabled: boolean): TaskIn
     setModel,
     reasoningEffort,
     setReasoningEffort,
+    fastMode,
+    setFastMode,
     send,
     editAndResend,
     stop,

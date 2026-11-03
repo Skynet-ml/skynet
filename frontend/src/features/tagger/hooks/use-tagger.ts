@@ -18,6 +18,7 @@ import {
   type InterviewOption,
 } from "@/shared/lib/api";
 import { useAgentKickoff } from "@/shared/hooks/use-agent-kickoff";
+import { sentFastMode } from "@/shared/lib/effort-slider";
 import { msg } from "@/shared/lib/messages";
 import {
   clearRecentSession,
@@ -461,6 +462,14 @@ export function useTagger(initialSession?: TaggerSessionDetail | null) {
     if (assistRef.current) assistRef.current = { ...assistRef.current, ...patch };
   }, []);
 
+  // Fast mode is not stored on the session: it lasts only while the page is open.
+  const [interviewFast, setInterviewFastState] = useState(false);
+  const interviewFastRef = useRef(false);
+  const setInterviewFast = useCallback((fast: boolean) => {
+    interviewFastRef.current = fast;
+    setInterviewFastState(fast);
+  }, []);
+
   // ---------------------------------------------------------------- frames
   // In review the annotator surface works on the open round's subset of rows;
   // everywhere else it sees the full dataset. ``currentIndex`` is always an
@@ -723,6 +732,7 @@ export function useTagger(initialSession?: TaggerSessionDetail | null) {
             locale: getActiveLocale(),
             model: sentModel ?? undefined,
             reasoning_effort: interviewRequestEffort(state, sentModel) ?? undefined,
+            ...(sentFastMode(interviewFastRef.current, sentModel) ? { fast_mode: true } : {}),
           },
           {
             signal: controller.signal,
@@ -1218,6 +1228,8 @@ export function useTagger(initialSession?: TaggerSessionDetail | null) {
     setAssistModel,
     setInterviewModel,
     setInterviewEffort,
+    interviewFast,
+    setInterviewFast,
     assistToggleBinary,
     assistToggleCategory,
     assistSetFreetext,
