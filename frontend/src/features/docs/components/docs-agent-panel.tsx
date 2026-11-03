@@ -8,6 +8,7 @@ import { AgentThread } from "@/shared/ui/agent/agent-thread";
 import { ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
+import { useSteerQueue } from "@/shared/ui/agent/use-steer-queue";
 import { AppMark } from "@/shared/ui/app-mark";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { Button } from "@/shared/ui/primitives/button";
@@ -43,10 +44,9 @@ import {
   trimHistory,
   type DocsAgentMessage,
 } from "../lib/docs-answer";
+import { docsAskFailure, type DocsAskNotice } from "../lib/docs-queue";
 
 const STORAGE_KEY = "docs-agent-history";
-
-type Notice = "rate" | "tooLong" | "error" | null;
 
 /** A question handed over from the search box; the nonce makes a repeat count. */
 export interface DocsAgentRequest {
@@ -130,7 +130,7 @@ export function DocsAgentPanel({
 }) {
   const [messages, setMessages] = React.useState<DocsAgentMessage[]>([]);
   const [streaming, setStreaming] = React.useState(false);
-  const [notice, setNotice] = React.useState<Notice>(null);
+  const [notice, setNotice] = React.useState<DocsAskNotice>(null);
   const [draft, setDraft] = React.useState("");
   const [mounted, setMounted] = React.useState(false);
   const messagesRef = React.useRef<DocsAgentMessage[]>([]);
@@ -149,6 +149,24 @@ export function DocsAgentPanel({
     update(loadHistory());
     return () => abortRef.current?.abort();
   }, [update]);
+
+  /** End the answer in flight; keep the text that already arrived. */
+  const stopAnswer = React.useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setStreaming(false);
+    const kept = trimHistory(messagesRef.current, MAX_KEPT_MESSAGES);
+    update(kept);
+    saveHistory(kept);
+  }, [update]);
+
+  const askLatestRef = React.useRef<((question: string) => Promise<void>) | null>(null);
+  const sendQueued = React.useCallback((text: string) => { void askLatestRef.current?.(text); }, []);
+  const { store: steerStore, midTurn, stop } = useSteerQueue({
+    busy: streaming,
+    send: sendQueued,
+    stop: stopAnswer,
+  });
 
   const ask = React.useCallback(
     async (question: string, earlier?: readonly DocsAgentMessage[]) => {
@@ -183,7 +201,7 @@ export function DocsAgentPanel({
       show(turn);
       setNotice(null);
       setStreaming(true);
-      let failed: Notice = null;
+      let failed: DocsAskNotice = null;
       let done = false;
       // The same events, and the same thinking and tool rows, as the generalist agent.
       const handlers: GeneralistAgentHandlers = {
@@ -236,10 +254,9 @@ export function DocsAgentPanel({
           body: JSON.stringify(body),
           signal: controller.signal,
         });
-        if (res.status === 429) failed = "rate";
-        else if (res.status === 422) failed = "tooLong";
-        else if (!res.ok || !res.body) failed = "error";
-        else {
+        if (abortRef.current !== controller) return;
+        failed = docsAskFailure(res.status, Boolean(res.body), () => steerStore.pause());
+        if (!failed && res.body) {
           await readServerSentEvents(res.body, (event) => {
             if (controller.signal.aborted) return;
             dispatchGeneralistEvent(handlers, event.event, event.data, () => labels.agentError);
@@ -258,8 +275,12 @@ export function DocsAgentPanel({
       update(final);
       saveHistory(final);
     },
-    [labels.agentError, locale, update],
+    [labels.agentError, locale, update, steerStore],
   );
+
+  React.useEffect(() => {
+    askLatestRef.current = ask;
+  }, [ask]);
 
   // Run each search-box question once; a locale change must not send it again.
   const handledRequestRef = React.useRef<DocsAgentRequest | null>(null);
@@ -271,17 +292,8 @@ export function DocsAgentPanel({
     void ask(request.question);
   }, [ask, request]);
 
-  /** End the answer in flight; keep the text that already arrived. */
-  const stop = () => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setStreaming(false);
-    const kept = trimHistory(messagesRef.current.map(settle), MAX_KEPT_MESSAGES);
-    update(kept);
-    saveHistory(kept);
-  };
-
   const clear = () => {
+    steerStore.clear();
     abortRef.current?.abort();
     abortRef.current = null;
     setStreaming(false);
@@ -452,6 +464,12 @@ export function DocsAgentPanel({
                 onStop={stop}
                 placeholder={labels.agentPlaceholder}
                 streaming={streaming}
+                midTurn={midTurn}
+                acceptsMidTurn={(text) => {
+                  if (!isQuestionTooLong(text)) return true;
+                  setNotice("tooLong");
+                  return false;
+                }}
                 sendAriaLabel={labels.agentSend}
                 attachments={false}
                 dictation={false}

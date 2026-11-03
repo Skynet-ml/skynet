@@ -20,10 +20,15 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/primitives/dropdown-menu";
 import { cn } from "@/shared/lib/utils";
+import { Button } from "@/shared/ui/primitives/button";
 
 import type { PendingMessage } from "./steer-queue";
 
 interface PendingMessagesProps {
+  paused: boolean;
+  streaming: boolean;
+  onSendNow: () => void;
+  onStopAndSendNow?: () => void;
   queued: readonly PendingMessage[];
   steering: readonly PendingMessage[];
   /** Queued follow-ups can be moved into the running turn right now. */
@@ -75,7 +80,7 @@ function PendingRow({
         onPointerDown={(e) => controls.start(e)}
         className={cn(
           "flex h-7 w-4 shrink-0 cursor-grab touch-none items-center justify-center text-muted-foreground",
-          "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 active:cursor-grabbing",
+          "active:cursor-grabbing",
         )}
       >
         <DotsSixVertical className="size-3.5" />
@@ -188,6 +193,10 @@ function PendingSection({
  * dragged to reorder, steered, deleted or pulled back for editing.
  */
 export function PendingMessages({
+  paused,
+  streaming,
+  onSendNow,
+  onStopAndSendNow,
   queued,
   steering,
   canPromote,
@@ -205,6 +214,20 @@ export function PendingMessages({
       role="group"
       className="mx-3 rounded-t-xl border border-b-0 border-border bg-muted/40 p-1"
     >
+      {(paused || (streaming && onStopAndSendNow)) && (
+        <div className="flex items-center justify-between gap-2 px-2 py-1 text-xs text-muted-foreground">
+          <span>{msg(paused ? "agent.pending.paused" : "agent.pending.list_label")}</span>
+          {streaming && onStopAndSendNow ? (
+            <Button type="button" variant="ghost" size="sm" onClick={onStopAndSendNow}>
+              {msg("agent.pending.stop_and_send_now")}
+            </Button>
+          ) : !streaming && (
+            <Button type="button" variant="ghost" size="sm" onClick={onSendNow}>
+              {msg("agent.pending.send_now")}
+            </Button>
+          )}
+        </div>
+      )}
       <PendingSection items={steering} steering onReorder={onReorderSteering} rowProps={rowProps} />
       <PendingSection
         items={queued}

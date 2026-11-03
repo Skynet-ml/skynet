@@ -8,10 +8,14 @@ import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 
 import type { AgentMessage, AgentStatus, AgentToolCall } from "@/shared/ui/agent/types";
 import type { ChatTurn, PendingApprovalPayload, TrustMode } from "@/features/agent-panel";
+import type { MidTurnQueue } from "@/shared/ui/agent/steer-queue";
+import { agentSteerChannel, newSteerKey, useSteerQueue } from "@/shared/ui/agent/use-steer-queue";
 
 import { confirmReactServeApproval, streamReactServeChat } from "../lib/react-chat-stream";
+import { appendReactChatSteer, reactChatCanSteer } from "../lib/react-chat-steering";
 
 export interface ReactServeChatState {
+  midTurn: MidTurnQueue;
   status: AgentStatus;
   statusLabel: string;
   messages: AgentMessage[];
@@ -45,6 +49,20 @@ export function useReactServeChat(
   const [pendingApproval, setPendingApproval] = React.useState<PendingApprovalPayload | null>(null);
 
   const abortRef = React.useRef<AbortController | null>(null);
+  const sendLatestRef = React.useRef<(text: string) => boolean>(() => false);
+  const sendQueued = React.useCallback((text: string) => { sendLatestRef.current(text); }, []);
+  const stopTurn = React.useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setStatus("idle");
+    setStatusLabel("");
+    setPendingApproval(null);
+  }, []);
+  const { store: steerStore, midTurn, stop } = useSteerQueue({
+    busy: status === "streaming",
+    send: sendQueued,
+    stop: stopTurn,
+  });
   const reasoningBufRef = React.useRef("");
   const replyBufRef = React.useRef("");
   const messagesRef = React.useRef<AgentMessage[]>(messages);
@@ -113,6 +131,9 @@ export function useReactServeChat(
   const runAgent = React.useCallback(
     (userMessage: string, history: AgentMessage[]): boolean => {
       abortRef.current?.abort();
+      steerStore.setBusy(false);
+      steerStore.setBusy(true);
+      const steerKey = newSteerKey();
       const controller = new AbortController();
       abortRef.current = controller;
 
@@ -140,6 +161,7 @@ export function useReactServeChat(
       void streamReactServeChat(
         optimizationId,
         {
+          steer_key: steerKey,
           user_message: userMessage,
           chat_history: chatHistory,
           trust_mode: trustRef.current,
@@ -147,6 +169,17 @@ export function useReactServeChat(
         crypto.randomUUID(),
         {
           signal: controller.signal,
+          onSteerReady: (key) => {
+            if (controller.signal.aborted || !reactChatCanSteer(key, steerKey)) return;
+            steerStore.openTurn(agentSteerChannel(steerKey));
+          },
+          onSteerApplied: ({ ids, text }) => {
+            if (controller.signal.aborted) return;
+            steerStore.applied(ids);
+            if (!text.trim()) return;
+            replyBufRef.current = "";
+            setMessages((prev) => appendReactChatSteer(prev, text));
+          },
           onReasoningPatch: (chunk) => {
             if (controller.signal.aborted) return;
             if (reasoningBufRef.current === "") setReasoningStartedAt(Date.now());
@@ -248,7 +281,7 @@ export function useReactServeChat(
       );
       return true;
     },
-    [optimizationId, appendReply, pushToolCall, finishToolCall],
+    [optimizationId, appendReply, pushToolCall, finishToolCall, steerStore],
   );
 
   const send = React.useCallback(
@@ -259,6 +292,9 @@ export function useReactServeChat(
     },
     [runAgent],
   );
+  React.useEffect(() => {
+    sendLatestRef.current = send;
+  }, [send]);
 
   const editAndResend = React.useCallback(
     (messageIndex: number, content: string) => {
@@ -294,13 +330,6 @@ export function useReactServeChat(
     runAgent(lastUser.content, truncated);
   }, [runAgent]);
 
-  const stop = React.useCallback(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setStatus("idle");
-    setStatusLabel("");
-  }, []);
-
   const confirmApproval = React.useCallback(
     async (approved: boolean) => {
       const pa = pendingApproval;
@@ -312,6 +341,7 @@ export function useReactServeChat(
   );
 
   return {
+    midTurn,
     status,
     statusLabel,
     messages,

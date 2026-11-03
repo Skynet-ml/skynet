@@ -10,7 +10,10 @@ from __future__ import annotations
 from typing import Any
 
 import dspy
+import pytest
+from sqlalchemy import create_engine
 
+from ...storage.models import AgentSteerMessageModel
 from ..agents.acting_react import ActingReActV2
 from ..agents.conversation_react import ConversationReAct
 from ..agents.steering import STEER_APPLIED_EVENT, SteerInbox, SteerStore, attach_steering
@@ -18,6 +21,29 @@ from .test_conversation_react import _ScriptedLM
 
 _OWNER = "alice"
 _KEY = "turn-1"
+
+
+@pytest.mark.parametrize("database", [False, True])
+def test_withdraw_distinguishes_delivered_and_is_idempotent(database: bool) -> None:
+    """Return unread ids once and preserve delivered outcomes on retries.
+
+    Args:
+        database: Exercise SQL storage instead of the in-memory fallback.
+    """
+    store = SteerStore()
+    if database:
+        engine = create_engine("sqlite://")
+        AgentSteerMessageModel.__table__.create(engine)
+        store.bind_engine(engine)
+    delivered = store.post(_OWNER, _KEY, "read")
+    store.take(_OWNER, _KEY)
+    unread = store.post(_OWNER, _KEY, "return")
+    store.post("mallory", _KEY, "private")
+    assert store.withdraw(_OWNER, _KEY, [unread, delivered, "missing"]) == ([unread], [delivered])
+    assert store.withdraw(_OWNER, _KEY, [unread, delivered]) == ([], [delivered])
+    assert store.withdraw("mallory", "other", [delivered]) == ([], [])
+    assert store.take(_OWNER, _KEY) == []
+    assert store.withdraw(_OWNER, _KEY, []) == ([], [])
 
 
 def _user_texts(messages: list[dict[str, Any]]) -> list[str]:

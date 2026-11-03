@@ -15,7 +15,14 @@ Haz clic en **Lo que puedo hacer** para ver la lista de herramientas del agente.
 
 Escribe tu mensaje y pulsa Intro. También puedes hacer clic en **Dictar** y decir tu mensaje en voz alta.
 
-Si el agente está ocupado, tu mensaje espera en **Mensajes pendientes**. Puedes editar, eliminar o reordenar un mensaje pendiente. Haz clic en **Orientar** para enviarlo al trabajo en curso. El agente lo lee en su siguiente paso.
+Mientras el agente trabaja, puedes seguir escribiendo:
+
+- **Enter** orienta el trabajo actual cuando está permitido. El agente lee el mensaje en su siguiente paso. **Tab** añade un nuevo turno a la cola. Sin orientación disponible, Enter también añade el mensaje a la cola.
+- En **Mensajes pendientes** puedes editar, eliminar y arrastrar mensajes para reordenarlos. **Orientar**, cuando está disponible, envía un mensaje de la cola al trabajo actual.
+- **Detener** para el turno y pausa la cola. Las instrucciones no leídas vuelven a la bandeja. Nada empieza automáticamente. **Esc** en el campo hace lo mismo, salvo con un menú abierto o durante la composición con un IME.
+- Cuando no hay un turno activo, **Enviar ahora** envía el primer mensaje de la cola pausada. Los demás siguen en orden. Un turno que termina normalmente también inicia el siguiente mensaje.
+- **Detener y enviar ahora** detiene el turno y envía la bandeja como un único turno nuevo. Espera a recuperar las instrucciones no leídas y las coloca antes de los mensajes en cola, separadas por líneas en blanco. No reenvía instrucciones ya leídas. Si no se confirma la retirada, la cola sigue en pausa.
+- El asistente de documentación y el chat protegido de programas publicados **solo usan la cola**. Enter y Tab añaden mensajes a la cola. El asistente de documentación pausa los restantes al alcanzar un límite de solicitudes.
 
 ## Lo que puede hacer el agente
 

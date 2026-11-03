@@ -14,6 +14,7 @@ import { MarkdownPreviewField } from "@/shared/ui/markdown-preview-field";
 
 import { autoResizeTextarea } from "./auto-resize";
 import { ComposerLoader } from "./composer-loader";
+import { handleComposerEscape } from "./composer-keys";
 import { MAX_ATTACHMENT_MB, readAttachments, splitClaimed } from "./file-attachments";
 import { PastedTextCard } from "./pasted-text-card";
 import {
@@ -243,6 +244,11 @@ export function Composer({
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+    const popupOpen = Boolean(suggestion || e.currentTarget.getAttribute("aria-expanded") === "true" ||
+      e.currentTarget.ownerDocument.querySelector(
+        '[role="menu"][data-state="open"], [role="listbox"], [role="dialog"][data-state="open"], [data-radix-popper-content-wrapper] [data-state="open"]',
+      ));
+    if (handleComposerEscape(e, { streaming: Boolean(streaming), popupOpen, composing: false }, onStop)) return;
     const suggestAction = suggestKeyAction(e, {
       suggestion,
       draft: value,
@@ -298,6 +304,10 @@ export function Composer({
           queued={midTurn.queued}
           steering={midTurn.steering}
           canPromote={midTurn.canSteer}
+          paused={midTurn.paused}
+          streaming={Boolean(streaming)}
+          onSendNow={midTurn.sendNow}
+          onStopAndSendNow={onStop ? () => midTurn.stopAndSendNow(onStop) : undefined}
           onPromote={midTurn.promote}
           onEdit={(id) => void editPending(id)}
           onRemove={midTurn.remove}

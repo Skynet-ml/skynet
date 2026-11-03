@@ -9,19 +9,22 @@ import type {
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
 import { readServerSentEvents } from "@/shared/lib/sse";
-import { fetchWithAuthRetry, parseErrorMessage } from "@/shared/lib/api";
+import { fetchWithAuthRetry, parseErrorMessage, parseSteerApplied } from "@/shared/lib/api";
 
 // Resolve lazily — a module-load const races the injected window.__APP_ENV__
 // and freezes the build-time localhost fallback. See shared/lib/api.ts.
 const apiBase = () => getRuntimeEnv().apiUrl;
 
 export interface ReactServeChatRequest {
+  steer_key?: string;
   user_message: string;
   chat_history: ChatTurn[];
   trust_mode: TrustMode;
 }
 
 export interface ReactServeChatHandlers {
+  onSteerReady?: (steerKey: string) => void;
+  onSteerApplied?: (ev: { ids: string[]; text: string }) => void;
   onReasoningPatch?: (chunk: string) => void;
   onToolStart?: (ev: ToolStartPayload) => void;
   onToolEnd?: (ev: ToolEndPayload) => void;
@@ -81,6 +84,12 @@ export async function streamReactServeChat(
   }
   const processEvent = ({ event, data }: { event: string; data: Record<string, unknown> }) => {
     switch (event) {
+      case "steer_ready":
+        handlers.onSteerReady?.(String(data.steer_key ?? ""));
+        break;
+      case "steer_applied":
+        handlers.onSteerApplied?.(parseSteerApplied(data));
+        break;
       case "reasoning_patch":
         handlers.onReasoningPatch?.(String(data.chunk ?? ""));
         break;

@@ -15,7 +15,14 @@ Ajanın araçlarının listesini görmek için **Neler yapabilirim** düğmesine
 
 Mesajınızı yazın ve Enter tuşuna basın. **Dikte et** düğmesine tıklayıp mesajınızı sesli olarak da söyleyebilirsiniz.
 
-Ajan meşgulse mesajınız **Bekleyen mesajlar** altında bekler. Bekleyen bir mesajı düzenleyebilir, silebilir veya sırasını değiştirebilirsiniz. Mesajı süren işe göndermek için **Yönlendir** düğmesine tıklayın. Ajan mesajı bir sonraki adımında okur.
+Ajan çalışırken mesaj alanını kullanmaya devam edebilirsiniz:
+
+- Destekleniyorsa **Enter** mevcut işi yönlendirir. Ajan mesajı bir sonraki adımda okur. **Tab** yeni bir turu kuyruğa ekler. Yönlendirme yoksa Enter da kuyruğa ekler.
+- **Bekleyen mesajlar** bölümünde mesajları düzenleyebilir, silebilir ve sürükleyerek sıralayabilirsiniz. **Yönlendir**, kullanılabiliyorsa kuyruktaki mesajı mevcut işe gönderir.
+- **Durdur** mevcut turu durdurur ve kuyruğu duraklatır. Okunmamış yönlendirmeler listeye döner. Hiçbir şey otomatik başlamaz. Mesaj alanındaki **Esc** de aynı işi yapar; ancak açık menü veya IME ile metin oluşturma sırasında durdurmaz.
+- Etkin tur yokken **Şimdi gönder**, duraklatılmış kuyruğun ilk mesajını gönderir. Diğerleri sırayla devam eder. Normal tur bitişi de sonraki mesajı başlatır.
+- **Durdur ve şimdi gönder** turu durdurup tüm listeyi tek bir yeni tur olarak gönderir. Okunmamış yönlendirmelerin dönmesini bekler, ardından bunları kuyruktaki mesajların önüne koyup boş satırlarla birleştirir. Okunmuş yönlendirmeler yeniden gönderilmez. Geri çekme doğrulanamazsa kuyruk duraklatılmış kalır.
+- Belge asistanı ve sunulan programların korumalı sohbeti **yalnızca kuyruk** kullanır. Enter ve Tab kuyruğa ekler. Belge asistanı istek sınırına ulaşınca kalan mesajları duraklatır.
 
 ## Ajan neler yapabilir
 

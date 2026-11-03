@@ -15,7 +15,14 @@ Click **What I can do** to see a list of the agent's tools.
 
 Type your message and press Enter. You can also click **Dictate** and speak your message.
 
-If the agent is busy, your message waits under **Pending messages**. You can edit, delete or reorder a pending message. Click **Steer** to send it into the current work. The agent reads it at its next step.
+While the agent works, the composer stays available:
+
+- **Enter** steers the current work where supported. The agent reads the message at its next step. **Tab** queues a new turn. Where steering is unavailable, Enter also queues.
+- The **Pending messages** tray lets you edit, delete and drag messages to reorder them. **Steer**, when available, moves a queued message into the current work.
+- **Stop** pauses the queue and stops the current turn. Unread steers return to the tray. Nothing starts automatically. **Esc** in the composer does the same, unless a menu is open or you are composing text with an IME.
+- When idle and paused, **Send now** sends the first queued message. Later messages continue in order. A normal turn completion also starts the next queued message.
+- During a turn, **Stop and send now** stops and sends the tray as one new turn. It waits for unread steers to return, then joins them before queued messages with blank lines. Already-read steers are not sent again. If withdrawal cannot be confirmed, the queue stays paused.
+- The docs assistant and protected served chat **queue only**. Enter and Tab both queue there. The docs assistant pauses remaining messages after a rate limit.
 
 ## What the agent can do
 

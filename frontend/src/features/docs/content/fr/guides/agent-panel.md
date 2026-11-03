@@ -15,7 +15,14 @@ Cliquez sur **Ce que je peux faire** pour voir la liste des outils de l'agent.
 
 Saisissez votre message et appuyez sur Entrée. Vous pouvez aussi cliquer sur **Dicter** et prononcer votre message.
 
-Si l'agent est occupé, votre message attend sous **Messages en attente**. Vous pouvez modifier, supprimer ou réordonner un message en attente. Cliquez sur **Orienter** pour l'injecter dans le travail en cours. L'agent le lit à sa prochaine étape.
+Pendant le travail de l’agent, le champ de saisie reste disponible :
+
+- **Entrée** oriente le travail en cours si cette fonction est disponible. L’agent lit le message à l’étape suivante. **Tab** place un nouveau tour dans la file. Sans orientation disponible, Entrée place aussi le message dans la file.
+- Sous **Messages en attente**, vous pouvez modifier, supprimer et faire glisser les messages pour les réordonner. **Orienter**, si disponible, transmet un message de la file au travail en cours.
+- **Arrêter** interrompt le tour et met la file en pause. Les instructions non lues reviennent dans la liste. Rien ne démarre automatiquement. **Échap** dans le champ fait de même, sauf si un menu est ouvert ou pendant une composition IME.
+- Sans tour actif, **Envoyer maintenant** envoie le premier message de la file en pause. Les suivants continuent dans l’ordre. Une fin normale de tour lance aussi le message suivant.
+- **Arrêter et envoyer maintenant** arrête le tour et envoie toute la liste en un seul nouveau tour. Cette action attend le retour des instructions non lues, puis les place avant les messages en file, séparés par des lignes vides. Les instructions déjà lues ne sont pas renvoyées. Si le retrait reste incertain, la file reste en pause.
+- L’assistant de documentation et le chat protégé des programmes déployés utilisent **uniquement la file**. Entrée et Tab y placent les messages. L’assistant de documentation met les messages restants en pause après une limite de requêtes.
 
 ## Ce que l'agent peut faire
 

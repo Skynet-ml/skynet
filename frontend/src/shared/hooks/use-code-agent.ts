@@ -1298,13 +1298,14 @@ export function useCodeAgent(args: UseCodeAgentArgs): CodeAgentState {
   );
 
   const stop = React.useCallback(() => {
+    steerStore.pause();
     abortRef.current?.abort();
     abortRef.current = null;
     setStatus("idle");
     setStatusLabel("");
     setSignatureStatus("idle");
     setMetricStatus("idle");
-  }, []);
+  }, [steerStore]);
 
   const reset = React.useCallback(() => {
     abortRef.current?.abort();

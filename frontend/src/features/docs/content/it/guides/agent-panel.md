@@ -15,7 +15,14 @@ Fai clic su **Cosa posso fare** per vedere un elenco degli strumenti dell'agente
 
 Scrivi il messaggio e premi Invio. Puoi anche fare clic su **Detta** e pronunciare il messaggio.
 
-Se l'agente è occupato, il tuo messaggio attende in **Messaggi in attesa**. Puoi modificare, eliminare o riordinare un messaggio in attesa. Fai clic su **Indirizza** per inserirlo nel lavoro in corso. L'agente lo legge al passaggio successivo.
+Mentre l’agente lavora, il campo del messaggio resta disponibile:
+
+- **Invio** indirizza il lavoro corrente, dove supportato. L’agente legge il messaggio al passo successivo. **Tab** accoda un nuovo turno. Se non è possibile indirizzare, anche Invio accoda il messaggio.
+- In **Messaggi in attesa** puoi modificare, eliminare e trascinare i messaggi per riordinarli. **Indirizza**, quando disponibile, passa un messaggio dalla coda al lavoro corrente.
+- **Interrompi** ferma il turno e mette in pausa la coda. Le istruzioni non lette tornano nell’elenco. Nulla parte automaticamente. **Esc** nel campo fa lo stesso, salvo con un menu aperto o durante la composizione con IME.
+- Senza un turno attivo, **Invia ora** invia il primo messaggio della coda in pausa. Gli altri proseguono in ordine. Anche la conclusione normale di un turno avvia il messaggio successivo.
+- **Interrompi e invia ora** ferma il turno e invia l’intero elenco come un unico nuovo turno. Attende il ritorno delle istruzioni non lette, poi le unisce prima dei messaggi in coda, separandoli con righe vuote. Non reinvia istruzioni già lette. Se il ritiro non è confermato, la coda resta in pausa.
+- L’assistente della documentazione e la chat protetta dei programmi distribuiti usano **solo la coda**. Invio e Tab accodano i messaggi. L’assistente della documentazione mette in pausa quelli restanti dopo un limite di richieste.
 
 ## Che cosa può fare l'agente
 

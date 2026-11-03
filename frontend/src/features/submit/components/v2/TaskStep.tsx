@@ -235,7 +235,7 @@ function TaskInterviewPanel({
   };
 
   // Answers typed while the interviewer is replying wait for it to finish.
-  const { midTurn } = useSteerQueue({ busy: interview.busy, send: interview.send });
+  const { midTurn, stop } = useSteerQueue({ busy: interview.busy, send: interview.send, stop: interview.stop });
   const localMenu = useLocalAgentMenuModels(agentSubscriptionFor("interview"), interview.model);
 
   return (
@@ -308,7 +308,7 @@ function TaskInterviewPanel({
         value={draft}
         onChange={setDraft}
         onSubmit={submit}
-        onStop={interview.stop}
+        onStop={stop}
         streaming={interview.busy}
         midTurn={midTurn}
         acceptsMidTurn={fitsInterview}

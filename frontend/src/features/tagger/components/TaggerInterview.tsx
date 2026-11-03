@@ -183,8 +183,9 @@ export function TaggerInterview({
   };
 
   // Answers typed while the interviewer is replying wait for it to finish.
-  const { midTurn } = useSteerQueue({
+  const { midTurn, stop } = useSteerQueue({
     busy,
+    stop: onStop,
     send: (text) => {
       if (!done) onSend(text);
     },
@@ -276,7 +277,7 @@ export function TaggerInterview({
             value={draft}
             onChange={setDraft}
             onSubmit={submit}
-            onStop={onStop}
+            onStop={stop}
             disabled={!busy && messages.length === 0}
             streaming={busy}
             midTurn={midTurn}

@@ -7,6 +7,8 @@ import { postAgentSteer, withdrawAgentSteers } from "@/shared/lib/api";
 import { midTurnOf, SteerQueue, type MidTurnQueue, type SteerChannel } from "./steer-queue";
 
 export interface UseSteerQueueArgs {
+  /** Abort the owner's active turn after pending input is paused. */
+  stop?: () => void;
   /** A turn is running in this chat. */
   busy: boolean;
   /** Start a new turn with `text`; called for each queued follow-up in turn. */
@@ -14,6 +16,7 @@ export interface UseSteerQueueArgs {
 }
 
 export interface SteerQueueHandle {
+  stop: () => void;
   /** The store, for the chat's turn machinery (`openTurn`, `applied`). */
   store: SteerQueue;
   /** The surface the composer renders and drives. */
@@ -42,7 +45,7 @@ export function agentSteerChannel(steerKey: string): SteerChannel {
  * `busy` is applied after the render commits, so a queued follow-up is sent
  * against the finished turn's committed history.
  */
-export function useSteerQueue({ busy, send }: UseSteerQueueArgs): SteerQueueHandle {
+export function useSteerQueue({ busy, send, stop }: UseSteerQueueArgs): SteerQueueHandle {
   const [store] = React.useState(() => new SteerQueue(send));
   // Before the busy effect below, so a follow-up runs through the latest send.
   React.useEffect(() => {
@@ -53,5 +56,9 @@ export function useSteerQueue({ busy, send }: UseSteerQueueArgs): SteerQueueHand
   }, [store, busy]);
   const snapshot = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const midTurn = React.useMemo(() => midTurnOf(() => store, snapshot), [store, snapshot]);
-  return { store, midTurn };
+  const stopTurn = React.useCallback(() => {
+    store.pause();
+    stop?.();
+  }, [store, stop]);
+  return { store, midTurn, stop: stopTurn };
 }

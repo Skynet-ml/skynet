@@ -246,6 +246,7 @@ class SteerWithdrawResponse(BaseModel):
     """Messages returned to the client, oldest first."""
 
     ids: list[str]
+    delivered: list[str]
 
 
 class NextPromptTurn(BaseModel):
@@ -1004,10 +1005,10 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             current_user: The authenticated caller.
 
         Returns:
-            The ids of the messages returned, oldest first.
+            Newly withdrawn ids and ids already read by the agent.
         """
-        taken = get_steer_store().take(current_user.username, req.steer_key, req.ids)
-        return SteerWithdrawResponse(ids=[message_id for message_id, _ in taken])
+        ids, delivered = get_steer_store().withdraw(current_user.username, req.steer_key, req.ids)
+        return SteerWithdrawResponse(ids=ids, delivered=delivered)
 
     @router.post(
         "/optimizations/agent-suggest",

@@ -992,6 +992,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
 
   const stop = React.useCallback(() => {
     const key = activeKeyRef.current;
+    steerQueueFor(key).pause();
     const wasQueued = sessionsRef.current.get(key)?.status === "queued";
     abortSession(key);
     patchSession(key, { status: "idle", statusLabel: "" });
@@ -1007,7 +1008,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         return prev;
       });
     }
-  }, [abortSession, patchMessages, patchSession, patchThinking]);
+  }, [abortSession, patchMessages, patchSession, patchThinking, steerQueueFor]);
 
   /**
    * Drop background sessions that are safely re-openable: idle/done ones whose

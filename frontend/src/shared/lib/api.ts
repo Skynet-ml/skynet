@@ -4255,14 +4255,14 @@ export function parseSteerApplied(data: Record<string, unknown>): { ids: string[
   };
 }
 
-/** Take back messages the turn opened with `steerKey` never read: only `ids`
- *  when given, otherwise all of them. Resolves the ids actually returned. */
-export async function withdrawAgentSteers(steerKey: string, ids?: string[]): Promise<string[]> {
-  const res = await request<{ ids: string[] }>("/optimizations/agent-steer/withdraw", {
+/** Take back explicit ids and report which messages the agent already read. */
+export async function withdrawAgentSteers(steerKey: string, ids: string[]): Promise<{ ids: string[]; delivered: string[] }> {
+  const res = await request<{ ids: string[]; delivered: string[] }>("/optimizations/agent-steer/withdraw", {
     method: "POST",
-    body: JSON.stringify(ids ? { steer_key: steerKey, ids } : { steer_key: steerKey }),
+    body: JSON.stringify({ steer_key: steerKey, ids }),
   });
-  return Array.isArray(res.ids) ? res.ids.map(String) : [];
+  if (!Array.isArray(res.ids) || !Array.isArray(res.delivered)) throw new Error("Invalid withdrawal outcome");
+  return { ids: res.ids.map(String), delivered: res.delivered.map(String) };
 }
 
 /**

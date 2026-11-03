@@ -46,6 +46,7 @@ class SteerStore:
         self._engine: Any = None
         self._lock = threading.Lock()
         self._local: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        self._delivered: dict[tuple[str, str], set[str]] = {}
 
     def bind_engine(self, engine: Any) -> None:
         """Attach the shared database engine that backs cross-replica delivery.
@@ -85,8 +86,7 @@ class SteerStore:
     def take(self, owner: str, steer_key: str, ids: list[str] | None = None) -> list[tuple[str, str]]:
         """Take unread messages for ``steer_key``, oldest first.
 
-        The running loop and the client's withdraw both call this; the row
-        lock makes each message go to exactly one of them.
+        The row lock serializes reads with withdrawal.
 
         Args:
             owner: Username the turn belongs to.
@@ -100,12 +100,15 @@ class SteerStore:
             with self._lock:
                 waiting = self._local.pop((owner, steer_key), [])
                 if ids is None:
+                    self._delivered.setdefault((owner, steer_key), set()).update(m[0] for m in waiting)
                     return waiting
                 wanted = set(ids)
                 kept = [m for m in waiting if m[0] not in wanted]
                 if kept:
                     self._local[(owner, steer_key)] = kept
-                return [m for m in waiting if m[0] in wanted]
+                taken = [m for m in waiting if m[0] in wanted]
+                self._delivered.setdefault((owner, steer_key), set()).update(m[0] for m in taken)
+                return taken
         conditions = [
             AgentSteerMessageModel.steer_key == steer_key,
             AgentSteerMessageModel.owner == owner,
@@ -132,6 +135,47 @@ class SteerStore:
                 row.taken_at = now
             session.commit()
             return taken
+
+    def withdraw(self, owner: str, steer_key: str, ids: list[str] | None = None) -> tuple[list[str], list[str]]:
+        """Delete unread messages and report messages already read by the agent.
+
+        Args:
+            owner: Username the turn belongs to.
+            steer_key: The turn's steer key.
+            ids: Requested ids, or all messages when omitted.
+
+        Returns:
+            Newly withdrawn ids and delivered ids. Missing ids were already withdrawn.
+        """
+        if self._engine is None:
+            with self._lock:
+                key = (owner, steer_key)
+                waiting = self._local.get(key, [])
+                wanted = set(ids) if ids is not None else None
+                withdrawn = [mid for mid, _ in waiting if wanted is None or mid in wanted]
+                self._local[key] = [m for m in waiting if m[0] not in withdrawn]
+                delivered = self._delivered.get(key, set())
+                return withdrawn, sorted(delivered if wanted is None else delivered & wanted)
+        conditions = [AgentSteerMessageModel.owner == owner, AgentSteerMessageModel.steer_key == steer_key]
+        if ids is not None:
+            conditions.append(AgentSteerMessageModel.id.in_(ids))
+        with Session(self._engine) as session:
+            rows = session.scalars(
+                select(AgentSteerMessageModel)
+                .where(*conditions)
+                .order_by(AgentSteerMessageModel.created_at, AgentSteerMessageModel.id)
+                .with_for_update()
+            ).all()
+            withdrawn = []
+            delivered = []
+            for row in rows:
+                if row.taken_at is not None:
+                    delivered.append(row.id)
+                else:
+                    withdrawn.append(row.id)
+                    session.delete(row)
+            session.commit()
+            return withdrawn, delivered
 
 
 _store = SteerStore()
