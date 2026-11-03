@@ -123,7 +123,7 @@ void test("theme control offers light, dark and system choices", () => {
   assert.match(system, /aria-checked="true"/);
 });
 
-void test("all docs actions leave the desktop window but stay relative on the web", () => {
+void test("docs and web app actions leave the desktop window but stay relative on the web", () => {
   const previousMode = process.env.APP_LOCAL_MODE;
   const previousHostedUrl = process.env.APP_HOSTED_APP_URL;
   try {
@@ -148,6 +148,11 @@ void test("all docs actions leave the desktop window but stay relative on the we
         for (const link of links.filter((tag) => /href="(?:#platforms|\/|\/explore)"/.test(tag))) {
           assert.ok(!link.includes('target="_blank"'), link);
         }
+        const web = links.find((tag) => tag.includes(`href="${origin}/explore"`));
+        assert.ok(web, `${local}: ${locale}`);
+        assert.equal(web.includes('target="_blank"'), local, web);
+        assert.equal(web.includes('rel="noopener noreferrer"'), local, web);
+        assert.equal(web.includes('data-next-link=""'), !local, web);
       }
     }
   } finally {

@@ -22,6 +22,7 @@ import { useLocale } from "@/shared/providers";
 import { DocsThemeToggle } from "@/features/docs/client";
 import { docsPathForLocale } from "@/shared/lib/locale";
 import { docsLinkProps } from "@/shared/lib/docs-link";
+import { hostedAppUrl } from "@/shared/lib/share-link";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { msg } from "@/shared/lib/messages";
 import {
@@ -67,12 +68,16 @@ function FeaturedCard({
 function DownloadsContent({
   headingId,
   compact = false,
+  onNavigate,
 }: {
   headingId: string;
   compact?: boolean;
+  onNavigate?: () => void;
 }) {
   const { locale } = useLocale();
   const local = isLocalMode();
+  // The Mac app's own /explore is not the web app, so it opens the hosted app in the browser.
+  const hostedWebApp = local ? hostedAppUrl("/explore") : null;
   const [macArch, setMacArch] = useState<MacArch>("arm64");
   useEffect(() => {
     void detectMacArch(navigator as Parameters<typeof detectMacArch>[0]).then(setMacArch);
@@ -120,10 +125,22 @@ function DownloadsContent({
             description={msg("downloads.web_description")}
           >
             <Button asChild size="lg" className={actionClass}>
-              <Link {...docsLinkProps("/explore", local)}>
-                {msg("downloads.browser")}
-                <ArrowRight className="rtl:-scale-x-100" aria-hidden="true" />
-              </Link>
+              {hostedWebApp ? (
+                <a
+                  href={hostedWebApp}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={onNavigate}
+                >
+                  {msg("downloads.browser")}
+                  <ArrowRight className="rtl:-scale-x-100" aria-hidden="true" />
+                </a>
+              ) : (
+                <Link href="/explore" onClick={onNavigate}>
+                  {msg("downloads.browser")}
+                  <ArrowRight className="rtl:-scale-x-100" aria-hidden="true" />
+                </Link>
+              )}
             </Button>
           </FeaturedCard>
           <FeaturedCard
@@ -146,7 +163,10 @@ function DownloadsContent({
             description={msg("downloads.agents_description")}
           >
             <Button asChild size="lg" className={actionClass}>
-              <Link {...docsLinkProps(docsPathForLocale(locale, "mcp"), local)}>
+              <Link
+                {...docsLinkProps(docsPathForLocale(locale, "mcp"), local)}
+                onClick={onNavigate}
+              >
                 {msg("downloads.connect_agent")}
                 <ArrowRight className="rtl:-scale-x-100" aria-hidden="true" />
               </Link>
@@ -274,7 +294,11 @@ export function DownloadsDialog({
           </DialogTitle>
         </DialogHeader>
         <div className="max-h-[calc(100dvh-6rem)] overflow-y-auto overscroll-contain px-5 sm:px-8">
-          <DownloadsContent headingId="downloads-dialog-hero" compact />
+          <DownloadsContent
+            headingId="downloads-dialog-hero"
+            compact
+            onNavigate={() => onOpenChange(false)}
+          />
         </div>
       </DialogContent>
     </Dialog>
