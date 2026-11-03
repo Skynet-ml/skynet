@@ -65,6 +65,8 @@
     "winningCandidate": "candidato vincente"
   },
   "messages": {
+    "contract.metric_model_empty": "Il valore model= in llm() non può essere vuoto o contenere solo spazi.",
+    "contract.metric_model_conflict": "Il modello della metrica salvato non corrisponde a model= nel codice. Rimuovi il modello salvato o modifica il codice.",
     "contract.file_invalid": "Il file {path} non è valido: {error}",
     "contract.files_unsupported": "Gli ottimizzatori DSPy eseguono solo run.py e metric.py. Sposta il codice dei file aggiuntivi in run.py o scegli un altro ottimizzatore.",
     "contract.metric_error": "La metrica non è riuscita sull'esempio {index}: {error}",

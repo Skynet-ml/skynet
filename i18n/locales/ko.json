@@ -65,6 +65,8 @@
     "winningCandidate": "최우수 후보"
   },
   "messages": {
+    "contract.metric_model_empty": "llm()의 model= 값은 비어 있거나 공백만 포함할 수 없습니다.",
+    "contract.metric_model_conflict": "저장된 지표 모델이 코드의 model=과 일치하지 않습니다. 저장된 모델을 삭제하거나 코드를 변경하세요.",
     "contract.file_invalid": "{path} 파일이 올바르지 않습니다: {error}",
     "contract.files_unsupported": "DSPy 옵티마이저는 run.py와 metric.py만 실행합니다. 추가 파일의 코드를 run.py로 옮기거나 다른 옵티마이저를 선택하세요.",
     "contract.metric_error": "샘플 {index}에서 메트릭이 실패했습니다: {error}",

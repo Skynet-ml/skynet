@@ -65,6 +65,8 @@
     "winningCandidate": "candidato vencedor"
   },
   "messages": {
+    "contract.metric_model_empty": "O valor model= em llm() não pode estar vazio nem conter apenas espaços.",
+    "contract.metric_model_conflict": "O modelo de métrica guardado não corresponde a model= no código. Remova o modelo guardado ou altere o código.",
     "contract.file_invalid": "O arquivo {path} não é válido: {error}",
     "contract.files_unsupported": "Os otimizadores DSPy executam apenas run.py e metric.py. Mova o código dos arquivos extras para run.py ou escolha outro otimizador.",
     "contract.metric_error": "A métrica falhou na amostra {index}: {error}",

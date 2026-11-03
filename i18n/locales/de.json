@@ -65,6 +65,8 @@
     "winningCandidate": "Gewinnerkandidat"
   },
   "messages": {
+    "contract.metric_model_empty": "Der Wert model= in llm() darf nicht leer sein oder nur Leerzeichen enthalten.",
+    "contract.metric_model_conflict": "Das gespeicherte Metrikmodell widerspricht model= im Metrikcode. Entfernen Sie das gespeicherte Modell oder passen Sie den Code an.",
     "contract.file_invalid": "Die Datei {path} ist ungültig: {error}",
     "contract.files_unsupported": "DSPy-Optimierer führen nur run.py und metric.py aus. Verschiebe den Code der zusätzlichen Dateien nach run.py oder wähle einen anderen Optimierer.",
     "contract.metric_error": "Die Metrik ist bei Beispiel {index} fehlgeschlagen: {error}",

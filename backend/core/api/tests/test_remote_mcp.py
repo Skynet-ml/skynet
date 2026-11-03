@@ -26,6 +26,7 @@ from sqlalchemy.pool import StaticPool
 from ... import i18n
 from ...billing.budgets import BudgetService
 from ...config import settings
+from ...models import BlackboxRunRequest
 from ...models.optimizations import JobCancelResponse
 from ...models.unified import UnifiedRunRequest
 from ...storage.models import Base, BillingCustomerModel, McpGrantModel, McpTokenModel, UserModel
@@ -549,8 +550,8 @@ def test_declared_extra_reflection_model_normalizes_with_its_source() -> None:
     assert spec.models.metric_model == spec.models.extra_reflection_models[0]
 
 
-def test_submission_ignores_client_metric_model_without_declaration() -> None:
-    """New submissions derive reflection even if the client sends an old picker value."""
+def test_submission_keeps_client_metric_model_without_declaration() -> None:
+    """Submissions preserve an old picker value when no model is declared."""
     spec = UnifiedRunRequest.model_validate(
         unified_payload(
             models={
@@ -561,7 +562,39 @@ def test_submission_ignores_client_metric_model_without_declaration() -> None:
         )
     )
     normalize_model_token_sources(spec)
-    assert spec.models.metric_model == spec.models.reflection_model
+    assert spec.models.metric_model.name == "anthropic/old"
+    assert spec.models.metric_model.token_source == "byok"
+
+
+def test_repo_submission_rejects_conflicting_stored_scorer_model() -> None:
+    """Reject a legacy repository scorer model that conflicts with its code."""
+    spec = BlackboxRunRequest.model_validate(
+        {
+            "objective": "optimize",
+            "reflection_model_config": {"name": "openai/reflection"},
+            "scorer": {
+                "kind": "python",
+                "model": {"name": "anthropic/old"},
+                "metric_code": "llm(model='anthropic/new')",
+            },
+        }
+    )
+    with pytest.raises(DomainError) as exc:
+        request_model_configs(spec)
+    assert exc.value.code == "contract.metric_model_conflict"
+
+
+def test_submission_rejects_conflicting_stored_metric_model() -> None:
+    """Reject a conflicting metric model before billing."""
+    spec = UnifiedRunRequest.model_validate(
+        unified_payload(
+            models={"reflection_model": {"name": "openai/reflection"}, "metric_model": {"name": "anthropic/old"}},
+            workspace={"run_code": "pass", "metric_code": "llm(model='anthropic/new')"},
+        )
+    )
+    with pytest.raises(DomainError) as exc:
+        request_model_configs(spec)
+    assert exc.value.code == "contract.metric_model_conflict"
 
 
 def test_unmatched_metric_model_is_managed_in_subscription_local_mode(monkeypatch: pytest.MonkeyPatch) -> None:

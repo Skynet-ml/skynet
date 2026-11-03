@@ -40,6 +40,7 @@ export function repoRunRequest(
     scorer: {
       kind: "python",
       metric_code: workspace.metricCode,
+      ...(hasModel(workspace.metricModel) && { model: prepareModelConfig(workspace.metricModel) }),
       timeout_seconds: workspace.metricTimeoutSeconds,
     },
     budget: optimizer.budget,

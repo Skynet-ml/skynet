@@ -11,6 +11,7 @@ from ..local.cli_catalog import parse_subscription_model_id
 from ..models import BlackboxRunRequest, RunRequest, UnifiedRunRequest
 from ..models.common import ModelConfig
 from ..models.submissions import _OptimizationRequestBase
+from ..models.unified import UnifiedModels
 from ..service_gateway.optimization.unified.metric_model import resolve_metric_model
 from .errors import DomainError
 
@@ -30,6 +31,13 @@ def request_model_configs(
         Model configs in execution order.
     """
     if isinstance(payload, BlackboxRunRequest):
+        if payload.scorer.kind == "python" and payload.scorer.model is not None:
+            models = UnifiedModels(
+                reflection_model=payload.reflection_model_settings, metric_model=payload.scorer.model
+            )
+            error = resolve_metric_model(models, str(payload.scorer.metric_code or ""))
+            if error:
+                raise DomainError(error, status=422)
         return [
             config
             for config in (

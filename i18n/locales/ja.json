@@ -65,6 +65,8 @@
     "winningCandidate": "最良候補"
   },
   "messages": {
+    "contract.metric_model_empty": "llm() の model= の値を空または空白のみにすることはできません。",
+    "contract.metric_model_conflict": "保存済みの指標モデルがコード内の model= と一致しません。保存済みモデルを削除するか、コードを変更してください。",
     "contract.file_invalid": "ファイル {path} が無効です: {error}",
     "contract.files_unsupported": "DSPy オプティマイザーは run.py と metric.py しか実行しません。追加ファイルのコードを run.py に移すか、別のオプティマイザーを選んでください。",
     "contract.metric_error": "サンプル {index} でメトリクスが失敗しました: {error}",

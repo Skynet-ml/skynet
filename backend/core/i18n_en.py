@@ -270,6 +270,8 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "contract.metric_error": "The metric failed on sample {index}: {error}",
     "contract.shape.blackbox": "The score function must return (score, side_info), where side_info is a dict with a feedback string.",
     "contract.metric_model_declaration": 'llm() calls must name at most one model as a string literal, like model="openai/gpt-4.1-mini". Without model=, the reflection model is used. Call llm() directly. Pass settings as named arguments, not **kwargs.',
+    "contract.metric_model_empty": "The model= value in llm() must not be empty or contain only whitespace.",
+    "contract.metric_model_conflict": "The stored metric model conflicts with model= in the metric code. Remove the stored model or change the code to match it.",
     "contract.passed": "The code matches what the optimizer needs.",
     "transcription.budget_exhausted": "Dictation is paused for the rest of the month. Type your message instead.",
     "transcription.failed": "Transcription failed on every configured provider.",

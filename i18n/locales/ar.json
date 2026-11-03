@@ -65,6 +65,8 @@
     "winningCandidate": "المرشّح الفائز"
   },
   "messages": {
+    "contract.metric_model_empty": "يجب ألا تكون قيمة model= في llm() فارغة أو مكونة من مسافات فقط.",
+    "contract.metric_model_conflict": "يتعارض نموذج المقياس المحفوظ مع model= في رمز المقياس. أزل النموذج المحفوظ أو غيّر الرمز ليتطابق معه.",
     "contract.file_invalid": "الملف {path} غير صالح: {error}",
     "contract.files_unsupported": "محسّنات DSPy لا تشغّل إلا run.py وmetric.py. انقل شيفرة الملفات الإضافية إلى run.py، أو اختر محسّنًا آخر.",
     "contract.metric_error": "فشل المقياس على النموذج {index}: {error}",

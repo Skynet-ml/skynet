@@ -65,6 +65,8 @@
     "program": "程式"
   },
   "messages": {
+    "contract.metric_model_empty": "llm() 入面嘅 model= 唔可以係空，亦唔可以只包含空格。",
+    "contract.metric_model_conflict": "已儲存嘅指標模型同程式碼入面嘅 model= 唔一致。請移除已儲存嘅模型，或者修改程式碼。",
     "contract.file_invalid": "檔案 {path} 無效：{error}",
     "contract.files_unsupported": "DSPy 優化器只會執行 run.py 同 metric.py。請將額外檔案嘅代碼搬去 run.py，或者揀第二個優化器。",
     "contract.metric_error": "指標喺示例 {index} 出錯：{error}",

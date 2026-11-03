@@ -72,6 +72,15 @@ test("Auto cannot optimize a repository", () => {
   assert.equal(computeStepIssue(state, "optimizer", null), "submit.v2.optimizer.issue.choice");
 });
 
+test("a repository clone submits its stored scorer model", () => {
+  const state = repoState();
+  state.workspace.metricModel = { name: "anthropic/legacy", token_source: "byok" };
+  assert.deepEqual(
+    repoRunRequest(state, options)?.scorer.model,
+    prepareModelConfig(state.workspace.metricModel),
+  );
+});
+
 test("a repository run skips inputs and needs only the scorer", () => {
   const state = repoState();
   state.inputs.mode = null;

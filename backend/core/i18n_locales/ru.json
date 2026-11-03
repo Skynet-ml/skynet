@@ -65,6 +65,8 @@
     "winningCandidate": "победивший кандидат"
   },
   "messages": {
+    "contract.metric_model_empty": "Значение model= в llm() не может быть пустым или состоять только из пробелов.",
+    "contract.metric_model_conflict": "Сохранённая модель метрики не совпадает с model= в коде. Удалите сохранённую модель или измените код.",
     "contract.file_invalid": "Файл {path} недействителен: {error}",
     "contract.files_unsupported": "Оптимизаторы DSPy запускают только run.py и metric.py. Перенесите код из дополнительных файлов в run.py или выберите другой оптимизатор.",
     "contract.metric_error": "Метрика завершилась с ошибкой на примере {index}: {error}",

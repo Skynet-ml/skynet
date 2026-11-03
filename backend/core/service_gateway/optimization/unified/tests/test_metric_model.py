@@ -49,20 +49,66 @@ def test_injected_llm_uses_reflection_on_worker() -> None:
     assert scan_metric_llm(code).uses_llm
 
 
+@pytest.mark.parametrize("value", ["", "  ", "\t\n"])
+def test_empty_model_has_clear_error(value: str) -> None:
+    """Reject blank model literals and provide a specific message."""
+    code = f"llm(model={value!r})"
+    models = UnifiedModels.model_validate({"reflection_model": {"name": "r"}})
+    error = resolve_metric_model(models, code)
+    assert error == "contract.metric_model_empty"
+    assert "empty" in ENGLISH_MESSAGES[error].lower()
+
+
+def test_nonempty_model_preserves_surrounding_whitespace() -> None:
+    """Keep literal model names exactly as written."""
+    models = UnifiedModels.model_validate({"reflection_model": {"name": "r"}})
+    assert resolve_metric_model(models, "llm(model=' a/b ')") is None
+    assert models.metric_model is not None
+    assert models.metric_model.name == " a/b "
+
+
+@pytest.mark.parametrize("code", ["llm()", "llm(model='old')", "llm(); llm(model='old')", "pass"])
+def test_submitted_legacy_metric_model_is_kept(code: str) -> None:
+    """Keep the submitted model and its billing configuration."""
+    legacy = {"name": "old", "token_source": "byok", "byok_provider": "openai"}
+    models = UnifiedModels.model_validate({"reflection_model": {"name": "r"}, "metric_model": legacy})
+    assert resolve_metric_model(models, code) is None
+    assert models.metric_model is not None
+    assert models.metric_model.name == "old"
+    assert models.metric_model.token_source == "byok"
+    payload = {
+        "models": {"reflection_model": {"name": "r"}, "metric_model": legacy},
+        "workspace": {"metric_code": code},
+    }
+    assert resolve_metric_model_dict(payload) is None
+    assert payload["models"]["metric_model"]["name"] == "old"
+
+
+@pytest.mark.parametrize("preserve", [True, False])
+def test_legacy_model_conflict_is_rejected(preserve: bool) -> None:
+    """Reject a code declaration that disagrees with a stored model."""
+    payload = {
+        "models": {"reflection_model": {"name": "r"}, "metric_model": {"name": "old"}},
+        "workspace": {"metric_code": "llm(model='new')"},
+    }
+    assert resolve_metric_model_dict(payload, preserve_metric_model=preserve) == "contract.metric_model_conflict"
+    assert payload["models"]["metric_model"]["name"] == "old"
+
+
 @pytest.mark.parametrize("prefix", ["", "from skynet import llm\n"])
-def test_scoped_shadow_does_not_hide_global_helper(prefix: str) -> None:
-    """Keep parameter bindings local to their function."""
+def test_parameter_binding_is_unsafe_in_any_scope(prefix: str) -> None:
+    """Reject parameter bindings even beside a global helper call."""
     scan = scan_metric_llm(prefix + "def helper(llm): return llm\ndef score(): return llm('x', model='openai/a')")
-    assert (scan.uses_llm, scan.names, scan.non_literal) == (True, {"openai/a"}, False)
+    assert (scan.uses_llm, scan.names, scan.non_literal) == (True, {"openai/a"}, True)
 
 
 @pytest.mark.parametrize(
     "local", ["def helper():\n llm = other\n return llm('local')", "helper = lambda llm: llm('local')"]
 )
-def test_local_shadow_does_not_hide_global_helper(local: str) -> None:
-    """Ignore local calls while scanning a global helper in another scope."""
+def test_local_binding_is_unsafe_in_any_scope(local: str) -> None:
+    """Reject local helper bindings even beside a global helper call."""
     scan = scan_metric_llm(local + "\ndef score(): return llm('x', model='openai/a')")
-    assert (scan.uses_llm, scan.names, scan.non_literal) == (True, {"openai/a"}, False)
+    assert (scan.uses_llm, scan.names, scan.non_literal) == (True, {"openai/a"}, True)
 
 
 def test_positional_model_name_is_not_keyword() -> None:
@@ -71,15 +117,9 @@ def test_positional_model_name_is_not_keyword() -> None:
     assert (scan.names, scan.non_literal) == ({"anthropic/expensive"}, False)
 
 
-@pytest.mark.parametrize(
-    "code",
-    [
-        "import skynet\nf(skynet=1)\nllm(model='a')",
-        "from skynet import llm\ndef f():\n global llm\n return llm(model='a')",
-    ],
-)
-def test_keyword_and_global_declaration_are_not_value_uses(code: str) -> None:
-    """Ignore keyword names and global declarations."""
+def test_keyword_name_is_not_a_value_use() -> None:
+    """Ignore keyword names."""
+    code = "import skynet\nf(skynet=1)\nllm(model='a')"
     scan = scan_metric_llm(code)
     assert (scan.uses_llm, scan.names, scan.non_literal) == (True, {"a"}, False)
 
@@ -179,17 +219,9 @@ def test_scan(code: str, uses: bool, names: set[str], non_literal: bool) -> None
 @pytest.mark.parametrize(
     "code",
     [
-        "llm = 'judge'",
         "output.llm",
         "output.llm(model=choice)",
         "from other import llm as judge\njudge(model=choice)",
-        "llm = 'judge'\nllm(model=choice)",
-        "def llm(x): return x\nllm(model=choice)",
-        "def score(llm): return llm(model=choice)",
-        "from other import helper as llm\nllm(model=choice)",
-        "import other as llm\nllm(model=choice)",
-        "for llm in items: pass\nllm(model=choice)",
-        "match x:\n    case llm: pass\nllm(model=choice)",
     ],
 )
 def test_unrelated_llm_names_do_not_declare_a_model(code: str) -> None:
@@ -271,14 +303,13 @@ def test_subscription_declaration_is_not_normalized_in_hosted_mode(monkeypatch: 
     assert models.metric_model.cli_provider is None
 
 
-def test_resolution_ignores_client_model_and_copies_reflection() -> None:
-    """Use reflection by default and discard a submitted metric model."""
-    models = UnifiedModels.model_validate(
-        {"reflection_model": {"name": "openrouter/r", "temperature": 0.2}, "metric_model": {"name": "wrong"}}
-    )
+def test_resolution_copies_reflection_when_no_model_is_submitted() -> None:
+    """Use reflection by default when no metric model is submitted."""
+    models = UnifiedModels.model_validate({"reflection_model": {"name": "openrouter/r", "temperature": 0.2}})
     assert resolve_metric_model(models, "from skynet import llm\nllm('x')") is None
     assert models.metric_model == models.reflection_model
     assert models.metric_model is not models.reflection_model
+    models.metric_model = None
     assert resolve_metric_model(models, "pass") is None
     assert models.metric_model is None
     assert (
@@ -424,6 +455,7 @@ def test_none_model_uses_reflection_and_does_not_conflict() -> None:
     models = UnifiedModels.model_validate({"reflection_model": {"name": "r"}})
     assert resolve_metric_model(models, "from skynet import llm\nllm(model=None)") is None
     assert models.metric_model == models.reflection_model
+    models.metric_model = None
     assert resolve_metric_model(models, "from skynet import llm\nllm(model=None); llm(model='a')") == (
         "contract.metric_model_declaration"
     )
@@ -450,7 +482,7 @@ def test_declared_byok_model_uses_same_connection_as_picked_model(provider: str)
 def test_alias_resolves_before_protection_and_is_idempotent() -> None:
     """Alias the derived model by identity for protection's nested updates."""
     payload = {
-        "models": {"reflection_model": {"name": "r"}, "metric_model": {"name": "wrong"}},
+        "models": {"reflection_model": {"name": "r"}},
         "workspace": {"metric_code": "from skynet import llm\nllm(model='openai/a')"},
     }
     alias_unified_model_roles(payload)
@@ -466,8 +498,8 @@ def test_alias_resolves_before_protection_and_is_idempotent() -> None:
 
 
 @pytest.mark.parametrize("code", ["from skynet import llm\nllm('x')", "pass"])
-def test_worker_alias_keeps_legacy_model_only_when_enabled(code: str) -> None:
-    """The execution path preserves old selections; setup derives reflection instead."""
+def test_worker_alias_keeps_legacy_model(code: str) -> None:
+    """Both setup and execution preserve an old model selection."""
     old = {"name": "anthropic/old", "token_source": "byok", "byok_provider": "anthropic"}
     payload = {
         "models": {"reflection_model": {"name": "openai/reflection"}, "metric_model": old},
@@ -477,20 +509,18 @@ def test_worker_alias_keeps_legacy_model_only_when_enabled(code: str) -> None:
     assert payload["models"]["metric_model"] == old
     assert payload["scorer"]["model"] is old
     alias_unified_model_roles(payload)
-    if code == "pass":
-        assert payload["models"]["metric_model"] is None
-    else:
-        assert payload["models"]["metric_model"]["name"] == "openai/reflection"
+    assert payload["models"]["metric_model"] == old
 
 
-def test_worker_alias_rejects_unsafe_or_replaces_explicit_declarations() -> None:
-    """Legacy preservation never overrides a declaration or accepts unknown options."""
+def test_worker_alias_rejects_unsafe_or_conflicting_declarations() -> None:
+    """Reject unknown options and declarations that conflict with stored models."""
     payload = {
         "models": {"reflection_model": {"name": "openai/reflection"}, "metric_model": {"name": "old"}},
         "workspace": {"metric_code": "from skynet import llm\nllm(model='new')"},
     }
-    alias_unified_model_roles(payload, preserve_metric_model=True)
-    assert payload["models"]["metric_model"]["name"] == "new"
+    with pytest.raises(ValueError, match="conflicts"):
+        alias_unified_model_roles(payload, preserve_metric_model=True)
+    assert payload["models"]["metric_model"]["name"] == "old"
     payload["workspace"]["metric_code"] = "from skynet import llm\nllm(model=choice)"
     with pytest.raises(ValueError, match="string literal"):
         alias_unified_model_roles(payload, preserve_metric_model=True)

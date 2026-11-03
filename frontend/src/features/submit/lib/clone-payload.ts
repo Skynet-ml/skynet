@@ -13,6 +13,7 @@ import type {
   TaskSlice,
   WorkspaceSlice,
 } from "./wizard-v2";
+import { declaredMetricModel } from "./run-floor";
 
 /**
  * `?clone=` hydration for the wizard. A stored payload is one of three
@@ -22,8 +23,6 @@ import type {
  * mapped best effort and leave the rest for the user to fill. A legacy
  * repository target becomes the task's repository: repo, branch, commit,
  * editable paths and setup command.
- *
- * Only type imports here, so node tests can load this file directly.
  */
 export type ClonePayload = Record<string, unknown>;
 
@@ -172,9 +171,18 @@ function cloneUnified(payload: ClonePayload): Omit<CloneSlices, "meta"> {
   if (typeof optimizer.choice === "string")
     optimizerSlice.choice = optimizer.choice as OptimizerChoice;
 
+  const metricCode = typeof workspace.metric_code === "string" ? workspace.metric_code : "";
+  const reflection = modelConfig(models.reflection_model);
+  const metricModel = modelConfig(models.metric_model);
+
   const workspaceSlice: Partial<WorkspaceSlice> = {
     runCode: typeof workspace.run_code === "string" ? workspace.run_code : "",
-    metricCode: typeof workspace.metric_code === "string" ? workspace.metric_code : "",
+    metricCode,
+    metricModel:
+      metricModel?.name !== reflection?.name &&
+      metricModel?.name !== declaredMetricModel(metricCode, reflection?.name)
+        ? metricModel
+        : null,
     // A payload stored before extra files existed has none.
     files: extraFiles(workspace.files),
   };
@@ -242,7 +250,7 @@ function cloneLegacyBlackbox(payload: ClonePayload): Omit<CloneSlices, "meta"> {
       })
     : [];
   const scorer = isRecord(payload.scorer) ? payload.scorer : {};
-  const workspace: Partial<WorkspaceSlice> = {};
+  const workspace: Partial<WorkspaceSlice> = { metricModel: modelConfig(scorer.model) };
   if (typeof scorer.metric_code === "string") workspace.metricCode = scorer.metric_code;
   if (typeof scorer.timeout_seconds === "number")
     workspace.metricTimeoutSeconds = scorer.timeout_seconds;
@@ -284,7 +292,8 @@ function cloneLegacyDspy(payload: ClonePayload): Omit<CloneSlices, "meta"> {
         outputCols.length > 0 ? Object.fromEntries(outputCols.map((col) => [col, row[col]])) : null,
     }),
   );
-  const inputs: Partial<InputsSlice> = inputCols.length > 0 ? inputsFromCases(cases, inputCols) : {};
+  const inputs: Partial<InputsSlice> =
+    inputCols.length > 0 ? inputsFromCases(cases, inputCols) : {};
   const fractions = split(payload.split_fractions);
   if (fractions) inputs.split = fractions;
   if (typeof payload.shuffle === "boolean") inputs.shuffle = payload.shuffle;
@@ -345,4 +354,5 @@ function runEconomyToModels(body: Omit<CloneSlices, "meta">): void {
       extraReflectionModels: optimizer.extraReflectionModels.map(economy),
     }),
   };
+  if (body.workspace.metricModel) body.workspace.metricModel = economy(body.workspace.metricModel);
 }

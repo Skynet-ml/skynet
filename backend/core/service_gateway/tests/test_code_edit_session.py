@@ -596,6 +596,17 @@ def test_write_file_draft_to_an_unsafe_path_is_dropped(ws_session: _UnifiedEditS
     assert u_events == []
 
 
+def test_unified_verifier_receives_reflection_model() -> None:
+    """Compare omitted and declared models against the authoring context."""
+    context = UnifiedAuthoringContext.model_validate(_unified(optimizer="gepa", reflection_name="x/y"))
+    verify = code_module._unified_verifier(context.model_dump())
+    metric = "from skynet import llm\ndef score(input, output):\n llm('a')\n llm('b', model='x/y')\n return 1, {}"
+    assert not any("at most one" in error for error in verify(_RUN, metric, {})[1]["errors"])
+    context.reflection_name = "other"
+    verify = code_module._unified_verifier(context.model_dump())
+    assert any("at most one" in error for error in verify(_RUN, metric, {})[1]["errors"])
+
+
 def test_real_unified_verifier_maps_lint_to_the_file() -> None:
     """The real check flags an undefined name in the helper, not in run.py."""
     verify = code_module._unified_verifier(_unified(optimizer="gepa"))

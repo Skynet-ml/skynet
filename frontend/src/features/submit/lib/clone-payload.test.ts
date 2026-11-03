@@ -1,7 +1,20 @@
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 import { test } from "node:test";
 
-import { cloneToSlices } from "./clone-payload.ts";
+const srcUrl = new URL("../../../", import.meta.url).href;
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier.startsWith("@/")) {
+      return { shortCircuit: true, url: new URL(`${specifier.slice(2)}.ts`, srcUrl).href };
+    }
+    if (specifier === "./run-floor") {
+      return { shortCircuit: true, url: new URL("./run-floor.ts", context.parentURL).href };
+    }
+    return nextResolve(specifier, context);
+  },
+});
+const { cloneToSlices } = await import("./clone-payload.ts");
 
 test("a unified run clones every slice it stored", () => {
   const slices = cloneToSlices(
@@ -46,17 +59,35 @@ test("a unified run clones every slice it stored", () => {
   assert.equal(slices.optimizer.choice, "gepa");
   assert.equal(slices.optimizer.reflectionModel?.name, "gpt-x");
   assert.equal("metricModelMode" in slices.workspace, false);
-  assert.equal("metricModel" in slices.workspace, false);
+  assert.deepEqual(slices.workspace.metricModel, { name: "judge-y" });
   assert.equal(slices.workspace.runCode, "def run(a, i): ...");
 });
 
-test("a legacy metric model is ignored when cloning", () => {
+test("a metric model equal to reflection is not pinned when cloning", () => {
   const slices = cloneToSlices("blackbox", {
     payload_kind: "unified_v1",
     models: { reflection_model: { name: "same" }, metric_model: { name: "same" } },
   });
   assert.equal(slices.optimizer.reflectionModel?.name, "same");
-  assert.equal("metricModel" in slices.workspace, false);
+  assert.equal(slices.workspace.metricModel, null);
+});
+
+test("a code-derived metric model is not pinned when cloning", () => {
+  const slices = cloneToSlices("blackbox", {
+    payload_kind: "unified_v1",
+    models: { reflection_model: { name: "r" }, metric_model: { name: "a/b" } },
+    workspace: { metric_code: "llm(model='a/b')" },
+  });
+  assert.equal(slices.workspace.metricModel, null);
+});
+
+test("a distinct legacy metric model is pinned when cloning", () => {
+  const slices = cloneToSlices("blackbox", {
+    payload_kind: "unified_v1",
+    models: { reflection_model: { name: "r" }, metric_model: { name: "old" } },
+    workspace: { metric_code: "llm(model='a/b')" },
+  });
+  assert.deepEqual(slices.workspace.metricModel, { name: "old" });
 });
 
 test("a legacy black-box run maps objective, seed, cases and scorer", () => {
@@ -64,10 +95,7 @@ test("a legacy black-box run maps objective, seed, cases and scorer", () => {
     objective: "Write emails",
     background: "B2B",
     seed_candidate: { system: "Be brief", user: "{brief}" },
-    cases: [
-      { brief: "launch", expected: "Hi" },
-      { brief: "renewal" },
-    ],
+    cases: [{ brief: "launch", expected: "Hi" }, { brief: "renewal" }],
     scorer: { kind: "python", metric_code: "def score(c, o): ...", model: { name: "judge" } },
     reflection_model_config: { name: "refl" },
   });
@@ -77,7 +105,7 @@ test("a legacy black-box run maps objective, seed, cases and scorer", () => {
   assert.deepEqual(slices.inputs.cases?.[0], { input: { brief: "launch" }, expected: "Hi" });
   assert.deepEqual(slices.inputs.cases?.[1], { input: { brief: "renewal" }, expected: null });
   assert.equal(slices.workspace.metricCode, "def score(c, o): ...");
-  assert.equal("metricModel" in slices.workspace, false);
+  assert.deepEqual(slices.workspace.metricModel, { name: "judge" });
   assert.equal(slices.optimizer.reflectionModel?.name, "refl");
 });
 
@@ -278,7 +306,7 @@ test("an older run-wide economy run turns economy on for each managed model", ()
   assert.equal(slices.optimizer.taskModel?.economy_mode, undefined);
   assert.equal(slices.optimizer.reflectionModel?.economy_mode, true);
   assert.equal(slices.optimizer.extraReflectionModels?.[0]?.economy_mode, true);
-  assert.equal("metricModel" in slices.workspace, false);
+  assert.equal(slices.workspace.metricModel?.economy_mode, true);
   assert.equal("economyMode" in slices.meta, false);
 });
 
@@ -292,5 +320,5 @@ test("a legacy metric economy setting does not change the reflection model", () 
   });
   assert.equal(slices.optimizer.reflectionModel?.economy_mode, true);
   assert.deepEqual(slices.optimizer.reflectionModel?.extra, { temperature_hint: 1 });
-  assert.equal("metricModel" in slices.workspace, false);
+  assert.equal(slices.workspace.metricModel, null);
 });

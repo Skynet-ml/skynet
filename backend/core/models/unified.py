@@ -548,6 +548,7 @@ class UnifiedAuthoringContext(BaseModel):
     expected_field: str | None = None
     sample_cases: list[dict[str, Any]] = Field(default_factory=list, max_length=5)
     optimizer: OptimizerChoice
+    reflection_name: str | None = None
     metric_has_model: bool = False  # Accepted for old clients; no longer used.
     focus: Literal["run", "metric"] = "run"
     target: Literal["artifact", "repo"] = "artifact"

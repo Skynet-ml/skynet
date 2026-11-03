@@ -24,7 +24,7 @@ def alias_unified_model_roles(payload_dict: dict[str, Any], *, preserve_metric_m
 
     Args:
         payload_dict: The raw unified payload, mutated in place.
-        preserve_metric_model: Keep a stored model when legacy code declares none.
+        preserve_metric_model: Retained for callers; stored models are always kept.
     """
     models = payload_dict.get("models")
     if not isinstance(models, dict):

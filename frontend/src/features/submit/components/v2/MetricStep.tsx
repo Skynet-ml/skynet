@@ -136,6 +136,7 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
       expected_field: inputs.expectedField,
       sample_cases: samples,
       optimizer: optimizer.choice,
+      reflection_name: optimizer.reflectionModel?.name ?? null,
       focus: repo ? "metric" : "run",
       ...(repo ? { target: "repo" as const } : {}),
       ...(repoPaths.length > 0 ? { repo_files: repoPaths } : {}),
@@ -153,6 +154,7 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
     inputs.inputFields,
     inputs.expectedField,
     optimizer.choice,
+    optimizer.reflectionModel?.name,
   ]);
 
   const setRunCode = React.useCallback(

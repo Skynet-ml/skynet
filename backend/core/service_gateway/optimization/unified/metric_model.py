@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import io
 import re
+import tokenize
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,6 +25,7 @@ class MetricLLMScan:
     names: set[str] = field(default_factory=set)
     non_literal: bool = False
     omitted: bool = False
+    empty_model: bool = False
 
 
 def scan_metric_llm(code: str) -> MetricLLMScan:
@@ -40,138 +43,162 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
     except (SyntaxError, ValueError):
         return result
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-    scopes = (
-        ast.Module,
-        ast.FunctionDef,
-        ast.AsyncFunctionDef,
-        ast.Lambda,
-        ast.ClassDef,
-        ast.ListComp,
-        ast.SetComp,
-        ast.DictComp,
-        ast.GeneratorExp,
-    )
-    annotations: set[ast.AST] = set()
-    for node in ast.walk(tree):
-        annotation = (
-            node.annotation
-            if isinstance(node, (ast.arg, ast.AnnAssign))
-            else node.returns
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            else None
-        )
-        if annotation is not None:
-            annotations.update(ast.walk(annotation))
-    bindings_by_scope: dict[ast.AST, set[str]] = {}
-    imported_by_scope: dict[ast.AST, set[str]] = {}
-    modules_by_scope: dict[ast.AST, set[str]] = {}
-    globals_by_scope: dict[ast.AST, set[str]] = {}
-
-    def scope_of(node: ast.AST) -> ast.AST:
-        """Return the lexical scope containing a node."""
-        parent = parents.get(node)
-        while parent is not None and not isinstance(parent, scopes):
-            parent = parents.get(parent)
-        return parent or tree
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Global):
-            globals_by_scope.setdefault(scope_of(node), set()).update(node.names)
-
-    for node in ast.walk(tree):
-        scope = scope_of(node)
-        bindings = bindings_by_scope.setdefault(scope, set())
-        imported = imported_by_scope.setdefault(scope, set())
-        modules = modules_by_scope.setdefault(scope, set())
-        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
-            bindings.add(node.id)
-        elif isinstance(node, ast.arg):
-            bindings.add(node.arg)
-        elif isinstance(
-            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler, ast.MatchAs, ast.MatchStar)
+    aliases = {"llm"}
+    modules: set[str] = set()
+    allowed_fallbacks: set[ast.AST] = set()
+    for statement in tree.body:
+        if not isinstance(statement, ast.Try) or len(statement.body) != 1 or len(statement.handlers) != 1:
+            continue
+        imported, handler = statement.body[0], statement.handlers[0]
+        if not (
+            isinstance(imported, ast.ImportFrom)
+            and imported.module == "skynet"
+            and imported.level == 0
+            and len(imported.names) == 1
+            and imported.names[0].name == "llm"
+            and imported.names[0].asname is None
+            and handler.name is None
+            and not statement.orelse
+            and not statement.finalbody
+            and len(handler.body) == 1
         ):
-            if node.name:
-                bindings.add(node.name)
-        elif isinstance(node, ast.MatchMapping) and node.rest:
-            bindings.add(node.rest)
+            continue
+        types = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+        if not any(isinstance(t, ast.Name) and t.id == "ImportError" for t in types):
+            continue
+        assignment = handler.body[0]
+        if (
+            isinstance(assignment, ast.Assign)
+            and len(assignment.targets) == 1
+            and isinstance(assignment.targets[0], ast.Name)
+            and assignment.targets[0].id == "llm"
+            and isinstance(assignment.value, ast.Constant)
+            and assignment.value.value is None
+        ):
+            allowed_fallbacks.add(assignment.targets[0])
+
+    if len(allowed_fallbacks) > 1:
+        allowed_fallbacks.clear()
+
+    for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "skynet" and node.level == 0:
             for alias in node.names:
                 if alias.name == "llm":
-                    imported.add(alias.asname or alias.name)
+                    aliases.add(alias.asname or alias.name)
                     result.uses_llm = True
                 elif alias.name == "*":
-                    imported.add("llm")
-                else:
-                    bindings.add(alias.asname or alias.name)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            bindings.update(alias.asname or alias.name.split(".")[0] for alias in node.names if alias.name != "*")
-            if isinstance(node, ast.Import):
-                modules.update(alias.asname or alias.name for alias in node.names if alias.name == "skynet")
-
-    for scope, names in globals_by_scope.items():
-        for mapping in (bindings_by_scope, imported_by_scope, modules_by_scope):
-            moved = mapping.get(scope, set()) & names
-            mapping.setdefault(tree, set()).update(moved)
-            mapping.setdefault(scope, set()).difference_update(moved)
-    injected_rebound = any(
-        isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr, ast.AugAssign))
-        and (scope_of(node) is tree or "llm" in globals_by_scope.get(scope_of(node), set()))
-        and any(
-            isinstance(child, ast.Name) and child.id == "llm" and isinstance(child.ctx, ast.Store)
-            for child in ast.walk(node)
-        )
-        and node.value is not None
-        and any(
-            isinstance(child, ast.Name) and child.id == "llm" and isinstance(child.ctx, ast.Load)
-            for child in ast.walk(node.value)
-        )
-        for node in ast.walk(tree)
-    )
-    if (
-        any(imported_by_scope.get(scope, set()) & names for scope, names in bindings_by_scope.items())
-        or injected_rebound
-    ):
-        result.uses_llm = True
-        result.non_literal = True
-
-    def resolves(node: ast.AST, name: str, *, module: bool = False) -> bool:
-        """Resolve a helper or module binding through enclosing scopes."""
-        scope = scope_of(node)
-        while True:
-            if name in globals_by_scope.get(scope, set()):
-                scope = tree
-            found = modules_by_scope.get(scope, set()) if module else imported_by_scope.get(scope, set())
-            if name in found:
-                return True
-            if name in bindings_by_scope.get(scope, set()):
-                return False
-            if scope is tree:
-                return not module and name == "llm"
-            scope = scope_of(scope)
-            if isinstance(scope, ast.ClassDef):
-                scope = scope_of(scope)
+                    aliases.add("llm")
+        elif isinstance(node, ast.Import):
+            modules.update(alias.asname or alias.name for alias in node.names if alias.name == "skynet")
 
     def is_helper(node: ast.AST) -> bool:
-        """Recognize injected or imported helper names and module attributes."""
-        return (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and resolves(node, node.id)) or (
+        """Recognize a direct helper name or module attribute."""
+        return (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in aliases) or (
             isinstance(node, ast.Attribute)
             and node.attr == "llm"
             and isinstance(node.value, ast.Name)
-            and resolves(node.value, node.value.id, module=True)
+            and node.value.id in modules
         )
 
     def is_namespace(node: ast.AST) -> bool:
         """Recognize helper-bearing module and namespace expressions."""
         if isinstance(node, ast.Name):
-            return node.id in {"builtins", "__builtins__"} or resolves(node, node.id, module=True)
+            return node.id in {"builtins", "__builtins__"} | modules
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             return node.func.id in {"globals", "vars"}
         return isinstance(node, ast.Attribute) and node.attr == "__dict__" and is_namespace(node.value)
 
     for node in ast.walk(tree):
-        if node in annotations:
-            continue
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and resolves(node, node.id, module=True):
+        bound: set[str] = set()
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)) and node not in allowed_fallbacks:
+            bound.add(node.id)
+        elif isinstance(node, (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)):
+            bound.add(node.name)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler, ast.MatchAs, ast.MatchStar)
+        ):
+            if node.name:
+                bound.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bound.add(node.rest)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            bound.update(node.names)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if isinstance(node, ast.Import) and alias.name == "skynet":
+                    continue
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module == "skynet"
+                    and node.level == 0
+                    and alias.name in {"llm", "*"}
+                ):
+                    continue
+                if alias.name != "*":
+                    bound.add(alias.asname or alias.name.split(".")[0])
+        if bound & (aliases | modules):
+            result.uses_llm = result.non_literal = True
+
+        if isinstance(node, ast.ClassDef):
+            for statement in node.body:
+                for item in ast.walk(statement):
+                    if (
+                        (isinstance(item, ast.Name) and item.id in aliases)
+                        or (isinstance(item, ast.Attribute) and item.attr == "llm")
+                        or (isinstance(item, ast.arg) and item.arg in aliases)
+                        or (isinstance(item, ast.keyword) and item.arg in aliases)
+                        or (isinstance(item, ast.alias) and (item.name in aliases or item.asname in aliases))
+                    ):
+                        result.uses_llm = result.non_literal = True
+
+        if isinstance(node, ast.Attribute) and node.attr == "llm" and isinstance(node.value, (ast.Call, ast.Subscript)):
+            result.uses_llm = result.non_literal = True
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in modules
+            and node.attr not in {"llm", "log", "Image", "observation", "service_cost", "reward"}
+        ):
+            result.uses_llm = result.non_literal = True
+        if (
+            (
+                isinstance(node, ast.Call)
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "skynet"
+                and (
+                    (isinstance(node.func, ast.Name) and node.func.id in {"__import__", "import_module"})
+                    or (
+                        isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "importlib"
+                        and node.func.attr == "import_module"
+                    )
+                )
+            )
+            or (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Attribute)
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id == "sys"
+                and node.value.attr == "modules"
+                and isinstance(node.slice, ast.Constant)
+                and node.slice.value == "skynet"
+            )
+            or (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and is_namespace(node.func.value)
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "llm"
+            )
+        ):
+            result.uses_llm = result.non_literal = True
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in modules:
             parent = parents.get(node)
             if not isinstance(parent, ast.Attribute) or parent.value is not node:
                 result.uses_llm = result.non_literal = True
@@ -195,9 +222,7 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
             parent = parents.get(node)
             if not isinstance(parent, ast.Call) or parent.func is not node:
                 result.non_literal = True
-        if not isinstance(node, ast.Call):
-            continue
-        if not is_helper(node.func):
+        if not isinstance(node, ast.Call) or not is_helper(node.func):
             continue
         result.omitted |= not any(keyword.arg == "model" for keyword in node.keywords)
         for keyword in node.keywords:
@@ -209,7 +234,14 @@ def scan_metric_llm(code: str) -> MetricLLMScan:
                     continue
                 if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
                     source = ast.get_source_segment(code, keyword.value) or ""
-                    if re.search(r"\\N\{", source) and "\\N{" not in keyword.value.value:
+                    if not keyword.value.value.strip():
+                        result.empty_model = result.non_literal = True
+                    elif any(
+                        token.type == tokenize.STRING
+                        and not re.match(r"(?i)r", token.string)
+                        and re.search(r"(^|[^\\])(?:\\\\)*\\N\{", token.string)
+                        for token in tokenize.generate_tokens(io.StringIO(source).readline)
+                    ):
                         result.non_literal = True
                     else:
                         result.names.add(keyword.value.value)
@@ -233,12 +265,21 @@ def resolve_metric_model(models: UnifiedModels, metric_code: str) -> str | None:
         metric_code: Python metric source.
 
     Returns:
-        ``contract.metric_model_declaration`` for an unsafe declaration, else None.
+        ``contract.metric_model_declaration`` or another contract message key
+        for an invalid declaration, else None.
     """
     scan = scan_metric_llm(metric_code)
-    models.metric_model = None
-    if metric_declaration_unsafe(scan, models.reflection_model.name):
+    if scan.empty_model:
+        return "contract.metric_model_empty"
+    legacy = models.metric_model
+    if scan.non_literal or len(scan.names) > 1:
         return "contract.metric_model_declaration"
+    if legacy and scan.names and scan.names != {legacy.name}:
+        return "contract.metric_model_conflict"
+    if metric_declaration_unsafe(scan, legacy.name if legacy else models.reflection_model.name):
+        return "contract.metric_model_declaration"
+    if legacy is not None:
+        return None
     if not scan.uses_llm:
         return None
     reflection = models.reflection_model
@@ -275,7 +316,7 @@ def resolve_metric_model_dict(payload: dict[str, Any], *, preserve_metric_model:
 
     Args:
         payload: Unified payload whose metric model is mutated in place.
-        preserve_metric_model: Keep a stored model when no model is declared.
+        preserve_metric_model: Retained for callers; stored models are always kept.
 
     Returns:
         The declaration error message key, or None.
@@ -285,14 +326,11 @@ def resolve_metric_model_dict(payload: dict[str, Any], *, preserve_metric_model:
     if not isinstance(models, dict) or not isinstance(workspace, dict):
         return None
     code = str(workspace.get("metric_code") or "")
-    if preserve_metric_model and isinstance(models.get("metric_model"), dict):
-        # A stored legacy selection already determined this run's budget route.
-        scan = scan_metric_llm(code)
-        if not scan.names and not scan.non_literal:
-            return None
-    typed = UnifiedModels.model_validate({**models, "metric_model": None})
+    stored = models.get("metric_model")
+    typed = UnifiedModels.model_validate(models)
     if typed.reflection_model.token_source is None:
         typed.reflection_model.token_source = payload.get("token_source") or "managed"
     error = resolve_metric_model(typed, code)
-    models["metric_model"] = typed.metric_model.model_dump(mode="json") if typed.metric_model else None
+    if error is None and not isinstance(stored, dict):
+        models["metric_model"] = typed.metric_model.model_dump(mode="json") if typed.metric_model else None
     return error

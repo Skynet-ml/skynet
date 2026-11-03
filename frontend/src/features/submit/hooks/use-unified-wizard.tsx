@@ -66,6 +66,7 @@ import {
   isSubscriptionModel,
   runFloor as computeRunFloor,
   runModels,
+  scanMetricModel,
 } from "../lib/run-floor";
 import { fileNewRun } from "../lib/file-new-run";
 import { inputsFromRoles, rowsToCases, singleInputCase, type Row } from "../lib/inputs-mode";
@@ -234,7 +235,8 @@ function readWizardSession(): string | null {
 
 function forgetWizardSession() {
   try {
-    for (const key of [WIZARD_SESSION_KEY, ...WIZARD_VIEW_KEYS]) window.sessionStorage.removeItem(key);
+    for (const key of [WIZARD_SESSION_KEY, ...WIZARD_VIEW_KEYS])
+      window.sessionStorage.removeItem(key);
   } catch {}
 }
 
@@ -410,18 +412,19 @@ export function WizardV2Provider({
   );
 
   const metricCallsModel = metricUsesModel(state);
-  const submittedModels = runModels(state.optimizer, metricCallsModel, state.workspace.metricCode);
+  const submittedModels = runModels(
+    state.optimizer,
+    metricCallsModel,
+    state.workspace.metricCode,
+    state.workspace.metricModel,
+  );
   // A CLI-subscription model bills to the user's own plan, so it has no
   // server hold to fetch and adds nothing to the floor.
   const pricedModels = submittedModels.filter(
     (model): model is ModelConfig & { token_source?: "managed" | "byok" } =>
       !isSubscriptionModel(model),
   );
-  const {
-    holds: callHolds,
-    boxHoldCents,
-    settled: costSettled,
-  } = useModelCallHolds(pricedModels);
+  const { holds: callHolds, boxHoldCents, settled: costSettled } = useModelCallHolds(pricedModels);
   const tokenSource = aggregateTokenSource(submittedModels);
   // The floor waits for the server's box hold, since the boxes are most of it.
   const runFloor =
@@ -434,6 +437,7 @@ export function WizardV2Provider({
               callHolds.get(callHoldKey(model.name, model.token_source ?? "managed")) ?? null,
           ),
           tokenSource,
+          unknownModel: scanMetricModel(state.workspace.metricCode).unknown,
         });
 
   // The spending limit lives on the server budget, like the slice mirror the
@@ -498,6 +502,9 @@ export function WizardV2Provider({
       models: {
         task_model: hasModel(optimizer.taskModel) ? prepareModelConfig(optimizer.taskModel) : null,
         reflection_model: prepareModelConfig(optimizer.reflectionModel),
+        metric_model: hasModel(workspace.metricModel)
+          ? prepareModelConfig(workspace.metricModel)
+          : null,
         extra_reflection_models:
           optimizer.choice === "shinka_evolve"
             ? optimizer.extraReflectionModels.filter(hasModel).map(prepareModelConfig)

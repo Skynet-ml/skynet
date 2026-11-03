@@ -65,6 +65,8 @@
     "winningCandidate": "نامزد برنده"
   },
   "messages": {
+    "contract.metric_model_empty": "مقدار model= در llm() نباید خالی باشد یا فقط فاصله داشته باشد.",
+    "contract.metric_model_conflict": "مدل معیار ذخیره‌شده با model= در کد معیار مطابقت ندارد. مدل ذخیره‌شده را حذف کنید یا کد را تغییر دهید.",
     "contract.file_invalid": "فایل {path} معتبر نیست: {error}",
     "contract.files_unsupported": "بهینه‌سازهای DSPy فقط run.py و metric.py را اجرا می‌کنند. کد فایل‌های اضافی را به run.py منتقل کنید یا بهینه‌ساز دیگری انتخاب کنید.",
     "contract.metric_error": "معیار روی نمونهٔ {index} شکست خورد: {error}",

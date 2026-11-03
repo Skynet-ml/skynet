@@ -372,7 +372,9 @@ def _contract_errors(
     elif not _fits(function, 2, 2):
         errors.append(f"{METRIC_FILE} must define {METRIC_SIGNATURE} returning (score, side_info).")
     scan = scan_metric_llm(metric_code)
-    if metric_declaration_unsafe(scan, reflection_name):
+    if scan.empty_model:
+        errors.append("llm() model= must not be empty or contain only whitespace.")
+    elif metric_declaration_unsafe(scan, reflection_name):
         errors.append('llm() calls must name at most one literal model, e.g. model="openai/gpt-4.1-mini".')
     return errors
 

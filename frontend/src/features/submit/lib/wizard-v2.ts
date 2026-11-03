@@ -114,6 +114,7 @@ export interface WorkspaceSlice {
   runCode: string;
   /** `metric.py`. */
   metricCode: string;
+  metricModel: ModelConfig | null;
   /** Every other workspace file, relative path to text (helpers `run.py` imports). */
   files: Record<string, string>;
   metricTimeoutSeconds: number;
@@ -197,6 +198,7 @@ export function initialWizardV2State(
     workspace: {
       runCode: "",
       metricCode: "",
+      metricModel: null,
       files: {},
       metricTimeoutSeconds: DEFAULT_METRIC_TIMEOUT_SECONDS,
       lastCheck: null,
@@ -565,6 +567,7 @@ export function contractSnapshot(s: WizardV2State): string {
     taskModel: s.optimizer.taskModel?.name.trim() || null,
     runCode: s.workspace.runCode,
     metricCode: s.workspace.metricCode,
+    ...(s.workspace.metricModel && { metricModel: s.workspace.metricModel.name }),
     // Left out when empty so a check stored before extra files existed stays current.
     ...(Object.keys(s.workspace.files).length > 0 && { files: s.workspace.files }),
     reflectionModel: s.optimizer.reflectionModel?.name ?? null,

@@ -19,11 +19,11 @@ const { metricUsesModel, scorerCallsModel, withScorerImports } = await import(
 );
 
 test("ignores unrelated llm names", () => {
-  assert.equal(scorerCallsModel("llm = 'judge'"), false);
+  assert.equal(scorerCallsModel("llm = 'judge'"), true);
   assert.equal(scorerCallsModel("output.llm"), false);
   assert.equal(scorerCallsModel('skynet.llm("judge")'), false);
-  assert.equal(scorerCallsModel("def score(llm): return llm('x')"), false);
-  assert.equal(scorerCallsModel("from other import foo as llm\nllm('x')"), false);
+  assert.equal(scorerCallsModel("def score(llm): return llm('x')"), true);
+  assert.equal(scorerCallsModel("from other import foo as llm\nllm('x')"), true);
 });
 
 test("detects a rebound imported or injected helper", () => {

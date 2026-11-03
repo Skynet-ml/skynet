@@ -3241,7 +3241,9 @@ def _unified_verifier(unified: dict[str, Any]) -> WorkspaceVerifier:
 
     def _verify(run_code: str, metric_code: str, files: dict[str, str]) -> list[dict[str, Any]]:
         """Check the workspace and return each file's verdict as plain data."""
-        verdicts = verify_workspace(run_code, metric_code, files, optimizer_resolved=optimizer)
+        verdicts = verify_workspace(
+            run_code, metric_code, files, optimizer_resolved=optimizer, reflection_name=unified.get("reflection_name")
+        )
         return [v.as_dict() for v in verdicts]
 
     return _verify

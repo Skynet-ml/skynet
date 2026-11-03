@@ -96,6 +96,25 @@ def _check(payload: UnifiedRunRequest, **kwargs: Any) -> Any:
         )
 
 
+@pytest.mark.parametrize("value", ["", "  "])
+def test_static_check_rejects_blank_model(value: str) -> None:
+    """Explain why a blank model literal is invalid."""
+    metric = f"def score(input, output):\n    return llm(model={value!r})\n"
+    result = static_contract_check(_payload(metric_code=metric))
+    check = next(item for item in result.checks if item.key == "metric.model")
+    assert check.status == "failed"
+    assert check.message_code == "contract.metric_model_empty"
+
+
+def test_static_check_rejects_conflicting_stored_model() -> None:
+    """Reject a literal model that differs from the stored model."""
+    metric = "def score(input, output):\n    return llm(model='new')\n"
+    result = static_contract_check(_payload(metric_code=metric, metric_model="old"))
+    check = next(item for item in result.checks if item.key == "metric.model")
+    assert check.status == "failed"
+    assert check.message_code == "contract.metric_model_conflict"
+
+
 def test_static_check_passes_a_matching_blackbox_workspace() -> None:
     """Run and score both fit, and no model is needed."""
     response = static_contract_check(_payload())
@@ -254,7 +273,7 @@ def test_metric_calling_llm_defaults_to_reflection_and_rejects_ambiguity() -> No
     assert not static_contract_check(_payload()).uses_llm
 
 
-@pytest.mark.parametrize("expression", ["llm = 'judge'", "output.llm"])
+@pytest.mark.parametrize("expression", ["output.llm"])
 def test_unrelated_llm_names_do_not_mark_metric_as_calling_helper(expression: str) -> None:
     """Ignore unrelated names in the model check and helper-use response."""
     metric = f"def score(input, output):\n    {expression}\n    return 1.0, {{}}\n"
@@ -603,6 +622,13 @@ def test_verify_workspace_rejects_omitted_and_explicit_models() -> None:
     assert not any("at most one" in error for error in same[1].errors)
     other = verify_workspace(RUN_CODE, metric, {}, optimizer_resolved="gepa", reflection_name="other")
     assert any("at most one" in error for error in other[1].errors)
+
+
+def test_verify_workspace_explains_blank_model() -> None:
+    """Give the coding agent a clear blank-model error."""
+    metric = "from skynet import llm\ndef score(input, output):\n return llm(model='  ')"
+    verdicts = verify_workspace(RUN_CODE, metric, {}, optimizer_resolved="gepa")
+    assert any("empty" in error for error in verdicts[1].errors)
 
 
 def test_static_check_lints_each_python_file_on_its_own() -> None:

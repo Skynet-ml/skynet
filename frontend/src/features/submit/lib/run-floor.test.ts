@@ -50,11 +50,28 @@ test("reuses a scan for identical input", () => {
   assert.notStrictEqual(scanMetricModel("llm(model='cached')", "other"), first);
 });
 
-test("function shadow bindings stay local", () => {
+test("syntax errors make the model estimate unknown and unpriced", () => {
+  const scan = scanMetricModel("def broken(");
+  assert.equal(scan.unknown, true);
+  assert.equal(scan.uses, true);
+  assert.equal(scanMetricModel("@decorator\n").unknown, true);
+  assert.equal(runFloor({ boxHoldCents: 0, callHoldCents: [], unknownModel: true }).unpriced, true);
+  assert.equal(
+    runFloor({
+      boxHoldCents: 0,
+      callHoldCents: [],
+      unknownModel: true,
+      tokenSource: "subscription",
+    }).unpriced,
+    true,
+  );
+});
+
+test("helper bindings are unsafe in every scope", () => {
   for (const prefix of ["", "from skynet import llm\n"]) {
     const code =
       prefix + "def helper(llm): return llm\ndef score(): return llm('x', model='openai/a')";
-    assert.deepEqual(scanMetricModel(code), { uses: true, name: "openai/a" });
+    assert.deepEqual(scanMetricModel(code), { uses: true, name: null });
   }
   for (const local of [
     "def helper():\n llm = other\n return llm('local')",
@@ -62,7 +79,7 @@ test("function shadow bindings stay local", () => {
   ]) {
     assert.deepEqual(scanMetricModel(local + "\ndef score(): return llm('x', model='openai/a')"), {
       uses: true,
-      name: "openai/a",
+      name: null,
     });
   }
 });
@@ -74,11 +91,8 @@ test("positional model variable does not hide the keyword", () => {
   });
 });
 
-test("module keyword names and global declarations are not value uses", () => {
-  for (const code of [
-    "import skynet\nf(skynet=1)\nllm(model='a')",
-    "from skynet import llm\ndef f():\n global llm\n return llm(model='a')",
-  ]) {
+test("module keyword names are not value uses", () => {
+  for (const code of ["import skynet\nf(skynet=1)\nllm(model='a')"]) {
     assert.deepEqual(scanMetricModel(code), { uses: true, name: "a" });
   }
 });
@@ -272,6 +286,18 @@ test("the floor prices the literal model declared by the metric", () => {
   );
 });
 
+test("the floor prices a stored metric model", () => {
+  const optimizer = {
+    choice: "gepa" as const,
+    taskModel: null,
+    reflectionModel: { name: "openai/r" },
+    extraReflectionModels: [],
+  };
+  const stored = { name: "anthropic/old", token_source: "byok" as const };
+  assert.deepEqual(runModels(optimizer, true, "llm()", stored).at(-1), stored);
+  assert.deepEqual(runModels(optimizer, false, "pass", stored).at(-1), stored);
+});
+
 test("a declared extra reflection model keeps its source for the floor", () => {
   const extra = {
     name: "anthropic/claude-x",
@@ -390,7 +416,7 @@ test("unrelated llm names do not hide a declared helper model", () => {
     reflectionModel: { name: "openai/reflection" },
     extraReflectionModels: [],
   };
-  for (const code of ["llm = 'judge'", "output.llm", "output.llm(model=choice)"]) {
+  for (const code of ["output.llm", "output.llm(model=choice)"]) {
     assert.equal(
       runModels(
         optimizer,

@@ -33,6 +33,7 @@ export interface RunFloorInput {
    * user's CLI plan, so those calls hold nothing and need no spare.
    */
   tokenSource?: TokenSourceMode;
+  unknownModel?: boolean;
 }
 
 export interface RunFloor {
@@ -44,10 +45,15 @@ export interface RunFloor {
 }
 
 /** Add the boxes' opening holds to the spare the first calls need. */
-export function runFloor({ boxHoldCents, callHoldCents, tokenSource }: RunFloorInput): RunFloor {
+export function runFloor({
+  boxHoldCents,
+  callHoldCents,
+  tokenSource,
+  unknownModel,
+}: RunFloorInput): RunFloor {
   const boxes = Math.ceil(Math.max(0, boxHoldCents ?? 0));
   if (tokenSource === "subscription")
-    return { boxHoldCents: boxes, spareCents: 0, floorCents: boxes, unpriced: false };
+    return { boxHoldCents: boxes, spareCents: 0, floorCents: boxes, unpriced: !!unknownModel };
   const dearestCall = callHoldCents.reduce<number>(
     (max, hold) => (typeof hold === "number" && hold > max ? hold : max),
     0,
@@ -57,21 +63,43 @@ export function runFloor({ boxHoldCents, callHoldCents, tokenSource }: RunFloorI
     boxHoldCents: boxes,
     spareCents: spare,
     floorCents: boxes + spare,
-    unpriced: callHoldCents.some((hold) => hold === null),
+    unpriced: !!unknownModel || callHoldCents.some((hold) => hold === null),
   };
 }
 
 type MetricDeclarations = { uses: boolean; names: string[]; omitted: boolean; unsafe: boolean };
-let lastScan: { code: string; declarations: MetricDeclarations } | undefined;
+const PYTHON_WHITESPACE =
+  /^[\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]*$/u;
+let lastScan: { code: string; declarations: MetricDeclarations; unknown?: boolean } | undefined;
 let lastModel:
-  | { code: string; reflectionName?: string; result: { uses: boolean; name: string | null } }
+  | {
+      code: string;
+      reflectionName?: string;
+      result: { uses: boolean; name: string | null; unknown?: boolean };
+    }
   | undefined;
 
 /** Read literal declarations from helper calls without executing Python. */
 export function scanMetricDeclarations(code: string): MetricDeclarations {
   if (lastScan?.code === code) return lastScan.declarations;
-  const tree = python().language.parser.parse(code);
+  const parserCode = code
+    .replace(/^([ \t]*)@(?=[^\n#]*\S)/gm, "$1 ")
+    .replace(/(^[ \t]*(?:async\s+)?with\s+)\(([^()\n]*\bas\b[^()\n]*)\)(?=\s*:)/gm, "$1 $2 ")
+    .replace(/(^[ \t]*(?:async\s+)?with\s+[^:\n]*\bas\s*)\(([\w\s,]+)\)(?=\s*:)/gm, "$1 $2 ");
+  const tree = python().language.parser.parse(parserCode);
   let invalid = false;
+  for (const decorator of code.matchAll(/^([ \t]*)@(?=[^\n#]*\S)/gm)) {
+    const position = decorator.index + decorator[1]!.length;
+    let statement: typeof tree.topNode | null = tree.resolve(position + 1, 1);
+    let current: typeof tree.topNode | null = statement;
+    while (current && !["String", "Comment"].includes(current.name)) current = current.parent;
+    if (current) continue;
+    while (statement && statement.name !== "ExpressionStatement") statement = statement.parent;
+    let next = statement?.nextSibling ?? null;
+    while (next?.name === "ExpressionStatement" && code.slice(next.from - 1, next.from) === "@")
+      next = next.nextSibling;
+    if (!next || !["FunctionDefinition", "ClassDefinition"].includes(next.name)) invalid = true;
+  }
   tree.iterate({
     enter(node) {
       if (node.type.isError) invalid = true;
@@ -79,7 +107,7 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
   });
   if (invalid) {
     const declarations = { uses: false, names: [], omitted: false, unsafe: false };
-    lastScan = { code, declarations };
+    lastScan = { code, declarations, unknown: true };
     return declarations;
   }
   const literal = (node: typeof tree.topNode): string | null => {
@@ -90,6 +118,7 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
     if (node.name === "ContinuedString") {
       let value = "";
       for (let child = node.firstChild; child; child = child.nextSibling) {
+        if (child.name === "Comment") continue;
         const part = literal(child);
         if (part === null) return null;
         value += part;
@@ -101,7 +130,7 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
     if (!match) return null;
     const value = match[3] ?? "";
     if (match[1]?.toLowerCase() === "r") return value;
-    if (/\\N\{/.test(value)) return null;
+    if (/(^|[^\\])(?:\\\\)*\\N\{/.test(value)) return null;
     try {
       const simple: Record<string, string> = {
         a: "\x07",
@@ -128,59 +157,89 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
     }
   };
   type Node = typeof tree.topNode;
-  const isScope = (name: string) =>
-    ["FunctionDefinition", "LambdaExpression", "ClassDefinition", "Script"].includes(name) ||
-    name.endsWith("ComprehensionExpression");
-  const scopeKey = (node: Node): string => {
-    let parent = node.parent;
-    if (
-      parent?.name === "FunctionDefinition" &&
-      parent.getChild("VariableName")?.from === node.from
-    )
-      parent = parent.parent;
-    while (parent && !isScope(parent.name)) parent = parent.parent;
-    return parent ? `${parent.name}:${parent.from}:${parent.to}` : "root";
-  };
-  const root = `${tree.topNode.name}:${tree.topNode.from}:${tree.topNode.to}`;
-  const bindingsByScope = new Map<string, Set<string>>();
-  const aliasesByScope = new Map<string, Set<string>>();
-  const modulesByScope = new Map<string, Set<string>>();
-  const globalsByScope = new Map<string, Set<string>>();
-  const bucket = (map: Map<string, Set<string>>, key: string): Set<string> => {
-    let value = map.get(key);
-    if (!value) {
-      value = new Set();
-      map.set(key, value);
-    }
-    return value;
-  };
+  const bindings = new Set<string>();
+  const aliases = new Set<string>(["llm"]);
+  const modules = new Set<string>();
+  const allowedFallbacks = new Set<number>();
   let imported = false;
-  let injectedRebound = false;
   tree.iterate({
     enter(node) {
-      if (node.name !== "ScopeStatement" || node.node.firstChild?.name !== "global") return;
-      for (let child: Node | null = node.node.firstChild; child; child = child.nextSibling) {
-        if (child.name === "VariableName")
-          bucket(globalsByScope, scopeKey(node.node)).add(code.slice(child.from, child.to));
-      }
+      if (node.name !== "TryStatement" || node.node.parent?.name !== "Script") return;
+      const bodies = node.node.getChildren("Body");
+      const handlers = node.node.getChildren("except");
+      if (
+        bodies.length !== 2 ||
+        handlers.length !== 1 ||
+        node.node.getChild("else") ||
+        node.node.getChild("finally")
+      )
+        return;
+      const statements = (body: Node | undefined): Node[] => {
+        const items: Node[] = [];
+        for (let child = body?.firstChild; child; child = child.nextSibling)
+          if (child.name !== ":" && child.name !== "Comment") items.push(child);
+        return items;
+      };
+      const tryBody = statements(bodies[0]);
+      const exceptBody = statements(bodies[1]);
+      const statement = tryBody[0];
+      const exception = handlers[0]?.nextSibling;
+      const assignment = exceptBody[0];
+      const isImportError =
+        exception?.name === "VariableName"
+          ? code.slice(exception.from, exception.to) === "ImportError"
+          : (exception?.name === "TupleExpression" || exception?.name === "ParenthesizedExpression") &&
+            exception
+              .getChildren("VariableName")
+              .some((n) => code.slice(n.from, n.to) === "ImportError");
+      if (
+        statement?.name !== "ImportStatement" ||
+        tryBody.length !== 1 ||
+        !/^from\s+skynet\s+import\s+llm\s*$/.test(
+          code
+            .slice(statement.from, statement.to)
+            .replace(/\\\r?\n/g, " ")
+            .replace(/#[^\n]*/g, "")
+            .replace(/[()]/g, ""),
+        ) ||
+        !isImportError ||
+        exception?.nextSibling?.from !== bodies[1]?.from ||
+        assignment?.name !== "AssignStatement" ||
+        exceptBody.length !== 1
+      )
+        return;
+      const target = assignment.firstChild;
+      const equals = target?.nextSibling;
+      let value = equals?.nextSibling;
+      while (value?.name === "ParenthesizedExpression") value = value.firstChild?.nextSibling;
+      if (
+        target?.name === "VariableName" &&
+        code.slice(target.from, target.to) === "llm" &&
+        equals?.name === "AssignOp" &&
+        value?.name === "None" &&
+        !equals?.nextSibling?.nextSibling
+      )
+        allowedFallbacks.add(target.from);
     },
   });
+  if (allowedFallbacks.size > 1) allowedFallbacks.clear();
   tree.iterate({
     enter(node) {
-      const scope = scopeKey(node.node);
-      const bindings = bucket(bindingsByScope, scope);
-      const aliases = bucket(aliasesByScope, scope);
-      const modules = bucket(modulesByScope, scope);
+      const current = node.node;
       if (node.name === "VariableName") {
         const name = code.slice(node.from, node.to);
-        const current = node.node;
         const parent = current.parent;
-        if (parent?.name === "CapturePattern" || parent?.name === "DeleteStatement") {
+        if (allowedFallbacks.has(node.from)) return;
+        if (
+          parent?.name === "CapturePattern" ||
+          parent?.name === "DeleteStatement" ||
+          parent?.name === "ScopeStatement"
+        ) {
           bindings.add(name);
         } else if (parent?.name === "ParamList") {
           let previous = current.prevSibling;
           while (previous && previous.name !== "," && previous.name !== "(") {
-            if (previous.name === "AssignOp") return;
+            if (previous.name === "AssignOp" || previous.name === "TypeDef") return;
             previous = previous.prevSibling;
           }
           bindings.add(name);
@@ -214,6 +273,12 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
           ) {
             bindings.add(name);
           } else if (
+            container?.name === "ArgList" &&
+            target.nextSibling?.name === "AssignOp" &&
+            code.slice(target.nextSibling.from, target.nextSibling.to) === ":="
+          ) {
+            bindings.add(name);
+          } else if (
             container?.name === "ForStatement" ||
             container?.name.endsWith("ComprehensionExpression")
           ) {
@@ -231,25 +296,12 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
             bindings.add(name);
           }
         }
-        if (name === "llm" && (scope === root || globalsByScope.get(scope)?.has("llm"))) {
-          let assignment = parent;
-          while (assignment && !["AssignStatement", "NamedExpression"].includes(assignment.name))
-            assignment = assignment.parent;
-          const target = assignment?.firstChild;
-          const equals = assignment?.getChild("AssignOp");
-          if (
-            target?.name === "VariableName" &&
-            code.slice(target.from, target.to) === "llm" &&
-            equals &&
-            current.from > equals.to
-          ) {
-            if (!(parent?.name === "ArgList" && current.nextSibling?.name === "AssignOp"))
-              injectedRebound = true;
-          }
-        }
       }
       if (node.name !== "ImportStatement") return;
-      const source = code.slice(node.from, node.to).replace(/#[^\n]*/g, "");
+      const source = code
+        .slice(node.from, node.to)
+        .replace(/\\\r?\n/g, " ")
+        .replace(/#[^\n]*/g, "");
       const from = source.match(/^from\s+([.\w]+)\s+import\s+([\s\S]*)$/);
       if (from) {
         for (const part of from[2]!.replace(/[()]/g, "").split(",")) {
@@ -264,47 +316,20 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
           } else if (binding && binding !== "*") bindings.add(binding);
         }
       } else {
-        const imported = source.match(/^import\s+([\s\S]*)$/);
-        for (const part of imported?.[1]?.split(",") ?? []) {
+        const importedNames = source.match(/^import\s+([\s\S]*)$/);
+        for (const part of importedNames?.[1]?.split(",") ?? []) {
           const match = part.trim().match(/^([\w.]+)(?:\s+as\s+(\w+))?$/);
           if (!match) continue;
           const binding = match[2] ?? match[1]!.split(".")[0];
           if (match[1] === "skynet") modules.add(binding!);
-          if (binding) bindings.add(binding);
+          else if (binding) bindings.add(binding);
         }
       }
     },
   });
-  for (const [scope, names] of globalsByScope) {
-    for (const map of [bindingsByScope, aliasesByScope, modulesByScope]) {
-      for (const name of names) {
-        if (map.get(scope)?.delete(name)) bucket(map, root).add(name);
-      }
-    }
-  }
-  const rebound =
-    [...aliasesByScope].some(([scope, aliases]) =>
-      [...aliases].some((name) => bindingsByScope.get(scope)?.has(name)),
-    ) || injectedRebound;
-  const resolves = (node: Node, name: string, module = false): boolean => {
-    let current: Node | null = node;
-    while (current) {
-      let key = scopeKey(current);
-      if (globalsByScope.get(key)?.has(name)) key = root;
-      if ((module ? modulesByScope : aliasesByScope).get(key)?.has(name)) return true;
-      if (bindingsByScope.get(key)?.has(name)) return false;
-      if (key === root) return !module && name === "llm";
-      let parent: Node | null = current.parent;
-      while (parent && !isScope(parent.name)) parent = parent.parent;
-      if (parent && parent.name !== "ClassDefinition") {
-        let enclosing: Node | null = parent.parent;
-        while (enclosing && !isScope(enclosing.name)) enclosing = enclosing.parent;
-        if (enclosing?.name === "ClassDefinition") parent = enclosing;
-      }
-      current = parent;
-    }
-    return false;
-  };
+  const rebound = [...aliases, ...modules].some((name) => bindings.has(name));
+  const resolves = (_node: Node, name: string, module = false): boolean =>
+    (module ? modules : aliases).has(name);
   const isHelper = (node: typeof tree.topNode): boolean => {
     if (node.name === "ParenthesizedExpression") {
       const child = node.firstChild?.nextSibling;
@@ -312,7 +337,9 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
     }
     if (node.name === "VariableName") return resolves(node, code.slice(node.from, node.to));
     if (node.name !== "MemberExpression") return false;
-    const target = node.firstChild;
+    let target = node.firstChild;
+    while (target?.name === "ParenthesizedExpression")
+      target = target.firstChild?.nextSibling ?? null;
     const property = node.lastChild;
     return (
       !!target &&
@@ -351,20 +378,70 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
   tree.iterate({
     enter(node) {
       const current = node.node;
-      let annotation = current.parent;
-      while (annotation && annotation.name !== "TypeDef") annotation = annotation.parent;
-      if (annotation) return false;
+      if (
+        (node.name === "VariableName" && aliases.has(code.slice(node.from, node.to))) ||
+        (node.name === "PropertyName" && code.slice(node.from, node.to) === "llm")
+      ) {
+        let ancestor = current.parent;
+        while (
+          ancestor &&
+          !(ancestor.name === "Body" && ancestor.parent?.name === "ClassDefinition")
+        )
+          ancestor = ancestor.parent;
+        if (ancestor) {
+          uses = true;
+          unsafe = true;
+        }
+      }
+      let indirectBase = current.firstChild;
+      while (indirectBase?.name === "ParenthesizedExpression")
+        indirectBase = indirectBase.firstChild?.nextSibling ?? null;
+      if (
+        node.name === "MemberExpression" &&
+        current.getChild(".") &&
+        code.slice(current.lastChild?.from, current.lastChild?.to) === "llm" &&
+        (indirectBase?.name === "CallExpression" ||
+          (indirectBase?.name === "MemberExpression" && indirectBase.getChild("[")))
+      ) {
+        uses = true;
+        unsafe = true;
+      }
+      if (
+        node.name === "MemberExpression" &&
+        current.getChild(".") &&
+        indirectBase?.name === "VariableName" &&
+        modules.has(code.slice(indirectBase.from, indirectBase.to)) &&
+        !["llm", "log", "Image", "observation", "service_cost", "reward"].includes(
+          code.slice(current.lastChild?.from, current.lastChild?.to),
+        )
+      ) {
+        uses = true;
+        unsafe = true;
+      }
+      if (
+        node.name === "MemberExpression" &&
+        current.getChild("[") &&
+        indirectBase?.name === "MemberExpression" &&
+        code.slice(indirectBase.from, indirectBase.to) === "sys.modules" &&
+        literal(current.getChild("[")?.nextSibling ?? current) === "skynet"
+      ) {
+        uses = true;
+        unsafe = true;
+      }
       if (node.name === "VariableName" && resolves(current, code.slice(node.from, node.to), true)) {
-        const parent = current.parent;
+        let value = current;
+        while (value.parent?.name === "ParenthesizedExpression") value = value.parent;
+        const parent = value.parent;
         let ancestor = parent;
         while (ancestor && ancestor.name !== "ImportStatement") ancestor = ancestor.parent;
         if (
           !ancestor &&
-          !(parent?.name === "ArgList" && current.nextSibling?.name === "AssignOp") &&
+          !(parent?.name === "ArgList" && current.nextSibling?.name === "AssignOp" &&
+            code.slice(current.nextSibling.from, current.nextSibling.to) === "=") &&
           parent?.name !== "ScopeStatement" &&
           !(
             parent?.name === "MemberExpression" &&
-            parent.firstChild?.from === current.from &&
+            parent.firstChild?.from === value.from &&
             parent.getChild(".")
           )
         ) {
@@ -383,8 +460,10 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
       if (
         node.name !== "ParenthesizedExpression" &&
         isHelper(current) &&
+        !allowedFallbacks.has(current.from) &&
         current.parent?.name !== "ScopeStatement" &&
-        !(current.parent?.name === "ArgList" && current.nextSibling?.name === "AssignOp")
+        !(current.parent?.name === "ArgList" && current.nextSibling?.name === "AssignOp" &&
+          code.slice(current.nextSibling.from, current.nextSibling.to) === "=")
       ) {
         let parent = current.parent;
         let callable = current;
@@ -409,9 +488,35 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
       const func = node.node.firstChild;
       if (!func) return;
       const args = node.node.getChild("ArgList");
+      const first = args?.firstChild?.nextSibling;
+      let called = func;
+      while (called.name === "ParenthesizedExpression" && called.firstChild?.nextSibling)
+        called = called.firstChild.nextSibling;
+      const functionName = code.slice(called.from, called.to);
+      if (
+        first &&
+        literal(first) === "skynet" &&
+        (["__import__", "import_module"].includes(functionName) ||
+          (called.name === "MemberExpression" &&
+            called.firstChild?.name === "VariableName" &&
+            code.slice(called.firstChild.from, called.firstChild.to) === "importlib" &&
+            code.slice(called.lastChild?.from, called.lastChild?.to) === "import_module"))
+      ) {
+        uses = true;
+        unsafe = true;
+      }
+      if (
+        first &&
+        literal(first) === "llm" &&
+        called.name === "MemberExpression" &&
+        code.slice(called.lastChild?.from, called.lastChild?.to) === "get" &&
+        isNamespace(called.firstChild)
+      ) {
+        uses = true;
+        unsafe = true;
+      }
       if (func.name === "VariableName" && code.slice(func.from, func.to) === "getattr") {
         const second = args?.getChild(",")?.nextSibling;
-        const first = args?.firstChild?.nextSibling;
         if (first && isNamespace(first) && second && literal(second) === "llm") {
           uses = true;
           unsafe = true;
@@ -424,7 +529,7 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
         if (arg.name !== "VariableName" || code.slice(arg.from, arg.to) !== "model") continue;
         const equals = arg.nextSibling;
         const value = equals?.nextSibling;
-        if (equals?.name !== "AssignOp") continue;
+        if (equals?.name !== "AssignOp" || code.slice(equals.from, equals.to) !== "=") continue;
         hasModel = true;
         if (!value) {
           unsafe = true;
@@ -439,7 +544,7 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
           continue;
         }
         const name = literal(value);
-        if (name === null) unsafe = true;
+        if (name === null || PYTHON_WHITESPACE.test(name)) unsafe = true;
         else names.add(name);
       }
       if (!hasModel) omitted = true;
@@ -453,10 +558,15 @@ export function scanMetricDeclarations(code: string): MetricDeclarations {
 export function scanMetricModel(
   code: string,
   reflectionName?: string,
-): { uses: boolean; name: string | null } {
+): { uses: boolean; name: string | null; unknown?: boolean } {
   if (lastModel?.code === code && lastModel.reflectionName === reflectionName)
     return lastModel.result;
   const scan = scanMetricDeclarations(code);
+  if (lastScan?.unknown) {
+    const result = { uses: true, name: null, unknown: true };
+    lastModel = { code, reflectionName, result };
+    return result;
+  }
   const name = scan.names.length === 1 ? scan.names[0]! : null;
   const result = {
     uses: scan.uses,
@@ -486,7 +596,7 @@ export function callHoldKey(name: string, tokenSource: TokenSourceMode): string 
  * model makes it a subscription job (local desktop build only).
  */
 export function aggregateTokenSource(configs: ModelConfig[]): TokenSourceMode {
-  const selected = configs.filter((config) => config.name.trim());
+  const selected = configs.filter((config) => !PYTHON_WHITESPACE.test(config.name));
   if (selected.length === 0) return "managed";
   if (selected.every((config) => config.token_source === "byok")) return "byok";
   const anyManaged = selected.some(
@@ -512,6 +622,7 @@ export function runModels(
   >,
   metricCallsModel: boolean,
   metricCode = "",
+  legacyMetricModel: ModelConfig | null = null,
 ): ModelConfig[] {
   const name = metricCallsModel
     ? declaredMetricModel(metricCode, optimizer.reflectionModel?.name)
@@ -527,25 +638,27 @@ export function runModels(
     ? name?.replace(/^\/+|\/+$/g, "").match(/^subscription\/(codex|claude)\/+[^/]/)?.[1]
     : undefined;
   const subscriptionCli = cli === "codex" || cli === "claude" ? cli : undefined;
-  const metric = name
-    ? (matchingRole ?? {
-        name,
-        token_source: subscriptionCli
-          ? "subscription"
-          : optimizer.reflectionModel?.token_source === "subscription"
-            ? "managed"
-            : optimizer.reflectionModel?.token_source,
-        cli_provider:
-          subscriptionCli ??
-          (optimizer.reflectionModel?.token_source === "subscription"
-            ? undefined
-            : optimizer.reflectionModel?.cli_provider),
-      })
-    : optimizer.reflectionModel;
+  const metric =
+    legacyMetricModel ??
+    (name
+      ? (matchingRole ?? {
+          name,
+          token_source: subscriptionCli
+            ? "subscription"
+            : optimizer.reflectionModel?.token_source === "subscription"
+              ? "managed"
+              : optimizer.reflectionModel?.token_source,
+          cli_provider:
+            subscriptionCli ??
+            (optimizer.reflectionModel?.token_source === "subscription"
+              ? undefined
+              : optimizer.reflectionModel?.cli_provider),
+        })
+      : optimizer.reflectionModel);
   return [
     optimizer.taskModel,
     optimizer.reflectionModel,
     ...extraReflectionModels,
-    metricCallsModel ? metric : null,
-  ].filter((config): config is ModelConfig => Boolean(config?.name.trim()));
+    metricCallsModel || legacyMetricModel ? metric : null,
+  ].filter((config): config is ModelConfig => !!config && !PYTHON_WHITESPACE.test(config.name));
 }

@@ -77,6 +77,7 @@ test("changing the cases, data source, split, models or metric timeout makes the
     { ...base, optimizer: { ...base.optimizer, taskModel: { name: "openai/gpt-x" } } },
     { ...base, optimizer: { ...base.optimizer, reflectionModel: { name: "openai/gpt-y" } } },
     { ...base, workspace: { ...base.workspace, metricTimeoutSeconds: 5 } },
+    { ...base, workspace: { ...base.workspace, metricModel: { name: "anthropic/legacy" } } },
   ];
   for (const edited of edits) assert.notEqual(contractSnapshot(edited as typeof base), snapshot);
 

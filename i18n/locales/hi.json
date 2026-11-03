@@ -65,6 +65,8 @@
     "winningCandidate": "विजेता उम्मीदवार"
   },
   "messages": {
+    "contract.metric_model_empty": "llm() में model= का मान खाली नहीं हो सकता या केवल खाली स्थान नहीं रख सकता।",
+    "contract.metric_model_conflict": "सहेजा गया मीट्रिक मॉडल कोड में model= से मेल नहीं खाता। सहेजा गया मॉडल हटाएं या कोड बदलें।",
     "contract.file_invalid": "फ़ाइल {path} मान्य नहीं है: {error}",
     "contract.files_unsupported": "DSPy ऑप्टिमाइज़र सिर्फ़ run.py और metric.py चलाते हैं। अतिरिक्त फ़ाइलों का कोड run.py में ले जाएँ, या कोई दूसरा ऑप्टिमाइज़र चुनें।",
     "contract.metric_error": "नमूना {index} पर मेट्रिक विफल रहा: {error}",
