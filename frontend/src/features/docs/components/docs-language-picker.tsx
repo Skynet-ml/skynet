@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { Check, Translate } from "@/shared/ui/icons";
 import { LOCALE_REGISTRY } from "@/shared/lib/locale";
@@ -39,7 +38,6 @@ export function DocsLanguagePicker({
   inline?: boolean;
   className?: string;
 }) {
-  const router = useRouter();
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [highlight, setHighlight] = React.useState(0);
@@ -80,7 +78,10 @@ export function DocsLanguagePicker({
 
   const choose = (next: DocsLocale) => {
     setOpen(false);
-    if (next !== locale) router.push(docsHref(slug, next));
+    // A full page load, not router.push: the root layout builds the shared UI
+    // catalog from the docs URL only when it renders, and it does not render
+    // again on a client navigation.
+    if (next !== locale) window.location.assign(docsHref(slug, next));
   };
 
   const onKeyDown = (event: React.KeyboardEvent) => {

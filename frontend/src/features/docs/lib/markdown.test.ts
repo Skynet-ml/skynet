@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import ReactMarkdown from "react-markdown";
 import { extractHeadings, remarkDocs, searchText, slugify, tabLabel } from "./markdown.ts";
+
+function renderMarkdown(source: string): string {
+  return renderToStaticMarkup(
+    createElement(ReactMarkdown, { remarkPlugins: [[remarkDocs, { headingIds: [] }]] }, source),
+  );
+}
 
 test("slugify keeps Hebrew letters and drops punctuation", () => {
   assert.equal(slugify("Tools & scopes"), "tools-scopes");
@@ -29,6 +38,26 @@ test("tabLabel reads the tab name from a code block info string", () => {
   assert.equal(tabLabel('tab="macOS"'), "macOS");
   assert.equal(tabLabel("title=x"), null);
   assert.equal(tabLabel(null), null);
+});
+
+test("remarkDocs renders a single tabbed code block as plain code", () => {
+  const html = renderMarkdown('```python tab="metric.py"\ndef score():\n    return 1\n```');
+  assert.doesNotMatch(html, /data-tabs/);
+  assert.match(html, /<pre><code class="language-python">def score\(\):\n    return 1\n<\/code><\/pre>/);
+});
+
+test("remarkDocs renders two adjacent tabbed blocks as one two-tab group", () => {
+  const html = renderMarkdown('```python tab="run.py"\nrun()\n```\n\n```bash tab="shell"\necho done\n```');
+  assert.equal((html.match(/data-tabs=/g) ?? []).length, 1);
+  assert.match(html, /data-tabs="\[&quot;run.py&quot;,&quot;shell&quot;\]"/);
+  assert.match(html, /<code class="language-python">run\(\)\n<\/code>/);
+  assert.match(html, /<code class="language-bash">echo done\n<\/code>/);
+});
+
+test("remarkDocs keeps tabbed blocks separated by prose plain on both sides", () => {
+  const html = renderMarkdown('```python tab="first.py"\nfirst()\n```\n\nBetween blocks.\n\n```python tab="second.py"\nsecond()\n```');
+  assert.doesNotMatch(html, /data-tabs/);
+  assert.match(html, /first\(\)\n<\/code><\/pre>\n<p>Between blocks\.<\/p>\n<pre><code class="language-python">second\(\)/);
 });
 
 test("remarkDocs groups adjacent tab code blocks once, unwraps callouts and marks headings", () => {
@@ -107,8 +136,8 @@ test("remarkDocs never joins tab groups across a callout boundary", () => {
     c.data?.hProperties?.dataTabs,
   ]);
   assert.deepEqual(groups, [
-    ["docsTabs", '["macOS"]'],
+    ["code", undefined],
     ["docsTabs", '["Linux","Windows"]'],
-    ["docsTabs", '["Other"]'],
+    ["code", undefined],
   ]);
 });

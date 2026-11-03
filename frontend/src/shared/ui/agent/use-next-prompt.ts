@@ -12,6 +12,7 @@ import {
   switchedSuggestion,
   suggestSignature,
   visibleSuggestion,
+  type SuggestPayload,
   type SuggestState,
 } from "./next-prompt";
 import type { AgentMessage } from "./types";
@@ -19,6 +20,11 @@ import type { AgentMessage } from "./types";
 // Waits out the stream's close (late thinking labels share the small model's
 // pool) and quick follow-up typing before a paid call.
 const SUGGEST_DEBOUNCE_MS = 600;
+
+/** Fetches one suggestion; the default is the signed-in agents' endpoint. */
+export type SuggestFetcher = (
+  body: SuggestPayload & { locale: string; model: string | null },
+) => Promise<string>;
 
 interface UseNextPromptOptions {
   /** The thread; undefined turns suggestions off. */
@@ -29,6 +35,8 @@ interface UseNextPromptOptions {
   draft: string;
   streaming: boolean;
   disabled: boolean;
+  /** Replaces the endpoint, for a host with its own access rules (the signed-out docs agent). */
+  fetcher?: SuggestFetcher;
 }
 
 function browserStorage(): Storage | null {
@@ -56,6 +64,7 @@ export function useNextPrompt({
   draft,
   streaming,
   disabled,
+  fetcher,
 }: UseNextPromptOptions) {
   const { locale } = useLocale();
   const chat = chatId ?? null;
@@ -77,6 +86,11 @@ export function useNextPrompt({
   React.useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+  // Read at fetch time, so an inline fetcher does not restart the debounce.
+  const fetcherRef = React.useRef(fetcher);
+  React.useEffect(() => {
+    fetcherRef.current = fetcher;
+  }, [fetcher]);
 
   // Declared before the fetch effect so a switch is seen first in the same commit.
   React.useEffect(() => {
@@ -107,7 +121,7 @@ export function useNextPrompt({
       fetched.current = signature;
       const mine = ++seq.current;
       const forChat = chatRef.current;
-      fetchNextPromptSuggestion({ ...payload, locale, model: model ?? null })
+      (fetcherRef.current ?? fetchNextPromptSuggestion)({ ...payload, locale, model: model ?? null })
         .then((text) => {
           const next = { signature, text, dismissed: false };
           if (text) saveSuggestion(browserStorage(), forChat, next);

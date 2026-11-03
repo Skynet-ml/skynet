@@ -20,7 +20,6 @@ import {
   ArrowSquareOut,
   HardDrive,
   Translate,
-  Microphone,
   PaperPlaneTilt,
   PencilSimple,
   Plus,
@@ -273,17 +272,6 @@ function AgentTab() {
           onEffortChange={(v) => setPref("composerEffort", v)}
           models={localMenu.models}
           openRouterEngine={localMenu.openRouterEngine}
-        />
-      </SettingsRow>
-
-      <SettingsRow
-        icon={Microphone}
-        label={msg("settings.agent.dictation.label")}
-        description={msg("settings.agent.dictation.description")}
-      >
-        <Switch
-          checked={prefs.dictationEnabled}
-          onCheckedChange={(v) => setPref("dictationEnabled", v)}
         />
       </SettingsRow>
 

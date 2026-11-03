@@ -13,7 +13,9 @@ import type { AgentEngine, CliStatus, LocalStatus } from "@/features/local-runti
 
 // The classic JSX transform the test loader applies reads a global React.
 (globalThis as { React?: typeof React }).React = React;
-const { AgentEngineSelect, EngineChoice, engineToSave } = await import("./AgentEngineSetting");
+const { AgentEngineSelect, AgentEngineSetting, EngineChoice, engineToSave } = await import(
+  "./AgentEngineSetting"
+);
 const { AgentRoleRow } = await import("./AgentLocalRunSetting");
 const { Select } = await import("@/shared/ui/primitives/select");
 const {
@@ -49,7 +51,6 @@ const status = (clis: CliStatus[]): LocalStatus => ({
 });
 
 function render(
-  local: boolean,
   value: AgentEngine,
   s: LocalStatus | null,
   keyVerified: boolean | null = false,
@@ -58,7 +59,6 @@ function render(
   setClientLocale("en");
   return renderToStaticMarkup(
     <AgentEngineSelect
-      local={local}
       status={s}
       value={value}
       keyVerified={keyVerified}
@@ -115,26 +115,31 @@ void describe("agent engine load state (SKY-123 R11-1)", () => {
 });
 
 void describe("AgentEngineSelect", () => {
-  void it("hosted builds show OpenRouter with the hosted description and no warning", () => {
-    const html = render(false, "openrouter", null);
-    // The UI catalog does not load under jiti, so its strings render as their keys.
-    assert.match(html, /settings\.agent_engine\.openrouter</);
-    assert.match(html, /settings\.agent_engine\.description</);
-    assert.doesNotMatch(html, /role="status"/);
+  void it("shows only in the local build, not in the hosted web app", () => {
+    const realLocal = process.env.APP_LOCAL_MODE;
+    try {
+      delete process.env.APP_LOCAL_MODE;
+      assert.equal(AgentEngineSetting(), null);
+      process.env.APP_LOCAL_MODE = "1";
+      assert.notEqual(AgentEngineSetting(), null);
+    } finally {
+      if (realLocal === undefined) delete process.env.APP_LOCAL_MODE;
+      else process.env.APP_LOCAL_MODE = realLocal;
+    }
   });
 
   void it("a ready local engine shows the CLI and no warning", () => {
-    const html = render(true, "codex", status([cli("codex")]));
+    const html = render("codex", status([cli("codex")]));
     assert.match(html, /subscription\.cli\.codex/);
     assert.match(html, /settings\.agent_engine\.description_local/);
     assert.doesNotMatch(html, /role="status"/);
   });
 
   void it("an engine the user never saved shows as Automatic, with the engine it runs on", () => {
-    const html = render(true, "claude", status([cli("claude"), cli("codex")]), false, true);
+    const html = render("claude", status([cli("claude"), cli("codex")]), false, true);
     assert.match(html, /settings\.agent_engine\.automatic/);
     assert.match(html, /data-engine-logo="claude"/);
-    assert.doesNotMatch(render(true, "claude", status([cli("claude")])), /agent_engine\.automatic/);
+    assert.doesNotMatch(render("claude", status([cli("claude")])), /agent_engine\.automatic/);
   });
 
   void it("choosing the shown engine saves it only while it is automatic", () => {
@@ -146,7 +151,7 @@ void describe("AgentEngineSelect", () => {
   });
 
   void it("a signed-out local engine says why, with its sign-in command", () => {
-    const html = render(true, "codex", status([cli("codex", { logged_in: false })]));
+    const html = render("codex", status([cli("codex", { logged_in: false })]));
     assert.match(html, /role="status"/);
     assert.match(html, /subscription\.state\.logged_out/);
     assert.match(html, /<code[^>]*>codex login<\/code>/);
@@ -169,11 +174,10 @@ function assertLogo(html: string, engine: AgentEngine) {
 void describe("engine logos", () => {
   void it("the selected value shows the engine's logo next to its name", () => {
     for (const engine of ["codex", "claude"] as const) {
-      const html = render(true, engine, status([cli("codex"), cli("claude")]));
+      const html = render(engine, status([cli("codex"), cli("claude")]));
       assertLogo(html, engine);
       assert.match(html, new RegExp(`subscription\\.cli\\.${engine}`));
     }
-    assertLogo(render(false, "openrouter", null), "openrouter");
   });
 
   void it("every menu choice shows its logo, also when it is disabled", () => {
@@ -203,7 +207,7 @@ void describe("engine logos", () => {
       agentEngineOptions(s, true).map((o) => o.engine),
       ["codex", "claude", "openrouter"],
     );
-    assert.doesNotMatch(render(true, "codex", s), /droid/i);
+    assert.doesNotMatch(render("codex", s), /droid/i);
   });
 });
 
@@ -457,19 +461,19 @@ void describe("OpenRouter engine (SKY-123 AC3)", () => {
   });
 
   void it("the selected OpenRouter engine shows its name and its own description", () => {
-    const ok = render(true, "openrouter", s, true);
+    const ok = render("openrouter", s, true);
     assert.match(ok, /data-engine-logo="openrouter"/);
     assert.match(ok, /settings\.agent_engine\.description_openrouter</);
     assert.doesNotMatch(ok, /settings\.agent_engine\.description_local/);
     assert.doesNotMatch(ok, /role="status"/);
     // While the key list loads, the engine stays OpenRouter with no warning.
-    const loading = render(true, "openrouter", s, null);
+    const loading = render("openrouter", s, null);
     assert.match(loading, /data-engine-logo="openrouter"/);
     assert.doesNotMatch(loading, /role="status"/);
   });
 
   void it("a stored OpenRouter engine with the key gone shows the CLI agents run on, and why", () => {
-    const gone = render(true, "openrouter", s, false);
+    const gone = render("openrouter", s, false);
     // The trigger names the default CLI, not OpenRouter.
     assert.match(gone, /data-engine-logo="codex"/);
     assert.doesNotMatch(gone, /data-engine-logo="openrouter"/);
@@ -481,7 +485,7 @@ void describe("OpenRouter engine (SKY-123 AC3)", () => {
   });
 
   void it("with the key gone and the fallback CLI signed out, the warning keeps its sign-in command", () => {
-    const html = render(true, "openrouter", status([cli("claude", { logged_in: false })]), false);
+    const html = render("openrouter", status([cli("claude", { logged_in: false })]), false);
     assert.match(html, /data-engine-logo="claude"/);
     assert.match(html, /settings\.agent_engine\.openrouter_fallback/);
     const warning = html.slice(html.indexOf('role="status"'));
@@ -493,7 +497,6 @@ void describe("OpenRouter engine (SKY-123 AC3)", () => {
     setClientLocale("en");
     const saved: AgentEngine[] = [];
     const tree = AgentEngineSelect({
-      local: true,
       status: s,
       value: "openrouter",
       keyVerified: false,

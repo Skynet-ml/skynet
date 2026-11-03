@@ -165,12 +165,15 @@ function groupTabs(children: MdNode[]): MdNode[] {
       : null;
     out.push(open ?? child);
   }
-  for (const group of out) {
-    if (group.type !== "docsTabs") continue;
-    const labels = (group.children ?? []).map((c) => tabLabel(c.meta) ?? "");
+  return out.map((group) => {
+    if (group.type !== "docsTabs") return group;
+    const blocks = group.children ?? [];
+    const single = blocks[0];
+    if (blocks.length === 1 && single) return single;
+    const labels = blocks.map((c) => tabLabel(c.meta) ?? "");
     group.data = { hName: "div", hProperties: { dataTabs: JSON.stringify(labels) } };
-  }
-  return out;
+    return group;
+  });
 }
 
 /**

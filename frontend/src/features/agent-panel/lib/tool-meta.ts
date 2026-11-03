@@ -365,6 +365,7 @@ const TOOL_TITLES: Record<string, LocaleString> = {
   list_sample_datasets_datasets_samples_get: () => msg("agent.tool.list_samples.title"),
   validate_datasets_validate_post: () => msg("agent.tool.validate_datasets.title"),
   web_search: () => msg("agent.tool.web_search.title"),
+  search_docs: () => msg("agent.tool.search_docs.title"),
   fetch_url: () => msg("agent.tool.fetch_url.title"),
   crawl_site: () => msg("agent.tool.crawl_site.title"),
   blackbox_engines_blackbox_engines_get: () => msg("agent.tool.blackbox_engines.title"),
