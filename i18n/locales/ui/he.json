@@ -25,8 +25,6 @@
   "downloads.cli_description": "כלים למסוף שלכם.",
   "downloads.docs": "תיעוד",
   "downloads.navigation": "ניווט בהורדות",
-  "downloads.light_theme": "מעבר לערכת נושא בהירה",
-  "downloads.dark_theme": "מעבר לערכת נושא כהה",
   "downloads.platform_options": "אפשרויות עבור {platform}",
   "downloads.macos": "macOS",
   "downloads.windows": "Windows",

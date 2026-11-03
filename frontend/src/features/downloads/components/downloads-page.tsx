@@ -42,13 +42,18 @@ export function DownloadsPage() {
     <div className="min-h-dvh bg-background text-foreground">
       <a
         href="#platforms"
-        className="sr-only focus:not-sr-only focus:fixed focus:start-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-card focus:p-3"
+        className="sr-only focus:not-sr-only focus:fixed focus:start-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-card focus:p-3 focus-visible:ring-[3px] focus-visible:ring-ring/50"
       >
         {msg("downloads.all_platforms")}
       </a>
       <header className="border-b border-border/60">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-5 py-4 sm:px-8">
-          <Link href="/" className="flex items-center gap-2.5" dir="ltr" aria-label={APP_NAME}>
+          <Link
+            href="/"
+            className="flex items-center gap-2.5 rounded-md focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            dir="ltr"
+            aria-label={APP_NAME}
+          >
             <AppMark className="size-8" aria-hidden="true" />
             <span className="text-sm font-bold uppercase tracking-[0.16em]">{APP_NAME}</span>
           </Link>
@@ -201,7 +206,7 @@ export function DownloadsPage() {
                         <Link
                           key={link.label}
                           href={platformHref(link.href)}
-                          className="mt-3 flex min-h-[44px] items-center justify-center text-center text-xs leading-relaxed text-muted-foreground underline underline-offset-4 hover:text-foreground"
+                          className="mt-3 flex min-h-[44px] items-center justify-center rounded-md text-center text-xs leading-relaxed text-muted-foreground underline underline-offset-4 hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
                         >
                           {msg(link.label)}
                         </Link>
@@ -230,7 +235,7 @@ export function DownloadsPage() {
                   </h2>
                   <Link
                     href={platformHref(item.setup.guide.href)}
-                    className="mt-4 inline-flex min-h-[44px] items-center gap-1 text-sm font-medium text-primary underline-offset-4 hover:underline"
+                    className="mt-4 inline-flex min-h-[44px] items-center gap-1 rounded-md text-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50"
                   >
                     {msg(item.setup.guide.label)}
                     <ArrowUpRight className="size-4 rtl:-scale-x-100" aria-hidden="true" />
@@ -258,15 +263,21 @@ export function DownloadsPage() {
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-5 py-6 text-sm text-muted-foreground sm:px-8">
           <span>{APP_NAME}</span>
           <div className="flex flex-wrap gap-5">
-            <Link href={docs} className="inline-flex min-h-[44px] items-center hover:text-foreground">
+            <Link
+              href={docs}
+              className="inline-flex min-h-[44px] items-center rounded-md hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            >
               {msg("downloads.docs")}
             </Link>
-            <Link href="/terms" className="inline-flex min-h-[44px] items-center hover:text-foreground">
+            <Link
+              href="/terms"
+              className="inline-flex min-h-[44px] items-center rounded-md hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            >
               {msg("legal.terms_link")}
             </Link>
             <Link
               href="/privacy"
-              className="inline-flex min-h-[44px] items-center hover:text-foreground"
+              className="inline-flex min-h-[44px] items-center rounded-md hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
             >
               {msg("legal.privacy_link")}
             </Link>

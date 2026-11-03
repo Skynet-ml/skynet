@@ -25,8 +25,6 @@
   "downloads.cli_description": "터미널 도구.",
   "downloads.docs": "문서",
   "downloads.navigation": "다운로드 탐색",
-  "downloads.light_theme": "밝은 테마 사용",
-  "downloads.dark_theme": "어두운 테마 사용",
   "downloads.platform_options": "{platform} 옵션 보기",
   "downloads.macos": "macOS",
   "downloads.windows": "Windows",

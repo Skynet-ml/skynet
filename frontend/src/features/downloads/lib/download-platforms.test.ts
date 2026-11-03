@@ -31,14 +31,26 @@ test("Mac setup does not advertise nonexistent release assets", () => {
     assert.equal(platform.status, "coming-soon");
 });
 
-test("ambiguous Linux touch devices use the all-platform fallback", () => {
-  assert.equal(detectPlatform("Mozilla/5.0 (X11; Linux x86_64)", 5), null);
+test("Linux detection does not depend on touchscreen capacity", () => {
+  for (const touches of [0, 1, 2, 5, 10]) {
+    assert.equal(detectPlatform("Mozilla/5.0 (X11; Linux x86_64)", touches), "linux");
+  }
 });
 
 const catalog = (locale: string): Record<string, string> =>
   JSON.parse(
     fs.readFileSync(path.resolve(process.cwd(), `../i18n/locales/ui/${locale}.json`), "utf8"),
   );
+
+test("catalogs contain no obsolete Downloads theme labels", () => {
+  for (const file of fs.readdirSync(path.resolve(process.cwd(), "../i18n/locales/ui"))) {
+    if (!file.endsWith(".json")) continue;
+    const messages = catalog(file.slice(0, -5));
+    for (const key of ["downloads.light_theme", "downloads.dark_theme"]) {
+      assert.equal(Object.hasOwn(messages, key), false, `${file}: ${key}`);
+    }
+  }
+});
 
 test("release note does not promise source build instructions absent from the guide", () => {
   assert.doesNotMatch(catalog("en")["downloads.release_note"], /build.from.source/i);

@@ -67,6 +67,9 @@ void test("platform actions use Next Link for docs and native anchors for platfo
 });
 
 void test("changing Mac to a real download hides the obsolete unpublished-installer note", () => {
+  const note = buildActiveCatalog("en")["downloads.release_note"];
+  assert.ok(note);
+  assert.ok(render().includes(note));
   const platforms = DOWNLOAD_PLATFORMS as DownloadPlatform[];
   const original = platforms[0];
   assert.ok(original);
@@ -78,9 +81,18 @@ void test("changing Mac to a real download hides the obsolete unpublished-instal
     };
     const html = render();
     assert.match(html, /https:\/\/example.test\/Skynet.dmg/);
-    assert.doesNotMatch(html, /downloads\.release_note/);
+    assert.ok(!html.includes(note));
   } finally {
     platforms[0] = original;
+  }
+});
+
+void test("every link draws a visible keyboard focus ring", () => {
+  const links = [...render().matchAll(/<a\b[^>]*>/g)];
+  assert.ok(links.length > 0);
+  for (const [link] of links) {
+    assert.ok(link.includes("focus-visible:ring-[3px]"), link);
+    assert.ok(link.includes("focus-visible:ring-ring/50"), link);
   }
 });
 

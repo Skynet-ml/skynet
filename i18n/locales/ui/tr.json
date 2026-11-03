@@ -25,8 +25,6 @@
   "downloads.cli_description": "Terminaliniz için araçlar.",
   "downloads.docs": "Belgeler",
   "downloads.navigation": "İndirme gezintisi",
-  "downloads.light_theme": "Açık temayı kullan",
-  "downloads.dark_theme": "Koyu temayı kullan",
   "downloads.platform_options": "{platform} seçeneklerini gör",
   "downloads.macos": "macOS",
   "downloads.windows": "Windows",

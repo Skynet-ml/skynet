@@ -25,8 +25,6 @@
   "downloads.cli_description": "ابزارهایی برای پایانهٔ شما.",
   "downloads.docs": "مستندات",
   "downloads.navigation": "پیمایش دانلودها",
-  "downloads.light_theme": "استفاده از پوستهٔ روشن",
-  "downloads.dark_theme": "استفاده از پوستهٔ تیره",
   "downloads.platform_options": "نمایش گزینه‌های {platform}",
   "downloads.macos": "macOS",
   "downloads.windows": "Windows",

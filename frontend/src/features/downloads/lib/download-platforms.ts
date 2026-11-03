@@ -79,6 +79,6 @@ export function detectPlatform(userAgent: string, maxTouchPoints = 0): PlatformI
     return "ios";
   if (/macintosh|mac os x/i.test(userAgent)) return "macos";
   if (/windows/i.test(userAgent)) return "windows";
-  if (/linux/i.test(userAgent) && !/cros/i.test(userAgent) && maxTouchPoints <= 1) return "linux";
+  if (/linux/i.test(userAgent) && !/cros/i.test(userAgent)) return "linux";
   return null;
 }

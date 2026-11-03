@@ -25,8 +25,6 @@
   "downloads.cli_description": "أدوات لطرفيتك.",
   "downloads.docs": "التوثيق",
   "downloads.navigation": "التنقل في التنزيلات",
-  "downloads.light_theme": "استخدام المظهر الفاتح",
-  "downloads.dark_theme": "استخدام المظهر الداكن",
   "downloads.platform_options": "عرض خيارات {platform}",
   "downloads.macos": "macOS",
   "downloads.windows": "Windows",

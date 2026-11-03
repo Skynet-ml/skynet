@@ -25,8 +25,6 @@
   "downloads.cli_description": "Strumenti per il tuo terminale.",
   "downloads.docs": "Documentazione",
   "downloads.navigation": "Navigazione download",
-  "downloads.light_theme": "Usa il tema chiaro",
-  "downloads.dark_theme": "Usa il tema scuro",
   "downloads.platform_options": "Vedi le opzioni per {platform}",
   "downloads.macos": "macOS",
   "downloads.windows": "Windows",

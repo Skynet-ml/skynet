@@ -25,8 +25,6 @@
   "downloads.cli_description": "आपके टर्मिनल के लिए टूल।",
   "downloads.docs": "दस्तावेज़",
   "downloads.navigation": "डाउनलोड नेविगेशन",
-  "downloads.light_theme": "लाइट थीम इस्तेमाल करें",
-  "downloads.dark_theme": "डार्क थीम इस्तेमाल करें",
   "downloads.platform_options": "{platform} के विकल्प देखें",
   "downloads.macos": "macOS",
   "downloads.windows": "Windows",
