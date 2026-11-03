@@ -24,6 +24,8 @@ export interface IdeCodingAgent {
   setModel: (model: string | null) => void;
   effort: string | null;
   setEffort: (effort: string | null) => void;
+  fast: boolean;
+  setFast: (fast: boolean) => void;
   /** The agent's last turn-ending verify_code verdict, newer than `lastCheck`; null otherwise. */
   verdict: AgentVerdict | null;
   /** Counts finished turns that wrote into the workspace. */
@@ -78,6 +80,7 @@ export function useIdeCodingAgent(options: {
   const repo = context?.target === "repo";
   const [model, setModel] = React.useState<string | null>(null);
   const [effort, setEffort] = React.useState<string | null>(null);
+  const [fast, setFast] = React.useState(false);
   const [runEdited, setRunEdited] = React.useState(false);
   const [metricEdited, setMetricEdited] = React.useState(false);
   const [runValidation, setRunValidation] = React.useState<ValidateCodeResponse | null>(null);
@@ -148,6 +151,7 @@ export function useIdeCodingAgent(options: {
     model,
     resolveModel: resolveCodeModel,
     reasoningEffort: effort,
+    fastMode: fast,
     resolveEffort: localAgentEffort,
     initialMessages: options.initialMessages,
   });
@@ -234,5 +238,5 @@ export function useIdeCodingAgent(options: {
     if (!repo) void check();
   }, [busy, agent.status, context, repo, runCode, metricCode, files, key, lastCheck, check]);
 
-  return { agent, model, setModel, effort, setEffort, verdict, writtenTurns };
+  return { agent, model, setModel, effort, setEffort, fast, setFast, verdict, writtenTurns };
 }

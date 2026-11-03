@@ -44,6 +44,7 @@ from ...constants import (
     TOKEN_SOURCE_BYOK,
     TOKEN_SOURCE_MANAGED,
 )
+from ...local.cli_catalog import RetiredEffort
 from ...models import ModelConfig
 from ...service_gateway import tagging
 from ...service_gateway.agents.kickoff import fits_kickoff_budget, oversized_kickoff
@@ -54,6 +55,7 @@ from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..model_catalog import ReasoningEffort, get_catalog_cached, is_hidden_model
 from ..model_router import (
+    cli_fast_config,
     effective_reasoning_effort,
     metering_token_source,
     route_interview_model,
@@ -101,9 +103,19 @@ class InterviewRequest(BaseModel):
             "default model."
         ),
     )
-    reasoning_effort: ReasoningEffort | None = Field(
+    reasoning_effort: ReasoningEffort | RetiredEffort | None = Field(
         default=None,
-        description=("Explicit reasoning-effort level for the chosen model; absent keeps the model's default."),
+        description=(
+            "Explicit reasoning-effort level for the chosen model; absent keeps the model's default. "
+            "The retired levels ``ultra`` and ``ultracode`` run at the model's top level."
+        ),
+    )
+    fast_mode: bool = Field(
+        default=False,
+        description=(
+            "Run this turn in the CLI's fast mode. Applies only to a local CLI model that takes "
+            "fast mode; any other model ignores it."
+        ),
     )
 
 
@@ -378,7 +390,7 @@ def create_tagger_assist_router(*, job_store, get_worker_ref: Callable[[], Any])
                 model=model,
                 reasoning_effort=effective_reasoning_effort(model, req.reasoning_effort),
                 usage_sink=usage_sink,
-                model_config=byok_config,
+                model_config=byok_config or cli_fast_config(model, req.fast_mode),
             )
         except Exception as exc:
             logger.exception("interview turn failed for session %s", session_id)
@@ -449,7 +461,7 @@ def create_tagger_assist_router(*, job_store, get_worker_ref: Callable[[], Any])
                     model=model,
                     reasoning_effort=effective_reasoning_effort(model, req.reasoning_effort),
                     usage_sink=usage_sink,
-                    model_config=byok_config,
+                    model_config=byok_config or cli_fast_config(model, req.fast_mode),
                 ):
                     yield event
             except Exception:

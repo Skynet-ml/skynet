@@ -3897,6 +3897,8 @@ export interface CodeAgentRequest {
   model?: string;
   // Explicit reasoning-effort level for the chosen model; absent keeps its default.
   reasoning_effort?: string;
+  // Runs a local CLI model in its fast mode; the backend ignores it elsewhere.
+  fast_mode?: boolean;
   unified?: UnifiedAuthoringContext;
   // Unified authoring only: the agent opens the conversation itself; the server
   // supplies the hidden opening message in place of `user_message`.

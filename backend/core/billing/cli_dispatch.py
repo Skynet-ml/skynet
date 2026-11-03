@@ -25,14 +25,14 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 from uuid import uuid4
 
 import httpx
 
 from .. import config
 from ..config import Settings
-from ..local.cli_catalog import CliProvider, cli_model_arg
+from ..local.cli_catalog import CliProvider, RetiredEffort, cli_efforts, cli_fast, cli_model_arg
 from ..local.cli_probe import read_cli_limits, write_cli_limit
 from .cli_runners import RUNNERS, CliCompletion, CliRunError, SubscriptionRateLimitedError
 from .model_dispatch import ModelHTTPResult
@@ -54,6 +54,12 @@ _UNSUPPORTED_PATHS = frozenset({"/responses", "/embeddings"})
 _RETRY_DELAYS_SECONDS = (2.0, 4.0, 8.0)
 _MAX_REQUEST_BYTES = 32 * 1024 * 1024
 _PRICE_TIMEOUT_SECONDS = 10
+# The request field that carries the turn's effort to the CLI. A plain
+# ``reasoning_effort`` cannot do it: dspy adds ``"low"`` to a call whose LM has
+# no effort, so it would override the CLI's default on turns with no pick.
+CLI_EFFORT_KEY = "skynet_cli_effort"
+# The request field that asks the CLI for fast mode on the turn's calls.
+CLI_FAST_KEY = "skynet_cli_fast"
 # A thinking label is a side call the turn never waits for. It runs in its
 # own one-call pool and never waits there, so labels cannot hold the slots of
 # the turn's own CLI calls; its client gives up after 8 s, so a longer run is
@@ -681,6 +687,8 @@ class CliDispatcher:
         prompt = render_prompt(chat)
         prefix = cache_prefix(chat)
         schema = _schema(chat)
+        effort = request.get(CLI_EFFORT_KEY)
+        fast = request.get(CLI_FAST_KEY) is True
         capped: SubscriptionRateLimitedError | None = None
         evidence: dict[str, Any] = {"provider": "subscription", "model": self.model, "cli": self.cli}
         for provider in self._providers():
@@ -699,7 +707,7 @@ class CliDispatcher:
                 continue
             started = time.monotonic()
             try:
-                completion = self._run(provider, model_arg, prompt, schema, stream, prefix)
+                completion = self._run(provider, model_arg, prompt, schema, stream, prefix, effort, fast)
             except SubscriptionRateLimitedError as error:
                 capped = error
                 if error.reset_at is not None:
@@ -740,6 +748,8 @@ class CliDispatcher:
         schema: dict[str, Any] | None,
         stream: _ChatStream | None = None,
         prefix: str = "",
+        effort: Any = None,
+        fast: bool = False,
     ) -> CliCompletion:
         """Run one CLI call, retrying transient failures with jittered back-off.
 
@@ -756,6 +766,12 @@ class CliDispatcher:
             schema: A JSON schema for the answer, or ``None``.
             stream: The live chat stream, or ``None``.
             prefix: The start of ``prompt`` that later calls repeat, or ``""``.
+            effort: The turn's effort level from the request, or ``None``. A
+                side call ignores it, and a level this model does not take on
+                ``provider`` (:func:`cli_efforts`) is dropped.
+            fast: Whether the request asks for fast mode. A side call ignores
+                it, and a model without fast mode on ``provider``
+                (:func:`cli_fast`) drops it.
 
         Returns:
             The completion.
@@ -769,14 +785,23 @@ class CliDispatcher:
             return self._run_label(provider, model_arg, prompt, schema)
         slots = _semaphore(provider, self.settings.cli_max_concurrency)
         # Only claude takes a cache mark from the caller.
-        cached = {"cache_prefix": prefix} if provider == "claude" and prefix else {}
+        runner_kwargs: dict[str, Any] = {"cache_prefix": prefix} if provider == "claude" and prefix else {}
+        levels = cli_efforts(provider, self.model)
+        # An old pick of a retired level, which the UI shows as Max, runs at the
+        # model's top level. So does Max on a model whose top is lower.
+        if (effort in get_args(RetiredEffort) or (effort == "max" and "max" not in levels)) and levels:
+            effort = levels[-1]
+        if isinstance(effort, str) and effort in levels:
+            runner_kwargs["effort"] = effort
+        if fast and cli_fast(provider, self.model):
+            runner_kwargs["fast"] = True
         for retry in range(len(_RETRY_DELAYS_SECONDS) + 1):
             if stream is not None and not stream.started:
                 # Held text of a failed attempt must not prefix the next one's.
                 stream.content = stream.sent = ""
             try:
                 with slots:
-                    return runner(model_arg, prompt, schema, self.settings, _step_cwd(), stream, **cached)
+                    return runner(model_arg, prompt, schema, self.settings, _step_cwd(), stream, **runner_kwargs)
             except CliRunError as error:
                 streamed = stream is not None and stream.started
                 if not error.transient or streamed or retry == len(_RETRY_DELAYS_SECONDS):

@@ -271,7 +271,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       }
       if (ev.status === "ok" && ev.tool === "open_page") {
         const nav = parseAgentNavigation(ev.result);
-        if (nav?.kind === "settings" && Object.hasOwn(SETTINGS_TABS, nav.tab)) openSettingsTo(nav.tab);
+        if (nav?.kind === "settings" && Object.hasOwn(SETTINGS_TABS, nav.tab))
+          openSettingsTo(nav.tab);
         else if (nav?.kind === "route") router.push(nav.path);
       }
       if (ev.status === "ok" && SUBMIT_TOOLS.has(ev.tool)) {
@@ -855,7 +856,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                   <ShareNetwork className="size-3.5" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="bottom">{msg("shared.agent.share_conversation")}</TooltipContent>
+              <TooltipContent side="bottom">
+                {msg("shared.agent.share_conversation")}
+              </TooltipContent>
             </Tooltip>
           )}
           {agent.messages.length > 0 && (
@@ -981,6 +984,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             onChange={agent.setModel}
             effort={agent.reasoningEffort}
             onEffortChange={agent.setReasoningEffort}
+            fast={agent.fastMode}
+            onFastChange={agent.setFastMode}
             models={localMenu.models}
             openRouterEngine={localMenu.openRouterEngine}
           />

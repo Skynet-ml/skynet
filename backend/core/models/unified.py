@@ -491,6 +491,8 @@ class TaskInterviewRequest(BaseModel):
     locale: str | None = None
     model: str | None = None
     reasoning_effort: str | None = None
+    # Applies only to a local CLI model that takes fast mode.
+    fast_mode: bool = False
 
 
 # Data of the interview's terminal ``interview_done`` event.

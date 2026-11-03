@@ -8,6 +8,7 @@ import time
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -26,6 +27,7 @@ from core.billing.tests.test_cli_runners import (
     fake_cli,
     local_settings,
     printing,
+    requests,
     waiting_for,
 )
 from core.local.cli_probe import read_cli_limits
@@ -260,6 +262,124 @@ def test_schema_request_reaches_the_cli(tmp_path: Path) -> None:
     assert json.loads(_body(result)["choices"][0]["message"]["content"]) == {"ok": True}
     [call] = calls(tmp_path, "claude")
     assert json.loads(call["argv"][call["argv"].index("--json-schema") + 1]) == schema
+
+
+def test_turn_effort_reaches_the_cli(tmp_path: Path) -> None:
+    """Run a turn at the effort its request carries, and ignore a value that is no level."""
+    fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))
+    model = "anthropic/claude-opus-5.5"
+    request = {**REQUEST, "model": model}
+    dispatcher = CliDispatcher(None, "claude", model, "agent", local_settings(tmp_path))
+    dispatcher.dispatch("/chat/completions", {**request, cli_dispatch.CLI_EFFORT_KEY: "max"})
+    dispatcher.dispatch("/chat/completions", {**request, cli_dispatch.CLI_EFFORT_KEY: {"effort": "high"}})
+    dispatcher.dispatch("/chat/completions", {**request, cli_dispatch.CLI_EFFORT_KEY: "minimal"})
+    dispatcher.dispatch("/chat/completions", {**request, "reasoning_effort": "low"})
+    first, *rest = calls(tmp_path, "claude")
+    assert first["argv"][first["argv"].index("--effort") + 1] == "max"
+    assert all("--effort" not in call["argv"] for call in rest)
+
+
+@pytest.mark.parametrize(
+    ("cli", "model", "effort", "sent"),
+    [
+        ("claude", "anthropic/claude-opus-4.7", "xhigh", "xhigh"),
+        ("claude", "anthropic/claude-sonnet-4.6", "max", "max"),
+        ("claude", "anthropic/claude-sonnet-4.6", "xhigh", None),
+        ("claude", "anthropic/claude-opus-4.5", "high", "high"),
+        ("claude", "anthropic/claude-opus-4.5", "max", "high"),
+        ("claude", "anthropic/claude-haiku-4.5", "max", None),
+        ("claude", "anthropic/claude-haiku-4.5", "low", None),
+        ("claude", "anthropic/claude-sonnet-4.5", "medium", None),
+        ("codex", "openai/gpt-6.1-sol", "max", "max"),
+        ("codex", "openai/gpt-6.1-sol", "ultra", "max"),
+        ("codex", "openai/gpt-6-luna", "ultra", "max"),
+        ("codex", "openai/gpt-6.1-sol", "ultracode", "max"),
+        ("claude", "anthropic/claude-opus-5.5", "ultracode", "max"),
+        ("claude", "anthropic/claude-sonnet-4.6", "ultracode", "max"),
+        ("claude", "anthropic/claude-opus-5.5", "ultra", "max"),
+        ("claude", "anthropic/claude-opus-4.5", "ultracode", "high"),
+        ("claude", "anthropic/claude-haiku-4.5", "ultracode", None),
+    ],
+)
+def test_turn_effort_follows_the_model_levels(
+    cli: str, model: str, effort: str, sent: str | None, tmp_path: Path
+) -> None:
+    """Send only a level the model takes on its CLI, map Max or a retired level to its top, and drop any other.
+
+    Args:
+        cli: The CLI the turn runs on.
+        model: The turn's catalog slug.
+        effort: The picked level.
+        sent: The level the CLI gets, or ``None`` when the dispatcher drops it.
+        tmp_path: Holds the fake CLI and its call log.
+    """
+    if cli == "claude":
+        fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))
+    else:
+        fake_app_server(tmp_path, emitting(*CODEX_TURN))
+    settings = local_settings(tmp_path, cli_fallback_order="")
+    CliDispatcher(None, cli, model, "agent", settings).dispatch(
+        "/chat/completions", {**REQUEST, "model": model, cli_dispatch.CLI_EFFORT_KEY: effort}
+    )
+    if cli == "claude":
+        [call] = calls(tmp_path, "claude")
+        got = call["argv"][call["argv"].index("--effort") + 1] if "--effort" in call["argv"] else None
+    else:
+        [turn] = (message for message in requests(tmp_path) if message.get("method") == "turn/start")
+        got = turn["params"].get("effort")
+    assert got == sent
+
+
+@pytest.mark.parametrize(
+    ("cli", "model", "fast", "sent"),
+    [
+        ("claude", "anthropic/claude-opus-5.5", True, True),
+        ("claude", "anthropic/claude-opus-4.7", True, False),
+        ("claude", "anthropic/claude-opus-5.5", "yes", False),
+        ("claude", "anthropic/claude-opus-5.5", None, False),
+        ("codex", "openai/gpt-5.6-luna", True, True),
+        ("codex", "openai/gpt-5.6-luna", 1, False),
+    ],
+)
+def test_turn_fast_mode_follows_the_model(cli: str, model: str, fast: Any, sent: bool, tmp_path: Path) -> None:
+    """Send fast mode only when the request asks with ``True`` and the model takes it.
+
+    Args:
+        cli: The CLI the turn runs on.
+        model: The turn's catalog slug.
+        fast: The request's fast value.
+        sent: Whether the CLI gets fast mode.
+        tmp_path: Holds the fake CLI and its call log.
+    """
+    if cli == "claude":
+        fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))
+    else:
+        fake_app_server(tmp_path, emitting(*CODEX_TURN))
+    settings = local_settings(tmp_path, cli_fallback_order="")
+    CliDispatcher(None, cli, model, "agent", settings).dispatch(
+        "/chat/completions", {**REQUEST, "model": model, cli_dispatch.CLI_FAST_KEY: fast}
+    )
+    if cli == "claude":
+        [call] = calls(tmp_path, "claude")
+        argv = call["argv"]
+        got = "--fast-mode" in argv and argv[argv.index("--fast-mode") + 1] == "on"
+    else:
+        [turn] = (message for message in requests(tmp_path) if message.get("method") == "turn/start")
+        got = turn["params"].get("serviceTier") == "priority"
+    assert got is sent
+
+
+def test_side_call_ignores_the_turn_effort(tmp_path: Path) -> None:
+    """Keep a thinking label at no effort and no fast mode, because it runs without thinking."""
+    fake_cli(tmp_path, "claude", printing(CLAUDE_SUCCESS))
+    model = "anthropic/claude-opus-5.5"
+    CliDispatcher(None, "claude", model, cli_dispatch.THINKING_LABEL_ROLE, local_settings(tmp_path)).dispatch(
+        "/chat/completions",
+        {**REQUEST, "model": model, cli_dispatch.CLI_EFFORT_KEY: "max", cli_dispatch.CLI_FAST_KEY: True},
+    )
+    [call] = calls(tmp_path, "claude")
+    assert "--effort" not in call["argv"]
+    assert "--fast-mode" not in call["argv"]
 
 
 def test_agent_steps_share_one_empty_working_directory() -> None:

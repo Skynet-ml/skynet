@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import get_args
 
 from ..billing.byok_bridge import resolve_byok_model_config
 from ..billing.byok_vault import ProviderKeyVault
+from ..billing.cli_dispatch import CLI_FAST_KEY
 from ..config import settings
 from ..constants import TOKEN_SOURCE_BYOK, TOKEN_SOURCE_MANAGED
-from ..local.cli_catalog import CLI_MODELS, parse_subscription_model_id
+from ..local.cli_catalog import CLI_MODELS, RetiredEffort, parse_subscription_model_id
 from ..models import ModelConfig
 from .errors import DomainError
 from .interview_model import interview_model_id
@@ -84,6 +86,27 @@ def route_agent_model(model: str | None) -> ModelConfig:
     return ModelConfig(name=name or agent_model_id(settings.generalist_agent_model))
 
 
+def cli_fast_config(model: str | None, fast_mode: bool) -> ModelConfig | None:
+    """Build the config that runs a local CLI turn in the CLI's fast mode.
+
+    Args:
+        model: The id the turn runs on, after routing.
+        fast_mode: Whether the composer asked for fast mode.
+
+    Returns:
+        A subscription config that carries :data:`CLI_FAST_KEY`, or ``None``
+        when fast mode is off or ``model`` is not a local CLI model. The CLI
+        dispatcher drops the flag for a model that does not take fast mode.
+    """
+    subscription = parse_subscription_model_id(model or "") if fast_mode and settings.local_mode else None
+    if subscription is None:
+        return None
+    cli, slug = subscription
+    return ModelConfig(
+        name=slug, token_source="subscription", cli_provider=cli, extra={"extra_body": {CLI_FAST_KEY: True}}
+    )
+
+
 def effective_reasoning_effort(model: str | None, requested: str | None) -> str | None:
     """Resolve the effort to send for a turn, on the model's own effort ladder.
 
@@ -107,6 +130,11 @@ def effective_reasoning_effort(model: str | None, requested: str | None) -> str 
         catalog knows one; otherwise :func:`unpicked_effort` of the model
         (its default effort, or low for an opt-in thinker).
     """
+    # A retired level (``ultra`` / ``ultracode``) from an old pick runs at the
+    # top level: the CLI dispatcher maps it for a local CLI model, and "max"
+    # snaps onto any other model's ladder below.
+    if requested in get_args(RetiredEffort) and parse_subscription_model_id(model or "") is None:
+        requested = "max"
     if not model:
         return requested
     try:
