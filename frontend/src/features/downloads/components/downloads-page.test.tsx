@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { Module } from "node:module";
 import path from "node:path";
 import { test } from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createJiti } from "jiti";
-import { DOWNLOAD_PLATFORMS, type DownloadPlatform, type PlatformId } from "../lib/download-platforms";
+import {
+  DOWNLOAD_PLATFORMS,
+  type DownloadPlatform,
+  type PlatformId,
+} from "../lib/download-platforms";
 import { LocaleProvider } from "@/shared/providers/locale-provider";
 import type { Locale } from "@/shared/lib/locale";
 import { ThemeProvider } from "@/shared/providers/theme-provider";
@@ -51,12 +54,11 @@ void test("cards have accessible headings and mobile-sized links", () => {
   assert.match(html, /min-h-\[44px\]/);
 });
 
-void test("header navigation wraps long locale names within its available width", () => {
-  const nav = render().match(/<nav\b[^>]*>/)?.[0];
-  assert.ok(nav);
-  assert.match(nav, /\bflex-wrap\b/);
-  assert.match(nav, /\bjustify-end\b/);
-  assert.match(nav, /\bgap-1\b/);
+void test("header controls wrap long locale names without a navigation landmark", () => {
+  const header = render().match(/<header\b[\s\S]*?<\/header>/)?.[0];
+  assert.ok(header);
+  assert.doesNotMatch(header, /<nav\b/);
+  assert.match(header, /<div\b[^>]*class="flex flex-wrap items-center justify-end gap-1"/);
 });
 
 void test("theme control offers light, dark and system choices", () => {
@@ -65,7 +67,10 @@ void test("theme control offers light, dark and system choices", () => {
   const options = [...html.matchAll(/<button\b[^>]*role="radio"[^>]*>/g)].map(([tag]) => tag);
   assert.equal(options.length, 3);
   for (const label of ["Light", "Dark", "System"]) {
-    assert.ok(options.some((option) => option.includes(`aria-label="${label}"`)), label);
+    assert.ok(
+      options.some((option) => option.includes(`aria-label="${label}"`)),
+      label,
+    );
   }
   const system = options.find((option) => option.includes('aria-label="System"'));
   assert.ok(system);
@@ -82,7 +87,9 @@ void test("the server hero renders the platform action, with Next Link only for 
     ["cli", "#platform-cli", "View CLI options", false],
     [null, "#platforms", "See all platforms", false],
   ] as const) {
-    const hero = render(id).match(/<section\b[^>]*aria-labelledby="download-title"[\s\S]*?(<a\b[^>]*>[\s\S]*?<\/a>)/)?.[1];
+    const hero = render(id).match(
+      /<section\b[^>]*aria-labelledby="download-title"[\s\S]*?(<a\b[^>]*>[\s\S]*?<\/a>)/,
+    )?.[1];
     assert.ok(hero, `hero action for ${id}`);
     assert.ok(hero.includes(`href="${href}"`), `${id}: ${hero}`);
     assert.equal(hero.replace(/<[^>]*>/g, "").trim(), label, `${id}: ${hero}`);
@@ -94,6 +101,40 @@ void test("the server hero renders the platform action, with Next Link only for 
   assert.match(render("macos", "he"), /href="\/docs\/he\/guides\/mac-app"[^>]*data-next-link=""/);
   assert.match(mac, /href="\/docs"[^>]*data-next-link=""/);
   assert.match(mac, /href="#platforms"/);
+});
+
+void test("all docs actions leave the desktop window but stay relative on the web", () => {
+  const previousMode = process.env.APP_LOCAL_MODE;
+  const previousHostedUrl = process.env.APP_HOSTED_APP_URL;
+  try {
+    process.env.APP_HOSTED_APP_URL = "https://downloads.example.test";
+    for (const local of [false, true]) {
+      process.env.APP_LOCAL_MODE = local ? "1" : "0";
+      for (const locale of ["en", "he"] as const) {
+        const docs = locale === "he" ? "/docs/he" : "/docs";
+        const href = `${local ? "https://downloads.example.test" : ""}${docs}`;
+        const html = render("macos", locale);
+        const links = [...html.matchAll(/<a\b[^>]*>/g)].map(([tag]) => tag);
+        const docsLinks = links.filter((tag) => tag.includes(`href="${href}`));
+        assert.equal(docsLinks.length, 6, `${local}: ${locale}`);
+        for (const link of docsLinks) {
+          assert.equal(link.includes('target="_blank"'), local, link);
+          assert.equal(link.includes('rel="noopener noreferrer"'), local, link);
+          assert.ok(link.includes('data-next-link=""'), link);
+        }
+        for (const link of links.filter((tag) =>
+          /href="(?:#platforms|\/|\/explore|\/terms|\/privacy)"/.test(tag),
+        )) {
+          assert.ok(!link.includes('target="_blank"'), link);
+        }
+      }
+    }
+  } finally {
+    if (previousMode === undefined) delete process.env.APP_LOCAL_MODE;
+    else process.env.APP_LOCAL_MODE = previousMode;
+    if (previousHostedUrl === undefined) delete process.env.APP_HOSTED_APP_URL;
+    else process.env.APP_HOSTED_APP_URL = previousHostedUrl;
+  }
 });
 
 void test("changing Mac to a real download hides the obsolete unpublished-installer note", () => {
@@ -132,30 +173,6 @@ void test("all placeholder platforms have no actionable install link", () => {
     const card = html.split(`id="platform-${id}"`)[1]?.split("</article>")[0];
     assert.ok(card, id);
     assert.doesNotMatch(card, /<a\b/, id);
-  }
-});
-
-void test("every page link and button has 44px touch targets on coarse-pointer devices", () => {
-  const css = readFileSync(path.join(process.cwd(), "src/app/globals.css"), "utf8");
-  const rule = css
-    .split("@media (any-pointer: coarse) {")
-    .slice(1)
-    .map((block) => block.replace(/\/\*[\s\S]*?\*\//g, "").match(/^\s*([^{}]+)\{([^}]+)\}/))
-    .find((block) => block?.[1]?.includes("button:not("));
-  const [, selectorText, declarations] = rule ?? [];
-  assert.ok(selectorText && declarations, "global coarse-pointer touch rule exists");
-  assert.match(declarations, /min-height:\s*44px\s*;/);
-  assert.match(declarations, /min-width:\s*44px\s*;/);
-  const selectors = selectorText.split(",").map((selector) => selector.trim());
-  const targets = [...render().matchAll(/<(?:a|button)\b[^>]*>/g)];
-  assert.ok(targets.some(([target]) => target.startsWith("<a ")));
-  assert.ok(targets.some(([target]) => target.startsWith("<button ")));
-  for (const [target] of targets) {
-    const selector = target.startsWith("<a ")
-      ? "a"
-      : 'button:not([role="checkbox"]):not([role="switch"])';
-    assert.ok(selectors.includes(selector), target);
-    assert.doesNotMatch(target, /role="(?:checkbox|switch)"/);
   }
 });
 

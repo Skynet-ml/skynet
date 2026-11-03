@@ -40,11 +40,51 @@ test("Linux detection does not depend on touchscreen capacity", () => {
 test("the hero action follows each detected platform and the unknown fallback", () => {
   for (const [id, expected] of [
     ["macos", { href: "/guides/mac-app", label: "downloads.apple_silicon", icon: "apple" }],
-    ["windows", { href: "#platform-windows", label: "downloads.platform_options", icon: "download", platform: "downloads.windows" }],
-    ["linux", { href: "#platform-linux", label: "downloads.platform_options", icon: "download", platform: "downloads.linux" }],
-    ["ios", { href: "#platform-ios", label: "downloads.platform_options", icon: "download", platform: "downloads.ios" }],
-    ["android", { href: "#platform-android", label: "downloads.platform_options", icon: "download", platform: "downloads.android" }],
-    ["cli", { href: "#platform-cli", label: "downloads.platform_options", icon: "download", platform: "downloads.cli" }],
+    [
+      "windows",
+      {
+        href: "#platform-windows",
+        label: "downloads.platform_options",
+        icon: "download",
+        platform: "downloads.windows",
+      },
+    ],
+    [
+      "linux",
+      {
+        href: "#platform-linux",
+        label: "downloads.platform_options",
+        icon: "download",
+        platform: "downloads.linux",
+      },
+    ],
+    [
+      "ios",
+      {
+        href: "#platform-ios",
+        label: "downloads.platform_options",
+        icon: "download",
+        platform: "downloads.ios",
+      },
+    ],
+    [
+      "android",
+      {
+        href: "#platform-android",
+        label: "downloads.platform_options",
+        icon: "download",
+        platform: "downloads.android",
+      },
+    ],
+    [
+      "cli",
+      {
+        href: "#platform-cli",
+        label: "downloads.platform_options",
+        icon: "download",
+        platform: "downloads.cli",
+      },
+    ],
     [null, { href: "#platforms", label: "downloads.all_platforms", icon: "download" }],
   ] as const) {
     assert.deepEqual(heroActionForPlatform(id), expected);
@@ -52,7 +92,8 @@ test("the hero action follows each detected platform and the unknown fallback", 
 });
 
 test("Android Chrome desktop-site mode has an indistinguishable Linux user agent", () => {
-  const desktopSiteUA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36";
+  const desktopSiteUA =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36";
   assert.equal(detectPlatform(desktopSiteUA, 5), "linux");
 });
 
@@ -61,11 +102,11 @@ const catalog = (locale: string): Record<string, string> =>
     fs.readFileSync(path.resolve(process.cwd(), `../i18n/locales/ui/${locale}.json`), "utf8"),
   );
 
-test("catalogs contain no obsolete Downloads theme labels", () => {
+test("catalogs contain no obsolete Downloads labels", () => {
   for (const file of fs.readdirSync(path.resolve(process.cwd(), "../i18n/locales/ui"))) {
     if (!file.endsWith(".json")) continue;
     const messages = catalog(file.slice(0, -5));
-    for (const key of ["downloads.light_theme", "downloads.dark_theme"]) {
+    for (const key of ["downloads.light_theme", "downloads.dark_theme", "downloads.navigation"]) {
       assert.equal(Object.hasOwn(messages, key), false, `${file}: ${key}`);
     }
   }
@@ -83,7 +124,6 @@ test("RTL minimum versions use words rather than a bidi-sensitive trailing plus"
 test("regional copy follows existing spelling and terminology", () => {
   assert.match(catalog("en-GB")["downloads.intro"] ?? "", /Optimise/);
   assert.match(catalog("pt-BR")["downloads.browser"] ?? "", /aplicativo/);
-  assert.equal(catalog("pt-BR")["downloads.navigation"], "Navegação de downloads");
   assert.equal(catalog("pt-BR")["downloads.download"], "Baixar");
   assert.match(catalog("es-419")["downloads.intro"] ?? "", /computadora/);
   assert.doesNotMatch(
@@ -109,5 +149,14 @@ test("every configured guide exists in every full docs locale", () => {
         );
       }
     }
+  }
+});
+
+test("every localized Mac guide links to Downloads", () => {
+  const docsRoot = path.resolve(process.cwd(), "src/features/docs/content");
+  for (const locale of fs.readdirSync(docsRoot)) {
+    if (!fs.statSync(path.join(docsRoot, locale)).isDirectory()) continue;
+    const guide = fs.readFileSync(path.join(docsRoot, locale, "guides/mac-app.md"), "utf8");
+    assert.ok(guide.includes("](/download)"), locale);
   }
 });

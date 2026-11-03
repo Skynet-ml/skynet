@@ -65,12 +65,7 @@ test("hosted builds route by path only", () => {
 });
 
 test("signed-out pages load the brand icons and artwork", () => {
-  for (const path of [
-    "/favicon.png",
-    "/favicon-dark.png",
-    "/apple-icon.png",
-    "/brand/hoatzin-light-256.webp",
-  ]) {
+  for (const path of ["/favicon.png", "/favicon-dark.png", "/apple-icon.png", "/brand/hoatzin-light-256.webp"]) {
     assert.equal(proxyRoute("staging.skynetml.com", path, {}), "pass", path);
   }
 });

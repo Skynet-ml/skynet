@@ -24,7 +24,6 @@
   "downloads.mobile_description": "Ваши оптимизации всегда с вами.",
   "downloads.cli_description": "Инструменты для вашего терминала.",
   "downloads.docs": "Документация",
-  "downloads.navigation": "Навигация по загрузкам",
   "downloads.platform_options": "Варианты для {platform}",
   "downloads.macos": "macOS",
   "downloads.windows": "Windows",

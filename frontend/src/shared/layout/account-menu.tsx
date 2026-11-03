@@ -291,10 +291,12 @@ export function AccountMenu({
           {msg("app.shell.account.docs")}
         </Link>
 
-        <Link href="/download" onClick={close} className={COMPACT_POPOVER_ITEM_CLASS}>
-          <DownloadSimple className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
-          {msg("downloads.title")}
-        </Link>
+        {!local && (
+          <Link href="/download" onClick={close} className={COMPACT_POPOVER_ITEM_CLASS}>
+            <DownloadSimple className={COMPACT_POPOVER_ICON_CLASS} aria-hidden="true" />
+            {msg("downloads.title")}
+          </Link>
+        )}
 
         <div role="separator" className="my-1 h-px bg-border/60" />
 

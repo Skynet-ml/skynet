@@ -68,6 +68,19 @@ function menuItem(label: string): { onClick: () => void } {
 
 const ada: LinkedAccount = { linked: true, name: "Ada", email: "ada@example.com", offline: false };
 
+void it("shows Downloads on the web but hides it in the desktop app", () => {
+  const previousMode = process.env.APP_LOCAL_MODE;
+  try {
+    process.env.APP_LOCAL_MODE = "0";
+    assert.match(render(ada), /href="\/download"/);
+    process.env.APP_LOCAL_MODE = "1";
+    assert.doesNotMatch(render(ada), /href="\/download"/);
+  } finally {
+    if (previousMode === undefined) delete process.env.APP_LOCAL_MODE;
+    else process.env.APP_LOCAL_MODE = previousMode;
+  }
+});
+
 void describe("AccountMenu link states in local mode", () => {
   beforeEach(() => {
     process.env.APP_LOCAL_MODE = "1";

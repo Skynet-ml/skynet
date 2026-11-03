@@ -18,9 +18,16 @@ import { LanguageSwitcher } from "@/shared/ui/language-switcher";
 import { useLocale } from "@/shared/providers";
 import { DocsThemeToggle } from "@/features/docs/client";
 import { docsPathForLocale } from "@/shared/lib/locale";
+import { docsLinkProps } from "@/shared/lib/docs-link";
+import { isLocalMode } from "@/shared/lib/runtime-env";
 import { msg } from "@/shared/lib/messages";
 import { APP_NAME } from "@/shared/lib/brand";
-import { DOWNLOAD_PLATFORMS, detectPlatform, heroActionForPlatform, type PlatformId } from "../lib/download-platforms";
+import {
+  DOWNLOAD_PLATFORMS,
+  detectPlatform,
+  heroActionForPlatform,
+  type PlatformId,
+} from "../lib/download-platforms";
 
 const ICONS = { apple: AppleLogo, desktop: Desktop, phone: DeviceMobile, terminal: Terminal };
 
@@ -28,14 +35,20 @@ export function DownloadsPage({ initialPlatform }: { initialPlatform: PlatformId
   const { locale } = useLocale();
   const [detected, setDetected] = useState<PlatformId | null>(initialPlatform);
   const docs = docsPathForLocale(locale);
+  const local = isLocalMode();
   const platform = DOWNLOAD_PLATFORMS.find((item) => item.id === detected);
   const action = heroActionForPlatform(detected);
   const PrimaryIcon = action.icon === "download" ? ArrowDown : ICONS[action.icon];
   const PrimaryLink = action.href.startsWith("#") ? "a" : Link;
   const platformHref = (href: string) => (href.startsWith("/guides/") ? `${docs}${href}` : href);
+  const platformLinkProps = (href: string) => docsLinkProps(platformHref(href), local);
 
   useEffect(() => {
-    if (initialPlatform === "macos" && detectPlatform(navigator.userAgent, navigator.maxTouchPoints) === "ios") {
+    // iPad Safari's desktop UA looks like macOS; only the browser exposes touch points.
+    if (
+      initialPlatform === "macos" &&
+      detectPlatform(navigator.userAgent, navigator.maxTouchPoints) === "ios"
+    ) {
       setDetected("ios");
     }
   }, [initialPlatform]);
@@ -59,7 +72,7 @@ export function DownloadsPage({ initialPlatform }: { initialPlatform: PlatformId
             <AppMark className="size-8" aria-hidden="true" />
             <span className="text-sm font-bold uppercase tracking-[0.16em]">{APP_NAME}</span>
           </Link>
-          <nav className="flex flex-wrap items-center justify-end gap-1" aria-label={msg("downloads.navigation")}>
+          <div className="flex flex-wrap items-center justify-end gap-1">
             <LanguageSwitcher />
             <DocsThemeToggle
               labels={{
@@ -70,9 +83,9 @@ export function DownloadsPage({ initialPlatform }: { initialPlatform: PlatformId
               }}
             />
             <Button variant="outline" size="sm" asChild className="ms-1 max-lg:min-h-[44px]">
-              <Link href={docs}>{msg("downloads.docs")}</Link>
+              <Link {...docsLinkProps(docs, local)}>{msg("downloads.docs")}</Link>
             </Button>
-          </nav>
+          </div>
         </div>
       </header>
       <main className="mx-auto max-w-6xl px-5 sm:px-8">
@@ -102,9 +115,12 @@ export function DownloadsPage({ initialPlatform }: { initialPlatform: PlatformId
                 size="lg"
                 className="h-auto min-h-10 min-w-[min(100%,18rem)] max-w-full whitespace-normal py-2 text-center max-lg:min-h-[44px]"
               >
-                <PrimaryLink href={platformHref(action.href)}>
+                <PrimaryLink {...platformLinkProps(action.href)}>
                   <PrimaryIcon aria-hidden="true" />
-                  {msg(action.label, action.platform ? { platform: msg(action.platform) } : undefined)}
+                  {msg(
+                    action.label,
+                    action.platform ? { platform: msg(action.platform) } : undefined,
+                  )}
                 </PrimaryLink>
               </Button>
               <Button
@@ -183,7 +199,7 @@ export function DownloadsPage({ initialPlatform }: { initialPlatform: PlatformId
                         asChild
                         className="h-auto min-h-9 w-full whitespace-normal text-center max-lg:min-h-[44px]"
                       >
-                        <Link href={platformHref(item.primary.href)}>
+                        <Link {...platformLinkProps(item.primary.href)}>
                           {item.status === "download" ? (
                             <ArrowDown aria-hidden="true" />
                           ) : (
@@ -195,7 +211,7 @@ export function DownloadsPage({ initialPlatform }: { initialPlatform: PlatformId
                       {item.secondary?.map((link) => (
                         <Link
                           key={link.label}
-                          href={platformHref(link.href)}
+                          {...platformLinkProps(link.href)}
                           className="mt-3 flex min-h-[44px] items-center justify-center rounded-md text-center text-xs leading-relaxed text-muted-foreground underline underline-offset-4 hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
                         >
                           {msg(link.label)}
@@ -224,7 +240,7 @@ export function DownloadsPage({ initialPlatform }: { initialPlatform: PlatformId
                     {msg(item.setup.title)}
                   </h2>
                   <Link
-                    href={platformHref(item.setup.guide.href)}
+                    {...platformLinkProps(item.setup.guide.href)}
                     className="mt-4 inline-flex min-h-[44px] items-center gap-1 rounded-md text-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50"
                   >
                     {msg(item.setup.guide.label)}
@@ -254,7 +270,7 @@ export function DownloadsPage({ initialPlatform }: { initialPlatform: PlatformId
           <span>{APP_NAME}</span>
           <div className="flex flex-wrap gap-5">
             <Link
-              href={docs}
+              {...docsLinkProps(docs, local)}
               className="inline-flex min-h-[44px] items-center rounded-md hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
             >
               {msg("downloads.docs")}
