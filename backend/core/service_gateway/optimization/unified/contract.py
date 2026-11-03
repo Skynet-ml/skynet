@@ -46,6 +46,7 @@ from ..blackbox.harness import GatewayConfig
 from ..blackbox.sandbox import SandboxRuntime
 from ..blackbox.workspace_harness import DETAIL_MAX_CHARS, METRIC_ENTRY_NAME, RUN_ENTRY_NAME
 from ..blackbox.workspace_scorer import WorkspaceProbe, build_workspace_scorer
+from .metric_model import resolve_metric_model, scan_metric_llm
 from .split import contract_samples, split_cases, split_seed
 
 PREVIEW_CHARS = 500
@@ -79,7 +80,11 @@ def contract_fingerprint(payload: UnifiedRunRequest) -> str:
     """
     data = payload.data
     task_model = payload.models.task_model
-    metric_model = payload.models.metric_model
+    models = payload.models.model_copy(deep=True)
+    if models.reflection_model.token_source is None:
+        models.reflection_model.token_source = payload.token_source
+    resolve_metric_model(models, payload.workspace.metric_code)
+    metric_model = models.metric_model
     # The sampled check draws its cases through the split, so different data
     # or a different split can flip the verdict even with identical code.
     cases = None if data.cases is None else [case.model_dump(mode="json") for case in data.cases]
@@ -199,11 +204,11 @@ def _metric_items(payload: UnifiedRunRequest, code: WorkspaceCodeIntrospection) 
     else:
         # ``expected`` is optional: the harness passes it only when the function accepts it.
         signature = _item("metric.signature", _fits(function, 2, 2), SIGNATURE_KEY)
-    model = _item(
-        "metric.model",
-        not code.uses_llm or payload.models.metric_model is not None,
-        "contract.metric_model_missing",
-    )
+    models = payload.models.model_copy(deep=True)
+    if models.reflection_model.token_source is None:
+        models.reflection_model.token_source = payload.token_source
+    error = resolve_metric_model(models, payload.workspace.metric_code)
+    model = _item("metric.model", error is None, error or "contract.metric_model_declaration")
     return [signature, model]
 
 
@@ -254,7 +259,7 @@ def _static_items(payload: UnifiedRunRequest) -> tuple[list[ContractCheckItem], 
     files = _files_item(payload)
     if files is not None:
         items.append(files)
-    return items, metric_code.uses_llm
+    return items, scan_metric_llm(payload.workspace.metric_code).uses_llm
 
 
 # Pyflakes catches what fails at import or call time: undefined names and
@@ -340,13 +345,13 @@ def ruff_findings(path: str, code: str) -> tuple[list[str], list[str]]:
     return errors, warnings
 
 
-def _contract_errors(path: str, code: WorkspaceCodeIntrospection, *, metric_has_model: bool) -> list[str]:
+def _contract_errors(path: str, code: WorkspaceCodeIntrospection, *, metric_code: str) -> list[str]:
     """Return the contract errors of ``run.py`` or ``metric.py``, in the agent's English.
 
     Args:
         path: :data:`RUN_FILE` or :data:`METRIC_FILE`.
         code: The file's introspection, which parsed.
-        metric_has_model: Whether a metric model is attached.
+        metric_code: Metric source to check for model declarations.
 
     Returns:
         One line per broken rule; empty when the file fits its contract.
@@ -363,8 +368,9 @@ def _contract_errors(path: str, code: WorkspaceCodeIntrospection, *, metric_has_
         errors.append(REGENERATE_METRIC)
     elif not _fits(function, 2, 2):
         errors.append(f"{METRIC_FILE} must define {METRIC_SIGNATURE} returning (score, side_info).")
-    if code.uses_llm and not metric_has_model:
-        errors.append(f"{METRIC_FILE} calls llm but no metric model is attached: remove the call or attach one.")
+    scan = scan_metric_llm(metric_code)
+    if scan.non_literal or len(scan.names) > 1:
+        errors.append('llm() calls must name at most one literal model, e.g. model="openai/gpt-4.1-mini".')
     return errors
 
 
@@ -434,7 +440,7 @@ def verify_workspace(
             verdict.errors.append(f"{path}: {code.syntax_error}")
             continue
         if path in (RUN_FILE, METRIC_FILE):
-            verdict.errors.extend(_contract_errors(path, code, metric_has_model=metric_has_model))
+            verdict.errors.extend(_contract_errors(path, code, metric_code=metric_code))
         lint_errors, lint_warnings = ruff_findings(path, text)
         verdict.errors.extend(lint_errors)
         verdict.warnings.extend(lint_warnings)

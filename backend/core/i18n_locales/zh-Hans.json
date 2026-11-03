@@ -69,7 +69,7 @@
     "contract.files_unsupported": "DSPy 优化器只运行 run.py 和 metric.py。请把额外文件中的代码移到 run.py，或选择其他优化器。",
     "contract.metric_error": "指标在示例 {index} 上失败：{error}",
     "contract.metric_missing": "指标代码没有定义此优化器调用的函数。",
-    "contract.metric_model_missing": "你的指标会调用模型，请选择指标模型。",
+    "contract.metric_model_declaration": "llm() 调用最多只能用字符串字面量指定一个模型，例如 model=\"openai/gpt-4.1-mini\"。不指定 model= 时使用反思模型。 请直接调用 llm()。请使用具名参数传递设置，不要使用 **kwargs。",
     "contract.runner_outdated": "检查所用的代码运行器早于此合约，仍在期待旧合约，因此需要重新构建。你的代码无需修改。",
     "contract.metric_signature.blackbox": "此优化器需要 score(input, output, expected=None)。",
     "contract.passed": "代码符合优化器的要求。",

@@ -839,7 +839,7 @@ class BackgroundWorker:
                 token_source = overview.get(PAYLOAD_OVERVIEW_TOKEN_SOURCE) or TOKEN_SOURCE_MANAGED
                 byok_engine = getattr(self._job_store, "engine", None)
                 if is_unified:
-                    alias_unified_model_roles(payload_dict)
+                    alias_unified_model_roles(payload_dict, preserve_metric_model=True)
                 if byok_engine is not None and payload_uses_token_source(
                     payload_dict,
                     TOKEN_SOURCE_BYOK,

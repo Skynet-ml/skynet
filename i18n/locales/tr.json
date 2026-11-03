@@ -69,7 +69,7 @@
     "contract.files_unsupported": "DSPy optimize edicileri yalnızca run.py ve metric.py dosyalarını çalıştırır. Ek dosyaların kodunu run.py'ye taşıyın veya başka bir optimize edici seçin.",
     "contract.metric_error": "Metrik {index}. örnekte başarısız oldu: {error}",
     "contract.metric_missing": "Metrik kodu, bu optimize edicinin çağırdığı fonksiyonu tanımlamıyor.",
-    "contract.metric_model_missing": "Metrik bir model çağırıyor, bu yüzden bir metrik modeli seçin.",
+    "contract.metric_model_declaration": "llm() çağrıları en fazla bir modeli model=\"openai/gpt-4.1-mini\" gibi bir dize sabiti olarak belirtmelidir. model= yoksa yansıtma modeli kullanılır. llm() işlevini doğrudan çağırın. Ayarları **kwargs ile değil, adlı argümanlarla iletin.",
     "contract.runner_outdated": "Kontrolün kod çalıştırıcısı bu sözleşmeden eski ve hâlâ önceki sözleşmeyi bekliyor, bu yüzden yeniden derlenmesi gerekiyor. Kodunuzda değişiklik gerekmiyor.",
     "contract.metric_signature.blackbox": "Bu optimize edici score(input, output, expected=None) gerektirir.",
     "contract.passed": "Kod, optimize edicinin ihtiyaç duyduğu şeyle uyumlu.",

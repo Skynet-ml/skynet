@@ -59,6 +59,115 @@ def run(artifact, input):
 """
 
 
+def test_lm_helper_guards_model_and_forwards_call_overrides() -> None:
+    """Forward sampling options without changing the metered model."""
+    calls: list[dict[str, Any]] = []
+
+    class LM:
+        """Record a protected LM call."""
+
+        budget_route = {"model": "openai/a"}
+
+        def __call__(self, **kwargs: Any) -> list[str]:
+            """Record call options and return a completion."""
+            calls.append(kwargs)
+            return ["ok"]
+
+    llm = engine_mod.lm_helper(LM())
+    assert llm("prompt", model="openrouter/openai/a", temperature=0.0, max_tokens=10, reasoning_effort="low") == "ok"
+    with pytest.raises(engine_mod.helper_runtime.ScorerError, match="must match"):
+        llm("prompt", model="openai/b")
+    assert len(calls) == 1
+    assert calls[0]["temperature"] == 0.0
+    assert calls[0]["max_tokens"] == 10
+    assert calls[0]["reasoning_effort"] == "low"
+    assert "model" not in calls[0]
+    assert "extra_body" not in calls[0]
+
+
+@pytest.mark.parametrize("model", ["litellm_proxy/anthropic/claude-sonnet-4", "openrouter/anthropic/claude-sonnet-4"])
+def test_lm_helper_translates_new_gateway_reasoning(model: str) -> None:
+    """Translate per-call effort for gateways without configured reasoning."""
+
+    class LM:
+        """Capture the request options."""
+
+        kwargs: dict[str, Any] = {}
+
+        def __init__(self) -> None:
+            self.model = model
+            self.calls: list[dict[str, Any]] = []
+
+        def __call__(self, **kwargs: Any) -> list[str]:
+            self.calls.append(kwargs)
+            return ["ok"]
+
+    lm = LM()
+    engine_mod.lm_helper(lm)("hi", reasoning_effort="high")
+    assert lm.calls[0]["extra_body"]["reasoning"] == {"effort": "high", "summary": "auto"}
+    lm.kwargs = {"extra_body": {"custom": 1, "reasoning": {"summary": "detailed", "effort": "low"}}}
+    engine_mod.lm_helper(lm)("hi", reasoning_effort="high")
+    assert lm.calls[1]["extra_body"] == {"custom": 1, "reasoning": {"summary": "detailed", "effort": "high"}}
+    engine_mod.lm_helper(lm)("hi")
+    assert "extra_body" not in lm.calls[2]
+
+
+def test_lm_helper_forwards_explicit_effort_to_subscription_cli() -> None:
+    """Replace a subscription's CLI effort only for an explicit helper override."""
+
+    class LM:
+        """Capture DSPy's merged request settings."""
+
+        budget_route = {"model": "anthropic/claude-opus-5.5"}
+        declared_model = "subscription/claude/anthropic/claude-opus-5.5"
+        subscription = True
+        kwargs = {"extra_body": {"skynet_cli_effort": "low", "other": True}}
+        calls: list[dict[str, Any]] = []
+
+        def __call__(self, **kwargs: Any) -> list[str]:
+            """Record call settings and return a completion."""
+            self.calls.append({**self.kwargs, **kwargs})
+            return ["ok"]
+
+    lm = LM()
+    helper = engine_mod.lm_helper(lm)
+    assert helper("judge", model=lm.declared_model, reasoning_effort="high") == "ok"
+    assert helper("judge") == "ok"
+    assert lm.calls[0]["extra_body"] == {"skynet_cli_effort": "high", "other": True}
+    assert lm.calls[1]["extra_body"] == {"skynet_cli_effort": "low", "other": True}
+    assert all("model" not in call for call in lm.calls)
+    lm.kwargs = {}
+    assert helper("judge", reasoning_effort="high") == "ok"
+    assert lm.calls[2]["extra_body"] == {"skynet_cli_effort": "high"}
+    assert helper("judge") == "ok"
+    assert "extra_body" not in lm.calls[3]
+
+
+@pytest.mark.parametrize("option", ["max_tokens", "reasoning_effort"])
+def test_lm_helper_overrides_existing_reasoning_settings(option: str) -> None:
+    """Replace reasoning-model defaults instead of sending conflicting settings."""
+
+    class LM:
+        """Merge call arguments as DSPy does."""
+
+        budget_route = {"model": "openai/gpt-5-mini"}
+        kwargs = {"max_completion_tokens": 1024, "extra_body": {"reasoning": {"effort": "high"}}}
+        merged: dict[str, Any] = {}
+
+        def __call__(self, **kwargs: Any) -> list[str]:
+            """Record the merged request."""
+            self.merged = {**self.kwargs, **kwargs}
+            return ["ok"]
+
+    lm = LM()
+    engine_mod.lm_helper(lm)("prompt", **{option: 512 if option == "max_tokens" else "low"})
+    if option == "max_tokens":
+        assert lm.merged.get("max_completion_tokens") == 512
+        assert "max_tokens" not in lm.merged
+    else:
+        assert lm.merged["reasoning_effort"] == lm.merged["extra_body"]["reasoning"]["effort"] == "low"
+
+
 def _never_scored(*_args: Any) -> tuple[float, dict[str, Any]]:
     """Fail when the eval server's own scorer is called: the DSPy engine scores in-process.
 

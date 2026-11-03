@@ -51,6 +51,26 @@ test("missing, broken or older setups are ignored", () => {
   );
 });
 
+test("a draft with the retired metric picker still loads", () => {
+  const state = initialWizardV2State("guided");
+  const raw = JSON.stringify({
+    account: "a",
+    state: {
+      ...state,
+      workspace: {
+        ...state.workspace,
+        metricCode: "llm('score')",
+        metricModelMode: "explicit",
+        metricModel: { name: "old/judge" },
+      },
+    },
+  });
+  const restored = decodeWizardSession(raw, "a", STEPS);
+  assert.ok(restored);
+  assert.equal(restored.workspace.metricCode, "llm('score')");
+  assert.equal(restored.optimizer.reflectionModel, state.optimizer.reflectionModel);
+});
+
 test("a saved spending limit survives any number of reloads", async () => {
   const { restoreSavedLimit } = await import("./budget-limit.ts");
   const AUTO_DEFAULT = 52;

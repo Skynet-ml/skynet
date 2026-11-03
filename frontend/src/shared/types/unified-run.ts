@@ -108,7 +108,6 @@ export interface UnifiedModels {
   task_model?: ModelConfig | null;
   reflection_model: ModelConfig;
   extra_reflection_models?: ModelConfig[];
-  metric_model?: ModelConfig | null;
 }
 
 export interface UnifiedWorkspace {
@@ -362,7 +361,6 @@ export interface UnifiedAuthoringContext {
   expected_field?: string | null;
   sample_cases?: Array<Record<string, unknown>>;
   optimizer: OptimizerChoice;
-  metric_has_model?: boolean;
   focus?: "run" | "metric";
   /** "repo" for a repository run: no run code, the agent writes only the repository scorer. */
   target?: "artifact" | "repo";

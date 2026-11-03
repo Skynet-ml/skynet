@@ -43,7 +43,7 @@ import type { ContractCheckState } from "../../hooks/use-contract-check";
 import { economyEligible } from "../../lib/model-config";
 import { aggregateTokenSource, runModels } from "../../lib/run-floor";
 import { metricUsesModel } from "../../lib/scorer-dependencies";
-import { resolvedMetricModel, type WizardV2State } from "../../lib/wizard-v2";
+import type { WizardV2State } from "../../lib/wizard-v2";
 import { ModelRoleRow } from "../blackbox/ModelRoleRow";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { optimizerLabel } from "./OptimizerPicker";
@@ -222,14 +222,10 @@ export function RunOverview({
   // Only the local build offers subscription models; a run on nothing else
   // bills the user's CLI plans, not the balance.
   const onSubscription =
-    aggregateTokenSource(
-      runModels(optimizer, metricUsesModel(state) ? resolvedMetricModel(state) : null),
-    ) === "subscription";
-  const metricModel = metricUsesModel(state) ? resolvedMetricModel(state) : null;
+    aggregateTokenSource(runModels(optimizer, metricUsesModel(state), workspace.metricCode)) === "subscription";
   const economyRoles = [
     [t("submit.v2.optimizer.models.task.label"), optimizer.taskModel],
     [t("submit.v2.optimizer.models.reflection.label"), optimizer.reflectionModel],
-    [t("submit.v2.metric.model.label"), task.repo ? null : metricModel],
   ] as const;
   const economyNames = economyRoles
     .filter(([, config]) => config?.economy_mode && economyEligible(config))
@@ -565,18 +561,6 @@ export function RunOverview({
                       config={null}
                     />
                   )}
-                  {!task.repo &&
-                    (workspace.metricModelMode === "explicit" && workspace.metricModel ? (
-                      <ReadOnlyModel
-                        role={t("submit.v2.metric.model.label")}
-                        config={workspace.metricModel}
-                      />
-                    ) : (
-                      <ModelRoleRow
-                        role={t("submit.v2.metric.model.label")}
-                        binding={t("submit.v2.metric.model.inherit")}
-                      />
-                    ))}
                 </div>
               )}
               {current === "budget" && (

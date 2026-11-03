@@ -284,7 +284,7 @@ class UnifiedOptimizer(BaseModel):
 
 
 # ``task_model`` is what ``skynet.llm`` calls inside run code;
-# ``metric_model`` is what it calls inside the metric.
+# ``metric_model`` is derived from the metric code and used inside the metric.
 class UnifiedModels(BaseModel):
     task_model: ModelConfig | None = None
     reflection_model: ModelConfig
@@ -456,8 +456,7 @@ class WorkspaceFileLint(BaseModel):
 # check depends on, so the wizard can tell when a passing check went stale.
 # ``files`` is the static check's lint of each Python file that parses, so
 # each editor shows its own findings; lint never decides ``ok``.
-# ``uses_llm`` is whether the metric code calls ``llm``, so the wizard asks for
-# a metric model only when the metric needs one.
+# ``uses_llm`` indicates whether the metric uses the helper; its model is derived from the code.
 class ContractCheckResponse(BaseModel):
     ok: bool
     optimizer_resolved: str

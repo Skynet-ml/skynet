@@ -103,7 +103,6 @@ import {
   deleteWorkspaceFile,
   initialWizardV2State,
   presetEngine,
-  resolvedMetricModel,
   type InputsSlice,
   type MetaSlice,
   type OptimizerSlice,
@@ -411,8 +410,7 @@ export function WizardV2Provider({
   );
 
   const metricCallsModel = metricUsesModel(state);
-  const metricModel = metricCallsModel ? resolvedMetricModel(state) : null;
-  const submittedModels = runModels(state.optimizer, metricModel);
+  const submittedModels = runModels(state.optimizer, metricCallsModel, state.workspace.metricCode);
   // A CLI-subscription model bills to the user's own plan, so it has no
   // server hold to fetch and adds nothing to the floor.
   const pricedModels = submittedModels.filter(
@@ -427,7 +425,7 @@ export function WizardV2Provider({
   const tokenSource = aggregateTokenSource(submittedModels);
   // The floor waits for the server's box hold, since the boxes are most of it.
   const runFloor =
-    boxHoldCents == null
+    boxHoldCents == null || !costSettled
       ? null
       : computeRunFloor({
           boxHoldCents,
@@ -471,7 +469,6 @@ export function WizardV2Provider({
     if (inputs.cases.length === 0 && !inputs.stagedDatasetId) return null;
     if (!hasModel(optimizer.reflectionModel)) return null;
     if (!workspace.runCode.trim() || !workspace.metricCode.trim()) return null;
-    const metric = metricUsesModel(state) ? resolvedMetricModel(state) : null;
     return {
       payload_kind: "unified_v1",
       name: meta.name.trim() || undefined,
@@ -505,7 +502,6 @@ export function WizardV2Provider({
           optimizer.choice === "shinka_evolve"
             ? optimizer.extraReflectionModels.filter(hasModel).map(prepareModelConfig)
             : [],
-        metric_model: hasModel(metric) ? prepareModelConfig(metric) : null,
       },
       workspace: {
         run_code: workspace.runCode,

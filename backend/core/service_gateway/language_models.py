@@ -485,9 +485,7 @@ class MeteredLM(dspy.LM):
                 if status == 402 and "budget_reached" in str(error):
                     raise BudgetReached() from error
                 if _gateway_failure_code(error) in _TRANSIENT_GATEWAY_CODES:
-                    raise InfrastructureInterruptionError(
-                        "The model provider transport was interrupted."
-                    ) from error
+                    raise InfrastructureInterruptionError("The model provider transport was interrupted.") from error
             raise
 
     def update_history(self, entry: object) -> None:
@@ -670,6 +668,7 @@ def build_language_model(config: ModelConfig, *, disable_cache: bool = False) ->
         raise ServiceError(f"Failed to build language model '{config.name}': {exc}") from exc
 
     language_model.budget_route = budget_route
+    language_model.declared_model = config.name
     # LiteLLM rebuilds a streamed call's usage and drops the gateway's
     # ``token_source`` mark, so the LM itself carries the zero-cost flag.
     language_model.subscription = config.token_source == "subscription"

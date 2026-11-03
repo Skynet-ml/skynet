@@ -93,7 +93,7 @@ Rédigez deux fichiers :
 
 L'**Agent de code** peut rédiger et modifier n'importe quel fichier pour vous. Il vérifie son code et corrige ce qui échoue. Vous pouvez ajouter jusqu'à 20 fichiers supplémentaires. Lisez [Métriques et évaluateurs](/docs/concepts/scorers).
 
-Si votre métrique appelle `llm()`, définissez le **Modèle de la métrique**. Par défaut, elle utilise le modèle de réflexion.
+La métrique définit son modèle dans son propre appel à `llm()`. Sans `model=`, la métrique utilise le modèle de réflexion.
 
 ### Vérification du contrat
 

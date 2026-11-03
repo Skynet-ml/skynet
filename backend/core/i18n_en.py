@@ -269,7 +269,7 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "contract.run_error": "The run code failed on sample {index}: {error}",
     "contract.metric_error": "The metric failed on sample {index}: {error}",
     "contract.shape.blackbox": "The score function must return (score, side_info), where side_info is a dict with a feedback string.",
-    "contract.metric_model_missing": "The metric calls a model, so choose a metric model.",
+    "contract.metric_model_declaration": 'llm() calls must name at most one model as a string literal, like model="openai/gpt-4.1-mini". Without model=, the reflection model is used. Call llm() directly. Pass settings as named arguments, not **kwargs.',
     "contract.passed": "The code matches what the optimizer needs.",
     "transcription.budget_exhausted": "Dictation is paused for the rest of the month. Type your message instead.",
     "transcription.failed": "Transcription failed on every configured provider.",

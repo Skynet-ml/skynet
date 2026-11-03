@@ -10,11 +10,9 @@ import {
 } from "@/shared/types/unified-run";
 
 import { inputsIssue } from "./inputs-mode";
-import { metricUsesModel } from "./scorer-dependencies";
 import {
   WIZARD_V2_STEPS,
   contractSnapshot,
-  resolvedMetricModel,
   taskIssue,
   type WizardStepId,
   type WizardV2State,
@@ -79,8 +77,6 @@ export function computeStepIssue(
         return workspace.metricCode.trim() ? null : "submit.v2.metric.issue.metric_code";
       if (!workspace.runCode.trim()) return "submit.v2.metric.issue.run_code";
       if (!workspace.metricCode.trim()) return "submit.v2.metric.issue.metric_code";
-      if (metricUsesModel(state) && !hasModel(resolvedMetricModel(state)))
-        return "submit.v2.metric.model.required";
       if (!workspace.lastCheck) return "submit.v2.metric.check.needed";
       if (workspace.lastCheckSnapshot !== contractSnapshot(state))
         return "submit.v2.metric.check.stale";

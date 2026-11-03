@@ -69,7 +69,7 @@
     "contract.files_unsupported": "DSPy ऑप्टिमाइज़र सिर्फ़ run.py और metric.py चलाते हैं। अतिरिक्त फ़ाइलों का कोड run.py में ले जाएँ, या कोई दूसरा ऑप्टिमाइज़र चुनें।",
     "contract.metric_error": "नमूना {index} पर मेट्रिक विफल रहा: {error}",
     "contract.metric_missing": "मेट्रिक कोड वह फ़ंक्शन परिभाषित नहीं करता जिसे यह ऑप्टिमाइज़र कॉल करता है।",
-    "contract.metric_model_missing": "मेट्रिक मॉडल चुनें, क्योंकि आपका मेट्रिक एक मॉडल कॉल करता है।",
+    "contract.metric_model_declaration": "llm() कॉल में अधिकतम एक मॉडल स्ट्रिंग लिटरल के रूप में दें, जैसे model=\"openai/gpt-4.1-mini\"। model= न देने पर रिफ्लेक्शन मॉडल उपयोग होता है। llm() को सीधे कॉल करें। सेटिंग को नाम वाले आर्ग्युमेंट के रूप में दें, **kwargs से नहीं।",
     "contract.runner_outdated": "जाँच का कोड रनर इस अनुबंध से पुराना है और अब भी पुराने अनुबंध की अपेक्षा करता है, इसलिए उसे फिर से बनाना होगा। आपके कोड में कोई बदलाव ज़रूरी नहीं है।",
     "contract.metric_signature.blackbox": "इस ऑप्टिमाइज़र को score(input, output, expected=None) चाहिए।",
     "contract.passed": "कोड ऑप्टिमाइज़र की ज़रूरतों से मेल खाता है।",

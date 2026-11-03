@@ -457,6 +457,48 @@ def test_process_job_validates_unified_payload_against_its_contract(
     assert "metric shape mismatch" in store._jobs["opt-7"]["message"]
 
 
+def test_worker_keeps_stored_metric_model_without_declaration(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """A queued legacy run keeps its selected metric model before protection."""
+    payload = copy.deepcopy(REAL_UNIFIED_PAYLOAD)
+    payload["models"]["metric_model"] = {
+        "name": "anthropic/old-judge",
+        "token_source": "byok",
+        "byok_provider": "anthropic",
+    }
+    payload["workspace"]["metric_code"] = (
+        "from skynet import llm\ndef score(input, output, expected=None):\n    return llm('judge')\n"
+    )
+    store.seed_job(
+        "legacy-metric",
+        payload=payload,
+        payload_overview={"optimization_type": "blackbox", "username": "bob"},
+        execution_budget_id="budget-legacy",
+    )
+    worker.enqueue_job("legacy-metric")
+    ctx, _proc = make_mp_context(exitcode=0, result_events=[])
+    worker._mp_ctx = ctx
+    worker._mp_start_method = "spawn"
+    recorded = {}
+    real_alias = engine_module.alias_unified_model_roles
+
+    def capture(source: dict, **kwargs: object) -> None:
+        """Capture the model after the real execution alias step."""
+        real_alias(source, **kwargs)
+        recorded.update(source["models"]["metric_model"])
+        raise ValueError("stop after alias")
+
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch.object(worker, "_get_service"),
+        patch.object(engine_module, "validate_unified_payload"),
+        patch.object(engine_module, "alias_unified_model_roles", side_effect=capture),
+    ):
+        worker._process_job("legacy-metric", 0)
+    assert recorded["name"] == "anthropic/old-judge"
+    assert recorded["token_source"] == "byok"
+    assert recorded["byok_provider"] == "anthropic"
+
+
 def test_process_job_handles_key_error_when_job_deleted_mid_run(
     worker: BackgroundWorker,
     store: FakeJobStore,

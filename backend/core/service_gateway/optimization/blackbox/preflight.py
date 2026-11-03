@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import time
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -22,6 +21,7 @@ from ....models.unified import (
     UnifiedRunRequest,
 )
 from ..unified.contract import run_contract_check
+from ..unified.metric_model import scan_metric_llm
 from ..unified.service import unified_job_spec
 from ..unified.split import split_seed
 from .agent_eval import READINESS_LIFETIME_SECONDS, case_lifetime_seconds
@@ -108,8 +108,7 @@ def _sample(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 def _needs_model(code: str) -> bool:
     """Detect direct scorer model helper use before an inherited model is chosen."""
-    tree = ast.parse(code)
-    return any(isinstance(node, ast.Name) and node.id == "llm" for node in ast.walk(tree))
+    return scan_metric_llm(code).uses_llm
 
 
 def verify_anything_in_sandbox(

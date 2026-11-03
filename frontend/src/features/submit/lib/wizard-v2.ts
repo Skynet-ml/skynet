@@ -116,8 +116,6 @@ export interface WorkspaceSlice {
   metricCode: string;
   /** Every other workspace file, relative path to text (helpers `run.py` imports). */
   files: Record<string, string>;
-  metricModelMode: "inherit" | "explicit";
-  metricModel: ModelConfig | null;
   metricTimeoutSeconds: number;
   lastCheck: ContractCheckResponse | null;
   lastCheckSnapshot: string | null;
@@ -200,8 +198,6 @@ export function initialWizardV2State(
       runCode: "",
       metricCode: "",
       files: {},
-      metricModelMode: "inherit",
-      metricModel: null,
       metricTimeoutSeconds: DEFAULT_METRIC_TIMEOUT_SECONDS,
       lastCheck: null,
       lastCheckSnapshot: null,
@@ -525,13 +521,6 @@ export function deleteWorkspaceFile(
   return { files };
 }
 
-/** The metric model the run will use: the reflection model unless one was picked explicitly. */
-export function resolvedMetricModel(s: WizardV2State): ModelConfig | null {
-  return s.workspace.metricModelMode === "inherit"
-    ? s.optimizer.reflectionModel
-    : s.workspace.metricModel;
-}
-
 /** Recursively sorts object keys so equal values always serialize the same. */
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
@@ -578,7 +567,7 @@ export function contractSnapshot(s: WizardV2State): string {
     metricCode: s.workspace.metricCode,
     // Left out when empty so a check stored before extra files existed stays current.
     ...(Object.keys(s.workspace.files).length > 0 && { files: s.workspace.files }),
-    metricModel: resolvedMetricModel(s)?.name ?? null,
+    reflectionModel: s.optimizer.reflectionModel?.name ?? null,
     metricTimeoutSeconds: s.workspace.metricTimeoutSeconds,
     // The check runs under the spending limit, so a pass under one limit says
     // nothing about another: a new limit runs the check again.

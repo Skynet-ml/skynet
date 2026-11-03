@@ -38,6 +38,19 @@ _SYSTEM_PYTHON = Path("/usr/bin/python3")
 _INTERPRETERS = [sys.executable] + ([str(_SYSTEM_PYTHON)] if _SYSTEM_PYTHON.is_file() else [])
 
 
+def test_short_model_matches_resolved_bound_route() -> None:
+    """Accept a short declaration resolved by the protected gateway."""
+    assert runner.model_matches_bound("gpt-4.1-mini", "openai/gpt-4.1-mini", "gpt-4.1-mini")
+    assert not runner.model_matches_bound("gpt-4.1-mini", "openai/gpt-4.1-mini")
+    assert not runner.model_matches_bound("other", "openai/gpt-4.1-mini", "gpt-4.1-mini")
+    with FakeGateway(reply="ok") as gateway:
+        client = GatewayClient(gateway.url, "openai/gpt-4.1-mini", declared_model="gpt-4.1-mini")
+        assert client("prompt", model="gpt-4.1-mini") == "ok"
+        with pytest.raises(ScorerError, match="must match"):
+            client("prompt", model="anthropic/gpt-4.1-mini")
+    assert gateway.requests[0]["body"]["model"] == "openai/gpt-4.1-mini"
+
+
 class _WithScore:
     """Object exposing a numeric ``score`` and a ``feedback`` attribute."""
 
@@ -253,6 +266,85 @@ def test_gateway_client_posts_chat_completions_and_records_usage() -> None:
     assert llm.usage == [{"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9}]
 
 
+def test_gateway_client_guards_model_and_applies_per_call_overrides() -> None:
+    """Keep the billed route model fixed while applying call settings."""
+    with FakeGateway(reply="ok") as gateway:
+        client = GatewayClient(gateway.url, "openai/a", temperature=0.1, max_tokens=30)
+        assert (
+            client("prompt", model="openrouter/openai/a", temperature=0.0, max_tokens=20, reasoning_effort="low")
+            == "ok"
+        )
+        with pytest.raises(ScorerError, match="must match"):
+            client("prompt", model="openai/b")
+    [request] = gateway.requests
+    assert request["body"]["model"] == "openai/a"
+    assert request["body"]["temperature"] == 0.0
+    assert request["body"]["max_tokens"] == 20
+    assert request["body"]["reasoning_effort"] == "low"
+    assert "skynet_cli_effort" not in request["body"]
+
+
+def test_openrouter_gateway_translates_reasoning_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Send OpenRouter's native reasoning settings with a per-call effort."""
+    requests: list[dict[str, Any]] = []
+    client = GatewayClient("https://openrouter.ai/api/v1", "anthropic/example")
+
+    def post(data: bytes) -> dict[str, Any]:
+        requests.append(json.loads(data))
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(client, "_post", post)
+    assert client("prompt", reasoning_effort="high") == "ok"
+    assert requests[0]["reasoning"] == {"effort": "high", "summary": "auto"}
+
+
+def test_protected_gateway_translates_reasoning_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Honor the gateway flag passed to the runner for a protected route."""
+    requests: list[dict[str, Any]] = []
+
+    def post(_self: GatewayClient, data: bytes) -> dict[str, Any]:
+        """Capture the body without contacting a gateway."""
+        requests.append(json.loads(data))
+        return {"choices": [{"message": {"content": "0.5"}}]}
+
+    monkeypatch.setattr(GatewayClient, "_post", post)
+    result = run_call(
+        {
+            "code": "def score(c): return float(llm(c, reasoning_effort='high')), {'feedback': 'ok'}",
+            "candidate": "x",
+            "gateway": {"url": "http://gateway", "model": "anthropic/x", "protected": True, "gateway_reasoning": True},
+        }
+    )
+    assert result["error"] is None
+    assert requests[0]["reasoning"] == {"effort": "high", "summary": "auto"}
+
+
+def test_subscription_runner_forwards_explicit_cli_effort() -> None:
+    """Send an explicit per-call effort without changing the bound model."""
+    name = "subscription/claude/anthropic/claude-opus-5.5"
+    model = "anthropic/claude-opus-5.5"
+    with FakeGateway(reply="0.75") as gateway:
+        base = {
+            "candidate": "judge",
+            "gateway": {
+                "url": gateway.url,
+                "model": model,
+                "declared_model": name,
+                "subscription": True,
+                "reasoning_effort": "low",
+            },
+        }
+        code = f"def score(c):\n return float(llm(c, model={name!r}, reasoning_effort='high')), {{'feedback': 'ok'}}"
+        explicit = run_call({**base, "code": code})
+        default = run_call({**base, "code": "def score(c):\n return float(llm(c)), {'feedback': 'ok'}"})
+    assert explicit["error"] is None
+    assert default["error"] is None
+    first, second = [request["body"] for request in gateway.requests]
+    assert first["model"] == second["model"] == model
+    assert first["skynet_cli_effort"] == "high"
+    assert "skynet_cli_effort" not in second
+
+
 def test_gateway_client_sends_images_and_raw_messages_without_a_key() -> None:
     """Images become content parts, ``messages=`` goes through verbatim, and no key means no header."""
     with FakeGateway() as gateway:
@@ -351,7 +443,7 @@ def test_run_call_passes_case_only_when_the_function_takes_one() -> None:
         ("def score(c, case=None): return 'nope'", "must return feedback"),
         ("def score(c, case=None): return 0.5", "must return feedback"),
         ("def !!!", "scorer code has a syntax error"),
-        (_LLM_SCORER, "This scorer calls llm() but no model was chosen in the Scorer step."),
+        (_LLM_SCORER, "The metric calls llm() but has no model. Add model= to llm() or check the reflection model."),
     ],
 )
 def test_run_call_reports_scorer_failures_as_data(code: str, error: str) -> None:

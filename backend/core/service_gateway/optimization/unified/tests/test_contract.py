@@ -234,18 +234,45 @@ def test_blackbox_score_with_one_argument_fails_the_signature() -> None:
     assert _statuses(response)["metric.signature"] == "failed"
 
 
-def test_metric_calling_llm_needs_a_metric_model() -> None:
-    """A metric that calls ``llm`` without a metric model fails ``metric.model``."""
+def test_metric_calling_llm_defaults_to_reflection_and_rejects_ambiguity() -> None:
+    """The model is derived from code, not the submitted metric model."""
     metric = "from skynet import llm\ndef score(input, output):\n    return float(llm('j', output)), {}\n"
 
     without = static_contract_check(_payload(metric_code=metric))
     with_model = static_contract_check(_payload(metric_code=metric, metric_model="openrouter/judge"))
+    ambiguous = static_contract_check(_payload(metric_code=metric.replace("llm('j', output)", "llm('j', model=x)")))
 
-    assert _statuses(without)["metric.model"] == "failed"
+    assert _statuses(without)["metric.model"] == "passed"
     assert _statuses(with_model)["metric.model"] == "passed"
+    assert _statuses(ambiguous)["metric.model"] == "failed"
+    assert (
+        next(item.message_code for item in ambiguous.checks if item.key == "metric.model")
+        == "contract.metric_model_declaration"
+    )
     assert without.uses_llm
     assert with_model.uses_llm
     assert not static_contract_check(_payload()).uses_llm
+
+
+@pytest.mark.parametrize("expression", ["llm = 'judge'", "output.llm"])
+def test_unrelated_llm_names_do_not_mark_metric_as_calling_helper(expression: str) -> None:
+    """Ignore unrelated names in the model check and helper-use response."""
+    metric = f"def score(input, output):\n    {expression}\n    return 1.0, {{}}\n"
+    response = static_contract_check(_payload(metric_code=metric))
+    assert _statuses(response)["metric.model"] == "passed"
+    assert not response.uses_llm
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "openai"])
+def test_metric_byok_declaration_accepts_provider(provider: str) -> None:
+    """A literal model declaration does not depend on the reflection provider."""
+    raw = _payload(
+        metric_code="from skynet import llm\ndef score(input, output):\n    return llm(model='openai/a')\n"
+    ).model_dump(mode="json")
+    raw["models"]["reflection_model"].update(token_source="byok", byok_provider=provider)
+    result = static_contract_check(UnifiedRunRequest.model_validate(raw))
+    item = next(item for item in result.checks if item.key == "metric.model")
+    assert item.status == "passed"
 
 
 def test_fingerprint_tracks_the_code_and_the_data() -> None:

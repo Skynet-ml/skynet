@@ -61,7 +61,7 @@ function checkedState() {
   };
 }
 
-test("changing the cases, data source, split, task model or metric timeout makes the check stale", () => {
+test("changing the cases, data source, split, models or metric timeout makes the check stale", () => {
   const base = checkedState();
   const snapshot = contractSnapshot(base);
   assert.equal(contractSnapshot(checkedState()), snapshot);
@@ -75,6 +75,7 @@ test("changing the cases, data source, split, task model or metric timeout makes
     { ...base, inputs: { ...base.inputs, split: { train: 0.5, val: 0.25, test: 0.25 } } },
     { ...base, inputs: { ...base.inputs, shuffle: !base.inputs.shuffle } },
     { ...base, optimizer: { ...base.optimizer, taskModel: { name: "openai/gpt-x" } } },
+    { ...base, optimizer: { ...base.optimizer, reflectionModel: { name: "openai/gpt-y" } } },
     { ...base, workspace: { ...base.workspace, metricTimeoutSeconds: 5 } },
   ];
   for (const edited of edits) assert.notEqual(contractSnapshot(edited as typeof base), snapshot);

@@ -262,7 +262,13 @@ def test_unresolved_paid_usage_blocks_stage_advancement(setup_client, monkeypatc
     assert any(check["key"] == "usage" and check["status"] == "pending" for check in result["checks"])
 
 
-def test_unified_metric_model_gets_a_metered_route(setup_client, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("metric_call", "expected_model"),
+    [("llm(output, model='fixture/judge')", "fixture/judge"), ("llm(output)", "fixture/text")],
+)
+def test_unified_metric_model_gets_a_metered_route(
+    setup_client, monkeypatch: pytest.MonkeyPatch, metric_call: str, expected_model: str
+) -> None:
     """Route a unified run's metric model like the worker does, then hand the guest no legacy aliases."""
     client, _engine, _calls = setup_client
     seen: list[dict] = []
@@ -301,11 +307,12 @@ def test_unified_metric_model_gets_a_metered_route(setup_client, monkeypatch: py
         },
         "workspace": {
             "run_code": "def run(artifact, input):\n    return artifact + input['question']\n",
-            "metric_code": "def score(input, output, expected=None):\n    return float(llm(output) == expected), {}\n",
+            "metric_code": f"from skynet import llm\ndef score(input, output, expected=None):\n    return float({metric_call} == expected), {{}}\n",
         },
         "max_cost_cents": 20,
     }
     response = client.post("/wizard/preflight", json={**_request(budget, payload), "workflow": "unified"})
     assert response.status_code == 200, response.text
     assert ROUTE_KEY in seen[0]["models"]["metric_model"]["extra"]
+    assert seen[0]["models"]["metric_model"]["name"] == expected_model
     assert not {"scorer", "task_model_config", "reflection_model_config"} & seen[0].keys()

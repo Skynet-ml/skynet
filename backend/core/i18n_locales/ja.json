@@ -69,7 +69,7 @@
     "contract.files_unsupported": "DSPy オプティマイザーは run.py と metric.py しか実行しません。追加ファイルのコードを run.py に移すか、別のオプティマイザーを選んでください。",
     "contract.metric_error": "サンプル {index} でメトリクスが失敗しました: {error}",
     "contract.metric_missing": "メトリクスのコードに、このオプティマイザーが呼び出す関数が定義されていません。",
-    "contract.metric_model_missing": "メトリクスがモデルを呼び出すため、メトリクスのモデルを選んでください。",
+    "contract.metric_model_declaration": "llm() 呼び出しで指定できるモデルは、model=\"openai/gpt-4.1-mini\" のような文字列リテラルで最大1つです。model= がない場合はリフレクションモデルを使用します。 llm() を直接呼び出してください。設定は **kwargs ではなく名前付き引数で渡してください。",
     "contract.runner_outdated": "チェックのコードランナーがこの契約より古く、まだ以前の契約を前提としているため、再ビルドが必要です。あなたのコードを変更する必要はありません。",
     "contract.metric_signature.blackbox": "このオプティマイザーには score(input, output, expected=None) が必要です。",
     "contract.passed": "コードはオプティマイザーの要件を満たしています。",

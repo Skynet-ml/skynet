@@ -172,23 +172,11 @@ function cloneUnified(payload: ClonePayload): Omit<CloneSlices, "meta"> {
   if (typeof optimizer.choice === "string")
     optimizerSlice.choice = optimizer.choice as OptimizerChoice;
 
-  const metricModel = modelConfig(models.metric_model);
-  const reflection = optimizerSlice.reflectionModel;
-  // A metric model that is the reflection model, economy choice included, was
-  // inherited, not picked.
-  const picked =
-    metricModel &&
-    (metricModel.name !== reflection?.name ||
-      Boolean(metricModel.economy_mode) !== Boolean(reflection?.economy_mode))
-      ? metricModel
-      : null;
   const workspaceSlice: Partial<WorkspaceSlice> = {
     runCode: typeof workspace.run_code === "string" ? workspace.run_code : "",
     metricCode: typeof workspace.metric_code === "string" ? workspace.metric_code : "",
     // A payload stored before extra files existed has none.
     files: extraFiles(workspace.files),
-    metricModelMode: picked ? "explicit" : "inherit",
-    metricModel: picked,
   };
   if (typeof workspace.metric_timeout_seconds === "number")
     workspaceSlice.metricTimeoutSeconds = workspace.metric_timeout_seconds;
@@ -258,11 +246,6 @@ function cloneLegacyBlackbox(payload: ClonePayload): Omit<CloneSlices, "meta"> {
   if (typeof scorer.metric_code === "string") workspace.metricCode = scorer.metric_code;
   if (typeof scorer.timeout_seconds === "number")
     workspace.metricTimeoutSeconds = scorer.timeout_seconds;
-  const scorerModel = modelConfig(scorer.model);
-  if (scorerModel) {
-    workspace.metricModelMode = "explicit";
-    workspace.metricModel = scorerModel;
-  }
   return {
     task,
     inputs: repo ? { mode: "single" } : inputsFromCases(cases, []),
@@ -351,7 +334,7 @@ function runEconomyToModels(body: Omit<CloneSlices, "meta">): void {
     config && (config.token_source ?? "managed") === "managed"
       ? ({ ...config, economy_mode: true } as T)
       : config;
-  const { optimizer, workspace } = body;
+  const { optimizer } = body;
   body.optimizer = {
     ...optimizer,
     ...(optimizer.taskModel !== undefined && { taskModel: economy(optimizer.taskModel) }),
@@ -362,6 +345,4 @@ function runEconomyToModels(body: Omit<CloneSlices, "meta">): void {
       extraReflectionModels: optimizer.extraReflectionModels.map(economy),
     }),
   };
-  if (workspace.metricModel !== undefined)
-    body.workspace = { ...workspace, metricModel: economy(workspace.metricModel) };
 }

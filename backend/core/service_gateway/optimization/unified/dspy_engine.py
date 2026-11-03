@@ -39,6 +39,7 @@ from typing import Any
 
 import dspy
 
+from ....billing.cli_dispatch import CLI_EFFORT_KEY
 from ....exceptions import ServiceError
 from ....models.common import ModelConfig
 from ....models.unified import DSPY_OPTIMIZER_NAMES, METRIC_SIGNATURE, RUN_ENTRY
@@ -100,13 +101,58 @@ def lm_helper(lm: Any) -> Callable[..., str]:
     if lm is None:
         return helper_runtime.missing_llm
 
-    def llm(prompt: Any = None, input: Any = None, *, images: Any = None, messages: Any = None) -> str:
+    def llm(
+        prompt: Any = None,
+        input: Any = None,
+        *,
+        images: Any = None,
+        messages: Any = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> str:
         """Complete one request through the metered LM and return its text."""
+        route = getattr(lm, "budget_route", None)
+        bound = route.get("model") if isinstance(route, dict) else getattr(lm, "model", "")
+        declared = getattr(lm, "declared_model", None)
+        if model is not None and not helper_runtime.model_matches_bound(model, str(bound), declared):
+            raise helper_runtime.ScorerError("llm(model=...) must match the model bound to this code.")
         if messages is None:
             if prompt is None:
                 raise helper_runtime.ScorerError("llm() needs a prompt, or messages=[...].")
             messages = helper_runtime.scorer_messages(prompt, input, images)
-        outputs = lm(messages=messages)
+        overrides = {
+            key: value
+            for key, value in (
+                ("temperature", temperature),
+                ("max_tokens", max_tokens),
+                ("reasoning_effort", reasoning_effort),
+            )
+            if value is not None
+        }
+        defaults = getattr(lm, "kwargs", {})
+        if isinstance(defaults, dict):
+            if max_tokens is not None and "max_completion_tokens" in defaults:
+                overrides.pop("max_tokens", None)
+                overrides["max_completion_tokens"] = max_tokens
+            if reasoning_effort is not None:
+                raw_body = defaults.get("extra_body")
+                body = dict(raw_body) if isinstance(raw_body, dict) else {}
+                reasoning = body.get("reasoning")
+                model_id = getattr(lm, "model", "")
+                gateway = isinstance(model_id, str) and model_id.startswith(("litellm_proxy/", "openrouter/"))
+                if isinstance(reasoning, dict) or gateway:
+                    native = dict(reasoning) if isinstance(reasoning, dict) else {}
+                    native["effort"] = reasoning_effort
+                    if gateway:
+                        native.setdefault("summary", "auto")
+                    body["reasoning"] = native
+                if getattr(lm, "subscription", False):
+                    body[CLI_EFFORT_KEY] = reasoning_effort
+                if isinstance(reasoning, dict) or gateway or getattr(lm, "subscription", False):
+                    overrides["extra_body"] = body
+        outputs = lm(messages=messages, **overrides)
         first = outputs[0] if outputs else ""
         return str(first.get("text") or "") if isinstance(first, dict) else str(first)
 

@@ -69,7 +69,7 @@
     "contract.files_unsupported": "محسّنات DSPy لا تشغّل إلا run.py وmetric.py. انقل شيفرة الملفات الإضافية إلى run.py، أو اختر محسّنًا آخر.",
     "contract.metric_error": "فشل المقياس على النموذج {index}: {error}",
     "contract.metric_missing": "لا يعرّف كود المقياس الدالة التي يستدعيها هذا المُحسِّن.",
-    "contract.metric_model_missing": "اختر نموذجًا للمقياس، لأن مقياسك يستدعي نموذجًا.",
+    "contract.metric_model_declaration": "يجب أن تحدد استدعاءات llm() نموذجًا واحدًا على الأكثر كسلسلة نصية ثابتة، مثل model=\"openai/gpt-4.1-mini\". دون model= يُستخدم نموذج التفكير. استدعِ llm() مباشرةً. مرّر الإعدادات كوسائط مسماة، وليس عبر **kwargs.",
     "contract.runner_outdated": "مُشغِّل الشيفرة الخاص بالفحص أقدم من هذا العقد وما زال يتوقع العقد السابق، لذا يحتاج إلى إعادة بناء. لا تحتاج شيفرتك إلى أي تغيير.",
     "contract.metric_signature.blackbox": "يحتاج هذا المُحسِّن إلى score(input, output, expected=None).",
     "contract.passed": "الكود يطابق ما يحتاجه المُحسِّن.",

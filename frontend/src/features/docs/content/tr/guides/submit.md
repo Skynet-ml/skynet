@@ -93,7 +93,7 @@ Limit veya bakiyeniz başlamak için gereken tutarın altındaysa sihirbaz devam
 
 **Kodlama ajanı** sizin için herhangi bir dosyayı yazabilir ve değiştirebilir. Kodunu kontrol eder ve başarısız olanı düzeltir. En fazla 20 ek dosya ekleyebilirsiniz. [Metrikler ve puanlayıcılar](/docs/concepts/scorers) sayfasını okuyun.
 
-Metriğiniz `llm()` çağırıyorsa **Metrik modeli** değerini belirleyin. Varsayılan olarak yansıtma modelini kullanır.
+Metrik, modelini kendi `llm()` çağrısında belirler. `model=` olmadan metrik yansıtma modelini kullanır.
 
 ### Sözleşme kontrolü
 

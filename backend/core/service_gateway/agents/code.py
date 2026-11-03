@@ -325,8 +325,7 @@ def _validate_unified_metric_code(code: str, metric_has_model: bool) -> str:
 
     Args:
         code: Metric source.
-        metric_has_model: Whether a metric model is attached; without one the
-            ``skynet`` helper does not exist in the metric's process.
+        metric_has_model: Retired model-picker flag, ignored for compatibility.
 
     Returns:
         An empty string when the code fits the contract, otherwise a short error message.
@@ -340,34 +339,7 @@ def _validate_unified_metric_code(code: str, metric_has_model: bool) -> str:
     accepted, required, variadic = _positional_capacity(fn)
     if (accepted < _METRIC_MIN_ACCEPTED and not variadic) or required > _METRIC_MAX_REQUIRED:
         return f"metric error: the signature must be {METRIC_SIGNATURE}."
-    if not metric_has_model and _imports_skynet_llm(code):
-        return "metric error: no metric model is attached, so `from skynet import llm` is unavailable."
     return ""
-
-
-def _imports_skynet_llm(code: str) -> bool:
-    """Return whether ``code`` may reach the metric model's ``llm`` helper.
-
-    The metric's ``skynet`` module always offers the trusted observation and
-    reward helpers; only ``llm`` needs an attached metric model. A bare
-    ``import skynet`` or a star import counts, since ``skynet.llm`` is then in reach.
-
-    Args:
-        code: Metric source that already parses.
-
-    Returns:
-        True when ``llm`` is imported from ``skynet`` or the module is imported whole.
-    """
-    for node in ast.walk(ast.parse(code)):
-        if isinstance(node, ast.Import) and any(alias.name.split(".")[0] == "skynet" for alias in node.names):
-            return True
-        if (
-            isinstance(node, ast.ImportFrom)
-            and (node.module or "").split(".")[0] == "skynet"
-            and any(alias.name in ("llm", "*") for alias in node.names)
-        ):
-            return True
-    return False
 
 
 def _validate_repo_metric_code(code: str) -> str:
@@ -1022,9 +994,7 @@ _METRIC_COMMON = """- Never raise: catch failures and return the lowest score wi
 - Standard library (and dspy) only; no network of your own.
 - The metric's source is never shown to the optimizer: it learns only from the scores and feedback, so put everything a better version needs to know into the feedback."""
 
-_METRIC_LLM = """A metric model is attached: `from skynet import llm` calls it. llm(prompt) -> str asks a free-form question, e.g. to grade the output against a rubric: parse the reply defensively (look for a number or a verdict word, default to the lowest score). Prefer deterministic checks where they suffice."""
-
-_METRIC_NO_LLM = """No metric model is attached, so the metric has NO llm helper: never import llm from skynet or call llm(). Score with deterministic checks (exact match, contains, numeric tolerance, JSON fields, structure, length, similarity to the expected value)."""
+_METRIC_LLM = """The metric sets its model in its own llm() call: `from skynet import llm` calls it. Set model= to a string literal, or omit it to use the reflection model. All calls in one metric must name at most one model. llm(prompt) -> str asks a free-form question, e.g. to grade the output against a rubric: parse the reply defensively (look for a number or a verdict word, default to the lowest score). Prefer deterministic checks where they suffice."""
 
 _METRIC_REWARD = """When the user's goals include speed or cost (how fast or how cheap one response is), never read time or cost from the output: run code can print anything. Use the trusted helper `from skynet import reward` (it needs no metric model) and declare the blend once, at module level, as plain data:
 REWARD_SPEC = {"weights": {"accuracy": <w>, "speed": <w>, "cost": <w>}, "accuracy": {"name": "<short name in the user's words>", "meaning": "<what is measured>", "unit": "<unit>", "reference": <error at which accuracy scores half; omit for a 0-1 score>}, "speed": {"name": "<short name, e.g. Speed>", "meaning": "Run time of one response", "unit": "ms", "reference": <ms>}, "cost": {"name": "<short name, e.g. Cost>", "meaning": "Model cost of one response", "unit": "USD", "reference": <usd>}}
@@ -1066,7 +1036,7 @@ def _unified_contracts(unified: dict[str, Any]) -> tuple[str, str]:
         [
             _METRIC_CONTRACT,
             _METRIC_COMMON,
-            _METRIC_LLM if unified.get("metric_has_model") else _METRIC_NO_LLM,
+            _METRIC_LLM,
             _METRIC_REWARD,
         ]
     )
@@ -3269,13 +3239,10 @@ def _unified_verifier(unified: dict[str, Any]) -> WorkspaceVerifier:
     task = unified.get("task") or {}
     kind = (task.get("artifact") or {}).get("kind") or "prompt"
     optimizer = resolve_optimizer(unified.get("optimizer") or "auto", kind)
-    has_model = bool(unified.get("metric_has_model"))
 
     def _verify(run_code: str, metric_code: str, files: dict[str, str]) -> list[dict[str, Any]]:
         """Check the workspace and return each file's verdict as plain data."""
-        verdicts = verify_workspace(
-            run_code, metric_code, files, metric_has_model=has_model, optimizer_resolved=optimizer
-        )
+        verdicts = verify_workspace(run_code, metric_code, files, metric_has_model=True, optimizer_resolved=optimizer)
         return [v.as_dict() for v in verdicts]
 
     return _verify
@@ -4163,7 +4130,7 @@ def _unified_validators(unified: dict[str, Any]) -> tuple[Callable[[str], str], 
         return _accept_any_run_code, _validate_repo_metric_code
     return (
         _validate_run_code,
-        partial(_validate_unified_metric_code, metric_has_model=bool(unified.get("metric_has_model"))),
+        partial(_validate_unified_metric_code, metric_has_model=True),
     )
 
 

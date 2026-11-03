@@ -69,7 +69,7 @@
     "contract.files_unsupported": "Los optimizadores de DSPy solo ejecutan run.py y metric.py. Mueve el código de los archivos adicionales a run.py o elige otro optimizador.",
     "contract.metric_error": "La métrica falló en la muestra {index}: {error}",
     "contract.metric_missing": "El código de la métrica no define la función que llama este optimizador.",
-    "contract.metric_model_missing": "La métrica llama a un modelo, así que elige un modelo para la métrica.",
+    "contract.metric_model_declaration": "Las llamadas a llm() deben indicar como máximo un modelo como cadena literal, por ejemplo model=\"openai/gpt-4.1-mini\". Sin model= se usa el modelo de reflexión. Llama a llm() directamente. Pasa los ajustes como argumentos con nombre, no mediante **kwargs.",
     "contract.runner_outdated": "El ejecutor de código de la comprobación es anterior a este contrato y todavía espera el antiguo, así que hay que reconstruirlo. Tu código no necesita cambios.",
     "contract.metric_signature.blackbox": "Este optimizador necesita score(input, output, expected=None).",
     "contract.passed": "El código cumple lo que necesita el optimizador.",

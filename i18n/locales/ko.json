@@ -69,7 +69,7 @@
     "contract.files_unsupported": "DSPy 옵티마이저는 run.py와 metric.py만 실행합니다. 추가 파일의 코드를 run.py로 옮기거나 다른 옵티마이저를 선택하세요.",
     "contract.metric_error": "샘플 {index}에서 메트릭이 실패했습니다: {error}",
     "contract.metric_missing": "메트릭 코드에 이 옵티마이저가 호출하는 함수가 정의되어 있지 않습니다.",
-    "contract.metric_model_missing": "메트릭이 모델을 호출하므로 메트릭 모델을 선택하세요.",
+    "contract.metric_model_declaration": "llm() 호출에는 model=\"openai/gpt-4.1-mini\"처럼 문자열 리터럴로 모델을 최대 하나만 지정해야 합니다. model=이 없으면 리플렉션 모델을 사용합니다. llm()을 직접 호출하세요. 설정은 **kwargs가 아닌 이름이 있는 인수로 전달하세요.",
     "contract.runner_outdated": "검사의 코드 실행기가 이 계약보다 오래되어 아직 이전 계약을 기대하므로 다시 빌드해야 합니다. 코드는 변경할 필요가 없습니다.",
     "contract.metric_signature.blackbox": "이 옵티마이저에는 score(input, output, expected=None)가 필요합니다.",
     "contract.passed": "코드가 옵티마이저의 요구 사항과 일치합니다.",
