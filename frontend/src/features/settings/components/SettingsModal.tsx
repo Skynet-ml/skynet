@@ -521,10 +521,14 @@ function EditableBudgetCell({
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState<string>(toMb(bytes));
   const [saving, setSaving] = React.useState(false);
+  const [dirty, setDirty] = React.useState(false);
   const fieldRef = React.useRef<HTMLSpanElement | null>(null);
 
   React.useEffect(() => {
-    if (!editing) setDraft(toMb(bytes));
+    if (!editing) {
+      setDraft(toMb(bytes));
+      setDirty(false);
+    }
   }, [bytes, editing, toMb]);
 
   React.useEffect(() => {
@@ -538,7 +542,8 @@ function EditableBudgetCell({
 
   const commit = React.useCallback(async () => {
     // An untouched draft is the rounded MB of an API-set value; saving it would silently change the override.
-    if (draft === toMb(bytes)) {
+    // A typed draft with the same digits is a deliberate round-down and still saves.
+    if (!dirty) {
       setEditing(false);
       return;
     }
@@ -562,7 +567,7 @@ function EditableBudgetCell({
     } finally {
       setSaving(false);
     }
-  }, [bytes, cancel, draft, onSave, toMb]);
+  }, [bytes, cancel, dirty, draft, onSave]);
 
   if (editing) {
     return (
@@ -588,8 +593,14 @@ function EditableBudgetCell({
         <NumberInput
           min={1}
           value={draft === "" ? "" : Number(draft)}
-          onChange={(value) => setDraft(String(value))}
-          onClear={() => setDraft("")}
+          onChange={(value) => {
+            setDraft(String(value));
+            setDirty(true);
+          }}
+          onClear={() => {
+            setDraft("");
+            setDirty(true);
+          }}
           disabled={saving}
           className="h-7 w-28 rounded-md [&_button]:size-7 [&_input]:text-xs"
         />
@@ -606,10 +617,14 @@ function EditableBudgetCell({
       title={msg("settings.admin.storage.edit_hint")}
       className="group inline-flex items-center gap-1.5 rounded px-2 py-1 text-xs tabular-nums text-muted-foreground hover:bg-accent/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
     >
-      {/* Same MB unit as the editor, so the shown number is the number the admin edits.
-          An API-set value that is not a whole MB keeps its exact size instead of rounding (to 0 under 0.5 MB). */}
+      {/* MB from 1 MB up, the unit the editor uses. An API-set value that is not a whole MB shows
+          one decimal instead of rounding; under 1 MB it shows KB or B so it does not read as 0. */}
       <span dir="ltr">
-        {bytes % BYTES_PER_MB === 0 ? `${toMb(bytes)} MB` : formatStorageSize(bytes)}
+        {bytes % BYTES_PER_MB === 0
+          ? `${toMb(bytes)} MB`
+          : bytes < BYTES_PER_MB
+            ? formatStorageSize(bytes)
+            : `${(bytes / BYTES_PER_MB).toFixed(1)} MB`}
       </span>
       <PencilSimple
         className="size-3 opacity-0 transition group-hover:opacity-50"
