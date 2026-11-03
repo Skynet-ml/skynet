@@ -1,6 +1,7 @@
 /** The docs answer panel's history, stream parsing, and docs-only links. */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { createElement, type ReactNode } from "react";
@@ -10,16 +11,25 @@ import remarkGfm from "remark-gfm";
 
 import {
   askBody,
+  DOCS_PATH_HEADER,
+  docsPathLocale,
   isDocsHref,
   isQuestionTooLong,
   keepDocsLinks,
   MAX_QUESTION_CHARS,
   parseStoredHistory,
+  pickRequestLocale,
   readSuggestion,
   toTranscript,
   trimHistory,
 } from "./docs-answer.ts";
 import { buildSuggestPayload } from "../../../shared/ui/agent/next-prompt.ts";
+import {
+  DEFAULT_LOCALE,
+  FULL_TRANSLATION_LOCALES,
+  isLocale,
+  localeFromAcceptLanguage,
+} from "../../../shared/lib/locale.ts";
 
 test("keepDocsLinks keeps links to docs pages", () => {
   const text = "See [Engines](/docs/engines) and [Hebrew](/docs/he/quickstart#run).";
@@ -217,4 +227,43 @@ test("a finished docs answer builds the shared suggestion payload with its searc
   });
   const running = [...thread.slice(0, 1), { ...thread[1], toolCalls: [{ ...search, status: "running" as const }] }];
   assert.equal(buildSuggestPayload(running), null);
+});
+
+const LOCALES = FULL_TRANSLATION_LOCALES;
+const localeRules = { isLocale, fromAcceptLanguage: localeFromAcceptLanguage, fallback: DEFAULT_LOCALE };
+
+test("docsPathLocale reads the locale from a docs URL", () => {
+  assert.equal(docsPathLocale("/docs", LOCALES), "en");
+  assert.equal(docsPathLocale("/docs/quickstart", LOCALES), "en");
+  assert.equal(docsPathLocale("/docs/he", LOCALES), "he");
+  assert.equal(docsPathLocale("/docs/he/quickstart", LOCALES), "he");
+  assert.equal(docsPathLocale("/docs/en", LOCALES), "en");
+  assert.equal(docsPathLocale("/docs/xx", LOCALES), "en");
+});
+
+test("docsPathLocale ignores paths outside /docs", () => {
+  for (const path of ["/", "/datasets", "/docs-md/quickstart", "/docs-search", "/login"]) {
+    assert.equal(docsPathLocale(path, LOCALES), null, path);
+  }
+});
+
+test("pickRequestLocale puts the docs URL locale ahead of the cookie and Accept-Language", () => {
+  const cookieAndBrowser = { cookieLocale: "fr", acceptLanguage: "fr-FR,fr;q=0.9" };
+  assert.equal(pickRequestLocale({ docsLocale: docsPathLocale("/docs", LOCALES), ...cookieAndBrowser }, localeRules), "en");
+  assert.equal(pickRequestLocale({ docsLocale: docsPathLocale("/docs/he", LOCALES), ...cookieAndBrowser }, localeRules), "he");
+  assert.equal(pickRequestLocale({ docsLocale: docsPathLocale("/docs/en", LOCALES), ...cookieAndBrowser }, localeRules), "en");
+});
+
+test("pickRequestLocale keeps the cookie, Accept-Language and default outside /docs", () => {
+  const docsLocale = docsPathLocale("/datasets", LOCALES);
+  assert.equal(pickRequestLocale({ docsLocale, cookieLocale: "fr", acceptLanguage: "en-US" }, localeRules), "fr");
+  assert.equal(pickRequestLocale({ docsLocale, cookieLocale: undefined, acceptLanguage: "en-US" }, localeRules), "en");
+  assert.equal(pickRequestLocale({ docsLocale, cookieLocale: "xx", acceptLanguage: "de-DE" }, localeRules), "de");
+  assert.equal(pickRequestLocale({ docsLocale, cookieLocale: undefined, acceptLanguage: null }, localeRules), DEFAULT_LOCALE);
+  assert.equal(pickRequestLocale({ docsLocale: "xx", cookieLocale: "fr", acceptLanguage: null }, localeRules), "fr");
+});
+
+test("the proxy sends the docs path in the header that the layout reads", () => {
+  const proxy = readFileSync(new URL("../../../proxy.ts", import.meta.url), "utf8");
+  assert.ok(proxy.includes(`const DOCS_PATH_HEADER = "${DOCS_PATH_HEADER}";`));
 });

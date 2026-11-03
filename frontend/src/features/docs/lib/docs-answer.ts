@@ -161,3 +161,39 @@ export function keepDocsLinks(markdown: string): string {
     .map((part) => (part.startsWith("```") ? part : rewriteLinks(part)))
     .join("");
 }
+
+/**
+ * The request header that carries a docs page's URL path from the proxy
+ * (src/proxy.ts) to the root layout. The docs agent's shared strings and
+ * message times follow the app catalog, so the catalog must match the URL.
+ */
+export const DOCS_PATH_HEADER = "x-docs-path";
+
+const DOCS_PAGE_PATH = /^\/docs(?:\/([^/]+))?(?:\/|$)/;
+
+/**
+ * The locale that a docs URL names, or null for a path outside /docs (or none).
+ *
+ * /docs and its English pages have no prefix; /docs/<locale>/... is that locale.
+ */
+export function docsPathLocale(pathname: string | null, locales: readonly string[]): string | null {
+  const match = DOCS_PAGE_PATH.exec(pathname ?? "");
+  if (!match) return null;
+  return match[1] && locales.includes(match[1]) ? match[1] : "en";
+}
+
+/**
+ * Choose a request's UI locale: the docs URL locale, then the switcher
+ * cookie, then the browser's Accept-Language, then the default.
+ *
+ * The locale rules come in as arguments so the Node unit test can load this
+ * file without the app's `@/` imports.
+ */
+export function pickRequestLocale<L extends string>(
+  request: { docsLocale: string | null; cookieLocale: string | undefined; acceptLanguage: string | null },
+  rules: { isLocale: (value: unknown) => value is L; fromAcceptLanguage: (header: string | null) => L | null; fallback: L },
+): L {
+  if (rules.isLocale(request.docsLocale)) return request.docsLocale;
+  if (rules.isLocale(request.cookieLocale)) return request.cookieLocale;
+  return rules.fromAcceptLanguage(request.acceptLanguage) ?? rules.fallback;
+}
