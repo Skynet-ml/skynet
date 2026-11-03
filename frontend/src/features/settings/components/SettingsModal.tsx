@@ -537,6 +537,11 @@ function EditableBudgetCell({
   }, [bytes, toMb]);
 
   const commit = React.useCallback(async () => {
+    // An untouched draft is the rounded MB of an API-set value; saving it would silently change the override.
+    if (draft === toMb(bytes)) {
+      setEditing(false);
+      return;
+    }
     const parsedMb = Number.parseInt(draft, 10);
     if (!Number.isFinite(parsedMb) || parsedMb < 1) {
       toast.error(msg("settings.admin.storage.budget_invalid"));
@@ -557,7 +562,7 @@ function EditableBudgetCell({
     } finally {
       setSaving(false);
     }
-  }, [bytes, cancel, draft, onSave]);
+  }, [bytes, cancel, draft, onSave, toMb]);
 
   if (editing) {
     return (
