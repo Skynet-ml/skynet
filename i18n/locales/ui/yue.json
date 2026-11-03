@@ -2133,7 +2133,7 @@
   "billing.popover.unavailable": "無法載入你嘅錢包。請開啟帳單設定再試一次。",
   "billing.portal.error": "無法開啟帳單管理。請再試一次。",
   "billing.pro.title": "{term.appName} Pro",
-  "billing.pro.pitch": "10GB 儲存空間、可以儲存 1,000 個工作，同時可以跑 20 個。用量照舊由結餘扣。",
+  "billing.pro.pitch": "20GB 儲存空間、可以儲存 1,000 個工作，同時可以跑 20 個。用量照舊由結餘扣。",
   "billing.pro.upgrade": "升級 · 每月 {p1}",
   "billing.pro.manage": "管理",
   "billing.pro.current": "生效中",

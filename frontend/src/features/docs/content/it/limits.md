@@ -30,7 +30,7 @@ Leggi [Esecuzioni](/docs/concepts/runs) per sapere come funzionano i tentativi d
 
 | Limite                        | Free    | Pro    |
 | ----------------------------- | ------- | ------ |
-| Spazio di archiviazione totale | 250 MiB | 10 GiB |
+| Spazio di archiviazione totale | 500 MiB | 20 GiB |
 
 Lo spazio di archiviazione totale comprende esecuzioni, dataset, log, chat con l'agente, caricamenti in attesa e dati di ricerca. Skynet rifiuta una scrittura che supererebbe il tuo limite di archiviazione.
 

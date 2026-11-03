@@ -1246,7 +1246,7 @@
   "billing.popover.unavailable": "We couldn't load your wallet. Open billing settings to retry.",
   "billing.portal.error": "Couldn't open billing management. Please try again.",
   "billing.pro.title": "{term.appName} Pro",
-  "billing.pro.pitch": "10 GB storage, 1,000 saved jobs and 20 optimizations at once. Usage still bills from your balance.",
+  "billing.pro.pitch": "20 GB storage, 1,000 saved jobs and 20 optimizations at once. Usage still bills from your balance.",
   "billing.pro.upgrade": "Upgrade · {p1}/mo",
   "billing.pro.manage": "Manage",
   "billing.pro.current": "Active",

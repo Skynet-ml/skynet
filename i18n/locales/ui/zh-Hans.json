@@ -1158,7 +1158,7 @@
   "billing.popover.unavailable": "无法加载您的钱包。请打开账单设置重试。",
   "billing.portal.error": "无法打开账单管理，请重试。",
   "billing.pro.title": "{term.appName} Pro",
-  "billing.pro.pitch": "10GB 存储空间、可保存 1,000 个任务、可同时运行 20 个。用量仍从余额中扣除。",
+  "billing.pro.pitch": "20GB 存储空间、可保存 1,000 个任务、可同时运行 20 个。用量仍从余额中扣除。",
   "billing.pro.upgrade": "升级 · 每月 {p1}",
   "billing.pro.manage": "管理",
   "billing.pro.current": "已生效",

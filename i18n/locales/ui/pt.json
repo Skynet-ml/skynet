@@ -1158,7 +1158,7 @@
   "billing.popover.unavailable": "Não foi possível carregar a sua carteira. Abra as definições de faturação para tentar novamente.",
   "billing.portal.error": "Não foi possível abrir a gestão de faturação. Tente novamente.",
   "billing.pro.title": "{term.appName} Pro",
-  "billing.pro.pitch": "10 GB de armazenamento, 1.000 jobs salvos e 20 execuções ao mesmo tempo. O uso continua sendo cobrado do seu saldo.",
+  "billing.pro.pitch": "20 GB de armazenamento, 1.000 jobs salvos e 20 execuções ao mesmo tempo. O uso continua sendo cobrado do seu saldo.",
   "billing.pro.upgrade": "Assinar · {p1}/mês",
   "billing.pro.manage": "Gerenciar",
   "billing.pro.current": "Ativo",

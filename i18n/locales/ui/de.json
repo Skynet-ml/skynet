@@ -1158,7 +1158,7 @@
   "billing.popover.unavailable": "Ihr Guthaben konnte nicht geladen werden. Öffnen Sie die Abrechnungseinstellungen, um es erneut zu versuchen.",
   "billing.portal.error": "Abrechnungsverwaltung konnte nicht geöffnet werden. Bitte versuchen Sie es erneut.",
   "billing.pro.title": "{term.appName} Pro",
-  "billing.pro.pitch": "10 GB Speicher, 1.000 gespeicherte Jobs und 20 gleichzeitige Läufe. Die Nutzung wird weiterhin über Guthaben abgerechnet.",
+  "billing.pro.pitch": "20 GB Speicher, 1.000 gespeicherte Jobs und 20 gleichzeitige Läufe. Die Nutzung wird weiterhin über Guthaben abgerechnet.",
   "billing.pro.upgrade": "Upgraden · {p1}/Monat",
   "billing.pro.manage": "Verwalten",
   "billing.pro.current": "Aktiv",

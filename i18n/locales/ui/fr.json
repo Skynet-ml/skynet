@@ -1158,7 +1158,7 @@
   "billing.popover.unavailable": "Impossible de charger votre portefeuille. Ouvrez les paramètres de facturation pour réessayer.",
   "billing.portal.error": "Impossible d'ouvrir la gestion de la facturation. Veuillez réessayer.",
   "billing.pro.title": "{term.appName} Pro",
-  "billing.pro.pitch": "10 Go de stockage, 1 000 tâches enregistrées et 20 exécutions simultanées. L’usage reste facturé sur votre solde.",
+  "billing.pro.pitch": "20 Go de stockage, 1 000 tâches enregistrées et 20 exécutions simultanées. L’usage reste facturé sur votre solde.",
   "billing.pro.upgrade": "Passer à Pro · {p1}/mois",
   "billing.pro.manage": "Gérer",
   "billing.pro.current": "Actif",

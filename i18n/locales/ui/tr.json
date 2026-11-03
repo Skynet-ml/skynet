@@ -1158,7 +1158,7 @@
   "billing.popover.unavailable": "Cüzdanınız yüklenemedi. Tekrar denemek için faturalandırma ayarlarını açın.",
   "billing.portal.error": "Faturalandırma yönetimi açılamadı. Lütfen tekrar deneyin.",
   "billing.pro.title": "{term.appName} Pro",
-  "billing.pro.pitch": "10 GB depolama, 1.000 kayıtlı iş ve aynı anda 20 çalıştırma. Kullanım yine bakiyenizden düşülür.",
+  "billing.pro.pitch": "20 GB depolama, 1.000 kayıtlı iş ve aynı anda 20 çalıştırma. Kullanım yine bakiyenizden düşülür.",
   "billing.pro.upgrade": "Yükselt · aylık {p1}",
   "billing.pro.manage": "Yönet",
   "billing.pro.current": "Etkin",

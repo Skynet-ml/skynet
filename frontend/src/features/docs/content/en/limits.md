@@ -30,7 +30,7 @@ Read [Runs](/docs/concepts/runs) for how recovery attempts work.
 
 | Limit         | Free    | Pro    |
 | ------------- | ------- | ------ |
-| Total storage | 250 MiB | 10 GiB |
+| Total storage | 500 MiB | 20 GiB |
 
 Total storage includes your runs, datasets, logs, agent chats, staged uploads and search data. Skynet refuses a write that would go over your storage limit.
 

@@ -787,3 +787,12 @@ def test_preview_detection_reads_only_app_environment(
     if railway is not None:
         monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", railway)
     assert Settings(_env_file=None).is_preview_environment is expected
+
+
+def test_storage_quota_defaults_follow_chatgpt_free_and_plus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default storage budgets are 500 MB on Free and 20 GB on Pro (ChatGPT Free and Plus)."""
+    monkeypatch.delenv("USER_STORAGE_QUOTA_BYTES", raising=False)
+    monkeypatch.delenv("PRO_STORAGE_QUOTA_BYTES", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.user_storage_quota_bytes == 500 * 1024 * 1024
+    assert settings.pro_storage_quota_bytes == 20 * 1024 * 1024 * 1024

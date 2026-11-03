@@ -30,7 +30,7 @@ Lisez [Exécutions](/docs/concepts/runs) pour savoir comment fonctionnent les te
 
 | Limite            | Free    | Pro    |
 | ----------------- | ------- | ------ |
-| Stockage total    | 250 Mio | 10 Gio |
+| Stockage total    | 500 Mio | 20 Gio |
 
 Le stockage total comprend vos exécutions, jeux de données, journaux, conversations avec l'agent, imports en attente et données de recherche. Skynet refuse toute écriture qui dépasserait votre limite de stockage.
 

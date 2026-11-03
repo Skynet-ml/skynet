@@ -1158,7 +1158,7 @@
   "billing.popover.unavailable": "No pudimos cargar tu billetera. Abre la configuración de facturación para reintentarlo.",
   "billing.portal.error": "No se pudo abrir la administración de facturación. Inténtalo de nuevo.",
   "billing.pro.title": "{term.appName} Pro",
-  "billing.pro.pitch": "10 GB de almacenamiento, 1000 trabajos guardados y 20 ejecuciones a la vez. El uso se sigue cobrando de tu saldo.",
+  "billing.pro.pitch": "20 GB de almacenamiento, 1000 trabajos guardados y 20 ejecuciones a la vez. El uso se sigue cobrando de tu saldo.",
   "billing.pro.upgrade": "Mejorar · {p1}/mes",
   "billing.pro.manage": "Gestionar",
   "billing.pro.current": "Activo",

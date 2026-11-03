@@ -1158,7 +1158,7 @@
   "billing.popover.unavailable": "지갑을 불러오지 못했습니다. 결제 설정을 열어 다시 시도하세요.",
   "billing.portal.error": "결제 관리 페이지를 열 수 없습니다. 다시 시도해 주세요.",
   "billing.pro.title": "{term.appName} Pro",
-  "billing.pro.pitch": "저장 공간 10GB, 저장 작업 1,000개, 동시 실행 20개. 사용량은 계속 잔액에서 차감됩니다.",
+  "billing.pro.pitch": "저장 공간 20GB, 저장 작업 1,000개, 동시 실행 20개. 사용량은 계속 잔액에서 차감됩니다.",
   "billing.pro.upgrade": "업그레이드 · 월 {p1}",
   "billing.pro.manage": "관리",
   "billing.pro.current": "활성",

@@ -30,7 +30,7 @@ Lee [Ejecuciones](/docs/concepts/runs) para saber cómo funcionan los intentos d
 
 | Límite                  | Free    | Pro    |
 | ----------------------- | ------- | ------ |
-| Almacenamiento total    | 250 MiB | 10 GiB |
+| Almacenamiento total    | 500 MiB | 20 GiB |
 
 El almacenamiento total incluye tus ejecuciones, conjuntos de datos, registros, chats con el agente, archivos subidos pendientes y datos de búsqueda. Skynet rechaza una escritura que superaría tu límite de almacenamiento.
 
