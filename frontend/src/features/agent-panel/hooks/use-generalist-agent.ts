@@ -30,6 +30,7 @@ import { agentSteerChannel, newSteerKey } from "@/shared/ui/agent/use-steer-queu
 
 import { confirmGeneralistApproval, streamGeneralistAgent } from "../lib/stream";
 import { dropPendingToolCalls, pendingToolCall, placeToolCall } from "../lib/pending-tool-calls";
+import { editTarget } from "../lib/edit-turn";
 import type {
   ChatTurn,
   PendingApprovalPayload,
@@ -177,6 +178,8 @@ interface PendingRun {
   wizardState: WizardState;
   trustMode: TrustMode;
   regenerate: boolean;
+  /** User turn this message edits; the backend drops its stored copy and every later row. */
+  editUserTurn: { text: string; occurrence: number } | null;
 }
 
 /** Per-session mutable machinery that must never trigger a render. */
@@ -523,6 +526,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             trust_mode: run.trustMode,
             conversation_id: sessionsRef.current.get(key)?.conversationId ?? null,
             regenerate: run.regenerate,
+            edit_user_text: run.editUserTurn?.text,
+            edit_user_occurrence: run.editUserTurn?.occurrence,
             locale: getActiveLocale(),
             model: sentModel ?? undefined,
             reasoning_effort:
@@ -857,6 +862,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       wizardStateOverride?: WizardState,
       regenerate = false,
       hidden = false,
+      editUserTurn: { text: string; occurrence: number } | null = null,
     ) => {
       // A resend within the same session replaces its own in-flight or queued
       // turn — other sessions' streams are untouched.
@@ -890,6 +896,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         wizardState: ws,
         trustMode: tm,
         regenerate,
+        editUserTurn,
       };
 
       commit((draft) => {
@@ -964,8 +971,10 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       const trimmed = content.trim();
       if (!trimmed) return;
       const key = activeKeyRef.current;
-      const truncated = (sessionsRef.current.get(key)?.messages ?? []).slice(0, messageIndex);
-      requestRun(key, trimmed, truncated);
+      const current = sessionsRef.current.get(key)?.messages ?? [];
+      const truncated = current.slice(0, messageIndex);
+      const editUserTurn = current[messageIndex]?.role === "user" ? editTarget(current, messageIndex) : null;
+      requestRun(key, trimmed, truncated, undefined, false, false, editUserTurn);
     },
     [requestRun],
   );

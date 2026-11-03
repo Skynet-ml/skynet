@@ -166,6 +166,21 @@ class GeneralistAgentRequest(BaseModel):
             "Replace the existing conversation's final user/assistant turn instead of appending a duplicate turn."
         ),
     )
+    edit_user_text: str | None = Field(
+        default=None,
+        description=(
+            "Original text of the user turn that this message edits. The stored copy of that turn and "
+            "every later message of the conversation are deleted before the new turn is saved."
+        ),
+    )
+    edit_user_occurrence: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "How many earlier user turns in the chat have the same text as the edited turn. It selects "
+            "the edited turn when several stored turns share its text."
+        ),
+    )
     locale: str | None = Field(
         default=None,
         description=(
@@ -482,6 +497,44 @@ def _discard_latest_turn(job_store, conversation_id: str) -> None:
         session.query(AgentMessageModel).filter(
             AgentMessageModel.conversation_id == conversation_id,
             AgentMessageModel.id >= latest_user.id,
+        ).delete(synchronize_session=False)
+        session.commit()
+
+
+def _discard_from_user_turn(job_store, conversation_id: str, user_text: str, occurrence: int) -> None:
+    """Delete the stored copy of the edited user turn and every message after it.
+
+    Edit-and-resend keeps only the turns before the edited one in memory, so the
+    stored history must lose the same suffix; otherwise a reload shows the old
+    turn and its replies with the edited copy appended after them. The turn is
+    found by its text, not its position: the chat can show turns that were never
+    stored (a send refused before it was saved), and the store can hold steered
+    turns that never reached the chat. When a missing turn shares the edited
+    text, no stored turn matches and nothing is deleted, never a wrong turn.
+
+    Args:
+        job_store: Job-store instance whose engine backs the DB session.
+        conversation_id: Conversation whose history is cut.
+        user_text: Original text of the edited turn.
+        occurrence: How many earlier chat user turns have the same text.
+    """
+    with Session(job_store.engine) as session:
+        edited = (
+            session.query(AgentMessageModel.id)
+            .filter(
+                AgentMessageModel.conversation_id == conversation_id,
+                AgentMessageModel.role == "user",
+                AgentMessageModel.content == user_text,
+            )
+            .order_by(AgentMessageModel.id)
+            .offset(occurrence)
+            .first()
+        )
+        if edited is None:
+            return
+        session.query(AgentMessageModel).filter(
+            AgentMessageModel.conversation_id == conversation_id,
+            AgentMessageModel.id >= edited.id,
         ).delete(synchronize_session=False)
         session.commit()
 
@@ -869,7 +922,9 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                 return None, None
             try:
                 cid, ttl = _ensure_conversation(job_store, req.conversation_id, current_user.username, req.user_message)
-                if req.regenerate:
+                if req.edit_user_text is not None:
+                    _discard_from_user_turn(job_store, cid, req.edit_user_text, req.edit_user_occurrence)
+                elif req.regenerate:
                     _discard_latest_turn(job_store, cid)
                 _persist_user_turn(job_store, cid, req.user_message)
             except DomainError:

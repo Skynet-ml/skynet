@@ -18,6 +18,7 @@ import hmac
 import json
 import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -163,6 +164,8 @@ def _post_turn(
     *,
     conversation_id: str | None = None,
     regenerate: bool = False,
+    edit_user_text: str | None = None,
+    edit_user_occurrence: int = 0,
 ) -> Any:
     """POST one generalist-agent turn and return the response.
 
@@ -172,6 +175,8 @@ def _post_turn(
         token: Bearer token, or None to omit the Authorization header.
         conversation_id: Existing conversation to continue, if any.
         regenerate: Whether to replace the conversation's final persisted turn.
+        edit_user_text: Original text of the user turn this message edits, if any.
+        edit_user_occurrence: How many earlier chat user turns have the same text as the edited one.
 
     Returns:
         The streaming ``Response`` (already fully read by the test client).
@@ -186,6 +191,8 @@ def _post_turn(
             "trust_mode": "ask",
             "conversation_id": conversation_id,
             "regenerate": regenerate,
+            "edit_user_text": edit_user_text,
+            "edit_user_occurrence": edit_user_occurrence,
         },
         headers=headers,
     )
@@ -350,6 +357,143 @@ def test_regenerate_replaces_final_persisted_turn(
             ("user", "hi"),
             ("assistant", "שלום"),
         ]
+
+
+def _start_conversation(client: TestClient, engine: Engine, token: str, texts: list[str]) -> str:
+    """Send ``texts`` as consecutive turns of one new conversation.
+
+    Args:
+        client: Bound test client.
+        engine: Engine of the test database.
+        token: Bearer token of the signed-in user.
+        texts: User messages to send in order; must not be empty.
+
+    Returns:
+        The id of the new conversation.
+    """
+    assert _post_turn(client, texts[0], token).status_code == 200
+    with Session(engine) as session:
+        conversation_id = session.query(AgentConversationModel.id).scalar()
+    for text in texts[1:]:
+        assert _post_turn(client, text, token, conversation_id=conversation_id).status_code == 200
+    return conversation_id
+
+
+def _stored_contents(engine: Engine) -> list[str]:
+    """Return the content of every stored agent message in insertion order."""
+    with Session(engine) as session:
+        return [m.content for m in session.query(AgentMessageModel).order_by(AgentMessageModel.id).all()]
+
+
+def test_edit_and_resend_replaces_the_edited_turn_and_later_rows(
+    persistence_client: tuple[TestClient, Engine],
+) -> None:
+    """Editing an earlier turn deletes it and every later row before the new turn is saved."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["first", "second", "third"])
+
+    edited = _post_turn(client, "second, edited", token, conversation_id=conversation_id, edit_user_text="second")
+
+    assert edited.status_code == 200
+    assert _stored_contents(engine) == ["first", "שלום", "second, edited", "שלום"]
+
+
+def test_edit_of_the_first_turn_keeps_only_the_new_turn(
+    persistence_client: tuple[TestClient, Engine],
+) -> None:
+    """Editing the first turn leaves only the new turn and its reply."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["first", "second"])
+
+    assert _post_turn(client, "redo", token, conversation_id=conversation_id, edit_user_text="first").status_code == 200
+
+    assert _stored_contents(engine) == ["redo", "שלום"]
+
+
+def test_edit_finds_the_edited_turn_when_the_chat_shows_an_unsaved_turn(
+    persistence_client: tuple[TestClient, Engine],
+) -> None:
+    """A chat turn with no stored row (a send refused with 402) must not shift the edit onto a later turn."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    # The chat shows [u0, u1 (refused, never stored), u2, u3]; the user edits u2.
+    conversation_id = _start_conversation(client, engine, token, ["u0", "u2", "u3"])
+
+    edited = _post_turn(client, "u2 edited", token, conversation_id=conversation_id, edit_user_text="u2")
+
+    assert edited.status_code == 200
+    assert _stored_contents(engine) == ["u0", "שלום", "u2 edited", "שלום"]
+
+
+def test_edit_finds_the_edited_turn_after_a_stored_turn_the_chat_never_showed(
+    persistence_client: tuple[TestClient, Engine],
+) -> None:
+    """A stored steered message that never reached the chat must not shift the edit onto an earlier turn."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["u0"])
+    with Session(engine) as session:
+        session.add(
+            AgentMessageModel(
+                conversation_id=conversation_id,
+                role="user",
+                content="steer",
+                tool_calls=None,
+                model=None,
+                created_at=datetime.now(UTC),
+            )
+        )
+        session.commit()
+    assert _post_turn(client, "u1", token, conversation_id=conversation_id).status_code == 200
+
+    # The chat shows [u0, u1]; the user edits u1.
+    edited = _post_turn(client, "u1 edited", token, conversation_id=conversation_id, edit_user_text="u1")
+
+    assert edited.status_code == 200
+    assert _stored_contents(engine) == ["u0", "שלום", "steer", "u1 edited", "שלום"]
+
+
+def test_edit_of_a_repeated_text_picks_the_matching_occurrence(
+    persistence_client: tuple[TestClient, Engine],
+) -> None:
+    """When several turns have the same text, the occurrence count selects the edited one."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["hi", "hi", "bye"])
+
+    edited = _post_turn(
+        client, "hello", token, conversation_id=conversation_id, edit_user_text="hi", edit_user_occurrence=1
+    )
+
+    assert edited.status_code == 200
+    assert _stored_contents(engine) == ["hi", "שלום", "hello", "שלום"]
+
+
+def test_edit_with_no_matching_stored_turn_deletes_nothing(
+    persistence_client: tuple[TestClient, Engine],
+) -> None:
+    """With no stored turn of that text and occurrence, the history stays and the new turn is appended."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["u0"])
+
+    assert _post_turn(client, "a", token, conversation_id=conversation_id, edit_user_text="other").status_code == 200
+    assert (
+        _post_turn(
+            client, "b", token, conversation_id=conversation_id, edit_user_text="u0", edit_user_occurrence=1
+        ).status_code
+        == 200
+    )
+
+    assert _stored_contents(engine) == ["u0", "שלום", "a", "שלום", "b", "שלום"]
 
 
 _CONV_ID = "conv-1"
