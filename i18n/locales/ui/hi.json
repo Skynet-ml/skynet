@@ -4387,7 +4387,6 @@
   "settings.agent_local.role.tagger": "टैगिंग इंटरव्यू",
   "settings.agent_engine.label": "एजेंट इंजन",
   "settings.agent_engine.automatic": "स्वचालित ({engine})",
-  "settings.agent_engine.description": "एजेंट OpenRouter के ज़रिए प्रबंधित मॉडलों पर चलते हैं",
   "settings.agent_engine.description_local": "जिन एजेंटों का अपना CLI नहीं है, वे इस CLI पर चलते हैं",
   "settings.agent_engine.description_openrouter": "हर एजेंट आपकी सहेजी गई OpenRouter कुंजी पर चलता है",
   "settings.agent_engine.openrouter": "OpenRouter",

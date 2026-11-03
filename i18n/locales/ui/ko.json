@@ -4387,7 +4387,6 @@
   "settings.agent_local.role.tagger": "태깅 인터뷰",
   "settings.agent_engine.label": "에이전트 엔진",
   "settings.agent_engine.automatic": "자동 ({engine})",
-  "settings.agent_engine.description": "에이전트는 OpenRouter를 통해 관리형 모델에서 실행됩니다",
   "settings.agent_engine.description_local": "자체 CLI가 없는 에이전트는 이 CLI에서 실행됩니다",
   "settings.agent_engine.description_openrouter": "모든 에이전트가 저장된 OpenRouter 키로 실행됩니다",
   "settings.agent_engine.openrouter": "OpenRouter",

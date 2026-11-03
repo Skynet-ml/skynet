@@ -4390,7 +4390,6 @@
   "settings.agent_local.role.tagger": "Tagging interview",
   "settings.agent_engine.label": "Agent engine",
   "settings.agent_engine.automatic": "Automatic ({engine})",
-  "settings.agent_engine.description": "Agents run on managed models through OpenRouter",
   "settings.agent_engine.description_local": "Agents with no CLI of their own run on this CLI",
   "settings.agent_engine.description_openrouter": "Every agent runs on your saved OpenRouter key",
   "settings.agent_engine.openrouter": "OpenRouter",

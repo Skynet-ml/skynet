@@ -4387,7 +4387,6 @@
   "settings.agent_local.role.tagger": "Etiketleme görüşmesi",
   "settings.agent_engine.label": "Ajan motoru",
   "settings.agent_engine.automatic": "Otomatik ({engine})",
-  "settings.agent_engine.description": "Ajanlar OpenRouter üzerinden yönetilen modellerde çalışır",
   "settings.agent_engine.description_local": "Kendi CLI'ı olmayan ajanlar bu CLI'da çalışır",
   "settings.agent_engine.description_openrouter": "Tüm ajanlar kayıtlı OpenRouter anahtarınla çalışır",
   "settings.agent_engine.openrouter": "OpenRouter",

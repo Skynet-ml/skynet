@@ -4387,7 +4387,6 @@
   "settings.agent_local.role.tagger": "Інтерв'ю з розмітки",
   "settings.agent_engine.label": "Рушій агентів",
   "settings.agent_engine.automatic": "Автоматично ({engine})",
-  "settings.agent_engine.description": "Агенти працюють на керованих моделях через OpenRouter",
   "settings.agent_engine.description_local": "Агенти без власного CLI працюють на цьому CLI",
   "settings.agent_engine.description_openrouter": "Усі агенти працюють на вашому збереженому ключі OpenRouter",
   "settings.agent_engine.openrouter": "OpenRouter",
