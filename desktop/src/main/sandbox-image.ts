@@ -33,6 +33,7 @@ export async function ensureSandboxImage(
   backendDir: string,
   bundleId: string,
   logFile: string,
+  onOutput?: (chunk: string) => void,
 ): Promise<string> {
   const ref = `${SANDBOX_REPO}:${sandboxTag(bundleId)}`;
   const existing = await imageId(ctx, ref);
@@ -46,6 +47,7 @@ export async function ensureSandboxImage(
       cwd: path.dirname(backendDir),
       timeoutMs: 60 * 60_000,
       log,
+      onOutput,
     });
     if (build.code !== 0) {
       // BuildKit ends with a "View build details" link; the ERROR line says what broke.

@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import type { CliId, CliLimit, CliStatus, DockerStatus } from "./cli-detect";
+import type { Timeline } from "./step-timing";
 
 export const STOP_GRACE_MS = 15_000;
 
@@ -34,6 +35,8 @@ export interface OnboardingState {
   limitMessage?: string;
   /** Short progress step while starting, e.g. "postgres". */
   step?: string;
+  /** Step timings while starting. */
+  timeline?: Timeline;
   error?: string;
   url?: string;
   signIn?: SignInPhase;
@@ -121,7 +124,14 @@ function tail(text: string): string {
 export function runCommand(
   file: string,
   args: string[],
-  opts: { env: Record<string, string>; cwd?: string; timeoutMs?: number; log?: fs.WriteStream },
+  opts: {
+    env: Record<string, string>;
+    cwd?: string;
+    timeoutMs?: number;
+    log?: fs.WriteStream;
+    /** Called with each chunk of stdout and stderr. */
+    onOutput?: (chunk: string) => void;
+  },
 ): Promise<RunOutput> {
   return new Promise((resolve) => {
     let stdout = "";
@@ -143,10 +153,12 @@ export function runCommand(
     child.stdout?.on("data", (d: Buffer) => {
       stdout = tail(stdout + d.toString());
       opts.log?.write(d);
+      opts.onOutput?.(d.toString());
     });
     child.stderr?.on("data", (d: Buffer) => {
       stderr = tail(stderr + d.toString());
       opts.log?.write(d);
+      opts.onOutput?.(d.toString());
     });
     child.on("error", (err) => {
       stderr += String(err);

@@ -1,5 +1,6 @@
 import en from "./locales/en.json";
 import he from "./locales/he.json";
+import { formatClock, remaining, stepPhase, totalElapsed, type Timeline } from "./timeline";
 
 type Kind =
   | "checking"
@@ -32,6 +33,7 @@ interface State {
   resetAt?: string;
   limitMessage?: string;
   step?: string;
+  timeline?: Timeline;
   error?: string;
   signIn?: "waiting" | "unavailable" | "unreachable" | "failed" | "declined";
 }
@@ -137,6 +139,79 @@ function renderChecklist(state: State): void {
   );
 }
 
+// The running step's clock and bar update from here; render() replaces it.
+let tick: (() => void) | null = null;
+let detailNode: HTMLElement | null = null;
+setInterval(() => tick?.(), 250);
+
+/** Steps shorter than this show no bar: it would fill before anyone sees it. */
+const MIN_BAR_MS = 1500;
+
+function timelinePanel(timeline: Timeline): HTMLElement {
+  const elapsedNode = el("span", { className: "tl-elapsed", dir: "ltr" });
+  const leftNode = el("span", { className: "tl-left" });
+  const head = el("div", { className: "tl-head" }, [
+    el("span", { className: "tl-title", text: t("starting.title") }),
+    el("span", { className: "tl-totals" }, [leftNode, elapsedNode]),
+  ]);
+  const updates: ((now: number) => void)[] = [];
+  detailNode = null;
+
+  const rows = timeline.steps.map((step) => {
+    const phase = stepPhase(step);
+    const time = el("span", { className: "tl-time", dir: "ltr" });
+    const row = el("li", { className: `tl-step tl-${phase}` }, [
+      el("span", { className: "tl-icon", text: phase === "done" ? "✓" : "" }),
+      el("span", { className: "tl-label", text: t(`step.${step.name}`) }),
+      time,
+    ]);
+    const estimate = step.estimateMs;
+    if (phase === "done") time.textContent = formatClock(step.durationMs as number);
+    if (phase === "pending" && estimate !== undefined) time.textContent = `~${formatClock(estimate)}`;
+    if (phase !== "active") return row;
+
+    const startedAt = step.startedAt as number;
+    const extra = el("div", { className: "tl-extra" });
+    const hasBar = estimate !== undefined && estimate >= MIN_BAR_MS;
+    if (hasBar) {
+      const fill = el("div", { className: "tl-fill" });
+      // A CSS animation fills the bar; the negative delay resumes it after a re-render without a jump.
+      fill.style.animationDuration = `${estimate}ms`;
+      fill.style.animationDelay = `-${Math.min(Date.now() - startedAt, estimate)}ms`;
+      extra.append(el("div", { className: "tl-bar" }, [fill, el("div", { className: "tl-sweep" })]));
+      extra.append(el("div", { className: "tl-note", text: t("timeline.over") }));
+    }
+    detailNode = el("div", { className: "tl-detail", dir: "ltr", text: timeline.detail ?? "" });
+    detailNode.hidden = !timeline.detail;
+    extra.append(detailNode);
+    row.append(extra);
+    updates.push((now) => {
+      const elapsed = now - startedAt;
+      time.textContent = estimate === undefined ? formatClock(elapsed) : `${formatClock(elapsed)} / ~${formatClock(estimate)}`;
+      row.classList.toggle("tl-over", hasBar && elapsed > (estimate as number));
+    });
+    return row;
+  });
+
+  updates.push((now) => {
+    elapsedNode.textContent = formatClock(totalElapsed(timeline, now));
+    const left = remaining(timeline, now);
+    leftNode.textContent = left !== null && left >= 1000 ? t("timeline.left", { time: formatClock(left) }) : "";
+  });
+  tick = () => {
+    const now = Date.now();
+    for (const update of updates) update(now);
+  };
+  tick();
+
+  const card = el("div", { className: "timeline" }, [head]);
+  // The clock changes every second; screen readers hear the checklist, not every tick.
+  card.setAttribute("aria-live", "off");
+  if (timeline.firstLaunch) card.append(el("p", { className: "tl-first", text: t("timeline.first") }));
+  card.append(el("ol", { className: "tl-steps" }, rows));
+  return card;
+}
+
 function formatReset(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
@@ -183,6 +258,7 @@ function panelBody(state: State): Node[] {
       nodes.push(actions(button(t("rate_capped.continue"), "primary", () => void bridge.continueAnyway()), button(t("action.recheck"), "secondary", () => void bridge.recheck())));
       break;
     case "starting":
+      if (state.timeline) nodes.push(timelinePanel(state.timeline));
       break;
     case "sign_in": {
       const skip = button(t("sign_in.skip"), "secondary", () => void bridge.skipSignIn());
@@ -213,7 +289,18 @@ const PROGRESS: Kind[] = ["checking", "starting", "ready"];
 const isProgress = (state: State) =>
   PROGRESS.includes(state.kind) || (state.kind === "sign_in" && state.signIn === "waiting");
 
+let lastKey = "";
+
 function render(state: State): void {
+  // A new output line alone patches the detail text, so the spinner and the bar do not restart.
+  const key = JSON.stringify({ ...state, timeline: state.timeline && { ...state.timeline, detail: undefined } });
+  if (key === lastKey && detailNode && state.timeline?.detail) {
+    detailNode.textContent = state.timeline.detail;
+    detailNode.hidden = false;
+    return;
+  }
+  lastKey = key;
+  tick = null;
   document.body.dataset.state = state.kind;
   document.body.toggleAttribute("data-progress", isProgress(state));
   renderChecklist(state);

@@ -32,7 +32,12 @@ export function databaseUrl(password: string, port: number): string {
  * removing the container loses nothing. POSTGRES_PASSWORD only takes effect
  * when the volume is empty, which is why the password must stay stable.
  */
-export async function startPostgres(ctx: DockerCtx, port: number, password: string): Promise<void> {
+export async function startPostgres(
+  ctx: DockerCtx,
+  port: number,
+  password: string,
+  onOutput?: (chunk: string) => void,
+): Promise<void> {
   await runCommand(ctx.docker, ["rm", "-f", PG_CONTAINER], { env: ctx.env, timeoutMs: 30_000 });
   const run = await runCommand(
     ctx.docker,
@@ -55,7 +60,7 @@ export async function startPostgres(ctx: DockerCtx, port: number, password: stri
       PG_IMAGE,
     ],
     // The password goes through the environment, not argv, so `ps` never shows it.
-    { env: { ...ctx.env, POSTGRES_PASSWORD: password }, timeoutMs: 10 * 60_000 },
+    { env: { ...ctx.env, POSTGRES_PASSWORD: password }, timeoutMs: 10 * 60_000, onOutput },
   );
   if (run.code !== 0) throw new Error(`docker run ${PG_IMAGE} failed: ${lastLine(run.stderr)}`);
   await waitFor(
