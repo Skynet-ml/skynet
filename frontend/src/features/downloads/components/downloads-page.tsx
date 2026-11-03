@@ -10,14 +10,13 @@ import {
   Desktop,
   DeviceMobile,
   Globe,
-  Moon,
-  Sun,
   Terminal,
 } from "@/shared/ui/icons";
 import { AppMark } from "@/shared/ui/app-mark";
 import { Button } from "@/shared/ui/primitives/button";
 import { LanguageSwitcher } from "@/shared/ui/language-switcher";
-import { useColorTheme, useLocale } from "@/shared/providers";
+import { useLocale } from "@/shared/providers";
+import { DocsThemeToggle } from "@/features/docs/client";
 import { docsPathForLocale } from "@/shared/lib/locale";
 import { msg } from "@/shared/lib/messages";
 import { APP_NAME } from "@/shared/lib/brand";
@@ -27,12 +26,12 @@ const ICONS = { apple: AppleLogo, desktop: Desktop, phone: DeviceMobile, termina
 
 export function DownloadsPage() {
   const { locale } = useLocale();
-  const { resolved, setTheme } = useColorTheme();
   const [detected, setDetected] = useState<PlatformId | null>(null);
   const docs = docsPathForLocale(locale);
   const platform = DOWNLOAD_PLATFORMS.find((item) => item.id === detected);
   const primary = platform && platform.status !== "coming-soon" ? platform : null;
   const PrimaryIcon = primary ? ICONS[primary.icon] : ArrowDown;
+  const PrimaryLink = primary ? Link : "a";
   const platformHref = (href: string) => (href.startsWith("/guides/") ? `${docs}${href}` : href);
 
   useEffect(() => {
@@ -55,17 +54,14 @@ export function DownloadsPage() {
           </Link>
           <nav className="flex flex-wrap items-center justify-end gap-1" aria-label={msg("downloads.navigation")}>
             <LanguageSwitcher />
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="max-lg:min-h-[44px] max-lg:min-w-[44px]"
-              aria-label={msg(
-                resolved === "dark" ? "downloads.light_theme" : "downloads.dark_theme",
-              )}
-              onClick={() => setTheme(resolved === "dark" ? "light" : "dark")}
-            >
-              {resolved === "dark" ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
-            </Button>
+            <DocsThemeToggle
+              labels={{
+                theme: msg("settings.account.theme.title"),
+                themeLight: msg("settings.account.theme.light"),
+                themeDark: msg("settings.account.theme.dark"),
+                themeSystem: msg("settings.account.theme.system"),
+              }}
+            />
             <Button variant="outline" size="sm" asChild className="ms-1 max-lg:min-h-[44px]">
               <Link href={docs}>{msg("downloads.docs")}</Link>
             </Button>
@@ -99,7 +95,7 @@ export function DownloadsPage() {
                 size="lg"
                 className="h-auto min-h-10 min-w-[min(100%,18rem)] max-w-full whitespace-normal py-2 text-center max-lg:min-h-[44px]"
               >
-                <a
+                <PrimaryLink
                   href={
                     primary
                       ? platformHref(primary.primary.href)
@@ -114,7 +110,7 @@ export function DownloadsPage() {
                     : platform
                       ? msg("downloads.platform_options", { platform: msg(platform.name) })
                       : msg("downloads.all_platforms")}
-                </a>
+                </PrimaryLink>
               </Button>
               <Button
                 variant="outline"
@@ -192,23 +188,23 @@ export function DownloadsPage() {
                         asChild
                         className="h-auto min-h-9 w-full whitespace-normal text-center max-lg:min-h-[44px]"
                       >
-                        <a href={platformHref(item.primary.href)}>
+                        <Link href={platformHref(item.primary.href)}>
                           {item.status === "download" ? (
                             <ArrowDown aria-hidden="true" />
                           ) : (
                             <BookOpen aria-hidden="true" />
                           )}
                           {msg(item.primary.label)}
-                        </a>
+                        </Link>
                       </Button>
                       {item.secondary?.map((link) => (
-                        <a
+                        <Link
                           key={link.label}
                           href={platformHref(link.href)}
                           className="mt-3 flex min-h-[44px] items-center justify-center text-center text-xs leading-relaxed text-muted-foreground underline underline-offset-4 hover:text-foreground"
                         >
                           {msg(link.label)}
-                        </a>
+                        </Link>
                       ))}
                     </div>
                   )}

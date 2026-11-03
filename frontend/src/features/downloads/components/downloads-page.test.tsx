@@ -1,19 +1,27 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { test } from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DOWNLOAD_PLATFORMS, type DownloadPlatform } from "../lib/download-platforms";
 import { LocaleProvider } from "@/shared/providers/locale-provider";
 import { ThemeProvider } from "@/shared/providers/theme-provider";
+import { TooltipProvider } from "@/shared/ui/primitives/tooltip";
+import { buildActiveCatalog } from "@/shared/lib/messages.server";
+import { setServerMessages } from "@/shared/lib/runtime-messages";
 
 (globalThis as { React?: typeof React }).React = React;
+setServerMessages(buildActiveCatalog("en"), "en");
 const { DownloadsPage } = await import("./downloads-page");
 
 function render() {
   return renderToStaticMarkup(
     <LocaleProvider initialLocale="en">
       <ThemeProvider>
-        <DownloadsPage />
+        <TooltipProvider>
+          <DownloadsPage />
+        </TooltipProvider>
       </ThemeProvider>
     </LocaleProvider>,
   );
@@ -32,6 +40,30 @@ void test("header navigation wraps long locale names within its available width"
   assert.match(nav, /\bflex-wrap\b/);
   assert.match(nav, /\bjustify-end\b/);
   assert.match(nav, /\bgap-1\b/);
+});
+
+void test("theme control offers light, dark and system choices", () => {
+  const html = render();
+  assert.match(html, /role="radiogroup"/);
+  const options = [...html.matchAll(/<button\b[^>]*role="radio"[^>]*>/g)].map(([tag]) => tag);
+  assert.equal(options.length, 3);
+  for (const label of ["Light", "Dark", "System"]) {
+    assert.ok(options.some((option) => option.includes(`aria-label="${label}"`)), label);
+  }
+  const system = options.find((option) => option.includes('aria-label="System"'));
+  assert.ok(system);
+  assert.match(system, /aria-checked="true"/);
+});
+
+void test("platform actions use Next Link for docs and native anchors for platform jumps", () => {
+  const source = readFileSync(
+    path.join(process.cwd(), "src/features/downloads/components/downloads-page.tsx"),
+    "utf8",
+  );
+  assert.match(source, /const PrimaryLink = primary \? Link : "a";/);
+  assert.match(source, /<PrimaryLink\s+href=\{\s*primary\s*\?/);
+  assert.match(source, /<Link href=\{platformHref\(item\.primary\.href\)\}>/);
+  assert.match(source, /<Link\s+key=\{link\.label\}\s+href=\{platformHref\(link\.href\)\}/);
 });
 
 void test("changing Mac to a real download hides the obsolete unpublished-installer note", () => {
@@ -61,14 +93,27 @@ void test("all placeholder platforms have no actionable install link", () => {
   }
 });
 
-void test("primary navigation and install links keep 44px touch targets below desktop widths", () => {
-  const html = render();
-  const targets = [
-    ...html.matchAll(/<a\b[^>]*href="(?:#platforms|\/explore|\/docs\/guides\/mac-app)"[^>]*>/g),
-  ];
-  assert.ok(targets.length >= 4);
+void test("every page link and button has 44px touch targets on coarse-pointer devices", () => {
+  const css = readFileSync(path.join(process.cwd(), "src/app/globals.css"), "utf8");
+  const rule = css
+    .split("@media (any-pointer: coarse) {")
+    .slice(1)
+    .map((block) => block.replace(/\/\*[\s\S]*?\*\//g, "").match(/^\s*([^{}]+)\{([^}]+)\}/))
+    .find((block) => block?.[1]?.includes("button:not("));
+  const [, selectorText, declarations] = rule ?? [];
+  assert.ok(selectorText && declarations, "global coarse-pointer touch rule exists");
+  assert.match(declarations, /min-height:\s*44px\s*;/);
+  assert.match(declarations, /min-width:\s*44px\s*;/);
+  const selectors = selectorText.split(",").map((selector) => selector.trim());
+  const targets = [...render().matchAll(/<(?:a|button)\b[^>]*>/g)];
+  assert.ok(targets.some(([target]) => target.startsWith("<a ")));
+  assert.ok(targets.some(([target]) => target.startsWith("<button ")));
   for (const [target] of targets) {
-    if (!target.includes('class="sr-only')) assert.match(target, /min-h-\[44px\]/);
+    const selector = target.startsWith("<a ")
+      ? "a"
+      : 'button:not([role="checkbox"]):not([role="switch"])';
+    assert.ok(selectors.includes(selector), target);
+    assert.doesNotMatch(target, /role="(?:checkbox|switch)"/);
   }
 });
 

@@ -98,18 +98,18 @@ export const APP_PAGES: readonly AppPage[] = [
     group: "navigate",
   },
   {
-    id: "terms",
-    href: "/terms",
-    label: { key: "legal.terms_link" },
-    keywordsKey: "app.shell.search.kw.terms",
-    group: "navigate",
-  },
-  {
     id: "download",
     href: "/download",
     label: { key: "downloads.title" },
     descriptionKey: "downloads.intro",
     keywordsKey: "downloads.search_keywords",
+    group: "navigate",
+  },
+  {
+    id: "terms",
+    href: "/terms",
+    label: { key: "legal.terms_link" },
+    keywordsKey: "app.shell.search.kw.terms",
     group: "navigate",
   },
   {
