@@ -148,7 +148,7 @@ image_is_fresh() {
 build_backend() {
   local registry staging_cache preview_cache week
   local -a cache_from=() pin_args=()
-  local -a buildx_flags=(--platform linux/arm64 --provenance=false --progress=plain --file "$repo_root/backend/Dockerfile")
+  local -a buildx_flags=()
   if image_is_fresh skynet/preview-backend "$2"; then
     echo "skip: $1:$2 exists"
     return 0
@@ -156,8 +156,8 @@ build_backend() {
   registry="${1%%/*}"
   week="$(date -u +%G-W%V)" || return 1
   [[ "$week" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || return 1
-  IMAGE_KEY_BUILD_FLAGS=("${buildx_flags[@]}")
-  export BUILDX_METADATA_PROVENANCE=min
+  image_build_flags "$repo_root/backend"
+  buildx_flags=("${IMAGE_KEY_BUILD_FLAGS[@]}")
   image_inputs "$repo_root/backend" "$week" "GIT_SHA=$sha"
   pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
   [[ -n "$IMAGE_KEY_CTX" ]] ||
@@ -189,7 +189,7 @@ build_backend() {
 build_frontend() {
   local registry staging_cache preview_cache build_arg week
   local -a cache_from=() pin_args=() build_args=() docker_args=()
-  local -a buildx_flags=(--platform linux/arm64 --provenance=false --progress=plain --file "$repo_root/frontend/Dockerfile")
+  local -a buildx_flags=()
   if image_is_fresh skynet/preview-frontend "$2"; then
     echo "skip: $1:$2 exists"
     return 0
@@ -206,8 +206,8 @@ build_frontend() {
     "APP_GIT_SHA=$sha"
     "APP_ENVIRONMENT=skynet-pr-$pr"
   )
-  IMAGE_KEY_BUILD_FLAGS=("${buildx_flags[@]}")
-  export BUILDX_METADATA_PROVENANCE=min
+  image_build_flags "$repo_root/frontend"
+  buildx_flags=("${IMAGE_KEY_BUILD_FLAGS[@]}")
   image_inputs "$repo_root/frontend" "$week" "${build_args[@]+"${build_args[@]}"}"
   pin_args=("${IMAGE_BUILD_CONTEXT_ARGS[@]+"${IMAGE_BUILD_CONTEXT_ARGS[@]}"}")
   [[ -n "$IMAGE_KEY_CTX" ]] ||
@@ -614,6 +614,7 @@ backend_image() {
   # preview checkout at /health. Staging keeps commit keys; production always builds.
   week="$(date -u +%G-W%V)" || return 1
   [[ "$week" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || return 1
+  image_build_flags "$repo_root/backend"
   image_inputs "$repo_root/backend" "$week"
   key="$IMAGE_KEY_TREE"
   if [[ -n "$key" ]] && find_fresh_by_key skynet/backend "$key"; then

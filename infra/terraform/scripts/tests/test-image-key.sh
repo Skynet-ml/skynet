@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+for command in awk grep git jq sed; do
+  command -v "$command" >/dev/null 2>&1 || {
+    printf 'missing test command: %s\n' "$command" >&2
+    exit 1
+  }
+done
+command -v python3 >/dev/null 2>&1 || {
+  printf 'missing test command: python3\n' >&2
+  exit 1
+}
+command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || {
+  printf 'missing test command: sha256sum or shasum\n' >&2
+  exit 1
+}
+
 repo_root="$(cd "$(dirname "$0")/../../../.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -10,11 +25,16 @@ cat >"$tmp/bin/stub" <<'SH'
 set -euo pipefail
 case "${0##*/}" in
   git)
-    if [[ "$1" == -C ]]; then shift 2; fi
+    git_root=""
+    if [[ "$1" == -C ]]; then git_root="$2"; shift 2; fi
     case "$1" in
       rev-parse)
         if [[ "$2" == --show-toplevel ]]; then
-          printf '%s\n' "$TEST_REPO_ROOT"
+          if [[ "$git_root" == "$TEST_ALT_REPO_ROOT"* ]]; then
+            printf '%s\n' "$TEST_ALT_REPO_ROOT"
+          else
+            printf '%s\n' "$TEST_REPO_ROOT"
+          fi
         else
           printf '%s\n' "${TREE_HASH:-tree-one}"
         fi
@@ -23,8 +43,30 @@ case "${0##*/}" in
         [[ "$*" == *--ignored* ]] || exit 4
         printf '%s' "${DIRTY_TREE:-}"
         ;;
+      config)
+        case "${*: -1}" in
+          core.autocrlf)
+            [[ -n "${TEST_CORE_AUTOCRLF:-}" ]] || exit 1
+            printf '%s\n' "$TEST_CORE_AUTOCRLF"
+            ;;
+          core.eol)
+            [[ -n "${TEST_CORE_EOL:-}" ]] || exit 1
+            printf '%s\n' "$TEST_CORE_EOL"
+            ;;
+          core.sparseCheckout)
+            [[ "${TEST_SPARSE_CHECKOUT:-}" == true ]] || exit 1
+            printf 'true\n'
+            ;;
+          *) exit 2 ;;
+        esac
+        ;;
       ls-files)
-        printf '%s\0' "${TEST_CONTEXT_PATH:-backend}/Dockerfile"
+        context="${*: -1}"
+        if [[ "$*" == *" -v "* ]]; then
+          printf '%s %s\n' "${TEST_INDEX_FLAG:-H}" "$context/Dockerfile"
+          exit 0
+        fi
+        printf '%s\0' "$context/Dockerfile"
         ;;
       check-attr)
         [[ "${ATTR_FAIL:-}" != true ]] || exit 11
@@ -60,6 +102,7 @@ case "${0##*/}" in
     exec /usr/bin/date "$@"
     ;;
   curl)
+    [[ "${CURL_FAIL:-}" != true ]] || exit 1
     header_file=""
     for arg in "$@"; do
       [[ "$arg" != *request-token-secret* ]] || exit 5
@@ -159,9 +202,11 @@ chmod +x "$tmp/bin/stub"
 for command in aws curl date docker git; do ln -s stub "$tmp/bin/$command"; done
 export PATH="$tmp/bin:$PATH"
 export TEST_REPO_ROOT="$repo_root"
+TEST_ALT_REPO_ROOT="$tmp/another-checkout"
+export TEST_ALT_REPO_ROOT
 export TREE_HASH BASE_DIGEST DIRTY_TREE DIGEST_FAIL DESCRIBE_ERROR RETAG_FAIL RETAG_EXISTS
 export RETAG_ERROR RETAG_DIFF LATEST_CACHE_TEST CACHE_ERROR FRESHNESS_TEST PUSHED_AT
-export CACHE_TIMESTAMP_TEST
+export CACHE_TIMESTAMP_TEST TEST_CORE_AUTOCRLF TEST_CORE_EOL TEST_SPARSE_CHECKOUT TEST_INDEX_FLAG
 export BUILDX_VERSION BUILDKIT_VERSION DATE_PARSE_FAIL OIDC_HEADER_PATH_OUT OIDC_TOKEN_PATH_OUT
 OIDC_HEADER_PATH_OUT="$tmp/oidc-header-path"
 OIDC_TOKEN_PATH_OUT="$tmp/oidc-token-path"
@@ -188,8 +233,8 @@ tree_key="$(image_key "$repo_root/backend" tree GIT_SHA=abc FEATURE=on)"
 [[ "$tree_key" =~ ^tree-[0-9a-f]{40}$ ]] || fail "tree key format: $tree_key"
 [[ "$tree_key" == "$(image_key "$repo_root/backend" tree GIT_SHA=def FEATURE=on)" ]] ||
   fail "tree key changed with GIT_SHA"
-[[ "$tree_key" != "$(image_key "$repo_root/backend" tree GIT_SHA=abc FEATURE=off)" ]] ||
-  fail "tree key ignored a non-GIT_SHA build arg"
+[[ "$tree_key" == "$(image_key "$repo_root/backend" tree GIT_SHA=abc FEATURE=off)" ]] ||
+  fail "tree key included a build arg"
 [[ "$key" != "$(image_key "$repo_root/backend" ctx GIT_SHA=def FEATURE=on)" ]] || fail "ctx key ignored GIT_SHA"
 TREE_HASH=tree-two
 [[ "$key" != "$(image_key "$repo_root/backend" ctx GIT_SHA=abc FEATURE=on)" ]] || fail "tree change kept key"
@@ -213,6 +258,23 @@ DIRTY_TREE=' M backend/Dockerfile'
 DIRTY_TREE='!! backend/ignored-file'
 [[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "ignored file produced key"
 unset DIRTY_TREE
+TEST_CORE_AUTOCRLF=true
+[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "non-default core.autocrlf produced key"
+unset TEST_CORE_AUTOCRLF
+TEST_CORE_EOL=crlf
+[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "non-default core.eol produced key"
+unset TEST_CORE_EOL
+TEST_INDEX_FLAG=h
+[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "assume-unchanged file produced key"
+TEST_INDEX_FLAG=S
+[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "skip-worktree file produced key"
+unset TEST_INDEX_FLAG
+TEST_SPARSE_CHECKOUT=true
+[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "sparse checkout produced key"
+unset TEST_SPARSE_CHECKOUT
+DOCKER_BUILDKIT=0
+[[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "DOCKER_BUILDKIT=0 produced key"
+unset DOCKER_BUILDKIT
 DIGEST_FAIL=true
 [[ -z "$(image_key "$repo_root/backend" ctx GIT_SHA=abc)" ]] || fail "unresolved base produced key"
 unset DIGEST_FAIL
@@ -283,6 +345,9 @@ export AWS_DEPLOY_ROLE_ARN=arn:aws:iam::123456789012:role/test
 refresh_aws_credentials
 [[ "$AWS_ACCESS_KEY_ID" == test-access && "$AWS_SECRET_ACCESS_KEY" == test-secret &&
   "$AWS_SESSION_TOKEN" == test-session ]] || fail "OIDC credentials were not installed"
+[[ -n "${AWS_CREDENTIALS_REFRESHED_AT:-}" ]] || fail "credential refresh timestamp was not exported"
+bash -c '[[ -n "${AWS_CREDENTIALS_REFRESHED_AT:-}" ]]' ||
+  fail "credential refresh timestamp was not inherited by child processes"
 [[ ! -e "$(cat "$OIDC_HEADER_PATH_OUT")" && ! -e "$(cat "$OIDC_TOKEN_PATH_OUT")" ]] ||
   fail "OIDC temp files were not removed"
 unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_DEPLOY_ROLE_ARN
@@ -323,6 +388,18 @@ AWS_CREDENTIALS_REFRESHED_AT=$((now - 45 * 60 - 1))
 wait_task_ok staging arn:aws:ecs:us-east-2:123456789012:task/test
 [[ "$(wc -l <"$CREDENTIAL_REFRESH_COUNT_OUT")" -eq 1 ]] ||
   fail "migration poll did not refresh credentials after 45 minutes"
+now="$(date +%s)"
+export CURL_FAIL=true
+AWS_CREDENTIALS_REFRESHED_AT=$((now - 50 * 60))
+warning="$(wait_task_ok staging arn:aws:ecs:us-east-2:123456789012:task/test 2>&1)" ||
+  fail "long poll failed on a refresh error before 55 minutes"
+[[ "$warning" == *"warning: AWS credential refresh failed before the 55-minute limit"* ]] ||
+  fail "long poll did not warn after an early refresh failure"
+AWS_CREDENTIALS_REFRESHED_AT=$((now - 56 * 60))
+if wait_task_ok staging arn:aws:ecs:us-east-2:123456789012:task/test >/dev/null 2>&1; then
+  fail "long poll accepted a refresh failure after 55 minutes"
+fi
+unset CURL_FAIL
 unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_DEPLOY_ROLE_ARN
 before_refresh_count="$(wc -l <"$CREDENTIAL_REFRESH_COUNT_OUT")"
 wait_task_ok staging arn:aws:ecs:us-east-2:123456789012:task/test
@@ -353,7 +430,7 @@ FROM docker.io/node:20-alpine
 DOCKERFILE
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
 printf '%s\n' "${IMAGE_BUILD_CONTEXT_ARGS[@]}" |
-  rg -Fxq 'node:20-alpine=docker-image://docker.io/node:20-alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ||
+  grep -Fxq 'node:20-alpine=docker-image://docker.io/node:20-alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ||
   fail "normalized docker.io build-context alias was not pinned"
 image_inputs "$test_context" "$test_week" --build-arg GIT_SHA=abc --build-arg FEATURE=on
 staging_ctx="$IMAGE_KEY_CTX"
@@ -391,6 +468,21 @@ export BUILDX_METADATA_PROVENANCE=min
 image_inputs "$test_context" "$test_week" GIT_SHA=abc
 [[ "$env_key" != "$IMAGE_KEY_CTX" ]] || fail "BUILDX_* environment did not change the key"
 unset BUILDX_METADATA_PROVENANCE
+export BUILDX_BUILDER=builder-one
+image_inputs "$test_context" "$test_week" GIT_SHA=abc
+builder_key="$IMAGE_KEY_CTX"
+export BUILDX_BUILDER=builder-two
+image_inputs "$test_context" "$test_week" GIT_SHA=abc
+[[ "$builder_key" == "$IMAGE_KEY_CTX" ]] || fail "builder identity changed the key"
+unset BUILDX_BUILDER
+image_build_flags "$test_context"
+image_inputs "$test_context" "$test_week" GIT_SHA=abc
+tree_path_one="$IMAGE_KEY_TREE"
+mkdir -p "$tmp/another-checkout/backend"
+cp "$test_context/Dockerfile" "$tmp/another-checkout/backend/Dockerfile"
+image_build_flags "$tmp/another-checkout/backend"
+image_inputs "$tmp/another-checkout/backend" "$test_week" GIT_SHA=abc
+[[ "$tree_path_one" == "$IMAGE_KEY_TREE" ]] || fail "checkout path changed the tree key"
 # shellcheck disable=SC2034
 export BUILDKIT_DRIVER=docker
 image_inputs "$test_context" "$test_week" GIT_SHA=abc

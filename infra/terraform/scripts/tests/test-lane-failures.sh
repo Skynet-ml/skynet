@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+for command in awk grep git jq sed; do
+  command -v "$command" >/dev/null 2>&1 || {
+    printf 'missing test command: %s\n' "$command" >&2
+    exit 1
+  }
+done
+
 repo_root="$(cd "$(dirname "$0")/../../../.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -26,6 +33,18 @@ case "$*" in
       printf '%s\n' '{"imageDetails":[]}'
     elif [[ "$*" == *"imageTag=$TEST_SHA"* && "${TEST_EXISTING_BACKEND:-}" == true &&
       "$*" == *"repository-name skynet/backend"* ]]; then
+      exit 0
+    elif [[ "${TEST_EXISTING_TAGS:-}" == true &&
+      "$*" == *"repository-name skynet/backend"* && "$*" == *"imageTag=$TEST_SHA"* ]]; then
+      exit 0
+    elif [[ "${TEST_EXISTING_TAGS:-}" == true &&
+      "$*" == *"repository-name skynet/frontend"* && "$*" == *"imageTag=$TEST_SHA-production"* ]]; then
+      exit 0
+    elif [[ "${TEST_EXISTING_TAGS:-}" == true &&
+      "$*" == *"repository-name skynet/litellm"* && "$*" == *"imageTag=$TEST_SHA"* ]]; then
+      exit 0
+    elif [[ "$*" == *"repository-name skynet/backend"* && "$*" == *"imageTag=$TEST_SHA"* &&
+      "${TEST_PUSH_RACE:-}" == true && -e "$TEST_RACE_TAG_FLAG" ]]; then
       exit 0
     elif [[ "$*" == *"--query imageDetails[0].imagePushedAt"* &&
       "${TEST_CTX_HIT:-}" == true ]]; then
@@ -69,11 +88,18 @@ case "$*" in
     name="${target#skynet/}"
     name="${name%%:*}"
     printf 'build:%s\n' "$name" >>"$TEST_EVENT_LOG"
-    [[ "${TEST_FAIL_BUILD:-}" != "$name" ]] || exit 17
+    if [[ "${TEST_FAIL_BUILD:-}" == "$name" ]]; then
+      [[ "${TEST_PUSH_RACE:-}" != true ]] || : >"$TEST_RACE_TAG_FLAG"
+      exit 17
+    fi
     if [[ -n "$metadata" ]]; then
-      printf '{"buildx.build.provenance":{"materials":[{"uri":"%s","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]}}\n' \
-        "${TEST_METADATA_URI:-pkg:docker/node?digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" \
-        >"$metadata"
+      if [[ "${TEST_NO_MATERIALS:-}" == true ]]; then
+        printf '%s\n' '{"buildx.build.provenance":{"materials":[]}}' >"$metadata"
+      else
+        printf '{"buildx.build.provenance":{"materials":[{"uri":"%s","digest":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]}}\n' \
+          "${TEST_METADATA_URI:-pkg:docker/node?digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" \
+          >"$metadata"
+      fi
     fi
     ;;
   *) exit 2 ;;
@@ -96,8 +122,13 @@ case "$1" in
     ;;
   ls-files)
     context="${*: -1}"
+    if [[ "$*" == *" -v "* ]]; then
+      printf 'H %s/Dockerfile\n' "$context"
+      exit 0
+    fi
     printf '%s\0' "$context/Dockerfile"
     ;;
+  config) exit 1 ;;
   check-attr)
     while IFS= read -r -d '' path; do
       for attr in filter eol text ident working-tree-encoding; do
@@ -121,6 +152,7 @@ chmod +x "$tmp/bin/"{aws,docker,git,curl}
 export PATH="$tmp/bin:$PATH" TEST_REPO_ROOT="$repo_root"
 export TEST_SHA=8d68a0de4ea55e3a1666860d947a622d3273e3f1
 export TEST_AWS_LOG="$tmp/aws.log" TEST_EVENT_LOG="$tmp/events.log"
+export TEST_RACE_TAG_FLAG="$tmp/pushed-by-race"
 export GITHUB_ACTIONS=true
 
 cat >"$tmp/build/deploy.sh" <<'SH'
@@ -140,6 +172,16 @@ fail() {
   exit 1
 }
 
+assert_no_match() {
+  local status
+  if grep -Eq -- "$1" "$2"; then
+    return 1
+  else
+    status=$?
+  fi
+  [[ "$status" -eq 1 ]]
+}
+
 run_build() {
   local output="$1" log="$2"
   : >"$TEST_AWS_LOG"
@@ -150,20 +192,20 @@ run_build() {
   if "$tmp/build/build-push.sh" staging "$TEST_SHA" --migrate >"$CURRENT_LOG" 2>&1; then
     fail "build-push succeeded in failure test: $output"
   fi
-  ! rg -q '^migrated=' "$output" || fail "failed lane wrote migrated output: $output"
+  assert_no_match '^migrated=' "$output" || fail "failed lane wrote migrated output: $output"
 }
 
 export GITHUB_OUTPUT="$tmp/migrated"
 export TEST_DEPLOY_STATUS=1
 run_build "$GITHUB_OUTPUT" "$tmp/migration.log"
-rg -q '^migrate:1$' "$TEST_EVENT_LOG" || fail "migration stub did not fail the deploy lane"
+grep -Eq '^migrate:1$' "$TEST_EVENT_LOG" || fail "migration stub did not fail the deploy lane"
 
 export TEST_DEPLOY_STATUS=0 TEST_FAIL_CURL=true
 export ACTIONS_ID_TOKEN_REQUEST_URL=https://token.invalid/request
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN=test-request-token
 export AWS_DEPLOY_ROLE_ARN=arn:aws:iam::123456789012:role/test
 run_build "$GITHUB_OUTPUT" "$tmp/credentials.log"
-if rg -q '^build:' "$TEST_EVENT_LOG"; then fail "build ran after credential refresh failed"; fi
+assert_no_match '^build:' "$TEST_EVENT_LOG" || fail "build ran after credential refresh failed"
 
 unset TEST_FAIL_CURL ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_DEPLOY_ROLE_ARN
 export TEST_FAIL_BUILD=backend
@@ -177,9 +219,8 @@ CURRENT_LOG="$tmp/skip.log"
 : >"$CURRENT_LOG"
 "$tmp/build/build-push.sh" staging "$TEST_SHA" >"$CURRENT_LOG" 2>&1 ||
   fail "existing immutable backend tag did not skip"
-if rg -q 'put-image.*--image-tag tree-' "$TEST_AWS_LOG"; then
+assert_no_match 'put-image.*--image-tag tree-' "$TEST_AWS_LOG" ||
   fail "existing SHA tag received an unverified tree-key tag"
-fi
 
 unset TEST_EXISTING_BACKEND
 export TEST_CTX_HIT=true
@@ -189,27 +230,53 @@ CURRENT_LOG="$tmp/reuse.log"
 : >"$CURRENT_LOG"
 "$tmp/build/build-push.sh" staging "$TEST_SHA" >"$CURRENT_LOG" 2>&1 ||
   fail "fresh context-key reuse failed"
-if rg -q 'put-image.*--image-tag tree-' "$TEST_AWS_LOG"; then
+assert_no_match 'put-image.*--image-tag tree-' "$TEST_AWS_LOG" ||
   fail "context-key reuse added a new tree-key tag"
-fi
 
 unset TEST_CTX_HIT
 rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
 CURRENT_LOG="$tmp/production.log"
 : >"$CURRENT_LOG"
+export TEST_EXISTING_TAGS=true
+: >"$TEST_EVENT_LOG"
 "$tmp/build/build-push.sh" production "$TEST_SHA" >"$CURRENT_LOG" 2>&1 ||
-  fail "production build failed"
-if rg -q 'describe-images.*repository-name skynet/(backend|frontend|litellm)' "$TEST_AWS_LOG"; then
-  fail "production looked up a shared application image tag"
-fi
-if rg -q 'batch-get-image.*repository-name skynet/(backend|frontend|litellm)' "$TEST_AWS_LOG"; then
+  fail "production skipped existing immutable tags"
+assert_no_match '^build:' "$TEST_EVENT_LOG" || fail "production rebuilt an existing immutable tag"
+assert_no_match '--query imageDetails\[0\]\.imagePushedAt' "$TEST_AWS_LOG" ||
+  fail "production called the keyed-image freshness lookup"
+assert_no_match 'batch-get-image.*repository-name skynet/(backend|frontend|litellm)' "$TEST_AWS_LOG" ||
   fail "production retagged a shared application image"
-fi
-if rg -q 'put-image.*--image-tag (ctx|tree)-' "$TEST_AWS_LOG"; then
+assert_no_match 'put-image.*--image-tag (ctx|tree)-' "$TEST_AWS_LOG" ||
   fail "production added a shared image-key tag"
-fi
-[[ "$(rg -c '^build:' "$TEST_EVENT_LOG")" -eq 3 ]] ||
+unset TEST_EXISTING_TAGS
+
+export TEST_FAIL_BUILD=backend TEST_PUSH_RACE=true
+rm -f "$TEST_RACE_TAG_FLAG" "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
+CURRENT_LOG="$tmp/production-push-race.log"
+: >"$CURRENT_LOG"
+"$tmp/build/build-push.sh" production "$TEST_SHA" >"$CURRENT_LOG" 2>&1 ||
+  fail "production did not accept the immutable-tag race fallback"
+assert_no_match '--query imageDetails\[0\]\.imagePushedAt' "$TEST_AWS_LOG" ||
+  fail "production called the keyed-image freshness lookup"
+assert_no_match 'batch-get-image.*repository-name skynet/(backend|frontend|litellm)' "$TEST_AWS_LOG" ||
+  fail "production retagged a shared application image"
+assert_no_match 'put-image.*--image-tag (ctx|tree)-' "$TEST_AWS_LOG" ||
+  fail "production wrote a shared image-key tag"
+unset TEST_FAIL_BUILD TEST_PUSH_RACE
+
+rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
+CURRENT_LOG="$tmp/production-build.log"
+: >"$CURRENT_LOG"
+"$tmp/build/build-push.sh" production "$TEST_SHA" >"$CURRENT_LOG" 2>&1 ||
+  fail "production build failed without an existing tag"
+[[ "$(grep -c '^build:' "$TEST_EVENT_LOG")" -eq 3 ]] ||
   fail "production did not build all three application images"
+assert_no_match '--query imageDetails\[0\]\.imagePushedAt' "$TEST_AWS_LOG" ||
+  fail "production called the keyed-image freshness lookup"
+assert_no_match 'batch-get-image.*repository-name skynet/(backend|frontend|litellm)' "$TEST_AWS_LOG" ||
+  fail "production retagged a shared application image"
+assert_no_match 'put-image.*--image-tag (ctx|tree)-' "$TEST_AWS_LOG" ||
+  fail "production wrote a shared image-key tag"
 
 export TEST_METADATA_URI=unknown:material
 : >"$TEST_AWS_LOG"
@@ -218,10 +285,21 @@ CURRENT_LOG="$tmp/unverified-provenance.log"
 : >"$CURRENT_LOG"
 "$tmp/build/build-push.sh" staging "$TEST_SHA" >"$CURRENT_LOG" 2>&1 ||
   fail "staging build failed when source metadata was unknown"
-if rg -q 'put-image.*--image-tag (ctx|tree)-' "$TEST_AWS_LOG"; then
+assert_no_match 'put-image.*--image-tag (ctx|tree)-' "$TEST_AWS_LOG" ||
   fail "unverified source metadata received an image-key tag"
-fi
+grep -Eq 'warning: no reusable key tag written: provenance sources did not verify' "$CURRENT_LOG" ||
+  fail "unverified provenance did not explain why no key tag was written"
 unset TEST_METADATA_URI
+
+export TEST_NO_MATERIALS=true
+rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
+CURRENT_LOG="$tmp/no-provenance-materials.log"
+: >"$CURRENT_LOG"
+"$tmp/build/build-push.sh" staging "$TEST_SHA" >"$CURRENT_LOG" 2>&1 ||
+  fail "staging build failed with empty provenance materials"
+grep -Eq 'warning: no reusable key tag written: provenance materials missing' "$CURRENT_LOG" ||
+  fail "empty provenance materials did not explain why no key tag was written"
+unset TEST_NO_MATERIALS
 
 rm -f "$TEST_AWS_LOG" "$TEST_EVENT_LOG"
 CURRENT_LOG="$tmp/preview-backend.log"
@@ -241,8 +319,9 @@ if run_preview_lane preview-backend backend_and_migrate \
   >"$CURRENT_LOG" 2>&1; then
   fail "failed preview backend build returned success"
 fi
-rg -q '^refresh$' "$TEST_EVENT_LOG" || fail "preview build did not use the successful credential stub"
-if rg -q 'ecs ' "$TEST_AWS_LOG"; then fail "preview migration ran after its backend build failed"; fi
+grep -Eq '^refresh$' "$TEST_EVENT_LOG" || fail "preview build did not use the successful credential stub"
+assert_no_match 'ecs ' "$TEST_AWS_LOG" ||
+  fail "preview migration ran after its backend build failed"
 
 unset TEST_FAIL_BUILD
 export TEST_FAIL_BUILD=preview-frontend

@@ -40,26 +40,24 @@ cfg="$(aws ecr describe-repositories --repository-names skynet/backend skynet/fr
 registry="$(jq -r '.ecr.backend' <<<"$cfg" | cut -d/ -f1)"
 aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null
 
-# Production shares application repositories with staging, so staging can
-# write the same deterministic key tags. Production never reads or writes them.
-# It always builds its own image.
+# Both environments can use the same immutable application tag. Keyed image
+# reuse and key-tag writes stay staging-only; production skips an existing tag.
 build() {
   local name="$1" tag="$2" context="$3" cache_name="$4"
   shift 4
   local url key tree_key cache_tag cache_repo week metadata_file="" build_succeeded
-  local -a build_args=("$@") pin_args=() cache_from=() metadata_args=()
-  local -a buildx_flags=(--platform linux/arm64 --provenance=false --progress=plain --file "$context/Dockerfile")
+  local -a build_args=("$@") pin_args=() cache_from=() metadata_args=() buildx_flags=()
   url="$(jq -r --arg n "$name" '.ecr[$n]' <<<"$cfg")" || return 1
   [[ -n "$url" && "$url" != null ]] || return 1
   cache_repo="skynet/buildcache-$env"
-  if [[ "$env" != production ]] && find_by_key "skynet/$name" "$tag"; then
+  if find_by_key "skynet/$name" "$tag"; then
     echo "skip: $url:$tag exists"
     return 0
   fi
   week="$(date -u +%G-W%V)" || return 1
   [[ "$week" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || return 1
-  IMAGE_KEY_BUILD_FLAGS=("${buildx_flags[@]}")
-  export BUILDX_METADATA_PROVENANCE=min
+  image_build_flags "$context"
+  buildx_flags=("${IMAGE_KEY_BUILD_FLAGS[@]}")
   image_inputs "$context" "$week" "${build_args[@]+"${build_args[@]}"}"
   key="$IMAGE_KEY_CTX"
   tree_key="$IMAGE_KEY_TREE"
@@ -99,9 +97,8 @@ build() {
   refresh_aws_credentials || return 1
   if [[ "$build_succeeded" != true ]]; then
     [[ -z "$metadata_file" ]] || rm -f "$metadata_file"
-    # Staging and production can build the same backend and litellm tag at
-    # once; the second push then fails on the immutable tag.
-    if [[ "$env" != production ]] && find_by_key "skynet/$name" "$tag"; then
+    # Another staging or production run may have written this immutable tag.
+    if find_by_key "skynet/$name" "$tag"; then
       echo "skip: $url:$tag was pushed by another run"
       return 0
     fi
@@ -118,7 +115,16 @@ build() {
         echo "warning: cannot add tree image-key tag skynet/backend:$tree_key" >&2
       fi
     else
-      echo "::warning::build metadata did not verify every pinned source; no image-key tags added for $url:$tag" >&2
+      local reason
+      if [[ ! -s "$metadata_file" ]]; then
+        reason="metadata missing or empty"
+      elif ! jq -e '(.["buildx.build.provenance"].materials // []) | type == "array" and length > 0' \
+        "$metadata_file" >/dev/null 2>&1; then
+        reason="provenance materials missing"
+      else
+        reason="provenance sources did not verify"
+      fi
+      echo "warning: no reusable key tag written: $reason ($url:$tag)" >&2
     fi
   fi
   [[ -z "$metadata_file" ]] || rm -f "$metadata_file"
@@ -167,7 +173,7 @@ wait_for_lane_success() {
   done
 }
 
-# Keep a lane's final error ahead of the coordinator's failure message.
+# The EXIT trap writes .failed unless the lane published .ok.
 run_lane() {
   local label="$1"
   local log_fd log_pid status

@@ -24,6 +24,12 @@ _clear_image_inputs() {
   IMAGE_KEY_BUILD_DRIVER=""
 }
 
+image_build_flags() {
+  local context="$1"
+  IMAGE_KEY_BUILD_FLAGS=(--platform linux/arm64 --provenance=false --progress=plain --file "$context/Dockerfile")
+  export BUILDX_METADATA_PROVENANCE=min
+}
+
 _is_stage() {
   local value="$1" stages="$2" stage_count="$3"
   [[ $'\n'"$stages"$'\n' == *$'\n'"$value"$'\n'* ]] && return 0
@@ -97,7 +103,7 @@ _hash_image_key() {
   shift 5
   local hash
   local -a args=("$@") sorted_args=()
-  local line digest name value
+  local line digest name value previous=""
   if ((${#args[@]})); then
     while IFS= read -r line; do sorted_args+=("$line"); done < <(
       printf '%s\n' "${args[@]+"${args[@]}"}" | LC_ALL=C sort
@@ -105,7 +111,8 @@ _hash_image_key() {
   fi
   local -a env_material=()
   while IFS= read -r name; do
-    [[ "$name" == SOURCE_DATE_EPOCH || "$name" == BUILDX_* ]] || continue
+    [[ "$name" == SOURCE_DATE_EPOCH || "$name" == DOCKER_DEFAULT_PLATFORM ||
+      "$name" == BUILDX_METADATA_PROVENANCE || "$name" == BUILDX_NO_DEFAULT_ATTESTATIONS ]] || continue
     value="${!name}"
     env_material+=("$name=$value")
   done < <(compgen -e | LC_ALL=C sort)
@@ -114,8 +121,15 @@ _hash_image_key() {
     {
       printf 'version=%s\nweek=%s\nplatform=linux/arm64\ncontext=%s\nbuildx=%s\nbuildkit=%s\n' \
         "$KEY_VERSION" "$week" "$context_hash" "$buildx_version" "$buildkit_version"
+      # The pinned setup action supplies defaults; the BuildKit version is hashed.
       printf 'builder-driver=%s\n' "$IMAGE_KEY_BUILD_DRIVER"
       for line in "${IMAGE_KEY_BUILD_FLAGS[@]+"${IMAGE_KEY_BUILD_FLAGS[@]}"}"; do
+        if [[ "$previous" == --file ]]; then
+          line="${line##*/}"
+          previous=""
+        elif [[ "$line" == --file ]]; then
+          previous=--file
+        fi
         printf 'buildx-flag=%s\n' "$line"
       done
       for line in "${env_material[@]+"${env_material[@]}"}"; do
@@ -137,7 +151,7 @@ _hash_image_key() {
 }
 
 _image_inputs_impl() {
-  local context_dir="$1" week="$2" repo_root context_path status dockerfile
+  local context_dir="$1" week="$2" repo_root context_path status dockerfile config_value config_status
   shift 2
   local -a raw_build_args=("$@") build_args=() tree_args=() words=() base_digests=()
   local line trimmed logical instruction ref image_ref alias digest_json digest
@@ -147,12 +161,35 @@ _image_inputs_impl() {
   declare -A digest_by_ref=() context_digest_by_ref=()
   _clear_image_inputs
   [[ "$week" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || return 1
+  [[ "${DOCKER_BUILDKIT:-}" != 0 ]] || return 1
   context_dir="$(cd "$context_dir" && pwd -P)" || return 1
   repo_root="$(git -C "$context_dir" rev-parse --show-toplevel 2>/dev/null)" || return 1
   context_path="${context_dir#"$repo_root"/}"
   [[ "$context_path" != "$context_dir" && -n "$context_path" ]] || return 1
   status="$(git -C "$repo_root" status --porcelain --ignored -- "$context_path" 2>/dev/null)" || return 1
   [[ -z "$status" ]] || return 1
+  if config_value="$(git -C "$repo_root" config --get core.autocrlf 2>/dev/null)"; then
+    [[ "$config_value" == false ]] || return 1
+  else
+    config_status=$?
+    ((config_status == 1)) || return 1
+  fi
+  if config_value="$(git -C "$repo_root" config --get core.eol 2>/dev/null)"; then
+    [[ "$config_value" == native ]] || return 1
+  else
+    config_status=$?
+    ((config_status == 1)) || return 1
+  fi
+  if config_value="$(git -C "$repo_root" config --bool --get core.sparseCheckout 2>/dev/null)"; then
+    [[ "$config_value" != true ]] || return 1
+  else
+    config_status=$?
+    ((config_status == 1)) || return 1
+  fi
+  status="$(git -C "$repo_root" ls-files -v -- "$context_path" 2>/dev/null)" || return 1
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[a-z] || "${line:0:1}" == S ]] && return 1
+  done <<<"$status"
   context_hash="$(git -C "$repo_root" rev-parse "HEAD:$context_path" 2>/dev/null)" || return 1
   _hash_context_attributes "$repo_root" "$context_path" || return 1
   dockerfile="$context_dir/Dockerfile"
@@ -313,9 +350,6 @@ _image_inputs_impl() {
   [[ -n "$buildkit_version" ]] || return 1
   IMAGE_KNOWN_STAGES=""
 
-  for line in "${build_args[@]+"${build_args[@]}"}"; do
-    [[ "$line" == GIT_SHA=* ]] || tree_args+=("$line")
-  done
   IMAGE_KEY_CTX="$(_hash_image_key ctx "$context_hash" "$buildx_version" "$buildkit_version" \
     "$week" "${build_args[@]+"${build_args[@]}"}")" || return 1
   IMAGE_KEY_TREE="$(_hash_image_key tree "$context_hash" "$buildx_version" "$buildkit_version" \
