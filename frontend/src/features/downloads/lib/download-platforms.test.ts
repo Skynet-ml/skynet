@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs";
 import path from "node:path";
-import { DOWNLOAD_PLATFORMS, detectPlatform, heroActionForPlatform } from "./download-platforms.ts";
+import {
+  DOWNLOAD_PLATFORMS,
+  clientPlatform,
+  detectPlatform,
+  heroActionForPlatform,
+} from "./download-platforms.ts";
 
 test("detect desktop and mobile platforms, including iPad desktop mode", () => {
   const cases = [
@@ -18,6 +23,29 @@ test("detect desktop and mobile platforms, including iPad desktop mode", () => {
   ] as const;
   for (const [agent, touches, expected] of cases)
     assert.equal(detectPlatform(agent, touches), expected, agent);
+});
+
+test("client platform refinement upgrades only server-detected macOS on iPad", () => {
+  const macUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)";
+  for (const [initial, touches, expected] of [
+    ["macos", 0, "macos"],
+    ["macos", 1, "macos"],
+    ["macos", 2, "ios"],
+    ["macos", 5, "ios"],
+    ["windows", 5, "windows"],
+    ["linux", 5, "linux"],
+    ["ios", 5, "ios"],
+    ["android", 5, "android"],
+    ["cli", 5, "cli"],
+    [null, 5, null],
+  ] as const) {
+    assert.equal(
+      clientPlatform(initial, macUserAgent, touches),
+      expected,
+      `${initial}: ${touches}`,
+    );
+  }
+  assert.equal(clientPlatform("macos", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", 5), "macos");
 });
 
 test("Mac setup does not advertise nonexistent release assets", () => {

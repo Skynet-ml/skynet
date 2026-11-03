@@ -104,3 +104,13 @@ export function detectPlatform(userAgent: string, maxTouchPoints = 0): PlatformI
   if (/linux/i.test(userAgent) && !/cros/i.test(userAgent)) return "linux";
   return null;
 }
+
+export function clientPlatform(
+  initialPlatform: PlatformId | null,
+  userAgent: string,
+  maxTouchPoints: number,
+): PlatformId | null {
+  return initialPlatform === "macos" && detectPlatform(userAgent, maxTouchPoints) === "ios"
+    ? "ios"
+    : initialPlatform;
+}

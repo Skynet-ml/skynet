@@ -24,7 +24,7 @@ import { msg } from "@/shared/lib/messages";
 import { APP_NAME } from "@/shared/lib/brand";
 import {
   DOWNLOAD_PLATFORMS,
-  detectPlatform,
+  clientPlatform,
   heroActionForPlatform,
   type PlatformId,
 } from "../lib/download-platforms";
@@ -45,12 +45,7 @@ export function DownloadsPage({ initialPlatform }: { initialPlatform: PlatformId
 
   useEffect(() => {
     // iPad Safari's desktop UA looks like macOS; only the browser exposes touch points.
-    if (
-      initialPlatform === "macos" &&
-      detectPlatform(navigator.userAgent, navigator.maxTouchPoints) === "ios"
-    ) {
-      setDetected("ios");
-    }
+    setDetected(clientPlatform(initialPlatform, navigator.userAgent, navigator.maxTouchPoints));
   }, [initialPlatform]);
 
   return (
