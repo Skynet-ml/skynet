@@ -22,7 +22,7 @@ from ..config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, app_env
 from ..exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
 from ..local.cli_catalog import CliProvider, parse_subscription_model_id
 from .budgets import BudgetError, BudgetInsufficientError
-from .byok_upstreams import OPENROUTER, ProviderUpstream, resolve_upstream, validate_custom_base
+from .byok_upstreams import OPENROUTER, ProviderUpstream, resolve_upstream, validate_byok_novelty, validate_custom_base
 from .cli_dispatch import CliDispatcher
 from .credential_safety import scrub_model_config
 from .data_policy import data_policy_for
@@ -929,6 +929,11 @@ class ModelGateway:
         economy = bool(result.get("economy_mode"))
         shinka = result.get("shinka")
         novelty = isinstance(shinka, dict) and bool(shinka.get("novelty"))
+        reflection = result.get("reflection_model_config")
+        if isinstance(reflection, dict):
+            validate_byok_novelty(
+                {**reflection, "token_source": reflection.get("token_source") or result.get("token_source")}, novelty
+            )
         for config, role in models:
             source = config.get("token_source") or result.get("token_source") or "managed"
             extra = config.get("extra") or {}

@@ -103,6 +103,7 @@
     "auth.missing_token": "Authentication token is required.",
     "auth.not_configured": "Backend authentication is not configured.",
     "billing.byok_invalid_endpoint": "The custom provider endpoint is unsafe or invalid.",
+    "submission.byok_novelty_unsupported": "Novelty checking requires a BYOK provider that supports embeddings.",
     "billing.insufficient_funds": "Your balance is empty. Add funds to start an optimization.",
     "wizard_agent.daily_limit_reached": "You've used today's {limit} free agent turns. The agent is available again tomorrow.",
     "billing.openrouter_oauth_failed": "OpenRouter sign-in didn't complete. Try again.",

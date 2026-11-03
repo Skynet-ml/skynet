@@ -27,6 +27,7 @@ from typing import Any, Literal
 import dspy
 
 from ....billing.budgets import BudgetError
+from ....billing.byok_upstreams import validate_byok_novelty
 from ....billing.model_gateway import EMBEDDING_ROUTE_KEY, ROUTE_KEY, SHINKA_EMBEDDING_MODEL
 from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.pricing import (
@@ -243,6 +244,7 @@ class JobSpec:
     context: dict[str, Any] = field(default_factory=dict)
     # Further metered models (the DSPy task model) whose usage the run bills.
     extra_lms: list[Any] = field(default_factory=list)
+    extra_lm_sources: list[str | None] = field(default_factory=list)
 
 
 def job_spec_from_payload(payload: BlackboxRunRequest) -> JobSpec:
@@ -369,6 +371,9 @@ def validate_job(payload: BlackboxRunRequest | JobSpec) -> None:
             or unavailable, a native proposer gets custom model settings or no
             spending budget, or Auto has too few scorer runs.
     """
+    validate_byok_novelty(
+        payload.reflection_model_settings.model_dump(), bool(payload.shinka and payload.shinka.novelty)
+    )
     caps = engine_capabilities(payload.target)
     if caps.agent_target and not caps.sandbox:
         raise ServiceError(f"Agent targets cannot run on this deployment: {caps.sandbox_reason}")
@@ -1102,7 +1107,15 @@ def _run_job(
     scorer_usage = getattr(base_scorer, "usage", None)
     lms = [lm, *job.extra_lms] + ([] if scorer_usage is None else [scorer_usage])
     byok_reflection = job.reflection_model_settings.token_source == "byok"
-    billable_lms = lms[1:] if byok_reflection else lms
+    billable_lms = (
+        ([] if byok_reflection else [lm])
+        + [
+            extra_lm
+            for index, extra_lm in enumerate(job.extra_lms)
+            if index >= len(job.extra_lm_sources) or job.extra_lm_sources[index] != "byok"
+        ]
+        + ([] if scorer_usage is None else [scorer_usage])
+    )
     native_sources: dict[str, set[str]] = {}
     for config in (job.reflection_model_settings, *job.extra_reflection_model_settings):
         route = config.extra.get(ROUTE_KEY) or {}

@@ -120,6 +120,14 @@ def unified_job_spec(
         optimizer_resolved=resolved,
         context=context,
         extra_lms=[lm for lm in (task_lm, metric_lm) if lm is not None],
+        extra_lm_sources=[
+            config.token_source
+            for lm, config in (
+                (task_lm, models.task_model or models.reflection_model),
+                (metric_lm, models.metric_model or models.reflection_model),
+            )
+            if lm is not None
+        ],
     )
 
 

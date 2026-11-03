@@ -145,15 +145,26 @@ def _byok_provider_cents(record: OperationRecord) -> Decimal | None:
                 cost = usage_charge(usage)
                 if cost is not None:
                     return cost / Decimal(str(CENT_USD_VALUE))
+                if usage.get("cost") is not None:
+                    return None
             elif usage.get("cost") is not None:
                 return exact_nonnegative(usage.get("cost")) / Decimal(str(CENT_USD_VALUE))
     except UnpricedOperationError:
         return None
     try:
         fraction = exact_nonnegative(record.policy.get("byok_fee_fraction"))
-        return cents_from_units(record.wallet_units) / fraction if fraction > 0 else None
+        if fraction > 0:
+            return cents_from_units(record.wallet_units) / fraction
     except UnpricedOperationError:
         return None
+    model = str(record.evidence.get("model") or record.quoted_model or "")
+    prices = known_token_prices(model) if model else None
+    if prices is None:
+        return None
+    input_tokens, output_tokens = _tokens(usage)
+    return Decimal(str(usage_cost_usd(ModelUsage(model, input_tokens, output_tokens), prices=prices))) / Decimal(
+        str(CENT_USD_VALUE)
+    )
 
 
 def aggregate(

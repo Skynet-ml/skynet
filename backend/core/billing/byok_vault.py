@@ -684,7 +684,15 @@ class ProviderKeyVault:
                 urls = [f"{root}/key"]
             else:
                 urls = self._model_probe_urls(api_base) if api_base else [probe["url"]]
-            if api_base and not canonical_openrouter:
+            canonical_provider = provider in UPSTREAMS and normalized_base == UPSTREAMS[provider].base_url.rstrip("/")
+            if canonical_provider and not canonical_openrouter:
+                upstream = UPSTREAMS[provider]
+                headers = dict(upstream.extra_headers)
+                if upstream.auth == "x-api-key":
+                    headers["x-api-key"] = secret
+                else:
+                    headers["Authorization"] = f"Bearer {secret}"
+            elif api_base and not canonical_openrouter:
                 headers = {"Authorization": f"Bearer {secret}"}
             else:
                 headers = {probe["header_name"]: probe["header_value"].format(secret=secret)}

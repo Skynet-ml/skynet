@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from core.api.errors import DomainError
 from core.billing.signals import BudgetReached
 from core.constants import (
     DETAIL_BASELINE,
@@ -59,6 +60,19 @@ from .mocks import (
 from .test_reward import GEOCODE_METRIC
 
 _CASES = [{"target": "aeiou", "i": i} for i in range(10)]
+
+
+def test_byok_novelty_requires_embedding_provider() -> None:
+    """Reject a BYOK novelty route whose provider cannot serve embeddings."""
+    payload = _payload(
+        strategy={"mode": "single", "engine": "shinka_evolve"},
+        shinka={"novelty": True},
+        max_cost_cents=100,
+        reflection_model_config={"name": "anthropic/claude-sonnet-4", "token_source": "byok"},
+    )
+    with pytest.raises(DomainError) as error:
+        validate_blackbox_payload(payload, verify_scorer=False)
+    assert error.value.code == "submission.byok_novelty_unsupported"
 
 
 class _RecordingScorer:
@@ -332,6 +346,33 @@ def test_legacy_auto_byok_reflection_with_cost_limit(
     assert response.strategy_mode == "auto"
     assert fake_native_proposers
     assert all(ctx.native_options.max_token_cost is not None for _, ctx in fake_native_proposers)
+
+
+def test_legacy_byok_task_usage_does_not_consume_budget(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep a BYOK task model out of the legacy budget checks."""
+    task_lm = FakeReflectionLM()
+    original = service_mod.job_spec_from_payload
+
+    def job_from_payload(payload: BlackboxRunRequest) -> service_mod.JobSpec:
+        """Add a BYOK task model to the job."""
+        job = original(payload)
+        job.extra_lms = [task_lm]
+        job.extra_lm_sources = ["byok"]
+        return job
+
+    def strategy(_strategy: Any, _task: Task, _server: EvalServer, ctx: EngineContext, *_args: Any, **_kwargs: Any):
+        """Exercise both budget checks after task model usage."""
+        task_lm.history.append({"usage": {"prompt_tokens": 1000000, "completion_tokens": 1000000}})
+        service_mod.dspy.settings.callbacks[0]._check()
+        ctx.check_budget()
+        assert ctx.remaining_cost_usd() > 0
+        return Result(best_candidate="hello world", best_score=0.5, total_evals=0), []
+
+    monkeypatch.setattr(service_mod, "job_spec_from_payload", job_from_payload)
+    monkeypatch.setattr(service_mod, "run_strategy", strategy)
+    run_blackbox_optimization(_payload(max_cost_cents=1), artifact_id="byok-task", gepa_log_dir_path=str(tmp_path))
 
 
 def test_legacy_byok_reflection_keeps_managed_scorer_budget(

@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import urlsplit
 
+from ..api.errors import DomainError
 from ..provider_registry import LITELLM_TO_BYOK_PROVIDER
 from .operation_pricing import UnpricedOperationError
 
@@ -134,3 +135,27 @@ def resolve_upstream(config: Mapping[str, Any]) -> ProviderUpstream:
     if slug not in UPSTREAMS:
         raise UnpricedOperationError("This BYOK provider is not supported.")
     return UPSTREAMS[slug]
+
+
+def validate_byok_novelty(
+    config: Mapping[str, Any], novelty: bool, *, api_bases: Mapping[str, str | None] | None = None
+) -> None:
+    """Reject BYOK novelty when the reflection route cannot serve embeddings.
+
+    Args:
+        config: The reflection model configuration.
+        novelty: Whether novelty checking is enabled.
+        api_bases: Saved provider endpoints, when credentials are not yet resolved.
+
+    Raises:
+        DomainError: When the BYOK route has no embeddings support.
+    """
+    if not novelty or config.get("token_source") != "byok":
+        return
+    name = str(config.get("name") or "")
+    prefix = name.split("/", 1)[0]
+    slug = str(config.get("byok_provider") or LITELLM_TO_BYOK_PROVIDER.get(prefix, prefix))
+    base = (api_bases or {}).get(slug)
+    resolved = {**config, "base_url": base} if base else config
+    if not resolve_upstream(resolved).embeddings:
+        raise DomainError("submission.byok_novelty_unsupported", status=400)

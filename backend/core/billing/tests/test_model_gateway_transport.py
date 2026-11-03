@@ -17,6 +17,7 @@ from pydantic import SecretStr
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from core.api.errors import DomainError
 from core.api.preflight_execution import _verify_model_routes
 from core.billing import model_gateway as gateway_module
 from core.billing.budgets import BudgetInsufficientError, BudgetService
@@ -330,6 +331,44 @@ def test_byok_custom_dispatch_pins_host_and_tls(
     assert sent[0].headers["host"] == "public.example:8443"
     assert sent[0].extensions["sni_hostname"] == "public.example"
     assert sent[0].headers["authorization"] == "Bearer private"
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "groq", "deepseek"])
+def test_shinka_byok_novelty_rejects_provider_without_embeddings(gateway: ModelGateway, provider: str) -> None:
+    """Reject unsupported novelty routes before registering any model."""
+    with pytest.raises(DomainError) as error:
+        gateway.protect_payload(
+            {
+                "shinka": {"novelty": True},
+                "reflection_model_config": {
+                    "name": f"{provider}/model",
+                    "token_source": "byok",
+                    "extra": {"api_key": "private"},
+                },
+            },
+            managed_key="",
+        )
+    assert error.value.code == "submission.byok_novelty_unsupported"
+    assert not gateway._routes
+
+
+@pytest.mark.parametrize(("provider", "novelty"), [("openai", True), ("openrouter", True), ("anthropic", False)])
+def test_shinka_byok_novelty_allows_supported_routes(gateway: ModelGateway, provider: str, novelty: bool) -> None:
+    """Allow embedding-capable providers and disabled novelty."""
+    protected = gateway.protect_payload(
+        {
+            "shinka": {"novelty": novelty},
+            "reflection_model_config": {
+                "name": "openrouter/openai/model" if provider == "openrouter" else f"{provider}/model",
+                "byok_provider": provider,
+                "token_source": "byok",
+                "extra": {"api_key": "private"},
+            },
+        },
+        managed_key="",
+    )
+    route = protected["reflection_model_config"]["extra"][ROUTE_KEY]
+    assert (EMBEDDING_ROUTE_KEY in route) is novelty
 
 
 def test_custom_base_requires_openai_prefix(gateway: ModelGateway) -> None:

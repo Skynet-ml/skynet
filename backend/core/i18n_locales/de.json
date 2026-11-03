@@ -177,6 +177,7 @@
     "webauthn.invalid_credential": "Dieser Passkey konnte nicht verifiziert werden.",
     "webauthn.not_found": "Passkey nicht gefunden.",
     "billing.byok_invalid_endpoint": "Der benutzerdefinierte Anbieter-Endpunkt ist unsicher oder ungültig.",
+    "submission.byok_novelty_unsupported": "Die Neuheitsprüfung erfordert einen BYOK-Anbieter mit Embedding-Unterstützung.",
     "billing.insufficient_funds": "Ihr Guthaben ist leer. Laden Sie Guthaben auf, um einen Durchlauf zu starten.",
     "wizard_agent.daily_limit_reached": "Sie haben die {limit} kostenlosen Agenten-Runden für heute aufgebraucht. Der Agent ist morgen wieder verfügbar.",
     "billing.openrouter_oauth_failed": "Die Anmeldung bei OpenRouter wurde nicht abgeschlossen. Versuchen Sie es erneut.",

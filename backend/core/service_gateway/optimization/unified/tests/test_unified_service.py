@@ -268,6 +268,17 @@ def test_strategy_dispatch(resolved: str, mode: str, engine: str | None) -> None
     assert (strategy.mode, strategy.engine) == (mode, engine)
 
 
+def test_job_spec_tracks_sources_for_each_extra_lm() -> None:
+    """Keep the task and metric source aligned with the supplied LMs."""
+    payload = _payload()
+    payload.models.reflection_model.token_source = "byok"
+    payload.models.metric_model = payload.models.reflection_model.model_copy(update={"token_source": "managed"})
+    job = unified_service.unified_job_spec(payload, seed=1, task_lm=object(), metric_lm=object())
+    assert job.extra_lm_sources == ["byok", "managed"]
+    metric_only = unified_service.unified_job_spec(payload, seed=1, task_lm=None, metric_lm=object())
+    assert metric_only.extra_lm_sources == ["managed"]
+
+
 def test_job_spec_keeps_metric_source_in_private_context() -> None:
     """The metric source rides only in the job's private context, never in the objective or seed."""
     payload = _payload()

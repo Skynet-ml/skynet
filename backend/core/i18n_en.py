@@ -62,6 +62,7 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "wizard_agent.daily_limit_reached": "You've used today's {limit} free agent turns. The agent is available again tomorrow.",
     "billing.byok_not_configured": "The BYOK key vault is not configured on this deployment, so provider keys can't be saved.",
     "billing.byok_invalid_endpoint": "The custom provider endpoint is unsafe or invalid.",
+    "submission.byok_novelty_unsupported": "Novelty checking requires a BYOK provider that supports embeddings.",
     "billing.byok_unknown_provider": "Unknown provider '{provider}'.",
     "billing.byok_empty_secret": "A provider key can't be empty.",
     "billing.byok_key_not_found": "No saved key for provider '{provider}'.",

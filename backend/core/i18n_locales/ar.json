@@ -177,6 +177,7 @@
     "webauthn.invalid_credential": "تعذّر التحقق من مفتاح المرور هذا.",
     "webauthn.not_found": "لم يتم العثور على مفتاح المرور.",
     "billing.byok_invalid_endpoint": "عنوان المزوّد المخصص غير آمن أو غير صالح.",
+    "submission.byok_novelty_unsupported": "يتطلب فحص التشابه مفتاح مزوّد يدعم التضمينات.",
     "billing.insufficient_funds": "رصيدك فارغ. أضف رصيدًا لبدء تشغيل.",
     "wizard_agent.daily_limit_reached": "لقد استخدمت أدوار الوكيل المجانية البالغة {limit} لهذا اليوم. سيكون الوكيل متاحًا مجددًا غدًا.",
     "billing.openrouter_oauth_failed": "لم يكتمل تسجيل الدخول إلى OpenRouter. حاول مرة أخرى.",

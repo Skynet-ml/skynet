@@ -377,10 +377,11 @@ class ProviderDispatcher:
             priced = cached[1]
         else:
             routed = dict(request) if self._data_policy is None else apply_data_policy(request, self._data_policy)
+            routed = mark_prompt_cache(path, routed)
             if self.policy.kind != "byok_model":
                 catalog = fetch_endpoint_prices(self.model, client=self._client)
                 pricer = {"/responses": price_responses_request, "/embeddings": price_embedding_request}
-                priced = pricer.get(path, price_text_request)(mark_prompt_cache(path, routed), catalog, self.policy)
+                priced = pricer.get(path, price_text_request)(routed, catalog, self.policy)
             else:
                 if routed.get("n", 1) != 1 or routed.get("best_of", 1) != 1:
                     raise UnpricedOperationError("Multiple completions require independently reserved requests.")

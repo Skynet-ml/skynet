@@ -177,6 +177,7 @@
     "webauthn.invalid_credential": "Не вдалося перевірити цей ключ доступу.",
     "webauthn.not_found": "Ключ доступу не знайдено.",
     "billing.byok_invalid_endpoint": "Власна адреса постачальника небезпечна або недійсна.",
+    "submission.byok_novelty_unsupported": "Для перевірки новизни потрібен провайдер BYOK із підтримкою ембедингів.",
     "billing.insufficient_funds": "Ваш баланс порожній. Поповніть його, щоб розпочати запуск.",
     "wizard_agent.daily_limit_reached": "Ви використали {limit} безкоштовних ходів агента на сьогодні. Агент знову буде доступний завтра.",
     "billing.openrouter_oauth_failed": "Вхід через OpenRouter не завершено. Спробуйте ще раз.",

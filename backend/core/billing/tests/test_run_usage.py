@@ -136,9 +136,48 @@ def test_byok_calls_report_the_provider_charge_from_usage() -> None:
     assert row.provider_cents == Decimal(10)
 
 
-@pytest.mark.parametrize("cost", [None, "invalid", "-1", "NaN"])
-def test_byok_missing_provider_cost_is_unavailable(cost: str | None) -> None:
-    """Do not invent provider cost from a zero fee or malformed usage."""
+@pytest.mark.parametrize(
+    ("model", "usage"),
+    [
+        ("openai/gpt-4o-mini", {"prompt_tokens": 100, "completion_tokens": 20}),
+        ("anthropic/claude-sonnet-4.5", {"input_tokens": 100, "output_tokens": 20}),
+    ],
+)
+def test_native_byok_estimates_missing_cost_from_tokens(
+    model: str, usage: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Estimate native provider cost without changing wallet charges."""
+    monkeypatch.setattr(
+        "core.billing.run_usage.known_token_prices", lambda _model: TokenPrices(prompt=0.001, completion=0.002)
+    )
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence={"model": model, "usage": usage})], proposer=False)
+    assert row.provider_cents == Decimal(14)
+    assert row.unpriced_calls == 0
+    assert row.charged_units == 0
+
+
+def test_byok_missing_provider_cost_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leave an unknown model unpriced when the provider gives no cost."""
+    monkeypatch.setattr("core.billing.run_usage.known_token_prices", lambda _model: None)
+    evidence = {"model": "unknown/model", "usage": {"input_tokens": 100, "output_tokens": 20}}
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence=evidence)], proposer=False)
+    assert row.provider_cents is None
+    assert row.unpriced_calls == 1
+
+
+def test_byok_missing_usage_with_known_model_has_zero_estimate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Use the known model price with zero recorded tokens."""
+    monkeypatch.setattr(
+        "core.billing.run_usage.known_token_prices", lambda _model: TokenPrices(prompt=0.001, completion=0.002)
+    )
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence={"model": "openai/model"})], proposer=False)
+    assert row.provider_cents == Decimal(0)
+    assert row.unpriced_calls == 0
+
+
+@pytest.mark.parametrize("cost", ["invalid", "-1", "NaN"])
+def test_byok_malformed_provider_cost_is_unavailable(cost: str) -> None:
+    """Do not replace malformed provider cost with an estimate."""
     (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence={"usage": {"cost": cost}})], proposer=False)
     assert row.provider_cents is None
     assert row.unpriced_calls == 1

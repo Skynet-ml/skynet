@@ -91,6 +91,16 @@ def test_save_key_verified_on_2xx(engine: object, vault_key: str) -> None:
     assert view.status == STATUS_VERIFIED
 
 
+def test_save_anthropic_canonical_base_uses_native_auth(engine: object, vault_key: str) -> None:
+    """Use Anthropic authentication for its canonical saved base."""
+    with patch("core.billing.byok_vault.httpx.Client.get", return_value=_probe_response(200)) as get:
+        view = ProviderKeyVault(engine=engine).save_key(
+            "u@x.com", "anthropic", "anthropic-secret", api_base="https://api.anthropic.com/v1/"
+        )
+    assert view.status == STATUS_VERIFIED
+    assert get.call_args.kwargs["headers"] == {"x-api-key": "anthropic-secret", "anthropic-version": "2023-06-01"}
+
+
 @pytest.mark.parametrize("api_base", [None, "https://openrouter.ai", "https://openrouter.ai/api/v1"])
 def test_save_openrouter_key_uses_credential_specific_probe(
     engine: object, vault_key: str, api_base: str | None

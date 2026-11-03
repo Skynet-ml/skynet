@@ -347,6 +347,7 @@ class I18nKey(StrEnum):
     SERVE_NO_MODEL_CONFIG = 'serve.no_model_config'
     SERVE_PROTECTED_INTERACTION_FAILED = 'serve.protected_interaction_failed'
     SERVE_SUBSCRIPTION_MODEL_HOSTED = 'serve.subscription_model_hosted'
+    SUBMISSION_BYOK_NOVELTY_UNSUPPORTED = 'submission.byok_novelty_unsupported'
     SUBMISSION_CAPACITY_REACHED = 'submission.capacity_reached'
     SUBMISSION_MODULE_RESOLVE_FAILED = 'submission.module_resolve_failed'
     SUBMISSION_STAGED_DATASET_NOT_FOUND = 'submission.staged_dataset_not_found'

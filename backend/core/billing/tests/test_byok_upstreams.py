@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from core.billing.byok_upstreams import OPENROUTER, UPSTREAMS, resolve_upstream
+from core.api.errors import DomainError
+from core.billing.byok_upstreams import OPENROUTER, UPSTREAMS, resolve_upstream, validate_byok_novelty
 from core.billing.byok_vault import _PROVIDER_PROBES
 from core.billing.operation_pricing import UnpricedOperationError
 from core.provider_registry import BYOK_PROVIDER_SLUGS
@@ -26,6 +27,14 @@ def test_custom_upstream_allows_only_chat() -> None:
     upstream = resolve_upstream({"name": "openai/model", "base_url": "https://example.com/v1"})
     assert upstream.paths == frozenset({"/chat/completions"})
     assert upstream.embeddings is False
+
+
+def test_novelty_validation_uses_saved_custom_base() -> None:
+    """Reject the custom endpoint even before credentials are resolved."""
+    config = {"name": "openai/example", "token_source": "byok"}
+    with pytest.raises(DomainError) as error:
+        validate_byok_novelty(config, True, api_bases={"openai": "https://public.example/v1"})
+    assert error.value.code == "submission.byok_novelty_unsupported"
 
 
 @pytest.mark.parametrize(("slug", "prefix"), BYOK_PROVIDER_SLUGS)

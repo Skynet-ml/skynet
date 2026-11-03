@@ -177,6 +177,7 @@
     "webauthn.invalid_credential": "Não foi possível verificar esta passkey.",
     "webauthn.not_found": "Passkey não encontrada.",
     "billing.byok_invalid_endpoint": "O endpoint personalizado do provedor não é seguro ou é inválido.",
+    "submission.byok_novelty_unsupported": "A verificação de novidade exige um provedor BYOK compatível com embeddings.",
     "billing.insufficient_funds": "O seu saldo está vazio. Adicione fundos para iniciar uma execução.",
     "wizard_agent.daily_limit_reached": "Usou os {limit} turnos gratuitos do agente de hoje. O agente fica disponível novamente amanhã.",
     "billing.openrouter_oauth_failed": "O login no OpenRouter não foi concluído. Tente novamente.",

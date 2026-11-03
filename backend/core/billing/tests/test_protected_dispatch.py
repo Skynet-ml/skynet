@@ -101,6 +101,29 @@ def test_byok_model_and_sandbox_are_metered_separately(database: Engine) -> None
     assert snapshot.reserved_cents == 0
 
 
+def test_openrouter_byok_anthropic_prompt_is_cacheable(database: Engine) -> None:
+    """Mark an Anthropic BYOK prompt before sending it to OpenRouter."""
+    sent: list[dict] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Capture the routed request and return a successful response."""
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": []})
+
+    model = "anthropic/claude-sonnet-5"
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+        dispatcher = OpenRouterDispatcher(
+            _runtime(database),
+            api_key="private",
+            model=model,
+            role="task",
+            policy=ChargePolicy("byok_model"),
+            client=client,
+        )
+        dispatcher.dispatch("/chat/completions", {"model": model, "messages": [{"role": "system", "content": "hello"}]})
+    assert sent[0]["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+
 @pytest.mark.parametrize("usage", [None, {"cost": "bad"}, {"cost": -1}, {"cost": "NaN"}])
 def test_byok_success_with_missing_or_invalid_usage_settles_zero(database: Engine, usage: object) -> None:
     """Settle a successful BYOK call even when usage is unavailable or malformed."""

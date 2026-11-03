@@ -36,6 +36,7 @@ from ...billing import (
 )
 from ...billing.budget_amounts import MAX_CENTS
 from ...billing.budgets import BudgetError, BudgetService
+from ...billing.byok_upstreams import validate_byok_novelty
 from ...billing.protected_credentials import ProtectedCredentialVault, protect_execution_credentials
 from ...config import settings
 from ...constants import (
@@ -697,7 +698,7 @@ def _cap_cost_ceiling_to_balance(
     payload.max_cost_cents = budget if current is None else min(current, budget)
 
 
-def _enforce_byok_connections(job_store, username: str, model_configs: list[ModelConfig]) -> None:
+def _enforce_byok_connections(job_store, username: str, model_configs: list[ModelConfig]) -> dict[str, str | None]:
     """Refuse BYOK models without a verified saved provider connection.
 
     In BYOK mode every model authenticates with the user's own provider key,
@@ -713,6 +714,9 @@ def _enforce_byok_connections(job_store, username: str, model_configs: list[Mode
         username: Account attempting the submission.
         model_configs: Executable configs with normalized per-model sources.
 
+    Returns:
+        Saved provider endpoints for the verified connections.
+
     Raises:
         DomainError: 400 ``billing.byok_missing_connection`` listing the providers
             the account has no saved connection for, or
@@ -721,7 +725,7 @@ def _enforce_byok_connections(job_store, username: str, model_configs: list[Mode
     """
     engine = getattr(job_store, "engine", None)
     if engine is None or not username:
-        return
+        return {}
     vault = ProviderKeyVault(engine=engine)
     # A model id carries a LiteLLM prefix (``gemini``, ``together_ai``) but the
     # key is saved under the vault slug (``google``, ``together``); bridge the two
@@ -746,6 +750,7 @@ def _enforce_byok_connections(job_store, username: str, model_configs: list[Mode
     for name, prefix, provider in routes:
         if not byok_prefix_routable(prefix, provider, api_base=api_bases.get(provider)):
             raise DomainError("billing.byok_model_not_served", status=400, model=name, provider=provider)
+    return api_bases
 
 
 def rows_to_cases(rows: list[dict], *, input_fields: list[str], expected_field: str | None) -> list[dict]:
@@ -1016,7 +1021,13 @@ def submit_unified_payload(
         _spendable = _enforce_balance(job_store, payload.username, payload.token_source)
         if payload.execution_budget_id is None:
             _cap_cost_ceiling_to_balance(payload, _spendable, payload.token_source)
-    _enforce_byok_connections(job_store, payload.username, _model_configs)
+    api_bases = _enforce_byok_connections(job_store, payload.username, _model_configs)
+
+    validate_byok_novelty(
+        payload.models.reflection_model.model_dump(),
+        bool(payload.optimizer.shinka and payload.optimizer.shinka.novelty),
+        api_bases=api_bases,
+    )
 
     try:
         validate_unified_payload(payload)
@@ -1213,7 +1224,13 @@ def create_submissions_router(*, service, job_store) -> APIRouter:
             _spendable = _enforce_balance(job_store, payload.username, payload.token_source)
             if payload.execution_budget_id is None:
                 _cap_cost_ceiling_to_balance(payload, _spendable, payload.token_source)
-        _enforce_byok_connections(job_store, payload.username, _model_configs)
+        api_bases = _enforce_byok_connections(job_store, payload.username, _model_configs)
+
+        validate_byok_novelty(
+            payload.reflection_model_settings.model_dump(),
+            bool(payload.shinka and payload.shinka.novelty),
+            api_bases=api_bases,
+        )
 
         _ensure_api_budget(
             payload,
