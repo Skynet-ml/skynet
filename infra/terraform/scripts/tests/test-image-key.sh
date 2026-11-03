@@ -185,6 +185,9 @@ FROM node:20-alpine
 COPY --from=missing /etc/os-release /os-release
 DOCKERFILE
 [[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "unknown COPY stage produced key"
+image_inputs "$test_context" ctx GIT_SHA=abc
+[[ -z "$IMAGE_KEY" ]] || fail "failed key kept a partial image key"
+((${#IMAGE_BUILD_CONTEXT_ARGS[@]} == 0)) || fail "failed key kept partial build contexts"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 ADD --from=missing /etc/os-release /os-release
@@ -200,6 +203,23 @@ FROM node:20-alpine
 RUN --mount=type=bind,from=missing true
 DOCKERFILE
 [[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "unknown RUN mount stage produced key"
+cat >"$test_context/Dockerfile" <<'DOCKERFILE'
+FROM node:20-alpine
+COPY \
+  --from=ghcr.io/x /etc/os-release /os-release
+DOCKERFILE
+[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "continued COPY source produced key"
+cat >"$test_context/Dockerfile" <<'DOCKERFILE'
+FROM node:20-alpine
+RUN \
+  --mount=type=bind,from=ghcr.io/x,target=/source true
+DOCKERFILE
+[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "continued RUN mount produced key"
+cat >"$test_context/Dockerfile" <<'DOCKERFILE'
+FROM node:20-alpine
+ADD /etc/os-release /os-release \
+DOCKERFILE
+[[ -z "$(image_key "$test_context" ctx GIT_SHA=abc)" ]] || fail "continued ADD produced key"
 cat >"$test_context/Dockerfile" <<'DOCKERFILE'
 FROM node:20-alpine
 ADD https://example.invalid/source /source

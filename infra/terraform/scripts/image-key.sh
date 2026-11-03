@@ -16,7 +16,7 @@ _is_stage() {
   [[ "$value" =~ ^[0-9]+$ ]] && ((value < stage_count))
 }
 
-image_inputs() {
+_image_inputs_impl() {
   local context_dir="$1" prefix="${2:-ctx}" repo_root context_path status dockerfile
   shift 2
   local -a build_args=("$@") words base_digests=() sorted_args=()
@@ -25,48 +25,72 @@ image_inputs() {
   declare -A digest_by_ref=()
   IMAGE_KEY=""
   IMAGE_BUILD_CONTEXT_ARGS=()
-  [[ "$prefix" == ctx || "$prefix" == tree ]] || return 0
+  [[ "$prefix" == ctx || "$prefix" == tree ]] || return 1
   [[ "$prefix" == tree ]] && build_args=()
-  context_dir="$(cd "$context_dir" && pwd -P)" || return 0
-  repo_root="$(git -C "$context_dir" rev-parse --show-toplevel 2>/dev/null)" || return 0
+  context_dir="$(cd "$context_dir" && pwd -P)" || return 1
+  repo_root="$(git -C "$context_dir" rev-parse --show-toplevel 2>/dev/null)" || return 1
   context_path="${context_dir#"$repo_root"/}"
-  [[ "$context_path" != "$context_dir" && -n "$context_path" ]] || return 0
-  status="$(git -C "$repo_root" status --porcelain --ignored -- "$context_path" 2>/dev/null)" || return 0
-  [[ -z "$status" ]] || return 0
-  git -C "$repo_root" rev-parse "HEAD:$context_path" >/dev/null 2>&1 || return 0
+  [[ "$context_path" != "$context_dir" && -n "$context_path" ]] || return 1
+  status="$(git -C "$repo_root" status --porcelain --ignored -- "$context_path" 2>/dev/null)" || return 1
+  [[ -z "$status" ]] || return 1
+  git -C "$repo_root" rev-parse "HEAD:$context_path" >/dev/null 2>&1 || return 1
   dockerfile="$context_dir/Dockerfile"
-  [[ -f "$dockerfile" ]] || return 0
+  [[ -f "$dockerfile" ]] || return 1
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
-    [[ "$trimmed" =~ ^#[[:space:]]*syntax= ]] && return 0
+    [[ "$trimmed" =~ ^#[[:space:]]*syntax= ]] && return 1
     [[ "$trimmed" == \#* || -z "$trimmed" ]] && continue
     if [[ "${trimmed%$'\r'}" == *\\ ]]; then
       instruction="${trimmed%%[[:space:]]*}"
-      [[ "${instruction,,}" == from ]] && return 0
+      [[ "${instruction,,}" == from || "${instruction,,}" == add ]] && return 1
     fi
     line="${line%%#*}"
     read -r -a words <<<"$line"
     instruction="${words[0]:-}"
     instruction="${instruction,,}"
+    for ((index = 0; index < ${#words[@]}; index++)); do
+      case "${words[index]}" in
+        --from=*)
+          from_ref="${words[index]#--from=}"
+          _is_stage "$from_ref" "$stages" "$stage_count" || return 1
+          ;;
+        --from)
+          index=$((index + 1))
+          from_ref="${words[index]:-}"
+          [[ -n "$from_ref" ]] || return 1
+          _is_stage "$from_ref" "$stages" "$stage_count" || return 1
+          ;;
+        --mount=*)
+          if [[ "${words[index]}" == *from=* ]]; then
+            if [[ "${words[index]}" =~ (^|,)from=([^,[:space:]]+) ]]; then
+              from_ref="${BASH_REMATCH[2]}"
+              _is_stage "$from_ref" "$stages" "$stage_count" || return 1
+            else
+              return 1
+            fi
+          fi
+          ;;
+      esac
+    done
     case "$instruction" in
       from)
         index=1
         while [[ "${words[index]:-}" == --* ]]; do
-          [[ "${words[index]}" == --platform=linux/arm64 ]] || return 0
+          [[ "${words[index]}" == --platform=linux/arm64 ]] || return 1
           ((index++))
         done
         ref="${words[index]:-}"
-        [[ -n "$ref" && "$ref" != *'$'* ]] || return 0
+        [[ -n "$ref" && "$ref" != *'$'* ]] || return 1
         if ! _is_stage "$ref" "$stages" "$stage_count" && [[ "$ref" != scratch ]]; then
           image_ref="$ref"
           if [[ -v "digest_by_ref[$image_ref]" ]]; then
             digest="${digest_by_ref[$image_ref]}"
           else
             digest_json="$(docker buildx imagetools inspect "$image_ref" \
-              --format '{{json .Manifest.Digest}}' 2>/dev/null)" || return 0
+              --format '{{json .Manifest.Digest}}' 2>/dev/null)" || return 1
             digest="$(jq -er 'select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' \
-              <<<"$digest_json" 2>/dev/null)" || return 0
+              <<<"$digest_json" 2>/dev/null)" || return 1
             digest_by_ref["$image_ref"]="$digest"
           fi
           base_digests+=("$image_ref@$digest")
@@ -79,34 +103,17 @@ image_inputs() {
         fi
         ;;
       copy|add)
-        for ((index = 1; index < ${#words[@]}; index++)); do
-          if [[ "${words[index]}" == --from=* ]]; then
-            from_ref="${words[index]#--from=}"
-            _is_stage "$from_ref" "$stages" "$stage_count" || return 0
-          elif [[ "${words[index]}" == --from ]]; then
-            ((index++))
-            _is_stage "${words[index]:-}" "$stages" "$stage_count" || return 0
-          fi
-        done
         if [[ "$instruction" == add ]]; then
           for source in "${words[@]:1:${#words[@]}-2}"; do
             [[ "$source" == --* ]] && continue
             [[ "$source" == http://* || "$source" == https://* || "$source" == git://* ||
-              "$source" == git@* || "$source" == *.git || "$source" == git+* ]] && return 0
+              "$source" == git@* || "$source" == *.git || "$source" == git+* ]] && return 1
           done
         fi
         ;;
-      run)
-        for ref in "${words[@]}"; do
-          if [[ "$ref" =~ (^|,)from=([^,[:space:]]+) ]]; then
-            from_ref="${BASH_REMATCH[2]}"
-            _is_stage "$from_ref" "$stages" "$stage_count" || return 0
-          fi
-        done
-        ;;
     esac
   done <"$dockerfile"
-  ((${#base_digests[@]} > 0)) || return 0
+  ((${#base_digests[@]} > 0)) || return 1
 
   while IFS= read -r line; do sorted_args+=("$line"); done < <(
     printf '%s\n' "${build_args[@]}" | LC_ALL=C sort
@@ -120,6 +127,17 @@ image_inputs() {
     } | if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -c1-40
   )"
   IMAGE_KEY="$prefix-${IMAGE_KEY}"
+}
+
+image_inputs() {
+  IMAGE_KEY=""
+  IMAGE_BUILD_CONTEXT_ARGS=()
+  if _image_inputs_impl "$@"; then
+    return 0
+  fi
+  IMAGE_KEY=""
+  IMAGE_BUILD_CONTEXT_ARGS=()
+  return 0
 }
 
 image_key() {

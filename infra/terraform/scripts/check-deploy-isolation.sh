@@ -79,6 +79,14 @@ for env in staging production; do
     "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$env"
   expect "$policy" denied "push to the $other build cache" ecr:PutImage \
     "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$other"
+  expect "$policy" allowed "read the $env build cache" ecr:BatchGetImage \
+    "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$env"
+  expect "$policy" allowed "describe the $env build cache" ecr:DescribeImages \
+    "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$env"
+  expect "$policy" denied "read the $other build cache" ecr:BatchGetImage \
+    "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$other"
+  expect "$policy" denied "describe the $other build cache" ecr:DescribeImages \
+    "arn:aws:ecr:$region:$account:repository/skynet/buildcache-$other"
 done
 
 policy="$(policy_for data.aws_iam_policy_document.github_preview)"

@@ -74,6 +74,5 @@ jobs:
 
       - name: Deploy services
         env:
-          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           MIGRATED_SHA: ${{ steps.build.outputs.migrated }}
         run: infra/terraform/scripts/deploy.sh "$DEPLOY_ENV" "$GITHUB_SHA" --skip-migrate

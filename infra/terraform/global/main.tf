@@ -183,23 +183,42 @@ resource "aws_ecr_repository" "buildcache_production" {
   # Checkov CKV_AWS_51 requires immutable cache tags.
   image_tag_mutability = "IMMUTABLE"
 
-  image_scanning_configuration { scan_on_push = true }
-  encryption_configuration { encryption_type = "KMS" }
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+  }
 }
 
 resource "aws_ecr_lifecycle_policy" "buildcache_production" {
   repository = aws_ecr_repository.buildcache_production.name
+
   policy = jsonencode({
     rules = concat([
-      { rulePriority = 1, description = "Delete untagged cache images after 1 day",
-        selection    = { tagStatus = "untagged", countType = "sinceImagePushed", countUnit = "days", countNumber = 1 },
-      action = { type = "expire" } },
+      {
+        rulePriority = 1
+        description  = "Delete untagged cache images after 1 day"
+        selection = {
+          tagStatus   = "untagged"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 1
+        }
+        action = { type = "expire" }
+      },
       ], [
       for index, prefix in ["backend-", "litellm-", "frontend-production-"] : {
         rulePriority = index + 2
         description  = "Keep newest five ${prefix} cache images"
-        selection    = { tagStatus = "tagged", tagPrefixList = [prefix], countType = "imageCountMoreThan", countNumber = 5 }
-        action       = { type = "expire" }
+        selection = {
+          tagStatus     = "tagged"
+          tagPrefixList = [prefix]
+          countType     = "imageCountMoreThan"
+          countNumber   = 5
+        }
+        action = { type = "expire" }
       }
     ])
   })

@@ -39,7 +39,7 @@ refresh_aws_credentials() {
   token="$(jq -er '.value' <<<"$token_response")" || die "GitHub OIDC response has no token"
   credentials="$(aws sts assume-role-with-web-identity \
     --role-arn "$AWS_DEPLOY_ROLE_ARN" --role-session-name skynet-deploy \
-    --web-identity-token "$token" --duration-seconds 900 --output json)" ||
+    --web-identity-token "$token" --duration-seconds 3600 --output json)" ||
     die "cannot assume AWS deploy role with GitHub OIDC"
   access_key="$(jq -er '.Credentials.AccessKeyId' <<<"$credentials")" ||
     die "OIDC credentials have no access key"
