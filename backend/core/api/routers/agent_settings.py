@@ -144,7 +144,7 @@ _SETTINGS: dict[str, _Setting] = {
     ),
     "preferences": _Setting(
         "tagging",
-        "Device preferences: wizard code assist, split mode, AI tagging assist and dictation. "
+        "Device preferences: wizard code assist, split mode and AI tagging assist. "
         "Change them with update_user_preferences.",
     ),
     "security": _Setting(

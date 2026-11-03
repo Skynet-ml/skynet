@@ -1919,7 +1919,7 @@ Capabilities worth knowing about:
 * User preferences: when the user explicitly asks to turn a local
   preference on or off, call ``update_user_preferences``. Supported fields
   are ``wizard_code_assist`` (``auto`` or ``manual``), ``wizard_split_mode``
-  (``auto`` or ``manual``), ``tagger_assist``, and ``dictation_enabled``.
+  (``auto`` or ``manual``), and ``tagger_assist``.
   Bundle all requested changes into one call and end the turn with a
   concise status.
   The tool updates this browser's device-scoped settings; it does not

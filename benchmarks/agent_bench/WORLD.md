@@ -242,9 +242,8 @@ gold set" (dana), `tag_0003` "noa triage set" (noa, `shared_with={dana: viewer}`
 ### Preferences (`preferences`)
 
 `advanced_mode`, `expand_advanced`, `lite_mode` (bool), `wizard_code_assist`,
-`wizard_split_mode` (str, default `"auto"`), `tagger_assist` (bool, True),
-`dictation_enabled` (bool). `update_user_preferences` merges these and rejects
-unknown keys (422).
+`wizard_split_mode` (str, default `"auto"`), `tagger_assist` (bool, True).
+`update_user_preferences` merges these and rejects unknown keys (422).
 
 ---
 
