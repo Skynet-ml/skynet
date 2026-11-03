@@ -400,16 +400,28 @@ def test_edit_and_resend_replaces_the_edited_turn_and_later_rows(
     assert _stored_contents(engine) == ["first", "שלום", "second, edited", "שלום"]
 
 
-def test_retry_of_an_unsaved_edit_with_the_edit_target_replaces_the_edited_turn(
+def test_retry_of_an_edit_refused_by_the_balance_gate_replaces_the_edited_turn_and_later_rows(
     persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A retry of an edit that failed before it was saved resends the edit target, not ``regenerate``."""
+    """A 402 on an edit stores nothing, and its retry with the edit target deletes the edited turn and later rows."""
     client, engine = persistence_client
     _fund(engine)
     token = _session_token()
-    conversation_id = _start_conversation(client, engine, token, ["first", "second"])
+    conversation_id = _start_conversation(client, engine, token, ["first", "second", "third"])
+    real_balance = agent_mod.enforce_llm_balance
 
-    # The failed edit stored nothing, so the retry is the first request that reaches the store.
+    def refuse(*_args: Any, **_kwargs: Any) -> None:
+        """Refuse the turn the way a depleted balance is refused."""
+        raise agent_mod.DomainError("billing.insufficient_balance", status=402)
+
+    monkeypatch.setattr(agent_mod, "enforce_llm_balance", refuse)
+    refused = _post_turn(client, "second, edited", token, conversation_id=conversation_id, edit_user_text="second")
+
+    assert refused.status_code == 402
+    assert _stored_contents(engine) == ["first", "שלום", "second", "שלום", "third", "שלום"]
+
+    monkeypatch.setattr(agent_mod, "enforce_llm_balance", real_balance)
     retried = _post_turn(client, "second, edited", token, conversation_id=conversation_id, edit_user_text="second")
 
     assert retried.status_code == 200
@@ -538,6 +550,66 @@ def test_edit_refused_by_model_routing_stores_nothing_and_its_retry_replaces_the
 
     assert retried.status_code == 200
     assert _stored_contents(engine) == ["first", "שלום", "edited", "שלום"]
+
+
+def _refused_send_then_retry(
+    client: TestClient, engine: Engine, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> list[str]:
+    """Send ``A``, fail send ``B`` in model routing, retry ``B`` with ``regenerate``, and return the stored rows.
+
+    Args:
+        client: Bound test client; it must return 5xx responses instead of raising.
+        engine: Engine of the test database.
+        monkeypatch: Pytest fixture used to make model routing fail once.
+        error: Exception that model routing raises for the failed send.
+
+    Returns:
+        The content of every stored message after the retry.
+    """
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["A"])
+    real_route = agent_mod.route_agent_model
+
+    def fail(*_args: Any, **_kwargs: Any) -> Any:
+        """Fail model routing with ``error``."""
+        raise error
+
+    monkeypatch.setattr(agent_mod, "route_agent_model", fail)
+    assert _post_turn(client, "B", token, conversation_id=conversation_id).status_code >= 400
+    assert _stored_contents(engine) == ["A", "שלום"]
+
+    monkeypatch.setattr(agent_mod, "route_agent_model", real_route)
+    retried = _post_turn(client, "B", token, conversation_id=conversation_id, regenerate=True)
+    assert retried.status_code == 200
+    return _stored_contents(engine)
+
+
+def test_retry_of_a_send_refused_by_model_routing_keeps_the_previous_turn(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A routing 422 stores nothing, so the ``regenerate`` retry must not delete the previous good turn."""
+    client, engine = persistence_client
+    error = agent_mod.DomainError("models.unknown_model", status=422)
+
+    assert _refused_send_then_retry(client, engine, monkeypatch, error) == ["A", "שלום", "B", "שלום"]
+
+
+def test_retry_of_a_send_that_crashed_in_model_routing_keeps_the_previous_turn(
+    persistence_client: tuple[TestClient, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A routing 5xx stores nothing, so the ``regenerate`` retry must not delete the previous good turn."""
+    client, engine = persistence_client
+    client = TestClient(client.app, raise_server_exceptions=False)
+
+    assert _refused_send_then_retry(client, engine, monkeypatch, RuntimeError("routing crashed")) == [
+        "A",
+        "שלום",
+        "B",
+        "שלום",
+    ]
 
 
 def test_retry_of_a_saved_edit_with_the_edit_target_and_regenerate_leaves_no_duplicate(

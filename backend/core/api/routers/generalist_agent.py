@@ -937,7 +937,9 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
                     if not found and req.regenerate:
                         _discard_latest_turn(job_store, cid, only_if_text=req.user_message)
                 elif req.regenerate:
-                    _discard_latest_turn(job_store, cid)
+                    # A retry of a send refused before it was stored also
+                    # sends regenerate; the text check keeps the previous turn.
+                    _discard_latest_turn(job_store, cid, only_if_text=req.user_message)
                 _persist_user_turn(job_store, cid, req.user_message)
             except DomainError:
                 raise
