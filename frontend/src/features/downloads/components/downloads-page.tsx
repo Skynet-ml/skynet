@@ -186,14 +186,7 @@ export function DownloadsPage({ initialPlatform }: { initialPlatform: PlatformId
                   <p className="mb-6 mt-2 flex-1 text-sm leading-relaxed text-muted-foreground">
                     {msg(item.description)}
                   </p>
-                  {item.status === "coming-soon" ? (
-                    <div
-                      aria-hidden="true"
-                      className="rounded-lg border border-dashed border-border px-4 py-2.5 text-center text-sm text-muted-foreground"
-                    >
-                      {msg("downloads.coming_soon")}
-                    </div>
-                  ) : (
+                  {item.status !== "coming-soon" && (
                     <div>
                       <Button
                         asChild

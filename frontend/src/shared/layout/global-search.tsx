@@ -61,7 +61,9 @@ export function GlobalSearch() {
   // Built from the same registries the sidebar and Settings rail render from,
   // so new pages and settings tabs become searchable without touching this file.
   const items = React.useMemo<SearchItem[]>(() => {
-    const pages: SearchItem[] = APP_PAGES.map((page) => ({
+    const pages: SearchItem[] = APP_PAGES.filter(
+      (page) => !(isLocalMode() && page.id === "download"),
+    ).map((page) => ({
       id: `page-${page.id}`,
       group: page.group,
       label: appPageLabel(page),

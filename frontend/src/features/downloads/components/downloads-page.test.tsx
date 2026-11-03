@@ -54,6 +54,18 @@ void test("cards have accessible headings and mobile-sized links", () => {
   assert.match(html, /min-h-\[44px\]/);
 });
 
+void test("placeholder cards show Coming soon once without a fake action", () => {
+  const html = render();
+  for (const platform of DOWNLOAD_PLATFORMS.filter((item) => item.status === "coming-soon")) {
+    const card = html.match(
+      new RegExp(`<article\\b[^>]*id="platform-${platform.id}"[\\s\\S]*?<\\/article>`),
+    )?.[0];
+    assert.ok(card, platform.id);
+    assert.equal(card.match(/Coming soon/g)?.length, 1, platform.id);
+    assert.doesNotMatch(card, /<a\b|<button\b|border-dashed/);
+  }
+});
+
 void test("header controls wrap long locale names without a navigation landmark", () => {
   const header = render().match(/<header\b[\s\S]*?<\/header>/)?.[0];
   assert.ok(header);

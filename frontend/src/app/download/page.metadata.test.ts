@@ -50,6 +50,8 @@ void test("Downloads social metadata uses the page locale and URL instead of the
     assert.equal(metadata.openGraph.url, "/download");
     assert.equal(metadata.twitter?.title, title);
     assert.equal(metadata.twitter?.description, metadata.description);
+    assert.ok(metadata.twitter && "card" in metadata.twitter);
+    assert.equal(metadata.twitter.card, "summary");
   }
   for (const [locale, ogLocale] of [
     ["zh-Hans", "zh_CN"],
