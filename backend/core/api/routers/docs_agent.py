@@ -51,6 +51,14 @@ from ...service_gateway.agents.docs_retrieval import DocsCorpus
 from ...service_gateway.agents.docs_tools import SEARCH_DOCS_TOOL, search_corpus
 from ...service_gateway.agents.generalist import build_hosted_suggest_lm
 from ...service_gateway.agents.next_prompt import suggest_next_prompt
+from ...service_gateway.agents.steering import (
+    STEER_APPLIED_EVENT,
+    STEER_KEY_MAX_CHARS,
+    SteerInbox,
+    claim_delivery,
+    get_steer_store,
+    open_steer_inbox,
+)
 from ...service_gateway.language_models import (
     apply_model_reasoning_config,
     build_language_model,
@@ -141,6 +149,12 @@ class DocsAgentAskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
     history: list[DocsAgentTurn] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS)
     locale: str = Field(default="en", max_length=16, pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$")
+    steer_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=STEER_KEY_MAX_CHARS,
+        description="The authenticated caller's running steering turn key.",
+    )
 
 
 class DocsAgentSuggestRequest(BaseModel):
@@ -451,6 +465,7 @@ def _run_answer(
     search: Callable[[str], dict[str, Any]],
     emit: Emit,
     stop: threading.Event,
+    inbox: SteerInbox | None = None,
 ) -> str:
     """Run the bounded search-and-answer loop, then record its spend, in one worker thread.
 
@@ -472,6 +487,7 @@ def _run_answer(
         search: Runs one docs search.
         emit: Sends one stream event; safe to call from this thread.
         stop: Set when the client has left; no new step starts after it.
+        inbox: The signed-in caller's optional mailbox, read only at existing steps.
 
     Returns:
         The answer text, or ``""`` when the client left first.
@@ -481,6 +497,25 @@ def _run_answer(
         for step in range(MAX_STEPS):
             if stop.is_set():
                 return ""
+            taken = []
+            if inbox is not None:
+                try:
+                    taken = inbox.store.take(inbox.owner, inbox.steer_key, max_chars=inbox.max_chars)
+                except Exception:
+                    logger.exception("Failed to read steer messages for a docs turn")
+                    taken = []
+                if stop.is_set():
+                    if taken:
+                        inbox.store.return_unread(inbox.owner, inbox.steer_key, taken)
+                    return ""
+            if stop.is_set():
+                if inbox is not None and taken:
+                    inbox.store.return_unread(inbox.owner, inbox.steer_key, taken)
+                return ""
+            if inbox is not None and taken and claim_delivery(inbox, taken):
+                text = "\n\n".join(text for _, text in taken)
+                messages = [*messages, {"role": "user", "content": f"<question>\n{_escape(text)}\n</question>"}]
+                inbox.emit({"event": STEER_APPLIED_EVENT, "data": {"ids": [mid for mid, _ in taken], "text": text}})
             offer = step < MAX_STEPS - 1 and searches < MAX_SEARCHES
             kwargs: dict[str, Any] = {"messages": messages, "max_tokens": MAX_OUTPUT_TOKENS}
             if offer:
@@ -571,6 +606,7 @@ def create_docs_agent_router(
 
         Returns:
             A ``text/event-stream`` of ``tool_start``/``tool_end`` per search,
+            ``steer_ready`` for a registered signed-in turn and ``steer_applied`` for consumed text,
             ``reasoning_patch`` per thinking step, ``message_patch`` answer
             chunks and ``done``. A model failure sends one ``error`` event.
 
@@ -626,10 +662,22 @@ def create_docs_agent_router(
         call: Future[str] | None = None
         model = "docs-agent"
         try:
+            inbox = None
+            if user is not None and req.steer_key:
+                inbox = await open_steer_inbox(
+                    owner=user.username,
+                    steer_key=req.steer_key,
+                    input_field="question",
+                    emit=lambda ev: emit((ev["event"], ev["data"])),
+                    store=get_steer_store(),
+                    max_chars=MAX_QUESTION_CHARS,
+                )
+            if inbox is not None:
+                opening.insert(0, ("steer_ready", {"steer_key": req.steer_key}))
             messages = build_messages(req.question, req.history, req.locale, results)
             lm = lm_factory()
             model = str(getattr(lm, "model", model))
-            call = _EXECUTOR.submit(_run_answer, lm, messages, search, lambda n, d: emit((n, d)), stop)
+            call = _EXECUTOR.submit(_run_answer, lm, messages, search, lambda n, d: emit((n, d)), stop, inbox)
         except Exception:
             logger.exception("docs agent answer could not start")
             _ANSWER_SLOTS.release()

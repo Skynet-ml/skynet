@@ -204,6 +204,7 @@
     "admin.quota_save_failed": "クォータの上書き保存に失敗しました。",
     "admin.user_not_found": "'{email}' のアカウントが見つかりません。",
     "agent.approval.unknown_call_id": "指定された call_id に対する保留中の承認はありません。",
+    "agent.steer_pending_full": "保留中のメッセージ数が上限に達しました。このメッセージをキューに追加してください。",
     "agent.status.tool_end": "ツールが完了しました。",
     "agent.status.tool_start": "エージェントがツールを呼び出しています…",
     "agent.turn.not_found": "エージェントのターンが見つからないか、期限切れです。",

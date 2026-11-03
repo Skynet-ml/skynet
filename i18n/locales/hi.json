@@ -204,6 +204,7 @@
     "admin.quota_save_failed": "कोटा ओवरराइड सहेजने में विफल।",
     "admin.user_not_found": "'{email}' के लिए कोई खाता नहीं मिला।",
     "agent.approval.unknown_call_id": "दिए गए call_id के लिए कोई लंबित अनुमोदन नहीं है।",
+    "agent.steer_pending_full": "लंबित संदेशों की सीमा पूरी हो गई है। इसके बजाय इस संदेश को कतार में जोड़ें।",
     "agent.status.tool_end": "टूल समाप्त हुआ।",
     "agent.status.tool_start": "एजेंट टूल आमंत्रित कर रहा है…",
     "agent.turn.not_found": "एजेंट का टर्न नहीं मिला या उसकी समय-सीमा समाप्त हो गई।",

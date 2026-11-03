@@ -8,10 +8,19 @@ import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 
 import type { AgentMessage, AgentStatus, AgentToolCall } from "@/shared/ui/agent/types";
 import type { ChatTurn, PendingApprovalPayload, TrustMode } from "@/features/agent-panel";
+import type { MidTurnQueue } from "@/shared/ui/agent/steer-queue";
+import { agentSteerChannel, newSteerKey, useSteerQueue } from "@/shared/ui/agent/use-steer-queue";
 
 import { confirmReactServeApproval, streamReactServeChat } from "../lib/react-chat-stream";
+import {
+  appendReactChatSteer,
+  reactChatCanSteer,
+  REACT_CHAT_USER_MESSAGE_MAX_CHARS,
+  removeReplyBeforeSteer,
+} from "../lib/react-chat-steering";
 
 export interface ReactServeChatState {
+  midTurn: MidTurnQueue;
   status: AgentStatus;
   statusLabel: string;
   messages: AgentMessage[];
@@ -45,8 +54,25 @@ export function useReactServeChat(
   const [pendingApproval, setPendingApproval] = React.useState<PendingApprovalPayload | null>(null);
 
   const abortRef = React.useRef<AbortController | null>(null);
+  const sendLatestRef = React.useRef<(text: string) => boolean>(() => false);
+  const sendQueued = React.useCallback((text: string) => sendLatestRef.current(text), []);
+  const stopTurn = React.useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setStatus("idle");
+    setStatusLabel("");
+    setPendingApproval(null);
+  }, []);
+  const { store: steerStore, midTurn, stop } = useSteerQueue({
+    busy: status === "streaming",
+    failed: status === "error",
+    send: sendQueued,
+    stop: stopTurn,
+    maxLength: REACT_CHAT_USER_MESSAGE_MAX_CHARS,
+  });
   const reasoningBufRef = React.useRef("");
   const replyBufRef = React.useRef("");
+  const replyBeforeSteerRef = React.useRef<string | null>(null);
   const messagesRef = React.useRef<AgentMessage[]>(messages);
   React.useEffect(() => {
     messagesRef.current = messages;
@@ -113,11 +139,36 @@ export function useReactServeChat(
   const runAgent = React.useCallback(
     (userMessage: string, history: AgentMessage[]): boolean => {
       abortRef.current?.abort();
+      steerStore.setBusy(false);
+      steerStore.setBusy(true);
+      const steerKey = newSteerKey();
       const controller = new AbortController();
       abortRef.current = controller;
+      let steerAnchor: AgentMessage = { role: "user", content: userMessage, createdAt: Date.now() };
+      const applySteer = ({ ids, text }: { ids: string[]; text: string }) => {
+        if (!steerStore.applied(ids)) return;
+        if (!text.trim()) return;
+        const message: AgentMessage = { role: "user", content: text, createdAt: Date.now() };
+        const previousAnchor = steerAnchor;
+        steerAnchor = message;
+        if (abortRef.current !== controller) {
+          setMessages((prev) => {
+            const index = prev.indexOf(previousAnchor);
+            if (index < 0) return prev;
+            let end = index + 1;
+            while (end < prev.length && prev[end]?.role !== "user") end++;
+            return [...prev.slice(0, end), message, ...prev.slice(end)];
+          });
+          return;
+        }
+        replyBeforeSteerRef.current = (replyBeforeSteerRef.current ?? "") + replyBufRef.current;
+        replyBufRef.current = "";
+        setMessages((prev) => appendReactChatSteer(prev, text, message));
+      };
 
       reasoningBufRef.current = "";
       replyBufRef.current = "";
+      replyBeforeSteerRef.current = null;
 
       setStatus("streaming");
       setStatusLabel(msg("auto.features.agent.panel.hooks.use.generalist.agent.literal.1"));
@@ -129,7 +180,7 @@ export function useReactServeChat(
 
       setMessages((m) => [
         ...m,
-        { role: "user", content: userMessage, createdAt: Date.now() },
+        steerAnchor,
         { role: "assistant", content: "", toolCalls: [] },
       ]);
 
@@ -140,6 +191,7 @@ export function useReactServeChat(
       void streamReactServeChat(
         optimizationId,
         {
+          steer_key: steerKey,
           user_message: userMessage,
           chat_history: chatHistory,
           trust_mode: trustRef.current,
@@ -147,6 +199,14 @@ export function useReactServeChat(
         crypto.randomUUID(),
         {
           signal: controller.signal,
+          onSteerReady: (key) => {
+            if (controller.signal.aborted || !reactChatCanSteer(key, steerKey)) return;
+            steerStore.openTurn(agentSteerChannel(steerKey, applySteer));
+          },
+          onSteerApplied: ({ ids, text }) => {
+            if (controller.signal.aborted) return;
+            applySteer({ ids, text });
+          },
           onReasoningPatch: (chunk) => {
             if (controller.signal.aborted) return;
             if (reasoningBufRef.current === "") setReasoningStartedAt(Date.now());
@@ -195,6 +255,8 @@ export function useReactServeChat(
           },
           onDone: (result) => {
             if (controller.signal.aborted) return;
+            // Steers the server reports late are placed after their anchor, not after this answer.
+            if (abortRef.current === controller) abortRef.current = null;
             setStatus("done");
             setStatusLabel("");
             if (result.cents_charged != null) {
@@ -208,6 +270,10 @@ export function useReactServeChat(
             setMessages((prev) => {
               const last = prev[prev.length - 1];
               if (!last || last.role !== "assistant") return prev;
+              let reply = result.assistant_message;
+              if (replyBeforeSteerRef.current !== null) {
+                reply = removeReplyBeforeSteer(reply, replyBeforeSteerRef.current);
+              }
               const fallback =
                 last.content ||
                 (last.toolCalls?.length
@@ -216,7 +282,7 @@ export function useReactServeChat(
               const next = prev.slice();
               next[next.length - 1] = {
                 ...last,
-                content: result.assistant_message || fallback,
+                content: reply || fallback,
                 model: result.model,
                 createdAt: Date.now(),
               };
@@ -225,6 +291,7 @@ export function useReactServeChat(
           },
           onError: (message) => {
             if (controller.signal.aborted) return;
+            if (abortRef.current === controller) abortRef.current = null;
             setStatus("error");
             setStatusLabel(msg("auto.features.agent.panel.hooks.use.generalist.agent.literal.6"));
             setError(message);
@@ -248,22 +315,26 @@ export function useReactServeChat(
       );
       return true;
     },
-    [optimizationId, appendReply, pushToolCall, finishToolCall],
+    [optimizationId, appendReply, pushToolCall, finishToolCall, steerStore],
   );
 
   const send = React.useCallback(
     (message: string) => {
       const trimmed = message.trim();
-      if (!trimmed) return false;
+      if (!trimmed || trimmed.length > REACT_CHAT_USER_MESSAGE_MAX_CHARS) return false;
       return runAgent(trimmed, messagesRef.current);
     },
     [runAgent],
   );
+  React.useEffect(() => {
+    sendLatestRef.current = send;
+  }, [send]);
 
   const editAndResend = React.useCallback(
     (messageIndex: number, content: string) => {
       const trimmed = content.trim();
-      if (!trimmed) return;
+      if (!trimmed || trimmed.length > REACT_CHAT_USER_MESSAGE_MAX_CHARS) return;
+      steerStore.pause();
       abortRef.current?.abort();
       abortRef.current = null;
       const truncated = messagesRef.current.slice(0, messageIndex);
@@ -271,7 +342,7 @@ export function useReactServeChat(
       messagesRef.current = truncated;
       runAgent(trimmed, truncated);
     },
-    [runAgent],
+    [runAgent, steerStore],
   );
 
   const retry = React.useCallback(() => {
@@ -286,20 +357,14 @@ export function useReactServeChat(
     if (lastUserIndex === -1) return;
     const lastUser = current[lastUserIndex];
     if (!lastUser) return;
+    steerStore.pause();
     abortRef.current?.abort();
     abortRef.current = null;
     const truncated = current.slice(0, lastUserIndex);
     setMessages(truncated);
     messagesRef.current = truncated;
     runAgent(lastUser.content, truncated);
-  }, [runAgent]);
-
-  const stop = React.useCallback(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setStatus("idle");
-    setStatusLabel("");
-  }, []);
+  }, [runAgent, steerStore]);
 
   const confirmApproval = React.useCallback(
     async (approved: boolean) => {
@@ -312,6 +377,7 @@ export function useReactServeChat(
   );
 
   return {
+    midTurn,
     status,
     statusLabel,
     messages,

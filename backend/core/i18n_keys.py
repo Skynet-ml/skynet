@@ -45,6 +45,7 @@ class I18nKey(StrEnum):
     AGENT_SHARE_TOO_LARGE = 'agent.share.too_large'
     AGENT_STATUS_TOOL_END = 'agent.status.tool_end'
     AGENT_STATUS_TOOL_START = 'agent.status.tool_start'
+    AGENT_STEER_PENDING_FULL = 'agent.steer_pending_full'
     AGENT_TURN_NOT_FOUND = 'agent.turn.not_found'
     AGENT_SETTINGS_HOSTED_ONLY = 'agent_settings.hosted_only'
     AGENT_SETTINGS_INVALID_PAGE = 'agent_settings.invalid_page'

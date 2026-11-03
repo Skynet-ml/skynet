@@ -7,13 +7,19 @@ import { postAgentSteer, withdrawAgentSteers } from "@/shared/lib/api";
 import { midTurnOf, SteerQueue, type MidTurnQueue, type SteerChannel } from "./steer-queue";
 
 export interface UseSteerQueueArgs {
+  /** Abort the owner's active turn after pending input is paused. */
+  stop?: () => void;
   /** A turn is running in this chat. */
   busy: boolean;
+  /** The last turn ended in an error; queued input waits for the user. */
+  failed?: boolean;
   /** Start a new turn with `text`; called for each queued follow-up in turn. */
-  send: (text: string) => void;
+  send: (text: string) => boolean | void;
+  maxLength?: number;
 }
 
 export interface SteerQueueHandle {
+  stop: () => void;
   /** The store, for the chat's turn machinery (`openTurn`, `applied`). */
   store: SteerQueue;
   /** The surface the composer renders and drives. */
@@ -26,8 +32,9 @@ export function newSteerKey(): string {
 }
 
 /** The backend steer mailbox of the turn started with `steerKey`. */
-export function agentSteerChannel(steerKey: string): SteerChannel {
+export function agentSteerChannel(steerKey: string, onApplied?: SteerChannel["onApplied"]): SteerChannel {
   return {
+    onApplied,
     post: (text) => postAgentSteer(steerKey, text),
     withdraw: (ids) => withdrawAgentSteers(steerKey, ids),
   };
@@ -42,16 +49,22 @@ export function agentSteerChannel(steerKey: string): SteerChannel {
  * `busy` is applied after the render commits, so a queued follow-up is sent
  * against the finished turn's committed history.
  */
-export function useSteerQueue({ busy, send }: UseSteerQueueArgs): SteerQueueHandle {
-  const [store] = React.useState(() => new SteerQueue(send));
+export function useSteerQueue({ busy, failed = false, send, stop, maxLength }: UseSteerQueueArgs): SteerQueueHandle {
+  const [store] = React.useState(() => new SteerQueue(send, maxLength));
   // Before the busy effect below, so a follow-up runs through the latest send.
   React.useEffect(() => {
     store.setSend(send);
-  }, [store, send]);
+    if (maxLength !== undefined) store.setMaxLength(maxLength);
+    return () => store.setSend(() => false);
+  }, [store, send, maxLength]);
   React.useEffect(() => {
-    store.setBusy(busy);
-  }, [store, busy]);
+    store.setBusy(busy, failed);
+  }, [store, busy, failed]);
   const snapshot = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const midTurn = React.useMemo(() => midTurnOf(() => store, snapshot), [store, snapshot]);
-  return { store, midTurn };
+  const stopTurn = React.useCallback(() => {
+    store.pause();
+    stop?.();
+  }, [store, stop]);
+  return { store, midTurn, stop: stopTurn };
 }

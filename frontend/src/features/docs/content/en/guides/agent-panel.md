@@ -15,7 +15,15 @@ Click **What I can do** to see a list of the agent's tools.
 
 Type your message and press Enter. You can also click **Dictate** and speak your message.
 
-If the agent is busy, your message waits under **Pending messages**. You can edit, delete or reorder a pending message. Click **Steer** to send it into the current work. The agent reads it at its next step.
+While the agent works, the composer stays available:
+
+- **Enter** steers the current work where supported. The agent reads the message at its next step. **Tab** queues a new turn. Where steering is unavailable, Enter also queues.
+- The **Pending messages** tray lets you edit, delete and drag messages to reorder them. **Steer**, when available, moves a queued message into the current work.
+- A message marked **Not confirmed** may already have reached the agent. When idle, use its menu to send it explicitly. You can edit or delete it at any time. Other queued messages can continue first.
+- **Stop** pauses the queue and stops the current turn. Unread steers return to the tray. Nothing starts automatically. **Esc** in the composer does the same. It first dismisses a composer suggestion or menu, and does not stop during IME composition.
+- When idle and paused, **Send now** sends the first queued message. Later messages continue in order. A normal turn completion also starts the next queued message.
+- During a turn, **Stop and send now** stops and sends the tray as one new turn. It waits for unread steers to return, then joins them before queued messages with blank lines. Already-read steers are not sent again. Unconfirmed messages stay in the tray and do not join this turn. Other messages continue normally.
+- When signed in, the docs assistant accepts **Enter** as steering after it announces a safe step boundary. It reads the message at the next existing model step. **Tab** always queues. Before that announcement, when signed out, and in protected served chat, Enter and Tab both queue. The docs assistant pauses remaining messages after a rate limit.
 
 ## What the agent can do
 

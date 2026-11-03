@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import dspy
 import pytest
 
+from ...api.routers._helpers import stream_with_llm_metering
+from ..agents import react_serve
 from ..agents.generalist import ApprovalRegistry, _wrap_tool_with_approval
 from ..agents.react_serve import (
     _filter_tools,
@@ -16,6 +20,8 @@ from ..agents.react_serve import (
     _react_needs_approval,
     run_react_chat,
 )
+from ..agents.steering import SteerStore
+from .test_conversation_react import _ScriptedLM
 
 
 def _make_fake_tool(name: str, return_value: str = "ok") -> dspy.Tool:
@@ -168,3 +174,126 @@ async def test_run_react_chat_surfaces_driver_error(monkeypatch: pytest.MonkeyPa
     ]
     assert events[-1]["event"] == "error"
     assert "error" in events[-1]["data"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("steering", [False, True])
+async def test_live_chat_steers_next_step_without_extra_metered_calls(
+    monkeypatch: pytest.MonkeyPatch, steering: bool
+) -> None:
+    """Deliver a steer on the next step without adding a metered LM call.
+
+    Args:
+        monkeypatch: Replace MCP transport and streaming with local doubles.
+        steering: Attach a mailbox and post a steer during the first tool call.
+    """
+    store = SteerStore()
+
+    def lookup(name: str) -> str:
+        """Post a follow-up while the first step's tool runs.
+
+        Args:
+            name: Requested lookup key.
+
+        Returns:
+            A fixed tool result.
+        """
+        if steering:
+            store.post("alice", "turn", "use blue instead")
+        return name
+
+    tool = dspy.Tool(lookup)
+    session = SimpleNamespace(list_tools=AsyncMock(return_value=SimpleNamespace(tools=[tool])))
+
+    @asynccontextmanager
+    async def fake_session(*_args: Any, **_kwargs: Any):
+        """Yield the local MCP session.
+
+        Args:
+            *_args: Unused endpoint arguments.
+            **_kwargs: Unused authentication arguments.
+
+        Yields:
+            A one-tool MCP session double.
+        """
+        yield session
+
+    def fake_streamify(program: dspy.Module, **_kwargs: Any):
+        """Run the real synchronous loop without provider streaming.
+
+        Args:
+            program: ReAct program built by the live driver.
+            **_kwargs: Unused stream listener settings.
+
+        Returns:
+            An async prediction iterator.
+        """
+
+        async def stream(**inputs: Any):
+            """Yield the real loop prediction.
+
+            Args:
+                **inputs: User inputs for this turn.
+
+            Yields:
+                The completed ReAct prediction.
+            """
+            yield await asyncio.to_thread(program, **inputs)
+
+        return stream
+
+    monkeypatch.setattr(react_serve, "_mcp_session", fake_session)
+    monkeypatch.setattr(dspy.Tool, "from_mcp_tool", lambda *_args: tool)
+    monkeypatch.setattr(react_serve, "_assert_tool_set_matches", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(react_serve, "get_steer_store", lambda: store)
+    monkeypatch.setattr(dspy, "streamify", fake_streamify)
+    meter = MagicMock()
+    monkeypatch.setattr("core.api.routers._helpers.meter_llm_run", meter)
+    signature = dspy.Signature("question: str -> reply: str")
+    overlay = SimpleNamespace(
+        tool_source={},
+        tool_schema_hashes={},
+        tool_descriptions={},
+        tool_arg_descriptions={},
+        tool_names={},
+        max_iters=2,
+    )
+    state = react_serve.RetryingReActV2(signature, tools=[tool], max_iters=2).dump_state()
+    lm = _ScriptedLM([("lookup", {"name": "a"}), ("submit", {"reply": "done"})])
+    source = run_react_chat(
+        signature_cls=signature,
+        program_state_json=state,
+        react_overlay=overlay,
+        user_message="make it red",
+        trust_mode="yolo",
+        lm=lm,
+        model_name="scripted",
+        mcp_url="http://mcp.local",
+        steer_key="turn" if steering else None,
+        steer_owner="alice",
+    )
+    with dspy.context(adapter=dspy.ChatAdapter(use_native_function_calling=True)):
+        events = [
+            event
+            async for event in stream_with_llm_metering(
+                source,
+                job_store=SimpleNamespace(engine=object()),
+                username="alice",
+                description="Serve chat",
+                usage_sink=[lm],
+            )
+        ]
+    assert events[-1]["event"] == "done", events
+    assert len(lm.requests) == 2
+    assert len(lm.history) == 2
+    meter.assert_called_once()
+    assert meter.call_args.args[2] == [lm]
+    assert events[-1]["data"]["stats"]["input_tokens"] == 2
+    applied = [event for event in events if event["event"] == "steer_applied"]
+    assert bool(applied) is steering
+    assert any(event["event"] == "steer_ready" for event in events) is steering
+    if steering:
+        assert applied[0]["data"]["text"] == "use blue instead"
+        assert store.withdraw("alice", "turn", applied[0]["data"]["ids"]) == ([], applied[0]["data"]["ids"])
+        assert lm.requests[1]["messages"][-1]["role"] == "user"
+        assert "use blue instead" in lm.requests[1]["messages"][-1]["content"]

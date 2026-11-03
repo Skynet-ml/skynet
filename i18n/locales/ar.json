@@ -204,6 +204,7 @@
     "admin.quota_save_failed": "تعذّر حفظ تجاوز الحصة.",
     "admin.user_not_found": "لم يُعثر على حساب لـ '{email}'.",
     "agent.approval.unknown_call_id": "لا توجد موافقة معلّقة لمعرّف الاستدعاء call_id المحدّد.",
+    "agent.steer_pending_full": "تم بلوغ حد الرسائل المعلقة. أضف هذه الرسالة إلى قائمة الانتظار بدلاً من ذلك.",
     "agent.status.tool_end": "انتهت الأداة.",
     "agent.status.tool_start": "الوكيل يستدعي الأداة…",
     "agent.turn.not_found": "لم يتم العثور على جولة الوكيل أو انتهت صلاحيتها.",

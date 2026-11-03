@@ -220,6 +220,7 @@
     "dataset.library.not_found": "ה{term.dataset} לא נמצא בספרייה שלך.",
     "dataset.library.forbidden": "אין לך הרשאה לבצע פעולה זו על ה{term.dataset}.",
     "agent.approval.unknown_call_id": "אין אישור ממתין ל-call_id שצוין.",
+    "agent.steer_pending_full": "מכסת ההודעות הממתינות מלאה. הוסף/י את ההודעה לתור במקום זאת.",
     "agent.status.tool_start": "הסוכן מפעיל כלי…",
     "agent.status.tool_end": "הכלי סיים לפעול.",
     "agent.turn.not_found": "סבב הסוכן לא נמצא או שפג תוקפו.",

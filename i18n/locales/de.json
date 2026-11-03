@@ -204,6 +204,7 @@
     "admin.quota_save_failed": "Das Speichern der Kontingentüberschreibung ist fehlgeschlagen.",
     "admin.user_not_found": "Kein Konto für '{email}' gefunden.",
     "agent.approval.unknown_call_id": "Keine ausstehende Genehmigung für die angegebene call_id.",
+    "agent.steer_pending_full": "Das Limit ausstehender Nachrichten ist erreicht. Stelle diese Nachricht stattdessen in die Warteschlange.",
     "agent.status.tool_end": "Werkzeug abgeschlossen.",
     "agent.status.tool_start": "Agent ruft Werkzeug auf…",
     "agent.turn.not_found": "Agentendurchlauf nicht gefunden oder abgelaufen.",

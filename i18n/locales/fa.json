@@ -204,6 +204,7 @@
     "admin.quota_save_failed": "ذخیره‌سازی بازنویسی سهمیه ناموفق بود.",
     "admin.user_not_found": "حسابی برای '{email}' پیدا نشد.",
     "agent.approval.unknown_call_id": "هیچ تأییدیه‌ی در انتظاری برای call_id داده‌شده وجود ندارد.",
+    "agent.steer_pending_full": "ظرفیت پیام‌های در انتظار پر است. این پیام را به صف اضافه کنید.",
     "agent.status.tool_end": "ابزار به پایان رسید.",
     "agent.status.tool_start": "عامل در حال فراخوانی ابزار…",
     "agent.turn.not_found": "نوبت عامل پیدا نشد یا منقضی شده است.",

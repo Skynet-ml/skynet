@@ -127,6 +127,7 @@ export function ReactServeChat({ optimizationId }: ReactServeChatProps) {
             : "optimizations.react.chat_placeholder",
         )}
         streaming={streaming}
+        midTurn={agent.midTurn}
         sendAriaLabel={msg("optimizations.react.chat_send_aria")}
         stopAriaLabel={msg("optimizations.react.chat_stop_aria")}
         layout="inline"

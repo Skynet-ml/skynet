@@ -177,16 +177,20 @@ export function TaggerInterview({
 
   const submit = () => {
     const content = draft.trim();
-    if (!content || busy || done) return;
+    if (!content || busy) return;
     setDraft("");
     onSend(content);
   };
 
   // Answers typed while the interviewer is replying wait for it to finish.
-  const { midTurn } = useSteerQueue({
+  const { midTurn, stop } = useSteerQueue({
     busy,
+    failed: error !== null,
+    stop: onStop,
+    maxLength: 20_000,
     send: (text) => {
-      if (!done) onSend(text);
+      onSend(text);
+      return true;
     },
   });
 
@@ -194,7 +198,7 @@ export function TaggerInterview({
     // Height subtracts page padding plus the ~2.5rem back-to-sessions bar
     // rendered above, so the thread stays viewport-locked without page scroll.
     <div className="flex h-[calc(100dvh-var(--header-height,53px)-5.5rem)] w-full flex-col md:h-[calc(100dvh-var(--header-height,53px)-6.5rem)]">
-      {done ? (
+      {done && midTurn.queued.length === 0 ? (
         <RubricCard
           config={config}
           assist={assist}
@@ -276,7 +280,7 @@ export function TaggerInterview({
             value={draft}
             onChange={setDraft}
             onSubmit={submit}
-            onStop={onStop}
+            onStop={stop}
             disabled={!busy && messages.length === 0}
             streaming={busy}
             midTurn={midTurn}

@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from starlette.responses import StreamingResponse
@@ -52,6 +52,8 @@ from ...service_gateway.agents.steering import (
     STEER_APPLIED_EVENT,
     STEER_KEY_MAX_CHARS,
     STEER_TEXT_MAX_CHARS,
+    SteerInputError,
+    SteerLimitError,
     get_steer_store,
 )
 from ...service_gateway.embedding_pipeline import queue_conversation_embed
@@ -198,6 +200,7 @@ class GeneralistAgentRequest(BaseModel):
     )
     steer_key: str | None = Field(
         default=None,
+        min_length=1,
         max_length=STEER_KEY_MAX_CHARS,
         description=(
             "Client-chosen key for this turn. Messages posted to "
@@ -242,10 +245,12 @@ class SteerWithdrawRequest(BaseModel):
     )
 
 
+# Delivered ids preserve the outcome when a withdrawal response needs a retry.
 class SteerWithdrawResponse(BaseModel):
     """Messages returned to the client, oldest first."""
 
     ids: list[str]
+    delivered: list[str] = Field(default_factory=list, description="Ids already read by the agent, oldest first.")
 
 
 class NextPromptTurn(BaseModel):
@@ -984,8 +989,18 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
 
         Returns:
             The stored message's id.
+
+        Raises:
+            HTTPException: Text cannot fit the turn (422).
+            DomainError: The pending allowance is full (429).
         """
-        return SteerMessageResponse(id=get_steer_store().post(current_user.username, req.steer_key, req.text))
+        try:
+            message_id = get_steer_store().post(current_user.username, req.steer_key, req.text)
+        except SteerInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except SteerLimitError as exc:
+            raise DomainError("agent.steer_pending_full", status=429) from exc
+        return SteerMessageResponse(id=message_id)
 
     @router.post(
         "/optimizations/agent-steer/withdraw",
@@ -1004,10 +1019,10 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             current_user: The authenticated caller.
 
         Returns:
-            The ids of the messages returned, oldest first.
+            Newly withdrawn ids and ids already read by the agent.
         """
-        taken = get_steer_store().take(current_user.username, req.steer_key, req.ids)
-        return SteerWithdrawResponse(ids=[message_id for message_id, _ in taken])
+        ids, delivered = get_steer_store().withdraw(current_user.username, req.steer_key, req.ids)
+        return SteerWithdrawResponse(ids=ids, delivered=delivered)
 
     @router.post(
         "/optimizations/agent-suggest",

@@ -204,6 +204,7 @@
     "admin.quota_save_failed": "No se pudo guardar la anulación de la cuota.",
     "admin.user_not_found": "No se encontró ninguna cuenta para '{email}'.",
     "agent.approval.unknown_call_id": "No hay ninguna aprobación pendiente para el call_id indicado.",
+    "agent.steer_pending_full": "Se alcanzó el límite de mensajes pendientes. Añade este mensaje a la cola.",
     "agent.status.tool_end": "Herramienta finalizada.",
     "agent.status.tool_start": "El agente está invocando la herramienta…",
     "agent.turn.not_found": "No se encontró el turno del agente o ha caducado.",
