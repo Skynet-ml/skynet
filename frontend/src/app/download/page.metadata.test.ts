@@ -15,12 +15,25 @@ const jiti = createJiti(import.meta.url, {
   jsx: true,
   alias: { "@/": `${path.join(frontend, "src")}/` },
 });
-const request = { locale: "en", userAgent: "" };
+const request: { locale: string | null; userAgent: string; acceptLanguage: string | null } = {
+  locale: "en",
+  userAgent: "",
+  acceptLanguage: null,
+};
 const headersId = jiti.resolve("next/headers");
 const headersModule = new Module(headersId);
 headersModule.exports = {
-  cookies: () => Promise.resolve({ get: () => ({ value: request.locale }) }),
-  headers: () => Promise.resolve(new Headers({ "user-agent": request.userAgent })),
+  cookies: () =>
+    Promise.resolve({
+      get: () => (request.locale === null ? undefined : { value: request.locale }),
+    }),
+  headers: () =>
+    Promise.resolve(
+      new Headers({
+        "user-agent": request.userAgent,
+        ...(request.acceptLanguage ? { "accept-language": request.acceptLanguage } : {}),
+      }),
+    ),
 };
 headersModule.loaded = true;
 jiti.cache[headersId] = headersModule;
@@ -67,6 +80,24 @@ void test("Downloads social metadata uses the page locale and URL instead of the
   for (const locale of LOCALES) {
     request.locale = locale;
     assert.match((await generateMetadata()).openGraph?.locale ?? "", /^[a-z]{2}_[A-Z]{2}$/);
+  }
+});
+
+void test("Downloads metadata falls back to Accept-Language and then English without a cookie", async () => {
+  const previous = { ...request };
+  try {
+    request.locale = null;
+    for (const [acceptLanguage, title, ogLocale] of [
+      ["he", "הורדות", "he_IL"],
+      [null, "Downloads", "en_US"],
+    ] as const) {
+      request.acceptLanguage = acceptLanguage;
+      const metadata = await generateMetadata();
+      assert.equal(metadata.title, title);
+      assert.equal(metadata.openGraph?.locale, ogLocale);
+    }
+  } finally {
+    Object.assign(request, previous);
   }
 });
 

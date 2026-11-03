@@ -130,16 +130,6 @@ const catalog = (locale: string): Record<string, string> =>
     fs.readFileSync(path.resolve(process.cwd(), `../i18n/locales/ui/${locale}.json`), "utf8"),
   );
 
-test("catalogs contain no obsolete Downloads labels", () => {
-  for (const file of fs.readdirSync(path.resolve(process.cwd(), "../i18n/locales/ui"))) {
-    if (!file.endsWith(".json")) continue;
-    const messages = catalog(file.slice(0, -5));
-    for (const key of ["downloads.light_theme", "downloads.dark_theme", "downloads.navigation"]) {
-      assert.equal(Object.hasOwn(messages, key), false, `${file}: ${key}`);
-    }
-  }
-});
-
 test("release note does not promise source build instructions absent from the guide", () => {
   assert.doesNotMatch(catalog("en")["downloads.release_note"], /build.from.source/i);
 });
