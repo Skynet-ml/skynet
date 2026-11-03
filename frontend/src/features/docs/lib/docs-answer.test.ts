@@ -14,6 +14,7 @@ import {
   isDocsHref,
   keepDocsLinks,
   parseStoredHistory,
+  toTranscript,
   trimHistory,
 } from "./docs-answer.ts";
 
@@ -124,4 +125,16 @@ test("isDocsHref accepts docs paths only", () => {
   for (const href of ["/docs", "/docs/billing", "/docs#top", "/docs/he/start"]) assert.ok(isDocsHref(href), href);
   for (const href of ["/docs-md", "//evil.example/docs", "http://www.evil.example", "mailto:bad@evil.example", "https://evil.example/q"])
     assert.ok(!isDocsHref(href), href);
+});
+
+test("toTranscript keeps docs links only in answers and leaves questions as typed", () => {
+  const messages = [
+    { role: "user" as const, content: "See [x](https://example.com)" },
+    { role: "assistant" as const, content: "Read [Runs](/docs/runs) or [x](https://example.com)." },
+  ];
+  assert.deepEqual(toTranscript(messages), [
+    { role: "user", content: "See [x](https://example.com)" },
+    { role: "assistant", content: "Read [Runs](/docs/runs) or x." },
+  ]);
+  assert.equal(messages[1]?.content, "Read [Runs](/docs/runs) or [x](https://example.com).");
 });

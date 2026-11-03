@@ -411,6 +411,7 @@ export function DocsSearch({
         labels={labels}
         request={request}
         open={panelOpen}
+        onOpen={() => setPanelOpen(true)}
         onClose={() => setPanelOpen(false)}
       />
     </>

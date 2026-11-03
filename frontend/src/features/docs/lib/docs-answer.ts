@@ -73,6 +73,13 @@ const REFERENCE_DEF = /^ {0,3}\[[^\]]+\]:[ \t]*<?([^\s>]*)>?.*$/gm;
 const ANGLE_LINK = /<(https?:\/\/[^>\s]+)>/g;
 const BARE_URL = /(^|[\s(])(https?:\/\/[^\s)<>]+)/g;
 
+/** The messages as the shared chat transcript shows them, with only docs links kept. */
+export function toTranscript(messages: readonly DocsAgentMessage[]): DocsAgentMessage[] {
+  return messages.map((message) =>
+    message.role === "assistant" ? { ...message, content: keepDocsLinks(message.content) } : message,
+  );
+}
+
 /** Whether a rendered link may stay a link in a docs answer: only docs pages. */
 export function isDocsHref(href: string): boolean {
   return DOCS_PATH.test(href);

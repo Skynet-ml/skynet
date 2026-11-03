@@ -36,6 +36,8 @@ interface AgentBubbleProps {
   /** What kind of step a call is, for the summary line over the turn's steps. */
   stepKind?: (call: AgentToolCall) => ActivityKind;
   onRunCode?: (code: string, language: string) => void;
+  /** Which links in the answer stay links; the rest render as plain text. */
+  allowLink?: (href: string) => boolean;
   toolCallsBeforeContent?: boolean;
   /**
    * Shown after the turn's text: the coding tool finishes after the reply was
@@ -53,6 +55,7 @@ export function AgentBubble({
   isStepCall,
   stepKind,
   onRunCode,
+  allowLink,
   toolCallsBeforeContent = false,
   afterContent,
   className,
@@ -118,7 +121,7 @@ export function AgentBubble({
   const answer = hasText && (
     <div className="text-sm leading-relaxed text-foreground">
       <React.Suspense fallback={<span className="whitespace-pre-wrap">{msg.content}</span>}>
-        <MessageMarkdown content={msg.content} onRunCode={onRunCode} />
+        <MessageMarkdown content={msg.content} onRunCode={onRunCode} allowLink={allowLink} />
       </React.Suspense>
     </div>
   );
