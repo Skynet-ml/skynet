@@ -66,7 +66,7 @@ Puedes añadir tus propias claves de proveedores de modelos.
 - Skynet solo guarda los cuatro últimos caracteres y un estado: sin verificar, verificada o no válida.
 - Cuando introduces una clave, Skynet envía una pequeña solicitud de prueba para comprobarla.
 
-Cuando usas tu propia clave, el proveedor cobra directamente a tu clave. Skynet sigue cobrando de tu saldo su tarifa de plataforma y el uso del sandbox.
+Tu proveedor factura los tokens del modelo a tu clave. Skynet no cobra ninguna tarifa por el modelo. El presupuesto de la ejecución solo cubre el uso del entorno aislado.
 
 Skynet también elimina los secretos de los registros y de los mensajes de error. Los sustituye por `[REDACTED]`.
 

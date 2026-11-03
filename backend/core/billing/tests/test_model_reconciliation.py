@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 
 import httpx
@@ -12,7 +13,7 @@ from sqlalchemy.orm import Session
 from core.billing.model_dispatch import OpenRouterDispatcher, generation_charge
 from core.billing.model_reconciliation import OpenRouterUsageReconciler
 from core.billing.openrouter_quotes import price_text_request, resolve_model_slug
-from core.billing.operation_pricing import ChargePolicy
+from core.billing.operation_pricing import ChargePolicy, json_fingerprint
 from core.billing.runtime import PaidResult, UsagePendingError
 from core.billing.tests.test_protected_dispatch import CATALOG, REQUEST, _runtime
 from core.billing.tests.test_protected_dispatch import database as _database_fixture
@@ -20,6 +21,53 @@ from core.config import settings
 from core.storage.models import ExecutionOperationModel, ExecutionUsageEvidenceModel
 
 database = _database_fixture
+
+
+def test_historical_byok_snapshot_reconciles_at_five_percent(database) -> None:
+    """Keep the fee stored in a historical operation when its receipt arrives."""
+    runtime = _runtime(database)
+    policy = ChargePolicy("byok_model", byok_fee_fraction=Decimal("0.05"))
+    quote = price_text_request(REQUEST, CATALOG, policy).quote
+    quote = replace(
+        quote, price_snapshot={**quote.price_snapshot, "credential_fingerprint": json_fingerprint("private")}
+    )
+    with pytest.raises(UsagePendingError):
+        runtime.execute(
+            quote,
+            policy,
+            lambda: PaidResult(
+                None, None, {"provider": "openrouter", "model": "fixture/text"}, provider_request_id="historical"
+            ),
+            operation_key="historical",
+            cost_kind="model",
+            role="task",
+        )
+    with Session(database) as session:
+        operation_id = session.scalar(select(ExecutionOperationModel.id))
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Return the original generation's final external cost."""
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "id": "historical",
+                    "model": "fixture/text",
+                    "total_cost": "0",
+                    "upstream_inference_cost": "0.004",
+                    "is_byok": True,
+                }
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+        result = OpenRouterUsageReconciler(runtime.service, lambda owner, digest: "private").reconcile(
+            operation_id, "alice", client=client
+        )
+    assert result.state == "settled"
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert snapshot.setup_spent_cents == Decimal("0.02")
+    assert snapshot.reserved_cents == 0
 
 
 @pytest.fixture(autouse=True)

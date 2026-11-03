@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import socket
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
@@ -19,6 +20,7 @@ from sqlalchemy.orm import Session
 from core.api.preflight_execution import _verify_model_routes
 from core.billing import model_gateway as gateway_module
 from core.billing.budgets import BudgetInsufficientError, BudgetService
+from core.billing.byok_upstreams import OPENROUTER, UPSTREAMS
 from core.billing.model_dispatch import ModelHTTPResult
 from core.billing.model_gateway import (
     EMBEDDING_ROUTE_KEY,
@@ -28,17 +30,18 @@ from core.billing.model_gateway import (
     ModelGateway,
 )
 from core.billing.model_mailbox import ModelMailbox
-from core.billing.operation_pricing import ChargePolicy
+from core.billing.operation_pricing import ChargePolicy, UnpricedOperationError
 from core.billing.protected_credentials import (
     ProtectedCredentialVault,
     protect_execution_credentials,
     resolve_execution_credentials,
 )
-from core.billing.runtime import BudgetRuntime
+from core.billing.runtime import BudgetRuntime, OperationCompletedError
 from core.billing.usage_tags import CALLER_PROPOSER, KIND_EMBEDDING, USAGE_TAGS_HEADER, encode_tags
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from core.config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, settings
 from core.exceptions import InfrastructureInterruptionError, ServiceError
+from core.provider_registry import BYOK_PROVIDER_SLUGS
 from core.service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
 from core.service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
@@ -100,6 +103,342 @@ def gateway(tmp_path: Path) -> Iterator[ModelGateway]:
     yield gateway
     gateway.close()
     engine.dispose()
+
+
+@pytest.mark.parametrize(("slug", "prefix"), BYOK_PROVIDER_SLUGS)
+@pytest.mark.parametrize("role", ["task", "reflection", "metric"])
+def test_byok_provider_routes(gateway: ModelGateway, slug: str, prefix: str, role: str) -> None:
+    """Keep each role's key in the parent and send requests only to its provider."""
+    upstream = UPSTREAMS[slug]
+    config = {
+        "name": f"{prefix}/fixture/text",
+        "token_source": "byok",
+        "byok_provider": slug,
+        "extra": {"api_key": "private-provider-key"},
+    }
+    payload = (
+        {"scorer": {"kind": "python", "model": config}}
+        if role == "metric"
+        else {"model_config" if role == "task" else "reflection_model_config": config}
+    )
+    sent: list[httpx.Request] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Return a priced OpenRouter catalog and a measured model response."""
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": CATALOG})
+        sent.append(request)
+        return httpx.Response(200, json={"id": "gen", "usage": {"cost": "0.001"}, "choices": []})
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider), follow_redirects=True)
+    protected = gateway.protect_payload(payload, managed_key="")
+    assert "private-provider-key" not in json.dumps(protected)
+    protected_config = (
+        protected["scorer"]["model"]
+        if role == "metric"
+        else protected["model_config" if role == "task" else "reflection_model_config"]
+    )
+    route = protected_config["extra"][ROUTE_KEY]
+    dispatcher = gateway._routes[route["token"]]
+    assert dispatcher.upstream == upstream
+    assert dispatcher.role == {"task": "task", "reflection": "optimization", "metric": "judge"}[role]
+    result = dispatcher.dispatch(
+        "/chat/completions",
+        {"model": route["model"], "messages": [{"role": "user", "content": "hello"}], "max_tokens": 10, "stream": True},
+    )
+    assert result.status == 200
+    assert len(sent) == 1
+    request = sent[0]
+    assert str(request.url) == f"{upstream.base_url}/chat/completions"
+    if upstream.auth == "x-api-key":
+        assert request.headers["x-api-key"] == "private-provider-key"
+        assert request.headers["anthropic-version"] == "2023-06-01"
+        assert "authorization" not in request.headers
+    else:
+        assert request.headers["authorization"] == "Bearer private-provider-key"
+    if upstream != OPENROUTER:
+        assert json.loads(request.content)["stream_options"]["include_usage"] is True
+
+
+@pytest.mark.parametrize("slug", list(UPSTREAMS))
+def test_byok_unsupported_paths_are_rejected(gateway: ModelGateway, slug: str) -> None:
+    """Reject unsupported Responses and embedding calls before dispatch."""
+    upstream = UPSTREAMS[slug]
+    route = gateway.register(
+        model="fixture/text", api_key="private", role="task", policy=ChargePolicy("byok_model"), upstream=upstream
+    )
+    dispatcher = gateway._routes[route["token"]]
+    if "/responses" not in upstream.paths:
+        with pytest.raises(UnpricedOperationError):
+            dispatcher.dispatch("/responses", {"model": route["model"]})
+    if not upstream.embeddings:
+        with pytest.raises(UnpricedOperationError):
+            gateway.register(
+                model="fixture/text",
+                api_key="private",
+                role="task",
+                policy=ChargePolicy("byok_model"),
+                upstream=upstream,
+                embeddings=True,
+            )
+
+
+@pytest.mark.parametrize(
+    ("base", "addresses"),
+    [
+        ("http://public.example/v1", ["8.8.8.8"]),
+        ("https://user@public.example/v1", ["8.8.8.8"]),
+        ("https://public.example/v1?x=1", ["8.8.8.8"]),
+        ("https://public.example/v1#fragment", ["8.8.8.8"]),
+        ("https://10.0.0.1/v1", ["10.0.0.1"]),
+        ("https://127.0.0.1/v1", ["127.0.0.1"]),
+        ("https://[::1]/v1", ["::1"]),
+        ("https://169.254.169.254/v1", ["169.254.169.254"]),
+        ("https://public.example/v1", ["8.8.8.8", "10.0.0.1"]),
+    ],
+)
+def test_byok_custom_base_rejected(
+    gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch, base: str, addresses: list[str]
+) -> None:
+    """Reject unsafe URL shapes and every non-global DNS answer before registration."""
+    monkeypatch.setattr(
+        socket, "getaddrinfo", lambda *args, **kwargs: [(0, 0, 0, "", (address, 443)) for address in addresses]
+    )
+    with pytest.raises(UnpricedOperationError):
+        gateway.protect_payload(
+            {
+                "model_config": {
+                    "name": "openai/example",
+                    "token_source": "byok",
+                    "base_url": base,
+                    "extra": {"api_key": "private"},
+                }
+            },
+            managed_key="",
+        )
+
+
+@pytest.mark.parametrize("status", [200, 302])
+def test_byok_custom_dispatch_pins_host_and_tls(
+    gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """Keep the original host and TLS name while dialing the verified IP without redirects."""
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [(0, 0, 0, "", ("8.8.8.8", 8443))])
+    sent: list[httpx.Request] = []
+
+    def send(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+        """Capture the request at the socket transport boundary."""
+        sent.append(request)
+        if status == 302:
+            return httpx.Response(302, headers={"Location": "https://elsewhere.example/v1/chat/completions"})
+        return httpx.Response(200, json={"usage": {"prompt_tokens": 3}})
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", send)
+    protected = gateway.protect_payload(
+        {
+            "model_config": {
+                "name": "openai/custom-model",
+                "token_source": "byok",
+                "base_url": "https://public.example:8443/v1",
+                "extra": {"api_key": "private"},
+            }
+        },
+        managed_key="",
+    )
+    route = protected["model_config"]["extra"][ROUTE_KEY]
+    result = gateway._routes[route["token"]].dispatch("/chat/completions", {"model": route["model"]})
+    assert result.status == status
+    assert len(sent) == 1
+    assert str(sent[0].url) == "https://8.8.8.8:8443/v1/chat/completions"
+    assert sent[0].headers["host"] == "public.example:8443"
+    assert sent[0].extensions["sni_hostname"] == "public.example"
+    assert sent[0].headers["authorization"] == "Bearer private"
+
+
+def test_custom_base_requires_openai_prefix(gateway: ModelGateway) -> None:
+    """Reject custom bases for native provider model prefixes."""
+    with pytest.raises(UnpricedOperationError, match="openai/"):
+        gateway.protect_payload(
+            {
+                "model_config": {
+                    "name": "anthropic/model",
+                    "token_source": "byok",
+                    "base_url": "https://public.example/v1",
+                    "extra": {"api_key": "private"},
+                }
+            },
+            managed_key="",
+        )
+
+
+def test_byok_redirect_is_not_followed(gateway: ModelGateway) -> None:
+    """Never forward a provider key to a redirect destination."""
+    requests: list[httpx.Request] = []
+
+    def redirect(request: httpx.Request) -> httpx.Response:
+        """Point the model request at a different host."""
+        requests.append(request)
+        return httpx.Response(302, headers={"Location": "https://other.example/v1/chat/completions"})
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(redirect), follow_redirects=True)
+    route = gateway.register(
+        model="openai/example",
+        api_key="private",
+        role="task",
+        policy=ChargePolicy("byok_model"),
+        upstream=UPSTREAMS["openai"],
+    )
+    result = gateway._routes[route["token"]].dispatch("/chat/completions", {"model": route["model"]})
+    assert result.status == 302
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "usage"),
+    [
+        (200, {"cost": "0.004", "prompt_tokens": 7}),
+        (200, None),
+        (200, {"cost": "invalid", "prompt_tokens": 7}),
+        (500, None),
+        (500, {"prompt_tokens": 7}),
+    ],
+)
+@pytest.mark.parametrize("slug", ["openai", "openrouter"])
+def test_native_byok_zero_quote_settles_without_provider_cost(
+    gateway: ModelGateway, status: int, usage: dict | None, slug: str
+) -> None:
+    """Settle zero for every BYOK provider without catalog or reconciliation calls."""
+    calls: list[httpx.Request] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Return an optional provider usage record."""
+        assert request.method == "POST"
+        calls.append(request)
+        return httpx.Response(status, json={"id": "generation", "usage": usage})
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider))
+    route = gateway.register(
+        model="fixture/text" if slug == "openrouter" else "openai/example",
+        api_key="private",
+        role="task",
+        policy=ChargePolicy("byok_model"),
+        upstream=UPSTREAMS[slug],
+    )
+    dispatcher = gateway._routes[route["token"]]
+    body = {"model": route["model"]}
+    result = dispatcher.dispatch("/chat/completions", body, operation_key="same")
+    assert result.status == status
+    with pytest.raises(OperationCompletedError):
+        dispatcher.dispatch("/chat/completions", body, operation_key="same")
+    assert len(calls) == 1
+    snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, "alice")
+    assert snapshot.billed_cents == 0
+    assert snapshot.reserved_cents == 0
+    with Session(gateway.runtime.service._engine) as session:
+        operation = session.scalars(select(ExecutionOperationModel)).one()
+        evidence = session.scalars(select(ExecutionUsageEvidenceModel)).one()
+        assert operation.state == "settled"
+        assert evidence.evidence["usage"] == usage
+
+
+def test_byok_provider_refusal_releases_operation(gateway: ModelGateway) -> None:
+    """Release a complete refusal without a provider receipt or wallet charge."""
+    gateway._client.close()
+    gateway._client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(429, json={"error": "busy"}))
+    )
+    route = gateway.register(model="fixture/text", api_key="private", role="task", policy=ChargePolicy("byok_model"))
+    result = gateway._routes[route["token"]].dispatch("/chat/completions", {"model": route["model"]})
+    assert result.status == 429
+    snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, "alice")
+    assert (snapshot.billed_cents, snapshot.reserved_cents, snapshot.pending_operations) == (0, 0, 0)
+    with Session(gateway.runtime.service._engine) as session:
+        assert session.scalars(select(ExecutionOperationModel.state)).one() == "released"
+
+
+@pytest.mark.parametrize(
+    ("slug", "path", "expected"), [("openai", "/chat/completions", None), ("anthropic", "/messages", 4000)]
+)
+def test_byok_only_supplies_default_output_limit_for_anthropic_messages(
+    gateway: ModelGateway, slug: str, path: str, expected: int | None
+) -> None:
+    """Leave optional output limits absent except where Anthropic requires one."""
+    sent: list[dict] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Capture the exact forwarded request."""
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "generation", "usage": {}})
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider))
+    route = gateway.register(
+        model="fixture/text",
+        api_key="private",
+        role="task",
+        policy=ChargePolicy("byok_model"),
+        upstream=UPSTREAMS[slug],
+    )
+    gateway._routes[route["token"]].dispatch(path, {"model": route["model"]})
+    assert sent[0].get("max_tokens") == expected
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"n": 2},
+        {"best_of": 2},
+        {"max_tokens": None},
+        {"max_tokens": 0},
+        {"max_tokens": -1},
+        {"max_tokens": True},
+        {"max_tokens": 2, "max_completion_tokens": 3},
+    ],
+)
+def test_byok_rejects_invalid_completion_bounds(gateway: ModelGateway, body: dict) -> None:
+    """Reject invalid model work before admission or provider dispatch."""
+    route = gateway.register(model="fixture/text", api_key="private", role="task", policy=ChargePolicy("byok_model"))
+    with pytest.raises(UnpricedOperationError):
+        gateway._routes[route["token"]].dispatch("/chat/completions", {"model": route["model"], **body})
+
+
+def test_anthropic_byok_rejects_explicit_null_limit(gateway: ModelGateway) -> None:
+    """Reject an explicitly invalid Anthropic limit instead of replacing it."""
+    route = gateway.register(
+        model="fixture/text",
+        api_key="private",
+        role="task",
+        policy=ChargePolicy("byok_model"),
+        upstream=UPSTREAMS["anthropic"],
+    )
+    with pytest.raises(UnpricedOperationError):
+        gateway._routes[route["token"]].dispatch("/messages", {"model": route["model"], "max_tokens": None})
+
+
+def test_byok_transport_failure_settles_and_prevents_replay(gateway: ModelGateway) -> None:
+    """Settle a failed connection and do not dispatch its attempt twice."""
+    calls = 0
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Raise a connection error after the attempt was admitted."""
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectError("connection failed", request=request)
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider))
+    route = gateway.register(model="fixture/text", api_key="private", role="task", policy=ChargePolicy("byok_model"))
+    dispatcher = gateway._routes[route["token"]]
+    with pytest.raises(httpx.ConnectError):
+        dispatcher.dispatch("/chat/completions", {"model": route["model"]}, operation_key="failed")
+    with pytest.raises(OperationCompletedError):
+        dispatcher.dispatch("/chat/completions", {"model": route["model"]}, operation_key="failed")
+    assert calls == 1
+    snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, "alice")
+    assert (snapshot.billed_cents, snapshot.reserved_cents, snapshot.pending_operations) == (0, 0, 0)
 
 
 def test_control_capability_is_separate_from_model_capability(gateway: ModelGateway) -> None:
@@ -249,7 +588,7 @@ def test_interaction_payload_never_batches_a_managed_economy_model(gateway: Mode
 
 
 def test_byok_agent_task_uses_its_scoped_fee_metered_route(gateway: ModelGateway) -> None:
-    """Route the evaluated agent through its own key while billing only the BYOK fee policy."""
+    """Route the evaluated agent through its own key with the BYOK policy."""
     protected = gateway.protect_payload(
         {
             "token_source": "byok",

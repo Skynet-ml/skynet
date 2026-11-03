@@ -1901,9 +1901,8 @@ class BackgroundWorker:
         but wrapped so a billing-DB hiccup can never flip job status — the local
         ledger is the balance source of truth, independent of whether Stripe is
         configured. A managed run is charged its full per-token cost; a BYOK run is
-        charged only Skynet's platform fee (the provider tokens were paid on the
-        user's own key), so the balance still meters a BYOK run without double-charging
-        for inference. A no-op when the store exposes no SQL engine (legacy/in-memory),
+        charged no model fee because the provider bills the user's key. A no-op
+        when the store exposes no SQL engine (legacy/in-memory),
         the caller is anonymous, or the run reported no token usage. A failed debit
         is logged at ``ERROR`` (forwarded as an alert) and retried at the fallback
         frontier price, so a metering fault never gives the tokens away.
@@ -1915,8 +1914,8 @@ class BackgroundWorker:
             run_name: Run name for the ledger row's human label.
             model: Model id stamped on the ledger row, or ``None``.
             optimization_id: Finished legacy job whose own wallet commitment is consumed.
-            token_source: ``"managed"`` (full cost) or ``"byok"`` (platform fee
-                only); defaults to managed.
+            token_source: ``"managed"`` (full cost) or ``"byok"`` (no model charge);
+                defaults to managed.
             token_sources_by_model: Optional model-to-source map for mixed jobs.
             settlement_key: Idempotency key for this leg's debit, so a retried
                 or re-claimed leg is never charged twice.

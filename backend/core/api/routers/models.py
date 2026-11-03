@@ -384,7 +384,7 @@ def call_hold_cents(name: str, token_source: str, *, client: httpx.Client) -> De
     Returns:
         The hold in charged cents, or ``None`` when the model has no verified pricing.
     """
-    if token_source == "subscription":
+    if token_source in {"subscription", "byok"}:
         return Decimal(0)
     try:
         slug = resolve_model_slug(name, client=client)

@@ -48,11 +48,11 @@ Per impostazione predefinita, no. L'opzione predefinita di **Privacy dei dati de
 
 ### Come addebita Skynet le esecuzioni?
 
-Skynet usa un saldo prepagato. L'uso dei modelli ospitati, le commissioni di Skynet e l'uso della sandbox vengono misurati. Prima che inizi un lavoro a pagamento, Skynet riserva un margine nel tuo portafoglio e nel budget dell'esecuzione. Vedi [Fatturazione](/docs/concepts/billing).
+Skynet usa un saldo prepagato. L'uso dei modelli ospitati, la commissione di ricarica e l'uso della sandbox vengono misurati. Prima che inizi un lavoro a pagamento, Skynet riserva un margine nel tuo portafoglio e nel budget dell'esecuzione. Vedi [Fatturazione](/docs/concepts/billing).
 
 ### Posso usare la chiave del mio provider di modelli?
 
-Sì. Con la tua chiave (BYOK), il provider addebita direttamente sulla tua chiave le chiamate ai modelli. Il tuo saldo Skynet paga comunque la commissione della piattaforma e l'uso della sandbox. Skynet cifra la tua chiave e non la mostra mai più. Vedi [Fatturazione](/docs/concepts/billing) e [Sicurezza](/docs/security).
+Sì. Con la tua chiave (BYOK), Il provider addebita i token del modello sulla tua chiave. Skynet non applica costi per il modello. Il budget dell’esecuzione copre solo l’uso della sandbox. Skynet cifra la tua chiave e non la mostra mai più. Vedi [Fatturazione](/docs/concepts/billing) e [Sicurezza](/docs/security).
 
 ### Posso usare Skynet senza pagare le chiamate ai modelli?
 

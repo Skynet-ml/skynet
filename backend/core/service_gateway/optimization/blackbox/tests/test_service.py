@@ -45,7 +45,7 @@ from ..harness import GatewayConfig
 from ..native_runtime import NativeOptions
 from ..protocol import Candidate, EngineContext, EvalServer, Result, Task, candidate_key
 from ..sandbox import LocalSubprocessRuntime
-from ..sandbox_scorer import ScorerGateway
+from ..sandbox_scorer import ScorerGateway, ScorerUsage
 from ..service import run_blackbox_optimization, validate_blackbox_payload
 from ..workspace_scorer import build_workspace_scorer
 from .mocks import (
@@ -296,6 +296,109 @@ def test_auto_run_hands_off_between_engines(
     handoffs = [m for e, m in sink if e == PROGRESS_LANE_HANDOFF]
     assert len(handoffs) == 1
     assert handoffs[0]["to_engine"] == "gepa"
+
+
+def test_byok_reflection_budget_does_not_limit_model_calls(
+    fake_lm: FakeReflectionLM, tmp_path: Path, fake_native_proposers: list[tuple[str, EngineContext]]
+) -> None:
+    """Allow BYOK reflection with a spending limit without a fee-based model cap."""
+    run_blackbox_optimization(
+        _payload(
+            strategy={"mode": "auto"},
+            budget={"max_scorer_runs": 24},
+            max_cost_cents=100,
+            execution_budget_id="fixture",
+            reflection_model_config={"name": "fake/model", "token_source": "byok"},
+        ),
+        artifact_id="job-byok",
+        gepa_log_dir_path=str(tmp_path),
+    )
+    assert fake_native_proposers
+    assert all(ctx.native_options.max_token_cost is None for _, ctx in fake_native_proposers)
+
+
+def test_legacy_byok_reflection_keeps_managed_scorer_budget(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exclude BYOK reflection while stopping managed scorer spend at the cap."""
+    usage = ScorerUsage("openai/gpt-4o-mini")
+
+    class ManagedScorer:
+        """Supply a managed scorer ledger to the legacy run."""
+
+        def __init__(self) -> None:
+            """Bind the managed usage ledger."""
+            self.usage = usage
+
+        def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float, dict[str, Any]]:
+            """Score the candidate without a network call."""
+            return vowel_scorer(candidate, case)
+
+        def close(self) -> None:
+            """Close the scorer."""
+
+    def strategy(_strategy: Any, _task: Task, _server: EvalServer, ctx: EngineContext, *_args: Any, **_kwargs: Any):
+        """Exercise the callback and boundary checks with each usage source."""
+        callback = service_mod.dspy.settings.callbacks[0]
+        fake_lm.history.append({"usage": {"prompt_tokens": 1000000, "completion_tokens": 1000000}})
+        callback._check()
+        ctx.check_budget()
+        assert ctx.remaining_cost_usd() > 0
+        usage.record([{"prompt_tokens": 1000000, "completion_tokens": 1000000}])
+        assert ctx.remaining_cost_usd() == 0
+        with pytest.raises(BudgetReached):
+            callback._check()
+        with pytest.raises(BudgetReached):
+            ctx.check_budget()
+        return Result(best_candidate="hello world", best_score=0.5, total_evals=0), []
+
+    monkeypatch.setattr(service_mod, "build_scorer", lambda *args, **kwargs: ManagedScorer())
+    monkeypatch.setattr(service_mod, "run_strategy", strategy)
+    run_blackbox_optimization(
+        _payload(
+            max_cost_cents=1,
+            reflection_model_config={"name": "fake/model", "token_source": "byok"},
+            scorer={"kind": "python", "metric_code": VOWEL_SCORER_CODE, "model": {"name": "openai/gpt-4o-mini"}},
+        ),
+        artifact_id="legacy-mixed-budget",
+        gepa_log_dir_path=str(tmp_path),
+    )
+
+
+def test_legacy_byok_reflection_counts_managed_native_model(
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_native_proposers: list[tuple[str, EngineContext]],
+) -> None:
+    """Count a managed native model without counting BYOK primary usage."""
+
+    def strategy(_strategy: Any, _task: Task, _server: EvalServer, ctx: EngineContext, *_args: Any, **_kwargs: Any):
+        """Check the budget after each native model's usage arrives."""
+        ctx.native_options.usage_by_model["openai/gpt-4o-mini"] = {
+            "prompt_tokens": 1000000,
+            "completion_tokens": 1000000,
+        }
+        ctx.check_budget()
+        ctx.native_options.usage_by_model["openai/gpt-4o"] = {
+            "prompt_tokens": 1000000,
+            "completion_tokens": 1000000,
+        }
+        with pytest.raises(BudgetReached):
+            ctx.check_budget()
+        return Result(best_candidate="hello world", best_score=0.5, total_evals=0), []
+
+    monkeypatch.setattr(service_mod, "run_strategy", strategy)
+    run_blackbox_optimization(
+        _payload(
+            strategy={"mode": "single", "engine": "shinka_evolve"},
+            max_cost_cents=1,
+            reflection_model_config={"name": "openai/gpt-4o-mini", "token_source": "byok"},
+            extra_reflection_model_configs=[{"name": "openai/gpt-4o", "token_source": "managed"}],
+        ),
+        artifact_id="legacy-mixed-native-budget",
+        gepa_log_dir_path=str(tmp_path),
+    )
 
 
 def test_regression_guard_restores_the_seed(

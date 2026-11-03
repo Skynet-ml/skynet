@@ -20,7 +20,7 @@
   "optimizations.reasoning_effort.short.min": "min",
   "optimizations.serve.field_separator": ": ",
   "tooltip.submit.blackbox.scorer_install": "Wird einmal in der netzwerkisolierten Cloud-Sandbox ausgeführt. Verwenden Sie Pakete aus dem festgeschriebenen Image oder bereitstellungseigene Paketartefakte; öffentliche apt- und Paketquellen sind nicht verfügbar.",
-  "submit.budget.byok_note": "Ihr Anbieter rechnet Modell-Token direkt über Ihren Schlüssel ab. Dieses Limit deckt nur die {term.appName}-Plattformgebühr und die Nutzung der Ausführungsumgebung ab.",
+  "submit.budget.byok_note": "Ihr Anbieter rechnet Modell-Tokens über Ihren Schlüssel ab. {term.appName} erhebt keine Modellgebühr. Das Laufbudget deckt nur die Nutzung der Sandbox ab.",
   "submit.blackbox.roles.optimization.managed_hint": "Verwendet die Standard-Sampling-Einstellungen des Modells; die Abrechnung kann über Ihr {term.appName}-Guthaben oder Ihren OpenRouter-Schlüssel erfolgen.",
   "optimizations.grid.open_pair": "Paar {pair} öffnen",
   "optimizations.grid.empty.title": "Keine Paarergebnisse",

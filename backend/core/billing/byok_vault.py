@@ -1,8 +1,8 @@
 """Encrypt-at-rest vault for bring-your-own-key (BYOK) provider secrets.
 
 When an account runs in ``byok`` token source, the provider bills model tokens
-directly to the user's key while the Skynet balance funds the platform fee and
-managed sandbox. This module is the only place that holds those secrets: it
+directly to the user's key while the Skynet balance funds the managed sandbox.
+Skynet charges no BYOK model fee. This module is the only place that holds those secrets: it
 encrypts them with Fernet under
 ``settings.byok_vault_key`` before they touch the database, decrypts them only
 to run a verify probe or hand them to a run, and never returns plaintext to the
@@ -24,18 +24,22 @@ saving a key requires ``settings.is_byok_vault_configured`` and raises
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from ..api.errors import DomainError
 from ..config import settings
 from ..provider_registry import LITELLM_TO_BYOK_PROVIDER
 from ..storage.models import BillingProviderKeyModel
+from .byok_upstreams import UPSTREAMS, validate_custom_base
+from .mcp_broker import _pinned_address, _PinnedTransport
 
 # Verification states a stored key can carry. ``unverified`` is the default and
 # also the resting state after a probe that couldn't reach a verdict (network /
@@ -44,6 +48,7 @@ from ..storage.models import BillingProviderKeyModel
 STATUS_UNVERIFIED = "unverified"
 STATUS_VERIFIED = "verified"
 STATUS_INVALID = "invalid"
+logger = logging.getLogger(__name__)
 
 
 def _bearer_probe(url: str) -> dict[str, str]:
@@ -92,8 +97,8 @@ _PROVIDER_PROBES: dict[str, dict[str, str]] = {
     },
     "xai": _bearer_probe("https://api.x.ai/v1/models"),
     "groq": _bearer_probe("https://api.groq.com/openai/v1/models"),
-    "deepseek": _bearer_probe("https://api.deepseek.com/models"),
-    "together": _bearer_probe("https://api.together.xyz/v1/models"),
+    "deepseek": _bearer_probe(f"{UPSTREAMS['deepseek'].base_url}/models"),
+    "together": _bearer_probe(f"{UPSTREAMS['together'].base_url}/models"),
     "mistral": _bearer_probe("https://api.mistral.ai/v1/models"),
     "moonshot": _bearer_probe("https://api.moonshot.ai/v1/models"),
     "cohere": _bearer_probe("https://api.cohere.ai/v1/models"),
@@ -440,6 +445,7 @@ class ProviderKeyVault:
             DomainError: 400 when ``provider`` is unknown and no ``api_base`` is
                 given, or ``secret`` is empty; 503 when the vault key is
                 unconfigured.
+            HTTPException: When a custom endpoint fails address validation.
         """
         secret = secret.strip()
         api_base = (api_base or "").strip() or None
@@ -447,9 +453,24 @@ class ProviderKeyVault:
             raise DomainError("billing.byok_unknown_provider", status=400, provider=provider)
         if not secret:
             raise DomainError("billing.byok_empty_secret", status=400, provider=provider)
+        try:
+            if api_base:
+                validate_custom_base(api_base)
+                if not (
+                    provider == "openrouter"
+                    and api_base.rstrip("/") in {"https://openrouter.ai", "https://openrouter.ai/api/v1"}
+                ):
+                    _pinned_address(api_base, False, label="custom provider endpoint")
+        except ValueError as error:
+            logger.warning("Custom provider endpoint validation failed: %s", error)
+            raise HTTPException(status_code=400, detail="Invalid custom provider endpoint.") from error
         cipher = self._cipher()
         ciphertext = cipher.encrypt(secret.encode("utf-8"))
-        status = self._probe(provider, secret, api_base)
+        try:
+            status = self._probe(provider, secret, api_base)
+        except ValueError as error:
+            logger.warning("Custom provider endpoint probe validation failed: %s", error)
+            raise HTTPException(status_code=400, detail="Invalid custom provider endpoint.") from error
         safe_params = safe_connection_params(params)
         now = datetime.now(UTC)
         with Session(self._engine) as session:
@@ -628,23 +649,31 @@ class ProviderKeyVault:
         Any other status, a timeout, or a network error means the probe couldn't
         reach a verdict, so the status stays :data:`STATUS_UNVERIFIED` — the key
         is not condemned for an outage on the provider's side. A custom
-        ``api_base`` is probed at ``{api_base}/models``: with the provider's own
-        auth header shape when the provider is known, or OpenAI-compatible Bearer
-        auth for an unknown provider.
+        ``api_base`` is probed at ``{api_base}/models`` with OpenAI-compatible
+        bearer authentication and a pinned destination.
 
         Args:
             provider: Provider slug.
             secret: The plaintext key to authenticate the probe with.
             api_base: Optional custom endpoint to probe instead of the provider's
-        default; required when ``provider`` is unknown. Canonical OpenRouter
-        bases use its credential-specific ``/key`` endpoint; custom compatible
-        hosts use their model-list endpoint because no standard key-introspection
-        operation exists.
+                default. Canonical OpenRouter bases use the ``/key`` endpoint.
 
         Returns:
             One of :data:`STATUS_VERIFIED`, :data:`STATUS_INVALID`, or
             :data:`STATUS_UNVERIFIED`.
+
+        Raises:
+            ValueError: When a custom endpoint fails address validation.
         """
+        canonical_openrouter = provider == "openrouter" and (api_base or "").rstrip("/") in {
+            "https://openrouter.ai",
+            "https://openrouter.ai/api/v1",
+        }
+        address = None
+        if api_base:
+            validate_custom_base(api_base)
+            if not canonical_openrouter:
+                address = _pinned_address(api_base, False, label="custom provider endpoint")
         probe = _PROVIDER_PROBES.get(provider)
         if probe is not None:
             normalized_base = (api_base or "").rstrip("/")
@@ -656,10 +685,13 @@ class ProviderKeyVault:
                 urls = [f"{root}/key"]
             else:
                 urls = self._model_probe_urls(api_base) if api_base else [probe["url"]]
-            headers = {probe["header_name"]: probe["header_value"].format(secret=secret)}
-            extra_name = probe.get("extra_header_name")
-            if extra_name:
-                headers[extra_name] = probe["extra_header_value"]
+            if api_base and not canonical_openrouter:
+                headers = {"Authorization": f"Bearer {secret}"}
+            else:
+                headers = {probe["header_name"]: probe["header_value"].format(secret=secret)}
+                extra_name = probe.get("extra_header_name")
+                if extra_name:
+                    headers[extra_name] = probe["extra_header_value"]
         elif api_base:
             urls = self._model_probe_urls(api_base)
             headers = {"Authorization": f"Bearer {secret}"}
@@ -667,7 +699,16 @@ class ProviderKeyVault:
             return STATUS_UNVERIFIED
         for url in urls:
             try:
-                response = httpx.get(url, headers=headers, timeout=_PROBE_TIMEOUT_SECONDS)
+                if address is None:
+                    response = httpx.get(url, headers=headers, timeout=_PROBE_TIMEOUT_SECONDS)
+                else:
+                    with httpx.Client(
+                        transport=_PinnedTransport(api_base, address),
+                        follow_redirects=False,
+                        trust_env=False,
+                        timeout=_PROBE_TIMEOUT_SECONDS,
+                    ) as client:
+                        response = client.get(url, headers=headers)
             except httpx.HTTPError:
                 return STATUS_UNVERIFIED
             if response.is_success:

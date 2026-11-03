@@ -40,7 +40,7 @@ from core.billing.run_usage import (
 from core.storage.models import Base, ExecutionBudgetModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 
 _MANAGED = {"kind": "managed_model", "byok_fee_fraction": "0.05"}
-_BYOK = {"kind": "byok_model", "byok_fee_fraction": "0.05"}
+_BYOK = {"kind": "byok_model", "byok_fee_fraction": "0"}
 _SUBSCRIPTION = {"kind": "subscription_model"}
 
 
@@ -129,10 +129,33 @@ def test_batched_calls_count_without_a_response_time() -> None:
 
 
 def test_byok_calls_report_the_provider_charge_behind_the_fee() -> None:
-    """Invert the BYOK fee to estimate what the owner's provider charged."""
-    (row,) = aggregate([_op(policy=_BYOK, cents="0.5", evidence=_call())], proposer=False)
+    """Read provider cost from usage without charging the user's wallet."""
+    evidence = {**_call(), "usage": {"cost": "0.10", "prompt_tokens": 3}}
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence=evidence)], proposer=False)
     assert row.billing == BILLING_BYOK
     assert row.provider_cents == Decimal(10)
+
+
+@pytest.mark.parametrize("cost", [None, "invalid", "-1", "NaN"])
+def test_byok_missing_provider_cost_is_unavailable(cost: str | None) -> None:
+    """Do not invent provider cost from a zero fee or malformed usage."""
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence={"usage": {"cost": cost}})], proposer=False)
+    assert row.provider_cents is None
+    assert row.unpriced_calls == 1
+
+
+def test_openrouter_byok_provider_cost_includes_upstream_cost() -> None:
+    """Include both OpenRouter and upstream cost in provider telemetry."""
+    usage = {"cost": "0.001", "is_byok": True, "cost_details": {"upstream_inference_cost": "0.02"}}
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence={"usage": usage})], proposer=False)
+    assert row.provider_cents == Decimal("2.1")
+
+
+def test_openrouter_byok_invalid_cost_details_are_unavailable() -> None:
+    """Keep malformed upstream evidence from blocking run usage."""
+    usage = {"cost": "0.001", "is_byok": True, "cost_details": "invalid"}
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence={"usage": usage})], proposer=False)
+    assert row.provider_cents is None
 
 
 def test_subscription_calls_show_their_api_rate_without_a_charge() -> None:

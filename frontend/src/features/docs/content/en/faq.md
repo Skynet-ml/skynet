@@ -48,11 +48,11 @@ By default, no. The default **Model data privacy** option is **No training**. It
 
 ### How does Skynet charge for runs?
 
-Skynet uses a prepaid balance. Hosted model usage, Skynet fees and sandbox usage are metered. Before paid work starts, Skynet reserves headroom in your wallet and in the run budget. See [Billing](/docs/concepts/billing).
+Skynet uses a prepaid balance. Hosted model usage, the top-up fee and sandbox usage are metered. Before paid work starts, Skynet reserves headroom in your wallet and in the run budget. See [Billing](/docs/concepts/billing).
 
 ### Can I use my own model provider key?
 
-Yes. With your own key (BYOK), the provider charges your key directly for model calls. Your Skynet balance still pays the platform fee and sandbox usage. Skynet encrypts your key and never shows it again. See [Billing](/docs/concepts/billing) and [Security](/docs/security).
+Yes. With your own key (BYOK), Your provider bills model tokens to your key. Skynet charges no model fee. The run budget covers sandbox usage only. Skynet encrypts your key and never shows it again. See [Billing](/docs/concepts/billing) and [Security](/docs/security).
 
 ### Can I run Skynet without paying for model calls?
 

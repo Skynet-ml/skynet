@@ -13,12 +13,20 @@ from uuid import uuid4
 
 import httpx
 
+from .byok_upstreams import OPENROUTER, ProviderUpstream
 from .data_policy import DataPolicy, apply_data_policy
 from .model_batch import BatchCollector
 from .model_terms import excluded_from_managed, managed_model_refusal
 from .openrouter_float import notify_managed_refusal
 from .openrouter_quotes import PricedRequest, fetch_endpoint_prices, price_embedding_request, price_text_request
-from .operation_pricing import ChargePolicy, OperationQuote, UnpricedOperationError, exact_nonnegative, json_fingerprint
+from .operation_pricing import (
+    ChargePolicy,
+    OperationQuote,
+    UnpricedOperationError,
+    exact_nonnegative,
+    json_fingerprint,
+    operation_quote,
+)
 from .responses_adapter import price_responses_request, responses_failure, responses_receipt
 from .runtime import BudgetRuntime, PaidResult
 from .usage_tags import header_tags
@@ -26,6 +34,7 @@ from .usage_tags import header_tags
 MODEL_ATTEMPT_HEADER = "x-app-model-attempt-id"
 
 logger = logging.getLogger(__name__)
+_BYOK_DEFAULT_MAX_TOKENS = 4000
 
 # How long a route answers a funds refusal locally instead of asking OpenRouter
 # again. The SDK retries every failure, and a drained account refuses each
@@ -158,6 +167,8 @@ def usage_charge(usage: Mapping[str, Any]) -> Decimal | None:
     if usage.get("cost") is None:
         return None
     details = usage.get("cost_details") or {}
+    if not isinstance(details, Mapping):
+        return None
     return generation_charge(
         {
             "total_cost": usage["cost"],
@@ -272,7 +283,7 @@ def batch_rates(quote: OperationQuote) -> tuple[Decimal, Decimal]:
     return exact_nonnegative(pricing.get("prompt", "0")), exact_nonnegative(pricing.get("completion", "0"))
 
 
-class OpenRouterDispatcher:
+class ProviderDispatcher:
     """Keep credentials and the spending ledger outside optimizer-controlled code."""
 
     def __init__(
@@ -287,6 +298,7 @@ class OpenRouterDispatcher:
         batch: BatchCollector | None = None,
         data_policy: DataPolicy | None = None,
         embeddings: bool = False,
+        upstream: ProviderUpstream = OPENROUTER,
     ) -> None:
         """Bind one model role to a trusted transport and pricing policy.
 
@@ -303,8 +315,11 @@ class OpenRouterDispatcher:
                 request; ``None`` leaves BYOK routing to the caller's own account.
             embeddings: Serve only ``/embeddings`` for an embeddings model,
                 instead of the chat protocols.
+            upstream: Fixed provider endpoint and permitted protocols.
         """
         self.runtime = runtime
+        if upstream != OPENROUTER and policy.kind != "byok_model":
+            raise UnpricedOperationError("Only BYOK routes can use a non-OpenRouter provider.")
         self._api_key = api_key
         self.model = model
         self.role = role
@@ -312,9 +327,10 @@ class OpenRouterDispatcher:
         self._client = client
         self._attempt_quotes: dict[tuple[str, str, int], tuple[str, PricedRequest]] = {}
         self._refusal: tuple[bytes, float] | None = None
-        self._batch = batch
-        self._data_policy = data_policy
+        self._batch = batch if upstream == OPENROUTER else None
+        self._data_policy = data_policy if upstream == OPENROUTER else None
         self.embeddings = embeddings
+        self.upstream = upstream
 
     def dispatch(
         self,
@@ -337,7 +353,11 @@ class OpenRouterDispatcher:
         Returns:
             Provider response after its actual charge is settled or held for reconciliation.
         """
-        paths = {"/embeddings"} if self.embeddings else {"/chat/completions", "/messages", "/responses"}
+        paths = {"/embeddings"} if self.embeddings and self.upstream.embeddings else set(self.upstream.paths)
+        if self.embeddings and not self.upstream.embeddings:
+            paths = set()
+        if not self.embeddings and self.policy.kind == "managed_model" and self.upstream == OPENROUTER:
+            paths.add("/messages")
         if path not in paths or request.get("model") != self.model:
             raise UnpricedOperationError("This scoped route cannot dispatch a different model or API operation.")
         if self.policy.kind == "managed_model" and excluded_from_managed(self.model):
@@ -355,10 +375,41 @@ class OpenRouterDispatcher:
                 raise UnpricedOperationError("A model attempt identity cannot be reused for a different request.")
             priced = cached[1]
         else:
-            catalog = fetch_endpoint_prices(self.model, client=self._client)
             routed = dict(request) if self._data_policy is None else apply_data_policy(request, self._data_policy)
-            pricer = {"/responses": price_responses_request, "/embeddings": price_embedding_request}
-            priced = pricer.get(path, price_text_request)(mark_prompt_cache(path, routed), catalog, self.policy)
+            if self.policy.kind != "byok_model":
+                catalog = fetch_endpoint_prices(self.model, client=self._client)
+                pricer = {"/responses": price_responses_request, "/embeddings": price_embedding_request}
+                priced = pricer.get(path, price_text_request)(mark_prompt_cache(path, routed), catalog, self.policy)
+            else:
+                if routed.get("n", 1) != 1 or routed.get("best_of", 1) != 1:
+                    raise UnpricedOperationError("Multiple completions require independently reserved requests.")
+                if path != "/embeddings":
+                    if (
+                        "max_tokens" in routed
+                        and "max_completion_tokens" in routed
+                        and routed["max_tokens"] != routed["max_completion_tokens"]
+                    ):
+                        raise UnpricedOperationError("Conflicting output token limits cannot authorize work.")
+                    field = (
+                        "max_output_tokens"
+                        if path == "/responses"
+                        else "max_completion_tokens"
+                        if "max_completion_tokens" in routed
+                        else "max_tokens"
+                    )
+                    if path == "/messages" and field not in routed:
+                        routed[field] = _BYOK_DEFAULT_MAX_TOKENS
+                    limit = routed.get(field)
+                    if field in routed and (isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0):
+                        raise UnpricedOperationError("An explicit positive output token limit is required.")
+                if self.upstream != OPENROUTER and path == "/chat/completions" and routed.get("stream"):
+                    routed["stream_options"] = {**(routed.get("stream_options") or {}), "include_usage": True}
+                priced = PricedRequest(
+                    routed,
+                    operation_quote(
+                        routed, Decimal(0), self.policy, {"provider": self.upstream.slug, "model": self.model}
+                    ),
+                )
             priced = replace(
                 priced,
                 quote=replace(
@@ -374,12 +425,16 @@ class OpenRouterDispatcher:
         physical_key = operation_key or str(uuid4())
         tags = header_tags(protocol_headers)
         started = time.monotonic()
-        headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", **dict(self.upstream.extra_headers)}
+        if self.upstream.auth == "x-api-key":
+            headers["x-api-key"] = self._api_key
+        else:
+            headers["Authorization"] = f"Bearer {self._api_key}"
         headers.update(
             {
                 name: value
                 for name, value in (protocol_headers or {}).items()
-                if name.lower() in {"anthropic-version", "anthropic-beta"}
+                if self.upstream == OPENROUTER and name.lower() in {"anthropic-version", "anthropic-beta"}
             }
         )
 
@@ -387,6 +442,7 @@ class OpenRouterDispatcher:
         # provider under terms this ledger cannot split per request.
         batched = (
             self._batch is not None
+            and self.upstream == OPENROUTER
             and path == "/chat/completions"
             and not priced.body.get("stream")
             and self.policy.kind == "managed_model"
@@ -401,7 +457,7 @@ class OpenRouterDispatcher:
                 answer = self._batch.run(priced.body, batch_rates(priced.quote))
                 return settle(answer.status, "application/json", answer.body, answer.interrupted, None)
             with self._client.stream(
-                "POST", f"https://openrouter.ai/api/v1{path}", headers=headers, json=priced.body, follow_redirects=False
+                "POST", f"{self.upstream.base_url}{path}", headers=headers, json=priced.body, follow_redirects=False
             ) as response:
                 content_type = response.headers.get("content-type", "application/json")
                 try:
@@ -427,7 +483,7 @@ class OpenRouterDispatcher:
                 interrupted = interrupted or not response_complete(content, content_type)
                 identity, usage = response_usage(content, content_type)
             evidence: dict[str, Any] = {
-                "provider": "openrouter",
+                "provider": self.upstream.slug,
                 "model": self.model,
                 "request_id": identity,
                 "status": status,
@@ -444,9 +500,14 @@ class OpenRouterDispatcher:
             if failure is not None:
                 evidence["failure"] = failure
             amount = None
-            if not interrupted and usage is not None and usage.get("cost") is not None:
+            if (
+                self.policy.kind != "byok_model"
+                and not interrupted
+                and usage is not None
+                and usage.get("cost") is not None
+            ):
                 amount = usage_charge(usage)
-            if amount is None and identity:
+            if self.policy.kind != "byok_model" and self.upstream == OPENROUTER and amount is None and identity:
                 reconciled = self.reconcile(identity)
                 if reconciled is not None:
                     amount, record = reconciled
@@ -458,7 +519,7 @@ class OpenRouterDispatcher:
             result = ModelHTTPResult(status, content_type, content)
             if status == 404 and self._data_policy is not None and b"data policy" in content.lower():
                 result = ModelHTTPResult(404, "application/json", data_policy_refusal(self.model, self._data_policy))
-            if status == 402 and not interrupted:
+            if self.upstream == OPENROUTER and status == 402 and not interrupted:
                 managed = self.policy.kind == "managed_model"
                 body, hold = funds_refusal(managed, retry_after)
                 self._refusal = (body, time.monotonic() + hold)
@@ -518,6 +579,8 @@ class OpenRouterDispatcher:
         Returns:
             Measured USD and usage-only evidence, or None while the bill is unavailable.
         """
+        if self.upstream != OPENROUTER:
+            return None
         try:
             response = self._client.get(
                 "https://openrouter.ai/api/v1/generation",
@@ -553,3 +616,6 @@ class OpenRouterDispatcher:
             return (amount, safe) if amount is not None else None
         except (httpx.HTTPError, ValueError):
             return None
+
+
+OpenRouterDispatcher = ProviderDispatcher

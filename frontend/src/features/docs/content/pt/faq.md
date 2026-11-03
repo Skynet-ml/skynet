@@ -48,11 +48,11 @@ Por padrão, não. A opção padrão de **Privacidade dos dados dos modelos** é
 
 ### Como o Skynet cobra pelas execuções?
 
-O Skynet usa um saldo pré-pago. O uso de modelos hospedados, as taxas do Skynet e o uso da sandbox são medidos. Antes de o trabalho pago começar, o Skynet reserva uma margem na sua carteira e no orçamento da execução. Veja [Cobrança](/docs/concepts/billing).
+O Skynet usa um saldo pré-pago. O uso de modelos hospedados, a taxa de recarga e o uso da sandbox são medidos. Antes de o trabalho pago começar, o Skynet reserva uma margem na sua carteira e no orçamento da execução. Veja [Cobrança](/docs/concepts/billing).
 
 ### Posso usar a minha própria chave de provedor de modelos?
 
-Sim. Com a sua própria chave (BYOK), o provedor cobra as chamadas de modelo diretamente na sua chave. O seu saldo no Skynet continua pagando a taxa da plataforma e o uso da sandbox. O Skynet criptografa a sua chave e nunca a mostra de novo. Veja [Cobrança](/docs/concepts/billing) e [Segurança](/docs/security).
+Sim. Com sua própria chave (BYOK), O provedor cobra os tokens do modelo na sua chave. Skynet não cobra taxa pelo modelo. O orçamento da execução cobre apenas o uso da sandbox. O Skynet criptografa a sua chave e nunca a mostra de novo. Veja [Cobrança](/docs/concepts/billing) e [Segurança](/docs/security).
 
 ### Posso usar o Skynet sem pagar pelas chamadas de modelo?
 

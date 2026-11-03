@@ -48,11 +48,11 @@ Skynet 就係 Optimize Anything。佢喺同一個產品入面最佳化提示詞�
 
 ### Skynet 點樣為運行收費？
 
-Skynet 用預付結餘。託管模型用量、Skynet 費用同沙盒用量都會計量。付費工作開始之前，Skynet 會喺你嘅錢包同運行預算入面預留空間。請睇 [預算同收費](/docs/concepts/billing)。
+Skynet 用預付結餘。託管模型用量、增值手續費同沙盒用量都會計量。付費工作開始之前，Skynet 會喺你嘅錢包同運行預算入面預留空間。請睇 [預算同收費](/docs/concepts/billing)。
 
 ### 我可唔可以用自己嘅模型供應商金鑰？
 
-可以。用你自己嘅金鑰（BYOK）嗰陣，供應商會直接向你嘅金鑰收模型呼叫嘅費用。你嘅 Skynet 結餘仍然要支付平台費同沙盒用量。Skynet 會加密你嘅金鑰，之後唔會再顯示佢。請睇 [預算同收費](/docs/concepts/billing) 同 [安全](/docs/security)。
+可以。用自己嘅金鑰（BYOK）時，供應商會將模型 token 費用記喺你嘅金鑰。Skynet 唔收模型費。 運行預算只包括沙盒用量。 Skynet 會加密你嘅金鑰，之後唔會再顯示佢。請睇 [預算同收費](/docs/concepts/billing) 同 [安全](/docs/security)。
 
 ### 我可唔可以唔使為模型呼叫畀錢就運行 Skynet？
 

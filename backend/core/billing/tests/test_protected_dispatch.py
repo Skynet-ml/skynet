@@ -22,8 +22,14 @@ from core.billing.model_dispatch import (
     response_usage,
 )
 from core.billing.openrouter_quotes import price_text_request
-from core.billing.operation_pricing import ChargePolicy, UnpricedOperationError
-from core.billing.runtime import BudgetRuntime, OperationCompletedError, ProviderFailedError, UsagePendingError
+from core.billing.operation_pricing import ChargePolicy, UnpricedOperationError, operation_quote
+from core.billing.runtime import (
+    BudgetRuntime,
+    OperationCompletedError,
+    PaidResult,
+    ProviderFailedError,
+    UsagePendingError,
+)
 from core.config import settings
 from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 
@@ -67,6 +73,62 @@ def _runtime(database: Engine, total: int = 50) -> BudgetRuntime:
     service = BudgetService(engine=database)
     budget = service.create("alice", total, idempotency_key="setup")
     return BudgetRuntime(service, username="alice", budget_id=budget.id, generation=0, phase="setup", wait_timeout=0)
+
+
+def test_byok_model_and_sandbox_are_metered_separately(database: Engine) -> None:
+    """Charge sandbox work while a BYOK model call settles for zero."""
+    runtime = _runtime(database)
+    byok = ChargePolicy("byok_model")
+    runtime.execute(
+        operation_quote({}, Decimal(0), byok, {}),
+        byok,
+        lambda: PaidResult(None, None, {}),
+        operation_key="model",
+        cost_kind="model",
+        role="task",
+    )
+    sandbox = ChargePolicy("sandbox")
+    runtime.execute(
+        operation_quote({}, Decimal("0.01"), sandbox, {}),
+        sandbox,
+        lambda: PaidResult(None, Decimal("0.01"), {}),
+        operation_key="sandbox",
+        cost_kind="sandbox",
+        role="runtime",
+    )
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert snapshot.setup_spent_cents == sandbox.convert(Decimal("0.01")).total
+    assert snapshot.reserved_cents == 0
+
+
+@pytest.mark.parametrize("usage", [None, {"cost": "bad"}, {"cost": -1}, {"cost": "NaN"}])
+def test_byok_success_with_missing_or_invalid_usage_settles_zero(database: Engine, usage: object) -> None:
+    """Settle a successful BYOK call even when usage is unavailable or malformed."""
+    runtime = _runtime(database)
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Return one success without valid provider-cost evidence."""
+        body = {"id": "generation", "choices": []}
+        if usage is not None:
+            body["usage"] = usage
+        return httpx.Response(200, json=body)
+
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+        dispatcher = OpenRouterDispatcher(
+            runtime,
+            api_key="private",
+            model="fixture/text",
+            role="task",
+            policy=ChargePolicy("byok_model"),
+            client=client,
+        )
+        assert dispatcher.dispatch("/chat/completions", REQUEST).status == 200
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert snapshot.reserved_cents == 0
+    assert snapshot.pending_operations == 0
+    assert snapshot.setup_spent_cents == 0
+    with Session(database) as session:
+        assert session.scalar(select(ExecutionOperationModel)).state == "settled"
 
 
 def test_final_request_caps_include_cache_and_output_overrides() -> None:
@@ -246,12 +308,12 @@ def test_anthropic_stream_merges_final_cost_without_inventing_zero() -> None:
 
 
 def test_usage_markup_applies_to_platform_paid_costs_but_not_byok(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mark up sandbox and managed dollars; charge BYOK only the platform fee on raw cost."""
+    """Mark up sandbox and managed dollars but do not charge BYOK model calls."""
     monkeypatch.setattr(settings, "usage_markup", 1.15)
     assert ChargePolicy("sandbox").convert(Decimal("0.01")).total == Decimal("1.15")
     assert ChargePolicy("managed_model").convert(Decimal("0.01")).total == Decimal("1.15")
     byok = ChargePolicy("byok_model").convert(Decimal("0.01"))
-    assert byok.total == byok.wallet == Decimal("0.05")
+    assert byok.total == byok.wallet == Decimal(0)
 
 
 def test_protected_hold_includes_the_usage_markup(monkeypatch: pytest.MonkeyPatch) -> None:

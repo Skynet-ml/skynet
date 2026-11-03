@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from ...config import settings
 from ...connectors.saved_secrets import SavedSecretStore
+from ...provider_registry import BYOK_PROVIDER_SLUGS
 from ...storage.models import (
     Base,
     BillingCustomerModel,
@@ -22,6 +23,7 @@ from ...storage.models import (
     ProtectedCredentialModel,
 )
 from ..budgets import BudgetService
+from ..byok_upstreams import UPSTREAMS, resolve_upstream
 from ..byok_vault import ProviderKeyVault
 from ..operation_pricing import json_fingerprint
 from ..protected_credentials import (
@@ -383,6 +385,17 @@ def test_reject_unverified_owner_keys_even_when_another_owner_is_verified(harnes
         prepare_protected_credentials(payload, username="alice", vault=harness.vault)
     assert harness.vault.resolve_connection("alice", "openrouter") is not None
     assert harness.vault.resolve_connection("alice", "openrouter", verified_only=True) is None
+
+
+@pytest.mark.parametrize("provider", sorted(UPSTREAMS))
+def test_verified_no_base_provider_resolves_to_upstream(harness: _Harness, provider: str) -> None:
+    """Resolve every built-in provider without a saved custom base."""
+    harness.store(provider=provider)
+    prefix = next(prefix for slug, prefix in BYOK_PROVIDER_SLUGS if slug == provider)
+    payload = {"model_config": {"name": f"{prefix}/fixture", "token_source": "byok"}}
+    config = prepare_protected_credentials(payload, username="alice", vault=harness.vault)["model_config"]
+    assert config["extra"]["api_key"] == "fixture-alice-key"
+    assert resolve_upstream(config) == UPSTREAMS[provider]
 
 
 def test_saved_custom_endpoint_is_preserved_for_explicit_adapter_validation(harness: _Harness) -> None:

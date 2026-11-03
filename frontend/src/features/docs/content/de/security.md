@@ -66,7 +66,7 @@ Sie können Ihre eigenen Schlüssel für Modellanbieter hinzufügen.
 - Skynet speichert nur die letzten vier Zeichen und einen Status: nicht geprüft, geprüft oder ungültig.
 - Wenn Sie einen Schlüssel eingeben, sendet Skynet eine kleine Testanfrage, um ihn zu prüfen.
 
-Wenn Sie Ihren eigenen Schlüssel verwenden, belastet der Anbieter Ihren Schlüssel direkt. Skynet berechnet weiterhin seine Plattformgebühr und die Sandbox-Nutzung aus Ihrem Guthaben.
+Dein Anbieter rechnet Modell-Tokens über deinen Schlüssel ab. Skynet erhebt keine Modellgebühr. Das Laufbudget deckt nur die Nutzung der Sandbox ab.
 
 Skynet entfernt außerdem Geheimnisse aus Logs und Fehlermeldungen. Es ersetzt sie durch `[REDACTED]`.
 

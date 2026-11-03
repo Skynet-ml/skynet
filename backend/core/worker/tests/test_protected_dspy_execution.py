@@ -17,7 +17,7 @@ from core.storage.base import JobStore
 from core.worker import engine
 
 from .conftest import FakeJobStore
-from .mocks import REAL_RUN_PAYLOAD, make_mp_context, make_result_event
+from .mocks import REAL_RUN_PAYLOAD, REAL_UNIFIED_PAYLOAD, make_mp_context, make_result_event
 
 
 class _Gateway:
@@ -156,6 +156,80 @@ def test_worker_orchestrator_skips_host_exec_and_dispatches_authored_source_to_o
     assert launched_payload["_protected_fixture"] is True
     assert launched_payload["workflow"] == payload["workflow"]
     assert launched_payload["metric_code"] == payload["metric_code"]
+
+
+def test_unified_byok_roles_are_aliased_before_worker_protection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep all unified model aliases available through BYOK injection and protection."""
+    payload = copy.deepcopy(REAL_UNIFIED_PAYLOAD)
+    payload["models"] = {
+        "task_model": {"name": "fixture/task"},
+        "reflection_model": {"name": "fixture/reflection"},
+        "metric_model": {"name": "openai/judge", "token_source": "byok", "byok_provider": "openai"},
+    }
+    payload["max_cost_cents"] = 20
+    store = FakeJobStore()
+    store.engine = object()
+    store.seed_job(
+        "unified-byok",
+        payload=payload,
+        payload_overview={"optimization_type": "blackbox", "username": "alice", "token_source": "managed"},
+        execution_budget_id="budget",
+        execution_budget_generation=0,
+    )
+    worker = engine.BackgroundWorker(job_store=cast(JobStore, store), num_workers=1)
+    worker.enqueue_job("unified-byok")
+    context, _process = make_mp_context(result_events=[make_result_event()])
+    monkeypatch.setattr(engine.settings, "openrouter_api_key", SecretStr("fixture-only"))
+    events: list[str] = []
+    alias = engine.alias_unified_model_roles
+
+    def alias_spy(source: dict[str, Any]) -> None:
+        """Record when the worker adds the legacy model aliases."""
+        events.append("alias")
+        alias(source)
+
+    def inject(source: dict[str, Any], **kwargs: Any) -> None:
+        """Stand in for vault resolution after checking the BYOK metric alias."""
+        events.append("inject")
+        assert source["scorer"]["model"] is source["models"]["metric_model"]
+        source["scorer"]["model"].setdefault("extra", {})["api_key"] = "metric-private"
+
+    class _RoutingGateway(_Gateway):
+        """Check the exact worker-to-protection boundary."""
+
+        def protect_payload(self, source: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            """Check each aliased model and the resolved metric credential."""
+            events.append("protect")
+            assert source["task_model_config"] is source["models"]["task_model"]
+            assert source["reflection_model_config"] is source["models"]["reflection_model"]
+            metric = source["scorer"]["model"]
+            assert metric is source["models"]["metric_model"]
+            assert metric["token_source"] == "byok"
+            assert metric["extra"]["api_key"] == "metric-private"
+            result = copy.deepcopy(source)
+            result["scorer"]["model"]["extra"].pop("api_key")
+            return result
+
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch("core.worker.engine.record_server_event"),
+        patch("core.worker.engine.bind_protected_sandbox"),
+        patch("core.worker.engine.validate_unified_payload"),
+        patch("core.worker.engine.OpenRouterKeyProvisioner", return_value=MagicMock(enabled=False)),
+        patch("core.worker.engine.alias_unified_model_roles", side_effect=alias_spy),
+        patch("core.worker.engine.inject_byok_connections", side_effect=inject),
+        patch("core.worker.engine.ModelGateway", _RoutingGateway),
+        patch("core.worker.engine.mp.get_context", return_value=context),
+        patch.object(worker, "_get_service", return_value=MagicMock()),
+        patch.object(worker, "_close_budget_gateway", return_value=({}, None)),
+        patch.object(worker, "_schedule_embedding_indexing"),
+    ):
+        worker._process_job("unified-byok", 0)
+
+    assert events == ["alias", "inject", "protect"]
+    assert store.get_job("unified-byok")["status"] == "success"
+    launched_payload = context.Process.call_args.kwargs["args"][0]
+    assert not {"scorer", "task_model_config", "reflection_model_config"} & launched_payload.keys()
 
 
 def test_budget_gateway_closes_while_the_lease_renews(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

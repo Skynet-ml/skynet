@@ -48,11 +48,11 @@ Varsayılan olarak hayır. Varsayılan **Model veri gizliliği** seçeneği **E�
 
 ### Skynet çalıştırmalar için nasıl ücret alır?
 
-Skynet ön ödemeli bir bakiye kullanır. Barındırılan model kullanımı, Skynet ücretleri ve sandbox kullanımı ölçülür. Ücretli iş başlamadan önce Skynet cüzdanınızda ve çalıştırma bütçesinde pay ayırır. [Faturalandırma](/docs/concepts/billing) sayfasına bakın.
+Skynet ön ödemeli bir bakiye kullanır. Barındırılan model kullanımı, bakiye yükleme ücreti ve sandbox kullanımı ölçülür. Ücretli iş başlamadan önce Skynet cüzdanınızda ve çalıştırma bütçesinde pay ayırır. [Faturalandırma](/docs/concepts/billing) sayfasına bakın.
 
 ### Kendi model sağlayıcı anahtarımı kullanabilir miyim?
 
-Evet. Kendi anahtarınızla (BYOK) sağlayıcı, model çağrıları için ücreti doğrudan anahtarınızdan alır. Skynet bakiyeniz yine de platform ücretini ve sandbox kullanımını öder. Skynet anahtarınızı şifreler ve bir daha asla göstermez. [Faturalandırma](/docs/concepts/billing) ve [Güvenlik](/docs/security) sayfalarına bakın.
+Evet. Kendi anahtarınızla (BYOK) Sağlayıcınız model belirteçlerini kendi anahtarınıza faturalandırır. Skynet model ücreti almaz. Çalışma bütçesi yalnızca sandbox kullanımını kapsar. Skynet anahtarınızı şifreler ve bir daha asla göstermez. [Faturalandırma](/docs/concepts/billing) ve [Güvenlik](/docs/security) sayfalarına bakın.
 
 ### Skynet'i model çağrılarına ödeme yapmadan çalıştırabilir miyim?
 

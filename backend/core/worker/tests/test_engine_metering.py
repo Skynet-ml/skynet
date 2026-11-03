@@ -101,7 +101,7 @@ def test_debit_hook_prices_per_model_usage_when_present() -> None:
 
 
 def test_debit_hook_charges_platform_fee_for_byok_run() -> None:
-    """A BYOK run debits with token_source='byok' so only the platform fee is charged."""
+    """A BYOK run debits with token_source='byok' and no model charge."""
     engine = object()
     worker = _worker(_Store(engine=engine))
     with patch("core.worker.engine.StripeBillingService") as billing_cls:

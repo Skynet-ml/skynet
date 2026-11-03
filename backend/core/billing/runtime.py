@@ -339,6 +339,7 @@ class BudgetRuntime:
         claimed = self.service.mark_dispatched(operation.id, self.username)
         if not claimed.dispatch_claimed:
             raise UsagePendingError("The attempt was already dispatched; do not repeat it.")
+        zero_fee_byok = policy.kind == "byok_model" and policy.byok_fee_fraction == 0
         try:
             result = dispatch()
             if result.provider_request_id:
@@ -352,16 +353,17 @@ class BudgetRuntime:
                         evidence=dict(result.evidence),
                     )
                     return result.value
-                self.service.mark_pending(
-                    operation.id,
-                    self.username,
-                    evidence_key=json_fingerprint(dict(result.evidence)),
-                    evidence=dict(result.evidence),
-                )
-                if result.failure is not None:
-                    raise ProviderFailedError(result.failure)
-                raise UsagePendingError("Provider usage is not yet confirmed; the reservation remains active.")
-            charge = policy.convert(result.provider_usd)
+                if not zero_fee_byok:
+                    self.service.mark_pending(
+                        operation.id,
+                        self.username,
+                        evidence_key=json_fingerprint(dict(result.evidence)),
+                        evidence=dict(result.evidence),
+                    )
+                    if result.failure is not None:
+                        raise ProviderFailedError(result.failure)
+                    raise UsagePendingError("Provider usage is not yet confirmed; the reservation remains active.")
+            charge = policy.convert(Decimal(0) if zero_fee_byok else result.provider_usd)
             self.service.settle(
                 operation.id,
                 self.username,
@@ -369,15 +371,29 @@ class BudgetRuntime:
                 actual_cents=charge.total,
                 actual_wallet_cents=charge.wallet,
                 evidence=dict(result.evidence),
-                final=result.final,
+                final=zero_fee_byok or result.final,
             )
-            if not result.final:
+            if zero_fee_byok and result.failure is not None:
+                raise ProviderFailedError(result.failure)
+            if not result.final and not zero_fee_byok:
                 raise UsagePendingError("Provider usage is incomplete; remaining coverage is retained.")
             return result.value
         except BaseException:
             current = self.service.get_operation(operation.id, self.username)
             if current.state in {"dispatched", "pending"}:
-                self.service.mark_pending(operation.id, self.username)
+                if zero_fee_byok:
+                    evidence = {"provider_failure": True}
+                    self.service.settle(
+                        operation.id,
+                        self.username,
+                        evidence_key=json_fingerprint(evidence),
+                        actual_cents=Decimal(0),
+                        actual_wallet_cents=Decimal(0),
+                        evidence=evidence,
+                        final=True,
+                    )
+                else:
+                    self.service.mark_pending(operation.id, self.username)
             raise
         finally:
             with self._changed:

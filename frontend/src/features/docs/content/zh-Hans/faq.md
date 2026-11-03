@@ -48,11 +48,11 @@ Skynet 就是 Optimize Anything。它在一个产品中优化提示词、代码�
 
 ### Skynet 如何为运行收费？
 
-Skynet 使用预付余额。托管模型用量、Skynet 费用和沙箱用量均按量计费。在付费工作开始之前，Skynet 会在你的钱包和运行预算中预留余量。请参阅[计费](/docs/concepts/billing)。
+Skynet 使用预付余额。托管模型用量、充值手续费和沙箱用量均按量计费。在付费工作开始之前，Skynet 会在你的钱包和运行预算中预留余量。请参阅[计费](/docs/concepts/billing)。
 
 ### 我可以使用自己的模型提供商密钥吗？
 
-可以。使用你自己的密钥（BYOK）时，提供商会直接从你的密钥为模型调用收费。你的 Skynet 余额仍然支付平台费和沙箱用量。Skynet 会加密你的密钥，并且永远不会再次显示它。请参阅[计费](/docs/concepts/billing)和[安全](/docs/security)。
+可以。使用自己的密钥（BYOK）时，提供商会将模型令牌费用计入你的密钥。Skynet 不收取模型费用。 运行预算只涵盖沙箱用量。 Skynet 会加密你的密钥，并且永远不会再次显示它。请参阅[计费](/docs/concepts/billing)和[安全](/docs/security)。
 
 ### 我可以在不为模型调用付费的情况下运行 Skynet 吗？
 

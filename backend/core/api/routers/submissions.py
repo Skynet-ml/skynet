@@ -561,8 +561,7 @@ def _enforce_balance(job_store, username: str, token_source: str) -> int | None:
     Concurrent dispatch is serialized by the shared ledger. There is no free
     allowance — a brand-new account is gated until it tops up. Both run
     modes are gated: a managed run spends its full per-token cost, and a BYOK
-    run still spends Skynet's platform fee (the provider tokens are on the
-    user's own key), so a zero balance can cover neither. The returned balance
+    run may spend on sandbox usage even though its model calls carry no fee. The returned balance
     feeds the per-run cost ceiling (see :func:`_cap_cost_ceiling_to_balance`) so
     a run can never spend past what the account holds.
 
@@ -679,8 +678,8 @@ def _cap_cost_ceiling_to_balance(
     spend more than the account holds. This clamps ``max_cost_cents`` to
     the balance-backed budget: a user-set cap still wins when it is tighter, but an
     absent or larger cap is lowered to the budget. For a managed run the budget is
-    the spendable balance; for a BYOK run it is proportionally larger, since the run
-    only spends the platform fee (see :func:`cost_ceiling_budget`). The run's
+    the spendable balance; for a BYOK run it is effectively uncapped, since model calls
+    carry no Skynet fee (see :func:`cost_ceiling_budget`). The run's
     ``CostCeilingCallback`` then hard-stops it once usage crosses that budget, so an
     over-ambitious run fails mid-flight (and is never billed) instead of driving the
     balance negative. A no-op for engine-less stores, where ``spendable`` is ``None``.

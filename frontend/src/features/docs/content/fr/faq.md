@@ -48,11 +48,11 @@ Par défaut, non. L'option par défaut de **Confidentialité des données des mo
 
 ### Comment Skynet facture-t-il les exécutions ?
 
-Skynet utilise un solde prépayé. L'utilisation des modèles hébergés, les frais Skynet et l'utilisation de la sandbox sont mesurés. Avant le début de tout travail payant, Skynet réserve une marge dans votre portefeuille et dans le budget de l'exécution. Voir [Facturation](/docs/concepts/billing).
+Skynet utilise un solde prépayé. L'utilisation des modèles hébergés, les frais de recharge et l'utilisation de la sandbox sont mesurés. Avant le début de tout travail payant, Skynet réserve une marge dans votre portefeuille et dans le budget de l'exécution. Voir [Facturation](/docs/concepts/billing).
 
 ### Puis-je utiliser ma propre clé de fournisseur de modèles ?
 
-Oui. Avec votre propre clé (BYOK), le fournisseur facture directement les appels de modèle sur votre clé. Votre solde Skynet paie toujours les frais de plateforme et l'utilisation de la sandbox. Skynet chiffre votre clé et ne l'affiche plus jamais. Voir [Facturation](/docs/concepts/billing) et [Sécurité](/docs/security).
+Oui. Avec votre propre clé (BYOK), Votre fournisseur facture les jetons du modèle sur votre clé. Skynet ne facture aucuns frais de modèle. Le budget de l’exécution couvre uniquement l’utilisation du bac à sable. Skynet chiffre votre clé et ne l'affiche plus jamais. Voir [Facturation](/docs/concepts/billing) et [Sécurité](/docs/security).
 
 ### Puis-je utiliser Skynet sans payer les appels de modèle ?
 

@@ -22,11 +22,12 @@ from ..config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, app_env
 from ..exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
 from ..local.cli_catalog import CliProvider, parse_subscription_model_id
 from .budgets import BudgetError, BudgetInsufficientError
+from .byok_upstreams import OPENROUTER, ProviderUpstream, resolve_upstream, validate_custom_base
 from .cli_dispatch import CliDispatcher
 from .credential_safety import scrub_model_config
 from .data_policy import data_policy_for
 from .dependency_lock import verify_dependency_lock
-from .mcp_broker import McpToolsBroker
+from .mcp_broker import McpToolsBroker, _pinned_address, _PinnedTransport
 from .model_batch import BatchCollector
 from .model_dispatch import MODEL_ATTEMPT_HEADER, ModelHTTPResult, OpenRouterDispatcher
 from .openrouter_quotes import resolve_model_slug
@@ -219,6 +220,7 @@ class ModelGateway:
         # and its type to tell the limit from the account balance.
         self.budget_refusal: BudgetInsufficientError | None = None
         self._client = httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False)
+        self._provider_clients: list[httpx.Client] = []
         self._routes: dict[str, OpenRouterDispatcher | CliDispatcher] = {}
         self._capabilities: dict[str, Callable[[bytes, dict[str, str]], ModelHTTPResult]] = {}
         self._capability_tokens: dict[str, str] = {}
@@ -465,6 +467,7 @@ class ModelGateway:
         batch: bool = False,
         embeddings: bool = False,
         parent_only: bool = False,
+        upstream: ProviderUpstream = OPENROUTER,
     ) -> dict[str, str]:
         """Register one fixed role without exposing its provider credential.
 
@@ -476,28 +479,50 @@ class ModelGateway:
             batch: Send this role's chat calls through half-price OpenRouter batches.
             embeddings: Serve only ``/embeddings`` for an embeddings model instead of chat.
             parent_only: Only the parent calls this route, so readiness probes skip it.
+            upstream: Fixed provider endpoint and permitted protocols.
 
         Returns:
             Scoped guest route containing no upstream credential.
         """
-        model = resolve_model_slug(model, client=self._client)
+        if embeddings and not upstream.embeddings:
+            raise UnpricedOperationError("This provider does not support embeddings on this route.")
+        model = resolve_model_slug(model, client=self._client) if upstream == OPENROUTER else model.split("/", 1)[-1]
+        client = self._client
+        if upstream.slug == "custom":
+            try:
+                validate_custom_base(upstream.base_url)
+                address = _pinned_address(upstream.base_url, False, label="custom provider endpoint")
+            except ValueError as error:
+                raise UnpricedOperationError(str(error)) from error
+            client = httpx.Client(
+                transport=_PinnedTransport(upstream.base_url, address),
+                timeout=self._client.timeout,
+                follow_redirects=False,
+                trust_env=False,
+            )
+            self._provider_clients.append(client)
         token = secrets.token_urlsafe(32)
         # BYOK traffic runs on the caller's own OpenRouter account, whose privacy settings apply there.
-        data_policy = data_policy_for(self.runtime.username) if policy.kind == "managed_model" else None
+        data_policy = (
+            data_policy_for(self.runtime.username)
+            if policy.kind == "managed_model" and upstream == OPENROUTER
+            else None
+        )
         self._routes[token] = OpenRouterDispatcher(
             self.runtime,
             api_key=api_key,
             model=model,
             role=role,
             policy=policy,
-            client=self._client,
+            client=client,
             data_policy=data_policy,
             batch=(
                 BatchCollector(api_key=api_key, model=model, client=self._client, heartbeat=self._beat)
-                if batch
+                if batch and upstream == OPENROUTER
                 else None
             ),
             embeddings=embeddings,
+            upstream=upstream,
         )
         if parent_only:
             self._parent_only.add(token)
@@ -731,7 +756,9 @@ class ModelGateway:
         """
         self._observers.setdefault(role, []).append(observer)
 
-    def _observe(self, route: OpenRouterDispatcher | CliDispatcher, body: Mapping[str, Any], response: ModelHTTPResult) -> None:
+    def _observe(
+        self, route: OpenRouterDispatcher | CliDispatcher, body: Mapping[str, Any], response: ModelHTTPResult
+    ) -> None:
         """Pass one answered model call to its role's observers.
 
         Args:
@@ -925,8 +952,7 @@ class ModelGateway:
                 config.pop("base_url", None)
                 continue
             endpoint = extra.get("api_base") or extra.get("base_url") or config.get("base_url")
-            if source == "byok" and urlsplit(str(endpoint or "")).hostname != "openrouter.ai":
-                raise UnpricedOperationError("This BYOK endpoint has no verified operation budget adapter.")
+            upstream = resolve_upstream(config) if source == "byok" else OPENROUTER
             if source == "managed" and endpoint and urlsplit(str(endpoint)).hostname != "openrouter.ai":
                 raise UnpricedOperationError("An explicit custom endpoint cannot be silently rerouted.")
             model = str(extra.get("model") or config.get("name", "")).removeprefix("openrouter/")
@@ -941,6 +967,7 @@ class ModelGateway:
                 role=role,
                 policy=ChargePolicy("byok_model" if source == "byok" else "managed_model"),
                 batch=batched,
+                upstream=upstream,
             )
             if config is target_config:
                 target_name = str(target.get("model") or "").strip("/")
@@ -960,6 +987,7 @@ class ModelGateway:
                         role=role,
                         policy=ChargePolicy("byok_model" if source == "byok" else "managed_model"),
                         embeddings=True,
+                        upstream=upstream,
                     ),
                 }
             config["extra"][ROUTE_KEY] = route
@@ -1018,6 +1046,9 @@ class ModelGateway:
                 self._sandbox.close()
         finally:
             self._client.close()
+            for client in self._provider_clients:
+                client.close()
+            self._provider_clients.clear()
             self._routes.clear()
             self._capabilities.clear()
             self._tools = None

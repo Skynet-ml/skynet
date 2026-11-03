@@ -21,7 +21,6 @@ export {
   DEFAULT_PRICING_TERMS,
   centsForUsage,
   modelTokenCosts,
-  platformFeeCents,
   rawCostUsd,
   type ModelTokenUsage,
   type PricingTerms,

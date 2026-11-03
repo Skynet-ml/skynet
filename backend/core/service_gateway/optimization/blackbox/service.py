@@ -31,7 +31,6 @@ from ....billing.model_gateway import EMBEDDING_ROUTE_KEY, ROUTE_KEY, SHINKA_EMB
 from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.pricing import (
     CENT_USD_VALUE,
-    PLATFORM_FEE_FRACTION,
     ModelUsage,
     cents_for_usage,
     combine_usages,
@@ -934,12 +933,15 @@ def run_job(
             logger.info("Scorer sandbox final usage is pending reconciliation")
 
 
-def _combined_usage(lms: list[Any], native: NativeOptions | None) -> list[ModelUsage]:
+def _combined_usage(
+    lms: list[Any], native: NativeOptions | None, *, excluded_native_models: frozenset[str] = frozenset()
+) -> list[ModelUsage]:
     """Preserve each native model's identity when combining token accounting.
 
     Args:
         lms: Metered DSPy models and scorer ledgers.
         native: Shared native usage collector, if the recipe uses one.
+        excluded_native_models: Native model IDs whose usage does not count toward this total.
 
     Returns:
         One usage row per model across both transports, with any reported cost
@@ -956,6 +958,7 @@ def _combined_usage(lms: list[Any], native: NativeOptions | None) -> list[ModelU
                 output_tokens=counts.get("completion_tokens", 0),
             )
             for model, counts in snapshot.items()
+            if model not in excluded_native_models
         )
     return combine_usages(usages)
 
@@ -1038,11 +1041,8 @@ def _run_job(
     lm = build_language_model(job.reflection_model_settings, disable_cache=True)
     reflection_lm, reflection_durations_ms = _reflection_caller(lm)
     token_budget = None
-    if job.max_cost_cents is not None:
-        cost_multiplier = (
-            PLATFORM_FEE_FRACTION if job.reflection_model_settings.token_source == "byok" else usage_markup()
-        )
-        token_budget = job.max_cost_cents * CENT_USD_VALUE / cost_multiplier
+    if job.max_cost_cents is not None and job.reflection_model_settings.token_source != "byok":
+        token_budget = job.max_cost_cents * CENT_USD_VALUE / usage_markup()
     native_options = None
     if uses_native_runtime(job):
         budget_route = job.reflection_model_settings.extra.get(ROUTE_KEY)
@@ -1051,7 +1051,7 @@ def _run_job(
             if budget_route
             else gateway_from_settings(settings)
         )
-        if gateway is None or token_budget is None:
+        if gateway is None or (token_budget is None and job.reflection_model_settings.token_source != "byok"):
             raise ServiceError("The upstream proposer needs a gateway and a total spending budget.")
         active_runtime = current_sandbox_runtime()
         native_options = NativeOptions(
@@ -1101,8 +1101,16 @@ def _run_job(
     # the cost ceiling and the usage the worker bills.
     scorer_usage = getattr(base_scorer, "usage", None)
     lms = [lm, *job.extra_lms] + ([] if scorer_usage is None else [scorer_usage])
+    byok_reflection = job.reflection_model_settings.token_source == "byok"
+    billable_lms = lms[1:] if byok_reflection else lms
+    native_sources: dict[str, set[str]] = {}
+    for config in (job.reflection_model_settings, *job.extra_reflection_model_settings):
+        route = config.extra.get(ROUTE_KEY) or {}
+        model = route.get("model", config.name)
+        native_sources.setdefault(model, set()).add(config.token_source)
+    excluded_native_models = frozenset(model for model, sources in native_sources.items() if sources == {"byok"})
     callbacks = (
-        [CostCeilingCallback(job.max_cost_cents, *lms)]
+        [CostCeilingCallback(job.max_cost_cents, *billable_lms)]
         if job.max_cost_cents is not None and job.execution_budget_id is None
         else []
     )
@@ -1110,15 +1118,22 @@ def _run_job(
 
         def check_budget() -> None:
             """Stop engine boundaries even when DSPy has caught a callback exception."""
-            if cents_for_usage(_combined_usage(lms, native_options)) >= job.max_cost_cents:
+            if (
+                cents_for_usage(
+                    _combined_usage(billable_lms, native_options, excluded_native_models=excluded_native_models)
+                )
+                >= job.max_cost_cents
+            ):
                 raise BudgetReached("The run's total spending budget has been reached.")
 
         ctx.check_budget = check_budget
 
         def remaining_cost_usd() -> float:
             """Return the run allowance after measured model usage across every lane."""
-            spent = raw_cost_usd(_combined_usage(lms, native_options))
-            return max(0.0, float(token_budget) - spent)
+            spent = raw_cost_usd(
+                _combined_usage(billable_lms, native_options, excluded_native_models=excluded_native_models)
+            )
+            return max(0.0, job.max_cost_cents * CENT_USD_VALUE / usage_markup() - spent)
 
         ctx.remaining_cost_usd = remaining_cost_usd
     iterations = f", up to {job.budget.max_iterations} iteration(s)" if job.budget.max_iterations else ""

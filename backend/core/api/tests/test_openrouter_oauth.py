@@ -265,7 +265,7 @@ def test_wallet_serves_the_current_pricing_terms(client: TestClient, monkeypatch
     assert response.status_code == 200
     assert response.json()["pricing"] == {
         "usage_markup": 1.3,
-        "byok_fee_fraction": 0.05,
+        "byok_fee_fraction": 0.0,
         "purchase_fee_rate": 0.125,
         "purchase_fee_fixed_cents": 35,
     }

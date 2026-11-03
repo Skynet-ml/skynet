@@ -2,7 +2,7 @@
  * Bring-your-own-key (BYOK) provider-key domain model.
  *
  * When an account runs in `byok` token mode, the provider bills model tokens
- * directly to the user's key. The Skynet balance still funds the platform fee and
+ * directly to the user's key. Skynet charges no model fee; the balance funds the
  * managed sandbox. A key is saved once per provider, shown only masked
  * afterwards, and carries a verification state so the UI can tell a typo'd
  * key from a working one before a job ever runs.

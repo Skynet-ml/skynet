@@ -66,7 +66,7 @@ You can add your own model provider keys.
 - Skynet keeps only the last four characters and a status: unverified, verified or invalid.
 - When you enter a key, Skynet sends a small test request to check it.
 
-When you use your own key, the provider charges your key directly. Skynet still charges its platform fee and sandbox usage from your balance.
+Your provider bills model tokens to your key. Skynet charges no model fee. The run budget covers sandbox usage only.
 
 Skynet also removes secrets from logs and error messages. It replaces them with `[REDACTED]`.
 

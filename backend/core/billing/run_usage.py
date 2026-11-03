@@ -20,6 +20,8 @@ from sqlalchemy.orm import Session
 
 from ..storage.models import ExecutionBudgetModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 from .budget_amounts import CENT_SCALE, cents_from_units
+from .model_dispatch import usage_charge
+from .operation_pricing import UnpricedOperationError, exact_nonnegative
 from .pricing import CENT_USD_VALUE, ModelUsage, known_token_prices, usage_cost_usd
 from .usage_tags import CALLER_PROPOSER, CALLER_REFLECTION
 
@@ -128,19 +130,24 @@ def _tokens(usage: Mapping[str, Any] | None) -> tuple[int, int]:
 
 
 def _byok_provider_cents(record: OperationRecord) -> Decimal | None:
-    """Recover the at-cost provider charge of a BYOK call from the fee Skynet billed on it.
+    """Read a BYOK provider charge from its usage evidence.
 
     Args:
         record: A BYOK model operation.
 
     Returns:
-        Provider cents, or ``None`` when the recorded fee fraction cannot be inverted.
+        Provider cents, or ``None`` when no valid cost was reported.
     """
     try:
-        fraction = Decimal(str(record.policy.get("byok_fee_fraction")))
-    except ArithmeticError:
+        usage = record.evidence.get("usage")
+        if not isinstance(usage, Mapping):
+            return None
+        if usage.get("is_byok") is True:
+            cost = usage_charge(usage)
+            return None if cost is None else cost / Decimal(str(CENT_USD_VALUE))
+        return exact_nonnegative(usage.get("cost")) / Decimal(str(CENT_USD_VALUE))
+    except UnpricedOperationError:
         return None
-    return cents_from_units(record.wallet_units) / fraction if fraction > 0 else None
 
 
 def aggregate(

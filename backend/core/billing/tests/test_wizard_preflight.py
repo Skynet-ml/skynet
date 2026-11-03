@@ -23,6 +23,7 @@ from core.api.model_billing import normalize_model_token_sources
 from core.api.routers import wizard_preflight as preflight_router
 from core.api.routers.execution_budgets import create_execution_budgets_router
 from core.billing.budgets import BudgetConflictError
+from core.billing.byok_vault import ProviderKeyVault
 from core.billing.model_gateway import ROUTE_KEY
 from core.billing.operation_pricing import ChargePolicy, operation_quote
 from core.billing.protected_credentials import (
@@ -309,3 +310,67 @@ def test_unified_metric_model_gets_a_metered_route(setup_client, monkeypatch: py
     assert response.status_code == 200, response.text
     assert ROUTE_KEY in seen[0]["models"]["metric_model"]["extra"]
     assert not {"scorer", "task_model_config", "reflection_model_config"} & seen[0].keys()
+
+
+def test_unified_byok_roles_are_aliased_before_setup_protection(setup_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep task, reflection, and BYOK metric aliases available at setup protection."""
+    client, engine, _calls = setup_client
+    monkeypatch.setattr(settings, "byok_vault_key", SecretStr(Fernet.generate_key().decode()))
+    monkeypatch.setattr("core.billing.byok_vault._pinned_address", lambda *args, **kwargs: "8.8.8.8")
+    monkeypatch.setattr(ProviderKeyVault, "_probe", lambda *args, **kwargs: "verified")
+    ProviderKeyVault(engine=engine).save_key("alice", "openai", "metric-private", api_base="https://public.example/v1")
+    events: list[str] = []
+    alias = wizard_preflight.alias_unified_model_roles
+
+    def alias_spy(payload: dict) -> None:
+        """Record when the setup adds its aliases."""
+        events.append("alias")
+        alias(payload)
+
+    class _RoutingGateway(_Gateway):
+        """Assert the protected boundary receives every aliased model."""
+
+        def protect_payload(self, payload: dict, **kwargs) -> dict:
+            """Check the roles and the resolved BYOK metric key."""
+            events.append("protect")
+            assert payload["task_model_config"] is payload["models"]["task_model"]
+            assert payload["reflection_model_config"] is payload["models"]["reflection_model"]
+            metric = payload["scorer"]["model"]
+            assert metric is payload["models"]["metric_model"]
+            assert metric["token_source"] == "byok"
+            assert metric["extra"]["api_key"] == "metric-private"
+            result = copy.deepcopy(payload)
+            result["scorer"]["model"]["extra"].pop("api_key")
+            return result
+
+    def verify(_gateway, payload, **kwargs) -> dict:
+        """Finish the setup without executing a sandbox."""
+        assert not {"scorer", "task_model_config", "reflection_model_config"} & payload.keys()
+        return {"checks": [{"key": "metric.contract", "status": "succeeded"}]}
+
+    monkeypatch.setattr(wizard_preflight, "alias_unified_model_roles", alias_spy)
+    monkeypatch.setattr(wizard_preflight, "ModelGateway", _RoutingGateway)
+    monkeypatch.setattr(wizard_preflight, "_verify_unified", verify)
+    payload = {
+        "task": {"objective": "Answer.", "artifact": {"kind": "prompt", "starting_version": "Answer: "}},
+        "data": {
+            "mode": "pairs",
+            "cases": [{"input": {"question": "Q"}, "expected": "A"}, {"input": {"question": "Q2"}, "expected": "A2"}],
+            "input_fields": ["question"],
+        },
+        "optimizer": {"choice": "gepa"},
+        "models": {
+            "task_model": {"name": "fixture/task"},
+            "reflection_model": {"name": "fixture/reflection"},
+            "metric_model": {"name": "openai/judge", "token_source": "byok", "byok_provider": "openai"},
+        },
+        "workspace": {
+            "run_code": "def run(artifact, input): return artifact",
+            "metric_code": "def score(input, output, expected=None): return 1.0, {}",
+        },
+        "max_cost_cents": 20,
+    }
+    response = client.post("/wizard/preflight", json={**_request(_budget(client), payload), "workflow": "unified"})
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "succeeded"
+    assert events == ["alias", "protect"]
