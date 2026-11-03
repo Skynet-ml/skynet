@@ -66,7 +66,7 @@ Você pode adicionar as suas próprias chaves de provedores de modelos.
 - O Skynet guarda apenas os quatro últimos caracteres e um status: não verificada, verificada ou inválida.
 - Quando você insere uma chave, o Skynet envia uma pequena requisição de teste para verificá-la.
 
-Quando você usa a sua própria chave, o provedor cobra diretamente na sua chave. O Skynet continua cobrando a taxa da plataforma e o uso da sandbox do seu saldo.
+O provedor cobra os tokens do modelo na sua chave. Skynet não cobra taxa pelo modelo. O orçamento da execução cobre apenas o uso da sandbox.
 
 O Skynet também remove segredos de logs e mensagens de erro. Ele os substitui por `[REDACTED]`.
 
@@ -102,7 +102,7 @@ A configuração **Privacidade dos dados dos modelos** controla o que os provedo
 | **Sem retenção**    | Apenas endpoints com um acordo de retenção zero de dados. Alguns modelos podem ficar indisponíveis. |
 
 > [!NOTE]
-> Otimizações com a sua própria chave seguem as configurações de privacidade da sua conta OpenRouter.
+> Chamadas BYOK pelo OpenRouter seguem as configurações de privacidade da sua conta OpenRouter. Chamadas BYOK diretas seguem a política de dados do provedor.
 
 ## Visibilidade das execuções
 

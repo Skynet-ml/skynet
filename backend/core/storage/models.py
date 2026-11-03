@@ -901,7 +901,7 @@ class BillingProviderKeyModel(Base):
     """One stored BYOK provider connection for an account, encrypted at rest.
 
     Backs BYOK mode: the user's provider key pays model usage while the Skynet balance
-    covers only the platform fee and sandbox usage. The secret is never stored
+    covers sandbox usage, with no BYOK model fee. The secret is never stored
     in plaintext — only ``secret_ciphertext`` (the Fernet-encrypted bytes) is
     persisted, so a database dump never leaks a usable key. ``last4`` is the
     recognizable tail kept for masked display, and ``status`` records whether the

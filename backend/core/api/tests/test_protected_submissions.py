@@ -886,15 +886,21 @@ def test_local_check_accepts_subscription_task_and_reflection_models(
     }
 
 
-def test_unusable_model_credentials_fail_the_check_instead_of_leaving_it_running(harness: _Harness) -> None:
+def test_unusable_model_credentials_fail_the_check_instead_of_leaving_it_running(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Record a failed check, not a row stuck at running, when a role has no usable credentials.
 
     Args:
         harness: Real setup and wallet services.
+        monkeypatch: Simulate a connection disappearing after admission.
     """
+    view = SimpleNamespace(provider="openai", api_base=None, status="verified")
+    vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
+    monkeypatch.setattr(submissions, "ProviderKeyVault", lambda **kwargs: vault)
     models = {
         "reflection_model": {"name": "fixture/text"},
-        "task_model": {"name": "bare-model", "token_source": "byok"},
+        "task_model": {"name": "gpt-4o", "token_source": "byok", "byok_provider": "openai"},
     }
 
     response, status = _check_models(harness, models)
@@ -903,7 +909,7 @@ def test_unusable_model_credentials_fail_the_check_instead_of_leaving_it_running
     body = response.json()
     assert body["status"] == "failed"
     assert status == "failed"
-    assert any("saved provider connection" in (check.get("message") or "") for check in body["checks"]), body
+    assert any("No verified openai connection" in (check.get("message") or "") for check in body["checks"]), body
     assert harness.calls == []
 
 

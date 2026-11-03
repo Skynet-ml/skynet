@@ -200,7 +200,7 @@ def test_protected_parent_does_not_load_scorer_code_before_sandbox() -> None:
         worker._process_job("protected-anything", 0)
 
     assert validate.call_count == 1
-    assert validate.call_args.kwargs == {"verify_scorer": False}
+    assert validate.call_args.kwargs == {"verify_scorer": False, "api_bases": {}}
 
 
 def test_contained_commands_cannot_restore_provider_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:

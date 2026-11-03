@@ -166,7 +166,7 @@
   "trajectory.controls.fullscreen_exit": "Sair da tela inteira",
   "trajectory.scrubber.live": "Ao vivo",
   "tooltip.submit.blackbox.scorer_install": "É executado uma vez na sandbox offline na nuvem. Use pacotes que já estejam na imagem fixada ou artefatos de pacotes gerenciados pela implantação; os repositórios públicos de apt e de pacotes não estão disponíveis.",
-  "submit.budget.byok_note": "Seu provedor cobra os tokens do modelo diretamente na sua chave. Este limite cobre apenas a taxa da plataforma {term.appName} e o uso do ambiente de execução.",
+  "submit.budget.byok_note": "O provedor cobra os tokens do modelo na sua chave. {term.appName} não cobra taxa pelo modelo. O orçamento da execução cobre apenas o uso da sandbox.",
   "submit.blackbox.roles.optimization.managed_hint": "Usa as configurações de amostragem padrão do modelo; o pagamento pode usar seu saldo {term.appName} ou sua chave OpenRouter.",
   "optimizations.grid.open_pair": "Abrir o par {pair}",
   "optimizations.grid.empty.title": "Nenhum resultado de pares",

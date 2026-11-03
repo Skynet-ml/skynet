@@ -57,13 +57,12 @@ Bir bütçede zaten hareket varsa sihirbazdaki **Harcama limiti** kartı hesap d
 
 ## Ücretler
 
-Skynet, sağlayıcı maliyetinin üzerine üç ücret uygular.
+Skynet, sağlayıcı maliyetinin üzerine iki ücret uygular.
 
 | Ücret                             | Geçerli varsayılan                          | Neye uygulanır                                              |
 | --------------------------------- | ------------------------------------------- | ----------------------------------------------------------- |
 | Bakiye yükleme ücreti             | Tutarın %12,5'i, artı 0,35 $                | Her bakiye yükleme                                          |
 | Kullanım marjı                    | Sağlayıcı maliyeti × 1,15 (maliyet artı %15) | Skynet'in anahtarlarıyla yapılan model çağrıları ve sandbox işlem gücü |
-| Kendi anahtarınız için platform ücreti | Model maliyetinin %5'i                  | Kendi sağlayıcı anahtarınızla yapılan model çağrıları       |
 
 ### Bakiye yükleme ücreti
 
@@ -87,8 +86,8 @@ Model çağrılarını kendi sağlayıcı anahtarınızla çalıştırabilirsini
 Bir model çağrısı anahtarınızı kullandığında:
 
 - Sağlayıcınız model token'larını anahtarınıza faturalandırır.
-- Skynet, model maliyetinin %5'i kadar bir platform ücretini bakiyenizden tahsil eder. Skynet bu ücrete kullanım marjı eklemez.
-- Çalıştırmanın harcama limiti yalnızca platform ücretini ve sandbox kullanımını kapsar.
+- Skynet model ücreti almaz.
+- Çalışma bütçesi yalnızca sandbox kullanımını kapsar.
 
 Harici bir puanlayıcı veya MCP sağlayıcısının ücretleri doğrudan o sağlayıcıya gider. Bunlar çalıştırmanın harcama limitine dahil değildir.
 

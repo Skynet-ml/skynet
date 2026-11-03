@@ -10,6 +10,7 @@ network call is made.
 
 from __future__ import annotations
 
+import socket
 from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -22,12 +23,15 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from core.api.errors import DomainError
+from core.billing.byok_upstreams import UPSTREAMS, resolve_upstream
 from core.billing.byok_vault import (
+    _PROVIDER_PROBES,
     STATUS_INVALID,
     STATUS_UNVERIFIED,
     STATUS_VERIFIED,
     ProviderKeyVault,
 )
+from core.billing.mcp_broker import _pinned_address
 from core.config import settings
 from core.storage.models import Base, BillingProviderKeyModel
 
@@ -46,6 +50,8 @@ def vault_key(monkeypatch: pytest.MonkeyPatch) -> str:
     """Set a real Fernet vault key so encryption/decryption works, and return it."""
     key = Fernet.generate_key().decode("utf-8")
     monkeypatch.setattr(settings, "byok_vault_key", SecretStr(key))
+    monkeypatch.setattr("core.billing.byok_vault._pinned_address", lambda *args, **kwargs: "8.8.8.8")
+    monkeypatch.setattr(httpx.Client, "get", lambda self, *args, **kwargs: _probe_response(200))
     return key
 
 
@@ -85,7 +91,19 @@ def test_save_key_verified_on_2xx(engine: object, vault_key: str) -> None:
     assert view.status == STATUS_VERIFIED
 
 
-@pytest.mark.parametrize("api_base", [None, "https://openrouter.ai", "https://openrouter.ai/api/v1"])
+def test_save_anthropic_canonical_base_uses_native_auth(engine: object, vault_key: str) -> None:
+    """Use Anthropic authentication for its canonical saved base."""
+    with patch("core.billing.byok_vault.httpx.Client.get", return_value=_probe_response(200)) as get:
+        view = ProviderKeyVault(engine=engine).save_key(
+            "u@x.com", "anthropic", "anthropic-secret", api_base="https://api.anthropic.com/v1/"
+        )
+    assert view.status == STATUS_VERIFIED
+    assert get.call_args.kwargs["headers"] == {"x-api-key": "anthropic-secret", "anthropic-version": "2023-06-01"}
+
+
+@pytest.mark.parametrize(
+    "api_base", [None, "https://openrouter.ai", "https://openrouter.ai/api/v1", "https://OPENROUTER.AI:443/api/v1/"]
+)
 def test_save_openrouter_key_uses_credential_specific_probe(
     engine: object, vault_key: str, api_base: str | None
 ) -> None:
@@ -249,13 +267,12 @@ def test_save_key_custom_api_base_probes_that_endpoint(engine: object, vault_key
     vault = ProviderKeyVault(engine=engine)
     captured: dict[str, str] = {}
 
-    def fake_get(url: str, headers: dict[str, str], timeout: float) -> object:
+    def fake_get(url: str, headers: dict[str, str]) -> object:
         """Record the probe URL + auth header, then report a 2xx.
 
         Args:
             url: The endpoint the probe hit.
             headers: The request headers (carrying the auth shape).
-            timeout: The probe timeout (unused).
 
         Returns:
             A stand-in 200 response.
@@ -264,7 +281,7 @@ def test_save_key_custom_api_base_probes_that_endpoint(engine: object, vault_key
         captured["auth"] = headers.get("Authorization", "")
         return _probe_response(200)
 
-    with patch("core.billing.byok_vault.httpx.get", side_effect=fake_get):
+    with patch("core.billing.byok_vault.httpx.Client.get", side_effect=fake_get):
         view = vault.save_key("u@x.com", "custom", "sk-custom-1234", api_base="https://host.example/v1")
     assert view.status == STATUS_VERIFIED
     assert view.api_base == "https://host.example/v1"
@@ -280,7 +297,7 @@ def test_save_key_custom_root_falls_back_across_models_paths(
     vault = ProviderKeyVault(engine=engine)
 
     with patch(
-        "core.billing.byok_vault.httpx.get",
+        "core.billing.byok_vault.httpx.Client.get",
         side_effect=[_probe_response(404), _probe_response(200)],
     ) as get:
         view = vault.save_key(
@@ -303,6 +320,154 @@ def test_save_key_unknown_provider_without_api_base_rejected(engine: object, vau
     with pytest.raises(DomainError) as exc:
         vault.save_key("u@x.com", "custom", "sk-1234")
     assert exc.value.status_code == 400
+
+
+def test_vault_probe_rejects_private_base(engine: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refuse a private custom probe without sending a key."""
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [(0, 0, 0, "", ("10.1.2.3", 443))])
+    assert ProviderKeyVault(engine=engine)._probe("custom", "private", "https://private.example/v1") == STATUS_INVALID
+
+
+@pytest.mark.parametrize("base", ["http://public.example/v1", "https://public.example/v1?x=1"])
+def test_vault_probe_rejects_unsafe_shape(engine: object, base: str) -> None:
+    """Classify legacy unsafe endpoint shapes as invalid."""
+    assert ProviderKeyVault(engine=engine)._probe("custom", "secret", base) == STATUS_INVALID
+
+
+@pytest.mark.parametrize("failure", ["shape", "private", "dns"])
+def test_verify_key_classifies_legacy_endpoint_failures(
+    engine: object, vault_key: str, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """Return a verification status for unsafe legacy URLs and DNS outages."""
+    vault = ProviderKeyVault(engine=engine)
+    with patch("core.billing.byok_vault.httpx.Client.get", side_effect=httpx.ConnectError("offline")):
+        saved = vault.save_key("u@x.com", "custom", "secret", api_base="https://public.example/v1")
+    assert saved.status == STATUS_UNVERIFIED
+    with Session(engine) as session:
+        row = session.query(BillingProviderKeyModel).filter_by(username="u@x.com", provider="custom").one()
+        if failure == "shape":
+            row.api_base = "http://public.example/v1"
+        session.commit()
+
+    def resolve(*args: object, **kwargs: object) -> object:
+        """Simulate DNS failure or a rebind to a private address."""
+        if failure == "dns":
+            raise socket.gaierror("dns unavailable")
+        return [(0, 0, 0, "", ("10.0.0.1", 443))]
+
+    monkeypatch.setattr("core.billing.byok_vault._pinned_address", _pinned_address)
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    result = vault.verify_key("u@x.com", "custom")
+    assert result.status == (STATUS_UNVERIFIED if failure == "dns" else STATUS_INVALID)
+
+
+def test_vault_probe_unverified_on_dns_failure(engine: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Do not treat DNS outages as invalid keys."""
+
+    def fail(*args: object, **kwargs: object) -> object:
+        """Simulate a DNS outage."""
+        raise socket.gaierror("dns unavailable")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fail)
+    assert ProviderKeyVault(engine=engine)._probe("custom", "secret", "https://public.example/v1") == STATUS_UNVERIFIED
+
+
+def test_vault_save_unverified_on_dns_failure(engine: object, vault_key: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Save a safe endpoint when DNS is temporarily unavailable."""
+
+    def fail(*args: object, **kwargs: object) -> object:
+        """Simulate a DNS outage."""
+        raise socket.gaierror("dns unavailable")
+
+    monkeypatch.setattr("core.billing.byok_vault._pinned_address", _pinned_address)
+    monkeypatch.setattr(socket, "getaddrinfo", fail)
+    view = ProviderKeyVault(engine=engine).save_key("u@x.com", "custom", "secret", api_base="https://public.example/v1")
+    assert view.status == STATUS_UNVERIFIED
+
+
+def test_vault_save_rejects_unsafe_shape(engine: object, vault_key: str) -> None:
+    """Return an i18n domain error for an unsafe endpoint."""
+    with pytest.raises(DomainError) as error:
+        ProviderKeyVault(engine=engine).save_key("u@x.com", "custom", "secret", api_base="http://public.example/v1")
+    assert error.value.code == "billing.byok_invalid_endpoint"
+    assert error.value.status_code == 400
+
+
+def test_vault_save_rejects_private_base(engine: object, vault_key: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject a private custom base before storing or probing its key."""
+    monkeypatch.setattr("core.billing.byok_vault._pinned_address", _pinned_address)
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [(0, 0, 0, "", ("127.0.0.1", 443))])
+    with pytest.raises(DomainError) as error:
+        ProviderKeyVault(engine=engine).save_key("u@x.com", "custom", "private", api_base="https://private.example/v1")
+    assert error.value.status_code == 400
+    assert error.value.code == "billing.byok_invalid_endpoint"
+    with Session(engine) as session:
+        assert session.query(BillingProviderKeyModel).count() == 0
+
+
+@pytest.mark.parametrize("slug", ["together"])
+def test_probe_and_runtime_use_same_base(slug: str) -> None:
+    """Keep verification and inference on the same provider endpoint."""
+    assert _PROVIDER_PROBES[slug]["url"] == f"{UPSTREAMS[slug].base_url}/models"
+
+
+def test_deepseek_probe_uses_root_endpoint() -> None:
+    """Use DeepSeek's root key probe while chat uses v1."""
+    assert _PROVIDER_PROBES["deepseek"]["url"] == "https://api.deepseek.com/models"
+    assert UPSTREAMS["deepseek"].base_url == "https://api.deepseek.com/v1"
+
+
+@pytest.mark.parametrize(
+    ("base", "probe", "dispatch"),
+    [
+        (None, "https://api.deepseek.com/models", "https://api.deepseek.com/v1"),
+        ("https://api.deepseek.com", "https://api.deepseek.com/v1/models", "https://api.deepseek.com/v1"),
+        ("https://api.deepseek.com/v1", "https://api.deepseek.com/v1/models", "https://api.deepseek.com/v1"),
+        ("https://api.deepseek.com/beta", "https://api.deepseek.com/beta/models", "https://api.deepseek.com/beta"),
+    ],
+)
+def test_deepseek_probe_matches_dispatch(
+    engine: object, vault_key: str, base: str | None, probe: str, dispatch: str
+) -> None:
+    """Keep the saved DeepSeek endpoint and its model probe aligned."""
+    with (
+        patch("core.billing.byok_vault.httpx.get", return_value=_probe_response(200)) as direct,
+        patch("core.billing.byok_vault.httpx.Client.get", return_value=_probe_response(200)) as pinned,
+    ):
+        view = ProviderKeyVault(engine=engine).save_key("u@x.com", "deepseek", "secret", api_base=base)
+    assert view.status == STATUS_VERIFIED
+    assert (pinned if base else direct).call_args.args[0] == probe
+    assert resolve_upstream({"name": "deepseek/model", "base_url": base}).base_url == dispatch
+
+
+@pytest.mark.parametrize("base", ["https://API.ANTHROPIC.COM/v1", "https://api.anthropic.com:443/v1"])
+def test_canonical_anthropic_probe_normalizes_endpoint(engine: object, vault_key: str, base: str) -> None:
+    """Preserve native probe authentication for equivalent endpoint spellings."""
+    with patch("core.billing.byok_vault.httpx.Client.get", return_value=_probe_response(200)) as get:
+        view = ProviderKeyVault(engine=engine).save_key("u@x.com", "anthropic", "secret", api_base=base)
+    assert view.status == STATUS_VERIFIED
+    assert get.call_args.kwargs["headers"] == {"x-api-key": "secret", "anthropic-version": "2023-06-01"}
+
+
+@pytest.mark.parametrize("status", [200, 302])
+def test_custom_probe_pins_host_and_tls(engine: object, monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    """Pin probe DNS and refuse redirects with the credential attached."""
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [(0, 0, 0, "", ("8.8.8.8", 443))])
+    requests: list[httpx.Request] = []
+
+    def send(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+        """Capture the pinned probe at the socket transport boundary."""
+        requests.append(request)
+        return httpx.Response(status, headers={"Location": "https://elsewhere.example/models"})
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", send)
+    result = ProviderKeyVault(engine=engine)._probe("custom", "private", "https://public.example/v1")
+    assert result == (STATUS_VERIFIED if status == 200 else STATUS_UNVERIFIED)
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://8.8.8.8/v1/models"
+    assert requests[0].headers["host"] == "public.example"
+    assert requests[0].extensions["sni_hostname"] == "public.example"
+    assert requests[0].headers["authorization"] == "Bearer private"
 
 
 def test_resolve_connection_round_trips_api_base_and_params(engine: object, vault_key: str) -> None:

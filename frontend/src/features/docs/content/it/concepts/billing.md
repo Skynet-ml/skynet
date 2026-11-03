@@ -57,13 +57,12 @@ Quando un budget ha già delle attività, la scheda **Limite di spesa** nella pr
 
 ## Commissioni
 
-Skynet applica tre addebiti oltre al costo del provider.
+Skynet applica due addebiti oltre al costo del provider.
 
 | Addebito                                   | Valore predefinito attuale                       | Si applica a                                                  |
 | ------------------------------------------ | ------------------------------------------------ | ------------------------------------------------------------- |
 | Commissione di ricarica                    | 12,5% dell'importo, più 0,35 $                   | Ogni ricarica                                                 |
 | Ricarico sull'utilizzo                     | Costo del provider × 1,15 (costo più 15%)        | Chiamate ai modelli con le chiavi di Skynet e calcolo della sandbox |
-| Commissione della piattaforma con la tua chiave | 5% del costo del modello                    | Chiamate ai modelli con la chiave del tuo provider            |
 
 ### Commissione di ricarica
 
@@ -87,8 +86,8 @@ Puoi eseguire le chiamate ai modelli con la chiave del tuo provider. Aggiungi le
 Quando una chiamata al modello usa la tua chiave:
 
 - Il tuo provider addebita i token del modello sulla tua chiave.
-- Skynet addebita sul tuo saldo una commissione della piattaforma pari al 5% del costo del modello. Skynet non aggiunge il ricarico sull'utilizzo a questa commissione.
-- Il limite di spesa dell'esecuzione copre solo la commissione della piattaforma e l'uso della sandbox.
+- Skynet non applica costi per il modello.
+- Il budget dell’esecuzione copre solo l’uso della sandbox.
 
 Eventuali commissioni di uno scorer esterno o di un provider MCP vanno direttamente a quel provider. Non fanno parte del limite di spesa dell'esecuzione.
 

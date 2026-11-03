@@ -548,7 +548,7 @@ class Settings(BaseSettings):
         default=1.15,
         ge=1.0,
         alias="USAGE_MARKUP",
-        description="Multiplier applied to the provider cost of every platform-paid metered charge (managed LLM tokens and Vercel sandbox compute) before converting to cents. 1.15 bills cost plus 15%. BYOK runs are unaffected: they pay only the 5% platform fee on model cost. Holds, pre-run estimates and displayed model prices include it.",
+        description="Multiplier applied to the provider cost of every platform-paid metered charge (managed LLM tokens and Vercel sandbox compute) before converting to cents. 1.15 bills cost plus 15%. BYOK model calls carry no Skynet fee. Holds, pre-run estimates and displayed model prices include it.",
     )
     openrouter_api_key: SecretStr | None = Field(
         default=None,

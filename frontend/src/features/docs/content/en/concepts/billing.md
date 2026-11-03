@@ -57,13 +57,12 @@ When a budget already has activity, the **Spending limit** card in the wizard sh
 
 ## Fees
 
-Skynet has three charges on top of the provider cost.
+Skynet has two charges on top of the provider cost.
 
 | Charge                        | Current default                      | Applies to                                        |
 | ----------------------------- | ------------------------------------ | ------------------------------------------------- |
 | Top-up fee                    | 12.5% of the amount, plus $0.35      | Each top-up                                       |
 | Usage markup                  | Provider cost × 1.15 (cost plus 15%) | Model calls on Skynet's keys, and sandbox compute |
-| Platform fee for your own key | 5% of the model cost                 | Model calls on your own provider key              |
 
 ### Top-up fee
 
@@ -87,8 +86,8 @@ You can run model calls on your own provider key. Add keys in **Settings → Pro
 When a model call uses your key:
 
 - Your provider bills the model tokens to your key.
-- Skynet charges a platform fee of 5% of the model cost from your balance. Skynet does not add the usage markup to this fee.
-- The run's spending limit covers only the platform fee and sandbox usage.
+- Skynet charges no model fee.
+- The run budget covers sandbox usage only.
 
 Any fees from an external scorer or MCP provider go directly to that provider. They are not part of the run's spending limit.
 

@@ -18,7 +18,7 @@
   "optimizations.serve.field_separator": ": ",
   "share.you": "(o próprio)",
   "tooltip.submit.blackbox.scorer_install": "É executado uma vez na sandbox offline na nuvem. Use pacotes já presentes na imagem fixada ou artefatos de pacotes geridos pela implantação; os repositórios públicos de apt e de pacotes não estão disponíveis.",
-  "submit.budget.byok_note": "O seu fornecedor cobra os tokens do modelo na sua chave. Este limite cobre apenas a taxa de plataforma da {term.appName} e o ambiente de execução.",
+  "submit.budget.byok_note": "O fornecedor cobra os tokens do modelo na sua chave. {term.appName} não cobra taxas pelo modelo. O orçamento da execução cobre apenas a utilização da sandbox.",
   "submit.blackbox.roles.optimization.managed_hint": "Usa as definições de amostragem predefinidas do modelo; o pagamento pode usar o seu saldo {term.appName} ou a sua chave OpenRouter.",
   "optimizations.grid.open_pair": "Abrir o par {pair}",
   "optimizations.grid.empty.title": "Sem resultados de pares",

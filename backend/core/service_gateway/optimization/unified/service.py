@@ -14,6 +14,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from ....api.errors import DomainError, domain_service_error
 from ....billing.model_gateway import ROUTE_KEY
 from ....config import settings
 from ....exceptions import ServiceError
@@ -120,6 +121,14 @@ def unified_job_spec(
         optimizer_resolved=resolved,
         context=context,
         extra_lms=[lm for lm in (task_lm, metric_lm) if lm is not None],
+        extra_lm_sources=[
+            config.token_source
+            for lm, config in (
+                (task_lm, models.task_model or models.reflection_model),
+                (metric_lm, models.metric_model or models.reflection_model),
+            )
+            if lm is not None
+        ],
     )
 
 
@@ -174,7 +183,10 @@ def run_unified_optimization(
         if payload.models.metric_model is not None:
             metric_lm = build_language_model(payload.models.metric_model)
     job = unified_job_spec(payload, seed=seed, task_lm=task_lm, metric_lm=metric_lm)
-    validate_job(job)
+    try:
+        validate_job(job)
+    except DomainError as error:
+        raise domain_service_error(error) from error
     protected = payload.execution_budget_id is not None or ROUTE_KEY in payload.models.reflection_model.extra
     scorer = build_workspace_scorer(payload, _gateway(payload), protected=protected)
     return run_job(

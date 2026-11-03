@@ -30,7 +30,7 @@ You write two functions: `run(artifact, input)` and `score(input, output, expect
 - The agent panel sets up runs, reads files you attach and explains results. [Agent panel](https://skynetml.com/docs/guides/agent-panel)
 - You can edit datasets in place. The tagger learns your labels, then tags the rest in rounds you review. [Datasets](https://skynetml.com/docs/guides/datasets) · [Tagger](https://skynetml.com/docs/guides/tagger)
 - Compare versions, share a run and export the best artifact. [Results](https://skynetml.com/docs/guides/results)
-- Pay from a prepaid balance, or bring your own OpenRouter key and pay only the platform fee and sandbox usage.
+- Pay from a prepaid balance, or use your own provider key. Skynet charges no model fee for your key; sandbox usage is billed.
 - The app is in 24 languages and Hebrew is the base locale, so RTL layouts get tested first. The docs are in 17 languages.
 
 ## Run it locally

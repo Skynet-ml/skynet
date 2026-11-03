@@ -1061,8 +1061,8 @@ def test_serve_program_resolves_stored_custom_byok_connection(
         "byok_vault_key",
         SecretStr(Fernet.generate_key().decode("utf-8")),
     )
-    response = SimpleNamespace(status_code=200, is_success=True)
-    with patch("core.billing.byok_vault.httpx.get", return_value=response):
+    monkeypatch.setattr("core.billing.byok_vault._pinned_address", lambda *args, **kwargs: "8.8.8.8")
+    with patch("core.billing.byok_vault.ProviderKeyVault._probe", return_value="verified"):
         ProviderKeyVault(engine=metered_store.engine).save_key(
             "alice",
             "custom",

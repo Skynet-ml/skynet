@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from core.api.errors import DomainError
 from core.exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, ServiceError
 from core.i18n import CANCELLATION_REASON
 from core.storage.base import JobStore
@@ -783,6 +784,163 @@ _BLACKBOX_OVERVIEW: dict = {
     "model_name": "gpt-4o",
     "token_source": "managed",
 }
+
+
+def test_protected_blackbox_novelty_failure_has_plain_detail(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """Store the domain detail without an HTTP status prefix on legacy jobs."""
+    payload = {
+        **_BLACKBOX_PAYLOAD,
+        "reflection_model_config": {"name": "anthropic/claude-sonnet-4", "token_source": "byok"},
+        "strategy": {"mode": "single", "engine": "shinka_evolve"},
+        "shinka": {"novelty": True},
+    }
+    store.seed_job("novelty", payload=payload, payload_overview=_BLACKBOX_OVERVIEW, execution_budget_id="budget")
+    worker.enqueue_job("novelty")
+    with patch("core.worker.engine.notify_job_completed"), patch.object(worker, "_get_service"):
+        worker._process_job("novelty", 0)
+    assert store._jobs["novelty"]["status"] == "failed"
+    assert store._jobs["novelty"]["message"] == DomainError("submission.byok_novelty_unsupported").detail
+
+
+@pytest.mark.parametrize("source", ["explicit", "inherited"])
+def test_protected_blackbox_custom_novelty_fails_in_worker(
+    worker: BackgroundWorker, store: FakeJobStore, source: str
+) -> None:
+    """Validate the saved custom reflection base before running a protected job."""
+    payload = {
+        **_BLACKBOX_PAYLOAD,
+        "reflection_model_config": {
+            "name": "openai/gpt-4o",
+            "token_source": "byok" if source == "explicit" else None,
+            "byok_provider": "openai",
+        },
+        "token_source": "byok",
+        "strategy": {"mode": "single", "engine": "shinka_evolve"},
+        "shinka": {"novelty": True},
+        "max_cost_cents": 100,
+    }
+    store.engine = MagicMock()
+    store.seed_job("custom-novelty", payload=payload, payload_overview=_BLACKBOX_OVERVIEW, execution_budget_id="budget")
+    worker.enqueue_job("custom-novelty")
+    vault = MagicMock()
+    vault.resolve_connection.return_value = MagicMock(api_base="https://custom.example/v1")
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch("core.worker.engine.record_server_event"),
+        patch.object(worker, "_get_service"),
+        patch("core.worker.engine.ProviderKeyVault", return_value=vault),
+    ):
+        worker._process_job("custom-novelty", 0)
+    assert store._jobs["custom-novelty"]["status"] == "failed"
+    assert store._jobs["custom-novelty"]["message"] == DomainError("submission.byok_novelty_unsupported").detail
+    vault.resolve_connection.assert_called_once_with(payload["username"], "openai", verified_only=True)
+
+
+def test_gateway_domain_failure_has_plain_detail(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """Convert a gateway DomainError before recording a protected worker failure."""
+    store.engine = MagicMock()
+    store.seed_job(
+        "gateway-domain",
+        payload=_BLACKBOX_PAYLOAD,
+        payload_overview=_BLACKBOX_OVERVIEW,
+        execution_budget_id="budget",
+        execution_budget_generation=0,
+    )
+    worker.enqueue_job("gateway-domain")
+    gateway = MagicMock()
+    gateway.protect_payload.side_effect = DomainError("submission.byok_novelty_unsupported")
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch("core.worker.engine.record_server_event"),
+        patch.object(worker, "_get_service"),
+        patch("core.worker.engine.validate_blackbox_payload"),
+        patch("core.worker.engine.payload_uses_token_source", return_value=False),
+        patch("core.worker.engine.ModelGateway", return_value=gateway),
+        patch("core.worker.engine.BudgetService"),
+        patch("core.worker.engine.BudgetRuntime"),
+        patch("core.worker.engine.bind_protected_sandbox"),
+        patch("core.worker.engine.protected_image", return_value=None),
+        patch("core.worker.engine.resolve_execution_credentials", side_effect=lambda payload, **kwargs: payload),
+        patch.object(worker, "_close_budget_gateway", return_value=(None, None)),
+    ):
+        worker._process_job("gateway-domain", 0)
+    gateway.protect_payload.assert_called_once()
+    assert store._jobs["gateway-domain"]["message"] == DomainError("submission.byok_novelty_unsupported").detail
+
+
+def test_unified_custom_novelty_fails_before_sandbox(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """Reject unified custom BYOK novelty before binding a protected sandbox."""
+    payload = copy.deepcopy(REAL_UNIFIED_PAYLOAD)
+    payload["optimizer"] = {"choice": "shinka_evolve", "shinka": {"novelty": True}}
+    payload["models"] = {
+        "reflection_model": {"name": "openai/gpt-4o", "token_source": "byok", "byok_provider": "openai"}
+    }
+    payload["token_source"] = "byok"
+    store.engine = MagicMock()
+    store.seed_job(
+        "unified-custom",
+        payload=payload,
+        payload_overview={"optimization_type": "blackbox", "username": payload["username"]},
+        execution_budget_id="budget",
+        execution_budget_generation=0,
+    )
+    worker.enqueue_job("unified-custom")
+    vault = MagicMock()
+    vault.resolve_connection.return_value = MagicMock(api_base="https://custom.example/v1", secret="fixture", params={})
+    gateway = MagicMock()
+    gateway.protect_payload.side_effect = RuntimeError("reached gateway")
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch("core.worker.engine.record_server_event"),
+        patch.object(worker, "_get_service"),
+        patch("core.worker.engine.ProviderKeyVault", return_value=vault),
+        patch("core.worker.engine.ModelGateway", return_value=gateway),
+        patch("core.worker.engine.BudgetService"),
+        patch("core.worker.engine.BudgetRuntime"),
+        patch("core.worker.engine.bind_protected_sandbox") as bind,
+        patch("core.worker.engine.domain_service_error", wraps=engine_module.domain_service_error) as convert,
+        patch("core.worker.engine.protected_image", return_value=None),
+        patch("core.worker.engine.resolve_execution_credentials", side_effect=lambda payload, **kwargs: payload),
+        patch.object(worker, "_close_budget_gateway", return_value=(None, None)),
+    ):
+        worker._process_job("unified-custom", 0)
+    bind.assert_not_called()
+    assert convert.call_args.args[0].code == "submission.byok_novelty_unsupported"
+    assert store._jobs["unified-custom"]["message"] == DomainError("submission.byok_novelty_unsupported").detail
+
+
+def test_unified_byok_injection_domain_error_before_sandbox(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """Record a plain domain error when the BYOK bridge rejects a model."""
+    name = "openrouter/anthropic/claude-sonnet-4"
+    payload = copy.deepcopy(REAL_UNIFIED_PAYLOAD)
+    payload["models"] = {"reflection_model": {"name": name, "token_source": "byok", "byok_provider": "anthropic"}}
+    payload["token_source"] = "byok"
+    store.engine = MagicMock()
+    store.seed_job(
+        "unified-inject",
+        payload=payload,
+        payload_overview={"optimization_type": "blackbox", "username": payload["username"], "token_source": "byok"},
+        execution_budget_id="budget",
+        execution_budget_generation=0,
+    )
+    worker.enqueue_job("unified-inject")
+    vault = MagicMock()
+    vault.resolve_connection.return_value = MagicMock(api_base=None, secret="fixture", params={})
+    with (
+        patch("core.worker.engine.notify_job_completed"),
+        patch("core.worker.engine.record_server_event"),
+        patch.object(worker, "_get_service"),
+        patch("core.worker.engine.ProviderKeyVault", return_value=vault),
+        patch("core.worker.engine.bind_protected_sandbox") as bind,
+    ):
+        worker._process_job("unified-inject", 0)
+    vault.resolve_connection.assert_called_with(payload["username"], "anthropic")
+    bind.assert_not_called()
+    assert store._jobs["unified-inject"]["status"] == "failed"
+    assert (
+        store._jobs["unified-inject"]["message"]
+        == DomainError("billing.byok_model_not_served", status=400, model=name, provider="anthropic").detail
+    )
 
 
 def test_process_job_blackbox_without_budget_requires_vercel(

@@ -18,9 +18,12 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from ..provider_registry import BYOK_TO_LITELLM_PROVIDER
 from ..storage.models import ExecutionBudgetModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 from .budget_amounts import CENT_SCALE, cents_from_units
-from .pricing import CENT_USD_VALUE, ModelUsage, known_token_prices, usage_cost_usd
+from .model_dispatch import usage_charge
+from .operation_pricing import UnpricedOperationError, exact_nonnegative
+from .pricing import CENT_USD_VALUE, ModelUsage, cached_token_prices, known_token_prices, usage_cost_usd
 from .usage_tags import CALLER_PROPOSER, CALLER_REFLECTION
 
 ROLE_TASK = "task"
@@ -128,19 +131,76 @@ def _tokens(usage: Mapping[str, Any] | None) -> tuple[int, int]:
 
 
 def _byok_provider_cents(record: OperationRecord) -> Decimal | None:
-    """Recover the at-cost provider charge of a BYOK call from the fee Skynet billed on it.
+    """Read a BYOK provider charge from its usage evidence.
 
     Args:
         record: A BYOK model operation.
 
     Returns:
-        Provider cents, or ``None`` when the recorded fee fraction cannot be inverted.
+        Provider cents, or ``None`` when no valid cost was reported.
     """
     try:
-        fraction = Decimal(str(record.policy.get("byok_fee_fraction")))
-    except ArithmeticError:
+        usage = record.evidence.get("usage")
+        if isinstance(usage, Mapping):
+            if usage.get("is_byok") is True:
+                cost = usage_charge(usage)
+                if cost is not None:
+                    return cost / Decimal(str(CENT_USD_VALUE))
+                if usage.get("cost") is not None:
+                    return None
+            elif usage.get("cost") is not None:
+                return exact_nonnegative(usage.get("cost")) / Decimal(str(CENT_USD_VALUE))
+    except UnpricedOperationError:
         return None
-    return cents_from_units(record.wallet_units) / fraction if fraction > 0 else None
+    try:
+        fraction = exact_nonnegative(record.policy.get("byok_fee_fraction"))
+        if fraction > 0:
+            return cents_from_units(record.wallet_units) / fraction
+    except UnpricedOperationError:
+        return None
+    if not isinstance(usage, Mapping):
+        return None
+    keys = (
+        ("prompt_tokens", "completion_tokens")
+        if "prompt_tokens" in usage or "completion_tokens" in usage
+        else ("input_tokens", "output_tokens")
+    )
+    if not all(type(usage.get(key)) is int and usage[key] >= 0 for key in keys):
+        return None
+    details_key = "prompt_tokens_details" if keys[0] == "prompt_tokens" else "input_tokens_details"
+    details = usage.get(details_key)
+    cached_tokens = 0
+    if details is not None:
+        if not isinstance(details, Mapping):
+            return None
+        cached_tokens = details.get("cached_tokens", 0)
+        if type(cached_tokens) is not int or cached_tokens < 0:
+            return None
+    provider = str(record.evidence.get("provider") or "")
+    if provider == "custom":
+        return None
+    model = str(record.evidence.get("model") or record.quoted_model or "")
+    prefix = BYOK_TO_LITELLM_PROVIDER.get(provider, provider)
+    if prefix and prefix != "openrouter" and model and not model.startswith(f"{prefix}/"):
+        model = f"{prefix}/{model}"
+    prices = cached_token_prices(model) if model else None
+    if prices is None:
+        return None
+    input_tokens, output_tokens = _tokens(usage)
+    cache_read = _int(usage.get("cache_read_input_tokens"))
+    if details is not None:
+        cache_read = cached_tokens
+    cache_write = _int(usage.get("cache_creation_input_tokens"))
+    return Decimal(
+        str(
+            usage_cost_usd(
+                ModelUsage(
+                    model, input_tokens, output_tokens, cache_read_tokens=cache_read, cache_write_tokens=cache_write
+                ),
+                prices=prices,
+            )
+        )
+    ) / Decimal(str(CENT_USD_VALUE))
 
 
 def aggregate(

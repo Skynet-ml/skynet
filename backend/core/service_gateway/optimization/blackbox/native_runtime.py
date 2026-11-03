@@ -166,7 +166,7 @@ class NativeOptions:
     runtime: Literal["vercel", "docker"]
     model: str
     gateway: GatewayConfig = field(repr=False)
-    max_token_cost: float
+    max_token_cost: float | None
     proposer: BlackboxProposer = field(default_factory=BlackboxProposer)
     budget_route: dict[str, str] | None = field(default=None, repr=False)
     sandbox_runtime: SandboxRuntime | None = None
@@ -1017,7 +1017,9 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
         task = replace(task, seed_candidate="")
     if server.remaining <= 0:
         raise BudgetExhaustedError("The native optimizer evaluation budget is exhausted.")
-    if not math.isfinite(options.max_token_cost) or options.max_token_cost <= 0:
+    if options.max_token_cost is not None and (
+        not math.isfinite(options.max_token_cost) or options.max_token_cost <= 0
+    ):
         raise ServiceError("Native optimizers require a positive proposer cost limit.")
     if not options.gateway.url or not options.gateway.api_key:
         raise ServiceError("Native optimizers require a configured model gateway.")

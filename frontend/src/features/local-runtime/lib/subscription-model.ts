@@ -466,8 +466,7 @@ export function isLocalModelRefusal(code: string | null | undefined): boolean {
 }
 
 /**
- * The hint under "Your own key". The hosted text names a platform fee, which
- * the local build never charges, so local mode gets its own line.
+ * The hint under "Your own key" for the hosted or local build.
  */
 export function byokHintKey(
   localMode: boolean,
@@ -477,15 +476,14 @@ export function byokHintKey(
 
 /**
  * The label of the run detail estimate row, or null to hide the row. The stored
- * estimate forecasts a Skynet fee or charge, which a local run never pays in
- * real money, so local mode hides it.
+ * estimate forecasts a Skynet model charge. BYOK and local runs do not pay it.
  */
 export function runEstimateLabelKey(
   tokenSource: string | null,
   localMode: boolean,
-): "submit.summary.estimate_fee" | "submit.summary.estimate_cost" | null {
-  if (localMode) return null;
-  return tokenSource === "byok" ? "submit.summary.estimate_fee" : "submit.summary.estimate_cost";
+): "submit.summary.estimate_cost" | null {
+  if (localMode || tokenSource === "byok") return null;
+  return "submit.summary.estimate_cost";
 }
 
 /**

@@ -42,17 +42,17 @@ Pon **Visibilidad** en **Privada** al enviar una ejecución para mantenerla fuer
 
 ### ¿Los proveedores de modelos entrenan con mis prompts?
 
-Por defecto, no. La opción predeterminada de **Privacidad de datos de los modelos** es **Sin entrenamiento**. Solo envía prompts a proveedores que no entrenan con ellos y no los conservan. Este ajuste se aplica a las llamadas que Skynet cobra a tu saldo. Las llamadas con tu propia clave siguen los ajustes de privacidad de tu cuenta de OpenRouter. Consulta [Seguridad](/docs/security).
+Por defecto, no. La opción predeterminada de **Privacidad de datos de los modelos** es **Sin entrenamiento**. Solo envía prompts a proveedores que no entrenan con ellos y no los conservan. Este ajuste se aplica a las llamadas que Skynet cobra a tu saldo. Las llamadas BYOK mediante OpenRouter siguen los ajustes de privacidad de tu cuenta de OpenRouter. Las llamadas BYOK directas siguen la política de datos del proveedor. Consulta [Seguridad](/docs/security).
 
 ## Facturación
 
 ### ¿Cómo cobra Skynet las ejecuciones?
 
-Skynet usa un saldo prepago. Se mide el uso de modelos alojados, las tarifas de Skynet y el uso del sandbox. Antes de que empiece el trabajo de pago, Skynet reserva margen en tu monedero y en el presupuesto de la ejecución. Consulta [Facturación](/docs/concepts/billing).
+Skynet usa un saldo prepago. Se mide el uso de modelos gestionados y su margen, así como el uso del sandbox. Se cobra una tarifa por la recarga. Antes de que empiece el trabajo de pago, Skynet reserva margen en tu monedero y en el presupuesto de la ejecución. Consulta [Facturación](/docs/concepts/billing).
 
 ### ¿Puedo usar mi propia clave de un proveedor de modelos?
 
-Sí. Con tu propia clave (BYOK), el proveedor cobra las llamadas al modelo directamente a tu clave. Tu saldo de Skynet sigue pagando la tarifa de la plataforma y el uso del sandbox. Skynet cifra tu clave y no vuelve a mostrarla nunca. Consulta [Facturación](/docs/concepts/billing) y [Seguridad](/docs/security).
+Sí. Con tu propia clave (BYOK), tu proveedor factura los tokens del modelo a tu clave. Skynet no cobra ninguna tarifa por el modelo. El presupuesto de la ejecución solo cubre el uso del entorno aislado. Skynet cifra tu clave y no vuelve a mostrarla nunca. Consulta [Facturación](/docs/concepts/billing) y [Seguridad](/docs/security).
 
 ### ¿Puedo usar Skynet sin pagar por las llamadas al modelo?
 

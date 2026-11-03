@@ -10,6 +10,7 @@ import {
   formatUsd,
   formatResetDate,
   EMPTY_WALLET,
+  DEFAULT_PRICING_TERMS,
   type WalletBalance,
 } from "./wallet.ts";
 
@@ -28,6 +29,10 @@ test("empty wallet never seeds demo balances or activity", () => {
   assert.equal(EMPTY_WALLET.paidBalanceCents, 0);
   assert.equal(EMPTY_WALLET.freeGrant.centsRemaining, 0);
   assert.deepEqual(EMPTY_WALLET.usage, []);
+});
+
+test("default pricing has no BYOK model fee", () => {
+  assert.equal(DEFAULT_PRICING_TERMS.byokFeeFraction, 0);
 });
 
 test("centsToUsd values each cent at $0.01", () => {

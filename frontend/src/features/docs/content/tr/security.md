@@ -66,7 +66,7 @@ Kendi model sağlayıcı anahtarlarınızı ekleyebilirsiniz.
 - Skynet yalnızca son dört karakteri ve bir durumu saklar: doğrulanmamış, doğrulanmış veya geçersiz.
 - Bir anahtar girdiğinizde Skynet onu kontrol etmek için küçük bir test isteği gönderir.
 
-Kendi anahtarınızı kullandığınızda sağlayıcı ücreti doğrudan anahtarınızdan alır. Skynet yine de platform ücretini ve sandbox kullanımını bakiyenizden alır.
+Sağlayıcınız model belirteçlerini kendi anahtarınıza faturalandırır. Skynet model ücreti almaz. Çalışma bütçesi yalnızca sandbox kullanımını kapsar.
 
 Skynet ayrıca günlüklerden ve hata mesajlarından gizli bilgileri kaldırır. Bunları `[REDACTED]` ile değiştirir.
 
@@ -102,7 +102,7 @@ Bir belirteci devre dışı bırakmak için **Belirteci iptal et**'e tıklayın.
 | **Sıfır saklama**    | Yalnızca sıfır veri saklama sözleşmesi olan uç noktalar. Bazı modeller kullanılamayabilir.               |
 
 > [!NOTE]
-> Kendi anahtarınızla yapılan optimizasyonlar OpenRouter hesabınızın gizlilik ayarlarına uyar.
+> OpenRouter üzerinden BYOK çağrıları OpenRouter hesabınızın gizlilik ayarlarına uyar. Doğrudan sağlayıcıya yapılan BYOK çağrıları sağlayıcının veri politikasına uyar.
 
 ## Çalıştırmaların görünürlüğü
 

@@ -42,17 +42,17 @@ Setzen Sie beim Einreichen eines Durchlaufs **Sichtbarkeit** auf **Privat**, dam
 
 ### Trainieren Modellanbieter mit meinen Prompts?
 
-Standardmäßig nicht. Die Standardoption für **Datenschutz bei Modellen** ist **Kein Training**. Sie sendet Prompts nur an Anbieter, die nicht damit trainieren und sie nicht speichern. Diese Einstellung gilt für Aufrufe, die Skynet über Ihr Guthaben abrechnet. Aufrufe mit Ihrem eigenen Schlüssel folgen den Datenschutzeinstellungen Ihres OpenRouter-Kontos. Siehe [Sicherheit](/docs/security).
+Standardmäßig nicht. Die Standardoption für **Datenschutz bei Modellen** ist **Kein Training**. Sie sendet Prompts nur an Anbieter, die nicht damit trainieren und sie nicht speichern. Diese Einstellung gilt für Aufrufe, die Skynet über Ihr Guthaben abrechnet. BYOK-Aufrufe über OpenRouter folgen den Datenschutzeinstellungen Ihres OpenRouter-Kontos. BYOK-Aufrufe direkt bei einem Anbieter folgen dessen Datenrichtlinie. Siehe [Sicherheit](/docs/security).
 
 ## Abrechnung
 
 ### Wie rechnet Skynet Durchläufe ab?
 
-Skynet verwendet ein Prepaid-Guthaben. Die Nutzung gehosteter Modelle, Skynet-Gebühren und die Sandbox-Nutzung werden gemessen. Bevor kostenpflichtige Arbeit beginnt, reserviert Skynet Spielraum in Ihrem Wallet und im Budget des Durchlaufs. Siehe [Budgets und Abrechnung](/docs/concepts/billing).
+Skynet verwendet ein Prepaid-Guthaben. Die Nutzung verwalteter Modelle und deren Aufschlag sowie die Sandbox-Nutzung werden gemessen. Beim Aufladen fällt eine Gebühr an. Bevor kostenpflichtige Arbeit beginnt, reserviert Skynet Spielraum in Ihrem Wallet und im Budget des Durchlaufs. Siehe [Budgets und Abrechnung](/docs/concepts/billing).
 
 ### Kann ich meinen eigenen Schlüssel eines Modellanbieters verwenden?
 
-Ja. Mit Ihrem eigenen Schlüssel (BYOK) belastet der Anbieter Ihren Schlüssel direkt für Modellaufrufe. Ihr Skynet-Guthaben bezahlt weiterhin die Plattformgebühr und die Sandbox-Nutzung. Skynet verschlüsselt Ihren Schlüssel und zeigt ihn nie wieder an. Siehe [Budgets und Abrechnung](/docs/concepts/billing) und [Sicherheit](/docs/security).
+Ja. Bei Nutzung eines eigenen Schlüssels (BYOK) gilt: Ihr Anbieter rechnet Modell-Tokens über Ihren Schlüssel ab. Skynet erhebt keine Modellgebühr. Das Laufbudget deckt nur die Nutzung der Sandbox ab. Skynet verschlüsselt Ihren Schlüssel und zeigt ihn nie wieder an. Siehe [Budgets und Abrechnung](/docs/concepts/billing) und [Sicherheit](/docs/security).
 
 ### Kann ich Skynet nutzen, ohne für Modellaufrufe zu bezahlen?
 

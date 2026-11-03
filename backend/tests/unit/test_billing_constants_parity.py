@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from core.api.routers.billing import _pricing_terms
 from core.billing import pricing, service
 from core.config import Settings
 
@@ -50,7 +51,7 @@ def test_default_pricing_terms_match_backend_defaults() -> None:
     assert block is not None
     terms = {name: float(value) for name, value in re.findall(r"(\w+):\s*([0-9.]+)", block.group(1))}
     assert terms["usageMarkup"] == pytest.approx(Settings.model_fields["usage_markup"].default)
-    assert terms["byokFeeFraction"] == pytest.approx(pricing.PLATFORM_FEE_FRACTION)
+    assert terms["byokFeeFraction"] == _pricing_terms().byok_fee_fraction == pricing.BYOK_FEE_FRACTION == 0
     assert terms["purchaseFeeRate"] == pytest.approx(service.PURCHASE_FEE_RATE)
     assert terms["purchaseFeeFixedCents"] == service.PURCHASE_FEE_FIXED_CENTS
 

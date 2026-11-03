@@ -40,7 +40,7 @@ from core.billing.run_usage import (
 from core.storage.models import Base, ExecutionBudgetModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 
 _MANAGED = {"kind": "managed_model", "byok_fee_fraction": "0.05"}
-_BYOK = {"kind": "byok_model", "byok_fee_fraction": "0.05"}
+_BYOK = {"kind": "byok_model", "byok_fee_fraction": "0"}
 _SUBSCRIPTION = {"kind": "subscription_model"}
 
 
@@ -128,11 +128,282 @@ def test_batched_calls_count_without_a_response_time() -> None:
     assert (row.calls, row.latency_calls, row.latency_ms_total) == (2, 1, 400)
 
 
-def test_byok_calls_report_the_provider_charge_behind_the_fee() -> None:
-    """Invert the BYOK fee to estimate what the owner's provider charged."""
-    (row,) = aggregate([_op(policy=_BYOK, cents="0.5", evidence=_call())], proposer=False)
+def test_byok_calls_report_the_provider_charge_from_usage() -> None:
+    """Read provider cost from usage without charging the user's wallet."""
+    evidence = {**_call(), "usage": {"cost": "0.10", "prompt_tokens": 3}}
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence=evidence)], proposer=False)
     assert row.billing == BILLING_BYOK
     assert row.provider_cents == Decimal(10)
+
+
+@pytest.mark.parametrize(
+    ("model", "usage"),
+    [
+        ("openai/gpt-4o-mini", {"prompt_tokens": 100, "completion_tokens": 20}),
+        ("anthropic/claude-sonnet-4.5", {"input_tokens": 100, "output_tokens": 20}),
+    ],
+)
+def test_native_byok_estimates_missing_cost_from_tokens(
+    model: str, usage: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Estimate native provider cost without changing wallet charges."""
+    monkeypatch.setattr(
+        "core.billing.run_usage.cached_token_prices", lambda _model: TokenPrices(prompt=0.001, completion=0.002)
+    )
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence={"model": model, "usage": usage})], proposer=False)
+    assert row.provider_cents == Decimal(14)
+    assert row.unpriced_calls == 0
+    assert row.charged_units == 0
+
+
+def test_byok_missing_provider_cost_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leave an unknown model unpriced when the provider gives no cost."""
+    monkeypatch.setattr("core.billing.run_usage.cached_token_prices", lambda _model: None)
+    evidence = {"model": "unknown/model", "usage": {"input_tokens": 100, "output_tokens": 20}}
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence=evidence)], proposer=False)
+    assert row.provider_cents is None
+    assert row.unpriced_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("state", "evidence"), [("settled", {"failure": "provider"}), ("reserved", {}), ("dispatched", {})]
+)
+def test_byok_missing_usage_is_unpriced(state: str, evidence: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Do not estimate a provider cost without usage."""
+    monkeypatch.setattr(
+        "core.billing.run_usage.cached_token_prices", lambda _model: TokenPrices(prompt=0.001, completion=0.002)
+    )
+    (row,) = aggregate(
+        [_op(policy=_BYOK, cents="0", state=state, quoted_model="openai/model", evidence=evidence)], proposer=False
+    )
+    assert row.provider_cents is None
+    assert row.unpriced_calls == 1
+
+
+def test_byok_anthropic_cache_tokens_use_cache_price(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Restore the provider prefix and use the cache-read token price."""
+
+    def prices(model: str) -> TokenPrices | None:
+        """Return a price only for the fully qualified model."""
+        return (
+            TokenPrices(prompt=0.000003, completion=0.000015, cache_read=0.0000003)
+            if model == "anthropic/claude"
+            else None
+        )
+
+    monkeypatch.setattr("core.billing.run_usage.cached_token_prices", prices)
+    evidence = {
+        "provider": "anthropic",
+        "model": "claude",
+        "usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 1000000},
+    }
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence=evidence)], proposer=False)
+    assert row.provider_cents == Decimal(30)
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {"prompt_tokens": 2000000, "completion_tokens": 0},
+        {"prompt_tokens": 2000000, "completion_tokens": 0, "prompt_tokens_details": None},
+        {"input_tokens": 1000000, "output_tokens": 0},
+        {"input_tokens": 1000000, "output_tokens": 0, "input_tokens_details": None},
+    ],
+)
+def test_byok_usage_without_details_keeps_top_level_cache_tokens(usage: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Price top-level cache reads when usage has no cache details."""
+    monkeypatch.setattr(
+        "core.billing.run_usage.cached_token_prices",
+        lambda _model: TokenPrices(prompt=0.000003, completion=0.000015, cache_read=0.0000003),
+    )
+    evidence = {"provider": "openai", "model": "gpt-4o", "usage": {**usage, "cache_read_input_tokens": 1000000}}
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence=evidence)], proposer=False)
+    assert row.provider_cents == Decimal(330)
+    assert row.unpriced_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("details", "expected"),
+    [
+        ({"cached_tokens": 1000000}, Decimal(330)),
+        ({}, Decimal(600)),
+        (None, Decimal(600)),
+        ("invalid", None),
+        ({"cached_tokens": "1000000"}, None),
+        ({"cached_tokens": -5}, None),
+        ({"cached_tokens": 1e6}, None),
+        ({"cached_tokens": True}, None),
+        ({"cached_tokens": None}, None),
+    ],
+)
+def test_byok_openai_cached_tokens_use_cache_price(
+    details: object, expected: Decimal | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Price cached OpenAI prompt tokens at the cache-read rate."""
+    monkeypatch.setattr(
+        "core.billing.run_usage.cached_token_prices",
+        lambda _model: TokenPrices(prompt=0.000003, completion=0.000015, cache_read=0.0000003),
+    )
+    evidence = {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "usage": {"prompt_tokens": 2000000, "completion_tokens": 0, "prompt_tokens_details": details},
+    }
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence=evidence)], proposer=False)
+    assert row.provider_cents == expected
+    assert row.unpriced_calls == (1 if expected is None else 0)
+    assert row.input_tokens == 2000000
+    assert row.charged_units == 0
+
+
+@pytest.mark.parametrize(
+    ("details", "expected"),
+    [({"cached_tokens": 1000000}, Decimal(330)), ({}, Decimal(600)), (None, Decimal(600))],
+)
+def test_byok_responses_cached_tokens_use_cache_price(
+    details: dict | None, expected: Decimal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Price Responses cached input separately from uncached input."""
+    monkeypatch.setattr(
+        "core.billing.run_usage.cached_token_prices",
+        lambda _model: TokenPrices(prompt=0.000003, completion=0.000015, cache_read=0.0000003),
+    )
+    usage = {"input_tokens": 2000000, "output_tokens": 0, "input_tokens_details": details}
+    (row,) = aggregate(
+        [_op(policy=_BYOK, cents="0", evidence={"provider": "openai", "model": "gpt-4o", "usage": usage})],
+        proposer=False,
+    )
+    assert row.provider_cents == expected
+    assert row.unpriced_calls == 0
+
+
+def test_byok_responses_without_details_uses_uncached_rate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Price Responses input without details as uncached."""
+    monkeypatch.setattr(
+        "core.billing.run_usage.cached_token_prices",
+        lambda _model: TokenPrices(prompt=0.000003, completion=0.000015, cache_read=0.0000003),
+    )
+    usage = {"input_tokens": 2000000, "output_tokens": 0}
+    (row,) = aggregate(
+        [_op(policy=_BYOK, cents="0", evidence={"provider": "openai", "model": "gpt-4o", "usage": usage})],
+        proposer=False,
+    )
+    assert row.provider_cents == Decimal(600)
+    assert row.unpriced_calls == 0
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        "invalid",
+        [],
+        {"cached_tokens": None},
+        {"cached_tokens": True},
+        {"cached_tokens": -1},
+        {"cached_tokens": 1.5},
+        {"cached_tokens": "1"},
+    ],
+)
+def test_byok_responses_malformed_cache_details_are_unpriced(details: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leave malformed Responses cache evidence unpriced."""
+    monkeypatch.setattr(
+        "core.billing.run_usage.cached_token_prices",
+        lambda _model: TokenPrices(prompt=0.000003, completion=0.000015, cache_read=0.0000003),
+    )
+    usage = {"input_tokens": 2000000, "output_tokens": 0, "input_tokens_details": details}
+    (row,) = aggregate(
+        [_op(policy=_BYOK, cents="0", evidence={"provider": "openai", "model": "gpt-4o", "usage": usage})],
+        proposer=False,
+    )
+    assert row.provider_cents is None
+    assert row.unpriced_calls == 1
+
+
+def test_byok_custom_provider_is_unpriced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Do not use a catalog price for an unknown custom endpoint."""
+    monkeypatch.setattr(
+        "core.billing.run_usage.cached_token_prices", lambda _model: TokenPrices(prompt=1, completion=1)
+    )
+    evidence = {"provider": "custom", "model": "openai/model", "usage": {"prompt_tokens": 1}}
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence=evidence)], proposer=False)
+    assert row.provider_cents is None
+
+
+@pytest.mark.parametrize("usage", [None, "invalid", {}, {"input_tokens": None}, {"prompt_tokens": "invalid"}])
+def test_byok_usage_without_token_counts_is_unpriced(usage: Any) -> None:
+    """Leave missing and malformed token evidence unpriced."""
+    (row,) = aggregate(
+        [_op(policy=_BYOK, cents="0", evidence={"model": "openai/gpt-4o-mini", "usage": usage})], proposer=False
+    )
+    assert row.provider_cents is None
+    assert row.unpriced_calls == 1
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {"cache_read_input_tokens": 0},
+        {"completion_tokens": 0},
+        {"prompt_tokens": "100", "completion_tokens": 0},
+        {"input_tokens": "100", "output_tokens": 0},
+        {"prompt_tokens": 100.0, "completion_tokens": 0},
+        {"prompt_tokens": None, "completion_tokens": 5},
+        {"input_tokens": 1, "output_tokens": True},
+        {"input_tokens": -1, "output_tokens": 0},
+    ],
+)
+def test_byok_incomplete_or_invalid_counts_are_unpriced(usage: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Require both valid token counts before estimating a provider cost."""
+    monkeypatch.setattr(
+        "core.billing.run_usage.cached_token_prices", lambda _: TokenPrices(prompt=0.001, completion=0.002)
+    )
+    (row,) = aggregate(
+        [_op(policy=_BYOK, cents="0", evidence={"model": "openai/model", "usage": usage})], proposer=False
+    )
+    assert row.provider_cents is None
+    assert row.unpriced_calls == 1
+
+
+def test_byok_estimate_does_not_refresh_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read token prices without refreshing the live catalog."""
+
+    def fail() -> None:
+        """Reject any refresh."""
+        raise AssertionError("catalog refreshed")
+
+    monkeypatch.setattr("core.billing.openrouter_prices._refresh_if_stale", fail)
+    evidence = {"provider": "openai", "model": "gpt-4o-mini", "usage": {"prompt_tokens": 100, "completion_tokens": 0}}
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence=evidence)], proposer=False)
+    assert row.provider_cents is not None
+
+
+@pytest.mark.parametrize("cost", ["invalid", "-1", "NaN"])
+def test_byok_malformed_provider_cost_is_unavailable(cost: str) -> None:
+    """Do not replace malformed provider cost with an estimate."""
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence={"usage": {"cost": cost}})], proposer=False)
+    assert row.provider_cents is None
+    assert row.unpriced_calls == 1
+
+
+def test_openrouter_byok_provider_cost_includes_upstream_cost() -> None:
+    """Include both OpenRouter and upstream cost in provider telemetry."""
+    usage = {"cost": "0.001", "is_byok": True, "cost_details": {"upstream_inference_cost": "0.02"}}
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence={"usage": usage})], proposer=False)
+    assert row.provider_cents == Decimal("2.1")
+
+
+def test_openrouter_byok_invalid_cost_details_are_unavailable() -> None:
+    """Keep malformed upstream evidence from blocking run usage."""
+    usage = {"cost": "0.001", "is_byok": True, "cost_details": "invalid"}
+    (row,) = aggregate([_op(policy=_BYOK, cents="0", evidence={"usage": usage})], proposer=False)
+    assert row.provider_cents is None
+
+
+def test_historical_byok_provider_cost_from_wallet_without_usage() -> None:
+    """Recover provider spend from an old fee-only operation."""
+    policy = {"kind": "byok_model", "byok_fee_fraction": "0.05"}
+    (row,) = aggregate([_op(policy=policy, cents="1", evidence={})], proposer=False)
+    assert row.provider_cents == Decimal(20)
 
 
 def test_subscription_calls_show_their_api_rate_without_a_charge() -> None:

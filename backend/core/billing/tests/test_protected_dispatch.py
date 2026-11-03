@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator
 from decimal import Decimal
@@ -13,6 +14,7 @@ from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session
 
 from core.billing.budgets import BudgetInsufficientError, BudgetService
+from core.billing.byok_upstreams import resolve_upstream
 from core.billing.model_dispatch import (
     BYOK_FUNDS_EXHAUSTED,
     FUNDS_BUSY,
@@ -22,8 +24,14 @@ from core.billing.model_dispatch import (
     response_usage,
 )
 from core.billing.openrouter_quotes import price_text_request
-from core.billing.operation_pricing import ChargePolicy, UnpricedOperationError
-from core.billing.runtime import BudgetRuntime, OperationCompletedError, ProviderFailedError, UsagePendingError
+from core.billing.operation_pricing import ChargePolicy, UnpricedOperationError, operation_quote
+from core.billing.runtime import (
+    BudgetRuntime,
+    OperationCompletedError,
+    PaidResult,
+    ProviderFailedError,
+    UsagePendingError,
+)
 from core.config import settings
 from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 
@@ -67,6 +75,192 @@ def _runtime(database: Engine, total: int = 50) -> BudgetRuntime:
     service = BudgetService(engine=database)
     budget = service.create("alice", total, idempotency_key="setup")
     return BudgetRuntime(service, username="alice", budget_id=budget.id, generation=0, phase="setup", wait_timeout=0)
+
+
+def test_byok_model_and_sandbox_are_metered_separately(database: Engine) -> None:
+    """Charge sandbox work while a BYOK model call settles for zero."""
+    runtime = _runtime(database)
+    byok = ChargePolicy("byok_model")
+    runtime.execute(
+        operation_quote({}, Decimal(0), byok, {}),
+        byok,
+        lambda: PaidResult(None, None, {}),
+        operation_key="model",
+        cost_kind="model",
+        role="task",
+    )
+    sandbox = ChargePolicy("sandbox")
+    runtime.execute(
+        operation_quote({}, Decimal("0.01"), sandbox, {}),
+        sandbox,
+        lambda: PaidResult(None, Decimal("0.01"), {}),
+        operation_key="sandbox",
+        cost_kind="sandbox",
+        role="runtime",
+    )
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert snapshot.setup_spent_cents == sandbox.convert(Decimal("0.01")).total
+    assert snapshot.reserved_cents == 0
+
+
+@pytest.mark.parametrize(
+    ("error", "failure"),
+    [
+        (httpx.ConnectError("offline"), "provider"),
+        (KeyboardInterrupt(), "interrupted"),
+        (asyncio.CancelledError(), "interrupted"),
+    ],
+)
+def test_byok_exception_releases_hold_with_failure_kind(database: Engine, error: BaseException, failure: str) -> None:
+    """Record the failure kind when a zero-fee dispatch fails."""
+    runtime = _runtime(database)
+    policy = ChargePolicy("byok_model")
+
+    def dispatch() -> PaidResult:
+        """Raise the requested failure."""
+        raise error
+
+    with pytest.raises(type(error)):
+        runtime.execute(
+            operation_quote({}, Decimal(0), policy, {}), policy, dispatch, operation_key="model", cost_kind="model"
+        )
+    with Session(database) as session:
+        assert session.scalars(select(ExecutionUsageEvidenceModel)).one().evidence == {"failure": failure}
+    assert runtime.service.get(runtime.budget_id, "alice").reserved_cents == 0
+
+
+def test_byok_settlement_failure_preserves_provider_usage(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retain successful provider usage when initial settlement fails."""
+    runtime = _runtime(database)
+    policy = ChargePolicy("byok_model")
+    settle = runtime.service.settle
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        """Fail the first settlement before persisting it."""
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("settlement failed")
+        return settle(*args, **kwargs)
+
+    monkeypatch.setattr(runtime.service, "settle", fail_once)
+    with pytest.raises(RuntimeError, match="settlement failed"):
+        runtime.execute(
+            operation_quote({}, Decimal(0), policy, {}),
+            policy,
+            lambda: PaidResult("ok", None, {"usage": {"prompt_tokens": 12}}),
+            operation_key="model",
+            cost_kind="model",
+        )
+    with Session(database) as session:
+        assert session.scalars(select(ExecutionUsageEvidenceModel)).one().evidence == {
+            "usage": {"prompt_tokens": 12},
+            "failure": "provider",
+        }
+    assert runtime.service.get(runtime.budget_id, "alice").reserved_cents == 0
+
+
+def test_openrouter_byok_anthropic_prompt_is_cacheable(database: Engine) -> None:
+    """Mark an Anthropic BYOK prompt before sending it to OpenRouter."""
+    sent: list[dict] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Capture the routed request and return a successful response."""
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": []})
+
+    model = "anthropic/claude-sonnet-5"
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+        dispatcher = OpenRouterDispatcher(
+            _runtime(database),
+            api_key="private",
+            model=model,
+            role="task",
+            policy=ChargePolicy("byok_model"),
+            client=client,
+        )
+        dispatcher.dispatch("/chat/completions", {"model": model, "messages": [{"role": "system", "content": "hello"}]})
+    assert sent[0]["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_custom_byok_does_not_mark_prompt_cache(database: Engine) -> None:
+    """Do not send Anthropic cache controls to custom endpoints."""
+    sent: list[dict] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Capture the routed request."""
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": []})
+
+    model = "anthropic/claude"
+    upstream = resolve_upstream({"name": "openai/anthropic/claude", "base_url": "https://example.com/v1"})
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+        dispatcher = OpenRouterDispatcher(
+            _runtime(database),
+            api_key="private",
+            model=model,
+            role="task",
+            policy=ChargePolicy("byok_model"),
+            client=client,
+            upstream=upstream,
+        )
+        dispatcher.dispatch("/chat/completions", {"model": model, "messages": [{"role": "system", "content": "hello"}]})
+    assert sent[0]["messages"][0]["content"] == "hello"
+
+
+def test_native_anthropic_does_not_mark_prompt_cache(database: Engine) -> None:
+    """Never add OpenRouter cache directives to the native Anthropic route."""
+    sent = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Capture the native request."""
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": []})
+
+    model = "anthropic/claude"
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+        dispatcher = OpenRouterDispatcher(
+            _runtime(database),
+            api_key="fixture",
+            model=model,
+            role="task",
+            policy=ChargePolicy("byok_model"),
+            client=client,
+            upstream=resolve_upstream({"name": model}),
+        )
+        dispatcher.dispatch("/chat/completions", {"model": model, "messages": [{"role": "system", "content": "hello"}]})
+    assert sent[0]["messages"][0]["content"] == "hello"
+
+
+@pytest.mark.parametrize("usage", [None, {"cost": "bad"}, {"cost": -1}, {"cost": "NaN"}])
+def test_byok_success_with_missing_or_invalid_usage_settles_zero(database: Engine, usage: object) -> None:
+    """Settle a successful BYOK call even when usage is unavailable or malformed."""
+    runtime = _runtime(database)
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Return one success without valid provider-cost evidence."""
+        body = {"id": "generation", "choices": []}
+        if usage is not None:
+            body["usage"] = usage
+        return httpx.Response(200, json=body)
+
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+        dispatcher = OpenRouterDispatcher(
+            runtime,
+            api_key="private",
+            model="fixture/text",
+            role="task",
+            policy=ChargePolicy("byok_model"),
+            client=client,
+        )
+        assert dispatcher.dispatch("/chat/completions", REQUEST).status == 200
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert snapshot.reserved_cents == 0
+    assert snapshot.pending_operations == 0
+    assert snapshot.setup_spent_cents == 0
+    with Session(database) as session:
+        assert session.scalar(select(ExecutionOperationModel)).state == "settled"
 
 
 def test_final_request_caps_include_cache_and_output_overrides() -> None:
@@ -246,12 +440,12 @@ def test_anthropic_stream_merges_final_cost_without_inventing_zero() -> None:
 
 
 def test_usage_markup_applies_to_platform_paid_costs_but_not_byok(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mark up sandbox and managed dollars; charge BYOK only the platform fee on raw cost."""
+    """Mark up sandbox and managed dollars but do not charge BYOK model calls."""
     monkeypatch.setattr(settings, "usage_markup", 1.15)
     assert ChargePolicy("sandbox").convert(Decimal("0.01")).total == Decimal("1.15")
     assert ChargePolicy("managed_model").convert(Decimal("0.01")).total == Decimal("1.15")
     byok = ChargePolicy("byok_model").convert(Decimal("0.01"))
-    assert byok.total == byok.wallet == Decimal("0.05")
+    assert byok.total == byok.wallet == Decimal(0)
 
 
 def test_protected_hold_includes_the_usage_markup(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -57,13 +57,12 @@ Wenn ein Budget bereits Aktivität hat, zeigt die Karte **Ausgabenlimit** im Ass
 
 ## Gebühren
 
-Skynet erhebt drei Gebühren zusätzlich zu den Anbieterkosten.
+Skynet erhebt zwei Gebühren zusätzlich zu den Anbieterkosten.
 
 | Gebühr                              | Aktueller Standardwert                       | Gilt für                                                 |
 | ----------------------------------- | -------------------------------------------- | -------------------------------------------------------- |
 | Aufladegebühr                       | 12,5 % des Betrags plus 0,35 $               | Jede Aufladung                                           |
 | Nutzungsaufschlag                   | Anbieterkosten × 1,15 (Kosten plus 15 %)     | Modellaufrufe über Skynets Schlüssel und Sandbox-Rechenzeit |
-| Plattformgebühr für eigenen Schlüssel | 5 % der Modellkosten                       | Modellaufrufe über Ihren eigenen Anbieterschlüssel       |
 
 ### Aufladegebühr
 
@@ -87,8 +86,8 @@ Sie können Modellaufrufe über Ihren eigenen Anbieterschlüssel ausführen. Fü
 Wenn ein Modellaufruf Ihren Schlüssel verwendet:
 
 - Ihr Anbieter rechnet die Modell-Token über Ihren Schlüssel ab.
-- Skynet belastet Ihr Guthaben mit einer Plattformgebühr von 5 % der Modellkosten. Skynet schlägt auf diese Gebühr keinen Nutzungsaufschlag auf.
-- Das Ausgabenlimit des Durchlaufs deckt nur die Plattformgebühr und die Sandbox-Nutzung ab.
+- Skynet erhebt keine Modellgebühr.
+- Das Laufbudget deckt nur die Nutzung der Sandbox ab.
 
 Gebühren eines externen Scorers oder MCP-Anbieters gehen direkt an diesen Anbieter. Sie sind nicht Teil des Ausgabenlimits des Durchlaufs.
 
