@@ -52,9 +52,10 @@ export function remaining(timeline: Timeline, now: number): number | null {
   return left;
 }
 
-/** Seconds with one decimal for a step under 10s ("0.8"), so short steps do not all read 0:00. Null from 10s. */
+/** Seconds with one decimal for a step under 10s ("0.8"), so short steps do not all read 0:00. Null when it would round to "10.0". */
 export function shortSeconds(ms: number): string | null {
-  return ms < 10_000 ? (Math.max(0, ms) / 1000).toFixed(1) : null;
+  const tenths = Math.round(Math.max(0, ms) / 100);
+  return tenths < 100 ? (tenths / 10).toFixed(1) : null;
 }
 
 /** Steps shorter than this show no fill bar: it would fill before anyone sees it. */

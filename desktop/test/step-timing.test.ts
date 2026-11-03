@@ -77,6 +77,14 @@ describe("timeline display", () => {
     expect(shortSeconds(10_000)).toBeNull();
   });
 
+  it("never shows 10.0s: a time that rounds to 10 s uses the clock", () => {
+    expect(shortSeconds(9_949)).toBe("9.9");
+    expect(shortSeconds(9_950)).toBeNull();
+    expect(shortSeconds(9_951)).toBeNull();
+    expect(shortSeconds(9_999)).toBeNull();
+    expect(shortSeconds(10_000)).toBeNull();
+  });
+
   it("tells each step's phase", () => {
     expect(timeline.steps.map(stepPhase)).toEqual(["done", "active", "pending"]);
   });
