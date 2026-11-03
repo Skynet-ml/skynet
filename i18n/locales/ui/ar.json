@@ -4385,7 +4385,6 @@
   "settings.agent_local.role.tagger": "مقابلة الوسم",
   "settings.agent_engine.label": "محرك الوكلاء",
   "settings.agent_engine.automatic": "تلقائي ({engine})",
-  "settings.agent_engine.description": "تعمل الوكلاء على نماذج مُدارة عبر OpenRouter",
   "settings.agent_engine.description_local": "الوكلاء الذين ليس لهم CLI خاص بهم يعملون على هذا الـ CLI",
   "settings.agent_engine.description_openrouter": "يعمل كل وكيل على مفتاح OpenRouter المحفوظ الخاص بك",
   "settings.agent_engine.openrouter": "OpenRouter",

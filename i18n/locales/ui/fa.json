@@ -4385,7 +4385,6 @@
   "settings.agent_local.role.tagger": "مصاحبهٔ برچسب‌گذاری",
   "settings.agent_engine.label": "موتور عامل‌ها",
   "settings.agent_engine.automatic": "خودکار ({engine})",
-  "settings.agent_engine.description": "عامل‌ها روی مدل‌های مدیریت‌شده از طریق OpenRouter اجرا می‌شوند",
   "settings.agent_engine.description_local": "عامل‌هایی که CLI خودشان را ندارند روی این CLI اجرا می‌شوند",
   "settings.agent_engine.description_openrouter": "همه عامل‌ها با کلید OpenRouter ذخیره‌شده شما اجرا می‌شوند",
   "settings.agent_engine.openrouter": "OpenRouter",

@@ -4385,7 +4385,6 @@
   "settings.agent_local.role.tagger": "Intervista di etichettatura",
   "settings.agent_engine.label": "Motore degli agenti",
   "settings.agent_engine.automatic": "Automatico ({engine})",
-  "settings.agent_engine.description": "Gli agenti usano modelli gestiti tramite OpenRouter",
   "settings.agent_engine.description_local": "Gli agenti senza una CLI propria usano questa CLI",
   "settings.agent_engine.description_openrouter": "Ogni agente usa la tua chiave OpenRouter salvata",
   "settings.agent_engine.openrouter": "OpenRouter",

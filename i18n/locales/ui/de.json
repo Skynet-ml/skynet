@@ -4385,7 +4385,6 @@
   "settings.agent_local.role.tagger": "Tagging-Interview",
   "settings.agent_engine.label": "Agent-Engine",
   "settings.agent_engine.automatic": "Automatisch ({engine})",
-  "settings.agent_engine.description": "Agenten laufen über OpenRouter auf verwalteten Modellen",
   "settings.agent_engine.description_local": "Agenten ohne eigene CLI laufen auf dieser CLI",
   "settings.agent_engine.description_openrouter": "Jeder Agent läuft mit deinem gespeicherten OpenRouter-Schlüssel",
   "settings.agent_engine.openrouter": "OpenRouter",

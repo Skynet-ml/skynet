@@ -4385,7 +4385,6 @@
   "settings.agent_local.role.tagger": "標記訪談",
   "settings.agent_engine.label": "代理引擎",
   "settings.agent_engine.automatic": "自動 ({engine})",
-  "settings.agent_engine.description": "代理經 OpenRouter 用託管模型運行",
   "settings.agent_engine.description_local": "冇自己 CLI 嘅代理會喺呢個 CLI 運行",
   "settings.agent_engine.description_openrouter": "所有代理都用你儲存咗嘅 OpenRouter 金鑰運行",
   "settings.agent_engine.openrouter": "OpenRouter",

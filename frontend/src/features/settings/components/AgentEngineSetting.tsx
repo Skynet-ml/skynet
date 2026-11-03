@@ -178,7 +178,6 @@ export function engineToSave(
  * gone shows the CLI agents run on instead, and says why.
  */
 export function AgentEngineSelect({
-  local,
   status,
   failed = false,
   value,
@@ -188,7 +187,6 @@ export function AgentEngineSelect({
   saving,
   onChange,
 }: {
-  local: boolean;
   status: LocalStatus | null;
   failed?: boolean;
   value: AgentEngine;
@@ -199,22 +197,17 @@ export function AgentEngineSelect({
   saving: boolean;
   onChange: (engine: AgentEngine) => void;
 }) {
-  const options = agentEngineOptions(status, local, new Date(), keyVerified);
-  const shown = local
-    ? (effectiveAgentEngine(value, keyVerified) ?? defaultAgentCli(status))
-    : value;
+  const options = agentEngineOptions(status, true, new Date(), keyVerified);
+  const shown = effectiveAgentEngine(value, keyVerified) ?? defaultAgentCli(status);
   const keyGone = shown !== value;
   const current = options.find((option) => option.engine === shown);
   // A key list that still loads is no reason to warn about the OpenRouter engine.
   const down = !!current?.disabled && current.engine !== OPENROUTER_ENGINE && !!status;
   const warn = !keyGone && down;
-  let description: MessageKey = "settings.agent_engine.description";
-  if (local) {
-    description =
-      shown === OPENROUTER_ENGINE
-        ? "settings.agent_engine.description_openrouter"
-        : "settings.agent_engine.description_local";
-  }
+  const description: MessageKey =
+    shown === OPENROUTER_ENGINE
+      ? "settings.agent_engine.description_openrouter"
+      : "settings.agent_engine.description_local";
   return (
     <div>
       <SettingsRow
@@ -306,26 +299,30 @@ export function AgentEngineSelect({
 
 /**
  * Settings > Agent: which engine runs every agent that has no model or CLI of
- * its own. Hosted builds offer only OpenRouter. The local build offers the
- * subscription CLIs on this computer. It also offers OpenRouter once the saved
- * OpenRouter key is verified; that engine runs every agent on the key.
+ * its own. Only the local build shows it: hosted builds run every agent on
+ * OpenRouter and offer no choice. The local build offers the subscription CLIs
+ * on this computer. It also offers OpenRouter once the saved OpenRouter key is
+ * verified; that engine runs every agent on the key.
  */
 export function AgentEngineSetting() {
-  const local = isLocalMode();
-  const { status, failed } = useLocalStatus(local);
+  return isLocalMode() ? <LocalAgentEngineSetting /> : null;
+}
+
+function LocalAgentEngineSetting() {
+  const { status, failed } = useLocalStatus(true);
   const { engine, stored, save } = useAgentEngine();
   const keys = useByokKeys();
   const [saving, setSaving] = React.useState(false);
   let value: AgentEngine = OPENROUTER_ENGINE;
-  if (local && engine !== OPENROUTER_ENGINE) value = defaultAgentCli(status, engine);
+  if (engine !== OPENROUTER_ENGINE) value = defaultAgentCli(status, engine);
   const keyVerified =
     keys.loading || keys.failed ? null : keys.keyFor(LOCAL_KEY_PROVIDER)?.status === "verified";
   const { failed: keysFailed, reload: reloadKeys } = keys;
   // Only the OpenRouter engine retries the key list, so the OpenRouter option
   // would stay disabled under a CLI engine until the app reloads.
   React.useEffect(() => {
-    if (local && keysFailed) void reloadKeys();
-  }, [local, keysFailed, reloadKeys]);
+    if (keysFailed) void reloadKeys();
+  }, [keysFailed, reloadKeys]);
 
   const onChange = (next: AgentEngine) => {
     setSaving(true);
@@ -340,13 +337,12 @@ export function AgentEngineSetting() {
     // The setup's CLI stop frames this row: it lists each CLI and how to sign in.
     <div data-setup="local-clis">
       <AgentEngineSelect
-        local={local}
         status={status}
         failed={failed}
         value={value}
         keyVerified={keyVerified}
         keysFailed={keysFailed}
-        automatic={local && stored === false}
+        automatic={stored === false}
         saving={saving}
         onChange={onChange}
       />
