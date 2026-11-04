@@ -793,6 +793,7 @@ def _make_fake_tool(name: str, return_value: str = "ok") -> dspy.Tool:
     """Build a ``dspy.Tool`` whose async ``func`` returns the given value."""
 
     async def func(**kwargs):
+        """Return the fixed value."""
         return return_value
 
     return dspy.Tool(func=func, name=name, desc="test tool", args={}, arg_types={}, arg_desc={})
@@ -884,6 +885,7 @@ def _make_recording_tool(name: str) -> tuple[dspy.Tool, dict]:
     seen: dict = {}
 
     async def func(**kwargs):
+        """Record the kwargs and return ``ok``."""
         seen.update(kwargs)
         return "ok"
 
@@ -1161,6 +1163,31 @@ async def test_submit_runs_through_the_wrapper() -> None:
     result = await submit.func._async_body(name="My run")
     assert result == "ok"
     assert submit_seen["name"] == "My run"
+
+
+@pytest.mark.asyncio
+async def test_continue_after_a_repository_only_write_counts_a_repository_run() -> None:
+    """A repository write without ``artifact_kind`` lets Continue pass the artifact screen."""
+    flag = _TurnAuthoringFlag()
+    state = {
+        "wizard_screen": "artifact",
+        "job_name": "My run",
+        "task_objective": "Sort tickets",
+        "artifact_kind": "dspy_program",
+    }
+    update, _ = _make_recording_tool("update_wizard_state")
+    _wrap_tool_with_approval(
+        update,
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=lambda _e: None,
+        outer_loop=asyncio.get_running_loop(),
+        wizard_state=cast(WizardState, state),
+        authoring_flag=flag,
+    )
+    assert await update.func._async_body(repository="acme/app") == "ok"
+    result = await _nav_tools(state, flag)["continue_to_next_screen"].acall()
+    assert result["screen_nav"] == {"action": "continue", "from": "artifact"}
 
 
 def test_system_prompt_sends_code_requests_to_the_metric_screen() -> None:
@@ -2031,25 +2058,29 @@ def test_mcp_session_bounds_each_tool_call(monkeypatch: pytest.MonkeyPatch) -> N
 
     @asynccontextmanager
     async def fake_transport(url: str, headers: dict[str, str] | None = None) -> AsyncIterator[tuple[Any, Any, Any]]:
+        """Yield empty transport streams."""
         yield (None, None, None)
 
     class FakeSession:
         def __init__(self, read: Any, write: Any, **kwargs: Any) -> None:
+            """Record the session kwargs."""
             seen.update(kwargs)
 
         async def __aenter__(self) -> FakeSession:
+            """Return this session."""
             return self
 
         async def __aexit__(self, *exc: object) -> None:
-            return None
+            """Close nothing."""
 
         async def initialize(self) -> None:
-            return None
+            """Skip the handshake."""
 
     monkeypatch.setattr(generalist_module, "streamablehttp_client", fake_transport)
     monkeypatch.setattr(generalist_module, "ClientSession", FakeSession)
 
     async def run() -> None:
+        """Open and close one MCP session."""
         async with generalist_module._mcp_session("http://mcp"):
             pass
 

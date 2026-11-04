@@ -555,9 +555,10 @@ export function WizardV2Provider({
   // The setup agent picks a repository only from a linked account's list.
   const connectors = useConnectors(wizardCtx !== null);
   const githubStatus = connectors.byProvider("github");
-  const githubConnected = connectors.loading
-    ? undefined
-    : githubStatus?.connected === true && githubStatus.status !== "invalid";
+  const githubConnected =
+    connectors.loading || connectors.error
+      ? undefined
+      : githubStatus?.connected === true && githubStatus.status !== "invalid";
   useEffect(() => {
     wizardCtxRef.current = wizardCtx;
   }, [wizardCtx]);

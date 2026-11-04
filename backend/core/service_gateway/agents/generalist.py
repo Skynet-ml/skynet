@@ -741,6 +741,10 @@ class _ApprovalGatedTool:
                 if isinstance(shown, dict):
                     shown = {**shown, "previous": self._previous_values(kwargs)}
                 self._authoring_flag.wizard_patch.update(kwargs)
+                # The wizard treats a repository write alone as a switch to a repository run,
+                # so the screen gate must see the same target this turn.
+                if kwargs.get("repository") and "artifact_kind" not in kwargs:
+                    self._authoring_flag.wizard_patch["artifact_kind"] = "repo"
                 if str(kwargs.get("job_name") or "").strip():
                     self._authoring_flag.job_named = True
             self._emit(
@@ -3360,8 +3364,7 @@ async def run_generalist_agent(
 ) -> AsyncGenerator[dict, None]:
     """Stream generalist-agent events for one user turn.
 
-    Emits the same SSE envelope as :func:`run_code_agent` so the frontend
-    chat primitives work unchanged:
+    Emits the SSE envelope that the frontend chat primitives read:
 
     * ``reasoning_patch`` — per-token reasoning
     * ``thinking_summary`` — ``{index, text}``, a heading-and-sentence label
