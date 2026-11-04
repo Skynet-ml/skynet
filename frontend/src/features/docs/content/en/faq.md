@@ -4,16 +4,16 @@ This page answers common questions about Skynet. Each answer links to the page w
 
 ### What is Skynet?
 
-Skynet is a platform that optimizes prompts, programs, agents and workflows against your own data and metric. You upload a dataset, describe the task, and start a run. The run tries new versions and scores them on held-out data. To start, read the [Quickstart](/docs/quickstart).
+Skynet is a platform that optimizes DSPy programs and repositories against your own data and metric. You upload a dataset, describe the task, and start a run. The run tries new versions and scores them on held-out data. To start, read the [Quickstart](/docs/quickstart).
 
 ### What can Skynet optimize?
 
-Skynet is Optimize Anything. It optimizes prompts, code, text and DSPy programs in one product. The artifact kind decides which engines can work on it:
+Skynet is Optimize Anything. It optimizes DSPy programs and repositories in one product. The artifact kind decides which engines can work on it:
 
-- Prompt, Code and Text artifacts use the native engines: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler and ShinkaEvolve.
+- Repositories use the native engines: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler and ShinkaEvolve.
 - DSPy programs use the DSPy optimizers: DSPy GEPA, DSPy MIPROv2 and DSPy BootstrapFewShot.
 
-**Auto** combines the engines that fit your task. See [How optimization works](/docs/concepts/optimization) and [Engines](/docs/concepts/engines).
+On a DSPy program, **Auto** uses DSPy GEPA. On a repository, you select one native engine. Read [How optimization works](/docs/concepts/optimization) and [Engines](/docs/concepts/engines).
 
 ### Which languages does the interface support?
 

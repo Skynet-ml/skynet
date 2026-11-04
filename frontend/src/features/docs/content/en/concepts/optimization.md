@@ -1,4 +1,4 @@
-Skynet is Optimize Anything: one product that improves any artifact against your data and your metric. Every run uses the same run contract and the same metric contract. The artifact kind decides which engines can work on it.
+Skynet is Optimize Anything: one product that improves a DSPy program or a repository against your metric. The artifact kind decides which engines can work on it.
 
 ## The shared contract
 
@@ -34,21 +34,19 @@ Read [Metrics and scorers](/docs/concepts/scorers) for the full metric contract.
 
 | Artifact kind | Engines                                                                      |
 | ------------- | ---------------------------------------------------------------------------- |
-| Prompt        | Auto, GEPA, Best-of-N, AutoResearch, Meta-Harness, AutoSaddler, ShinkaEvolve |
-| Code          | Same as Prompt                                                               |
-| Text          | Same as Prompt                                                               |
+| Repository | GEPA, Best-of-N, AutoResearch, Meta-Harness, AutoSaddler, ShinkaEvolve |
 | DSPy program  | Auto, DSPy GEPA, DSPy MIPROv2, DSPy BootstrapFewShot                         |
 
 The engines come in two families:
 
-- The **native engines** treat the artifact as a black box. They work on Prompt, Code and Text artifacts.
+- The **native engines** treat the artifact as a black box. They work on repositories.
 - The **DSPy optimizers** work inside a DSPy program. They work only on DSPy program artifacts.
 
 DSPy MIPROv2 and DSPy BootstrapFewShot need pairs (cases with expected outputs). With a single input, a DSPy program can use only Auto and DSPy GEPA.
 
-## Prompt, Code and Text artifacts
+## Repositories
 
-The native engines treat the artifact as a black box. An engine proposes a new version, runs `run(artifact, input)` on the cases, and reads the score and feedback.
+The native engines change the files in the paths that you allow. Your metric scores each version of the repository.
 
 The six native engines use different search methods:
 
@@ -86,18 +84,16 @@ DSPy BootstrapFewShot does not use a reflection model.
 
 **Auto** is the default choice in the wizard.
 
-- On a Prompt, Code or Text artifact, Auto explores with five native engines, then continues with GEPA from the best version.
+- **Repository**: Auto is not available. Select one native engine.
 - On a DSPy program, Auto runs DSPy GEPA.
 
-Both forms of Auto read the feedback text from your metric.
+Auto reads the feedback text from your metric.
 
 ## Which engine to pick
 
 | Your situation                                        | Use                                                                |
 | ----------------------------------------------------- | ------------------------------------------------------------------ |
-| You have a prompt that a model runs                   | A Prompt artifact. Start with Auto.                                |
-| You have code to make faster, cheaper or more correct | A Code artifact. Start with Auto.                                  |
-| You have a document or a configuration                | A Text artifact. Start with Auto.                                  |
+| You have code in a GitHub repository | A repository. Select one native engine. |
 | You have a DSPy program                               | A DSPy program artifact. Start with Auto.                          |
 | You want few-shot demos picked from your data         | A DSPy program artifact with DSPy BootstrapFewShot or DSPy MIPROv2 |
 

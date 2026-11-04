@@ -34,7 +34,7 @@ import {
   ResetFiltersButton,
   type SortDir,
 } from "@/shared/ui/excel-filter";
-import { formatDate, formatId, formatRelativeTime, moduleLabel } from "@/shared/lib";
+import { formatDate, formatId, formatRelativeTime } from "@/shared/lib";
 import {
   ACTIVE_STATUSES,
   STATUS_DOT_COLOR,
@@ -60,7 +60,7 @@ import {
 } from "../lib/jobs-columns";
 import { rememberLayout } from "@/shared/lib/layout-hint";
 import { jobsColumnGate, useExperienceLevel } from "@/features/experience";
-import { formatScore, typeBadge } from "../lib/status-badges";
+import { formatScore } from "../lib/status-badges";
 import { StatusBadge } from "@/shared/ui/status-badge";
 
 type ColResize = ReturnType<typeof useColumnResize>;
@@ -368,27 +368,6 @@ export function JobsTab({
                       />
                     </>
                   )}
-                  {showCol("optimization_type") && (
-                    <ColumnHeader
-                      label={msg("auto.features.dashboard.components.jobstab.literal.2")}
-                      sortKey="optimization_type"
-                      currentSort={sortKey}
-                      sortDir={sortDir}
-                      onSort={toggleSort}
-                      filterCol="optimization_type"
-                      filterOptions={filterOptions.optimization_type}
-                      filters={filters}
-                      onFilter={setColumnFilter}
-                      openFilter={openFilter}
-                      setOpenFilter={setOpenFilter}
-                      width={
-                        colResize.widths["optimization_type"] ??
-                        DEFAULT_COL_WIDTHS.optimization_type
-                      }
-                      onResize={colResize.setColumnWidth}
-                      collapse={columnCollapse("optimization_type")}
-                    />
-                  )}
                   <ColumnHeader
                     label={msg("auto.features.dashboard.components.jobstab.literal.3")}
                     sortKey="status"
@@ -405,36 +384,6 @@ export function JobsTab({
                     onResize={colResize.setColumnWidth}
                     collapse={columnCollapse("status")}
                   />
-                  {showCol("module_name") && (
-                    <ColumnHeader
-                      label={msg("auto.features.dashboard.components.jobstab.literal.4")}
-                      sortKey="module_name"
-                      currentSort={sortKey}
-                      sortDir={sortDir}
-                      onSort={toggleSort}
-                      filterCol="module_name"
-                      filterOptions={filterOptions.module_name}
-                      filters={filters}
-                      onFilter={setColumnFilter}
-                      openFilter={openFilter}
-                      setOpenFilter={setOpenFilter}
-                      width={colResize.widths["module_name"] ?? DEFAULT_COL_WIDTHS.module_name}
-                      onResize={colResize.setColumnWidth}
-                      collapse={columnCollapse("module_name")}
-                    />
-                  )}
-                  {showCol("dataset_rows") && (
-                    <ColumnHeader
-                      label={msg("auto.features.dashboard.components.jobstab.literal.5")}
-                      sortKey="dataset_rows"
-                      currentSort={sortKey}
-                      sortDir={sortDir}
-                      onSort={toggleSort}
-                      width={colResize.widths["dataset_rows"] ?? DEFAULT_COL_WIDTHS.dataset_rows}
-                      onResize={colResize.setColumnWidth}
-                      collapse={columnCollapse("dataset_rows")}
-                    />
-                  )}
                   <ColumnHeader
                     label={msg("auto.features.dashboard.components.jobstab.literal.6")}
                     sortKey="created_at"
@@ -585,14 +534,6 @@ export function JobsTab({
                                     : job.username}
                                 </TableInline>
                               )}
-                              {showCol("optimization_type") && (
-                                <TableInline at="md">
-                                  {typeBadge(job.optimization_type)}
-                                </TableInline>
-                              )}
-                              {showCol("module_name") && (
-                                <TableInline at="lg">{moduleLabel(job.module_name)}</TableInline>
-                              )}
                               {showCol("elapsed_seconds") && (
                                 <TableInline at="md">
                                   <LiveElapsed
@@ -639,17 +580,6 @@ export function JobsTab({
                               </TableCell>
                             </>
                           )}
-                          {showCol("optimization_type") && (
-                            <TableCell
-                              className="px-2 truncate overflow-hidden"
-                              data-label={msg(
-                                "auto.features.dashboard.components.jobstab.literal.2",
-                              )}
-                              collapse={columnCollapse("optimization_type")}
-                            >
-                              {typeBadge(job.optimization_type)}
-                            </TableCell>
-                          )}
                           <TableCell
                             className="px-2 truncate overflow-hidden"
                             data-label={msg("auto.features.dashboard.components.jobstab.literal.3")}
@@ -657,29 +587,6 @@ export function JobsTab({
                           >
                             <StatusBadge status={job.status} compact />
                           </TableCell>
-                          {showCol("module_name") && (
-                            <TableCell
-                              className="px-2 max-w-[120px] text-sm truncate overflow-hidden"
-                              title={job.module_name ?? ""}
-                              data-label={msg(
-                                "auto.features.dashboard.components.jobstab.literal.4",
-                              )}
-                              collapse={columnCollapse("module_name")}
-                            >
-                              {moduleLabel(job.module_name)}
-                            </TableCell>
-                          )}
-                          {showCol("dataset_rows") && (
-                            <TableCell
-                              className="px-2 text-sm tabular-nums truncate overflow-hidden"
-                              data-label={msg(
-                                "auto.features.dashboard.components.jobstab.literal.5",
-                              )}
-                              collapse={columnCollapse("dataset_rows")}
-                            >
-                              {job.dataset_rows ?? "-"}
-                            </TableCell>
-                          )}
                           <TableCell
                             className="px-2 text-xs text-muted-foreground truncate overflow-hidden whitespace-nowrap"
                             title={formatDate(job.created_at)}

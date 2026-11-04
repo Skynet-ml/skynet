@@ -16,14 +16,7 @@ Puoi modificare entrambi i campi. L'assistente non sovrascrive le tue modifiche.
 
 ### Che cosa verrà ottimizzato
 
-Seleziona il **Tipo di artefatto**:
-
-| Tipo di artefatto | Che cosa cambia                                              |
-| ----------------- | ------------------------------------------------------------ |
-| Prompt            | Le istruzioni inviate a un modello linguistico               |
-| Codice            | Il sorgente di un programma                                  |
-| Programma DSPy    | Le istruzioni dei predictor di un modulo DSPy                |
-| Testo             | Qualsiasi altro testo, come un documento o un template       |
+In **Cosa viene ottimizzato**, seleziona **Programma DSPy** o **Un repository GitHub**.
 
 Poi fornisci la **Versione iniziale** (Guidato: **Da dove partiamo**). Incolla la versione attuale, oppure lascia che l'assistente scriva una bozza.
 

@@ -216,7 +216,7 @@ def _incumbent_payload() -> dict[str, Any]:
         "name": "Support answers",
         "task": {
             "objective": "Answer the question in one word.",
-            "artifact": {"kind": "prompt", "starting_version": "Answer briefly: "},
+            "artifact": {"kind": "dspy_program", "starting_version": "Answer briefly: "},
         },
         "data": {
             "mode": "pairs",
@@ -224,7 +224,7 @@ def _incumbent_payload() -> dict[str, Any]:
             "input_fields": ["question"],
             "expected_field": "answer",
         },
-        "optimizer": {"choice": "gepa"},
+        "optimizer": {"choice": "dspy_gepa"},
         "models": {"reflection_model": {"name": "fixture/text"}, "task_model": {"name": "fixture/task"}},
         "workspace": {
             "run_code": "def run(artifact, input):\n    return artifact + input['question']\n",

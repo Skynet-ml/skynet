@@ -4,16 +4,16 @@
 
 ### Skynet은 무엇인가요?
 
-Skynet은 프롬프트, 프로그램, 에이전트, 워크플로를 사용자의 데이터와 메트릭에 맞춰 최적화하는 플랫폼입니다. 데이터셋을 업로드하고, 작업을 설명하고, 실행을 시작합니다. 실행은 새 버전을 시도하고 따로 떼어 둔 데이터에서 채점합니다. 시작하려면 [빠른 시작](/docs/quickstart)을 읽어 보세요.
+Skynet은 사용자의 데이터와 메트릭을 기준으로 DSPy 프로그램과 리포지토리를 최적화하는 플랫폼입니다. 데이터셋을 업로드하고, 작업을 설명하고, 실행을 시작합니다. 실행은 새 버전을 시도하고 따로 떼어 둔 데이터에서 채점합니다. 시작하려면 [빠른 시작](/docs/quickstart)을 읽어 보세요.
 
 ### Skynet은 무엇을 최적화할 수 있나요?
 
-Skynet은 Optimize Anything입니다. 하나의 제품에서 프롬프트, 코드, 텍스트, DSPy 프로그램을 최적화합니다. 어떤 엔진이 작업할 수 있는지는 아티팩트 종류에 따라 정해집니다.
+Skynet은 Optimize Anything입니다. 하나의 제품에서 DSPy 프로그램과 리포지토리를 최적화합니다. 아티팩트 종류에 따라 사용할 수 있는 엔진이 정해집니다.
 
-- 프롬프트, 코드, 텍스트 아티팩트는 네이티브 엔진을 사용합니다: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler, ShinkaEvolve.
+- 리포지토리는 네이티브 엔진을 사용합니다: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler, ShinkaEvolve.
 - DSPy 프로그램은 DSPy 옵티마이저를 사용합니다: DSPy GEPA, DSPy MIPROv2, DSPy BootstrapFewShot.
 
-**Auto**는 작업에 맞는 엔진을 조합합니다. [최적화의 작동 방식](/docs/concepts/optimization)과 [엔진](/docs/concepts/engines)을 참고하세요.
+DSPy 프로그램에서 **Auto**는 DSPy GEPA를 사용합니다. 리포지토리에서는 네이티브 엔진 하나를 선택합니다. [최적화의 작동 방식](/docs/concepts/optimization) 및 [엔진](/docs/concepts/engines) 문서를 참고하세요.
 
 ### 인터페이스는 어떤 언어를 지원하나요?
 

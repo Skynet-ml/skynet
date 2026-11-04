@@ -7,7 +7,7 @@
 
 <h1 align="center">Skynet</h1>
 
-<p align="center"><b>Optimize Anything.</b> Give Skynet a prompt, code, a DSPy program or any text, plus a set of cases and a metric. Skynet finds a better version and shows you the score that proves it.</p>
+<p align="center"><b>Optimize Anything.</b> Give Skynet a DSPy program or a GitHub repository, plus a metric. Skynet finds a better version and shows you the score that proves it.</p>
 
 <p align="center">
   <a href="https://skynetml.com">skynetml.com</a> ·
@@ -23,7 +23,7 @@ You write two functions: `run(artifact, input)` and `score(input, output, expect
 
 ## Features
 
-- Engines: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler and ShinkaEvolve for prompts, code and text, and DSPy GEPA, MIPROv2 and BootstrapFewShot for DSPy programs. Auto picks one for you. [Engines](https://skynetml.com/docs/concepts/engines)
+- Engines: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler and ShinkaEvolve for repositories, and DSPy GEPA, MIPROv2 and BootstrapFewShot for DSPy programs. On a DSPy program, Auto picks one for you. [Engines](https://skynetml.com/docs/concepts/engines)
 - Your code runs in an isolated sandbox. Each run has a spending limit, and Skynet reserves it before any paid work starts. [Billing](https://skynetml.com/docs/concepts/billing) · [Security](https://skynetml.com/docs/security)
 - Claude, Codex and other MCP clients can check, start, follow and stop runs through the hosted MCP server (`https://mcp.skynetml.com/mcp`, OAuth 2.1). The [Skynet plugin](plugins/skynet) adds skills for Claude and Codex. [MCP](https://skynetml.com/docs/mcp)
 - Skynet for Mac runs the whole stack on your Mac. Model calls go through Claude Code or Codex, so your existing CLI plan pays for them. [Mac app](https://skynetml.com/docs/guides/mac-app) · [desktop/](desktop)

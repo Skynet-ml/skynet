@@ -17,10 +17,7 @@ export type JobsColumnKey =
   | "name"
   | "username"
   | "role"
-  | "optimization_type"
   | "status"
-  | "module_name"
-  | "dataset_rows"
   | "created_at"
   | "elapsed_seconds"
   | "optimized_test_metric";
@@ -37,10 +34,7 @@ export const JOBS_COLUMNS: readonly JobsColumn[] = [
   { key: "name", width: 104 },
   { key: "username", width: 94, collapse: "md", shared: true },
   { key: "role", width: 92, collapse: "lg", shared: true },
-  { key: "optimization_type", width: 80, collapse: "md" },
   { key: "status", width: 94, collapse: "lg" },
-  { key: "module_name", width: 94, collapse: "lg" },
-  { key: "dataset_rows", width: 72, collapse: "lg" },
   { key: "created_at", width: 94, collapse: "sm" },
   { key: "elapsed_seconds", width: 66, collapse: "md" },
   { key: "optimized_test_metric", width: 94 },

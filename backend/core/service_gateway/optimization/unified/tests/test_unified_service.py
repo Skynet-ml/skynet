@@ -6,8 +6,6 @@ from typing import Any
 
 import pytest
 
-from core.api.errors import DomainError
-from core.exceptions import ServiceError
 from core.models.unified import UnifiedCase, UnifiedRunRequest
 from core.service_gateway.optimization.blackbox import service as blackbox_service
 from core.service_gateway.optimization.blackbox.harness import GatewayConfig
@@ -18,20 +16,6 @@ from core.service_gateway.optimization.unified.split import split_cases, split_s
 
 SEED = "Answer."
 OPTIMIZED = "Answer carefully."
-
-
-def test_worker_maps_novelty_domain_error_to_service_error() -> None:
-    """Preserve novelty error detail and code at the unified worker boundary."""
-    raw = _payload(choice="shinka_evolve").model_dump()
-    raw["optimizer"]["shinka"] = {"novelty": True}
-    raw["models"]["reflection_model"] = {"name": "anthropic/claude-sonnet-4", "token_source": "byok"}
-    payload = UnifiedRunRequest.model_validate(raw)
-    expected = DomainError("submission.byok_novelty_unsupported", status=400)
-    with pytest.raises(ServiceError) as error:
-        unified_service.run_unified_optimization(payload, artifact_id="test")
-    assert str(error.value) == expected.detail
-    assert error.value.code == expected.code
-    assert error.value.params == expected.params
 
 
 class _TableScorer:
@@ -66,8 +50,8 @@ class _TableScorer:
         self.closed = True
 
 
-def _payload(n: int = 20, *, choice: str = "gepa", seed: int | None = 5) -> UnifiedRunRequest:
-    """Build a pairs-mode prompt run.
+def _payload(n: int = 20, *, choice: str = "dspy_gepa", seed: int | None = 5) -> UnifiedRunRequest:
+    """Build a pairs-mode DSPy program run.
 
     Args:
         n: How many cases.
@@ -79,7 +63,7 @@ def _payload(n: int = 20, *, choice: str = "gepa", seed: int | None = 5) -> Unif
     """
     return UnifiedRunRequest.model_validate(
         {
-            "task": {"objective": "answer well", "artifact": {"kind": "prompt", "starting_version": SEED}},
+            "task": {"objective": "answer well", "artifact": {"kind": "dspy_program", "starting_version": SEED}},
             "data": {"mode": "pairs", "cases": [{"input": {"i": i}, "expected": "x"} for i in range(n)]},
             "optimizer": {"choice": choice, "budget": {"max_scorer_runs": 40}},
             "models": {"reflection_model": {"name": "fake/model"}},
@@ -105,6 +89,7 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     seen: dict[str, Any] = {}
     monkeypatch.setattr(unified_service, "_gateway", lambda payload: GatewayConfig(url="http://gw", api_key="k"))
     monkeypatch.setattr(blackbox_service, "build_language_model", lambda config, **_: FakeReflectionLM())
+    monkeypatch.setattr(unified_service, "build_language_model", lambda config, **_: FakeReflectionLM())
 
     def strategy(strategy: Any, task: Any, server: Any, ctx: Any, progress: Any, *, caps: Any) -> Any:
         """Score both versions on every train case, then return the optimized one."""
@@ -180,9 +165,9 @@ def test_engine_gets_train_and_val_and_never_a_test_case(
     assert not {index for _, index in search_calls} & _ids(splits.test)
     assert scorer.closed is True
     assert response.split_counts == splits.counts
-    assert response.optimizer_resolved == "gepa"
+    assert response.optimizer_resolved == "dspy_gepa"
     assert harness["strategy"].mode == "single"
-    assert harness["strategy"].engine == "gepa"
+    assert harness["strategy"].engine == "dspy_gepa"
 
 
 def test_final_scores_report_on_test_and_select_on_val(
@@ -302,12 +287,13 @@ def test_job_spec_keeps_metric_source_in_private_context() -> None:
     assert job.context["metric_code"] == payload.workspace.metric_code
     assert payload.workspace.metric_code not in (job.objective or "")
     assert job.seed_candidate == SEED
-    assert job.optimizer_resolved == "gepa"
+    assert job.optimizer_resolved == "dspy_gepa"
 
 
 def test_worker_kwargs_reach_run_job(monkeypatch: pytest.MonkeyPatch) -> None:
     """The subprocess runner's sink, route and repo snapshot pass through to ``run_job`` unchanged."""
     _install_scorer(monkeypatch, _TableScorer({}))
+    monkeypatch.setattr(unified_service, "build_language_model", lambda config, **_: FakeReflectionLM())
     monkeypatch.setattr(unified_service, "_gateway", lambda payload: GatewayConfig(url="http://gw", api_key="k"))
     seen: dict[str, Any] = {}
 

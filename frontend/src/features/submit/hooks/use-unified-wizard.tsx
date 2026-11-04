@@ -104,6 +104,7 @@ import {
   defaultModels,
   deleteWorkspaceFile,
   initialWizardV2State,
+  optimizerTarget,
   presetEngine,
   type InputsSlice,
   type MetaSlice,
@@ -117,7 +118,6 @@ import {
   withDefaultModels,
   withLevel,
   withOptimizerPatch,
-  withQuestionInputs,
   writeWorkspaceFile,
   type ModelRole,
 } from "../lib/wizard-v2";
@@ -269,14 +269,11 @@ export function WizardV2Provider({
       WIZARD_V2_STEPS as readonly string[],
     );
   });
-  const [stored, dispatch] = useReducer(reducer, undefined, () => {
+  const [state, dispatch] = useReducer(reducer, undefined, () => {
     if (restored) return restored;
     const initial = initialWizardV2State(level, readPref("optimizerMaxRuns"));
     return { ...initial, meta: { ...initial.meta, folderId } };
   });
-  // A single-answer task's one case is derived, never stored, so it always
-  // matches the question.
-  const state = useMemo(() => withQuestionInputs(stored), [stored]);
   const router = useRouter();
   const { data: session } = useSession();
   const guided = level === "guided";
@@ -313,7 +310,7 @@ export function WizardV2Provider({
 
   // The catalog follows the setup it was asked for; a choice it no longer
   // offers is kept and reported as a step issue, never swapped silently.
-  const kind = state.task.artifactKind;
+  const kind = optimizerTarget(state.task);
   const mode = state.inputs.mode;
   const [optimizerCatalog, setOptimizerCatalog] = useState<OptimizerCatalogResponse | null>(null);
   const [optimizerCatalogLoading, setOptimizerCatalogLoading] = useState(false);
@@ -772,9 +769,9 @@ export function WizardV2Provider({
   useEffect(() => {
     if (submittedRef.current) return;
     try {
-      window.sessionStorage.setItem(WIZARD_SESSION_KEY, encodeWizardSession(accountId, stored));
+      window.sessionStorage.setItem(WIZARD_SESSION_KEY, encodeWizardSession(accountId, state));
     } catch {}
-  }, [accountId, stored]);
+  }, [accountId, state]);
   useEffect(() => {
     if (submittedRef.current) return;
     if (scheduledRun) keepSessionValue(WIZARD_SCHEDULE_KEY, JSON.stringify(scheduledRun));

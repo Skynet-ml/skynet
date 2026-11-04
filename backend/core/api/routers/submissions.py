@@ -1,7 +1,7 @@
 """Routes for submitting optimization jobs. [PUBLIC DEV API]
 
-``POST /optimize`` — one optimization run of a prompt, code, text or DSPy
-program, for every optimizer.
+``POST /optimize`` — one optimization run of a DSPy program, for every DSPy
+optimizer.
 ``POST /blackbox/run`` — one optimization of a GitHub repository.
 ``GET /optimizers`` — the optimizers that fit a setup, with availability.
 ``GET /blackbox/engines`` — the engine catalog with per-deployment availability.
@@ -76,10 +76,8 @@ from ...constants import (
 from ...exceptions import ServiceError
 from ...i18n_keys import I18nKey
 from ...models import (
-    DSPY_OPTIMIZERS,
     FEEDBACK_OPTIMIZERS,
     UNIFIED_PAYLOAD_KIND,
-    ArtifactKind,
     BlackboxEngineCatalogResponse,
     BlackboxRunRequest,
     DataMode,
@@ -88,6 +86,7 @@ from ...models import (
     OptimizerCatalogResponse,
     OptimizerChoice,
     OptimizerOption,
+    OptimizerTarget,
     UnifiedData,
     UnifiedRunRequest,
     optimizer_family,
@@ -862,6 +861,64 @@ def _materialize_unified_cases(payload: UnifiedRunRequest, *, job_store, usernam
         raise DomainError(_UNIFIED_CONTRACT_FAILED, status=422, error=_first_error(error)) from error
 
 
+def _materialize_repo_cases(payload: BlackboxRunRequest, *, job_store, username: str) -> None:
+    """Inline a repository run's staged dataset into ``payload.cases``.
+
+    Rows map to cases the same way as a unified run's, through
+    ``input_fields`` and ``expected_field``. Inline cases win over a staged
+    id, and the id is always cleared so the stored payload never holds it.
+
+    Args:
+        payload: The repository run request, mutated in place.
+        job_store: Backend exposing ``get_staged_dataset``.
+        username: Authenticated submitter; staging rows are scoped to one owner.
+
+    Raises:
+        DomainError: 400 ``submission.staged_dataset_not_found`` when the id
+            is unknown or owned by another user.
+    """
+    staged_id = payload.staged_dataset_id
+    payload.staged_dataset_id = None
+    if not staged_id or payload.cases:
+        return
+    payload.cases = staged_repo_cases(
+        staged_id,
+        input_fields=payload.input_fields,
+        expected_field=payload.expected_field,
+        job_store=job_store,
+        username=username,
+    )
+
+
+def staged_repo_cases(
+    staged_id: str, *, input_fields: list[str], expected_field: str | None, job_store, username: str
+) -> list[dict]:
+    """Read one owner's staged dataset as repository run cases.
+
+    Args:
+        staged_id: The staged dataset id the caller sent.
+        input_fields: Columns that form each case's input; empty means every column.
+        expected_field: Column holding the expected answer, if any.
+        job_store: Backend exposing ``get_staged_dataset``.
+        username: Authenticated submitter; staging rows are scoped to one owner.
+
+    Returns:
+        The staged rows mapped onto cases.
+
+    Raises:
+        DomainError: 400 ``submission.staged_dataset_not_found`` when the id
+            is unknown or owned by another user.
+    """
+    rows = job_store.get_staged_dataset(staged_id, username)
+    if not rows:
+        raise DomainError(
+            I18nKey.SUBMISSION_STAGED_DATASET_NOT_FOUND,
+            status=400,
+            staged_dataset_id=staged_id,
+        )
+    return rows_to_cases(rows, input_fields=input_fields, expected_field=expected_field)
+
+
 def _first_error(error: ValidationError) -> str:
     """Return the first readable message of a Pydantic validation error.
 
@@ -959,15 +1016,15 @@ def _unified_overview(
 
 def _optimizer_option(
     option_id: OptimizerChoice,
-    artifact_kind: ArtifactKind,
+    artifact_kind: OptimizerTarget,
     catalog: BlackboxEngineCatalogResponse,
 ) -> OptimizerOption:
     """Describe one optimizer choice with its availability on this deployment.
 
     Args:
         option_id: The optimizer choice being described.
-        artifact_kind: What the run optimizes; fixes Auto's resolution.
-        catalog: The black-box engine catalog for text targets.
+        artifact_kind: A DSPy program, or ``"repo"``; fixes Auto's resolution.
+        catalog: The black-box engine catalog for the run's target.
 
     Returns:
         The catalog option.
@@ -1155,10 +1212,10 @@ def create_submissions_router(*, service, job_store) -> APIRouter:
         current_user: AuthenticatedUserDep,
         idempotency_key: IdempotencyKeyHeader = None,
     ) -> OptimizationSubmissionResponse | JSONResponse:
-        """Queue one optimization of a prompt, code, text or DSPy program.
+        """Queue one optimization of a DSPy program.
 
-        Every optimizer (the DSPy optimizers and the black-box engines) runs
-        through the black-box engine layer against the workspace code, so the
+        Every DSPy optimizer runs through the black-box engine layer against
+        the workspace code, so the
         run is stored as a black-box run marked ``payload_kind=unified_v1``.
         The persisted owner is the authenticated caller, not whatever the
         client posted.
@@ -1210,8 +1267,8 @@ def create_submissions_router(*, service, job_store) -> APIRouter:
     ) -> OptimizationSubmissionResponse:
         """Queue a black-box optimization of a GitHub repository against a scorer.
 
-        Only repository targets come through here; prompts, code, text and
-        DSPy programs submit to ``/optimize``. Without an execution budget the
+        Only repository targets come through here; DSPy programs submit to
+        ``/optimize``. Without an execution budget the
         server creates one and runs the setup check itself, which stages the
         repository and infers a setup command when none is given. The
         persisted owner is the authenticated caller.
@@ -1232,7 +1289,7 @@ def create_submissions_router(*, service, job_store) -> APIRouter:
         if payload.target.kind != BLACKBOX_TARGET_REPO or payload.target.repo is None:
             raise DomainError("submission.validation_failed", status=400)
         payload.username = current_user.username
-        payload.staged_dataset_id = None
+        _materialize_repo_cases(payload, job_store=job_store, username=payload.username)
 
         replay_keys = resolve_submission_replay_keys(
             payload,
@@ -1354,29 +1411,30 @@ def create_submissions_router(*, service, job_store) -> APIRouter:
     )
     def optimizer_catalog(
         current_user: AuthenticatedUserDep,
-        artifact_kind: ArtifactKind,
+        artifact_kind: OptimizerTarget,
         data_mode: DataMode,
     ) -> OptimizerCatalogResponse:
-        """Describe the optimizers the wizard may offer for one artifact kind and data mode.
+        """Describe the optimizers the wizard may offer for a DSPy program or a repository.
 
-        DSPy optimizers are always available; black-box engines and the
-        black-box Auto strategy carry this deployment's availability.
+        DSPy optimizers are always available; the black-box engines a
+        repository run takes carry this deployment's availability.
 
         Args:
             current_user: Authenticated caller resolved from the bearer token.
-            artifact_kind: What the run optimizes.
+            artifact_kind: ``dspy_program``, or ``repo`` for a repository run.
             data_mode: Whether the run has one input or input/output pairs.
 
         Returns:
-            The relevant options, Auto first, with what Auto resolves to.
+            The relevant options, with what Auto resolves to. A repository
+            run has no Auto, so its ``auto_resolves_to`` is empty.
         """
         del current_user
-        catalog = engine_catalog(BLACKBOX_TARGET_TEXT)
+        repo = artifact_kind == BLACKBOX_TARGET_REPO
+        catalog = engine_catalog(BLACKBOX_TARGET_REPO if repo else BLACKBOX_TARGET_TEXT)
         options = [
             _optimizer_option(option, artifact_kind, catalog) for option in optimizers_for(artifact_kind, data_mode)
         ]
-        auto_resolved = resolve_optimizer("auto", artifact_kind)
-        auto_resolves_to = [auto_resolved] if auto_resolved in DSPY_OPTIMIZERS else list(catalog.auto_engines)
+        auto_resolves_to = [] if repo else [resolve_optimizer("auto", artifact_kind)]
         return OptimizerCatalogResponse(
             artifact_kind=artifact_kind,
             data_mode=data_mode,

@@ -23,6 +23,7 @@ import {
   type DataMode,
   type OptimizerCatalogResponse,
   type OptimizerChoice,
+  type OptimizerTarget,
   type TaskInterviewTurnResult,
   type UnifiedCase,
   type UnifiedChatTurn,
@@ -74,6 +75,10 @@ export interface TaskSlice {
   transcript: UnifiedChatTurn[];
   /** Set for a repository run, which has no artifact or inputs of its own. */
   repo: RepoDraft | null;
+  /** The repository the user named in the interview, searched until one is chosen. */
+  repoQuery?: string;
+  /** The interview's call on whether the run needs example data; unset means unknown. */
+  needsData?: boolean;
 }
 
 export interface InputsSlice {
@@ -155,7 +160,7 @@ export function initialWizardV2State(
     task: {
       objective: "",
       background: "",
-      artifactKind: null,
+      artifactKind: "dspy_program",
       startingVersion: null,
       artifactRationale: "",
       transcript: [],
@@ -252,8 +257,20 @@ export function repoIssue(repo: RepoDraft): string | null {
 export function taskInterviewPatch(
   result: TaskInterviewTurnResult,
   dirty: ReadonlySet<keyof TaskSlice>,
+  current?: Pick<TaskSlice, "repo">,
 ): Partial<TaskSlice> {
   const patch: Partial<TaskSlice> = {};
+  // A target the user picked by hand stays; the interview leaves a chosen
+  // repository alone and only switches back while none is chosen yet.
+  if (current && !dirty.has("repo")) {
+    if (result.target === "repo" && !current.repo) patch.repo = emptyRepoDraft();
+    else if (result.target === "dspy_program" && current.repo && !current.repo.repository.trim()) {
+      patch.repo = null;
+      if (!dirty.has("artifactKind")) patch.artifactKind = "dspy_program";
+    }
+  }
+  if (result.repo_query?.trim()) patch.repoQuery = result.repo_query.trim();
+  if (typeof result.needs_data === "boolean") patch.needsData = result.needs_data;
   if (result.objective.trim() && !dirty.has("objective")) patch.objective = result.objective;
   if (result.background.trim() && !dirty.has("background")) patch.background = result.background;
   if (result.artifact_kind && !dirty.has("artifactKind")) {
@@ -266,58 +283,33 @@ export function taskInterviewPatch(
   return patch;
 }
 
+/**
+ * The inputs and optimizer patches that go with switching to a repository
+ * target: one case at a time, and a named engine in place of Auto, which has
+ * no repository strategy.
+ */
+export function repoTargetSlices(choice: OptimizerChoice): {
+  inputs: Partial<InputsSlice>;
+  optimizer: Partial<OptimizerSlice> | null;
+} {
+  const fits = optimizersFor("repo", "single").includes(choice);
+  return { inputs: { mode: "single" }, optimizer: fits ? null : { choice: "gepa" } };
+}
+
+/** The optimizer patch for leaving a repository target: a black-box engine goes back to Auto. */
+export function programTargetOptimizer(choice: OptimizerChoice): Partial<OptimizerSlice> | null {
+  return optimizersFor("dspy_program", "pairs").includes(choice) ? null : { choice: "auto" };
+}
+
+/** What the optimizer catalog is keyed on: `"repo"` for a repository run, else the artifact kind. */
+export function optimizerTarget(task: Pick<TaskSlice, "repo" | "artifactKind">): OptimizerTarget | null {
+  return task.repo ? "repo" : task.artifactKind;
+}
+
 /** Whether the models the chosen artifact needs to run are set. */
 export function optimizerModelsReady(s: WizardV2State): boolean {
-  if (s.task.artifactKind === "dspy_program" && !hasModel(s.optimizer.taskModel)) return false;
+  if (!s.task.repo && !hasModel(s.optimizer.taskModel)) return false;
   return hasModel(s.optimizer.reflectionModel);
-}
-
-/** The field a single-answer task's one input sits under. */
-export const QUESTION_INPUT_FIELD = "question";
-
-/**
- * Whether the run optimizes one answer itself (a solution, a summary, a
- * document): a text artifact with no table behind it. Its one input is the
- * original question, which the objective and background already hold, so the
- * Inputs step has nothing left to ask. A text task that brings a table keeps
- * the step.
- */
-export function isSingleAnswerTask(s: Pick<WizardV2State, "task" | "inputs">): boolean {
-  return (
-    !s.task.repo &&
-    s.task.artifactKind === "text" &&
-    s.inputs.mode !== "pairs" &&
-    s.inputs.datasetLabel === null &&
-    s.inputs.stagedDatasetId === null
-  );
-}
-
-/** A single-answer task's inputs: one case holding the question, its objective then its background. */
-export function questionInputs(
-  task: Pick<TaskSlice, "objective" | "background">,
-): Pick<InputsSlice, "mode" | "cases" | "inputFields" | "expectedField"> {
-  const question = [task.objective.trim(), task.background.trim()].filter(Boolean).join("\n\n");
-  return {
-    mode: "single",
-    cases: [{ input: { [QUESTION_INPUT_FIELD]: question } }],
-    inputFields: [QUESTION_INPUT_FIELD],
-    expectedField: null,
-  };
-}
-
-/**
- * The state the wizard shows and submits: a single-answer task with no case of
- * its own gets the one case built from its question, so it follows every edit
- * without being stored. A cloned run's case or a table is left alone, and a
- * user on the skipped Inputs step stands on the task.
- */
-export function withQuestionInputs(s: WizardV2State): WizardV2State {
-  if (!isSingleAnswerTask(s) || s.inputs.cases.length > 0) return s;
-  return {
-    ...s,
-    step: s.step === "inputs" ? "task" : s.step,
-    inputs: { ...s.inputs, ...questionInputs(s.task) },
-  };
 }
 
 /**
@@ -327,10 +319,12 @@ export function withQuestionInputs(s: WizardV2State): WizardV2State {
  * the run out of sight.
  */
 export function wizardSteps(s: WizardV2State, optimizerBlocked: boolean): readonly WizardStepId[] {
-  // A repository run is scored on the checkout itself, and a single-answer
-  // task's one input is its question, so neither has an Inputs step.
-  const skipInputs = Boolean(s.task.repo) || isSingleAnswerTask(s);
-  const all = skipInputs ? WIZARD_V2_STEPS.filter((step) => step !== "inputs") : WIZARD_V2_STEPS;
+  // A repository run is scored on the checkout itself, so it has an Inputs
+  // step only when the interview found it scores one case at a time.
+  const all =
+    s.task.repo && !s.task.needsData
+      ? WIZARD_V2_STEPS.filter((step) => step !== "inputs")
+      : WIZARD_V2_STEPS;
   if (s.level !== "guided" || optimizerBlocked || s.step === "optimizer") return all;
   return all.filter((step) => step !== "optimizer");
 }
@@ -425,11 +419,11 @@ export function withOptimizerPatch(
 export function presetEngine(
   choice: OptimizerChoice,
   engine: OptimizerChoice,
-  kind: ArtifactKind,
+  target: OptimizerTarget,
   mode: DataMode,
 ): OptimizerChoice | null {
   if (choice !== "auto" || engine === "auto") return null;
-  return optimizersFor(kind, mode).includes(engine) ? engine : null;
+  return optimizersFor(target, mode).includes(engine) ? engine : null;
 }
 
 /* ── Workspace files ─────────────────────────────────────────────────── */
@@ -552,9 +546,9 @@ function fnv1a(text: string): string {
  * calls the task model, so the data and both of those count too.
  */
 export function contractSnapshot(s: WizardV2State): string {
-  const kind = s.task.artifactKind;
+  const target = optimizerTarget(s.task);
   return stableJson({
-    artifactKind: kind,
+    artifactKind: s.task.artifactKind,
     startingVersion: s.task.startingVersion,
     mode: s.inputs.mode,
     cases: s.inputs.cases.length > 0 ? fnv1a(stableJson(s.inputs.cases)) : null,
@@ -563,7 +557,7 @@ export function contractSnapshot(s: WizardV2State): string {
     expectedField: s.inputs.expectedField,
     split: s.inputs.split,
     shuffle: s.inputs.shuffle,
-    resolvedOptimizer: kind ? resolveOptimizer(s.optimizer.choice, kind) : null,
+    resolvedOptimizer: target ? resolveOptimizer(s.optimizer.choice, target) : null,
     taskModel: s.optimizer.taskModel?.name.trim() || null,
     runCode: s.workspace.runCode,
     metricCode: s.workspace.metricCode,

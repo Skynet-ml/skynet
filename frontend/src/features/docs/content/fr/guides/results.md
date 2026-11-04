@@ -8,14 +8,14 @@ La page d'exécution n'affiche que les onglets qui s'appliquent à l'exécution.
 | -------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
 | **Aperçu**                 | Toujours                                                                        | La progression, les scores et l'historique des scores                                      |
 | **Utilisation**            | Une exécution réussie avec un programme que Skynet peut servir                  | Un formulaire pour exécuter le programme optimisé, et du code d'intégration                |
-| **Artefact**               | Une exécution Prompt, Code ou Texte qui a un résultat                           | Les versions de votre artefact, avec la meilleure version                                  |
+| **Artefact** | Une exécution sur un dépôt avec un résultat | Les versions de votre artefact, avec la meilleure version |
 | **Données**                | Une exécution de programme DSPy terminée                                        | Les données réparties en ensembles d'entraînement, de validation et de test, et l'évaluation du jeu de test |
 | **Code**                   | Quand l'exécution a du code à afficher                                          | Le code d'exécution et la métrique                                                         |
-| **Récompense**             | Une exécution Prompt, Code ou Texte dont la métrique déclare des composantes de récompense | Les composantes de la récompense et leurs poids                                 |
-| **Artefact**               | Une exécution avec un prompt ou des fichiers optimisés                          | La sortie optimisée et **Exporter les résultats**                                          |
+| **Récompense** | Une exécution sur un dépôt dont la métrique déclare des parts de récompense | Les composantes de la récompense et leurs poids |
+| **Artefact** | Une exécution de programme DSPy terminée | La sortie optimisée et **Exporter les résultats** |
 | **Journaux**               | La plupart des exécutions                                                       | Le journal de l'exécution                                                                  |
 | **Utilisation et coût**    | Quand vous êtes connecté                                                        | Ce que l'exécution a dépensé                                                               |
-| **Exécution planifiée**    | Une exécution Prompt, Code ou Texte réussie                                     | Une planification pour relancer l'optimisation                                             |
+| **Exécution planifiée** | Une exécution réussie d'un programme DSPy | Une planification pour relancer l'optimisation |
 | **Configuration**          | Toujours                                                                        | La configuration de l'exécution                                                            |
 
 > [!NOTE]
@@ -33,7 +33,7 @@ L'onglet **Aperçu** affiche :
 
 Pendant que l'exécution est active, l'aperçu affiche aussi **Écoulé**, **Restant** et **Débit**.
 
-Pour une exécution Prompt, Code ou Texte, l'aperçu affiche aussi **Scores nommés** quand votre métrique renvoie des scores nommés.
+Pour une exécution sur un dépôt, la vue d'ensemble affiche aussi **Scores nommés** quand votre métrique renvoie des scores nommés.
 
 Pour une exécution de programme DSPy, l'onglet **Données** comporte une **Évaluation du jeu de test**. Elle affiche le score de référence et le score optimisé pour chaque cas de test.
 
@@ -45,7 +45,7 @@ Si l'exécution s'est arrêtée à son budget, la page d'exécution vous indique
 
 ## Exporter la meilleure version
 
-### Exécutions Prompt, Code et Texte
+### Exécutions sur un dépôt
 
 L'onglet **Artefact** liste les **Versions** de votre artefact. Pour chaque version, vous pouvez :
 

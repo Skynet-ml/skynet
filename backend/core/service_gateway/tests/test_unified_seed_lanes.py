@@ -229,7 +229,7 @@ async def test_run_code_reaches_the_editor_when_the_provider_sends_it_whole(
     monkeypatch.setattr(litellm, "acompletion", _fake_acompletion)
     monkeypatch.setattr(code, "_validate_and_repair_artifact", validate)
     unified = {
-        "task": {"objective": "o", "artifact": {"kind": "prompt", "starting_version": "x"}},
+        "task": {"objective": "o", "artifact": {"kind": "dspy_program", "starting_version": "x"}},
         "input_fields": ["review"],
     }
     queue: asyncio.Queue[dict | None] = asyncio.Queue()

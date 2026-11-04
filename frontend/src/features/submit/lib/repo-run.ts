@@ -3,7 +3,8 @@
  *
  * A repository run optimizes a GitHub checkout against a Python scorer, so it
  * carries the task, the repository target, the engine and the models; it has
- * no artifact, inputs or run code.
+ * no artifact or run code, and carries cases only when the interview found
+ * the run needs data.
  */
 import type { BlackboxEngineId, BlackboxRunRequest, ModelConfig } from "@/shared/types/api";
 import { prepareModelConfig } from "./model-config";
@@ -24,7 +25,7 @@ export function repoRunRequest(
   state: WizardV2State,
   { username, tokenSource, maxCostCents }: RepoRunOptions,
 ): BlackboxRunRequest | null {
-  const { task, optimizer, workspace, meta } = state;
+  const { task, inputs, optimizer, workspace, meta } = state;
   const repo = task.repo;
   if (!repo || optimizer.choice === "auto" || !hasModel(optimizer.reflectionModel)) return null;
   if (!workspace.metricCode.trim()) return null;
@@ -45,6 +46,17 @@ export function repoRunRequest(
       ...(hasModel(metricModel) && { model: prepareModelConfig(metricModel) }),
       timeout_seconds: workspace.metricTimeoutSeconds,
     },
+    // The scorer gets each case as `score(repo_path, case)`.
+    ...(task.needsData && inputs.cases.length > 0
+      ? { cases: inputs.cases as unknown as Array<Record<string, unknown>> }
+      : {}),
+    ...(task.needsData &&
+      inputs.cases.length === 0 &&
+      inputs.stagedDatasetId && {
+        staged_dataset_id: inputs.stagedDatasetId,
+        input_fields: inputs.inputFields,
+        expected_field: inputs.expectedField,
+      }),
     budget: optimizer.budget,
     strategy: { mode: "single", engine },
     proposer: optimizer.proposer,

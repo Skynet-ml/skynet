@@ -131,25 +131,3 @@ export function errorMessageKey(code: string | undefined, status?: number): stri
   if (code === "rate_limit.exceeded" || status === 429) return "desktop_link.error.rate_limit";
   return "desktop_link.error.generic";
 }
-
-// The Mac app loads the consent page in its own window and intercepts this
-// path to let the user go on without an account. No route serves it.
-export const DESKTOP_SKIP_PATH = "/desktop/link/skip";
-const DESKTOP_APP_UA_MARK = "SkynetDesktop";
-
-/** Whether the page runs inside the Mac app's window (its user agent carries the mark). */
-export function isDesktopAppUserAgent(userAgent: string): boolean {
-  return userAgent.includes(DESKTOP_APP_UA_MARK);
-}
-
-/** Whether a /login query returns the user to the consent page on ``origin``. */
-export function returnsToDesktopLink(search: string, origin: string): boolean {
-  const callback = new URLSearchParams(search).get("callbackUrl");
-  if (!callback) return false;
-  try {
-    const url = new URL(callback, origin);
-    return url.origin === origin && url.pathname === "/desktop/link";
-  } catch {
-    return false;
-  }
-}

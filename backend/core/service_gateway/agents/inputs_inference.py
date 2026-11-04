@@ -46,6 +46,9 @@ class InputsInferenceSig(dspy.Signature):
     __doc__ = with_conduct("""Decide what the optimization run is evaluated on, from the task and the user's data.
 
     The run improves an artifact (``artifact_kind``) toward ``objective``.
+    For ``repo`` the artifact is a GitHub repository: each input is one
+    case its scorer runs against the repository, such as a page or a
+    prompt, and the expected output is what that case should produce.
     Decide ``mode``:
     - ``single``: the artifact is judged on ONE input (e.g. a single
       document to rewrite, one problem to solve), or there is no table.
@@ -67,7 +70,7 @@ class InputsInferenceSig(dspy.Signature):
 
     objective: str = dspy.InputField(desc="What the run must improve.")
     background: str = dspy.InputField(desc="Extra task context; may be empty.")
-    artifact_kind: str = dspy.InputField(desc="prompt | code | dspy_program | text.")
+    artifact_kind: str = dspy.InputField(desc="dspy_program, or repo for a GitHub repository.")
     starting_version: str = dspy.InputField(desc="The artifact's starting version as JSON; may be empty.")
     columns: list[str] = dspy.InputField(desc="Column names of the user's data; may be empty.")
     sample_rows: str = dspy.InputField(desc="JSON array of up to five sample rows.")

@@ -24,7 +24,7 @@ import {
   type HeldOutCounts,
   type Row,
 } from "../lib/inputs-mode";
-import type { InputsSlice, WizardV2Context } from "../lib/wizard-v2";
+import { optimizerTarget, type InputsSlice, type WizardV2Context } from "../lib/wizard-v2";
 
 const SAMPLE_ROWS = 5;
 
@@ -111,7 +111,7 @@ export function useInputsInference(ctx: WizardV2Context): InputsInferenceState {
           {
             objective: task.objective,
             background: task.background,
-            artifact_kind: task.artifactKind ?? "prompt",
+            artifact_kind: optimizerTarget(task) ?? "dspy_program",
             starting_version: task.startingVersion,
             columns: data.columns,
             sample_rows: data.rows.slice(0, SAMPLE_ROWS),
@@ -151,7 +151,14 @@ export function useInputsInference(ctx: WizardV2Context): InputsInferenceState {
         }
       }
     },
-    [task.objective, task.background, task.artifactKind, task.startingVersion, patchInputs],
+    [
+      task.objective,
+      task.background,
+      task.repo,
+      task.artifactKind,
+      task.startingVersion,
+      patchInputs,
+    ],
   );
 
   // A fresh table replaces the cases outright; inference then refines how

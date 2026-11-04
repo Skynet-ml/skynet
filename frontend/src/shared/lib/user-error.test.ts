@@ -19,6 +19,7 @@ const stubs: Record<string, string> = {
   "@/shared/lib/runtime-locale": `export const getActiveLocale = () => "en";`,
   "@/shared/lib/sse": "export const readServerSentEvents = async () => {};",
   "@/shared/lib/resumable-turn": "export const streamResumableTurn = async () => {};",
+  "@/shared/lib/oauth-return": "export const forgetOAuthReturn = () => {};",
 };
 
 registerHooks({

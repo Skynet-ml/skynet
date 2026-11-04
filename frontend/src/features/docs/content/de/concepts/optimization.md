@@ -1,4 +1,4 @@
-Skynet ist Optimize Anything: ein Produkt, das jedes Artefakt anhand Ihrer Daten und Ihrer Metrik verbessert. Jeder Durchlauf nutzt denselben Ausführungsvertrag und denselben Metrikvertrag. Die Artefaktart bestimmt, welche Engines daran arbeiten können.
+Skynet ist Optimize Anything: ein Produkt, das ein DSPy-Programm oder ein Repository anhand Ihrer Metrik verbessert. Die Artefaktart entscheidet, welche Engines damit arbeiten können.
 
 ## Der gemeinsame Vertrag
 
@@ -34,21 +34,19 @@ Den vollständigen Metrikvertrag finden Sie unter [Metriken und Scorer](/docs/co
 
 | Artefaktart   | Engines                                                                      |
 | ------------- | ---------------------------------------------------------------------------- |
-| Prompt        | Auto, GEPA, Best-of-N, AutoResearch, Meta-Harness, AutoSaddler, ShinkaEvolve |
-| Code          | Wie bei Prompt                                                               |
-| Text          | Wie bei Prompt                                                               |
+| Repository | GEPA, Best-of-N, AutoResearch, Meta-Harness, AutoSaddler, ShinkaEvolve |
 | DSPy-Programm | Auto, DSPy GEPA, DSPy MIPROv2, DSPy BootstrapFewShot                         |
 
 Es gibt zwei Familien von Engines:
 
-- Die **nativen Engines** behandeln das Artefakt als Black Box. Sie arbeiten mit Prompt-, Code- und Text-Artefakten.
+- Die **nativen Engines** behandeln das Artefakt als Black Box. Sie arbeiten mit Repositorys.
 - Die **DSPy-Optimierer** arbeiten innerhalb eines DSPy-Programms. Sie arbeiten nur mit DSPy-Programm-Artefakten.
 
 DSPy MIPROv2 und DSPy BootstrapFewShot benötigen Paare (Fälle mit erwarteten Ausgaben). Mit einer einzelnen Eingabe kann ein DSPy-Programm nur Auto und DSPy GEPA verwenden.
 
-## Prompt-, Code- und Text-Artefakte
+## Repositorys
 
-Die nativen Engines behandeln das Artefakt als Black Box. Eine Engine schlägt eine neue Version vor, führt `run(artifact, input)` auf den Fällen aus und liest Score und Feedback.
+Die nativen Engines ändern die Dateien in den Pfaden, die Sie freigeben. Ihre Metrik bewertet jede Version des Repositorys.
 
 Die sechs nativen Engines verwenden unterschiedliche Suchverfahren:
 
@@ -86,18 +84,16 @@ DSPy BootstrapFewShot verwendet kein Reflexionsmodell.
 
 **Auto** ist die Standardwahl im Assistenten.
 
-- Bei einem Prompt-, Code- oder Text-Artefakt erkundet Auto mit fünf nativen Engines und macht dann mit GEPA ab der besten Version weiter.
+- **Repository**: Auto ist nicht verfügbar. Wählen Sie eine native Engine.
 - Bei einem DSPy-Programm führt Auto DSPy GEPA aus.
 
-Beide Formen von Auto lesen den Feedback-Text Ihrer Metrik.
+Auto liest den Feedback-Text Ihrer Metrik.
 
 ## Welche Engine Sie wählen
 
 | Ihre Situation                                                   | Verwenden Sie                                                       |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------- |
-| Sie haben einen Prompt, den ein Modell ausführt                  | Ein Prompt-Artefakt. Beginnen Sie mit Auto.                         |
-| Sie haben Code, der schneller, günstiger oder korrekter werden soll | Ein Code-Artefakt. Beginnen Sie mit Auto.                        |
-| Sie haben ein Dokument oder eine Konfiguration                   | Ein Text-Artefakt. Beginnen Sie mit Auto.                           |
+| Sie haben Code in einem GitHub-Repository | Ein Repository. Wählen Sie eine native Engine. |
 | Sie haben ein DSPy-Programm                                      | Ein DSPy-Programm-Artefakt. Beginnen Sie mit Auto.                  |
 | Sie möchten Few-Shot-Demos aus Ihren Daten auswählen lassen      | Ein DSPy-Programm-Artefakt mit DSPy BootstrapFewShot oder DSPy MIPROv2 |
 

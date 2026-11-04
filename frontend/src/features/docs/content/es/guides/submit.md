@@ -16,14 +16,7 @@ Puedes editar los dos campos. El asistente de IA no sobrescribe tus ediciones.
 
 ### Qué se optimizará
 
-Selecciona el **Tipo de artefacto**:
-
-| Tipo de artefacto | Qué cambia                                                 |
-| ----------------- | ---------------------------------------------------------- |
-| Prompt            | Las instrucciones que se envían a un modelo de lenguaje    |
-| Código            | El código fuente de un programa                            |
-| Programa DSPy     | Las instrucciones de los predictores de un módulo DSPy     |
-| Texto             | Cualquier otro texto, como un documento o una plantilla    |
+En **Qué se optimiza**, selecciona **Programa DSPy** o **Un repositorio de GitHub**.
 
 Después da la **Versión inicial** (Guiado: **Desde dónde empezamos**). Pega la versión actual, o deja que el asistente de IA escriba un borrador.
 

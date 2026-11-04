@@ -2,14 +2,12 @@ Skynet, elinizde zaten olan bir yapıtı iyileştirir. Ona bir başlangıç sür
 
 ## Skynet neyi optimize eder
 
-Skynet dört yapıt türüyle çalışır:
+Skynet iki yapıt türüyle çalışır:
 
 | Yapıt türü    | Ne değişir                                                   |
 | ------------- | ------------------------------------------------------------ |
-| İstem         | İstem metni                                                  |
-| Kod           | Kaynak kod                                                   |
+| Depo | Değiştirilmesine izin verdiğiniz yollardaki dosyalar |
 | DSPy programı | Bir `dspy.Module` içindeki tahmin edicilerin talimatları      |
-| Metin         | Diğer her tür metin, örneğin bir belge veya bir yapılandırma |
 
 Her çalıştırma aynı sözleşmeyi kullanır. Çalıştırma kodunuz `run(artifact, input)` fonksiyonunu tanımlar. Metriğiniz `score(input, output, expected=None)` fonksiyonunu tanımlar. Metrik bir puan ve yazılı geri bildirim döndürür. Optimize edici, bir sonraki sürümü daha iyi yapmak için bu geri bildirimi okur.
 
@@ -20,10 +18,10 @@ Her çalıştırma aynı sözleşmeyi kullanır. Çalıştırma kodunuz `run(art
 
 Skynet, Optimize Anything'dir. Hangi motorların bir yapıt üzerinde çalışabileceğine yapıt türü karar verir:
 
-- İstem, Kod ve Metin yapıtları yerel motorları kullanır: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler ve ShinkaEvolve.
+- Depolar yerel motorları kullanır: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler ve ShinkaEvolve.
 - DSPy programı yapıtları DSPy optimize edicilerini kullanır: DSPy GEPA, DSPy MIPROv2 ve DSPy BootstrapFewShot.
 
-**Auto** seçimi sizin yerinize yapar. Bir DSPy programında Auto, DSPy GEPA'yı kullanır. Diğer yapıt türlerinde Auto beş yerel motoru birleştirir. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) ve [Motorlar](/docs/concepts/engines) sayfalarını okuyun.
+Bir DSPy programında **Auto**, DSPy GEPA'yı kullanır. Bir depoda tek bir yerel motor seçersiniz. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) ve [Motorlar](/docs/concepts/engines) sayfalarını okuyun.
 
 ## Bir çalıştırma nasıl işler
 

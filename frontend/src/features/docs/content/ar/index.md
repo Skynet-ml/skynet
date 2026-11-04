@@ -2,14 +2,12 @@
 
 ## ما الذي يحسنه Skynet
 
-يعمل Skynet على أربعة أنواع من العناصر:
+يعمل Skynet على نوعين من العناصر:
 
 | نوع العنصر   | ما الذي يتغيّر                                     |
 | ------------ | -------------------------------------------------- |
-| موجّه        | نص الموجّه                                         |
-| كود          | الكود المصدري                                      |
+| مستودع | الملفات في المسارات التي تسمح بتغييرها |
 | برنامج DSPy  | تعليمات المتنبئات (predictors) في `dspy.Module`    |
-| نص           | أي نص آخر، مثل مستند أو ملف إعدادات                |
 
 يستخدم كل تشغيل العقد نفسه. يعرّف كود التشغيل الخاص بك الدالة `run(artifact, input)`. ويعرّف مقياسك الدالة `score(input, output, expected=None)`. يُرجع المقياس درجة وملاحظات مكتوبة. يقرأ المُحسِّن الملاحظات ليجعل النسخة التالية أفضل.
 
@@ -20,10 +18,10 @@
 
 Skynet هو Optimize Anything. يحدّد نوع العنصر المحرّكات التي يمكنها العمل عليه:
 
-- تستخدم عناصر الموجّه والكود والنص المحرّكات الأصلية: GEPA وBest-of-N وMeta-Harness وAutoResearch وAutoSaddler وShinkaEvolve.
+- تستخدم المستودعات المحرّكات الأصلية: GEPA وBest-of-N وMeta-Harness وAutoResearch وAutoSaddler وShinkaEvolve.
 - تستخدم عناصر برنامج DSPy مُحسِّنات DSPy: DSPy GEPA وDSPy MIPROv2 وDSPy BootstrapFewShot.
 
-يختار **Auto** نيابةً عنك. على برنامج DSPy، يستخدم Auto DSPy GEPA. وعلى أنواع العناصر الأخرى، يجمع Auto بين خمسة محرّكات أصلية. اقرأ [كيف يعمل التحسين](/docs/concepts/optimization) و[المحرّكات](/docs/concepts/engines).
+في برنامج DSPy، يستخدم **Auto** محرّك DSPy GEPA. في المستودع، تختار محرّكًا أصليًا واحدًا. اقرأ [كيف يعمل التحسين](/docs/concepts/optimization) و[المحرّكات](/docs/concepts/engines).
 
 ## كيف يعمل التشغيل
 

@@ -2,14 +2,12 @@ Skynet verbessert ein Artefakt, das Sie bereits haben. Sie geben eine Ausgangsve
 
 ## Was Skynet optimiert
 
-Skynet arbeitet mit vier Artefaktarten:
+Skynet arbeitet mit zwei Artefaktarten:
 
 | Artefaktart   | Was sich ändert                                                   |
 | ------------- | ----------------------------------------------------------------- |
-| Prompt        | Der Text des Prompts                                              |
-| Code          | Der Quellcode                                                     |
+| Repository | Die Dateien in den Pfaden, die Sie freigeben |
 | DSPy-Programm | Die Anweisungen der Predictors in einem `dspy.Module`             |
-| Text          | Jeder andere Text, zum Beispiel ein Dokument oder eine Konfiguration |
 
 Jeder Durchlauf nutzt denselben Vertrag. Ihr Ausführungscode definiert `run(artifact, input)`. Ihre Metrik definiert `score(input, output, expected=None)`. Die Metrik gibt einen Score und schriftliches Feedback zurück. Der Optimierer liest das Feedback, um die nächste Version zu verbessern.
 
@@ -20,10 +18,10 @@ Jeder Durchlauf nutzt denselben Vertrag. Ihr Ausführungscode definiert `run(art
 
 Skynet ist Optimize Anything. Die Artefaktart bestimmt, welche Engines daran arbeiten können:
 
-- Prompt-, Code- und Text-Artefakte nutzen die nativen Engines: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler und ShinkaEvolve.
+- Repositorys nutzen die nativen Engines: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler und ShinkaEvolve.
 - DSPy-Programm-Artefakte nutzen die DSPy-Optimierer: DSPy GEPA, DSPy MIPROv2 und DSPy BootstrapFewShot.
 
-**Auto** wählt für Sie aus. Bei einem DSPy-Programm nutzt Auto DSPy GEPA. Bei den anderen Artefaktarten kombiniert Auto fünf native Engines. Lesen Sie [So funktioniert die Optimierung](/docs/concepts/optimization) und [Engines](/docs/concepts/engines).
+Bei einem DSPy-Programm verwendet **Auto** DSPy GEPA. Bei einem Repository wählen Sie eine native Engine. Lesen Sie [So funktioniert die Optimierung](/docs/concepts/optimization) und [Engines](/docs/concepts/engines).
 
 ## So läuft ein Durchlauf ab
 

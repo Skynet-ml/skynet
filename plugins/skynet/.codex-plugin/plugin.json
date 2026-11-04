@@ -1,7 +1,7 @@
 {
   "name": "skynet",
   "version": "0.1.0",
-  "description": "Optimize prompts, programs and agents against your own metric with Skynet, and manage the runs.",
+  "description": "Optimize DSPy programs against your own metric with Skynet, and manage the runs.",
   "author": {
     "name": "Skynet",
     "url": "https://skynetml.com"
@@ -9,13 +9,13 @@
   "homepage": "https://skynetml.com",
   "repository": "https://github.com/Skynet-ml/skynet",
   "license": "AGPL-3.0-only",
-  "keywords": ["optimization", "prompts", "dspy", "gepa", "evaluation", "agents"],
+  "keywords": ["optimization", "dspy", "gepa", "evaluation"],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Skynet",
-    "shortDescription": "Optimize prompts and agents",
-    "longDescription": "Skynet improves a prompt, a program or an agent against a metric that you write. You give a starting version, a few test cases, a run(artifact, input) function and a score(input, output, expected) function. Skynet runs optimizers such as GEPA, DSPy and Best-of-N in a sandbox, scores each new version, and returns the best version with its score next to the starting score.\n\nWith this plugin, your assistant checks a run spec before it runs, suggests a spending limit, starts the run only after you agree to the limit, follows its progress, and shows the result. It can also list your runs and stop a run. A run spends at most the limit you set from your existing Skynet balance. Unused budget is released when the run ends. You need a Skynet account at skynetml.com.",
+    "shortDescription": "Optimize DSPy programs",
+    "longDescription": "Skynet improves a DSPy program against a metric that you write. You give the program in run.py, a few test cases and a score(input, output, expected) function. Skynet runs DSPy optimizers such as GEPA in a sandbox, scores each new version, and returns the best version with its score next to the starting score. Repository runs start from the Skynet app.\n\nWith this plugin, your assistant checks a run spec before it runs, suggests a spending limit, starts the run only after you agree to the limit, follows its progress, and shows the result. It can also list your runs and stop a run. A run spends at most the limit you set from your existing Skynet balance. Unused budget is released when the run ends. You need a Skynet account at skynetml.com.",
     "developerName": "Skynet",
     "category": "Developer Tools",
     "capabilities": [
@@ -30,7 +30,7 @@
     "privacyPolicyURL": "https://skynetml.com/privacy",
     "termsOfServiceURL": "https://skynetml.com/terms",
     "defaultPrompt": [
-      "Optimize this prompt with Skynet against my test cases.",
+      "Optimize this DSPy program with Skynet against my test cases.",
       "Show my recent Skynet runs.",
       "What is the status of my last Skynet run?"
     ],
@@ -48,13 +48,13 @@
           "positive": [
             {
               "description": "Check a run spec before it runs",
-              "prompt": "Check whether this Skynet run spec is valid and tell me what limit to set: a prompt that classifies support tickets, with 6 labeled cases and an exact-match metric.",
+              "prompt": "Check whether this Skynet run spec is valid and tell me what limit to set: a DSPy program that classifies support tickets, with 6 labeled cases and an exact-match metric.",
               "tools_triggered": "check_run",
               "expected_behavior": "Calls check_run once. Reports the static check results, the minimum and suggested max_cost_cents, and the spendable balance. Does not start a run."
             },
             {
               "description": "Start a run after the user agrees to a limit",
-              "prompt": "Optimize the ticket classifier prompt with Skynet. I agree to a limit of 5 dollars.",
+              "prompt": "Optimize the ticket classifier DSPy program with Skynet. I agree to a limit of 5 dollars.",
               "tools_triggered": "check_run, start_run",
               "expected_behavior": "Calls check_run first, then start_run with max_cost_cents 500. Returns the optimization_id and the run status."
             },

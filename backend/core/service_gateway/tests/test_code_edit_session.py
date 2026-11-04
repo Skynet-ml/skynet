@@ -112,7 +112,7 @@ _SCORE = "def score(input, output, expected=None):\n    return 1.0, {'feedback':
 def _unified(**overrides: object) -> dict:
     """Build a wizard authoring context as the router hands it over."""
     base: dict = {
-        "task": {"objective": "Answer tickets.", "artifact": {"kind": "prompt", "starting_version": "Be brief."}},
+        "task": {"objective": "Answer tickets.", "artifact": {"kind": "dspy_program", "starting_version": "Be brief."}},
         "data_mode": "pairs",
         "input_fields": ["ticket"],
         "expected_field": "label",
@@ -358,14 +358,6 @@ def test_a_seed_without_the_authoring_context_fails(monkeypatch) -> None:
     events = asyncio.run(collect())
     assert [e["event"] for e in events] == ["error"]
     assert "authoring context" in events[0]["data"]["error"]
-
-
-def test_run_and_metric_contracts_agree_on_a_prompt_output() -> None:
-    """The run and metric are drafted in parallel, so both contracts pin a prompt's output to the reply str."""
-    run_contract, metric_contract = _unified_contracts(_unified())
-    assert "a prompt or text returns the reply str unchanged" in run_contract
-    assert "for a prompt or text it is the reply str" in metric_contract
-    assert "never call .get or getattr on it" in metric_contract
 
 
 def test_unified_draft_opens_the_row_and_the_edit_reuses_it(

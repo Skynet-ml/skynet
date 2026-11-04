@@ -5,7 +5,7 @@ import type {
 } from "@/shared/types/api";
 import {
   resolveOptimizer,
-  type ArtifactKind,
+  type OptimizerTarget,
   type OptimizerChoice,
 } from "@/shared/types/unified-run";
 
@@ -141,7 +141,7 @@ export function patchPercent(share: number): number {
 export function submittedShinka(
   settings: BlackboxShinkaSettings | null,
   choice: OptimizerChoice,
-  kind: ArtifactKind,
+  kind: OptimizerTarget,
 ): BlackboxShinkaSettings | undefined {
   const resolved = resolveOptimizer(choice, kind);
   if (resolved === "shinka_evolve") return { ...(settings ?? DEFAULT_SHINKA_SETTINGS) };

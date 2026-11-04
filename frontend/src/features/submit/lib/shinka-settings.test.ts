@@ -122,7 +122,7 @@ test("a ShinkaEvolve run always sends its settings, the defaults when untouched"
   const sent = submittedShinka(DEFAULT_SHINKA_SETTINGS, "shinka_evolve", "code");
   assert.deepEqual(sent, DEFAULT_SHINKA_SETTINGS);
   assert.notEqual(sent, DEFAULT_SHINKA_SETTINGS);
-  assert.deepEqual(submittedShinka(null, "shinka_evolve", "prompt"), DEFAULT_SHINKA_SETTINGS);
+  assert.deepEqual(submittedShinka(null, "shinka_evolve", "repo"), DEFAULT_SHINKA_SETTINGS);
 });
 
 test("the editor choice goes out with the settings, for ShinkaEvolve and Auto", () => {
@@ -140,9 +140,9 @@ test("other optimizers never send ShinkaEvolve settings", () => {
 });
 
 test("black-box Auto sends the settings only once the user edited them", () => {
-  assert.equal(submittedShinka(null, "auto", "prompt"), undefined);
+  assert.equal(submittedShinka(null, "auto", "repo"), undefined);
   const tuned = { ...DEFAULT_SHINKA_SETTINGS, num_islands: 4 };
-  assert.deepEqual(submittedShinka(tuned, "auto", "prompt"), tuned);
+  assert.deepEqual(submittedShinka(tuned, "auto", "repo"), tuned);
 });
 
 test("extra optimization models go out only for ShinkaEvolve", () => {

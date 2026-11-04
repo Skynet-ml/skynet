@@ -351,7 +351,7 @@ def test_run_service_in_subprocess_unified_payload_calls_run_unified_optimizatio
     run_unified.assert_called_once()
     payload_arg = run_unified.call_args.args[0]
     assert isinstance(payload_arg, sr.UnifiedRunRequest)
-    assert payload_arg.optimizer.choice == "gepa"
+    assert payload_arg.optimizer.choice == "dspy_gepa"
     assert run_unified.call_args.kwargs["artifact_id"] == "art-6"
     assert run_unified.call_args.kwargs["gepa_log_dir_path"] == "/tmp/u-run"
     run_bb.assert_not_called()

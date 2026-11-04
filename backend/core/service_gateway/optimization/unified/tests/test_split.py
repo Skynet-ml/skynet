@@ -43,7 +43,7 @@ def _payload(**data_overrides: Any) -> UnifiedRunRequest:
     data.update(data_overrides)
     return UnifiedRunRequest.model_validate(
         {
-            "task": {"objective": "answer", "artifact": {"kind": "prompt", "starting_version": "Answer."}},
+            "task": {"objective": "answer", "artifact": {"kind": "dspy_program", "starting_version": "Answer."}},
             "data": data,
             "models": {"reflection_model": {"name": "openai/gpt-4o-mini"}},
             "workspace": {"run_code": "def run(artifact, input):\n    return ''", "metric_code": "x = 1"},

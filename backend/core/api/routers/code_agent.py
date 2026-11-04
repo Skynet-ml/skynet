@@ -622,7 +622,12 @@ def create_code_agent_router(*, job_store=None) -> APIRouter:
             A :class:`StreamingResponse` of Server-Sent Events.
         """
         if not req.turns and not fits_kickoff_budget(
-            measured_bytes(req.objective, req.background, req.starting_version or "", req.sample_cases)
+            measured_bytes(
+                req.objective,
+                req.background,
+                req.starting_version or "",
+                req.sample_cases,
+            )
         ):
             return await _turn_response(oversized_kickoff("data"), current_user.username)
         billed_store = await asyncio.to_thread(gate_interactive_turn, job_store, current_user.username, True)
@@ -643,6 +648,8 @@ def create_code_agent_router(*, job_store=None) -> APIRouter:
                     artifact_kind=req.artifact_kind,
                     starting_version=req.starting_version,
                     sample_cases=req.sample_cases,
+                    target=req.target,
+                    repo_context=req.repo_context.model_dump() if req.repo_context else None,
                     locale=req.locale,
                     model=model,
                     reasoning_effort=effective_reasoning_effort(model, req.reasoning_effort),

@@ -2,14 +2,12 @@ Skynet은 이미 가지고 있는 아티팩트를 개선합니다. 시작 버전
 
 ## Skynet이 최적화하는 대상
 
-Skynet은 네 가지 아티팩트 종류를 다룹니다.
+Skynet은 두 가지 아티팩트 종류를 다룹니다.
 
 | 아티팩트 종류 | 변경되는 부분                                       |
 | ------------- | --------------------------------------------------- |
-| 프롬프트      | 프롬프트 텍스트                                     |
-| 코드          | 소스 코드                                           |
+| 리포지토리 | 변경을 허용한 경로의 파일 |
 | DSPy 프로그램 | `dspy.Module` 안에 있는 예측기(predictor)의 지시문  |
-| 텍스트        | 그 밖의 모든 텍스트(예: 문서나 구성 파일)           |
 
 모든 실행은 같은 계약을 따릅니다. 실행 코드는 `run(artifact, input)`을 정의합니다. 메트릭은 `score(input, output, expected=None)`을 정의합니다. 메트릭은 점수와 서술형 피드백을 반환합니다. 옵티마이저는 이 피드백을 읽고 다음 버전을 더 좋게 만듭니다.
 
@@ -20,10 +18,10 @@ Skynet은 네 가지 아티팩트 종류를 다룹니다.
 
 Skynet은 Optimize Anything입니다. 어떤 엔진이 작업할 수 있는지는 아티팩트 종류에 따라 정해집니다.
 
-- 프롬프트, 코드, 텍스트 아티팩트는 네이티브 엔진을 사용합니다: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler, ShinkaEvolve.
+- 리포지토리는 네이티브 엔진을 사용합니다: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler, ShinkaEvolve.
 - DSPy 프로그램 아티팩트는 DSPy 옵티마이저를 사용합니다: DSPy GEPA, DSPy MIPROv2, DSPy BootstrapFewShot.
 
-**Auto**가 대신 선택합니다. DSPy 프로그램에서는 Auto가 DSPy GEPA를 사용합니다. 다른 아티팩트 종류에서는 Auto가 다섯 개의 네이티브 엔진을 조합합니다. [최적화의 작동 방식](/docs/concepts/optimization)과 [엔진](/docs/concepts/engines)을 읽어 보세요.
+DSPy 프로그램에서 **Auto**는 DSPy GEPA를 사용합니다. 리포지토리에서는 네이티브 엔진 하나를 선택합니다. [최적화의 작동 방식](/docs/concepts/optimization) 및 [엔진](/docs/concepts/engines) 문서를 참고하세요.
 
 ## 실행의 작동 방식
 

@@ -26,7 +26,7 @@ _ALICE = AuthenticatedUser(username="alice", role="user", groups=())
 _URL = "/optimizations/infer-inputs"
 _BODY = {
     "objective": "Classify support tickets.",
-    "artifact_kind": "prompt",
+    "artifact_kind": "dspy_program",
     "columns": ["ticket", "label"],
     "sample_rows": [{"ticket": "refund please", "label": "billing"}],
     "row_count": 40,

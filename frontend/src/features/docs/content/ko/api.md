@@ -45,7 +45,7 @@ Authorization: Bearer skyd_...
 | `GET /models`                                   | 사용할 수 있는 모델을 나열합니다.                            |
 | `GET /optimizers`                               | 설정에 맞는 옵티마이저를 나열합니다.                         |
 | `GET /blackbox/engines`                         | 네이티브 엔진과 각 엔진의 사용 가능 여부를 나열합니다.       |
-| `POST /optimize`                                | 프롬프트, 코드, 텍스트 또는 DSPy 프로그램의 실행을 시작합니다. |
+| `POST /optimize` | DSPy 프로그램 실행을 시작합니다. |
 | `POST /blackbox/run`                            | GitHub 리포지토리에서 실행을 시작합니다.                     |
 | `GET /optimizations`                            | 내 실행을 나열합니다.                                        |
 | `GET /optimizations/{optimization_id}`          | 실행 하나의 상태, 진행 상황, 로그, 결과를 반환합니다.        |
@@ -56,7 +56,7 @@ Authorization: Bearer skyd_...
 
 ## 실행 시작하기
 
-`POST /optimize`는 제출 마법사와 같은 설정을 받습니다. 이 예제는 지원 메시지를 라벨로 분류하는 프롬프트를 개선합니다.
+`POST /optimize`는 제출 마법사와 같은 설정을 받습니다. 예제는 지원 메시지를 라벨로 분류하는 DSPy 프로그램을 개선합니다.
 
 ```bash tab="curl"
 curl https://api.skynetml.com/optimize \
@@ -72,7 +72,7 @@ curl https://api.skynetml.com/optimize \
   "task": {
     "objective": "Sort each support message into billing, bug or other.",
     "artifact": {
-      "kind": "prompt",
+      "kind": "dspy_program",
       "starting_version": "Label this support message as billing, bug or other."
     }
   },
@@ -93,7 +93,7 @@ curl https://api.skynetml.com/optimize \
     "reflection_model": { "name": "<model from GET /models>" }
   },
   "workspace": {
-    "run_code": "from skynet import llm\n\ndef run(artifact, input):\n    return llm(artifact, input=input[\"message\"])\n",
+    "run_code": "import dspy\n\nprogram = dspy.Predict(\"message -> label\")\n\n\ndef run(artifact, input):\n    return program(message=input[\"message\"]).label\n",
     "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
   },
   "max_cost_cents": 500
@@ -102,7 +102,7 @@ curl https://api.skynetml.com/optimize \
 
 중요한 필드:
 
-- `task.artifact.kind`는 `prompt`, `code`, `text` 또는 `dspy_program`입니다.
+- `task.artifact.kind`는 `dspy_program`입니다.
 - `data.mode`는 `pairs`(기대 출력이 있는 입력) 또는 `single`(정확히 하나의 케이스)입니다.
 - `optimizer.choice`는 `auto` 또는 `GET /optimizers`가 반환한 옵티마이저 이름 하나입니다.
 - `max_cost_cents`는 이 실행의 지출 한도이며 단위는 미국 센트입니다.

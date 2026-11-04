@@ -55,7 +55,13 @@ from ..preflight_execution import (
 )
 from ..preflight_progress import progress_observer
 from ..rate_limit import enforce_submission_rate
-from .submissions import _admit_byok_models, _default_unified_seed, _materialize_unified_cases
+from .submissions import (
+    _admit_byok_models,
+    _default_unified_seed,
+    _materialize_repo_cases,
+    _materialize_unified_cases,
+    staged_repo_cases,
+)
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 AcceptLanguageDep = Annotated[str | None, Header(include_in_schema=False)]
@@ -332,6 +338,7 @@ def create_wizard_preflight_router(*, job_store: Any) -> APIRouter:
                 _default_unified_seed(typed)
                 spec = typed
             else:
+                _materialize_repo_cases(typed, job_store=job_store, username=user.username)
                 reflection = typed.reflection_model_settings
                 novelty = bool(typed.shinka and typed.shinka.novelty)
             _admit_byok_models(job_store, user.username, configs, reflection, novelty)
@@ -347,6 +354,17 @@ def create_wizard_preflight_router(*, job_store: Any) -> APIRouter:
                 ) from error
             enforce_raw_local_mode_sources(payload)
             payload["scorer"] = scorer.model_dump(mode="json", by_alias=True)
+            # The scorer dry run reads the first case, so a staged dataset is
+            # inlined here exactly as the execution check inlines it.
+            staged_id = payload.pop("staged_dataset_id", None) if request.workflow == "anything" else None
+            if staged_id and not payload.get("cases"):
+                payload["cases"] = staged_repo_cases(
+                    staged_id,
+                    input_fields=payload.get("input_fields") or [],
+                    expected_field=payload.get("expected_field"),
+                    job_store=job_store,
+                    username=user.username,
+                )
             configs = []
             reflection = None
             for raw in _model_config_dicts(payload):

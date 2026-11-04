@@ -22,7 +22,6 @@ import {
   type JobsColumnKey,
   type JobsLayout,
 } from "../lib/jobs-columns";
-import { typeBadge } from "../lib/status-badges";
 import { Card, CardContent } from "@/shared/ui/primitives/card";
 import { UNDERLINE_TABS_LIST_CLASS } from "@/shared/ui/primitives/tabs";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
@@ -56,9 +55,7 @@ function StatStrip() {
       <div className="grid grid-cols-2 items-stretch @min-[26rem]:grid-cols-3 @min-[40rem]:flex">
         {Array.from({ length: STAT_CELLS }).map((_, i) => (
           <Fragment key={i}>
-            {i > 0 && (
-              <div className="my-4 hidden w-px shrink-0 bg-border/50 @min-[40rem]:block" />
-            )}
+            {i > 0 && <div className="my-4 hidden w-px shrink-0 bg-border/50 @min-[40rem]:block" />}
             <StatCell />
           </Fragment>
         ))}
@@ -74,28 +71,14 @@ function TextBone({ className, width }: { className: string; width: number | str
   return <Skeleton width={width} containerClassName={cn("inline-block", className)} />;
 }
 
-// A component, not a typeBadge() call in the map below: the map is built when
-// the module loads, which on the server is before the layout pins the message
-// catalog, so the badge text would freeze to its raw key and fail hydration.
-function TypeBadgeBone() {
-  return typeBadge("run");
-}
-
 const CELL_BONES: Partial<Record<JobsColumnKey, ReactNode>> = {
   username: <TextBone className="text-sm" width={64} />,
   role: <Skeleton width={16} height={16} borderRadius={4} />,
-  optimization_type: (
-    <Ghost>
-      <TypeBadgeBone />
-    </Ghost>
-  ),
   status: (
     <Ghost>
       <StatusBadge status="success" compact />
     </Ghost>
   ),
-  module_name: <TextBone className="text-sm" width={56} />,
-  dataset_rows: <TextBone className="text-sm" width={24} />,
   created_at: <TextBone className="text-xs" width={64} />,
   elapsed_seconds: <TextBone className="text-xs" width={32} />,
   optimized_test_metric: <TextBone className="text-xs" width={72} />,
@@ -166,8 +149,6 @@ function BodyRow({ columns, shared }: { columns: readonly JobsColumn[]; shared: 
             <TextBone className="" width="80%" />
           </span>
           {shared && <TableInline at="md">{CELL_BONES.username}</TableInline>}
-          <TableInline at="md">{CELL_BONES.optimization_type}</TableInline>
-          <TableInline at="lg">{CELL_BONES.module_name}</TableInline>
           <TableInline at="md">{CELL_BONES.elapsed_seconds}</TableInline>
           <TableInline at="sm">{CELL_BONES.created_at}</TableInline>
         </div>

@@ -4,16 +4,16 @@
 
 ### Skynet 係乜嘢？
 
-Skynet 係一個平台，用你自己嘅數據同指標去最佳化提示詞、程式、agent 同工作流程。你上載一個數據集、描述任務，然後開始運行。運行會試新版本，再喺預留起嘅數據上幫佢哋評分。想開始，請睇 [快速入門](/docs/quickstart)。
+Skynet 係一個按你自己嘅數據同指標去最佳化 DSPy 程式同倉庫嘅平台。你上載一個數據集、描述任務，然後開始運行。運行會試新版本，再喺預留起嘅數據上幫佢哋評分。想開始，請睇 [快速入門](/docs/quickstart)。
 
 ### Skynet 可以最佳化啲乜？
 
-Skynet 就係 Optimize Anything。佢喺同一個產品入面最佳化提示詞、程式碼、文字同 DSPy 程式。成品類型決定邊啲引擎可以處理佢：
+Skynet 就係 Optimize Anything。佢喺一個產品入面最佳化 DSPy 程式同倉庫。成品類型決定邊啲引擎可以處理佢：
 
-- 提示詞、程式碼同文字成品用原生引擎：GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler 同 ShinkaEvolve。
+- 倉庫用原生引擎：GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler 同 ShinkaEvolve。
 - DSPy 程式用 DSPy 優化器：DSPy GEPA、DSPy MIPROv2 同 DSPy BootstrapFewShot。
 
-**Auto** 會結合適合你任務嘅引擎。請睇 [最佳化點樣運作](/docs/concepts/optimization) 同 [引擎](/docs/concepts/engines)。
+喺 DSPy 程式上，**Auto** 會用 DSPy GEPA。喺倉庫上，你揀一個原生引擎。睇吓 [最佳化點樣運作](/docs/concepts/optimization) 同 [引擎](/docs/concepts/engines)。
 
 ### 介面支援邊啲語言？
 

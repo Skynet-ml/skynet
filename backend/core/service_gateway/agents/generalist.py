@@ -1065,8 +1065,8 @@ _DATASET_READY_TOOLS = frozenset(
         "validate_datasets_validate_post",
     }
 )
-# The one submit surface: ``POST /optimize`` takes every artifact kind and
-# optimizer, so there is never a second submit tool for the model to waver on.
+# The one submit surface: ``POST /optimize`` takes every optimizer, so there
+# is never a second submit tool for the model to waver on.
 _SUBMIT_TOOLS = frozenset({"submit_unified_run_optimize_post"})
 _POST_SUBMIT_TOOLS = frozenset(
     {
@@ -1796,9 +1796,9 @@ Rules:
        the task in prose. NEVER leave the run unnamed.
     2. Task — set ``task_objective`` (what "better" means, in the
        user's words), ``task_background`` (context), ``artifact_kind``
-       (``prompt``, ``code``, ``text`` or ``dspy_program``) and
-       ``starting_version`` (the text being improved, or a map of named
-       parts to text). Get the starting version and the objective from
+       (always ``dspy_program``: new runs optimize a DSPy program, and a
+       prompt the user brings becomes the instruction of its predictor) and
+       ``starting_version`` (a map of predictor names to instructions). Get the starting version and the objective from
        the user; never invent either.
     3. Inputs — set ``data_mode``: ``single`` for one input, ``pairs``
        for many input/output examples. For pairs, call
@@ -2155,8 +2155,8 @@ SCREEN_FOCUS: dict[str, str] = {
         "context into ``task_background``. Name the run (``job_name``) first if it has no name."
     ),
     "artifact": (
-        "Artifact: set ``artifact_kind`` (``prompt``, ``code``, ``text`` or ``dspy_program``) and "
-        "``starting_version``, the text being improved, taken from the user verbatim."
+        "Artifact: set ``artifact_kind`` to ``dspy_program`` (the only kind new runs take) and "
+        "``starting_version``, the predictor instructions being improved, taken from the user verbatim."
     ),
     "source": (
         "Data: set ``data_mode`` (``single`` for one input, ``pairs`` for input/output examples) and, for "

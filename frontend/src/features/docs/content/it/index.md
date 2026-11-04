@@ -2,14 +2,12 @@ Skynet migliora un artefatto che hai già. Gli fornisci una versione iniziale, u
 
 ## Che cosa ottimizza Skynet
 
-Skynet lavora su quattro tipi di artefatto:
+Skynet lavora su due tipi di artefatto:
 
 | Tipo di artefatto | Che cosa cambia                                                     |
 | ----------------- | ------------------------------------------------------------------- |
-| Prompt            | Il testo del prompt                                                 |
-| Codice            | Il codice sorgente                                                  |
+| Repository | I file nei percorsi che consenti di modificare |
 | Programma DSPy    | Le istruzioni dei predictor in un `dspy.Module`                     |
-| Testo             | Qualsiasi altro testo, ad esempio un documento o una configurazione |
 
 Ogni esecuzione usa lo stesso contratto. Il tuo codice di esecuzione definisce `run(artifact, input)`. La tua metrica definisce `score(input, output, expected=None)`. La metrica restituisce un punteggio e un feedback scritto. L'ottimizzatore legge il feedback per migliorare la versione successiva.
 
@@ -20,10 +18,10 @@ Ogni esecuzione usa lo stesso contratto. Il tuo codice di esecuzione definisce `
 
 Skynet è Optimize Anything. Il tipo di artefatto determina quali motori possono lavorarci:
 
-- Gli artefatti Prompt, Codice e Testo usano i motori nativi: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler e ShinkaEvolve.
+- I repository usano i motori nativi: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler e ShinkaEvolve.
 - Gli artefatti Programma DSPy usano gli ottimizzatori DSPy: DSPy GEPA, DSPy MIPROv2 e DSPy BootstrapFewShot.
 
-**Auto** sceglie al posto tuo. Su un programma DSPy, Auto usa DSPy GEPA. Sugli altri tipi di artefatto, Auto combina cinque motori nativi. Leggi [Come funziona l'ottimizzazione](/docs/concepts/optimization) e [Motori](/docs/concepts/engines).
+Su un programma DSPy, **Auto** usa DSPy GEPA. Su un repository, scegli un motore nativo. Leggi [Come funziona l'ottimizzazione](/docs/concepts/optimization) e [Motori](/docs/concepts/engines).
 
 ## Come funziona un'esecuzione
 

@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import { signIn, getProviders, getSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import { CircleNotch, GithubLogo, Fingerprint } from "@/shared/ui/icons";
 import { GoogleMark } from "@/shared/ui/google-mark";
@@ -34,8 +33,6 @@ import {
 import { tI18n } from "@/shared/lib/i18n";
 import { cn } from "@/shared/lib/utils";
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
-import { LEGAL_LINKS, SOURCE_CODE_URL } from "@/features/legal/legal-config";
-import { DesktopSkipLink } from "@/features/desktop-link";
 import { LoginHalo } from "./LoginHalo";
 
 const ENTER_EASE = [0.16, 1, 0.3, 1] as const;
@@ -1418,39 +1415,6 @@ export function LoginView() {
                 )}
               </CardContent>
             </Card>
-
-            <div className="mt-4 flex justify-center">
-              <DesktopSkipLink onLogin />
-            </div>
-
-            <p className="mt-4 flex min-h-[44px] flex-wrap items-center justify-center gap-x-2 gap-y-1 text-xs text-muted-foreground sm:mt-6 lg:min-h-0">
-              <Link
-                href={LEGAL_LINKS.terms}
-                className="inline-flex min-h-[44px] items-center underline-offset-2 transition-colors hover:text-foreground hover:underline lg:min-h-0"
-              >
-                {msg("legal.terms_link")}
-              </Link>
-              <span aria-hidden="true" className="text-muted-foreground/40">
-                {"·"}
-              </span>
-              <Link
-                href={LEGAL_LINKS.privacy}
-                className="inline-flex min-h-[44px] items-center underline-offset-2 transition-colors hover:text-foreground hover:underline lg:min-h-0"
-              >
-                {msg("legal.privacy_link")}
-              </Link>
-              <span aria-hidden="true" className="text-muted-foreground/40">
-                {"·"}
-              </span>
-              <a
-                href={SOURCE_CODE_URL}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex min-h-[44px] items-center underline-offset-2 transition-colors hover:text-foreground hover:underline lg:min-h-0"
-              >
-                {msg("legal.source_link")}
-              </a>
-            </p>
           </div>
         )}
       </motion.div>

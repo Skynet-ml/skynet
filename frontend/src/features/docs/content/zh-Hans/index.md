@@ -2,14 +2,12 @@ Skynet 用来改进你已有的产物。你提供一个起始版本、一组用�
 
 ## Skynet 能优化什么
 
-Skynet 支持四种产物类型：
+Skynet 支持两种产物类型：
 
 | 产物类型     | 改动的内容                                  |
 | ------------ | ------------------------------------------- |
-| 提示词       | 提示词文本                                  |
-| 代码         | 源代码                                      |
+| 仓库 | 你允许修改的路径中的文件 |
 | DSPy 程序    | `dspy.Module` 中各预测器（predictor）的指令 |
-| 文本         | 任何其他文本，例如文档或配置                |
 
 每次运行都遵循同一个契约。你的运行代码定义 `run(artifact, input)`。你的指标定义 `score(input, output, expected=None)`。指标返回一个分数和一段文字反馈。优化器读取反馈，让下一个版本更好。
 
@@ -20,10 +18,10 @@ Skynet 支持四种产物类型：
 
 Skynet 就是 Optimize Anything。产物类型决定了哪些引擎可以处理它：
 
-- 提示词、代码和文本产物使用原生引擎：GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler 和 ShinkaEvolve。
+- 仓库使用原生引擎：GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler 和 ShinkaEvolve。
 - DSPy 程序产物使用 DSPy 优化器：DSPy GEPA、DSPy MIPROv2 和 DSPy BootstrapFewShot。
 
-**Auto** 会替你选择。对于 DSPy 程序，Auto 使用 DSPy GEPA。对于其他产物类型，Auto 会组合五个原生引擎。请阅读[优化的工作原理](/docs/concepts/optimization)和[引擎](/docs/concepts/engines)。
+对于 DSPy 程序，**Auto** 使用 DSPy GEPA。对于仓库，你需要选择一个原生引擎。请阅读 [优化的工作原理](/docs/concepts/optimization) 和 [引擎](/docs/concepts/engines)。
 
 ## 一次运行如何进行
 

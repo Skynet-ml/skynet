@@ -1,11 +1,10 @@
 """Request/response models for the unified (wizard v2) optimization run.
 
-One payload covers every optimizer: the DSPy optimizers and the black-box
-engines all run through the black-box engine layer against the same workspace
-contract (a ``run(artifact, input)`` function plus a ``score(input, output,
-expected=None)`` metric, whatever the artifact kind or optimizer). Stored runs keep the ``blackbox``
-optimization type and are told apart from legacy black-box runs by
-``payload_kind``.
+One payload optimizes a DSPy program with any DSPy optimizer. Every optimizer
+runs through the black-box engine layer against the same workspace contract
+(a ``run(artifact, input)`` function plus a ``score(input, output,
+expected=None)`` metric). Stored runs keep the ``blackbox`` optimization type
+and are told apart from repository runs by ``payload_kind``.
 
 Pydantic class docstrings are part of the OpenAPI contract — see AGENTS.md
 "Pydantic class docstrings" — so per-model annotations live in comments
@@ -36,7 +35,10 @@ UNIFIED_PAYLOAD_KIND = "unified_v1"
 REPO_FILES_MAX = 2000
 REPO_FILE_PATH_MAX = 1024
 
-ArtifactKind = Literal["prompt", "code", "dspy_program", "text"]
+ArtifactKind = Literal["dspy_program"]
+# What the optimizer catalog is asked about: a unified run's artifact, or a
+# repository run, which has no artifact and runs only the black-box engines.
+OptimizerTarget = Literal["dspy_program", "repo"]
 DataMode = Literal["single", "pairs"]
 OptimizerChoice = Literal[
     "auto",
@@ -81,39 +83,41 @@ ARTIFACT_KIND_DSPY_PROGRAM = "dspy_program"
 OPTIMIZER_AUTO = "auto"
 
 
-def optimizers_for(artifact_kind: ArtifactKind, data_mode: DataMode) -> list[OptimizerChoice]:
-    """List the optimizer choices that fit an artifact kind and data mode.
+def optimizers_for(target: OptimizerTarget, data_mode: DataMode) -> list[OptimizerChoice]:
+    """List the optimizer choices that fit a target and data mode.
 
     Runtime availability (sandbox, installed engines) is filtered separately
     by the catalog route; this is the static relevance rule.
 
     Args:
-        artifact_kind: What is being optimized.
+        target: A DSPy program, or ``"repo"`` for a repository run.
         data_mode: Whether the run has one input or input/output pairs.
 
     Returns:
-        The allowed choices, ``"auto"`` first.
+        The allowed choices. A DSPy program lists ``"auto"`` first; a
+        repository run lists only the black-box engines, because Auto has no
+        repository strategy.
     """
-    if artifact_kind == ARTIFACT_KIND_DSPY_PROGRAM:
+    if target == ARTIFACT_KIND_DSPY_PROGRAM:
         if data_mode == "pairs":
             return ["auto", "dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"]
         return ["auto", "dspy_gepa"]
-    return ["auto", "gepa", "best_of_n", "autoresearch", "meta_harness", "autosaddler", "shinka_evolve"]
+    return ["gepa", "best_of_n", "autoresearch", "meta_harness", "autosaddler", "shinka_evolve"]
 
 
-def resolve_optimizer(choice: OptimizerChoice, artifact_kind: ArtifactKind) -> str:
+def resolve_optimizer(choice: OptimizerChoice, target: OptimizerTarget) -> str:
     """Resolve the user's choice to the optimizer that actually runs.
 
     Args:
         choice: The optimizer the user picked.
-        artifact_kind: What is being optimized.
+        target: A DSPy program, or ``"repo"`` for a repository run.
 
     Returns:
         ``"dspy_gepa"`` for Auto on a DSPy program, ``"auto"`` (the black-box
-        Auto strategy) for Auto on anything else, otherwise ``choice``.
+        Auto strategy) for Auto on a repository, otherwise ``choice``.
     """
     if choice == OPTIMIZER_AUTO:
-        return "dspy_gepa" if artifact_kind == ARTIFACT_KIND_DSPY_PROGRAM else OPTIMIZER_AUTO
+        return "dspy_gepa" if target == ARTIFACT_KIND_DSPY_PROGRAM else OPTIMIZER_AUTO
     return choice
 
 
@@ -391,7 +395,7 @@ class OptimizerOption(BaseModel):
 # for a DSPy program, otherwise the engines the Auto strategy explores.
 # ``run_entry`` and ``metric_signature`` are the one contract every optimizer runs.
 class OptimizerCatalogResponse(BaseModel):
-    artifact_kind: ArtifactKind
+    artifact_kind: OptimizerTarget
     data_mode: DataMode
     run_entry: str
     metric_signature: str
@@ -479,6 +483,23 @@ class InterviewOption(BaseModel):
     description: str = Field(default="", max_length=400)
 
 
+# The selected repository's README and file tree, read by the client from
+# GitHub and cut to these caps; the interview drafts the goal from them only.
+TASK_INTERVIEW_README_MAX = 8000
+TASK_INTERVIEW_REPO_PATHS_MAX = 400
+# Per-path cap for the interview's file tree; with the path count it bounds a turn's size.
+TASK_INTERVIEW_REPO_PATH_MAX = 300
+
+
+class TaskInterviewRepoContext(BaseModel):
+    repository: str = Field(max_length=201)
+    readme: str = Field(default="", max_length=TASK_INTERVIEW_README_MAX)
+    paths: list[Annotated[str, Field(max_length=TASK_INTERVIEW_REPO_PATH_MAX)]] = Field(
+        default_factory=list, max_length=TASK_INTERVIEW_REPO_PATHS_MAX
+    )
+    truncated: bool = False
+
+
 # ``POST /optimizations/task-interview``: one turn of the step-1 interview.
 class TaskInterviewRequest(BaseModel):
     turns: list[UnifiedChatTurn] = Field(default_factory=list, max_length=40)
@@ -487,6 +508,9 @@ class TaskInterviewRequest(BaseModel):
     artifact_kind: ArtifactKind | None = None
     starting_version: BlackboxCandidate | None = None
     sample_cases: list[dict[str, Any]] = Field(default_factory=list, max_length=5)
+    # The run's current target; None when the wizard has not settled it.
+    target: OptimizerTarget | None = None
+    repo_context: TaskInterviewRepoContext | None = None
     locale: str | None = None
     model: str | None = None
     reasoning_effort: str | None = None
@@ -504,6 +528,11 @@ class TaskInterviewTurnResult(BaseModel):
     artifact_kind: ArtifactKind | None = None
     starting_version: BlackboxCandidate | None = None
     artifact_rationale: str = ""
+    target: OptimizerTarget | None = None
+    # The repository the user named: ``owner/name`` for a GitHub link, else their words.
+    repo_query: str = Field(default="", max_length=200)
+    # Whether the run needs example data; None while the interview cannot tell.
+    needs_data: bool | None = None
     model: str | None = None
     served_model: str | None = None
 
@@ -513,7 +542,7 @@ class TaskInterviewTurnResult(BaseModel):
 class InputsInferenceRequest(BaseModel):
     objective: str
     background: str = ""
-    artifact_kind: ArtifactKind
+    artifact_kind: OptimizerTarget
     starting_version: BlackboxCandidate | None = None
     columns: list[str] = Field(default_factory=list)
     sample_rows: list[dict[str, Any]] = Field(default_factory=list, max_length=5)
@@ -535,6 +564,11 @@ class InputsInferenceResponse(BaseModel):
     model: str | None = None
 
 
+# A repository run has no artifact, so its authoring context carries none.
+class AuthoringTask(UnifiedTask):
+    artifact: UnifiedArtifact | None = None  # type: ignore[assignment]
+
+
 # What the code agent needs to write run code and a metric for a unified run.
 # ``focus`` names which of the two the user is working on. ``target`` is
 # ``"repo"`` for a repository run: the optimizer edits the repository itself,
@@ -542,7 +576,7 @@ class InputsInferenceResponse(BaseModel):
 # ``repo_files`` lists a repository run's file paths, which the agent may open
 # read-only.
 class UnifiedAuthoringContext(BaseModel):
-    task: UnifiedTask
+    task: AuthoringTask
     data_mode: DataMode
     input_fields: list[str] = Field(default_factory=list)
     expected_field: str | None = None
@@ -575,6 +609,7 @@ __all__ = [
     "UNIFIED_PAYLOAD_KIND",
     "WORKSPACE_FILE_MAX_COUNT",
     "ArtifactKind",
+    "AuthoringTask",
     "ContractCheckItem",
     "ContractCheckKey",
     "ContractCheckRequest",
@@ -588,6 +623,8 @@ __all__ = [
     "OptimizerChoice",
     "OptimizerFamily",
     "OptimizerOption",
+    "OptimizerTarget",
+    "TaskInterviewRepoContext",
     "TaskInterviewRequest",
     "TaskInterviewTurnResult",
     "UnifiedArtifact",

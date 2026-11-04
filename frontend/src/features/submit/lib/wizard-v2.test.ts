@@ -16,16 +16,16 @@ registerHooks({
 });
 
 const {
-  QUESTION_INPUT_FIELD,
   WIZARD_V2_STEPS,
   contractSnapshot,
   deleteWorkspaceFile,
   emptyRepoDraft,
   initialWizardV2State,
-  isSingleAnswerTask,
   optimizerModelsReady,
   defaultModels,
   presetEngine,
+  programTargetOptimizer,
+  repoTargetSlices,
   taskInterviewPatch,
   taskIssue,
   wizardSteps,
@@ -33,7 +33,6 @@ const {
   withDefaultModels,
   withLevel,
   withOptimizerPatch,
-  withQuestionInputs,
   workspaceFileText,
   workspacePathIssue,
   workspacePaths,
@@ -45,7 +44,7 @@ function checkedState() {
   const state = initialWizardV2State();
   return {
     ...state,
-    task: { ...state.task, artifactKind: "prompt" as const, startingVersion: "Answer." },
+    task: { ...state.task, artifactKind: "dspy_program" as const, startingVersion: "Answer." },
     inputs: {
       ...state.inputs,
       mode: "labeled" as const,
@@ -231,10 +230,12 @@ test("unchanged defaults, a role with no default and an untracked setup leave th
   });
 });
 test("the Settings default engine applies only from Auto and only when it fits the task", () => {
-  assert.equal(presetEngine("auto", "gepa", "prompt", "pairs"), "gepa");
-  assert.equal(presetEngine("auto", "dspy_gepa", "prompt", "pairs"), null);
-  assert.equal(presetEngine("best_of_n", "gepa", "prompt", "pairs"), null);
-  assert.equal(presetEngine("auto", "auto", "prompt", "pairs"), null);
+  assert.equal(presetEngine("auto", "gepa", "repo", "pairs"), "gepa");
+  assert.equal(presetEngine("auto", "dspy_gepa", "repo", "pairs"), null);
+  assert.equal(presetEngine("auto", "dspy_gepa", "dspy_program", "pairs"), "dspy_gepa");
+  assert.equal(presetEngine("auto", "gepa", "dspy_program", "pairs"), null);
+  assert.equal(presetEngine("best_of_n", "gepa", "repo", "pairs"), null);
+  assert.equal(presetEngine("auto", "auto", "repo", "pairs"), null);
 });
 
 function readyState(level: "guided" | "standard" | "expert", withModels = true) {
@@ -334,8 +335,9 @@ test("the task step clears once nothing is missing, with no separate confirm", (
   assert.equal("confirmed" in empty, false);
   assert.equal(taskIssue(empty), "submit.v2.task.issue.objective");
   const withObjective = { ...empty, objective: "Summarize tickets" };
-  assert.equal(taskIssue(withObjective), "submit.v2.task.issue.kind");
-  const withKind = { ...withObjective, artifactKind: "prompt" as const };
+  assert.equal(empty.artifactKind, "dspy_program");
+  assert.equal(taskIssue({ ...withObjective, artifactKind: null }), "submit.v2.task.issue.kind");
+  const withKind = withObjective;
   assert.equal(taskIssue(withKind), "submit.v2.task.issue.starting");
   assert.equal(taskIssue({ ...withKind, startingVersion: "   " }), "submit.v2.task.issue.starting");
   assert.equal(
@@ -360,14 +362,14 @@ test("taskInterviewPatch keeps a rationale only from a turn that names the artif
   assert.equal("artifactRationale" in early, false);
 
   const named = taskInterviewPatch(
-    { ...turn, artifact_kind: "prompt", artifact_rationale: "You already have a prompt to tune." },
+    { ...turn, artifact_kind: "dspy_program", artifact_rationale: "You already have a DSPy program to tune." },
     new Set(),
   );
-  assert.equal(named.artifactKind, "prompt");
-  assert.equal(named.artifactRationale, "You already have a prompt to tune.");
+  assert.equal(named.artifactKind, "dspy_program");
+  assert.equal(named.artifactRationale, "You already have a DSPy program to tune.");
 
   const handPicked = taskInterviewPatch(
-    { ...turn, artifact_kind: "prompt", artifact_rationale: "You already have a prompt to tune." },
+    { ...turn, artifact_kind: "dspy_program", artifact_rationale: "You already have a DSPy program to tune." },
     new Set(["objective", "artifactKind"]),
   );
   assert.deepEqual(handPicked, {});
@@ -425,88 +427,80 @@ test("extra files make the check stale, and a workspace without them keeps its o
   );
 });
 
-function textTask(objective = "Solve 2x + 3 = 7.", background = "Show the steps.") {
-  const state = initialWizardV2State("standard");
-  return {
-    ...state,
-    task: {
-      ...state.task,
-      objective,
-      background,
-      artifactKind: "text" as const,
-      startingVersion: "x = 2",
-    },
-  };
-}
-
 const withoutInputs = WIZARD_V2_STEPS.filter((step) => step !== "inputs");
 
-test("a single-answer task skips Inputs; a dataset task keeps it; a repository still skips it", () => {
-  assert.equal(isSingleAnswerTask(textTask()), true);
-  assert.deepEqual(wizardSteps(textTask(), false), withoutInputs);
-
-  const prompt = { ...textTask(), task: { ...textTask().task, artifactKind: "prompt" as const } };
-  assert.equal(isSingleAnswerTask(prompt), false);
-  assert.deepEqual(wizardSteps(prompt, false), WIZARD_V2_STEPS);
-
-  const textWithTable = {
-    ...textTask(),
-    inputs: { ...textTask().inputs, datasetLabel: "rows.csv" },
-  };
-  assert.deepEqual(wizardSteps(textWithTable, false), WIZARD_V2_STEPS);
-  const textWithPairs = { ...textTask(), inputs: { ...textTask().inputs, mode: "pairs" as const } };
-  assert.deepEqual(wizardSteps(textWithPairs, false), WIZARD_V2_STEPS);
-
-  const repo = {
-    ...prompt,
-    task: { ...prompt.task, artifactKind: "code" as const, repo: emptyRepoDraft() },
-  };
+test("a DSPy program task keeps Inputs; a repository skips it", () => {
+  const state = initialWizardV2State("standard");
+  const program = { ...state, task: { ...state.task, artifactKind: "dspy_program" as const } };
+  assert.deepEqual(wizardSteps(program, false), WIZARD_V2_STEPS);
+  const repo = { ...program, task: { ...program.task, repo: emptyRepoDraft() } };
   assert.deepEqual(wizardSteps(repo, false), withoutInputs);
-  assert.equal(
-    isSingleAnswerTask({ ...repo, task: { ...repo.task, artifactKind: "text" as const } }),
-    false,
+});
+
+test("a repository that needs data keeps Inputs", () => {
+  const state = initialWizardV2State("standard");
+  const repo = { ...state, task: { ...state.task, repo: emptyRepoDraft(), needsData: true } };
+  assert.deepEqual(wizardSteps(repo, false), WIZARD_V2_STEPS);
+  assert.deepEqual(
+    wizardSteps({ ...repo, task: { ...repo.task, needsData: false } }, false),
+    withoutInputs,
   );
 });
 
-test("Guided on a single-answer task walks only the task and metric steps", () => {
-  const guided = { ...textTask(), level: "guided" as const };
-  assert.deepEqual(wizardSteps(guided, false), ["task", "metric"]);
-  assert.deepEqual(wizardSteps(guided, true), ["task", "optimizer", "metric"]);
-});
-
-test("a single-answer task runs on exactly one case: its question", () => {
-  const next = withQuestionInputs(textTask());
-  assert.equal(next.inputs.mode, "single");
-  assert.deepEqual(next.inputs.cases, [
-    { input: { [QUESTION_INPUT_FIELD]: "Solve 2x + 3 = 7.\n\nShow the steps." } },
-  ]);
-  assert.deepEqual(next.inputs.inputFields, [QUESTION_INPUT_FIELD]);
-  assert.equal(next.inputs.expectedField, null);
-
-  const noBackground = withQuestionInputs(textTask("Summarize the report.", " "));
-  assert.deepEqual(noBackground.inputs.cases, [
-    { input: { [QUESTION_INPUT_FIELD]: "Summarize the report." } },
-  ]);
-});
-
-test("the one case follows the question, but a run's own case is kept", () => {
-  const edited = withQuestionInputs(textTask("Solve x + 1 = 3."));
-  assert.deepEqual(edited.inputs.cases, [
-    { input: { [QUESTION_INPUT_FIELD]: "Solve x + 1 = 3.\n\nShow the steps." } },
-  ]);
-
-  const cloned = {
-    ...textTask(),
-    inputs: { ...textTask().inputs, cases: [{ input: { problem: "1 + 1" } }] },
+test("taskInterviewPatch switches the target unless the user picked it", () => {
+  const turn = {
+    message: "",
+    options: [],
+    done: false,
+    objective: "",
+    background: "",
+    artifact_rationale: "",
   };
-  assert.equal(withQuestionInputs(cloned), cloned);
+  const toRepo = taskInterviewPatch(
+    { ...turn, target: "repo", repo_query: " me/site ", needs_data: false },
+    new Set(),
+    { repo: null },
+  );
+  assert.deepEqual(toRepo.repo, emptyRepoDraft());
+  assert.equal(toRepo.repoQuery, "me/site");
+  assert.equal(toRepo.needsData, false);
+  assert.equal(
+    "repo" in taskInterviewPatch({ ...turn, target: "repo" }, new Set(["repo"]), { repo: null }),
+    false,
+  );
+  const back = taskInterviewPatch({ ...turn, target: "dspy_program" }, new Set(), {
+    repo: emptyRepoDraft(),
+  });
+  assert.equal(back.repo, null);
+  assert.equal(back.artifactKind, "dspy_program");
+  const chosen = { ...emptyRepoDraft(), repository: "me/site" };
+  assert.equal(
+    "repo" in taskInterviewPatch({ ...turn, target: "dspy_program" }, new Set(), { repo: chosen }),
+    false,
+  );
+  const unknown = taskInterviewPatch({ ...turn, needs_data: null }, new Set(), { repo: null });
+  assert.equal("needsData" in unknown, false);
+  assert.equal("repoQuery" in unknown, false);
 });
 
-test("other tasks get no built case; a user on the skipped step stands on the task", () => {
-  const prompted = { ...textTask(), task: { ...textTask().task, artifactKind: "prompt" as const } };
-  assert.equal(withQuestionInputs(prompted), prompted);
+test("programTargetOptimizer returns a black-box engine to Auto", () => {
+  assert.deepEqual(programTargetOptimizer("gepa"), { choice: "auto" });
+  assert.deepEqual(programTargetOptimizer("shinka_evolve"), { choice: "auto" });
+  assert.equal(programTargetOptimizer("auto"), null);
+  assert.equal(programTargetOptimizer("dspy_miprov2"), null);
+});
 
-  const onInputs = withQuestionInputs({ ...textTask(), step: "inputs" as const });
-  assert.equal(onInputs.step, "task");
-  assert.equal(onInputs.inputs.cases.length, 1);
+test("repoTargetSlices runs one case at a time and replaces Auto", () => {
+  assert.deepEqual(repoTargetSlices("auto"), {
+    inputs: { mode: "single" },
+    optimizer: { choice: "gepa" },
+  });
+  assert.deepEqual(repoTargetSlices("dspy_miprov2"), {
+    inputs: { mode: "single" },
+    optimizer: { choice: "gepa" },
+  });
+  assert.deepEqual(repoTargetSlices("shinka_evolve"), {
+    inputs: { mode: "single" },
+    optimizer: null,
+  });
 });

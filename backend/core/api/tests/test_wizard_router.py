@@ -62,8 +62,8 @@ def test_task_fields_round_trip(wizard_client: TestClient) -> None:
     body = {
         "task_objective": "  Make it shorter  ",
         "task_background": "Support replies.",
-        "artifact_kind": "prompt",
-        "starting_version": "You are a helpful bot.",
+        "artifact_kind": "dspy_program",
+        "starting_version": {"predict": "You are a helpful bot."},
     }
     resp = wizard_client.post("/wizard/update", json=body)
 
@@ -71,8 +71,16 @@ def test_task_fields_round_trip(wizard_client: TestClient) -> None:
     patch = resp.json()["wizard_state"]
     assert patch["task_objective"] == "Make it shorter"
     assert patch["task_background"] == "Support replies."
-    assert patch["artifact_kind"] == "prompt"
-    assert patch["starting_version"] == "You are a helpful bot."
+    assert patch["artifact_kind"] == "dspy_program"
+    assert patch["starting_version"] == {"predict": "You are a helpful bot."}
+
+
+@pytest.mark.parametrize("kind", ["prompt", "code", "text"])
+def test_other_artifact_kinds_are_refused_for_new_runs(wizard_client: TestClient, kind: str) -> None:
+    """The wizard sets up only new runs, and new runs take only a DSPy program."""
+    resp = wizard_client.post("/wizard/update", json={"artifact_kind": kind})
+
+    assert resp.status_code == 422
 
 
 def test_multi_part_starting_version_round_trips(wizard_client: TestClient) -> None:

@@ -11,8 +11,7 @@ import { rememberLayout } from "@/shared/lib/layout-hint";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { tip } from "@/shared/lib/tooltips";
 import { TERMS } from "@/shared/lib/terms";
-import { cn } from "@/shared/lib/utils";
-import { BREAKDOWN_GRID_CLASS, BREAKDOWN_WIDE_CELL_CLASS, STATUS_COLORS } from "../constants";
+import { STATUS_COLORS } from "../constants";
 import { ANALYTICS_LAYOUT_KEY, analyticsShape } from "../lib/analytics-shape";
 import { AnalyticsEmpty } from "./AnalyticsEmpty";
 import { AnalyticsFilterChips } from "./AnalyticsFilterChips";
@@ -81,8 +80,6 @@ function AnalyticsTabImpl({
     setDateRange,
     setOwner,
     setAccess,
-    setJobType,
-    setModule,
     setImprovement,
     setRuntime,
     setDataset,
@@ -221,7 +218,9 @@ function AnalyticsTabImpl({
                     />
                   </div>
                   <div className="min-w-0">
-                    <PanelHeading>{msg("auto.features.dashboard.components.analyticstab.26")}</PanelHeading>
+                    <PanelHeading>
+                      {msg("auto.features.dashboard.components.analyticstab.26")}
+                    </PanelHeading>
                     <RangeHistogram
                       data={chartData.runtimeHistogram}
                       unitLabel={msg("dashboard.analytics.axis_minutes")}
@@ -284,38 +283,15 @@ function AnalyticsTabImpl({
                 title={msg("dashboard.analytics.section_breakdown")}
                 className="border-border/60"
               >
-                <div className={BREAKDOWN_GRID_CLASS}>
-                  <div className="min-w-0">
-                    <PanelHeading>
-                      {msg("auto.features.dashboard.components.analyticstab.22")}
-                    </PanelHeading>
-                    <ShareBars
-                      bars={chartData.status}
-                      color={(bar) => STATUS_COLORS[bar.key] ?? "var(--color-chart-5)"}
-                      onSelect={setStatus}
-                    />
-                  </div>
-                  <div className="min-w-0">
-                    <PanelHeading>
-                      {msg("auto.features.dashboard.components.analyticstab.24")}
-                      {TERMS.optimization}
-                    </PanelHeading>
-                    <ShareBars bars={chartData.jobTypes} onSelect={setJobType} />
-                  </div>
-                  <div className={cn("min-w-0", BREAKDOWN_WIDE_CELL_CLASS)}>
-                    <PanelHeading>{msg("dashboard.analytics.by_module")}</PanelHeading>
-                    {chartData.modules.length > 0 ? (
-                      <ShareBars
-                        bars={chartData.modules}
-                        color={() => "var(--color-chart-4)"}
-                        onSelect={setModule}
-                      />
-                    ) : (
-                      <p className="text-sm text-muted-foreground">
-                        {msg("auto.shared.charts.chart.utils.literal.1")}
-                      </p>
-                    )}
-                  </div>
+                <div className="min-w-0">
+                  <PanelHeading>
+                    {msg("auto.features.dashboard.components.analyticstab.22")}
+                  </PanelHeading>
+                  <ShareBars
+                    bars={chartData.status}
+                    color={(bar) => STATUS_COLORS[bar.key] ?? "var(--color-chart-5)"}
+                    onSelect={setStatus}
+                  />
                 </div>
               </AnalyticsSection>
             </StaggerItem>

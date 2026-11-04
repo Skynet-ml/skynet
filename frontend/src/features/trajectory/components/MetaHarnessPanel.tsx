@@ -37,7 +37,6 @@ import { TrajectoryDrawer, type DrawerSelection } from "./TrajectoryDrawer";
 const NEWEST_HIGHLIGHT_MS = 2200;
 
 const BLACKBOX_FALLBACK: BlackboxTrajectoryContext = {
-  recipe: null,
   hasCases: false,
   rendersByText: new Map(),
 };

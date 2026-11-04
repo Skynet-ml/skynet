@@ -43,7 +43,7 @@ def _request(**overrides: Any) -> InputsInferenceRequest:
     """Build a pairs-shaped request with ``overrides`` applied."""
     base: dict[str, Any] = {
         "objective": "Classify support tickets.",
-        "artifact_kind": "prompt",
+        "artifact_kind": "dspy_program",
         "columns": ["ticket", "label"],
         "sample_rows": [{"ticket": "refund please", "label": "billing"}],
         "row_count": 40,
@@ -89,9 +89,7 @@ def test_single_mode_builds_the_one_input(monkeypatch: pytest.MonkeyPatch) -> No
             single_input_json='{"document": "The report.", "junk": 1}',
         ),
     )
-    result = infer_inputs(
-        _request(columns=["document"], sample_rows=[{"document": "The report."}], row_count=1, artifact_kind="text")
-    )
+    result = infer_inputs(_request(columns=["document"], sample_rows=[{"document": "The report."}], row_count=1))
     assert result.mode == "single"
     assert result.input_fields == ["document"]
     assert result.expected_field is None

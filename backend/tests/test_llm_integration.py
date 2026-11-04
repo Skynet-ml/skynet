@@ -84,7 +84,7 @@ def test_optimize_golden_path() -> None:
         "username": username,
         "task": {
             "objective": "Solve grade school math word problems.",
-            "artifact": {"kind": "prompt", "starting_version": "Solve the math problem."},
+            "artifact": {"kind": "dspy_program", "starting_version": "Solve the math problem."},
         },
         "data": {
             "mode": "pairs",

@@ -25,8 +25,7 @@ import { FadeIn } from "@/shared/ui/motion";
 import { Segmented } from "@/shared/ui/segmented";
 import { HelpTip } from "@/shared/ui/help-tip";
 import { msg } from "@/shared/lib/messages";
-import { cn } from "@/shared/lib/utils";
-import { DatasetRowReader, ExpandTableButton } from "@/features/datasets";
+import { DatasetRowReader } from "@/features/datasets";
 import { tip } from "@/shared/lib/tooltips";
 import { getOptimizationDataset, getTestResults, getPairTestResults } from "@/shared/lib/api";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
@@ -234,8 +233,6 @@ export function DataTab({
 
   // Index into ``filtered``; non-null swaps the table for the row reader.
   const [readerIndex, setReaderIndex] = useState<number | null>(null);
-  const [expanded, setExpanded] = useState(false);
-  const expandButton = useRef<HTMLButtonElement>(null);
   useEffect(() => setReaderIndex(null), [filtered]);
   const reader = readerIndex === null ? null : buildRecords(readerIndex);
 
@@ -375,12 +372,6 @@ export function DataTab({
             {filtered.length}
             {msg("auto.features.optimizations.components.datatab.4")}
           </div>
-          <ExpandTableButton
-            ref={expandButton}
-            expanded={expanded}
-            controls="data-tab-table"
-            onToggle={() => setExpanded(!expanded)}
-          />
           <ExportTableMenu
             iconOnly
             disabled={filtered.length === 0}
@@ -398,19 +389,13 @@ export function DataTab({
           />
         ) : (
           <Card
-            id="data-tab-table"
             onKeyDown={(e) => {
-              if (e.key !== "Escape") return;
-              if (readerIndex !== null) setReaderIndex(null);
-              else if (expanded) {
-                setExpanded(false);
-                expandButton.current?.focus();
-              }
+              if (e.key === "Escape" && readerIndex !== null) setReaderIndex(null);
             }}
           >
             <CardContent className="p-0">
               {reader && readerIndex !== null && reader.rows[0] ? (
-                <div className={cn("flex flex-col", expanded ? "h-[80dvh]" : "h-[520px]")}>
+                <div className="flex h-[520px] flex-col">
                   <DatasetRowReader
                     columns={reader.columns}
                     row={reader.rows[0]}
@@ -427,12 +412,7 @@ export function DataTab({
                   />
                 </div>
               ) : (
-                <div
-                  className={cn(
-                    "table-scroll overflow-y-auto",
-                    expanded ? "max-h-[80dvh]" : "max-h-[520px]",
-                  )}
-                >
+                <div className="table-scroll max-h-[520px] overflow-y-auto">
                   <Table className="table-fixed">
                     <TableHeader>
                       <TableRow>

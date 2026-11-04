@@ -1,4 +1,4 @@
-Motor, yapıtınızın yeni sürümlerini öneren arama yöntemidir. Skynet'te İstem, Kod ve Metin yapıtları için altı yerel motor, DSPy programları için üç DSPy optimize edicisi ve **Auto** vardır. Bu sayfa her birinin ne yaptığını, ne zaman seçileceğini ve hangi ayarlara sahip olduğunu anlatır.
+Motor, yapıtınızın yeni sürümlerini öneren arama yöntemidir. Skynet'te depolar için altı yerel motor, DSPy programları için üç DSPy optimize edici ve **Auto** vardır. Bu sayfa her birinin ne yaptığını, ne zaman seçileceğini ve hangi ayarlara sahip olduğunu anlatır.
 
 Yapıtınıza hangi motorların uyduğunu bilmiyorsanız önce [Optimizasyon nasıl çalışır](/docs/concepts/optimization) sayfasını okuyun.
 
@@ -6,13 +6,13 @@ Yapıtınıza hangi motorların uyduğunu bilmiyorsanız önce [Optimizasyon nas
 
 | Motor                 | Yapıt türleri      | Kodlama ajanı ayarları               | Maks. yineleme ayarı |
 | --------------------- | ------------------ | ------------------------------------ | -------------------- |
-| Auto                  | Tümü               | Evet, İstem, Kod ve Metin üzerinde   | Hayır                |
-| GEPA                  | İstem, Kod, Metin  | Hayır                                | Hayır                |
-| Best-of-N             | İstem, Kod, Metin  | Hayır                                | Hayır                |
-| AutoResearch          | İstem, Kod, Metin  | Evet                                 | Hayır                |
-| Meta-Harness          | İstem, Kod, Metin  | Evet                                 | Evet                 |
-| AutoSaddler           | İstem, Kod, Metin  | Evet                                 | Evet                 |
-| ShinkaEvolve          | İstem, Kod, Metin  | Hayır. Kendi düzenleyici ayarı vardır. | Evet               |
+| Auto | DSPy programı | Hayır | Hayır |
+| GEPA | Depo | Hayır | Hayır |
+| Best-of-N | Depo | Hayır | Hayır |
+| AutoResearch | Depo | Evet | Hayır |
+| Meta-Harness | Depo | Evet | Evet |
+| AutoSaddler | Depo | Evet | Evet |
+| ShinkaEvolve | Depo | Hayır. Kendi düzenleyici ayarı vardır. | Evet |
 | DSPy GEPA             | DSPy programı      | Hayır                                | Hayır                |
 | DSPy MIPROv2          | DSPy programı      | Hayır                                | Hayır                |
 | DSPy BootstrapFewShot | DSPy programı      | Hayır                                | Hayır                |
@@ -24,12 +24,7 @@ Sihirbaz GEPA, DSPy GEPA ve Auto'yu metriğinizden gelen geri bildirim metnini k
 Auto varsayılandır. Ne çalıştırdığı yapıt türüne bağlıdır:
 
 - **DSPy programı**: Auto, DSPy GEPA'yı çalıştırır.
-- **İstem, Kod veya Metin**: Auto aynı anda beş motorla keşif yapar: GEPA, AutoResearch, Meta-Harness, AutoSaddler ve ShinkaEvolve. Her motor puanlayıcı çalıştırmalarından eşit pay alır: bütçenin 6'ya bölümü. Ardından GEPA, bütçenin geri kalanıyla en iyi sürümden devam eder.
-
-Auto, Best-of-N kullanmaz.
-
-> [!WARNING]
-> Bir İstem, Kod veya Metin yapıtında Auto en az 6 puanlayıcı çalıştırmasına ihtiyaç duyar: 5 keşif kulvarı ve bir devam aşaması. Beş motorun tamamı kullanılabilir olmalıdır. Biri kullanılamıyorsa tek bir motor seçin.
+- **Depo**: Auto kullanılamaz. Tek bir yerel motor seçin.
 
 **Şu durumda seçin:** hangi motorun uyduğunu bilmiyorsunuz. Başlamak için en iyi yer burasıdır.
 
@@ -49,7 +44,7 @@ Auto, Best-of-N kullanmaz.
 
 Bir kodlama ajanı araştırma turları çalıştırır. Bütçe bitene kadar düzenler, puanlar ve işe yarayanı saklar.
 
-**Şu durumda seçin:** iyi bir değişiklik, örneğin bir Kod yapıtında, birkaç adımlık inceleme gerektiriyor.
+**Şu durumda seçin:** iyi bir değişiklik, örneğin bir Kod yapıtında.
 
 ## Meta-Harness
 
@@ -85,7 +80,7 @@ DSPy MIPROv2 ve DSPy BootstrapFewShot çiftlere (beklenen çıktıları olan vak
 
 | Ayar                                  | Varsayılan | Aralık                                                          |
 | ------------------------------------- | ---------- | --------------------------------------------------------------- |
-| Maksimum puanlayıcı çalıştırması      | 200        | 1 ila 100000 (Auto: en az 6)                                    |
+| Maksimum puanlayıcı çalıştırması      | 200        | 1 ila 100000                                    |
 | Şu puanda dur                         | Kapalı     | 0 veya daha fazla                                               |
 | Maks. yineleme                        | Kapalı     | 1 ila 1000. Yalnızca Meta-Harness, AutoSaddler ve ShinkaEvolve. |
 
@@ -93,12 +88,12 @@ Bir puanlayıcı çalıştırması, metriğinizin tek bir vaka üzerinde bir kez
 
 ### Kodlama ajanı ayarları
 
-Bu ayarlar Auto, AutoResearch, Meta-Harness ve AutoSaddler için geçerlidir.
+Bu ayarlar AutoResearch, Meta-Harness ve AutoSaddler için geçerlidir.
 
 | Ayar                                   | Varsayılan | Aralık                                            |
 | -------------------------------------- | ---------- | ------------------------------------------------- |
 | Kodlama ajanı                          | Codex      | Pi, Codex, OpenCode, Prime Agent, Özel komut      |
-| Yineleme başına aday                   | 3          | 1 ila 8. Auto ve Meta-Harness için gösterilir.    |
+| Yineleme başına aday                   | 3          | 1 ila 8. |
 | Aday başına en fazla araç çağrısı      | 100        | 1 ila 1000                                        |
 
 ### ShinkaEvolve ayarları
@@ -113,8 +108,6 @@ Bu ayarlar Auto, AutoResearch, Meta-Harness ve AutoSaddler için geçerlidir.
 | Arşiv boyutu                                       | 40                                                               |
 | Paralel değerlendirmeler                           | 2                                                                |
 | Paralel öneriler                                   | 2                                                                |
-
-Auto, ShinkaEvolve'u çalıştırdığında sihirbaz bu ayarları "ShinkaEvolve ayarları (Auto çalıştırdığında)" olarak gösterir.
 
 ## İlgili sayfalar
 

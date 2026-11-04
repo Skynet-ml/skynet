@@ -12,17 +12,15 @@ function candidateOf(value: unknown): BlackboxCandidate | null {
 }
 
 /**
- * Name what a black-box run's versions are, for the score chart: the prompt
- * for the legacy prompt recipe, otherwise the starting point (or the result's
- * candidate while the payload is still loading) as one file, one text, or a
- * bare version when it has several named parts.
+ * Name what a black-box run's versions are, for the score chart: the starting
+ * point (or the result's candidate while the payload is still loading) as one
+ * file, one text, or a bare version when it has several named parts.
  */
 export function describeBlackboxArtifact(
   result: BlackboxRunResult | null,
   payload: OptimizationPayloadResponse | null,
 ): ScoreChartArtifact {
   const submitted = payload?.payload ?? {};
-  if (submitted.recipe === "prompt") return { kind: "prompt" };
   const candidate =
     candidateOf(submitted.seed_candidate) ??
     result?.seed_candidate ??

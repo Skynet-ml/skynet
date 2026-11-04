@@ -51,7 +51,7 @@ class WizardUpdateRequest(BaseModel):
     )
     artifact_kind: ArtifactKind | None = Field(
         default=None,
-        description="Task step: what is optimized. One of: 'prompt', 'code', 'text', 'dspy_program'.",
+        description="Task step: what is optimized. Always 'dspy_program'.",
     )
     starting_version: BlackboxCandidate | None = Field(
         default=None,

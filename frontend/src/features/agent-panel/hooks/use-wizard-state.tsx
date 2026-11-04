@@ -228,7 +228,8 @@ export function useWizardStateOptional(): WizardStateContextValue | null {
   return React.useContext(Ctx);
 }
 
-const ARTIFACT_KINDS: readonly ArtifactKind[] = ["prompt", "code", "dspy_program", "text"];
+// New runs optimize only a DSPy program; a repository run has no artifact kind here.
+const ARTIFACT_KINDS: readonly ArtifactKind[] = ["dspy_program"];
 const DATA_MODES: readonly DataMode[] = ["single", "pairs"];
 const OPTIMIZER_CHOICES: readonly string[] = ["auto", ...DSPY_OPTIMIZERS, ...BLACKBOX_OPTIMIZERS];
 

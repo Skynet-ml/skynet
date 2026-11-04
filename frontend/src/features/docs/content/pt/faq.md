@@ -4,16 +4,16 @@ Esta página responde a perguntas comuns sobre o Skynet. Cada resposta tem um li
 
 ### O que é o Skynet?
 
-O Skynet é uma plataforma que otimiza prompts, programas, agentes e fluxos de trabalho com base nos seus próprios dados e na sua métrica. Você envia um conjunto de dados, descreve a tarefa e inicia uma execução. A execução testa novas versões e as pontua em dados reservados. Para começar, leia o [Início rápido](/docs/quickstart).
+O Skynet é uma plataforma que otimiza programas DSPy e repositórios com seus próprios dados e sua métrica. Você envia um conjunto de dados, descreve a tarefa e inicia uma execução. A execução testa novas versões e as pontua em dados reservados. Para começar, leia o [Início rápido](/docs/quickstart).
 
 ### O que o Skynet pode otimizar?
 
-O Skynet é o Optimize Anything. Ele otimiza prompts, código, texto e programas DSPy em um único produto. O tipo de artefato define quais motores podem trabalhar nele:
+O Skynet é o Optimize Anything. Ele otimiza programas DSPy e repositórios em um único produto. O tipo de artefato decide quais motores podem trabalhar nele:
 
-- Artefatos de Prompt, Código e Texto usam os motores nativos: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler e ShinkaEvolve.
+- Repositórios usam os motores nativos: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler e ShinkaEvolve.
 - Programas DSPy usam os otimizadores DSPy: DSPy GEPA, DSPy MIPROv2 e DSPy BootstrapFewShot.
 
-O **Auto** combina os motores adequados à sua tarefa. Veja [Como a otimização funciona](/docs/concepts/optimization) e [Motores](/docs/concepts/engines).
+Em um programa DSPy, o **Auto** usa o DSPy GEPA. Em um repositório, você escolhe um motor nativo. Leia [Como a otimização funciona](/docs/concepts/optimization) e [Motores](/docs/concepts/engines).
 
 ### Quais idiomas a interface suporta?
 

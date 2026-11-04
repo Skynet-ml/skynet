@@ -1,6 +1,5 @@
 "use client";
 
-import * as React from "react";
 import { ArrowsClockwise, Info } from "@/shared/ui/icons";
 
 import { Button } from "@/shared/ui/primitives/button";
@@ -25,27 +24,6 @@ interface MessageActionsProps {
   className?: string;
 }
 
-interface ActionButtonProps {
-  label: string;
-  onClick: () => void;
-  children: React.ReactNode;
-}
-
-function ActionButton({ label, onClick, children }: ActionButtonProps) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button variant="ghost" size="icon-xs" onClick={onClick} aria-label={label}>
-          {children}
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent side="bottom" dir={getActiveDir()}>
-        {label}
-      </TooltipContent>
-    </Tooltip>
-  );
-}
-
 function formatSeconds(ms: number, locale: string): string {
   const seconds = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(ms / 1000);
   return `${seconds}${msg("shared.agent.seconds_short")}`;
@@ -60,8 +38,8 @@ function formatCost(cents: number, locale: string): string {
 function InfoRow({ label, value }: { label: string; value: string }) {
   return (
     <>
-      <dt className="text-background/60">{label}</dt>
-      <dd dir="ltr" className="text-end font-mono tabular-nums">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd dir="ltr" className="whitespace-nowrap text-end font-mono tabular-nums">
         {value}
       </dd>
     </>
@@ -131,6 +109,9 @@ export function MessageActions({
     rows.push({ label: msg("shared.agent.info.cost"), value: formatCost(stats.cents, locale) });
   }
 
+  // An aria-label only, so the retry audit's visible-text rule does not apply.
+  const regenerateLabel = msg("shared.agent.regenerate");
+
   return (
     <div className={cn("flex items-center gap-1 -ms-1.5", className)}>
       {text.length > 0 && (
@@ -145,9 +126,15 @@ export function MessageActions({
         </Button>
       )}
       {onRegenerate && (
-        <ActionButton label={msg("shared.agent.regenerate")} onClick={onRegenerate}>
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          autoTooltip={false}
+          onClick={onRegenerate}
+          aria-label={regenerateLabel}
+        >
           <ArrowsClockwise className="size-3.5" />
-        </ActionButton>
+        </Button>
       )}
       <span className="sr-only" role="status" aria-live="polite">
         {copied ? msg("shared.agent.copied") : ""}
@@ -159,7 +146,11 @@ export function MessageActions({
               <Info className="size-3.5" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="top" dir={getActiveDir()} className="text-start text-pretty">
+          <TooltipContent
+            side="top"
+            dir={getActiveDir()}
+            className="max-w-(--radix-tooltip-content-available-width) text-start text-pretty"
+          >
             <dl className="grid grid-cols-[auto_auto] gap-x-4 gap-y-1">
               {rows.map((row) => (
                 <InfoRow key={row.label} label={row.label} value={row.value} />

@@ -34,7 +34,7 @@ export interface CloneSlices {
   meta: Partial<MetaSlice>;
 }
 
-const ARTIFACT_KINDS: readonly ArtifactKind[] = ["prompt", "code", "dspy_program", "text"];
+const ARTIFACT_KINDS: readonly ArtifactKind[] = ["dspy_program"];
 const DATA_MODES: readonly DataMode[] = ["single", "pairs"];
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -262,28 +262,14 @@ function legacyRepo(target: unknown): RepoDraft | null {
   };
 }
 
+/** A `/blackbox/run` payload is a repository run, scored one case at a time. */
 function cloneLegacyBlackbox(payload: ClonePayload): Omit<CloneSlices, "meta"> {
-  const seed = startingVersion(payload.seed_candidate);
   const task: Partial<TaskSlice> = {
     objective: text(payload.objective) ?? "",
     background: text(payload.background) ?? "",
   };
-  if (seed !== undefined) task.startingVersion = seed;
   const repo = legacyRepo(payload.target);
-  if (repo) {
-    // The wizard keys its engine catalog on a kind and mode, so a repository
-    // run stands in as one piece of code scored once per round.
-    task.repo = repo;
-    task.artifactKind = "code";
-  }
-  // Legacy cases are flat rows the scorer read whole; an `expected` key, when
-  // present, was the answer the scorer compared against.
-  const cases = Array.isArray(payload.cases)
-    ? payload.cases.filter(isRecord).map((row): UnifiedCase => {
-        const { expected, ...input } = row;
-        return { input, expected: expected ?? null };
-      })
-    : [];
+  if (repo) task.repo = repo;
   const scorer = isRecord(payload.scorer) ? payload.scorer : {};
   const reflection = modelConfig(payload.reflection_model_config ?? payload.reflection_model_settings);
   const metricModel = modelConfig(scorer.model);
@@ -299,7 +285,7 @@ function cloneLegacyBlackbox(payload: ClonePayload): Omit<CloneSlices, "meta"> {
     workspace.metricTimeoutSeconds = scorer.timeout_seconds;
   return {
     task,
-    inputs: repo ? { mode: "single" } : inputsFromCases(cases, []),
+    inputs: { mode: "single" },
     // Stored payloads may be dumped by alias or by field name.
     optimizer: {
       taskModel: modelConfig(payload.task_model_config ?? payload.task_model_settings),

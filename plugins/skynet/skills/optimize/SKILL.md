@@ -1,13 +1,12 @@
 ---
 name: optimize
-description: Optimize a prompt, a program, a DSPy program or an agent against a metric with Skynet. Use when the user asks to improve, tune or optimize a prompt or code against test cases or a score, or asks to run a Skynet optimization. Builds the run spec, checks it with check_run, gets the user's agreement to a spending limit, starts the run with start_run, follows it with get_run and presents the result.
+description: Optimize a DSPy program against a metric with Skynet. Use when the user asks to improve, tune or optimize a DSPy program or its instructions against test cases or a score, or asks to run a Skynet optimization. Builds the run spec, checks it with check_run, gets the user's agreement to a spending limit, starts the run with start_run, follows it with get_run and presents the result.
 ---
 
 # Optimize with Skynet
 
-Skynet improves an artifact (a prompt, code, a DSPy program or text) against
-a metric that the user owns. It needs the Skynet MCP server of this plugin.
-The first tool call asks the user to sign in to their Skynet account.
+Skynet improves a DSPy program against a metric that the user owns. It needs
+the Skynet MCP server of this plugin. The first tool call asks the user to sign in to their Skynet account.
 
 The tools:
 
@@ -29,9 +28,10 @@ The tools:
    Ask the user for what is missing. Do not invent test cases or expected
    outputs without the user's agreement.
 2. **Write the workspace code.** Every run uses one contract:
-   - `run.py` defines `def run(artifact, input)`. `artifact` is the current
-     version (a string, or a dict of named strings). `input` is the case's
-     input dict. Return the output.
+   - `run.py` builds a `dspy.Module` at module level and defines
+     `def run(artifact, input)`, which calls the module. If the file has more
+     than one module, name the one to optimize `program`. `input` is the
+     case's input dict. Return the output.
    - `metric.py` defines `def score(input, output, expected=None)`. Return
      `(score, {"feedback": "<short text>"})`: a number (higher is better)
      and a dict whose `feedback` string explains the score. Skynet refuses a
@@ -97,7 +97,7 @@ The tools:
   "task": {
     "objective": "Classify a support ticket as billing, bug or other.",
     "artifact": {
-      "kind": "prompt",
+      "kind": "dspy_program",
       "starting_version": "Classify the ticket. Answer with one word: billing, bug or other."
     }
   },
@@ -114,7 +114,7 @@ The tools:
     "reflection_model": {"name": "<model id>"}
   },
   "workspace": {
-    "run_code": "from skynet import llm\n\ndef run(artifact, input):\n    return llm(artifact, input[\"ticket\"]).strip().lower()\n",
+    "run_code": "import dspy\n\nprogram = dspy.Predict(\"ticket -> label\")\n\n\ndef run(artifact, input):\n    return program(ticket=input[\"ticket\"]).label.strip().lower()\n",
     "metric_code": "def score(input, output, expected=None):\n    ok = output == expected\n    return (1.0 if ok else 0.0), {\"feedback\": \"correct\" if ok else f\"expected {expected}, got {output}\"}\n"
   }
 }
@@ -122,16 +122,15 @@ The tools:
 
 Notes on the spec:
 
-- `task.artifact.kind` is `prompt`, `code`, `dspy_program` or `text`.
+- `task.artifact.kind` is `dspy_program`. Repository runs start from the
+  Skynet app, not from this plugin.
 - `models.reflection_model` is required. `task_model` is the model that
-  `llm` calls in `run.py`. Add `metric_model` only when the metric calls
+  the DSPy program in `run.py` uses. Add `metric_model` only when the metric calls
   `llm`.
 - `optimizer.budget.max_scorer_runs` (default 200) caps how many times the
   metric runs. It is not a money limit. The money limit is
   `max_cost_cents` on `start_run`.
-- `workspace.files` can hold extra helper files for `run.py`, as
-  `{"path": "text"}`. Not supported for `dspy_program` artifacts, because
-  DSPy optimizers load `run.py` alone.
+- Do not set `workspace.files`. DSPy optimizers load `run.py` alone.
 - Do not set `max_cost_cents`, `execution_budget_id` or `preflight_id` in
   the spec. `start_run` sets the budget.
 

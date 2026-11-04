@@ -6,6 +6,7 @@ import { effortLabel } from "@/shared/lib/model-efforts";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { ArrowCounterClockwise, Lightning, Sparkle } from "@/shared/ui/icons";
+import { TooltipButton } from "@/shared/ui/tooltip-button";
 
 interface EffortSliderProps {
   efforts: readonly string[];
@@ -16,8 +17,6 @@ interface EffortSliderProps {
   hintFor: (level: string | null) => string;
   /** The fast mode toggle; absent when the model does not take fast mode. */
   fast?: { on: boolean; onChange: (on: boolean) => void; note: string } | null;
-  /** The CLI's retired top level, shown greyed out; it is never a stop. */
-  retired?: "ultra" | "ultracode" | null;
 }
 
 /**
@@ -26,7 +25,7 @@ interface EffortSliderProps {
  * take it, a fast mode toggle. The fill and its glow grow with the level.
  */
 export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
-  function EffortSlider({ efforts, value, onChange, modelName, hintFor, fast, retired }, ref) {
+  function EffortSlider({ efforts, value, onChange, modelName, hintFor, fast }, ref) {
     const stops = sliderStops(efforts);
     const index = Math.max(0, stops.indexOf(value));
     const level = stops[index] ?? null;
@@ -58,6 +57,38 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
         }}
       >
         <div className="flex items-start gap-2">
+          {fast ? (
+            <TooltipButton
+              side="top"
+              tooltip={
+                <span className="flex flex-col gap-0.5">
+                  <span>{msg("agent.model_menu.fast")}</span>
+                  <span className="font-normal text-muted-foreground" dir="auto">
+                    {fast.note}
+                  </span>
+                </span>
+              }
+            >
+              <button
+                type="button"
+                aria-pressed={fast.on}
+                aria-label={msg("agent.model_menu.fast")}
+                onClick={() => fast.onChange(!fast.on)}
+                className={cn(
+                  "flex size-7 shrink-0 items-center justify-center rounded-md transition-colors",
+                  "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40",
+                  fast.on
+                    ? "bg-primary/10 text-primary hover:bg-primary/15"
+                    : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+                )}
+              >
+                <Lightning aria-hidden className="size-3.5" />
+              </button>
+            </TooltipButton>
+          ) : (
+            // Balances the reset button so the level name stays centered.
+            <span aria-hidden className="size-7 shrink-0" />
+          )}
           <div className="flex min-w-0 flex-1 flex-col items-center">
             <span className="flex items-center gap-1.5 text-sm font-semibold">
               {/* The sparkle grows with the level and pops on each change. */}
@@ -85,20 +116,21 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
               {modelName}
             </span>
           </div>
-          <button
-            type="button"
-            aria-label={msg("agent.model_menu.effort_reset")}
-            title={msg("agent.model_menu.effort_reset")}
-            disabled={level === null}
-            onClick={() => onChange(null)}
-            className={cn(
-              "flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground",
-              "hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40",
-              "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40",
-            )}
-          >
-            <ArrowCounterClockwise className="size-3.5 rtl:-scale-x-100" />
-          </button>
+          <TooltipButton side="top" tooltip={msg("agent.model_menu.effort_reset")}>
+            <button
+              type="button"
+              aria-label={msg("agent.model_menu.effort_reset")}
+              disabled={level === null}
+              onClick={() => onChange(null)}
+              className={cn(
+                "flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground",
+                "hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40",
+                "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40",
+              )}
+            >
+              <ArrowCounterClockwise className="size-3.5 rtl:-scale-x-100" />
+            </button>
+          </TooltipButton>
         </div>
 
         <div
@@ -186,66 +218,6 @@ export const EffortSlider = React.forwardRef<HTMLDivElement, EffortSliderProps>(
         <p id={hintId} className="text-xs text-muted-foreground" dir="auto">
           {hintFor(level)}
         </p>
-
-        {retired && (
-          <div
-            aria-disabled="true"
-            className="flex cursor-not-allowed flex-col rounded-md border border-dashed border-border px-2.5 py-2 opacity-50 select-none"
-          >
-            <span className="text-sm font-medium">
-              {msg(
-                retired === "ultra"
-                  ? "agent.model_menu.effort_ultra"
-                  : "agent.model_menu.effort_ultracode",
-              )}
-            </span>
-            <span className="text-xs text-muted-foreground" dir="auto">
-              {msg("agent.model_menu.effort_unavailable_note")}
-            </span>
-          </div>
-        )}
-
-        {fast && (
-          <button
-            type="button"
-            role="switch"
-            aria-checked={fast.on}
-            onClick={() => fast.onChange(!fast.on)}
-            className={cn(
-              "flex items-start gap-2 rounded-md border border-border px-2.5 py-2 text-start transition-colors",
-              "hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40",
-              fast.on && "border-primary/50 bg-primary/10",
-            )}
-          >
-            <Lightning
-              aria-hidden
-              className={cn(
-                "mt-0.5 size-4 shrink-0 transition-colors",
-                fast.on ? "text-primary" : "text-muted-foreground",
-              )}
-            />
-            <span className="flex min-w-0 flex-1 flex-col">
-              <span className="text-sm font-medium">{msg("agent.model_menu.fast")}</span>
-              <span className="text-xs text-muted-foreground" dir="auto">
-                {fast.note}
-              </span>
-            </span>
-            <span
-              aria-hidden
-              className={cn(
-                "mt-0.5 flex h-4 w-7 shrink-0 items-center rounded-full p-0.5 transition-colors",
-                fast.on ? "bg-primary" : "bg-muted-foreground/30",
-              )}
-            >
-              <span
-                className={cn(
-                  "size-3 rounded-full bg-background transition-transform motion-reduce:transition-none",
-                  fast.on && "translate-x-3 rtl:-translate-x-3",
-                )}
-              />
-            </span>
-          </button>
-        )}
       </div>
     );
   },

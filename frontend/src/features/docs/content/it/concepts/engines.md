@@ -1,4 +1,4 @@
-Un motore è il metodo di ricerca che propone nuove versioni del tuo artefatto. Skynet ha sei motori nativi per gli artefatti Prompt, Codice e Testo, tre ottimizzatori DSPy per i programmi DSPy, e **Auto**. Questa pagina spiega che cosa fa ciascuno, quando sceglierlo e quali impostazioni ha.
+Un motore è il metodo di ricerca che propone nuove versioni del tuo artefatto. Skynet ha sei motori nativi per i repository, tre ottimizzatori DSPy per i programmi DSPy e **Auto**. Questa pagina spiega cosa fa ciascuno, quando sceglierlo e quali impostazioni ha.
 
 Leggi prima [Come funziona l'ottimizzazione](/docs/concepts/optimization) se non sai quali motori si adattano al tuo artefatto.
 
@@ -6,13 +6,13 @@ Leggi prima [Come funziona l'ottimizzazione](/docs/concepts/optimization) se non
 
 | Motore                | Tipi di artefatto     | Impostazioni dell'agente di programmazione | Impostazione delle iterazioni massime |
 | --------------------- | --------------------- | ------------------------------------------ | ------------------------------------- |
-| Auto                  | Tutti                 | Sì, su Prompt, Codice e Testo              | No                                    |
-| GEPA                  | Prompt, Codice, Testo | No                                         | No                                    |
-| Best-of-N             | Prompt, Codice, Testo | No                                         | No                                    |
-| AutoResearch          | Prompt, Codice, Testo | Sì                                         | No                                    |
-| Meta-Harness          | Prompt, Codice, Testo | Sì                                         | Sì                                    |
-| AutoSaddler           | Prompt, Codice, Testo | Sì                                         | Sì                                    |
-| ShinkaEvolve          | Prompt, Codice, Testo | No. Ha una propria impostazione dell'editor. | Sì                                  |
+| Auto | Programma DSPy | No | No |
+| GEPA | Repository | No | No |
+| Best-of-N | Repository | No | No |
+| AutoResearch | Repository | Sì | No |
+| Meta-Harness | Repository | Sì | Sì |
+| AutoSaddler | Repository | Sì | Sì |
+| ShinkaEvolve | Repository | No. Ha una propria impostazione dell'editor. | Sì |
 | DSPy GEPA             | Programma DSPy        | No                                         | No                                    |
 | DSPy MIPROv2          | Programma DSPy        | No                                         | No                                    |
 | DSPy BootstrapFewShot | Programma DSPy        | No                                         | No                                    |
@@ -24,12 +24,7 @@ La procedura guidata contrassegna GEPA, DSPy GEPA e Auto come ottimizzatori che 
 Auto è l'opzione predefinita. Che cosa esegue dipende dal tipo di artefatto:
 
 - **Programma DSPy**: Auto esegue DSPy GEPA.
-- **Prompt, Codice o Testo**: Auto esplora con cinque motori contemporaneamente: GEPA, AutoResearch, Meta-Harness, AutoSaddler e ShinkaEvolve. Ogni motore riceve una quota uguale delle esecuzioni dello scorer: il budget diviso per 6. Poi GEPA prosegue dalla versione migliore con il resto del budget.
-
-Auto non usa Best-of-N.
-
-> [!WARNING]
-> Su un artefatto Prompt, Codice o Testo, Auto richiede almeno 6 esecuzioni dello scorer: 5 corsie di esplorazione e una di prosecuzione. Tutti e cinque i motori devono essere disponibili. Se uno non è disponibile, seleziona un singolo motore.
+- **Repository**: Auto non è disponibile. Scegli un motore nativo.
 
 **Sceglilo quando** non sai quale motore sia adatto. È il punto di partenza migliore.
 
@@ -49,7 +44,7 @@ Auto non usa Best-of-N.
 
 Un agente di programmazione esegue cicli di ricerca. Modifica, valuta e conserva ciò che aiuta finché il budget non si esaurisce.
 
-**Sceglilo quando** una buona modifica richiede diversi passaggi di indagine, ad esempio su un artefatto Codice.
+**Sceglilo quando** una buona modifica richiede diversi passaggi di indagine.
 
 ## Meta-Harness
 
@@ -85,7 +80,7 @@ DSPy MIPROv2 e DSPy BootstrapFewShot richiedono coppie (casi con output attesi).
 
 | Impostazione                  | Predefinito | Intervallo                                                          |
 | ----------------------------- | ----------- | ------------------------------------------------------------------- |
-| Esecuzioni dello scorer max   | 200         | Da 1 a 100000 (Auto: almeno 6)                                      |
+| Esecuzioni dello scorer max   | 200         | Da 1 a 100000                                      |
 | Fermati al punteggio          | Disattivato | 0 o più                                                             |
 | Iterazioni max                | Disattivato | Da 1 a 1000. Solo Meta-Harness, AutoSaddler e ShinkaEvolve.         |
 
@@ -93,12 +88,12 @@ Un'esecuzione dello scorer è una chiamata della tua metrica su un caso. Il rica
 
 ### Impostazioni dell'agente di programmazione
 
-Queste impostazioni si applicano ad Auto, AutoResearch, Meta-Harness e AutoSaddler.
+Queste impostazioni si applicano ad AutoResearch, Meta-Harness e AutoSaddler.
 
 | Impostazione                         | Predefinito | Intervallo                                          |
 | ------------------------------------ | ----------- | --------------------------------------------------- |
 | Agente di programmazione             | Codex       | Pi, Codex, OpenCode, Prime Agent, Comando personalizzato |
-| Candidati per iterazione             | 3           | Da 1 a 8. Mostrato per Auto e Meta-Harness.         |
+| Candidati per iterazione             | 3           | Da 1 a 8. |
 | Chiamate di strumenti max per candidato | 100      | Da 1 a 1000                                         |
 
 ### Impostazioni di ShinkaEvolve
@@ -113,8 +108,6 @@ Queste impostazioni si applicano ad Auto, AutoResearch, Meta-Harness e AutoSaddl
 | Dimensione dell'archivio                             | 40                                                                                |
 | Valutazioni parallele                                | 2                                                                                 |
 | Proposte parallele                                   | 2                                                                                 |
-
-Quando Auto esegue ShinkaEvolve, la procedura guidata mostra queste impostazioni come «Impostazioni di ShinkaEvolve (quando Auto lo esegue)».
 
 ## Pagine correlate
 

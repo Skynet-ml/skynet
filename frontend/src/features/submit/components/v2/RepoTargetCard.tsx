@@ -12,6 +12,7 @@ import { TOUCH_FIELD } from "@/shared/ui/touch";
 import { useConnectors } from "@/features/connectors";
 import { listGithubBranches, startConnectorOAuth } from "@/shared/lib/api";
 import { msg } from "@/shared/lib/messages";
+import { rememberOAuthReturn } from "@/shared/lib/oauth-return";
 import { userErrorMessage } from "@/shared/lib/user-error";
 
 import type { RepoDraft } from "../../lib/wizard-v2";
@@ -65,6 +66,7 @@ export function RepoTargetCard({
     setConnecting(true);
     try {
       const { authorize_url } = await startConnectorOAuth("github");
+      rememberOAuthReturn(`${window.location.pathname}${window.location.search}`);
       window.location.assign(authorize_url);
     } catch (err) {
       toast.error(userErrorMessage(err, msg("submit.blackbox.repo.connect_failed")));

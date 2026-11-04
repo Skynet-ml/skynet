@@ -383,14 +383,14 @@ def unified_payload(**overrides: Any) -> dict:
         "task": {
             "objective": "Answer the question in one word.",
             "background": "",
-            "artifact": {"kind": "prompt", "starting_version": "Answer briefly: "},
+            "artifact": {"kind": "dspy_program", "starting_version": "Answer briefly: "},
         },
         "data": {
             "mode": "pairs",
             "cases": [{"input": {"question": f"Q{i}?"}, "expected": f"A{i}"} for i in range(6)],
             "input_fields": ["question"],
         },
-        "optimizer": {"choice": "gepa"},
+        "optimizer": {"choice": "dspy_gepa"},
         "models": {"reflection_model": {"name": "openai/gpt-4o-mini"}},
         "workspace": {"run_code": _RUN_CODE, "metric_code": _METRIC_CODE},
     }
@@ -477,7 +477,7 @@ def test_optimize_returns_201_and_enqueues_one_job(monkeypatch: pytest.MonkeyPat
     body = resp.json()
     assert body["status"] == "pending"
     assert body["optimization_type"] == "blackbox"
-    assert body["optimizer_name"] == "gepa"
+    assert body["optimizer_name"] == "dspy_gepa"
     assert store.created_ids() == [body["optimization_id"]]
     assert store._jobs[body["optimization_id"]]["payload"]["payload_kind"] == "unified_v1"
 

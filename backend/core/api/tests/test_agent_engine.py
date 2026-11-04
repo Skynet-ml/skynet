@@ -512,7 +512,7 @@ _AGENT_ROUTES = [
         "/optimizations/infer-inputs",
         code_agent_mod,
         "route_interview_model",
-        {"objective": "Answer questions", "artifact_kind": "prompt"},
+        {"objective": "Answer questions", "artifact_kind": "dspy_program"},
     ),
     ("/account/intake-interview", code_agent_mod, "route_interview_model", {"phase": "billing"}),
     ("/tagging-sessions/s1/assist/interview", tagger_mod, "route_interview_model", {}),

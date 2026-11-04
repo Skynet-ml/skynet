@@ -1,4 +1,4 @@
-Skynet 就係 Optimize Anything：一個產品，用你嘅數據同指標去改良任何成品。每次運行都用同一份運行合約同同一份指標合約。成品類型決定邊啲引擎可以處理佢。
+Skynet 就係 Optimize Anything：一個按你嘅指標改良 DSPy 程式或者倉庫嘅產品。成品類型決定邊啲引擎可以處理佢。
 
 ## 共用合約
 
@@ -34,21 +34,19 @@ def score(input, output, expected=None):
 
 | 成品類型   | 引擎                                                                         |
 | ---------- | ---------------------------------------------------------------------------- |
-| 提示詞     | Auto、GEPA、Best-of-N、AutoResearch、Meta-Harness、AutoSaddler、ShinkaEvolve |
-| 程式碼     | 同提示詞一樣                                                                 |
-| 文字       | 同提示詞一樣                                                                 |
+| 倉庫 | GEPA、Best-of-N、AutoResearch、Meta-Harness、AutoSaddler、ShinkaEvolve |
 | DSPy 程式  | Auto、DSPy GEPA、DSPy MIPROv2、DSPy BootstrapFewShot                         |
 
 引擎分兩大類：
 
-- **原生引擎** 將成品當做黑盒處理。佢哋用喺提示詞、程式碼同文字成品上。
+- **原生引擎** 將成品當做黑盒處理。佢哋用喺倉庫上。
 - **DSPy 優化器** 喺 DSPy 程式入面運作。佢哋只用喺 DSPy 程式成品上。
 
 DSPy MIPROv2 同 DSPy BootstrapFewShot 需要成對數據（有預期輸出嘅案例）。如果得單一輸入，DSPy 程式只可以用 Auto 同 DSPy GEPA。
 
-## 提示詞、程式碼同文字成品
+## 倉庫
 
-原生引擎將成品當做黑盒處理。引擎會提出一個新版本，喺案例上運行 `run(artifact, input)`，再讀取分數同回饋。
+原生引擎會改你准改嘅路徑入面嘅檔案。你嘅指標會為倉庫嘅每個版本評分。
 
 六個原生引擎用唔同嘅搜尋方法：
 
@@ -86,18 +84,16 @@ DSPy BootstrapFewShot 唔用反思模型。
 
 **Auto** 係精靈入面嘅預設選擇。
 
-- 喺提示詞、程式碼或者文字成品上，Auto 會用五個原生引擎探索，然後由最佳版本開始用 GEPA 繼續。
+- **倉庫**：Auto 用唔到。揀一個原生引擎。
 - 喺 DSPy 程式上，Auto 運行 DSPy GEPA。
 
-兩種形式嘅 Auto 都會讀你指標嘅回饋文字。
+Auto 會讀你指標嘅回饋文字。
 
 ## 揀邊個引擎
 
 | 你嘅情況                                       | 用乜                                                          |
 | ---------------------------------------------- | ------------------------------------------------------------- |
-| 你有一個由模型運行嘅提示詞                     | 提示詞成品。由 Auto 開始。                                    |
-| 你有程式碼想變得更快、更平或者更正確           | 程式碼成品。由 Auto 開始。                                    |
-| 你有一份文件或者一個設定檔                     | 文字成品。由 Auto 開始。                                      |
+| 你喺 GitHub 倉庫有程式碼 | 倉庫。揀一個原生引擎。 |
 | 你有一個 DSPy 程式                             | DSPy 程式成品。由 Auto 開始。                                 |
 | 你想由你嘅數據揀出 few-shot 示範               | DSPy 程式成品，配 DSPy BootstrapFewShot 或者 DSPy MIPROv2     |
 

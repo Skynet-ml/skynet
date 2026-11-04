@@ -45,7 +45,7 @@ Authorization: Bearer skyd_...
 | `GET /models`                                   | 列出你可以使用的模型。                       |
 | `GET /optimizers`                               | 列出适合某个设置的优化器。                   |
 | `GET /blackbox/engines`                         | 列出原生引擎以及每个引擎是否可用。           |
-| `POST /optimize`                                | 为提示词、代码、文本或 DSPy 程序启动运行。   |
+| `POST /optimize` | 为 DSPy 程序启动一次运行。 |
 | `POST /blackbox/run`                            | 在 GitHub 仓库上启动运行。                   |
 | `GET /optimizations`                            | 列出你的运行。                               |
 | `GET /optimizations/{optimization_id}`          | 返回一次运行：状态、进度、日志和结果。       |
@@ -56,7 +56,7 @@ Authorization: Bearer skyd_...
 
 ## 启动运行
 
-`POST /optimize` 接受与提交向导相同的设置。本示例改进一个把客服消息归类到标签的提示词。
+`POST /optimize` 接受与提交向导相同的设置。示例会改进一个把客服消息归类到标签的 DSPy 程序。
 
 ```bash tab="curl"
 curl https://api.skynetml.com/optimize \
@@ -72,7 +72,7 @@ curl https://api.skynetml.com/optimize \
   "task": {
     "objective": "Sort each support message into billing, bug or other.",
     "artifact": {
-      "kind": "prompt",
+      "kind": "dspy_program",
       "starting_version": "Label this support message as billing, bug or other."
     }
   },
@@ -93,7 +93,7 @@ curl https://api.skynetml.com/optimize \
     "reflection_model": { "name": "<model from GET /models>" }
   },
   "workspace": {
-    "run_code": "from skynet import llm\n\ndef run(artifact, input):\n    return llm(artifact, input=input[\"message\"])\n",
+    "run_code": "import dspy\n\nprogram = dspy.Predict(\"message -> label\")\n\n\ndef run(artifact, input):\n    return program(message=input[\"message\"]).label\n",
     "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
   },
   "max_cost_cents": 500
@@ -102,7 +102,7 @@ curl https://api.skynetml.com/optimize \
 
 重要字段：
 
-- `task.artifact.kind` 取值为 `prompt`、`code`、`text` 或 `dspy_program`。
+- `task.artifact.kind` 取值为 `dspy_program`。
 - `data.mode` 取值为 `pairs`（带期望输出的输入）或 `single`（恰好一个用例）。
 - `optimizer.choice` 取值为 `auto`，或 `GET /optimizers` 返回的某个优化器名称。
 - `max_cost_cents` 是本次运行的支出上限，单位为美分。

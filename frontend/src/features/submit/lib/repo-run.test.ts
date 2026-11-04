@@ -27,7 +27,6 @@ const model = { name: "openai/gpt-default", token_source: "managed" as const };
 function repoState() {
   const state = initialWizardV2State();
   state.task.objective = "Make the build faster.";
-  state.task.artifactKind = "code";
   state.task.repo = {
     ...emptyRepoDraft(),
     repository: "example/site",
@@ -165,4 +164,32 @@ test("a repository run sends economy on the models that chose it, not for the ru
   assert.equal(request.reflection_model_config?.extra?.economy_mode, true);
   assert.equal(request.extra_reflection_model_configs?.[0]?.extra, undefined);
   assert.equal("economy_mode" in request, false);
+});
+
+test("a repository run sends its cases only when it needs data", () => {
+  const state = repoState();
+  state.inputs.cases = [{ input: { url: "/" } }];
+  state.inputs.inputFields = ["url"];
+  assert.equal(repoRunRequest(state, options)?.cases, undefined);
+  state.task.needsData = true;
+  assert.deepEqual(repoRunRequest(state, options)?.cases, [{ input: { url: "/" } }]);
+  assert.equal(computeStepIssue(state, "inputs", null), null);
+  state.inputs.cases = [];
+  state.inputs.mode = null;
+  assert.equal(repoRunRequest(state, options)?.cases, undefined);
+  assert.notEqual(computeStepIssue(state, "inputs", null), null);
+});
+
+test("a repository run sends a staged dataset by reference", () => {
+  const state = repoState();
+  state.task.needsData = true;
+  state.inputs.stagedDatasetId = "ds-1";
+  state.inputs.inputFields = ["url"];
+  state.inputs.expectedField = null;
+  const request = repoRunRequest(state, options);
+  assert.equal(request?.cases, undefined);
+  assert.equal(request?.staged_dataset_id, "ds-1");
+  assert.deepEqual(request?.input_fields, ["url"]);
+  state.task.needsData = false;
+  assert.equal(repoRunRequest(state, options)?.staged_dataset_id, undefined);
 });

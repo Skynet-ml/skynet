@@ -8,14 +8,14 @@ La pagina dell'esecuzione mostra solo le schede pertinenti all'esecuzione. Alcun
 | ----------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | **Panoramica**          | Sempre                                                               | Avanzamento, punteggi e cronologia dei punteggi                                         |
 | **Utilizzo**            | Un'esecuzione riuscita con un programma che Skynet può servire       | Un modulo per eseguire il programma ottimizzato e il codice di integrazione             |
-| **Artefatto**           | Un'esecuzione Prompt, Codice o Testo con un risultato                | Le versioni del tuo artefatto, con la versione migliore                                 |
+| **Artefatto** | Un'esecuzione su repository con un risultato | Le versioni del tuo artefatto, con la versione migliore |
 | **Dati**                | Un'esecuzione di un programma DSPy terminata                         | I dati suddivisi in set di addestramento, convalida e test, e la valutazione sul set di test |
 | **Codice**              | Quando l'esecuzione ha codice da mostrare                            | Il codice di esecuzione e la metrica                                                    |
-| **Ricompensa**          | Un'esecuzione Prompt, Codice o Testo la cui metrica dichiara componenti della ricompensa | Le componenti della ricompensa e i loro pesi                          |
-| **Artefatto**           | Un'esecuzione con un prompt o file ottimizzati                       | L'output ottimizzato ed **Esporta i risultati**                                         |
+| **Ricompensa** | Un'esecuzione su repository la cui metrica dichiara parti di ricompensa | Le componenti della ricompensa e i loro pesi |
+| **Artefatto** | Un'esecuzione di un programma DSPy terminata | L'output ottimizzato ed **Esporta i risultati** |
 | **Log**                 | La maggior parte delle esecuzioni                                    | Il log dell'esecuzione                                                                  |
 | **Utilizzo e costi**    | Quando hai effettuato l'accesso                                      | Quanto ha speso l'esecuzione                                                            |
-| **Esecuzione pianificata** | Un'esecuzione Prompt, Codice o Testo riuscita                     | Una pianificazione per eseguire di nuovo l'ottimizzazione                               |
+| **Esecuzione pianificata** | Un'esecuzione riuscita di un programma DSPy | Una pianificazione per eseguire di nuovo l'ottimizzazione |
 | **Configurazione**      | Sempre                                                               | La configurazione dell'esecuzione                                                       |
 
 > [!NOTE]
@@ -33,7 +33,7 @@ La scheda **Panoramica** mostra:
 
 Mentre l'esecuzione è attiva, la panoramica mostra anche **Trascorso**, **Rimanente** e **Velocità**.
 
-Per un'esecuzione Prompt, Codice o Testo, la panoramica mostra anche i **Punteggi con nome** quando la tua metrica riporta punteggi con nome.
+Per un'esecuzione su repository, la panoramica mostra anche **Punteggi con nome** quando la tua metrica riporta punteggi con nome.
 
 Per un'esecuzione di un programma DSPy, la scheda **Dati** contiene una **Valutazione sul set di test**. Mostra il punteggio di partenza e il punteggio ottimizzato per ogni caso di test.
 
@@ -45,7 +45,7 @@ Se l'esecuzione si è fermata al suo budget, la pagina dell'esecuzione ti indica
 
 ## Esportare la versione migliore
 
-### Esecuzioni Prompt, Codice e Testo
+### Esecuzioni su repository
 
 La scheda **Artefatto** elenca le **Versioni** del tuo artefatto. Per ogni versione puoi:
 

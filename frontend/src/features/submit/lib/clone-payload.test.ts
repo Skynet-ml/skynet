@@ -26,7 +26,7 @@ test("a unified run clones every slice it stored", () => {
       task: {
         objective: "Summarize tickets",
         background: "Support queue",
-        artifact: { kind: "prompt", starting_version: "Summarize:" },
+        artifact: { kind: "dspy_program", starting_version: { summarize: "Summarize:" } },
       },
       data: {
         mode: "pairs",
@@ -38,7 +38,7 @@ test("a unified run clones every slice it stored", () => {
         split: { train: 0.6, val: 0.2, test: 0.2 },
         shuffle: false,
       },
-      optimizer: { choice: "gepa", budget: { max_scorer_runs: 50 } },
+      optimizer: { choice: "dspy_gepa", budget: { max_scorer_runs: 50 } },
       models: {
         reflection_model: { name: "gpt-x" },
         metric_model: { name: "judge-y" },
@@ -49,14 +49,16 @@ test("a unified run clones every slice it stored", () => {
   );
   assert.equal(slices.meta.name, "Job name");
   assert.equal(slices.meta.isPrivate, true);
-  assert.equal(slices.task.artifactKind, "prompt");
-  assert.equal(slices.task.startingVersion, "Summarize:");
+  assert.equal(slices.task.objective, "Summarize tickets");
+  assert.equal(slices.task.background, "Support queue");
+  assert.equal(slices.task.artifactKind, "dspy_program");
+  assert.deepEqual(slices.task.startingVersion, { summarize: "Summarize:" });
   assert.equal(slices.inputs.mode, "pairs");
   assert.equal(slices.inputs.cases?.length, 2);
   assert.deepEqual(slices.inputs.inputFields, ["ticket"]);
   assert.deepEqual(slices.inputs.split, { train: 0.6, val: 0.2, test: 0.2 });
   assert.equal(slices.inputs.shuffle, false);
-  assert.equal(slices.optimizer.choice, "gepa");
+  assert.equal(slices.optimizer.choice, "dspy_gepa");
   assert.equal(slices.optimizer.reflectionModel?.name, "gpt-x");
   assert.equal("metricModelMode" in slices.workspace, false);
   assert.deepEqual(slices.workspace.metricModel, { name: "judge-y" });
@@ -118,23 +120,13 @@ test("a legacy metric model is dropped when cloning a metric that never calls ll
   assert.equal(slices.workspace.metricModel, null);
 });
 
-test("a legacy black-box run maps objective, seed, cases and scorer", () => {
+test("a DSPy program run clones with its starting version", () => {
   const slices = cloneToSlices("blackbox", {
-    objective: "Write emails",
-    background: "B2B",
-    seed_candidate: { system: "Be brief", user: "{brief}" },
-    cases: [{ brief: "launch", expected: "Hi" }, { brief: "renewal" }],
-    scorer: { kind: "python", metric_code: "def score(c, o): return llm('x')", model: { name: "judge" } },
-    reflection_model_config: { name: "refl" },
+    payload_kind: "unified_v1",
+    task: { objective: "Route tickets", artifact: { kind: "dspy_program", starting_version: { route: "Route:" } } },
   });
-  assert.equal(slices.task.objective, "Write emails");
-  assert.deepEqual(slices.task.startingVersion, { system: "Be brief", user: "{brief}" });
-  assert.equal(slices.inputs.mode, "pairs");
-  assert.deepEqual(slices.inputs.cases?.[0], { input: { brief: "launch" }, expected: "Hi" });
-  assert.deepEqual(slices.inputs.cases?.[1], { input: { brief: "renewal" }, expected: null });
-  assert.equal(slices.workspace.metricCode, "def score(c, o): return llm('x')");
-  assert.equal(slices.workspace.metricModel, null);
-  assert.equal(slices.optimizer.reflectionModel?.name, "refl");
+  assert.equal(slices.task.artifactKind, "dspy_program");
+  assert.deepEqual(slices.task.startingVersion, { route: "Route:" });
 });
 
 test("a black-box clone drops derived models and retains a legacy model the code names", () => {
@@ -306,17 +298,8 @@ test("a stored legacy repository run clones every setting the wizard holds", () 
     editablePaths: ["."],
     setupCommand: "npm ci && npm run build",
   });
-  assert.equal(slices.task.artifactKind, "code");
+  assert.equal(slices.task.artifactKind, undefined);
   assert.deepEqual(slices.inputs, { mode: "single" });
-});
-
-test("a legacy text run clones without a repository", () => {
-  const slices = cloneToSlices("blackbox", {
-    target: { kind: "text" },
-    cases: [{ question: "q" }],
-  });
-  assert.equal(slices.task.repo, undefined);
-  assert.equal(slices.inputs.rowCount, 1);
 });
 
 test("a legacy Auto-mode run keeps the default engine", () => {
@@ -330,7 +313,7 @@ test("a legacy Auto-mode run keeps the default engine", () => {
 test("a clone restores the extra workspace files; an old payload has none", () => {
   const base = {
     payload_kind: "unified_v1",
-    task: { objective: "o", artifact: { kind: "prompt", starting_version: "s" } },
+    task: { objective: "o", artifact: { kind: "dspy_program", starting_version: "s" } },
     data: { mode: "single", cases: [{ input: {} }], input_fields: [] },
     optimizer: { choice: "auto", budget: { max_scorer_runs: 10 } },
     models: { reflection_model: { name: "m" } },

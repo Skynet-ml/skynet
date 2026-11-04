@@ -56,7 +56,7 @@ _SUBMIT = "submit_unified_run_optimize_post"
 _READY: dict[str, Any] = {
     "job_name": "My run",
     "task_objective": "Answer support questions",
-    "artifact_kind": "prompt",
+    "artifact_kind": "dspy_program",
     "starting_version": "You are a helpful agent.",
     "data_mode": "pairs",
     "dataset_ready": True,
@@ -145,7 +145,7 @@ def test_order_rejects_task_before_name() -> None:
 
 def test_order_allows_name_and_task_in_one_patch() -> None:
     """A single patch may set the name AND the task — each satisfies its own step."""
-    patch = {"job_name": "My run", "task_objective": "x", "artifact_kind": "prompt", "starting_version": "s"}
+    patch = {"job_name": "My run", "task_objective": "x", "artifact_kind": "dspy_program", "starting_version": "s"}
     assert validate_wizard_patch_order(patch, WizardState()) is None
 
 
@@ -183,7 +183,7 @@ def test_screen_allows_visible_and_screenless_fields() -> None:
 
 def test_screen_rejects_fields_off_the_visible_screen() -> None:
     """A field from another screen is refused and named in the error."""
-    patch = {"task_objective": "x", "artifact_kind": "prompt", "data_mode": "pairs"}
+    patch = {"task_objective": "x", "artifact_kind": "dspy_program", "data_mode": "pairs"}
     err = validate_wizard_screen("update_wizard_state", patch, WizardState(wizard_screen="brief"))
     assert err is not None
     assert "artifact_kind" in err
@@ -248,7 +248,7 @@ _FULL_SNAPSHOT: dict[str, Any] = {
     "is_private": False,
     "task_objective": "Classify tickets",
     "task_background": "b",
-    "artifact_kind": "prompt",
+    "artifact_kind": "dspy_program",
     "starting_version": "v1",
     "data_mode": "pairs",
     "dataset_ready": True,
@@ -776,7 +776,7 @@ async def test_submit_fills_unified_payload_from_snapshot() -> None:
     assert seen["task"] == {
         "objective": "Answer support questions",
         "background": "Tier-1 support",
-        "artifact": {"kind": "prompt", "starting_version": "You are a helpful agent."},
+        "artifact": {"kind": "dspy_program", "starting_version": "You are a helpful agent."},
     }
     assert seen["data"] == {
         "mode": "pairs",

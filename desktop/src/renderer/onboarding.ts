@@ -47,7 +47,6 @@ interface Bridge {
   openLogs(): Promise<void>;
   openDockerDownload(): Promise<void>;
   signIn(): Promise<void>;
-  skipSignIn(): Promise<void>;
   onState(listener: (state: State) => void): () => void;
 }
 
@@ -263,17 +262,15 @@ function panelBody(state: State): Node[] {
       if (state.timeline) nodes.push(timelinePanel(state.timeline));
       break;
     case "sign_in": {
-      const skip = button(t("sign_in.skip"), "secondary", () => void bridge.skipSignIn());
       if (state.signIn === "waiting") {
         // The browser shows the link page; the window shows only the timeline.
       } else if (state.signIn === "unavailable") {
         nodes.push(el("pre", { className: "detail", text: t("sign_in.unavailable") }));
-        nodes.push(actions(button(t("sign_in.skip"), "primary", () => void bridge.skipSignIn())));
       } else {
         if (state.signIn === "declined") nodes.push(el("p", { className: "lead", text: t("sign_in.declined") }));
         if (state.signIn === "unreachable") nodes.push(el("p", { className: "lead", text: t("sign_in.unreachable") }));
         if (state.signIn === "failed") nodes.push(el("pre", { className: "detail detail-error", text: state.error || t("sign_in.failed"), dir: "auto" }));
-        nodes.push(actions(skip, button(t("action.retry"), "primary", () => void bridge.signIn())));
+        nodes.push(actions(button(t("action.retry"), "primary", () => void bridge.signIn())));
       }
       break;
     }

@@ -23,6 +23,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
 import {
   BLACKBOX_STR_CANDIDATE_KEY,
@@ -95,8 +96,14 @@ import {
 
 const PARETO_PASS = "#8a9a5b";
 const PARETO_FAIL = "#a85a3b";
-const PARETO_PASS_BG = "rgba(138, 154, 91, 0.28)";
-const PARETO_FAIL_BG = "rgba(168, 90, 59, 0.22)";
+// Diff ink and tints. The light-theme inks are dark olive/rust, which vanish on the
+// dark theme's tinted rows, so dark mode swaps in pale inks over softer tints.
+const DIFF_ADD_TEXT = "text-[#3f4d1f] dark:text-[#cfe0a0]";
+const DIFF_DEL_TEXT = "text-[#6e2e16] dark:text-[#f3b8a0]";
+const DIFF_ADD_ROW = "bg-[rgba(138,154,91,0.28)] dark:bg-[rgba(138,154,91,0.16)]";
+const DIFF_DEL_ROW = "bg-[rgba(168,90,59,0.22)] dark:bg-[rgba(196,98,60,0.16)]";
+const DIFF_ADD_WORD = "bg-[rgba(138,154,91,0.55)] dark:bg-[rgba(150,170,95,0.38)]";
+const DIFF_DEL_WORD = "bg-[rgba(168,90,59,0.5)] dark:bg-[rgba(206,110,72,0.4)]";
 
 const DIFF_VIEW_KEY = "app:trajectory:prompt-view";
 
@@ -383,11 +390,9 @@ function NodeBody({
       ? "prompt"
       : promptViewMode;
   const blackboxRaw: BlackboxRawView =
-    blackbox?.recipe === "prompt"
-      ? "prompt"
-      : blackboxParts.length > 0 && blackboxParts.every((part) => part.kind === "markdown")
-        ? "text"
-        : "code";
+    blackboxParts.length > 0 && blackboxParts.every((part) => part.kind === "markdown")
+      ? "text"
+      : "code";
 
   const headerTitle =
     view.pending !== null
@@ -421,7 +426,7 @@ function NodeBody({
           ? "trajectory.drawer.rejected.module_title"
           : "trajectory.drawer.rejected.prompt_title"
       : blackbox !== null
-        ? blackboxSectionKey(blackbox.recipe, blackboxParts)
+        ? blackboxSectionKey(blackboxParts)
         : isModuleSection
           ? "trajectory.node.section.module"
           : "trajectory.node.section.prompt";
@@ -1916,13 +1921,17 @@ function PromptKindHeader({
   label,
   decomposed = false,
   kindLabel,
+  trailing,
 }: {
   isCode: boolean;
   label: string;
   decomposed?: boolean;
   // Names the kind outright: a black-box part is whatever its content parses as.
   kindLabel?: string;
+  // Rides the end of the header line, e.g. a diff's +/- counts.
+  trailing?: ReactNode;
 }) {
+  const showLabel = !decomposed && label.length > 0 && label !== "self";
   const KindIcon = isCode ? Code : TextAlignLeft;
   const kindText =
     kindLabel ??
@@ -1938,9 +1947,14 @@ function PromptKindHeader({
         {kindText}
       </span>
       {/* "self" is the name DSPy gives a lone predictor, not a useful label. */}
-      {!decomposed && label.length > 0 && label !== "self" ? (
-        <span className="truncate font-mono text-[0.625rem] text-muted-foreground/70" dir="ltr">
-          {label}
+      {showLabel || trailing ? (
+        <span className="flex min-w-0 items-center gap-3">
+          {showLabel ? (
+            <span className="truncate font-mono text-[0.625rem] text-muted-foreground/70" dir="ltr">
+              {label}
+            </span>
+          ) : null}
+          {trailing}
         </span>
       ) : null}
     </div>
@@ -1982,11 +1996,25 @@ function PromptEntry({
     () => (isCode && parentPrompt.length > 0 ? decomposeFlexSource(parentPrompt) : null),
     [isCode, parentPrompt],
   );
+  // Only a flat diff (not a decomposed module or a structured React overlay) has
+  // one +/- total that belongs on the header line.
+  const flatDiff =
+    mode === "diff" &&
+    hasParent &&
+    decomposition === null &&
+    !(overlay !== null && parentOverlay !== null);
 
   return (
     <>
       <div className="overflow-hidden rounded-md border border-border/40 bg-background/60 p-3">
-        <PromptKindHeader isCode={isCode} label={label} decomposed={decomposition !== null} />
+        <PromptKindHeader
+          isCode={isCode}
+          label={label}
+          decomposed={decomposition !== null}
+          trailing={
+            flatDiff ? <DiffStats before={parentPrompt} after={prompt} /> : undefined
+          }
+        />
         {decomposition !== null ? (
           <FlexModuleView
             decomposition={decomposition}
@@ -2134,7 +2162,7 @@ function PromptBody({
     if (overlay !== null && parentOverlay !== null) {
       return <ReactOverlayDiffView before={parentOverlay} after={overlay} />;
     }
-    return <PromptDiff before={parentPrompt} after={prompt} />;
+    return <PromptDiff before={parentPrompt} after={prompt} statsInHeader />;
   }
 
   if (overlay !== null) {
@@ -2582,25 +2610,25 @@ function ToolChangeChip({
       : status === "removed"
         ? msg("trajectory.prompt.react.tool.removed")
         : msg("trajectory.prompt.react.tool.changed");
-  const color =
-    status === "removed" ? "#6e2e16" : status === "added" ? "#3f4d1f" : "color-mix(in srgb, var(--foreground) 70%, transparent)";
-  const background =
+  const tone =
     status === "removed"
-      ? PARETO_FAIL_BG
+      ? cn(DIFF_DEL_ROW, DIFF_DEL_TEXT)
       : status === "added"
-        ? PARETO_PASS_BG
-        : "color-mix(in srgb, var(--foreground) 6%, transparent)";
+        ? cn(DIFF_ADD_ROW, DIFF_ADD_TEXT)
+        : "bg-foreground/[0.06] text-foreground/70";
   return (
     <span
-      className="inline-flex shrink-0 items-center gap-1.5 rounded-sm px-1.5 py-[1px] text-[9px] font-semibold"
-      style={{ color, background }}
+      className={cn(
+        "inline-flex shrink-0 items-center gap-1.5 rounded-sm px-1.5 py-[1px] text-[9px] font-semibold",
+        tone,
+      )}
     >
       {status === "changed" ? (
         // A changed tool speaks for itself through its +/- counts; the "שונה"
         // word is redundant next to them, so the chip carries only the numbers.
         <span className="inline-flex items-center gap-1 font-mono tabular-nums" dir="ltr">
-          <span style={{ color: "#3f4d1f" }}>+{added}</span>
-          <span style={{ color: "#6e2e16" }}>−{removed}</span>
+          <span className={DIFF_ADD_TEXT}>+{added}</span>
+          <span className={DIFF_DEL_TEXT}>−{removed}</span>
         </span>
       ) : (
         <span>{label}</span>
@@ -2646,9 +2674,8 @@ function Section({
 
 type View = "prompt" | "diff" | "preview";
 
-// How a black-box version's raw view is named: the recipe's word when it has
-// one, else by what the content is.
-type BlackboxRawView = "prompt" | "text" | "code";
+// How a black-box version's raw view is named, by what the content is.
+type BlackboxRawView = "text" | "code";
 
 interface BlackboxToggle {
   canPreview: boolean;
@@ -2702,11 +2729,7 @@ function PromptViewToggle({
         ? { value: "prompt", label: msg("optimization.blackbox.versions.view.code"), icon: Code }
         : {
             value: "prompt",
-            label: msg(
-              blackbox.raw === "prompt"
-                ? "trajectory.drawer.toggle.prompt"
-                : "trajectory.blackbox.section.text",
-            ),
+            label: msg("trajectory.blackbox.section.text"),
             icon: TextAlignLeft,
           },
     );
@@ -2925,16 +2948,19 @@ function pairWordDiffs(lines: DiffLine[]): DiffRow[] {
 function DiffRowView({ row }: { row: DiffRow }) {
   const isAdded = row.kind === "added";
   const isRemoved = row.kind === "removed";
-  const bg = isAdded ? PARETO_PASS_BG : isRemoved ? PARETO_FAIL_BG : "transparent";
-  const color = isAdded ? "#3f4d1f" : isRemoved ? "#6e2e16" : "color-mix(in srgb, var(--foreground) 78%, transparent)";
+  const tone = isAdded
+    ? cn(DIFF_ADD_ROW, DIFF_ADD_TEXT)
+    : isRemoved
+      ? cn(DIFF_DEL_ROW, DIFF_DEL_TEXT)
+      : "text-foreground/80";
   const prefix = isAdded ? "+" : isRemoved ? "−" : " ";
-  const emphasis = isAdded ? "rgba(138, 154, 91, 0.55)" : "rgba(168, 90, 59, 0.5)";
+  const emphasis = isAdded ? DIFF_ADD_WORD : DIFF_DEL_WORD;
   const shown =
     row.segs === null
       ? null
       : row.segs.filter((s) => (isAdded ? s.kind !== "removed" : s.kind !== "added"));
   return (
-    <div className="flex items-start gap-2 px-3 py-0.5" style={{ background: bg, color }}>
+    <div className={cn("flex items-start gap-2 px-3 py-0.5", tone)}>
       <span
         aria-hidden="true"
         className="select-none tabular-nums opacity-60"
@@ -2951,7 +2977,7 @@ function DiffRowView({ row }: { row: DiffRow }) {
             ? "​"
             : shown.map((s, idx) =>
                 (isAdded ? s.kind === "added" : s.kind === "removed") ? (
-                  <span key={idx} style={{ background: emphasis, borderRadius: "2px" }}>
+                  <span key={idx} className={cn("rounded-[2px]", emphasis)}>
                     {s.text}
                   </span>
                 ) : (
@@ -2963,16 +2989,38 @@ function DiffRowView({ row }: { row: DiffRow }) {
   );
 }
 
+// Word-level +/- counts for a before/after pair; null when nothing changed.
+// Counts words, not lines: a reworded paragraph is a single line but many word
+// edits, so a line count would read a wholesale rewrite as "1 changed".
+function DiffStats({ before, after }: { before: string; after: string }) {
+  const words = useMemo(() => diffWords(before, after), [before, after]);
+  if (!words.some((s) => s.kind !== "same")) return null;
+  const addedCount = words.reduce((n, s) => n + (s.kind === "added" ? countWords(s.text) : 0), 0);
+  const removedCount = words.reduce(
+    (n, s) => n + (s.kind === "removed" ? countWords(s.text) : 0),
+    0,
+  );
+  return (
+    <div dir="ltr" className="inline-flex items-center gap-3 font-mono text-[10px] tabular-nums">
+      <span className={DIFF_ADD_TEXT}>+{addedCount}</span>
+      <span className={DIFF_DEL_TEXT}>−{removedCount}</span>
+    </div>
+  );
+}
+
 function PromptDiff({
   before,
   after,
   label,
   labelInfo,
+  statsInHeader = false,
 }: {
   before: string;
   after: string;
   label?: string;
   labelInfo?: string;
+  // The caller shows <DiffStats> in its own header row, so the body skips its copy.
+  statsInHeader?: boolean;
 }) {
   const rows = useMemo(() => pairWordDiffs(diffLines(before, after)), [before, after]);
   const words = useMemo(() => diffWords(before, after), [before, after]);
@@ -2987,19 +3035,7 @@ function PromptDiff({
       </div>
     );
   }
-  // Count changed *words*, not lines: a reworded paragraph is a single line but
-  // many word edits, so a line count would read a wholesale rewrite as "1 changed".
-  const addedCount = words.reduce((n, s) => n + (s.kind === "added" ? countWords(s.text) : 0), 0);
-  const removedCount = words.reduce(
-    (n, s) => n + (s.kind === "removed" ? countWords(s.text) : 0),
-    0,
-  );
-  const stats = (
-    <div dir="ltr" className="inline-flex items-center gap-3 text-[10px] tabular-nums opacity-80">
-      <span style={{ color: "#3f4d1f" }}>+{addedCount}</span>
-      <span style={{ color: "#6e2e16" }}>−{removedCount}</span>
-    </div>
-  );
+  const stats = <DiffStats before={before} after={after} />;
   return (
     <div className={label !== undefined ? "space-y-1.5" : undefined}>
       {label !== undefined ? (
@@ -3011,7 +3047,9 @@ function PromptDiff({
         </div>
       ) : null}
       <div dir="ltr" className="font-mono text-xs leading-relaxed">
-        {label === undefined ? <div className="mb-1.5 flex justify-end">{stats}</div> : null}
+        {label === undefined && !statsInHeader ? (
+          <div className="mb-1.5 flex justify-end">{stats}</div>
+        ) : null}
         <div className="overflow-hidden rounded-md border border-border/40">
           {rows.map((row, idx) => (
             <DiffRowView key={idx} row={row} />
@@ -3057,14 +3095,9 @@ const BLACKBOX_KIND_SECTION = {
   code: "trajectory.blackbox.section.code",
 } as const satisfies Record<RenderKind, MessageKey>;
 
-// What to call a black-box version: the recipe's word when the run has one,
-// else the one kind its content parses as, else just "version".
-function blackboxSectionKey(
-  recipe: BlackboxTrajectoryContext["recipe"],
-  parts: BlackboxPart[],
-): MessageKey {
-  if (recipe === "prompt") return "trajectory.blackbox.section.prompt";
-  if (recipe === "code") return "trajectory.blackbox.section.code";
+// What to call a black-box version: the one kind its content parses as, else
+// just "version".
+function blackboxSectionKey(parts: BlackboxPart[]): MessageKey {
   const kinds = new Set(parts.map((part) => part.kind));
   const [only] = kinds;
   return kinds.size === 1 && only !== undefined
@@ -3461,6 +3494,7 @@ function BlackboxEntry({
   hasParent: boolean;
 }) {
   const kindLabel = msg(BLACKBOX_KIND_LABEL[part.kind]);
+  const showDiff = mode === "diff" && hasParent;
   return (
     <div className="overflow-hidden rounded-md border border-border/40 bg-background/60 p-3">
       {part.label.length > 0 ? (
@@ -3468,10 +3502,11 @@ function BlackboxEntry({
           isCode={part.kind !== "markdown"}
           label={part.label}
           kindLabel={kindLabel}
+          trailing={showDiff ? <DiffStats before={parentText} after={part.text} /> : undefined}
         />
       ) : null}
-      {mode === "diff" && hasParent ? (
-        <PromptDiff before={parentText} after={part.text} />
+      {showDiff ? (
+        <PromptDiff before={parentText} after={part.text} statsInHeader={part.label.length > 0} />
       ) : mode === "preview" && isDrawable(part.kind) ? (
         <RenderedText
           text={part.text}

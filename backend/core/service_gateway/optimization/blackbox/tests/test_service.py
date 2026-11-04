@@ -1569,11 +1569,14 @@ def test_engine_catalog_for_a_repository_offers_every_engine_but_not_auto() -> N
 
 GEOCODE_SLOW_RUN = (
     "import time\n"
+    "import dspy\n"
     "from skynet import llm\n"
+    "program = dspy.Predict('message -> coordinates')\n"
     "def run(artifact, input):\n"
-    "    if 'slowly' in artifact:\n"
+    "    instructions = program.signature.instructions\n"
+    "    if 'slowly' in instructions:\n"
     "        time.sleep(0.15)\n"
-    "    return llm(artifact, input['message'])\n"
+    "    return llm(instructions, input['message'])\n"
 )
 
 
@@ -1581,7 +1584,7 @@ def test_geocoding_final_runs_keep_raw_observations_for_both_versions() -> None:
     """Baseline and winner run the same cases under one gateway; each case keeps raw time, cost and components."""
     payload = UnifiedRunRequest.model_validate(
         {
-            "task": {"objective": "geocode", "artifact": {"kind": "prompt", "starting_version": "Think slowly."}},
+            "task": {"objective": "geocode", "artifact": {"kind": "dspy_program", "starting_version": "Think slowly."}},
             "data": {
                 "mode": "pairs",
                 "cases": [
@@ -1590,7 +1593,7 @@ def test_geocoding_final_runs_keep_raw_observations_for_both_versions() -> None:
                 ],
                 "input_fields": ["message"],
             },
-            "optimizer": {"choice": "best_of_n"},
+            "optimizer": {"choice": "dspy_gepa"},
             "models": {"reflection_model": {"name": "openrouter/task"}},
             "workspace": {"run_code": GEOCODE_SLOW_RUN, "metric_code": GEOCODE_METRIC, "metric_timeout_seconds": 30},
         }

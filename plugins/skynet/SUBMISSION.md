@@ -59,17 +59,16 @@ directory.
 | Logo | `assets/logo.png`, 512 x 512 PNG, transparent background. Dark: `assets/logo-dark.png` |
 | Brand colors | `#B4521F` (light), `#E0935A` (dark) |
 | Category | OpenAI: `Developer Tools`. Claude: pick "Developer tools" or the nearest category in the portal list |
-| Short description (30 characters or fewer) | Optimize prompts and agents |
-| One-liner (200 characters or fewer) | Optimize prompts, programs and agents against your own metric. Check a run spec before it runs, start it with a spending limit you approve, and get the best version with its score. |
+| Short description (30 characters or fewer) | Optimize DSPy programs |
+| One-liner (200 characters or fewer) | Optimize DSPy programs against your own metric. Check a run spec before it runs, start it with a spending limit you approve, and get the best version with its score. |
 
 Long description (OpenAI 4000 characters or fewer, Claude 2000 or fewer):
 
-> Skynet improves a prompt, a program or an agent against a metric that you
-> write. You give a starting version, a few test cases, a run(artifact,
-> input) function and a score(input, output, expected) function. Skynet runs
-> optimizers such as GEPA, DSPy and Best-of-N in a sandbox, scores each new
-> version, and returns the best version with its score next to the starting
-> score.
+> Skynet improves a DSPy program against a metric that you write. You give
+> the program in run.py, a few test cases and a score(input, output,
+> expected) function. Skynet runs DSPy optimizers such as GEPA in a sandbox,
+> scores each new version, and returns the best version with its score next
+> to the starting score. Repository runs start from the Skynet app.
 >
 > With this connector, your assistant checks a run spec before it runs,
 > suggests a spending limit, starts the run only after you agree to the
@@ -80,7 +79,7 @@ Long description (OpenAI 4000 characters or fewer, Claude 2000 or fewer):
 
 Example prompts:
 
-- Optimize this prompt with Skynet against my test cases.
+- Optimize this DSPy program with Skynet against my test cases.
 - Show my recent Skynet runs.
 - What is the status of my last Skynet run?
 
@@ -238,10 +237,10 @@ the Claude use cases too.
 Positive:
 
 1. "Check whether this Skynet run spec is valid and tell me what limit to
-   set: a prompt that classifies support tickets, with 6 labeled cases and
-   an exact-match metric." Expect `check_run` only. No run starts.
-2. "Optimize the ticket classifier prompt with Skynet. I agree to a limit of
-   5 dollars." Expect `check_run`, then `start_run` with `max_cost_cents`
+   set: a DSPy program that classifies support tickets, with 6 labeled
+   cases and an exact-match metric." Expect `check_run` only. No run starts.
+2. "Optimize the ticket classifier DSPy program with Skynet. I agree to a
+   limit of 5 dollars." Expect `check_run`, then `start_run` with `max_cost_cents`
    500.
 3. "How is my last Skynet run doing? Show the result if it is done." Expect
    `list_runs`, then `get_run`.
