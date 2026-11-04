@@ -3,10 +3,9 @@
 Mirrors the tagger's dataset interview (``core.service_gateway.tagging``):
 each interview is a stateless, single-turn dspy Signature streamed over the
 generalist agent's event shapes. The transcript is client-owned and re-sent
-on every turn; nothing here touches the database. The wizard's task interview
-(:mod:`.task_interview`) and the account intake interview
-(:mod:`.intake_interview`) both run their turns through
-:func:`relay_interview_turn` with their own ``parse``.
+on every turn; nothing here touches the database. The account intake
+interview (:mod:`.intake_interview`) runs its turns through
+:func:`relay_interview_turn` with its own ``parse``.
 """
 
 from __future__ import annotations
@@ -28,14 +27,11 @@ from .parse_salvage import salvage_prediction
 # The tagger imports normalize_options from here; keep the re-export stable.
 __all__ = [
     "INTERVIEW_TURN_ATTEMPTS",
-    "MAX_INTERVIEW_QUESTIONS",
     "normalize_options",
     "relay_interview_turn",
 ]
 
 logger = logging.getLogger(__name__)
-
-MAX_INTERVIEW_QUESTIONS = 5
 
 INTERVIEW_TURN_ATTEMPTS = 2
 """LLM attempts per turn; a parse-salvaged reply never spends the retry."""
@@ -52,30 +48,6 @@ def _parse_json(text: str, fallback: Any) -> Any:
         return json.loads(text) if text and text.strip() else fallback
     except (json.JSONDecodeError, TypeError):
         return fallback
-
-
-def _transcript_json(turns: list[dict[str, str]]) -> str:
-    """Encode the transcript, appending the question-count reminder once questions were asked.
-
-    Args:
-        turns: Prior ``{role, content}`` turns, oldest first.
-
-    Returns:
-        The JSON-encoded transcript the interview signatures read.
-    """
-    asked = sum(1 for t in turns if t.get("role") == "assistant")
-    noted = list(turns)
-    if asked:
-        noted.append(
-            {
-                "role": "system",
-                "content": (
-                    f"Questions asked so far: {asked} of at most {MAX_INTERVIEW_QUESTIONS}."
-                    " If the limit is reached you MUST finish now."
-                ),
-            }
-        )
-    return json.dumps(noted, ensure_ascii=False)
 
 
 async def _drive_interview_turn(

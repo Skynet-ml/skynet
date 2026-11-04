@@ -85,9 +85,26 @@ def test_task_fields_round_trip(wizard_client: TestClient) -> None:
     assert patch["starting_version"] == {"predict": "You are a helpful bot."}
 
 
+def test_repo_target_round_trips_without_a_starting_version(wizard_client: TestClient) -> None:
+    """A repository run takes the repo kind and an owner/name, with no starting version."""
+    resp = wizard_client.post("/wizard/update", json={"artifact_kind": "repo", "repository": "acme/support-bot"})
+
+    assert resp.status_code == 200
+    patch = resp.json()["wizard_state"]
+    assert patch == {"artifact_kind": "repo", "repository": "acme/support-bot"}
+
+
+@pytest.mark.parametrize("name", ["acme", "acme/bot/extra", "https://github.com/acme/bot", "acme/ bot"])
+def test_malformed_repository_rejected(wizard_client: TestClient, name: str) -> None:
+    """Only a bare owner/name reaches the repository picker."""
+    resp = wizard_client.post("/wizard/update", json={"repository": name})
+
+    assert resp.status_code == 422
+
+
 @pytest.mark.parametrize("kind", ["prompt", "code", "text"])
 def test_other_artifact_kinds_are_refused_for_new_runs(wizard_client: TestClient, kind: str) -> None:
-    """The wizard sets up only new runs, and new runs take only a DSPy program."""
+    """New runs take a DSPy program or a repository, nothing else."""
     resp = wizard_client.post("/wizard/update", json={"artifact_kind": kind})
 
     assert resp.status_code == 422
@@ -161,7 +178,6 @@ def test_optimizer_choice_alone_is_echoed(wizard_client: TestClient) -> None:
 @pytest.mark.parametrize(
     "body",
     [
-        {"artifact_kind": "repo"},
         {"data_mode": "many"},
         {"optimizer_choice": "grid_search"},
         {"spending_limit_usd": 0},

@@ -596,6 +596,7 @@ def create_connectors_router(*, job_store) -> APIRouter:
         "/connectors/github/repos",
         response_model=GithubRepositoriesResponse,
         summary="List the caller's GitHub repositories for the repository picker",
+        tags=["agent"],
     )
     def list_github_repositories(
         user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],

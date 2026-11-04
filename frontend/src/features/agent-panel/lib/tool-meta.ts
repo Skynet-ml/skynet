@@ -4,7 +4,6 @@ import {
   ChartBar,
   Check,
   CheckCircle,
-  Code,
   Copy,
   Database,
   FadersHorizontal,
@@ -115,16 +114,6 @@ export const TOOL_META: Record<string, ToolMetaDef> = {
     confirmLabel: () => msg("auto.features.agent.panel.lib.tool.meta.literal.12"),
     severity: "info",
     icon: PushPin,
-  },
-  edit_code_optimizations_edit_code_post: {
-    title: () => msg("auto.features.agent.panel.lib.tool.meta.literal.18"),
-    description: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.14", {
-      p1: TERMS.signature,
-      p2: TERMS.metric,
-    }),
-    confirmLabel: () => msg("auto.features.agent.panel.lib.tool.meta.literal.19"),
-    severity: "info",
-    icon: Code,
   },
   validate_code_validate_code_post: {
     title: () => msg("auto.features.agent.panel.lib.tool.meta.literal.20"),
@@ -369,6 +358,7 @@ const TOOL_TITLES: Record<string, LocaleString> = {
   fetch_url: () => msg("agent.tool.fetch_url.title"),
   crawl_site: () => msg("agent.tool.crawl_site.title"),
   blackbox_engines_blackbox_engines_get: () => msg("agent.tool.blackbox_engines.title"),
+  list_github_repositories_connectors_github_repos_get: () => msg("agent.tool.github_repos.title"),
   serve_info_serve: () => msg("auto.features.agent.panel.lib.tool.meta.literal.74"),
   serve_pair_info_serve: () => msg("auto.features.agent.panel.lib.tool.meta.literal.75"),
   request_user_dataset_datasets_request_upload_post: () => msg(

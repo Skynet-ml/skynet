@@ -89,8 +89,6 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "budget.not_found": "This budget is unavailable for your account. Start a new setup budget.",
     "budget.pending": "Usage is still being settled. Wait for work in progress to finish before continuing.",
     "budget.idempotency_required": "Send a unique Idempotency-Key for this request.",
-    "code_agent.seed_lane_timeout": "The model thought for too long without writing the code, so the draft was stopped. Try again, or pick a faster model or a lower reasoning effort.",
-    "code_agent.upstream_failed": "Code agent failed: {error}",
     "dataset.column_roles_invalid": "Invalid role values (must be 'input', 'output', or 'ignore'): {bad}",
     "dataset.column_roles_need_input": "At least one column must have role 'input'.",
     "dataset.column_roles_need_output": "At least one column must have role 'output'.",

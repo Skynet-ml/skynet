@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import csv
-import io
 import json
 from typing import Any
 
 import pytest
 
 from core.models.unified import UnifiedRunRequest
-from core.service_gateway.agents.code import _unified_inputs
 
 from ...blackbox.harness import GatewayConfig
 from ...blackbox.sandbox import LocalSubprocessRuntime
@@ -421,46 +418,6 @@ def test_a_sample_run_error_carries_its_params() -> None:
     assert failed.message_code == "contract.run_error"
     assert failed.message_params["index"] == 1
     assert "boom" in str(failed.message_params["error"])
-
-
-REVIEWS_CSV = (
-    "review,product,rating,sentiment\n"
-    "Great sound,Headphones,5,positive\n"
-    "Broke in a week,Kettle,1,negative\n"
-    "Does the job,Lamp,3,neutral\n"
-)
-
-
-def test_a_multi_column_csv_gives_the_agent_and_the_check_the_same_input_fields() -> None:
-    """Run code written against the fields the agent is shown passes the sampled check.
-
-    The wizard ignored ``product`` and ``rating``; the seed once still showed
-    them, so the agent read ``input["product"]`` and every sample failed with
-    ``KeyError``.
-    """
-    rows = list(csv.DictReader(io.StringIO(REVIEWS_CSV)))
-    input_fields = ["review"]
-    cases = [{"input": {f: row[f] for f in input_fields}, "expected": row["sentiment"]} for row in rows]
-    seen = _unified_inputs(
-        {
-            "task": {"objective": "o", "artifact": {"kind": "dspy_program", "starting_version": "p"}},
-            "input_fields": input_fields,
-            "expected_field": "sentiment",
-            "sample_cases": [{"input": dict(row), "expected": row["sentiment"]} for row in rows],
-        }
-    )
-    agent_fields = sorted({key for case in json.loads(seen["sample_cases"]) for key in case["input"]})
-    reads = " + ".join(f"input[{field!r}]" for field in agent_fields)
-    raw = _payload().model_dump(mode="json")
-    raw["data"].update({"cases": cases * 2, "input_fields": input_fields})
-    raw["workspace"]["run_code"] = (
-        DSPY_PROGRAM + f"def run(artifact, input):\n    return dspy.Prediction(answer={reads})\n"
-    )
-
-    response = _check(UnifiedRunRequest.model_validate(raw), sample_count=3)
-
-    assert seen["case_fields"] == agent_fields == input_fields
-    assert [check.status for check in response.checks if check.key == "workspace.run"] == ["passed"] * 3
 
 
 @pytest.mark.parametrize(

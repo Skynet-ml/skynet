@@ -27,6 +27,7 @@ const {
   inputsFromRoles,
   inputsIssue,
   inputsWithRoles,
+  rolesFromFields,
   rowsToCases,
   singleInputCase,
   withColumnRole,
@@ -118,6 +119,21 @@ test("the inferred fields preselect the column roles: inputs, the output, the re
     note: "ignore",
     a: "output",
   });
+});
+
+test("shared fields keep the Output on a staged sample", () => {
+  assert.deepEqual(rolesFromFields(["q", "note", "a"], ["q"], "a"), {
+    q: "input",
+    note: "ignore",
+    a: "output",
+  });
+  assert.deepEqual(rolesFromFields(["q", "note", "a"], [], "a"), {
+    q: "input",
+    note: "input",
+    a: "output",
+  });
+  assert.equal(rolesFromFields(["q", "a"], ["q"], null), null);
+  assert.equal(rolesFromFields(["q", "a"], ["q"], "missing"), null);
 });
 
 test("an Output column reads the table as input/output pairs over every row", () => {

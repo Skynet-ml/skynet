@@ -14,9 +14,9 @@ above each class, not in class bodies.
 from __future__ import annotations
 
 import re
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from ..i18n_en import t_en
 from ..i18n_keys import I18nKey
@@ -31,9 +31,6 @@ from .common import ModelConfig, SplitFractions
 from .scorer_dependencies import ScorerDependencyLock
 
 UNIFIED_PAYLOAD_KIND = "unified_v1"
-# Every path rides each agent turn's prompt, so a repository's list is capped.
-REPO_FILES_MAX = 2000
-REPO_FILE_PATH_MAX = 1024
 
 ArtifactKind = Literal["dspy_program"]
 # What the optimizer catalog is asked about: a unified run's artifact, or a
@@ -472,125 +469,6 @@ class ContractCheckResponse(BaseModel):
     terminal: dict[str, Any] | None = None
 
 
-class UnifiedChatTurn(BaseModel):
-    role: Literal["user", "assistant"]
-    content: str = Field(max_length=8000)
-
-
-# One clickable answer the task interview offers.
-class InterviewOption(BaseModel):
-    label: str = Field(max_length=80)
-    description: str = Field(default="", max_length=400)
-
-
-# The selected repository's README and file tree, read by the client from
-# GitHub and cut to these caps; the interview drafts the goal from them only.
-TASK_INTERVIEW_README_MAX = 8000
-TASK_INTERVIEW_REPO_PATHS_MAX = 400
-# Per-path cap for the interview's file tree; with the path count it bounds a turn's size.
-TASK_INTERVIEW_REPO_PATH_MAX = 300
-
-
-class TaskInterviewRepoContext(BaseModel):
-    repository: str = Field(max_length=201)
-    readme: str = Field(default="", max_length=TASK_INTERVIEW_README_MAX)
-    paths: list[Annotated[str, Field(max_length=TASK_INTERVIEW_REPO_PATH_MAX)]] = Field(
-        default_factory=list, max_length=TASK_INTERVIEW_REPO_PATHS_MAX
-    )
-    truncated: bool = False
-
-
-# ``POST /optimizations/task-interview``: one turn of the step-1 interview.
-class TaskInterviewRequest(BaseModel):
-    turns: list[UnifiedChatTurn] = Field(default_factory=list, max_length=40)
-    objective: str = ""
-    background: str = ""
-    artifact_kind: ArtifactKind | None = None
-    starting_version: BlackboxCandidate | None = None
-    sample_cases: list[dict[str, Any]] = Field(default_factory=list, max_length=5)
-    # The run's current target; None when the wizard has not settled it.
-    target: OptimizerTarget | None = None
-    repo_context: TaskInterviewRepoContext | None = None
-    locale: str | None = None
-    model: str | None = None
-    reasoning_effort: str | None = None
-    # Applies only to a local CLI model that takes fast mode.
-    fast_mode: bool = False
-
-
-# Data of the interview's terminal ``interview_done`` event.
-class TaskInterviewTurnResult(BaseModel):
-    message: str
-    options: list[InterviewOption] = Field(default_factory=list)
-    done: bool
-    objective: str = ""
-    background: str = ""
-    artifact_kind: ArtifactKind | None = None
-    starting_version: BlackboxCandidate | None = None
-    artifact_rationale: str = ""
-    target: OptimizerTarget | None = None
-    # The repository the user named: ``owner/name`` for a GitHub link, else their words.
-    repo_query: str = Field(default="", max_length=200)
-    # Whether the run needs example data; None while the interview cannot tell.
-    needs_data: bool | None = None
-    model: str | None = None
-    served_model: str | None = None
-
-
-# ``POST /optimizations/infer-inputs``: decide single input vs pairs from the
-# task and a sample of the uploaded data.
-class InputsInferenceRequest(BaseModel):
-    objective: str
-    background: str = ""
-    artifact_kind: OptimizerTarget
-    starting_version: BlackboxCandidate | None = None
-    columns: list[str] = Field(default_factory=list)
-    sample_rows: list[dict[str, Any]] = Field(default_factory=list, max_length=5)
-    row_count: int = Field(default=0, ge=0)
-    user_note: str = Field(default="", max_length=4000)
-    locale: str | None = None
-    model: str | None = None
-
-
-class InputsInferenceResponse(BaseModel):
-    mode: DataMode
-    input_fields: list[str]
-    expected_field: str | None = None
-    single_input: dict[str, Any] | None = None
-    rationale: str
-    suggested_split: SplitFractions
-    held_out_count: int
-    warnings: list[str] = Field(default_factory=list)
-    model: str | None = None
-
-
-# A repository run has no artifact, so its authoring context carries none.
-class AuthoringTask(UnifiedTask):
-    artifact: UnifiedArtifact | None = None  # type: ignore[assignment]
-
-
-# What the code agent needs to write run code and a metric for a unified run.
-# ``focus`` names which of the two the user is working on. ``target`` is
-# ``"repo"`` for a repository run: the optimizer edits the repository itself,
-# so there is no run code and the agent writes only the repository scorer.
-# ``repo_files`` lists a repository run's file paths, which the agent may open
-# read-only.
-class UnifiedAuthoringContext(BaseModel):
-    task: AuthoringTask
-    data_mode: DataMode
-    input_fields: list[str] = Field(default_factory=list)
-    expected_field: str | None = None
-    sample_cases: list[dict[str, Any]] = Field(default_factory=list, max_length=5)
-    optimizer: OptimizerChoice
-    reflection_name: str | None = None
-    metric_has_model: bool = False  # Accepted for old clients; no longer used.
-    focus: Literal["run", "metric"] = "run"
-    target: Literal["artifact", "repo"] = "artifact"
-    repo_files: list[Annotated[str, StringConstraints(min_length=1, max_length=REPO_FILE_PATH_MAX)]] = Field(
-        default_factory=list, max_length=REPO_FILES_MAX
-    )
-
-
 __all__ = [
     "BLACKBOX_OPTIMIZERS",
     "CONTRACT_SAMPLE_COUNT_KEY",
@@ -602,35 +480,24 @@ __all__ = [
     "METRIC_FILE",
     "METRIC_SIGNATURE",
     "MIN_PAIRS_FOR_HELD_OUT",
-    "REPO_FILES_MAX",
-    "REPO_FILE_PATH_MAX",
     "RUN_ENTRY",
     "RUN_FILE",
     "UNIFIED_PAYLOAD_KIND",
     "WORKSPACE_FILE_MAX_COUNT",
     "ArtifactKind",
-    "AuthoringTask",
     "ContractCheckItem",
     "ContractCheckKey",
     "ContractCheckRequest",
     "ContractCheckResponse",
     "ContractSample",
     "DataMode",
-    "InputsInferenceRequest",
-    "InputsInferenceResponse",
-    "InterviewOption",
     "OptimizerCatalogResponse",
     "OptimizerChoice",
     "OptimizerFamily",
     "OptimizerOption",
     "OptimizerTarget",
-    "TaskInterviewRepoContext",
-    "TaskInterviewRequest",
-    "TaskInterviewTurnResult",
     "UnifiedArtifact",
-    "UnifiedAuthoringContext",
     "UnifiedCase",
-    "UnifiedChatTurn",
     "UnifiedData",
     "UnifiedModels",
     "UnifiedOptimizer",

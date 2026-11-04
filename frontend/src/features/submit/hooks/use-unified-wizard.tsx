@@ -17,6 +17,7 @@ import { useSession } from "next-auth/react";
 import { toast } from "react-toastify";
 
 import { useWizardStateOptional } from "@/features/agent-panel";
+import { useConnectors } from "@/features/connectors";
 import { formatBudgetUsd, usePricingTerms } from "@/features/billing";
 import {
   useExperienceLevel,
@@ -73,6 +74,7 @@ import { fileNewRun } from "../lib/file-new-run";
 import {
   inputsFromRoles,
   inputsWithRoles,
+  rolesFromFields,
   rowsToCases,
   singleInputCase,
   type Row,
@@ -112,6 +114,8 @@ import {
   initialWizardV2State,
   optimizerTarget,
   presetEngine,
+  targetPatch,
+  withRepository,
   type InputsSlice,
   type MetaSlice,
   type OptimizerSlice,
@@ -548,6 +552,12 @@ export function WizardV2Provider({
   const submittedRef = useRef(false);
   const wizardCtx = useWizardStateOptional();
   const wizardCtxRef = useRef(wizardCtx);
+  // The setup agent picks a repository only from a linked account's list.
+  const connectors = useConnectors(wizardCtx !== null);
+  const githubStatus = connectors.byProvider("github");
+  const githubConnected = connectors.loading
+    ? undefined
+    : githubStatus?.connected === true && githubStatus.status !== "invalid";
   useEffect(() => {
     wizardCtxRef.current = wizardCtx;
   }, [wizardCtx]);
@@ -836,6 +846,9 @@ export function WizardV2Provider({
     const keys = wizardCtx?.agentPulseKeys ?? [];
     if (!shared || keys.length === 0) return;
     let rolesWritten = false;
+    // Both target keys can land in one pulse while `state` is still the
+    // render's; the draft written first is the base for the second.
+    let repo = state.task.repo;
     for (const key of keys) {
       switch (key) {
         case "job_name":
@@ -856,9 +869,27 @@ export function WizardV2Provider({
           if (typeof shared.task_background === "string")
             patchTask({ background: shared.task_background });
           break;
-        case "artifact_kind":
-          if (shared.artifact_kind) patchTask({ artifactKind: shared.artifact_kind });
+        case "artifact_kind": {
+          const target = shared.artifact_kind;
+          if (target !== "repo" && target !== "dspy_program") break;
+          const patch = targetPatch(target, repo, state.optimizer.choice);
+          patchTask(patch.task);
+          if (patch.inputs) patchInputs(patch.inputs);
+          if (patch.optimizer) patchOptimizer(patch.optimizer);
+          repo = patch.task.repo ?? null;
           break;
+        }
+        case "repository": {
+          if (typeof shared.repository !== "string" || !shared.repository) break;
+          if (!repo) {
+            const patch = targetPatch("repo", null, state.optimizer.choice);
+            if (patch.inputs) patchInputs(patch.inputs);
+            if (patch.optimizer) patchOptimizer(patch.optimizer);
+          }
+          repo = withRepository(repo, shared.repository);
+          patchTask({ repo });
+          break;
+        }
         case "starting_version":
           if (shared.starting_version !== undefined)
             patchTask({ startingVersion: shared.starting_version });
@@ -921,7 +952,12 @@ export function WizardV2Provider({
             .then((res) => {
               if (!mountedRef.current || res.rows.length === 0) return;
               const columns = res.columns.length > 0 ? res.columns : Object.keys(res.rows[0] ?? {});
-              patchInputs(inputsFromRows(res.rows, columns, "dataset.json", stagedId, null));
+              const roles = rolesFromFields(
+                columns,
+                shared.input_fields,
+                typeof shared.expected_field === "string" ? shared.expected_field : null,
+              );
+              patchInputs(inputsFromRows(res.rows, columns, "dataset.json", stagedId, roles));
             })
             .catch(() => {
               /* best effort: a failed fetch leaves the wizard's own inputs */
@@ -958,8 +994,10 @@ export function WizardV2Provider({
       is_private: meta.isPrivate,
       task_objective: task.objective || undefined,
       task_background: task.background || undefined,
-      artifact_kind: task.artifactKind ?? undefined,
-      starting_version: task.startingVersion ?? undefined,
+      artifact_kind: task.repo ? ("repo" as const) : (task.artifactKind ?? undefined),
+      starting_version: task.repo ? undefined : (task.startingVersion ?? undefined),
+      repository: task.repo?.repository.trim() || undefined,
+      github_connected: githubConnected,
       data_mode: inputs.mode ?? undefined,
       staged_dataset_id: inputs.stagedDatasetId ?? undefined,
       optimizer_choice: optimizer.choice,
@@ -994,7 +1032,7 @@ export function WizardV2Provider({
       handDataFlagRef.current = false;
       if (s.dataset_ready) wizardCtx.clearField("dataset_ready");
     }
-  }, [wizardCtx, state, runFloor, cloning]);
+  }, [wizardCtx, state, runFloor, cloning, githubConnected]);
 
   const value: WizardV2Shell = {
     restored: restored !== null,

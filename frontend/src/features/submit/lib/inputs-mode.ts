@@ -71,6 +71,21 @@ export function columnRoles(
   return roles;
 }
 
+/**
+ * Roles for a table from the shared input and expected fields, or null when
+ * no listed Output column is in the table. Without listed inputs every other
+ * column is an input.
+ */
+export function rolesFromFields(
+  columns: readonly string[],
+  inputFields: readonly string[] | null | undefined,
+  expectedField: string | null | undefined,
+): Record<string, ColumnRole> | null {
+  if (!expectedField || !columns.includes(expectedField)) return null;
+  const inputs = inputFields?.length ? inputFields : columns.filter((c) => c !== expectedField);
+  return columnRoles(columns, inputs, expectedField);
+}
+
 /** The roles with one column changed; a new Output turns the previous one to Ignore. */
 export function withColumnRole(
   roles: Readonly<Record<string, ColumnRole>>,

@@ -17,7 +17,7 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...models import ArtifactKind, DataMode, OptimizerChoice, optimizers_for
+from ...models import DataMode, OptimizerChoice, OptimizerTarget, optimizers_for
 from ...models.blackbox import BlackboxCandidate
 from ..errors import DomainError
 
@@ -49,13 +49,21 @@ class WizardUpdateRequest(BaseModel):
         max_length=20_000,
         description="Task step: context the optimizer should know about the task.",
     )
-    artifact_kind: ArtifactKind | None = Field(
+    artifact_kind: OptimizerTarget | None = Field(
         default=None,
-        description="Task step: what is optimized. Always 'dspy_program'.",
+        description="Task step: what is optimized. 'dspy_program' for a DSPy program, 'repo' for a GitHub repository.",
     )
     starting_version: BlackboxCandidate | None = Field(
         default=None,
-        description="Task step: the starting version, a string or a map of named parts to strings.",
+        description=(
+            "Task step: the starting version, a string or a map of named parts to strings. A 'repo' run has none."
+        ),
+    )
+    repository: str | None = Field(
+        default=None,
+        max_length=201,
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+        description="Task step: the GitHub repository a 'repo' run optimizes, as owner/name.",
     )
 
     data_mode: DataMode | None = Field(
@@ -244,7 +252,7 @@ def create_wizard_router() -> APIRouter:
         if supplied.get("task_background") is not None:
             patch["task_background"] = supplied["task_background"].strip()
 
-        for literal_key in ("artifact_kind", "data_mode", "optimizer_choice", "staged_dataset_id"):
+        for literal_key in ("artifact_kind", "data_mode", "optimizer_choice", "staged_dataset_id", "repository"):
             if supplied.get(literal_key) is not None:
                 patch[literal_key] = supplied[literal_key]
 

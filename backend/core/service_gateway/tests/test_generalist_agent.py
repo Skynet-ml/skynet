@@ -347,7 +347,7 @@ _FULL_SNAPSHOT: dict[str, Any] = {
 def test_screen_snapshot_keeps_screen_fields_and_read_only_extras(screen: str, expected: set[str]) -> None:
     """A screen sees its own fields plus the values it depends on, nothing else."""
     trimmed = screen_snapshot(cast(WizardState, {**_FULL_SNAPSHOT, "wizard_screen": screen}))
-    assert set(trimmed) == expected | {"wizard_screen", "job_name"}
+    assert set(trimmed) == expected | {"wizard_screen", "job_name", "editable_fields"}
     assert trimmed["wizard_screen"] == screen
 
 
@@ -400,6 +400,67 @@ def test_screen_snapshot_names_what_blocks_continue() -> None:
     """The Continue button's refusal reaches the agent."""
     state = cast(WizardState, {"wizard_screen": "brief", "screen_issue": "Describe the task first"})
     assert screen_snapshot(state)["continue_blocked_by"] == "Describe the task first"
+
+
+def test_screen_snapshot_lists_the_fields_the_screen_takes() -> None:
+    """The snapshot names the writable fields, so the agent need not guess them from refusals."""
+    snapshot = screen_snapshot(cast(WizardState, {"wizard_screen": "brief", "job_name": "Tickets"}))
+    assert snapshot["editable_fields"] == [
+        "is_private",
+        "job_description",
+        "job_name",
+        "task_background",
+        "task_objective",
+    ]
+    assert "optimizer_choice" not in snapshot["editable_fields"]
+
+
+def test_artifact_snapshot_carries_the_repository_and_github_link() -> None:
+    """The artifact screen sees the chosen repository and whether GitHub is linked."""
+    state = cast(
+        WizardState,
+        {
+            **_READY,
+            "wizard_screen": "artifact",
+            "artifact_kind": "repo",
+            "repository": "acme/support-bot",
+            "github_connected": False,
+        },
+    )
+    snapshot = screen_snapshot(state)
+    assert snapshot["artifact_kind"] == "repo"
+    assert snapshot["repository"] == "acme/support-bot"
+    assert snapshot["github_connected"] is False
+    assert "repository" in snapshot["editable_fields"]
+
+
+def test_repo_target_needs_a_repository_not_a_starting_version() -> None:
+    """A repository run completes the Task step with its repository alone."""
+    repo = cast(
+        WizardState,
+        {"job_name": "Bot", "task_objective": "Fix flaky tests", "artifact_kind": "repo", "wizard_screen": "artifact"},
+    )
+    assert (
+        validate_wizard_screen("update_wizard_state", {"artifact_kind": "repo", "repository": "acme/bot"}, repo) is None
+    )
+    assert _screen_problems("artifact", repo) == ["repository must be set as owner/name"]
+    chosen = cast(WizardState, {**repo, "repository": "acme/bot"})
+    assert _screen_problems("artifact", chosen) == []
+    assert validate_wizard_patch_order({"data_mode": "single"}, chosen) is None
+
+
+def test_repo_target_never_unlocks_the_unified_submit() -> None:
+    """The wizard's own Run button submits a repository run, not the agent's submit tool."""
+    assert _SUBMIT in tools_for(cast(WizardState, _READY))
+    repo = cast(WizardState, {**_READY, "artifact_kind": "repo", "repository": "acme/bot"})
+    assert _SUBMIT not in tools_for(repo)
+
+
+def test_screen_prompts_forbid_unconfirmed_claims() -> None:
+    """Both prompts tell the agent not to claim writes or screen moves a tool did not confirm."""
+    assert "Say only what a tool result confirms." in (GENERALIST_SYSTEM_PROMPT or "")
+    assert "Say only what a tool result confirms." in screen_signature("brief").instructions
+    assert "the only kind new runs take" not in SCREEN_FOCUS["artifact"]
 
 
 def test_screen_snapshot_of_a_clone_names_notes_and_what_blocks_continue() -> None:
