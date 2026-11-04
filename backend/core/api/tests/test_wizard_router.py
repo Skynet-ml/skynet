@@ -49,9 +49,19 @@ def test_model_config_prefixed_accepted(wizard_client: TestClient) -> None:
 
 
 @pytest.mark.parametrize("field", ["run_code", "metric_code"])
-def test_workspace_code_rejected(wizard_client: TestClient, field: str) -> None:
-    """Workspace code cannot be hand-patched — the Metric & run step's coding agent writes it."""
-    resp = wizard_client.post("/wizard/update", json={field: "def run(artifact, input):\n    return input"})
+def test_workspace_code_round_trips_unchanged(wizard_client: TestClient, field: str) -> None:
+    """The wizard's agent writes workspace code; it comes back with its whitespace kept."""
+    code = "def run(artifact, input):\n    return input\n"
+    resp = wizard_client.post("/wizard/update", json={field: code})
+
+    assert resp.status_code == 200
+    assert resp.json()["wizard_state"] == {field: code}
+
+
+@pytest.mark.parametrize("field", ["run_code", "metric_code"])
+def test_blank_workspace_code_rejected(wizard_client: TestClient, field: str) -> None:
+    """Blank code would wipe the file, so the endpoint refuses it."""
+    resp = wizard_client.post("/wizard/update", json={field: "   "})
 
     assert resp.status_code == 422
     assert field in resp.json()["detail"]

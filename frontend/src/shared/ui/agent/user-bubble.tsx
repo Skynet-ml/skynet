@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import dynamic from "next/dynamic";
-import { PencilSimple } from "@/shared/ui/icons";
+import { ListChecks, PencilSimple } from "@/shared/ui/icons";
 
 import { cn } from "@/shared/lib/utils";
 import { msg } from "@/shared/lib/messages";
@@ -10,6 +10,7 @@ import { Button } from "@/shared/ui/primitives/button";
 import { CopyButton } from "@/shared/ui/copy-button";
 
 import { autoResizeTextarea } from "./auto-resize";
+import { automaticTurnBody } from "./automatic-turn";
 import { Textarea } from "@/shared/ui/primitives/textarea";
 import { MarkdownPreviewField } from "@/shared/ui/markdown-preview-field";
 
@@ -49,6 +50,8 @@ interface UserBubbleProps {
 // The user's turns sit at the end side as bubbles; the agent's answers sit
 // at the start side with no bubble. Logical classes mirror both in RTL.
 export function UserBubble({ content, onEdit, editable = true, createdAt }: UserBubbleProps) {
+  const automatic = automaticTurnBody(content);
+  if (automatic !== null) return <AutomaticBubble body={automatic} createdAt={createdAt} />;
   const { text, pastes, files } = splitSent(content);
 
   return (
@@ -107,6 +110,35 @@ export function UserBubble({ content, onEdit, editable = true, createdAt }: User
           </div>
           <MessageTime createdAt={createdAt} />
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A turn the app sent by itself (a failed setup check): it sits where the
+ * user's turns sit, but as an outlined card with an "Automatic" label, and the
+ * user cannot edit it.
+ */
+function AutomaticBubble({ body, createdAt }: { body: string; createdAt?: number }) {
+  return (
+    <div className="flex justify-end">
+      <div className="flex max-w-[80%] flex-col items-end gap-1.5">
+        <div
+          className="max-w-full rounded-2xl rounded-ee-[4px] border border-dashed border-border bg-muted/40 px-4 py-2.5 text-sm leading-[1.45] text-foreground"
+          dir="auto"
+        >
+          <p className="mb-1 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+            <ListChecks className="size-3.5 shrink-0" aria-hidden="true" />
+            {msg("shared.agent.automatic")}
+          </p>
+          <CollapsibleMessage>
+            <React.Suspense fallback={<span className="whitespace-pre-wrap">{body}</span>}>
+              <MessageMarkdown content={body} />
+            </React.Suspense>
+          </CollapsibleMessage>
+        </div>
+        <MessageTime createdAt={createdAt} />
       </div>
     </div>
   );

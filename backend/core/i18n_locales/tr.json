@@ -326,7 +326,6 @@
     "code_agent.seed_lane_timeout": "Model kodu yazmadan çok uzun süre düşündü, bu yüzden taslak durduruldu. Yeniden deneyin ya da daha hızlı bir model veya daha düşük bir akıl yürütme düzeyi seçin.",
     "submit.no_models_available": "Katalogda kullanılabilir model yok — önce bir sağlayıcı API anahtarı yapılandırın.",
     "user.storage.quota_exceeded": "Depolama kotası aşıldı ({quota_mb}MB içinden {used_mb}MB kullanıldı). Yer açın ve tekrar deneyin.",
-    "wizard.code_via_authoring_only": "{field}, update_wizard_state aracılığıyla ayarlanamaz. Çalıştırma ve Metrik kodunu yalnızca sihirbazın Metrik adımındaki kodlama ajanı yazar.",
     "wizard.column_roles_not_object": "column_roles bir nesne olmalıdır.",
     "wizard.field_must_be_list": "{field} bir liste olmalıdır.",
     "wizard.field_non_empty_string": "{field} boş olmayan bir dize olmalıdır.",

@@ -24,7 +24,6 @@ import {
   type OptimizerCatalogResponse,
   type OptimizerChoice,
   type OptimizerTarget,
-  type TaskInterviewTurnResult,
   type UnifiedCase,
   type UnifiedChatTurn,
   type UnifiedRunRequest,
@@ -246,41 +245,6 @@ export function repoIssue(repo: RepoDraft): string | null {
     return "submit.v2.repo.issue.commit";
   if (!repo.editablePaths.some((path) => path.trim())) return "submit.v2.repo.issue.paths";
   return null;
-}
-
-/**
- * The task fields an interview turn may write: only what it actually filled,
- * and nothing the user has edited by hand since. The rationale explains the
- * artifact kind, so it is kept only from a turn that names the kind the card
- * shows; an early turn otherwise fills it with "not yet known" filler.
- */
-export function taskInterviewPatch(
-  result: TaskInterviewTurnResult,
-  dirty: ReadonlySet<keyof TaskSlice>,
-  current?: Pick<TaskSlice, "repo">,
-): Partial<TaskSlice> {
-  const patch: Partial<TaskSlice> = {};
-  // A target the user picked by hand stays; the interview leaves a chosen
-  // repository alone and only switches back while none is chosen yet.
-  if (current && !dirty.has("repo")) {
-    if (result.target === "repo" && !current.repo) patch.repo = emptyRepoDraft();
-    else if (result.target === "dspy_program" && current.repo && !current.repo.repository.trim()) {
-      patch.repo = null;
-      if (!dirty.has("artifactKind")) patch.artifactKind = "dspy_program";
-    }
-  }
-  if (result.repo_query?.trim()) patch.repoQuery = result.repo_query.trim();
-  if (typeof result.needs_data === "boolean") patch.needsData = result.needs_data;
-  if (result.objective.trim() && !dirty.has("objective")) patch.objective = result.objective;
-  if (result.background.trim() && !dirty.has("background")) patch.background = result.background;
-  if (result.artifact_kind && !dirty.has("artifactKind")) {
-    patch.artifactKind = result.artifact_kind;
-    if (result.artifact_rationale.trim()) patch.artifactRationale = result.artifact_rationale;
-  }
-  if (result.starting_version != null && !dirty.has("startingVersion")) {
-    patch.startingVersion = result.starting_version;
-  }
-  return patch;
 }
 
 /**
@@ -608,12 +572,6 @@ export interface WizardV2Context {
   contractStale: boolean;
   /** An i18n key or the exact contract error text. */
   runBlockedReason: string | null;
-  /** The Metric step's coding agent reports whether it is writing the code. */
-  setAgentWriting(writing: boolean): void;
-  /** Whether the Inputs step's inference is still deciding the column roles. */
-  inputsInferring: boolean;
-  /** The Inputs step reports whether its inference is in flight. */
-  setInputsInferring(inferring: boolean): void;
   buildPayload(): UnifiedRunRequest | null;
   /** The wizard's execution budget, created on first use; the sandboxed check bills to it. */
   ensureBudget(): Promise<ExecutionBudget>;

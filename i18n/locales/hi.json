@@ -326,7 +326,6 @@
     "code_agent.seed_lane_timeout": "मॉडल ने कोड लिखे बिना बहुत देर तक सोचा, इसलिए ड्राफ़्ट रोक दिया गया। फिर से कोशिश करें, या कोई तेज़ मॉडल या कम रीज़निंग स्तर चुनें।",
     "submit.no_models_available": "कैटलॉग में कोई मॉडल उपलब्ध नहीं है — पहले एक प्रदाता API कुंजी कॉन्फ़िगर करें।",
     "user.storage.quota_exceeded": "स्टोरेज कोटा पार हो गया ({quota_mb}MB में से {used_mb}MB उपयोग किया गया)। स्थान खाली करें और पुनः प्रयास करें।",
-    "wizard.code_via_authoring_only": "{field} को update_wizard_state के माध्यम से सेट नहीं किया जा सकता। रन कोड और मीट्रिक कोड केवल विज़ार्ड के मीट्रिक चरण का कोडिंग एजेंट लिखता है।",
     "wizard.column_roles_not_object": "column_roles एक ऑब्जेक्ट होना चाहिए।",
     "wizard.field_must_be_list": "{field} एक सूची होनी चाहिए।",
     "wizard.field_non_empty_string": "{field} एक गैर-रिक्त स्ट्रिंग होनी चाहिए।",

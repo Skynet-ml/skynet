@@ -238,7 +238,6 @@
     "webauthn.challenge_expired": "The passkey request expired — try again.",
     "webauthn.invalid_credential": "This passkey couldn't be verified.",
     "webauthn.not_found": "Passkey not found.",
-    "wizard.code_via_authoring_only": "{field} cannot be set through update_wizard_state. Run and metric code are written only by the coding agent in the wizard's Metric step.",
     "wizard.column_roles_not_object": "column_roles must be an object.",
     "wizard.field_must_be_list": "{field} must be a list.",
     "wizard.field_non_empty_string": "{field} must be a non-empty string.",

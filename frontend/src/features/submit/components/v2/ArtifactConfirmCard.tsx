@@ -31,13 +31,13 @@ export interface ArtifactConfirmCardProps {
   rationale: string;
   /** An i18n key naming what is missing, or null when the card is complete. */
   issue: string | null;
-  /** The interview is mid-turn and may still rewrite the card. */
+  /** The setup agent is writing the starting version; the editor holds until it lands. */
   writing: boolean;
   guided: boolean;
 }
 
 /**
- * What the interview derived: the starting version of the DSPy program the
+ * What the setup agent derived: the starting version of the DSPy program the
  * run optimizes. There is no confirm button: Continue moves on once nothing
  * is missing.
  */
@@ -136,6 +136,7 @@ function StartingVersionEditor({
               value={text}
               onChange={(e) => onChange({ ...value, [name]: e.target.value })}
               rows={3}
+              readOnly={streaming}
               dir="auto"
               className="rounded-none border-0 bg-transparent shadow-none focus-visible:ring-inset"
             />
@@ -156,6 +157,7 @@ function StartingVersionEditor({
         language={detectLanguage(text) ?? "Python"}
         label={t("submit.v2.task.artifact.starting_label")}
         streaming={streaming}
+        readOnly={streaming}
       />
     );
   }
@@ -167,6 +169,7 @@ function StartingVersionEditor({
       onChange={(e) => onChange(e.target.value)}
       placeholder={t("submit.v2.task.artifact.starting_placeholder")}
       rows={8}
+      readOnly={streaming}
       dir="auto"
       className="min-h-40 font-mono text-sm"
     />

@@ -1,45 +1,33 @@
 "use client";
 
 import * as React from "react";
-import { isGeneralistAgentEnabled, useHideAgentPill } from "@/features/agent-panel";
-import { githubRepoFile, githubRepoTree } from "@/shared/lib/api";
-import { msg } from "@/shared/lib/messages";
-import type { UnifiedAuthoringContext, UnifiedCase } from "@/shared/types/unified-run";
-import { useWizardAutoAdvance } from "../../hooks/use-auto-advance";
-import { useWizardV2, useWizardV2Shell } from "../../hooks/use-unified-wizard";
-import { useContractCheck } from "../../hooks/use-contract-check";
-import { CodingAgentPanel } from "../../ide/CodingAgentPanel";
-import { workspaceKey } from "../../ide/agent-verdict";
-import { IdeWorkspace } from "../../ide/IdeWorkspace";
-import type { IdeOpenRequest } from "../../ide/open-file";
-import { indexRepoTree, repoFolderName, type RepoSource } from "../../ide/repo-files";
-import { useIdeCodingAgent } from "../../ide/use-ide-coding-agent";
-import { metricAdvanceFrom } from "../../lib/auto-advance";
-import { activeContractPhase } from "../../lib/contract-validation";
-import { authoringCases } from "../../lib/inputs-mode";
 import {
-  WIZARD_CODING_CHAT_KEY,
-  decodeCodingChat,
-  keepSessionValue,
-  readSessionValue,
-} from "../../lib/session-state";
+  AgentPanelDock,
+  isGeneralistAgentEnabled,
+  lockedCodeFiles,
+  useWizardStateOptional,
+} from "@/features/agent-panel";
+import { githubRepoFile, githubRepoTree } from "@/shared/lib/api";
+import { contractCheckMessage } from "@/shared/lib/i18n";
+import { msg } from "@/shared/lib/messages";
+import type { ContractCheckResponse } from "@/shared/types/unified-run";
+import { useWizardV2 } from "../../hooks/use-unified-wizard";
+import { useContractCheck } from "../../hooks/use-contract-check";
+import { IdeWorkspace } from "../../ide/IdeWorkspace";
+import { indexRepoTree, repoFolderName, type RepoSource } from "../../ide/repo-files";
+import { activeContractPhase } from "../../lib/contract-validation";
 import { withScorerImports } from "../../lib/scorer-dependencies";
+import { setupCheckFeedback } from "../../lib/setup-check-feedback";
 import { METRIC_FILE, RUN_FILE, repoIssue } from "../../lib/wizard-v2";
-import { v2Msg } from "./ArtifactConfirmCard";
 import { ScheduleRunScreen } from "./ScheduleRunScreen";
 import { ContractCheckScreen } from "./ContractCheckScreen";
+import { GeneralistAgentShell } from "./GeneralistAgentShell";
 import { RunOverview } from "./RunOverview";
 import { WizardScreen } from "./WizardScreen";
 
-const SAMPLE_CASE_LIMIT = 5;
-// The backend's REPO_FILES_MAX: every path rides each agent turn's prompt.
-const REPO_PATHS_LIMIT = 2000;
-
-/** The app-wide agent launcher stays hidden while the IDE's own coding agent is on screen. */
-function HideAgentPill() {
-  useHideAgentPill();
-  return null;
-}
+// Each failed check the agent fixes runs a paid sandbox check again; past
+// this many in a row the user decides what happens next.
+const AUTO_FIX_ROUNDS = 3;
 
 /**
  * The repository's checkout for the IDE's explorer, read from GitHub at the
@@ -53,7 +41,6 @@ function HideAgentPill() {
  *   The tree, fetched now, and a reader that fetches each file when it is opened.
  */
 function repoSource(repository: string, ref: string): RepoSource {
-  // The editor and the agent's open_file both read a file it opens; one fetch serves both.
   const reads = new Map<string, ReturnType<RepoSource["read"]>>();
   const fetchFile = async (path: string): ReturnType<RepoSource["read"]> => {
     const file = await githubRepoFile(repository, ref, path);
@@ -77,19 +64,60 @@ function repoSource(repository: string, ref: string): RepoSource {
 }
 
 /**
- * Step 4, three screens. First the code, in VS Code's workbench: the coding
- * agent docked beside it writes run.py, metric.py and any helper files, and
- * the user can open and edit each one. Then the sandbox check, which runs the
- * code on a few samples. Then the overview, which holds Run, so the run
- * button never covers the editors.
+ * A failed setup check goes to the setup agent as an automatic turn; once the
+ * agent finishes that turn, the check runs again if the code changed, up to
+ * ``AUTO_FIX_ROUNDS`` times.
+ *
+ * Args:
+ *   lastCheck: The newest check, or null.
+ *   stale: The files changed since that check.
+ *   check: Run the check again.
+ */
+function useAutoFixLoop(
+  lastCheck: ContractCheckResponse | null,
+  stale: boolean,
+  check: () => Promise<ContractCheckResponse | null>,
+): void {
+  const agent = useWizardStateOptional();
+  const send = agent?.sendAutoFeedback;
+  const finished = agent?.finishedAutoFeedback ?? 0;
+  const reported = React.useRef<ContractCheckResponse | null>(lastCheck);
+  const rounds = React.useRef(0);
+  // The automatic message this loop is waiting on; another turn ending does
+  // not count as its fix.
+  const pending = React.useRef<number | null>(null);
+
+  React.useEffect(() => {
+    if (!lastCheck || stale || reported.current === lastCheck) return;
+    reported.current = lastCheck;
+    if (lastCheck.ok) {
+      rounds.current = 0;
+      return;
+    }
+    if (!send || !isGeneralistAgentEnabled() || rounds.current >= AUTO_FIX_ROUNDS) return;
+    rounds.current += 1;
+    pending.current = send(setupCheckFeedback(lastCheck, contractCheckMessage));
+  }, [lastCheck, stale, send]);
+
+  React.useEffect(() => {
+    if (pending.current === null || finished !== pending.current) return;
+    pending.current = null;
+    if (stale) void check();
+  }, [finished, stale, check]);
+}
+
+/**
+ * Step 4, three screens. First the code, in VS Code's workbench: the setup
+ * agent docked beside it writes run.py and metric.py, and the user can open
+ * and edit each one. Then the sandbox check, which runs the code on a few
+ * samples, with the agent docked beside it too. Then the overview, which
+ * holds Run, so the run button never covers the editors.
  */
 export function MetricStep({ page, onBack }: { page: number; onBack: () => void }) {
   const ctx = useWizardV2();
-  const { state, patchWorkspace, setWorkspaceFile, guided, inputsInferring } = ctx;
-  const { task, inputs, optimizer, workspace } = state;
-  const kind = task.artifactKind;
+  const { state, patchWorkspace, setWorkspaceFile, guided } = ctx;
+  const { task, workspace } = state;
   const repo = Boolean(task.repo);
-  const t = (key: string) => v2Msg(key, guided);
 
   const repoDraft = task.repo && !repoIssue(task.repo) ? task.repo : null;
   const repoName = repoDraft?.repository.trim() ?? "";
@@ -99,68 +127,6 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
     [repoName, repoRef],
   );
 
-  // The paths the agent may open read-only, once the tree has loaded.
-  const [repoPaths, setRepoPaths] = React.useState<string[]>([]);
-  React.useEffect(() => {
-    setRepoPaths([]);
-    let live = true;
-    void repoFiles?.tree
-      .then((index) => live && setRepoPaths([...index.files].sort().slice(0, REPO_PATHS_LIMIT)))
-      .catch(() => undefined);
-    return () => {
-      live = false;
-    };
-  }, [repoFiles]);
-
-  const authoringContext = React.useMemo<UnifiedAuthoringContext | null>(() => {
-    // A repository run skips the Inputs step, so it may have no data mode.
-    const dataMode = inputs.mode ?? (repo ? "single" : null);
-    if ((!repo && !kind) || !dataMode) return null;
-    const samples = authoringCases(
-      {
-        cases: inputs.cases,
-        sampleRows: inputs.sampleRows,
-        inputFields: inputs.inputFields,
-        expectedField: inputs.expectedField,
-      },
-      SAMPLE_CASE_LIMIT,
-    ).map((c: UnifiedCase) => ({ input: c.input, expected: c.expected ?? null }));
-    return {
-      task: {
-        objective: task.objective,
-        background: task.background,
-        ...(!repo && kind ? { artifact: { kind, starting_version: task.startingVersion ?? "" } } : {}),
-      },
-      data_mode: dataMode,
-      input_fields: inputs.inputFields,
-      expected_field: inputs.expectedField,
-      sample_cases: samples,
-      optimizer: optimizer.choice,
-      reflection_name: optimizer.reflectionModel?.name ?? null,
-      focus: repo ? "metric" : "run",
-      ...(repo ? { target: "repo" as const } : {}),
-      ...(repoPaths.length > 0 ? { repo_files: repoPaths } : {}),
-    };
-  }, [
-    kind,
-    repo,
-    repoPaths,
-    task.objective,
-    task.background,
-    task.startingVersion,
-    inputs.mode,
-    inputs.cases,
-    inputs.sampleRows,
-    inputs.inputFields,
-    inputs.expectedField,
-    optimizer.choice,
-    optimizer.reflectionModel?.name,
-  ]);
-
-  const setRunCode = React.useCallback(
-    (code: string) => patchWorkspace({ runCode: code }),
-    [patchWorkspace],
-  );
   const setMetricCode = React.useCallback(
     (code: string) => patchWorkspace({ metricCode: code }),
     [patchWorkspace],
@@ -171,7 +137,7 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
   );
 
   const contract = useContractCheck(ctx);
-  const lastCheckOk = contract.lastCheck && !contract.stale ? contract.lastCheck.ok : null;
+  useAutoFixLoop(contract.lastCheck, contract.stale, contract.check);
   // The running Check names its step beside the IDE's spinner, as the check
   // screen's rows do.
   const contractPhase = activeContractPhase(contract.timing, contract.checking);
@@ -185,102 +151,21 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
               ? "submit.validation.progress.evaluator"
               : "submit.validation.progress.budget",
         );
-
-  // The coding agent writes under this context. Inference re-roles the
-  // columns when it answers, and the Inputs step stays mounted while it does,
-  // so code written earlier would target input fields the contract check and
-  // the run no longer pass. A repository run has no run code: the agent
-  // writes only its scorer, metric.py.
-  const agentContext = inputsInferring ? null : authoringContext;
-  const onScreen = state.step === "metric" && page === 0;
-  // Queued, not replaced: open_file calls batched into one render each open a tab.
-  const [openRequests, setOpenRequests] = React.useState<readonly IdeOpenRequest[]>([]);
-  const openFile = React.useCallback(
-    (path: string, line?: number) =>
-      setOpenRequests((prev) => [...prev, line ? { path, line } : { path }]),
-    [],
-  );
-  // A reload brings the chat back; the setup's answers came back with it.
-  const { restored } = useWizardV2Shell();
-  const [savedChat] = React.useState(() =>
-    restored ? decodeCodingChat(readSessionValue(WIZARD_CODING_CHAT_KEY)) : [],
-  );
-  const coding = useIdeCodingAgent({
-    context: agentContext,
-    active: onScreen,
-    dataKnown: (authoringContext?.sample_cases?.length ?? 0) > 0,
-    runCode: workspace.runCode,
-    metricCode: workspace.metricCode,
-    files: workspace.files,
-    setRunCode,
-    setMetricCode,
-    setFile: setWorkspaceFile,
-    openFile,
-    lastCheck: contract.lastCheck,
-    lastCheckOk,
-    check: contract.check,
-    guided,
-    initialMessages: savedChat,
-  });
-  // The results strip: the agent's verify_code verdict while it is newer than
-  // the last Check, else that Check. Until either is fresh, a failing static
-  // check (what typing just broke) wins; a result older than the files is dimmed.
-  const filesKey = workspaceKey(workspace.runCode, workspace.metricCode, workspace.files);
-  const verdict = coding.verdict;
-  const verdictFresh = verdict?.key === filesKey;
+  // Until a fresh Check exists, a failing static check (what typing just broke) wins.
   const staticFailed = contract.staticResult?.checks.some((item) => item.status === "failed");
-  const showStatic =
-    staticFailed && !verdictFresh && (verdict !== null || !contract.lastCheck || contract.stale);
+  const showStatic = staticFailed && (!contract.lastCheck || contract.stale);
   const consoleResult = showStatic ? contract.staticResult : contract.lastCheck;
-  const agentResults = !showStatic && verdict ? verdict.files : null;
-  const resultsStale = showStatic ? false : verdict ? !verdictFresh : contract.stale;
 
-  const { setAgentWriting } = ctx;
-  const agentBusy = coding.agent.status === "streaming";
-  // Kept between turns only: a turn cut off mid-stream would come back with
-  // tool calls that spin forever.
-  const chat = coding.agent.messages;
-  React.useEffect(() => {
-    if (!agentBusy) keepSessionValue(WIZARD_CODING_CHAT_KEY, JSON.stringify(chat));
-  }, [agentBusy, chat]);
-  React.useEffect(() => {
-    setAgentWriting(agentBusy);
-    return () => setAgentWriting(false);
-  }, [agentBusy, setAgentWriting]);
-
-  // Code the agent just wrote moves the wizard on once it passes: from the
-  // editor to Check, and from a passing Check to the overview, where Run
-  // stays the user's. Only the files the agent left count (a hand edit stops
-  // it), and only until the overview was first reached.
-  const { advanceFrom } = useWizardAutoAdvance();
+  const onStep = state.step === "metric";
+  const onScreen = onStep && page === 0;
+  // The agent may rewrite either file from what it read when its turn began,
+  // so the editor holds both for the whole turn, not only while a write runs.
+  const agent = useWizardStateOptional();
+  const lockedFiles = lockedCodeFiles(
+    onStep && (agent?.agentBusy ?? false),
+    agent?.agentWritingFields ?? [],
+  );
   const overviewPage = repo ? 1 : 3;
-  const [overviewSeen, setOverviewSeen] = React.useState(false);
-  const [agentLeft, setAgentLeft] = React.useState<string | null>(null);
-  const filesKeyRef = React.useRef(filesKey);
-  React.useEffect(() => {
-    filesKeyRef.current = filesKey;
-  });
-  const { writtenTurns } = coding;
-  React.useEffect(() => {
-    if (writtenTurns > 0) setAgentLeft(filesKeyRef.current);
-  }, [writtenTurns]);
-  const onMetricStep = state.step === "metric";
-  React.useEffect(() => {
-    if (onMetricStep && page === overviewPage) setOverviewSeen(true);
-  }, [onMetricStep, page, overviewPage]);
-  const advancePast = metricAdvanceFrom({
-    onStep: onMetricStep,
-    overviewSeen,
-    busy: agentBusy,
-    agentLeftFiles: agentLeft === filesKey,
-    editorPassed: (verdictFresh && verdict?.ok === true) || lastCheckOk === true,
-    checkPassed: contract.lastCheck?.ok === true && !contract.stale,
-    repo,
-    page,
-  });
-  React.useEffect(() => {
-    if (advancePast) advanceFrom(advancePast);
-  }, [advancePast, advanceFrom]);
 
   // The sandbox still injects `llm` for old scorers; making the import
   // explicit as the user leaves the code keeps it honest about what it calls.
@@ -293,7 +178,6 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {onScreen && isGeneralistAgentEnabled() && <HideAgentPill />}
       {/* Clip, not hide: a hidden box still scrolls when the editor takes focus. */}
       <WizardScreen active={page === 0} className="flex flex-col overflow-clip">
         <IdeWorkspace
@@ -305,24 +189,25 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
           onCheck={repo ? null : contract.check}
           checkPhase={checkPhaseLabel}
           checkResult={repo ? null : consoleResult}
-          agentResults={repo ? null : agentResults}
-          resultsStale={!repo && resultsStale}
+          resultsStale={!repo && !showStatic && contract.stale}
           repo={repoFiles}
-          openRequests={openRequests}
+          lockedFiles={lockedFiles}
           guided={guided}
           sidePanel={
-            <CodingAgentPanel
-              coding={coding}
-              disabledReason={agentContext ? null : t("submit.v2.ide.agent.waiting")}
-              onOpenFile={openFile}
-              guided={guided}
-            />
+            onScreen && isGeneralistAgentEnabled() ? (
+              <AgentPanelDock className="absolute inset-0" />
+            ) : null
           }
         />
       </WizardScreen>
       {!repo && (
-        <WizardScreen active={page === 1}>
-          <ContractCheckScreen cc={contract} guided={guided} active={page === 1} onBack={onBack} />
+        <WizardScreen active={page === 1} className="flex flex-col">
+          {/* The check's automatic message and the agent's fix play out in this chat. */}
+          <GeneralistAgentShell active={onStep && page === 1}>
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 sm:py-6">
+              <ContractCheckScreen cc={contract} guided={guided} active={page === 1} onBack={onBack} />
+            </div>
+          </GeneralistAgentShell>
         </WizardScreen>
       )}
       {!repo && (

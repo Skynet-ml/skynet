@@ -92,6 +92,8 @@ export interface IdeWorkbench {
   openFile(path: string, line?: number, preserveFocus?: boolean): Promise<void>;
   /** Show a repository's checkout as a read-only folder, or remove it with null. */
   setRepo(source: RepoSource | null): void;
+  /** Hold these workspace files read-only in their editors, or none with an empty list. */
+  setLocked(paths: readonly string[]): void;
 }
 
 const ENCODER = new TextEncoder();
@@ -334,8 +336,10 @@ function guardFixedFiles(describe: (issue: string) => string): void {
   }
 }
 
-function settings(dark: boolean, repoFolder: string | null): string {
+function settings(dark: boolean, repoFolder: string | null, locked: readonly string[]): string {
   return JSON.stringify({
+    // Relative patterns match from the workspace folder, so each names one file.
+    "files.readonlyInclude": Object.fromEntries(locked.map((path) => [path, true])),
     // Searching the repository would read every one of its files from GitHub.
     "search.exclude": repoFolder ? { [`${repoFolder}/**`]: true } : {},
     "workbench.colorTheme": dark ? APP_DARK_THEME : APP_LIGHT_THEME,
@@ -409,7 +413,7 @@ async function boot(dark: boolean, describe: (issue: string) => string): Promise
   document.body.append(element);
 
   registerAppThemes();
-  await initUserConfiguration(settings(dark, null));
+  await initUserConfiguration(settings(dark, null, []));
   await initialize(
     {
       ...getConfigurationServiceOverride(),
@@ -454,6 +458,7 @@ async function boot(dark: boolean, describe: (issue: string) => string): Promise
   const editorService = await getService(IEditorService);
   let darkNow = dark;
   let repoFolder: string | null = null;
+  let locked: readonly string[] = [];
 
   return {
     element,
@@ -464,7 +469,7 @@ async function boot(dark: boolean, describe: (issue: string) => string): Promise
     setDark: (next) => {
       if (next === darkNow) return;
       darkNow = next;
-      void updateUserConfiguration(settings(next, repoFolder));
+      void updateUserConfiguration(settings(next, repoFolder, locked));
     },
     layout: () => layoutService.layout(),
     saveAll: async () => {
@@ -485,7 +490,12 @@ async function boot(dark: boolean, describe: (issue: string) => string): Promise
       if ((source?.folder ?? null) === repoFolder && source !== null) return;
       repoFolder = source?.folder ?? null;
       provider?.setRepo(source);
-      void updateUserConfiguration(settings(darkNow, repoFolder));
+      void updateUserConfiguration(settings(darkNow, repoFolder, locked));
+    },
+    setLocked: (paths) => {
+      if (paths.length === locked.length && paths.every((p, i) => p === locked[i])) return;
+      locked = [...paths];
+      void updateUserConfiguration(settings(darkNow, repoFolder, locked));
     },
   };
 }

@@ -326,7 +326,6 @@
     "code_agent.seed_lane_timeout": "El modelo pensó demasiado tiempo sin escribir el código, así que se detuvo el borrador. Inténtalo de nuevo o elige un modelo más rápido o un nivel de razonamiento más bajo.",
     "submit.no_models_available": "No hay modelos disponibles en el catálogo; configura primero la clave de API de un proveedor.",
     "user.storage.quota_exceeded": "Se superó la cuota de almacenamiento (se usan {used_mb}MB de {quota_mb}MB). Libera espacio e inténtalo de nuevo.",
-    "wizard.code_via_authoring_only": "{field} no se puede establecer a través de update_wizard_state. El código de ejecución y el de métrica solo los escribe el agente de programación en el paso de Métrica del asistente.",
     "wizard.column_roles_not_object": "column_roles debe ser un objeto.",
     "wizard.field_must_be_list": "{field} debe ser una lista.",
     "wizard.field_non_empty_string": "{field} debe ser una cadena no vacía.",

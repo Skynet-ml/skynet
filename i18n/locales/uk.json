@@ -326,7 +326,6 @@
     "code_agent.seed_lane_timeout": "Модель надто довго міркувала, не написавши код, тому чернетку зупинено. Спробуйте ще раз або виберіть швидшу модель чи нижчий рівень міркувань.",
     "submit.no_models_available": "У каталозі немає доступних моделей — спочатку налаштуйте ключ API постачальника.",
     "user.storage.quota_exceeded": "Перевищено квоту сховища (використано {used_mb} МБ з {quota_mb} МБ). Звільніть місце і спробуйте ще раз.",
-    "wizard.code_via_authoring_only": "{field} не можна встановити через update_wizard_state. Код запуску та код метрики пише лише агент-програміст на кроці метрики в майстрі.",
     "wizard.column_roles_not_object": "column_roles має бути об'єктом.",
     "wizard.field_must_be_list": "{field} має бути списком.",
     "wizard.field_non_empty_string": "{field} має бути непорожнім рядком.",

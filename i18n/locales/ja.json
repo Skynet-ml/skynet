@@ -326,7 +326,6 @@
     "code_agent.seed_lane_timeout": "モデルがコードを書かずに長く考えすぎたため、下書きを停止しました。もう一度試すか、より高速なモデルか低い推論レベルを選んでください。",
     "submit.no_models_available": "カタログに利用可能なモデルがありません。先にプロバイダーのAPIキーを設定してください。",
     "user.storage.quota_exceeded": "ストレージのクォータを超過しました（{quota_mb}MB 中 {used_mb}MB 使用中）。空き容量を確保して再試行してください。",
-    "wizard.code_via_authoring_only": "{field} は update_wizard_state では設定できません。実行コードとメトリックのコードは、ウィザードのメトリックのステップにあるコーディングエージェントだけが書きます。",
     "wizard.column_roles_not_object": "column_roles はオブジェクトである必要があります。",
     "wizard.field_must_be_list": "{field} はリストである必要があります。",
     "wizard.field_non_empty_string": "{field} は空でない文字列である必要があります。",

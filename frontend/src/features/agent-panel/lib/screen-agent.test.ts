@@ -2,39 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  decodeScreenChats,
-  encodeScreenChats,
+  autoFeedbackAction,
+  decodeSetupChat,
+  encodeSetupChat,
+  opensWithKickoff,
   parseScreenNav,
   runScreenNav,
-  switchScreenChat,
+  trackAutoTurn,
 } from "./screen-agent.ts";
-
-test("each screen starts its own conversation", () => {
-  const chats = new Map<string, string>();
-  assert.deepEqual(switchScreenChat(chats, null, null, "brief"), { kind: "fresh" });
-  assert.deepEqual(switchScreenChat(chats, "brief", "conv-brief", "artifact"), { kind: "fresh" });
-  assert.equal(chats.get("brief"), "conv-brief");
-});
-
-test("going back resumes the earlier screen's conversation", () => {
-  const chats = new Map<string, string>();
-  switchScreenChat(chats, "brief", "conv-brief", "artifact");
-  assert.deepEqual(switchScreenChat(chats, "artifact", "conv-artifact", "brief"), {
-    kind: "resume",
-    conversationId: "conv-brief",
-  });
-  assert.deepEqual(switchScreenChat(chats, "brief", "conv-brief", "artifact"), {
-    kind: "resume",
-    conversationId: "conv-artifact",
-  });
-});
-
-test("staying on a screen keeps its chat, and an unused chat is not remembered", () => {
-  const chats = new Map<string, string>();
-  assert.deepEqual(switchScreenChat(chats, "brief", "conv-brief", "brief"), { kind: "stay" });
-  switchScreenChat(chats, "artifact", null, "brief");
-  assert.equal(chats.has("artifact"), false);
-});
 
 test("a continue result runs the Continue button's own handler", () => {
   const calls: string[] = [];
@@ -82,14 +57,35 @@ test("a continue from a screen the wizard already left is dropped", () => {
   assert.deepEqual(calls, []);
 });
 
-test("the screen chats kept for a tab round-trip and ignore junk", () => {
-  const chats = new Map([
-    ["inputs", "c1"],
-    ["optimizer", "c2"],
-  ]);
-  assert.deepEqual(decodeScreenChats(encodeScreenChats(chats)), chats);
-  assert.deepEqual(decodeScreenChats(null), new Map());
-  assert.deepEqual(decodeScreenChats("not json"), new Map());
-  assert.deepEqual(decodeScreenChats('["c1"]'), new Map());
-  assert.deepEqual(decodeScreenChats('{"inputs":"c1","task":3,"x":""}'), new Map([["inputs", "c1"]]));
+test("the setup chat keeps its id and the screens already started", () => {
+  const raw = encodeSetupChat({ id: "c1", kicked: ["brief", "source"] });
+  assert.deepEqual(decodeSetupChat(raw), { id: "c1", kicked: ["brief", "source"] });
+  assert.equal(decodeSetupChat(null), null);
+  assert.equal(decodeSetupChat("not json"), null);
+  assert.equal(decodeSetupChat('{"kicked":[]}'), null);
+  assert.deepEqual(decodeSetupChat('{"id":"c2","kicked":[1,"brief"]}'), { id: "c2", kicked: ["brief"] });
+});
+
+test("an automatic message waits for the chat on view and a free agent, and a silent clone drops it", () => {
+  assert.equal(autoFeedbackAction({ docked: true, busy: false, silent: false }), "send");
+  assert.equal(autoFeedbackAction({ docked: false, busy: false, silent: false }), "wait");
+  assert.equal(autoFeedbackAction({ docked: true, busy: true, silent: false }), "wait");
+  assert.equal(autoFeedbackAction({ docked: true, busy: false, silent: true }), "skip");
+});
+
+test("an automatic turn ends only after the agent started on it", () => {
+  let step = trackAutoTurn({ id: 4, started: false }, false);
+  assert.deepEqual(step, { turn: { id: 4, started: false }, ended: null });
+  step = trackAutoTurn(step.turn, true);
+  assert.deepEqual(step, { turn: { id: 4, started: true }, ended: null });
+  step = trackAutoTurn(step.turn, false);
+  assert.deepEqual(step, { turn: null, ended: 4 });
+  assert.deepEqual(trackAutoTurn(null, false), { turn: null, ended: null });
+});
+
+test("the Check screen opens with no kickoff turn; other screens do", () => {
+  assert.equal(opensWithKickoff("check"), false);
+  for (const screen of ["brief", "inputs", "optimizer", "metric", "overview"]) {
+    assert.equal(opensWithKickoff(screen), true);
+  }
 });

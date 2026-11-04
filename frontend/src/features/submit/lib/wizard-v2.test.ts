@@ -26,7 +26,6 @@ const {
   presetEngine,
   programTargetOptimizer,
   repoTargetSlices,
-  taskInterviewPatch,
   taskIssue,
   wizardSteps,
   withContractBudget,
@@ -348,33 +347,6 @@ test("the task step clears once nothing is missing, with no separate confirm", (
   assert.equal(taskIssue({ ...withKind, startingVersion: { a: "", b: "Do it." } }), null);
 });
 
-test("taskInterviewPatch keeps a rationale only from a turn that names the artifact kind", () => {
-  const turn = {
-    message: "",
-    options: [],
-    done: false,
-    objective: "Route tickets",
-    background: "",
-    artifact_rationale: "The artifact kind is not yet known, so no rationale can be given.",
-  };
-  const early = taskInterviewPatch(turn, new Set());
-  assert.equal(early.objective, "Route tickets");
-  assert.equal("artifactRationale" in early, false);
-
-  const named = taskInterviewPatch(
-    { ...turn, artifact_kind: "dspy_program", artifact_rationale: "You already have a DSPy program to tune." },
-    new Set(),
-  );
-  assert.equal(named.artifactKind, "dspy_program");
-  assert.equal(named.artifactRationale, "You already have a DSPy program to tune.");
-
-  const handPicked = taskInterviewPatch(
-    { ...turn, artifact_kind: "dspy_program", artifact_rationale: "You already have a DSPy program to tune." },
-    new Set(["objective", "artifactKind"]),
-  );
-  assert.deepEqual(handPicked, {});
-});
-
 test("run.py and metric.py write through to the run and metric code; others are extra files", () => {
   const ws = initialWizardV2State().workspace;
   assert.deepEqual(writeWorkspaceFile(ws, "run.py", "r"), { runCode: "r" });
@@ -445,42 +417,6 @@ test("a repository that needs data keeps Inputs", () => {
     wizardSteps({ ...repo, task: { ...repo.task, needsData: false } }, false),
     withoutInputs,
   );
-});
-
-test("taskInterviewPatch switches the target unless the user picked it", () => {
-  const turn = {
-    message: "",
-    options: [],
-    done: false,
-    objective: "",
-    background: "",
-    artifact_rationale: "",
-  };
-  const toRepo = taskInterviewPatch(
-    { ...turn, target: "repo", repo_query: " me/site ", needs_data: false },
-    new Set(),
-    { repo: null },
-  );
-  assert.deepEqual(toRepo.repo, emptyRepoDraft());
-  assert.equal(toRepo.repoQuery, "me/site");
-  assert.equal(toRepo.needsData, false);
-  assert.equal(
-    "repo" in taskInterviewPatch({ ...turn, target: "repo" }, new Set(["repo"]), { repo: null }),
-    false,
-  );
-  const back = taskInterviewPatch({ ...turn, target: "dspy_program" }, new Set(), {
-    repo: emptyRepoDraft(),
-  });
-  assert.equal(back.repo, null);
-  assert.equal(back.artifactKind, "dspy_program");
-  const chosen = { ...emptyRepoDraft(), repository: "me/site" };
-  assert.equal(
-    "repo" in taskInterviewPatch({ ...turn, target: "dspy_program" }, new Set(), { repo: chosen }),
-    false,
-  );
-  const unknown = taskInterviewPatch({ ...turn, needs_data: null }, new Set(), { repo: null });
-  assert.equal("needsData" in unknown, false);
-  assert.equal("repoQuery" in unknown, false);
 });
 
 test("programTargetOptimizer returns a black-box engine to Auto", () => {

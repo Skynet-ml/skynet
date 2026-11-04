@@ -1,4 +1,3 @@
-import type { AgentMessage } from "@/shared/hooks/use-code-agent";
 import type { ContinuousEnableRequest } from "@/shared/types/continuous";
 
 import type { WizardV2State } from "./wizard-v2";
@@ -13,16 +12,11 @@ export const WIZARD_SESSION_KEY = "skynet.wizard.session.v1";
 /**
  * What the setup's screens hold beside its answers, kept for the same tab and
  * read back only when the setup itself came back: the screen on view inside
- * the step, the coding agent's chat and the scheduled run saved for the run.
+ * the step and the scheduled run saved for the run.
  */
 export const WIZARD_SCREEN_KEY = "skynet.wizard.screen.v1";
-export const WIZARD_CODING_CHAT_KEY = "skynet.wizard.coding-chat.v1";
 export const WIZARD_SCHEDULE_KEY = "skynet.wizard.schedule.v1";
-export const WIZARD_VIEW_KEYS = [
-  WIZARD_SCREEN_KEY,
-  WIZARD_CODING_CHAT_KEY,
-  WIZARD_SCHEDULE_KEY,
-] as const;
+export const WIZARD_VIEW_KEYS = [WIZARD_SCREEN_KEY, WIZARD_SCHEDULE_KEY] as const;
 
 const SLICES = ["task", "inputs", "optimizer", "workspace", "meta"] as const;
 
@@ -117,44 +111,6 @@ export function keepSessionValue(key: string, value: string): void {
  */
 export function reopenedPage(screens: readonly string[], saved: string | null): number {
   return saved === null ? 0 : Math.max(0, screens.indexOf(saved));
-}
-
-/**
- * Read back the coding agent's saved chat, or none when it is missing or
- * malformed. A tool call still running when its turn was stopped comes back
- * as failed: nothing will finish it after the reload.
- *
- * Args:
- *   raw: The stored text, or null.
- *
- * Returns:
- *   The chat's messages.
- */
-export function decodeCodingChat(raw: string | null): AgentMessage[] {
-  if (!raw) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
-  const valid = parsed.every((item: unknown) => {
-    if (!item || typeof item !== "object") return false;
-    const { role, content } = item as Record<string, unknown>;
-    return (role === "user" || role === "assistant") && typeof content === "string";
-  });
-  if (!valid) return [];
-  return (parsed as AgentMessage[]).map((message) =>
-    message.toolCalls?.some((call) => call.status === "running")
-      ? {
-          ...message,
-          toolCalls: message.toolCalls.map((call) =>
-            call.status === "running" ? { ...call, status: "error" as const } : call,
-          ),
-        }
-      : message,
-  );
 }
 
 /**

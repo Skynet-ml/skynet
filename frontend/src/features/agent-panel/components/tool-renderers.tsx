@@ -14,6 +14,7 @@ import { SubmitSummaryCard } from "./SubmitSummaryCard";
 import { TaggingSessionsCard } from "./TaggingSessionsCard";
 import { TestResultsCard } from "./TestResultsCard";
 import { WalletCard } from "./WalletCard";
+import { WizardWriteCard } from "./WizardWriteCard";
 
 export interface ToolRenderer {
   /**
@@ -386,6 +387,7 @@ const RENDERERS: Record<string, ToolRenderer> = {
         done: msg("auto.features.agent.panel.lib.tool.renderers.literal.58"),
         error: msg("auto.features.agent.panel.lib.tool.renderers.literal.59"),
       }),
+    card: (call) => <WizardWriteCard call={call} />,
   },
 
   public_search_dashboard_search_post: {
@@ -410,6 +412,10 @@ const RENDERERS: Record<string, ToolRenderer> = {
 
   list_tagging_sessions_for_agent: {
     card: (call) => <TaggingSessionsCard call={call} />,
+  },
+
+  update_wizard_state: {
+    card: (call) => <WizardWriteCard call={call} />,
   },
 
 };

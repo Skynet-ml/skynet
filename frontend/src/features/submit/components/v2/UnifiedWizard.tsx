@@ -11,7 +11,6 @@ import { msg } from "@/shared/lib/messages";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
 import { slideVariants } from "../../constants";
-import { WizardAutoAdvanceContext, useAutoAdvanceDriver } from "../../hooks/use-auto-advance";
 import { ExecutionBudgetProvider } from "../../hooks/use-execution-budget";
 import { WizardV2Provider, useWizardV2Shell, v2Text } from "../../hooks/use-unified-wizard";
 import { budgetContinueBlock, budgetShortfall, type BudgetShortfall } from "../../lib/budget-limit";
@@ -154,7 +153,6 @@ function UnifiedWizardFrame() {
   const pricing =
     !w.costSettled &&
     (beforeMetric || (LIMIT_SCREENS as readonly string[]).includes(visibleScreen));
-  const forwardOpen = inputsOpen && shortfall === null && !pricing;
   const [waitingOn, setWaitingOn] = useState<string | null>(null);
   if (waitingOn !== null && waitingOn !== visibleScreen) setWaitingOn(null);
   // Continue stays clickable under a shortfall so the press can say why it holds.
@@ -195,12 +193,6 @@ function UnifiedWizardFrame() {
   }, [waitingOn, pricing, forward]);
   const [reopenedScreen, setReopenedScreen] = useState(() => (w.restored ? visibleScreen : null));
   if (reopenedScreen !== null && reopenedScreen !== visibleScreen) setReopenedScreen(null);
-  const autoAdvance = useAutoAdvanceDriver(
-    visibleScreen,
-    forwardOpen && !advancing && !submitting,
-    forward,
-    reopenedScreen,
-  );
 
   const back = useCallback(() => {
     if (page > 0) {
@@ -332,26 +324,24 @@ function UnifiedWizardFrame() {
         className="relative min-h-0 flex-1 overflow-hidden pt-[10px]"
         data-tutorial="submit-wizard"
       >
-        <WizardAutoAdvanceContext.Provider value={autoAdvance}>
-          {WIZARD_V2_STEPS.filter(mounted).map((step) => {
-            const active = step === current;
-            return (
-              <motion.div
-                key={step}
-                hidden={!active}
-                className="h-full"
-                data-tutorial={active ? `wizard-stage-${step}` : undefined}
-                custom={direction}
-                variants={slideVariants}
-                initial="enter"
-                animate={active ? "center" : "enter"}
-                transition={{ duration: active ? 0.1 : 0 }}
-              >
-                {STEP_VIEWS[step](Math.min(pages[step], stepPages(step, w.state).length - 1), back)}
-              </motion.div>
-            );
-          })}
-        </WizardAutoAdvanceContext.Provider>
+        {WIZARD_V2_STEPS.filter(mounted).map((step) => {
+          const active = step === current;
+          return (
+            <motion.div
+              key={step}
+              hidden={!active}
+              className="h-full"
+              data-tutorial={active ? `wizard-stage-${step}` : undefined}
+              custom={direction}
+              variants={slideVariants}
+              initial="enter"
+              animate={active ? "center" : "enter"}
+              transition={{ duration: active ? 0.1 : 0 }}
+            >
+              {STEP_VIEWS[step](Math.min(pages[step], stepPages(step, w.state).length - 1), back)}
+            </motion.div>
+          );
+        })}
       </div>
 
       <div className="shrink-0">

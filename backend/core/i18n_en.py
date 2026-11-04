@@ -307,10 +307,6 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "webauthn.challenge_expired": "The passkey request expired — try again.",
     "webauthn.invalid_credential": "This passkey couldn't be verified.",
     "webauthn.not_found": "Passkey not found.",
-    "wizard.code_via_authoring_only": (
-        "{field} cannot be set through update_wizard_state. Run and metric "
-        "code are written only by the coding agent in the wizard's Metric step."
-    ),
     "wizard.optimizer_unknown": (
         "'{name}' is not a recognized optimizer. Call get_registry_snapshot for "
         "registered names, or use the alias 'gepa' or a fully qualified dotted "

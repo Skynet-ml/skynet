@@ -41,25 +41,6 @@ export function rowsToCases(
   });
 }
 
-/**
- * The cases the coding agent writes the run code against. They are the run's
- * own cases, or for a staged table its sample rows read through the same
- * roles, so the agent sees exactly the input fields the contract check and
- * the optimization will hand `run`.
- */
-export function authoringCases(
-  inputs: {
-    cases: readonly UnifiedCase[];
-    sampleRows: readonly Row[];
-    inputFields: readonly string[];
-    expectedField: string | null;
-  },
-  limit: number,
-): UnifiedCase[] {
-  if (inputs.cases.length > 0) return inputs.cases.slice(0, limit);
-  return rowsToCases(inputs.sampleRows.slice(0, limit), inputs.inputFields, inputs.expectedField);
-}
-
 /** The table rows a set of cases came from, as far as the cases still carry them. */
 export function casesToRows(cases: readonly UnifiedCase[]): Row[] {
   return cases.map((c) => {
@@ -76,11 +57,6 @@ export function singleInputCase(input: Row): UnifiedCase {
   return { input: { ...input } };
 }
 
-/** Every column except the expected one, in table order. */
-export function defaultInputFields(columns: readonly string[], expectedField: string | null): string[] {
-  return columns.filter((c) => c !== expectedField);
-}
-
 /** Each column's role as the inputs slice reads it. */
 export function columnRoles(
   columns: readonly string[],
@@ -93,28 +69,6 @@ export function columnRoles(
       column === expectedField ? "output" : inputFields.includes(column) ? "input" : "ignore";
   }
   return roles;
-}
-
-/**
- * The roles a table starts with from the backend's reading: its input fields
- * are Inputs, its expected field the Output, the rest ignored. A reading that
- * keeps pairs without a usable expected field takes the last column as the
- * Output (the upload card's `defaultRoleFor` rule) rather than collapsing to
- * one input; only the user's own picks turn a table into one input.
- */
-export function inferredRoles(
-  columns: readonly string[],
-  inferred: { mode: DataMode; input_fields: readonly string[]; expected_field?: string | null },
-): Record<string, ColumnRole> {
-  const named =
-    inferred.expected_field && columns.includes(inferred.expected_field)
-      ? inferred.expected_field
-      : null;
-  const expectedField =
-    named ?? (inferred.mode === "pairs" && columns.length > 1 ? columns[columns.length - 1]! : null);
-  const picked = inferred.input_fields.filter((f) => columns.includes(f) && f !== expectedField);
-  const inputFields = picked.length ? picked : defaultInputFields(columns, expectedField);
-  return columnRoles(columns, inputFields, expectedField);
 }
 
 /** The roles with one column changed; a new Output turns the previous one to Ignore. */
@@ -158,6 +112,21 @@ export function inputsFromRoles(
     expectedField: null,
     cases: first ? rowsToCases([first], inputFields, null) : [],
   };
+}
+
+/**
+ * Apply column roles the agent wrote the way a user's role change applies:
+ * on a loaded table the cases, mode and roles change together, and names
+ * that are not table columns drop. With no table loaded only the names change.
+ */
+export function inputsWithRoles(
+  columns: readonly string[],
+  inputFields: readonly string[],
+  expectedField: string | null,
+  rows: readonly Row[],
+): { mode?: DataMode; inputFields: string[]; expectedField: string | null; cases?: UnifiedCase[] } {
+  if (columns.length === 0) return { inputFields: [...inputFields], expectedField };
+  return inputsFromRoles(columns, columnRoles(columns, inputFields, expectedField), rows);
 }
 
 /**

@@ -21,14 +21,12 @@ registerHooks({
 });
 
 const {
-  authoringCases,
   casesToRows,
   columnRoles,
-  defaultInputFields,
   heldOutCounts,
-  inferredRoles,
   inputsFromRoles,
   inputsIssue,
+  inputsWithRoles,
   rowsToCases,
   singleInputCase,
   withColumnRole,
@@ -66,11 +64,6 @@ test("a single input becomes one case with a copied input", () => {
   const c = singleInputCase(input);
   assert.deepEqual(c, { input: { input: "hi" } });
   assert.notEqual(c.input, input);
-});
-
-test("input fields default to every column but the expected one", () => {
-  assert.deepEqual(defaultInputFields(["q", "ctx", "a"], "a"), ["q", "ctx"]);
-  assert.deepEqual(defaultInputFields(["q"], null), ["q"]);
 });
 
 test("pairs hold out a test portion once there are enough of them", () => {
@@ -174,57 +167,44 @@ test("one input with no input columns is not done", () => {
   );
 });
 
-test("a pairs reading with no expected field keeps pairs, the last column the Output", () => {
-  const columns = ["q", "ctx", "a"];
-  const roles = inferredRoles(columns, { mode: "pairs", input_fields: ["q"], expected_field: null });
-  assert.deepEqual(roles, { q: "input", ctx: "ignore", a: "output" });
-  const rows = [
-    { q: "1", ctx: "x", a: "2" },
-    { q: "3", ctx: "y", a: "4" },
-  ];
-  assert.equal(inputsFromRoles(columns, roles, rows).mode, "pairs");
-  const unknown = inferredRoles(columns, { mode: "pairs", input_fields: [], expected_field: "gone" });
-  assert.deepEqual(unknown, { q: "input", ctx: "input", a: "output" });
-});
-
-test("the inferred expected field is the Output; a single reading has none", () => {
-  assert.deepEqual(
-    inferredRoles(["q", "a", "n"], { mode: "pairs", input_fields: ["q"], expected_field: "a" }),
-    { q: "input", a: "output", n: "ignore" },
-  );
-  assert.deepEqual(
-    inferredRoles(["q", "a"], { mode: "single", input_fields: ["q"], expected_field: null }),
-    { q: "input", a: "ignore" },
-  );
-});
-
 test("the user setting every column to Input or Ignore still means one input", () => {
   const columns = ["q", "a"];
-  const roles = withColumnRole(
-    inferredRoles(columns, { mode: "pairs", input_fields: ["q"], expected_field: null }),
-    "a",
-    "ignore",
-  );
+  const roles = withColumnRole({ q: "input", a: "output" }, "a", "ignore");
   assert.equal(inputsFromRoles(columns, roles, [{ q: "1", a: "2" }, { q: "3", a: "4" }]).mode, "single");
 });
 
-test("a four-column CSV gives the agent the same input fields the contract check sends", () => {
-  const csv = "review,product,rating,sentiment\nGreat sound,Headphones,5,positive\nBroke in a week,Kettle,1,negative";
-  const [header, ...lines] = csv.split("\n");
-  const columns = header.split(",");
-  const rows = lines.map((line) => Object.fromEntries(line.split(",").map((v, i) => [columns[i], v])));
-  const roles = { review: "input", product: "ignore", rating: "ignore", sentiment: "output" };
-  const run = inputsFromRoles(columns, roles, rows);
+test("an agent roles write rebuilds the cases, so the gold answer leaves the input", () => {
+  const columns = ["q", "a", "note"];
+  const rows = [
+    { q: "2+2", a: "4", note: "easy" },
+    { q: "3+3", a: "6", note: "easy" },
+  ];
+  const before = inputsFromRoles(columns, { q: "input", a: "input", note: "output" }, rows);
+  assert.deepEqual(before.cases[0], { input: { q: "2+2", a: "4" }, expected: { note: "easy" } });
+  const after = inputsWithRoles(columns, ["q", "missing"], "a", casesToRows(before.cases));
+  assert.equal(after.mode, "pairs");
+  assert.deepEqual(after.inputFields, ["q"]);
+  assert.equal(after.expectedField, "a");
+  assert.deepEqual(after.cases, [
+    { input: { q: "2+2" }, expected: { a: "4" } },
+    { input: { q: "3+3" }, expected: { a: "6" } },
+  ]);
+});
 
-  const fromCases = authoringCases({ ...run, sampleRows: rows }, 5);
-  const fromStaged = authoringCases({ ...run, cases: [], sampleRows: rows }, 5);
+test("an agent roles write that adds an Output turns one input into pairs over every row", () => {
+  const columns = ["q", "a"];
+  const rows = [
+    { q: "2+2", a: "4" },
+    { q: "3+3", a: "6" },
+  ];
+  const single = inputsFromRoles(columns, { q: "input", a: "input" }, rows);
+  assert.equal(single.mode, "single");
+  assert.equal(single.cases.length, 1);
+  const after = inputsWithRoles(columns, ["q"], "a", rows);
+  assert.equal(after.mode, "pairs");
+  assert.equal(after.cases?.length, 2);
+});
 
-  for (const seen of [fromCases, fromStaged]) {
-    assert.deepEqual(
-      seen.map((c: { input: Record<string, unknown> }) => Object.keys(c.input)),
-      run.cases.map((c: { input: Record<string, unknown> }) => Object.keys(c.input)),
-    );
-    assert.deepEqual(Object.keys(seen[0].input), ["review"]);
-    assert.deepEqual(seen[0].expected, { sentiment: "positive" });
-  }
+test("with no table loaded, an agent roles write changes only the names", () => {
+  assert.deepEqual(inputsWithRoles([], ["q"], "a", []), { inputFields: ["q"], expectedField: "a" });
 });
