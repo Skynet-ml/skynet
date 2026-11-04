@@ -1,4 +1,4 @@
-Cette page explique comment lancer votre première exécution en une dizaine de minutes. Vous vous connectez, importez un petit jeu de données, remplissez les quatre étapes de l'assistant et lancez l'exécution. L'exemple améliore un prompt qui classe des messages de support selon des étiquettes.
+Cette page explique comment lancer votre première exécution en une dizaine de minutes. Vous vous connectez, importez un petit jeu de données, remplissez les quatre étapes de l'assistant et lancez l'exécution. L'exemple améliore un programme DSPy qui classe des messages de support selon des étiquettes.
 
 ## Avant de commencer
 
@@ -25,8 +25,8 @@ La première étape est **Tâche**. Elle demande « Que souhaitez-vous optimiser
 
 1. Dans **Objectif**, décrivez ce qu'est un bon résultat. Utilisez des mots simples, par exemple « Classer chaque message de support dans billing, bug ou other. »
 2. Facultatif : dans **Contexte**, ajoutez des informations utiles à l'optimiseur.
-3. Dans **Type d'artefact**, sélectionnez **Prompt**.
-4. Dans **Version de départ**, collez votre prompt actuel.
+3. Dans **Ce qui est optimisé**, sélectionnez **Programme DSPy**.
+4. Dans **Version de départ**, collez l'instruction actuelle de votre programme.
 
 ## 3. Entrées
 
@@ -47,7 +47,7 @@ La troisième étape est **Optimiseur** (« Optimiseur, modèles et budget »).
 
 - Laissez l'optimiseur sur **Auto**.
 - Sélectionnez un **Modèle de réflexion**. L'optimiseur l'utilise pour écrire les nouvelles versions. Ce modèle est obligatoire.
-- Facultatif : sélectionnez un **Modèle de tâche**. Votre code d'exécution l'utilise.
+- Sélectionnez un **Modèle de tâche**. Votre programme l'utilise. Un programme DSPy doit en avoir un.
 - Sous **Budget**, laissez **Exécutions du scoreur max.** à sa valeur par défaut de 200.
 
 Lisez [Moteurs](/docs/concepts/engines) pour choisir un moteur précis.
@@ -57,11 +57,13 @@ Lisez [Moteurs](/docs/concepts/engines) pour choisir un moteur précis.
 La dernière étape est **Métrique et exécution** (« Code et métrique »). Vous écrivez deux fichiers.
 
 ```python tab="run.py"
-from skynet import llm
+import dspy
+
+program = dspy.Predict("message -> label")
 
 
 def run(artifact, input):
-    return llm(artifact, input=input["message"])
+    return program(message=input["message"]).label
 ```
 
 ```python tab="metric.py"
@@ -73,7 +75,7 @@ def score(input, output, expected=None):
     return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`artifact` est la version actuelle de votre prompt. `input` contient les colonnes d'entrée d'un cas. `expected` contient la colonne de sortie, indexée par le nom de la colonne.
+`artifact` est l'instruction actuelle que propose l'optimiseur. Skynet l'applique à `program`. `input` contient les colonnes d'entrée d'un cas. `expected` contient la colonne de sortie, indexée par le nom de la colonne.
 
 Sélectionnez ensuite **Vérifier** sous **Vérification du contrat**. La vérification exécute votre code et votre métrique dans la sandbox sur 3 cas d'exemple. Elle contrôle :
 

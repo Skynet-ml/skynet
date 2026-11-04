@@ -1,4 +1,4 @@
-Bu sayfa, ilk çalıştırmanızı yaklaşık on dakikada nasıl başlatacağınızı gösterir. Giriş yapar, küçük bir veri kümesi yükler, sihirbazın dört adımını doldurur ve çalıştırmayı başlatırsınız. Örnek, destek mesajlarını etiketlere ayıran bir istemi iyileştirir.
+Bu sayfa, ilk çalıştırmanızı yaklaşık on dakikada nasıl başlatacağınızı gösterir. Giriş yapar, küçük bir veri kümesi yükler, sihirbazın dört adımını doldurur ve çalıştırmayı başlatırsınız. Örnek, destek mesajlarını etiketlere ayıran bir DSPy programını iyileştirir.
 
 ## Başlamadan önce
 
@@ -25,8 +25,8 @@ Skynet'e giriş yapın. Ardından `/submit` adresindeki gönderme sayfasını a�
 
 1. **Amaç** alanına iyi bir sonucun ne olduğunu yazın. Sade bir dil kullanın, örneğin "Her destek mesajını faturalandırma, hata veya diğer olarak sınıflandır."
 2. İsteğe bağlı: **Arka plan** alanına optimize ediciye yardımcı olacak bağlamı ekleyin.
-3. **Yapıt türü** alanında **İstem**'i seçin.
-4. **Başlangıç sürümü** alanına mevcut isteminizi yapıştırın.
+3. **Neyin optimize edileceği** alanında **DSPy programı** seçeneğini seçin.
+4. **Başlangıç sürümü** alanına programınızın geçerli talimatını yapıştırın.
 
 ## 3. Girdiler
 
@@ -47,7 +47,7 @@ Kuralların tamamı için [Veri kümeleri ve bölmeler](/docs/concepts/datasets)
 
 - Optimize ediciyi **Auto** olarak bırakın.
 - Bir **Yansıtma modeli** seçin. Optimize edici yeni sürümleri yazmak için bu modeli kullanır. Bu model zorunludur.
-- İsteğe bağlı: bir **Görev modeli** seçin. Çalıştırma kodunuz bu modeli kullanır.
+- Bir **Görev modeli** seçin. Programınız onu kullanır. Bir DSPy programı için zorunludur.
 - **Bütçe** altında **Maksimum puanlayıcı çalıştırması** değerini varsayılan 200'de bırakın.
 
 Belirli bir motor seçmek için [Motorlar](/docs/concepts/engines) sayfasını okuyun.
@@ -57,11 +57,13 @@ Belirli bir motor seçmek için [Motorlar](/docs/concepts/engines) sayfasını o
 Son adım **Metrik ve çalıştırma**'dır ("Kod ve metrik"). İki dosya yazarsınız.
 
 ```python tab="run.py"
-from skynet import llm
+import dspy
+
+program = dspy.Predict("message -> label")
 
 
 def run(artifact, input):
-    return llm(artifact, input=input["message"])
+    return program(message=input["message"]).label
 ```
 
 ```python tab="metric.py"
@@ -73,7 +75,7 @@ def score(input, output, expected=None):
     return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`artifact`, isteminizin mevcut sürümüdür. `input`, bir vakanın Girdi sütunlarını tutar. `expected`, Çıktı sütununu sütun adıyla anahtarlanmış olarak tutar.
+`artifact`, optimize edicinin önerdiği geçerli talimattır. Skynet bunu `program` üzerine uygular. `input`, bir vakanın Girdi sütunlarını tutar. `expected`, Çıktı sütununu sütun adıyla anahtarlanmış olarak tutar.
 
 Ardından **Sözleşme kontrolü** altında **Kontrol et**'i seçin. Kontrol, kodunuzu ve metriğinizi sandbox içinde 3 örnek vaka üzerinde çalıştırır. Şunları kontrol eder:
 

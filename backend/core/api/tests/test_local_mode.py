@@ -354,7 +354,7 @@ def test_host_cli_proposer_is_refused_outside_local_mode(monkeypatch: pytest.Mon
     client, store = _local_submit_client(monkeypatch, local_mode=False)
 
     resp = client.post(
-        "/optimize", json=unified_payload(optimizer={"choice": "gepa", "proposer": {"host_cli": "codex"}})
+        "/optimize", json=unified_payload(optimizer={"choice": "dspy_gepa", "proposer": {"host_cli": "codex"}})
     )
 
     assert resp.status_code == 422
@@ -375,7 +375,7 @@ def test_droid_is_not_a_host_cli_option(monkeypatch: pytest.MonkeyPatch) -> None
         json=unified_payload(
             token_source="subscription",
             models=_SUBSCRIPTION_MODELS,
-            optimizer={"choice": "gepa", "proposer": {"host_cli": "droid"}},
+            optimizer={"choice": "dspy_gepa", "proposer": {"host_cli": "droid"}},
         ),
     )
 
@@ -676,7 +676,7 @@ def test_explicit_proposer_pick_overrides_the_agent_engine(
         json=unified_payload(
             token_source="subscription",
             models=_SUBSCRIPTION_MODELS,
-            optimizer={"choice": "gepa", "proposer": {"host_cli": pick}},
+            optimizer={"choice": "dspy_gepa", "proposer": {"host_cli": pick}},
         ),
     )
 
@@ -786,7 +786,7 @@ def test_local_proposer_stays_in_the_sandbox_without_an_engine_cli(
         json=unified_payload(
             token_source="subscription",
             models=_SUBSCRIPTION_MODELS,
-            optimizer={"choice": "gepa", "proposer": proposer},
+            optimizer={"choice": "dspy_gepa", "proposer": proposer},
         ),
     )
 

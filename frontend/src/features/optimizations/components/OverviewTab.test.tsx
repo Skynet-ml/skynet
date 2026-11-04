@@ -84,7 +84,7 @@ void describe("finished-run Overview fixtures", () => {
   void it("formats DSPy scores as percentages and black-box scores raw", () => {
     const dspy = render(overviewFixture("dspy-single-module"));
     assert.ok(dspy.includes(">42.0%<") || dspy.includes(">42%<"), "DSPy baseline percent");
-    const html = render(overviewFixture("oa-gepa-prompt"));
+    const html = render(overviewFixture("oa-gepa"));
     assert.ok(html.includes(">0.42<") && html.includes(">0.78<"), "raw black-box scores");
   });
 });
@@ -114,7 +114,7 @@ void describe("detail page result layout", () => {
       "the FadeIn wrapper renders only with the notice, so no empty gap sits above the summary",
     );
 
-    const fixture = overviewFixture("oa-gepa-prompt");
+    const fixture = overviewFixture("oa-gepa");
     const job = {
       ...fixture.job,
       blackbox_result: {

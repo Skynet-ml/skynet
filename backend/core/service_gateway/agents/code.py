@@ -50,6 +50,7 @@ from ...i18n import t_locale
 from ...local.cli_catalog import parse_subscription_model_id
 from ...models import ModelConfig, WorkflowSpec
 from ...models.unified import (
+    ARTIFACT_KIND_DSPY_PROGRAM,
     METRIC_FILE,
     METRIC_SIGNATURE,
     RUN_ENTRY,
@@ -973,11 +974,10 @@ _RUN_CONTRACT = """The run code is plain python that turns one case input into a
 
 _RUN_ENTRY = (
     f"define {RUN_ENTRY}: "
-    """artifact is the version under optimization (a str, or a dict of name -> text when the starting version is a mapping), exactly as the optimizer proposes it; input is one case input, a dict keyed by the input fields. Return the output: a str, or any JSON-serializable value the metric reads.
-- The task model comes from the skynet module: `from skynet import llm` (never define your own). llm(prompt, input=None, images=None) -> str; llm(artifact, input["<input field>"]) runs the artifact as the system message with that field as the user message and returns the reply; that is how a prompt is exercised. llm() caps the reply length itself (the task model's max tokens, or a default), so never pass a token limit. images= attaches PNG/JPEG bytes, file paths or data: URLs.
-- Per artifact kind: a prompt is exercised with llm(artifact, ...); code is python source to load with exec into a fresh dict namespace (or write to a temp file and run with subprocess and a timeout) and call on the input; text is used as written (return it, or apply it with llm when the objective is about what the text makes a model do).
-- The metric is written separately and relies on this output shape, so keep to it: a prompt or text returns the reply str unchanged (never wrap it in a dict), code returns what the code returns, a DSPy program returns its dspy.Prediction.
-- A DSPy program uses the same run(artifact, input): `import dspy` at the top, define the dspy.Signature classes and the dspy.Module in the run code, build ONE instance of the module at module level as `program = MyProgram()`, and have run return program(**input) (the dspy.Prediction it returns is the output). Every optimizer finds that module-level program and tunes its predictors itself: it applies the version under optimization (artifact is then a dict mapping each predictor name, as program.named_predictors() reports it, to its instruction text) and binds the task model as the dspy LM, so never set instructions, call dspy.configure or create a dspy.LM yourself. Name the predictors so they match the keys of the starting version, name the signature's input fields exactly as the case input fields, and name the output fields so the metric can read output.<field>."""
+    """artifact is the version under optimization, exactly as the optimizer proposes it; input is one case input, a dict keyed by the input fields. Return the output: the dspy.Prediction the program returns.
+- The task model comes from the skynet module: `from skynet import llm` (never define your own). llm(prompt, input=None, images=None) -> str. llm() caps the reply length itself (the task model's max tokens, or a default), so never pass a token limit. images= attaches PNG/JPEG bytes, file paths or data: URLs.
+- The metric is written separately and relies on this output shape, so keep to it: return the dspy.Prediction unchanged.
+- The artifact is a DSPy program: `import dspy` at the top, define the dspy.Signature classes and the dspy.Module in the run code, build ONE instance of the module at module level as `program = MyProgram()`, and have run return program(**input) (the dspy.Prediction it returns is the output). Every optimizer finds that module-level program and tunes its predictors itself: it applies the version under optimization (artifact is then a dict mapping each predictor name, as program.named_predictors() reports it, to its instruction text) and binds the task model as the dspy LM, so never set instructions, call dspy.configure or create a dspy.LM yourself. Name the predictors so they match the keys of the starting version, name the signature's input fields exactly as the case input fields, and name the output fields so the metric can read output.<field>."""
 )
 
 _METRIC_CONTRACT = (
@@ -985,7 +985,7 @@ _METRIC_CONTRACT = (
 - Define """
     + METRIC_SIGNATURE
     + """.
-- input is the case input dict (keyed by the input fields), output is exactly what run returned for it, and it is written without seeing the run code, so read it by the artifact kind: for a prompt or text it is the reply str (compare or parse the text; never call .get or getattr on it), for a DSPy program the dspy.Prediction (read output.<field>), for code whatever the code returns (check its type before reading into it), expected is the case's expected output as a dict keyed by the expected field (read expected["<field>"]; None when the case has none). Declare expected only when you use it.
+- input is the case input dict (keyed by the input fields), output is exactly what run returned for it, the DSPy program's dspy.Prediction (read output.<field>), and the metric is written without seeing the run code; expected is the case's expected output as a dict keyed by the expected field (read expected["<field>"]; None when the case has none). Declare expected only when you use it.
 - Return (score, side_info): score is a float, higher is better, 0.0 to 1.0 by convention; side_info is a dict with "feedback": str saying WHY the output scored that, naming the expected value or the failed check, because the optimizer learns from it. When several things are measured, add "scores": {"<name>": float, ...}, one entry per thing; the top-level score is then their (weighted) combination."""
 )
 
@@ -1063,7 +1063,7 @@ class GenerateRunCode(dspy.Signature):
 
     objective: str = dspy.InputField(desc="What a better version of the artifact achieves.")
     background: str = dspy.InputField(desc="Context, constraints and examples; may be empty.")
-    artifact_kind: str = dspy.InputField(desc="prompt | code | dspy_program | text.")
+    artifact_kind: str = dspy.InputField(desc="dspy_program, or repo for a repository run.")
     starting_version: str = dspy.InputField(desc="The artifact's starting version (JSON for a mapping).")
     case_fields: list[str] = dspy.InputField(desc="Keys of every case input dict (the input fields).")
     expected_field: str = dspy.InputField(desc="Column the expected output came from; empty when none.")
@@ -1095,7 +1095,7 @@ class GenerateUnifiedMetric(dspy.Signature):
 
     objective: str = dspy.InputField(desc="What a better version of the artifact achieves.")
     background: str = dspy.InputField(desc="Context, constraints and examples; may be empty.")
-    artifact_kind: str = dspy.InputField(desc="prompt | code | dspy_program | text.")
+    artifact_kind: str = dspy.InputField(desc="dspy_program, or repo for a repository run.")
     case_fields: list[str] = dspy.InputField(desc="Keys of every case input dict (the input fields).")
     expected_field: str = dspy.InputField(desc="Column the expected output came from; empty when none.")
     sample_cases: str = dspy.InputField(desc="JSON array of up to 5 cases, each {input, expected}.")
@@ -1228,7 +1228,7 @@ class UnifiedAssistant(dspy.Signature):
 
     objective: str = dspy.InputField(desc="What a better version of the artifact achieves.")
     background: str = dspy.InputField(desc="Context, constraints and examples; may be empty.")
-    artifact_kind: str = dspy.InputField(desc="prompt | code | dspy_program | text.")
+    artifact_kind: str = dspy.InputField(desc="dspy_program, or repo for a repository run.")
     starting_version: str = dspy.InputField(desc="The artifact's starting version (JSON for a mapping).")
     focus: str = dspy.InputField(desc="'run' or 'metric' — the editor the user is looking at.")
     case_fields: list[str] = dspy.InputField(desc="Keys of every case input dict (the input fields).")
@@ -3236,7 +3236,7 @@ def _unified_verifier(unified: dict[str, Any]) -> WorkspaceVerifier:
     if _is_repo(unified):
         return _verify_repo_scorer
     task = unified.get("task") or {}
-    kind = (task.get("artifact") or {}).get("kind") or "prompt"
+    kind = (task.get("artifact") or {}).get("kind") or ARTIFACT_KIND_DSPY_PROGRAM
     optimizer = resolve_optimizer(unified.get("optimizer") or "auto", kind)
 
     def _verify(run_code: str, metric_code: str, files: dict[str, str]) -> list[dict[str, Any]]:
@@ -4071,7 +4071,7 @@ def _unified_inputs(unified: dict[str, Any]) -> dict[str, Any]:
     return {
         "objective": str(task.get("objective", "")).strip(),
         "background": str(task.get("background", "") or "").strip(),
-        "artifact_kind": str(artifact.get("kind", "prompt")),
+        "artifact_kind": "repo" if _is_repo(unified) else str(artifact.get("kind") or ARTIFACT_KIND_DSPY_PROGRAM),
         "starting_version": version if isinstance(version, str) else json.dumps(version, ensure_ascii=False),
         "case_fields": case_fields,
         "expected_field": str(unified.get("expected_field") or ""),

@@ -11,20 +11,11 @@ function result(best: BlackboxRunResult["best_candidate"]): BlackboxRunResult {
   return { best_candidate: best } as BlackboxRunResult;
 }
 
-test("the legacy prompt recipe keeps the prompt wording", () => {
-  assert.deepEqual(
-    describeBlackboxArtifact(null, payload({ recipe: "prompt", seed_candidate: "Be brief" })),
-    {
-      kind: "prompt",
-    },
-  );
-});
-
 test("a single-file starting point names the file", () => {
   assert.deepEqual(
     describeBlackboxArtifact(
       null,
-      payload({ recipe: "anything", seed_candidate: { "AGENTS.md": "# Rules" } }),
+      payload({ seed_candidate: { "AGENTS.md": "# Rules" } }),
     ),
     { kind: "file", name: "AGENTS.md" },
   );
@@ -32,7 +23,7 @@ test("a single-file starting point names the file", () => {
 
 test("a text starting point hands its text over for kind detection", () => {
   assert.deepEqual(
-    describeBlackboxArtifact(null, payload({ recipe: "code", seed_candidate: "import os" })),
+    describeBlackboxArtifact(null, payload({ seed_candidate: "import os" })),
     {
       kind: "text",
       text: "import os",

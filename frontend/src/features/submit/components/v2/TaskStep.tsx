@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { ArrowCounterClockwise, Code, GithubLogo } from "@/shared/ui/icons";
+import { ArrowCounterClockwise, Brain, GithubLogo } from "@/shared/ui/icons";
 import {
   AgentThread,
   ChatTranscript,
@@ -32,9 +32,10 @@ import {
 import { useWizardV2, useWizardV2Shell } from "../../hooks/use-unified-wizard";
 import { taskAdvanceFrom } from "../../lib/auto-advance";
 import { INTERVIEW_TURN_MAX_CHARS } from "../../lib/interview-turn";
-import { emptyRepoDraft, taskIssue } from "../../lib/wizard-v2";
+import { REPO_NAME_PATTERN, taskIssue } from "../../lib/wizard-v2";
 import { AuthoringShell } from "../steps/AuthoringShell";
 import { ArtifactConfirmCard, v2Msg } from "./ArtifactConfirmCard";
+import { InterviewRepoMatches } from "./InterviewRepoMatches";
 import { RepoTargetCard } from "./RepoTargetCard";
 import { WizardScreen } from "./WizardScreen";
 
@@ -46,7 +47,7 @@ import { WizardScreen } from "./WizardScreen";
  */
 export function TaskStep({ page }: { page: number }) {
   const ctx = useWizardV2();
-  const { state, guided, patchTask, patchInputs, patchOptimizer } = ctx;
+  const { state, guided, patchTask } = ctx;
   const task = state.task;
   const t = (key: string) => v2Msg(key, guided);
 
@@ -80,6 +81,9 @@ export function TaskStep({ page }: { page: number }) {
           interview={interview}
           guided={guided}
           firstPass={state.furthestStep === "task"}
+          repoSearch={
+            Boolean(task.repo) && !REPO_NAME_PATTERN.test(task.repo?.repository.trim() ?? "")
+          }
           className="absolute inset-0"
         />
       }
@@ -110,26 +114,17 @@ export function TaskStep({ page }: { page: number }) {
         active={page === 1}
         className="relative flex flex-col gap-5 px-4 py-5 sm:px-6 sm:py-6"
       >
-        <Segmented<"artifact" | "repo">
+        <Segmented<"dspy_program" | "repo">
           label={t("submit.v2.repo.target_label")}
-          value={task.repo ? "repo" : "artifact"}
-          onChange={(target) => {
-            // The engine catalog is keyed on a kind and mode, so a repository
-            // stands in as code scored one case at a time, as a clone does.
-            if (target === "repo") {
-              patchTask({ repo: task.repo ?? emptyRepoDraft(), artifactKind: "code" });
-              patchInputs({ mode: "single" });
-              // Auto, the default, has no repository strategy, so the first named engine stands in.
-              if (state.optimizer.choice === "auto") patchOptimizer({ choice: "gepa" });
-            } else patchTask({ repo: null });
-          }}
+          value={task.repo ? "repo" : "dspy_program"}
+          onChange={interview.setTarget}
           className="w-full"
           options={[
             {
-              value: "artifact",
-              label: t("submit.blackbox.repo.kind_text"),
-              tip: t("submit.blackbox.repo.kind_text_desc"),
-              icon: <Code className="size-3.5" aria-hidden="true" />,
+              value: "dspy_program",
+              label: t("submit.v2.task.artifact.kind.dspy_program"),
+              tip: t("submit.v2.task.artifact.kind.dspy_program.desc"),
+              icon: <Brain className="size-3.5" aria-hidden="true" />,
             },
             {
               value: "repo",
@@ -149,7 +144,6 @@ export function TaskStep({ page }: { page: number }) {
         ) : (
           <ArtifactConfirmCard
             kind={task.artifactKind}
-            onKindChange={(k) => interview.editField("artifactKind", k)}
             startingVersion={task.startingVersion}
             onStartingVersionChange={(v) => interview.editField("startingVersion", v)}
             rationale={task.artifactRationale}
@@ -212,6 +206,7 @@ function TaskInterviewPanel({
   interview,
   guided,
   firstPass,
+  repoSearch,
   className,
 }: {
   interview: TaskInterviewState;
@@ -219,6 +214,8 @@ function TaskInterviewPanel({
   // The "has what it needs" note announces the move on; once the user is
   // past this step it would only be stale.
   firstPass: boolean;
+  /** The run targets a repository and none is chosen yet. */
+  repoSearch: boolean;
   className?: string;
 }) {
   const [draft, setDraft] = React.useState("");
@@ -299,7 +296,11 @@ function TaskInterviewPanel({
         </p>
       )}
 
-      {!interview.error && interview.options.length > 0 && !interview.busy && (
+      {repoSearch && !interview.error && !interview.busy && interview.messages.length > 0 && (
+        <InterviewRepoMatches query={interview.repoQuery} onPick={interview.pickRepo} />
+      )}
+
+      {!repoSearch && !interview.error && interview.options.length > 0 && !interview.busy && (
         <QuestionChoices
           options={interview.options.map((o) => ({
             label: o.label,
@@ -321,6 +322,7 @@ function TaskInterviewPanel({
         acceptsMidTurn={fitsInterview}
         suggest={{ messages: interview.messages, model: interview.model }}
         placeholder={t("submit.v2.task.chat.placeholder")}
+        attachments={false}
         modelMenu={
           <ComposerModelMenu
             value={interview.model}

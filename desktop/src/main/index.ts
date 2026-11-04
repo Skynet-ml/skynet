@@ -369,7 +369,7 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
   watchForCrash(apiProc, "The API");
   watchForCrash(feProc, "The web app");
 
-  // Sign-in to a Skynet account comes first; "Use without signing in" skips it.
+  // The app opens only for a Mac linked to a Skynet account.
   hostedLink = new HostedLinkClient(apiOrigin, secrets.backendAuthSecret);
   await hostedLink.ensureLocalUser();
   let linked = false;
@@ -395,7 +395,7 @@ async function openApp(): Promise<void> {
  * Open the hosted sign-in (skynetml.com) in the default browser. The page
  * links the account and opens skynet://link/callback, which brings the result
  * back to handleAppUrl. Without a hosted link (or on an error) the onboarding
- * card offers a retry and "Use without signing in".
+ * card offers a retry.
  */
 async function signIn(): Promise<void> {
   if (state.kind !== "sign_in" || !hostedLink) return;
@@ -470,11 +470,6 @@ async function handleAppUrl(raw: string): Promise<void> {
   } finally {
     finishingSignIn = false;
   }
-}
-
-function skipSignIn(): void {
-  log("sign-in skipped");
-  void openApp();
 }
 
 function watchForCrash(proc: ManagedProcess, label: string): void {
@@ -634,7 +629,6 @@ ipcMain.handle("onboarding:open-logs", () => shell.openPath(logsDir));
 ipcMain.handle("onboarding:sign-in", () => {
   void signIn();
 });
-ipcMain.handle("onboarding:skip-sign-in", () => skipSignIn());
 ipcMain.on("theme:changed", (event, value: unknown) => {
   const theme = parseTheme(value);
   if (event.sender !== win?.webContents || !theme || theme === reportedTheme) return;

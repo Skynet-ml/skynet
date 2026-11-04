@@ -45,7 +45,7 @@ Authorization: Bearer skyd_...
 | `GET /models`                                   | מציג את המודלים שזמינים לך.                       |
 | `GET /optimizers`                               | מציג את האופטימייזרים שמתאימים להגדרות.           |
 | `GET /blackbox/engines`                         | מציג את המנועים המובנים ואם כל אחד מהם זמין.      |
-| `POST /optimize`                                | מפעיל ריצה עבור פרומפט, קוד, טקסט או תוכנית DSPy. |
+| `POST /optimize` | מפעיל ריצה עבור תוכנית DSPy. |
 | `POST /blackbox/run`                            | מפעיל ריצה על מאגר GitHub.                        |
 | `GET /optimizations`                            | מציג את הריצות שלך.                               |
 | `GET /optimizations/{optimization_id}`          | מחזיר ריצה אחת: סטטוס, התקדמות, לוגים ותוצאה.     |
@@ -56,7 +56,7 @@ Authorization: Bearer skyd_...
 
 ## הפעלת ריצה
 
-`POST /optimize` מקבל את אותן הגדרות כמו אשף ההגשה. הדוגמה הזו משפרת פרומפט שממיין הודעות תמיכה לתוויות.
+`POST /optimize` מקבל את אותן הגדרות כמו אשף ההגשה. הדוגמה משפרת תוכנית DSPy שממיינת הודעות תמיכה לתוויות.
 
 ```bash tab="curl"
 curl https://api.skynetml.com/optimize \
@@ -72,7 +72,7 @@ curl https://api.skynetml.com/optimize \
   "task": {
     "objective": "Sort each support message into billing, bug or other.",
     "artifact": {
-      "kind": "prompt",
+      "kind": "dspy_program",
       "starting_version": "Label this support message as billing, bug or other."
     }
   },
@@ -93,7 +93,7 @@ curl https://api.skynetml.com/optimize \
     "reflection_model": { "name": "<model from GET /models>" }
   },
   "workspace": {
-    "run_code": "from skynet import llm\n\ndef run(artifact, input):\n    return llm(artifact, input=input[\"message\"])\n",
+    "run_code": "import dspy\n\nprogram = dspy.Predict(\"message -> label\")\n\n\ndef run(artifact, input):\n    return program(message=input[\"message\"]).label\n",
     "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
   },
   "max_cost_cents": 500
@@ -102,7 +102,7 @@ curl https://api.skynetml.com/optimize \
 
 שדות חשובים:
 
-- `task.artifact.kind` הוא `prompt`,‏ `code`,‏ `text` או `dspy_program`.
+- `task.artifact.kind` הוא `dspy_program`.
 - `data.mode` הוא `pairs` (קלטים עם פלטים צפויים) או `single` (מקרה אחד בדיוק).
 - `optimizer.choice` הוא `auto` או שם של אופטימייזר אחד מ-`GET /optimizers`.
 - `max_cost_cents` היא תקרת ההוצאה של הריצה הזו, בסנטים אמריקאיים.

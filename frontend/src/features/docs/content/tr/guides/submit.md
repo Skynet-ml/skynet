@@ -16,14 +16,7 @@ Görevinizi **Görev görüşmesi** sohbetinde asistana anlatın. Asistan sizin 
 
 ### Ne optimize edilecek
 
-**Yapıt türü** seçin:
-
-| Yapıt türü    | Ne değişir                                         |
-| ------------- | -------------------------------------------------- |
-| İstem         | Bir dil modeline gönderilen talimatlar             |
-| Kod           | Bir programın kaynak kodu                          |
-| DSPy programı | Bir DSPy modülünün tahminci (predictor) talimatları |
-| Metin         | Belge veya şablon gibi başka herhangi bir metin    |
+**Neyin optimize edileceği** alanında **DSPy programı** veya **Bir GitHub deposu** seçeneğini seçin.
 
 Ardından **Başlangıç sürümü** (Rehberli: **Nereden başlıyoruz**) değerini verin. Geçerli sürümü yapıştırın veya asistanın bir taslak yazmasına izin verin.
 

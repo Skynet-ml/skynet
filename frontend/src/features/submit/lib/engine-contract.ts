@@ -4,7 +4,7 @@ import type {
 } from "@/shared/types/api";
 import {
   resolveOptimizer,
-  type ArtifactKind,
+  type OptimizerTarget,
   type OptimizerChoice,
 } from "@/shared/types/unified-run";
 
@@ -13,7 +13,7 @@ import {
  * engines drive one; DSPy optimizers, GEPA and Best-of-N call their
  * optimization model directly, and ShinkaEvolve edits through its own editor.
  */
-export function usesNativeProposer(choice: OptimizerChoice, kind: ArtifactKind): boolean {
+export function usesNativeProposer(choice: OptimizerChoice, kind: OptimizerTarget): boolean {
   const resolved = resolveOptimizer(choice, kind);
   return (
     resolved === "auto" ||
@@ -43,7 +43,7 @@ export const MAX_TOOL_CALLS_LIMITS = { min: 1, max: 1_000 } as const;
 /** Which engine-specific proposer knobs the choice exposes; black-box Auto may run any engine. */
 export function proposerKnobs(
   choice: OptimizerChoice,
-  kind: ArtifactKind,
+  kind: OptimizerTarget,
 ): { candidates: boolean; ralph: boolean } {
   const resolved = resolveOptimizer(choice, kind);
   const auto = resolved === "auto";
@@ -57,7 +57,7 @@ export function proposerKnobs(
 export function submittedProposer(
   proposer: BlackboxProposer,
   choice: OptimizerChoice,
-  kind: ArtifactKind,
+  kind: OptimizerTarget,
 ): BlackboxProposer {
   const knobs = proposerKnobs(choice, kind);
   return {
@@ -79,7 +79,7 @@ export function submittedProposer(
 export function submittedRunProposer(input: {
   proposer: BlackboxProposer;
   choice: OptimizerChoice;
-  kind: ArtifactKind;
+  kind: OptimizerTarget;
   shinka: BlackboxShinkaSettings | null;
 }): BlackboxProposer | undefined {
   const { proposer, choice, kind, shinka } = input;
@@ -93,7 +93,7 @@ export function submittedRunProposer(input: {
 }
 
 /** Whether the resolved engine honours `budget.max_iterations`. */
-export function supportsIterationLimit(choice: OptimizerChoice, kind: ArtifactKind): boolean {
+export function supportsIterationLimit(choice: OptimizerChoice, kind: OptimizerTarget): boolean {
   const resolved = resolveOptimizer(choice, kind);
   return (
     resolved === "meta_harness" || resolved === "autosaddler" || resolved === "shinka_evolve"
@@ -104,6 +104,6 @@ export function supportsIterationLimit(choice: OptimizerChoice, kind: ArtifactKi
 export const AUTO_MIN_SCORER_RUNS = 6;
 
 /** The smallest scorer-run budget the resolved optimizer can spend. */
-export function minScorerRuns(choice: OptimizerChoice, kind: ArtifactKind): number {
+export function minScorerRuns(choice: OptimizerChoice, kind: OptimizerTarget): number {
   return resolveOptimizer(choice, kind) === "auto" ? AUTO_MIN_SCORER_RUNS : 1;
 }

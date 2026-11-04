@@ -12,7 +12,9 @@ import type {
   SplitFractions,
 } from "@/shared/types/api";
 
-export type ArtifactKind = "prompt" | "code" | "dspy_program" | "text";
+export type ArtifactKind = "dspy_program";
+/** What the optimizer catalog is keyed on: a unified run's artifact, or a repository run. */
+export type OptimizerTarget = ArtifactKind | "repo";
 export type DataMode = "single" | "pairs";
 export type OptimizerChoice =
   | "auto"
@@ -43,19 +45,23 @@ const FEEDBACK_OPTIMIZERS: ReadonlySet<string> = new Set(["dspy_gepa", "gepa", "
 export const MIN_PAIRS_FOR_HELD_OUT = 5;
 export const CONTRACT_SAMPLE_MAX = 5;
 
-/** Optimizer choices that fit an artifact kind and data mode, `"auto"` first. */
-export function optimizersFor(kind: ArtifactKind, mode: DataMode): OptimizerChoice[] {
-  if (kind === "dspy_program") {
+/**
+ * Optimizer choices that fit a target and data mode. A DSPy program lists
+ * `"auto"` first; a repository run lists only the black-box engines, as Auto
+ * has no repository strategy.
+ */
+export function optimizersFor(target: OptimizerTarget, mode: DataMode): OptimizerChoice[] {
+  if (target === "dspy_program") {
     return mode === "pairs"
       ? ["auto", "dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"]
       : ["auto", "dspy_gepa"];
   }
-  return ["auto", ...BLACKBOX_OPTIMIZERS];
+  return [...BLACKBOX_OPTIMIZERS];
 }
 
 /** The optimizer that actually runs: Auto is DSPy GEPA on a DSPy program, else the black-box Auto strategy. */
-export function resolveOptimizer(choice: OptimizerChoice, kind: ArtifactKind): string {
-  if (choice === "auto") return kind === "dspy_program" ? "dspy_gepa" : "auto";
+export function resolveOptimizer(choice: OptimizerChoice, target: OptimizerTarget): string {
+  if (choice === "auto") return target === "dspy_program" ? "dspy_gepa" : "auto";
   return choice;
 }
 
@@ -66,8 +72,8 @@ export function optimizerFamily(resolved: string): OptimizerFamily {
 }
 
 /** Whether the resolved optimizer reads the metric's feedback text. */
-export function usesFeedback(choice: OptimizerChoice, kind: ArtifactKind): boolean {
-  return FEEDBACK_OPTIMIZERS.has(resolveOptimizer(choice, kind));
+export function usesFeedback(choice: OptimizerChoice, target: OptimizerTarget): boolean {
+  return FEEDBACK_OPTIMIZERS.has(resolveOptimizer(choice, target));
 }
 
 export interface UnifiedCase {
@@ -169,9 +175,9 @@ export interface OptimizerOption {
 }
 
 export interface OptimizerCatalogResponse {
-  artifact_kind: ArtifactKind;
+  artifact_kind: OptimizerTarget;
   data_mode: DataMode;
-  /** The run code's entry point; the same for every artifact kind and optimizer. */
+  /** The run code's entry point; the same for every optimizer. */
   run_entry: string;
   /** The metric's exact signature, as the coding agent is told; the same for every optimizer. */
   metric_signature: string;
@@ -310,11 +316,21 @@ export interface TaskInterviewRequest {
   artifact_kind?: ArtifactKind | null;
   starting_version?: UnifiedCandidate | null;
   sample_cases?: Array<Record<string, unknown>>;
+  target?: OptimizerTarget | null;
+  repo_context?: TaskInterviewRepoContext | null;
   locale?: string | null;
   model?: string | null;
   reasoning_effort?: string | null;
   /** Runs a local CLI model in its fast mode; the backend ignores it elsewhere. */
   fast_mode?: boolean;
+}
+
+/** The chosen repository's README and file tree, cut to the server's caps. */
+export interface TaskInterviewRepoContext {
+  repository: string;
+  readme: string;
+  paths: string[];
+  truncated: boolean;
 }
 
 export interface TaskInterviewTurnResult {
@@ -326,6 +342,11 @@ export interface TaskInterviewTurnResult {
   artifact_kind?: ArtifactKind | null;
   starting_version?: UnifiedCandidate | null;
   artifact_rationale: string;
+  target?: OptimizerTarget | null;
+  /** The repository the user named: `owner/name` for a GitHub link, else their words. */
+  repo_query?: string;
+  /** Whether the run needs example data; null while the interview cannot tell. */
+  needs_data?: boolean | null;
   model?: string | null;
   served_model?: string | null;
 }
@@ -333,7 +354,7 @@ export interface TaskInterviewTurnResult {
 export interface InputsInferenceRequest {
   objective: string;
   background?: string;
-  artifact_kind: ArtifactKind;
+  artifact_kind: OptimizerTarget;
   starting_version?: UnifiedCandidate | null;
   columns?: string[];
   sample_rows?: Array<Record<string, unknown>>;
@@ -356,7 +377,8 @@ export interface InputsInferenceResponse {
 }
 
 export interface UnifiedAuthoringContext {
-  task: UnifiedTask;
+  /** A repository run has no artifact, so its task carries none. */
+  task: Omit<UnifiedTask, "artifact"> & { artifact?: UnifiedArtifact };
   data_mode: DataMode;
   input_fields?: string[];
   expected_field?: string | null;

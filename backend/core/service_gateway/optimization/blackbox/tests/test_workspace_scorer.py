@@ -17,28 +17,32 @@ from ..sandbox import LocalSubprocessRuntime, SandboxSession, SandboxSpec
 from ..workspace_scorer import HARNESS_FILE, build_workspace_scorer
 from .mocks import FakeGateway
 
-RUN_CODE = "def run(artifact, input):\n    return artifact + ':' + input['q']\n"
+PROGRAM = "import dspy\nprogram = dspy.Predict('q -> answer')\n"
+RUN_CODE = (
+    PROGRAM + "def run(artifact, input):\n"
+    "    return dspy.Prediction(answer=program.signature.instructions + ':' + input['q'])\n"
+)
 SECRET = "SECRET_METRIC_MARKER_93"
 METRIC_CODE = (
     f"# {SECRET}\n"
     "def score(input, output, expected=None):\n"
-    "    return float(output == expected), {'feedback': 'compared'}\n"
+    "    return float(output.answer == expected), {'feedback': 'compared'}\n"
 )
 
 
 def _payload(
     *, run_code: str = RUN_CODE, metric_code: str = METRIC_CODE, metric_model: str | None = None
 ) -> UnifiedRunRequest:
-    """Build a pairs-mode prompt run on the blackbox metric shape."""
+    """Build a pairs-mode DSPy program run."""
     payload = UnifiedRunRequest.model_validate(
         {
-            "task": {"objective": "o", "artifact": {"kind": "prompt", "starting_version": "p"}},
+            "task": {"objective": "o", "artifact": {"kind": "dspy_program", "starting_version": "p"}},
             "data": {
                 "mode": "pairs",
                 "cases": [{"input": {"q": str(i)}, "expected": f"p:{i}"} for i in range(6)],
                 "input_fields": ["q"],
             },
-            "optimizer": {"choice": "best_of_n"},
+            "optimizer": {"choice": "dspy_gepa"},
             "models": {
                 "reflection_model": {"name": "openrouter/task"},
                 "metric_model": {"name": metric_model} if metric_model else None,
@@ -143,7 +147,7 @@ def test_run_many_scores_every_case_in_order_in_one_box() -> None:
 
 def test_user_error_reaches_the_optimizer_as_type_and_message_only() -> None:
     """A crash in the run code is ``(0.0, {"error": "Type: msg"})`` with no source or traceback."""
-    run_code = "def run(artifact, input):\n    raise ValueError('bad input')\n"
+    run_code = PROGRAM + "def run(artifact, input):\n    raise ValueError('bad input')\n"
     with FakeGateway(reply="unused") as gw:
         scorer = build_workspace_scorer(
             _payload(run_code=run_code),
@@ -160,7 +164,7 @@ def test_user_error_reaches_the_optimizer_as_type_and_message_only() -> None:
 
 
 def test_shape_mismatch_aborts_the_run() -> None:
-    """A blackbox metric returning a bare float stops the run."""
+    """A metric returning a bare float stops the run."""
     metric = "def score(input, output):\n    return 1.0\n"
     with FakeGateway(reply="unused") as gw:
         scorer = build_workspace_scorer(
@@ -178,11 +182,14 @@ def test_shape_mismatch_aborts_the_run() -> None:
 
 def test_run_and_metric_call_their_own_models_and_both_are_billed() -> None:
     """``llm`` is the task model in run code and the metric model in the metric."""
-    run_code = "from skynet import llm\ndef run(artifact, input):\n    return llm(artifact, input['q'])\n"
+    run_code = (
+        "from skynet import llm\n" + PROGRAM + "def run(artifact, input):\n"
+        "    return dspy.Prediction(answer=llm(program.signature.instructions, input['q']))\n"
+    )
     metric = (
         "from skynet import llm\n"
         "def score(input, output):\n"
-        "    return float(llm('judge', output, model='openrouter/judge-model')), {'feedback': 'judged'}\n"
+        "    return float(llm('judge', output.answer, model='openrouter/judge-model')), {'feedback': 'judged'}\n"
     )
 
     def reply(body: dict[str, Any]) -> str:
@@ -203,7 +210,7 @@ def test_run_and_metric_call_their_own_models_and_both_are_billed() -> None:
         models = [request["body"]["model"] for request in gw.requests]
 
     assert probe.score == 0.5
-    assert probe.output_preview == "generated"
+    assert probe.output_preview == '{"answer": "generated"}'
     assert models == ["task", "judge-model"]
     billed: dict[str, tuple[int, int]] = {}
     for ledger in scorer.ledgers:
@@ -213,7 +220,10 @@ def test_run_and_metric_call_their_own_models_and_both_are_billed() -> None:
 
 def test_probe_carries_the_harness_observation_with_queue_and_evaluation_time() -> None:
     """The scorer adds the box wait and the whole boxed call to the harness's run-stage timing and cost."""
-    run_code = "from skynet import llm\ndef run(artifact, input):\n    return llm(artifact, input['q'])\n"
+    run_code = (
+        "from skynet import llm\n" + PROGRAM + "def run(artifact, input):\n"
+        "    return dspy.Prediction(answer=llm(program.signature.instructions, input['q']))\n"
+    )
     metric = "def score(input, output):\n    return 1.0, {'feedback': 'ok'}\n"
     with FakeGateway(reply="generated", cost=0.003) as gw:
         scorer = build_workspace_scorer(

@@ -14,13 +14,14 @@ re-sent on every turn.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, get_args
 
 import dspy
 
 from ...api.model_catalog import agent_model_id
 from ...config import settings
-from ...models import ArtifactKind, ModelConfig, TaskInterviewTurnResult
+from ...models import ArtifactKind, ModelConfig, OptimizerTarget, TaskInterviewTurnResult
 from ...models.blackbox import BlackboxCandidate
 from .answer_options import normalize_options
 from .code import _build_agent_lm, _reply_language
@@ -31,28 +32,48 @@ ARTIFACT_KINDS: tuple[str, ...] = get_args(ArtifactKind)
 OPENING_QUESTION = "what do you want to optimize?"
 MAX_SAMPLE_CASE_CHARS = 4000
 """Cap on the JSON of the sample cases fed to the model, per turn."""
+MAX_REPO_QUERY_CHARS = 200
+_REPO_TARGET_ALIASES = {"repo", "repository", "github", "github_repo", "github_repository", "git_repo"}
+_GITHUB_LINK = re.compile(
+    r"(?:https?://)?(?:www\.)?github\.com[/:](?P<owner>[A-Za-z0-9_.-]{1,100})/(?P<name>[A-Za-z0-9_.-]{1,100}?)"
+    r"(?:\.git)?(?=[/?#\s]|$)",
+    re.IGNORECASE,
+)
 
+# A prompt is the instruction of a DSPy program's predictor, so it names one.
 _ARTIFACT_KIND_ALIASES = {
     "dspy": "dspy_program",
     "program": "dspy_program",
     "dspy_module": "dspy_program",
-    "system_prompt": "prompt",
-    "python": "code",
-    "function": "code",
-    "document": "text",
+    "prompt": "dspy_program",
+    "system_prompt": "dspy_program",
 }
 
 
 class TaskInterviewTurnSig(dspy.Signature):
     __doc__ = with_conduct("""Run one turn of the interview that sets up what the user wants to optimize.
 
-    You are a sharp engineer helping someone set up an optimization run on
-    a prompt- and program-optimization platform. The run improves one
-    artifact: a ``prompt`` (an LLM prompt or system prompt), ``code`` (a
-    Python function or snippet), a ``dspy_program`` (a DSPy module whose
-    predictor instructions get tuned) or ``text`` (any other text, e.g. a
-    template or a policy). You write everything; the user only answers and
-    confirms.
+    You are a sharp engineer helping someone set up an optimization run.
+    The run improves one of two targets, set in ``target``:
+    - ``dspy_program``: a DSPy module whose predictor instructions get
+      tuned. A prompt the user brings is the instruction of one predictor.
+    - ``repo``: a GitHub repository the optimizer edits in place, such as
+      a website, a library or an app. When the user wants to optimize a
+      repository, or pastes a GitHub link, set ``target`` to repo and
+      never ask for or draft a DSPy program. Put the repository the user
+      named in ``repo_query`` (their words, ``owner/name`` or the link);
+      the wizard finds it among their GitHub repositories and shows the
+      matches. Until ``repo_context`` names a repository, ask which one
+      only if the user gave no name. Once ``repo_context`` is filled, the
+      repository is chosen: restate the goal for it in one sentence and
+      continue, using only its README and file tree for the objective and
+      background.
+    You write everything; the user only answers and confirms. Never design
+    the scorer or the metric, and never suggest how to measure: a later
+    step writes it with the user. You may name how the user judges success
+    (for example a Lighthouse SEO score) in the objective. Never ask the
+    user to upload, attach or paste a dataset or example rows: the Data
+    step collects them.
 
     When the transcript is empty and the ``draft_*`` fields are empty, open
     by asking what they want to optimize ("what do you want to optimize?",
@@ -61,10 +82,12 @@ class TaskInterviewTurnSig(dspy.Signature):
     short sentence and ask what to change this time, with options such as
     keeping it as is; never ask again for what the draft already holds.
     Then ask ONE short question at a time (``message`` is one or two short
-    sentences) until you know the goal, how success is judged and the
-    starting version. Never ask what the ``draft_*`` fields, the sample cases
-    or the transcript already answer. When you know enough, or the
-    question-count note says the limit is reached, set ``done`` to true and
+    sentences) until you know the goal, how success is judged and, for a
+    DSPy program, the starting version. Never ask what the ``draft_*``
+    fields, the sample cases, ``repo_context`` or the transcript already
+    answer. When you know enough (for a repository, only once
+    ``repo_context`` is filled), or the question-count note says the
+    limit is reached, set ``done`` to true and
     write a one-sentence summary of the draft; the wizard then moves on to
     the next step by itself, so do not ask the user to confirm anything.
 
@@ -81,14 +104,22 @@ class TaskInterviewTurnSig(dspy.Signature):
       better, in ``reply_language``.
     - ``background``: the context an optimizer needs (domain, constraints,
       what good output looks like), in ``reply_language``; may be empty.
-    - ``artifact_kind``: prompt | code | dspy_program | text, or empty
-      when still unknown.
-    - ``starting_version_json``: the artifact's starting version as JSON —
-      a string for prompt/code/text (the user's prompt, code or text
-      verbatim, or a short sensible first draft you write when they have
-      none), or for dspy_program an object mapping each predictor name to
-      its instruction. Empty when still unknown.
-    - ``artifact_rationale``: one sentence on why this artifact kind fits.
+    - ``artifact_kind``: dspy_program, or empty when still unknown.
+    - ``starting_version_json``: the program's starting version as JSON,
+      an object mapping each predictor name to its instruction (the user's
+      prompt verbatim, or a short sensible first draft you write when they
+      have none). Empty when still unknown.
+    - ``artifact_rationale``: one sentence on why a DSPy program fits;
+      empty for a repository.
+    - ``target``: dspy_program, repo, or empty when still unknown.
+    - ``repo_query``: the repository the user named; empty when none.
+    - ``needs_data``: true when the run needs example inputs to try each
+      version on (a DSPy program always does; a repository does only when
+      it is scored per input, such as one test case per prompt), false when
+      a whole-run measurement is enough (a Lighthouse score, a test suite,
+      a benchmark), empty when still unknown.
+    A repository run has no starting version: leave
+    ``starting_version_json`` empty for it.
     """)
 
     # The draft inputs carry a ``draft_`` prefix because the same names are
@@ -98,6 +129,13 @@ class TaskInterviewTurnSig(dspy.Signature):
     draft_artifact_kind: str = dspy.InputField(desc="Current draft artifact kind; empty when unknown.")
     draft_starting_version: str = dspy.InputField(desc="Current draft starting version as JSON; empty when unknown.")
     sample_cases: str = dspy.InputField(desc="JSON array of up to five example inputs the user provided; may be [].")
+    draft_target: str = dspy.InputField(desc="Current target: dspy_program, repo, or empty when unknown.")
+    repo_context: str = dspy.InputField(
+        desc=(
+            'JSON {"repository", "readme", "paths", "truncated"} of the chosen repository; '
+            "empty when no repository is chosen yet."
+        )
+    )
     transcript_json: str = dspy.InputField(desc="JSON array of prior {role, content} turns, oldest first.")
     reply_language: str = dspy.InputField(desc="Language the message, options, objective and background use.")
     message: str = dspy.OutputField(desc="The next question, or a one-sentence summary when done.")
@@ -112,11 +150,18 @@ class TaskInterviewTurnSig(dspy.Signature):
     )
     objective: str = dspy.OutputField(desc="Updated objective.")
     background: str = dspy.OutputField(desc="Updated background.")
-    artifact_kind: str = dspy.OutputField(desc="prompt | code | dspy_program | text, or empty when unknown.")
+    artifact_kind: str = dspy.OutputField(desc="dspy_program, or empty when unknown.")
     starting_version_json: str = dspy.OutputField(
-        desc="Starting version as JSON: a string, or for dspy_program an object of predictor name to instruction."
+        desc="Starting version as JSON: an object of predictor name to instruction."
     )
-    artifact_rationale: str = dspy.OutputField(desc="One sentence on why the artifact kind fits.")
+    artifact_rationale: str = dspy.OutputField(desc="One sentence on why a DSPy program fits; empty for a repository.")
+    target: str = dspy.OutputField(desc="dspy_program, repo, or empty when unknown.")
+    repo_query: str = dspy.OutputField(
+        desc="The repository the user named (words, owner/name or a link); empty if none."
+    )
+    needs_data: str = dspy.OutputField(
+        desc="'true' when the run needs example inputs, 'false' when not, empty if unknown."
+    )
 
 
 def _truthy(value: Any) -> bool:
@@ -147,20 +192,84 @@ def normalize_artifact_kind(value: Any) -> ArtifactKind | None:
     return cleaned if cleaned in ARTIFACT_KINDS else None  # type: ignore[return-value]
 
 
-def normalize_starting_version(raw: Any, artifact_kind: ArtifactKind | None) -> BlackboxCandidate | None:
-    """Turn a model-written starting version into ``str | dict[str, str]``.
+def normalize_target(value: Any) -> OptimizerTarget | None:
+    """Coerce a model-written target onto :data:`OptimizerTarget`.
 
-    A JSON string is decoded first; a value that is not JSON is the version
-    itself (models often skip the quoting). A DSPy program's version must be
-    a non-empty mapping of predictor names to instructions; any other kind
-    takes a string, so a mapping is flattened only when it has one entry.
+    Args:
+        value: Raw field value.
+
+    Returns:
+        ``"repo"``, ``"dspy_program"``, or ``None`` when the value names neither.
+    """
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip().lower().replace("-", "_").replace(" ", "_")
+    if cleaned in _REPO_TARGET_ALIASES:
+        return "repo"
+    return "dspy_program" if normalize_artifact_kind(cleaned) else None
+
+
+def normalize_repo_query(value: Any) -> str:
+    """Turn the repository the user named into a search the wizard can run.
+
+    A GitHub link (``https://github.com/owner/name``, with ``.git``, a
+    ``/tree/<branch>`` tail or the ``git@github.com:`` form) becomes
+    ``owner/name``; any other text is kept, trimmed.
+
+    Args:
+        value: Raw ``repo_query`` value.
+
+    Returns:
+        ``owner/name`` for a link, the trimmed text otherwise, cut to
+        :data:`MAX_REPO_QUERY_CHARS`.
+    """
+    text = str(value or "").strip().strip("<>\"'`")
+    match = _GITHUB_LINK.search(text)
+    if match:
+        text = f"{match['owner']}/{match['name']}"
+    return text[:MAX_REPO_QUERY_CHARS]
+
+
+def _optional_bool(value: Any) -> bool | None:
+    """Read a model's three-way boolean field.
+
+    Args:
+        value: Raw field value.
+
+    Returns:
+        True, False, or ``None`` when the value spells neither.
+    """
+    cleaned = str(value or "").strip().lower()
+    if cleaned in {"true", "yes", "1"}:
+        return True
+    if cleaned in {"false", "no", "0"}:
+        return False
+    return None
+
+
+def _repo_context_json(context: dict[str, Any] | None) -> str:
+    """Encode the chosen repository's README and file tree for the model.
+
+    Args:
+        context: The client's repository context, or ``None``.
+
+    Returns:
+        JSON text, or ``""`` when no repository is chosen.
+    """
+    return "" if not context else json.dumps(context, ensure_ascii=False)
+
+
+def normalize_starting_version(raw: Any) -> BlackboxCandidate | None:
+    """Turn a model-written starting version into a DSPy program's ``dict[str, str]``.
+
+    A JSON string is decoded first. The version must be a non-empty mapping
+    of predictor names to instructions.
 
     Args:
         raw: The raw ``starting_version_json`` value.
-        artifact_kind: The validated artifact kind, or ``None``.
 
     Returns:
-        The starting version, or ``None`` when it is empty or invalid.
+        The starting version, or ``None`` when it is empty or not a mapping.
     """
     value: Any = raw
     if isinstance(raw, str):
@@ -170,20 +279,11 @@ def normalize_starting_version(raw: Any, artifact_kind: ArtifactKind | None) -> 
         try:
             value = json.loads(text)
         except json.JSONDecodeError:
-            value = text
-    if isinstance(value, dict):
-        mapping = {str(k).strip(): str(v) for k, v in value.items() if str(k).strip() and v is not None}
-        if not mapping:
             return None
-        if artifact_kind == "dspy_program" or artifact_kind is None:
-            return mapping
-        return next(iter(mapping.values())) if len(mapping) == 1 else None
-    if isinstance(value, (str, int, float)) and not isinstance(value, bool):
-        text = str(value)
-        if not text.strip() or artifact_kind == "dspy_program":
-            return None
-        return text
-    return None
+    if not isinstance(value, dict):
+        return None
+    mapping = {str(k).strip(): str(v) for k, v in value.items() if str(k).strip() and v is not None}
+    return mapping or None
 
 
 def _version_json(version: BlackboxCandidate | None) -> str:
@@ -219,6 +319,8 @@ def task_interview_inputs(
     starting_version: BlackboxCandidate | None,
     sample_cases: list[dict[str, Any]],
     locale: str | None,
+    target: OptimizerTarget | None = None,
+    repo_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the :class:`TaskInterviewTurnSig` inputs for one turn.
 
@@ -230,6 +332,8 @@ def task_interview_inputs(
         starting_version: Current draft starting version.
         sample_cases: Example inputs the user provided.
         locale: UI locale code; replies are written in that language.
+        target: The run's current target, or ``None`` when unsettled.
+        repo_context: The chosen repository's README and file tree.
 
     Returns:
         Keyword inputs for the predictor.
@@ -240,6 +344,8 @@ def task_interview_inputs(
         "draft_artifact_kind": artifact_kind or "",
         "draft_starting_version": _version_json(starting_version),
         "sample_cases": _sample_cases_json(sample_cases),
+        "draft_target": target or "",
+        "repo_context": _repo_context_json(repo_context),
         "transcript_json": _transcript_json(turns),
         "reply_language": _reply_language(locale),
     }
@@ -261,8 +367,8 @@ def parse_task_interview_prediction(
         pred: The prediction, or ``None`` when the stream produced nothing.
         asked: Assistant questions asked before this turn.
         draft: The client's current draft (``objective``, ``background``,
-            ``artifact_kind``, ``starting_version``); fills in what the
-            prediction leaves out.
+            ``artifact_kind``, ``starting_version``, ``target``); fills
+            in what the prediction leaves out.
 
     Returns:
         A :class:`TaskInterviewTurnResult` as a dict.
@@ -272,9 +378,10 @@ def parse_task_interview_prediction(
     kind = normalize_artifact_kind(getattr(pred, "artifact_kind", "")) or normalize_artifact_kind(
         draft.get("artifact_kind")
     )
-    version = normalize_starting_version(getattr(pred, "starting_version_json", ""), kind)
+    version = normalize_starting_version(getattr(pred, "starting_version_json", ""))
     if version is None:
-        version = normalize_starting_version(_version_json(draft.get("starting_version")), kind)
+        version = normalize_starting_version(_version_json(draft.get("starting_version")))
+    target = normalize_target(getattr(pred, "target", "")) or normalize_target(draft.get("target"))
     options = [] if done else normalize_options(_parse_json(getattr(pred, "options_json", "[]"), []))
     result = TaskInterviewTurnResult(
         message=str(getattr(pred, "message", "") or "").strip(),
@@ -285,6 +392,9 @@ def parse_task_interview_prediction(
         artifact_kind=kind,
         starting_version=version,
         artifact_rationale=str(getattr(pred, "artifact_rationale", "") or "").strip(),
+        target=target,
+        repo_query=normalize_repo_query(getattr(pred, "repo_query", "")),
+        needs_data=_optional_bool(getattr(pred, "needs_data", "")),
         model=agent_model_id(settings.code_agent_model),
     )
     return result.model_dump()
@@ -298,6 +408,8 @@ async def task_interview_turn_stream(
     artifact_kind: ArtifactKind | None = None,
     starting_version: BlackboxCandidate | None = None,
     sample_cases: list[dict[str, Any]] | None = None,
+    target: OptimizerTarget | None = None,
+    repo_context: dict[str, Any] | None = None,
     locale: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
@@ -318,6 +430,8 @@ async def task_interview_turn_stream(
         artifact_kind: Current draft artifact kind.
         starting_version: Current draft starting version.
         sample_cases: Example inputs the user provided.
+        target: The run's current target, or ``None`` when unsettled.
+        repo_context: The chosen repository's README and file tree.
         locale: UI locale code.
         model: LiteLLM id conducting the turn; ``None`` runs the server default.
         reasoning_effort: Effort level for ``model``; ``None`` keeps its default.
@@ -334,6 +448,7 @@ async def task_interview_turn_stream(
         "background": background,
         "artifact_kind": artifact_kind,
         "starting_version": starting_version,
+        "target": target,
     }
     inputs = task_interview_inputs(
         turns=turns,
@@ -343,6 +458,8 @@ async def task_interview_turn_stream(
         starting_version=starting_version,
         sample_cases=sample_cases or [],
         locale=locale,
+        target=target,
+        repo_context=repo_context,
     )
 
     def parse(pred: Any, count: int) -> dict[str, Any]:

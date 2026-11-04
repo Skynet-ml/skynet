@@ -1,4 +1,4 @@
-Eine Engine ist das Suchverfahren, das neue Versionen Ihres Artefakts vorschlägt. Skynet hat sechs native Engines für Prompt-, Code- und Text-Artefakte, drei DSPy-Optimierer für DSPy-Programme und **Auto**. Diese Seite erklärt, was jede davon tut, wann Sie sie wählen und welche Einstellungen sie hat.
+Eine Engine ist die Suchmethode, die neue Versionen Ihres Artefakts vorschlägt. Skynet hat sechs native Engines für Repositorys, drei DSPy-Optimierer für DSPy-Programme und **Auto**. Diese Seite erklärt, was jede tut, wann Sie sie wählen und welche Einstellungen sie hat.
 
 Lesen Sie zuerst [So funktioniert die Optimierung](/docs/concepts/optimization), wenn Sie nicht wissen, welche Engines zu Ihrem Artefakt passen.
 
@@ -6,13 +6,13 @@ Lesen Sie zuerst [So funktioniert die Optimierung](/docs/concepts/optimization),
 
 | Engine                | Artefaktarten      | Einstellungen für den Coding-Agenten | Einstellung „Max. Iterationen“ |
 | --------------------- | ------------------ | ------------------------------------ | ------------------------------ |
-| Auto                  | Alle               | Ja, bei Prompt, Code und Text        | Nein                           |
-| GEPA                  | Prompt, Code, Text | Nein                                 | Nein                           |
-| Best-of-N             | Prompt, Code, Text | Nein                                 | Nein                           |
-| AutoResearch          | Prompt, Code, Text | Ja                                   | Nein                           |
-| Meta-Harness          | Prompt, Code, Text | Ja                                   | Ja                             |
-| AutoSaddler           | Prompt, Code, Text | Ja                                   | Ja                             |
-| ShinkaEvolve          | Prompt, Code, Text | Nein. Es hat eine eigene Editor-Einstellung. | Ja                     |
+| Auto | DSPy-Programm | Nein | Nein |
+| GEPA | Repository | Nein | Nein |
+| Best-of-N | Repository | Nein | Nein |
+| AutoResearch | Repository | Ja | Nein |
+| Meta-Harness | Repository | Ja | Ja |
+| AutoSaddler | Repository | Ja | Ja |
+| ShinkaEvolve | Repository | Nein. Es hat eine eigene Editor-Einstellung. | Ja |
 | DSPy GEPA             | DSPy-Programm      | Nein                                 | Nein                           |
 | DSPy MIPROv2          | DSPy-Programm      | Nein                                 | Nein                           |
 | DSPy BootstrapFewShot | DSPy-Programm      | Nein                                 | Nein                           |
@@ -24,12 +24,7 @@ Der Assistent kennzeichnet GEPA, DSPy GEPA und Auto als Optimierer, die den Feed
 Auto ist die Standardwahl. Was es ausführt, hängt vom Artefakttyp ab:
 
 - **DSPy-Programm**: Auto führt DSPy GEPA aus.
-- **Prompt, Code oder Text**: Auto erkundet gleichzeitig mit fünf Engines: GEPA, AutoResearch, Meta-Harness, AutoSaddler und ShinkaEvolve. Jede Engine erhält einen gleichen Anteil der Bewertungsläufe: das Budget geteilt durch 6. Danach macht GEPA ab der besten Version mit dem Rest des Budgets weiter.
-
-Auto verwendet Best-of-N nicht.
-
-> [!WARNING]
-> Bei einem Prompt-, Code- oder Text-Artefakt benötigt Auto mindestens 6 Bewertungsläufe: 5 Erkundungsspuren und eine Fortsetzung. Alle fünf Engines müssen verfügbar sein. Ist eine davon nicht verfügbar, wählen Sie eine einzelne Engine.
+- **Repository**: Auto ist nicht verfügbar. Wählen Sie eine native Engine.
 
 **Wählen Sie sie, wenn** Sie nicht wissen, welche Engine passt. Hier fangen Sie am besten an.
 
@@ -49,7 +44,7 @@ Auto verwendet Best-of-N nicht.
 
 Ein Coding-Agent führt Forschungsrunden aus. Er bearbeitet, bewertet und behält, was hilft, bis das Budget aufgebraucht ist.
 
-**Wählen Sie sie, wenn** eine gute Änderung mehrere Untersuchungsschritte erfordert, zum Beispiel bei einem Code-Artefakt.
+**Wählen Sie sie, wenn** eine gute Änderung mehrere Untersuchungsschritte erfordert.
 
 ## Meta-Harness
 
@@ -85,7 +80,7 @@ DSPy MIPROv2 und DSPy BootstrapFewShot benötigen Paare (Fälle mit erwarteten A
 
 | Einstellung             | Standard | Bereich                                                        |
 | ----------------------- | -------- | -------------------------------------------------------------- |
-| Max. Bewertungsläufe    | 200      | 1 bis 100000 (Auto: mindestens 6)                              |
+| Max. Bewertungsläufe    | 200      | 1 bis 100000                              |
 | Stoppen bei Bewertung   | Aus      | 0 oder mehr                                                    |
 | Max. Iterationen        | Aus      | 1 bis 1000. Nur Meta-Harness, AutoSaddler und ShinkaEvolve.    |
 
@@ -93,12 +88,12 @@ Ein Bewertungslauf ist ein Aufruf Ihrer Metrik auf einem Fall. Die abschließend
 
 ### Einstellungen für den Coding-Agenten
 
-Diese Einstellungen gelten für Auto, AutoResearch, Meta-Harness und AutoSaddler.
+Diese Einstellungen gelten für AutoResearch, Meta-Harness und AutoSaddler.
 
 | Einstellung                     | Standard | Bereich                                            |
 | ------------------------------- | -------- | -------------------------------------------------- |
 | Coding-Agent                    | Codex    | Pi, Codex, OpenCode, Prime Agent, Eigener Befehl   |
-| Kandidaten pro Iteration        | 3        | 1 bis 8. Wird für Auto und Meta-Harness angezeigt. |
+| Kandidaten pro Iteration        | 3        | 1 bis 8. |
 | Max. Tool-Aufrufe pro Kandidat  | 100      | 1 bis 1000                                         |
 
 ### Einstellungen für ShinkaEvolve
@@ -113,8 +108,6 @@ Diese Einstellungen gelten für Auto, AutoResearch, Meta-Harness und AutoSaddler
 | Archivgröße                                         | 40                                                               |
 | Parallele Auswertungen                              | 2                                                                |
 | Parallele Vorschläge                                | 2                                                                |
-
-Wenn Auto ShinkaEvolve ausführt, zeigt der Assistent diese Einstellungen als „ShinkaEvolve-Einstellungen (wenn Auto es ausführt)“.
 
 ## Verwandte Seiten
 

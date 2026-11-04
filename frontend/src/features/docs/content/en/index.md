@@ -2,14 +2,12 @@ Skynet improves an artifact that you already have. You give it a starting versio
 
 ## What Skynet optimizes
 
-Skynet works on four artifact kinds:
+Skynet works on two artifact kinds:
 
 | Artifact kind | What changes                                              |
 | ------------- | --------------------------------------------------------- |
-| Prompt        | The prompt text                                           |
-| Code          | The source code                                           |
+| Repository | The files in the paths that you allow |
 | DSPy program  | The instructions of the predictors in a `dspy.Module`     |
-| Text          | Any other text, for example a document or a configuration |
 
 Every run uses the same contract. Your run code defines `run(artifact, input)`. Your metric defines `score(input, output, expected=None)`. The metric returns a score and written feedback. The optimizer reads the feedback to make the next version better.
 
@@ -20,10 +18,10 @@ Every run uses the same contract. Your run code defines `run(artifact, input)`. 
 
 Skynet is Optimize Anything. The artifact kind decides which engines can work on it:
 
-- Prompt, Code and Text artifacts use the native engines: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler and ShinkaEvolve.
+- Repositories use the native engines: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler and ShinkaEvolve.
 - DSPy program artifacts use the DSPy optimizers: DSPy GEPA, DSPy MIPROv2 and DSPy BootstrapFewShot.
 
-**Auto** picks for you. On a DSPy program, Auto uses DSPy GEPA. On other artifact kinds, Auto combines five native engines. Read [How optimization works](/docs/concepts/optimization) and [Engines](/docs/concepts/engines).
+On a DSPy program, **Auto** uses DSPy GEPA. On a repository, you select one native engine. Read [How optimization works](/docs/concepts/optimization) and [Engines](/docs/concepts/engines).
 
 ## How a run works
 

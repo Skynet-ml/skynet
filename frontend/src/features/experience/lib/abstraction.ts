@@ -38,9 +38,6 @@ export type Surface =
   // Dashboard
   | "dashboard.analytics"
   | "dashboard.jobs.optimization_id"
-  | "dashboard.jobs.optimization_type"
-  | "dashboard.jobs.module_name"
-  | "dashboard.jobs.dataset_rows"
   | "dashboard.jobs.elapsed_seconds"
   // Logs
   | "logs.verbose";
@@ -57,9 +54,6 @@ const HIDDEN_IN_GUIDED: ReadonlySet<Surface> = new Set<Surface>([
   "run.tab.config",
   "dashboard.analytics",
   "dashboard.jobs.optimization_id",
-  "dashboard.jobs.optimization_type",
-  "dashboard.jobs.module_name",
-  "dashboard.jobs.dataset_rows",
   "dashboard.jobs.elapsed_seconds",
 ]);
 

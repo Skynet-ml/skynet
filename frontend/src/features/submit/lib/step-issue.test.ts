@@ -18,7 +18,7 @@ registerHooks({
   },
 });
 
-const { contractSnapshot, initialWizardV2State, withQuestionInputs } = await import(
+const { contractSnapshot, initialWizardV2State } = await import(
   "./wizard-v2.ts"
 );
 const { stepPages } = await import("./wizard-pages.ts");
@@ -52,7 +52,7 @@ function readyState(level: Level, check: ContractCheckResponse | null) {
     task: {
       ...state.task,
       objective: "Answer the question.",
-      artifactKind: "prompt" as const,
+      artifactKind: "dspy_program" as const,
       startingVersion: "Answer.",
       confirmed: true,
     },
@@ -169,24 +169,4 @@ test("a failed run never puts its traceback under the Run button", () => {
 
   const long = runBlockedReason(crashed, null, { message: () => "x".repeat(500) });
   assert.ok(long !== null && long.length <= 120 && !long.includes("\n"));
-});
-
-test("a single-answer task's skipped Inputs step never blocks Continue or Run", () => {
-  const base = readyState("standard", null);
-  const text = withQuestionInputs({
-    ...base,
-    task: { ...base.task, artifactKind: "text" as const },
-    inputs: initialWizardV2State("standard").inputs,
-  });
-  assert.equal(computeStepIssue(text, "inputs", null), null);
-  assert.notEqual(computeStepIssue(text, "optimizer", null), "submit.v2.optimizer.needs_setup");
-  const checked = {
-    ...text,
-    workspace: {
-      ...text.workspace,
-      lastCheck: checkResult(true),
-      lastCheckSnapshot: contractSnapshot(text),
-    },
-  };
-  assert.equal(runBlockedReason(checked, null), null);
 });

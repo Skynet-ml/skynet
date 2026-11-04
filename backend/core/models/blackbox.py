@@ -398,15 +398,17 @@ class BlackboxRunRequest(BaseModel):
     username: str | None = None
     objective: str | None = None
     background: str | None = None
-    # Which wizard recipe authored the run ("prompt" / "code" / "anything" / "repo").
-    # Engines ignore it; cloning reads it back to preselect the recipe picker.
-    recipe: Literal["prompt", "code", "anything", "repo"] | None = None
+    # Marks a repository run. Engines ignore it; cloning reads it back.
+    recipe: Literal["repo"] | None = None
     seed_candidate: BlackboxCandidate | None = None
     scorer: BlackboxScorer
     cases: list[dict[str, Any]] | None = Field(default=None, max_length=200_000)
     # By-reference twin of ``cases`` for agent callers: a dataset already staged
     # server-side, so the rows never travel through the model's tool arguments.
     staged_dataset_id: str | None = Field(default=None, min_length=1, max_length=64)
+    # How staged rows map to cases, as in the unified run's data block.
+    input_fields: list[str] = Field(default_factory=list)
+    expected_field: str | None = None
     seed: int | None = None
     budget: BlackboxBudget = Field(default_factory=BlackboxBudget)
     strategy: BlackboxStrategy = Field(default_factory=BlackboxStrategy)

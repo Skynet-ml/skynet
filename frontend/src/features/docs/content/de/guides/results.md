@@ -8,14 +8,14 @@ Die Seite des Durchlaufs zeigt nur die Tabs, die für den Durchlauf gelten. Eini
 | ----------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | **Übersicht**           | Immer                                                                         | Fortschritt, Scores und der Score-Verlauf                                                        |
 | **Nutzung**             | Ein erfolgreicher Durchlauf mit einem Programm, das Skynet bereitstellen kann | Ein Formular zum Ausführen des optimierten Programms und Integrationscode                         |
-| **Artefakt**            | Ein Prompt-, Code- oder Text-Durchlauf mit einem Ergebnis                     | Die Versionen Ihres Artefakts, mit der besten Version                                            |
+| **Artefakt** | Ein Repository-Durchlauf mit Ergebnis | Die Versionen Ihres Artefakts, mit der besten Version |
 | **Daten**               | Ein abgeschlossener DSPy-Programm-Durchlauf                                   | Die Aufteilung der Daten in Trainings-, Validierungs- und Testmenge sowie die Auswertung auf dem Testset |
 | **Code**                | Wenn der Durchlauf Code zum Anzeigen hat                                      | Der Ausführungscode und die Metrik                                                               |
-| **Belohnung**           | Ein Prompt-, Code- oder Text-Durchlauf, dessen Metrik Belohnungsteile deklariert | Die Belohnungsteile und ihre Gewichte                                                         |
-| **Artefakt**            | Ein Durchlauf mit einem optimierten Prompt oder optimierten Dateien           | Die optimierte Ausgabe und **Ergebnisse exportieren**                                            |
+| **Belohnung** | Ein Repository-Durchlauf, dessen Metrik Belohnungsteile angibt | Die Belohnungsteile und ihre Gewichte |
+| **Artefakt** | Ein abgeschlossener DSPy-Programm-Durchlauf | Die optimierte Ausgabe und **Ergebnisse exportieren** |
 | **Logs**                | Die meisten Durchläufe                                                        | Das Log des Durchlaufs                                                                           |
 | **Nutzung und Kosten**  | Wenn Sie angemeldet sind                                                      | Was der Durchlauf ausgegeben hat                                                                 |
-| **Geplanter Lauf**      | Ein erfolgreicher Prompt-, Code- oder Text-Durchlauf                          | Ein Zeitplan, um die Optimierung erneut auszuführen                                              |
+| **Geplanter Lauf** | Ein erfolgreicher Durchlauf mit einem DSPy-Programm | Ein Zeitplan, um die Optimierung erneut auszuführen |
 | **Konfiguration**       | Immer                                                                         | Die Konfiguration des Durchlaufs                                                                 |
 
 > [!NOTE]
@@ -33,7 +33,7 @@ Der Tab **Übersicht** zeigt:
 
 Solange der Durchlauf aktiv ist, zeigt die Übersicht auch **Verstrichen**, **Verbleibend** und **Rate**.
 
-Bei einem Prompt-, Code- oder Text-Durchlauf zeigt die Übersicht außerdem **Benannte Punktzahlen**, wenn Ihre Metrik benannte Scores meldet.
+Bei einem Repository-Durchlauf zeigt die Übersicht auch **Benannte Punktzahlen**, wenn Ihre Metrik benannte Scores meldet.
 
 Bei einem DSPy-Programm-Durchlauf hat der Tab **Daten** eine **Auswertung auf dem Testset**. Sie zeigt für jeden Testfall den Score der Baseline und den optimierten Score.
 
@@ -45,7 +45,7 @@ Hat der Durchlauf an seinem Budget gestoppt, teilt Ihnen die Seite des Durchlauf
 
 ## Die beste Version exportieren
 
-### Prompt-, Code- und Text-Durchläufe
+### Repository-Durchläufe
 
 Der Tab **Artefakt** listet die **Versionen** Ihres Artefakts auf. Für jede Version können Sie:
 

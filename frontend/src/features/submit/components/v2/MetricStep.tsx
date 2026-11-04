@@ -24,7 +24,7 @@ import {
   readSessionValue,
 } from "../../lib/session-state";
 import { withScorerImports } from "../../lib/scorer-dependencies";
-import { METRIC_FILE, RUN_FILE, isSingleAnswerTask, repoIssue } from "../../lib/wizard-v2";
+import { METRIC_FILE, RUN_FILE, repoIssue } from "../../lib/wizard-v2";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { ScheduleRunScreen } from "./ScheduleRunScreen";
 import { ContractCheckScreen } from "./ContractCheckScreen";
@@ -115,7 +115,7 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
   const authoringContext = React.useMemo<UnifiedAuthoringContext | null>(() => {
     // A repository run skips the Inputs step, so it may have no data mode.
     const dataMode = inputs.mode ?? (repo ? "single" : null);
-    if (!kind || !dataMode) return null;
+    if ((!repo && !kind) || !dataMode) return null;
     const samples = authoringCases(
       {
         cases: inputs.cases,
@@ -129,7 +129,7 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
       task: {
         objective: task.objective,
         background: task.background,
-        artifact: { kind, starting_version: task.startingVersion ?? "" },
+        ...(!repo && kind ? { artifact: { kind, starting_version: task.startingVersion ?? "" } } : {}),
       },
       data_mode: dataMode,
       input_fields: inputs.inputFields,
@@ -208,7 +208,7 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
   const coding = useIdeCodingAgent({
     context: agentContext,
     active: onScreen,
-    dataKnown: (authoringContext?.sample_cases?.length ?? 0) > 0 || isSingleAnswerTask(state),
+    dataKnown: (authoringContext?.sample_cases?.length ?? 0) > 0,
     runCode: workspace.runCode,
     metricCode: workspace.metricCode,
     files: workspace.files,

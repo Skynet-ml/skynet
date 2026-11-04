@@ -35,7 +35,7 @@ export function AnalyticsEmpty({
     "no-data": {
       icon: Database,
       title: msg("auto.features.dashboard.components.analyticsempty.literal.1"),
-      description: msg("auto.features.dashboard.components.jobstab.5"),
+      description: msg("dashboard.analytics.empty_body"),
       action: { label: TERMS.notificationNewOpt, href: "/submit", icon: Plus },
     },
     "no-results": {

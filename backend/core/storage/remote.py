@@ -3563,7 +3563,8 @@ class RemoteDBJobStore:
         """List jobs shared with ``username`` via a member grant, newest first.
 
         Joins ``optimization_share_grants`` on ``grantee_username`` so a member
-        sees runs they were invited to but do not own. The same count-folding as
+        sees runs they were invited to but do not own. Grants the member hid
+        from their own view are skipped. The same count-folding as
         :meth:`list_jobs` is applied; the grant role is not attached here (the
         caller resolves roles for the page via
         :func:`core.api.sharing_access.list_grants_for_user`).
@@ -3587,6 +3588,7 @@ class RemoteDBJobStore:
                     OptimizationShareGrantModel.optimization_id == JobModel.optimization_id,
                 )
                 .filter(OptimizationShareGrantModel.grantee_username == normalized)
+                .filter(OptimizationShareGrantModel.hidden_at.is_(None))
                 .filter(_user_facing_jobs())
                 .order_by(JobModel.created_at.desc())
                 .offset(offset)
@@ -3616,6 +3618,7 @@ class RemoteDBJobStore:
                     OptimizationShareGrantModel.optimization_id == JobModel.optimization_id,
                 )
                 .filter(OptimizationShareGrantModel.grantee_username == normalized)
+                .filter(OptimizationShareGrantModel.hidden_at.is_(None))
                 .filter(_user_facing_jobs())
                 .scalar()
                 or 0
@@ -3662,7 +3665,8 @@ class RemoteDBJobStore:
         session = self._get_session()
         try:
             grant_ids = session.query(OptimizationShareGrantModel.optimization_id).filter(
-                OptimizationShareGrantModel.grantee_username == normalized
+                OptimizationShareGrantModel.grantee_username == normalized,
+                OptimizationShareGrantModel.hidden_at.is_(None),
             )
             q = self._list_query(session).filter(
                 or_(JobModel.username == username, JobModel.optimization_id.in_(grant_ids))
@@ -3701,7 +3705,8 @@ class RemoteDBJobStore:
         session = self._get_session()
         try:
             grant_ids = session.query(OptimizationShareGrantModel.optimization_id).filter(
-                OptimizationShareGrantModel.grantee_username == normalized
+                OptimizationShareGrantModel.grantee_username == normalized,
+                OptimizationShareGrantModel.hidden_at.is_(None),
             )
             q = session.query(func.count(JobModel.optimization_id)).filter(
                 or_(JobModel.username == username, JobModel.optimization_id.in_(grant_ids))
@@ -3831,7 +3836,8 @@ class RemoteDBJobStore:
         session = self._get_session()
         try:
             grant_ids = session.query(OptimizationShareGrantModel.optimization_id).filter(
-                OptimizationShareGrantModel.grantee_username == normalized
+                OptimizationShareGrantModel.grantee_username == normalized,
+                OptimizationShareGrantModel.hidden_at.is_(None),
             )
             q = session.query(JobModel.status, func.count(JobModel.optimization_id)).filter(
                 or_(JobModel.username == username, JobModel.optimization_id.in_(grant_ids)),

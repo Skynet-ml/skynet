@@ -70,10 +70,10 @@ def test_overview_carries_payload_kind_and_split_counts(monkeypatch: pytest.Monk
     assert status == 201, body
     _payload, overview = _stored(store, body["optimization_id"])
     assert overview["payload_kind"] == "unified_v1"
-    assert overview["artifact_kind"] == "prompt"
+    assert overview["artifact_kind"] == "dspy_program"
     assert overview["optimizer_choice"] == "auto"
-    assert overview["optimizer_resolved"] == "auto"
-    assert overview["optimizer_name"] == "auto"
+    assert overview["optimizer_resolved"] == "dspy_gepa"
+    assert overview["optimizer_name"] == "dspy_gepa"
     assert overview["data_mode"] == "pairs"
     assert overview["dataset_rows"] == 6
     counts = overview["split_counts"]
@@ -165,14 +165,14 @@ def test_posted_seed_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_optimizer_outside_the_setup_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A DSPy optimizer on a prompt artifact is rejected by request validation."""
+    """A black-box engine on a DSPy program is rejected by request validation."""
     store = _FakeJobStore()
     client = make_client(store, monkeypatch=monkeypatch)
 
-    status, body = _submit(client, unified_payload(optimizer={"choice": "dspy_miprov2"}))
+    status, body = _submit(client, unified_payload(optimizer={"choice": "gepa"}))
 
     assert status == 422
-    assert "dspy_miprov2" in str(body) or "optimizer" in str(body).lower()
+    assert "gepa" in str(body) or "optimizer" in str(body).lower()
     assert store.created_ids() == []
 
 

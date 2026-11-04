@@ -1,4 +1,4 @@
-呢頁教你點樣喺大約十分鐘內開始你第一次運行。你會登入、上載一個細嘅數據集、填好精靈嘅四個步驟，然後開始運行。例子會改良一個將客服訊息分類做唔同標籤嘅提示詞。
+呢頁教你點樣喺大約十分鐘內開始你第一次運行。你會登入、上載一個細嘅數據集、填好精靈嘅四個步驟，然後開始運行。例子會改良一個將客服訊息分類做唔同標籤嘅 DSPy 程式。
 
 ## 開始之前
 
@@ -25,8 +25,8 @@
 
 1. 喺 **目標**，寫低咩先算好結果。用淺白嘅字，例如「將每條客服訊息分類做 billing、bug 或者 other。」
 2. 可選：喺 **背景**，加啲可以幫到優化器嘅背景資料。
-3. 喺 **成品類型**，揀 **提示詞**。
-4. 喺 **起始版本**，貼上你而家嘅提示詞。
+3. 喺 **優化對象**，揀 **DSPy 程式**。
+4. 喺 **起始版本**，貼上你程式而家嘅指示。
 
 ## 3. 輸入
 
@@ -47,7 +47,7 @@
 
 - 優化器保留 **Auto**。
 - 揀一個 **反思模型**。優化器用佢嚟寫新版本。呢個模型係必填。
-- 可選：揀一個 **任務模型**。你嘅運行程式碼會用佢。
+- 揀一個 **任務模型**。你嘅程式會用佢。DSPy 程式一定要有。
 - 喺 **預算** 下面，**評分器最多運行次數** 保留預設嘅 200。
 
 想揀指定引擎，請睇 [引擎](/docs/concepts/engines)。
@@ -57,11 +57,13 @@
 最後一步係 **指標同執行**（「程式碼同指標」）。你要寫兩個檔案。
 
 ```python tab="run.py"
-from skynet import llm
+import dspy
+
+program = dspy.Predict("message -> label")
 
 
 def run(artifact, input):
-    return llm(artifact, input=input["message"])
+    return program(message=input["message"]).label
 ```
 
 ```python tab="metric.py"
@@ -73,7 +75,7 @@ def score(input, output, expected=None):
     return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`artifact` 係你個提示詞而家嘅版本。`input` 裝住一個案例嘅輸入欄。`expected` 裝住輸出欄，用欄名做 key。
+`artifact` 係最佳化器提出嘅而家嘅指示。Skynet 會將佢套用落 `program`。`input` 裝住一個案例嘅輸入欄。`expected` 裝住輸出欄，用欄名做 key。
 
 然後喺 **合約檢查** 下面揀 **檢查**。檢查會喺沙盒入面，用 3 個示例案例運行你嘅程式碼同指標。佢會檢查：
 

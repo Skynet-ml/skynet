@@ -10,6 +10,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -29,7 +30,7 @@ _BODY = {
         {"role": "user", "content": "My support prompt"},
     ],
     "objective": "Resolve tickets in one reply.",
-    "artifact_kind": "prompt",
+    "artifact_kind": "dspy_program",
     "starting_version": "Answer the ticket.",
     "sample_cases": [{"ticket": "hi"}],
     "locale": "en",
@@ -41,7 +42,7 @@ _DONE = {
     "done": True,
     "objective": "Resolve tickets in one reply.",
     "background": "",
-    "artifact_kind": "prompt",
+    "artifact_kind": "dspy_program",
     "starting_version": "Answer the ticket.",
     "artifact_rationale": "It is an LLM prompt.",
     "model": "m",
@@ -106,7 +107,7 @@ def test_streams_events_and_forwards_the_draft(monkeypatch) -> None:
     assert "event: turn_end" in resp.text
     assert seen["turns"] == _BODY["turns"]
     assert seen["objective"] == _BODY["objective"]
-    assert seen["artifact_kind"] == "prompt"
+    assert seen["artifact_kind"] == "dspy_program"
     assert seen["starting_version"] == "Answer the ticket."
     assert seen["sample_cases"] == [{"ticket": "hi"}]
     assert seen["locale"] == "en"
@@ -218,3 +219,74 @@ def test_later_turns_skip_the_size_gate(monkeypatch) -> None:
     monkeypatch.setattr(code_agent_router, "consume_wizard_agent_turn", lambda *_a: None)
     resp = _client().post(_URL, json=_BODY)
     assert "event: interview_done" in resp.text
+
+
+def test_a_full_repo_context_does_not_trip_the_opening_budget(monkeypatch) -> None:
+    """The repository context is capped by its schema, so the opening budget skips it."""
+    _catalog(monkeypatch)
+
+    async def fake_stream(**_kwargs: Any) -> Any:
+        """Finish at once."""
+        yield {"event": "interview_done", "data": _DONE}
+
+    monkeypatch.setattr(code_agent_router, "task_interview_turn_stream", fake_stream)
+    monkeypatch.setattr(code_agent_router, "consume_wizard_agent_turn", lambda *_a: None)
+    context = {"repository": "me/site", "readme": "é" * 8000, "paths": ["p" * 300] * 400}
+    resp = _client().post(_URL, json={**_BODY, "turns": [], "repo_context": context})
+    assert "event: interview_done" in resp.text
+    assert "event: kickoff_oversized" not in resp.text
+
+
+def test_forwards_the_target_and_repo_context(monkeypatch) -> None:
+    """The draft target and the repository context reach the engine as plain data."""
+    _catalog(monkeypatch)
+    seen: dict[str, Any] = {}
+
+    async def fake_stream(**kwargs: Any) -> Any:
+        """Record the kwargs and finish at once."""
+        seen.update(kwargs)
+        yield {"event": "interview_done", "data": _DONE}
+
+    monkeypatch.setattr(code_agent_router, "task_interview_turn_stream", fake_stream)
+    monkeypatch.setattr(code_agent_router, "consume_wizard_agent_turn", lambda *_a: None)
+    context = {"repository": "me/site", "readme": "# Site", "paths": ["index.html"], "truncated": True}
+    resp = _client().post(_URL, json={**_BODY, "target": "repo", "repo_context": context})
+    assert resp.status_code == 200
+    assert seen["target"] == "repo"
+    assert seen["repo_context"] == context
+
+
+def test_without_repo_context_forwards_none(monkeypatch) -> None:
+    """An older client that sends neither field still runs the turn."""
+    _catalog(monkeypatch)
+    seen: dict[str, Any] = {}
+
+    async def fake_stream(**kwargs: Any) -> Any:
+        """Record the kwargs and finish at once."""
+        seen.update(kwargs)
+        yield {"event": "interview_done", "data": _DONE}
+
+    monkeypatch.setattr(code_agent_router, "task_interview_turn_stream", fake_stream)
+    monkeypatch.setattr(code_agent_router, "consume_wizard_agent_turn", lambda *_a: None)
+    assert _client().post(_URL, json=_BODY).status_code == 200
+    assert seen["target"] is None
+    assert seen["repo_context"] is None
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        {"repository": "me/site", "readme": "x" * 8001},
+        {"repository": "me/site", "paths": ["a"] * 401},
+        {"repository": "me/site", "paths": ["a" * 1025]},
+        {"repository": "x" * 202},
+    ],
+)
+def test_rejects_an_oversized_repo_context(context: dict[str, Any]) -> None:
+    """The README, the path list and each path are capped before any model call."""
+    assert _client().post(_URL, json={**_BODY, "repo_context": context}).status_code == 422
+
+
+def test_rejects_an_unknown_target() -> None:
+    """The target is one of the optimizer targets."""
+    assert _client().post(_URL, json={**_BODY, "target": "spreadsheet"}).status_code == 422

@@ -12,7 +12,6 @@ if (window.location.protocol === "file:") {
     openLogs: () => ipcRenderer.invoke("onboarding:open-logs"),
     openDockerDownload: () => ipcRenderer.invoke("onboarding:open-docker"),
     signIn: () => ipcRenderer.invoke("onboarding:sign-in"),
-    skipSignIn: () => ipcRenderer.invoke("onboarding:skip-sign-in"),
     onState: (listener: (state: unknown) => void) => {
       const handler = (_event: IpcRendererEvent, state: unknown) => listener(state);
       ipcRenderer.on("onboarding:state", handler);

@@ -35,10 +35,9 @@ LEGACY_FEEDBACK_METRIC = (
 LEGACY_BUILD_PROGRAM = "import dspy\ndef build_program():\n    return dspy.Predict('q -> a')\n"
 # A DSPy program under the one contract: run calls the module-level module. It
 # returns the module's instruction so the sampled check needs no model.
+DSPY_PROGRAM = "import dspy\nprogram = dspy.Predict('q -> answer')\n"
 DSPY_RUN_CODE = (
-    "import dspy\n"
-    "program = dspy.Predict('q -> answer')\n"
-    "def run(artifact, input):\n"
+    DSPY_PROGRAM + "def run(artifact, input):\n"
     "    return dspy.Prediction(answer=program.signature.instructions + ':' + input['q'])\n"
 )
 DSPY_METRIC = (
@@ -49,10 +48,10 @@ DSPY_METRIC = (
 
 def _payload(
     *,
-    kind: str = "prompt",
-    optimizer: str = "best_of_n",
-    run_code: str = RUN_CODE,
-    metric_code: str = BLACKBOX_METRIC,
+    kind: str = "dspy_program",
+    optimizer: str = "dspy_gepa",
+    run_code: str = DSPY_RUN_CODE,
+    metric_code: str = DSPY_METRIC,
     metric_model: str | None = None,
     files: dict[str, str] | None = None,
 ) -> UnifiedRunRequest:
@@ -145,12 +144,10 @@ def test_missing_run_fails_the_run_signature() -> None:
         ("dspy_program", "dspy_gepa", DSPY_RUN_CODE, DSPY_METRIC),
         ("dspy_program", "dspy_miprov2", DSPY_RUN_CODE, DSPY_METRIC),
         ("dspy_program", "dspy_bootstrap_fewshot", DSPY_RUN_CODE, DSPY_METRIC),
-        ("prompt", "gepa", RUN_CODE, BLACKBOX_METRIC),
-        ("prompt", "best_of_n", RUN_CODE, BLACKBOX_METRIC),
     ],
 )
 def test_every_optimizer_checks_the_same_contract(kind: str, optimizer: str, run_code: str, metric_code: str) -> None:
-    """run(artifact, input) plus score(input, output, expected=None) passes for every kind and optimizer.
+    """run(artifact, input) plus score(input, output, expected=None) passes for every optimizer.
 
     Args:
         kind: The artifact kind.
@@ -349,14 +346,14 @@ def test_sampled_check_never_fires_on_ready_without_samples() -> None:
     """A spec whose cases all land in the held-out test split opens no box and fires no hook."""
     payload = UnifiedRunRequest.model_validate(
         {
-            "task": {"objective": "o", "artifact": {"kind": "prompt", "starting_version": "p"}},
+            "task": {"objective": "o", "artifact": {"kind": "dspy_program", "starting_version": "p"}},
             "data": {
                 "mode": "pairs",
                 "cases": [{"input": {"q": str(i)}, "expected": f"p:{i}"} for i in range(6)],
                 "input_fields": ["q"],
                 "split": {"train": 0.0, "val": 0.0, "test": 1.0},
             },
-            "optimizer": {"choice": "best_of_n"},
+            "optimizer": {"choice": "dspy_gepa"},
             "models": {"reflection_model": {"name": "openrouter/task"}},
             "workspace": {"run_code": RUN_CODE, "metric_code": BLACKBOX_METRIC},
         }
@@ -380,7 +377,7 @@ def test_blackbox_score_returning_a_bare_float_fails_the_shape() -> None:
 
 def test_run_crash_reports_the_users_error_and_skips_the_metric() -> None:
     """The exact error reaches the item, without the harness's own frames."""
-    run_code = "def run(artifact, input):\n    raise KeyError('missing_field')\n"
+    run_code = DSPY_PROGRAM + "def run(artifact, input):\n    raise KeyError('missing_field')\n"
     response = _check(_payload(run_code=run_code), sample_count=1)
 
     run = next(check for check in response.checks if check.key == "workspace.run")
@@ -418,7 +415,7 @@ def test_check_items_carry_their_message_code_for_the_client_locale() -> None:
 
 def test_a_sample_run_error_carries_its_params() -> None:
     """A failing sample's message code keeps the placeholders the client fills in."""
-    response = _check(_payload(run_code="def run(artifact, input):\n    raise ValueError('boom')\n"))
+    response = _check(_payload(run_code=DSPY_PROGRAM + "def run(artifact, input):\n    raise ValueError('boom')\n"))
 
     failed = next(check for check in response.checks if check.key == "workspace.run" and check.status == "failed")
     assert failed.message_code == "contract.run_error"
@@ -446,7 +443,7 @@ def test_a_multi_column_csv_gives_the_agent_and_the_check_the_same_input_fields(
     cases = [{"input": {f: row[f] for f in input_fields}, "expected": row["sentiment"]} for row in rows]
     seen = _unified_inputs(
         {
-            "task": {"objective": "o", "artifact": {"kind": "prompt", "starting_version": "p"}},
+            "task": {"objective": "o", "artifact": {"kind": "dspy_program", "starting_version": "p"}},
             "input_fields": input_fields,
             "expected_field": "sentiment",
             "sample_cases": [{"input": dict(row), "expected": row["sentiment"]} for row in rows],
@@ -456,7 +453,9 @@ def test_a_multi_column_csv_gives_the_agent_and_the_check_the_same_input_fields(
     reads = " + ".join(f"input[{field!r}]" for field in agent_fields)
     raw = _payload().model_dump(mode="json")
     raw["data"].update({"cases": cases * 2, "input_fields": input_fields})
-    raw["workspace"]["run_code"] = f"def run(artifact, input):\n    return {reads}\n"
+    raw["workspace"]["run_code"] = (
+        DSPY_PROGRAM + f"def run(artifact, input):\n    return dspy.Prediction(answer={reads})\n"
+    )
 
     response = _check(UnifiedRunRequest.model_validate(raw), sample_count=3)
 
@@ -482,7 +481,6 @@ def test_every_item_and_sample_result_carries_a_message_code(run_code: str, metr
     assert {check.sample_index for check in response.checks if check.sample_index is not None} == {0, 1}
 
 
-HELPER_RUN = "from helpers import join\n\ndef run(artifact, input):\n    return join(artifact, input['q'])\n"
 HELPER = "def join(a, b):\n    return a + ':' + b\n"
 
 
@@ -526,54 +524,15 @@ def test_file_limits_are_enforced() -> None:
     assert _payload(files={"lib/parse.py": "", "data/rules.json": "{}"}).workspace.files
 
 
-def test_static_check_reports_extra_files() -> None:
-    """A parsing helper passes; a broken one names its file; DSPy optimizers refuse extra files."""
-    assert (
-        _statuses(static_contract_check(_payload(run_code=HELPER_RUN, files={"helpers.py": HELPER})))["workspace.files"]
-        == "passed"
-    )
-    broken = static_contract_check(_payload(files={"helpers.py": "def (:\n"}))
-    item = next(check for check in broken.checks if check.key == "workspace.files")
+def test_static_check_refuses_extra_files() -> None:
+    """A DSPy optimizer cannot run extra workspace files, so the check names them."""
+    response = static_contract_check(_payload(files={"helpers.py": HELPER}))
+    item = next(check for check in response.checks if check.key == "workspace.files")
     assert item.status == "failed"
     assert "helpers.py" in (item.detail or "")
-    dspy = static_contract_check(
-        _payload(
-            kind="dspy_program",
-            optimizer="dspy_gepa",
-            run_code=DSPY_RUN_CODE,
-            metric_code=DSPY_METRIC,
-            files={"helpers.py": HELPER},
-        )
-    )
-    assert _statuses(dspy)["workspace.files"] == "failed"
-
-
-def test_sampled_check_runs_run_code_that_imports_a_helper_file() -> None:
-    """run.py imports helpers.py from the workspace and the box scores it."""
-    response = _check(_payload(run_code=HELPER_RUN, files={"helpers.py": HELPER}))
-
-    assert response.ok, [(c.key, c.detail) for c in response.checks]
-    assert all(sample.score == 1.0 for sample in response.samples)
 
 
 PARSE = "def clean(text):\n    return text.strip()\n"
-
-
-@pytest.mark.parametrize(
-    ("run_import", "files"),
-    [
-        ("from lib.parse import clean", {"lib/parse.py": PARSE}),
-        ("from lib.parse import clean", {"lib/__init__.py": "", "lib/parse.py": PARSE}),
-        ("from parse import clean", {"parse.py": PARSE}),
-    ],
-)
-def test_sampled_check_imports_helpers_from_folders_and_the_root(run_import: str, files: dict[str, str]) -> None:
-    """A helper in a folder or at the workspace root imports in every sample, as in a real run."""
-    run_code = f"{run_import}\n\ndef run(artifact, input):\n    return clean(artifact + ':' + input['q'])\n"
-    response = _check(_payload(run_code=run_code, files=files))
-
-    assert response.ok, [(c.key, c.message, c.detail) for c in response.checks]
-    assert all(sample.score == 1.0 for sample in response.samples)
 
 
 def test_guest_round_trip_keeps_the_workspace_files() -> None:
@@ -583,14 +542,6 @@ def test_guest_round_trip_keeps_the_workspace_files() -> None:
 
     assert guest.workspace.files == {"lib/parse.py": PARSE}
     assert unified_job_spec(guest, seed=0, task_lm=None).context["files"] == {"lib/parse.py": PARSE}
-
-
-def test_metric_cannot_import_candidate_files() -> None:
-    """The metric runs apart from the run code's files, so importing one fails."""
-    metric = "from helpers import join\n\ndef score(input, output, expected=None):\n    return 1.0, {}\n"
-    response = _check(_payload(run_code=HELPER_RUN, metric_code=metric, files={"helpers.py": HELPER}), sample_count=1)
-
-    assert not response.ok
 
 
 def test_verify_workspace_gives_each_file_its_own_verdict() -> None:
@@ -635,7 +586,6 @@ def test_static_check_lints_each_python_file_on_its_own() -> None:
     """Each parsing Python file gets its own lint; a file that does not parse is left to its check item."""
     response = static_contract_check(
         _payload(
-            run_code=HELPER_RUN,
             files={"helpers.py": "def join(a, b):\n    return a + missing\n", "broken.py": "def (:\n", "notes.md": "x"},
         )
     )

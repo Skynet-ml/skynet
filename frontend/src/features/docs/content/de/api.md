@@ -45,7 +45,7 @@ Die Referenz liest das OpenAPI-Dokument unter `https://api.skynetml.com/openapi.
 | `GET /models`                                   | Listet die Modelle auf, die Sie verwenden können.                |
 | `GET /optimizers`                               | Listet die Optimierer auf, die zu einer Konfiguration passen.    |
 | `GET /blackbox/engines`                         | Listet die nativen Engines auf und ob jede verfügbar ist.        |
-| `POST /optimize`                                | Startet einen Durchlauf für einen Prompt, Code, Text oder ein DSPy-Programm. |
+| `POST /optimize` | Startet einen Durchlauf für ein DSPy-Programm. |
 | `POST /blackbox/run`                            | Startet einen Durchlauf auf einem GitHub-Repository.             |
 | `GET /optimizations`                            | Listet Ihre Durchläufe auf.                                      |
 | `GET /optimizations/{optimization_id}`          | Gibt einen Durchlauf zurück: Status, Fortschritt, Logs und Ergebnis. |
@@ -56,7 +56,7 @@ Die Referenz liest das OpenAPI-Dokument unter `https://api.skynetml.com/openapi.
 
 ## Einen Durchlauf starten
 
-`POST /optimize` nimmt dieselbe Konfiguration an wie der Einreichungsassistent. Dieses Beispiel verbessert einen Prompt, der Support-Nachrichten Labels zuordnet.
+`POST /optimize` nimmt dieselbe Konfiguration an wie der Einreichungsassistent. Das Beispiel verbessert ein DSPy-Programm, das Support-Nachrichten Labels zuordnet.
 
 ```bash tab="curl"
 curl https://api.skynetml.com/optimize \
@@ -72,7 +72,7 @@ curl https://api.skynetml.com/optimize \
   "task": {
     "objective": "Sort each support message into billing, bug or other.",
     "artifact": {
-      "kind": "prompt",
+      "kind": "dspy_program",
       "starting_version": "Label this support message as billing, bug or other."
     }
   },
@@ -93,7 +93,7 @@ curl https://api.skynetml.com/optimize \
     "reflection_model": { "name": "<model from GET /models>" }
   },
   "workspace": {
-    "run_code": "from skynet import llm\n\ndef run(artifact, input):\n    return llm(artifact, input=input[\"message\"])\n",
+    "run_code": "import dspy\n\nprogram = dspy.Predict(\"message -> label\")\n\n\ndef run(artifact, input):\n    return program(message=input[\"message\"]).label\n",
     "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
   },
   "max_cost_cents": 500
@@ -102,7 +102,7 @@ curl https://api.skynetml.com/optimize \
 
 Wichtige Felder:
 
-- `task.artifact.kind` ist `prompt`, `code`, `text` oder `dspy_program`.
+- `task.artifact.kind` ist `dspy_program`.
 - `data.mode` ist `pairs` (Eingaben mit erwarteten Ausgaben) oder `single` (genau ein Fall).
 - `optimizer.choice` ist `auto` oder ein Optimierername aus `GET /optimizers`.
 - `max_cost_cents` ist das Ausgabenlimit für diesen Durchlauf, in US-Cent.

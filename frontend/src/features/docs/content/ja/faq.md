@@ -4,16 +4,16 @@
 
 ### Skynet とは何ですか？
 
-Skynet は、プロンプト、プログラム、エージェント、ワークフローを、あなた自身のデータとメトリクスに対して最適化するプラットフォームです。データセットをアップロードし、タスクを説明して、実行を開始します。実行は新しいバージョンを試し、評価用に取り分けたデータでそれらを採点します。始めるには、[クイックスタート](/docs/quickstart) をお読みください。
+Skynet は、あなた自身のデータとメトリクスに対して DSPy プログラムとリポジトリを最適化するプラットフォームです。データセットをアップロードし、タスクを説明して、実行を開始します。実行は新しいバージョンを試し、評価用に取り分けたデータでそれらを採点します。始めるには、[クイックスタート](/docs/quickstart) をお読みください。
 
 ### Skynet は何を最適化できますか？
 
-Skynet は Optimize Anything です。プロンプト、コード、テキスト、DSPy プログラムを 1 つのプロダクトで最適化します。アーティファクトの種類によって、使えるエンジンが決まります。
+Skynet は Optimize Anything です。1 つのプロダクトで DSPy プログラムとリポジトリを最適化します。アーティファクトの種類によって、使えるエンジンが決まります。
 
-- プロンプト、コード、テキストのアーティファクトは、ネイティブエンジン（GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler、ShinkaEvolve）を使います。
+- リポジトリは、ネイティブエンジン（GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler、ShinkaEvolve）を使います。
 - DSPy プログラムは、DSPy オプティマイザー（DSPy GEPA、DSPy MIPROv2、DSPy BootstrapFewShot）を使います。
 
-**Auto** は、タスクに合うエンジンを組み合わせます。[最適化の仕組み](/docs/concepts/optimization) と [エンジン](/docs/concepts/engines) をご覧ください。
+DSPy プログラムでは、**Auto** は DSPy GEPA を使います。リポジトリでは、ネイティブエンジンを 1 つ選びます。[最適化の仕組み](/docs/concepts/optimization) と [エンジン](/docs/concepts/engines) を参照してください。
 
 ### インターフェースはどの言語に対応していますか？
 

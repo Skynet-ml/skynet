@@ -6,7 +6,6 @@ import { PencilSimple } from "@/shared/ui/icons";
 
 import { cn } from "@/shared/lib/utils";
 import { msg } from "@/shared/lib/messages";
-import { TooltipButton } from "@/shared/ui/tooltip-button";
 import { Button } from "@/shared/ui/primitives/button";
 import { CopyButton } from "@/shared/ui/copy-button";
 
@@ -95,16 +94,15 @@ export function UserBubble({ content, onEdit, editable = true, createdAt }: User
               copiedAriaLabel={msg("shared.agent.copied")}
             />
             {editable && onEdit && (
-              <TooltipButton tooltip={msg("shared.agent.edit_and_resend")} side="top">
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  onClick={onEdit}
-                  aria-label={msg("shared.agent.edit_and_resend")}
-                >
-                  <PencilSimple className="size-3.5" />
-                </Button>
-              </TooltipButton>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                onClick={onEdit}
+                aria-label={msg("shared.agent.edit_and_resend")}
+                autoTooltip={false}
+              >
+                <PencilSimple className="size-3.5" />
+              </Button>
             )}
           </div>
           <MessageTime createdAt={createdAt} />

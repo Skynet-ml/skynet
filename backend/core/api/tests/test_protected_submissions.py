@@ -208,14 +208,14 @@ def _payload(*, total: int = 20) -> dict[str, Any]:
         "username": "spoofed-owner",
         "task": {
             "objective": "Answer the question in one word.",
-            "artifact": {"kind": "prompt", "starting_version": "Answer briefly: "},
+            "artifact": {"kind": "dspy_program", "starting_version": "Answer briefly: "},
         },
         "data": {
             "mode": "pairs",
             "cases": [{"input": {"question": f"Q{index}?"}, "expected": "A"} for index in range(10)],
             "input_fields": ["question"],
         },
-        "optimizer": {"choice": "gepa"},
+        "optimizer": {"choice": "dspy_gepa"},
         "models": {"reflection_model": {"name": "fixture/text"}, "task_model": {"name": "fixture/task"}},
         "workspace": {
             "run_code": "def run(artifact, input):\n    return artifact + input['question']\n",

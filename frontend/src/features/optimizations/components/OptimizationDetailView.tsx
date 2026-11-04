@@ -53,6 +53,7 @@ import {
   serveSharedOptimization,
   STORAGE_CHANGED_EVENT,
   getContinuousState,
+  unhideSharedItem,
 } from "@/shared/lib/api";
 import type { ServeInfoResponse, WorkflowNodeTrace, WorkflowSpec } from "@/shared/types/api";
 import { OptimizationDetailSkeleton } from "./OptimizationDetailSkeleton";
@@ -363,6 +364,13 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const authReady = isShare || sessionStatus === "authenticated";
 
   const [job, setJob] = useState<OptimizationStatusResponse | null>(null);
+  // Opening a run shared with the caller shows it in Shared with me again if
+  // they hid it there.
+  const memberRole = isShare ? shareRole : (job?.effective_role ?? null);
+  useEffect(() => {
+    if (memberRole !== "viewer" && memberRole !== "editor") return;
+    void unhideSharedItem("optimizations", id).catch(() => {});
+  }, [memberRole, id]);
   const [payload, setPayload] = useState<OptimizationPayloadResponse | null>(null);
   const [loading, setLoading] = useState(true);
   // Shapes the loading skeleton like this run's kind when an earlier fetch saw it.

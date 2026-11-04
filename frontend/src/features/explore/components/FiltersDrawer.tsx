@@ -40,8 +40,6 @@ interface FiltersPanelProps {
   onShowMore: () => void;
   selectedModels: string[];
   selectedOptimizers: string[];
-  selectedTypes: string[];
-  selectedModules: string[];
   dateFrom: string | null;
   dateTo: string | null;
   /** Live result count for the current query + filters. */
@@ -49,8 +47,6 @@ interface FiltersPanelProps {
   resultsLoading: boolean;
   onChangeModels: (next: string[]) => void;
   onChangeOptimizers: (next: string[]) => void;
-  onChangeTypes: (next: string[]) => void;
-  onChangeModules: (next: string[]) => void;
   onChangeDateRange: (from: string | null, to: string | null) => void;
   /** Wipes every structured filter (the free-text query stays). */
   onClearAll: () => void;
@@ -61,32 +57,14 @@ interface FiltersHostProps extends FiltersPanelProps {
   onOpenChange: (open: boolean) => void;
 }
 
-const TYPE_VALUES: ReadonlyArray<{
-  value: string;
-  labelKey: Parameters<typeof msg>[0];
-}> = [
-  { value: "run", labelKey: "explore.filter.run" },
-  { value: "grid_search", labelKey: "explore.filter.grid" },
-  { value: "blackbox", labelKey: "explore.filter.blackbox" },
-];
-
-/** Display label for a run-type value; unknown values fall back to the raw id. */
-function typeLabel(value: string): string {
-  const entry = TYPE_VALUES.find((t) => t.value === value);
-  return entry ? msg(entry.labelKey) : value;
-}
-
-const FOCUS_RING =
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/45";
+const FOCUS_RING = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/45";
 
 const SEARCHABLE: ReadonlyArray<{
-  dimension: Exclude<FacetDimension, "types">;
+  dimension: FacetDimension;
   displayName: (value: string) => string;
-  /** Model and optimizer ids are Latin identifiers; module names are free text. */
   dir: "ltr" | "auto";
 }> = [
   { dimension: "models", displayName: modelDisplayName, dir: "ltr" },
-  { dimension: "modules", displayName: (v) => v, dir: "auto" },
   { dimension: "optimizers", displayName: engineDisplayName, dir: "ltr" },
 ];
 
@@ -151,16 +129,12 @@ function FiltersPanel({
   onShowMore,
   selectedModels,
   selectedOptimizers,
-  selectedTypes,
-  selectedModules,
   dateFrom,
   dateTo,
   resultTotal,
   resultsLoading,
   onChangeModels,
   onChangeOptimizers,
-  onChangeTypes,
-  onChangeModules,
   onChangeDateRange,
   onClearAll,
 }: FiltersPanelProps & {
@@ -171,22 +145,13 @@ function FiltersPanel({
   const selectedBy: Record<FacetDimension, string[]> = {
     models: selectedModels,
     optimizers: selectedOptimizers,
-    types: selectedTypes,
-    modules: selectedModules,
   };
   const changeBy: Record<FacetDimension, (next: string[]) => void> = {
     models: onChangeModels,
     optimizers: onChangeOptimizers,
-    types: onChangeTypes,
-    modules: onChangeModules,
   };
   const dateCount = (dateFrom ? 1 : 0) + (dateTo ? 1 : 0);
-  const totalActive =
-    selectedModels.length +
-    selectedOptimizers.length +
-    selectedTypes.length +
-    selectedModules.length +
-    dateCount;
+  const totalActive = selectedModels.length + selectedOptimizers.length + dateCount;
   // A field's empty list means "ruled out by the other filters" only when
   // there are other filters; with none active, it means the scope has none.
   const othersActive = (own: number) => totalActive - own > 0;
@@ -231,13 +196,6 @@ function FiltersPanel({
               othersActive={othersActive(selectedBy[dimension].length)}
             />
           ))}
-          <TypeField
-            open={openField === "types"}
-            onToggle={() => toggleField("types")}
-            options={openField === "types" ? options : []}
-            selected={selectedTypes}
-            onChange={onChangeTypes}
-          />
           <DateField
             open={openField === "date"}
             onToggle={() => toggleField("date")}
@@ -322,13 +280,11 @@ export function FiltersDrawer({ open, onOpenChange, ...panel }: FiltersHostProps
 
 /**
  * One line of plain text naming the applied filters, for when the panel is
- * closed: "Model gpt-4o +1 · Type Run", with a single clear action.
+ * closed: "Model gpt-4o +1 · Optimizer GEPA", with a single clear action.
  */
 export function FilterSummary({
   models,
   optimizers,
-  types,
-  modules,
   dateFrom,
   dateTo,
   onOpen,
@@ -336,8 +292,6 @@ export function FilterSummary({
 }: {
   models: string[];
   optimizers: string[];
-  types: string[];
-  modules: string[];
   dateFrom: string | null;
   dateTo: string | null;
   onOpen: () => void;
@@ -351,9 +305,7 @@ export function FilterSummary({
     parts.push({ label, value: displayName(first), more: selected.length - 1 });
   };
   push(msg("explore.filters.trigger.models"), models, modelDisplayName);
-  push(msg("explore.filters.trigger.modules"), modules, (v) => v);
   push(msg("explore.filters.trigger.optimizers"), optimizers, engineDisplayName);
-  push(msg("explore.filters.trigger.types"), types, typeLabel);
   const date = dateSummary(dateFrom, dateTo, formatDay);
   if (date) parts.push({ label: msg("explore.filters.trigger.date"), value: date, more: 0 });
   if (parts.length === 0) return null;
@@ -519,7 +471,7 @@ function FacetField({
   onChange,
   othersActive,
 }: {
-  dimension: Exclude<FacetDimension, "types">;
+  dimension: FacetDimension;
   displayName: (value: string) => string;
   dir: "ltr" | "auto";
   open: boolean;
@@ -721,77 +673,6 @@ function FacetField({
             )}
           </div>
         )}
-      </div>
-    </FieldRow>
-  );
-}
-
-/**
- * Run types are a fixed trio, so their field skips the search box and lists
- * all three in a stable order with the fetched counts attached. Until a fetch
- * has answered the counts are unknown rather than zero, and a type with no
- * runs in the current context is disabled instead of hidden.
- */
-function TypeField({
-  open,
-  onToggle,
-  options,
-  selected,
-  onChange,
-}: {
-  open: boolean;
-  onToggle: () => void;
-  options: FacetOption[];
-  selected: string[];
-  onChange: (next: string[]) => void;
-}) {
-  const numberFormat = useNumberFormat();
-  const [first] = selected;
-  const toggle = (value: string) => {
-    onChange(selected.includes(value) ? selected.filter((v) => v !== value) : [...selected, value]);
-  };
-  return (
-    <FieldRow
-      label={msg("explore.filters.trigger.types")}
-      summary={first === undefined ? null : typeLabel(first)}
-      count={selected.length}
-      onClear={selected.length > 0 ? () => onChange([]) : undefined}
-      open={open}
-      onToggle={onToggle}
-    >
-      <div className="flex flex-col pb-2">
-        <div role="group" aria-label={msg("explore.filters.section.types")} className="-mx-3">
-          {TYPE_VALUES.map((type) => {
-            const checked = selected.includes(type.value);
-            const count =
-              options.length === 0
-                ? null
-                : (options.find((o) => o.value === type.value)?.count ?? 0);
-            const disabled = count === 0 && !checked;
-            return (
-              <button
-                key={type.value}
-                type="button"
-                role="checkbox"
-                aria-checked={checked}
-                disabled={disabled}
-                onClick={() => toggle(type.value)}
-                className={cn(
-                  "group flex h-11 w-full cursor-pointer items-center gap-2.5 px-3 text-[13px] text-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent lg:h-9",
-                  FOCUS_RING,
-                )}
-              >
-                <CheckboxIndicator checked={checked} />
-                <span className="min-w-0 flex-1 truncate text-start">{msg(type.labelKey)}</span>
-                {count !== null && (
-                  <span className="shrink-0 text-[12px] tabular-nums text-foreground/45">
-                    {numberFormat.format(count)}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
       </div>
     </FieldRow>
   );

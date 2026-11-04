@@ -45,6 +45,7 @@ import {
   restartJob,
   resumeJob,
   listFolders,
+  unhideSharedItem,
 } from "@/shared/lib/api";
 import type { RunFolder, SidebarJobItem } from "@/shared/lib/api";
 import {
@@ -88,6 +89,8 @@ import {
 import { DEFAULT_RUN_VIEW, applyRunView, parseRunView, type RunView } from "../lib/run-view";
 import { ROW_MOTION, rowTransition } from "../lib/row-motion";
 import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
+import { SharedItemMenuItems, useSharedItemActions } from "@/shared/ui/shared-item-menu";
+import { topFolderName } from "@/shared/lib/shared-with-me";
 
 const NAV_ITEMS = perLocale(() =>
   APP_PAGES.filter((page) => page.sidebar).map((page) => ({
@@ -466,6 +469,13 @@ export function Sidebar() {
   // ``?folder=<id>`` (set by the share-link claim page) opens that folder and
   // every ancestor, on whichever tab the folder lives.
   const folderParam = searchParams.get("folder");
+  // Opening a folder link shows the folder again if the caller hid it from view.
+  const unhiddenFolderParamRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!folderParam || unhiddenFolderParamRef.current === folderParam) return;
+    unhiddenFolderParamRef.current = folderParam;
+    void unhideSharedItem("folders", folderParam).then(fetchFolders, () => {});
+  }, [folderParam, fetchFolders]);
   // Applied once per param value, so the 30s refresh doesn't re-open a folder
   // the user has since collapsed.
   const handledFolderParamRef = React.useRef<string | null>(null);
@@ -534,11 +544,12 @@ export function Sidebar() {
     [folderDialog, toggleFolder, handleTabChange],
   );
 
-  const renderJob = (job: SidebarJobItem, isShared: boolean) => (
+  const renderJob = (job: SidebarJobItem, isShared: boolean, inheritedFrom?: string | null) => (
     <JobRow
       key={job.optimization_id}
       job={job}
       isShared={isShared}
+      inheritedFrom={inheritedFrom}
       isActive={pathname === `/optimizations/${job.optimization_id}`}
       activePair={pathname === `/optimizations/${job.optimization_id}` ? activePairIndex : null}
       onDelete={handleDelete}
@@ -738,7 +749,13 @@ export function Sidebar() {
                       onToggle={toggleFolder}
                       view={view}
                       version={folderVersion}
-                      renderRun={(job) => renderJob(job, job.role != null && job.role !== "owner")}
+                      renderRun={(job) =>
+                        renderJob(
+                          job,
+                          job.role != null && job.role !== "owner",
+                          job.folder_id ? topFolderName(folders, job.folder_id) : null,
+                        )
+                      }
                       onAction={setFolderDialog}
                     />
                   </div>
@@ -978,6 +995,7 @@ function NavItem({
 function JobRow({
   job,
   isShared,
+  inheritedFrom,
   isActive,
   activePair,
   onDelete,
@@ -986,6 +1004,8 @@ function JobRow({
 }: {
   job: SidebarJobItem;
   isShared: boolean;
+  /** Folder whose share gives this run's access; the row then offers no grant controls. */
+  inheritedFrom?: string | null;
   isActive: boolean;
   activePair: number | null;
   onDelete: (e: React.MouseEvent, id: string) => void;
@@ -1012,6 +1032,15 @@ function JobRow({
   // owner-only (and a shared-with-me row is never one the caller owns). On the
   // "mine" tab the caller is always owner/admin, so everything is allowed.
   const canEdit = !isShared || job.role === "editor" || job.role === "owner";
+  const shared = useSharedItemActions(
+    { kind: "optimizations", id: job.optimization_id, name: displayName, role: job.role },
+    {
+      onChanged: () => window.dispatchEvent(new Event("optimizations-changed")),
+      onRemoved: () => {
+        if (isActive) router.push("/");
+      },
+    },
+  );
 
   React.useEffect(() => {
     if (renaming) renameRef.current?.focus();
@@ -1449,6 +1478,13 @@ function JobRow({
                   </button>
                 </PopoverPrimitive.Close>
               )}
+
+              {isShared && (
+                <>
+                  <div role="separator" className="mx-3.5 my-1 border-t border-border/40" />
+                  <SharedItemMenuItems actions={shared} inheritedFrom={inheritedFrom} />
+                </>
+              )}
             </PopoverPrimitive.Content>
           </PopoverPrimitive.Portal>
         </PopoverPrimitive.Root>
@@ -1495,6 +1531,8 @@ function JobRow({
           </motion.div>
         )}
       </AnimatePresence>
+
+      {isShared && shared.dialog}
 
       {!isShared && (
         <ShareDialog

@@ -535,7 +535,7 @@ def test_declared_extra_reflection_model_normalizes_with_its_source() -> None:
     """A metric naming an extra reflection model uses that role's source."""
     spec = UnifiedRunRequest.model_validate(
         unified_payload(
-            optimizer={"choice": "shinka_evolve"},
+            optimizer={"choice": "dspy_gepa"},
             models={
                 "reflection_model": {"name": "openai/gpt-4o-mini", "token_source": "managed"},
                 "extra_reflection_models": [

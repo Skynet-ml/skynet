@@ -2,14 +2,12 @@ O Skynet melhora um artefato que você já tem. Você fornece uma versão inicia
 
 ## O que o Skynet otimiza
 
-O Skynet trabalha com quatro tipos de artefato:
+O Skynet trabalha com dois tipos de artefato:
 
 | Tipo de artefato | O que muda                                                     |
 | ---------------- | -------------------------------------------------------------- |
-| Prompt           | O texto do prompt                                              |
-| Código           | O código-fonte                                                 |
+| Repositório | Os arquivos nos caminhos que você permite alterar |
 | Programa DSPy    | As instruções dos preditores em um `dspy.Module`               |
-| Texto            | Qualquer outro texto, por exemplo um documento ou uma configuração |
 
 Toda execução usa o mesmo contrato. O seu código de execução define `run(artifact, input)`. A sua métrica define `score(input, output, expected=None)`. A métrica retorna uma pontuação e um feedback escrito. O otimizador lê o feedback para melhorar a próxima versão.
 
@@ -20,10 +18,10 @@ Toda execução usa o mesmo contrato. O seu código de execução define `run(ar
 
 O Skynet é o Optimize Anything. O tipo de artefato define quais motores podem trabalhar nele:
 
-- Artefatos de Prompt, Código e Texto usam os motores nativos: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler e ShinkaEvolve.
+- Repositórios usam os motores nativos: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler e ShinkaEvolve.
 - Artefatos de programa DSPy usam os otimizadores DSPy: DSPy GEPA, DSPy MIPROv2 e DSPy BootstrapFewShot.
 
-O **Auto** escolhe por você. Em um programa DSPy, o Auto usa o DSPy GEPA. Nos outros tipos de artefato, o Auto combina cinco motores nativos. Leia [Como a otimização funciona](/docs/concepts/optimization) e [Motores](/docs/concepts/engines).
+Em um programa DSPy, o **Auto** usa o DSPy GEPA. Em um repositório, você escolhe um motor nativo. Leia [Como a otimização funciona](/docs/concepts/optimization) e [Motores](/docs/concepts/engines).
 
 ## Como funciona uma execução
 

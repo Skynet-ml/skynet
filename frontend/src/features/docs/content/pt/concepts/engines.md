@@ -1,4 +1,4 @@
-Um motor é o método de busca que propõe novas versões do seu artefato. O Skynet tem seis motores nativos para artefatos de Prompt, Código e Texto, três otimizadores DSPy para programas DSPy e o **Auto**. Esta página explica o que cada um faz, quando escolhê-lo e quais configurações ele tem.
+Um motor é o método de busca que propõe novas versões do seu artefato. O Skynet tem seis motores nativos para repositórios, três otimizadores DSPy para programas DSPy e o **Auto**. Esta página explica o que cada um faz, quando escolhê-lo e quais configurações ele tem.
 
 Leia primeiro [Como a otimização funciona](/docs/concepts/optimization) se você não souber quais motores servem para o seu artefato.
 
@@ -6,13 +6,13 @@ Leia primeiro [Como a otimização funciona](/docs/concepts/optimization) se voc
 
 | Motor                 | Tipos de artefato     | Configurações do agente de programação | Configuração de máx. de iterações |
 | --------------------- | --------------------- | -------------------------------------- | --------------------------------- |
-| Auto                  | Todos                 | Sim, em Prompt, Código e Texto         | Não                               |
-| GEPA                  | Prompt, Código, Texto | Não                                    | Não                               |
-| Best-of-N             | Prompt, Código, Texto | Não                                    | Não                               |
-| AutoResearch          | Prompt, Código, Texto | Sim                                    | Não                               |
-| Meta-Harness          | Prompt, Código, Texto | Sim                                    | Sim                               |
-| AutoSaddler           | Prompt, Código, Texto | Sim                                    | Sim                               |
-| ShinkaEvolve          | Prompt, Código, Texto | Não. Tem a sua própria configuração de editor. | Sim                       |
+| Auto | Programa DSPy | Não | Não |
+| GEPA | Repositório | Não | Não |
+| Best-of-N | Repositório | Não | Não |
+| AutoResearch | Repositório | Sim | Não |
+| Meta-Harness | Repositório | Sim | Sim |
+| AutoSaddler | Repositório | Sim | Sim |
+| ShinkaEvolve | Repositório | Não. Tem a sua própria configuração de editor. | Sim |
 | DSPy GEPA             | Programa DSPy         | Não                                    | Não                               |
 | DSPy MIPROv2          | Programa DSPy         | Não                                    | Não                               |
 | DSPy BootstrapFewShot | Programa DSPy         | Não                                    | Não                               |
@@ -24,12 +24,7 @@ O assistente marca o GEPA, o DSPy GEPA e o Auto como otimizadores que usam o tex
 O Auto é o padrão. O que ele executa depende do tipo de artefato:
 
 - **Programa DSPy**: o Auto executa o DSPy GEPA.
-- **Prompt, Código ou Texto**: o Auto explora com cinco motores ao mesmo tempo: GEPA, AutoResearch, Meta-Harness, AutoSaddler e ShinkaEvolve. Cada motor recebe uma parte igual das execuções do avaliador: o orçamento dividido por 6. Depois o GEPA continua a partir da melhor versão com o resto do orçamento.
-
-O Auto não usa o Best-of-N.
-
-> [!WARNING]
-> Em um artefato de Prompt, Código ou Texto, o Auto precisa de pelo menos 6 execuções do avaliador: 5 linhas de exploração e uma continuação. Os cinco motores precisam estar disponíveis. Se um deles não estiver disponível, selecione um único motor.
+- **Repositório**: O Auto não está disponível. Escolha um motor nativo.
 
 **Escolha-o quando** você não sabe qual motor serve. Este é o melhor ponto de partida.
 
@@ -49,7 +44,7 @@ O Auto não usa o Best-of-N.
 
 Um agente de programação faz rodadas de pesquisa. Ele edita, pontua e mantém o que ajuda até o orçamento acabar.
 
-**Escolha-o quando** uma boa mudança exige várias etapas de investigação, por exemplo em um artefato de Código.
+**Escolha-o quando** uma boa mudança exige várias etapas de investigação.
 
 ## Meta-Harness
 
@@ -85,7 +80,7 @@ O DSPy MIPROv2 e o DSPy BootstrapFewShot precisam de pares (casos com saídas es
 
 | Configuração                   | Padrão     | Intervalo                                                    |
 | ------------------------------ | ---------- | ------------------------------------------------------------ |
-| Máx. de execuções do avaliador | 200        | 1 a 100000 (Auto: pelo menos 6)                              |
+| Máx. de execuções do avaliador | 200        | 1 a 100000                              |
 | Parar na pontuação             | Desativada | 0 ou mais                                                    |
 | Máx. de iterações              | Desativada | 1 a 1000. Apenas Meta-Harness, AutoSaddler e ShinkaEvolve.   |
 
@@ -93,12 +88,12 @@ Uma execução do avaliador é uma chamada da sua métrica em um caso. A nova po
 
 ### Configurações do agente de programação
 
-Estas configurações valem para Auto, AutoResearch, Meta-Harness e AutoSaddler.
+Estas configurações valem para AutoResearch, Meta-Harness e AutoSaddler.
 
 | Configuração                                   | Padrão | Intervalo                                                |
 | ---------------------------------------------- | ------ | -------------------------------------------------------- |
 | Agente de programação                          | Codex  | Pi, Codex, OpenCode, Prime Agent, Comando personalizado  |
-| Candidatos por iteração                        | 3      | 1 a 8. Aparece para Auto e Meta-Harness.                 |
+| Candidatos por iteração                        | 3      | 1 a 8. |
 | Máx. de chamadas de ferramentas por candidato  | 100    | 1 a 1000                                                 |
 
 ### Configurações do ShinkaEvolve
@@ -113,8 +108,6 @@ Estas configurações valem para Auto, AutoResearch, Meta-Harness e AutoSaddler.
 | Tamanho do arquivo                                 | 40                                                                  |
 | Avaliações paralelas                               | 2                                                                   |
 | Propostas paralelas                                | 2                                                                   |
-
-Quando o Auto executa o ShinkaEvolve, o assistente mostra estas configurações como "Definições do ShinkaEvolve (quando o Auto o executa)".
 
 ## Páginas relacionadas
 

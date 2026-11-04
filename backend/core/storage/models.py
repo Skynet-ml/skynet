@@ -1216,6 +1216,10 @@ class OptimizationShareGrantModel(Base):
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
 
+    # Set when the grantee removes the item from their own "Shared with me"
+    # view. Access is unchanged; listings skip the row until it is cleared.
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # The composite PK leads with optimization_id, so "list everything shared
     # with this user" (filtering on grantee_username alone) could not use it.
     __table_args__ = (Index("ix_optimization_share_grants_grantee", "grantee_username"),)
@@ -1836,6 +1840,10 @@ class DatasetShareGrantModel(Base):
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
 
+    # Set when the grantee removes the item from their own "Shared with me"
+    # view. Access is unchanged; listings skip the row until it is cleared.
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # The composite PK leads with dataset_id, so "list everything shared with
     # this user" (filtering on grantee_username alone) could not use it.
     __table_args__ = (Index("ix_dataset_share_grants_grantee", "grantee_username"),)
@@ -1898,6 +1906,10 @@ class TaggingSessionShareGrantModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
+
+    # Set when the grantee removes the item from their own "Shared with me"
+    # view. Access is unchanged; listings skip the row until it is cleared.
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # The composite PK leads with session_id, so "list everything shared with
     # this user" (filtering on grantee_username alone) could not use it.
@@ -1967,6 +1979,10 @@ class RunFolderShareGrantModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
+
+    # Set when the grantee removes the item from their own "Shared with me"
+    # view. Access is unchanged; listings skip the row until it is cleared.
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # The composite PK leads with folder_id, so "list everything shared with
     # this user" (filtering on grantee_username alone) could not use it.

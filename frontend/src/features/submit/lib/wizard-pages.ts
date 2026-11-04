@@ -27,7 +27,7 @@ const OPTIMIZER_SCREENS: readonly WizardPageId[] = ["optimizer", "models", "budg
  * gets Expert's screens so every choice is in reach.
  */
 function optimizerPages(state: WizardV2State): readonly WizardPageId[] {
-  if (!state.task.artifactKind || !state.inputs.mode) return ["optimizer"];
+  if (!(state.task.repo || state.task.artifactKind) || !state.inputs.mode) return ["optimizer"];
   return state.level === "standard" ? ["plan"] : OPTIMIZER_SCREENS;
 }
 

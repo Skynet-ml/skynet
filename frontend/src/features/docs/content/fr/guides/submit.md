@@ -16,14 +16,7 @@ Vous pouvez modifier les deux champs. L'assistant IA n'écrase pas vos modificat
 
 ### Ce qui sera optimisé
 
-Sélectionnez le **Type d'artefact** :
-
-| Type d'artefact | Ce qui change                                             |
-| --------------- | --------------------------------------------------------- |
-| Prompt          | Les instructions envoyées à un modèle de langage          |
-| Code            | Le source d'un programme                                  |
-| Programme DSPy  | Les instructions des prédicteurs d'un module DSPy         |
-| Texte           | Tout autre texte, comme un document ou un modèle de texte |
+Dans **Ce qui est optimisé**, sélectionnez **Programme DSPy** ou **Un dépôt GitHub**.
 
 Indiquez ensuite la **Version de départ** (Guidé : **Notre point de départ**). Collez la version actuelle, ou laissez l'assistant IA rédiger un brouillon.
 

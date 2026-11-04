@@ -209,14 +209,13 @@ function blackboxJob(
 }
 
 function blackboxPayload(
-  recipe: string,
   engine: string,
   extra: Record<string, unknown> = {},
 ): OptimizationPayloadResponse {
   return {
     optimization_id: "fixture-run",
     optimization_type: "blackbox",
-    payload: { recipe, strategy: { mode: "single", engine }, ...extra },
+    payload: { strategy: { mode: "single", engine }, ...extra },
   };
 }
 
@@ -327,16 +326,16 @@ export const OVERVIEW_FIXTURES: OverviewFixture[] = [
     expect: { ...finished, scoreCards: false },
   },
   {
-    name: "oa-gepa-prompt",
+    name: "oa-gepa",
     job: blackboxJob("gepa"),
-    payload: blackboxPayload("prompt", "gepa"),
+    payload: blackboxPayload("gepa"),
     scorePoints: BLACKBOX_SERIES,
     expect: finished,
   },
   {
     name: "oa-best-of-n-text",
     job: blackboxJob("best_of_n"),
-    payload: blackboxPayload("text", "best_of_n"),
+    payload: blackboxPayload("best_of_n"),
     scorePoints: BLACKBOX_SERIES,
     expect: finished,
   },
@@ -347,28 +346,28 @@ export const OVERVIEW_FIXTURES: OverviewFixture[] = [
       best_candidate: { "agent.py": "def solve(ticket):\n    return classify(ticket)\n" },
       versions: [],
     }),
-    payload: blackboxPayload("code", "meta_harness"),
+    payload: blackboxPayload("meta_harness"),
     scorePoints: BLACKBOX_SERIES,
     expect: { ...finished, climb: true },
   },
   {
     name: "oa-autoresearch",
     job: blackboxJob("autoresearch"),
-    payload: blackboxPayload("text", "autoresearch"),
+    payload: blackboxPayload("autoresearch"),
     scorePoints: BLACKBOX_SERIES,
     expect: { ...finished, climb: true },
   },
   {
     name: "oa-autosaddler",
     job: blackboxJob("autosaddler"),
-    payload: blackboxPayload("text", "autosaddler"),
+    payload: blackboxPayload("autosaddler"),
     scorePoints: BLACKBOX_SERIES,
     expect: { ...finished, climb: true },
   },
   {
     name: "oa-shinka-evolve",
     job: blackboxJob("shinka_evolve"),
-    payload: blackboxPayload("code", "shinka_evolve"),
+    payload: blackboxPayload("shinka_evolve"),
     scorePoints: BLACKBOX_SERIES,
     expect: { ...finished, climb: true },
   },
@@ -408,7 +407,7 @@ export const OVERVIEW_FIXTURES: OverviewFixture[] = [
     payload: {
       optimization_id: "fixture-run",
       optimization_type: "blackbox",
-      payload: { recipe: "prompt", strategy: { mode: "auto" } },
+      payload: { strategy: { mode: "auto" } },
     },
     scorePoints: BLACKBOX_SERIES,
     expect: finished,
@@ -420,7 +419,10 @@ export const OVERVIEW_FIXTURES: OverviewFixture[] = [
       best_candidate: { repo: "best" },
       versions: [],
     }),
-    payload: blackboxPayload("repo", "meta_harness", { repo_url: "https://github.com/acme/agent" }),
+    payload: blackboxPayload("meta_harness", {
+      recipe: "repo",
+      repo_url: "https://github.com/acme/agent",
+    }),
     scorePoints: BLACKBOX_SERIES,
     expect: { ...finished, climb: true },
   },
@@ -433,7 +435,7 @@ export const OVERVIEW_FIXTURES: OverviewFixture[] = [
       best_val_score: 0.8,
       split_counts: { train: 36, val: 12, test: 12 },
     }),
-    payload: blackboxPayload("dspy_program", "gepa", { artifact_kind: "dspy_program" }),
+    payload: blackboxPayload("gepa", { artifact_kind: "dspy_program" }),
     scorePoints: BLACKBOX_SERIES,
     expect: finished,
   },
@@ -444,14 +446,14 @@ export const OVERVIEW_FIXTURES: OverviewFixture[] = [
       metric_improvement: null,
       seed_candidate: null,
     }),
-    payload: blackboxPayload("text", "gepa"),
+    payload: blackboxPayload("gepa"),
     scorePoints: BLACKBOX_SERIES,
     expect: { ...finished, scoreCards: false },
   },
   {
     name: "oa-stopped-partial",
     job: blackboxJob("gepa", {}, { status: "stopped", stop_reason: "budget" }),
-    payload: blackboxPayload("text", "gepa"),
+    payload: blackboxPayload("gepa"),
     scorePoints: BLACKBOX_SERIES.slice(0, 3),
     expect: finished,
   },

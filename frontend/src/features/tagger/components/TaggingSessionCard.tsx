@@ -35,6 +35,7 @@ import { cn } from "@/shared/lib/utils";
 import { TAGGER_SESSIONS_CHANGED } from "../hooks/use-tagger";
 import { TaggingSessionShareDialog } from "./TaggingSessionShareDialog";
 import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
+import { SharedItemMenu } from "@/shared/ui/shared-item-menu";
 
 const MODE_LABEL_KEYS: Record<string, MessageKey> = {
   manual: "tagger.assist.setup.manual_label",
@@ -211,6 +212,19 @@ export function TaggingSessionCard({
           />
         </div>
 
+        {!isOwner && (
+          <div className={LIST_ROW_ACTIONS_CLASS} onClick={stop}>
+            <SharedItemMenu
+              item={{
+                kind: "tagging-sessions",
+                id: session.id,
+                name: displayName,
+                role: session.role,
+              }}
+              onChanged={notifyChanged}
+            />
+          </div>
+        )}
         {isOwner && (
           <div className={LIST_ROW_ACTIONS_CLASS} onClick={stop}>
             <TaggingSessionShareDialog sessionId={session.id} />

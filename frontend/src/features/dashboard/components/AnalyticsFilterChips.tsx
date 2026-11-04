@@ -2,11 +2,10 @@ import { FunnelX, X } from "@/shared/ui/icons";
 import { Button } from "@/shared/ui/primitives/button";
 import { TooltipButton } from "@/shared/ui/tooltip-button";
 import { getStatusLabel } from "@/shared/constants/job-status";
-import { modelDisplayName, moduleLabel } from "@/shared/lib/formatters";
+import { modelDisplayName } from "@/shared/lib/formatters";
 import { msg } from "@/shared/lib/messages";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { TERMS } from "@/shared/lib/terms";
-import { jobTypeLabel } from "../lib/transform-chart-data";
 import type { UseAnalyticsFiltersReturn } from "../hooks/use-analytics-filters";
 
 export function AnalyticsFilterChips({
@@ -25,8 +24,6 @@ export function AnalyticsFilterChips({
     dateTo,
     owner,
     access,
-    jobType,
-    module,
     improvement,
     runtime,
     dataset,
@@ -37,8 +34,6 @@ export function AnalyticsFilterChips({
     setDate,
     setOwner,
     setAccess,
-    setJobType,
-    setModule,
     setImprovement,
     setRuntime,
     setDataset,
@@ -105,22 +100,6 @@ export function AnalyticsFilterChips({
       )}
       {date && (
         <FilterChip label={dateLabel} ariaLabel={bucketClearLabel} onClear={() => setDate(null)} />
-      )}
-      {jobType && (
-        <FilterChip
-          label={jobTypeLabel(jobType)}
-          ariaLabel={bucketClearLabel}
-          onClear={() => setJobType(null)}
-        />
-      )}
-      {module && (
-        <FilterChip
-          label={moduleLabel(module)}
-          title={module}
-          truncate
-          ariaLabel={bucketClearLabel}
-          onClear={() => setModule(null)}
-        />
       )}
       {improvement && (
         <FilterChip

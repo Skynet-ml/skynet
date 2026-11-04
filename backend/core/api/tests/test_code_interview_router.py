@@ -163,7 +163,7 @@ _UNIFIED_CONTEXT = {
     "task": {
         "objective": "Replies that resolve the ticket.",
         "background": "",
-        "artifact": {"kind": "prompt", "starting_version": "Answer the ticket."},
+        "artifact": {"kind": "dspy_program", "starting_version": "Answer the ticket."},
     },
     "data_mode": "pairs",
     "input_fields": ["ticket"],
@@ -185,7 +185,7 @@ def test_seed_endpoint_forwards_unified_context_without_columns(monkeypatch) -> 
         json={"dataset_columns": [], "column_roles": {}, "unified": _UNIFIED_CONTEXT},
     )
     assert resp.status_code == 200
-    assert seen["unified"]["task"]["artifact"] == {"kind": "prompt", "starting_version": "Answer the ticket."}
+    assert seen["unified"]["task"]["artifact"] == {"kind": "dspy_program", "starting_version": "Answer the ticket."}
     assert seen["unified"]["focus"] == "metric"
     assert "blackbox" not in seen
 

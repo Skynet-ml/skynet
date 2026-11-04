@@ -7,7 +7,7 @@ import { Warning } from "@/shared/ui/icons";
 
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
 import { stepPages } from "../../lib/wizard-pages";
-import { optimizerModelsReady } from "../../lib/wizard-v2";
+import { optimizerModelsReady, optimizerTarget } from "../../lib/wizard-v2";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { BudgetSection } from "./BudgetSection";
 import { GeneralistAgentShell } from "./GeneralistAgentShell";
@@ -27,7 +27,7 @@ export function OptimizerStep({ page }: { page: number }) {
   const { state, guided } = useWizardV2();
   const { openTo } = useSettingsModal();
   const t = (key: string) => v2Msg(key, guided);
-  const kind = state.task.artifactKind;
+  const kind = optimizerTarget(state.task);
   const mode = state.inputs.mode;
   const choice = state.optimizer.choice;
   const pages = stepPages("optimizer", state);

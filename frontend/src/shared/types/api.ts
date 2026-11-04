@@ -653,10 +653,13 @@ export interface BlackboxRunRequest {
   objective?: string | null;
   background?: string | null;
   // Wizard recipe that authored the run; cloning preselects the picker with it.
-  recipe?: "prompt" | "code" | "anything" | "repo" | null;
+  recipe?: "repo" | null;
   seed_candidate?: BlackboxCandidate | null;
   scorer: BlackboxScorer;
   cases?: Array<Record<string, unknown>> | null;
+  staged_dataset_id?: string | null;
+  input_fields?: string[];
+  expected_field?: string | null;
   seed?: number | null;
   budget: BlackboxBudget;
   strategy: BlackboxStrategy;

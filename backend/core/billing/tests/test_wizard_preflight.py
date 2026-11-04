@@ -465,13 +465,16 @@ def test_unified_metric_model_gets_a_metered_route(
     monkeypatch.setattr(wizard_preflight, "_verify_unified", verify)
     budget = _budget(client)
     payload = {
-        "task": {"objective": "Answer in one word.", "artifact": {"kind": "prompt", "starting_version": "Answer: "}},
+        "task": {
+            "objective": "Answer in one word.",
+            "artifact": {"kind": "dspy_program", "starting_version": "Answer: "},
+        },
         "data": {
             "mode": "pairs",
             "cases": [{"input": {"question": f"Q{index}?"}, "expected": "A"} for index in range(10)],
             "input_fields": ["question"],
         },
-        "optimizer": {"choice": "gepa"},
+        "optimizer": {"choice": "dspy_gepa"},
         "models": {
             "reflection_model": {"name": "fixture/text"},
             "task_model": {"name": "fixture/task"},
@@ -529,13 +532,13 @@ def test_unified_byok_roles_are_aliased_before_setup_protection(setup_client, mo
     monkeypatch.setattr(wizard_preflight, "ModelGateway", _RoutingGateway)
     monkeypatch.setattr(wizard_preflight, "_verify_unified", verify)
     payload = {
-        "task": {"objective": "Answer.", "artifact": {"kind": "prompt", "starting_version": "Answer: "}},
+        "task": {"objective": "Answer.", "artifact": {"kind": "dspy_program", "starting_version": "Answer: "}},
         "data": {
             "mode": "pairs",
             "cases": [{"input": {"question": "Q"}, "expected": "A"}, {"input": {"question": "Q2"}, "expected": "A2"}],
             "input_fields": ["question"],
         },
-        "optimizer": {"choice": "gepa"},
+        "optimizer": {"choice": "dspy_gepa"},
         "models": {
             "task_model": {"name": "fixture/task"},
             "reflection_model": {"name": "fixture/reflection"},

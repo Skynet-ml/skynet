@@ -136,6 +136,7 @@ from .routers.saved_secrets import create_saved_secrets_router
 from .routers.scorer_dependencies import create_scorer_dependencies_router
 from .routers.serve import create_serve_router
 from .routers.share import create_share_router
+from .routers.shared_with_me import create_shared_with_me_router
 from .routers.submissions import create_submissions_router
 from .routers.tagger_assist import create_tagger_assist_router
 from .routers.tagging_session_share import create_tagging_session_share_router
@@ -1377,6 +1378,7 @@ def create_app(
     app.include_router(create_dataset_library_router(job_store=job_store), tags=["Datasets"])
     app.include_router(create_dataset_share_router(job_store=job_store), tags=["Datasets"])
     app.include_router(create_folders_router(job_store=job_store), tags=["Folders"])
+    app.include_router(create_shared_with_me_router(job_store=job_store), tags=["Folders"])
     app.include_router(create_continuous_router(job_store=job_store), tags=["Optimizations"])
     app.include_router(create_connectors_router(job_store=job_store), tags=["Connectors"])
     app.include_router(create_saved_secrets_router(job_store=job_store), tags=["Settings"])

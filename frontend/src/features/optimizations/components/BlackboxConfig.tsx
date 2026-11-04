@@ -91,12 +91,6 @@ const BLACKBOX_SLIDES = perLocale(() => [
   },
 ]);
 
-const RECIPE_LABELS: Record<string, string> = perLocale(() => ({
-  prompt: msg("optimization.config.recipe.prompt"),
-  code: msg("optimization.config.recipe.code"),
-  anything: msg("optimization.config.recipe.anything"),
-}));
-
 function modelName(cfg: Record<string, unknown> | null): string {
   if (!cfg) return "—";
   const provider = typeof cfg.provider === "string" ? cfg.provider : "";
@@ -267,7 +261,6 @@ export function BlackboxConfigCard({
     });
   }
 
-  const recipe = typeof payload.recipe === "string" ? payload.recipe : null;
   const seed = payload.seed_candidate;
   const seedValue =
     typeof seed === "string" && seed.trim() !== ""
@@ -303,13 +296,6 @@ export function BlackboxConfigCard({
       label: msg("optimization.blackbox.config.budget_stop_label"),
       value: String(budget.stop_at_score),
       icon: <Target />,
-    });
-  }
-  if (recipe) {
-    optimizationRows.push({
-      label: <HelpTip text={tip("config.recipe")}>{msg("optimization.config.recipe")}</HelpTip>,
-      value: RECIPE_LABELS[recipe] ?? recipe,
-      icon: <Sparkle />,
     });
   }
   optimizationRows.push({

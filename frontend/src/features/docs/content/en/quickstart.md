@@ -1,4 +1,4 @@
-This page shows how to start your first run in about ten minutes. You sign in, upload a small dataset, fill in the four wizard steps, and start the run. The example improves a prompt that sorts support messages into labels.
+This page shows how to start your first run in about ten minutes. You sign in, upload a small dataset, fill in the four wizard steps, and start the run. The example improves a DSPy program that sorts support messages into labels.
 
 ## Before you start
 
@@ -25,8 +25,8 @@ The first step is **Task**. It asks "What do you want to optimize?"
 
 1. In **Objective**, write what a good result is. Use plain words, for example "Sort each support message into billing, bug or other."
 2. Optional: in **Background**, add context that helps the optimizer.
-3. In **Artifact type**, select **Prompt**.
-4. In **Starting version**, paste your current prompt.
+3. In **What gets optimized**, select **DSPy program**.
+4. In **Starting version**, paste the current instruction of your program.
 
 ## 3. Inputs
 
@@ -47,7 +47,7 @@ The third step is **Optimizer** ("Optimizer, models and budget").
 
 - Keep the optimizer on **Auto**.
 - Select a **Reflection model**. The optimizer uses it to write new versions. This model is required.
-- Optional: select a **Task model**. Your run code uses it.
+- Select a **Task model**. Your program uses it. A DSPy program must have one.
 - Under **Budget**, keep **Max scorer runs** at its default of 200.
 
 Read [Engines](/docs/concepts/engines) to pick a specific engine.
@@ -57,11 +57,13 @@ Read [Engines](/docs/concepts/engines) to pick a specific engine.
 The last step is **Metric & run** ("Code and metric"). You write two files.
 
 ```python tab="run.py"
-from skynet import llm
+import dspy
+
+program = dspy.Predict("message -> label")
 
 
 def run(artifact, input):
-    return llm(artifact, input=input["message"])
+    return program(message=input["message"]).label
 ```
 
 ```python tab="metric.py"
@@ -73,7 +75,7 @@ def score(input, output, expected=None):
     return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`artifact` is the current version of your prompt. `input` holds the Input columns of one case. `expected` holds the Output column, keyed by its column name.
+`artifact` is the current instruction that the optimizer proposes. Skynet applies it to `program`. `input` holds the Input columns of one case. `expected` holds the Output column, keyed by its column name.
 
 Then select **Check** under **Contract check**. The check runs your code and your metric in the sandbox on 3 sample cases. It checks:
 

@@ -8,14 +8,14 @@ The run page shows only the tabs that apply to the run. Some tabs depend on the 
 | ------------------ | ------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | **Overview**       | Always                                                        | Progress, scores and the score history                                           |
 | **Usage**          | A successful run with a program that Skynet can serve         | A form to run the optimized program, and integration code                        |
-| **Artifact**       | A Prompt, Code or Text run with a result                      | The versions of your artifact, with the best version                             |
+| **Artifact** | A repository run with a result | The versions of your artifact, with the best version |
 | **Data**           | A finished DSPy program run                                   | The data split into train, validation and test sets, and the test set evaluation |
 | **Code**           | When the run has code to show                                 | The run code and the metric                                                      |
-| **Reward**         | A Prompt, Code or Text run whose metric declares reward parts | The reward parts and their weights                                               |
-| **Artifact**       | A run with an optimized prompt or files                       | The optimized output and **Export results**                                      |
+| **Reward** | A repository run whose metric declares reward parts | The reward parts and their weights |
+| **Artifact** | A finished DSPy program run | The optimized output and **Export results** |
 | **Logs**           | Most runs                                                     | The run log                                                                      |
 | **Usage and cost** | When you are signed in                                        | What the run spent                                                               |
-| **Scheduled run**  | A successful Prompt, Code or Text run                         | A schedule to run the optimization again                                         |
+| **Scheduled run** | A successful DSPy program run | A schedule to run the optimization again |
 | **Config**         | Always                                                        | The run configuration                                                            |
 
 > [!NOTE]
@@ -33,7 +33,7 @@ The **Overview** tab shows:
 
 While the run is active, the overview also shows **Elapsed**, **Remaining** and **Rate**.
 
-For a Prompt, Code or Text run, the overview also shows **Named scores** when your metric reports named scores.
+For a repository run, the overview also shows **Named scores** when your metric reports named scores.
 
 For a DSPy program run, the **Data** tab has a **Test set evaluation**. It shows the baseline and optimized score for each test case.
 
@@ -45,7 +45,7 @@ If the run stopped at its budget, the run page tells you which version Skynet sa
 
 ## Export the best version
 
-### Prompt, Code and Text runs
+### Repository runs
 
 The **Artifact** tab lists the **Versions** of your artifact. For each version you can:
 

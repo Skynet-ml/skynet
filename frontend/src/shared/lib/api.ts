@@ -33,7 +33,6 @@ import type {
   WorkflowSpec,
 } from "@/shared/types/api";
 import type {
-  ArtifactKind,
   CheckTerminalEvent,
   ContractCheckRequest,
   ContractCheckResponse,
@@ -42,6 +41,7 @@ import type {
   InputsInferenceRequest,
   InputsInferenceResponse,
   OptimizerCatalogResponse,
+  OptimizerTarget,
   TaskInterviewRequest,
   TaskInterviewTurnResult,
   UnifiedAuthoringContext,
@@ -49,6 +49,7 @@ import type {
 } from "@/shared/types/unified-run";
 import { kickoffOpening } from "@/shared/lib/agent-kickoff";
 import { formatMsg, msg } from "@/shared/lib/messages";
+import { forgetOAuthReturn } from "@/shared/lib/oauth-return";
 import type { TurnStats } from "@/shared/ui/agent/types";
 import { parseTurnStats } from "@/shared/ui/agent/turn-stats";
 import { I18N_KEY, tI18n } from "@/shared/lib/i18n";
@@ -504,8 +505,8 @@ export function submitRepoRun(req: BlackboxRunRequest, opts?: { idempotencyKey?:
   });
 }
 
-export function getOptimizerCatalog(kind: ArtifactKind, mode: DataMode, signal?: AbortSignal) {
-  const query = `artifact_kind=${encodeURIComponent(kind)}&data_mode=${encodeURIComponent(mode)}`;
+export function getOptimizerCatalog(target: OptimizerTarget, mode: DataMode, signal?: AbortSignal) {
+  const query = `artifact_kind=${encodeURIComponent(target)}&data_mode=${encodeURIComponent(mode)}`;
   return request<OptimizerCatalogResponse>(`/optimizers?${query}`, { signal });
 }
 
@@ -1958,6 +1959,8 @@ export function removeConnector(provider: ConnectorProvider) {
  * ``fields`` carries what must be named before sign-in (Azure's storage account).
  */
 export function startConnectorOAuth(provider: ConnectorProvider, fields?: Record<string, string>) {
+  // A caller that wants the callback to return to it remembers its path after this resolves.
+  forgetOAuthReturn();
   return request<{ authorize_url: string }>(`/connectors/${provider}/oauth/start`, {
     method: "POST",
     ...(fields ? { body: JSON.stringify({ fields }) } : {}),
@@ -3591,6 +3594,42 @@ export async function deleteFolder(folderId: string) {
   return result;
 }
 
+/** A kind of item another user can share with the caller. */
+export type SharedItemKind = "optimizations" | "datasets" | "tagging-sessions" | "folders";
+
+function invalidateSharedLists() {
+  invalidateCache("/folders", "/optimizations", "/datasets/library", "/tagging-sessions");
+}
+
+/** Hide a shared item from the caller's own lists. Access does not change. */
+export async function hideSharedItem(kind: SharedItemKind, id: string) {
+  await request<void>(`/shared-with-me/${kind}/${encodeURIComponent(id)}/hide`, { method: "POST" });
+  invalidateSharedLists();
+}
+
+/** Show a hidden shared item again. A no-op when nothing is hidden. */
+export async function unhideSharedItem(kind: SharedItemKind, id: string) {
+  await request<void>(`/shared-with-me/${kind}/${encodeURIComponent(id)}/hide`, {
+    method: "DELETE",
+  });
+  invalidateSharedLists();
+}
+
+/** Lower the caller's own role on a shared item. The server refuses a raise. */
+export async function lowerSharedRole(kind: SharedItemKind, id: string, role: MemberRole) {
+  await request<void>(`/shared-with-me/${kind}/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ role }),
+  });
+  invalidateSharedLists();
+}
+
+/** Remove the caller's own access to a shared item. */
+export async function removeSharedAccess(kind: SharedItemKind, id: string) {
+  await request<void>(`/shared-with-me/${kind}/${encodeURIComponent(id)}`, { method: "DELETE" });
+  invalidateSharedLists();
+}
+
 /** Move a folder under another folder, or to the top level with null. */
 export async function moveFolder(folderId: string, parentId: string | null) {
   const folder = await request<RunFolder>(`/folders/${folderId}/move`, {
@@ -4357,16 +4396,16 @@ export async function streamTaskInterviewTurn(
             done: data.done === true,
             objective: typeof data.objective === "string" ? data.objective : "",
             background: typeof data.background === "string" ? data.background : "",
-            artifact_kind:
-              kind === "prompt" || kind === "code" || kind === "dspy_program" || kind === "text"
-                ? kind
-                : null,
+            artifact_kind: kind === "dspy_program" ? kind : null,
             starting_version: parseCandidate(data.starting_version),
             artifact_rationale:
               typeof data.artifact_rationale === "string" ? data.artifact_rationale : "",
             model: typeof data.model === "string" && data.model ? data.model : null,
             served_model:
               typeof data.served_model === "string" && data.served_model ? data.served_model : null,
+            target: data.target === "repo" || data.target === "dspy_program" ? data.target : null,
+            repo_query: typeof data.repo_query === "string" ? data.repo_query : "",
+            needs_data: typeof data.needs_data === "boolean" ? data.needs_data : null,
           };
           handlers.onDone(outcome);
           break;
@@ -4435,7 +4474,7 @@ export interface CorpusFacets {
   totals: FacetTotals;
 }
 
-export type FacetDimension = keyof FacetTotals;
+export type FacetDimension = "models" | "optimizers";
 
 /** The active structured filters, echoed back so facet counts are contextual. */
 export interface FacetContext {

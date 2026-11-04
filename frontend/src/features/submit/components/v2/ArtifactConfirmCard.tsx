@@ -1,9 +1,7 @@
 "use client";
 
-import { Brain, ChatText, Code, TextT } from "@/shared/ui/icons";
 import { LazyCodeEditor as CodeEditor } from "@/shared/ui/lazy-code-editor";
 import { Textarea } from "@/shared/ui/primitives/textarea";
-import { Segmented } from "@/shared/ui/segmented";
 import { PingDot } from "@/shared/ui/ping-dot";
 import { msg, type MessageKey } from "@/shared/lib/messages";
 import { getActiveMessages } from "@/shared/lib/runtime-messages";
@@ -24,20 +22,10 @@ export function v2Msg(key: string, guided: boolean, params?: MessageParams): str
   return msg(chosen as MessageKey, params);
 }
 
-export const ARTIFACT_KINDS: readonly ArtifactKind[] = ["prompt", "code", "dspy_program", "text"];
-
-const KIND_ICONS: Record<ArtifactKind, React.ReactNode> = {
-  prompt: <ChatText className="size-3.5" aria-hidden="true" />,
-  code: <Code className="size-3.5" aria-hidden="true" />,
-  dspy_program: <Brain className="size-3.5" aria-hidden="true" />,
-  text: <TextT className="size-3.5" aria-hidden="true" />,
-};
-
 type StartingVersion = string | Record<string, string> | null;
 
 export interface ArtifactConfirmCardProps {
   kind: ArtifactKind | null;
-  onKindChange: (kind: ArtifactKind) => void;
   startingVersion: StartingVersion;
   onStartingVersionChange: (value: string | Record<string, string>) => void;
   rationale: string;
@@ -49,13 +37,12 @@ export interface ArtifactConfirmCardProps {
 }
 
 /**
- * What the interview derived: the kind of artifact to optimize, picked with
- * one click, and the starting version it will be optimized from. There is no
- * confirm button: Continue moves on once nothing is missing.
+ * What the interview derived: the starting version of the DSPy program the
+ * run optimizes. There is no confirm button: Continue moves on once nothing
+ * is missing.
  */
 export function ArtifactConfirmCard({
   kind,
-  onKindChange,
   startingVersion,
   onStartingVersionChange,
   rationale,
@@ -83,20 +70,6 @@ export function ArtifactConfirmCard({
       </div>
 
       <div className="flex flex-col gap-4 px-4 py-4">
-        <Segmented<ArtifactKind>
-          label={t("submit.v2.task.artifact.kind_label")}
-          value={kind}
-          onChange={onKindChange}
-          controls="v2-starting-version"
-          className="w-full"
-          options={ARTIFACT_KINDS.map((k) => ({
-            value: k,
-            label: t(`submit.v2.task.artifact.kind.${k}`),
-            tip: t(`submit.v2.task.artifact.kind.${k}.desc`),
-            icon: KIND_ICONS[k],
-          }))}
-        />
-
         <div id="v2-starting-version" className="flex flex-col gap-2">
           <span className="text-sm font-medium text-foreground">
             {t("submit.v2.task.artifact.starting_label")}
@@ -173,7 +146,7 @@ function StartingVersionEditor({
   }
 
   const text = value ?? "";
-  const isCode = kind === "code" || kind === "dspy_program" || looksLikeCode(text);
+  const isCode = kind === "dspy_program" || looksLikeCode(text);
   if (isCode) {
     return (
       <CodeEditor
