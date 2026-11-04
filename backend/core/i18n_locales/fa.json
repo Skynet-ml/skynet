@@ -326,7 +326,6 @@
     "code_agent.seed_lane_timeout": "مدل بیش از حد فکر کرد بدون اینکه کد را بنویسد، بنابراین پیش‌نویس متوقف شد. دوباره امتحان کنید، یا مدلی سریع‌تر یا سطح استدلال پایین‌تری انتخاب کنید.",
     "submit.no_models_available": "هیچ مدلی در فهرست در دسترس نیست — ابتدا یک کلید API ارائه‌دهنده را پیکربندی کنید.",
     "user.storage.quota_exceeded": "سهمیه‌ی ذخیره‌سازی از حد گذشت ({used_mb} مگابایت از {quota_mb} مگابایت استفاده شد). فضا آزاد کرده و دوباره تلاش کنید.",
-    "wizard.code_via_authoring_only": "{field} را نمی‌توان از طریق update_wizard_state تنظیم کرد. کد اجرا و کد معیار را فقط عامل برنامه‌نویسی در مرحلهٔ معیار ویزارد می‌نویسد.",
     "wizard.column_roles_not_object": "column_roles باید یک شیء باشد.",
     "wizard.field_must_be_list": "{field} باید یک فهرست باشد.",
     "wizard.field_non_empty_string": "{field} باید یک رشته‌ی غیرخالی باشد.",

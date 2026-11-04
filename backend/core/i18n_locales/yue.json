@@ -344,7 +344,6 @@
     "notifier.email.footer": "呢個係嚟自 {term.appName} 嘅自動傳送訊息。",
     "optimization.no_program_artifact": "冇程式產物。",
     "optimization.no_program_artifact_scoped": "最佳化冇程式產物。",
-    "wizard.code_via_authoring_only": "{field} 唔可以透過 update_wizard_state 設定。執行程式碼同 Metric 程式碼只會由精靈 Metric 步驟入面嘅編程代理編寫。",
     "budget.idempotency_required": "請為呢個請求傳送一個唯一嘅 Idempotency-Key。",
     "serve.caller_tool_connection_required": "呢次執行用咗一個綁定擁有者嘅工具連接。喺調用之前，請先將個工具連接到你嘅帳戶。",
     "serve.protected_interaction_failed": "沙盒請求失敗：{error}",

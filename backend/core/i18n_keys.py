@@ -400,7 +400,6 @@ class I18nKey(StrEnum):
     WEBAUTHN_CHALLENGE_EXPIRED = 'webauthn.challenge_expired'
     WEBAUTHN_INVALID_CREDENTIAL = 'webauthn.invalid_credential'
     WEBAUTHN_NOT_FOUND = 'webauthn.not_found'
-    WIZARD_CODE_VIA_AUTHORING_ONLY = 'wizard.code_via_authoring_only'
     WIZARD_COLUMN_ROLES_NOT_OBJECT = 'wizard.column_roles_not_object'
     WIZARD_FIELD_MUST_BE_LIST = 'wizard.field_must_be_list'
     WIZARD_FIELD_NON_EMPTY_STRING = 'wizard.field_non_empty_string'

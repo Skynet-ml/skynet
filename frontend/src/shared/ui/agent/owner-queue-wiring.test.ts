@@ -5,7 +5,6 @@ import ts from "typescript";
 
 import { discardStaleDocsResponse, docsAskFailure } from "../../../features/docs/lib/docs-queue.ts";
 import { askBody, isQuestionTooLong, trimHistory, MAX_QUESTION_CHARS } from "../../../features/docs/lib/docs-answer.ts";
-import { INTERVIEW_TURN_MAX_CHARS } from "../../../features/submit/lib/interview-turn.ts";
 import { REACT_CHAT_USER_MESSAGE_MAX_CHARS } from "../../../features/optimizations/lib/react-chat-steering.ts";
 import { handleComposerEscape } from "./composer-keys.ts";
 import { midTurnOf, SteerQueue } from "./steer-queue.ts";
@@ -213,15 +212,13 @@ function expression(file: string, name: string, context: Record<string, unknown>
 
 for (const [file, limit] of [
   [docs, 8000],
-  ["src/features/submit/components/v2/TaskStep.tsx", 8000],
   [served, 2000],
 ] as const) {
   test(`${file} preserves an over-limit Stop and send now join`, async () => {
     const noop = () => {};
     const options = expression(file, "useSteerQueue", {
       streaming: true, status: "streaming", sendQueued: noop, stopAnswer: noop, stopTurn: noop,
-      interview: { busy: true, send: noop, stop: noop },
-      MAX_QUESTION_CHARS, INTERVIEW_TURN_MAX_CHARS, REACT_CHAT_USER_MESSAGE_MAX_CHARS,
+      MAX_QUESTION_CHARS, REACT_CHAT_USER_MESSAGE_MAX_CHARS,
     });
     const sent: string[] = [];
     const queue = new SteerQueue((text) => { sent.push(text); });
@@ -336,7 +333,8 @@ test("R2 an idle next-prompt hint cannot block streaming Escape", () => {
   assert.equal(stops, 1);
 });
 
-for (const file of ["src/features/agent-panel/hooks/use-generalist-agent.ts", "src/shared/hooks/use-code-agent.ts"]) {
+{
+  const file = "src/features/agent-panel/hooks/use-generalist-agent.ts";
   for (const action of ["editAndResend", "retry"]) {
   test(`R2 ${file} pauses unread input before ${action}`, () => {
     const queue = new SteerQueue();
@@ -437,7 +435,7 @@ test("R3 a changed draft does not retain the old length alert", () => {
   assert.equal(new Function("lengthNotice", "value", `return ${condition}`)("old rejected draft", "short"), false);
 });
 
-for (const owner of ["generalist", "code", "served"] as const) {
+for (const owner of ["generalist", "served"] as const) {
   test(`R3 ${owner} delivery proof does not alter a replacement turn`, () => {
     const oldQuestion = { role: "user", content: "old question" };
     let messages = [oldQuestion, { role: "assistant", content: "old answer" },
@@ -447,8 +445,7 @@ for (const owner of ["generalist", "code", "served"] as const) {
     const reply = { current: "new answer" };
     const before = { current: null };
     const patch = (update: (previous: typeof messages) => typeof messages) => { messages = update(messages); };
-    const file = owner === "generalist" ? "src/features/agent-panel/hooks/use-generalist-agent.ts" :
-      owner === "code" ? "src/shared/hooks/use-code-agent.ts" : served;
+    const file = owner === "generalist" ? "src/features/agent-panel/hooks/use-generalist-agent.ts" : served;
     const store = { applied: () => true };
     const callback = expression(file, "applySteer", {
       controller, rt: { controller: new AbortController(), replyBuf: "new answer" },
@@ -484,9 +481,4 @@ test("R2 docs refuses an over-length queued question without losing it", () => {
     askLatestRef: { current: () => assert.fail("started over-length ask") }, isQuestionTooLong,
   });
   assert.equal(callback("x".repeat(8001)), false);
-});
-
-test("R2 the code agent refuses queued input without a usable chat context", () => {
-  const callback = expression("src/shared/hooks/use-code-agent.ts", "runAgent", { canChat: false, hasRequiredContext: false });
-  assert.equal(callback("keep", []), false);
 });

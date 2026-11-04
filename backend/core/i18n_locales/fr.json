@@ -326,7 +326,6 @@
     "code_agent.seed_lane_timeout": "Le modèle a réfléchi trop longtemps sans écrire le code, le brouillon a donc été arrêté. Réessayez, ou choisissez un modèle plus rapide ou un niveau de réflexion plus bas.",
     "submit.no_models_available": "Aucun modèle disponible dans le catalogue — configurez d'abord une clé API de fournisseur.",
     "user.storage.quota_exceeded": "Quota de stockage dépassé ({used_mb} Mo sur {quota_mb} Mo utilisés). Libérez de l'espace et réessayez.",
-    "wizard.code_via_authoring_only": "{field} ne peut pas être défini via update_wizard_state. Le code d'exécution et le code de métrique sont écrits uniquement par l'agent de code à l'étape Métrique de l'assistant.",
     "wizard.column_roles_not_object": "column_roles doit être un objet.",
     "wizard.field_must_be_list": "{field} doit être une liste.",
     "wizard.field_non_empty_string": "{field} doit être une chaîne non vide.",

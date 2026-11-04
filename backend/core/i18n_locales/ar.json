@@ -326,7 +326,6 @@
     "code_agent.seed_lane_timeout": "فكّر النموذج لفترة طويلة جدًا دون أن يكتب الشيفرة، لذا أُوقفت المسودة. حاول مرة أخرى، أو اختر نموذجًا أسرع أو مستوى تفكير أقل.",
     "submit.no_models_available": "لا تتوفّر أي نماذج في الكتالوج — هيّئ مفتاح API لمزوّد أولاً.",
     "user.storage.quota_exceeded": "تم تجاوز حصة التخزين (استُخدم {used_mb} ميغابايت من {quota_mb} ميغابايت). حرّر مساحة وحاول مجددًا.",
-    "wizard.code_via_authoring_only": "لا يمكن تعيين {field} عبر update_wizard_state. لا يكتب كود التشغيل وكود المقياس إلا وكيل البرمجة في خطوة المقياس في المعالج.",
     "wizard.column_roles_not_object": "يجب أن يكون column_roles كائنًا.",
     "wizard.field_must_be_list": "يجب أن يكون {field} قائمة.",
     "wizard.field_non_empty_string": "يجب أن يكون {field} نصًا غير فارغ.",

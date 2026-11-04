@@ -78,7 +78,7 @@ export interface GeneralistAgentHandlers {
   signal?: AbortSignal;
 }
 
-/** Stream generalist-agent events via SSE. Mirrors `streamCodeAgent`. */
+/** Stream generalist-agent events via SSE. */
 export async function streamGeneralistAgent(
   req: GeneralistAgentRequest,
   handlers: GeneralistAgentHandlers,

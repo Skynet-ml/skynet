@@ -19,6 +19,7 @@ interface ExpandableTextareaProps {
   className?: string;
   /** `data-tutorial` hook for the compact textarea. */
   tutorial?: string;
+  readOnly?: boolean;
   /**
    * Receives the compact textarea and the expand trigger so the caller seats
    * them in its own field markup (the trigger usually lives in the label row).
@@ -43,6 +44,7 @@ export function ExpandableTextarea({
   rows,
   className,
   tutorial,
+  readOnly,
   children,
 }: ExpandableTextareaProps) {
   const [expanded, setExpanded] = React.useState(false);
@@ -100,6 +102,8 @@ export function ExpandableTextarea({
       onChange={(event) => onChange(event.target.value)}
       placeholder={placeholder}
       rows={rows}
+      readOnly={readOnly}
+      aria-busy={readOnly || undefined}
       dir="auto"
       data-tutorial={tutorial}
       className={className}
@@ -156,6 +160,7 @@ export function ExpandableTextarea({
             value={value}
             onChange={(event) => onChange(event.target.value)}
             placeholder={placeholder}
+            readOnly={readOnly}
             dir="auto"
             className={cn(className, "min-h-0 flex-1 overflow-y-auto leading-relaxed")}
           />

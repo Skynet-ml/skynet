@@ -1,40 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import {
-  decodeScreenChats,
-  encodeScreenChats,
-  parseScreenNav,
-  runScreenNav,
-  switchScreenChat,
-} from "./screen-agent.ts";
-
-test("each screen starts its own conversation", () => {
-  const chats = new Map<string, string>();
-  assert.deepEqual(switchScreenChat(chats, null, null, "brief"), { kind: "fresh" });
-  assert.deepEqual(switchScreenChat(chats, "brief", "conv-brief", "artifact"), { kind: "fresh" });
-  assert.equal(chats.get("brief"), "conv-brief");
-});
-
-test("going back resumes the earlier screen's conversation", () => {
-  const chats = new Map<string, string>();
-  switchScreenChat(chats, "brief", "conv-brief", "artifact");
-  assert.deepEqual(switchScreenChat(chats, "artifact", "conv-artifact", "brief"), {
-    kind: "resume",
-    conversationId: "conv-brief",
-  });
-  assert.deepEqual(switchScreenChat(chats, "brief", "conv-brief", "artifact"), {
-    kind: "resume",
-    conversationId: "conv-artifact",
-  });
-});
-
-test("staying on a screen keeps its chat, and an unused chat is not remembered", () => {
-  const chats = new Map<string, string>();
-  assert.deepEqual(switchScreenChat(chats, "brief", "conv-brief", "brief"), { kind: "stay" });
-  switchScreenChat(chats, "artifact", null, "brief");
-  assert.equal(chats.has("artifact"), false);
-});
+import { parseScreenNav, runScreenNav } from "./screen-agent.ts";
 
 test("a continue result runs the Continue button's own handler", () => {
   const calls: string[] = [];
@@ -80,16 +47,4 @@ test("a continue from a screen the wizard already left is dropped", () => {
   };
   runScreenNav({ action: "continue", from: "brief" }, navigator);
   assert.deepEqual(calls, []);
-});
-
-test("the screen chats kept for a tab round-trip and ignore junk", () => {
-  const chats = new Map([
-    ["inputs", "c1"],
-    ["optimizer", "c2"],
-  ]);
-  assert.deepEqual(decodeScreenChats(encodeScreenChats(chats)), chats);
-  assert.deepEqual(decodeScreenChats(null), new Map());
-  assert.deepEqual(decodeScreenChats("not json"), new Map());
-  assert.deepEqual(decodeScreenChats('["c1"]'), new Map());
-  assert.deepEqual(decodeScreenChats('{"inputs":"c1","task":3,"x":""}'), new Map([["inputs", "c1"]]));
 });

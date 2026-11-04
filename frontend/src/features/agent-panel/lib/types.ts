@@ -62,6 +62,8 @@ export interface WizardState {
   screen_notes?: ScreenNote[];
   /** What the Continue button refuses on the screen on view. */
   screen_issue?: string;
+  /** The setup is a copy of an earlier run, so the agent waits for the user. */
+  cloned_run?: boolean;
 }
 
 /** A note one wizard screen's agent left for the screens after it. */

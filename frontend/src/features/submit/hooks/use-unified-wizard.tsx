@@ -402,8 +402,8 @@ export function WizardV2Provider({
   const snapshot = contractSnapshot(state);
   const contractStale = state.workspace.lastCheckSnapshot !== snapshot;
 
-  const [agentWriting, setAgentWriting] = useState(false);
-  const [inputsInferring, setInputsInferring] = useState(false);
+  // While the wizard's agent works, missing code reads as being written.
+  const agentWriting = useWizardStateOptional()?.agentBusy ?? false;
   const runBlockedReason = useMemo(
     () => blockedReason(state, optimizerCatalog, { message: contractCheckMessage, agentWriting }),
     [state, optimizerCatalog, agentWriting],
@@ -947,11 +947,20 @@ export function WizardV2Provider({
       optimizer_choice: optimizer.choice,
       run_code: workspace.runCode || undefined,
       metric_code: workspace.metricCode || undefined,
+      input_fields: inputs.inputFields.length > 0 ? inputs.inputFields : undefined,
+      expected_field: inputs.expectedField ?? undefined,
       spending_floor_cents: runFloor?.floorCents,
+      cloned_run: cloning || undefined,
     } as const;
     for (const key of Object.keys(outgoing) as Array<keyof typeof outgoing>) {
       const value = outgoing[key];
-      if (s[key] === value) continue;
+      const held = s[key];
+      // A list is rebuilt on every render; only a changed one is a new value.
+      const same =
+        Array.isArray(value) && Array.isArray(held)
+          ? value.length === held.length && value.every((v, i) => v === held[i])
+          : held === value;
+      if (same) continue;
       if (value === undefined) wizardCtx.clearField(key);
       else wizardCtx.setField(key, value, "user");
     }
@@ -966,7 +975,7 @@ export function WizardV2Provider({
       handDataFlagRef.current = false;
       if (s.dataset_ready) wizardCtx.clearField("dataset_ready");
     }
-  }, [wizardCtx, state, runFloor]);
+  }, [wizardCtx, state, runFloor, cloning]);
 
   const value: WizardV2Shell = {
     restored: restored !== null,
@@ -994,9 +1003,6 @@ export function WizardV2Provider({
     optimizerCatalogLoading,
     contractStale,
     runBlockedReason,
-    setAgentWriting,
-    inputsInferring,
-    setInputsInferring,
     buildPayload,
     ensureBudget,
     submit,

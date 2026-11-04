@@ -14,6 +14,7 @@ import { SubmitSummaryCard } from "./SubmitSummaryCard";
 import { TaggingSessionsCard } from "./TaggingSessionsCard";
 import { TestResultsCard } from "./TestResultsCard";
 import { WalletCard } from "./WalletCard";
+import { WizardWriteCard } from "./WizardWriteCard";
 
 export interface ToolRenderer {
   /**
@@ -410,6 +411,10 @@ const RENDERERS: Record<string, ToolRenderer> = {
 
   list_tagging_sessions_for_agent: {
     card: (call) => <TaggingSessionsCard call={call} />,
+  },
+
+  update_wizard_state: {
+    card: (call) => <WizardWriteCard call={call} />,
   },
 
 };

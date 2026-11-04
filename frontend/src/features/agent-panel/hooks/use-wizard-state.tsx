@@ -65,6 +65,22 @@ interface WizardStateContextValue {
   setRestoredSetup: (restored: boolean) => void;
   /** Move the wizard as a screen agent asked, through the frame's handlers. */
   navigateScreen: (nav: ScreenNav) => void;
+  /** The wizard's agent is running or waiting on a turn. */
+  agentBusy: boolean;
+  setAgentBusy: (busy: boolean) => void;
+  /** Fields a running agent write is changing; the form locks them until it lands. */
+  agentWritingFields: readonly string[];
+  setAgentWritingFields: (fields: readonly string[]) => void;
+  /** The newest message the wizard sends the agent by itself, such as a failed setup check. */
+  autoFeedback: AutoFeedback | null;
+  sendAutoFeedback: (text: string) => void;
+}
+
+/** A message the wizard sends its agent without the user typing it. */
+export interface AutoFeedback {
+  /** Grows with each message, so the same text sent twice still counts twice. */
+  id: number;
+  text: string;
 }
 
 const Ctx = React.createContext<WizardStateContextValue | null>(null);
@@ -84,6 +100,17 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
   const [screenIssue, setScreenIssue] = React.useState<string | null>(null);
   const [reopenedScreen, setReopenedScreen] = React.useState<string | null>(null);
   const [restoredSetup, setRestoredSetup] = React.useState(false);
+  const [agentBusy, setAgentBusy] = React.useState(false);
+  const [agentWritingFields, setAgentWritingFieldsState] = React.useState<readonly string[]>([]);
+  const setAgentWritingFields = React.useCallback((fields: readonly string[]) => {
+    setAgentWritingFieldsState((prev) =>
+      prev.length === fields.length && prev.every((f, i) => f === fields[i]) ? prev : fields,
+    );
+  }, []);
+  const [autoFeedback, setAutoFeedback] = React.useState<AutoFeedback | null>(null);
+  const sendAutoFeedback = React.useCallback((text: string) => {
+    setAutoFeedback((prev) => ({ id: (prev?.id ?? 0) + 1, text }));
+  }, []);
   // A ref, not state: the frame re-registers on every render that changes its
   // handlers, and the agent reads it only when a move arrives.
   const navigatorRef = React.useRef<ScreenNavigator | null>(null);
@@ -177,6 +204,7 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
     // afterwards early-returns from its incoming-sync effect instead of
     // replaying the last agent write onto an otherwise-empty form.
     setPulseKeys([]);
+    setAutoFeedback(null);
   }, []);
 
   const overriddenFields = React.useMemo(() => Array.from(overridden).sort(), [overridden]);
@@ -201,6 +229,12 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       setReopenedScreen,
       restoredSetup,
       setRestoredSetup,
+      agentBusy,
+      setAgentBusy,
+      agentWritingFields,
+      setAgentWritingFields,
+      autoFeedback,
+      sendAutoFeedback,
     }),
     [
       state,
@@ -217,6 +251,11 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       navigateScreen,
       reopenedScreen,
       restoredSetup,
+      agentBusy,
+      agentWritingFields,
+      setAgentWritingFields,
+      autoFeedback,
+      sendAutoFeedback,
     ],
   );
 
@@ -226,6 +265,11 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
 /** Safe variant — returns null when outside a provider. */
 export function useWizardStateOptional(): WizardStateContextValue | null {
   return React.useContext(Ctx);
+}
+
+/** Whether a running agent write is changing this wizard field, so the form holds it. */
+export function useAgentFieldLock(field: keyof WizardState): boolean {
+  return React.useContext(Ctx)?.agentWritingFields.includes(field) ?? false;
 }
 
 // New runs optimize only a DSPy program; a repository run has no artifact kind here.

@@ -25,6 +25,8 @@ from core.service_gateway.agents import generalist as generalist_module
 from core.service_gateway.agents.code import AgentStoppedError, _agent_error_payload, _SubmitArgExtractor
 from core.service_gateway.agents.docs_retrieval import DocsCorpus
 from core.service_gateway.agents.generalist import (
+    AUTOMATIC_TURN_PREFIX,
+    CLONE_FOCUS,
     GENERALIST_SYSTEM_PROMPT,
     SCREEN_FOCUS,
     ApprovalRegistry,
@@ -212,10 +214,53 @@ def test_screen_allows_only_screenless_fields_on_a_screen_without_fields() -> No
     assert validate_wizard_screen("update_wizard_state", {"seed": 1}, state) is not None
 
 
-def test_screen_leaves_code_fields_to_the_tool_refusal() -> None:
-    """Run and metric code are not screen-scoped; ``update_wizard_state`` refuses them itself."""
-    state = WizardState(wizard_screen="metric")
-    assert validate_wizard_screen("update_wizard_state", {"run_code": "x", "metric_code": "y"}, state) is None
+def test_screen_lets_only_the_code_screens_write_code() -> None:
+    """The Metric and Check screens write run and metric code; earlier screens may not."""
+    code = {"run_code": "x", "metric_code": "y"}
+    assert validate_wizard_screen("update_wizard_state", code, WizardState(wizard_screen="metric")) is None
+    assert validate_wizard_screen("update_wizard_state", code, WizardState(wizard_screen="check")) is None
+    assert validate_wizard_screen("update_wizard_state", code, WizardState(wizard_screen="brief")) is not None
+
+
+@pytest.mark.asyncio
+async def test_wrap_reports_previous_values_of_a_wizard_write() -> None:
+    """A wizard write's tool_end carries what each field held before, for the chat's field card."""
+    events: list[dict] = []
+    tool = _wrap_tool_with_approval(
+        _make_fake_tool("update_wizard_state", return_value={"wizard_state": {"run_code": "new"}}),
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=events.append,
+        outer_loop=asyncio.get_running_loop(),
+        wizard_state=cast(WizardState, {**_READY, "wizard_screen": "metric", "run_code": "old"}),
+    )
+    await tool.func._async_body(run_code="new", metric_code="score", job_description="Sorts mail")
+    end = next(e for e in events if e["event"] == "tool_end")
+    assert end["data"]["status"] == "ok"
+    assert end["data"]["result"]["previous"] == {
+        "run_code": "old",
+        "metric_code": _READY["metric_code"],
+        "job_description": None,
+    }
+    assert end["data"]["result"]["wizard_state"] == {"run_code": "new"}
+
+
+def test_cloned_setup_snapshot_holds_the_whole_setup() -> None:
+    """A cloned run's agent sees every field, not only the screen on view."""
+    state = cast(WizardState, {"wizard_screen": "brief", "cloned_run": True, "optimizer_choice": "auto"})
+    assert screen_snapshot(state)["optimizer_choice"] == "auto"
+    assert "optimizer_choice" not in screen_snapshot(WizardState(wizard_screen="brief", optimizer_choice="auto"))
+
+
+def test_cloned_setup_signature_waits_for_the_user() -> None:
+    """A cloned run's prompt says the setup arrived filled in, so the agent does not refill it."""
+    assert CLONE_FOCUS in screen_signature("brief", cloned=True).instructions
+    assert CLONE_FOCUS not in screen_signature("brief").instructions
+
+
+def test_screen_signature_explains_automatic_check_messages() -> None:
+    """The prompt tells the agent that a check-failure message comes from the wizard."""
+    assert AUTOMATIC_TURN_PREFIX in screen_signature("check").instructions
 
 
 @pytest.mark.asyncio
@@ -349,7 +394,7 @@ def test_screen_snapshot_names_what_blocks_continue() -> None:
     ("screen", "kept"),
     [
         ("brief", {"update_wizard_state"}),
-        ("metric", {"validate_code_validate_code_post"}),
+        ("metric", {"update_wizard_state", "validate_code_validate_code_post"}),
         ("budget", {"update_wizard_state", "get_wallet_for_agent"}),
         ("overview", {_SUBMIT, "get_wallet_for_agent"}),
     ],
@@ -468,9 +513,9 @@ async def test_go_back_only_to_an_earlier_screen() -> None:
 
 @pytest.mark.parametrize("screen", list(SCREEN_FOCUS))
 def test_screen_signature_is_short_and_names_the_screen(screen: str) -> None:
-    """Each screen agent gets its own short instructions, not the full prompt."""
+    """Each screen gets its own short instructions, not the full prompt."""
     instructions = screen_signature(screen).instructions
-    assert f"the ``{screen}`` screen" in instructions
+    assert f"The screen on view is ``{screen}``" in instructions
     assert SCREEN_FOCUS[screen] in instructions
     assert "remember_for_later" in instructions
     assert len(instructions) < len(GENERALIST_SYSTEM_PROMPT or "")
@@ -1019,10 +1064,10 @@ async def test_submit_runs_through_the_wrapper() -> None:
     assert submit_seen["name"] == "My run"
 
 
-def test_system_prompt_sends_code_requests_to_the_metric_coding_agent() -> None:
-    """The prompt points code requests at the Metric screen's coding agent."""
+def test_system_prompt_sends_code_requests_to_the_metric_screen() -> None:
+    """Outside the wizard the prompt points code requests at the wizard's Metric screen."""
     prompt = " ".join((GENERALIST_SYSTEM_PROMPT or "").split())
-    assert "tell them to ask that coding agent on the Metric screen" in prompt
+    assert "send them to the Metric screen" in prompt
 
 
 def _approval_engine():
