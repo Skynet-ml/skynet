@@ -263,6 +263,14 @@ def test_screen_signature_explains_automatic_check_messages() -> None:
     assert AUTOMATIC_TURN_PREFIX in screen_signature("check").instructions
 
 
+def test_check_signature_holds_continue_until_the_check_passes() -> None:
+    """The Check prompt tells the agent not to continue while the check runs or after it failed."""
+    assert (
+        "Do not call ``continue_to_next_screen`` while the check runs or after it failed."
+        in screen_signature("check").instructions
+    )
+
+
 @pytest.mark.asyncio
 async def test_wrap_refuses_off_screen_patch_without_calling_tool() -> None:
     """The wrapper turns an off-screen patch into an error observation."""

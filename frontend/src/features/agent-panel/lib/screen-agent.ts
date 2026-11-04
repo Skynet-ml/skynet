@@ -11,6 +11,16 @@ import type { AgentMessage } from "@/shared/ui/agent/types";
 export const SCREEN_KICKOFF =
   "[The wizard opened this screen; I typed nothing.] If what you know is enough, fill this screen in and continue; otherwise ask me the one thing you need.";
 
+/**
+ * Whether a screen opens with a kickoff turn. The Check screen does not: its
+ * check starts as it opens, so a kickoff turn would have no result to explain
+ * and could continue past the screen before the result lands. Only the
+ * automatic failure message and the user's own messages start turns there.
+ */
+export function opensWithKickoff(screen: string): boolean {
+  return screen !== "check";
+}
+
 /** A reopened chat stores the wizard's kickoff as a user turn; it stays unshown. */
 export function hideKickoffs(messages: AgentMessage[]): AgentMessage[] {
   return messages.map((m) =>

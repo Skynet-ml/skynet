@@ -61,6 +61,7 @@ import {
   decodeSetupChat,
   encodeSetupChat,
   hideKickoffs,
+  opensWithKickoff,
   parseScreenNav,
   trackAutoTurn,
   type AutoTurn,
@@ -462,7 +463,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     }
     if (from !== null) {
       if (opening) sendToAgent(opening, undefined, { hidden: true });
-      else if (!kickedScreensRef.current.has(shownScreen)) setKickoffScreen(shownScreen);
+      else if (!kickedScreensRef.current.has(shownScreen) && opensWithKickoff(shownScreen)) {
+        setKickoffScreen(shownScreen);
+      }
       return;
     }
     // The wizard just mounted. Gate on its restored flag rather than the
@@ -484,7 +487,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       keepSetupChat(null);
       newSession();
       setActiveConversation(null);
-      if (shownScreen !== reopenedScreenRef.current) setKickoffScreen(shownScreen);
+      if (shownScreen !== reopenedScreenRef.current && opensWithKickoff(shownScreen)) {
+        setKickoffScreen(shownScreen);
+      }
       return;
     }
     const id = saved.id;
@@ -512,7 +517,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     keepSetupChat,
   ]);
 
-  // A screen the agent has not had a turn on opens with one: it fills the
+  // A screen the agent has not had a turn on (Check aside) opens with one: it fills the
   // screen from what it already knows and continues, or asks the one thing
   // it lacks. It waits for the chat to be on view (Manual hides it) and for
   // every turn to finish: two turns running tool calls at once left one of

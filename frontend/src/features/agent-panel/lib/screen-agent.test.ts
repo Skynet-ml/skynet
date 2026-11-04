@@ -5,6 +5,7 @@ import {
   autoFeedbackAction,
   decodeSetupChat,
   encodeSetupChat,
+  opensWithKickoff,
   parseScreenNav,
   runScreenNav,
   trackAutoTurn,
@@ -80,4 +81,11 @@ test("an automatic turn ends only after the agent started on it", () => {
   step = trackAutoTurn(step.turn, false);
   assert.deepEqual(step, { turn: null, ended: 4 });
   assert.deepEqual(trackAutoTurn(null, false), { turn: null, ended: null });
+});
+
+test("the Check screen opens with no kickoff turn; other screens do", () => {
+  assert.equal(opensWithKickoff("check"), false);
+  for (const screen of ["brief", "inputs", "optimizer", "metric", "overview"]) {
+    assert.equal(opensWithKickoff(screen), true);
+  }
 });

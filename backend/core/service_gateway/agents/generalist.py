@@ -2224,7 +2224,8 @@ SCREEN_FOCUS: dict[str, str] = {
     ),
     "check": (
         "Check: explain the results of the dry run on the screen. When it failed, fix ``run_code`` or "
-        "``metric_code`` with ``update_wizard_state``; the wizard runs the check again."
+        "``metric_code`` with ``update_wizard_state``; the wizard runs the check again. Do not call "
+        "``continue_to_next_screen`` while the check runs or after it failed."
     ),
     "overview": (
         "Overview: answer questions about the run as configured and submit it with the submit tool once "
