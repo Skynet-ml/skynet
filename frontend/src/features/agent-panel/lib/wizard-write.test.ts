@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  ROLES_WRITE_TOOL,
   fieldValueText,
+  isWizardWrite,
   liveValues,
   lockedCodeFiles,
+  rolesFields,
   wizardWriteChanges,
   writingFields,
 } from "./wizard-write.ts";
@@ -68,4 +71,48 @@ test("a running turn on the code screens locks both files; otherwise only the on
   assert.deepEqual(lockedCodeFiles(true, []), ["run.py", "metric.py"]);
   assert.deepEqual(lockedCodeFiles(false, ["metric_code"]), ["metric.py"]);
   assert.deepEqual(lockedCodeFiles(false, ["task_objective"]), []);
+});
+
+const running = (tool: string, args: Record<string, unknown>) => ({
+  role: "assistant" as const,
+  content: "",
+  toolCalls: [{ ...call("running"), tool, payload: { arguments: args } }],
+});
+
+test("a running budget write holds the form's budget field", () => {
+  assert.deepEqual(writingFields([running("update_wizard_state", { spending_limit_usd: 5 })]), [
+    "max_cost_cents",
+  ]);
+});
+
+test("a running column-role write holds the roles card's fields", () => {
+  const roles = { column_roles: { q: "input", a: "output" }, dataset_columns: ["q", "a"] };
+  assert.deepEqual(writingFields([running(ROLES_WRITE_TOOL, roles)]), [
+    "input_fields",
+    "expected_field",
+  ]);
+  assert.equal(isWizardWrite(ROLES_WRITE_TOOL), true);
+  assert.equal(isWizardWrite("list_models_for_agent"), false);
+});
+
+test("a column-role map reads as the inputs and the expected field", () => {
+  assert.deepEqual(rolesFields({ ctx: "input", junk: "ignore", q: "input", a: "output", b: "output" }), {
+    input_fields: ["ctx", "q"],
+    expected_field: "a",
+  });
+  assert.equal(rolesFields({ q: "input" }), null);
+  assert.equal(rolesFields({ a: "output" }), null);
+  assert.equal(rolesFields(null), null);
+});
+
+test("a column-role write shows the roles card's old and new values", () => {
+  const done = {
+    ...call("done"),
+    tool: ROLES_WRITE_TOOL,
+    payload: { arguments: { column_roles: { q: "input", a: "output" }, dataset_columns: ["q", "a"] } },
+  };
+  assert.deepEqual(wizardWriteChanges(done, { input_fields: ["a"], expected_field: "q" }), [
+    { field: "input_fields", before: ["a"], after: ["q"] },
+    { field: "expected_field", before: "q", after: "a" },
+  ]);
 });

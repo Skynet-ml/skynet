@@ -23,7 +23,14 @@ import { WizardScreen } from "./WizardScreen";
 type MessageParams = Record<string, string | number>;
 
 // The wizard fields the setup agent writes on the roles and split card.
-const INPUTS_FIELDS = ["data_mode", "split_fractions", "shuffle", "seed"] as const;
+const INPUTS_FIELDS = [
+  "data_mode",
+  "split_fractions",
+  "shuffle",
+  "seed",
+  "input_fields",
+  "expected_field",
+] as const;
 
 /**
  * Step 2, Inputs: bring a table (upload, library or connector import). Once

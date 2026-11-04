@@ -947,6 +947,7 @@ export function WizardV2Provider({
       optimizer_choice: optimizer.choice,
       run_code: workspace.runCode || undefined,
       metric_code: workspace.metricCode || undefined,
+      dataset_columns: inputs.columns.length > 0 ? inputs.columns : undefined,
       input_fields: inputs.inputFields.length > 0 ? inputs.inputFields : undefined,
       expected_field: inputs.expectedField ?? undefined,
       spending_floor_cents: runFloor?.floorCents,

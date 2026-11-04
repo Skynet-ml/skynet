@@ -12,6 +12,7 @@ import {
 
 import type { ScreenNav, ScreenNavigator } from "../lib/screen-agent";
 import { runScreenNav } from "../lib/screen-agent";
+import { rolesFields } from "../lib/wizard-write";
 import type { ScreenNote, WizardState } from "../lib/types";
 
 type WizardKey = keyof WizardState;
@@ -366,6 +367,8 @@ export function extractWizardPatch(result: unknown): Partial<WizardState> {
   const notes = parseScreenNotes(wrap.screen_notes);
   if (notes) patch.screen_notes = notes;
   if (isStringList(wrap.input_fields)) patch.input_fields = wrap.input_fields;
+  const roles = rolesFields(wrap.column_roles);
+  if (roles && !patch.input_fields && !patch.expected_field) Object.assign(patch, roles);
 
   const kind = ARTIFACT_KINDS.find((k) => k === wrap.artifact_kind);
   if (kind) patch.artifact_kind = kind;

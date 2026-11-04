@@ -305,6 +305,7 @@ _FULL_SNAPSHOT: dict[str, Any] = {
     "starting_version": "v1",
     "data_mode": "pairs",
     "dataset_ready": True,
+    "dataset_columns": ["text", "label"],
     "input_fields": ["text"],
     "optimizer_choice": "auto",
     "model_config": {"name": "openai/gpt-4o"},
@@ -320,7 +321,10 @@ _FULL_SNAPSHOT: dict[str, Any] = {
     [
         ("brief", {"task_objective", "task_background"}),
         ("artifact", {"artifact_kind", "starting_version", "task_objective"}),
-        ("source", {"data_mode", "dataset_ready", "input_fields", "task_objective", "artifact_kind"}),
+        (
+            "source",
+            {"data_mode", "dataset_ready", "dataset_columns", "input_fields", "task_objective", "artifact_kind"},
+        ),
         (
             "plan",
             {
@@ -547,6 +551,12 @@ def test_screen_signature_is_short_and_names_the_screen(screen: str) -> None:
     assert SCREEN_FOCUS[screen] in instructions
     assert "remember_for_later" in instructions
     assert len(instructions) < len(GENERALIST_SYSTEM_PROMPT or "")
+
+
+def test_source_signature_sets_the_column_roles() -> None:
+    """The Data prompt tells the agent to set the column roles, so it fills the roles card."""
+    assert "``set_column_roles``" in SCREEN_FOCUS["source"]
+    assert SCREEN_FOCUS["source"] in screen_signature("source").instructions
 
 
 def test_screen_signature_names_the_reply_language() -> None:

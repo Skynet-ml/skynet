@@ -387,6 +387,7 @@ const RENDERERS: Record<string, ToolRenderer> = {
         done: msg("auto.features.agent.panel.lib.tool.renderers.literal.58"),
         error: msg("auto.features.agent.panel.lib.tool.renderers.literal.59"),
       }),
+    card: (call) => <WizardWriteCard call={call} />,
   },
 
   public_search_dashboard_search_post: {

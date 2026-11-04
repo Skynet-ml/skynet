@@ -967,6 +967,8 @@ class WizardState(TypedDict, total=False):
     starting_version: str | dict[str, str]
     data_mode: str
     dataset_ready: bool
+    # The loaded table's columns, so the Data screen's agent can name them in ``set_column_roles``.
+    dataset_columns: list[str]
     staged_dataset_id: str
     input_fields: list[str]
     expected_field: str
@@ -1322,7 +1324,9 @@ def validate_wizard_screen(tool_name: str, kwargs: dict[str, Any], state: Wizard
 # metric screen needs the task and the data its code runs on.
 _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
     "artifact": frozenset({"task_objective"}),
-    "source": frozenset({"task_objective", "artifact_kind", "dataset_ready", "input_fields", "expected_field"}),
+    "source": frozenset(
+        {"task_objective", "artifact_kind", "dataset_ready", "dataset_columns", "input_fields", "expected_field"}
+    ),
     "plan": frozenset(
         {"task_objective", "artifact_kind", "data_mode", "model_configured", "max_cost_cents", "spending_floor_cents"}
     ),
@@ -2201,7 +2205,9 @@ SCREEN_FOCUS: dict[str, str] = {
     ),
     "source": (
         "Data: set ``data_mode`` (``single`` for one input, ``pairs`` for input/output examples) and, for "
-        "pairs, get a dataset attached with ``request_user_dataset`` or a sample or library dataset."
+        "pairs, get a dataset attached with ``request_user_dataset`` or a sample or library dataset. "
+        "Then set which ``dataset_columns`` are the inputs and which one is the expected output with "
+        "``set_column_roles``."
     ),
     "plan": (
         "Plan: choose ``optimizer_choice`` (``auto`` unless the user names one) and the task and reflection "

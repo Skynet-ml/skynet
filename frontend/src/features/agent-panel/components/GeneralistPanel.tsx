@@ -67,7 +67,7 @@ import {
   type AutoTurn,
   type SetupChat,
 } from "../lib/screen-agent";
-import { WIZARD_WRITE_TOOL, liveValues, writingFields } from "../lib/wizard-write";
+import { isWizardWrite, liveValues, writingFields } from "../lib/wizard-write";
 import type { ToolEndPayload, WizardState } from "../lib/types";
 import { stageDatasetForAgent } from "@/shared/lib/api";
 import { DATASET_UPLOAD_EXTENSIONS } from "@/shared/lib/parse-dataset";
@@ -301,7 +301,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       if (!wizardCtx) return;
       const patch = extractWizardPatch(ev.result);
       if (Object.keys(patch).length > 0) {
-        if (ev.tool === WIZARD_WRITE_TOOL)
+        if (isWizardWrite(ev.tool))
           wizardCtx.noteWriteBefore(ev.id, liveValues(liveStateRef.current, Object.keys(patch)));
         wizardCtx.applyAgentPatch(patch);
         liveStateRef.current = { ...liveStateRef.current, ...patch };
@@ -827,7 +827,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // which links to the new run, and each wizard write with its old and new values.
   const isStepCall = React.useCallback((call: AgentToolCall) => {
     if (RICH_CARD_TOOLS.has(call.tool)) return false;
-    const card = SUBMIT_TOOLS.has(call.tool) || call.tool === WIZARD_WRITE_TOOL;
+    const card = SUBMIT_TOOLS.has(call.tool) || isWizardWrite(call.tool);
     return !(card && call.status !== "running");
   }, []);
   const stepKind = React.useCallback((call: AgentToolCall) => getToolKind(call.tool), []);

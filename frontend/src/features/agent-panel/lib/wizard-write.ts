@@ -1,5 +1,5 @@
 /**
- * What one ``update_wizard_state`` call changed, read from its tool call, so
+ * What one wizard write (``update_wizard_state`` or the column-role tool) changed, read from its tool call, so
  * the chat can show each field's old and new value, and the form can hold
  * the fields a running call is about to write.
  */
@@ -7,6 +7,37 @@
 import type { AgentMessage, AgentToolCall } from "@/shared/ui/agent/types";
 
 export const WIZARD_WRITE_TOOL = "update_wizard_state";
+/** The agent's column-role tool; its roles land on the Inputs roles card. */
+export const ROLES_WRITE_TOOL = "set_column_roles_datasets_column_roles_post";
+
+/** Whether a tool call writes wizard fields, so it shows as a write card. */
+export function isWizardWrite(tool: string): boolean {
+  return tool === WIZARD_WRITE_TOOL || tool === ROLES_WRITE_TOOL;
+}
+
+// The tool argument names the budget in dollars; the form holds it in cents
+// under another name, and the form's field locks match the form's names.
+const FORM_FIELD: Readonly<Record<string, string>> = { spending_limit_usd: "max_cost_cents" };
+
+/**
+ * Read the roles card's fields out of a column-role map.
+ *
+ * Args:
+ *   roles: The map of column name to "input", "output" or "ignore".
+ *
+ * Returns:
+ *   The input columns in map order and the first output column, or null
+ *   when the map names no input or no output.
+ */
+export function rolesFields(
+  roles: unknown,
+): { input_fields: string[]; expected_field: string } | null {
+  if (!isRecord(roles)) return null;
+  const columns = Object.entries(roles);
+  const input_fields = columns.filter(([, role]) => role === "input").map(([column]) => column);
+  const expected_field = columns.find(([, role]) => role === "output")?.[0];
+  return input_fields.length > 0 && expected_field ? { input_fields, expected_field } : null;
+}
 
 /** The workspace file each code field writes; its change shows as a diff. */
 export const CODE_FIELD_FILES: Readonly<Record<string, string>> = {
@@ -31,7 +62,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * List the fields a wizard write sets, each with what it held before.
  *
  * Args:
- *   call: An ``update_wizard_state`` tool call.
+ *   call: A wizard write tool call.
  *   liveBefore: The form's own values when the write landed. They win over
  *     the server's, which date from the start of the turn; a reopened chat
  *     has only the server's.
@@ -44,7 +75,8 @@ export function wizardWriteChanges(
   liveBefore?: Readonly<Record<string, unknown>>,
 ): WizardFieldChange[] {
   const payload = call.payload ?? {};
-  const args = isRecord(payload.arguments) ? payload.arguments : {};
+  const raw = isRecord(payload.arguments) ? payload.arguments : {};
+  const args = call.tool === ROLES_WRITE_TOOL ? (rolesFields(raw.column_roles) ?? {}) : raw;
   const result = isRecord(payload.result) ? payload.result : {};
   const previous = isRecord(result.previous) ? result.previous : {};
   return Object.entries(args)
@@ -103,10 +135,11 @@ export function writingFields(messages: readonly AgentMessage[]): string[] {
   const last = messages[messages.length - 1];
   if (last?.role !== "assistant") return [];
   return (last.toolCalls ?? [])
-    .filter((call) => call.tool === WIZARD_WRITE_TOOL && call.status === "running")
+    .filter((call) => isWizardWrite(call.tool) && call.status === "running")
     .flatMap((call) => {
+      if (call.tool === ROLES_WRITE_TOOL) return ["input_fields", "expected_field"];
       const args = call.payload?.arguments;
-      return isRecord(args) ? Object.keys(args) : [];
+      return isRecord(args) ? Object.keys(args).map((field) => FORM_FIELD[field] ?? field) : [];
     });
 }
 
