@@ -8,6 +8,7 @@ import { cn } from "@/shared/lib/utils";
 import { MagicWand } from "@/shared/ui/icons";
 import type { AgentToolCall } from "@/shared/ui/agent/types";
 
+import { useWizardStateOptional } from "../hooks/use-wizard-state";
 import {
   CODE_FIELD_FILES,
   fieldValueText,
@@ -22,7 +23,8 @@ const ADDED_TONE = "text-[#5A7247] dark:text-[#adc899]";
  * new value, and each code file as a diff of the lines it changed.
  */
 export function WizardWriteCard({ call }: { call: AgentToolCall }) {
-  const changes = wizardWriteChanges(call);
+  const liveBefore = useWizardStateOptional()?.writeBefore[call.id];
+  const changes = wizardWriteChanges(call, liveBefore);
   if (changes.length === 0) return null;
   return (
     <section className="overflow-hidden rounded-xl border border-border/60 bg-card text-sm">

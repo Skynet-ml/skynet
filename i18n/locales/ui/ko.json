@@ -52,6 +52,7 @@
   "submit.v2.metric.files.error.chars": "문자, 숫자, _ . - 만 사용하고 . 또는 .. 폴더는 쓰지 마세요.",
   "submit.v2.metric.files.error.count": "작업 공간에는 추가 파일을 최대 20개까지 둘 수 있습니다.",
   "submit.v2.ide.loading": "편집기를 불러오는 중…",
+  "submit.v2.ide.agent_writing": "설정 에이전트가 이 코드를 편집하고 있습니다",
   "submit.v2.ide.load_failed": "편집기를 불러오지 못했습니다. 닫고 다시 시도하세요.",
   "submit.v2.ide.error.fixed": "run.py와 metric.py는 실행의 진입 파일이므로 삭제, 이름 변경, 이동할 수 없습니다.",
   "submit.v2.ide.check.passed": "문제 없음",

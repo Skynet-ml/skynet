@@ -22,6 +22,7 @@ export {
   useWizardStateOptional,
 } from "./hooks/use-wizard-state";
 export { isGeneralistAgentEnabled } from "./lib/feature-flag";
+export { lockedCodeFiles } from "./lib/wizard-write";
 export {
   deleteConversation,
   getSharedConversation,

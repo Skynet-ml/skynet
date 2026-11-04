@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { useSearchParams } from "next/navigation";
 
 import { DatasetPickerDialog } from "@/features/datasets";
 import { ImportFromMenu } from "@/features/connectors";
@@ -13,16 +12,18 @@ import { DATASET_UPLOAD_ACCEPT } from "@/shared/lib/parse-dataset";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
 
-import { useWizardAutoAdvance } from "../../hooks/use-auto-advance";
 import { useInputsData } from "../../hooks/use-inputs-data";
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
-import { inputsAdvanceFrom } from "../../lib/auto-advance";
+import { AgentFieldLock } from "./AgentFieldLock";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { GeneralistAgentShell } from "./GeneralistAgentShell";
 import { InputsColumnsCard } from "./InputsColumnsCard";
 import { WizardScreen } from "./WizardScreen";
 
 type MessageParams = Record<string, string | number>;
+
+// The wizard fields the setup agent writes on the roles and split card.
+const INPUTS_FIELDS = ["data_mode", "split_fractions", "shuffle", "seed"] as const;
 
 /**
  * Step 2, Inputs: bring a table (upload, library or connector import). Once
@@ -45,13 +46,8 @@ export function InputsStep() {
 
   return (
     <GeneralistAgentShell active={state.step === "inputs"}>
-      {(assist) => (
+      {() => (
         <div className="flex min-h-0 flex-1 flex-col gap-5 px-4 py-5 sm:px-6 sm:py-6">
-          <InputsAutoAdvance
-            auto={assist === "auto"}
-            hasData={hasData}
-            inferring={data.loading}
-          />
           <header className="flex shrink-0 flex-col gap-1">
             <h3 className="text-base font-semibold text-foreground">
               {t("submit.v2.inputs.title")}
@@ -136,13 +132,15 @@ export function InputsStep() {
             </section>
 
             {hasData && (
-              <InputsColumnsCard
-                inputs={inputs}
-                data={data}
-                patchInputs={patchInputs}
-                issue={stepIssue("inputs")}
-                guided={guided}
-              />
+              <AgentFieldLock fields={INPUTS_FIELDS}>
+                <InputsColumnsCard
+                  inputs={inputs}
+                  data={data}
+                  patchInputs={patchInputs}
+                  issue={stepIssue("inputs")}
+                  guided={guided}
+                />
+              </AgentFieldLock>
             )}
           </WizardScreen>
 
@@ -155,32 +153,4 @@ export function InputsStep() {
       )}
     </GeneralistAgentShell>
   );
-}
-
-/** Moves on from Inputs once data the user brought by hand is ready, as the agent would. */
-function InputsAutoAdvance({
-  auto,
-  hasData,
-  inferring,
-}: {
-  auto: boolean;
-  hasData: boolean;
-  inferring: boolean;
-}) {
-  const { state, stepIssue } = useWizardV2();
-  const cloned = useSearchParams().has("clone");
-  const { advanceFrom } = useWizardAutoAdvance();
-  const advancePast = inputsAdvanceFrom({
-    auto,
-    firstPass: state.furthestStep === "inputs",
-    onStep: state.step === "inputs",
-    cloned,
-    hasData,
-    inferring,
-    valid: stepIssue("inputs") === null,
-  });
-  React.useEffect(() => {
-    if (advancePast) advanceFrom(advancePast);
-  }, [advancePast, advanceFrom]);
-  return null;
 }

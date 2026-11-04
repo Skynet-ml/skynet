@@ -52,6 +52,7 @@
   "submit.v2.metric.files.error.chars": "只可以用字母、數字、_ . 同 -，唔可以有 . 或 .. 資料夾。",
   "submit.v2.metric.files.error.count": "工作區最多可以放 20 個額外檔案。",
   "submit.v2.ide.loading": "編輯器載入緊…",
+  "submit.v2.ide.agent_writing": "設定助理而家改緊呢段程式碼",
   "submit.v2.ide.load_failed": "編輯器載入唔到。關咗佢再試吓。",
   "submit.v2.ide.error.fixed": "run.py 同 metric.py 係執行嘅入口檔案，所以唔可以刪除、改名或者搬走。",
   "submit.v2.ide.check.passed": "冇問題",

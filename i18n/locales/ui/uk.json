@@ -52,6 +52,7 @@
   "submit.v2.metric.files.error.chars": "Використовуйте лише літери, цифри, _ . і -, без папок . чи ..",
   "submit.v2.metric.files.error.count": "Робоча область містить щонайбільше 20 додаткових файлів.",
   "submit.v2.ide.loading": "Завантаження редактора…",
+  "submit.v2.ide.agent_writing": "Агент налаштування редагує цей код",
   "submit.v2.ide.load_failed": "Редактор не завантажився. Закрийте його й спробуйте ще раз.",
   "submit.v2.ide.error.fixed": "run.py і metric.py — вхідні файли запуску, тому їх не можна видалити, перейменувати чи перемістити.",
   "submit.v2.ide.check.passed": "Проблем немає",

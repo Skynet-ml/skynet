@@ -52,6 +52,7 @@
   "submit.v2.metric.files.error.chars": "只能使用字母、数字、_ . 和 -，不能有 . 或 .. 文件夹。",
   "submit.v2.metric.files.error.count": "工作区最多容纳 20 个额外文件。",
   "submit.v2.ide.loading": "正在加载编辑器…",
+  "submit.v2.ide.agent_writing": "设置助手正在编辑此代码",
   "submit.v2.ide.load_failed": "编辑器未能加载。请关闭后重试。",
   "submit.v2.ide.error.fixed": "run.py 和 metric.py 是运行的入口文件，因此不能删除、重命名或移动。",
   "submit.v2.ide.check.passed": "没有问题",

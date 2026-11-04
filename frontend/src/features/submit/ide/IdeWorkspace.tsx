@@ -12,6 +12,7 @@ import {
 import { createPortal } from "react-dom";
 import { contractCheckMessage } from "@/shared/lib/i18n";
 import { cn } from "@/shared/lib/utils";
+import { PingDot } from "@/shared/ui/ping-dot";
 import { Button } from "@/shared/ui/primitives/button";
 import {
   ArrowsIn,
@@ -177,6 +178,7 @@ export function IdeWorkspace({
   checkResult,
   resultsStale,
   repo,
+  lockedFiles,
   strip,
   sidePanel,
   guided,
@@ -196,6 +198,8 @@ export function IdeWorkspace({
   resultsStale: boolean;
   /** A repository run's checkout, shown read-only in the explorer. */
   repo: RepoSource | null;
+  /** Workspace files the setup agent may write now; the editor holds them read-only. */
+  lockedFiles?: readonly string[];
   /** Shown above the editor (the metric model row). */
   strip?: ReactNode;
   /** The end-side region: the setup agent's chat. */
@@ -308,6 +312,11 @@ export function IdeWorkspace({
 
   useEffect(() => () => workbench?.setRepo(null), [workbench]);
 
+  const lockedKey = (lockedFiles ?? []).join("\n");
+  useEffect(() => {
+    workbench?.setLocked(lockedKey ? lockedKey.split("\n") : []);
+  }, [workbench, lockedKey]);
+
   const toggleFullScreen = useCallback(async () => {
     await workbench?.saveAll();
     if (!fullScreen) {
@@ -387,6 +396,12 @@ export function IdeWorkspace({
   const body = (
     <>
       <header className="flex shrink-0 items-center gap-3 border-b border-border/60 px-4 py-2">
+        {lockedKey && (
+          <span role="status" className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+            <PingDot size="sm" tone="agent" />
+            <span className="truncate">{v2Msg("submit.v2.ide.agent_writing", guided)}</span>
+          </span>
+        )}
         <div className="ms-auto flex shrink-0 items-center gap-1">
           {onCheck && checking && checkPhase && (
             <span className="text-xs text-muted-foreground" aria-live="polite">

@@ -52,6 +52,7 @@
   "submit.v2.metric.files.error.chars": "Utilisez uniquement des lettres, des chiffres, _ . et -, sans dossier . ou ..",
   "submit.v2.metric.files.error.count": "L'espace de travail contient au plus 20 fichiers supplémentaires.",
   "submit.v2.ide.loading": "Chargement de l'éditeur…",
+  "submit.v2.ide.agent_writing": "L'agent de configuration modifie ce code",
   "submit.v2.ide.load_failed": "L'éditeur ne s'est pas chargé. Fermez-le et réessayez.",
   "submit.v2.ide.error.fixed": "run.py et metric.py sont les fichiers d'entrée de l'exécution : impossible de les supprimer, de les renommer ou de les déplacer.",
   "submit.v2.ide.check.passed": "Aucun problème",

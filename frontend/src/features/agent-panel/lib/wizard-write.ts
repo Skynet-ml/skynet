@@ -32,20 +32,64 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *
  * Args:
  *   call: An ``update_wizard_state`` tool call.
+ *   liveBefore: The form's own values when the write landed. They win over
+ *     the server's, which date from the start of the turn; a reopened chat
+ *     has only the server's.
  *
  * Returns:
  *   One change per written field, in the order the agent wrote them.
  */
-export function wizardWriteChanges(call: AgentToolCall): WizardFieldChange[] {
+export function wizardWriteChanges(
+  call: AgentToolCall,
+  liveBefore?: Readonly<Record<string, unknown>>,
+): WizardFieldChange[] {
   const payload = call.payload ?? {};
   const args = isRecord(payload.arguments) ? payload.arguments : {};
   const result = isRecord(payload.result) ? payload.result : {};
   const previous = isRecord(result.previous) ? result.previous : {};
   return Object.entries(args)
     .filter(([field]) => !UNSHOWN_FIELDS.has(field))
-    .map(([field, after]) => ({ field, before: previous[field] ?? null, after }));
+    .map(([field, after]) => ({
+      field,
+      before: (liveBefore && Object.hasOwn(liveBefore, field) ? liveBefore[field] : previous[field]) ?? null,
+      after,
+    }));
 }
 
+/**
+ * Read what a write's fields hold on the form right before it lands.
+ *
+ * Args:
+ *   state: The form's wizard state now.
+ *   fields: The fields the write sets.
+ *
+ * Returns:
+ *   Each field's value, null when the form holds none.
+ */
+export function liveValues(
+  state: Readonly<Record<string, unknown>>,
+  fields: readonly string[],
+): Record<string, unknown> {
+  return Object.fromEntries(fields.map((field) => [field, state[field] ?? null]));
+}
+
+/**
+ * Name the code files the editor holds read-only for the agent.
+ *
+ * Args:
+ *   turnRunning: The agent has a turn running on the code screens. It may
+ *     write either file from the code it read when the turn began, so a
+ *     user edit meanwhile would be lost.
+ *   writing: The fields a running write is changing.
+ *
+ * Returns:
+ *   The workspace paths to lock.
+ */
+export function lockedCodeFiles(turnRunning: boolean, writing: readonly string[]): string[] {
+  return Object.entries(CODE_FIELD_FILES)
+    .filter(([field]) => turnRunning || writing.includes(field))
+    .map(([, file]) => file);
+}
 /**
  * Name the wizard fields a running write in the newest turn is changing.
  *

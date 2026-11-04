@@ -4107,6 +4107,7 @@
   "submit.v2.metric.files.error.exists": "כבר יש קובץ או תיקייה בשם הזה.",
   "submit.v2.metric.files.error.count": "סביבת העבודה מכילה עד 20 קבצים נוספים.",
   "submit.v2.ide.loading": "העורך נטען…",
+  "submit.v2.ide.agent_writing": "סוכן ההגדרה עורך את הקוד הזה",
   "submit.v2.ide.load_failed": "העורך לא נטען. אפשר לסגור ולנסות שוב.",
   "submit.v2.ide.error.fixed": "run.py ו-metric.py הם קובצי הכניסה של הריצה, ולכן אי אפשר למחוק אותם, לשנות את שמם או להעביר אותם.",
   "submit.v2.ide.check.passed": "אין בעיות",

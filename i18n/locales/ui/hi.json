@@ -52,6 +52,7 @@
   "submit.v2.metric.files.error.chars": "सिर्फ़ अक्षर, अंक, _ . और - इस्तेमाल करें, . या .. फ़ोल्डर नहीं।",
   "submit.v2.metric.files.error.count": "वर्कस्पेस में ज़्यादा से ज़्यादा 20 अतिरिक्त फ़ाइलें हो सकती हैं।",
   "submit.v2.ide.loading": "एडिटर लोड हो रहा है…",
+  "submit.v2.ide.agent_writing": "सेटअप एजेंट यह कोड संपादित कर रहा है",
   "submit.v2.ide.load_failed": "एडिटर लोड नहीं हुआ। इसे बंद करके फिर से कोशिश करें।",
   "submit.v2.ide.error.fixed": "run.py और metric.py रन की एंट्री फ़ाइलें हैं, इसलिए इन्हें हटाया, नाम बदला या खिसकाया नहीं जा सकता।",
   "submit.v2.ide.check.passed": "कोई समस्या नहीं",

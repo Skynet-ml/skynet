@@ -52,6 +52,7 @@
   "submit.v2.metric.files.error.chars": "فقط از حروف، ارقام، _ . و - استفاده کنید، بدون پوشه‌های . یا ..",
   "submit.v2.metric.files.error.count": "فضای کار حداکثر 20 فایل اضافی دارد.",
   "submit.v2.ide.loading": "در حال بارگذاری ویرایشگر…",
+  "submit.v2.ide.agent_writing": "عامل راه‌اندازی در حال ویرایش این کد است",
   "submit.v2.ide.load_failed": "ویرایشگر بارگذاری نشد. آن را ببندید و دوباره امتحان کنید.",
   "submit.v2.ide.error.fixed": "run.py و metric.py فایل‌های ورودی اجرا هستند، بنابراین نمی‌توان آن‌ها را حذف، تغییر نام یا جابه‌جا کرد.",
   "submit.v2.ide.check.passed": "مشکلی نیست",

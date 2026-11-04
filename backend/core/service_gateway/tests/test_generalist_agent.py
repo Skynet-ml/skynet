@@ -390,6 +390,26 @@ def test_screen_snapshot_names_what_blocks_continue() -> None:
     assert screen_snapshot(state)["continue_blocked_by"] == "Describe the task first"
 
 
+def test_screen_snapshot_of_a_clone_names_notes_and_what_blocks_continue() -> None:
+    """A cloned run keeps its whole setup and still gets the named notes and blocker."""
+    state = cast(
+        WizardState,
+        {
+            "wizard_screen": "budget",
+            "cloned_run": True,
+            "optimizer_choice": "auto",
+            "screen_issue": "Set a budget first",
+            "screen_notes": [{"screen": "brief", "note": "keep it cheap"}],
+        },
+    )
+    snapshot = screen_snapshot(state)
+    assert snapshot["optimizer_choice"] == "auto"
+    assert snapshot["continue_blocked_by"] == "Set a budget first"
+    assert snapshot["notes_from_earlier_screens"] == ["brief: keep it cheap"]
+    assert "screen_issue" not in snapshot
+    assert "screen_notes" not in snapshot
+
+
 @pytest.mark.parametrize(
     ("screen", "kept"),
     [

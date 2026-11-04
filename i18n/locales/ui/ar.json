@@ -52,6 +52,7 @@
   "submit.v2.metric.files.error.chars": "استخدم الحروف والأرقام و_ . و- فقط، دون مجلدات . أو ..",
   "submit.v2.metric.files.error.count": "تتسع مساحة العمل لـ 20 ملفًا إضافيًا على الأكثر.",
   "submit.v2.ide.loading": "جارٍ تحميل المحرر…",
+  "submit.v2.ide.agent_writing": "وكيل الإعداد يعدّل هذه الشيفرة",
   "submit.v2.ide.load_failed": "لم يتم تحميل المحرر. أغلقه وحاول مرة أخرى.",
   "submit.v2.ide.error.fixed": "run.py و metric.py هما ملفا الدخول للتشغيل، لذا لا يمكن حذفهما أو إعادة تسميتهما أو نقلهما.",
   "submit.v2.ide.check.passed": "لا توجد مشكلات",

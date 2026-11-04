@@ -62,7 +62,81 @@ export function runScreenNav(nav: ScreenNav, navigator: ScreenNavigator | null):
 }
 
 /**
- * Where the setup's chat id is kept for the tab, so a reload that reopens the
- * setup reopens its chat with it.
+ * Where the setup's chat id is kept for the tab, with the screens its agent
+ * already had a turn on, so a reload that reopens the setup reopens its chat
+ * and does not start those screens over.
  */
 export const SETUP_CHAT_KEY = "skynet.agent.setup-chat.v1";
+
+/** The setup's chat as the tab keeps it. */
+export interface SetupChat {
+  id: string;
+  kicked: string[];
+}
+
+/** Write the setup's chat for the tab. */
+export function encodeSetupChat(chat: SetupChat): string {
+  return JSON.stringify(chat);
+}
+
+/** Read the setup's chat back; null when nothing usable is kept. */
+export function decodeSetupChat(raw: string | null): SetupChat | null {
+  if (!raw) return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!isRecord(value) || typeof value.id !== "string" || !value.id) return null;
+    const kicked = Array.isArray(value.kicked)
+      ? value.kicked.filter((s): s is string => typeof s === "string")
+      : [];
+    return { id: value.id, kicked };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What the panel does with a message the wizard queued for the agent.
+ *
+ * Args:
+ *   input.docked: The chat is on view, so the user sees the exchange.
+ *   input.busy: A turn is running; two at once leave tool calls hanging.
+ *   input.silent: A cloned run whose user has not written to the agent yet.
+ *
+ * Returns:
+ *   "skip" drops it, "wait" holds it, "send" sends it now.
+ */
+export function autoFeedbackAction(input: {
+  docked: boolean;
+  busy: boolean;
+  silent: boolean;
+}): "skip" | "wait" | "send" {
+  if (input.silent) return "skip";
+  if (!input.docked || input.busy) return "wait";
+  return "send";
+}
+
+/** An automatic turn the panel sent, until the agent finishes it. */
+export interface AutoTurn {
+  id: number;
+  /** The agent started on it; a send takes a render to show as busy. */
+  started: boolean;
+}
+
+/**
+ * Follow an automatic turn through the agent's busy flag.
+ *
+ * Args:
+ *   turn: The turn in flight, or null.
+ *   busy: The agent is running or waiting on a turn.
+ *
+ * Returns:
+ *   The turn still in flight, and the id of the one that just ended.
+ */
+export function trackAutoTurn(
+  turn: AutoTurn | null,
+  busy: boolean,
+): { turn: AutoTurn | null; ended: number | null } {
+  if (!turn) return { turn: null, ended: null };
+  if (busy) return { turn: turn.started ? turn : { ...turn, started: true }, ended: null };
+  return turn.started ? { turn: null, ended: turn.id } : { turn, ended: null };
+}

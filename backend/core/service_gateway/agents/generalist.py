@@ -1411,19 +1411,26 @@ def screen_snapshot(state: WizardState) -> dict[str, Any]:
     Returns:
         The visible screen's fields, the read-only values it depends on,
         ``wizard_screen``, the notes earlier screens left and what blocks
-        Continue; or the whole snapshot when the wizard is not on screen
-        or the setup is a cloned run's.
+        Continue. The whole snapshot when the wizard is not on screen; a
+        cloned run's whole setup, with the notes and what blocks Continue.
     """
-    if "wizard_screen" not in state or state.get("cloned_run"):
+    if "wizard_screen" not in state:
         return dict(state)
-    screen = state.get("wizard_screen") or ""
-    keep = (
-        _SCREEN_FIELDS.get(screen, frozenset()) | _SCREEN_SNAPSHOT_EXTRAS.get(screen, frozenset()) | {"wizard_screen"}
-    )
-    snapshot = {key: value for key, value in state.items() if key in keep}
-    # Every wizard write is refused until the run has a name, and no screen
-    # shows it, so the agent must see when it is still missing.
-    snapshot["job_name"] = state.get("job_name") or None
+    if state.get("cloned_run"):
+        # A cloned run's agent sees the whole copied setup, with the client's
+        # raw notes and issue read the same way as on any other screen.
+        snapshot = {key: value for key, value in state.items() if key not in {"screen_issue", "screen_notes"}}
+    else:
+        screen = state.get("wizard_screen") or ""
+        keep = (
+            _SCREEN_FIELDS.get(screen, frozenset())
+            | _SCREEN_SNAPSHOT_EXTRAS.get(screen, frozenset())
+            | {"wizard_screen"}
+        )
+        snapshot = {key: value for key, value in state.items() if key in keep}
+        # Every wizard write is refused until the run has a name, and no screen
+        # shows it, so the agent must see when it is still missing.
+        snapshot["job_name"] = state.get("job_name") or None
     notes = earlier_screen_notes(state)
     if notes:
         snapshot["notes_from_earlier_screens"] = notes

@@ -54,8 +54,19 @@ import { useHostedFeaturesAvailable } from "@/shared/hooks/use-hosted-features";
 import { sharedChatUrl } from "@/shared/lib/share-link";
 import { TRUST_MODE_HUE, useTrustMode } from "../hooks/use-trust-mode";
 import { extractWizardPatch, useWizardStateOptional } from "../hooks/use-wizard-state";
-import { SCREEN_KICKOFF, SETUP_CHAT_KEY, hideKickoffs, parseScreenNav } from "../lib/screen-agent";
-import { WIZARD_WRITE_TOOL, writingFields } from "../lib/wizard-write";
+import {
+  SCREEN_KICKOFF,
+  SETUP_CHAT_KEY,
+  autoFeedbackAction,
+  decodeSetupChat,
+  encodeSetupChat,
+  hideKickoffs,
+  parseScreenNav,
+  trackAutoTurn,
+  type AutoTurn,
+  type SetupChat,
+} from "../lib/screen-agent";
+import { WIZARD_WRITE_TOOL, liveValues, writingFields } from "../lib/wizard-write";
 import type { ToolEndPayload, WizardState } from "../lib/types";
 import { stageDatasetForAgent } from "@/shared/lib/api";
 import { DATASET_UPLOAD_EXTENSIONS } from "@/shared/lib/parse-dataset";
@@ -202,8 +213,10 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const keepSetupChat = React.useCallback((id: string | null) => {
     setupChatRef.current = id;
     try {
-      if (id) window.sessionStorage.setItem(SETUP_CHAT_KEY, id);
-      else window.sessionStorage.removeItem(SETUP_CHAT_KEY);
+      if (id) {
+        const chat = { id, kicked: [...kickedScreensRef.current] };
+        window.sessionStorage.setItem(SETUP_CHAT_KEY, encodeSetupChat(chat));
+      } else window.sessionStorage.removeItem(SETUP_CHAT_KEY);
     } catch {
       // Storage full or blocked: a reload then starts the setup's chat fresh.
     }
@@ -251,6 +264,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const { setTheme } = useColorTheme();
   const { setLocale } = useLocale();
 
+  // The form's state as of the last write, so a write's card shows what each
+  // field held when it landed rather than when the turn began.
+  const liveStateRef = React.useRef<Record<string, unknown>>({ ...wizardCtx?.state });
+  React.useEffect(() => {
+    liveStateRef.current = { ...wizardCtx?.state };
+  }, [wizardCtx?.state]);
+
   const handleToolEnd = React.useCallback(
     (ev: ToolEndPayload, ctx: SessionEventContext) => {
       // Background chats keep streaming, but only the chat on screen may drive
@@ -279,7 +299,12 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       }
       if (!wizardCtx) return;
       const patch = extractWizardPatch(ev.result);
-      if (Object.keys(patch).length > 0) wizardCtx.applyAgentPatch(patch);
+      if (Object.keys(patch).length > 0) {
+        if (ev.tool === WIZARD_WRITE_TOOL)
+          wizardCtx.noteWriteBefore(ev.id, liveValues(liveStateRef.current, Object.keys(patch)));
+        wizardCtx.applyAgentPatch(patch);
+        liveStateRef.current = { ...liveStateRef.current, ...patch };
+      }
       const nav = ev.status === "ok" ? parseScreenNav(ev.result) : null;
       if (nav) {
         screenOpeningRef.current = nav.action === "back" && nav.request ? nav.request : null;
@@ -401,6 +426,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const autoFeedback = wizardCtx?.autoFeedback ?? null;
   const autoFeedbackRef = React.useRef(autoFeedback);
   const sentFeedbackRef = React.useRef(autoFeedback?.id ?? 0);
+  const autoTurnRef = React.useRef<AutoTurn | null>(null);
   React.useEffect(() => {
     autoFeedbackRef.current = autoFeedback;
   }, [autoFeedback]);
@@ -425,6 +451,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       keepSetupChat(null);
       kickedScreensRef.current = new Set();
       sentFeedbackRef.current = autoFeedbackRef.current?.id ?? 0;
+      autoTurnRef.current = null;
       if (id) {
         discardConversation(id);
         void removeConversation(id);
@@ -441,28 +468,33 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     // The wizard just mounted. Gate on its restored flag rather than the
     // reopened screen: this panel's chunk loads lazily, so the wizard may
     // already have moved off that screen (clearing it) before this runs.
-    let saved: string | null = null;
-    if (restoredSetupRef.current) {
-      try {
-        saved = window.sessionStorage.getItem(SETUP_CHAT_KEY);
-      } catch {
-        // Blocked storage: the setup starts a new chat.
-      }
+    let saved: SetupChat | null = null;
+    try {
+      saved = decodeSetupChat(window.sessionStorage.getItem(SETUP_CHAT_KEY));
+    } catch {
+      // Blocked storage: the setup starts a new chat.
     }
-    if (!saved) {
+    if (!saved || !restoredSetupRef.current) {
+      // A kept chat this setup does not reopen lost its draft (a cloned run
+      // reloads from its source run, not the tab's draft), so it goes too.
+      if (saved) {
+        discardConversation(saved.id);
+        void removeConversation(saved.id);
+      }
       keepSetupChat(null);
       newSession();
       setActiveConversation(null);
       if (shownScreen !== reopenedScreenRef.current) setKickoffScreen(shownScreen);
       return;
     }
-    setupChatRef.current = saved;
-    kickedScreensRef.current = new Set([shownScreen]);
-    setActiveConversation(saved);
-    if (activateConversation(saved)) return;
-    void getConversation(saved).then((detail) => {
-      if (setupChatRef.current !== saved) return;
-      if (detail) openConversation(saved, hideKickoffs(detail.messages));
+    const id = saved.id;
+    kickedScreensRef.current = new Set([...saved.kicked, shownScreen]);
+    keepSetupChat(id);
+    setActiveConversation(id);
+    if (activateConversation(id)) return;
+    void getConversation(id).then((detail) => {
+      if (setupChatRef.current !== id) return;
+      if (detail) openConversation(id, hideKickoffs(detail.messages));
       else {
         keepSetupChat(null);
         newSession();
@@ -498,6 +530,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     if (!panelDock || activeBusy || backgroundBusy) return;
     setKickoffScreen(null);
     kickedScreensRef.current.add(kickoffScreen);
+    if (setupChatRef.current) keepSetupChat(setupChatRef.current);
     sendToAgent(SCREEN_KICKOFF, undefined, { hidden: true });
   }, [
     kickoffScreen,
@@ -508,16 +541,34 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     activeBusy,
     backgroundBusy,
     sendToAgent,
+    keepSetupChat,
   ]);
 
   // What the wizard tells the agent by itself (a failed setup check) goes out
-  // as a turn once the agent is free.
+  // as a turn once the chat is on view and the agent is free, so the user
+  // sees the whole exchange. A cloned run's agent stays silent until the
+  // user writes to it, so it gets none of them.
   React.useEffect(() => {
     if (!inSetup || !autoFeedback || autoFeedback.id === sentFeedbackRef.current) return;
-    if (activeBusy || backgroundBusy) return;
+    const action = autoFeedbackAction({
+      docked: panelDock !== null,
+      busy: activeBusy || backgroundBusy,
+      silent: cloned && !userSpoke,
+    });
+    if (action === "wait") return;
     sentFeedbackRef.current = autoFeedback.id;
+    if (action === "skip") return;
+    autoTurnRef.current = { id: autoFeedback.id, started: false };
     sendToAgent(autoFeedback.text);
-  }, [inSetup, autoFeedback, activeBusy, backgroundBusy, sendToAgent]);
+  }, [inSetup, autoFeedback, panelDock, activeBusy, backgroundBusy, cloned, userSpoke, sendToAgent]);
+  // The wizard checks the code again only once the agent finished the turn
+  // the failed check started, not on the end of some other turn.
+  const setFinishedAutoFeedback = wizardCtx?.setFinishedAutoFeedback;
+  React.useEffect(() => {
+    const next = trackAutoTurn(autoTurnRef.current, activeBusy);
+    autoTurnRef.current = next.turn;
+    if (next.ended !== null) setFinishedAutoFeedback?.(next.ended);
+  }, [activeBusy, setFinishedAutoFeedback]);
 
   // The form holds the fields a running write is changing, and the Metric
   // screen waits for the agent before it checks its code again.

@@ -73,7 +73,14 @@ interface WizardStateContextValue {
   setAgentWritingFields: (fields: readonly string[]) => void;
   /** The newest message the wizard sends the agent by itself, such as a failed setup check. */
   autoFeedback: AutoFeedback | null;
-  sendAutoFeedback: (text: string) => void;
+  /** Queue a message for the agent; returns its id. */
+  sendAutoFeedback: (text: string) => number;
+  /** The id of the newest automatic message whose turn the agent finished. */
+  finishedAutoFeedback: number;
+  setFinishedAutoFeedback: (id: number) => void;
+  /** What each wizard write's fields held on the form when it landed, by tool call id. */
+  writeBefore: Readonly<Record<string, Record<string, unknown>>>;
+  noteWriteBefore: (callId: string, before: Record<string, unknown>) => void;
 }
 
 /** A message the wizard sends its agent without the user typing it. */
@@ -108,8 +115,17 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
     );
   }, []);
   const [autoFeedback, setAutoFeedback] = React.useState<AutoFeedback | null>(null);
+  const feedbackIdRef = React.useRef(0);
   const sendAutoFeedback = React.useCallback((text: string) => {
-    setAutoFeedback((prev) => ({ id: (prev?.id ?? 0) + 1, text }));
+    feedbackIdRef.current += 1;
+    const id = feedbackIdRef.current;
+    setAutoFeedback({ id, text });
+    return id;
+  }, []);
+  const [finishedAutoFeedback, setFinishedAutoFeedback] = React.useState(0);
+  const [writeBefore, setWriteBefore] = React.useState<Record<string, Record<string, unknown>>>({});
+  const noteWriteBefore = React.useCallback((callId: string, before: Record<string, unknown>) => {
+    setWriteBefore((prev) => ({ ...prev, [callId]: before }));
   }, []);
   // A ref, not state: the frame re-registers on every render that changes its
   // handlers, and the agent reads it only when a move arrives.
@@ -205,6 +221,7 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
     // replaying the last agent write onto an otherwise-empty form.
     setPulseKeys([]);
     setAutoFeedback(null);
+    setWriteBefore({});
   }, []);
 
   const overriddenFields = React.useMemo(() => Array.from(overridden).sort(), [overridden]);
@@ -235,6 +252,10 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       setAgentWritingFields,
       autoFeedback,
       sendAutoFeedback,
+      finishedAutoFeedback,
+      setFinishedAutoFeedback,
+      writeBefore,
+      noteWriteBefore,
     }),
     [
       state,
@@ -256,6 +277,9 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       setAgentWritingFields,
       autoFeedback,
       sendAutoFeedback,
+      finishedAutoFeedback,
+      writeBefore,
+      noteWriteBefore,
     ],
   );
 
@@ -267,9 +291,11 @@ export function useWizardStateOptional(): WizardStateContextValue | null {
   return React.useContext(Ctx);
 }
 
-/** Whether a running agent write is changing this wizard field, so the form holds it. */
-export function useAgentFieldLock(field: keyof WizardState): boolean {
-  return React.useContext(Ctx)?.agentWritingFields.includes(field) ?? false;
+/** Whether a running agent write is changing this wizard field (or any of these), so the form holds it. */
+export function useAgentFieldLock(field: keyof WizardState | ReadonlyArray<keyof WizardState>): boolean {
+  const writing = React.useContext(Ctx)?.agentWritingFields ?? [];
+  const fields: readonly string[] = typeof field === "string" ? [field] : field;
+  return fields.some((f) => writing.includes(f));
 }
 
 // New runs optimize only a DSPy program; a repository run has no artifact kind here.

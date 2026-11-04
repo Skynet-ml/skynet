@@ -52,6 +52,7 @@
   "submit.v2.metric.files.error.chars": "Nur Buchstaben, Ziffern, _ . und - verwenden, keine Ordner . oder ..",
   "submit.v2.metric.files.error.count": "Der Arbeitsbereich enthält höchstens 20 zusätzliche Dateien.",
   "submit.v2.ide.loading": "Editor wird geladen…",
+  "submit.v2.ide.agent_writing": "Der Einrichtungsagent bearbeitet diesen Code",
   "submit.v2.ide.load_failed": "Der Editor wurde nicht geladen. Schließe ihn und versuche es erneut.",
   "submit.v2.ide.error.fixed": "run.py und metric.py sind die Einstiegsdateien des Laufs und können nicht gelöscht, umbenannt oder verschoben werden.",
   "submit.v2.ide.check.passed": "Keine Probleme",

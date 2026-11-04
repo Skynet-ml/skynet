@@ -52,6 +52,7 @@
   "submit.v2.metric.files.error.chars": "Use apenas letras, dígitos, _ . e -, sem pastas . ou ..",
   "submit.v2.metric.files.error.count": "O espaço de trabalho comporta no máximo 20 arquivos extras.",
   "submit.v2.ide.loading": "Carregando o editor…",
+  "submit.v2.ide.agent_writing": "O agente de configuração está editando este código",
   "submit.v2.ide.load_failed": "O editor não carregou. Feche-o e tente novamente.",
   "submit.v2.ide.error.fixed": "run.py e metric.py são os arquivos de entrada da execução, por isso não podem ser excluídos, renomeados nem movidos.",
   "submit.v2.ide.check.passed": "Nenhum problema",

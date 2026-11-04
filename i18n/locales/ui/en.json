@@ -4107,6 +4107,7 @@
   "submit.v2.metric.files.error.exists": "A file or folder with that name already exists.",
   "submit.v2.metric.files.error.count": "The workspace holds at most 20 extra files.",
   "submit.v2.ide.loading": "Loading the editor…",
+  "submit.v2.ide.agent_writing": "The setup agent is editing this code",
   "submit.v2.ide.load_failed": "The editor didn't load. Close it and try again.",
   "submit.v2.ide.error.fixed": "run.py and metric.py are the run's entry files, so they can't be deleted, renamed or moved.",
   "submit.v2.ide.check.passed": "No problems",

@@ -52,6 +52,7 @@
   "submit.v2.metric.files.error.chars": "英字、数字、_ . - のみを使い、. や .. のフォルダーは使わないでください。",
   "submit.v2.metric.files.error.count": "ワークスペースに追加できるファイルは最大 20 個です。",
   "submit.v2.ide.loading": "エディターを読み込んでいます…",
+  "submit.v2.ide.agent_writing": "セットアップエージェントがこのコードを編集しています",
   "submit.v2.ide.load_failed": "エディターを読み込めませんでした。閉じてもう一度お試しください。",
   "submit.v2.ide.error.fixed": "run.py と metric.py は実行のエントリーファイルなので、削除、名前の変更、移動はできません。",
   "submit.v2.ide.check.passed": "問題はありません",

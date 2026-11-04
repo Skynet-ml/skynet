@@ -52,6 +52,7 @@
   "submit.v2.metric.files.error.chars": "Yalnızca harf, rakam, _ . ve - kullanın; . veya .. klasörü olmasın.",
   "submit.v2.metric.files.error.count": "Çalışma alanında en fazla 20 ek dosya olabilir.",
   "submit.v2.ide.loading": "Düzenleyici yükleniyor…",
+  "submit.v2.ide.agent_writing": "Kurulum aracısı bu kodu düzenliyor",
   "submit.v2.ide.load_failed": "Düzenleyici yüklenmedi. Kapatıp yeniden deneyin.",
   "submit.v2.ide.error.fixed": "run.py ve metric.py çalıştırmanın giriş dosyalarıdır; silinemez, yeniden adlandırılamaz veya taşınamaz.",
   "submit.v2.ide.check.passed": "Sorun yok",
