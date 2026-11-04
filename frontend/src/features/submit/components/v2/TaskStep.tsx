@@ -15,7 +15,7 @@ import {
 } from "@/features/agent-panel";
 
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
-import { emptyRepoDraft, programTargetOptimizer, repoTargetSlices, taskIssue } from "../../lib/wizard-v2";
+import { targetPatch, taskIssue } from "../../lib/wizard-v2";
 import { AuthoringShell } from "../steps/AuthoringShell";
 import { ArtifactConfirmCard, v2Msg } from "./ArtifactConfirmCard";
 import { RepoTargetCard } from "./RepoTargetCard";
@@ -34,16 +34,10 @@ export function TaskStep({ page }: { page: number }) {
   const startingLocked = useAgentFieldLock("starting_version");
 
   const setTarget = (target: "dspy_program" | "repo") => {
-    if (target === "repo") {
-      patchTask({ repo: task.repo ?? emptyRepoDraft() });
-      const { inputs, optimizer } = repoTargetSlices(state.optimizer.choice);
-      patchInputs(inputs);
-      if (optimizer) patchOptimizer(optimizer);
-    } else {
-      patchTask({ repo: null, artifactKind: "dspy_program" });
-      const optimizer = programTargetOptimizer(state.optimizer.choice);
-      if (optimizer) patchOptimizer(optimizer);
-    }
+    const patch = targetPatch(target, task.repo, state.optimizer.choice);
+    patchTask(patch.task);
+    if (patch.inputs) patchInputs(patch.inputs);
+    if (patch.optimizer) patchOptimizer(patch.optimizer);
   };
 
   return (

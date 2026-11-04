@@ -168,7 +168,6 @@ _SAFE_MUTATIONS: frozenset[str] = frozenset(
     {
         "rename_job_optimizations",
         "toggle_pin_job_optimizations",
-        "edit_code_optimizations_edit_code_post",
         "validate_code_validate_code_post",
         "profile_datasets_profile_post",
         "discover_models_models_discover_post",
@@ -742,6 +741,10 @@ class _ApprovalGatedTool:
                 if isinstance(shown, dict):
                     shown = {**shown, "previous": self._previous_values(kwargs)}
                 self._authoring_flag.wizard_patch.update(kwargs)
+                # The wizard treats a repository write alone as a switch to a repository run,
+                # so the screen gate must see the same target this turn.
+                if kwargs.get("repository") and "artifact_kind" not in kwargs:
+                    self._authoring_flag.wizard_patch["artifact_kind"] = "repo"
                 if str(kwargs.get("job_name") or "").strip():
                     self._authoring_flag.job_named = True
             self._emit(
@@ -963,8 +966,13 @@ class WizardState(TypedDict, total=False):
     is_private: bool
     task_objective: str
     task_background: str
+    # ``dspy_program``, or ``repo`` for a run that optimizes a GitHub repository.
     artifact_kind: str
     starting_version: str | dict[str, str]
+    # The repository a ``repo`` run optimizes, as ``owner/name``.
+    repository: str
+    # Whether the user linked a GitHub account; absent while the wizard does not know yet.
+    github_connected: bool
     data_mode: str
     dataset_ready: bool
     # The loaded table's columns, so the Data screen's agent can name them in ``set_column_roles``.
@@ -997,6 +1005,9 @@ class WizardState(TypedDict, total=False):
     # waits for the user and sees the whole setup, not one screen's slice.
     cloned_run: bool
 
+
+# The repository picker's own listing; it answers 409 when GitHub is not linked.
+GITHUB_REPOS_TOOL = "list_github_repositories_connectors_github_repos_get"
 
 _ALWAYS_TOOLS = frozenset(
     {
@@ -1050,6 +1061,7 @@ _ALWAYS_TOOLS = frozenset(
         "request_user_dataset_from_library",
         # Generalized wizard patch — any editable field, partial updates.
         "update_wizard_state",
+        GITHUB_REPOS_TOOL,
         "update_user_preferences",
         # Account settings. change_setting asks in Ask and Auto-safe;
         # change_protected_setting asks in every mode (_ALWAYS_CONFIRM_TOOLS).
@@ -1117,14 +1129,17 @@ def _name_set(state: WizardState) -> bool:
 
 
 def _task_ready(state: WizardState) -> bool:
-    """Return True when the Task step has an objective, artifact kind and starting version."""
+    """Return True when the Task step has an objective and a complete artifact.
+
+    A DSPy program needs a starting version; a repository run needs only the
+    repository, since the checkout itself is the starting version.
+    """
     objective = state.get("task_objective") or ""
-    return bool(
-        isinstance(objective, str)
-        and objective.strip()
-        and state.get("artifact_kind")
-        and state.get("starting_version") not in (None, "", {})
-    )
+    if not (isinstance(objective, str) and objective.strip()):
+        return False
+    if state.get("artifact_kind") == "repo":
+        return bool(str(state.get("repository") or "").strip())
+    return bool(state.get("artifact_kind") and state.get("starting_version") not in (None, "", {}))
 
 
 def _dataset_ready(state: WizardState) -> bool:
@@ -1172,7 +1187,10 @@ def tools_for(state: WizardState) -> set[str]:
         allowed |= _DATASET_READY_TOOLS
     name_set = _name_set(state)
     task_ready = _task_ready(state)
-    if name_set and task_ready and _inputs_ready(state) and _code_ready(state) and _model_ready(state):
+    # A repository run is submitted by the wizard's own Run button; the
+    # unified submit tool has no repository target.
+    is_repo = state.get("artifact_kind") == "repo"
+    if not is_repo and name_set and task_ready and _inputs_ready(state) and _code_ready(state) and _model_ready(state):
         allowed |= _SUBMIT_TOOLS
     return allowed
 
@@ -1193,6 +1211,7 @@ _FIELD_STEP: dict[str, int] = {
     "task_background": 1,
     "artifact_kind": 1,
     "starting_version": 1,
+    "repository": 1,
     "data_mode": 2,
     "staged_dataset_id": 2,
     "split_fractions": 2,
@@ -1207,7 +1226,10 @@ _PREREQ_STEPS = (0, 1, 2)
 # What the agent must DO to satisfy each gating step (used in the error hint).
 _STEP_FIX_HINT = {
     0: "set ``job_name`` via update_wizard_state",
-    1: "set ``task_objective``, ``artifact_kind`` and ``starting_version`` via update_wizard_state",
+    1: (
+        "set ``task_objective``, ``artifact_kind`` and ``starting_version`` (or ``repository`` "
+        "for a ``repo`` run) via update_wizard_state"
+    ),
     2: "set ``data_mode`` (and attach the dataset via request_user_dataset for pairs)",
 }
 
@@ -1275,7 +1297,7 @@ def validate_wizard_patch_order(patch: dict[str, Any], state: WizardState) -> st
 # so nothing changes out of sight. Mirrors the frontend's ``wizard-pages``.
 _SCREEN_FIELDS: dict[str, frozenset[str]] = {
     "brief": frozenset({"task_objective", "task_background"}),
-    "artifact": frozenset({"artifact_kind", "starting_version"}),
+    "artifact": frozenset({"artifact_kind", "starting_version", "repository"}),
     "source": frozenset({"data_mode", "staged_dataset_id", "split_fractions", "shuffle", "seed"}),
     "plan": frozenset({"optimizer_choice", "model_config", "reflection_model_config", "spending_limit_usd"}),
     "optimizer": frozenset({"optimizer_choice"}),
@@ -1323,7 +1345,7 @@ def validate_wizard_screen(tool_name: str, kwargs: dict[str, Any], state: Wizard
 # agent can see what is already there: the budget is stored as cents, and the
 # metric screen needs the task and the data its code runs on.
 _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
-    "artifact": frozenset({"task_objective"}),
+    "artifact": frozenset({"task_objective", "github_connected"}),
     "source": frozenset(
         {"task_objective", "artifact_kind", "dataset_ready", "dataset_columns", "input_fields", "expected_field"}
     ),
@@ -1340,6 +1362,7 @@ _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
             "task_objective",
             "artifact_kind",
             "starting_version",
+            "repository",
             "input_fields",
             "expected_field",
         }
@@ -1369,7 +1392,7 @@ _SCREEN_ORDER: tuple[str, ...] = (
 # reach past the screen the user is on.
 _SCREEN_ALLOWED_TOOLS: dict[str, frozenset[str]] = {
     "brief": frozenset({"update_wizard_state"}),
-    "artifact": frozenset({"update_wizard_state"}),
+    "artifact": frozenset({"update_wizard_state", GITHUB_REPOS_TOOL}),
     "source": frozenset(
         {
             "update_wizard_state",
@@ -1435,6 +1458,9 @@ def screen_snapshot(state: WizardState) -> dict[str, Any]:
         # Every wizard write is refused until the run has a name, and no screen
         # shows it, so the agent must see when it is still missing.
         snapshot["job_name"] = state.get("job_name") or None
+        # Agents tried to write fields of later screens; the list in the
+        # snapshot names what this screen takes before the first call.
+        snapshot["editable_fields"] = sorted(_SCREEN_FIELDS.get(screen, frozenset()) | _SCREENLESS_FIELDS)
     notes = earlier_screen_notes(state)
     if notes:
         snapshot["notes_from_earlier_screens"] = notes
@@ -1519,6 +1545,8 @@ def _screen_problems(screen: str, state: WizardState) -> list[str]:
     if screen == "brief" and not str(state.get("task_objective") or "").strip():
         return ["task_objective is empty"]
     if screen == "artifact" and not _task_ready(state):
+        if state.get("artifact_kind") == "repo":
+            return ["repository must be set as owner/name"]
         return ["artifact_kind and starting_version must both be set"]
     if screen == "source" and not _inputs_ready(state):
         return ["data_mode must be set, and pairs need a dataset attached"]
@@ -1798,7 +1826,7 @@ The wizard screen on view:
   looking at, and each turn you may change only the fields on it (plus
   ``job_name``, ``job_description`` and ``is_private``, which show on no
   screen). Screens: ``brief`` (task_objective, task_background),
-  ``artifact`` (artifact_kind, starting_version), ``source`` (data_mode,
+  ``artifact`` (artifact_kind, starting_version, repository), ``source`` (data_mode,
   staged_dataset_id, split_fractions, shuffle, seed), ``plan``
   (optimizer_choice, model_config, reflection_model_config,
   spending_limit_usd), ``optimizer`` (optimizer_choice), ``models``
@@ -1809,6 +1837,10 @@ The wizard screen on view:
   visible screen holds in one call, then tell the user what the next
   screen will hold once they move on with the wizard's arrows. Without
   ``wizard_screen`` the wizard is not on view and any field may be set.
+* Say only what a tool result confirms. A refused write changed
+  nothing, and the screen moves only when a navigation tool returns
+  ``screen_nav``; never tell the user a field is set or that you moved
+  them to another screen otherwise.
 
 Rules:
 * Prefer calling tools over explaining. One tool call per turn is ideal.
@@ -1827,11 +1859,13 @@ Rules:
        authoring code or submitting, even when the user only described
        the task in prose. NEVER leave the run unnamed.
     2. Task — set ``task_objective`` (what "better" means, in the
-       user's words), ``task_background`` (context), ``artifact_kind``
-       (always ``dspy_program``: new runs optimize a DSPy program, and a
-       prompt the user brings becomes the instruction of its predictor) and
-       ``starting_version`` (a map of predictor names to instructions). Get the starting version and the objective from
-       the user; never invent either.
+       user's words), ``task_background`` (context) and ``artifact_kind``.
+       ``dspy_program`` optimizes a DSPy program: a prompt the user brings
+       becomes the instruction of its predictor, and ``starting_version``
+       is a map of predictor names to instructions. ``repo`` optimizes a
+       GitHub repository: set ``repository`` (``owner/name``) and no
+       starting version. Get the starting version, the repository and the
+       objective from the user; never invent them.
     3. Inputs — set ``data_mode``: ``single`` for one input, ``pairs``
        for many input/output examples. For pairs, call
        ``request_user_dataset`` so the user attaches them; part of the
@@ -1940,7 +1974,7 @@ Capabilities worth knowing about:
 * Any wizard field: ``update_wizard_state`` patches any subset of
   editable fields — job_name, job_description, is_private,
   task_objective, task_background, artifact_kind, starting_version,
-  data_mode, staged_dataset_id, split_fractions, shuffle, seed,
+  repository, data_mode, staged_dataset_id, split_fractions, shuffle, seed,
   optimizer_choice, model_config (task model), reflection_model_config,
   plus spending_limit_usd (dollars; send null to remove the limit).
   Supply only the fields you want to change; everything else is left
@@ -2138,7 +2172,9 @@ How a turn works:
 
 This screen:
 * {focus}
-* You see and edit this screen only. When the user asks for something
+* ``wizard_state.editable_fields`` lists every field this screen takes;
+  a write to any other field is refused. You see and edit this screen
+  only. When the user asks for something
   that belongs to an earlier screen, call ``go_back_to_screen`` with what
   they want there. When it belongs to a later screen, change nothing for
   it: save it with ``remember_for_later`` and say it will be handled there.
@@ -2154,6 +2190,10 @@ This screen:
   you asked to finish this screen counts as wanting to move on; do not
   ask again whether to continue. If it is refused, tell the user what is
   missing.
+* Say only what a tool result confirms. A refused write changed nothing,
+  and the screen moves only when ``continue_to_next_screen`` or
+  ``go_back_to_screen`` returns ``screen_nav``. Never say a field is set
+  or the user is on another screen otherwise.
 * A turn that opens a screen comes from the wizard, not the user: the
   wizard just moved here (the user typed nothing), or a later screen sent
   the user back with a request. Be proactive. When this screen's values, the
@@ -2200,8 +2240,12 @@ SCREEN_FOCUS: dict[str, str] = {
         "context into ``task_background``. Name the run (``job_name``) first if it has no name."
     ),
     "artifact": (
-        "Artifact: set ``artifact_kind`` to ``dspy_program`` (the only kind new runs take) and "
-        "``starting_version``, the predictor instructions being improved, taken from the user verbatim."
+        "Artifact: set ``artifact_kind``. For a DSPy program (``dspy_program``) also set "
+        "``starting_version``, the predictor instructions being improved, taken from the user verbatim. "
+        "For a GitHub repository (``repo``) set ``repository`` as ``owner/name`` and no starting version. "
+        "When ``github_connected`` is true, find the repository the user names with "
+        "``list_github_repositories`` (pass its name as ``search``) and copy its ``full_name``. When it is "
+        "false, tell the user to link GitHub with the Connect GitHub button on this screen; never ask for a token."
     ),
     "source": (
         "Data: set ``data_mode`` (``single`` for one input, ``pairs`` for input/output examples) and, for "
@@ -3320,8 +3364,7 @@ async def run_generalist_agent(
 ) -> AsyncGenerator[dict, None]:
     """Stream generalist-agent events for one user turn.
 
-    Emits the same SSE envelope as :func:`run_code_agent` so the frontend
-    chat primitives work unchanged:
+    Emits the SSE envelope that the frontend chat primitives read:
 
     * ``reasoning_patch`` — per-token reasoning
     * ``thinking_summary`` — ``{index, text}``, a heading-and-sentence label

@@ -30,7 +30,6 @@ export interface ToolRenderer {
 // a file, ran a check, read results"). A tool not listed reads by its name:
 // get_/list_ tools read, anything else is a generic tool.
 const TOOL_KINDS: Record<string, ActivityKind> = {
-  edit_code_optimizations_edit_code_post: "edit",
   delete_job_optimizations: "act",
   bulk_delete_jobs_optimizations_bulk_delete_post: "act",
   rename_job_optimizations: "act",
@@ -349,15 +348,6 @@ const RENDERERS: Record<string, ToolRenderer> = {
         done: msg("auto.features.agent.panel.lib.tool.renderers.literal.47"),
       });
     },
-  },
-
-  edit_code_optimizations_edit_code_post: {
-    summary: (call) =>
-      byStatus(call, {
-        running: msg("auto.features.agent.panel.lib.tool.renderers.literal.48"),
-        done: msg("auto.features.agent.panel.lib.tool.renderers.literal.49"),
-        error: msg("auto.features.agent.panel.lib.tool.renderers.literal.50"),
-      }),
   },
 
   profile_datasets_profile_post: {

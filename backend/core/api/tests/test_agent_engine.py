@@ -501,19 +501,6 @@ def test_hosted_chat_turn_maps_a_retired_effort_and_drops_fast_mode(
 
 # Each route, its routing function and its module, with a minimal valid body.
 _AGENT_ROUTES = [
-    (
-        "/optimizations/ai-generate-code",
-        code_agent_mod,
-        "route_menu_model",
-        {"dataset_columns": ["q", "a"], "column_roles": {"q": "input", "a": "output"}, "user_message": "hi"},
-    ),
-    ("/optimizations/task-interview", code_agent_mod, "route_interview_model", {"objective": "Answer questions"}),
-    (
-        "/optimizations/infer-inputs",
-        code_agent_mod,
-        "route_interview_model",
-        {"objective": "Answer questions", "artifact_kind": "dspy_program"},
-    ),
     ("/account/intake-interview", code_agent_mod, "route_interview_model", {"phase": "billing"}),
     ("/tagging-sessions/s1/assist/interview", tagger_mod, "route_interview_model", {}),
     ("/tagging-sessions/s1/assist/interview/stream", tagger_mod, "route_interview_model", {}),
@@ -525,9 +512,6 @@ _AGENT_ROUTES = [
     ("path", "module", "router_fn", "body"),
     _AGENT_ROUTES,
     ids=[
-        "ai_generate_code",
-        "task_interview",
-        "infer_inputs",
         "intake_interview",
         "tagger_interview",
         "tagger_interview_stream",
@@ -561,8 +545,7 @@ def test_agent_route_with_no_model_routes_the_engine_model(
         raise DomainError("test.routed", status=418)
 
     monkeypatch.setattr(module, router_fn, record)
-    monkeypatch.setattr(module, "fits_kickoff_budget", lambda _size: True)
-    monkeypatch.setattr(code_agent_mod, "gate_interactive_turn", lambda *_args: None)
+    monkeypatch.setattr(tagger_mod, "fits_kickoff_budget", lambda _size: True)
     monkeypatch.setattr(code_agent_mod, "gate_intake_turn", lambda *_args: (None, False))
     monkeypatch.setattr(code_agent_mod, "_intake_catalog", lambda: ([], []))
     monkeypatch.setattr(tagger_mod, "enforce_llm_balance", lambda *_args: None)
@@ -587,13 +570,6 @@ def test_agent_route_with_no_model_routes_the_engine_model(
 # Each composer route that runs a turn on the picked model, the engine call it
 # makes, and a minimal valid body.
 _COMPOSER_ROUTES = [
-    (
-        "/optimizations/ai-generate-code",
-        code_agent_mod,
-        "run_code_agent",
-        {"dataset_columns": ["q", "a"], "column_roles": {"q": "input", "a": "output"}, "user_message": "hi"},
-    ),
-    ("/optimizations/task-interview", code_agent_mod, "task_interview_turn_stream", {"objective": "Answer questions"}),
     ("/tagging-sessions/s1/assist/interview", tagger_mod.tagging, "interview_turn", {}),
     ("/tagging-sessions/s1/assist/interview/stream", tagger_mod.tagging, "interview_turn_stream", {}),
 ]
@@ -603,7 +579,7 @@ _COMPOSER_ROUTES = [
 @pytest.mark.parametrize(
     ("path", "module", "engine_fn", "body"),
     _COMPOSER_ROUTES,
-    ids=["ai_generate_code", "task_interview", "tagger_interview", "tagger_interview_stream"],
+    ids=["tagger_interview", "tagger_interview_stream"],
 )
 @pytest.mark.parametrize("fast", [True, False])
 def test_composer_route_passes_cli_effort_and_fast_mode_to_the_engine(
@@ -631,9 +607,7 @@ def test_composer_route_passes_cli_effort_and_fast_mode_to_the_engine(
         raise DomainError("test.routed", status=418)
 
     monkeypatch.setattr(module, engine_fn, record)
-    monkeypatch.setattr(code_agent_mod, "fits_kickoff_budget", lambda _size: True)
     monkeypatch.setattr(tagger_mod, "fits_kickoff_budget", lambda _size: True)
-    monkeypatch.setattr(code_agent_mod, "gate_interactive_turn", lambda *_args: None)
     monkeypatch.setattr(tagger_mod, "enforce_llm_balance", lambda *_args: None)
     monkeypatch.setattr(tagger_mod, "_load_for_role", lambda *_args: SimpleNamespace(columns=[], data=[]))
     monkeypatch.setattr(tagger_mod, "_interview_config", lambda _row: {})

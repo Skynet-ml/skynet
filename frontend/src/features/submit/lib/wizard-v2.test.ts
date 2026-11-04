@@ -26,7 +26,9 @@ const {
   presetEngine,
   programTargetOptimizer,
   repoTargetSlices,
+  targetPatch,
   taskIssue,
+  withRepository,
   wizardSteps,
   withContractBudget,
   withDefaultModels,
@@ -439,4 +441,30 @@ test("repoTargetSlices runs one case at a time and replaces Auto", () => {
     inputs: { mode: "single" },
     optimizer: null,
   });
+});
+
+test("targetPatch switches to a repository and back to a DSPy program", () => {
+  const toRepo = targetPatch("repo", null, "auto");
+  assert.deepEqual(toRepo.task, { repo: emptyRepoDraft() });
+  assert.deepEqual(toRepo.inputs, { mode: "single" });
+  assert.deepEqual(toRepo.optimizer, { choice: "gepa" });
+  const kept = { ...emptyRepoDraft(), repository: "acme/bot" };
+  assert.equal(targetPatch("repo", kept, "gepa").task.repo, kept);
+  assert.deepEqual(targetPatch("dspy_program", kept, "gepa"), {
+    task: { repo: null, artifactKind: "dspy_program" },
+    inputs: null,
+    optimizer: { choice: "auto" },
+  });
+});
+
+test("withRepository picks a repository from its default branch", () => {
+  const pinned = { ...emptyRepoDraft(), repository: "acme/old", branch: "dev", commit: "abc1234" };
+  assert.deepEqual(withRepository(pinned, "acme/bot"), {
+    ...pinned,
+    repository: "acme/bot",
+    branch: "",
+    commit: "",
+  });
+  assert.equal(withRepository(pinned, "acme/old"), pinned);
+  assert.equal(withRepository(null, "acme/bot").repository, "acme/bot");
 });

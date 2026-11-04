@@ -4,6 +4,7 @@
  * the fields a running call is about to write.
  */
 
+import { diffStats, lineDiff } from "@/shared/lib/line-diff";
 import type { AgentMessage, AgentToolCall } from "@/shared/ui/agent/types";
 
 export const WIZARD_WRITE_TOOL = "update_wizard_state";
@@ -68,7 +69,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *     has only the server's.
  *
  * Returns:
- *   One change per written field, in the order the agent wrote them.
+ *   One change per field whose value the write changed, in the order the
+ *   agent wrote them; a field written with the value it already held is left out.
  */
 export function wizardWriteChanges(
   call: AgentToolCall,
@@ -85,7 +87,42 @@ export function wizardWriteChanges(
       field,
       before: (liveBefore && Object.hasOwn(liveBefore, field) ? liveBefore[field] : previous[field]) ?? null,
       after,
-    }));
+    }))
+    .filter((change) => fieldValueText(change.before) !== fieldValueText(change.after));
+}
+
+/**
+ * Count the lines a code field's write added and removed.
+ *
+ * Args:
+ *   change: A change to a code field.
+ *
+ * Returns:
+ *   The added and removed line counts.
+ */
+export function codeChangeStats(change: WizardFieldChange): { added: number; removed: number } {
+  return diffStats(lineDiff(fieldValueText(change.before) ?? "", fieldValueText(change.after) ?? ""));
+}
+
+/**
+ * Sum up a write on one line: each changed field, and each code file with
+ * the lines it added and removed.
+ *
+ * Args:
+ *   changes: The write's changes.
+ *
+ * Returns:
+ *   E.g. `"task_objective, metric.py +3 −1"`.
+ */
+export function writeSummary(changes: readonly WizardFieldChange[]): string {
+  return changes
+    .map((change) => {
+      const file = CODE_FIELD_FILES[change.field];
+      if (!file) return change.field;
+      const { added, removed } = codeChangeStats(change);
+      return `${file} +${added} −${removed}`;
+    })
+    .join(", ");
 }
 
 /**

@@ -5,9 +5,9 @@ import * as React from "react";
 import {
   BLACKBOX_OPTIMIZERS,
   DSPY_OPTIMIZERS,
-  type ArtifactKind,
   type DataMode,
   type OptimizerChoice,
+  type OptimizerTarget,
 } from "@/shared/types/unified-run";
 
 import type { ScreenNav, ScreenNavigator } from "../lib/screen-agent";
@@ -299,8 +299,7 @@ export function useAgentFieldLock(field: keyof WizardState | ReadonlyArray<keyof
   return fields.some((f) => writing.includes(f));
 }
 
-// New runs optimize only a DSPy program; a repository run has no artifact kind here.
-const ARTIFACT_KINDS: readonly ArtifactKind[] = ["dspy_program"];
+const ARTIFACT_KINDS: readonly OptimizerTarget[] = ["dspy_program", "repo"];
 const DATA_MODES: readonly DataMode[] = ["single", "pairs"];
 const OPTIMIZER_CHOICES: readonly string[] = ["auto", ...DSPY_OPTIMIZERS, ...BLACKBOX_OPTIMIZERS];
 
@@ -360,7 +359,7 @@ export function extractWizardPatch(result: unknown): Partial<WizardState> {
   ] as const) {
     if (typeof wrap[key] === "string") patch[key] = wrap[key] as string;
   }
-  for (const key of ["staged_dataset_id", "source_dataset_id", "expected_field"] as const) {
+  for (const key of ["staged_dataset_id", "source_dataset_id", "expected_field", "repository"] as const) {
     if (typeof wrap[key] === "string" && wrap[key]) patch[key] = wrap[key] as string;
   }
   if (isStringList(wrap.dataset_columns)) patch.dataset_columns = wrap.dataset_columns;

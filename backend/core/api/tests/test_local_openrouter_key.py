@@ -48,11 +48,9 @@ from .. import auth as auth_mod
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..routers import agent_engine as engine_router_mod
-from ..routers import code_agent as code_router_mod
 from ..routers import generalist_agent as agent_mod
 from ..routers.agent_engine import create_agent_engine_router
 from ..routers.billing import create_billing_router
-from ..routers.code_agent import create_code_agent_router
 from ..routers.generalist_agent import create_generalist_agent_router
 from .test_generalist_persistence import _SECRET, _fund, _session_token
 
@@ -162,7 +160,6 @@ def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[list[obje
         config,
         agent_engine,
         engine_router_mod,
-        code_router_mod,
         model_router,
         language_models,
         byok_vault,
@@ -523,115 +520,6 @@ def test_local_chat_turn_runs_on_the_saved_key(
     assert _FAKE_KEY not in response.text
     assert _FAKE_KEY not in caplog.text
     assert _FAKE_KEY[-12:] not in caplog.text
-
-
-def _edit_code(store: object, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, dict[str, Any], list[str]]:
-    """Call ``POST /optimizations/edit-code`` with the code agent replaced by a recorder.
-
-    Args:
-        store: The job store the router uses.
-        monkeypatch: Swaps the code agent and the metering wrapper.
-
-    Returns:
-        The response, the code agent's keyword arguments, and the metered billing sources.
-    """
-    seen: dict[str, Any] = {}
-
-    async def record_agent(**kwargs: Any) -> AsyncIterator[dict[str, Any]]:
-        """Record the code agent's arguments and finish the turn."""
-        seen.update(kwargs)
-        yield {"event": "done", "data": {"signature_code": "sig", "metric_code": "metric"}}
-
-    monkeypatch.setattr(code_router_mod, "run_code_agent", record_agent)
-    real_metering = code_router_mod.stream_with_llm_metering
-    metered: list[str] = []
-
-    def record_metering(source: Any, **kwargs: Any) -> Any:
-        """Record the billing source the turn is metered under."""
-        metered.append(kwargs.get("token_source", TOKEN_SOURCE_MANAGED))
-        return real_metering(source, **kwargs)
-
-    monkeypatch.setattr(code_router_mod, "stream_with_llm_metering", record_metering)
-    app = FastAPI()
-
-    @app.exception_handler(DomainError)
-    async def _domain_error(request: Request, exc: DomainError) -> JSONResponse:
-        """Render a domain error with its i18n code."""
-        return JSONResponse(status_code=exc.status_code, content={"code": exc.code})
-
-    app.include_router(create_code_agent_router(job_store=store))
-    app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser(username=_USER, role="user", groups=())
-    response = TestClient(app).post(
-        "/optimizations/edit-code",
-        json={
-            "goal": "tighten the metric",
-            "dataset_columns": ["q", "a"],
-            "column_roles": {"q": "input", "a": "output"},
-        },
-    )
-    return response, seen, metered
-
-
-def test_local_edit_code_runs_on_the_saved_key(local: list[object], monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run the agent's edit_code tool on the saved key, metered as BYOK, never on the managed default.
-
-    Args:
-        local: The blocked remote addresses.
-        monkeypatch: Swaps the code agent.
-    """
-    engine = _engine()
-    _fund(engine)
-    store = SimpleNamespace(engine=engine)
-    _save(_client(store))
-    response, seen, metered = _edit_code(store, monkeypatch)
-    assert response.status_code == 200, response.text
-    config_ = seen["model_config"]
-    assert config_ is not None
-    assert (seen["model"], config_.token_source, config_.byok_provider) == (_MODEL, TOKEN_SOURCE_BYOK, "openrouter")
-    assert metered == [TOKEN_SOURCE_BYOK]
-    lm = code_agent._build_agent_lm(seen["model"], "low", 512, model_config=config_)
-    assert lm.kwargs.get("api_key") == _FAKE_KEY
-    assert "base_url" not in lm.kwargs
-    assert _FAKE_KEY not in response.text
-
-
-def test_local_edit_code_without_a_verified_key_is_refused(
-    local: list[object], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Refuse the edit_code tool with no key, and with a key OpenRouter rejected; never run it on a managed key.
-
-    Args:
-        local: The blocked remote addresses.
-        monkeypatch: Swaps the code agent.
-    """
-    engine = _engine()
-    _fund(engine)
-    store = SimpleNamespace(engine=engine)
-    response, seen, _ = _edit_code(store, monkeypatch)
-    assert (response.status_code, response.json()) == (422, {"code": "models.managed_unavailable_local"})
-    assert seen == {}
-
-    _save(_client(store), status_code=401)
-    response, seen, _ = _edit_code(store, monkeypatch)
-    assert (response.status_code, response.json()) == (422, {"code": "models.managed_unavailable_local"})
-    assert seen == {}
-
-
-def test_hosted_edit_code_keeps_the_code_agent_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Leave the hosted edit_code tool on the code agent's own default model, metered as managed.
-
-    Args:
-        monkeypatch: Turns local mode off and swaps the code agent.
-    """
-    hosted = config.settings.model_copy(update={"local_mode": False})
-    for module in (agent_engine, code_router_mod, model_router):
-        monkeypatch.setattr(module, "settings", hosted)
-    engine = _engine()
-    _fund(engine)
-    response, seen, metered = _edit_code(SimpleNamespace(engine=engine), monkeypatch)
-    assert response.status_code == 200, response.text
-    assert (seen["model"], seen["model_config"]) == (None, None)
-    assert metered == [TOKEN_SOURCE_MANAGED]
 
 
 @pytest.mark.parametrize(

@@ -1,7 +1,20 @@
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 import { test } from "node:test";
 
-import {
+const wizardWriteUrl = new URL("./wizard-write.ts", import.meta.url).href;
+const lineDiffUrl = new URL("../../../shared/lib/line-diff.ts", import.meta.url).href;
+
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (context.parentURL === wizardWriteUrl && specifier === "@/shared/lib/line-diff") {
+      return { shortCircuit: true, url: lineDiffUrl };
+    }
+    return nextResolve(specifier, context);
+  },
+});
+
+const {
   ROLES_WRITE_TOOL,
   fieldValueText,
   isWizardWrite,
@@ -9,8 +22,9 @@ import {
   lockedCodeFiles,
   rolesFields,
   wizardWriteChanges,
+  writeSummary,
   writingFields,
-} from "./wizard-write.ts";
+} = await import(wizardWriteUrl);
 
 const call = (status: "running" | "done", result?: unknown) => ({
   id: "1",
@@ -31,6 +45,29 @@ test("a write lists each field with what it held before", () => {
     { field: "task_objective", before: "Old goal", after: "Sort tickets" },
     { field: "metric_code", before: null, after: "def m(): ..." },
   ]);
+});
+
+test("a field written with the value it already held is left out", () => {
+  const done = call("done", {
+    previous: { task_objective: "Sort tickets", screen_notes: null, metric_code: "def m(): ..." },
+  });
+  assert.deepEqual(wizardWriteChanges(done), []);
+  const blank = call("done", { previous: { task_objective: "", metric_code: null } });
+  assert.deepEqual(
+    wizardWriteChanges({ ...blank, payload: { ...blank.payload, arguments: { task_objective: null } } }),
+    [],
+  );
+});
+
+test("the collapsed line names the fields and each code file's line counts", () => {
+  assert.equal(
+    writeSummary([
+      { field: "task_objective", before: null, after: "Sort tickets" },
+      { field: "metric_code", before: "a = 1\nb = 2\n", after: "a = 1\nb = 3\nc = 4\n" },
+    ]),
+    "task_objective, metric.py +2 −1",
+  );
+  assert.equal(writeSummary([]), "");
 });
 
 test("only a running write in the newest turn holds its fields", () => {

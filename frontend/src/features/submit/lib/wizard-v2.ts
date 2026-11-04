@@ -265,6 +265,37 @@ export function programTargetOptimizer(choice: OptimizerChoice): Partial<Optimiz
   return optimizersFor("dspy_program", "pairs").includes(choice) ? null : { choice: "auto" };
 }
 
+/**
+ * The slice patches for switching what the run optimizes. A repository keeps
+ * its draft when it is already the target; a DSPy program clears it.
+ */
+export function targetPatch(
+  target: OptimizerTarget,
+  repo: RepoDraft | null,
+  choice: OptimizerChoice,
+): {
+  task: Partial<TaskSlice>;
+  inputs: Partial<InputsSlice> | null;
+  optimizer: Partial<OptimizerSlice> | null;
+} {
+  if (target === "repo") {
+    const { inputs, optimizer } = repoTargetSlices(choice);
+    return { task: { repo: repo ?? emptyRepoDraft() }, inputs, optimizer };
+  }
+  return {
+    task: { repo: null, artifactKind: "dspy_program" },
+    inputs: null,
+    optimizer: programTargetOptimizer(choice),
+  };
+}
+
+/** The draft with another repository picked; a new repository starts from its default branch. */
+export function withRepository(repo: RepoDraft | null, repository: string): RepoDraft {
+  const base = repo ?? emptyRepoDraft();
+  if (base.repository === repository) return base;
+  return { ...base, repository, branch: "", commit: "" };
+}
+
 /** What the optimizer catalog is keyed on: `"repo"` for a repository run, else the artifact kind. */
 export function optimizerTarget(task: Pick<TaskSlice, "repo" | "artifactKind">): OptimizerTarget | null {
   return task.repo ? "repo" : task.artifactKind;

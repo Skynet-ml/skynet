@@ -3,36 +3,64 @@
 import * as React from "react";
 
 import { formatMsg, msg } from "@/shared/lib/messages";
-import { diffHunks, diffStats, lineDiff } from "@/shared/lib/line-diff";
+import { diffHunks, lineDiff } from "@/shared/lib/line-diff";
 import { cn } from "@/shared/lib/utils";
+import { StepRow } from "@/shared/ui/agent/activity-steps";
 import { MagicWand } from "@/shared/ui/icons";
 import type { AgentToolCall } from "@/shared/ui/agent/types";
 
 import { useWizardStateOptional } from "../hooks/use-wizard-state";
 import {
   CODE_FIELD_FILES,
+  codeChangeStats,
   fieldValueText,
   wizardWriteChanges,
+  writeSummary,
   type WizardFieldChange,
 } from "../lib/wizard-write";
 
 const ADDED_TONE = "text-[#5A7247] dark:text-[#adc899]";
 
 /**
- * What the setup agent wrote into the wizard: each field with its old and
- * new value, and each code file as a diff of the lines it changed.
+ * What the setup agent wrote into the wizard, as one collapsed step line:
+ * the changed fields, and each code file with its line counts. Opening it
+ * shows each field's old and new value and each code file's diff. A write
+ * that changed nothing shows nothing.
  */
 export function WizardWriteCard({ call }: { call: AgentToolCall }) {
   const liveBefore = useWizardStateOptional()?.writeBefore[call.id];
   const changes = wizardWriteChanges(call, liveBefore);
+  if (call.status === "error") {
+    const result = call.payload?.result;
+    const reason = typeof result === "string" ? result.trim() : "";
+    return (
+      <StepRow
+        icon={MagicWand}
+        label={msg("agent.wizard_write.failed")}
+        status="error"
+        errorLabel={msg("agent.wizard_write.failed")}
+      >
+        {reason ? (
+          <p className="whitespace-pre-wrap break-words" dir="auto">
+            {reason}
+          </p>
+        ) : null}
+      </StepRow>
+    );
+  }
   if (changes.length === 0) return null;
   return (
-    <section className="overflow-hidden rounded-xl border border-border/60 bg-card text-sm">
-      <h4 className="flex items-center gap-1.5 border-b border-border/40 px-3 py-2 text-xs font-medium text-muted-foreground">
-        <MagicWand className="size-3.5 shrink-0" aria-hidden="true" />
-        {call.status === "error" ? msg("agent.wizard_write.failed") : msg("agent.wizard_write.title")}
-      </h4>
-      <ul className="divide-y divide-border/40">
+    <StepRow
+      icon={MagicWand}
+      label={msg("agent.wizard_write.title")}
+      detail={
+        <bdi dir="ltr" className="font-mono text-[0.75rem]">
+          {writeSummary(changes)}
+        </bdi>
+      }
+      status={call.status}
+    >
+      <ul className="divide-y divide-border/40 overflow-hidden rounded-lg border border-border/60 bg-card text-sm">
         {changes.map((change) => (
           <li key={change.field} className="flex flex-col gap-1.5 px-3 py-2">
             {CODE_FIELD_FILES[change.field] ? (
@@ -43,7 +71,7 @@ export function WizardWriteCard({ call }: { call: AgentToolCall }) {
           </li>
         ))}
       </ul>
-    </section>
+    </StepRow>
   );
 }
 
@@ -75,7 +103,7 @@ function CodeChange({ file, change }: { file: string; change: WizardFieldChange 
     [change.before, change.after],
   );
   const hunks = React.useMemo(() => diffHunks(lines), [lines]);
-  const { added, removed } = diffStats(lines);
+  const { added, removed } = codeChangeStats(change);
   return (
     <>
       <span className="flex items-center gap-2 font-mono text-xs" dir="ltr">

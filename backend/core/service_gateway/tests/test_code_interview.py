@@ -1,14 +1,13 @@
 """Tests for the shared interview-turn driver.
 
 The streamify loop is replaced by a scripted generator, so no LLM or network
-is touched: the tests pin the event sequence every interview (task, intake)
+is touched: the tests pin the event sequence the intake interview
 relays and the retry / salvage behavior.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 
 import dspy
@@ -16,9 +15,7 @@ import pytest
 
 from core.service_gateway.agents import code_interview
 from core.service_gateway.agents.code_interview import (
-    MAX_INTERVIEW_QUESTIONS,
     _parse_json,
-    _transcript_json,
     relay_interview_turn,
 )
 
@@ -80,16 +77,6 @@ def test_parse_json_falls_back_on_garbage() -> None:
     assert _parse_json("", []) == []
     assert _parse_json("{broken", {}) == {}
     assert _parse_json('["a"]', []) == ["a"]
-
-
-def test_transcript_json_appends_the_limit_note_once_asked() -> None:
-    """No note before the first question; afterwards the count and cap are spelled out."""
-    assert json.loads(_transcript_json([])) == []
-    turns = [{"role": "assistant", "content": "Q1?"}, {"role": "user", "content": "A1"}]
-    transcript = json.loads(_transcript_json(turns))
-    assert transcript[:2] == turns
-    assert transcript[-1]["role"] == "system"
-    assert f"1 of at most {MAX_INTERVIEW_QUESTIONS}" in transcript[-1]["content"]
 
 
 def test_relay_streams_message_hint_and_done(monkeypatch: pytest.MonkeyPatch) -> None:
