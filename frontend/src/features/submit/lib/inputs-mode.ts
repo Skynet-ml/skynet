@@ -115,6 +115,21 @@ export function inputsFromRoles(
 }
 
 /**
+ * Apply column roles the agent wrote the way a user's role change applies:
+ * on a loaded table the cases, mode and roles change together, and names
+ * that are not table columns drop. With no table loaded only the names change.
+ */
+export function inputsWithRoles(
+  columns: readonly string[],
+  inputFields: readonly string[],
+  expectedField: string | null,
+  rows: readonly Row[],
+): { mode?: DataMode; inputFields: string[]; expectedField: string | null; cases?: UnifiedCase[] } {
+  if (columns.length === 0) return { inputFields: [...inputFields], expectedField };
+  return inputsFromRoles(columns, columnRoles(columns, inputFields, expectedField), rows);
+}
+
+/**
  * How the server will split the cases (`unified/split.py`): single mode scores
  * its one case everywhere, and pairs below MIN_PAIRS_FOR_HELD_OUT keep no test
  * cases, sharing train and validation in their own proportion.

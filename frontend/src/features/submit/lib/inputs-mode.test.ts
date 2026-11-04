@@ -26,6 +26,7 @@ const {
   heldOutCounts,
   inputsFromRoles,
   inputsIssue,
+  inputsWithRoles,
   rowsToCases,
   singleInputCase,
   withColumnRole,
@@ -170,4 +171,40 @@ test("the user setting every column to Input or Ignore still means one input", (
   const columns = ["q", "a"];
   const roles = withColumnRole({ q: "input", a: "output" }, "a", "ignore");
   assert.equal(inputsFromRoles(columns, roles, [{ q: "1", a: "2" }, { q: "3", a: "4" }]).mode, "single");
+});
+
+test("an agent roles write rebuilds the cases, so the gold answer leaves the input", () => {
+  const columns = ["q", "a", "note"];
+  const rows = [
+    { q: "2+2", a: "4", note: "easy" },
+    { q: "3+3", a: "6", note: "easy" },
+  ];
+  const before = inputsFromRoles(columns, { q: "input", a: "input", note: "output" }, rows);
+  assert.deepEqual(before.cases[0], { input: { q: "2+2", a: "4" }, expected: { note: "easy" } });
+  const after = inputsWithRoles(columns, ["q", "missing"], "a", casesToRows(before.cases));
+  assert.equal(after.mode, "pairs");
+  assert.deepEqual(after.inputFields, ["q"]);
+  assert.equal(after.expectedField, "a");
+  assert.deepEqual(after.cases, [
+    { input: { q: "2+2" }, expected: { a: "4" } },
+    { input: { q: "3+3" }, expected: { a: "6" } },
+  ]);
+});
+
+test("an agent roles write that adds an Output turns one input into pairs over every row", () => {
+  const columns = ["q", "a"];
+  const rows = [
+    { q: "2+2", a: "4" },
+    { q: "3+3", a: "6" },
+  ];
+  const single = inputsFromRoles(columns, { q: "input", a: "input" }, rows);
+  assert.equal(single.mode, "single");
+  assert.equal(single.cases.length, 1);
+  const after = inputsWithRoles(columns, ["q"], "a", rows);
+  assert.equal(after.mode, "pairs");
+  assert.equal(after.cases?.length, 2);
+});
+
+test("with no table loaded, an agent roles write changes only the names", () => {
+  assert.deepEqual(inputsWithRoles([], ["q"], "a", []), { inputFields: ["q"], expectedField: "a" });
 });

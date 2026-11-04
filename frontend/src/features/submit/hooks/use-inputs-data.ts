@@ -37,6 +37,11 @@ function cacheKey(inputs: Pick<InputsSlice, "datasetLabel" | "rowCount" | "colum
   return JSON.stringify([inputs.datasetLabel, inputs.rowCount, inputs.columns]);
 }
 
+/** The full table rows for these inputs, as far as the wizard still has them. */
+export function tableRows(inputs: InputsSlice): Row[] {
+  return rowsCache && rowsCache.key === cacheKey(inputs) ? rowsCache.rows : casesToRows(inputs.cases);
+}
+
 export interface InputsDataState {
   /** Rows to rebuild cases from when the user re-picks columns. */
   rows: Row[];

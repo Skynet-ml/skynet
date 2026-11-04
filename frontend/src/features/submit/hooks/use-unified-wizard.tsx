@@ -70,7 +70,13 @@ import {
   runModels,
 } from "../lib/run-floor";
 import { fileNewRun } from "../lib/file-new-run";
-import { inputsFromRoles, rowsToCases, singleInputCase, type Row } from "../lib/inputs-mode";
+import {
+  inputsFromRoles,
+  inputsWithRoles,
+  rowsToCases,
+  singleInputCase,
+  type Row,
+} from "../lib/inputs-mode";
 import { prepareModelConfig } from "../lib/model-config";
 import {
   checkedRunRequest,
@@ -122,6 +128,7 @@ import {
   type ModelRole,
 } from "../lib/wizard-v2";
 import { useExecutionBudget } from "./use-execution-budget";
+import { tableRows } from "./use-inputs-data";
 import { useModelCallHolds, useModelCatalog } from "./use-submit-wizard-data";
 import { useWizardPreflight } from "./use-wizard-preflight";
 
@@ -828,6 +835,7 @@ export function WizardV2Provider({
     const shared = wizardCtx?.state;
     const keys = wizardCtx?.agentPulseKeys ?? [];
     if (!shared || keys.length === 0) return;
+    let rolesWritten = false;
     for (const key of keys) {
       switch (key) {
         case "job_name":
@@ -859,11 +867,8 @@ export function WizardV2Provider({
           if (shared.data_mode) patchInputs({ mode: shared.data_mode });
           break;
         case "input_fields":
-          if (shared.input_fields) patchInputs({ inputFields: shared.input_fields });
-          break;
         case "expected_field":
-          if (typeof shared.expected_field === "string")
-            patchInputs({ expectedField: shared.expected_field });
+          rolesWritten = true;
           break;
         case "split_fractions":
           if (shared.split_fractions) patchInputs({ split: shared.split_fractions });
@@ -924,6 +929,19 @@ export function WizardV2Provider({
           break;
         }
       }
+    }
+    // Applied after the loop so the mode the roles imply wins over a data_mode
+    // in the same pulse, and once even when both role keys arrive.
+    if (rolesWritten) {
+      const inputs = state.inputs;
+      patchInputs(
+        inputsWithRoles(
+          inputs.columns,
+          shared.input_fields ?? inputs.inputFields,
+          typeof shared.expected_field === "string" ? shared.expected_field : inputs.expectedField,
+          tableRows(inputs),
+        ),
+      );
     }
     // Runs once per agent pulse; the keys and state are read from that render.
   }, [agentPulseTick]);
