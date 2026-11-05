@@ -13,7 +13,9 @@ Phased exposure (the gate):
 * Always available: read-only discovery tools (``list_models``,
   ``get_registry_snapshot``, ``get_job_*``, analytics).
 * Unlocked once a dataset is attached: ``validate_code``,
-  ``profile_datasets``.
+  ``profile_datasets``. A repository run gets ``validate_code`` without one.
+* On the Metric screen: the hand-off to the workspace coding agent
+  (:mod:`.workspace_coder`), which reads a repository run's checkout.
 * Unlocked once name + task + inputs + run/metric code + reflection model
   are all set: ``submit_unified_run`` (``POST /optimize``).
 * Always available post-submit: ``cancel_job``, rename/pin.
@@ -68,6 +70,7 @@ from ..language_models import (
     served_model_from,
 )
 from ..optimization.training_ground.registry import hash_tool_schema
+from .answer_options import normalize_options
 from .code import ReactReplyStream, _agent_error_payload, _format_agent_error, _reply_language, _require_answer
 from .conduct import with_conduct
 from .constants import REASONING_FIELD
@@ -76,6 +79,8 @@ from .docs_tools import build_docs_tools
 from .steering import STEER_APPLIED_EVENT, SteerInbox, attach_steering, get_steer_store
 from .tool_pending import TOOL_PENDING_CLEAR_EVENT, TOOL_PENDING_EVENT, ToolCallSpotter
 from .web_tools import build_web_tools
+from .workspace_coder import CODING_AGENT_TOOL, run_coding_agent
+from .workspace_coder import CONTEXT_FIELDS as CODER_CONTEXT_FIELDS
 
 logger = logging.getLogger(__name__)
 
@@ -451,25 +456,21 @@ def _needs_approval(tool_name: str, trust_mode: TrustMode) -> bool:
     return trust_mode == "ask" and tool_name in _SAFE_MUTATIONS
 
 
-# A screen agent's form writes land on the screen the user is looking at,
-# scoped to its fields, and editing the field undoes them. Asking first would
-# stall the wizard's proactive flow on every field it fills.
-_SCREEN_OWN_WRITES: frozenset[str] = frozenset({"update_wizard_state", "set_column_roles_datasets_column_roles_post"})
-
-
 def _screen_needs_approval(tool_name: str, trust_mode: TrustMode) -> bool:
-    """Decide whether a wizard screen agent's tool call must pause for confirmation.
+    """Let a wizard screen agent call its tools without asking.
+
+    A screen agent only fills the setup the user is looking at and moves
+    between its screens. Its tools cannot start a run, so the trust mode
+    does not apply to it. Only the protected settings still ask.
 
     Args:
         tool_name: The MCP tool's registered name.
-        trust_mode: The caller's selected trust level.
+        trust_mode: The caller's selected trust level, ignored here.
 
     Returns:
-        False for the screen's own form writes; otherwise :func:`_needs_approval`.
+        True only for a tool in ``_ALWAYS_CONFIRM_TOOLS``.
     """
-    if tool_name in _SCREEN_OWN_WRITES:
-        return False
-    return _needs_approval(tool_name, trust_mode)
+    return tool_name in _ALWAYS_CONFIRM_TOOLS
 
 
 class _TurnAuthoringFlag:
@@ -488,6 +489,12 @@ class _TurnAuthoringFlag:
         # Fields ``update_wizard_state`` wrote this turn, so a later
         # ``continue_to_next_screen`` judges the screen as it now stands.
         self.wizard_patch: dict[str, Any] = {}
+        # A Continue or Back move ends the turn well on its own (see
+        # :func:`screen_turn_guard`), and the guard refuses one reply at most.
+        self.screen_moved = False
+        self.end_refused = False
+        # An ``ask_user`` question ends the turn as well as a typed one does.
+        self.asked = False
 
 
 _SAMPLE_STAGE_TOOL = "stage_sample_dataset_datasets_samples"
@@ -658,6 +665,10 @@ class _ApprovalGatedTool:
             and not kwargs.get("dataset")
         ):
             kwargs["staged_dataset_id"] = self._staged_dataset_id
+        # The check needs a column mapping with an input, but a repository
+        # scorer reads the checkout, not columns, so any mapping fits it.
+        if self._tool_name == VALIDATE_CODE_TOOL and self._wizard_state.get("artifact_kind") == "repo":
+            kwargs["column_mapping"] = REPO_COLUMN_MAPPING
         self._emit(
             {
                 "event": "tool_start",
@@ -1099,9 +1110,11 @@ _ALWAYS_TOOLS = frozenset(
 # Diagnostic tools unlocked the moment a dataset has columns + roles. These
 # inspect the data; they do not advance the wizard, so they don't depend on
 # the run being named yet.
+VALIDATE_CODE_TOOL = "validate_code_validate_code_post"
+REPO_COLUMN_MAPPING: dict[str, dict[str, str]] = {"inputs": {"repo_path": "repo_path"}, "outputs": {}}
 _DATASET_READY_TOOLS = frozenset(
     {
-        "validate_code_validate_code_post",
+        VALIDATE_CODE_TOOL,
         "profile_datasets_profile_post",
         "validate_datasets_validate_post",
     }
@@ -1185,11 +1198,15 @@ def tools_for(state: WizardState) -> set[str]:
     allowed = set(_ALWAYS_TOOLS) | set(_POST_SUBMIT_TOOLS)
     if _dataset_ready(state):
         allowed |= _DATASET_READY_TOOLS
+    # A repository run often has no dataset, and the static code check reads
+    # no rows, so its Metric screen keeps the check without one.
+    is_repo = state.get("artifact_kind") == "repo"
+    if is_repo:
+        allowed.add(VALIDATE_CODE_TOOL)
     name_set = _name_set(state)
     task_ready = _task_ready(state)
     # A repository run is submitted by the wizard's own Run button; the
     # unified submit tool has no repository target.
-    is_repo = state.get("artifact_kind") == "repo"
     if not is_repo and name_set and task_ready and _inputs_ready(state) and _code_ready(state) and _model_ready(state):
         allowed |= _SUBMIT_TOOLS
     return allowed
@@ -1416,14 +1433,15 @@ _SCREEN_ALLOWED_TOOLS: dict[str, frozenset[str]] = {
     "budget": frozenset({"update_wizard_state", "get_wallet_for_agent"}),
     "metric": frozenset({"update_wizard_state", "validate_code_validate_code_post"}),
     "check": frozenset({"update_wizard_state", "validate_code_validate_code_post"}),
-    "overview": frozenset({"submit_unified_run_optimize_post", "get_wallet_for_agent"}),
+    "overview": frozenset({"get_wallet_for_agent"}),
 }
 REMEMBER_TOOL = "remember_for_later"
 CONTINUE_TOOL = "continue_to_next_screen"
 GO_BACK_TOOL = "go_back_to_screen"
-SCREEN_NAV_TOOLS = frozenset({REMEMBER_TOOL, CONTINUE_TOOL, GO_BACK_TOOL})
+ASK_USER_TOOL = "ask_user"
+SCREEN_NAV_TOOLS = frozenset({REMEMBER_TOOL, CONTINUE_TOOL, GO_BACK_TOOL, ASK_USER_TOOL})
 _MAX_SCREEN_NOTES = 10
-_MAX_NOTE_CHARS = 200
+_MAX_NOTE_CHARS = 1000
 # A go-back request becomes the earlier screen agent's opening message, so it
 # gets room for a sentence or two and no more.
 _MAX_BACK_REQUEST_CHARS = 500
@@ -1556,10 +1574,14 @@ def _screen_problems(screen: str, state: WizardState) -> list[str]:
         short = _limit_below_floor(state)
         if short:
             return [short]
-    if screen == "metric" and not _code_ready(state):
+    if screen == "metric" and state.get("artifact_kind") == "repo":
+        # A repository run has no run.py: its scorer reads the checkout itself.
+        if not str(state.get("metric_code") or "").strip():
+            return ["metric_code must be written"]
+    elif screen == "metric" and not _code_ready(state):
         return ["run_code and metric_code must both be written"]
     if screen == "overview":
-        return ["this is the last screen; submit the run instead"]
+        return ["this is the last screen; the user starts the run from it"]
     return []
 
 
@@ -1591,20 +1613,134 @@ def _limit_below_floor(state: WizardState) -> str | None:
     )
 
 
+def _note_too_long(note: str) -> str | None:
+    """Explain why a note is refused for its length.
+
+    A cut note would reach later screens mid-sentence, so a long one is
+    sent back to the agent to shorten instead.
+
+    Args:
+        note: The note text, as the agent sent it.
+
+    Returns:
+        The refusal for the agent, or ``None`` when the note fits.
+    """
+    length = len(" ".join(note.split()))
+    if length <= _MAX_NOTE_CHARS:
+        return None
+    return (
+        f"Note too long: {length} characters, and the limit is {_MAX_NOTE_CHARS}. "
+        "Nothing was saved. Shorten it and call again."
+    )
+
+
 def _append_note(notes: list[dict[str, str]], screen: str, note: str) -> None:
     """Add one note in place, keeping the newest ``_MAX_SCREEN_NOTES``.
 
     Args:
         notes: The notes so far, oldest first.
         screen: The screen the note was left on.
-        note: The note text; clipped to ``_MAX_NOTE_CHARS``.
+        note: The note text, at most ``_MAX_NOTE_CHARS`` once its spaces are collapsed.
     """
-    notes.append({"screen": screen, "note": " ".join(note.split())[:_MAX_NOTE_CHARS]})
+    notes.append({"screen": screen, "note": " ".join(note.split())})
     del notes[:-_MAX_SCREEN_NOTES]
 
 
+# Screens whose turns may end on a plain statement: the Check screen waits on
+# its own check, and the Overview ends with the run submitted or a question.
+_FREE_END_SCREENS = frozenset({"check", "overview"})
+# The guard's refusal shows in the chat as a step of this name, so the user
+# sees why a reply was taken back. It is no tool the agent can call.
+TURN_CHECK_TOOL = "turn_check"
+_NOT_SETUP_TOOLS = frozenset({TURN_CHECK_TOOL, "list_repo_folder", "read_repo_file"})
+_QUESTION_MARKS = ("?", "\u061f", "\uff1f")
+
+
+def screen_turn_guard(
+    state: WizardState,
+    turn: _TurnAuthoringFlag,
+    user_message: str,
+    emit: Callable[[dict], None],
+) -> Callable[[dict[str, Any]], str | None] | None:
+    """Build the check that stops a screen turn from ending with nothing to do.
+
+    A screen turn must end by moving the wizard or by asking the user
+    something. A reply that only reports what the agent did leaves the user
+    at a dead end, so the first such reply is refused with what to do
+    instead. The streamed text is taken back, a ``turn_check`` step in the
+    chat shows the held-back reply and why, and the agent tries again.
+
+    Args:
+        state: The turn-start wizard snapshot.
+        turn: The turn's shared flag.
+        user_message: The message that started the turn.
+        emit: Sends one stream event.
+
+    Returns:
+        The guard for :class:`ConversationReAct`, or ``None`` for a turn
+        that may end on a statement: no wizard, a cloned run, the Check or
+        Overview screen, or the wizard's automatic check-failure message.
+    """
+    screen = state.get("wizard_screen")
+    if (
+        not screen
+        or screen in _FREE_END_SCREENS
+        or state.get("cloned_run")
+        or user_message.startswith(AUTOMATIC_TURN_PREFIX)
+    ):
+        return None
+
+    def guard(outputs: dict[str, Any]) -> str | None:
+        """Explain why this reply may not end the turn, or allow it.
+
+        Args:
+            outputs: The submit call's outputs.
+
+        Returns:
+            The refusal for the agent, or ``None``.
+        """
+        reply = str(outputs.get("assistant_message") or "")
+        if turn.end_refused or turn.screen_moved or turn.asked or any(mark in reply for mark in _QUESTION_MARKS):
+            return None
+        turn.end_refused = True
+        problems = _screen_problems(screen, cast(WizardState, {**state, **turn.wizard_patch}))
+        issue = str(state.get("screen_issue") or "").strip()
+        if issue and not turn.wizard_patch:
+            problems.append(issue)
+        if problems:
+            todo = "This screen still needs: " + "; ".join(problems) + ". Ask the user for it in one short question."
+        else:
+            todo = (
+                "This screen is complete. If the user wants to move on, call continue_to_next_screen; "
+                "otherwise end your reply with one short question."
+            )
+        refusal = "Not delivered: the reply leaves the user with nothing to do. " + todo + " Then call submit again."
+        call_id = uuid.uuid4().hex[:12]
+        emit({"event": "message_reset", "data": {}})
+        emit(
+            {
+                "event": "tool_start",
+                "data": {"id": call_id, "tool": TURN_CHECK_TOOL, "reason": "", "arguments": {"reply": reply}},
+            }
+        )
+        emit(
+            {
+                "event": "tool_end",
+                "data": {
+                    "id": call_id,
+                    "tool": TURN_CHECK_TOOL,
+                    "status": "done",
+                    "result": {"missing": problems, "feedback": refusal},
+                },
+            }
+        )
+        return refusal
+
+    return guard
+
+
 def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.Tool]:
-    """Build the screen agent's own tools: notes, Continue and Back.
+    """Build the screen agent's own tools: questions with choices, notes, Continue and Back.
 
     They run in-process, not over MCP. Each returns what the frontend acts
     on (a ``wizard_state`` patch carrying the notes, a ``screen_nav`` move),
@@ -1616,7 +1752,7 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
             fields ``update_wizard_state`` wrote so far this turn.
 
     Returns:
-        The three tools, unwrapped.
+        The four tools, unwrapped.
     """
     screen = state.get("wizard_screen") or ""
     notes = _stored_notes(state)
@@ -1625,6 +1761,8 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
         """Save a note every later wizard screen's assistant will read."""
         if not note.strip():
             return "Empty note: say what a later screen needs to know."
+        if refusal := _note_too_long(note):
+            return refusal
         _append_note(notes, screen, note)
         return {"wizard_state": {"screen_notes": list(notes)}}
 
@@ -1638,8 +1776,11 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
             problems.append(issue)
         if problems:
             return "Can't continue yet: " + "; ".join(problems) + ". Fix this with the user, then try again."
+        if note and (refusal := _note_too_long(note)):
+            return refusal
         if note and note.strip():
             _append_note(notes, screen, note)
+        turn.screen_moved = True
         return {"screen_nav": {"action": "continue", "from": screen}, "wizard_state": {"screen_notes": list(notes)}}
 
     async def go_back_to_screen(screen_id: str, request: str) -> Any:
@@ -1649,6 +1790,7 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
             return f"Not an earlier screen: {screen_id!r}. Earlier screens are {', '.join(earlier) or 'none'}."
         if not request.strip():
             return "Empty request: say what the user wants changed on that screen."
+        turn.screen_moved = True
         return {
             "screen_nav": {
                 "action": "back",
@@ -1658,13 +1800,49 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
             }
         }
 
+    async def ask_user(question: str, options_json: str) -> Any:
+        """Show the user one question with two to four answers to click."""
+        if turn.asked:
+            return "A question is already shown this turn. Call submit now with that same question."
+        try:
+            raw = json.loads(options_json) if options_json and options_json.strip() else []
+        except (json.JSONDecodeError, TypeError):
+            raw = None
+        options = normalize_options(raw)
+        if not question.strip() or len(options) < 2:
+            return (
+                "Not shown: send one question and options_json as a JSON array of 2-4 "
+                '{"label", "description"} objects. Nothing is shown to the user.'
+            )
+        turn.asked = True
+        return {"question": question.strip(), "options": options}
+
     return [
+        dspy.Tool(
+            ask_user,
+            name=ASK_USER_TOOL,
+            desc=(
+                "Show the user ONE question with 2-4 answers they can click; the picked label arrives as "
+                "their next message, and they can still type their own answer. Use it when a click can "
+                "settle the question. Call it once, right before submit, and end assistant_message with "
+                "the same question."
+            ),
+            arg_desc={
+                "question": "The question, in the reply language.",
+                "options_json": (
+                    'JSON array of 2-4 {"label": <an answer the user could send as is, at most 6 words>, '
+                    '"description": <what picking it means, one short line>} objects, built from what the '
+                    "user said and what this screen shows."
+                ),
+            },
+        ),
         dspy.Tool(
             remember_for_later,
             name=REMEMBER_TOOL,
             desc=(
                 "Save a short note for a later wizard screen, e.g. 'keep it cheap' for the budget. "
-                f"Each note is cut to {_MAX_NOTE_CHARS} characters; only the newest {_MAX_SCREEN_NOTES} are kept."
+                f"A note may be up to {_MAX_NOTE_CHARS} characters; a longer one is refused and nothing is "
+                f"saved. Only the newest {_MAX_SCREEN_NOTES} notes are kept."
             ),
             arg_desc={"note": "What a later screen must know, in one sentence."},
         ),
@@ -1675,7 +1853,12 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
                 "Move the wizard to the next screen, exactly like the Continue button. Refused, with the "
                 "reasons, while this screen is incomplete. Call it as your last tool this turn."
             ),
-            arg_desc={"note": "Optional note for later screens, saved like remember_for_later."},
+            arg_desc={
+                "note": (
+                    f"Optional note for later screens, saved like remember_for_later; up to {_MAX_NOTE_CHARS} "
+                    "characters, or the move is refused."
+                )
+            },
         ),
         dspy.Tool(
             go_back_to_screen,
@@ -1689,6 +1872,69 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
                 "request": "What the user wants changed there, in their words.",
             },
         ),
+    ]
+
+
+def coding_agent_tools(
+    state: WizardState,
+    turn: _TurnAuthoringFlag,
+    *,
+    lm: Any,
+    emit: Callable[[dict], None],
+    github_token: Callable[[], str | None] | None,
+) -> list[dspy.Tool]:
+    """Build the Metric screen's hand-off to the workspace coding agent.
+
+    The call blocks until the coding agent is done, and its result is the
+    tool's observation, so the setup agent goes on from it in the same turn.
+    The code it wrote reaches the editor as a ``wizard_state`` patch.
+
+    Args:
+        state: The turn-start wizard snapshot.
+        turn: The turn's shared flag; the code written lands in its
+            ``wizard_patch``, so Continue judges the screen with it.
+        lm: The language model of this turn; the coding agent runs on it.
+        emit: Sends one stream event.
+        github_token: Returns the caller's GitHub token, or ``None``.
+
+    Returns:
+        The one tool on the Metric screen, unwrapped; empty on any other screen.
+    """
+    if state.get("wizard_screen") != "metric":
+        return []
+
+    async def hand_off_to_coding_agent(request: str) -> Any:
+        """Have the coding agent write the screen's code, then return its result."""
+        if not request.strip():
+            return "Empty request: say what the code must do and what the user wants measured."
+        current = cast(dict[str, Any], {**state, **turn.wizard_patch})
+        context = {key: current[key] for key in CODER_CONTEXT_FIELDS if key in current}
+        notes = earlier_screen_notes(state)
+        if notes:
+            context["notes_from_earlier_screens"] = notes
+        context["github_connected"] = current.get("github_connected")
+        result = await asyncio.to_thread(
+            run_coding_agent, context, request.strip(), lm=lm, emit=emit, github_token=github_token
+        )
+        turn.wizard_patch.update(result["wizard_state"])
+        return result
+
+    return [
+        dspy.Tool(
+            hand_off_to_coding_agent,
+            name=CODING_AGENT_TOOL,
+            desc=(
+                "Hand the screen's code to the workspace coding agent. It gets the run's setup and, for a "
+                "repository run with GitHub linked, reads the repository. It writes the code into the editor "
+                "and returns its summary, the files it read and its open questions. Do not write the same "
+                "code again with update_wizard_state."
+            ),
+            arg_desc={
+                "request": (
+                    "What the code must do: what the user wants measured and anything they said about it, in English."
+                )
+            },
+        )
     ]
 
 
@@ -2181,8 +2427,9 @@ This screen:
 * ``job_name``, ``job_description`` and ``is_private`` show on no screen.
   Set them only when the user asks for them this turn, with one exception:
   when ``job_name`` is null, every write is refused until the run has a
-  name, so put a short name drawn from the task into your first
-  ``update_wizard_state`` call, beside this screen's fields.
+  name, so put a short name drawn from the user's task into your first
+  ``update_wizard_state`` call, beside this screen's fields. Never write
+  a placeholder name: with no task from the user yet, write nothing.
 * When the user says something a later screen needs (a budget, a model
   preference, "keep it cheap"), call ``remember_for_later`` with it.
 * When this screen is complete and the user wants to move on, call
@@ -2190,6 +2437,23 @@ This screen:
   you asked to finish this screen counts as wanting to move on; do not
   ask again whether to continue. If it is refused, tell the user what is
   missing.
+* End every turn in one of two ways: ``continue_to_next_screen`` (or
+  ``go_back_to_screen``), or one question the user must answer. When
+  something blocks this screen, name it in that question. A reply that only
+  states what you did leaves the user with nothing to do, and the runtime
+  refuses it once.
+* When the question has a few likely answers (pick one of a few
+  measures, approve a default or change it, choose between two readings
+  of what the user said), call ``ask_user`` with 2-4 options right before
+  ``submit``, and end the reply with the same question. Build the options
+  from what the user told you and what this screen shows; each label is an
+  answer the user could send as is. Never add an "Other" option: the user
+  can always type. Ask open questions (the task in their words, their own
+  data, a number only they know) in plain text, without ``ask_user``.
+* Send only the fields you change. Write the user's task in their words:
+  add no formula, number or detail they did not give. When you set a value
+  the user did not name (a default, or your own wording for a field), say
+  it in one short clause of your reply.
 * Say only what a tool result confirms. A refused write changed nothing,
   and the screen moves only when ``continue_to_next_screen`` or
   ``go_back_to_screen`` returns ``screen_nav``. Never say a field is set
@@ -2237,7 +2501,14 @@ _ASK_FOR_BUDGET = (
 SCREEN_FOCUS: dict[str, str] = {
     "brief": (
         "Brief: get what the run should improve, in the user's words, into ``task_objective``, and any "
-        "context into ``task_background``. Name the run (``job_name``) first if it has no name."
+        "context into ``task_background``. Interview first: until the user has said what they want to "
+        "improve, call no tool. Ask what the run should improve and how they would judge a better version, "
+        "then stop. Once they say it, name the run (``job_name``) from their task in the same "
+        "``update_wizard_state`` call as the brief fields. A run scores every new version by itself, in "
+        "minutes, with no people in the loop. When the user's measure needs real-world results (replies, "
+        "sales, clicks, people reaching out), say the run cannot wait for those, and offer one score it can "
+        "compute now, such as a model that plays the reader and rates each version. Put the measure they "
+        "accept in ``task_objective``; the screen is not complete until they accept one."
     ),
     "artifact": (
         "Artifact: set ``artifact_kind``. For a DSPy program (``dspy_program``) also set "
@@ -2267,10 +2538,17 @@ SCREEN_FOCUS: dict[str, str] = {
     ),
     "budget": ("Budget: " + _ASK_FOR_BUDGET),
     "metric": (
-        "Metric: write ``run_code`` (runs the DSPy program on one input) and ``metric_code`` (scores "
-        "its output) with ``update_wizard_state``, from the task, the starting version and the input "
-        "fields. Each write replaces the whole file, so send the full code; the user may have edited it, "
-        "so start from the code in ``wizard_state``. Check it with ``validate_code`` before you continue."
+        "Metric: for a DSPy program, write ``run_code`` (runs the program on one input) and ``metric_code`` "
+        "(scores its output) with ``update_wizard_state``, from the task, the starting version and the input "
+        "fields, or hand the work to the coding agent with ``hand_off_to_coding_agent``. Each write replaces "
+        "the whole file, so send the full code; the user may have edited it, so start from the code in "
+        "``wizard_state``. For a repository run (``artifact_kind`` ``repo``) you cannot read the "
+        "repository: never guess its code and never ``fetch_url`` it. Call ``hand_off_to_coding_agent`` "
+        "with what the user wants measured; it reads the repository and writes ``metric_code`` (a "
+        "repository run has no ``run_code``). Its result is where you go on from: the code is already in "
+        "the editor, so say in one sentence what it measures and which files it read, and ask the user its "
+        "``open_questions``. Check ``metric_code`` with ``validate_code`` before you continue; for a "
+        "repository run the wizard fills its ``column_mapping``."
     ),
     "check": (
         "Check: explain the results of the dry run on the screen. When it failed, fix ``run_code`` or "
@@ -2278,8 +2556,8 @@ SCREEN_FOCUS: dict[str, str] = {
         "``continue_to_next_screen`` while the check runs or after it failed."
     ),
     "overview": (
-        "Overview: answer questions about the run as configured and submit it with the submit tool once "
-        "the user confirms; send changes back to their screen with ``go_back_to_screen``."
+        "Overview: answer questions about the run as configured. You cannot start the run: the user starts "
+        "it with this screen's start button. Send changes back to their screen with ``go_back_to_screen``."
     ),
 }
 
@@ -2372,8 +2650,14 @@ def _history_from_chat(chat_history: list[dict]) -> dspy.History:
     Returns:
         History for the ``history`` input of this turn.
     """
+    # A turn check and the coding agent's reads are no tools the setup agent
+    # has; replayed, they would read as its own calls.
     turns = [
-        (turn["role"], turn.get("content") or "", turn.get("tools") or [])
+        (
+            turn["role"],
+            turn.get("content") or "",
+            [call for call in turn.get("tools") or [] if call.get("tool") not in _NOT_SETUP_TOOLS],
+        )
         if turn.get("role") == "assistant"
         else (turn["role"], turn.get("content") or "")
         for turn in chat_history
@@ -3170,6 +3454,7 @@ async def _drive_generalist_agent(
     auth_header: str | None = None,
     approval_owner: str | None = None,
     steer_key: str | None = None,
+    github_token: Callable[[], str | None] | None = None,
 ) -> str:
     """Open the MCP session, run the ReAct loop, and return the final assistant message.
 
@@ -3197,6 +3482,8 @@ async def _drive_generalist_agent(
             stream's own caller can resolve them.
         steer_key: Client-chosen key the user's mid-turn messages are posted
             under; ``None`` leaves the turn unsteerable.
+        github_token: Returns the caller's GitHub token, or ``None``; the
+            Metric screen's coding agent reads a repository run with it.
 
     Returns:
         The full assistant reply text after the loop completes.
@@ -3261,7 +3548,10 @@ async def _drive_generalist_agent(
                     authoring_flag=authoring_flag,
                     approval_owner=approval_owner,
                 )
-                for tool in screen_nav_tools(wizard_state, authoring_flag)
+                for tool in [
+                    *screen_nav_tools(wizard_state, authoring_flag),
+                    *coding_agent_tools(wizard_state, authoring_flag, lm=lm, emit=emit, github_token=github_token),
+                ]
             ]
         dspy_tools.append(plan_tool(emit))
         # Snapshot the live tool surface for downstream training-ground
@@ -3282,7 +3572,12 @@ async def _drive_generalist_agent(
             if screen is None
             else screen_signature(screen or "", reply_language, cloned=bool(wizard_state.get("cloned_run")))
         )
-        react = ConversationReAct(signature, tools=dspy_tools, max_iters=12)
+        react = ConversationReAct(
+            signature,
+            tools=dspy_tools,
+            max_iters=12,
+            submit_guard=screen_turn_guard(wizard_state, authoring_flag, user_message, emit),
+        )
         if steer_key and approval_owner:
             attach_steering(
                 react,
@@ -3361,6 +3656,7 @@ async def run_generalist_agent(
     usage_sink: list | None = None,
     approval_owner: str | None = None,
     steer_key: str | None = None,
+    github_token: Callable[[], str | None] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Stream generalist-agent events for one user turn.
 
@@ -3412,6 +3708,8 @@ async def run_generalist_agent(
             approvals are keyed to it so another account cannot resolve them.
         steer_key: Client-chosen key for messages the user sends while this
             turn runs; they reach the loop at its next step.
+        github_token: Returns the caller's GitHub token, or ``None``; the
+            Metric screen's coding agent reads a repository run with it.
 
     Yields:
         SSE event dicts of shape ``{"event": str, "data": dict}``.
@@ -3464,6 +3762,7 @@ async def run_generalist_agent(
             auth_header=auth_header,
             approval_owner=approval_owner,
             steer_key=steer_key,
+            github_token=github_token,
         )
     )
     try:

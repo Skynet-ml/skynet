@@ -110,19 +110,60 @@ export function codeChangeStats(change: WizardFieldChange): { added: number; rem
  *
  * Args:
  *   changes: The write's changes.
+ *   label: How a field is named; its key when omitted.
  *
  * Returns:
  *   E.g. `"task_objective, metric.py +3 −1"`.
  */
-export function writeSummary(changes: readonly WizardFieldChange[]): string {
+export function writeSummary(
+  changes: readonly WizardFieldChange[],
+  label: (field: string) => string = (field) => field,
+): string {
   return changes
     .map((change) => {
       const file = CODE_FIELD_FILES[change.field];
-      if (!file) return change.field;
+      if (!file) return label(change.field);
       const { added, removed } = codeChangeStats(change);
       return `${file} +${added} −${removed}`;
     })
     .join(", ");
+}
+
+/**
+ * Whether a text value reads as a passage rather than a single value: it
+ * has a line break, or is too long to sit beside its old value on one line.
+ *
+ * Args:
+ *   text: The value.
+ *
+ * Returns:
+ *   True for a passage.
+ */
+export function isLongText(text: string): boolean {
+  return text.includes("\n") || text.length > 60;
+}
+
+/**
+ * Lay out a list field's change: the new list in order, with the items the
+ * write dropped after it.
+ *
+ * Args:
+ *   before: The old items.
+ *   after: The new items.
+ *
+ * Returns:
+ *   Each item once, marked kept, added or removed.
+ */
+export function listChange(
+  before: readonly string[],
+  after: readonly string[],
+): Array<{ item: string; state: "same" | "add" | "del" }> {
+  const old = new Set(before);
+  const next = new Set(after);
+  return [
+    ...[...next].map((item) => ({ item, state: old.has(item) ? ("same" as const) : ("add" as const) })),
+    ...[...old].filter((item) => !next.has(item)).map((item) => ({ item, state: "del" as const })),
+  ];
 }
 
 /**

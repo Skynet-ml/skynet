@@ -6,6 +6,7 @@ import { Warning } from "@/shared/ui/icons";
 import { Label } from "@/shared/ui/primitives/label";
 import { msg } from "@/shared/lib/messages";
 import type { OptimizerTarget, DataMode, OptimizerChoice } from "@/shared/types/unified-run";
+import { OPTIMIZER_NAMES } from "@/shared/lib/optimizer-names";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
@@ -19,19 +20,6 @@ import { EngineCard } from "../blackbox/EngineCard";
 import { StepCard } from "../blackbox/shared";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { OptimizerSourceLinks } from "./OptimizerSourceLinks";
-
-// Product names stay untranslated in every locale; Auto is the one generic word.
-const OPTIMIZER_NAMES: Record<Exclude<OptimizerChoice, "auto">, string> = {
-  dspy_gepa: "DSPy GEPA",
-  dspy_miprov2: "MIPROv2",
-  dspy_bootstrap_fewshot: "BootstrapFewShot",
-  gepa: "GEPA",
-  best_of_n: "Best-of-N",
-  autoresearch: "AutoResearch",
-  meta_harness: "Meta-Harness",
-  autosaddler: "AutoSaddler",
-  shinka_evolve: "ShinkaEvolve",
-};
 
 /** The display name of an optimizer choice in the active locale. */
 export function optimizerLabel(choice: OptimizerChoice, guided: boolean): string {

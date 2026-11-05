@@ -33,6 +33,8 @@ from starlette.responses import StreamingResponse
 from ...billing.cli_dispatch import CLI_FAST_KEY
 from ...billing.metering import meter_llm_run
 from ...config import settings
+from ...connectors import github
+from ...connectors.vault import ConnectorVault
 from ...constants import TOKEN_SOURCE_MANAGED
 from ...local.cli_catalog import RetiredEffort
 from ...service_gateway.agents.code import _reply_language
@@ -65,6 +67,7 @@ from ..model_catalog import ReasoningEffort
 from ..model_router import effective_reasoning_effort, metering_token_source, route_agent_model, route_local_byok_model
 from ..suggest_model import hosted_suggest_model
 from ._helpers import enforce_llm_balance, sse_from_events, stream_with_llm_metering
+from .connectors import connector_secret
 
 logger = logging.getLogger(__name__)
 # A suggestion has a larger prompt than a thinking label, and on a CLI engine a
@@ -978,6 +981,20 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         # would resend it as a new edit.
         conversation_id, title = await asyncio.to_thread(_setup_turn)
         usage_sink: list = []
+
+        def _github_token() -> str | None:
+            """Load the caller's GitHub token for the coding agent's repository reads.
+
+            Returns:
+                The token, or ``None`` when GitHub is not linked or the link expired.
+            """
+            if engine is None:
+                return None
+            try:
+                return connector_secret(ConnectorVault(engine), current_user.username, github.PROVIDER).access_token
+            except DomainError:
+                return None
+
         source = run_generalist_agent(
             wizard_state=wizard_state,
             chat_history=history_for_agent(req.chat_history),
@@ -989,6 +1006,7 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
             model_config=model_config,
             usage_sink=usage_sink,
             steer_key=req.steer_key,
+            github_token=_github_token,
         )
         metered = stream_with_llm_metering(
             source,

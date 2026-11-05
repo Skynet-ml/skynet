@@ -47,6 +47,9 @@ ENV_GATEWAY_URL = "APP_GATEWAY_URL"
 ENV_API_KEY = "APP_API_KEY"
 ENV_PROMPT_FILE = "APP_PROMPT_FILE"
 ENV_ANSWER_FILE = "APP_ANSWER_FILE"
+# Set for a custom harness only when the run chose an effort, so its command
+# can read the level without it ever being spliced into the command text.
+ENV_REASONING_EFFORT = "APP_REASONING_EFFORT"
 # Substituted verbatim into a custom harness's commands; the env vars above
 # are the quoting-safe alternative. Saved custom commands may still use the
 # ``SKYNET_*`` spellings, so every launch sets both.
@@ -105,6 +108,8 @@ _PINNED_HARNESSES = {
     BLACKBOX_HARNESS_PRIME: ("prime-agent", PRIME_AGENT_VERSION),
 }
 PI_THINKING_LEVEL = "low"
+# Skynet's effort names that the CLIs spell differently; others pass through.
+_PI_THINKING_LEVELS = {"none": "off"}
 # The LiteLLM-style routing prefix; the gateway fronts OpenRouter itself and
 # rejects model ids that still carry it.
 _OPENROUTER_PREFIX = "openrouter/"
@@ -231,7 +236,9 @@ def _base_env(model: str, gateway: GatewayConfig) -> dict[str, str]:
     )
 
 
-def _pi_models_json(model: str, gateway: GatewayConfig) -> tuple[dict[str, Any], str]:
+def _pi_models_json(
+    model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None
+) -> tuple[dict[str, Any], str]:
     """Build Pi's ``models.json`` for the gateway and the ``--model`` argument that selects the entry.
 
     Prime Agent is a Pi fork and reads the same file.
@@ -239,18 +246,23 @@ def _pi_models_json(model: str, gateway: GatewayConfig) -> tuple[dict[str, Any],
     Args:
         model: Target model id.
         gateway: Gateway URL and key.
+        reasoning_effort: The user's effort for the model, or ``None`` for the default.
 
     Returns:
         The ``models.json`` content and the quoted ``--model`` argument.
     """
     openrouter = "openrouter.ai" in gateway.url
+    # An explicit effort comes from a model the catalog lists as reasoning-capable,
+    # so its gateway accepts the field the default leaves out.
+    reasoning = openrouter or bool(reasoning_effort)
+    level = _PI_THINKING_LEVELS.get(reasoning_effort, reasoning_effort) if reasoning_effort else PI_THINKING_LEVEL
     entry: dict[str, object] = {
         "id": model,
         "name": model,
         # OpenRouter models such as DeepSeek reason by default and, left to that default, think until
         # they hit ``maxTokens`` without a single tool call or answer. Pi's OpenRouter thinking format
         # makes every request carry an explicit effort instead; other gateways may reject that field.
-        "reasoning": openrouter,
+        "reasoning": reasoning,
         "input": ["text"],
         "contextWindow": 200_000,
         "maxTokens": 32_000,
@@ -258,7 +270,11 @@ def _pi_models_json(model: str, gateway: GatewayConfig) -> tuple[dict[str, Any],
     }
     if openrouter:
         entry["compat"] = {"thinkingFormat": "openrouter"}
-    model_arg = f'"${ENV_MODEL}:{PI_THINKING_LEVEL}"' if openrouter else f'"${ENV_MODEL}"'
+    if reasoning_effort:
+        # Without a map entry Pi sends no effort for ``off`` on an OpenAI-style gateway, so the model
+        # keeps its default thinking, and it clamps ``xhigh`` and ``max`` down to ``high``.
+        entry["thinkingLevelMap"] = {level: reasoning_effort}
+    model_arg = f'"${ENV_MODEL}:{level}"' if reasoning else f'"${ENV_MODEL}"'
     models_json = {
         "providers": {
             PROVIDER: {
@@ -273,17 +289,18 @@ def _pi_models_json(model: str, gateway: GatewayConfig) -> tuple[dict[str, Any],
     return models_json, model_arg
 
 
-def _pi_launch(model: str, gateway: GatewayConfig) -> HarnessLaunch:
+def _pi_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
     """Build the launch for Pi (:data:`PI_PACKAGE`, pinned to :data:`PI_VERSION`).
 
     Args:
         model: Target model id.
         gateway: Gateway URL and key.
+        reasoning_effort: The user's effort for the model, or ``None`` for the default.
 
     Returns:
         The launch.
     """
-    models_json, model_arg = _pi_models_json(model, gateway)
+    models_json, model_arg = _pi_models_json(model, gateway, reasoning_effort=reasoning_effort)
     return HarnessLaunch(
         instructions_file="AGENTS.md",
         install_command=_pi_install(),
@@ -297,12 +314,13 @@ def _pi_launch(model: str, gateway: GatewayConfig) -> HarnessLaunch:
     )
 
 
-def _codex_launch(model: str, gateway: GatewayConfig) -> HarnessLaunch:
+def _codex_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
     """Build the launch for Codex CLI (``@openai/codex``).
 
     Args:
         model: Target model id.
         gateway: Gateway URL and key.
+        reasoning_effort: The user's effort for the model, or ``None`` for Codex's default.
 
     Returns:
         The launch.
@@ -310,7 +328,8 @@ def _codex_launch(model: str, gateway: GatewayConfig) -> HarnessLaunch:
     config_toml = (
         f"model = {json.dumps(model)}\n"
         f'model_provider = "{PROVIDER}"\n'
-        "\n"
+        + (f"model_reasoning_effort = {json.dumps(reasoning_effort)}\n" if reasoning_effort else "")
+        + "\n"
         f"[model_providers.{PROVIDER}]\n"
         'name = "Model gateway"\n'
         f"base_url = {json.dumps(gateway.url)}\n"
@@ -333,16 +352,22 @@ def _codex_launch(model: str, gateway: GatewayConfig) -> HarnessLaunch:
     )
 
 
-def _opencode_launch(model: str, gateway: GatewayConfig) -> HarnessLaunch:
+def _opencode_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
     """Build the launch for OpenCode (``opencode-ai``).
 
     Args:
         model: Target model id.
         gateway: Gateway URL and key.
+        reasoning_effort: The user's effort for the model, or ``None`` for OpenCode's default.
 
     Returns:
         The launch.
     """
+    entry: dict[str, object] = {"name": model}
+    if reasoning_effort:
+        # OpenCode hands model options to its bundled @ai-sdk/openai-compatible as
+        # provider options, which sends this one as ``reasoning_effort``.
+        entry["options"] = {"reasoningEffort": reasoning_effort}
     config = {
         "$schema": "https://opencode.ai/config.json",
         "provider": {
@@ -350,7 +375,7 @@ def _opencode_launch(model: str, gateway: GatewayConfig) -> HarnessLaunch:
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "Model gateway",
                 "options": {"baseURL": gateway.url, "apiKey": f"{{env:{ENV_API_KEY}}}"},
-                "models": {model: {"name": model}},
+                "models": {model: entry},
             }
         },
         "model": f"{PROVIDER}/{model}",
@@ -365,7 +390,7 @@ def _opencode_launch(model: str, gateway: GatewayConfig) -> HarnessLaunch:
     )
 
 
-def _prime_agent_launch(model: str, gateway: GatewayConfig) -> HarnessLaunch:
+def _prime_agent_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
     """Build the launch for Prime Agent (:data:`PRIME_AGENT_TARBALL`, pinned to :data:`PRIME_AGENT_VERSION`).
 
     Prime Agent works through a Python kernel. The sandbox image's prebuilt
@@ -377,11 +402,12 @@ def _prime_agent_launch(model: str, gateway: GatewayConfig) -> HarnessLaunch:
     Args:
         model: Target model id.
         gateway: Gateway URL and key.
+        reasoning_effort: The user's effort for the model, or ``None`` for the default.
 
     Returns:
         The launch.
     """
-    models_json, model_arg = _pi_models_json(model, gateway)
+    models_json, model_arg = _pi_models_json(model, gateway, reasoning_effort=reasoning_effort)
     env = _base_env(model, gateway)
     env.update({"PRIME_AGENT_INSTALL_UV": "1", "PRIME_AGENT_TELEMETRY": "0", "PI_SKIP_VERSION_CHECK": "1"})
     return HarnessLaunch(
@@ -407,7 +433,12 @@ PI_EDITOR_CONFIG_DIR = ".app/pi"
 
 
 def pi_editor_launch(
-    model: str, gateway: GatewayConfig, *, headers: dict[str, str] | None = None, protected: bool = False
+    model: str,
+    gateway: GatewayConfig,
+    *,
+    headers: dict[str, str] | None = None,
+    protected: bool = False,
+    reasoning_effort: str | None = None,
 ) -> HarnessLaunch:
     """Build the Pi launch a ShinkaEvolve agent-editor session runs.
 
@@ -419,12 +450,13 @@ def pi_editor_launch(
         gateway: Route URL and key the session calls.
         headers: Extra headers every model request carries (the usage tags).
         protected: Require the image's pinned Pi and the sandbox-local relay.
+        reasoning_effort: The user's effort for the model, or ``None`` for the default.
 
     Returns:
         The launch.
     """
     model = model.removeprefix(_OPENROUTER_PREFIX)
-    models_json, model_arg = _pi_models_json(model, gateway)
+    models_json, model_arg = _pi_models_json(model, gateway, reasoning_effort=reasoning_effort)
     if headers:
         models_json["providers"][PROVIDER]["headers"] = dict(headers)
     files = {f"{PI_EDITOR_CONFIG_DIR}/models.json": json.dumps(models_json, indent=2)}
@@ -520,7 +552,7 @@ def _fill(command: str | None, model: str, gateway: GatewayConfig, *, protected:
     return command
 
 
-_CATALOG: dict[str, Callable[[str, GatewayConfig], HarnessLaunch]] = {
+_CATALOG: dict[str, Callable[..., HarnessLaunch]] = {
     BLACKBOX_HARNESS_PI: _pi_launch,
     BLACKBOX_HARNESS_CODEX: _codex_launch,
     BLACKBOX_HARNESS_OPENCODE: _opencode_launch,
@@ -535,6 +567,7 @@ def build_launch(
     protected: bool = False,
     host_cli: str | None = None,
     host_agent_token: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> HarnessLaunch:
     """Resolve the launch for a job's target: catalog harness or custom command.
 
@@ -548,6 +581,8 @@ def build_launch(
         protected: Require preinstalled pinned dependencies and the isolated model mailbox.
         host_cli: The user's own CLI that runs each proposer turn, if any.
         host_agent_token: The token the parent minted for that host proposer.
+        reasoning_effort: The proposer model's effort level. Catalog harnesses apply it;
+            a custom harness reads it from :data:`ENV_REASONING_EFFORT`.
 
     Returns:
         The launch.
@@ -562,17 +597,20 @@ def build_launch(
         run_command = _fill(target.run_command, model, gateway, protected=protected)
         if run_command is None:
             raise ServiceError("A custom harness needs a run_command.")
+        env = _base_env(model, gateway)
+        if reasoning_effort:
+            env.update(with_legacy_env({ENV_REASONING_EFFORT: reasoning_effort}))
         return HarnessLaunch(
             instructions_file="AGENTS.md",
             install_command=_fill(target.install_command, model, gateway, protected=protected),
             run_command=run_command,
-            env=_base_env(model, gateway),
+            env=env,
             parse_output=parse_plain_output,
         )
     factory = _CATALOG.get(target.harness)
     if factory is None:
         raise ServiceError(f"Unknown harness '{target.harness}'.")
-    launch = factory(model, gateway)
+    launch = factory(model, gateway, reasoning_effort=reasoning_effort)
     install_command = _fill(target.install_command, model, gateway, protected=protected) or launch.install_command
     run_command = _fill(target.run_command, model, gateway, protected=protected) or launch.run_command
     env = dict(launch.env)

@@ -356,8 +356,12 @@ const TOOL_TITLES: Record<string, LocaleString> = {
   web_search: () => msg("agent.tool.web_search.title"),
   search_docs: () => msg("agent.tool.search_docs.title"),
   fetch_url: () => msg("agent.tool.fetch_url.title"),
+  hand_off_to_coding_agent: () => msg("agent.tool.coding_agent.title"),
+  read_repo_file: () => msg("agent.tool.read_repo_file.title"),
+  list_repo_folder: () => msg("agent.tool.list_repo_folder.title"),
   crawl_site: () => msg("agent.tool.crawl_site.title"),
   blackbox_engines_blackbox_engines_get: () => msg("agent.tool.blackbox_engines.title"),
+  optimizer_catalog_optimizers_get: () => msg("agent.tool.optimizers.title"),
   list_github_repositories_connectors_github_repos_get: () => msg("agent.tool.github_repos.title"),
   serve_info_serve: () => msg("auto.features.agent.panel.lib.tool.meta.literal.74"),
   serve_pair_info_serve: () => msg("auto.features.agent.panel.lib.tool.meta.literal.75"),
@@ -370,6 +374,10 @@ const TOOL_TITLES: Record<string, LocaleString> = {
   list_settings: () => msg("agent.tool.list_settings.title"),
   get_setting: () => msg("agent.tool.get_setting.title"),
   open_page: () => msg("agent.tool.open_page.title"),
+  remember_for_later: () => msg("agent.note.title"),
+  continue_to_next_screen: () => msg("agent.screen_nav.continued"),
+  go_back_to_screen: () => msg("agent.screen_nav.back_running"),
+  turn_check: () => msg("agent.turn_check.title"),
 };
 
 function prettifyToolName(tool: string): string {

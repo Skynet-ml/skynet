@@ -1,6 +1,6 @@
-"""Read-only view of a GitHub repository for the black-box authoring agent.
+"""Read-only view of a GitHub repository for the workspace coding agent.
 
-The wizard's agent sees a repository job's structure as a compact,
+The coding agent sees a repository job's structure as a compact,
 hierarchical tree (folders collapse to file counts past a depth or line
 budget) and opens what it needs through two ReAct tools: one expands a
 folder, the other reads a file. Every call goes to GitHub with the caller's
@@ -44,17 +44,6 @@ MANIFEST_NAMES = (
     "gemfile",
     "composer.json",
     "mix.exs",
-)
-
-# The hidden turn the wizard sends when the user picks a repository. It never
-# shows in the chat; only the agent's reply does.
-KICKOFF_MESSAGE = (
-    "(Automatic start, not typed by the user: they just picked this repository.) "
-    "Its tree, README and manifest are in repo. Do not read other files this turn. "
-    "Open with one or two sentences in the shape 'I looked at <repository>. It looks like "
-    "<what the project is and does>.', then ask what they want to improve in it through "
-    "ask_user, with 2-4 options grounded in this repository (its features, tests, "
-    "performance or prompts), and finish. When repo is empty, ask what they want to optimize."
 )
 
 # Generated or vendored folders say nothing about the project and would eat
@@ -220,6 +209,8 @@ class RepoBrowser:
         self._emit: Callable[[dict], None] = lambda _event: None
         self._reads = 0
         self._key_files: list[tuple[str, str]] = []
+        # What the agent opened, in order, so its result can name the files.
+        self.files_read: list[str] = []
 
     def bind(self, emit: Callable[[dict], None]) -> None:
         """Route tool events to this turn's stream and reset the per-turn read count.
@@ -371,6 +362,8 @@ class RepoBrowser:
             lines = text.splitlines()
             cut = truncated or len(lines) > FILE_LINES
             body = "\n".join(f"{i + 1:>4} {line}" for i, line in enumerate(lines[:FILE_LINES]))
+            if clean not in self.files_read:
+                self.files_read.append(clean)
             return body + ("\n... (file cut here)" if cut else "")
 
         return self._tool("read_repo_file", clean, run)

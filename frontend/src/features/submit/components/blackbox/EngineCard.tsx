@@ -2,19 +2,7 @@
 
 import type { ComponentType } from "react";
 
-import {
-  ArrowsClockwise,
-  Crosshair,
-  Cube,
-  DiceFive,
-  GitBranch,
-  MagicWand,
-  PushPin,
-  Robot,
-  SquaresFour,
-  TreeStructure,
-  Wrench,
-} from "@/shared/ui/icons";
+import { OptimizerLogo } from "@/shared/ui/optimizer-logo";
 import { Badge } from "@/shared/ui/primitives/badge";
 import { msg } from "@/shared/lib/messages";
 
@@ -60,7 +48,7 @@ export function EngineCard({
   // such as source links that cannot live inside the card's button.
   footerSlot?: boolean;
 }) {
-  const { Banner, icon: Icon } = ENGINE_VISUALS[engine.id] ?? GENERIC_VISUAL;
+  const Banner = ENGINE_BANNERS[engine.id] ?? GenericBanner;
   return (
     <>
       {/* The banner frame sizes itself for a full-width slide; a grid card
@@ -70,9 +58,7 @@ export function EngineCard({
       </div>
       <div className="flex flex-1 flex-col gap-1.5 p-3 text-start">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-accent text-muted-foreground [&_svg]:size-3.5">
-            <Icon className="size-3.5" />
-          </span>
+          <OptimizerLogo id={engine.id} size={28} className="[&_svg]:size-3.5" />
           <span dir="ltr" className="text-sm font-semibold tracking-tight text-foreground">
             {engine.label}
           </span>
@@ -99,11 +85,6 @@ export function EngineCard({
       </div>
     </>
   );
-}
-
-interface EngineVisual {
-  Banner: ComponentType;
-  icon: ComponentType<{ className?: string }>;
 }
 
 // Each banner is the engine's search loop in the wizard's schematic grammar:
@@ -556,17 +537,15 @@ function GenericBanner() {
   );
 }
 
-const GENERIC_VISUAL: EngineVisual = { Banner: GenericBanner, icon: Cube };
-
-const ENGINE_VISUALS: Record<string, EngineVisual> = {
-  auto: { Banner: AutoBanner, icon: MagicWand },
-  dspy_gepa: { Banner: DspyGepaBanner, icon: TreeStructure },
-  dspy_miprov2: { Banner: DspyMiproBanner, icon: Crosshair },
-  dspy_bootstrap_fewshot: { Banner: DspyBootstrapBanner, icon: PushPin },
-  gepa: { Banner: GepaBanner, icon: GitBranch },
-  best_of_n: { Banner: BestOfNBanner, icon: DiceFive },
-  autoresearch: { Banner: AutoResearchBanner, icon: Robot },
-  meta_harness: { Banner: MetaHarnessBanner, icon: Wrench },
-  autosaddler: { Banner: AutoSaddlerBanner, icon: ArrowsClockwise },
-  shinka_evolve: { Banner: ShinkaEvolveBanner, icon: SquaresFour },
+const ENGINE_BANNERS: Record<string, ComponentType> = {
+  auto: AutoBanner,
+  dspy_gepa: DspyGepaBanner,
+  dspy_miprov2: DspyMiproBanner,
+  dspy_bootstrap_fewshot: DspyBootstrapBanner,
+  gepa: GepaBanner,
+  best_of_n: BestOfNBanner,
+  autoresearch: AutoResearchBanner,
+  meta_harness: MetaHarnessBanner,
+  autosaddler: AutoSaddlerBanner,
+  shinka_evolve: ShinkaEvolveBanner,
 };

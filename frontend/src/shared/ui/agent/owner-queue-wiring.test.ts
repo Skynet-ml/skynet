@@ -413,13 +413,6 @@ test("R3 served post-steer final output replaces incomplete streamed text", () =
   assert.equal(messages.at(-1)?.content, "Complete final answer");
 });
 
-test("R3 Composer length checks allow steering proof to settle before Stop", () => {
-  const pending = expression("src/shared/ui/agent/composer.tsx", "pendingLength", {
-    midTurn: { steering: [{ text: "x".repeat(2000) }], queued: [{ text: "fits" }] },
-  });
-  assert.equal(pending, 4);
-});
-
 test("R3 a changed draft does not retain the old length alert", () => {
   const file = "src/shared/ui/agent/composer.tsx";
   const source = ts.createSourceFile(file, readFileSync(new URL(`../../../../${file}`, import.meta.url), "utf8"),

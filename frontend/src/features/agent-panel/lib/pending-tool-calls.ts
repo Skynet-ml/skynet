@@ -47,3 +47,14 @@ export function placeToolCall(calls: readonly AgentToolCall[], call: AgentToolCa
 export function dropPendingToolCalls(calls: readonly AgentToolCall[]): AgentToolCall[] {
   return calls.filter((row) => !isPendingToolCall(row));
 }
+
+/**
+ * End the rows of a stopped turn: placeholders go, started calls fail now.
+ * A stopped stream sends no `tool_end`, and a row left running kept the
+ * turn's "Working for" header counting while the agent waited on the user.
+ */
+export function stopToolCalls(calls: readonly AgentToolCall[], now: number): AgentToolCall[] {
+  return dropPendingToolCalls(calls).map((row) =>
+    row.status === "running" ? { ...row, status: "error", endedAt: now } : row,
+  );
+}

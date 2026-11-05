@@ -48,6 +48,7 @@ from ..billing.host_agent import (
     failure_message,
     host_agent_failure,
     host_proposer,
+    host_reasoning_effort,
 )
 from ..billing.metering import debit_at_fallback_price
 from ..billing.model_gateway import ModelGateway
@@ -995,9 +996,14 @@ class BackgroundWorker:
                     if host is not None:
                         # The CLI and permission come from the stored run settings,
                         # never from the guest, and only this run's proposer gets the token.
-                        attach_host_agent_token(
-                            payload_dict, bind_host_agent(budget_gateway, settings, cli=host[0], permission=host[1])
+                        host_token = bind_host_agent(
+                            budget_gateway,
+                            settings,
+                            cli=host[0],
+                            permission=host[1],
+                            reasoning_effort=host_reasoning_effort(payload_dict),
                         )
+                        attach_host_agent_token(payload_dict, host_token)
                     # The wizard leaves the ceiling unset for a budget without a
                     # limit, while the guest's proposer still plans its spend
                     # against one, so the parent hands it the ledger's allowance.

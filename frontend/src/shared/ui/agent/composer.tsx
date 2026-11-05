@@ -162,9 +162,6 @@ export function Composer({
   const [attaching, setAttaching] = React.useState(0);
   const [lengthNotice, setLengthNotice] = React.useState<string | null>(null);
   const maxLength = midTurn?.maxLength ?? 20_000;
-  const pendingLength = [...(midTurn?.queued ?? [])]
-    .filter((item) => !item.uncertain).map((item) => item.text).join("\n\n").length;
-  const hasCertainPending = [...(midTurn?.steering ?? []), ...(midTurn?.queued ?? [])].some((item) => !item.uncertain);
   const headLength = midTurn?.queued.find((item) => !item.uncertain)?.text.length ?? 0;
   const tooLong = (count: number) => msg("agent.pending.too_long", { count, max: maxLength });
   const attachFiles = async (picked: File[]) => {
@@ -324,11 +321,8 @@ export function Composer({
           canPromote={midTurn.canSteer}
           paused={midTurn.paused}
           streaming={Boolean(streaming)}
-          stopAndSendDisabled={!hasCertainPending || pendingLength > maxLength}
-          lengthReason={pendingLength > maxLength ? tooLong(pendingLength) : undefined}
           sendNowReason={headLength > maxLength ? tooLong(headLength) : undefined}
           onSendNow={midTurn.sendNow}
-          onStopAndSendNow={onStop ? () => midTurn.stopAndSendNow(onStop) : undefined}
           onPromote={midTurn.promote}
           onEdit={(id) => void editPending(id)}
           onRemove={midTurn.remove}

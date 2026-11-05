@@ -58,33 +58,29 @@ void describe("Composer", () => {
     assert.ok(html.includes(msg("agent.pending.paused")), html);
     assert.ok(html.includes(msg("agent.pending.send_now")), html);
     assert.ok(html.includes('role="status"'), html);
-    assert.ok(!html.includes(msg("agent.pending.stop_and_send_now")), html);
   });
 
-  void it("shows Stop and send now for a running turn with pending input", () => {
+  void it("shows no tray header for a running turn with pending input", () => {
     const store = new SteerQueue();
     store.setBusy(true);
     store.enqueue("next");
     const html = render({ streaming: true, onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
-    assert.ok(html.includes(msg("agent.pending.stop_and_send_now")), html);
     assert.ok(!html.includes(msg("agent.pending.paused")), html);
-    assert.ok(html.includes("[@media(pointer:fine)]:opacity-0"), html);
+    assert.ok(!html.includes(msg("agent.pending.send_now")), html);
+    assert.ok(html.includes(`aria-label="${msg("agent.pending.remove")}"`), html);
+    assert.ok(!html.includes("opacity-0"), html);
   });
 
-  for (const streaming of [false, true]) {
-    void it(`disables an over-limit tray action with a visible reason, streaming=${streaming}`, () => {
-      const store = new SteerQueue();
-      store.setMaxLength(3);
-      store.setBusy(true);
-      store.enqueue("long");
-      if (!streaming) {
-        store.pause();
-        store.setBusy(false);
-      }
-      const html = render({ streaming, onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
-      const label = msg(streaming ? "agent.pending.stop_and_send_now" : "agent.pending.send_now");
-      assert.match(html, new RegExp(`<button[^>]*disabled=""[^>]*>${label}</button>`));
-      assert.ok(html.includes(msg("agent.pending.too_long", { count: 4, max: 3 })), html);
-    });
-  }
+  void it("disables an over-limit Send now with a visible reason", () => {
+    const store = new SteerQueue();
+    store.setMaxLength(3);
+    store.setBusy(true);
+    store.enqueue("long");
+    store.pause();
+    store.setBusy(false);
+    const html = render({ onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
+    const label = msg("agent.pending.send_now");
+    assert.match(html, new RegExp(`<button[^>]*disabled=""[^>]*>${label}</button>`));
+    assert.ok(html.includes(msg("agent.pending.too_long", { count: 4, max: 3 })), html);
+  });
 });

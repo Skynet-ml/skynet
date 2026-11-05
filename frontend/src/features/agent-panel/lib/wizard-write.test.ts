@@ -17,7 +17,9 @@ registerHooks({
 const {
   ROLES_WRITE_TOOL,
   fieldValueText,
+  isLongText,
   isWizardWrite,
+  listChange,
   liveValues,
   lockedCodeFiles,
   rolesFields,
@@ -68,6 +70,28 @@ test("the collapsed line names the fields and each code file's line counts", () 
     "task_objective, metric.py +2 −1",
   );
   assert.equal(writeSummary([]), "");
+});
+
+test("the collapsed line names each field in the given words", () => {
+  const label = (field: string) => (field === "task_objective" ? "Objective" : field);
+  assert.equal(
+    writeSummary([{ field: "task_objective", before: null, after: "Sort tickets" }], label),
+    "Objective",
+  );
+});
+
+test("a list change keeps the new order and puts dropped items last", () => {
+  assert.deepEqual(listChange(["a", "b"], ["c", "a"]), [
+    { item: "c", state: "add" },
+    { item: "a", state: "same" },
+    { item: "b", state: "del" },
+  ]);
+});
+
+test("a line break or a long value reads as a passage", () => {
+  assert.equal(isLongText("short"), false);
+  assert.equal(isLongText("one\ntwo"), true);
+  assert.equal(isLongText("x".repeat(61)), true);
 });
 
 test("only a running write in the newest turn holds its fields", () => {

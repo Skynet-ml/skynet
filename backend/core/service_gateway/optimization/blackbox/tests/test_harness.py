@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,7 @@ from ..harness import (
     GatewayConfig,
     build_launch,
     launch_payload,
+    pi_editor_launch,
 )
 from ..harness_bridge import (
     parse_codex_output,
@@ -154,6 +156,120 @@ def test_opencode_launch_names_the_gateway_model() -> None:
     assert config["provider"]["app"]["options"]["apiKey"] == "{env:APP_API_KEY}"
     assert 'opencode run --format json --model "app/$APP_MODEL"' in launch.run_command
     assert launch.parse_output is parse_opencode_output
+
+
+@pytest.mark.parametrize(("effort", "expected"), [("high", "high"), ("none", "none"), ("max", "max")])
+def test_codex_launch_sets_the_chosen_reasoning_effort(effort: str, expected: str) -> None:
+    """Codex reads the effort from its config unchanged; Codex 0.153 knows every Skynet level.
+
+    Args:
+        effort: The optimization model's effort level.
+        expected: The level Codex receives.
+    """
+    launch = build_launch(_target(BLACKBOX_HARNESS_CODEX), _GATEWAY, reasoning_effort=effort)
+
+    config = tomllib.loads(launch.files[".app/codex/config.toml"])
+    assert config["model_reasoning_effort"] == expected
+    assert config["model_providers"]["app"]["env_key"] == "APP_API_KEY"
+
+
+def test_codex_launch_keeps_its_default_effort_without_a_choice() -> None:
+    """With no effort chosen the config names none, so Codex keeps its own default."""
+    launch = build_launch(_target(BLACKBOX_HARNESS_CODEX), _GATEWAY)
+
+    assert "model_reasoning_effort" not in tomllib.loads(launch.files[".app/codex/config.toml"])
+
+
+@pytest.mark.parametrize(
+    ("harness", "models_file"),
+    [(BLACKBOX_HARNESS_PI, ".app/pi/models.json"), (BLACKBOX_HARNESS_PRIME, ".app/prime/models.json")],
+)
+@pytest.mark.parametrize(
+    ("url", "effort", "suffix"),
+    [
+        ("https://gw.example/v1", "high", ":high"),
+        ("https://gw.example/v1", "none", ":off"),
+        ("https://gw.example/v1", "xhigh", ":xhigh"),
+        ("https://gw.example/v1", "max", ":max"),
+        ("https://openrouter.ai/api/v1", "medium", ":medium"),
+        ("https://openrouter.ai/api/v1", "none", ":off"),
+    ],
+)
+def test_pi_family_launch_selects_the_chosen_thinking_level(
+    harness: str, models_file: str, url: str, effort: str, suffix: str
+) -> None:
+    """A chosen effort marks the model reasoning-capable, replaces the default level and maps it to the wire value.
+
+    Args:
+        harness: Pi or Prime Agent.
+        models_file: Where the harness reads its models.json.
+        url: Gateway URL.
+        effort: The optimization model's effort level.
+        suffix: The thinking suffix the model argument carries.
+    """
+    launch = build_launch(_target(harness), GatewayConfig(url=url, api_key="k"), reasoning_effort=effort)
+
+    entry = json.loads(launch.files[models_file])["providers"]["app"]["models"][0]
+    assert entry["reasoning"] is True
+    assert entry["thinkingLevelMap"] == {suffix[1:]: effort}
+    assert f'--model "$APP_MODEL{suffix}"' in launch.run_command
+
+
+def test_opencode_launch_sets_the_chosen_reasoning_effort() -> None:
+    """OpenCode's gateway model carries the effort as a model option; the command is unchanged."""
+    default = build_launch(_target(BLACKBOX_HARNESS_OPENCODE), _GATEWAY)
+    chosen = build_launch(_target(BLACKBOX_HARNESS_OPENCODE), _GATEWAY, reasoning_effort="high")
+
+    model = json.loads(chosen.files["opencode.json"])["provider"]["app"]["models"]["target-model"]
+    assert model == {"name": "target-model", "options": {"reasoningEffort": "high"}}
+    assert chosen.run_command == default.run_command
+
+
+def test_opencode_launch_keeps_its_default_effort_without_a_choice() -> None:
+    """With no effort chosen the OpenCode model entry names only the model."""
+    launch = build_launch(_target(BLACKBOX_HARNESS_OPENCODE), _GATEWAY)
+
+    model = json.loads(launch.files["opencode.json"])["provider"]["app"]["models"]["target-model"]
+    assert model == {"name": "target-model"}
+
+
+def test_custom_launch_exposes_the_chosen_effort_only_as_an_environment_variable() -> None:
+    """A custom harness reads the effort from its environment; the command text never carries it."""
+    target = _target(BLACKBOX_HARNESS_CUSTOM, run_command="agent {model}")
+
+    chosen = build_launch(target, _GATEWAY, reasoning_effort="high")
+    default = build_launch(target, _GATEWAY)
+
+    assert chosen.env["APP_REASONING_EFFORT"] == chosen.env["SKYNET_REASONING_EFFORT"] == "high"
+    assert chosen.run_command == default.run_command == "agent target-model"
+    assert "APP_REASONING_EFFORT" not in default.env
+    assert "SKYNET_REASONING_EFFORT" not in default.env
+
+
+@pytest.mark.parametrize(("effort", "suffix"), [("high", ":high"), ("none", ":off")])
+def test_pi_editor_launch_selects_the_chosen_thinking_level(effort: str, suffix: str) -> None:
+    """ShinkaEvolve's Pi editor applies the effort the way Pi's catalog launch does.
+
+    Args:
+        effort: The optimization model's effort level.
+        suffix: The thinking suffix the model argument carries.
+    """
+    launch = pi_editor_launch("m", _GATEWAY, reasoning_effort=effort)
+
+    entry = json.loads(launch.files[".app/pi/models.json"])["providers"]["app"]["models"][0]
+    assert entry["reasoning"] is True
+    assert entry["thinkingLevelMap"] == {suffix[1:]: effort}
+    assert f'--model "$APP_MODEL{suffix}"' in launch.run_command
+
+
+def test_pi_editor_launch_keeps_the_default_without_a_choice() -> None:
+    """With no effort chosen the Pi editor launch is the one it was before efforts existed."""
+    launch = pi_editor_launch("m", _GATEWAY)
+
+    entry = json.loads(launch.files[".app/pi/models.json"])["providers"]["app"]["models"][0]
+    assert entry["reasoning"] is False
+    assert "thinkingLevelMap" not in entry
+    assert '--model "$APP_MODEL"' in launch.run_command
 
 
 @pytest.mark.parametrize(

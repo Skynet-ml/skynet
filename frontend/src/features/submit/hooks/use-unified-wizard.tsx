@@ -16,7 +16,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { toast } from "react-toastify";
 
-import { useWizardStateOptional } from "@/features/agent-panel";
+import { SETUP_CHAT_KEY, useWizardStateOptional } from "@/features/agent-panel";
 import { useConnectors } from "@/features/connectors";
 import { formatBudgetUsd, usePricingTerms } from "@/features/billing";
 import {
@@ -40,6 +40,7 @@ import {
   enableContinuous,
 } from "@/shared/lib/api";
 import { contractCheckMessage } from "@/shared/lib/i18n";
+import { clearSetupDraft, writeSetupDraft } from "@/shared/lib/setup-draft";
 import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import type { ContinuousEnableRequest } from "@/shared/types/continuous";
@@ -101,6 +102,7 @@ import {
   encodeWizardSession,
   keepSessionValue,
   readSessionValue,
+  setupWorthKeeping,
 } from "../lib/session-state";
 import { metricUsesModel } from "../lib/scorer-dependencies";
 import { computeStepIssue, hasModel, runBlockedReason as blockedReason } from "../lib/step-issue";
@@ -799,9 +801,38 @@ export function WizardV2Provider({
       } catch {}
     }
   }, [scheduledRun]);
-  // Leaving the page inside the app ends the setup; only a reload, which runs
-  // no cleanup, finds it again.
-  useEffect(() => forgetWizardSession, []);
+  // Leaving the page ends the tab's setup but keeps a copy in this browser
+  // for a short time, which /submit offers back on return. A reload or a tab
+  // close runs no cleanup, so the page hide keeps the copy too; the mount
+  // drops it again, as a reload finds the tab's own setup.
+  const leftStateRef = useRef(state);
+  useEffect(() => {
+    leftStateRef.current = state;
+  }, [state]);
+  useEffect(() => {
+    const keep = () => {
+      const left = leftStateRef.current;
+      if (submittedRef.current || !setupWorthKeeping(left)) {
+        clearSetupDraft();
+        return;
+      }
+      const values: Record<string, string> = {
+        [WIZARD_SESSION_KEY]: encodeWizardSession(accountId, left),
+      };
+      for (const key of [...WIZARD_VIEW_KEYS, SETUP_CHAT_KEY]) {
+        const value = readSessionValue(key);
+        if (value !== null) values[key] = value;
+      }
+      writeSetupDraft({ account: accountId, leftAt: Date.now(), values });
+    };
+    clearSetupDraft();
+    window.addEventListener("pagehide", keep);
+    return () => {
+      window.removeEventListener("pagehide", keep);
+      keep();
+      forgetWizardSession();
+    };
+  }, [accountId]);
 
   // A table the agent panel staged reaches the wizard by event while it is
   // open, or through the session key when it mounts later.

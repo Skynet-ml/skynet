@@ -55,7 +55,7 @@ from typing import Any, Literal, cast
 
 from ..config import Settings
 from ..i18n import t_locale
-from ..local.cli_catalog import CliProvider, cli_model_arg, parse_subscription_model_id
+from ..local.cli_catalog import CliProvider, cli_efforts, cli_model_arg, parse_subscription_model_id
 from ..local.cli_isolation import CODEX_AUTH_FILE, isolated_cli
 from ..local.cli_probe import cli_binary, codex_subscription_login, read_cli_limits, write_cli_limit
 from ..worker.host_agent_shim import INSTRUCTIONS_FILES, excluded_path
@@ -127,6 +127,7 @@ def host_cli_argv(
     workdir: Path,
     model_arg: str | None,
     isolation_args: tuple[str, ...] = (),
+    effort: str | None = None,
 ) -> list[str]:
     """Build the CLI command for one turn; the prompt goes on stdin.
 
@@ -138,6 +139,7 @@ def host_cli_argv(
         workdir: The copied workspace.
         model_arg: The CLI's own model name, or None for its default.
         isolation_args: Flags that keep the user's own config out.
+        effort: An effort level from :func:`_effort_arg`, or None for the CLI's default.
 
     Returns:
         The argv list.
@@ -167,6 +169,9 @@ def host_cli_argv(
         raise HostAgentRequestError(f"Unknown host CLI {cli!r}.")
     if model_arg:
         argv += ["--model", model_arg]
+    if effort:
+        # ``codex exec`` has no effort flag; its config key takes the same levels.
+        argv += ["-c", f"model_reasoning_effort={json.dumps(effort)}"] if cli == "codex" else ["--effort", effort]
     return argv
 
 
@@ -204,6 +209,27 @@ def _model_arg(cli: CliProvider, model: str) -> str | None:
     """
     slug = _catalog_slug(cli, model)
     return cli_model_arg(cli, slug) if slug else None
+
+
+def _effort_arg(cli: CliProvider, model: str, effort: str | None) -> str | None:
+    """Map the run's effort to a level the CLI takes for the proposer's model.
+
+    Like the CLI dispatcher, Max runs at the model's top level when the model
+    has no Max, and any other level the model does not take is dropped.
+
+    Args:
+        cli: The CLI that runs the turn.
+        model: ``subscription/<cli>/<slug>``, a plain catalog slug, or empty.
+        effort: The reflection model's effort from the run settings, or None.
+
+    Returns:
+        A level from :data:`~core.local.cli_catalog.CLI_EFFORTS`, or None for the CLI's default.
+    """
+    slug = _catalog_slug(cli, model)
+    levels = cli_efforts(cli, slug) if slug and effort else ()
+    if effort == "max" and levels and "max" not in levels:
+        return levels[-1]
+    return effort if effort in levels else None
 
 
 def _extract(archive_bytes: bytes, destination: Path) -> None:
@@ -1087,7 +1113,13 @@ def _command(binary: str, env: dict[str, str]) -> str:
 
 
 def run_host_agent(
-    body: dict, settings: Settings, *, cli: CliProvider, permission: HostPermission, job: str = "run"
+    body: dict,
+    settings: Settings,
+    *,
+    cli: CliProvider,
+    permission: HostPermission,
+    job: str = "run",
+    reasoning_effort: str | None = None,
 ) -> dict:
     """Run one host-CLI turn on a copy of the guest workspace.
 
@@ -1098,6 +1130,7 @@ def run_host_agent(
         cli: The CLI from the run's stored proposer settings.
         permission: The permission from the run's stored proposer settings.
         job: Folder name that groups this run's copies.
+        reasoning_effort: The reflection model's effort from the run's stored settings, or None.
 
     Returns:
         ``{status, result_tar_b64, usage, transcript_tail, error?}``.
@@ -1146,8 +1179,15 @@ def run_host_agent(
                 env["CODEX_CA_CERTIFICATE"] = str(ca_file)
                 secret_values.update(_login_secrets((turn / "codex" / CODEX_AUTH_FILE).read_bytes())[1])
             binary = _command(cli_binary(cli, settings), env)
+            model = str(body.get("model") or "")
             argv = host_cli_argv(
-                cli, permission, binary, workdir, _model_arg(cli, str(body.get("model") or "")), isolation_args
+                cli,
+                permission,
+                binary,
+                workdir,
+                _model_arg(cli, model),
+                isolation_args,
+                _effort_arg(cli, model, reasoning_effort),
             )
             if permission == "workspace_only":
                 argv = confine(
@@ -1217,6 +1257,36 @@ def host_proposer(payload: dict[str, Any]) -> tuple[CliProvider, HostPermission]
     return cast(CliProvider, proposer["host_cli"]), cast(HostPermission, permission)
 
 
+def _proposer_model_extra(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``extra`` settings of a run's proposer model.
+
+    Args:
+        payload: The stored run payload (black-box ``reflection_model_config`` or
+            unified ``models.reflection_model``).
+
+    Returns:
+        The model's ``extra`` mapping, or an empty one when the payload has none.
+    """
+    config = payload.get("reflection_model_config")
+    if not isinstance(config, dict) and isinstance(payload.get("models"), dict):
+        config = payload["models"].get("reflection_model")
+    extra = config.get("extra") if isinstance(config, dict) else None
+    return extra if isinstance(extra, dict) else {}
+
+
+def host_reasoning_effort(payload: dict[str, Any]) -> str | None:
+    """Read the proposer model's effort from a run's stored settings.
+
+    Args:
+        payload: The stored run payload.
+
+    Returns:
+        The effort, or None when the run chose none.
+    """
+    effort = _proposer_model_extra(payload).get("reasoning_effort")
+    return effort if isinstance(effort, str) and effort else None
+
+
 def attach_host_agent_token(payload: dict[str, Any], token: str) -> None:
     """Hand the host proposer's token to the guest beside its proposer route.
 
@@ -1227,10 +1297,7 @@ def attach_host_agent_token(payload: dict[str, Any], token: str) -> None:
     Raises:
         ValueError: When the payload has no proposer route.
     """
-    config = payload.get("reflection_model_config")
-    if not isinstance(config, dict) and isinstance(payload.get("models"), dict):
-        config = payload["models"].get("reflection_model")
-    route = ((config or {}).get("extra") or {}).get(ROUTE_KEY) if isinstance(config, dict) else None
+    route = _proposer_model_extra(payload).get(ROUTE_KEY)
     if not isinstance(route, dict):
         raise ValueError("A host CLI proposer needs its proposer model route.")  # noqa: TRY004 - a bad payload, not a bad argument type
     route[HOST_AGENT_TOKEN_KEY] = token
@@ -1288,7 +1355,9 @@ def _reply(status: int, document: dict[str, Any]) -> ModelHTTPResult:
     return ModelHTTPResult(status, "application/json", json.dumps(document).encode())
 
 
-def bind_host_agent(gateway: ModelGateway, settings: Settings, *, cli: str, permission: str) -> str:
+def bind_host_agent(
+    gateway: ModelGateway, settings: Settings, *, cli: str, permission: str, reasoning_effort: str | None = None
+) -> str:
     """Serve ``/v1/_host_agent`` for one run whose proposer is a host CLI.
 
     The worker calls this only for a run whose stored proposer names a host
@@ -1303,6 +1372,7 @@ def bind_host_agent(gateway: ModelGateway, settings: Settings, *, cli: str, perm
         settings: Local-mode settings.
         cli: The proposer's host CLI from the run settings.
         permission: The proposer's host permission from the run settings.
+        reasoning_effort: The proposer model's effort from the run settings, or None.
 
     Returns:
         The token the host proposer's shim must present.
@@ -1354,7 +1424,12 @@ def bind_host_agent(gateway: ModelGateway, settings: Settings, *, cli: str, perm
         def dispatch() -> PaidResult[dict[str, Any]]:
             """Run the CLI; the subscription pays, so the settled cost is zero."""
             document = run_host_agent(
-                body, settings, cli=trusted_cli, permission=trusted_permission, job=str(runtime.budget_id)
+                body,
+                settings,
+                cli=trusted_cli,
+                permission=trusted_permission,
+                job=str(runtime.budget_id),
+                reasoning_effort=reasoning_effort,
             )
             usage = document["usage"]
             evidence = {

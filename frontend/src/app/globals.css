@@ -1911,3 +1911,36 @@ table {
     opacity: 0;
   }
 }
+
+/* The reply hook catches once when it fires: it drops in from above, bites,
+   and swings to rest about its eye. Saved chats show it still. */
+.agent-hook-fired [data-hook-icon] {
+  transform-origin: 58% 12%;
+  animation: agent-hook-catch 720ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes agent-hook-catch {
+  0% {
+    opacity: 0;
+    transform: translateY(-4px) rotate(0deg);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(1.5px) rotate(16deg);
+  }
+  55% {
+    transform: translateY(0) rotate(-9deg);
+  }
+  78% {
+    transform: rotate(4deg);
+  }
+  100% {
+    transform: rotate(0deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-hook-fired [data-hook-icon] {
+    animation: none;
+  }
+}

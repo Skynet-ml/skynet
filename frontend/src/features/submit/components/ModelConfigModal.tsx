@@ -305,6 +305,7 @@ export function ModelConfigModal({
         token_source: draft.token_source ?? "managed",
         byok_provider: draft.token_source === "byok" ? draft.byok_provider : undefined,
         ...(draft.token_source === "subscription" ? { cli_provider: draft.cli_provider } : {}),
+        extra: withEffort(undefined, storedEffort ?? null),
       });
     } else {
       onSave(withoutInlineConnection(draft));
@@ -499,7 +500,7 @@ export function ModelConfigModal({
             />
           </div>
 
-          {!nameOnly && !modelDefaultsOnly && (
+          {!nameOnly && (!modelDefaultsOnly || canThink) && (
             <>
               <Separator />
 
@@ -510,47 +511,53 @@ export function ModelConfigModal({
                 onOpenChange={setParametersOpen}
               >
                 <div className="space-y-4">
-                  <div className="space-y-2">
-                    <Label htmlFor={`${parametersId}-temperature`}>
-                      <HelpTip text={tip("model_config.temperature")}>
-                        {msg("auto.features.submit.components.modelconfigmodal.5")}
-                      </HelpTip>
-                    </Label>
-                    <NumberInput
-                      id={`${parametersId}-temperature`}
-                      min={0}
-                      max={2}
-                      step={0.1}
-                      value={draft.temperature ?? ""}
-                      onChange={(value) =>
-                        setDraft((current) => ({ ...current, temperature: value }))
-                      }
-                      onClear={() =>
-                        setDraft((current) => ({ ...current, temperature: undefined }))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor={`${parametersId}-max-tokens`}>
-                      <HelpTip text={tip("model_config.max_tokens")}>
-                        {msg("auto.features.submit.components.modelconfigmodal.7")}
-                      </HelpTip>
-                    </Label>
-                    <NumberInput
-                      id={`${parametersId}-max-tokens`}
-                      min={1}
-                      step={256}
-                      value={draft.max_tokens ?? ""}
-                      onChange={(value) =>
-                        setDraft((current) => ({ ...current, max_tokens: value }))
-                      }
-                      onClear={() => setDraft((current) => ({ ...current, max_tokens: undefined }))}
-                    />
-                  </div>
+                  {!modelDefaultsOnly && (
+                    <>
+                      <div className="space-y-2">
+                        <Label htmlFor={`${parametersId}-temperature`}>
+                          <HelpTip text={tip("model_config.temperature")}>
+                            {msg("auto.features.submit.components.modelconfigmodal.5")}
+                          </HelpTip>
+                        </Label>
+                        <NumberInput
+                          id={`${parametersId}-temperature`}
+                          min={0}
+                          max={2}
+                          step={0.1}
+                          value={draft.temperature ?? ""}
+                          onChange={(value) =>
+                            setDraft((current) => ({ ...current, temperature: value }))
+                          }
+                          onClear={() =>
+                            setDraft((current) => ({ ...current, temperature: undefined }))
+                          }
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor={`${parametersId}-max-tokens`}>
+                          <HelpTip text={tip("model_config.max_tokens")}>
+                            {msg("auto.features.submit.components.modelconfigmodal.7")}
+                          </HelpTip>
+                        </Label>
+                        <NumberInput
+                          id={`${parametersId}-max-tokens`}
+                          min={1}
+                          step={256}
+                          value={draft.max_tokens ?? ""}
+                          onChange={(value) =>
+                            setDraft((current) => ({ ...current, max_tokens: value }))
+                          }
+                          onClear={() =>
+                            setDraft((current) => ({ ...current, max_tokens: undefined }))
+                          }
+                        />
+                      </div>
+                    </>
+                  )}
 
                   {canThink && (
                     <>
-                      <Separator />
+                      {!modelDefaultsOnly && <Separator />}
                       <div className="space-y-3">
                         <div className="flex items-center justify-between">
                           <Label>{msg("auto.features.submit.components.modelconfigmodal.8")}</Label>

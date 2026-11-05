@@ -180,6 +180,8 @@ class NativeOptions:
     shinka_models: tuple[dict[str, str], ...] = field(default=(), repr=False)
     # The embeddings route ShinkaEvolve's duplicate rejection uses, when it is on.
     shinka_embedding: dict[str, str] | None = field(default=None, repr=False)
+    # The optimization model's effort level, which the proposer CLI applies.
+    reasoning_effort: str | None = None
     usage_by_model: dict[str, dict[str, int]] = field(default_factory=dict)
     usage_lock: Any = field(default_factory=threading.Lock, repr=False, compare=False)
 
@@ -969,6 +971,8 @@ def _shinka_editor(options: NativeOptions, relay: str | None) -> dict[str, Any]:
             GatewayConfig(url=relay or route["url"], api_key=harness_bridge.KEY_TOKEN),
             headers=headers,
             protected=options.budget_route is not None,
+            # Only the reflection model, first in ``shinka_models``, may carry an effort.
+            reasoning_effort=options.reasoning_effort if index == 0 else None,
         )
         input_price, output_price = model_token_costs(route["model"])
         launches.append(
@@ -1053,6 +1057,7 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
         protected=options.budget_route is not None,
         host_cli=proposer.host_cli,
         host_agent_token=(options.budget_route or {}).get(HOST_AGENT_TOKEN_KEY),
+        reasoning_effort=options.reasoning_effort,
     )
     input_price, output_price = model_token_costs(options.model)
     # Runs carry no wall-clock cap of their own: the budget and evaluation
