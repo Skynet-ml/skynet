@@ -125,9 +125,7 @@ import { linkedUsername, useLinkedAccount } from "@/shared/hooks/use-linked-acco
 import { useHostedFeaturesAvailable } from "@/shared/hooks/use-hosted-features";
 import { hostedFeaturesAvailable } from "@/shared/lib/hosted-features";
 import { AgentEngineSetting } from "./AgentEngineSetting";
-import { AgentLocalRunSetting } from "./AgentLocalRunSetting";
 import { useLocalAgentMenuModels } from "@/features/local-runtime";
-import { agentSubscriptionFor } from "../lib/prefs";
 
 function WizardTab() {
   const { prefs, setPref } = useUserPrefs();
@@ -251,10 +249,7 @@ function TaggingTab() {
 
 function AgentTab() {
   const { prefs, setPref } = useUserPrefs();
-  const localMenu = useLocalAgentMenuModels(
-    agentSubscriptionFor("generalist"),
-    prefs.composerModel,
-  );
+  const localMenu = useLocalAgentMenuModels(prefs.composerModel);
 
   return (
     <div className="space-y-1">
@@ -297,8 +292,6 @@ function AgentTab() {
           </SelectContent>
         </Select>
       </SettingsRow>
-
-      {isLocalMode() && <AgentLocalRunSetting />}
     </div>
   );
 }

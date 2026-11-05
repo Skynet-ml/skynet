@@ -41,7 +41,6 @@ const RENAMED_KEYS = [
   "generalist-panel.width",
   "intake.draft",
   "intake.resume",
-  "prefs.agent.subscription",
   "prefs.agent.trust-mode",
   "prefs.color-theme",
   "prefs.composer.effort",

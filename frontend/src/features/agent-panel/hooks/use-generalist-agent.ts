@@ -8,7 +8,7 @@ import {
   localModelRefusalMessage,
   useLocalStatus,
 } from "@/features/local-runtime";
-import { agentSubscriptionFor, readPref } from "@/features/settings";
+import { readPref } from "@/features/settings";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { I18N_KEY } from "@/shared/lib/i18n";
 import { getActiveLocale } from "@/shared/lib/runtime-locale";
@@ -553,7 +553,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       // Every stream callback short-circuits on ``controller.signal.aborted``
       // so a slow stream replaced by a fresh ``send`` (or by the unmount-time
       // abort) cannot leak state writes or window events into the live view.
-      void localAgentModel(modelRef.current, agentSubscriptionFor("generalist")).then((sentModel) =>
+      void localAgentModel(modelRef.current).then((sentModel) =>
         streamGeneralistAgent(
           {
             user_message: run.message,

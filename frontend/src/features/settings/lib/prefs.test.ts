@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import {
   DEFAULT_PREFS,
   PREF_KEYS,
-  agentSubscriptionFor,
   parseAgentPreferencePatch,
   readPref,
 } from "./prefs.ts";
@@ -55,19 +54,4 @@ test("new optimizations default to Auto, the catalog's models and the wizard's o
   assert.deepEqual(readPref("optimizerTaskModel"), { name: "" });
   assert.deepEqual(readPref("optimizerReflectionModel"), { name: "" });
   assert.equal(readPref("optimizerMaxRuns"), null);
-});
-
-test("a saved agent CLI pref that names Droid reads as no CLI", () => {
-  const store = new Map<string, string>([
-    [PREF_KEYS.agentSubscription, JSON.stringify({ generalist: "droid", code: "codex" })],
-  ]);
-  const g = globalThis as { window?: unknown };
-  const realWindow = g.window;
-  g.window = { localStorage: { getItem: (key: string) => store.get(key) ?? null } };
-  try {
-    assert.equal(agentSubscriptionFor("generalist"), null);
-    assert.equal(agentSubscriptionFor("code"), "codex");
-  } finally {
-    g.window = realWindow;
-  }
 });

@@ -1,5 +1,5 @@
 import { isLocalModelRefusal, localAgentEffort, localAgentModel } from "@/features/local-runtime";
-import { agentSubscriptionFor, readPref } from "@/features/settings";
+import { readPref } from "@/features/settings";
 import type { ModelConfig } from "@/shared/types/api";
 import type {
   Annotation,
@@ -193,13 +193,13 @@ export function interviewComposerModel(assist: Pick<AssistState, "interviewModel
 }
 
 /**
- * The model an interview request sends: the composer's, or the local CLI's
- * when the tagger runs on one.
+ * The model an interview request sends: the composer's, resolved on the
+ * local agent engine in the local build.
  */
 export function interviewRequestModel(
   assist: Pick<AssistState, "interviewModel">,
 ): Promise<string | null> {
-  return localAgentModel(interviewComposerModel(assist), agentSubscriptionFor("tagger"));
+  return localAgentModel(interviewComposerModel(assist));
 }
 
 /** The effort an interview request sends with `sent`, the model it resolved. */
