@@ -9,6 +9,7 @@ import {
   type SharedConversation,
 } from "@/features/agent-panel";
 import { msg } from "@/shared/lib/messages";
+import { CopyChatMenu } from "@/shared/ui/agent/copy-chat-menu";
 import { CircleNotch } from "@/shared/ui/icons";
 
 /**
@@ -49,11 +50,14 @@ export default function SharedChatPage() {
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-8">
-      <header className="border-b border-border/60 pb-3">
-        <h1 className="text-lg font-semibold text-foreground" dir="auto">
-          {chat.title || msg("shared.agent.share_page_title")}
-        </h1>
-        <p className="text-xs text-muted-foreground">{msg("shared.agent.share_read_only")}</p>
+      <header className="flex items-start justify-between gap-3 border-b border-border/60 pb-3">
+        <div className="min-w-0">
+          <h1 className="text-lg font-semibold text-foreground" dir="auto">
+            {chat.title || msg("shared.agent.share_page_title")}
+          </h1>
+          <p className="text-xs text-muted-foreground">{msg("shared.agent.share_read_only")}</p>
+        </div>
+        <CopyChatMenu messages={chat.messages} title={chat.title} />
       </header>
       <SharedChatView messages={chat.messages} />
     </div>

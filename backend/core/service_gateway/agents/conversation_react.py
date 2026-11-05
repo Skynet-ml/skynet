@@ -14,7 +14,7 @@ loop's own ``dspy.History`` so turn N+1 extends the exact prompt turn N ended on
 from __future__ import annotations
 
 import textwrap
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import dspy
@@ -161,6 +161,7 @@ class ConversationReAct(RetryingReActV2):
         *,
         parse_retries: int = PARSE_RETRY_ATTEMPTS,
         serial_tool_calls: bool = True,
+        submit_guard: Callable[[dict[str, Any]], str | None] | None = None,
     ):
         """Build the loop.
 
@@ -170,11 +171,61 @@ class ConversationReAct(RetryingReActV2):
             max_iters: Loop budget per user turn.
             parse_retries: Extra resample attempts per inner-predict call.
             serial_tool_calls: Ask the provider for one tool call per step.
+            submit_guard: Reads a ``submit`` call's outputs and returns why the
+                turn may not end yet, or ``None`` to let it end. A refusal is
+                the submit's tool result, so the loop goes on and the model
+                reads it. The forced submit at the loop's budget is never refused.
         """
         super().__init__(
             signature, tools, max_iters=max_iters, parse_retries=parse_retries, serial_tool_calls=serial_tool_calls
         )
         self._adapter = AppendOnlyChatAdapter()
+        self._forcing = False
+        if submit_guard is not None:
+            self._guard_submit(submit_guard)
+
+    def _guard_submit(self, guard: Callable[[dict[str, Any]], str | None]) -> None:
+        """Run ``guard`` before every ``submit`` the loop executes.
+
+        ReActV2 ends the loop only when ``submit`` returns a dict, so a refusal
+        returned as text reads to the model as an ordinary tool result.
+
+        Args:
+            guard: As for ``submit_guard`` in :meth:`__init__`.
+        """
+        tool = self.tools[SUBMIT_TOOL]
+        submit = tool.func
+
+        def guarded(**kwargs: Any) -> Any:
+            """Refuse the submit when the guard objects, else submit.
+
+            Args:
+                **kwargs: The submit call's outputs.
+
+            Returns:
+                The guard's refusal, or the submitted outputs.
+            """
+            if not self._forcing and (refusal := guard(kwargs)):
+                return refusal
+            return submit(**kwargs)
+
+        tool.func = guarded
+
+    def _forced_submit(self, *args: Any, **kwargs: Any) -> dspy.Prediction:
+        """Run ReActV2's last-chance submit with the guard off.
+
+        Args:
+            *args: As for the base method.
+            **kwargs: As for the base method.
+
+        Returns:
+            The base method's prediction.
+        """
+        self._forcing = True
+        try:
+            return super()._forced_submit(*args, **kwargs)
+        finally:
+            self._forcing = False
 
     def forward(self, **input_args):
         """Run one user turn under the append-only adapter.

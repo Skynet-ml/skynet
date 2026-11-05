@@ -29,7 +29,12 @@ import { midTurnOf, SteerQueue, type MidTurnQueue } from "@/shared/ui/agent/stee
 import { agentSteerChannel, newSteerKey } from "@/shared/ui/agent/use-steer-queue";
 
 import { confirmGeneralistApproval, streamGeneralistAgent } from "../lib/stream";
-import { dropPendingToolCalls, pendingToolCall, placeToolCall } from "../lib/pending-tool-calls";
+import {
+  dropPendingToolCalls,
+  pendingToolCall,
+  placeToolCall,
+  stopToolCalls,
+} from "../lib/pending-tool-calls";
 import { editMode, retryMode } from "../lib/edit-turn";
 import type {
   ChatTurn,
@@ -1031,6 +1036,15 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     abortSession(key);
     patchSession(key, { status: "idle", statusLabel: "" });
     patchThinking(key, (segments) => closeThinking(segments, Date.now()));
+    patchMessages(key, (prev) => {
+      const last = prev[prev.length - 1];
+      if (!last || last.role !== "assistant" || !last.toolCalls?.some((t) => t.status === "running")) {
+        return prev;
+      }
+      const next = prev.slice();
+      next[next.length - 1] = { ...last, toolCalls: stopToolCalls(last.toolCalls, Date.now()) };
+      return next;
+    });
     if (wasQueued) {
       // Nothing streamed yet — drop the empty assistant placeholder so the
       // transcript doesn't keep a hollow bubble for a turn that never ran.

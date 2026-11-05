@@ -79,18 +79,18 @@ export function UserBubble({ content, onEdit, editable = true, createdAt }: User
             </CollapsibleMessage>
           </div>
         )}
-        <div className="flex items-center gap-0.5 -me-1">
-          {/* Copy (always) + edit (when editable) show on hover, like the
-              assistant reply's actions; the send time stays visible. */}
-          <div
-            className={cn(
-              "flex items-center gap-0.5",
-              "opacity-0 group-hover/user:opacity-100 focus-within:opacity-100 transition-opacity",
-              // The global coarse-pointer reveal only matches the unnamed
-              // `group-hover:` spelling, so touch screens (iPad) need their own.
-              "any-pointer-coarse:opacity-100",
-            )}
-          >
+        {/* Copy, edit and the send time show on hover, like the assistant
+            reply's actions. */}
+        <div
+          className={cn(
+            "flex items-center gap-0.5 -me-1",
+            "opacity-0 group-hover/user:opacity-100 focus-within:opacity-100 transition-opacity",
+            // The global coarse-pointer reveal only matches the unnamed
+            // `group-hover:` spelling, so touch screens (iPad) need their own.
+            "any-pointer-coarse:opacity-100",
+          )}
+        >
+          <div className="flex items-center gap-0.5">
             <CopyButton
               text={content}
               ariaLabel={msg("shared.agent.copy")}
@@ -122,7 +122,7 @@ export function UserBubble({ content, onEdit, editable = true, createdAt }: User
  */
 function AutomaticBubble({ body, createdAt }: { body: string; createdAt?: number }) {
   return (
-    <div className="flex justify-end">
+    <div className="flex justify-end group/user">
       <div className="flex max-w-[80%] flex-col items-end gap-1.5">
         <div
           className="max-w-full rounded-2xl rounded-ee-[4px] border border-dashed border-border bg-muted/40 px-4 py-2.5 text-sm leading-[1.45] text-foreground"
@@ -138,7 +138,14 @@ function AutomaticBubble({ body, createdAt }: { body: string; createdAt?: number
             </React.Suspense>
           </CollapsibleMessage>
         </div>
-        <MessageTime createdAt={createdAt} />
+        <span
+          className={cn(
+            "opacity-0 group-hover/user:opacity-100 transition-opacity",
+            "any-pointer-coarse:opacity-100",
+          )}
+        >
+          <MessageTime createdAt={createdAt} />
+        </span>
       </div>
     </div>
   );

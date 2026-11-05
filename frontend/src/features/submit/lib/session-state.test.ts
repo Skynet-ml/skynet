@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { test } from "node:test";
 
-import { decodeScheduledRun, decodeWizardSession, encodeWizardSession } from "./session-state.ts";
+import {
+  decodeScheduledRun,
+  decodeWizardSession,
+  encodeWizardSession,
+  setupWorthKeeping,
+} from "./session-state.ts";
 
 const srcUrl = new URL("../../../", import.meta.url).href;
 
@@ -156,4 +161,12 @@ test("a missing, malformed or older scheduled run reads back as none", () => {
     ),
     null,
   );
+});
+
+test("only a setup with an answer, data or a later step is worth offering back", () => {
+  const fresh = initialWizardV2State();
+  assert.equal(setupWorthKeeping(fresh), false);
+  assert.equal(setupWorthKeeping({ ...fresh, task: { ...fresh.task, objective: "Shorter replies" } }), true);
+  assert.equal(setupWorthKeeping({ ...fresh, meta: { ...fresh.meta, name: "Replies" } }), true);
+  assert.equal(setupWorthKeeping({ ...fresh, furthestStep: WIZARD_V2_STEPS[1] }), true);
 });

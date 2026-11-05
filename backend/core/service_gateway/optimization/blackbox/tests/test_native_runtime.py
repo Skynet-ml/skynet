@@ -1033,6 +1033,37 @@ def test_shinka_agent_editor_ships_a_tagged_pi_launch_per_model(
     assert "node -e" in session.calls[0][0]
 
 
+def test_shinka_agent_editor_applies_the_effort_only_to_the_reflection_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reflection model's Pi editor runs at the chosen effort; the extra models keep the default.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    session.candidate = "better"
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(
+        ctx.native_options,
+        proposer=BlackboxProposer(harness="pi"),
+        shinka={"editor": "agent"},
+        shinka_models=(
+            {"model": "claude-test", "url": "https://gateway.example/v1", "token": "route-a"},
+            {"model": "gpt-test", "url": "https://gateway.example/v1", "token": "route-b"},
+        ),
+        reasoning_effort="high",
+    )
+    run_native_engine("shinka_evolve", Task("seed"), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+
+    main, extra = json.loads(session.files["native_input.json"])["shinka_editor"]["launches"]
+    assert '--model "$APP_MODEL:high"' in main["run_command"]
+    assert '--model "$APP_MODEL"' in extra["run_command"]
+    assert "thinkingLevelMap" not in json.loads(extra["files"][".app/pi/models.json"])["providers"]["app"]["models"][0]
+
+
 def test_shinka_bootstrap_prepares_pi_only_for_the_agent_editor() -> None:
     """Install Pi and check Node for the agent editor, and skip both for single-call ShinkaEvolve."""
     plain = _bootstrap_command("vercel", engine_id="shinka_evolve", harness="pi", install_command="npm i -g pi@1")
@@ -1350,6 +1381,21 @@ def test_run_native_engine_serializes_the_proposer_without_the_gateway_key(
     assert harness_bridge.KEY_TOKEN in session.files["native_input.json"]
     assert session.calls[1][1]["env"][harness_bridge.KEY_ENV] == "app-managed"
     assert "codex --version" in session.calls[0][0]
+
+
+def test_run_native_engine_hands_the_reasoning_effort_to_the_proposer_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The optimization model's effort reaches the config the proposer CLI reads in the sandbox."""
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(
+        ctx.native_options, proposer=BlackboxProposer(harness="codex"), reasoning_effort="high"
+    )
+    run_native_engine("autoresearch", Task("seed"), EvalServer(lambda c, e: (0.5, {}), max_evals=3), ctx)
+    payload = json.loads(session.files["native_input.json"])
+    assert 'model_reasoning_effort = "high"' in payload["proposer"]["files"][".app/codex/config.toml"]
 
 
 class _RecordingMailbox:

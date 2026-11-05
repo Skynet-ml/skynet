@@ -340,6 +340,37 @@ def test_byok_reflection_budget_does_not_limit_model_calls(
     assert all(ctx.native_options.max_token_cost is None for _, ctx in fake_native_proposers)
 
 
+def test_native_proposers_receive_the_reflection_reasoning_effort(
+    fake_lm: FakeReflectionLM, tmp_path: Path, fake_native_proposers: list[tuple[str, EngineContext]]
+) -> None:
+    """The effort chosen for the optimization model passes validation and reaches every native proposer."""
+    run_blackbox_optimization(
+        _payload(
+            strategy={"mode": "auto"},
+            budget={"max_scorer_runs": 24},
+            max_cost_cents=100,
+            reflection_model_config={"name": "fake/model", "extra": {"reasoning_effort": "high"}},
+        ),
+        artifact_id="job-effort",
+        gepa_log_dir_path=str(tmp_path),
+    )
+    assert fake_native_proposers
+    assert all(ctx.native_options.reasoning_effort == "high" for _, ctx in fake_native_proposers)
+
+
+def test_native_proposers_keep_the_default_effort_without_a_choice(
+    fake_lm: FakeReflectionLM, tmp_path: Path, fake_native_proposers: list[tuple[str, EngineContext]]
+) -> None:
+    """A run with no chosen effort hands the native proposers none."""
+    run_blackbox_optimization(
+        _payload(strategy={"mode": "auto"}, budget={"max_scorer_runs": 24}, max_cost_cents=100),
+        artifact_id="job-no-effort",
+        gepa_log_dir_path=str(tmp_path),
+    )
+    assert fake_native_proposers
+    assert all(ctx.native_options.reasoning_effort is None for _, ctx in fake_native_proposers)
+
+
 def test_legacy_auto_byok_reflection_with_cost_limit(
     fake_lm: FakeReflectionLM, tmp_path: Path, fake_native_proposers: list[tuple[str, EngineContext]]
 ) -> None:
@@ -947,9 +978,10 @@ def test_native_call_count_sums_in_sandbox_requests() -> None:
         {"temperature": 0.2},
         {"max_tokens": 4096},
         {"base_url": "https://models.example/v1"},
-        {"extra": {"reasoning_effort": "high"}},
+        {"extra": {"top_p": 0.9}},
+        {"extra": {"reasoning_effort": "high$(id)"}},
     ],
-    ids=["temperature", "max-tokens", "base-url", "extra"],
+    ids=["temperature", "max-tokens", "base-url", "extra", "unknown-effort"],
 )
 def test_native_model_controls_are_rejected_without_restricting_direct_engines(
     monkeypatch: pytest.MonkeyPatch, strategy: dict[str, str], native: bool, model_options: dict[str, Any]

@@ -8,6 +8,7 @@ import { AgentThread } from "@/shared/ui/agent/agent-thread";
 import { ChatErrorBanner } from "@/shared/ui/agent/chat-error-banner";
 import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
+import { CopyChatMenu } from "@/shared/ui/agent/copy-chat-menu";
 import type { AgentThinking, AgentToolCall } from "@/shared/ui/agent/types";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { msg } from "@/shared/lib/messages";
@@ -67,9 +68,11 @@ export function ReactServeChat({ optimizationId }: ReactServeChatProps) {
     <div className="flex flex-col min-w-0 max-h-[560px] pt-2">
       <div className="flex flex-wrap items-center justify-end gap-3 pb-2">
         <TrustToggle mode={trustMode} onCycle={cycleTrust} />
+        <CopyChatMenu messages={agent.messages} />
       </div>
 
       <AgentThread
+        streaming={streaming}
         isEmpty={agent.messages.length === 0}
         emptyState={emptyState}
         scrollDeps={[

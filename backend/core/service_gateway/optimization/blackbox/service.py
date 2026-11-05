@@ -117,6 +117,10 @@ _REPO_ENGINE_REASON = "Auto mode does not optimize a repository; pick one engine
 # does not flood the job log.
 _PROGRESS_EVENTS = 100
 
+# No choice, or one of the catalog's ``ReasoningEffort`` levels (core/api/model_catalog.py). Pi and Prime Agent put
+# the effort into a shell command line, so a free-form value must never reach them.
+_NATIVE_EFFORTS = (None, "none", "minimal", "low", "medium", "high", "xhigh", "max")
+
 
 def _proposer_runtime() -> Literal["vercel", "docker"]:
     """Name the sandbox runtime this deployment runs proposers in.
@@ -395,12 +399,16 @@ def validate_job(payload: BlackboxRunRequest | JobSpec, *, api_bases: dict[str, 
     needs_native = uses_native_runtime(payload)
     if needs_native:
         models = [payload.reflection_model_settings, *payload.extra_reflection_model_settings]
+        # The proposer CLI applies the main model's effort; the extra models feed
+        # ShinkaEvolve's own calls, which have no effort setting.
+        allowed = [{ROUTE_KEY, "reasoning_effort"}, *({ROUTE_KEY} for _ in payload.extra_reflection_model_settings)]
         if any(
             model.temperature is not None
             or model.max_tokens is not None
             or model.base_url
-            or any(key != ROUTE_KEY for key in model.extra)
-            for model in models
+            or any(key not in keys for key in model.extra)
+            or model.extra.get("reasoning_effort") not in _NATIVE_EFFORTS
+            for model, keys in zip(models, allowed, strict=True)
         ):
             raise ServiceError(
                 "Native proposers accept a model selection; custom sampling and routing settings are unsupported."
@@ -1069,6 +1077,7 @@ def _run_job(
         if gateway is None or (token_budget is None and job.reflection_model_settings.token_source != "byok"):
             raise ServiceError("The upstream proposer needs a gateway and a total spending budget.")
         active_runtime = current_sandbox_runtime()
+        effort = job.reflection_model_settings.extra.get("reasoning_effort")
         native_options = NativeOptions(
             shinka=(job.shinka or BlackboxShinkaSettings()).model_dump(),
             shinka_models=_shinka_models(job, gateway),
@@ -1080,6 +1089,7 @@ def _run_job(
             budget_route=budget_route,
             max_token_cost=token_budget,
             proposer=job.proposer,
+            reasoning_effort=effort if isinstance(effort, str) and effort else None,
             repo=(
                 {
                     "chunks": [str(Path(chunk).resolve()) for chunk in repo_snapshot["chunks"]],

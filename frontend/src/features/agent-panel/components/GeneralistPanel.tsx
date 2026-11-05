@@ -26,6 +26,8 @@ import { ChatTranscript } from "@/shared/ui/agent/chat-transcript";
 import { Composer } from "@/shared/ui/agent/composer";
 import { AppMark } from "@/shared/ui/app-mark";
 import { ComposerModelMenu } from "@/shared/ui/agent/composer-model-menu";
+import { CopyChatMenu } from "@/shared/ui/agent/copy-chat-menu";
+import { QuestionChoices } from "@/shared/ui/agent/question-choices";
 import type { AgentToolCall } from "@/shared/ui/agent/types";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { SubmitSplashOverlay, SUBMIT_SPLASH_HOLD_MS } from "@/shared/ui/submit-splash-overlay";
@@ -68,8 +70,10 @@ import {
   type SetupChat,
 } from "../lib/screen-agent";
 import { isWizardWrite, liveValues, writingFields } from "../lib/wizard-write";
+import { ASK_USER_TOOL, askedChoices } from "../lib/ask-user";
 import type { ToolEndPayload, WizardState } from "../lib/types";
 import { stageDatasetForAgent } from "@/shared/lib/api";
+import { decodeSetupDraft, readSetupDraft } from "@/shared/lib/setup-draft";
 import { DATASET_UPLOAD_EXTENSIONS } from "@/shared/lib/parse-dataset";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
@@ -201,8 +205,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       : { ...merged, wizard_screen: screen };
   })();
   // The setup has one agent and one chat, which lives as long as the draft:
-  // a reload brings it back, and leaving the wizard (or submitting) deletes
-  // it. Each screen the wizard reaches gives the agent a turn of its own; an
+  // a reload or a return to a left setup brings it back, and submitting or
+  // starting a new setup deletes it. Each screen the wizard reaches gives the agent a turn of its own; an
   // agent's Back leaves the earlier screen its request.
   const shownScreen = wizardCtx?.wizardScreen ?? null;
   const inSetup = shownScreen !== null;
@@ -339,6 +343,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   });
   const localMenu = useLocalAgentMenuModels(agentSubscriptionFor("generalist"), agent.model);
   const streaming = agent.status === "streaming";
+  const choices = askedChoices(agent.messages);
   // Each conversation on view gets fresh turn components, so one chat's
   // timers and "already shown" text never carry into another. A new chat
   // getting its id from its first turn is still the same chat.
@@ -447,7 +452,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     const opening = screenOpeningRef.current;
     screenOpeningRef.current = null;
     if (shownScreen === null) {
-      // The wizard closed without a reload: the draft ended, so its chat ends too.
+      // The wizard closed without a reload. Its chat ends too, unless the
+      // setup the user left keeps it for a return.
       const id = setupChatRef.current;
       keepSetupChat(null);
       kickedScreensRef.current = new Set();
@@ -455,7 +461,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       autoTurnRef.current = null;
       if (id) {
         discardConversation(id);
-        void removeConversation(id);
+        const left = decodeSetupDraft(readSetupDraft(), Date.now());
+        if (decodeSetupChat(left?.values[SETUP_CHAT_KEY] ?? null)?.id !== id) void removeConversation(id);
       }
       newSession();
       setActiveConversation(null);
@@ -809,6 +816,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           />
         );
       }
+      // The question shows as the reply; its answers show under the chat.
+      if (call.tool === ASK_USER_TOOL) return null;
       if (call.tool === REQUEST_INFERENCE_TOOL || call.tool === REQUEST_PAIR_INFERENCE_TOOL) {
         return <InferenceFormCard call={call} disabled={streaming} />;
       }
@@ -826,10 +835,15 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // user acts on or reads at a glance: the request cards, the submit summary,
   // which links to the new run, and each wizard write with its old and new values.
   const isStepCall = React.useCallback((call: AgentToolCall) => {
-    if (RICH_CARD_TOOLS.has(call.tool)) return false;
+    if (RICH_CARD_TOOLS.has(call.tool) || call.tool === ASK_USER_TOOL) return false;
     const card = SUBMIT_TOOLS.has(call.tool) || isWizardWrite(call.tool);
     return !(card && call.status !== "running");
   }, []);
+  // A folded turn hides every tool but the requests the user must answer.
+  const isPinnedCall = React.useCallback(
+    (call: AgentToolCall) => RICH_CARD_TOOLS.has(call.tool),
+    [],
+  );
   const stepKind = React.useCallback((call: AgentToolCall) => getToolKind(call.tool), []);
 
   // In the Mac app the local backend publishes the chat to the linked hosted
@@ -902,6 +916,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          <CopyChatMenu messages={agent.messages} />
           {/* The setup's chat is the draft's own: no history, sharing or second chat. */}
           {!inSetup && (
           <Tooltip>
@@ -1008,6 +1023,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
 
       <AgentThread
         className="overscroll-contain"
+        streaming={streaming}
         isEmpty={agent.messages.length === 0}
         emptyState={emptyState}
         scrollDeps={[
@@ -1026,11 +1042,20 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           editAndResend={agent.editAndResend}
           renderToolCall={renderToolCall}
           isStepCall={isStepCall}
+          isPinnedCall={isPinnedCall}
           stepKind={stepKind}
           onRunCode={handleRunCode}
           animatePairs
-          trailing={() => (
+          trailing={({ isEditingAny }) => (
             <>
+              {choices && !isEditingAny && !streaming && !agent.pendingApproval && !agent.error && (
+                <QuestionChoices
+                  options={choices}
+                  onSelect={(label) => agent.send(label)}
+                  hint={msg("agent.choices.hint")}
+                  ariaLabel={msg("agent.choices.label")}
+                />
+              )}
               {agent.pendingApproval && (
                 <ApprovalCard payload={agent.pendingApproval} onResolve={agent.confirmApproval} />
               )}
@@ -1121,14 +1146,15 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                 />
               </PopoverContent>
             </Popover>
-            <TrustToggle mode={trustMode} onCycle={cycleTrust} plain />
+            {/* The setup agent works without approvals, so the trust mode does not apply. */}
+            {!inSetup && <TrustToggle mode={trustMode} onCycle={cycleTrust} plain />}
           </>
         }
         sendAriaLabel={msg("auto.features.agent.panel.components.generalistpanel.literal.6")}
         stopAriaLabel={msg("auto.features.agent.panel.components.generalistpanel.literal.7")}
       />
 
-      <PresenceStrip active={streaming} hue={hue} />
+      <PresenceStrip active={streaming} hue={inSetup ? undefined : hue} />
     </div>
   );
 

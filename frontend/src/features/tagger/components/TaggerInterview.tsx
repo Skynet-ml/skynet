@@ -233,6 +233,7 @@ export function TaggerInterview({
           </div>
 
           <AgentThread
+            streaming={busy}
             scrollDeps={[messages.length, streamText, thinking?.reasoning]}
             isEmpty={messages.length === 0}
             emptyState={

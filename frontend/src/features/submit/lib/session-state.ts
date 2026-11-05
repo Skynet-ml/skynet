@@ -140,3 +140,23 @@ export function decodeScheduledRun(raw: string | null): ContinuousEnableRequest 
   if (typeof task_model !== "boolean" || typeof reflection_model !== "boolean") return null;
   return { schedule: schedule as ContinuousEnableRequest["schedule"], permitted: { task_model, reflection_model } };
 }
+
+/**
+ * Whether a left setup holds anything worth offering back: an answer, data,
+ * a repository or a step past the first.
+ *
+ * Args:
+ *   state: The wizard's state as the user left it.
+ *
+ * Returns:
+ *   True when a return to the wizard should offer it back.
+ */
+export function setupWorthKeeping(state: WizardV2State): boolean {
+  return (
+    state.furthestStep !== "task" ||
+    Boolean(state.task.objective.trim() || state.task.background.trim() || state.meta.name.trim()) ||
+    state.task.repo !== null ||
+    state.inputs.cases.length > 0 ||
+    state.inputs.stagedDatasetId !== null
+  );
+}
