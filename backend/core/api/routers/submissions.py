@@ -1179,6 +1179,152 @@ def submit_unified_payload(
     )
 
 
+def submit_repo_payload(
+    payload: BlackboxRunRequest,
+    *,
+    service,
+    job_store,
+    current_user: AuthenticatedUser,
+    idempotency_key: str | None,
+) -> OptimizationSubmissionResponse:
+    """Admit, fund, verify and enqueue one repository run for an authenticated owner.
+
+    The ``/blackbox/run`` route and the MCP ``repo_draft_submit`` tool share
+    this one path, so an agent submission gets the same admission, balance,
+    protected budget and replay protection as a wizard submission.
+
+    Args:
+        payload: The black-box request, mutated in place.
+        service: Optimization service handed to the in-process worker.
+        job_store: Job store that persists the submission.
+        current_user: Owner of the new run.
+        idempotency_key: Optional dedup key; a repeat returns the original.
+
+    Returns:
+        An ``OptimizationSubmissionResponse`` for the new or replayed run.
+
+    Raises:
+        DomainError: 400 (not a repository target, or the scorer does not
+            load), 402 (no balance), 409 (quota or a failed setup check).
+    """
+    if payload.target.kind != BLACKBOX_TARGET_REPO or payload.target.repo is None:
+        raise DomainError("submission.validation_failed", status=400)
+    payload.username = current_user.username
+    _materialize_repo_cases(payload, job_store=job_store, username=payload.username)
+
+    replay_keys = resolve_submission_replay_keys(
+        payload,
+        username=payload.username,
+        workflow=_BLACKBOX_WORKFLOW,
+        supplied_key=idempotency_key,
+    )
+    normalized_key = replay_keys.job
+    if normalized_key:
+        existing_id = job_store.find_job_by_idempotency_key(payload.username, normalized_key)
+        if existing_id:
+            cached = _existing_submission_response(job_store, existing_id)
+            if cached is not None:
+                logger.info(
+                    "Idempotent repo retry hit: returning existing %s for user=%s",
+                    existing_id,
+                    payload.username,
+                )
+                return cached
+
+    _enforce_submission_admission(job_store, payload.username)
+
+    _requested_source = payload.token_source
+    _model_configs, _token_sources_by_model = normalize_model_token_sources(payload)
+    fill_proposer_host_cli(job_store, payload.username, payload)
+    enforce_local_mode_sources(payload, _requested_source, _model_configs)
+    if not settings.local_mode:
+        _spendable = _enforce_balance(job_store, payload.username, payload.token_source)
+        if payload.execution_budget_id is None:
+            _cap_cost_ceiling_to_balance(payload, _spendable, payload.token_source)
+    _admit_byok_models(
+        job_store,
+        payload.username,
+        _model_configs,
+        payload.reflection_model_settings,
+        bool(payload.shinka and payload.shinka.novelty),
+    )
+
+    _ensure_api_budget(
+        payload,
+        job_store,
+        _BLACKBOX_WORKFLOW,
+        replay_keys.budget,
+        current_user,
+    )
+    verified = _protected_submission(payload, job_store, _BLACKBOX_WORKFLOW)
+    try:
+        if verified is None:
+            validate_blackbox_payload(payload)
+    except ServiceError as exc:
+        # Log the detail server-side only; don't leak it to the client.
+        logger.warning("Repo run validation failed: %s", exc)
+        raise DomainError("submission.validation_failed", status=400) from exc
+
+    optimization_id = str(uuid4())
+    if payload.seed is None:
+        payload.seed = stable_seed(optimization_id)
+    optimizer_name = payload.strategy.engine or BLACKBOX_STRATEGY_AUTO
+    reflection_model = payload.reflection_model_settings.normalized_identifier()
+
+    payload_dump = _persistable_payload(payload, job_store)
+    enforce_job_quota(job_store, payload.username)
+    enforce_storage_quota(job_store, payload.username, incoming_bytes=json_byte_size(payload_dump))
+
+    _create_submission_job(job_store, optimization_id, payload, normalized_key, verified)
+    payload_dump["execution_budget_generation"] = payload.execution_budget_generation
+    job_store.set_payload_overview(
+        optimization_id,
+        {
+            PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE: OPTIMIZATION_TYPE_BLACKBOX,
+            **_execution_overview(payload),
+            PAYLOAD_OVERVIEW_COMPOSITION: COMPOSITION_SINGLE,
+            PAYLOAD_OVERVIEW_NAME: payload.name,
+            PAYLOAD_OVERVIEW_DESCRIPTION: payload.description,
+            PAYLOAD_OVERVIEW_USERNAME: payload.username,
+            PAYLOAD_OVERVIEW_MODULE_NAME: BLACKBOX_MODULE_NAME,
+            PAYLOAD_OVERVIEW_OPTIMIZER_NAME: optimizer_name,
+            # The reflection model is the only model a black-box run
+            # bills, so it doubles as the overview's primary model.
+            PAYLOAD_OVERVIEW_MODEL_NAME: reflection_model,
+            PAYLOAD_OVERVIEW_MODEL_SETTINGS: strip_api_key(payload.reflection_model_settings.model_dump()),
+            PAYLOAD_OVERVIEW_REFLECTION_MODEL: reflection_model,
+            PAYLOAD_OVERVIEW_DATASET_ROWS: len(payload.cases or []),
+            PAYLOAD_OVERVIEW_SEED: payload.seed,
+            PAYLOAD_OVERVIEW_TOKEN_SOURCE: payload.token_source,
+            PAYLOAD_OVERVIEW_TOKEN_SOURCES_BY_MODEL: _token_sources_by_model,
+            PAYLOAD_OVERVIEW_MAX_COST_CENTS: payload.max_cost_cents,
+            PAYLOAD_OVERVIEW_ESTIMATED_LOW: payload.estimated_cents_low,
+            PAYLOAD_OVERVIEW_ESTIMATED_HIGH: payload.estimated_cents_high,
+            PAYLOAD_OVERVIEW_IS_PRIVATE: payload.is_private,
+        },
+    )
+
+    _persist_and_signal_job(job_store, service, optimization_id, payload_dump)
+
+    logger.info(
+        "Enqueued repo run %s: repository=%s optimizer=%s",
+        optimization_id,
+        payload.target.repo.repository,
+        optimizer_name,
+    )
+
+    return OptimizationSubmissionResponse(
+        optimization_id=optimization_id,
+        optimization_type=cast(OptimizationType, OPTIMIZATION_TYPE_BLACKBOX),
+        status=OptimizationStatus.pending,
+        created_at=datetime.now(UTC),
+        name=payload.name,
+        username=payload.username,
+        module_name=BLACKBOX_MODULE_NAME,
+        optimizer_name=optimizer_name,
+    )
+
+
 def create_submissions_router(*, service, job_store) -> APIRouter:
     """Build the submissions router.
 
@@ -1286,121 +1432,12 @@ def create_submissions_router(*, service, job_store) -> APIRouter:
             DomainError: 400 (not a repository target, or the scorer does not
                 load), 402 (no balance), 409 (quota or a failed setup check).
         """
-        if payload.target.kind != BLACKBOX_TARGET_REPO or payload.target.repo is None:
-            raise DomainError("submission.validation_failed", status=400)
-        payload.username = current_user.username
-        _materialize_repo_cases(payload, job_store=job_store, username=payload.username)
-
-        replay_keys = resolve_submission_replay_keys(
+        return submit_repo_payload(
             payload,
-            username=payload.username,
-            workflow=_BLACKBOX_WORKFLOW,
-            supplied_key=idempotency_key,
-        )
-        normalized_key = replay_keys.job
-        if normalized_key:
-            existing_id = job_store.find_job_by_idempotency_key(payload.username, normalized_key)
-            if existing_id:
-                cached = _existing_submission_response(job_store, existing_id)
-                if cached is not None:
-                    logger.info(
-                        "Idempotent repo retry hit: returning existing %s for user=%s",
-                        existing_id,
-                        payload.username,
-                    )
-                    return cached
-
-        _enforce_submission_admission(job_store, payload.username)
-
-        _requested_source = payload.token_source
-        _model_configs, _token_sources_by_model = normalize_model_token_sources(payload)
-        fill_proposer_host_cli(job_store, payload.username, payload)
-        enforce_local_mode_sources(payload, _requested_source, _model_configs)
-        if not settings.local_mode:
-            _spendable = _enforce_balance(job_store, payload.username, payload.token_source)
-            if payload.execution_budget_id is None:
-                _cap_cost_ceiling_to_balance(payload, _spendable, payload.token_source)
-        _admit_byok_models(
-            job_store,
-            payload.username,
-            _model_configs,
-            payload.reflection_model_settings,
-            bool(payload.shinka and payload.shinka.novelty),
-        )
-
-        _ensure_api_budget(
-            payload,
-            job_store,
-            _BLACKBOX_WORKFLOW,
-            replay_keys.budget,
-            current_user,
-        )
-        verified = _protected_submission(payload, job_store, _BLACKBOX_WORKFLOW)
-        try:
-            if verified is None:
-                validate_blackbox_payload(payload)
-        except ServiceError as exc:
-            # Log the detail server-side only; don't leak it to the client.
-            logger.warning("Repo run validation failed: %s", exc)
-            raise DomainError("submission.validation_failed", status=400) from exc
-
-        optimization_id = str(uuid4())
-        if payload.seed is None:
-            payload.seed = stable_seed(optimization_id)
-        optimizer_name = payload.strategy.engine or BLACKBOX_STRATEGY_AUTO
-        reflection_model = payload.reflection_model_settings.normalized_identifier()
-
-        payload_dump = _persistable_payload(payload, job_store)
-        enforce_job_quota(job_store, payload.username)
-        enforce_storage_quota(job_store, payload.username, incoming_bytes=json_byte_size(payload_dump))
-
-        _create_submission_job(job_store, optimization_id, payload, normalized_key, verified)
-        payload_dump["execution_budget_generation"] = payload.execution_budget_generation
-        job_store.set_payload_overview(
-            optimization_id,
-            {
-                PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE: OPTIMIZATION_TYPE_BLACKBOX,
-                **_execution_overview(payload),
-                PAYLOAD_OVERVIEW_COMPOSITION: COMPOSITION_SINGLE,
-                PAYLOAD_OVERVIEW_NAME: payload.name,
-                PAYLOAD_OVERVIEW_DESCRIPTION: payload.description,
-                PAYLOAD_OVERVIEW_USERNAME: payload.username,
-                PAYLOAD_OVERVIEW_MODULE_NAME: BLACKBOX_MODULE_NAME,
-                PAYLOAD_OVERVIEW_OPTIMIZER_NAME: optimizer_name,
-                # The reflection model is the only model a black-box run
-                # bills, so it doubles as the overview's primary model.
-                PAYLOAD_OVERVIEW_MODEL_NAME: reflection_model,
-                PAYLOAD_OVERVIEW_MODEL_SETTINGS: strip_api_key(payload.reflection_model_settings.model_dump()),
-                PAYLOAD_OVERVIEW_REFLECTION_MODEL: reflection_model,
-                PAYLOAD_OVERVIEW_DATASET_ROWS: len(payload.cases or []),
-                PAYLOAD_OVERVIEW_SEED: payload.seed,
-                PAYLOAD_OVERVIEW_TOKEN_SOURCE: payload.token_source,
-                PAYLOAD_OVERVIEW_TOKEN_SOURCES_BY_MODEL: _token_sources_by_model,
-                PAYLOAD_OVERVIEW_MAX_COST_CENTS: payload.max_cost_cents,
-                PAYLOAD_OVERVIEW_ESTIMATED_LOW: payload.estimated_cents_low,
-                PAYLOAD_OVERVIEW_ESTIMATED_HIGH: payload.estimated_cents_high,
-                PAYLOAD_OVERVIEW_IS_PRIVATE: payload.is_private,
-            },
-        )
-
-        _persist_and_signal_job(job_store, service, optimization_id, payload_dump)
-
-        logger.info(
-            "Enqueued repo run %s: repository=%s optimizer=%s",
-            optimization_id,
-            payload.target.repo.repository,
-            optimizer_name,
-        )
-
-        return OptimizationSubmissionResponse(
-            optimization_id=optimization_id,
-            optimization_type=cast(OptimizationType, OPTIMIZATION_TYPE_BLACKBOX),
-            status=OptimizationStatus.pending,
-            created_at=datetime.now(UTC),
-            name=payload.name,
-            username=payload.username,
-            module_name=BLACKBOX_MODULE_NAME,
-            optimizer_name=optimizer_name,
+            service=service,
+            job_store=job_store,
+            current_user=current_user,
+            idempotency_key=idempotency_key,
         )
 
     @router.get(

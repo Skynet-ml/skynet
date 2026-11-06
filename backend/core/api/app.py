@@ -77,6 +77,7 @@ from ..worker.engine import BackgroundWorker, get_worker
 from .directory_client import build_directory_client
 from .errors import DomainError
 from .mcp_mount import mount_mcp_on_app
+from .mcp_oauth import load_or_create_local_token, resource_url
 from .model_catalog import prewarm_catalog
 from .observability import (
     STARTUP_WORK_LOCK_KEY,
@@ -92,6 +93,8 @@ from .observability import (
 )
 from .rate_limit import build_login_throttle
 from .remote_mcp import mount_remote_mcp
+from .remote_mcp_repo import register_repo_tools
+from .remote_mcp_routes import register_route_tools
 from .routers.account_data import create_account_data_router
 from .routers.account_security import create_account_security_router
 from .routers.accounts import create_accounts_router
@@ -1425,6 +1428,17 @@ def create_app(
         mount_mcp_on_app(app)
     except ImportError as exc:
         logger.warning("FastMCP not available, skipping /mcp mount: %s", exc)
-    mount_remote_mcp(app, service=service, job_store=job_store, get_worker=lambda: worker)
+    if settings.local_mode and settings.local_state_dir and resource_url():
+        load_or_create_local_token(settings.local_state_dir, resource_url())
+    mount_remote_mcp(
+        app,
+        service=service,
+        job_store=job_store,
+        get_worker=lambda: worker,
+        extensions=[
+            partial(register_repo_tools, service=service, job_store=job_store),
+            register_route_tools(app),
+        ],
+    )
 
     return app
