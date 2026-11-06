@@ -37,7 +37,6 @@ import { formatMsg } from "@/shared/lib/messages";
 import { useLocalAgentMenuModels } from "@/features/local-runtime";
 import {
   SETTINGS_TABS,
-  agentSubscriptionFor,
   parseAgentPreferencePatch,
   useSettingsModal,
   useUserPrefs,
@@ -341,7 +340,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     onToolEnd: handleToolEnd,
     onConversationMeta: handleConversationMeta,
   });
-  const localMenu = useLocalAgentMenuModels(agentSubscriptionFor("generalist"), agent.model);
+  const localMenu = useLocalAgentMenuModels(agent.model);
   const streaming = agent.status === "streaming";
   const choices = askedChoices(agent.messages);
   // Each conversation on view gets fresh turn components, so one chat's

@@ -16,7 +16,6 @@ import type { AgentEngine, CliStatus, LocalStatus } from "@/features/local-runti
 const { AgentEngineSelect, AgentEngineSetting, EngineChoice, engineToSave } = await import(
   "./AgentEngineSetting"
 );
-const { AgentRoleRow } = await import("./AgentLocalRunSetting");
 const { Select } = await import("@/shared/ui/primitives/select");
 const {
   agentEngineLoaded,
@@ -100,8 +99,8 @@ void describe("agent engine load state (SKY-123 R11-1)", () => {
       assert.equal(agentEngineLoaded(), false);
       // The empty menu keeps a key pick on the chip, so the request sends it unchanged.
       const pick = "openrouter/anthropic/claude-sonnet-4.5";
-      assert.equal(await localAgentModel(pick, null), pick);
-      assert.equal(await localAgentModel(null, null), null);
+      assert.equal(await localAgentModel(pick), pick);
+      assert.equal(await localAgentModel(null), null);
       fails = false;
       assert.equal(await loadAgentEngine(), "openrouter");
       assert.equal(agentEngineLoaded(), true);
@@ -367,7 +366,7 @@ void describe("loadAgentEngine", () => {
       assert.equal(await loadAgentEngine(), null);
       assert.equal(peekAgentEngine(), null);
       // With no engine, every role runs on the first ready CLI.
-      assert.match((await localAgentModel(null, null)) ?? "", /^subscription\/codex\//);
+      assert.match((await localAgentModel(null)) ?? "", /^subscription\/codex\//);
     } finally {
       globalThis.fetch = realFetch;
       if (realLocal === undefined) delete process.env.APP_LOCAL_MODE;
@@ -403,11 +402,11 @@ void describe("loadAgentEngine", () => {
     try {
       await loadLocalStatus(true);
       assert.equal(await loadAgentEngine(), "codex");
-      assert.match((await localAgentModel(null, null)) ?? "", /^subscription\/codex\//);
+      assert.match((await localAgentModel(null)) ?? "", /^subscription\/codex\//);
       // The status cache expires, so the next request refreshes it and reloads the engine.
       engineFails = true;
       Date.now = () => realNow() + 60_000;
-      assert.match((await localAgentModel(null, null)) ?? "", /^subscription\/codex\//);
+      assert.match((await localAgentModel(null)) ?? "", /^subscription\/codex\//);
       assert.equal(peekAgentEngine(), "codex");
     } finally {
       globalThis.fetch = realFetch;
@@ -521,25 +520,5 @@ void describe("OpenRouter engine (SKY-123 AC3)", () => {
     assert.notEqual(select.value, "codex");
     select.onValueChange("codex");
     assert.deepEqual(saved, ["codex"]);
-  });
-
-  void it("an agent role on the OpenRouter engine shows OpenRouter and no CLI choice", () => {
-    setClientLocale("en");
-    const html = renderToStaticMarkup(
-      <AgentRoleRow role="code" openRouter value="codex" onChange={() => {}} />,
-    );
-    assert.match(html, /data-engine-logo="openrouter"/);
-    assert.match(html, /settings\.agent_engine\.openrouter</);
-    assert.doesNotMatch(html, /role="combobox"/);
-    assert.doesNotMatch(html, /subscription\.cli\.codex/);
-  });
-
-  void it("an agent role on a CLI engine keeps its CLI choice", () => {
-    setClientLocale("en");
-    const html = renderToStaticMarkup(
-      <AgentRoleRow role="code" openRouter={false} value="codex" onChange={() => {}} />,
-    );
-    assert.match(html, /role="combobox"/);
-    assert.doesNotMatch(html, /data-engine-logo="openrouter"/);
   });
 });

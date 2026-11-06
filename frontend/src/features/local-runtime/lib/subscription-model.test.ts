@@ -1436,7 +1436,7 @@ test("no UI locale keeps the old My subscription or My OpenRouter key labels", (
 test("the Agent settings name the agent engine and describe each engine truthfully", () => {
   const dir = new URL("../../../../../i18n/locales/ui/", import.meta.url);
   const en = JSON.parse(readFileSync(new URL("en.json", dir), "utf8")) as Record<string, string>;
-  assert.equal(en["settings.agent_local.title"], "Agent engine");
+  assert.equal(en["settings.agent_engine.description_local"], "Every agent runs on this CLI");
   assert.equal(
     en["settings.agent_engine.description_openrouter"],
     "Every agent runs on your saved OpenRouter key",
@@ -1444,8 +1444,8 @@ test("the Agent settings name the agent engine and describe each engine truthful
   for (const file of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
     const loc = JSON.parse(readFileSync(new URL(file, dir), "utf8")) as Record<string, string>;
     if (!loc["settings.agent_engine.label"]) continue;
-    assert.equal(loc["settings.agent_local.title"], loc["settings.agent_engine.label"], file);
     for (const key of [
+      "settings.agent_engine.description_local",
       "settings.agent_engine.description_openrouter",
       "settings.agent_engine.openrouter_fallback",
     ]) {
