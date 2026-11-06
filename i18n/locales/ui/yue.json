@@ -4461,5 +4461,22 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "喺 設定 → API 產生權杖。用 Bearer 權杖傳送，每次呼叫都附上新嘅 Idempotency-Key。",
   "serve_tab.api.endpoint": "端點",
-  "serve_tab.api.copy": "複製端點網址"
+  "serve_tab.api.copy": "複製端點網址",
+  "localUsage.title": "CLI 訂閱用量",
+  "localUsage.intro": "你用咗幾多 Claude Code 同 Codex 方案額度。呢度計晒你全部用量，唔只係 {term.appName} 嘅執行。",
+  "localUsage.window.5h": "目前工作階段",
+  "localUsage.window.7d": "今個星期",
+  "localUsage.capped": "限額至 {time}",
+  "localUsage.billingNote": "呢個用量唔會改變你網上嘅積分或餘額。",
+  "localUsage.cliToggle": "CLI",
+  "localUsage.resets": "{time} 重設",
+  "localUsage.used": "已用 {percent}",
+  "localUsage.noWindows": "{cli} 冇提供呢個方案嘅限額時段。",
+  "localUsage.reconnect": "{cli} 要你重新登入。喺終端機執行 {command}，然後揀重新整理。",
+  "localUsage.unavailable": "讀唔到 {cli} 嘅方案用量。",
+  "localUsage.skynet.5h": "過去 5 個鐘 {term.appName} 執行：{calls} 次呼叫，{tokens} 個 token",
+  "localUsage.skynet.7d": "過去 7 日 {term.appName} 執行：{calls} 次呼叫，{tokens} 個 token",
+  "localUsage.loading": "載入緊 CLI 用量…",
+  "localUsage.loadFailed": "載入唔到 CLI 用量。",
+  "localUsage.refresh": "重新整理"
 }

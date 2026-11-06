@@ -51,6 +51,7 @@ import { CopyButton } from "@/shared/ui/copy-button";
 import { ExpandToggleButton } from "@/shared/ui/expand-toggle-button";
 import { WalletTab, UsageTab, ByokKeysSection } from "@/features/billing";
 import { ConnectorsTab } from "@/features/connectors";
+import { LocalCliUsagePanel } from "@/features/local-usage";
 import { AdminDashboard } from "@/features/dashboard";
 import { ExperienceLevelControl } from "@/features/experience";
 import { Input } from "@/shared/ui/primitives/input";
@@ -1518,7 +1519,7 @@ export function SettingsModal() {
                 <WalletTab />
               </TabsContent>
               <TabsContent value="usage">
-                <UsageTab />
+                <UsageTab localPanel={<LocalCliUsagePanel />} />
               </TabsContent>
               <TabsContent value="providers">
                 <ByokKeysSection />

@@ -4461,5 +4461,22 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "أنشئ رمزًا في الإعدادات ← API. أرسله كرمز Bearer مع Idempotency-Key جديد في كل استدعاء.",
   "serve_tab.api.endpoint": "نقطة النهاية",
-  "serve_tab.api.copy": "نسخ عنوان نقطة النهاية"
+  "serve_tab.api.copy": "نسخ عنوان نقطة النهاية",
+  "localUsage.title": "استخدام اشتراكات CLI",
+  "localUsage.intro": "مقدار ما استخدمته من خطتي Claude Code وCodex. يشمل هذا كل استخدامك، وليس تشغيلات {term.appName} فقط.",
+  "localUsage.window.5h": "الجلسة الحالية",
+  "localUsage.window.7d": "هذا الأسبوع",
+  "localUsage.capped": "محدود حتى {time}",
+  "localUsage.billingNote": "هذا الاستخدام لا يغيّر أرصدتك أو رصيدك على الويب.",
+  "localUsage.cliToggle": "CLI",
+  "localUsage.resets": "يُعاد الضبط {time}",
+  "localUsage.used": "{percent} مستخدم",
+  "localUsage.noWindows": "لا يُبلغ {cli} عن نافذة حد لهذه الخطة.",
+  "localUsage.reconnect": "يجب تسجيل الدخول مجددًا إلى {cli}. شغّل {command} في الطرفية، ثم اختر تحديث.",
+  "localUsage.unavailable": "تعذرت قراءة استخدام الخطة من {cli}.",
+  "localUsage.skynet.5h": "تشغيلات {term.appName} في آخر 5 ساعات: {calls} استدعاءات، {tokens} رموز",
+  "localUsage.skynet.7d": "تشغيلات {term.appName} في آخر 7 أيام: {calls} استدعاءات، {tokens} رموز",
+  "localUsage.loading": "جارٍ تحميل استخدام CLI…",
+  "localUsage.loadFailed": "تعذّر تحميل استخدام CLI.",
+  "localUsage.refresh": "تحديث"
 }

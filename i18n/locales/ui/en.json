@@ -4461,5 +4461,22 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "Generate a token in Settings → API. Send it as a bearer token with a new Idempotency-Key on each call.",
   "serve_tab.api.endpoint": "Endpoint",
-  "serve_tab.api.copy": "Copy endpoint URL"
+  "serve_tab.api.copy": "Copy endpoint URL",
+  "localUsage.title": "CLI subscription use",
+  "localUsage.intro": "How much of your Claude Code and Codex plans you used. This counts all your use, not only {term.appName} runs.",
+  "localUsage.window.5h": "Current session",
+  "localUsage.window.7d": "This week",
+  "localUsage.capped": "Capped until {time}",
+  "localUsage.billingNote": "This use does not change your web credits or balance.",
+  "localUsage.cliToggle": "CLI",
+  "localUsage.resets": "Resets {time}",
+  "localUsage.used": "{percent} used",
+  "localUsage.noWindows": "{cli} reports no limit window for this plan.",
+  "localUsage.reconnect": "{cli} needs you to sign in again. Run {command} in a terminal, then select Refresh.",
+  "localUsage.unavailable": "Could not read the plan use from {cli}.",
+  "localUsage.skynet.5h": "{term.appName} runs in the last 5 hours: {calls} calls, {tokens} tokens",
+  "localUsage.skynet.7d": "{term.appName} runs in the last 7 days: {calls} calls, {tokens} tokens",
+  "localUsage.loading": "Loading CLI use…",
+  "localUsage.loadFailed": "Could not load CLI use.",
+  "localUsage.refresh": "Refresh"
 }

@@ -102,6 +102,51 @@ def test_recorded_cap_skips_the_cli_until_it_resets(tmp_path: Path) -> None:
     assert len(calls(tmp_path, "claude")) == 1
 
 
+def test_cap_evidence_says_whether_a_cli_started(tmp_path: Path) -> None:
+    """Mark a 429 that a saved cap answered as not dispatched; a CLI's own 429 has no mark."""
+    fake_cli(tmp_path, "claude", CAPPED)
+    dispatcher = CliDispatcher(None, "claude", MODEL, "judge", local_settings(tmp_path))
+    _, ran = dispatcher._answer("/chat/completions", REQUEST)
+    _, skipped = dispatcher._answer("/chat/completions", REQUEST)
+    assert (ran["status"], "dispatched" in ran) == (429, False)
+    assert (skipped["status"], skipped["dispatched"]) == (429, False)
+    assert len(calls(tmp_path, "claude")) == 1
+
+
+def test_cap_evidence_names_the_cli_that_ran(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Credit a 429 to the CLI that ran, not to a later fallback that its saved cap skipped."""
+    fake_cli(tmp_path, "claude", CAPPED)
+    monkeypatch.setattr(cli_dispatch, "cli_model_arg", lambda provider, model: model)
+    settings = local_settings(tmp_path, cli_fallback_order="claude,codex")
+    cli_dispatch.write_cli_limit(settings, "codex", datetime(2099, 1, 1, tzinfo=UTC), "codex is capped")
+    _, evidence = CliDispatcher(None, "claude", MODEL, "judge", settings)._answer("/chat/completions", REQUEST)
+    assert (evidence["status"], evidence["cli"], "dispatched" in evidence) == (429, "claude", False)
+    assert "capped_runs" not in evidence
+    assert len(calls(tmp_path, "claude")) == 1
+
+
+def test_evidence_lists_a_capped_cli_that_ran_before_the_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the capped first CLI in ``capped_runs`` when a fallback CLI answers."""
+    fake_cli(tmp_path, "claude", CAPPED)
+    fake_app_server(tmp_path, emitting(*CODEX_TURN))
+    monkeypatch.setattr(cli_dispatch, "cli_model_arg", lambda provider, model: model)
+    settings = local_settings(tmp_path, cli_fallback_order="claude,codex")
+    _, evidence = CliDispatcher(None, "claude", MODEL, "judge", settings)._answer("/chat/completions", REQUEST)
+    assert (evidence["status"], evidence["cli"], evidence["capped_runs"]) == (200, "codex", ["claude"])
+
+
+def test_evidence_marks_a_fallback_cli_that_is_not_installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing fallback CLI never started: the row keeps the capped CLI that ran."""
+    fake_cli(tmp_path, "claude", CAPPED)
+    monkeypatch.setattr(cli_dispatch, "cli_model_arg", lambda provider, model: model)
+    settings = local_settings(tmp_path, cli_fallback_order="claude,codex")
+    _, evidence = CliDispatcher(None, "claude", MODEL, "judge", settings)._answer("/chat/completions", REQUEST)
+    assert (evidence["status"], evidence["cli"], evidence["dispatched"]) == (502, "codex", False)
+    assert evidence["capped_runs"] == ["claude"]
+
+
 def test_fallback_order_that_names_droid_skips_it(tmp_path: Path) -> None:
     """Skip droid in a saved fallback order: it is not a runner, so it never starts."""
     fake_cli(tmp_path, "claude", CAPPED)

@@ -4461,5 +4461,22 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "Genera un token in Impostazioni → API. Invialo come token Bearer con una nuova Idempotency-Key a ogni chiamata.",
   "serve_tab.api.endpoint": "Endpoint",
-  "serve_tab.api.copy": "Copia l’URL dell’endpoint"
+  "serve_tab.api.copy": "Copia l’URL dell’endpoint",
+  "localUsage.title": "Uso degli abbonamenti CLI",
+  "localUsage.intro": "Quanto hai usato dei tuoi piani Claude Code e Codex. Conta tutto il tuo utilizzo, non solo le esecuzioni di {term.appName}.",
+  "localUsage.window.5h": "Sessione corrente",
+  "localUsage.window.7d": "Questa settimana",
+  "localUsage.capped": "Limitato fino a {time}",
+  "localUsage.billingNote": "Questo uso non cambia i tuoi crediti web né il saldo.",
+  "localUsage.cliToggle": "CLI",
+  "localUsage.resets": "Si azzera {time}",
+  "localUsage.used": "{percent} usato",
+  "localUsage.noWindows": "{cli} non indica una finestra di limite per questo piano.",
+  "localUsage.reconnect": "{cli} richiede un nuovo accesso. Esegui {command} in un terminale, poi seleziona Aggiorna.",
+  "localUsage.unavailable": "Impossibile leggere l’uso del piano da {cli}.",
+  "localUsage.skynet.5h": "Esecuzioni di {term.appName} nelle ultime 5 ore: {calls} chiamate, {tokens} token",
+  "localUsage.skynet.7d": "Esecuzioni di {term.appName} negli ultimi 7 giorni: {calls} chiamate, {tokens} token",
+  "localUsage.loading": "Caricamento dell’uso CLI…",
+  "localUsage.loadFailed": "Impossibile caricare l’uso CLI.",
+  "localUsage.refresh": "Aggiorna"
 }

@@ -4461,5 +4461,22 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "Створіть токен у розділі Налаштування → API. Надсилайте його як Bearer-токен із новим Idempotency-Key під час кожного виклику.",
   "serve_tab.api.endpoint": "Ендпоінт",
-  "serve_tab.api.copy": "Скопіювати URL ендпоінта"
+  "serve_tab.api.copy": "Скопіювати URL ендпоінта",
+  "localUsage.title": "Використання підписок CLI",
+  "localUsage.intro": "Скільки ви використали з планів Claude Code і Codex. Враховується все ваше використання, а не лише запуски {term.appName}.",
+  "localUsage.window.5h": "Поточний сеанс",
+  "localUsage.window.7d": "Цей тиждень",
+  "localUsage.capped": "Обмежено до {time}",
+  "localUsage.billingNote": "Це використання не змінює ваші веб-кредити чи баланс.",
+  "localUsage.cliToggle": "CLI",
+  "localUsage.resets": "Скидання: {time}",
+  "localUsage.used": "Використано {percent}",
+  "localUsage.noWindows": "{cli} не повідомляє вікно ліміту для цього плану.",
+  "localUsage.reconnect": "Потрібно знову ввійти в {cli}. Виконайте {command} у терміналі, потім натисніть «Оновити».",
+  "localUsage.unavailable": "Не вдалося прочитати використання плану з {cli}.",
+  "localUsage.skynet.5h": "Запуски {term.appName} за останні 5 годин: викликів {calls}, токенів {tokens}",
+  "localUsage.skynet.7d": "Запуски {term.appName} за останні 7 днів: викликів {calls}, токенів {tokens}",
+  "localUsage.loading": "Завантаження використання CLI…",
+  "localUsage.loadFailed": "Не вдалося завантажити використання CLI.",
+  "localUsage.refresh": "Оновити"
 }

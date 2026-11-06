@@ -854,6 +854,51 @@ def test_capped_turn_fails_the_run_with_its_reset_time(
     assert "claude" in message
 
 
+def test_turn_that_no_cli_started_is_marked_for_the_usage_panel(
+    gateway: ModelGateway, local: Settings, guest: Path, database: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn that a saved cap stops before the CLI starts records ``dispatched: false``; the guest never sees the marker."""
+    monkeypatch.setenv("FAKE_CLI_NAME", "claude")
+    monkeypatch.setenv("FAKE_CLI_MODE", "limit")
+    token = bind_host_agent(gateway, local, cli="claude", permission="workspace_only")
+    body = {"model": "", "prompt": "x", "workspace_tar_b64": _workspace_tar(guest)}
+
+    ran = _post(gateway, token, body)
+    skipped = _post(gateway, token, body)
+
+    assert ran.status_code == skipped.status_code == 429
+    assert host_agent.NOT_STARTED_KEY not in skipped.json()
+    records = run_usage.load_records(database, str(gateway.runtime.budget_id))
+    assert sorted(record.evidence.get("dispatched", True) for record in records) == [False, True]
+
+
+def test_only_a_cli_that_could_not_start_is_marked_not_started(
+    local: Settings, guest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed start is not local use; a cleanup error after the CLI ran still is."""
+    monkeypatch.setenv("FAKE_CLI_NAME", "claude")
+    body = {"model": "", "prompt": "x", "workspace_tar_b64": _workspace_tar(guest)}
+
+    def broken_cleanup(*args: object, **kwargs: object) -> None:
+        """Fail like a ``ps`` fork error after the CLI ran."""
+        raise OSError("fork failed")
+
+    monkeypatch.setattr(host_agent, "_stop_turn", broken_cleanup)
+    ran = run_host_agent(body, local, cli="claude", permission="workspace_only")
+    monkeypatch.setattr(host_agent.subprocess, "Popen", broken_cleanup)
+    refused = run_host_agent(body, local, cli="claude", permission="workspace_only")
+
+    assert (ran["status"], host_agent.NOT_STARTED_KEY in ran) == ("error", False)
+    assert (refused["status"], refused.get(host_agent.NOT_STARTED_KEY)) == ("error", True)
+
+
+def test_failed_start_keeps_the_missing_binary_in_the_message(tmp_path: Path) -> None:
+    """The start error names the binary, so the user can see which CLI is missing."""
+    missing = str(tmp_path / "no-such-cli")
+    with pytest.raises(host_agent.CliStartError, match="no-such-cli"):
+        host_agent.run_group([missing], cwd=tmp_path, env=dict(os.environ), stdin="", timeout=1)
+
+
 def test_oversized_workspace_is_refused(gateway: ModelGateway, local: Settings, tmp_path: Path) -> None:
     """A request above 32 MB is refused with 413 before any CLI runs."""
     token = bind_host_agent(gateway, local, cli="claude", permission="workspace_only")

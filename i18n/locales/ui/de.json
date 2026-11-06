@@ -4461,5 +4461,22 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "Erstellen Sie ein Token unter Einstellungen → API. Senden Sie es als Bearer-Token mit einem neuen Idempotency-Key pro Aufruf.",
   "serve_tab.api.endpoint": "Endpunkt",
-  "serve_tab.api.copy": "Endpunkt-URL kopieren"
+  "serve_tab.api.copy": "Endpunkt-URL kopieren",
+  "localUsage.title": "CLI-Abo-Nutzung",
+  "localUsage.intro": "Wie viel deiner Claude-Code- und Codex-Pläne du verbraucht hast. Das zählt deine gesamte Nutzung, nicht nur {term.appName}-Läufe.",
+  "localUsage.window.5h": "Aktuelle Sitzung",
+  "localUsage.window.7d": "Diese Woche",
+  "localUsage.capped": "Begrenzt bis {time}",
+  "localUsage.billingNote": "Diese Nutzung ändert weder deine Web-Credits noch dein Guthaben.",
+  "localUsage.cliToggle": "CLI",
+  "localUsage.resets": "Setzt zurück: {time}",
+  "localUsage.used": "{percent} verbraucht",
+  "localUsage.noWindows": "{cli} meldet für diesen Plan kein Limitfenster.",
+  "localUsage.reconnect": "{cli} braucht eine neue Anmeldung. Führe {command} in einem Terminal aus und wähle dann Aktualisieren.",
+  "localUsage.unavailable": "Die Plannutzung von {cli} konnte nicht gelesen werden.",
+  "localUsage.skynet.5h": "{term.appName}-Läufe in den letzten 5 Stunden: {calls} Aufrufe, {tokens} Tokens",
+  "localUsage.skynet.7d": "{term.appName}-Läufe in den letzten 7 Tagen: {calls} Aufrufe, {tokens} Tokens",
+  "localUsage.loading": "CLI-Nutzung wird geladen…",
+  "localUsage.loadFailed": "CLI-Nutzung konnte nicht geladen werden.",
+  "localUsage.refresh": "Aktualisieren"
 }

@@ -79,6 +79,7 @@ SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 # Agent sockets act outside the sandbox (the SSH agent signs with the user's keys).
 RATE_LIMITED_CODE = "subscription.rate_limited"
 FAILED_KEY = "blackbox.host_agent_failed"
+NOT_STARTED_KEY = "_cli_not_started"
 CLAUDE_WORKSPACE_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep")
 CODEX_SUBSCRIPTION_HINT = (
     "Codex is not signed in with a ChatGPT subscription in a login file. Sign in with ChatGPT, not an API key: "
@@ -114,6 +115,10 @@ class HostAgentFailure:
 
 class HostAgentRequestError(ValueError):
     """Raised for a request the capability refuses before any CLI runs."""
+
+
+class CliStartError(OSError):
+    """Raised when the CLI process itself could not start."""
 
 
 _failures: weakref.WeakKeyDictionary[ModelGateway, HostAgentFailure] = weakref.WeakKeyDictionary()
@@ -804,22 +809,26 @@ def run_group(
 
     Raises:
         subprocess.TimeoutExpired: When the command ran longer than ``timeout``.
-        OSError: When the command could not start.
+        CliStartError: When the command could not start.
+        OSError: When stopping the turn's processes failed after the command ran.
     """
     root = root or cwd
     marker_value = uuid.uuid4().hex
     marker = f"{TURN_MARKER_ENV}={marker_value}"
-    process = subprocess.Popen(
-        argv,
-        cwd=cwd,
-        env={**env, TURN_MARKER_ENV: marker_value},
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        errors="replace",
-        start_new_session=True,
-    )
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env={**env, TURN_MARKER_ENV: marker_value},
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise CliStartError(error.errno, error.strerror, error.filename) from error
     try:
         stdout, stderr = process.communicate(stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -970,6 +979,19 @@ def _error(code: str, message: str, *, reset_at: str | None = None, transcript: 
         "transcript_tail": transcript[-_TRANSCRIPT_TAIL_CHARS:],
         "error": {"code": code, "reset_at": reset_at, "message": message},
     }
+
+
+def _not_started(document: dict[str, Any]) -> dict[str, Any]:
+    """Mark an error response as one that never started the CLI.
+
+    Args:
+        document: A response from :func:`_error`.
+
+    Returns:
+        The same response with :data:`NOT_STARTED_KEY` set; the proposer
+        route removes the key before the guest sees the response.
+    """
+    return {**document, NOT_STARTED_KEY: True}
 
 
 def _login_paths(cli: CliProvider) -> list[str]:
@@ -1136,18 +1158,18 @@ def run_host_agent(
         ``{status, result_tar_b64, usage, transcript_tail, error?}``.
     """
     if cli not in HOST_CLIS:
-        return _error(FAILED_KEY, f"Unknown host CLI {cli!r}.")
+        return _not_started(_error(FAILED_KEY, f"Unknown host CLI {cli!r}."))
     if permission not in HOST_PERMISSIONS:
-        return _error(FAILED_KEY, f"Unknown host permission {permission!r}.")
+        return _not_started(_error(FAILED_KEY, f"Unknown host permission {permission!r}."))
     try:
         root = _workspace_root(settings)
         archive = base64.b64decode(str(body.get("workspace_tar_b64") or ""), validate=True)
     except (HostAgentRequestError, binascii.Error) as error:
-        return _error(FAILED_KEY, str(error))
+        return _not_started(_error(FAILED_KEY, str(error)))
     capped_until = _recorded_cap(settings, cli)
     if capped_until is not None:
         message = f"{cli} is capped until {capped_until.isoformat()}"
-        return _error(RATE_LIMITED_CODE, message, reset_at=capped_until.isoformat())
+        return _not_started(_error(RATE_LIMITED_CODE, message, reset_at=capped_until.isoformat()))
     safe_job = "".join(char for char in job if char.isalnum() or char in "-_") or "run"
     turn = root / safe_job / uuid.uuid4().hex
     workdir = turn / "workspace"
@@ -1204,8 +1226,11 @@ def run_host_agent(
                 )
             except subprocess.TimeoutExpired:
                 return _error(FAILED_KEY, f"The {cli} turn ran longer than {settings.host_agent_timeout_seconds:.0f}s.")
+            except CliStartError as error:
+                return _not_started(_error(FAILED_KEY, f"The {cli} CLI could not start: {error}"))
             except OSError as error:
-                return _error(FAILED_KEY, f"The {cli} CLI could not start: {error}")
+                # The CLI ran, so the turn counts as local use; only the cleanup after it failed.
+                return _error(FAILED_KEY, f"The {cli} turn could not be cleaned up: {error}")
         elapsed_ms = int((time.monotonic() - started) * 1000)
         # The transcript and the error text go to the guest like the files do.
         stdout, stderr = _redact(completed.stdout, secret_values), _redact(completed.stderr, secret_values)
@@ -1234,7 +1259,8 @@ def run_host_agent(
             "transcript_tail": transcript[-_TRANSCRIPT_TAIL_CHARS:],
         }
     except HostAgentRequestError as error:
-        return _error(FAILED_KEY, str(error))
+        # Every HostAgentRequestError comes from a check that runs before the CLI starts.
+        return _not_started(_error(FAILED_KEY, str(error)))
     finally:
         shutil.rmtree(turn, ignore_errors=True)
 
@@ -1431,6 +1457,7 @@ def bind_host_agent(
                 job=str(runtime.budget_id),
                 reasoning_effort=reasoning_effort,
             )
+            started = not document.pop(NOT_STARTED_KEY, False)
             usage = document["usage"]
             evidence = {
                 "source": "host_agent",
@@ -1444,6 +1471,9 @@ def bind_host_agent(
                 "usage": {"prompt_tokens": usage["prompt_tokens"], "completion_tokens": usage["completion_tokens"]},
                 "latency_ms": usage["model_ms"],
             }
+            if not started:
+                # The local usage panel must not count a turn that no CLI ran (SKY-341).
+                evidence["dispatched"] = False
             return PaidResult(document, Decimal(0), evidence)
 
         document = runtime.execute(
