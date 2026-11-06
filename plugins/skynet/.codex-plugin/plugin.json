@@ -8,7 +8,7 @@
   },
   "homepage": "https://skynetml.com",
   "repository": "https://github.com/Skynet-ml/skynet",
-  "license": "AGPL-3.0-only",
+  "license": "Apache-2.0",
   "keywords": ["optimization", "dspy", "gepa", "evaluation"],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",

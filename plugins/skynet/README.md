@@ -75,4 +75,5 @@ access:
 
 ## License
 
-AGPL-3.0-only, the same as the Skynet repository.
+Apache-2.0. See [LICENSE](LICENSE). The rest of the Skynet repository is
+AGPL-3.0.
