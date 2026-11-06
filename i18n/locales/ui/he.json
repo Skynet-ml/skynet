@@ -3002,6 +3002,7 @@
   "trajectory.scrubber.live": "חי",
   "usage.empty.desc": "אופטימיזציות מנוהלות יופיעו כאן עם פירוט עלויות.",
   "usage.empty.title": "אין ניצול עדיין",
+  "usage.load_error": "לא הצלחנו לטעון את הניצול מחשבון הווב.",
   "usage.model.unknown": "מחשוב בסביבה מבודדת",
   "usage.panel.by_model": "לפי מודל",
   "usage.panel.by_run": "לפי אופטימיזציה",

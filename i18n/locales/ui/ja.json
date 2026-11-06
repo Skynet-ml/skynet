@@ -3516,6 +3516,7 @@
   "trajectory.scrubber.live": "ライブ",
   "usage.empty.desc": "マネージド実行がコスト内訳とともにここに表示されます。",
   "usage.empty.title": "使用状況はまだありません",
+  "usage.load_error": "Web アカウントの使用量を読み込めませんでした。",
   "usage.model.unknown": "サンドボックスの計算",
   "usage.panel.by_model": "モデル別",
   "usage.panel.by_run": "最適化実行別",

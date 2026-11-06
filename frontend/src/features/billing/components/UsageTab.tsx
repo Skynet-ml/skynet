@@ -10,7 +10,15 @@ import { modelDisplayName } from "@/shared/lib/formatters";
 import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 import { useLocale } from "@/shared/providers";
-import { getUsage, type BillingUsageEntry, type BillingUsageResponse } from "@/shared/lib/api";
+import {
+  getUsage,
+  hostedRunsAvailable,
+  type BillingUsageEntry,
+  type BillingUsageResponse,
+} from "@/shared/lib/api";
+import { onLinkChange } from "@/shared/hooks/use-linked-account";
+import { InlineErrorRow } from "@/shared/ui/inline-error-row";
+import { RetryIconButton } from "@/shared/ui/retry-icon-button";
 import { AppDatePicker, toISODate } from "@/shared/ui/app-date-picker";
 import { ExportTableMenu } from "@/shared/ui/export-table-menu";
 import { Segmented } from "@/shared/ui/segmented";
@@ -371,9 +379,9 @@ function LedgerRow({ entry, locale }: { entry: BillingUsageEntry; locale: string
  * A full personal spend dashboard over the balance ledger: a date-ranged
  * window, headline stats (spent · runs), a billed-spend time series, per-model
  * and per-run breakdowns, and the raw activity list. Data
- * comes from the backend `GET /billing/usage` rollup; if that read fails the tab
- * derives the same shape client-side from the wallet's recent ledger so the
- * surface still renders.
+ * comes from the backend `GET /billing/usage` rollup; if a local read fails the
+ * tab derives the same shape client-side from the wallet's recent ledger so the
+ * surface still renders. A failed web-account read shows an error instead.
  */
 export function UsageTab() {
   const { wallet } = useBalance();
@@ -383,6 +391,7 @@ export function UsageTab() {
   const [customTo, setCustomTo] = React.useState<string | null>(null);
   const [data, setData] = React.useState<BillingUsageResponse | null>(null);
   const [loading, setLoading] = React.useState(true);
+  const [failed, setFailed] = React.useState(false);
   const reqId = React.useRef(0);
 
   const todayIso = React.useMemo(() => toISODate(new Date()), []);
@@ -404,13 +413,20 @@ export function UsageTab() {
     const { startIso, endIso, startMs, endMs } = rangeBounds(range, customFrom, customTo);
     const id = ++reqId.current;
     setLoading(true);
+    setFailed(false);
     getUsage(startIso, endIso)
       .then((resp) => {
         if (id === reqId.current) setData(resp);
       })
       .catch(() => {
-        if (id === reqId.current)
+        if (id !== reqId.current) return;
+        // The local wallet ledger cannot stand in for the web account's usage.
+        if (hostedRunsAvailable()) {
+          setData(null);
+          setFailed(true);
+        } else {
           setData(deriveUsage(wallet.usage, startMs, endMs, startIso, endIso));
+        }
       })
       .finally(() => {
         if (id === reqId.current) setLoading(false);
@@ -420,6 +436,8 @@ export function UsageTab() {
   React.useEffect(() => {
     load();
   }, [load]);
+
+  React.useEffect(() => onLinkChange(load), [load]);
 
   const buckets = React.useMemo(
     () => bucketDays(data?.by_day ?? [], locale),
@@ -491,6 +509,21 @@ export function UsageTab() {
       )}
     </div>
   );
+
+  if (failed) {
+    return (
+      <div className="flex flex-col gap-5">
+        {toolbar}
+        <InlineErrorRow
+          message={msg("usage.load_error")}
+          className="items-center py-2"
+          action={
+            <RetryIconButton label={msg("billing.wallet.retry")} loading={loading} onClick={load} />
+          }
+        />
+      </div>
+    );
+  }
 
   if (data == null) {
     return (

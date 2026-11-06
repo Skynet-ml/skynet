@@ -179,6 +179,8 @@ export async function getConversation(
   signal?: AbortSignal,
 ): Promise<ConversationDetail | null> {
   const { source, id } = parseSourceKey(conversationId);
+  // An unlinked Mac would send a web id to the local backend.
+  if (source === "hosted" && !hostedRunsAvailable()) return null;
   const path = `/agent/conversations/${encodeURIComponent(id)}`;
   try {
     const res = await fetchWithAuthRetry(

@@ -3516,6 +3516,7 @@
   "trajectory.scrubber.live": "Наживо",
   "usage.empty.desc": "Керовані запуски з’являться тут із розбивкою витрат.",
   "usage.empty.title": "Поки що немає використання",
+  "usage.load_error": "Не вдалося завантажити використання з вашого веб-акаунта.",
   "usage.model.unknown": "Обчислення в пісочниці",
   "usage.panel.by_model": "За моделлю",
   "usage.panel.by_run": "За запуском оптимізації",

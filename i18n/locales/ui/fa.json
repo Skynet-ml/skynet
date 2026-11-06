@@ -3516,6 +3516,7 @@
   "trajectory.scrubber.live": "زنده",
   "usage.empty.desc": "اجراهای مدیریت‌شده با تفکیک هزینه اینجا نمایش داده می‌شوند.",
   "usage.empty.title": "هنوز مصرفی نیست",
+  "usage.load_error": "نتوانستیم مصرف را از حساب وب شما بارگیری کنیم.",
   "usage.model.unknown": "پردازش سندباکس",
   "usage.panel.by_model": "بر اساس مدل",
   "usage.panel.by_run": "بر اساس اجرای بهینه‌سازی",

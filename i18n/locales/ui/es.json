@@ -3516,6 +3516,7 @@
   "trajectory.scrubber.live": "En vivo",
   "usage.empty.desc": "Las ejecuciones gestionadas aparecerán aquí con un desglose de costes.",
   "usage.empty.title": "Aún no hay uso",
+  "usage.load_error": "No pudimos cargar el uso de tu cuenta web.",
   "usage.model.unknown": "Cómputo de sandbox",
   "usage.panel.by_model": "Por modelo",
   "usage.panel.by_run": "Por ejecución de optimización",

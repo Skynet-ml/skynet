@@ -3516,6 +3516,7 @@
   "trajectory.scrubber.live": "En direct",
   "usage.empty.desc": "Les exécutions gérées apparaîtront ici, avec le détail des coûts.",
   "usage.empty.title": "Aucune utilisation pour l'instant",
+  "usage.load_error": "Impossible de charger l’utilisation de votre compte web.",
   "usage.model.unknown": "Calcul du bac à sable",
   "usage.panel.by_model": "Par modèle",
   "usage.panel.by_run": "Par exécution d'optimisation",

@@ -3349,6 +3349,7 @@
   "trajectory.scrubber.live": "即時",
   "usage.empty.desc": "受管執行記錄會喺度顯示，並附帶費用明細。",
   "usage.empty.title": "仲未有用量紀錄",
+  "usage.load_error": "我哋載入唔到你網頁帳戶嘅用量。",
   "usage.model.unknown": "沙盒運算",
   "usage.panel.by_model": "按模型劃分",
   "usage.panel.by_run": "按最佳化執行劃分",

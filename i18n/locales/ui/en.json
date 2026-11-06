@@ -2729,6 +2729,7 @@
   "trajectory.scrubber.live": "Live",
   "usage.empty.desc": "Managed optimizations will appear here with a cost breakdown.",
   "usage.empty.title": "No usage yet",
+  "usage.load_error": "We couldn't load usage from your web account.",
   "usage.model.unknown": "Sandbox compute",
   "usage.panel.by_model": "By model",
   "usage.panel.by_run": "By optimization",

@@ -3516,6 +3516,7 @@
   "trajectory.scrubber.live": "实时",
   "usage.empty.desc": "托管运行将在此处显示，并附带费用明细。",
   "usage.empty.title": "暂无用量",
+  "usage.load_error": "无法从你的网页账户加载用量。",
   "usage.model.unknown": "沙盒计算",
   "usage.panel.by_model": "按模型",
   "usage.panel.by_run": "按优化运行",

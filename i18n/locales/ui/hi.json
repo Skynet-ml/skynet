@@ -3516,6 +3516,7 @@
   "trajectory.scrubber.live": "लाइव",
   "usage.empty.desc": "प्रबंधित रन यहाँ लागत-विवरण के साथ दिखाई देंगे।",
   "usage.empty.title": "अभी कोई उपयोग नहीं",
+  "usage.load_error": "हम आपके वेब खाते से उपयोग लोड नहीं कर सके।",
   "usage.model.unknown": "सैंडबॉक्स कंप्यूट",
   "usage.panel.by_model": "मॉडल के अनुसार",
   "usage.panel.by_run": "ऑप्टिमाइज़ेशन रन के अनुसार",
