@@ -225,6 +225,11 @@
   --border: #e6ded4;
   --input: #d8cdc0;
   --ring: #b4521f;
+  /* The effort slider's ramp: calm neutral, hot amber, white-hot core. */
+  --effort-calm: oklch(0.72 0.012 70);
+  --effort-volt: oklch(0.7 0.2 52);
+  --effort-core: oklch(0.99 0.03 85);
+  --effort-arc: oklch(0.6 0.21 45);
 
   --bg: #f5f0ea;
   --surface-1: #ffffff;
@@ -349,6 +354,10 @@
   --border: #483d34;
   --input: #54483d;
   --ring: #e0935a;
+  --effort-calm: oklch(0.52 0.012 70);
+  --effort-volt: oklch(0.8 0.17 62);
+  --effort-core: oklch(0.99 0.03 85);
+  --effort-arc: oklch(0.99 0.03 85);
 
   --bg: #1c1814;
   --surface-1: #2c2621;
@@ -1726,6 +1735,322 @@ table {
   }
 }
 
+/* The effort slider's fill: a light band sweeps toward the thumb. Its speed
+   and brightness grow with the level (fillMotion). Reduced motion keeps the
+   fill still. The menu unmounts the slider when it closes, so the loop never
+   runs hidden. */
+.effort-sweep {
+  display: none;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .effort-sweep {
+    display: block;
+    position: absolute;
+    inset-block: 0;
+    left: 0;
+    width: 40%;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgb(255 255 255 / var(--sweep-strength)) 50%,
+      transparent
+    );
+    animation: effort-sweep var(--sweep-seconds) cubic-bezier(0.45, 0, 0.55, 1) infinite;
+    will-change: transform;
+  }
+  .effort-sweep:dir(rtl) {
+    animation-direction: reverse;
+  }
+}
+@keyframes effort-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+/* The effort slider's charge. The root sets --effort-heat (effortCharge,
+   0 calm to 1 at the top level) and the registered property eases the
+   whole ramp between levels. The fill runs from a neutral through the brand
+   rufous to a hot amber with a white-hot tip; --effort-top (the upper half
+   of the ramp) drives the bloom, the core line, the orb thumb, the label
+   glow and the panel edge. Sparks, streaks, the pulse and the step-up burst
+   exist only without reduced motion, and the menu unmounts the slider when
+   it closes, so no loop runs hidden. */
+@property --effort-heat {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+.effort-charge {
+  --effort-top: max(0, var(--effort-heat) * 2 - 1);
+  --effort-tone: color-mix(
+    in oklch,
+    var(--effort-calm),
+    var(--primary-fill) calc(min(1, var(--effort-heat) * 4) * 100%)
+  );
+  --effort-hot: color-mix(in oklch, var(--effort-tone), var(--effort-volt) calc(var(--effort-top) * 100%));
+  --effort-tip: color-mix(
+    in oklch,
+    var(--effort-hot),
+    var(--effort-core) calc(max(0, var(--effort-heat) * 4 - 3) * 70%)
+  );
+  --effort-glow: calc(max(0, var(--effort-heat) * 1.3 - 0.2) * 0.85);
+  border-radius: inherit;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in oklch, var(--effort-volt) calc(var(--effort-top) * 45%), transparent),
+    inset 0 -18px 40px -14px
+      color-mix(in oklch, var(--effort-volt) calc(var(--effort-top) * 50%), transparent);
+}
+.effort-level {
+  color: color-mix(
+    in oklch,
+    var(--foreground),
+    var(--primary) calc(min(1, var(--effort-heat) * 4) * 100%)
+  );
+  text-shadow: 0 0 calc(var(--effort-top) * 14px)
+    color-mix(in oklch, var(--effort-volt) calc(var(--effort-top) * 75%), transparent);
+}
+.effort-fill {
+  --effort-mid: color-mix(in oklch, var(--effort-tone), var(--effort-hot) 70%);
+  background: linear-gradient(
+    to right,
+    var(--effort-tone),
+    var(--effort-mid) 40%,
+    var(--effort-hot) 82%,
+    var(--effort-tip)
+  );
+}
+.effort-fill:dir(rtl) {
+  background: linear-gradient(
+    to left,
+    var(--effort-tone),
+    var(--effort-mid) 40%,
+    var(--effort-hot) 82%,
+    var(--effort-tip)
+  );
+}
+/* The bright core line down the middle of the fill. */
+.effort-fill::after {
+  content: "";
+  position: absolute;
+  inset-inline: 10px 6px;
+  top: calc(50% - 1.5px);
+  height: 3px;
+  border-radius: 9999px;
+  background: linear-gradient(to right, transparent, var(--effort-core));
+  filter: blur(0.6px);
+  opacity: calc(var(--effort-top) * 0.9);
+}
+.effort-fill:dir(rtl)::after {
+  background: linear-gradient(to left, transparent, var(--effort-core));
+}
+.effort-glow {
+  background: linear-gradient(to right, transparent, var(--effort-hot) 45%, var(--effort-tip));
+  filter: blur(9px);
+  opacity: var(--effort-glow);
+}
+.effort-glow:dir(rtl) {
+  background: linear-gradient(to left, transparent, var(--effort-hot) 45%, var(--effort-tip));
+}
+/* The wide outer bloom, only in the upper half of the ramp. */
+.effort-glow::after {
+  content: "";
+  position: absolute;
+  inset: -12px -8px;
+  border-radius: inherit;
+  background: inherit;
+  filter: blur(18px);
+  opacity: var(--effort-top);
+}
+.effort-thumb {
+  background-image: radial-gradient(
+    circle at 50% 42%,
+    color-mix(in oklch, white, var(--effort-core) calc(var(--effort-top) * 100%)) 35%,
+    color-mix(in oklch, white, var(--effort-volt) calc(var(--effort-top) * 35%))
+  );
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 0.16),
+    0 3px 8px -1px rgb(0 0 0 / 0.16),
+    0 0 0 calc(var(--effort-top) * 2px) var(--effort-tip),
+    0 0 calc(var(--effort-top) * 20px) calc(var(--effort-top) * 4px)
+      color-mix(in oklch, var(--effort-volt) calc(var(--effort-top) * 85%), transparent);
+}
+.effort-thumb-glow {
+  background: radial-gradient(
+    circle,
+    var(--effort-core) 0,
+    var(--effort-volt) 30%,
+    color-mix(in oklch, var(--effort-volt) 35%, transparent) 50%,
+    transparent 70%
+  );
+  opacity: calc(var(--effort-top) * 0.95);
+}
+.effort-spark,
+.effort-spray,
+.effort-flash,
+.effort-streak {
+  display: none;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .effort-charge {
+    transition: --effort-heat 420ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .effort-glow[data-pulse],
+  .effort-thumb-glow[data-pulse] {
+    animation: effort-pulse 1.1s ease-in-out infinite alternate;
+  }
+  .effort-spark,
+  .effort-spray {
+    display: block;
+    position: absolute;
+    left: 0;
+    top: -4px;
+    width: 16px;
+    height: 8px;
+    transform-origin: 0 50%;
+    opacity: 0;
+    filter: drop-shadow(0 0 2px var(--effort-volt));
+  }
+  .effort-spark {
+    animation: effort-spark var(--spark-t) linear var(--spark-delay) infinite;
+  }
+  .effort-spray {
+    animation: effort-spray 480ms cubic-bezier(0.16, 1, 0.3, 1) var(--spark-delay) both;
+  }
+  .effort-flash {
+    display: block;
+    position: absolute;
+    left: -22px;
+    top: -22px;
+    width: 44px;
+    height: 44px;
+    border-radius: 9999px;
+    background: radial-gradient(
+      circle,
+      var(--effort-core),
+      color-mix(in oklch, var(--effort-volt) 70%, transparent) 38%,
+      transparent 70%
+    );
+    animation: effort-flash 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  /* Thin bolts of current that run along the fill into the thumb. */
+  .effort-streak {
+    display: block;
+    position: absolute;
+    left: 0;
+    width: 45%;
+    height: 8px;
+    color: var(--effort-core);
+    opacity: 0;
+    mask-image: linear-gradient(to right, transparent, black 70%, transparent);
+    animation: effort-streak var(--streak-t) cubic-bezier(0.55, 0, 0.75, 0.4) var(--streak-delay)
+      infinite;
+  }
+  .effort-streak:dir(rtl) {
+    left: auto;
+    right: 0;
+    scale: -1 1;
+    animation-name: effort-streak-rtl;
+  }
+}
+@keyframes effort-pulse {
+  from {
+    opacity: calc(var(--effort-glow) * 0.6);
+    scale: 1;
+  }
+  to {
+    opacity: var(--effort-glow);
+    scale: 1.03 1.35;
+  }
+}
+/* A short, flickering life near the start of each cycle, then idle. The
+   slider gives each spark a new angle and length every cycle. */
+@keyframes effort-spark {
+  0% {
+    opacity: 0;
+    transform: rotate(var(--spark-a)) translateX(14px) scaleX(0.3);
+  }
+  6% {
+    opacity: 1;
+    transform: rotate(var(--spark-a)) translateX(15px) scaleX(var(--spark-r, 1));
+  }
+  12% {
+    opacity: 0.2;
+  }
+  18% {
+    opacity: 1;
+    transform: rotate(var(--spark-a)) translateX(17px) scaleX(var(--spark-r, 1));
+  }
+  25% {
+    opacity: 0.35;
+  }
+  29% {
+    opacity: 0.9;
+  }
+  36%,
+  100% {
+    opacity: 0;
+    transform: rotate(var(--spark-a)) translateX(19px) scaleX(0.5);
+  }
+}
+@keyframes effort-spray {
+  from {
+    opacity: 1;
+    transform: rotate(var(--spark-a)) translateX(12px) scaleX(0.5);
+  }
+  55% {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    transform: rotate(var(--spark-a)) translateX(24px) scaleX(1);
+  }
+}
+@keyframes effort-flash {
+  from {
+    opacity: var(--flash-o);
+    scale: 0.35;
+  }
+  to {
+    opacity: 0;
+    scale: 1.4;
+  }
+}
+@keyframes effort-streak {
+  0% {
+    opacity: 0;
+    transform: translateX(-20%);
+  }
+  30% {
+    opacity: 0.75;
+  }
+  85% {
+    opacity: 0.75;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(130%);
+  }
+}
+@keyframes effort-streak-rtl {
+  0% {
+    opacity: 0;
+    transform: translateX(20%);
+  }
+  30% {
+    opacity: 0.75;
+  }
+  85% {
+    opacity: 0.75;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-130%);
+  }
+}
 /* The inline IDE's 190 px explorer can't fit its title and five header
    actions, so the title truncated to "WORKS…". Show the actions only while
    the explorer is hovered or focused, as VS Code does for view panes. */
