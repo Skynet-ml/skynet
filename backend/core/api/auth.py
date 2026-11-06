@@ -305,7 +305,7 @@ def _authenticate_desktop_token(request: Request, token: str) -> AuthenticatedUs
             or the desktop token errors of :func:`resolve_desktop_principal`.
     """
     route_path = getattr(request.scope.get("route"), "path", None)
-    if route_path is None or not desktop_sync_route_allowed(request.method, route_path):
+    if route_path is None or not desktop_sync_route_allowed(route_path):
         raise DomainError("auth.desktop_token_not_allowed", status=401)
     principal = resolve_desktop_principal(request, token, "sync")
     request.state.auth_channel = "desktop"

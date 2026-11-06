@@ -13,15 +13,18 @@ import hashlib
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from ...registry.core import ServiceRegistry
 from ...storage.models import (
     Base,
     BillingCustomerModel,
@@ -33,6 +36,7 @@ from ...storage.models import (
 from .. import auth as auth_mod
 from .. import desktop_auth
 from ..account_data_service import delete_account, export_account
+from ..app import create_app
 from ..auth import AuthenticatedUser, get_authenticated_user, hash_api_token, is_admin
 from ..desktop_auth import DesktopPrincipal, get_desktop_principal
 from ..errors import DomainError
@@ -576,45 +580,121 @@ def test_sync_token_is_never_admin(harness: Any, monkeypatch: pytest.MonkeyPatch
     assert response.json()["admin"] is False
 
 
-@pytest.mark.parametrize(
-    ("method", "path", "allowed"),
-    [
-        ("GET", "/optimizations", True),
-        ("POST", "/optimizations/{job_id}/cancel", True),
-        ("GET", "/datasets", True),
-        ("GET", "/agent/conversations", True),
-        ("GET", "/billing/wallet", True),
-        ("GET", "/account/experience", True),
-        ("GET", "/connectors/{provider}/browse", True),
-        ("POST", "/settings/user-preferences", True),
-        ("GET", "/optimizationsx", False),
-        ("GET", "/admin/users", False),
-        ("GET", "/settings/api-token", False),
-        ("GET", "/settings/desktop-links", False),
-        ("POST", "/desktop/link/authorize", False),
-        ("GET", "/local/status", False),
-        ("POST", "/auth/security/totp/setup", False),
-        ("POST", "/oauth/consent", False),
-        ("GET", "/account/export", False),
-        ("POST", "/account/delete", False),
-        ("POST", "/billing/checkout", False),
-        ("POST", "/billing/subscription/checkout", False),
-        ("POST", "/billing/portal", False),
-        ("DELETE", "/billing/payment-methods/{payment_method_id}", False),
-        ("PUT", "/billing/byok/keys", False),
-        ("POST", "/billing/byok/openrouter/oauth/start", False),
-        ("PUT", "/connectors/{provider}/credentials", False),
-        ("PUT", "/connectors/huggingface/token", False),
-        ("POST", "/connectors/{provider}/oauth/start", False),
-        ("DELETE", "/connectors/{provider}", False),
-        ("GET", "/secrets", False),
-        ("POST", "/agent/protected-settings", False),
-        ("GET", "/telemetry/summary", False),
-    ],
+_POLICY_CASES: list[tuple[str, bool]] = [
+    ("/optimizations", True),
+    ("/optimizations/{optimization_id}/cancel", True),
+    ("/datasets/library", True),
+    ("/agent/conversations", True),
+    ("/billing/wallet", True),
+    ("/account/experience", True),
+    ("/settings/user-preferences", True),
+    ("/notifications", True),
+    ("/admin/quotas", False),
+    ("/settings/api-token", False),
+    ("/settings/desktop-links", False),
+    ("/desktop/link/authorize", False),
+    ("/local/status", False),
+    ("/auth/security/totp/setup", False),
+    ("/oauth/consent", False),
+    ("/secrets", False),
+    ("/telemetry/summary", False),
+    ("/account/export", False),
+    ("/account/delete", False),
+    ("/account/package-registry", False),
+    ("/agent/protected-settings", False),
+    ("/billing/checkout", False),
+    ("/billing/subscription/checkout", False),
+    ("/billing/portal", False),
+    ("/billing/payment-methods/{payment_method_id}", False),
+    ("/billing/byok/keys", False),
+    ("/billing/byok/openrouter/oauth/start", False),
+    ("/connectors/{provider}", False),
+    ("/connectors/{provider}/credentials", False),
+    ("/connectors/{provider}/oauth/start", False),
+    ("/connectors/{provider}/picker", False),
+    ("/connectors/github/file", False),
+    ("/connectors/huggingface/token", False),
+    ("/optimizations/{optimization_id}/sharing/transfer", False),
+    ("/optimizations/{optimization_id}/visibility", False),
+    ("/datasets/library/{dataset_id}/sharing/members", False),
+    ("/folders/{folder_id}/sharing/transfer", False),
+    ("/tagging-sessions/{session_id}/sharing/members", False),
+    ("/agent/conversations/{conversation_id}/share", False),
+    ("/notifications/push/subscriptions", False),
+    ("/notifications/slack", False),
+]
+
+# Segments that mark a credential, payment, export or access grant. A new
+# sensitive route under an open prefix fails the test until someone reviews it.
+_SENSITIVE_SEGMENTS = frozenset(
+    {
+        "checkout",
+        "credentials",
+        "delete",
+        "export",
+        "keys",
+        "oauth",
+        "payment-methods",
+        "picker",
+        "portal",
+        "secrets",
+        "share",
+        "sharing",
+        "token",
+        "tokens",
+        "visibility",
+    }
 )
-def test_sync_route_policy(method: str, path: str, allowed: bool) -> None:
-    """The allowlist opens account data and keeps credentials and admin closed."""
-    assert desktop_auth.desktop_sync_route_allowed(method, path) is allowed
+
+# Reviewed open routes that carry a sensitive segment. They only receive what
+# someone else shared with this account, or export the account's own run.
+_REVIEWED_SENSITIVE_OPEN = frozenset(
+    {
+        "/datasets/share/{token}",
+        "/datasets/share/{token}/claim",
+        "/folders/share/{token}/claim",
+        "/optimizations/{optimization_id}/export",
+        "/share/{token}",
+        "/share/{token}/claim",
+        "/share/{token}/serve",
+        "/tagging-sessions/share/{token}/claim",
+    }
+)
+
+
+@pytest.fixture(scope="module")
+def live_route_paths() -> set[str]:
+    """Build the real app without starting it and return its route templates.
+
+    Returns:
+        Every ``APIRoute`` template that the production app serves.
+    """
+    with (
+        patch("core.api.app.get_job_store", return_value=MagicMock()),
+        patch("core.api.app.get_worker", return_value=MagicMock()),
+        patch("core.api.app.DspyService"),
+    ):
+        application = create_app(registry=ServiceRegistry())
+    return {route.path for route in application.routes if isinstance(route, APIRoute)}
+
+
+@pytest.mark.parametrize(("path", "allowed"), _POLICY_CASES)
+def test_sync_route_policy(path: str, allowed: bool) -> None:
+    """The allowlist opens account data and keeps credentials, grants and admin closed."""
+    assert desktop_auth.desktop_sync_route_allowed(path) is allowed
+
+
+def test_policy_cases_are_live_routes(live_route_paths: set[str]) -> None:
+    """Every policy case names a route the app really serves."""
+    assert {path for path, _ in _POLICY_CASES} - live_route_paths == set()
+
+
+def test_no_open_route_is_sensitive(live_route_paths: set[str]) -> None:
+    """Every live sync route with a sensitive segment is one that someone reviewed."""
+    opened = {path for path in live_route_paths if desktop_auth.desktop_sync_route_allowed(path)}
+    assert opened
+    sensitive = {path for path in opened if _SENSITIVE_SEGMENTS & set(path.split("/"))}
+    assert sensitive == _REVIEWED_SENSITIVE_OPEN
 
 
 def test_session_jwt_and_pat_are_refused_on_desktop_routes(harness: Any) -> None:

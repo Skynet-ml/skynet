@@ -49,7 +49,6 @@ _SYNC_ROUTE_PREFIXES: tuple[str, ...] = (
     "/analytics",
     "/billing",
     "/blackbox",
-    "/connectors",
     "/continuous",
     "/dashboard",
     "/datasets",
@@ -72,12 +71,15 @@ _SYNC_ROUTE_PREFIXES: tuple[str, ...] = (
     "/wizard",
     "/workflows",
 )
+# Connector routes stay closed: they use the user's stored third-party grants,
+# and the picker returns the raw access token.
 # Inside the open prefixes, these stay on the web app only: account export and
-# deletion, payments, and stored credentials. A stolen Mac token must not reach
-# them.
+# deletion, payments, stored credentials, and changes that outlive a revoke
+# (package index, push endpoints, Slack). A stolen Mac token must not reach them.
 _SYNC_ROUTE_EXCLUDED_PREFIXES: tuple[str, ...] = (
     "/account/delete",
     "/account/export",
+    "/account/package-registry",
     "/agent/protected-settings",
     "/billing/byok/keys",
     "/billing/byok/openrouter",
@@ -86,18 +88,13 @@ _SYNC_ROUTE_EXCLUDED_PREFIXES: tuple[str, ...] = (
     "/billing/portal",
     "/billing/subscription",
     "/billing/webhook",
-    "/connectors/huggingface/oauth",
-    "/connectors/huggingface/token",
-    "/connectors/{provider}/credentials",
-    "/connectors/{provider}/oauth",
-    "/notifications/slack/oauth",
+    "/agent/conversations/{conversation_id}/share",
+    "/notifications/push",
+    "/notifications/slack",
 )
-_SYNC_ROUTE_EXCLUDED: frozenset[tuple[str, str]] = frozenset(
-    {
-        ("DELETE", "/connectors/huggingface"),
-        ("DELETE", "/connectors/{provider}"),
-    }
-)
+# Path segments that give other people access to the account's data. The grant
+# outlives a revoke of the link, so these stay on the web app on every router.
+_SYNC_EXCLUDED_SEGMENTS: frozenset[str] = frozenset({"sharing", "visibility"})
 
 
 def _under(path: str, prefixes: tuple[str, ...]) -> bool:
@@ -113,11 +110,10 @@ def _under(path: str, prefixes: tuple[str, ...]) -> bool:
     return any(path == prefix or path.startswith(f"{prefix}/") for prefix in prefixes)
 
 
-def desktop_sync_route_allowed(method: str, path: str) -> bool:
+def desktop_sync_route_allowed(path: str) -> bool:
     """Return whether a ``sync`` desktop token may call this session route.
 
     Args:
-        method: HTTP method.
         path: The matched route template, never the raw URL, so path
             parameters cannot change the decision.
 
@@ -126,7 +122,7 @@ def desktop_sync_route_allowed(method: str, path: str) -> bool:
     """
     if not _under(path, _SYNC_ROUTE_PREFIXES) or _under(path, _SYNC_ROUTE_EXCLUDED_PREFIXES):
         return False
-    return (method.upper(), path) not in _SYNC_ROUTE_EXCLUDED
+    return _SYNC_EXCLUDED_SEGMENTS.isdisjoint(path.split("/"))
 
 
 @dataclass(frozen=True)
