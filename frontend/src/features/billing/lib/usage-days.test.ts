@@ -1,6 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dayCalls, dayWindow, formatUsageDay, usageDayRows } from "./usage-days.ts";
+import {
+  dayCalls,
+  dayWindow,
+  formatUsageCallDate,
+  formatUsageDay,
+  usageDayRows,
+} from "./usage-days.ts";
+
+test("formatUsageCallDate shows the call's UTC date, also west of UTC", () => {
+  const previous = process.env.TZ;
+  process.env.TZ = "America/Los_Angeles";
+  try {
+    assert.equal(formatUsageCallDate("2026-11-06T01:30:00+00:00", "en-US"), "Nov 6, 2026");
+  } finally {
+    process.env.TZ = previous;
+  }
+});
 
 test("formatUsageDay labels the UTC day itself, also west of UTC", () => {
   const previous = process.env.TZ;

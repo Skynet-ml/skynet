@@ -30,6 +30,7 @@ import { formatCents, formatCentsUsd, formatResetDate, type UsageEntry } from ".
 import {
   dayCalls,
   dayWindow,
+  formatUsageCallDate,
   formatUsageDay,
   usageDayRows,
   type UsageDayRow,
@@ -336,8 +337,19 @@ function RunBreakdown({ entries, locale }: { entries: BillingUsageEntry[]; local
   );
 }
 
-/** One activity-list row. Numerals and model ids stay LTR-islanded. */
-function LedgerRow({ entry, locale }: { entry: BillingUsageEntry; locale: string }) {
+/**
+ * One activity-list row. Numerals and model ids stay LTR-islanded. `utc` shows
+ * the UTC date, so a call inside an open UTC day matches the day's label.
+ */
+function LedgerRow({
+  entry,
+  locale,
+  utc = false,
+}: {
+  entry: BillingUsageEntry;
+  locale: string;
+  utc?: boolean;
+}) {
   const credited = entry.cents > 0;
   const free = entry.cents === 0;
   return (
@@ -370,7 +382,7 @@ function LedgerRow({ entry, locale }: { entry: BillingUsageEntry; locale: string
           </span>
         )}
         <span dir="ltr" className="text-[0.6875rem] text-muted-foreground/70">
-          {formatResetDate(entry.at, locale)}
+          {utc ? formatUsageCallDate(entry.at, locale) : formatResetDate(entry.at, locale)}
         </span>
       </span>
     </li>
@@ -497,7 +509,7 @@ function DayRow({
             <>
               <ul className="flex max-h-72 flex-col overflow-y-auto pe-1">
                 {calls.map((entry) => (
-                  <LedgerRow key={entry.id} entry={entry} locale={locale} />
+                  <LedgerRow key={entry.id} entry={entry} locale={locale} utc />
                 ))}
               </ul>
               {day.calls != null && calls.length < day.calls && (

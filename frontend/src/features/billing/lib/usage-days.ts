@@ -68,6 +68,16 @@ export function formatUsageDay(date: string, locale: string): string {
 }
 
 /**
+ * The medium date of one call inside an open UTC day. It formats in UTC, so
+ * every call shows the same date as the day row above it.
+ */
+export function formatUsageCallDate(iso: string, locale: string): string {
+  return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeZone: "UTC" }).format(
+    new Date(iso),
+  );
+}
+
+/**
  * The UTC bounds of one `YYYY-MM-DD` day, clipped to the selected range so the
  * drill-down never shows calls that the day row did not count.
  */
