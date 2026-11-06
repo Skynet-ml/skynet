@@ -117,6 +117,20 @@ exact status.
 
 Cloud agents such as Devin skip this section.
 
+The credentials for `pool-1` to `pool-4` are in AWS Secrets Manager:
+`skynet/staging/test-accounts` (account 669242775630, region `us-east-2`,
+profile `skynet`). It is a JSON object keyed by slot. Read only your slot,
+inside your own script. For example, sign in with the `devin-login.sh`
+variables, loaded without printing:
+
+```bash
+eval "$(aws secretsmanager get-secret-value --profile skynet --region us-east-2 \
+  --secret-id skynet/staging/test-accounts --query SecretString --output text |
+  SLOT=pool-1 python3 -c 'import json,os,shlex,sys;a=json.load(sys.stdin)[os.environ["SLOT"]];print("export SKYNET_POOL_EMAIL=%s SKYNET_POOL_PASSWORD=%s" % (shlex.quote(a["email"]), shlex.quote(a["password"])))')"
+export PREFIX=SKYNET_POOL APP=https://staging.skynetml.com API=https://api-staging.skynetml.com
+. .agents/skills/skynet-test-accounts/devin-login.sh
+```
+
 - The orchestrator claims an account for you and gives you: the target
   (`staging` or `preview <n>`), the slot (`pool-1` to `pool-4` for staging,
   or `pr-<n>` for a preview), a secret access-file path, a context-file
