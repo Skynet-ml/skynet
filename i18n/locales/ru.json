@@ -324,6 +324,7 @@
     "submit.no_models_available": "В каталоге нет доступных моделей — сначала настройте API-ключ провайдера.",
     "user.storage.quota_exceeded": "Превышена квота хранилища (использовано {used_mb} МБ из {quota_mb} МБ). Освободите место и повторите попытку.",
     "wizard.column_roles_not_object": "column_roles должен быть объектом.",
+    "wizard.setup_draft.too_large": "Черновик настройки слишком большой для сохранения, даже без чата.",
     "wizard.field_must_be_list": "{field} должен быть списком.",
     "wizard.field_non_empty_string": "{field} должен быть непустой строкой.",
     "wizard.invalid_role_values": "Недопустимые значения роли (должно быть одно из {allowed}): {bad}",

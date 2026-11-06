@@ -12,17 +12,17 @@ import {
   DialogTitle,
 } from "@/shared/ui/primitives/dialog";
 
-/** How long ago the user left, as "3 minutes ago" in the app's locale. */
+/** How long ago the user left, as "3 minutes ago" or "2 days ago" in the app's locale. */
 function leftAgo(leftAt: number): string {
   const minutes = Math.max(1, Math.round((Date.now() - leftAt) / 60_000));
-  return new Intl.RelativeTimeFormat(getActiveIntlLocale(), { numeric: "auto" }).format(
-    -minutes,
-    "minute",
-  );
+  const format = new Intl.RelativeTimeFormat(getActiveIntlLocale(), { numeric: "auto" });
+  if (minutes < 60) return format.format(-minutes, "minute");
+  if (minutes < 24 * 60) return format.format(-Math.round(minutes / 60), "hour");
+  return format.format(-Math.round(minutes / (24 * 60)), "day");
 }
 
 /**
- * The offer of a run setup the user left a short time ago: continue it where
+ * The offer of a run setup the user left: continue it where
  * it stopped, with its agent chat, or start a new one. Closing the dialog
  * keeps the setup, so no answer is lost by accident.
  */

@@ -135,6 +135,7 @@ from .routers.registry import create_registry_router
 from .routers.saved_secrets import create_saved_secrets_router
 from .routers.scorer_dependencies import create_scorer_dependencies_router
 from .routers.serve import create_serve_router
+from .routers.setup_draft import create_setup_draft_router
 from .routers.share import create_share_router
 from .routers.shared_with_me import create_shared_with_me_router
 from .routers.submissions import create_submissions_router
@@ -1393,6 +1394,7 @@ def create_app(
     app.include_router(create_agent_settings_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_telemetry_router(job_store=job_store), tags=["Telemetry"])
     app.include_router(create_wizard_router(), tags=["Wizard"])
+    app.include_router(create_setup_draft_router(job_store=job_store), tags=["Wizard"])
     app.include_router(create_workflows_router(job_store=job_store), tags=["Workflows"])
     app.include_router(
         create_submissions_router(service=service, job_store=job_store),

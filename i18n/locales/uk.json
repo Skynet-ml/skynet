@@ -324,6 +324,7 @@
     "submit.no_models_available": "У каталозі немає доступних моделей — спочатку налаштуйте ключ API постачальника.",
     "user.storage.quota_exceeded": "Перевищено квоту сховища (використано {used_mb} МБ з {quota_mb} МБ). Звільніть місце і спробуйте ще раз.",
     "wizard.column_roles_not_object": "column_roles має бути об'єктом.",
+    "wizard.setup_draft.too_large": "Чернетка налаштування завелика для збереження, навіть без чату.",
     "wizard.field_must_be_list": "{field} має бути списком.",
     "wizard.field_non_empty_string": "{field} має бути непорожнім рядком.",
     "wizard.invalid_role_values": "Недійсні значення ролей (мають бути одним із {allowed}): {bad}",

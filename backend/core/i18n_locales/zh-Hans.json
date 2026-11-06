@@ -324,6 +324,7 @@
     "submit.no_models_available": "模型目录中没有可用的模型——请先配置提供方的 API 密钥。",
     "user.storage.quota_exceeded": "存储配额已超出（已使用 {used_mb}MB，共 {quota_mb}MB）。请释放空间后重试。",
     "wizard.column_roles_not_object": "column_roles 必须是一个对象。",
+    "wizard.setup_draft.too_large": "设置草稿太大，即使不含聊天也无法保存。",
     "wizard.field_must_be_list": "{field} 必须是一个列表。",
     "wizard.field_non_empty_string": "{field} 必须是非空字符串。",
     "wizard.invalid_role_values": "角色取值无效（必须是 {allowed} 之一）：{bad}",

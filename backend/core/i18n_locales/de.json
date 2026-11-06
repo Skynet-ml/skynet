@@ -324,6 +324,7 @@
     "submit.no_models_available": "Keine Modelle im Katalog verfügbar — konfigurieren Sie zuerst einen Anbieter-API-Schlüssel.",
     "user.storage.quota_exceeded": "Speicherkontingent überschritten ({used_mb}MB von {quota_mb}MB belegt). Geben Sie Speicherplatz frei und versuchen Sie es erneut.",
     "wizard.column_roles_not_object": "column_roles muss ein Objekt sein.",
+    "wizard.setup_draft.too_large": "Der Einrichtungsentwurf ist zu groß zum Speichern, auch ohne seinen Chat.",
     "wizard.field_must_be_list": "{field} muss eine Liste sein.",
     "wizard.field_non_empty_string": "{field} muss eine nicht-leere Zeichenkette sein.",
     "wizard.invalid_role_values": "Ungültige Rollenwerte (müssen einer von {allowed} sein): {bad}",

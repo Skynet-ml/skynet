@@ -324,6 +324,7 @@
     "submit.no_models_available": "Katalogda kullanılabilir model yok — önce bir sağlayıcı API anahtarı yapılandırın.",
     "user.storage.quota_exceeded": "Depolama kotası aşıldı ({quota_mb}MB içinden {used_mb}MB kullanıldı). Yer açın ve tekrar deneyin.",
     "wizard.column_roles_not_object": "column_roles bir nesne olmalıdır.",
+    "wizard.setup_draft.too_large": "Kurulum taslağı, sohbeti olmadan bile kaydedilemeyecek kadar büyük.",
     "wizard.field_must_be_list": "{field} bir liste olmalıdır.",
     "wizard.field_non_empty_string": "{field} boş olmayan bir dize olmalıdır.",
     "wizard.invalid_role_values": "Geçersiz rol değerleri ({allowed} değerlerinden biri olmalıdır): {bad}",

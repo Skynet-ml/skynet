@@ -324,6 +324,7 @@
     "submit.no_models_available": "कैटलॉग में कोई मॉडल उपलब्ध नहीं है — पहले एक प्रदाता API कुंजी कॉन्फ़िगर करें।",
     "user.storage.quota_exceeded": "स्टोरेज कोटा पार हो गया ({quota_mb}MB में से {used_mb}MB उपयोग किया गया)। स्थान खाली करें और पुनः प्रयास करें।",
     "wizard.column_roles_not_object": "column_roles एक ऑब्जेक्ट होना चाहिए।",
+    "wizard.setup_draft.too_large": "सेटअप ड्राफ़्ट सहेजने के लिए बहुत बड़ा है, उसकी चैट के बिना भी।",
     "wizard.field_must_be_list": "{field} एक सूची होनी चाहिए।",
     "wizard.field_non_empty_string": "{field} एक गैर-रिक्त स्ट्रिंग होनी चाहिए।",
     "wizard.invalid_role_values": "अमान्य भूमिका मान ({allowed} में से एक होना चाहिए): {bad}",

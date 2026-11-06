@@ -23,7 +23,7 @@ export {
 } from "./hooks/use-wizard-state";
 export { isGeneralistAgentEnabled } from "./lib/feature-flag";
 export { lockedCodeFiles } from "./lib/wizard-write";
-export { SETUP_CHAT_KEY, decodeSetupChat } from "./lib/screen-agent";
+export { SETUP_CHAT_KEY, flushSetupChat, legacySetupChatId } from "./lib/screen-agent";
 export {
   deleteConversation,
   getSharedConversation,

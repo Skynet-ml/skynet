@@ -400,6 +400,64 @@ def test_edit_and_resend_replaces_the_edited_turn_and_later_rows(
     assert _stored_contents(engine) == ["first", "שלום", "second, edited", "שלום"]
 
 
+def test_unsaved_turn_streams_the_reply_and_stores_nothing(
+    persistence_client: tuple[TestClient, Engine],
+) -> None:
+    """A turn sent with ``persist`` False streams the reply but writes no conversation or message."""
+    client, engine = persistence_client
+    _fund(engine)
+
+    resp = client.post(
+        "/optimizations/generalist-agent",
+        json={
+            "user_message": "hi",
+            "chat_history": [],
+            "wizard_state": {"wizard_screen": "brief"},
+            "trust_mode": "ask",
+            "conversation_id": "setup-local-id",
+            "persist": False,
+        },
+        headers={"Authorization": f"Bearer {_session_token()}"},
+    )
+
+    assert resp.status_code == 200
+    assert "conversation_meta" not in resp.text
+    assert "שלום" in resp.text
+    with Session(engine) as session:
+        assert session.query(AgentConversationModel).count() == 0
+        assert session.query(AgentMessageModel).count() == 0
+
+
+def test_unsaved_edit_and_regenerate_leave_saved_turns_alone(
+    persistence_client: tuple[TestClient, Engine],
+) -> None:
+    """With ``persist`` False the edit and regenerate fields delete no stored turn."""
+    client, engine = persistence_client
+    _fund(engine)
+    token = _session_token()
+    conversation_id = _start_conversation(client, engine, token, ["one", "two"])
+    before = _stored_contents(engine)
+
+    resp = client.post(
+        "/optimizations/generalist-agent",
+        json={
+            "user_message": "two",
+            "chat_history": [],
+            "wizard_state": {},
+            "trust_mode": "ask",
+            "conversation_id": conversation_id,
+            "regenerate": True,
+            "edit_user_text": "one",
+            "persist": False,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 200
+    assert "conversation_meta" not in resp.text
+    assert _stored_contents(engine) == before
+
+
 def test_retry_of_an_edit_refused_by_the_balance_gate_replaces_the_edited_turn_and_later_rows(
     persistence_client: tuple[TestClient, Engine],
     monkeypatch: pytest.MonkeyPatch,

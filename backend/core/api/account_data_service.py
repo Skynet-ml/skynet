@@ -67,6 +67,7 @@ from ..storage.models import (
     PackageRegistryPreferenceModel,
     ProgressEventModel,
     PushSubscriptionModel,
+    SetupDraftModel,
     SlackConnectionModel,
     TaggingSessionModel,
     TaggingSessionShareGrantModel,
@@ -415,6 +416,20 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
         for connector in connector_rows
     ]
 
+    draft_row = session.get(SetupDraftModel, username)
+    setup_draft = (
+        None
+        if draft_row is None or draft_row.deleted
+        else {
+            "left_at": draft_row.left_at,
+            "values": draft_row.draft_values,
+            "chat": draft_row.chat,
+            "staged_dataset_id": draft_row.staged_dataset_id,
+            "revision": draft_row.revision,
+            "updated_at": _iso(draft_row.updated_at),
+        }
+    )
+
     return {
         "export_format": EXPORT_FORMAT,
         "exported_at": _iso(datetime.now(UTC)),
@@ -424,6 +439,7 @@ def export_account(session: Session, username: str) -> dict[str, Any]:
         "datasets": datasets_out,
         "tagging_sessions": tagging_out,
         "agent_conversations": conversations_out,
+        "setup_draft": setup_draft,
         "billing": billing,
         "api_token": api_token,
         "desktop_links": desktop_links,
@@ -580,6 +596,7 @@ def delete_account(session: Session, username: str) -> AccountDeletionSummary:
     _run_delete(delete(UserQuotaOverrideModel).where(UserQuotaOverrideModel.username == username))
     _run_delete(delete(UserStorageQuotaOverrideModel).where(UserStorageQuotaOverrideModel.username == username))
     _run_delete(delete(AgentStagedDatasetModel).where(AgentStagedDatasetModel.username == username))
+    _run_delete(delete(SetupDraftModel).where(SetupDraftModel.username == username))
     _run_delete(delete(NotificationPreferenceModel).where(NotificationPreferenceModel.username == username))
     _run_delete(delete(NotificationModel).where(NotificationModel.username == username))
     _run_delete(delete(PushSubscriptionModel).where(PushSubscriptionModel.username == username))

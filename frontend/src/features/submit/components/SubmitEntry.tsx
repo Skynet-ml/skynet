@@ -4,14 +4,10 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 
-import { SETUP_CHAT_KEY, decodeSetupChat, deleteConversation } from "@/features/agent-panel";
+import { SETUP_CHAT_KEY, deleteConversation, legacySetupChatId } from "@/features/agent-panel";
+import { setupDraftApi } from "@/shared/lib/api";
 import { sessionIdentity } from "@/shared/lib/session-identity";
-import {
-  clearSetupDraft,
-  decodeSetupDraft,
-  readSetupDraft,
-  type SetupDraft,
-} from "@/shared/lib/setup-draft";
+import { clearSetupDraft, type SetupDraft } from "@/shared/lib/setup-draft";
 
 import {
   WIZARD_SESSION_KEY,
@@ -19,6 +15,7 @@ import {
   keepSessionValue,
   readSessionValue,
 } from "../lib/session-state";
+import { deleteSetupDraft, loadSetupDraft } from "../lib/setup-draft-sync";
 import { WIZARD_V2_STEPS } from "../lib/wizard-v2";
 import { SetupDraftDialog } from "./SetupDraftDialog";
 import { UnifiedWizard } from "./v2/UnifiedWizard";
@@ -37,11 +34,11 @@ function clearRetiredDrafts() {
   } catch {}
 }
 
-/** Drop a left setup with its agent chat, which nothing else would reopen. */
-function discardSetupDraft(draft: SetupDraft | null) {
-  clearSetupDraft();
-  const chat = decodeSetupChat(draft?.values[SETUP_CHAT_KEY] ?? null);
-  if (chat) void deleteConversation(chat.id);
+/** Drop a left setup; a chat an older build saved on the server goes with it. */
+function discardSetupDraft(account: string, draft: SetupDraft | null) {
+  void deleteSetupDraft(account, setupDraftApi);
+  const legacy = legacySetupChatId(draft?.values[SETUP_CHAT_KEY] ?? null);
+  if (legacy) void deleteConversation(legacy);
 }
 
 /** `/submit` root: the one submission wizard, once the session is known. */
@@ -55,30 +52,31 @@ export function SubmitEntry() {
   // The wizard reads this tab's saved setup as it mounts, which the server
   // render cannot see; mounting after hydration keeps both renders equal.
   const [hydrated, setHydrated] = useState(false);
-  // A setup the user left a short time ago, offered back before the wizard mounts.
+  // The account's left setup, offered back before the wizard mounts.
   const [offer, setOffer] = useState<SetupDraft | null>(null);
   useEffect(() => {
     if (accountId === null) return;
     clearRetiredDrafts();
-    const raw = readSetupDraft();
-    const draft = decodeSetupDraft(raw, Date.now());
-    const mine = draft?.account === accountId ? draft : null;
+    let live = true;
     // A reload finds the tab's own setup, and a clone starts from its source run.
     const reload = readSessionValue(WIZARD_SESSION_KEY) !== null;
-    const usable =
-      mine &&
-      decodeWizardSession(
-        mine.values[WIZARD_SESSION_KEY] ?? null,
-        accountId,
-        WIZARD_V2_STEPS as readonly string[],
-      );
-    if (usable && !reload && !searchParams.has("clone")) setOffer(mine);
-    else if (raw !== null && !reload) {
-      // An expired or unusable draft goes with its chat; another account's live one stays.
-      const stale = decodeSetupDraft(raw, null);
-      if (!draft || mine) discardSetupDraft(stale?.account === accountId ? stale : null);
-    }
-    setHydrated(true);
+    void loadSetupDraft(accountId, setupDraftApi).then((draft) => {
+      if (!live) return;
+      const usable =
+        draft &&
+        decodeWizardSession(
+          draft.values[WIZARD_SESSION_KEY] ?? null,
+          accountId,
+          WIZARD_V2_STEPS as readonly string[],
+        );
+      if (usable && !reload && !searchParams.has("clone")) setOffer(draft);
+      // A draft from an older wizard shape cannot reopen, so it goes with its chat.
+      else if (draft && !usable) discardSetupDraft(accountId, draft);
+      setHydrated(true);
+    });
+    return () => {
+      live = false;
+    };
     // Runs once the account is known; the wizard remounts per account.
   }, [accountId]);
 
@@ -99,7 +97,7 @@ export function SubmitEntry() {
           setOffer(null);
         }}
         onStartNew={() => {
-          discardSetupDraft(offer);
+          discardSetupDraft(accountId, offer);
           setOffer(null);
         }}
       />

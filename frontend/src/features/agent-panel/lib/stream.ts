@@ -38,6 +38,8 @@ export interface GeneralistAgentRequest {
   /** Client-generated id of this turn; `/agent-steer` messages posted with
    *  it are delivered into the running turn. */
   steer_key?: string;
+  /** False runs the turn without saving it as a conversation; absent saves it. */
+  persist?: boolean;
 }
 
 interface ConversationMetaPayload {

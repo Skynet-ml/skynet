@@ -3399,6 +3399,59 @@ export function getStagedDataset(stagedDatasetId: string) {
   return request<StagedDatasetResponse>(`/datasets/staged/${encodeURIComponent(stagedDatasetId)}`);
 }
 
+/** The account's one left setup as the server keeps it; the chat travels apart from the keys. */
+export interface ServerSetupDraft {
+  left_at: number;
+  values: Record<string, string>;
+  chat: Record<string, unknown> | null;
+  staged_dataset_id: string | null;
+}
+
+/** The account's draft slot: a save or delete changes it only from its current revision. */
+export interface ServerSetupDraftSlot {
+  revision: number;
+  /** False when the call named a revision that was no longer current. */
+  changed: boolean;
+  draft: ServerSetupDraft | null;
+}
+
+/** The page and count of a save; a browser copy sent again also names the revision it builds on. */
+export interface SetupDraftSaveMark {
+  writer?: string;
+  seq?: number;
+  copyBase?: number;
+}
+
+/** The caller's left setup calls, in the shape the setup draft sync takes. */
+export const setupDraftApi = {
+  get: (signal?: AbortSignal) => request<ServerSetupDraftSlot>("/wizard/setup-draft", { signal }),
+  put: (
+    draft: ServerSetupDraft,
+    baseRevision: number,
+    keepalive = false,
+    signal?: AbortSignal,
+    mark: SetupDraftSaveMark = {},
+  ) => {
+    const params = new URLSearchParams({ base_revision: String(baseRevision) });
+    if (mark.writer !== undefined && mark.seq !== undefined) {
+      params.set("writer", mark.writer);
+      params.set("seq", String(mark.seq));
+    }
+    if (mark.copyBase !== undefined) params.set("copy_base", String(mark.copyBase));
+    return request<ServerSetupDraftSlot>(`/wizard/setup-draft?${params}`, {
+      method: "PUT",
+      body: JSON.stringify(draft),
+      keepalive,
+      signal,
+    });
+  },
+  delete: (revision: number, signal?: AbortSignal) =>
+    request<ServerSetupDraftSlot>(`/wizard/setup-draft?revision=${revision}`, {
+      method: "DELETE",
+      signal,
+    }),
+};
+
 export function validateCode(payload: {
   signature_code?: string;
   metric_code?: string;

@@ -324,6 +324,7 @@
     "submit.no_models_available": "Aucun modèle disponible dans le catalogue — configurez d'abord une clé API de fournisseur.",
     "user.storage.quota_exceeded": "Quota de stockage dépassé ({used_mb} Mo sur {quota_mb} Mo utilisés). Libérez de l'espace et réessayez.",
     "wizard.column_roles_not_object": "column_roles doit être un objet.",
+    "wizard.setup_draft.too_large": "Le brouillon de configuration est trop volumineux pour être enregistré, même sans sa conversation.",
     "wizard.field_must_be_list": "{field} doit être une liste.",
     "wizard.field_non_empty_string": "{field} doit être une chaîne non vide.",
     "wizard.invalid_role_values": "Valeurs de rôle invalides (doivent être l'une de {allowed}) : {bad}",

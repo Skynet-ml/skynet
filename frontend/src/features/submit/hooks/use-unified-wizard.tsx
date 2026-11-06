@@ -16,7 +16,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { toast } from "react-toastify";
 
-import { SETUP_CHAT_KEY, useWizardStateOptional } from "@/features/agent-panel";
+import { flushSetupChat, useWizardStateOptional } from "@/features/agent-panel";
 import { useConnectors } from "@/features/connectors";
 import { formatBudgetUsd, usePricingTerms } from "@/features/billing";
 import {
@@ -35,12 +35,17 @@ import {
   getStagedDataset,
   isInsufficientFundsError,
   isStorageQuotaError,
+  setupDraftApi,
   submitRepoRun,
   submitUnifiedRun,
   enableContinuous,
 } from "@/shared/lib/api";
 import { contractCheckMessage } from "@/shared/lib/i18n";
-import { clearSetupDraft, writeSetupDraft } from "@/shared/lib/setup-draft";
+import {
+  SETUP_CHAT_KEPT_EVENT,
+  SETUP_SUBMITTED_EVENT,
+  clearSetupDraft,
+} from "@/shared/lib/setup-draft";
 import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import type { ContinuousEnableRequest } from "@/shared/types/continuous";
@@ -102,9 +107,14 @@ import {
   encodeWizardSession,
   keepSessionValue,
   readSessionValue,
-  setupWorthKeeping,
 } from "../lib/session-state";
 import { metricUsesModel } from "../lib/scorer-dependencies";
+import {
+  SETUP_DRAFT_SAVE_DELAY_MS,
+  deleteSetupDraft,
+  saveSetupDraft,
+  setupDraftOf,
+} from "../lib/setup-draft-sync";
 import { computeStepIssue, hasModel, runBlockedReason as blockedReason } from "../lib/step-issue";
 import { canEnterStep, canMoveForward } from "../lib/wizard-steps";
 import { createStepViewTracker } from "../lib/wizard-telemetry";
@@ -252,6 +262,34 @@ function forgetWizardSession() {
     for (const key of [WIZARD_SESSION_KEY, ...WIZARD_VIEW_KEYS])
       window.sessionStorage.removeItem(key);
   } catch {}
+}
+
+/**
+ * Save the setup the user paused on as the account's draft. A setup this page
+ * saved and the user then emptied leaves the server too, or /submit would
+ * offer the old one back.
+ *
+ * Args:
+ *   account: The signed-in account.
+ *   state: The wizard's state.
+ *   submitted: True once the setup was submitted.
+ *   saved: Whether the server may hold this page's setup; updated here.
+ */
+function saveLeftSetup(
+  account: string,
+  state: WizardV2State,
+  submitted: { current: boolean },
+  saved: { current: boolean },
+) {
+  if (submitted.current) return;
+  const draft = setupDraftOf(account, state);
+  if (draft) {
+    saved.current = true;
+    void saveSetupDraft(draft, setupDraftApi);
+  } else if (saved.current) {
+    saved.current = false;
+    void deleteSetupDraft(account, setupDraftApi);
+  }
 }
 
 const Ctx = createContext<WizardV2Shell | null>(null);
@@ -575,6 +613,7 @@ export function WizardV2Provider({
   // A submitted run opens on its page once the splash has played.
   const openSubmitted = async (optimizationId: string) => {
     submittedRef.current = true;
+    void deleteSetupDraft(accountId, setupDraftApi);
     forgetWizardSession();
     await fileNewRun(optimizationId, state.meta.folderId);
     const jobUrl = `/optimizations/${optimizationId}`;
@@ -801,29 +840,34 @@ export function WizardV2Provider({
       } catch {}
     }
   }, [scheduledRun]);
-  // Leaving the page ends the tab's setup but keeps a copy in this browser
-  // for a short time, which /submit offers back on return. A reload or a tab
-  // close runs no cleanup, so the page hide keeps the copy too; the mount
-  // drops it again, as a reload finds the tab's own setup.
+  // Leaving the page keeps the setup as the account's draft on the server,
+  // and in this browser until the server takes it. /submit offers the draft
+  // back on any device until a submit or Start new. A reload or a tab close
+  // runs no cleanup, so the page hide keeps the draft too; the mount drops
+  // the browser copy, as a reload finds the tab's own setup.
   const leftStateRef = useRef(state);
   useEffect(() => {
     leftStateRef.current = state;
   }, [state]);
+  const openedStateRef = useRef(state);
+  const [openedWithSetup] = useState(() => setupDraftOf(accountId, state) !== null);
+  // True while the server holds a setup this page saved or opened.
+  const savedDraftRef = useRef(openedWithSetup);
   useEffect(() => {
     const keep = () => {
-      const left = leftStateRef.current;
-      if (submittedRef.current || !setupWorthKeeping(left)) {
+      // A reload reopens the chat from the tab, so it is written even when no draft is kept.
+      flushSetupChat();
+      const draft = submittedRef.current ? null : setupDraftOf(accountId, leftStateRef.current);
+      if (!draft) {
         clearSetupDraft();
+        // A setup emptied less than a save delay before leaving still leaves the server.
+        if (!submittedRef.current && savedDraftRef.current) {
+          savedDraftRef.current = false;
+          void deleteSetupDraft(accountId, setupDraftApi);
+        }
         return;
       }
-      const values: Record<string, string> = {
-        [WIZARD_SESSION_KEY]: encodeWizardSession(accountId, left),
-      };
-      for (const key of [...WIZARD_VIEW_KEYS, SETUP_CHAT_KEY]) {
-        const value = readSessionValue(key);
-        if (value !== null) values[key] = value;
-      }
-      writeSetupDraft({ account: accountId, leftAt: Date.now(), values });
+      void saveSetupDraft(draft, setupDraftApi, true);
     };
     clearSetupDraft();
     window.addEventListener("pagehide", keep);
@@ -833,6 +877,42 @@ export function WizardV2Provider({
       forgetWizardSession();
     };
   }, [accountId]);
+  // A change saves the draft once the user pauses. The setup the wizard opens
+  // with is already the server's, so only a change starts a save.
+  useEffect(() => {
+    if (state === openedStateRef.current) return;
+    const timer = window.setTimeout(
+      () => saveLeftSetup(accountId, state, submittedRef, savedDraftRef),
+      SETUP_DRAFT_SAVE_DELAY_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [accountId, state]);
+  // A chat-only turn changes no answer, so the panel's signal starts the save.
+  useEffect(() => {
+    let timer: number | undefined;
+    const chatKept = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(
+        () => saveLeftSetup(accountId, leftStateRef.current, submittedRef, savedDraftRef),
+        SETUP_DRAFT_SAVE_DELAY_MS,
+      );
+    };
+    window.addEventListener(SETUP_CHAT_KEPT_EVENT, chatKept);
+    return () => {
+      window.removeEventListener(SETUP_CHAT_KEPT_EVENT, chatKept);
+      window.clearTimeout(timer);
+    };
+  }, [accountId]);
+  // The agent can submit while the wizard is open; its unmount must then keep no draft.
+  useEffect(() => {
+    const agentSubmitted = () => {
+      submittedRef.current = true;
+      // As after the wizard's own submit: a reload during the splash must not reopen the setup.
+      forgetWizardSession();
+    };
+    window.addEventListener(SETUP_SUBMITTED_EVENT, agentSubmitted);
+    return () => window.removeEventListener(SETUP_SUBMITTED_EVENT, agentSubmitted);
+  }, []);
 
   // A table the agent panel staged reaches the wizard by event while it is
   // open, or through the session key when it mounts later.
