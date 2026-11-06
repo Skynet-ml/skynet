@@ -77,7 +77,6 @@ from ..worker.engine import BackgroundWorker, get_worker
 from .directory_client import build_directory_client
 from .errors import DomainError
 from .mcp_mount import mount_mcp_on_app
-from .mcp_oauth import load_or_create_local_token, resource_url
 from .model_catalog import prewarm_catalog
 from .observability import (
     STARTUP_WORK_LOCK_KEY,
@@ -1428,8 +1427,6 @@ def create_app(
         mount_mcp_on_app(app)
     except ImportError as exc:
         logger.warning("FastMCP not available, skipping /mcp mount: %s", exc)
-    if settings.local_mode and settings.local_state_dir and resource_url():
-        load_or_create_local_token(settings.local_state_dir, resource_url())
     mount_remote_mcp(
         app,
         service=service,

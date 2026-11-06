@@ -22,9 +22,11 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from ...billing.budgets import BudgetConflictError
 from ...config import settings
 from ...storage.models import Base, McpRunDraftModel, UserModel
 from .. import remote_mcp_repo
+from ..errors import DomainError
 from ..remote_mcp import mount_remote_mcp
 from ..remote_mcp_repo import register_repo_tools
 from .test_remote_mcp import (
@@ -267,6 +269,56 @@ def test_submit_default_key_follows_the_draft(harness: Any) -> None:
     assert first != changed
     assert first.startswith(f"mcp-draft-{draft_id}-")
     assert calls["submits"][0]["username"] == USER
+
+
+def test_submit_waits_while_other_usage_settles(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer in_progress, without an error, while the wallet has pending usage."""
+    client, _engine, _calls = harness
+
+    def pending(request: Any, **kwargs: Any) -> Any:
+        """Refuse the submission like a wallet with unsettled usage."""
+        raise DomainError("budget.pending", status=409)
+
+    monkeypatch.setattr(remote_mcp_repo, "submit_repo_payload", pending)
+    draft_id = _complete_draft(client)
+    body = _payload(_call(client, "repo_draft_submit", {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True}))
+    assert body["status"] == "in_progress"
+    assert body["retry_after_seconds"] == remote_mcp_repo._PENDING_RETRY_SECONDS
+
+
+def test_submit_refuses_a_lower_limit_for_a_used_key(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refuse a retry whose key already made a higher budget, and name its run."""
+    client, _engine, calls = harness
+
+    class _Budgets:
+        """Stand in for a budget service that holds a 900-cent budget for the key."""
+
+        def __init__(self, *, engine: Any) -> None:
+            """Accept the engine."""
+
+        def find_by_creation_key(self, username: str, idempotency_key: str) -> Any:
+            """Return the budget the first call made."""
+            return SimpleNamespace(total_cents=900, job_id="opt-old")
+
+        def create(self, username: str, total_cents: int, **kwargs: Any) -> Any:
+            """Refuse another total for the same key."""
+            raise BudgetConflictError("total differs")
+
+    monkeypatch.setattr(remote_mcp_repo, "BudgetService", _Budgets)
+    monkeypatch.setattr(
+        remote_mcp_repo,
+        "resolve_submission_replay_keys",
+        lambda request, *, username, workflow, supplied_key: SimpleNamespace(budget="budget-key", job=supplied_key),
+    )
+    draft_id = _complete_draft(client)
+    arguments = {"draft_id": draft_id, "max_cost_cents": 500, "confirm": True}
+    error = json.loads(_error_text(_call(client, "repo_draft_submit", arguments)))
+    assert (error["code"], error["optimization_id"]) == ("budget.conflict", "opt-old")
+    assert calls["submits"] == []
+    assert _payload(_call(client, "repo_draft_submit", {**arguments, "max_cost_cents": 900})) == {
+        "optimization_id": "opt-1",
+        "next_tool": "get_run",
+    }
 
 
 def test_start_purges_old_drafts_and_caps_the_count(harness: Any) -> None:

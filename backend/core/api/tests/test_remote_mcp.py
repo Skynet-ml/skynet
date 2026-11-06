@@ -27,7 +27,7 @@ from ...models import BlackboxRunRequest
 from ...models.optimizations import JobCancelResponse
 from ...models.unified import UnifiedRunRequest
 from ...storage.models import Base, McpGrantModel, McpTokenModel, UserModel
-from .. import mcp_oauth, remote_mcp
+from .. import remote_mcp
 from ..auth import hash_api_token
 from ..errors import DomainError
 from ..model_billing import enforce_local_mode_sources, normalize_model_token_sources, request_model_configs
@@ -616,83 +616,6 @@ def test_viewer_grant_can_read_but_not_stop(harness: Any, monkeypatch: pytest.Mo
 
 
 LOCAL_URL = "http://127.0.0.1:8123/remote-mcp"
-
-
-@pytest.fixture
-def local_harness(harness: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> Any:
-    """Switch the harness to the Mac app's local mode and write its token file.
-
-    Args:
-        harness: The remote MCP harness.
-        monkeypatch: Pytest monkeypatch fixture.
-        tmp_path: Temporary local state directory.
-
-    Returns:
-        A ``(client, token, tmp_path)`` tuple.
-    """
-    client, _store, _calls = harness
-    monkeypatch.setattr(mcp_oauth, "_local_token", None)
-    monkeypatch.setattr(settings, "mcp_resource_url", LOCAL_URL)
-    monkeypatch.setattr(settings, "local_mode", True)
-    monkeypatch.setattr(settings, "local_user_email", USER.upper())
-    token = mcp_oauth.load_or_create_local_token(tmp_path, LOCAL_URL)
-    return client, token, tmp_path
-
-
-def _local_tools(client: TestClient, token: str) -> Any:
-    """List the tools on the local MCP URL with ``token``.
-
-    Args:
-        client: Test client.
-        token: Bearer token.
-
-    Returns:
-        The HTTP response.
-    """
-    return client.post(
-        LOCAL_URL,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json, text/event-stream",
-            "Content-Type": "application/json",
-        },
-        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-    )
-
-
-def test_local_token_file_is_private_and_stable(local_harness: Any) -> None:
-    """Write the URL and token for this user only, and keep the token across restarts."""
-    _client, token, state_dir = local_harness
-    path = state_dir / mcp_oauth.LOCAL_MCP_FILE
-    assert path.stat().st_mode & 0o777 == 0o600
-    assert json.loads(path.read_text()) == {"url": LOCAL_URL, "token": token}
-    assert token.startswith(mcp_oauth.LOCAL_TOKEN_PREFIX)
-    other_url = "http://127.0.0.1:9000/remote-mcp"
-    assert mcp_oauth.load_or_create_local_token(state_dir, other_url) == token
-    assert json.loads(path.read_text())["url"] == other_url
-
-
-def test_local_token_reaches_the_local_server(local_harness: Any) -> None:
-    """Accept the local token on the loopback URL as the local user."""
-    client, token, _state_dir = local_harness
-    resp = _local_tools(client, token)
-    assert resp.status_code == 200, resp.text
-    assert "get_run" in {tool["name"] for tool in resp.json()["result"]["tools"]}
-
-
-@pytest.mark.parametrize("case", ["hosted", "wrong_token", "no_user"])
-def test_local_token_is_refused_outside_its_conditions(
-    local_harness: Any, monkeypatch: pytest.MonkeyPatch, case: str
-) -> None:
-    """Refuse the local token outside local mode, for another value, and without the local user."""
-    client, token, _state_dir = local_harness
-    if case == "hosted":
-        monkeypatch.setattr(settings, "local_mode", False)
-    elif case == "wrong_token":
-        token = token[:-4] + "AAAA"
-    else:
-        monkeypatch.setattr(settings, "local_user_email", "nobody@example.test")
-    assert _local_tools(client, token).status_code == 401
 
 
 def test_local_mode_serves_the_mcp_on_the_app_port(tmp_path: Any) -> None:

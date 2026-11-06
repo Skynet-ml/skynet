@@ -4,8 +4,8 @@ Skynet has one MCP server. An outside agent (Claude Code, Codex, Cursor or
 any standard MCP client) uses it to work with the whole platform. The agent
 can also set up a repository run step by step and start it.
 
-The hosted app and the Mac app serve the same server. Only the sign-in is
-different.
+The hosted app and the Mac app serve the same server and the same OAuth
+connect flow. Only the URL is different.
 
 ## Connect to the hosted server
 
@@ -29,21 +29,23 @@ claude mcp add --transport http skynet https://mcp.skynetml.com/mcp
 
 ## Connect to the Mac app
 
-The Mac app runs the backend on this machine. At start, the backend writes
-`mcp.json` into its state folder (`APP_LOCAL_STATE_DIR`). The file has mode
-`0600` and holds two values:
+The Mac app serves the same OAuth connect flow on this machine. Its API
+uses the first free port from 48100 to 48119, so the URL is usually
+`http://127.0.0.1:48100/remote-mcp`. The app log shows the port in the
+`ports api=...` line.
 
-- `url`: the local server, for example `http://127.0.0.1:8000/remote-mcp`.
-- `token`: a local bearer token. It stays the same across restarts.
-
-Give the client the URL and send the token in the `Authorization` header:
+Add the URL to your client:
 
 ```bash
-claude mcp add --transport http skynet-local http://127.0.0.1:8000/remote-mcp --header "Authorization: Bearer <token from mcp.json>"
+claude mcp add --transport http skynet-local http://127.0.0.1:48100/remote-mcp
 ```
 
-The local token acts for the Mac app's linked account and has both scopes. A
-hosted server refuses it. Do not copy the token into logs or shared files.
+The client opens the Mac app's consent page in your browser. The Mac app
+signs in to its own account by itself. Approve the scopes. The agent then
+acts for the Mac app's account.
+
+If the app starts on another port, connect the client again with the new
+URL.
 
 ## Set up and start a repository run
 

@@ -14,32 +14,22 @@ names an ``https`` URL as its ``client_id``: a client ID metadata document
 
 ``core.api.auth.get_authenticated_user`` never accepts a ``skym_`` token: it is
 not a session JWT and has no PAT prefix. Only the remote MCP server reads it.
-
-The Mac app has no OAuth sign-in for local clients. In local mode the server
-also accepts one ``skym_local_`` token, kept with the server URL in
-``mcp.json`` in the local state directory. A local MCP client reads that file
-to connect. The file is readable only by the user (SKY-320).
 """
 
 from __future__ import annotations
 
 import base64
 import contextlib
-import fcntl
 import hashlib
-import hmac
 import ipaddress
 import json
-import os
 import re
 import secrets
 import socket
-import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -60,9 +50,6 @@ SCOPE_WRITE = "runs:write"
 
 ACCESS_TOKEN_PREFIX = "skym_at_"
 REFRESH_TOKEN_PREFIX = "skym_rt_"
-LOCAL_TOKEN_PREFIX = "skym_local_"
-LOCAL_MCP_FILE = "mcp.json"
-LOCAL_GRANT_ID = "local"
 TOKEN_KIND_ACCESS = "access"
 TOKEN_KIND_REFRESH = "refresh"
 
@@ -86,10 +73,6 @@ _CIMD_CACHE_TTL_SECONDS = 300.0
 _CIMD_FAILURE_TTL_SECONDS = 60.0
 _CIMD_CACHE_MAX = 256
 _CIMD_MAX_CONCURRENT_FETCHES = 8
-# Set once at startup in local mode. resolve_principal accepts this token only
-# while local mode is on.
-_local_token: str | None = None
-
 _cimd_cache: dict[str, tuple[float, McpClient | None]] = {}
 _cimd_lock = threading.Lock()
 _cimd_fetch_slots = threading.BoundedSemaphore(_CIMD_MAX_CONCURRENT_FETCHES)
@@ -617,8 +600,6 @@ def resolve_principal(job_store: Any, token: str) -> McpPrincipal:
         DomainError: 503 from the monthly active user cap.
     """
     audience = resource_url()
-    if audience and token.startswith(LOCAL_TOKEN_PREFIX):
-        return _local_principal(job_store, token)
     if not audience or not token.startswith(ACCESS_TOKEN_PREFIX):
         raise McpTokenError
     now = datetime.now(UTC)
@@ -646,85 +627,3 @@ def resolve_principal(job_store: Any, token: str) -> McpPrincipal:
         session.commit()
     enforce_monthly_active_user_limit(job_store, principal.username)
     return principal
-
-
-def _local_principal(job_store: Any, token: str) -> McpPrincipal:
-    """Check the Mac app's local MCP token and return the local user.
-
-    Args:
-        job_store: Store whose ORM engine holds the accounts.
-        token: Raw bearer token with the local prefix.
-
-    Returns:
-        The local user, with read and write scopes.
-
-    Raises:
-        McpTokenError: Outside local mode, before startup made the token, for
-            another token, or before the local user signed in once.
-    """
-    expected = _local_token
-    if not settings.local_mode or expected is None or not hmac.compare_digest(token, expected):
-        raise McpTokenError
-    username = settings.local_user_email.strip().lower()
-    with Session(job_store.engine) as session:
-        if session.get(UserModel, username) is None:
-            raise McpTokenError
-    return McpPrincipal(username=username, grant_id=LOCAL_GRANT_ID, scopes=frozenset({SCOPE_READ, SCOPE_WRITE}))
-
-
-def load_or_create_local_token(state_dir: str | os.PathLike[str], url: str) -> str:
-    """Write the local MCP connection file and keep its token for this process.
-
-    The token stays the same across restarts, so a client set up once keeps
-    working. The URL is written again each time, because the port can change.
-    The API and the worker can start together, so the write runs under an
-    exclusive file lock. The file is written to a private temp file and moved
-    into place, so a client never reads it half written.
-
-    Args:
-        state_dir: The local-mode state directory.
-        url: The local MCP server URL.
-
-    Returns:
-        The local MCP token.
-    """
-    global _local_token
-    directory = Path(state_dir)
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path = directory / LOCAL_MCP_FILE
-    lock_fd = os.open(directory / f"{LOCAL_MCP_FILE}.lock", os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        token = _read_local_token(path) or f"{LOCAL_TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
-        fd, temp_name = tempfile.mkstemp(dir=directory, prefix=f".{LOCAL_MCP_FILE}.")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump({"url": url, "token": token}, handle)
-                handle.flush()
-                os.fsync(handle.fileno())
-            Path(temp_name).replace(path)
-        finally:
-            Path(temp_name).unlink(missing_ok=True)
-    finally:
-        os.close(lock_fd)
-    _local_token = token
-    return token
-
-
-def _read_local_token(path: Path) -> str | None:
-    """Read the token from an existing local MCP connection file.
-
-    Args:
-        path: The connection file.
-
-    Returns:
-        The stored token, or ``None`` when the file is missing or not valid.
-    """
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, ValueError):
-        return None
-    token = data.get("token") if isinstance(data, dict) else None
-    if isinstance(token, str) and token.startswith(LOCAL_TOKEN_PREFIX) and len(token) > len(LOCAL_TOKEN_PREFIX) + 20:
-        return token
-    return None
