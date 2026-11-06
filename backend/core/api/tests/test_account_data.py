@@ -39,6 +39,7 @@ from ...storage.models import (
     NotificationModel,
     NotificationPreferenceModel,
     PushSubscriptionModel,
+    SetupDraftModel,
     SlackConnectionModel,
     TelemetryEventModel,
     UserConnectorModel,
@@ -193,6 +194,33 @@ def test_export_returns_owned_data_without_secrets(harness: SimpleNamespace) -> 
     assert body["account"]["intake_profile"] is None
     # No other account's rows leak into this export.
     assert all(job["optimization_id"] != f"job-{_OTHER}" for job in body["optimizations"])
+
+
+def test_export_carries_the_saved_setup_draft_until_it_is_deleted(harness: SimpleNamespace) -> None:
+    """Export returns the account's saved setup and chat, and nothing once the draft is deleted."""
+    assert harness.client.get("/account/export").json()["setup_draft"] is None
+
+    with Session(harness.engine) as session:
+        session.add(
+            SetupDraftModel(
+                username=_EMAIL,
+                left_at=1700000000000,
+                draft_values={"goal": "summarize tickets"},
+                chat={"messages": [{"role": "user", "content": "help me set up"}]},
+                revision=3,
+            )
+        )
+        session.commit()
+    draft = harness.client.get("/account/export").json()["setup_draft"]
+    assert draft["values"] == {"goal": "summarize tickets"}
+    assert draft["chat"]["messages"][0]["content"] == "help me set up"
+    assert draft["left_at"] == 1700000000000
+    assert draft["revision"] == 3
+
+    with Session(harness.engine) as session:
+        session.get(SetupDraftModel, _EMAIL).deleted = True
+        session.commit()
+    assert harness.client.get("/account/export").json()["setup_draft"] is None
 
 
 def test_delete_rejects_wrong_password_for_local_account(harness: SimpleNamespace) -> None:

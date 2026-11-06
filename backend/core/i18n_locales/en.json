@@ -237,6 +237,7 @@
     "webauthn.invalid_credential": "This passkey couldn't be verified.",
     "webauthn.not_found": "Passkey not found.",
     "wizard.column_roles_not_object": "column_roles must be an object.",
+    "wizard.setup_draft.too_large": "The setup draft is too large to save, even without its chat.",
     "wizard.field_must_be_list": "{field} must be a list.",
     "wizard.field_non_empty_string": "{field} must be a non-empty string.",
     "wizard.invalid_role_values": "Invalid role values (must be one of {allowed}): {bad}",

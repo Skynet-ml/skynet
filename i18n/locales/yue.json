@@ -316,6 +316,7 @@
     "webauthn.invalid_credential": "無法驗證此 Passkey。",
     "webauthn.not_found": "搵唔到 Passkey。",
     "wizard.column_roles_not_object": "column_roles 必須係一個物件（object）。",
+    "wizard.setup_draft.too_large": "設定草稿太大，就算唔連傾偈紀錄都儲存唔到。",
     "wizard.field_must_be_list": "{field} 必須係一個清單（list）。",
     "wizard.field_non_empty_string": "{field} 必須係非空白字串。",
     "wizard.invalid_role_values": "無效嘅 role 數值（必須為 {allowed} 其中之一）：{bad}",

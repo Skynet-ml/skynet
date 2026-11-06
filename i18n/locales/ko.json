@@ -324,6 +324,7 @@
     "submit.no_models_available": "카탈로그에 사용 가능한 모델이 없습니다. 먼저 공급자 API 키를 구성하세요.",
     "user.storage.quota_exceeded": "저장 용량 할당량을 초과했습니다({quota_mb}MB 중 {used_mb}MB 사용). 공간을 확보하고 다시 시도하세요.",
     "wizard.column_roles_not_object": "column_roles는 객체여야 합니다.",
+    "wizard.setup_draft.too_large": "설정 초안이 너무 커서 채팅을 빼도 저장할 수 없습니다.",
     "wizard.field_must_be_list": "{field}은(는) 리스트여야 합니다.",
     "wizard.field_non_empty_string": "{field}은(는) 비어 있지 않은 문자열이어야 합니다.",
     "wizard.invalid_role_values": "유효하지 않은 역할 값입니다({allowed} 중 하나여야 함): {bad}",

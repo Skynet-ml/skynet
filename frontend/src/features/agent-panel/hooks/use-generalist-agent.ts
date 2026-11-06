@@ -92,8 +92,11 @@ export interface GeneralistAgentState {
    * conversation has no in-memory session and must be loaded from the server.
    */
   activateConversation: (id: string) => boolean;
-  /** Open a server-loaded conversation as the displayed session. */
-  openConversation: (id: string, messages: AgentMessage[]) => void;
+  /**
+   * Open a conversation as the displayed session. An `unsaved` one lives
+   * only in the browser: its turns go out with `persist: false`.
+   */
+  openConversation: (id: string, messages: AgentMessage[], options?: { unsaved?: boolean }) => void;
   /** Drop a conversation's session (aborting its stream) after deletion. */
   discardConversation: (id: string) => void;
   /** Conversation ids with a stream running or waiting in the queue. */
@@ -174,6 +177,8 @@ interface SessionView {
   /** Machine code of the error, e.g. the balance gate's, so the panel can offer its way out. */
   errorCode: string | null;
   pendingApproval: PendingApprovalPayload | null;
+  /** The server keeps no copy: its id is the browser's own and its turns are not saved. */
+  unsaved?: boolean;
 }
 
 /** A turn captured at send time, replayed verbatim when a slot frees up. */
@@ -514,6 +519,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         if (streamingKeysRef.current.delete(key)) requestPump();
       };
 
+      const unsaved = sessionsRef.current.get(key)?.unsaved === true;
       const steerKey = newSteerKey();
       const steerQueue = steerQueueFor(key);
       const applySteer = ({ ids, text }: { ids: string[]; text: string }) => {
@@ -560,7 +566,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
             chat_history: run.chatHistory,
             wizard_state: run.wizardState,
             trust_mode: run.trustMode,
-            conversation_id: sessionsRef.current.get(key)?.conversationId ?? null,
+            conversation_id: unsaved ? null : (sessionsRef.current.get(key)?.conversationId ?? null),
+            persist: unsaved ? false : undefined,
             regenerate: run.regenerate,
             edit_user_text: run.editUserTurn?.text,
             edit_user_occurrence: run.editUserTurn?.occurrence,
@@ -1070,7 +1077,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       for (const [key, session] of draft) {
         if (key === keepKey) continue;
         if (isBusy(session) || session.status === "error") continue;
-        if (session.conversationId === null && session.messages.length > 0) continue;
+        if ((session.conversationId === null || session.unsaved) && session.messages.length > 0) continue;
         if (steerQueues.get(key)?.hasPending()) continue;
         draft.delete(key);
         runtimesRef.current.delete(key);
@@ -1112,10 +1119,15 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
   );
 
   const openConversation = React.useCallback(
-    (id: string, loaded: AgentMessage[]) => {
+    (id: string, loaded: AgentMessage[], options?: { unsaved?: boolean }) => {
       const key = nextKey();
       commit((draft) => {
-        draft.set(key, { ...blankSession(key), conversationId: id, messages: loaded });
+        draft.set(key, {
+          ...blankSession(key),
+          conversationId: id,
+          messages: loaded,
+          ...(options?.unsaved ? { unsaved: true } : {}),
+        });
         pruneInactive(draft, key);
       });
       setActive(key);

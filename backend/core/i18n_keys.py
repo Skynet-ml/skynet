@@ -411,6 +411,7 @@ class I18nKey(StrEnum):
     WIZARD_MODULE_UNKNOWN = 'wizard.module_unknown'
     WIZARD_OPTIMIZER_KWARGS_NOT_OBJECT = 'wizard.optimizer_kwargs_not_object'
     WIZARD_OPTIMIZER_UNKNOWN = 'wizard.optimizer_unknown'
+    WIZARD_SETUP_DRAFT_TOO_LARGE = 'wizard.setup_draft.too_large'
     WIZARD_SPLIT_FRACTIONS_NEGATIVE = 'wizard.split_fractions_negative'
     WIZARD_SPLIT_FRACTIONS_NOT_NUMBER = 'wizard.split_fractions_not_number'
     WIZARD_SPLIT_FRACTIONS_NOT_OBJECT = 'wizard.split_fractions_not_object'

@@ -228,6 +228,14 @@ class GeneralistAgentRequest(BaseModel):
             "the agent at its next step, announced by a ``steer_applied`` event."
         ),
     )
+    persist: bool = Field(
+        default=True,
+        description=(
+            "Save the turn as a conversation. False runs the turn without saving: the server ignores "
+            "``conversation_id``, ``regenerate`` and the edit fields, stores no row and emits no "
+            "``conversation_meta`` event. The setup wizard's chat sends False."
+        ),
+    )
 
 
 class ConfirmApprovalRequest(BaseModel):
@@ -932,9 +940,9 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
 
             Returns:
                 ``(conversation_id, title)`` — both ``None`` when persistence is
-                off (no ``job_store``) or failed non-fatally.
+                off (no ``job_store`` or ``persist`` is False) or failed non-fatally.
             """
-            if job_store is None:
+            if job_store is None or not req.persist:
                 return None, None
             try:
                 cid, ttl = _ensure_conversation(job_store, req.conversation_id, current_user.username, req.user_message)

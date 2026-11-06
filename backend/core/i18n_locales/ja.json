@@ -324,6 +324,7 @@
     "submit.no_models_available": "カタログに利用可能なモデルがありません。先にプロバイダーのAPIキーを設定してください。",
     "user.storage.quota_exceeded": "ストレージのクォータを超過しました（{quota_mb}MB 中 {used_mb}MB 使用中）。空き容量を確保して再試行してください。",
     "wizard.column_roles_not_object": "column_roles はオブジェクトである必要があります。",
+    "wizard.setup_draft.too_large": "セットアップの下書きが大きすぎて、チャットを除いても保存できません。",
     "wizard.field_must_be_list": "{field} はリストである必要があります。",
     "wizard.field_non_empty_string": "{field} は空でない文字列である必要があります。",
     "wizard.invalid_role_values": "ロールの値が無効です（{allowed} のいずれかである必要があります）: {bad}",

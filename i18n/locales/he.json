@@ -222,6 +222,7 @@
     "agent.status.tool_end": "הכלי סיים לפעול.",
     "agent.turn.not_found": "סבב הסוכן לא נמצא או שפג תוקפו.",
     "wizard.column_roles_not_object": "column_roles חייב להיות אובייקט.",
+    "wizard.setup_draft.too_large": "טיוטת ההגדרה גדולה מדי לשמירה, גם בלי הצ'אט שלה.",
     "wizard.invalid_role_values": "ערכי תפקיד לא תקינים (חייבים להיות אחד מ-{allowed}): {bad}",
     "wizard.field_must_be_list": "{field} חייב להיות רשימה.",
     "wizard.split_fractions_not_object": "split_fractions חייב להיות אובייקט עם המפתחות train/val/test.",

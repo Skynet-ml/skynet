@@ -324,6 +324,7 @@
     "submit.no_models_available": "Nenhum modelo disponível no catálogo — configure primeiro uma chave de API de fornecedor.",
     "user.storage.quota_exceeded": "Quota de armazenamento excedida ({used_mb}MB de {quota_mb}MB utilizados). Liberte espaço e tente novamente.",
     "wizard.column_roles_not_object": "column_roles deve ser um objeto.",
+    "wizard.setup_draft.too_large": "O rascunho da configuração é grande demais para ser guardado, mesmo sem o chat.",
     "wizard.field_must_be_list": "{field} deve ser uma lista.",
     "wizard.field_non_empty_string": "{field} deve ser uma cadeia de caracteres não vazia.",
     "wizard.invalid_role_values": "Valores de função inválidos (devem ser um de {allowed}): {bad}",

@@ -287,6 +287,7 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "transcription.unconfigured": "No transcription provider configured. Set TRANSCRIPTION_API_KEY.",
     "user.storage.quota_exceeded": "Storage quota exceeded ({used_mb}MB of {quota_mb}MB used). Free up space and try again.",
     "wizard.column_roles_not_object": "column_roles must be an object.",
+    "wizard.setup_draft.too_large": "The setup draft is too large to save, even without its chat.",
     "wizard.field_must_be_list": "{field} must be a list.",
     "wizard.field_non_empty_string": "{field} must be a non-empty string.",
     "wizard.invalid_role_values": "Invalid role values (must be one of {allowed}): {bad}",

@@ -324,6 +324,7 @@
     "submit.no_models_available": "هیچ مدلی در فهرست در دسترس نیست — ابتدا یک کلید API ارائه‌دهنده را پیکربندی کنید.",
     "user.storage.quota_exceeded": "سهمیه‌ی ذخیره‌سازی از حد گذشت ({used_mb} مگابایت از {quota_mb} مگابایت استفاده شد). فضا آزاد کرده و دوباره تلاش کنید.",
     "wizard.column_roles_not_object": "column_roles باید یک شیء باشد.",
+    "wizard.setup_draft.too_large": "پیش‌نویس تنظیم برای ذخیره بیش از حد بزرگ است، حتی بدون گفتگوی آن.",
     "wizard.field_must_be_list": "{field} باید یک فهرست باشد.",
     "wizard.field_non_empty_string": "{field} باید یک رشته‌ی غیرخالی باشد.",
     "wizard.invalid_role_values": "مقادیر نقش نامعتبر است (باید یکی از {allowed} باشد): {bad}",

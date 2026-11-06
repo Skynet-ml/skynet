@@ -5,6 +5,7 @@ import * as React from "react";
 import { useCompletionNotification } from "@/shared/hooks/use-completion-notification";
 import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useSession } from "next-auth/react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   ClockCounterClockwise,
@@ -27,10 +28,12 @@ import { AppMark } from "@/shared/ui/app-mark";
 import { ComposerModelMenu } from "@/shared/ui/agent/composer-model-menu";
 import { CopyChatMenu } from "@/shared/ui/agent/copy-chat-menu";
 import { QuestionChoices } from "@/shared/ui/agent/question-choices";
-import type { AgentToolCall } from "@/shared/ui/agent/types";
+import type { AgentMessage, AgentToolCall } from "@/shared/ui/agent/types";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { SubmitSplashOverlay, SUBMIT_SPLASH_HOLD_MS } from "@/shared/ui/submit-splash-overlay";
 import { cn } from "@/shared/lib/utils";
+import { SETUP_CHAT_KEPT_EVENT, SETUP_SUBMITTED_EVENT } from "@/shared/lib/setup-draft";
+import { sessionIdentity } from "@/shared/lib/session-identity";
 import { formatMsg } from "@/shared/lib/messages";
 
 import { useLocalAgentMenuModels } from "@/features/local-runtime";
@@ -61,17 +64,24 @@ import {
   decodeSetupChat,
   encodeSetupChat,
   hideKickoffs,
+  legacySetupChatId,
+  newSetupChatId,
+  newSetupChatStart,
   opensWithKickoff,
   parseScreenNav,
+  registerSetupChatFlush,
+  setupChatSnapshot,
+  storedKickedScreens,
   trackAutoTurn,
+  trackKickoffTurn,
   type AutoTurn,
+  type KickoffTurn,
   type SetupChat,
 } from "../lib/screen-agent";
 import { isWizardWrite, liveValues, writingFields } from "../lib/wizard-write";
 import { ASK_USER_TOOL, askedChoices } from "../lib/ask-user";
 import type { ToolEndPayload, WizardState } from "../lib/types";
 import { stageDatasetForAgent } from "@/shared/lib/api";
-import { decodeSetupDraft, readSetupDraft } from "@/shared/lib/setup-draft";
 import { DATASET_UPLOAD_EXTENSIONS } from "@/shared/lib/parse-dataset";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
@@ -204,25 +214,46 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   })();
   // The setup has one agent and one chat, which lives as long as the draft:
   // a reload or a return to a left setup brings it back, and submitting or
-  // starting a new setup deletes it. Each screen the wizard reaches gives the agent a turn of its own; an
-  // agent's Back leaves the earlier screen its request.
+  // starting a new setup drops it. The server never saves it, so the tab
+  // keeps its messages. Each screen the wizard reaches gives the agent a
+  // turn of its own; an agent's Back leaves the earlier screen its request.
   const shownScreen = wizardCtx?.wizardScreen ?? null;
   const inSetup = shownScreen !== null;
   const setupChatRef = React.useRef<string | null>(null);
+  const setupMessagesRef = React.useRef<AgentMessage[]>([]);
   const screenOpeningRef = React.useRef<string | null>(null);
   const shownScreenRef = React.useRef<string | null>(null);
   const kickedScreensRef = React.useRef(new Set<string>());
+  // A kickoff turn counts as done for the tab's copy only once it finished,
+  // so a reload in the middle of it runs it again.
+  const kickoffTurnRef = React.useRef<KickoffTurn | null>(null);
   const [kickoffScreen, setKickoffScreen] = React.useState<string | null>(null);
   const keepSetupChat = React.useCallback((id: string | null) => {
     setupChatRef.current = id;
     try {
       if (id) {
-        const chat = { id, kicked: [...kickedScreensRef.current] };
-        window.sessionStorage.setItem(SETUP_CHAT_KEY, encodeSetupChat(chat));
+        const chat = {
+          id,
+          kicked: storedKickedScreens(kickedScreensRef.current, kickoffTurnRef.current),
+          messages: setupMessagesRef.current,
+        };
+        try {
+          window.sessionStorage.setItem(SETUP_CHAT_KEY, encodeSetupChat(chat));
+        } catch {
+          // Storage full: the screens already started still count after a
+          // reload, even though the messages do not fit.
+          window.sessionStorage.setItem(SETUP_CHAT_KEY, encodeSetupChat({ ...chat, messages: [] }));
+        }
       } else window.sessionStorage.removeItem(SETUP_CHAT_KEY);
     } catch {
-      // Storage full or blocked: a reload then starts the setup's chat fresh.
+      // Storage full or blocked: a reload then starts the setup's chat fresh,
+      // not from an older copy.
+      try {
+        window.sessionStorage.removeItem(SETUP_CHAT_KEY);
+      } catch {}
     }
+    // A chat-only turn changes no answer, so the wizard saves the draft on this signal.
+    window.dispatchEvent(new Event(SETUP_CHAT_KEPT_EVENT));
   }, []);
 
   // Agent-submit splash: a successful submit tool plays the same full-screen
@@ -231,6 +262,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // so it owns this overlay regardless of which page the agent submitted from.
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { data: session } = useSession();
+  const account = sessionIdentity(session) || null;
   const [submitSplash, setSubmitSplash] = React.useState(false);
   const splashTimersRef = React.useRef<Array<ReturnType<typeof setTimeout>>>([]);
   React.useEffect(() => () => splashTimersRef.current.forEach(clearTimeout), []);
@@ -238,6 +271,9 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   const startSubmitSplash = React.useCallback(
     (optimizationId: string) => {
       setSubmitSplash(true);
+      // The left setup is gone now: the root deletes the server draft, and an
+      // open wizard keeps no draft when it unmounts.
+      window.dispatchEvent(new CustomEvent(SETUP_SUBMITTED_EVENT, { detail: { account } }));
       // Drop the replay cache now so a later /submit visit can't re-stage the
       // just-submitted dataset (the backend evicts it on submit anyway).
       try {
@@ -260,7 +296,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       }, SUBMIT_SPLASH_HOLD_MS);
       splashTimersRef.current.push(routeTimer);
     },
-    [router, wizardCtx],
+    [account, router, wizardCtx],
   );
 
   const { openTo: openSettingsTo } = useSettingsModal();
@@ -323,14 +359,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     (id: string, title: string, ctx: SessionEventContext) => {
       store.upsertFromMeta(id, title);
       if (!ctx.isActive) return;
-      if (shownScreenRef.current) keepSetupChat(id);
       store.setActiveId(id);
       // The user is actively in this conversation — every new turn is "seen"
       // by definition. Without this, the row would render as unread the
       // moment the server bumps its updated_at.
       store.markSeen(id);
     },
-    [store, keepSetupChat],
+    [store],
   );
 
   const agent = useGeneralistAgent({
@@ -399,16 +434,17 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // Honour ?chat=<id> deep-links (e.g. the storage page's chat rows): open the
   // panel onto that conversation, then strip the param so a refresh or back-nav
   // doesn't reopen it. The panel is client-only and globally mounted, so this
-  // works from whichever route the link was clicked on.
+  // works from whichever route the link was clicked on. The setup's panel
+  // holds only the setup chat, so a link waits until the setup closes.
   const chatDeepLinkRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     const chatId = searchParams.get("chat");
-    if (!chatId || chatDeepLinkRef.current === chatId) return;
+    if (inSetup || !chatId || chatDeepLinkRef.current === chatId) return;
     chatDeepLinkRef.current = chatId;
     setOpen(true);
     void handlePickConversation(chatId);
     router.replace(window.location.pathname, { scroll: false });
-  }, [searchParams, setOpen, handlePickConversation, router]);
+  }, [inSetup, searchParams, setOpen, handlePickConversation, router]);
 
   const handleNewConversation = React.useCallback(() => {
     agent.newSession();
@@ -450,18 +486,15 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     const opening = screenOpeningRef.current;
     screenOpeningRef.current = null;
     if (shownScreen === null) {
-      // The wizard closed without a reload. Its chat ends too, unless the
-      // setup the user left keeps it for a return.
+      // The wizard closed without a reload. Its chat ends too; a setup the
+      // user left keeps a copy in its draft for a return.
       const id = setupChatRef.current;
       keepSetupChat(null);
       kickedScreensRef.current = new Set();
+      kickoffTurnRef.current = null;
       sentFeedbackRef.current = autoFeedbackRef.current?.id ?? 0;
       autoTurnRef.current = null;
-      if (id) {
-        discardConversation(id);
-        const left = decodeSetupDraft(readSetupDraft(), Date.now());
-        if (decodeSetupChat(left?.values[SETUP_CHAT_KEY] ?? null)?.id !== id) void removeConversation(id);
-      }
+      if (id) discardConversation(id);
       newSession();
       setActiveConversation(null);
       return;
@@ -478,38 +511,38 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     // already have moved off that screen (clearing it) before this runs.
     let saved: SetupChat | null = null;
     try {
-      saved = decodeSetupChat(window.sessionStorage.getItem(SETUP_CHAT_KEY));
+      const raw = window.sessionStorage.getItem(SETUP_CHAT_KEY);
+      saved = decodeSetupChat(raw);
+      // An older build saved the setup chat on the server; nothing else
+      // would ever take it out of the history list.
+      const legacy = legacySetupChatId(raw);
+      if (legacy) void removeConversation(legacy);
     } catch {
       // Blocked storage: the setup starts a new chat.
     }
+    setActiveConversation(null);
     if (!saved || !restoredSetupRef.current) {
       // A kept chat this setup does not reopen lost its draft (a cloned run
       // reloads from its source run, not the tab's draft), so it goes too.
-      if (saved) {
-        discardConversation(saved.id);
-        void removeConversation(saved.id);
-      }
-      keepSetupChat(null);
-      newSession();
-      setActiveConversation(null);
-      if (shownScreen !== reopenedScreenRef.current && opensWithKickoff(shownScreen)) {
-        setKickoffScreen(shownScreen);
-      }
+      if (saved) discardConversation(saved.id);
+      const id = newSetupChatId();
+      const start = newSetupChatStart(shownScreen, reopenedScreenRef.current);
+      kickedScreensRef.current = new Set(start.kicked);
+      setupMessagesRef.current = [];
+      keepSetupChat(id);
+      openConversation(id, [], { unsaved: true });
+      if (start.kickoff) setKickoffScreen(shownScreen);
       return;
     }
     const id = saved.id;
-    kickedScreensRef.current = new Set([...saved.kicked, shownScreen]);
+    kickedScreensRef.current = new Set(saved.kicked);
+    setupMessagesRef.current = saved.messages;
     keepSetupChat(id);
-    setActiveConversation(id);
-    if (activateConversation(id)) return;
-    void getConversation(id).then((detail) => {
-      if (setupChatRef.current !== id) return;
-      if (detail) openConversation(id, hideKickoffs(detail.messages));
-      else {
-        keepSetupChat(null);
-        newSession();
-      }
-    });
+    if (!activateConversation(id)) openConversation(id, saved.messages, { unsaved: true });
+    // A reload in the middle of this screen's kickoff left it out of the copy.
+    if (!saved.kicked.includes(shownScreen) && opensWithKickoff(shownScreen)) {
+      setKickoffScreen(shownScreen);
+    }
   }, [
     shownScreen,
     activateConversation,
@@ -521,6 +554,33 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     removeConversation,
     keepSetupChat,
   ]);
+
+  // The tab's copy of the setup chat follows each settled turn; a turn still
+  // streaming is written only when the page goes away (flushSetupChat), since
+  // its text changes with every chunk.
+  const agentMessages = agent.messages;
+  const agentConversationId = agent.conversationId;
+  const liveChatRef = React.useRef({ id: agentConversationId, messages: agentMessages });
+  React.useEffect(() => {
+    liveChatRef.current = { id: agentConversationId, messages: agentMessages };
+    kickoffTurnRef.current = trackKickoffTurn(kickoffTurnRef.current, activeBusy);
+    const id = setupChatRef.current;
+    if (!id || agentConversationId !== id || activeBusy) return;
+    setupMessagesRef.current = agentMessages;
+    keepSetupChat(id);
+  }, [agentMessages, agentConversationId, activeBusy, keepSetupChat]);
+  React.useEffect(
+    () =>
+      registerSetupChatFlush(() => {
+        const id = setupChatRef.current;
+        const live = liveChatRef.current;
+        if (!id || live.id !== id) return;
+        const kickoffFrom = kickoffTurnRef.current?.from ?? null;
+        setupMessagesRef.current = setupChatSnapshot(live.messages, kickoffFrom, Date.now());
+        keepSetupChat(id);
+      }),
+    [keepSetupChat],
+  );
 
   // A screen the agent has not had a turn on (Check aside) opens with one: it fills the
   // screen from what it already knows and continues, or asks the one thing
@@ -540,7 +600,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     if (!panelDock || activeBusy || backgroundBusy) return;
     setKickoffScreen(null);
     kickedScreensRef.current.add(kickoffScreen);
-    if (setupChatRef.current) keepSetupChat(setupChatRef.current);
+    kickoffTurnRef.current = {
+      screen: kickoffScreen,
+      from: liveChatRef.current.messages.length,
+      started: false,
+    };
     sendToAgent(SCREEN_KICKOFF, undefined, { hidden: true });
   }, [
     kickoffScreen,
@@ -551,7 +615,6 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     activeBusy,
     backgroundBusy,
     sendToAgent,
-    keepSetupChat,
   ]);
 
   // What the wizard tells the agent by itself (a failed setup check) goes out

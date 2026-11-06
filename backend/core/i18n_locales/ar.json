@@ -324,6 +324,7 @@
     "submit.no_models_available": "لا تتوفّر أي نماذج في الكتالوج — هيّئ مفتاح API لمزوّد أولاً.",
     "user.storage.quota_exceeded": "تم تجاوز حصة التخزين (استُخدم {used_mb} ميغابايت من {quota_mb} ميغابايت). حرّر مساحة وحاول مجددًا.",
     "wizard.column_roles_not_object": "يجب أن يكون column_roles كائنًا.",
+    "wizard.setup_draft.too_large": "مسودة الإعداد كبيرة جدًا للحفظ، حتى بدون الدردشة.",
     "wizard.field_must_be_list": "يجب أن يكون {field} قائمة.",
     "wizard.field_non_empty_string": "يجب أن يكون {field} نصًا غير فارغ.",
     "wizard.invalid_role_values": "قيم أدوار غير صالحة (يجب أن تكون إحدى {allowed}): {bad}",

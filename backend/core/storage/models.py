@@ -1705,6 +1705,38 @@ class AgentStagedDatasetModel(Base):
     __table_args__ = (Index("ix_agent_staged_datasets_user_created", "username", "created_at"),)
 
 
+# One left run-wizard setup per account, offered back on any device until the
+# user submits or starts new. ``staged_dataset_id`` names the upload the setup
+# uses, so the staged-dataset sweep keeps that upload while the draft exists.
+class SetupDraftModel(Base):
+    """Server copy of the run-wizard setup an account left."""
+
+    __tablename__ = "setup_drafts"
+
+    username: Mapped[str] = mapped_column(String(255), primary_key=True)
+    left_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    draft_values: Mapped[dict[str, str]] = mapped_column(JSON_STORE, nullable=False)
+    chat: Mapped[dict[str, Any] | None] = mapped_column(JSON_STORE, nullable=True)
+    staged_dataset_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # Raised on each save and delete; a call that names an older one changes nothing.
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    # A delete keeps the row with no setup and a new revision, so a save sent
+    # before the delete that arrives after it is refused.
+    deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    # The latest save from each recent browser page, as [writer, seq, revision]
+    # entries, oldest first. A load drops a browser copy whose save already landed.
+    saves: Mapped[list[list[Any]]] = mapped_column(JSON_STORE, nullable=False, default=list, server_default="[]")
+    # The highest revision a page that left ``saves`` made; a copy from an
+    # unknown page that builds on an older revision may have landed.
+    evicted_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    # The revision of the last delete. A later save clears ``deleted`` but keeps
+    # this, so a copy older than a submit cannot bring the submitted setup back.
+    deleted_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
 class TaggingSessionModel(Base):
     """Persisted text-labeling (tagger) session — one row per saved session.
 
