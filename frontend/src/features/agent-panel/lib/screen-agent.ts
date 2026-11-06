@@ -103,7 +103,7 @@ export function runScreenNav(nav: ScreenNav, navigator: ScreenNavigator | null):
 }
 
 /**
- * The wizard's screens in order, as the backend's ``_SCREEN_ORDER`` lists them.
+ * The wizard's screens in order: the backend's ``_SCREEN_ORDER``, plus ``schedule``.
  */
 const SCREEN_ORDER: readonly string[] = [
   "brief",

@@ -143,10 +143,14 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
   const [returnScreen, setReturnScreen] = React.useState<string | null>(null);
   // Clear it when the wizard moves to it or past it, not while the wizard
   // still shows the screen the go-back left: that screen is the return screen.
+  // A null screen means the wizard closed; the provider outlives it, so the
+  // next setup must not inherit this one's return screen.
   const [seenScreen, setSeenScreen] = React.useState<string | null>(wizardScreen);
   if (seenScreen !== wizardScreen) {
     setSeenScreen(wizardScreen);
-    if (returnScreen !== null && reachedReturnScreen(returnScreen, wizardScreen)) setReturnScreen(null);
+    if (returnScreen !== null && (wizardScreen === null || reachedReturnScreen(returnScreen, wizardScreen))) {
+      setReturnScreen(null);
+    }
   }
   const navigateScreen = React.useCallback((nav: ScreenNav) => {
     setReturnScreen((prev) => nextReturnScreen(prev, nav));
