@@ -431,6 +431,27 @@ def test_github_picker_lists_repositories_with_details() -> None:
     assert unknown == {"repositories": []}
 
 
+@pytest.mark.parametrize(
+    ("search", "expected"),
+    [
+        ("octo docs", ["octo/docs"]),
+        ("octo-docs", ["octo/docs"]),
+        ("the app", ["octo/app"]),
+        ("app docs", []),
+        ("---", []),
+        ("אתר אישי", []),
+    ],
+)
+@pytest.mark.usefixtures("vault_key", "generic_oauth_off")
+def test_github_picker_search_matches_words_in_name_and_description(search: str, expected: list[str]) -> None:
+    """Each search word must be in the name or the description; separators only split words."""
+    client, _ = _make_client()
+    with patch("core.connectors.transport.CLIENT.request", side_effect=_github_picker_api):
+        client.put("/connectors/github/credentials", json={"fields": {"token": "ghp_secret"}})
+        found = client.get("/connectors/github/repos", params={"search": search}).json()["repositories"]
+    assert [r["full_name"] for r in found] == expected
+
+
 @pytest.mark.usefixtures("vault_key", "generic_oauth_off")
 def test_github_picker_branches_are_paginated_and_capped() -> None:
     """Branches page through GitHub up to the cap, with the default branch kept in the list."""

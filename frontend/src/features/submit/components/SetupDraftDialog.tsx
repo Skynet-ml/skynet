@@ -42,7 +42,7 @@ export function SetupDraftDialog({
     <Dialog open onOpenChange={(open) => !open && onContinue()}>
       <DialogContent showCloseButton={false} data-tutorial="submit-draft-offer">
         <DialogHeader>
-          <DialogTitle>{msg("submit.draft.title")}</DialogTitle>
+          <DialogTitle className="sm:whitespace-nowrap">{msg("submit.draft.title")}</DialogTitle>
           <DialogDescription>
             {name
               ? formatMsg("submit.draft.left_named", { name, time: ago })

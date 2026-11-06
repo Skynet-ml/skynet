@@ -53,13 +53,14 @@ test("the internals copy holds the plan, the thinking and each tool call in turn
     "#### Thinking",
     "#### Tool: update_wizard_state",
     "#### Thinking",
-    "## You",
+    "## App",
   ]);
   assert.match(out, /#### Thinking \(1s\) - Name first/);
   assert.match(out, /#### Tool: update_wizard_state \(done, 1s\)/);
   assert.match(out, /"job_name": "Docs"/);
   assert.match(out, /model gpt-5 \u00b7 in 10 tokens \u00b7 out 4 tokens \u00b7 cost 0\.25 USD \u00b7 took 1\.5s/);
-  assert.match(out, /## You \(sent by the app\)/);
+  assert.match(out, /## App \(wizard request\)/);
+  assert.doesNotMatch(out, /## You \(sent by the app\)/);
 });
 
 test("a result holding a fence gets a longer fence around it", () => {

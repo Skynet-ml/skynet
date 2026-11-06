@@ -53,7 +53,8 @@ export function hideKickoffs(messages: AgentMessage[]): AgentMessage[] {
 
 /** A move the screen agent asked for, read from its tool result. */
 export type ScreenNav =
-  | { action: "continue"; from: string }
+  /** ``to`` is a later screen to jump to, after a go-back edit: the user returns where they were. */
+  | { action: "continue"; from: string; to?: string }
   | { action: "back"; from: string; screen: string; request: string };
 
 /** What the wizard frame exposes so the agent can move it. */
@@ -64,6 +65,8 @@ export interface ScreenNavigator {
   forward: () => void;
   /** Jump back to an earlier screen. */
   goToScreen: (screen: string) => void;
+  /** Jump forward to a later screen; the Continue button's checks still apply. */
+  goForwardTo: (screen: string) => void;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -75,7 +78,11 @@ export function parseScreenNav(result: unknown): ScreenNav | null {
   if (!isRecord(result) || !isRecord(result.screen_nav)) return null;
   const nav = result.screen_nav;
   const from = typeof nav.from === "string" ? nav.from : "";
-  if (nav.action === "continue") return { action: "continue", from };
+  if (nav.action === "continue") {
+    return typeof nav.to === "string" && nav.to
+      ? { action: "continue", from, to: nav.to }
+      : { action: "continue", from };
+  }
   if (nav.action === "back" && typeof nav.screen === "string" && nav.screen) {
     const request = typeof nav.request === "string" ? nav.request : "";
     return { action: "back", from, screen: nav.screen, request };
@@ -90,8 +97,72 @@ export function runScreenNav(nav: ScreenNav, navigator: ScreenNavigator | null):
     // The wizard may already have moved past the agent's screen by itself;
     // continuing again would skip the next one unseen.
     if (nav.from && nav.from !== navigator.screen) return;
-    navigator.forward();
+    if (nav.to) navigator.goForwardTo(nav.to);
+    else navigator.forward();
   } else navigator.goToScreen(nav.screen);
+}
+
+/**
+ * The wizard's screens in order: the backend's ``_SCREEN_ORDER``, plus ``schedule``.
+ */
+const SCREEN_ORDER: readonly string[] = [
+  "brief",
+  "artifact",
+  "source",
+  "plan",
+  "optimizer",
+  "models",
+  "budget",
+  "metric",
+  "check",
+  "schedule",
+  "overview",
+];
+
+/** The later of two screens in the wizard's order; null when both are null. */
+function laterScreen(a: string | null, b: string | null): string | null {
+  if (a === null || b === null) return a ?? b;
+  return SCREEN_ORDER.indexOf(a) > SCREEN_ORDER.indexOf(b) ? a : b;
+}
+
+/**
+ * The screen the user returns to after an agent's go-back edit. The first
+ * go-back sets it; a second go-back from a screen before it keeps it. A
+ * go-back from a later screen replaces it, since the user moved past it. Any
+ * other move keeps it until the wizard reaches it, even a Continue whose
+ * jump the wizard holds.
+ *
+ * Args:
+ *   current: The return screen so far, or null.
+ *   nav: The move the agent asked for.
+ *   shown: The screen the wizard shows when the move arrives. The user can
+ *     move on while the agent works, so it can be later than ``nav.from``.
+ *
+ * Returns:
+ *   The return screen after the move.
+ */
+export function nextReturnScreen(current: string | null, nav: ScreenNav, shown: string | null = null): string | null {
+  if (nav.action !== "back") return current;
+  return laterScreen(current, laterScreen(nav.from || null, shown));
+}
+
+/**
+ * Whether the wizard reached the return screen: it shows that screen or a
+ * later one, for example after a stepper jump past it.
+ *
+ * Args:
+ *   returnScreen: The screen the user returns to.
+ *   screen: The screen the wizard shows, or null.
+ *
+ * Returns:
+ *   True when the return screen is no longer ahead of the wizard.
+ */
+export function reachedReturnScreen(returnScreen: string, screen: string | null): boolean {
+  if (screen === null) return false;
+  if (screen === returnScreen) return true;
+  const here = SCREEN_ORDER.indexOf(screen);
+  const there = SCREEN_ORDER.indexOf(returnScreen);
+  return here >= 0 && there >= 0 && here > there;
 }
 
 /**

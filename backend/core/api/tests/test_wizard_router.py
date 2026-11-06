@@ -126,6 +126,22 @@ def test_blank_objective_rejected(wizard_client: TestClient) -> None:
     assert resp.status_code == 422
 
 
+@pytest.mark.parametrize("value", ["", "   "])
+def test_empty_job_description_clears_it(wizard_client: TestClient, value: str) -> None:
+    """An empty description is optional, so it clears the field instead of a 422."""
+    resp = wizard_client.post("/wizard/update", json={"job_name": "My run", "job_description": value})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["wizard_state"] == {"job_name": "My run", "job_description": ""}
+
+
+def test_blank_job_name_still_rejected(wizard_client: TestClient) -> None:
+    """The run name stays required."""
+    resp = wizard_client.post("/wizard/update", json={"job_name": "  "})
+
+    assert resp.status_code == 422
+
+
 def test_inputs_fields_round_trip(wizard_client: TestClient) -> None:
     """Data mode, staged dataset and split land in the patch."""
     resp = wizard_client.post(

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { toast } from "react-toastify";
 
@@ -207,7 +207,7 @@ function UnifiedWizardFrame() {
 
   // Back to one named screen: the agent's go-back lands where the user's
   // own Back presses would, without walking every screen between.
-  const { goTo } = w;
+  const { goTo, canEnter, stepIssue } = w;
   const goToScreen = useCallback(
     (screen: string) => {
       const step = steps.find((s) => (stepPages(s, w.state) as readonly string[]).includes(screen));
@@ -218,6 +218,33 @@ function UnifiedWizardFrame() {
       if (step !== current) goTo(step);
     },
     [steps, position, current, page, goTo, w.state],
+  );
+
+  // Forward to one named screen, after the agent's go-back edit returns the
+  // user where they were. Anything the jump cannot pass falls back to a
+  // plain Continue, which shows why it holds.
+  const goForwardTo = useCallback(
+    (screen: string) => {
+      const step = steps.find((s) => (stepPages(s, w.state) as readonly string[]).includes(screen));
+      const target = step ? (stepPages(step, w.state) as readonly string[]).indexOf(screen) : -1;
+      const later = step !== undefined && (steps.indexOf(step) > position || (step === current && target > page));
+      const open = inputsOpen && !pricing && shortfall === null;
+      // The stepper's own hold: no jump into the metric step while costs are unsettled.
+      const held = step !== undefined && (runShort || !w.costSettled) && WIZARD_STAGE[step] >= WIZARD_STAGE.metric;
+      // A step on the way with a problem (an optimizer that no longer fits
+      // the data, a stale check) holds the jump, so Continue shows it.
+      const blocked =
+        step !== undefined &&
+        (steps.slice(position, steps.indexOf(step)).some((s) => stepIssue(s) !== null) ||
+          (target > 0 && stepIssue(step) !== null));
+      if (!step || !later || !open || held || blocked || (step !== current && !canEnter(step))) {
+        forward();
+        return;
+      }
+      setPages((p) => ({ ...p, [step]: target }));
+      if (step !== current) goTo(step);
+    },
+    [steps, position, current, page, inputsOpen, pricing, shortfall, runShort, w.costSettled, forward, goTo, canEnter, stepIssue, w.state],
   );
 
   // Guided's flow skips the screen that sets the limit, so its notice has no button.
@@ -258,16 +285,20 @@ function UnifiedWizardFrame() {
   useEffect(() => {
     shareRestoredSetup?.(w.restored);
   }, [shareRestoredSetup, w.restored]);
-  useEffect(() => {
+  // Layout effects: the agent's go-back can arrive right after a Continue,
+  // and it must not see the screen before it.
+  useLayoutEffect(() => {
     setWizardScreen?.(visibleScreen);
   }, [visibleScreen, setWizardScreen]);
   useEffect(() => {
     setScreenIssue?.(blockedText);
   }, [blockedText, setScreenIssue]);
-  useEffect(() => {
-    setScreenNavigator?.({ screen: visibleScreen, forward, goToScreen });
-  }, [visibleScreen, forward, goToScreen, setScreenNavigator]);
-  useEffect(
+  useLayoutEffect(() => {
+    setScreenNavigator?.({ screen: visibleScreen, forward, goToScreen, goForwardTo });
+  }, [visibleScreen, forward, goToScreen, goForwardTo, setScreenNavigator]);
+  // A layout cleanup: a new frame (an account switch remounts it) registers in
+  // layout effects, and this old frame's nulls must land before them.
+  useLayoutEffect(
     () => () => {
       setWizardScreen?.(null);
       setScreenIssue?.(null);
