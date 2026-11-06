@@ -49,6 +49,7 @@ _SYNC_ROUTE_PREFIXES: tuple[str, ...] = (
     "/analytics",
     "/billing",
     "/blackbox",
+    "/connectors",
     "/continuous",
     "/dashboard",
     "/datasets",
@@ -71,15 +72,12 @@ _SYNC_ROUTE_PREFIXES: tuple[str, ...] = (
     "/wizard",
     "/workflows",
 )
-# Connector routes stay closed: they use the user's stored third-party grants,
-# and the picker returns the raw access token.
-# Inside the open prefixes, these stay on the web app only: account export and
-# deletion, payments, stored credentials, and changes that outlive a revoke
-# (package index, push endpoints, Slack). A stolen Mac token must not reach them.
+# A sync token has the rights of a web session on these routes, except the
+# ones that return or write a stored credential, move money, or export or
+# delete the account. A stolen Mac token must not reach them.
 _SYNC_ROUTE_EXCLUDED_PREFIXES: tuple[str, ...] = (
     "/account/delete",
     "/account/export",
-    "/account/package-registry",
     "/agent/protected-settings",
     "/billing/byok/keys",
     "/billing/byok/openrouter",
@@ -88,13 +86,13 @@ _SYNC_ROUTE_EXCLUDED_PREFIXES: tuple[str, ...] = (
     "/billing/portal",
     "/billing/subscription",
     "/billing/webhook",
-    "/agent/conversations/{conversation_id}/share",
-    "/notifications/push",
-    "/notifications/slack",
+    "/connectors/huggingface/oauth",
+    "/connectors/huggingface/token",
+    "/connectors/{provider}/credentials",
+    "/connectors/{provider}/oauth",
+    "/connectors/{provider}/picker",
+    "/notifications/slack/oauth",
 )
-# Path segments that give other people access to the account's data. The grant
-# outlives a revoke of the link, so these stay on the web app on every router.
-_SYNC_EXCLUDED_SEGMENTS: frozenset[str] = frozenset({"sharing", "visibility"})
 
 
 def _under(path: str, prefixes: tuple[str, ...]) -> bool:
@@ -118,11 +116,9 @@ def desktop_sync_route_allowed(path: str) -> bool:
             parameters cannot change the decision.
 
     Returns:
-        True when the route serves the account's own web data.
+        True when a web session may call the route and it is not excluded.
     """
-    if not _under(path, _SYNC_ROUTE_PREFIXES) or _under(path, _SYNC_ROUTE_EXCLUDED_PREFIXES):
-        return False
-    return _SYNC_EXCLUDED_SEGMENTS.isdisjoint(path.split("/"))
+    return _under(path, _SYNC_ROUTE_PREFIXES) and not _under(path, _SYNC_ROUTE_EXCLUDED_PREFIXES)
 
 
 @dataclass(frozen=True)

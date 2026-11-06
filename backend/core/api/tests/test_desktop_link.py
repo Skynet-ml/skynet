@@ -600,7 +600,7 @@ _POLICY_CASES: list[tuple[str, bool]] = [
     ("/telemetry/summary", False),
     ("/account/export", False),
     ("/account/delete", False),
-    ("/account/package-registry", False),
+    ("/account/package-registry", True),
     ("/agent/protected-settings", False),
     ("/billing/checkout", False),
     ("/billing/subscription/checkout", False),
@@ -608,24 +608,27 @@ _POLICY_CASES: list[tuple[str, bool]] = [
     ("/billing/payment-methods/{payment_method_id}", False),
     ("/billing/byok/keys", False),
     ("/billing/byok/openrouter/oauth/start", False),
-    ("/connectors/{provider}", False),
+    ("/connectors/{provider}", True),
     ("/connectors/{provider}/credentials", False),
     ("/connectors/{provider}/oauth/start", False),
     ("/connectors/{provider}/picker", False),
-    ("/connectors/github/file", False),
+    ("/connectors/github/file", True),
     ("/connectors/huggingface/token", False),
-    ("/optimizations/{optimization_id}/sharing/transfer", False),
-    ("/optimizations/{optimization_id}/visibility", False),
-    ("/datasets/library/{dataset_id}/sharing/members", False),
-    ("/folders/{folder_id}/sharing/transfer", False),
-    ("/tagging-sessions/{session_id}/sharing/members", False),
-    ("/agent/conversations/{conversation_id}/share", False),
-    ("/notifications/push/subscriptions", False),
-    ("/notifications/slack", False),
+    ("/connectors/huggingface/oauth/start", False),
+    ("/notifications/slack/oauth/start", False),
+    ("/optimizations/{optimization_id}/sharing/transfer", True),
+    ("/optimizations/{optimization_id}/visibility", True),
+    ("/datasets/library/{dataset_id}/sharing/members", True),
+    ("/folders/{folder_id}/sharing/transfer", True),
+    ("/tagging-sessions/{session_id}/sharing/members", True),
+    ("/agent/conversations/{conversation_id}/share", True),
+    ("/notifications/push/subscriptions", True),
+    ("/notifications/slack", True),
 ]
 
-# Segments that mark a credential, payment, export or access grant. A new
-# sensitive route under an open prefix fails the test until someone reviews it.
+# Path words that often mark a credential, payment, export or access grant.
+# The test checks path words only, not what a route does: a new open route
+# with one of these words fails until someone reviews it.
 _SENSITIVE_SEGMENTS = frozenset(
     {
         "checkout",
@@ -646,18 +649,37 @@ _SENSITIVE_SEGMENTS = frozenset(
     }
 )
 
-# Reviewed open routes that carry a sensitive segment. They only receive what
-# someone else shared with this account, or export the account's own run.
+# Reviewed open routes that carry a sensitive path word. A web session may
+# share, claim and export the account's own items, so the Mac token may too.
+# None of them returns a stored credential.
 _REVIEWED_SENSITIVE_OPEN = frozenset(
     {
+        "/agent/conversations/{conversation_id}/share",
+        "/datasets/library/{dataset_id}/sharing",
+        "/datasets/library/{dataset_id}/sharing/members",
+        "/datasets/library/{dataset_id}/sharing/members/{username}",
+        "/datasets/library/{dataset_id}/sharing/transfer",
         "/datasets/share/{token}",
         "/datasets/share/{token}/claim",
         "/folders/share/{token}/claim",
+        "/folders/{folder_id}/sharing",
+        "/folders/{folder_id}/sharing/members",
+        "/folders/{folder_id}/sharing/members/{username}",
+        "/folders/{folder_id}/sharing/transfer",
         "/optimizations/{optimization_id}/export",
+        "/optimizations/{optimization_id}/sharing",
+        "/optimizations/{optimization_id}/sharing/members",
+        "/optimizations/{optimization_id}/sharing/members/{username}",
+        "/optimizations/{optimization_id}/sharing/transfer",
+        "/optimizations/{optimization_id}/visibility",
         "/share/{token}",
         "/share/{token}/claim",
         "/share/{token}/serve",
         "/tagging-sessions/share/{token}/claim",
+        "/tagging-sessions/{session_id}/sharing",
+        "/tagging-sessions/{session_id}/sharing/members",
+        "/tagging-sessions/{session_id}/sharing/members/{username}",
+        "/tagging-sessions/{session_id}/sharing/transfer",
     }
 )
 
@@ -680,7 +702,7 @@ def live_route_paths() -> set[str]:
 
 @pytest.mark.parametrize(("path", "allowed"), _POLICY_CASES)
 def test_sync_route_policy(path: str, allowed: bool) -> None:
-    """The allowlist opens account data and keeps credentials, grants and admin closed."""
+    """The allowlist gives web-session rights and keeps secrets, money and admin closed."""
     assert desktop_auth.desktop_sync_route_allowed(path) is allowed
 
 
