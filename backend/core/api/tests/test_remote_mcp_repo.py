@@ -360,10 +360,20 @@ def test_save_step_locks_the_draft_row(harness: Any, monkeypatch: pytest.MonkeyP
         "from mylib import score\n",
         "class S:\n  def __call__(self, path):\n    return 1.0, 'ok'\n\nscore = S()\n",
         "def _mk():\n  return lambda path: (1.0, 'ok')\n\nscore = _mk()\n",
+        "@with_feedback\ndef score(path):\n  return 1.0\n",
+        "def score(path):\n  return 1.0\n\nscore = add_feedback(score)\n",
+        "from lib import score\n\ndef metric(path):\n  return 1.0\n",
     ],
 )
 def test_imported_or_assigned_scorer_is_a_note(code: str) -> None:
     """Leave an imported or assigned scorer to the run's setup check, like the runner accepts it."""
     issues, notes = remote_mcp_repo.scorer_issues(code, has_cases=True)
     assert issues == []
-    assert "imported or assigned" in notes[0]
+    assert "imported, assigned or decorated" in notes[0]
+
+
+@pytest.mark.parametrize("value", ["1", "-1", "0.5", "True", "-0.5"])
+def test_bare_number_return_is_an_issue(value: str) -> None:
+    """Flag a number, negative number or bool literal, which the runner refuses."""
+    issues, _notes = remote_mcp_repo.scorer_issues(f"def score(path):\n  return {value}\n", has_cases=False)
+    assert "returns a bare number" in issues[0]

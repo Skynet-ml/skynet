@@ -222,11 +222,12 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
     except SyntaxError as error:
         return [f"The scorer has a syntax error on line {error.lineno}: {error.msg}."], []
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)]
-    named = next((node for name in _SCORER_NAMES for node in functions if node.name == name), None)
-    if named is None and _binds_scorer_name(tree):
-        # The runner takes any callable bound to the name, such as an import
-        # or an instance, so only the run's setup check can check it.
-        return [], ["Skynet cannot check an imported or assigned scorer before the run's setup check."]
+    bound, named = _scorer_binding(tree)
+    if bound and named is None:
+        # The runner takes any callable bound to the name, such as an import,
+        # an instance or a decorated function, so only the run's setup check
+        # can check it.
+        return [], ["Skynet cannot check an imported, assigned or decorated scorer before the run's setup check."]
     scorer = named or (functions[0] if len(functions) == 1 else None)
     if scorer is None:
         return ["The scorer must define score(repo_path) or score(repo_path, case)."], []
@@ -247,27 +248,40 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
     return issues, notes
 
 
-def _binds_scorer_name(tree: ast.Module) -> bool:
-    """Tell whether a top-level import or assignment binds a scorer name.
+def _scorer_binding(tree: ast.Module) -> tuple[bool, ast.FunctionDef | ast.AsyncFunctionDef | None]:
+    """Find the top-level binding the runner uses as the scorer.
+
+    Like the runner, ``score`` wins over ``metric``, and the last top-level
+    binding of the name wins.
 
     Args:
         tree: The parsed scorer module.
 
     Returns:
-        True when ``score`` or ``metric`` is imported or assigned at the top level.
+        Whether a scorer name is bound, and the function when that binding is
+        a plain ``def`` without decorators.
     """
-    for node in tree.body:
-        if isinstance(node, ast.Import | ast.ImportFrom):
-            names = [alias.asname or alias.name.split(".")[0] for alias in node.names]
-        elif isinstance(node, ast.Assign):
-            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
-        elif isinstance(node, ast.AnnAssign | ast.AugAssign) and isinstance(node.target, ast.Name):
-            names = [node.target.id]
-        else:
-            continue
-        if any(name in _SCORER_NAMES for name in names):
-            return True
-    return False
+    for name in _SCORER_NAMES:
+        bound = False
+        function: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                names = [node.name]
+            elif isinstance(node, ast.Import | ast.ImportFrom):
+                names = [alias.asname or alias.name.split(".")[0] for alias in node.names]
+            elif isinstance(node, ast.Assign):
+                names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            elif isinstance(node, ast.AnnAssign | ast.AugAssign) and isinstance(node.target, ast.Name):
+                names = [node.target.id]
+            else:
+                continue
+            if name in names:
+                bound = True
+                plain = isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and not node.decorator_list
+                function = node if plain else None
+        if bound:
+            return True, function
+    return False, None
 
 
 def _returns_bare_number(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
@@ -287,9 +301,12 @@ def _returns_bare_number(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bo
         node = pending.pop()
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
             continue
-        if isinstance(node, ast.Return) and isinstance(node.value, ast.Constant):
-            value = node.value.value
-            if isinstance(value, int | float) and not isinstance(value, bool):
+        if isinstance(node, ast.Return):
+            value = node.value
+            if isinstance(value, ast.UnaryOp):
+                value = value.operand
+            # The runner refuses bools too: they are ints.
+            if isinstance(value, ast.Constant) and isinstance(value.value, int | float):
                 return True
         pending.extend(ast.iter_child_nodes(node))
     return False
