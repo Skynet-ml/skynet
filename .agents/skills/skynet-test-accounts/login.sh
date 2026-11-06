@@ -1,16 +1,16 @@
-# Sign in to Skynet staging or a PR preview with a test account from secrets.
-# Usage (bash or zsh): set the variables first, then source the script:
-#   export N=1 APP=https://staging.skynetml.com API=https://api-staging.skynetml.com
-#   . ./devin-login.sh
-# For a preview account, export PREFIX=SKYNET_PR_<n> instead of N.
+# Sign in to Skynet staging or a PR preview with a test account.
+# Usage (bash or zsh): export the credentials as <PREFIX>_EMAIL and
+# <PREFIX>_PASSWORD, set the variables below, then source the script:
+#   export PREFIX=SKYNET_POOL APP=https://staging.skynetml.com API=https://api-staging.skynetml.com
+#   . ./login.sh
 # Sets TOKEN and nothing else. Prints only the HTTP status of the check.
-if [ -z "$APP" ] || [ -z "$API" ] || { [ -z "$PREFIX" ] && [ -z "$N" ]; }; then
-  echo 'devin-login: set APP, API and N (or PREFIX) first, then source this script' >&2
+if [ -z "$APP" ] || [ -z "$API" ] || [ -z "$PREFIX" ]; then
+  echo 'login: set APP, API and PREFIX first, then source this script' >&2
   # exit runs only when the script is executed instead of sourced.
   # shellcheck disable=SC2317
   return 1 2>/dev/null || exit 1
 fi
-_DL_PREFIX="${PREFIX:-SKYNET_DEVIN_${N}}"
+_DL_PREFIX="$PREFIX"
 _DL_JAR=$(mktemp); _DL_DOH=(--doh-url https://cloudflare-dns.com/dns-query)
 _DL_CSRF=$(curl -s "${_DL_DOH[@]}" -c "$_DL_JAR" -b "$_DL_JAR" "$APP/api/auth/csrf" | python3 -c 'import sys,json;print(json.load(sys.stdin)["csrfToken"])')
 # The password goes to curl on stdin, so it does not show in the process list.
