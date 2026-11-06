@@ -735,8 +735,8 @@ def test_byok_only_supplies_default_output_limit_for_anthropic_messages(
     assert sent[0].get("max_tokens") == expected
 
 
-def test_anthropic_byok_messages_adds_max_tokens_beside_completion_limit(gateway: ModelGateway) -> None:
-    """Give Anthropic its required max_tokens when the caller set only max_completion_tokens."""
+def test_anthropic_byok_messages_moves_completion_limit_to_max_tokens(gateway: ModelGateway) -> None:
+    """Forward the caller's max_completion_tokens to Anthropic as max_tokens only."""
     sent: list[dict] = []
 
     def provider(request: httpx.Request) -> httpx.Response:
@@ -754,7 +754,27 @@ def test_anthropic_byok_messages_adds_max_tokens_beside_completion_limit(gateway
         upstream=UPSTREAMS["anthropic"],
     )
     gateway._routes[route["token"]].dispatch("/messages", {"model": route["model"], "max_completion_tokens": 50})
-    assert sent[0]["max_tokens"] == 4000
+    assert sent[0] == {"model": route["model"], "max_tokens": 50}
+
+
+@pytest.mark.parametrize("limit", [0, -1, "50", True, 1.5])
+def test_anthropic_byok_messages_rejects_invalid_completion_limit(gateway: ModelGateway, limit: object) -> None:
+    """Refuse an invalid max_completion_tokens on /messages before any provider call."""
+    sent: list[httpx.Request] = []
+    gateway._client.close()
+    gateway._client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: sent.append(request) or httpx.Response(200, json={}))
+    )
+    route = gateway.register(
+        model="fixture/text",
+        api_key="private",
+        role="task",
+        policy=ChargePolicy("byok_model"),
+        upstream=UPSTREAMS["anthropic"],
+    )
+    with pytest.raises(UnpricedOperationError, match="positive output token limit"):
+        gateway._routes[route["token"]].dispatch("/messages", {"model": route["model"], "max_completion_tokens": limit})
+    assert sent == []
 
 
 _STREAM_WITHOUT_DONE = (

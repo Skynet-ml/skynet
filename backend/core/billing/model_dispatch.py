@@ -414,6 +414,10 @@ class ProviderDispatcher:
                         and routed["max_tokens"] != routed["max_completion_tokens"]
                     ):
                         raise UnpricedOperationError("Conflicting output token limits cannot authorize work.")
+                    if path == "/messages" and "max_completion_tokens" in routed:
+                        # Anthropic's Messages API rejects unknown top-level fields, so carry the
+                        # caller's limit over to the one field it accepts.
+                        routed["max_tokens"] = routed.pop("max_completion_tokens")
                     field = (
                         "max_output_tokens"
                         if path == "/responses"
