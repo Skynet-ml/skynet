@@ -330,7 +330,9 @@ export function saveSetupDraft(
   // the delete of the revision this page knew; a newer setup from another
   // device stays.
   const ownSlot = (slot: ServerSetupDraftSlot, read: number | null) => {
-    if (!slot.draft) return slot.revision === (read ?? 0) + 1;
+    // A page whose load failed never learned the revision; an empty slot is still safe to fill.
+    if (!slot.draft)
+      return slot.revision === (read ?? 0) + 1 || (read === null && foreign !== account);
     // An earlier save of this page that landed first is this page's setup too.
     if (slot.writer === writer) return true;
     const left = fromServerDraft(account, slot.draft);

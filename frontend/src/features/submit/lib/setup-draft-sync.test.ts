@@ -780,6 +780,56 @@ test("a stale tab that closes before its leave save is refused does not replace 
   assert.deepEqual(server.stored, sync.toServerDraft(y));
 });
 
+test("after a failed load on a deleted slot, saves land and the setup survives leaving", async () => {
+  reset();
+  const server = fakeServer();
+  // The user saved once and then submitted, so a delete left the slot at revision 2.
+  server.stored = null;
+  server.revision = 2;
+  server.fail = true;
+  assert.equal(await sync.loadSetupDraft("a", server), null);
+  server.fail = false;
+  const saves: boolean[] = [];
+  for (let i = 1; i <= 3; i += 1) {
+    saves.push(await sync.saveSetupDraft(editedDraft(1000 + i, `s${i}`), server));
+  }
+  assert.deepEqual(saves, [true, true, true]);
+  const left = editedDraft(2000, "left");
+  await sync.saveSetupDraft(left, server, true);
+  // In-app navigation drops the tab's session and opens a new page.
+  session.items.clear();
+  sync.resetSetupDraftSyncForTests();
+  const back = await sync.loadSetupDraft("a", server);
+  assert.equal(back?.values[WIZARD_SESSION_KEY], left.values[WIZARD_SESSION_KEY]);
+});
+
+test("after a failed load, a newer setup from another device is not overwritten", async () => {
+  reset();
+  const server = fakeServer();
+  server.stored = null;
+  server.revision = 2;
+  server.fail = true;
+  assert.equal(await sync.loadSetupDraft("a", server), null);
+  server.fail = false;
+  const other = sync.toServerDraft(editedDraft(900, "other-device"));
+  server.elsewhere(other);
+  assert.equal(await sync.saveSetupDraft(editedDraft(1001, "mine"), server), false);
+  assert.deepEqual(server.stored, other);
+});
+
+test("a page whose load failed can save over a delete from another device", async () => {
+  reset();
+  const server = fakeServer(sync.toServerDraft(editedDraft(800, "first")));
+  server.fail = true;
+  assert.equal(await sync.loadSetupDraft("a", server), null);
+  server.fail = false;
+  // Accepted behavior: the page never read the deleted setup, so its own setup is kept.
+  await server.delete(server.revision);
+  const mine = editedDraft(1001, "mine");
+  assert.equal(await sync.saveSetupDraft(mine, server), true);
+  assert.deepEqual(server.stored, sync.toServerDraft(mine));
+});
+
 test("N6: a reloaded stale tab keeps another setup saved elsewhere on load, leave and submit", async () => {
   reset();
   const mine = editedDraft(1000, "A");
