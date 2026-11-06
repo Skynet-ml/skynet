@@ -77,23 +77,31 @@ const call = (id: string, at: string): BillingUsageEntry => ({
   kind: "run",
 });
 
-/** Mount one DayRow, run `body`, then unmount. */
+type RowProps = {
+  day?: UsageDayRow;
+  loadCalls: (date: string) => Promise<BillingUsageEntry[]>;
+};
+
+/** Mount one DayRow, run `body` (it can render the row again with new props), then unmount. */
 async function withDayRow(
-  props: { day?: UsageDayRow; loadCalls: (date: string) => Promise<BillingUsageEntry[]> },
-  body: (container: HTMLElement) => Promise<void>,
+  props: RowProps,
+  body: (container: HTMLElement, rerender: (next: RowProps) => Promise<void>) => Promise<void>,
 ) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  try {
+  const render = async (next: RowProps) => {
     await React.act(async () => {
       root.render(
         <ul>
-          <DayRow day={props.day ?? day} locale="en-US" loadCalls={props.loadCalls} />
+          <DayRow day={next.day ?? day} locale="en-US" loadCalls={next.loadCalls} />
         </ul>,
       );
     });
-    await body(container);
+  };
+  try {
+    await render(props);
+    await body(container, render);
   } finally {
     await React.act(async () => root.unmount());
     container.remove();
@@ -225,4 +233,52 @@ void test("closing the day hides its calls, and opening it again reloads them", 
       );
     },
   );
+});
+
+/** A promise and the function that settles it, for loads the test finishes by hand. */
+function deferred() {
+  let resolve: (rows: BillingUsageEntry[]) => void = () => {};
+  const promise = new Promise<BillingUsageEntry[]>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+void test("an open day reloads when its totals change, and shows the new calls", async () => {
+  const loads = [deferred(), deferred()];
+  let count = 0;
+  const loadCalls = () => loads[count++]!.promise;
+  await withDayRow({ loadCalls }, async (container, rerender) => {
+    await clickDay(container);
+    await React.act(async () => loads[0]!.resolve([call("a", "2026-11-06T12:00:00+00:00")]));
+    assert.match(container.textContent ?? "", /Run a/);
+
+    await rerender({ day: { ...day, calls: 4, cents: 40 }, loadCalls });
+    assert.equal(count, 2);
+    assert.doesNotMatch(container.textContent ?? "", /Run a/);
+    assert.equal(
+      container.querySelector('[role="status"]')?.textContent,
+      "Loading the calls for this day…",
+    );
+
+    await React.act(async () => loads[1]!.resolve([call("b", "2026-11-06T13:00:00+00:00")]));
+    assert.match(container.textContent ?? "", /Run b/);
+  });
+});
+
+void test("a load that finishes after a newer one is ignored", async () => {
+  const older = deferred();
+  const newer = deferred();
+  const loadOld = () => older.promise;
+  const loadNew = () => newer.promise;
+  await withDayRow({ loadCalls: loadOld }, async (container, rerender) => {
+    await clickDay(container);
+    // A new loader (new range or account) starts a second request while the first one waits.
+    await rerender({ loadCalls: loadNew });
+    await React.act(async () => newer.resolve([call("new", "2026-11-06T13:00:00+00:00")]));
+    await React.act(async () => older.resolve([call("old", "2026-11-06T12:00:00+00:00")]));
+    assert.match(container.textContent ?? "", /Run new/);
+    assert.doesNotMatch(container.textContent ?? "", /Run old/);
+    assert.equal(container.querySelector('[role="status"]')?.textContent, "");
+  });
 });
