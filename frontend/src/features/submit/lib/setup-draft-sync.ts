@@ -316,6 +316,17 @@ export function saveSetupDraft(
     ).then((slot) => learn(account, slot));
   const keepCopy = () =>
     keepLocalSetupDraft({ ...draft, save, baseRevision: knownRevision(account) ?? 0 });
+  // A stale save goes once more only on top of this page's own setup, or of
+  // the delete of the revision this page knew; a newer setup from another
+  // device stays.
+  const ownSlot = (slot: ServerSetupDraftSlot, read: number | null) => {
+    if (!slot.draft) return slot.revision === (read ?? 0) + 1;
+    const left = fromServerDraft(account, slot.draft);
+    return (
+      bodyKey(account, toServerDraft(left)) === takenBody ||
+      left.values[WIZARD_SESSION_KEY] === draft.values[WIZARD_SESSION_KEY]
+    );
+  };
   const work = async () => {
     // A setup the server took or gave is not sent again, not even on leave: a
     // save from an idle tab would raise the revision, and a delete another tab
@@ -328,11 +339,20 @@ export function saveSetupDraft(
     if (keepalive) keepCopy();
     try {
       if (values === rejectedValues) throw new Error("setup draft too large");
+      const read = known;
       let slot = await send(knownRevision(account) ?? 0);
       // Another tab or device wrote or deleted the slot since this page read
       // it. This setup holds an edit the server never took, so it goes once
-      // more on top.
-      if (!slot.changed && deletes === deletesBefore) slot = await send(slot.revision);
+      // more on top of the same setup.
+      if (!slot.changed && deletes === deletesBefore) {
+        if (!ownSlot(slot, read?.account === account ? read.revision : null)) {
+          // Later saves from this page must not land on the newer setup either.
+          known = read;
+          foreign = account;
+          throw new Error("setup draft superseded");
+        }
+        slot = await send(slot.revision);
+      }
       if (!slot.changed) throw new Error("setup draft save refused");
     } catch (err) {
       if ((err as { status?: unknown } | null)?.status === 413) rejectedValues = values;
@@ -465,7 +485,10 @@ export function loadSetupDraft(
       take(tabBody);
       // Same answers with another chat (a copy without it, a trimmed one, or a
       // chat-only edit elsewhere) is still this setup, so a submit deletes it.
-      if (server?.values[WIZARD_SESSION_KEY] !== tabSetup) foreign = account;
+      if (server?.values[WIZARD_SESSION_KEY] === tabSetup) return;
+      foreign = account;
+      // The server holds another setup, so this tab's saves must not land on it.
+      known = null;
     };
     const local = localDraftOf(account);
     // The server's draft is unknown, so a delete from the reopened tab only
@@ -514,21 +537,41 @@ export function loadSetupDraft(
           SETUP_DRAFT_LOAD_TIMEOUT_MS,
         ),
       );
+    // The copy can come from another tab; only a copy of the setup this tab reopens is its own.
+    const copyIsTab = tabSetup !== null && local.values[WIZARD_SESSION_KEY] === tabSetup;
+    const tabBody = copyIsTab ? bodyKey(account, toServerDraft(local)) : reopened;
+    // The copy goes on top only of the revision it builds on, of the same
+    // setup, or of an empty slot (the server refuses it after a delete); a
+    // newer setup from another device stays.
+    const ownSlot = (at: ServerSetupDraftSlot) => {
+      if (!at.draft || at.revision === mark.copyBase) return true;
+      const left = fromServerDraft(account, at.draft);
+      return (
+        bodyKey(account, toServerDraft(left)) === reopened ||
+        left.values[WIZARD_SESSION_KEY] === local.values[WIZARD_SESSION_KEY] ||
+        (tabSetup !== null && left.values[WIZARD_SESSION_KEY] === tabSetup)
+      );
+    };
+    const superseded = (at: ServerSetupDraftSlot) => {
+      clearSetupDraft();
+      const current = at.draft ? fromServerDraft(account, at.draft) : null;
+      settle(current, tabBody);
+      return current;
+    };
+    if (!ownSlot(slot)) return superseded(slot);
     let base = slot.revision;
     let saved: ServerSetupDraftSlot;
     try {
       saved = await sendCopy(base);
       // Another write came between the read and this save, so the copy goes once more on top.
       if (!saved.changed && saved.revision !== base) {
+        if (!ownSlot(saved)) return superseded(saved);
         base = saved.revision;
         saved = await sendCopy(base);
       }
     } catch {
       return offered;
     }
-    // The copy can come from another tab; only a copy of the setup this tab reopens is its own.
-    const copyIsTab = tabSetup !== null && local.values[WIZARD_SESSION_KEY] === tabSetup;
-    const tabBody = copyIsTab ? bodyKey(account, toServerDraft(local)) : reopened;
     if (saved.changed) {
       clearSetupDraft();
       settle(local, tabBody);

@@ -255,14 +255,14 @@ test("an older browser copy goes to the server once, then leaves this browser", 
   assert.deepEqual(server.calls, ["get", "put", "get"]);
 });
 
-test("a browser copy the server never took wins over a later save elsewhere, whatever the clocks", async () => {
+test("a browser copy does not replace another setup saved elsewhere, whatever the clocks", async () => {
   reset();
   const server = fakeServer(sync.toServerDraft(editedDraft(9_000_000_000_000, "B")));
   local.setItem(SETUP_DRAFT_KEY, encodeSetupDraft(draft(1000)));
-  assert.deepEqual(await sync.loadSetupDraft("a", server), draft(1000));
-  assert.deepEqual(server.calls, ["get", "put"]);
-  assert.deepEqual(server.stored, sync.toServerDraft(draft(1000)));
-  assert.equal(server.revision, 2);
+  assert.deepEqual(await sync.loadSetupDraft("a", server), editedDraft(9_000_000_000_000, "B"));
+  assert.deepEqual(server.calls, ["get"]);
+  assert.deepEqual(server.stored, sync.toServerDraft(editedDraft(9_000_000_000_000, "B")));
+  assert.equal(server.revision, 1);
   assert.equal(localDraft(), null);
 });
 
@@ -520,7 +520,7 @@ test("N6: after a fast-clock device saves, Continue on another device saves its 
   assert.deepEqual(server.stored, sync.toServerDraft(edit));
 });
 
-test("N6: an edit after another device wrote goes on top of it, whatever the clocks", async () => {
+test("N6: an edit after another device saved the same setup goes on top of it, whatever the clocks", async () => {
   reset();
   const server = fakeServer(sync.toServerDraft(draft(1000)));
   await sync.loadSetupDraft("a", server);
@@ -529,6 +529,56 @@ test("N6: an edit after another device wrote goes on top of it, whatever the clo
   assert.equal(await sync.saveSetupDraft(edit, server), true);
   assert.deepEqual(server.calls, ["get", "put", "put"]);
   assert.deepEqual(server.stored, sync.toServerDraft(edit));
+});
+
+test("N6: an edit in a stale tab does not replace another setup saved elsewhere", async () => {
+  reset();
+  const server = fakeServer(sync.toServerDraft(draft(1000)));
+  await sync.loadSetupDraft("a", server);
+  const other = sync.toServerDraft(editedDraft(fast, "X"));
+  server.elsewhere(other);
+  const edit = editedDraft(2000, "B");
+  assert.equal(await sync.saveSetupDraft(edit, server), false);
+  assert.deepEqual(server.stored, other);
+  sameSetup(localDraft(), edit);
+  // A later edit from the same page does not land on the other setup either.
+  assert.equal(await sync.saveSetupDraft(editedDraft(3000, "B2"), server), false);
+  assert.deepEqual(server.stored, other);
+  // The kept copy does not replace it on the next load.
+  sync.resetSetupDraftSyncForTests();
+  await sync.loadSetupDraft("a", server);
+  assert.deepEqual(server.stored, other);
+  assert.equal(localDraft(), null);
+});
+
+test("N6: a reloaded stale tab keeps another setup saved elsewhere on load, leave and submit", async () => {
+  reset();
+  const mine = editedDraft(1000, "A");
+  const server = fakeServer(sync.toServerDraft(mine));
+  session.setItem(WIZARD_SESSION_KEY, mine.values[WIZARD_SESSION_KEY]);
+  await sync.loadSetupDraft("a", server);
+  const other = sync.toServerDraft(editedDraft(fast, "X"));
+  server.elsewhere(other);
+  const edit = editedDraft(2000, "A2");
+  session.setItem(WIZARD_SESSION_KEY, edit.values[WIZARD_SESSION_KEY]);
+  assert.equal(await sync.saveSetupDraft(edit, server, true), false);
+  sync.resetSetupDraftSyncForTests();
+  await sync.loadSetupDraft("a", server);
+  assert.deepEqual(server.stored, other);
+  assert.equal(await sync.saveSetupDraft(editedDraft(3000, "A3"), server, true), false);
+  assert.deepEqual(server.stored, other);
+  await sync.deleteSetupDraft("a", server);
+  assert.deepEqual(server.stored, other);
+});
+
+test("N6: a stale tab's edit does not bring back another setup that was submitted", async () => {
+  reset();
+  const server = fakeServer(sync.toServerDraft(draft(1000)));
+  await sync.loadSetupDraft("a", server);
+  server.elsewhere(sync.toServerDraft(editedDraft(fast, "X")));
+  server.elsewhere(null);
+  assert.equal(await sync.saveSetupDraft(editedDraft(2000, "B"), server), false);
+  assert.equal(server.stored, null);
 });
 
 test("N6: a delete from a fast-clock device does not lose a later edit here", async () => {
@@ -663,12 +713,9 @@ test("a reload of an idle tab does not put its setup over a later edit elsewhere
   assert.deepEqual(server.calls, ["get", "get"]);
   assert.deepEqual(server.stored, other);
 
-  await sync.saveSetupDraft(editedDraft(4000, "Z"), server);
-  assert.deepEqual(
-    server.stored,
-    sync.toServerDraft(editedDraft(4000, "Z")),
-    "an edit still saves",
-  );
+  // An edit in the stale tab stays in this browser; the later setup stays on the server.
+  assert.equal(await sync.saveSetupDraft(editedDraft(4000, "Z"), server), false);
+  assert.deepEqual(server.stored, other);
 });
 
 test("a new page without the tab's setup takes the server's draft", async () => {
@@ -687,7 +734,7 @@ test("an edit undone after a save is still an edit the server never took", async
   const server = fakeServer(sync.toServerDraft(draft(1000)));
   await sync.loadSetupDraft("a", server);
   assert.equal(await sync.saveSetupDraft(editedDraft(2000, "B"), server), true);
-  server.elsewhere(sync.toServerDraft(editedDraft(3000, "C")));
+  server.elsewhere(sync.toServerDraft(editedDraft(2500, "B")));
   assert.equal(await sync.saveSetupDraft(draft(4000), server, true), true);
   assert.deepEqual(server.stored, sync.toServerDraft(draft(4000)));
 });
@@ -755,7 +802,7 @@ test("F1d: Start new in one tab, then an idle tab closes: the setup stays gone",
   assert.equal(server.stored, null);
 });
 
-test("a closed tab's copy whose save never landed goes on top of a later edit elsewhere", async () => {
+test("a closed tab's copy whose save never landed does not replace a later setup elsewhere", async () => {
   reset();
   const server = fakeServer();
   await sync.loadSetupDraft("a", server);
@@ -768,8 +815,8 @@ test("a closed tab's copy whose save never landed goes on top of a later edit el
   server.put = put;
   sync.resetSetupDraftSyncForTests();
   server.elsewhere(sync.toServerDraft(editedDraft(2000, "check")));
-  assert.deepEqual(await sync.loadSetupDraft("a", server), mine);
-  assert.deepEqual(server.stored, sync.toServerDraft(mine));
+  assert.deepEqual(await sync.loadSetupDraft("a", server), editedDraft(2000, "check"));
+  assert.deepEqual(server.stored, sync.toServerDraft(editedDraft(2000, "check")));
   assert.equal(localDraft(), null);
 });
 
@@ -832,8 +879,9 @@ test("a reload after a landed leave save does not put the idle tab over a later 
   await sync.loadSetupDraft("a", server);
   await sync.saveSetupDraft(editedDraft(4000, "A-edit"), server, true);
   assert.deepEqual(server.stored, other);
-  await sync.saveSetupDraft(editedDraft(5000, "A-edit-2"), server);
-  assert.deepEqual(server.stored, sync.toServerDraft(editedDraft(5000, "A-edit-2")));
+  // A new edit in the stale tab does not replace the later setup either.
+  assert.equal(await sync.saveSetupDraft(editedDraft(5000, "A-edit-2"), server), false);
+  assert.deepEqual(server.stored, other);
 });
 
 test("a reloaded tab whose leave copy lost its chat still removes its setup on submit", async () => {
@@ -909,7 +957,7 @@ test("a reloaded tab that sends another tab's copy keeps that setup on leave and
   }
 });
 
-test("a copy refused because of a write between the load's read and save goes once more on top", async () => {
+test("a copy refused because another setup came between the load's read and save does not replace it", async () => {
   for (const finish of ["submit", "leave", "fresh submit"]) {
     reset();
     const mine = editedDraft(1000, "B");
@@ -929,15 +977,16 @@ test("a copy refused because of a write between the load's read and save goes on
     };
     await sync.loadSetupDraft("a", server);
     server.get = get;
-    assert.deepEqual(server.stored, sync.toServerDraft(copy), finish);
+    const other = sync.toServerDraft(editedDraft(2000, "Y"));
+    assert.deepEqual(server.stored, other, finish);
     if (finish === "leave") await sync.saveSetupDraft(editedDraft(3000, "B"), server, true);
     else await sync.deleteSetupDraft("a", server);
-    const kept = finish === "fresh submit" ? null : sync.toServerDraft(copy);
-    assert.deepEqual(server.stored, kept, finish);
+    // A fresh page shows the other setup, so its submit removes it.
+    assert.deepEqual(server.stored, finish === "fresh submit" ? null : other, finish);
   }
 });
 
-test("a reloaded tab's first edit, left before its answer, builds on the real revision", async () => {
+test("a reloaded stale tab's edit, left before its answer, does not replace the later setup", async () => {
   reset();
   const mine = editedDraft(1000, "task");
   const server = fakeServer(sync.toServerDraft(mine));
@@ -954,11 +1003,12 @@ test("a reloaded tab's first edit, left before its answer, builds on the real re
   };
   await sync.saveSetupDraft(edited, server, true);
   server.put = put;
-  assert.equal(localDraft()?.baseRevision, server.revision);
   sync.resetSetupDraftSyncForTests();
   session.items.clear();
   const offered = await sync.loadSetupDraft("a", server);
-  assert.equal(offered?.values[WIZARD_SESSION_KEY], edited.values[WIZARD_SESSION_KEY]);
+  const other = editedDraft(2000, "other");
+  assert.equal(offered?.values[WIZARD_SESSION_KEY], other.values[WIZARD_SESSION_KEY]);
+  assert.deepEqual(server.stored, sync.toServerDraft(other));
 });
 
 test("a reloaded tab whose load fails deletes only its own setup on submit", async () => {

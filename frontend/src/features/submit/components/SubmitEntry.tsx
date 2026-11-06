@@ -70,8 +70,9 @@ export function SubmitEntry() {
           WIZARD_V2_STEPS as readonly string[],
         );
       if (usable && !reload && !searchParams.has("clone")) setOffer(draft);
-      // A draft from an older wizard shape cannot reopen, so it goes with its chat.
-      else if (draft && !usable) discardSetupDraft(accountId, draft);
+      // A draft this build cannot read may come from a newer build on another
+      // device, so only this browser's copy goes; the server keeps it.
+      else if (draft && !usable) clearSetupDraft();
       setHydrated(true);
     });
     return () => {

@@ -220,6 +220,13 @@ test("Start new deletes the server draft", () => {
   assert.match(text, /onStartNew=\{\(\) => \{\n\s+discardSetupDraft\(accountId, offer\);/);
 });
 
+test("a draft this build cannot read stays on the server and is not offered", () => {
+  const text = source("src/features/submit/components/SubmitEntry.tsx");
+  assert.match(text, /else if \(draft && !usable\) clearSetupDraft\(\);/);
+  assert.equal(text.match(/discardSetupDraft\(/g)?.length, 2);
+  assert.equal(text.match(/deleteSetupDraft\(/g)?.length, 1);
+});
+
 function runSave(state: { empty: boolean }, submitted: boolean, saved: boolean) {
   const calls: string[] = [];
   const save = expression(wizard, "saveLeftSetup", {
