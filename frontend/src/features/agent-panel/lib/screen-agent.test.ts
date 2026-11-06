@@ -66,12 +66,15 @@ test("a continue with a return screen jumps straight back there", () => {
   assert.deepEqual(calls, ["to:budget"]);
 });
 
-test("the return screen is the first screen a go-back left, until a continue uses it", () => {
+test("the return screen is the latest screen a go-back left, until the wizard reaches it", () => {
   const back = (from: string) => ({ action: "back" as const, from, screen: "brief", request: "" });
   assert.equal(nextReturnScreen(null, back("budget")), "budget");
   assert.equal(nextReturnScreen("budget", back("optimizer")), "budget");
   assert.equal(nextReturnScreen("budget", { action: "continue", from: "brief" }), "budget");
-  assert.equal(nextReturnScreen("budget", { action: "continue", from: "optimizer", to: "budget" }), null);
+  // A held jump keeps the screen; the wizard clears it when it gets there.
+  assert.equal(nextReturnScreen("budget", { action: "continue", from: "optimizer", to: "budget" }), "budget");
+  // A go-back from past the old screen means the user moved on: the newer screen wins.
+  assert.equal(nextReturnScreen("budget", back("overview")), "overview");
 });
 
 test("a back result jumps to the named screen with its request", () => {

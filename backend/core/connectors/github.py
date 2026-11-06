@@ -266,7 +266,10 @@ def list_repositories(secret: ConnectorSecret, search: str) -> list[dict[str, An
         params={"per_page": REPO_LIMIT, "sort": "pushed", "affiliation": "owner,collaborator,organization_member"},
     )
     needle = search.strip().lower()
-    words = [word for word in re.split(r"[^a-z0-9]+", needle) if word]
+    words = [word for word in re.split(r"[\W_]+", needle) if word]
+    # A search of only punctuation has no words; it must match nothing, not everything.
+    if needle and not words:
+        words = [needle]
     repos = [
         _repo_summary(repo)
         for repo in body or []

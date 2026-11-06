@@ -103,9 +103,28 @@ export function runScreenNav(nav: ScreenNav, navigator: ScreenNavigator | null):
 }
 
 /**
+ * The wizard's screens in order, as the backend's ``_SCREEN_ORDER`` lists them.
+ */
+const SCREEN_ORDER: readonly string[] = [
+  "brief",
+  "artifact",
+  "source",
+  "plan",
+  "optimizer",
+  "models",
+  "budget",
+  "metric",
+  "check",
+  "schedule",
+  "overview",
+];
+
+/**
  * The screen the user returns to after an agent's go-back edit. The first
- * go-back sets it; a second go-back from the earlier screen keeps it. Any
- * other move keeps it until the wizard reaches it.
+ * go-back sets it; a second go-back from a screen before it keeps it. A
+ * go-back from a later screen replaces it, since the user moved past it. Any
+ * other move keeps it until the wizard reaches it, even a Continue whose
+ * jump the wizard holds.
  *
  * Args:
  *   current: The return screen so far, or null.
@@ -115,8 +134,10 @@ export function runScreenNav(nav: ScreenNav, navigator: ScreenNavigator | null):
  *   The return screen after the move.
  */
 export function nextReturnScreen(current: string | null, nav: ScreenNav): string | null {
-  if (nav.action === "back") return current ?? (nav.from || null);
-  return nav.to ? null : current;
+  if (nav.action !== "back") return current;
+  const from = nav.from || null;
+  if (current === null || from === null) return current ?? from;
+  return SCREEN_ORDER.indexOf(current) > SCREEN_ORDER.indexOf(from) ? current : from;
 }
 
 /**

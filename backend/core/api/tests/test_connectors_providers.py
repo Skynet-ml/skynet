@@ -438,6 +438,8 @@ def test_github_picker_lists_repositories_with_details() -> None:
         ("octo-docs", ["octo/docs"]),
         ("the app", ["octo/app"]),
         ("app docs", []),
+        ("---", []),
+        ("אתר אישי", []),
     ],
 )
 @pytest.mark.usefixtures("vault_key", "generic_oauth_off")

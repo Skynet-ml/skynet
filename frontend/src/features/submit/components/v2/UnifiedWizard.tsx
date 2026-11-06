@@ -207,7 +207,7 @@ function UnifiedWizardFrame() {
 
   // Back to one named screen: the agent's go-back lands where the user's
   // own Back presses would, without walking every screen between.
-  const { goTo, canEnter } = w;
+  const { goTo, canEnter, stepIssue } = w;
   const goToScreen = useCallback(
     (screen: string) => {
       const step = steps.find((s) => (stepPages(s, w.state) as readonly string[]).includes(screen));
@@ -231,14 +231,20 @@ function UnifiedWizardFrame() {
       const open = inputsOpen && !pricing && shortfall === null;
       // The stepper's own hold: no jump into the metric step while costs are unsettled.
       const held = step !== undefined && (runShort || !w.costSettled) && WIZARD_STAGE[step] >= WIZARD_STAGE.metric;
-      if (!step || !later || !open || held || (step !== current && !canEnter(step))) {
+      // A step on the way with a problem (an optimizer that no longer fits
+      // the data, a stale check) holds the jump, so Continue shows it.
+      const blocked =
+        step !== undefined &&
+        (steps.slice(position, steps.indexOf(step)).some((s) => stepIssue(s) !== null) ||
+          (target > 0 && stepIssue(step) !== null));
+      if (!step || !later || !open || held || blocked || (step !== current && !canEnter(step))) {
         forward();
         return;
       }
       setPages((p) => ({ ...p, [step]: target }));
       if (step !== current) goTo(step);
     },
-    [steps, position, current, page, inputsOpen, pricing, shortfall, runShort, w.costSettled, forward, goTo, canEnter, w.state],
+    [steps, position, current, page, inputsOpen, pricing, shortfall, runShort, w.costSettled, forward, goTo, canEnter, stepIssue, w.state],
   );
 
   // Guided's flow skips the screen that sets the limit, so its notice has no button.
