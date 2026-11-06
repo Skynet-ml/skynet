@@ -282,3 +282,23 @@ void test("a load that finishes after a newer one is ignored", async () => {
     assert.equal(container.querySelector('[role="status"]')?.textContent, "");
   });
 });
+
+void test("an older load that finishes first does not end the newer load's spinner", async () => {
+  const older = deferred();
+  const newer = deferred();
+  const loadOld = () => older.promise;
+  const loadNew = () => newer.promise;
+  await withDayRow({ loadCalls: loadOld }, async (container, rerender) => {
+    await clickDay(container);
+    await rerender({ loadCalls: loadNew });
+    await React.act(async () => older.resolve([call("old", "2026-11-06T12:00:00+00:00")]));
+    assert.doesNotMatch(container.textContent ?? "", /Run old/);
+    assert.equal(
+      container.querySelector('[role="status"]')?.textContent,
+      "Loading the calls for this day…",
+    );
+    await React.act(async () => newer.resolve([call("new", "2026-11-06T13:00:00+00:00")]));
+    assert.match(container.textContent ?? "", /Run new/);
+    assert.equal(container.querySelector('[role="status"]')?.textContent, "");
+  });
+});
