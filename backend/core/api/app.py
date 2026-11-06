@@ -120,6 +120,7 @@ from .routers.experience import create_experience_router
 from .routers.folders import create_folders_router
 from .routers.generalist_agent import create_generalist_agent_router
 from .routers.local_hosted_link import create_local_hosted_link_router
+from .routers.local_hosted_proxy import create_local_hosted_proxy_router
 from .routers.local_notifications import create_local_notifications_router
 from .routers.local_runtime import create_local_runtime_router
 from .routers.mcp_oauth import create_mcp_oauth_router
@@ -1366,6 +1367,7 @@ def create_app(
     app.include_router(create_account_security_router(job_store=job_store), tags=["Auth"])
     app.include_router(create_local_runtime_router(), tags=["Auth"])
     app.include_router(create_local_hosted_link_router(job_store=job_store), tags=["Auth"])
+    app.include_router(create_local_hosted_proxy_router(job_store=job_store), tags=["Auth"])
     app.include_router(create_account_data_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_notification_preferences_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_local_notifications_router(job_store=job_store), tags=["Settings"])
