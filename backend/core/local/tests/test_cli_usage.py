@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from ...api.auth import AuthenticatedUser, get_authenticated_user
+from ...api.routers import local_cli_usage as local_cli_usage_router
 from ...api.routers.local_cli_usage import create_local_cli_usage_router
 from ...config import settings
 from ...storage.models import (
@@ -340,6 +341,11 @@ def test_route_is_404_and_hidden_outside_local_mode(engine, monkeypatch: pytest.
 def test_route_answers_in_local_mode(engine, state_dir, monkeypatch: pytest.MonkeyPatch) -> None:
     """In local mode the route returns the user's usage document."""
     monkeypatch.setattr(settings, "local_mode", True)
+    quotas = {
+        "claude": {"status": "reconnect", "windows": []},
+        "codex": {"status": "ok", "windows": [{"window": "5h", "used_percent": 12.0, "resets_at": None}]},
+    }
+    monkeypatch.setattr(local_cli_usage_router, "read_cli_quotas", lambda _settings: quotas)
     with Session(engine) as session:
         # The route reads the real clock, so this call settles five minutes before now.
         age = _NOW - datetime.now(UTC) + timedelta(minutes=5)
@@ -349,3 +355,5 @@ def test_route_answers_in_local_mode(engine, state_dir, monkeypatch: pytest.Monk
     assert response.status_code == 200
     codex = _by_cli(response.json())["codex"]
     assert codex["windows"]["5h"]["input_tokens"] == 4
+    assert codex["quota"] == quotas["codex"]
+    assert _by_cli(response.json())["claude"]["quota"]["status"] == "reconnect"

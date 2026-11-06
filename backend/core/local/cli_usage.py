@@ -7,9 +7,9 @@ each CLI call inside a run settles a zero-cent row in
 ``execution_usage_evidence`` with the CLI, its status and its token counts.
 
 This module only reads. It never changes credits, balances or wallet
-numbers. No CLI reports a used-percent for Skynet's calls, so the only
-window fact is the cap reset time that :func:`.cli_probe.read_cli_limits`
-saved when a CLI reported a limit. A 429 row marked ``dispatched: false``
+numbers. The subscription's used percent covers the whole account, so
+:mod:`.cli_quota` reads it apart. The cap here is the reset time that
+:func:`.cli_probe.read_cli_limits` saved when a CLI reported a limit. A 429 row marked ``dispatched: false``
 or a 502 row marked the same way never started the CLI it names (a saved cap,
 no CLI for the model, or a CLI that is not installed), so that CLI is skipped.
 One operation keeps one row, so a row's ``capped_runs`` lists the fallback

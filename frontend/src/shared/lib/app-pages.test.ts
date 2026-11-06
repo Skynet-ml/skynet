@@ -12,9 +12,8 @@ const enCatalog = JSON.parse(
   fs.readFileSync(path.join(process.cwd(), "..", "i18n", "locales", "ui", "en.json"), "utf8"),
 ) as Record<string, string>;
 
-// Routes a signed-in user never navigates to by name. /local-usage is a
-// local-only mount until SKY-340's Usage tab hosts its panel.
-const NOT_SEARCHABLE = new Set(["/login", "/desktop/link", "/mcp/authorize", "/local-usage"]);
+// Routes a signed-in user never navigates to by name.
+const NOT_SEARCHABLE = new Set(["/login", "/desktop/link", "/mcp/authorize"]);
 
 function staticRoutes(dir: string, segments: string[] = []): string[] {
   const routes: string[] = [];

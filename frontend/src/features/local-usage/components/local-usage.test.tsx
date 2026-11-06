@@ -24,7 +24,13 @@ const report: CliUsageReport = {
   generated_at: "2026-11-06T12:00:00+00:00",
   windows: ["5h", "7d"],
   clis: [
-    { cli: "codex", last_used_at: null, cap: null, windows: { "5h": zero, "7d": zero } },
+    {
+      cli: "codex",
+      last_used_at: null,
+      cap: null,
+      windows: { "5h": zero, "7d": zero },
+      quota: { status: "unavailable", windows: [] },
+    },
     {
       cli: "claude",
       last_used_at: "2026-11-06T11:00:00+00:00",
@@ -33,9 +39,21 @@ const report: CliUsageReport = {
         "5h": { calls: 3, failed_calls: 1, runs: 2, input_tokens: 1234, output_tokens: 23 },
         "7d": { calls: 4, failed_calls: 1, runs: 2, input_tokens: 51234, output_tokens: 223 },
       },
+      quota: {
+        status: "ok",
+        windows: [
+          { window: "7d", used_percent: 22.4, resets_at: "2026-11-12T15:00:00+00:00" },
+          { window: "5h", used_percent: 100, resets_at: null },
+        ],
+      },
     },
   ],
 };
+
+const withQuota = (cli: "claude" | "codex", quota: CliUsageReport["clis"][number]["quota"]): CliUsageReport => ({
+  ...report,
+  clis: report.clis.map((entry) => (entry.cli === cli ? { ...entry, quota } : entry)),
+});
 
 const render = (props: Partial<React.ComponentProps<typeof LocalCliUsageView>>) =>
   renderToStaticMarkup(
@@ -43,22 +61,35 @@ const render = (props: Partial<React.ComponentProps<typeof LocalCliUsageView>>) 
   );
 
 void describe("LocalCliUsageView", () => {
-  void it("shows both windows, the totals and the cap", () => {
+  void it("shows a percent bar for each window, session first, and the Skynet totals", () => {
     const html = render({ report });
-    assert.match(html, /localUsage\.window\.5h/);
-    assert.match(html, /localUsage\.window\.7d/);
-    assert.match(html, /51,234/);
-    assert.match(html, /1,234/);
+    assert.equal(html.match(/role="progressbar"/g)?.length, 2);
+    assert.ok(html.indexOf("localUsage.window.5h") < html.indexOf("localUsage.window.7d"));
+    assert.match(html, /localUsage\.used/);
+    assert.match(html, /localUsage\.resets/);
+    assert.match(html, /localUsage\.skynet\.5h/);
+    assert.match(html, /localUsage\.skynet\.7d/);
     assert.match(html, /localUsage\.capped/);
-    assert.match(html, /localUsage\.neverUsed/);
-    assert.match(html, /localUsage\.lastUsed/);
+    assert.match(html, /localUsage\.billingNote/);
   });
 
-  void it("says the use does not change web credits and has no plan percent", () => {
+  void it("toggles between Claude Code and Codex, with Claude Code first", () => {
     const html = render({ report });
-    assert.match(html, /localUsage\.billingNote/);
-    assert.match(html, /localUsage\.noPercent/);
-    assert.doesNotMatch(html, /%/);
+    assert.match(html, /role="radiogroup"/);
+    assert.ok(html.indexOf("subscription.cli.claude") < html.indexOf("subscription.cli.codex"));
+    const codex = render({ report, defaultCli: "codex" });
+    assert.doesNotMatch(codex, /role="progressbar"/);
+    assert.match(codex, /localUsage\.unavailable/);
+  });
+
+  void it("asks the user to reconnect an expired sign-in", () => {
+    const html = render({ report: withQuota("claude", { status: "reconnect", windows: [] }) });
+    assert.match(html, /localUsage\.reconnect/);
+    assert.doesNotMatch(html, /role="progressbar"/);
+  });
+
+  void it("says so when the CLI reports no window", () => {
+    assert.match(render({ report: withQuota("claude", { status: "ok", windows: [] }) }), /localUsage\.noWindows/);
   });
 
   void it("tells the user in every UI catalog that billing does not change", () => {
