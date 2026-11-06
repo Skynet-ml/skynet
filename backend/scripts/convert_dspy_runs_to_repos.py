@@ -65,6 +65,7 @@ DSPY_OPTIMIZER_PREFIX = "dspy_"
 DSPY_STATE_KEY = "__dspy_state__"
 ARTIFACT_KIND_DSPY_PROGRAM = "dspy_program"
 PLAN_ENDED = "ended"
+END_DSPY_RETIRED = "dspy_retired"
 
 PROGRAM_DIR = "program"
 DSPY_REQUIREMENT = "dspy==3.3.1"
@@ -589,16 +590,17 @@ def plan_moves(plans: Iterable[dict[str, Any]], converted: dict[str, str]) -> li
 
     A plan follows its incumbent: the converted incumbent becomes both the
     new source and the new incumbent, and the baseline restarts with no tried
-    models. Ended plans stay as they are.
+    models. Ended plans stay as they are, except plans the worker ended only
+    because their run was a DSPy run: those move and start again.
 
     Args:
         plans: ``continuous_plans`` rows with ``id``, ``source_optimization_id``,
-            ``incumbent_optimization_id`` and ``status``.
+            ``incumbent_optimization_id``, ``status`` and ``pause_reason``.
         converted: Old job id to the new run id (or its placeholder).
 
     Returns:
         One entry per plan: ``{"plan_id", "action": "move"|"skip", "reason",
-        "old_source", "old_incumbent", "from_job", "new_run"}``.
+        "old_source", "old_incumbent", "from_job", "new_run", "restart"}``.
     """
     moves: list[dict[str, Any]] = []
     claimed: set[str] = set()
@@ -613,9 +615,11 @@ def plan_moves(plans: Iterable[dict[str, Any]], converted: dict[str, str]) -> li
             "old_incumbent": incumbent,
             "from_job": None,
             "new_run": None,
+            "restart": False,
         }
         moves.append(entry)
-        if plan.get("status") == PLAN_ENDED:
+        retired = plan.get("status") == PLAN_ENDED and plan.get("pause_reason") == END_DSPY_RETIRED
+        if plan.get("status") == PLAN_ENDED and not retired:
             entry["reason"] = "The plan ended."
             continue
         if incumbent not in converted:
@@ -628,7 +632,7 @@ def plan_moves(plans: Iterable[dict[str, Any]], converted: dict[str, str]) -> li
             entry["reason"] = f"Another plan already moves to the conversion of {incumbent}."
             continue
         claimed.add(new_run)
-        entry.update(action="move", from_job=incumbent, new_run=new_run)
+        entry.update(action="move", from_job=incumbent, new_run=new_run, restart=retired)
     return moves
 
 
@@ -660,9 +664,12 @@ def plan_move_sql(moves: Sequence[dict[str, Any]]) -> str:
     lines = ["-- Review, replace every placeholder with the submitted run id, then run.", "BEGIN;"]
     for move in rows:
         snapshot = json.dumps({"incumbent": move["new_run"], "tried_models": []})
+        # The worker ends a DSPy plan at its first check after the cut-over;
+        # the converted run is a repository run, so that plan can check again.
+        restart = " status = 'active', pause_reason = NULL, next_check_at = now()," if move.get("restart") else ""
         lines.append(
             "UPDATE continuous_plans"
-            f" SET source_optimization_id = {_sql_literal(move['new_run'])},"
+            f" SET{restart} source_optimization_id = {_sql_literal(move['new_run'])},"
             f" incumbent_optimization_id = {_sql_literal(move['new_run'])},"
             f" baseline_snapshot = {_sql_literal(snapshot)}"
             f" WHERE id = {_sql_literal(move['plan_id'])}"
@@ -727,7 +734,8 @@ def load_plans(engine: Any, job_ids: Sequence[str]) -> list[dict[str, Any]]:
     if not job_ids:
         return []
     query = (
-        "SELECT id, username, source_optimization_id, incumbent_optimization_id, status FROM continuous_plans"
+        "SELECT id, username, source_optimization_id, incumbent_optimization_id, status, pause_reason"
+        " FROM continuous_plans"
         " WHERE source_optimization_id = ANY(:ids) OR incumbent_optimization_id = ANY(:ids)"
     )
     with engine.connect() as conn:

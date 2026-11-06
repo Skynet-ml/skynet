@@ -129,11 +129,19 @@ def test_created_repository_gets_every_version_and_the_best_branch(
 
     outcome, calls = _publish(monkeypatch, tmp_path, result)
 
-    assert calls == [("ada/starter", _COMMIT, [("1", ""), ("2", _OTHER), ("3", _EDIT)], "3", "tok")]
+    assert calls == [
+        (
+            "ada/starter",
+            _COMMIT,
+            [("0123456789ab-1", ""), ("0123456789ab-2", _OTHER), ("0123456789ab-3", _EDIT)],
+            "0123456789ab-3",
+            "tok",
+        )
+    ]
     assert outcome == result["details"][repo_staging.CANDIDATE_BRANCHES_DETAIL]
     assert outcome is not None
-    assert outcome["best_version"] == "3"
-    assert outcome["branches"][BEST_BRANCH] == "sha-3"
+    assert outcome["best_version"] == "0123456789ab-3"
+    assert outcome["branches"][BEST_BRANCH] == "sha-0123456789ab-3"
     assert outcome["skipped"] == 0
     assert repo_staging.PULL_REQUEST_DETAIL not in result["details"]
 
@@ -146,9 +154,9 @@ def test_created_repository_points_best_at_the_start_without_an_improvement(
 
     outcome, calls = _publish(monkeypatch, tmp_path, result)
 
-    assert calls[0][2:4] == ([("1", _EDIT), ("start", "")], "start")
+    assert calls[0][2:4] == ([("0123456789ab-1", _EDIT), ("0123456789ab-start", "")], "0123456789ab-start")
     assert outcome is not None
-    assert outcome["best_version"] == "start"
+    assert outcome["best_version"] == "0123456789ab-start"
 
 
 def test_created_repository_never_pushes_a_version_that_breaks_the_rules(
@@ -164,9 +172,29 @@ def test_created_repository_never_pushes_a_version_that_breaks_the_rules(
 
     outcome, calls = _publish(monkeypatch, tmp_path, result)
 
-    assert calls[0][2:4] == ([("1", "")], "1")
+    assert calls[0][2:4] == ([("0123456789ab-1", "")], "0123456789ab-1")
     assert outcome is not None
     assert outcome["skipped"] == 2
+
+
+def test_second_run_on_a_created_repository_uses_new_branch_names(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A later run never reuses an earlier run's branch, so its push needs no rewrite."""
+    result = _result(_EDIT, 0.8, [{"candidate": _EDIT}])
+    _, first = _publish(monkeypatch, tmp_path, result)
+    calls: list[Any] = []
+    monkeypatch.setattr(repo_staging, "push_candidates", lambda *args: calls.append(args) or {BEST_BRANCH: "sha"})
+    repo_staging.publish_candidates(
+        _result(_OTHER, 0.8, [{"candidate": _OTHER}]),
+        _payload(True),
+        _staged(tmp_path),
+        username="ada",
+        engine=None,
+        optimization_id="fedcba9876543210",
+    )
+
+    assert {version_id for version_id, _ in first[0][2]}.isdisjoint({version_id for version_id, _ in calls[0][2]})
 
 
 def test_created_repository_push_failure_is_recorded_not_raised(
@@ -189,7 +217,9 @@ def test_created_repository_push_failure_is_recorded_not_raised(
     monkeypatch.setattr(repo_staging, "push_candidates", refuse)
     result = _result(_EDIT, 0.8, [{"candidate": _EDIT}])
 
-    outcome = repo_staging.publish_candidates(result, _payload(True), _staged(tmp_path), username="ada", engine=None)
+    outcome = repo_staging.publish_candidates(
+        result, _payload(True), _staged(tmp_path), username="ada", engine=None, optimization_id="0123456789abcdef"
+    )
 
     assert outcome == {"error": "Could not push the candidate branches: denied"}
     assert result["details"][repo_staging.CANDIDATE_BRANCHES_DETAIL] == outcome
@@ -213,7 +243,9 @@ def test_unexpected_push_failure_is_recorded_not_raised(monkeypatch: pytest.Monk
     monkeypatch.setattr(repo_staging, "github_token", explode)
     result = _result(_EDIT, 0.8, [{"candidate": _EDIT}])
 
-    outcome = repo_staging.publish_candidates(result, _payload(True), _staged(tmp_path), username="ada", engine=None)
+    outcome = repo_staging.publish_candidates(
+        result, _payload(True), _staged(tmp_path), username="ada", engine=None, optimization_id="0123456789abcdef"
+    )
 
     assert outcome == {"error": "The candidate branches could not be pushed."}
 
@@ -260,7 +292,7 @@ def test_created_repository_keeps_only_the_top_scoring_versions(
 
     pushed_ids = [version_id for version_id, _ in calls[0][2]]
     assert len(pushed_ids) == repo_staging.MAX_CANDIDATE_BRANCHES
-    assert pushed_ids == ["4", *[str(index) for index in range(7, 16)]]
+    assert pushed_ids == ["0123456789ab-4", *[f"0123456789ab-{index}" for index in range(7, 16)]]
     assert outcome is not None
-    assert outcome["best_version"] == "4"
+    assert outcome["best_version"] == "0123456789ab-4"
     assert outcome["left_out"] == len(patches) - repo_staging.MAX_CANDIDATE_BRANCHES

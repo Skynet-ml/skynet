@@ -627,7 +627,9 @@ def publish_improvement(
         when the run did not improve an existing repository.
     """
     if payload["target"]["repo"].get("created_by_skynet"):
-        return publish_candidates(result, payload, staged, username=username, engine=engine)
+        return publish_candidates(
+            result, payload, staged, username=username, engine=engine, optimization_id=optimization_id
+        )
     patch = improved_patch(result)
     if patch is None:
         return None
@@ -673,7 +675,7 @@ def publish_improvement(
 
 
 def _candidate_versions(
-    result: dict[str, Any], repo: dict[str, Any], staged: StagedRepository
+    result: dict[str, Any], repo: dict[str, Any], staged: StagedRepository, run: str
 ) -> tuple[list[tuple[str, str]], int]:
     """Number the run's versions that may reach the repository.
 
@@ -681,9 +683,10 @@ def _candidate_versions(
         result: Finished black-box result.
         repo: The payload's repository source.
         staged: The fetched tree, whose read-only paths still apply.
+        run: Short run id that starts every version id.
 
     Returns:
-        ``(id, patch)`` pairs in first-seen order, ids counting from 1, and
+        ``(id, patch)`` pairs in first-seen order, ids ``<run>-1`` upward, and
         how many versions were left out.
     """
     versions: list[tuple[str, str]] = []
@@ -701,7 +704,7 @@ def _candidate_versions(
         ):
             skipped += 1
             continue
-        versions.append((str(index), patch))
+        versions.append((f"{run}-{index}", patch))
     return versions, skipped
 
 
@@ -712,6 +715,7 @@ def publish_candidates(
     *,
     username: str,
     engine: Any,
+    optimization_id: str,
 ) -> dict[str, Any]:
     """Push the top versions of a run on a created repository to their own branches.
 
@@ -725,12 +729,17 @@ def publish_candidates(
         staged: The fetched tree, whose read-only paths still apply.
         username: Owner of the run and of the GitHub connection.
         engine: SQLAlchemy engine holding the connector vault.
+        optimization_id: The run, named in every version id.
 
     Returns:
         What was recorded under ``details.candidate_branches``.
     """
     repo = payload["target"]["repo"]
-    versions, skipped = _candidate_versions(result, repo, staged)
+    # A later run on the same repository (a retry, clone or scheduled cycle)
+    # makes different commits for the same version number. Branch names carry
+    # the run id so those pushes never need to rewrite an earlier run's branch.
+    run = optimization_id[:12]
+    versions, skipped = _candidate_versions(result, repo, staged, run)
     best_patch = improved_patch(result) or ""
     best_id = next((version_id for version_id, patch in versions if patch == best_patch), None)
     left_out = 0
@@ -744,7 +753,7 @@ def publish_candidates(
         left_out = len(versions) - len(kept)
         versions = [pair for pair in versions if pair[0] in kept]
     if best_id is None:
-        best_id = "start"
+        best_id = f"{run}-start"
         versions.append((best_id, ""))
     outcome: dict[str, Any]
     try:

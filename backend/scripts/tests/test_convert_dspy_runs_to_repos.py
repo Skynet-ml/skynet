@@ -262,6 +262,36 @@ def test_plan_moves_follow_the_incumbent_after_a_cycle() -> None:
     assert "WHERE id = 'p1' AND source_optimization_id = 'src'" in sql
     assert '{"incumbent": "new-inc", "tried_models": []}' in sql
     assert plan_move_sql([]) == "-- No continuous plan moves.\n"
+    assert "status = 'active'" not in sql
+
+
+def test_plan_ended_as_dspy_retired_moves_and_restarts() -> None:
+    """Move a plan the worker ended for its DSPy run, and make it active again."""
+    plans = [
+        {
+            "id": "p1",
+            "source_optimization_id": "src",
+            "incumbent_optimization_id": None,
+            "status": "ended",
+            "pause_reason": "dspy_retired",
+        },
+        {
+            "id": "p2",
+            "source_optimization_id": "other",
+            "incumbent_optimization_id": None,
+            "status": "ended",
+            "pause_reason": "user",
+        },
+    ]
+    moves = {move["plan_id"]: move for move in plan_moves(plans, {"src": "new-src", "other": "new-other"})}
+    assert moves["p1"]["action"] == "move"
+    assert moves["p1"]["restart"] is True
+    assert moves["p2"]["action"] == "skip"
+    sql = plan_move_sql(list(moves.values()))
+    assert sql.count("UPDATE continuous_plans") == 1
+    assert (
+        "SET status = 'active', pause_reason = NULL, next_check_at = now(), source_optimization_id = 'new-src'" in sql
+    )
 
 
 def test_generated_serve_and_scorer_run_in_a_subprocess(tmp_path: Path) -> None:

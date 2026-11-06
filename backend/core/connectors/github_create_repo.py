@@ -54,12 +54,18 @@ def existing_repository(token: str, name: str) -> tuple[str, str] | None:
 
     Returns:
         The ``owner/name`` and default branch, or ``None`` when no such repository exists.
+
+    Raises:
+        RepoCreateError: When GitHub fails with anything but 404, so an
+            outage never looks like a free name.
     """
     login = str(get_json(f"{API_URL}/user", provider=PROVIDER, headers=_headers(token))["login"])
     try:
         found = get_json(f"{API_URL}/repos/{login}/{name}", provider=PROVIDER, headers=_headers(token))
-    except DomainError:
-        return None
+    except DomainError as error:
+        if error.code == "connectors.not_found":
+            return None
+        raise RepoCreateError(f"Could not check GitHub for a repository named '{name}'. Retry later.") from error
     return str(found["full_name"]), str(found.get("default_branch") or "main")
 
 

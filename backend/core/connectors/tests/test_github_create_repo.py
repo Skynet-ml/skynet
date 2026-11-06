@@ -137,6 +137,20 @@ def test_existing_repository_lookup(
     assert existing_repository("tok", "starter") == expected
 
 
+def test_existing_repository_lookup_raises_when_github_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A GitHub outage raises instead of reporting the name as free."""
+
+    def fake_get_json(url: str, **_: Any) -> dict[str, Any]:
+        if url == "https://api.github.com/user":
+            return {"login": "ada"}
+        raise DomainError("connectors.provider_error", status=502, provider="GitHub", status_code=500)
+
+    monkeypatch.setattr(github_create_repo, "get_json", fake_get_json)
+
+    with pytest.raises(RepoCreateError, match="Could not check GitHub"):
+        existing_repository("tok", "starter")
+
+
 @pytest.mark.parametrize("files", [{}, {"../escape.py": "x"}, {"/abs.py": "x"}, {".git/config": "x"}])
 def test_bad_files_fail_before_github_is_called(monkeypatch: pytest.MonkeyPatch, files: dict[str, str]) -> None:
     """No repository is created when the first commit could not be pushed."""
