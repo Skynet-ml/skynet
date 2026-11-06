@@ -4472,7 +4472,7 @@
   "localUsage.resets": "{time} 重置",
   "localUsage.used": "已用 {percent}",
   "localUsage.noWindows": "{cli} 未提供此方案的限额时段。",
-  "localUsage.reconnect": "需要重新登录 {cli}。请在终端运行 {command}，然后选择刷新。",
+  "localUsage.reconnect": "{cli} 的用量不是最新的。请在终端运行 {command} 来更新，如有提示请登录。然后选择刷新。",
   "localUsage.unavailable": "无法从 {cli} 读取方案用量。",
   "localUsage.skynet.5h": "过去 5 小时的 {term.appName} 运行：{calls} 次调用，{tokens} 个 token",
   "localUsage.skynet.7d": "过去 7 天的 {term.appName} 运行：{calls} 次调用，{tokens} 个 token",

@@ -4472,7 +4472,7 @@
   "localUsage.resets": "Si azzera {time}",
   "localUsage.used": "{percent} usato",
   "localUsage.noWindows": "{cli} non indica una finestra di limite per questo piano.",
-  "localUsage.reconnect": "{cli} richiede un nuovo accesso. Esegui {command} in un terminale, poi seleziona Aggiorna.",
+  "localUsage.reconnect": "L’utilizzo di {cli} non è aggiornato. Esegui {command} in un terminale per aggiornarlo, e accedi se richiesto. Poi seleziona Aggiorna.",
   "localUsage.unavailable": "Impossibile leggere l’uso del piano da {cli}.",
   "localUsage.skynet.5h": "Esecuzioni di {term.appName} nelle ultime 5 ore: {calls} chiamate, {tokens} token",
   "localUsage.skynet.7d": "Esecuzioni di {term.appName} negli ultimi 7 giorni: {calls} chiamate, {tokens} token",

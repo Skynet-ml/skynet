@@ -4472,7 +4472,7 @@
   "localUsage.resets": "{time}에 재설정",
   "localUsage.used": "{percent} 사용",
   "localUsage.noWindows": "{cli}이(가) 이 플랜의 한도 기간을 알려 주지 않습니다.",
-  "localUsage.reconnect": "{cli}에 다시 로그인해야 합니다. 터미널에서 {command}을(를) 실행한 다음 새로고침을 선택하세요.",
+  "localUsage.reconnect": "{cli} 사용량이 최신이 아닙니다. 터미널에서 {command}을(를) 실행해 업데이트하고, 요청하면 로그인하세요. 그런 다음 새로고침을 선택하세요.",
   "localUsage.unavailable": "{cli}에서 플랜 사용량을 읽을 수 없습니다.",
   "localUsage.skynet.5h": "최근 5시간 {term.appName} 실행: 호출 {calls}회, 토큰 {tokens}개",
   "localUsage.skynet.7d": "최근 7일 {term.appName} 실행: 호출 {calls}회, 토큰 {tokens}개",

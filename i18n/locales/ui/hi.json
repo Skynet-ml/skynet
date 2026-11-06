@@ -4472,7 +4472,7 @@
   "localUsage.resets": "{time} रीसेट होगा",
   "localUsage.used": "{percent} उपयोग हुआ",
   "localUsage.noWindows": "{cli} इस प्लान के लिए कोई सीमा विंडो नहीं बताता।",
-  "localUsage.reconnect": "{cli} में फिर से साइन इन करें। टर्मिनल में {command} चलाएँ, फिर रीफ़्रेश चुनें।",
+  "localUsage.reconnect": "{cli} का उपयोग अद्यतन नहीं है। इसे अद्यतन करने के लिए टर्मिनल में {command} चलाएँ, और पूछे जाने पर साइन इन करें। फिर रीफ़्रेश चुनें।",
   "localUsage.unavailable": "{cli} से प्लान उपयोग नहीं पढ़ा जा सका।",
   "localUsage.skynet.5h": "पिछले 5 घंटों में {term.appName} रन: {calls} कॉल, {tokens} टोकन",
   "localUsage.skynet.7d": "पिछले 7 दिनों में {term.appName} रन: {calls} कॉल, {tokens} टोकन",

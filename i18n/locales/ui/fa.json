@@ -4472,7 +4472,7 @@
   "localUsage.resets": "بازنشانی {time}",
   "localUsage.used": "{percent} مصرف‌شده",
   "localUsage.noWindows": "{cli} برای این طرح پنجره محدودیتی گزارش نمی‌کند.",
-  "localUsage.reconnect": "باید دوباره وارد {cli} شوید. {command} را در ترمینال اجرا کنید و سپس تازه‌سازی را بزنید.",
+  "localUsage.reconnect": "داده‌های مصرف {cli} به‌روز نیست. {command} را در ترمینال اجرا کنید تا به‌روز شود، و اگر خواست وارد شوید. سپس تازه‌سازی را بزنید.",
   "localUsage.unavailable": "خواندن مصرف طرح از {cli} ممکن نشد.",
   "localUsage.skynet.5h": "اجراهای {term.appName} در ۵ ساعت گذشته: {calls} فراخوانی، {tokens} توکن",
   "localUsage.skynet.7d": "اجراهای {term.appName} در ۷ روز گذشته: {calls} فراخوانی، {tokens} توکن",

@@ -4472,7 +4472,7 @@
   "localUsage.resets": "Скидання: {time}",
   "localUsage.used": "Використано {percent}",
   "localUsage.noWindows": "{cli} не повідомляє вікно ліміту для цього плану.",
-  "localUsage.reconnect": "Потрібно знову ввійти в {cli}. Виконайте {command} у терміналі, потім натисніть «Оновити».",
+  "localUsage.reconnect": "Дані про використання {cli} застаріли. Виконайте {command} у терміналі, щоб оновити їх, і ввійдіть, якщо попросить. Потім натисніть «Оновити».",
   "localUsage.unavailable": "Не вдалося прочитати використання плану з {cli}.",
   "localUsage.skynet.5h": "Запуски {term.appName} за останні 5 годин: викликів {calls}, токенів {tokens}",
   "localUsage.skynet.7d": "Запуски {term.appName} за останні 7 днів: викликів {calls}, токенів {tokens}",

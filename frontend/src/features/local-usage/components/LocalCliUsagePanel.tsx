@@ -38,7 +38,7 @@ const SKYNET_KEYS: Record<CliUsageWindow, MessageKey> = {
   "7d": "localUsage.skynet.7d",
 };
 
-// The command that signs each CLI in again; Skynet never refreshes a CLI sign-in itself.
+// The command that refreshes each CLI's sign-in, or asks to sign in; Skynet never refreshes it itself.
 const LOGIN_COMMAND: Record<CliProvider, string> = { claude: "claude", codex: "codex login" };
 
 const PANEL_ID = "local-cli-usage-panel";

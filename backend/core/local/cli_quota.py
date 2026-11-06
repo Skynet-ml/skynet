@@ -6,8 +6,8 @@ windows. This is the whole account's use, not only Skynet's.
 - Claude: the module reads the Claude Code sign-in from
   ``~/.claude/.credentials.json`` or, on macOS, the Keychain, and asks
   Claude's usage endpoint, the same source that Claude's ``/usage`` reads.
-  Skynet never refreshes that sign-in: an expired one gives ``reconnect``,
-  and the user runs ``claude`` to sign in again.
+  Skynet never refreshes that sign-in: an expired one gives ``reconnect``.
+  The user then runs ``claude``, which refreshes the token or asks to sign in.
 - Codex: a short ``codex app-server`` session answers ``account/rateLimits/read``.
 
 Neither read starts a model turn, so neither uses the subscription. The
@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -42,13 +43,17 @@ _CACHE_SECONDS = 30.0
 
 _cache_lock = threading.Lock()
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
+# Held while a CLI's read runs, so a second request waits for that read and
+# takes its cached answer instead of starting another CLI process.
+_read_locks: dict[str, threading.Lock] = {cli: threading.Lock() for cli in CLI_IDS}
 
 
 def _quota(status: str, windows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Build one CLI's quota document.
 
     Args:
-        status: ``ok``, ``reconnect`` (sign in again) or ``unavailable``.
+        status: ``ok``, ``reconnect`` (run the CLI to refresh its sign-in) or
+            ``unavailable``.
         windows: ``{window, used_percent, resets_at}`` for each known window.
 
     Returns:
@@ -231,11 +236,33 @@ def read_codex_quota(settings: Settings) -> dict[str, Any]:
     return _quota("ok", windows)
 
 
+def _cached_quota(cli: str, reader: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    """Return one CLI's cached quota, or read it once and cache it.
+
+    Args:
+        cli: The CLI id.
+        reader: Reads that CLI's quota.
+
+    Returns:
+        The quota document.
+    """
+    with _read_locks[cli]:
+        with _cache_lock:
+            cached = _cache.get(cli)
+        if cached is not None and time.monotonic() - cached[0] < _CACHE_SECONDS:
+            return cached[1]
+        quota = reader()
+        with _cache_lock:
+            _cache[cli] = (time.monotonic(), quota)
+        return quota
+
+
 def read_cli_quotas(settings: Settings) -> dict[str, dict[str, Any]]:
     """Read every CLI's quota, cached for a short time.
 
     A failed read is cached too, so a page refresh never starts a burst of
-    CLI processes or Keychain reads.
+    CLI processes or Keychain reads. The CLIs are read in parallel, so the
+    slowest read, not the sum of all reads, sets the response time.
 
     Args:
         settings: Application settings.
@@ -247,18 +274,9 @@ def read_cli_quotas(settings: Settings) -> dict[str, dict[str, Any]]:
         "claude": read_claude_quota,
         "codex": lambda: read_codex_quota(settings),
     }
-    quotas: dict[str, dict[str, Any]] = {}
-    for cli in CLI_IDS:
-        with _cache_lock:
-            cached = _cache.get(cli)
-        if cached is not None and time.monotonic() - cached[0] < _CACHE_SECONDS:
-            quotas[cli] = cached[1]
-            continue
-        quota = readers[cli]()
-        with _cache_lock:
-            _cache[cli] = (time.monotonic(), quota)
-        quotas[cli] = quota
-    return quotas
+    with ThreadPoolExecutor(max_workers=len(CLI_IDS), thread_name_prefix="cli-quota") as pool:
+        futures = {cli: pool.submit(_cached_quota, cli, readers[cli]) for cli in CLI_IDS}
+        return {cli: future.result() for cli, future in futures.items()}
 
 
 def clear_quota_cache() -> None:
