@@ -10,14 +10,19 @@ the optimizations category sums.
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from core.api.errors import DomainError
+from core.api.routers._helpers import enforce_storage_quota
 from core.config import settings
 from core.storage.models import (
     EMBEDDING_DIM,
@@ -391,6 +396,38 @@ def test_storage_quota_override_absent_returns_none(store: _SQLiteJobStore) -> N
 def test_effective_storage_quota_falls_back_to_default(store: _SQLiteJobStore) -> None:
     """Without an override the effective budget is the global default."""
     assert store.get_effective_user_storage_quota("alice") == settings.user_storage_quota_bytes
+
+
+def test_local_mode_budget_is_used_bytes_plus_free_disk(
+    store: _SQLiteJobStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The Mac app ignores the 500 MB web budget and admin overrides (SKY-344)."""
+    two_gb = 2 * 1024 * 1024 * 1024
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(settings, "local_state_dir", str(tmp_path))
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: SimpleNamespace(free=two_gb))
+    store.set_user_storage_quota_override("alice", 1, updated_by="admin")
+    _insert_dataset(store, dataset_id="ds-1", owner="alice", name="Set", byte_size=600 * 1024 * 1024)
+
+    budget = store.get_effective_user_storage_quota("alice")
+
+    assert budget == 600 * 1024 * 1024 + two_gb
+    assert budget > settings.user_storage_quota_bytes
+
+
+def test_local_mode_gate_blocks_only_writes_larger_than_free_disk(
+    store: _SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local save passes the 500 MB mark, and fails only when the disk is full."""
+    free = 1024 * 1024 * 1024
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(settings, "local_state_dir", "")
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: SimpleNamespace(free=free))
+
+    enforce_storage_quota(store, "alice", incoming_bytes=900 * 1024 * 1024)
+    with pytest.raises(DomainError) as exc:
+        enforce_storage_quota(store, "alice", incoming_bytes=free + 1)
+    assert exc.value.code == "user.storage.quota_exceeded"
 
 
 def test_storage_quota_override_replaces_default(store: _SQLiteJobStore) -> None:

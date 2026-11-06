@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import shutil
 import threading
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -2153,11 +2155,12 @@ class RemoteDBJobStore:
     def get_effective_user_storage_quota(self, username: str) -> int:
         """Return the unified storage budget in bytes the user is held to.
 
-        Resolves an admin per-user override first (a live DB row that replaces
-        the default ceiling for that user), falling back to the static
-        ``settings.user_storage_quota_bytes`` default. Staying a method keeps the
-        save/run gate, the usage meter, and the quota modal resolving the budget
-        through one seam that tests can stub.
+        In local mode (the Mac app) the budget is the used bytes plus the free
+        disk space. Otherwise it resolves an admin per-user override first (a
+        live DB row that replaces the default ceiling for that user), falling
+        back to the static ``settings.user_storage_quota_bytes`` default.
+        Staying a method keeps the save/run gate, the usage meter, and the
+        quota modal resolving the budget through one seam that tests can stub.
 
         Args:
             username: Owner whose effective byte budget is resolved.
@@ -2165,6 +2168,15 @@ class RemoteDBJobStore:
         Returns:
             The byte budget the user's total storage is checked against.
         """
+        if settings.local_mode:
+            # The Mac app keeps its data on the user's own disk, so the web
+            # budget only blocks them (SKY-344). The budget is what Skynet
+            # already uses plus the free disk, so the gate fires only when the
+            # disk cannot hold the write.
+            state_dir = Path(settings.local_state_dir)
+            disk = state_dir if settings.local_state_dir and state_dir.is_dir() else Path.home()
+            free = shutil.disk_usage(disk).free
+            return self.compute_user_storage(username).total + free
         override = self.get_user_storage_quota_override(username)
         if override is not None:
             return override
