@@ -375,6 +375,56 @@ def test_continue_data_copy_names_only_ticked_items() -> None:
     assert "private score" not in detail.text
 
 
+def _copy_statuses(bob: TestClient, fork_id: str) -> list[str]:
+    """Return the share status of the first three copied tool calls (run, data list, Bob's run).
+
+    Args:
+        bob: The recipient's client.
+        fork_id: The recipient's continued chat.
+
+    Returns:
+        The ``shared`` or ``not_shared`` status of each call.
+    """
+    calls = bob.get(f"/agent/conversations/{fork_id}").json()["messages"][1]["tool_calls"]
+    return [c["payload"]["result"]["status"] for c in calls[:3]]
+
+
+def test_reopen_shows_a_newly_ticked_item_and_keeps_own_turns() -> None:
+    """After the owner ticks another item, a second open names it in the copy; Bob's turns stay."""
+    client, store = _client(_ALICE)
+    _private_chat(store)
+    token = _share(client, "continue_data", [{"kind": "run", "id": "run-a"}])
+    bob = _mount(store, _BOB)
+    fork_id = bob.post(f"/agent/shared-conversations/{token}/open").json()["conversation_id"]
+    _add_message(store, fork_id, "user", "bob turn")
+    assert _copy_statuses(bob, fork_id) == ["shared", "not_shared", "not_shared"]
+
+    _share(client, "continue_data", [{"kind": "run", "id": "run-a"}, {"kind": "dataset", "id": "ds-a"}])
+    assert bob.post(f"/agent/shared-conversations/{token}/open").json()["conversation_id"] == fork_id
+
+    assert _copy_statuses(bob, fork_id) == ["shared", "shared", "not_shared"]
+    messages = bob.get(f"/agent/conversations/{fork_id}").json()["messages"]
+    assert messages[1]["tool_calls"][1]["payload"]["result"]["items"] == [
+        {"kind": "dataset", "id": "ds-a", "label": "Alice data"}
+    ]
+    assert messages[-1]["content"] == "bob turn"
+
+
+def test_reopen_marks_an_unticked_item_not_shared() -> None:
+    """After the owner unticks an item, a second open shows it as "not shared" in the copy."""
+    client, store = _client(_ALICE)
+    _private_chat(store)
+    token = _share(client, "continue_data", [{"kind": "run", "id": "run-a"}, {"kind": "dataset", "id": "ds-a"}])
+    bob = _mount(store, _BOB)
+    fork_id = bob.post(f"/agent/shared-conversations/{token}/open").json()["conversation_id"]
+
+    _share(client, "continue_data", [{"kind": "dataset", "id": "ds-a"}])
+    bob.post(f"/agent/shared-conversations/{token}/open")
+
+    assert _copy_statuses(bob, fork_id) == ["not_shared", "shared", "not_shared"]
+    assert "Alice run" not in bob.get(f"/agent/conversations/{fork_id}").text
+
+
 def test_shared_item_read_is_allowed_for_a_ticked_item() -> None:
     """Bob reads the ticked run and file through his copy, masked and read-only."""
     client, store = _client(_ALICE)

@@ -685,7 +685,8 @@ def create_agent_history_router(*, job_store) -> APIRouter:
 
         The owner opens the chat itself. Another user gets the read-only view
         for a ``view`` link. For a continue link, the first open makes the
-        caller's own copy of the chat and later opens return the same copy.
+        caller's own copy of the chat and later opens return the same copy,
+        with its copied tool calls rebuilt when the owner changed the link.
 
         Args:
             token: The share token from the link.
@@ -705,6 +706,7 @@ def create_agent_history_router(*, job_store) -> APIRouter:
                 return SharedChatOpenResponse(mode="view", conversation_id=None)
             existing = _fork_of(session, share.token, user.username)
             if existing is not None:
+                _refresh_fork(session, share, existing)
                 return SharedChatOpenResponse(mode="fork", conversation_id=existing)
             source = session.get(AgentConversationModel, share.conversation_id)
             if source is None:
@@ -957,6 +959,40 @@ def _fork_of(session: Session, token: str, username: str) -> str | None:
         .first()
     )
     return cast(str, row[0]) if row is not None else None
+
+
+def _refresh_fork(session: Session, share: AgentChatShareModel, fork_id: str) -> None:
+    """Rebuild the copied tool calls of a continued chat after the owner changed the link.
+
+    The copy names the ticked items in its tool-call rows, and the recipient
+    and the model learn item ids only from there. A stale copy would hide a
+    newly ticked item and still name an unticked one. Copied rows keep the
+    source turn's role and time, so they match the source by that key; the
+    recipient's own later turns never match and stay as they are.
+
+    Args:
+        session: Active SQLAlchemy session.
+        share: The live share link.
+        fork_id: The recipient's continued chat.
+    """
+    fork = session.get(AgentConversationModel, fork_id)
+    if fork is None or share.updated_at is None or share.updated_at <= fork.created_at:
+        return
+    rebuilt: dict[tuple[str, Any], list[Any]] = {}
+    for m in _recipient_messages(session, share):
+        rebuilt.setdefault((m.role, m.created_at), []).append(m.tool_calls)
+    changed = False
+    for row in (
+        session.query(AgentMessageModel)
+        .filter(AgentMessageModel.conversation_id == fork_id, AgentMessageModel.created_at <= fork.created_at)
+        .order_by(AgentMessageModel.created_at, AgentMessageModel.id)
+    ):
+        calls = rebuilt.get((cast(str, row.role), row.created_at))
+        if calls:
+            row.tool_calls = calls.pop(0)
+            changed = True
+    if changed:
+        session.commit()
 
 
 def _share_refs(share: AgentChatShareModel) -> list[tuple[str, str]]:
