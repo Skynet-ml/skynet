@@ -276,3 +276,53 @@ def test_start_purges_old_drafts_and_caps_the_count(harness: Any) -> None:
         count = session.scalar(select(func.count()).select_from(McpRunDraftModel))
     assert "old" not in ids
     assert count == remote_mcp_repo._MAX_DRAFTS_PER_ACCOUNT
+
+
+def test_models_step_refuses_a_source_this_server_cannot_run(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report managed models in the Mac app and subscription models on a hosted server, like the submit does."""
+    client, _engine, _calls = harness
+    draft_id = _complete_draft(client)
+    body = _step(
+        client, "repo_draft_set_models", draft_id=draft_id, reflection_model="openai/gpt-5", token_source="subscription"
+    )
+    assert "only in the Mac app" in body["issues"][0]
+    monkeypatch.setattr(settings, "local_mode", True)
+    body = _step(client, "repo_draft_set_models", draft_id=draft_id, reflection_model="openai/gpt-5")
+    assert "cannot use managed models" in body["issues"][0]
+    review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    assert review["ready"] is False
+    body = _step(
+        client, "repo_draft_set_models", draft_id=draft_id, reflection_model="openai/gpt-5", token_source="subscription"
+    )
+    assert body["issues"] == []
+
+
+def test_expired_draft_is_refused(harness: Any) -> None:
+    """Refuse a draft that nobody changed for more than a week, before any purge runs."""
+    client, engine, _calls = harness
+    with Session(engine) as session:
+        session.add(
+            McpRunDraftModel(id="stale", username=USER, spec={}, updated_at=datetime.now(UTC) - timedelta(days=8))
+        )
+        session.commit()
+    assert "expired" in _error_text(_call(client, "repo_draft_review", {"draft_id": "stale"}))
+    assert "expired" in _error_text(
+        _call(client, "repo_draft_set_scorer", {"draft_id": "stale", "metric_code": SCORER})
+    )
+
+
+def test_save_step_locks_the_draft_row(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Load the draft with a row lock, so parallel steps do not overwrite each other's parts."""
+    client, _engine, _calls = harness
+    draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
+    locks: list[bool] = []
+    load = remote_mcp_repo._load_draft
+
+    def spy(session: Session, draft: str, username: str, *, lock: bool = False) -> McpRunDraftModel:
+        """Record the lock flag of each load."""
+        locks.append(lock)
+        return load(session, draft, username, lock=lock)
+
+    monkeypatch.setattr(remote_mcp_repo, "_load_draft", spy)
+    _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code=SCORER)
+    assert locks == [True]

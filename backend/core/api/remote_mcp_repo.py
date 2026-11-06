@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 
 from ..billing.operation_pricing import json_fingerprint
 from ..billing.service import StripeBillingService
+from ..config import settings
 from ..connectors import github
 from ..connectors.vault import ConnectorVault
 from ..exceptions import ServiceError
@@ -88,23 +89,28 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def _load_draft(session: Session, draft_id: str, username: str) -> McpRunDraftModel:
-    """Load one of the account's drafts.
+def _load_draft(session: Session, draft_id: str, username: str, *, lock: bool = False) -> McpRunDraftModel:
+    """Load one of the account's drafts that is not expired.
 
     Args:
         session: Open database session.
         draft_id: The draft.
         username: Account that owns it.
+        lock: Lock the row until the session commits, for a read-modify-write.
 
     Returns:
         The draft row.
 
     Raises:
-        ToolError: When the account has no draft with this id.
+        ToolError: When the account has no draft with this id, or the draft expired.
     """
-    row = session.get(McpRunDraftModel, draft_id)
+    row = session.get(McpRunDraftModel, draft_id, with_for_update=lock)
     if row is None or row.username != username:
         raise ToolError("Unknown draft_id. Call repo_draft_start for a new draft.")
+    # SQLite gives back naive datetimes; the column stores UTC.
+    updated = row.updated_at if row.updated_at.tzinfo else row.updated_at.replace(tzinfo=UTC)
+    if updated < _now() - _DRAFT_MAX_AGE:
+        raise ToolError("This draft expired after 7 days without changes. Call repo_draft_start for a new draft.")
     return row
 
 
@@ -237,7 +243,10 @@ def _model_entries(models: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def model_issues(models: dict[str, Any], http_client: Callable[[], httpx.Client]) -> tuple[list[str], list[str]]:
-    """Check that every platform-paid model has a verified price.
+    """Check that this server can run the token source, and that managed models have a verified price.
+
+    The source rules mirror ``enforce_local_mode_sources``, so a draft that
+    review calls ready is not refused at submit for its token source.
 
     Args:
         models: The draft's models part.
@@ -246,7 +255,12 @@ def model_issues(models: dict[str, Any], http_client: Callable[[], httpx.Client]
     Returns:
         The issues and the notes.
     """
-    if models["token_source"] != "managed":
+    source = models["token_source"]
+    if settings.local_mode and source == "managed":
+        return ["The Mac app cannot use managed models. Use token_source 'subscription' or 'byok'."], []
+    if not settings.local_mode and source == "subscription":
+        return ["A subscription model runs only in the Mac app. Use token_source 'managed' or 'byok'."], []
+    if source != "managed":
         return [], ["Skynet cannot check a model on your own key or subscription before the run starts."]
     issues: list[str] = []
     with http_client() as client:
@@ -551,7 +565,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         """
         user = _user(SCOPE_WRITE)
         with Session(job_store.engine) as session:
-            row = _load_draft(session, draft_id, user.username)
+            row = _load_draft(session, draft_id, user.username, lock=True)
             spec = dict(row.spec or {})
             if part is None:
                 spec.pop(step, None)

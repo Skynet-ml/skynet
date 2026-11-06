@@ -95,6 +95,11 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Any:
         """Stand in for the paid run route that the projection leaves out."""
         return {}
 
+    @app.get("/billing/wallet", tags=[AGENT_TAG], operation_id="billing_wallet")
+    def billing_wallet() -> dict[str, str]:
+        """Stand in for a billing read that stays a tool."""
+        return {}
+
     @app.post("/billing/top-up", tags=[AGENT_TAG], operation_id="billing_top_up")
     def billing_top_up() -> dict[str, str]:
         """Stand in for a billing change that the projection leaves out."""
@@ -115,10 +120,10 @@ def _names(client: TestClient) -> set[str]:
 
 
 def test_only_agent_routes_become_platform_tools(client: TestClient) -> None:
-    """List agent-tagged routes as platform tools, without paid run, billing or untagged routes."""
+    """List agent-tagged routes as platform tools, without paid run, billing change or untagged routes."""
     names = _names(client)
-    assert {"platform_list_folders", "platform_create_folder"} <= names
-    assert not {name for name in names if "optimize" in name or "billing" in name or "internal" in name}
+    assert {"platform_list_folders", "platform_create_folder", "platform_billing_wallet"} <= names
+    assert not {name for name in names if "optimize" in name or "top_up" in name or "internal" in name}
     assert "get_run" in names
 
 

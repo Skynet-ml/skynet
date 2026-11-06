@@ -51,7 +51,8 @@ The `repo_draft_*` tools follow the same steps as the setup screen in the
 app. Each step saves into a draft. Each answer gives feedback, so the agent
 knows what to fix and what to do next:
 
-- `saved`: true when the step has no issues.
+- `saved`: the part the step stored. A step stores its part also when it
+  has issues.
 - `issues`: problems to fix before the run can start.
 - `notes`: facts the agent can show the user.
 - `remaining_steps`: required steps that are not done.
@@ -70,14 +71,20 @@ knows what to fix and what to do next:
 | Submit | `repo_draft_submit` | Yes |
 
 `repo_draft_review` gives the minimum spending limit, a suggested limit and
-the account balance. The agent must show the price to the user.
+the amount the account can spend now (`spendable_cents`). The agent must show
+the price to the user.
 `repo_draft_submit` starts the run only with `confirm=true`, after the user
 agrees to `max_cost_cents`. A limit below the minimum is refused.
 
 A retry with the same arguments does not start a second run. The default
 idempotency key comes from the draft and its contents.
 
-An account keeps at most 20 drafts. Drafts older than 7 days are removed.
+A draft expires 7 days after its last change, and the tools refuse it. Each
+`repo_draft_start` removes expired drafts and the oldest drafts above 20.
+
+The hosted server runs `managed` and `byok` models. The Mac app runs
+`subscription` and `byok` models. The models step reports any other token
+source as an issue.
 
 After the submit, use `get_run`, `list_runs` and `stop_run` to follow the run.
 
@@ -95,6 +102,7 @@ Some agent routes are not tools:
 
 - Routes that start paid work without the cost review: `/optimize`, clone,
   retry, resume, restart and `/serve/*`. Use the `repo_draft_*` flow.
-- Billing routes (`/billing/*`). The MCP server never adds funds or changes
-  billing.
+- Billing routes that change data (`POST`, `PUT`, `PATCH` and `DELETE` on
+  `/billing/*`). The MCP server never adds funds or changes billing. Billing
+  read routes, such as the wallet, are tools.
 - Routes that only drive the in-app UI, such as opening a page or a dialog.
