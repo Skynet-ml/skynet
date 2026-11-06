@@ -543,17 +543,34 @@ export function submitUnifiedRun(req: UnifiedRunRequest, opts?: { idempotencyKey
 }
 
 /** Queue a repository run; prompts, code, text and DSPy programs submit to `/optimize`. */
-export function submitRepoRun(req: BlackboxRunRequest, opts?: { idempotencyKey?: string }) {
-  return request<OptimizationSubmissionResponse>("/blackbox/run", {
-    method: "POST",
-    body: JSON.stringify(req),
-    ...(opts?.idempotencyKey ? { headers: { "Idempotency-Key": opts.idempotencyKey } } : {}),
-  });
+export function submitRepoRun(
+  req: BlackboxRunRequest,
+  opts?: { idempotencyKey?: string },
+  source?: ApiSource,
+) {
+  // `request` sends hosted calls to the Mac when the link is gone; a run the
+  // user chose to start on the web must fail instead.
+  if (source === "hosted" && !hostedRunsAvailable())
+    return Promise.reject(new Error(msg("submit.v2.run_on.blocked.unlinked")));
+  return request<OptimizationSubmissionResponse>(
+    "/blackbox/run",
+    {
+      method: "POST",
+      body: JSON.stringify(req),
+      ...(opts?.idempotencyKey ? { headers: { "Idempotency-Key": opts.idempotencyKey } } : {}),
+    },
+    source,
+  );
 }
 
-export function getOptimizerCatalog(target: OptimizerTarget, mode: DataMode, signal?: AbortSignal) {
+export function getOptimizerCatalog(
+  target: OptimizerTarget,
+  mode: DataMode,
+  signal?: AbortSignal,
+  source?: ApiSource,
+) {
   const query = `artifact_kind=${encodeURIComponent(target)}&data_mode=${encodeURIComponent(mode)}`;
-  return request<OptimizerCatalogResponse>(`/optimizers?${query}`, { signal });
+  return request<OptimizerCatalogResponse>(`/optimizers?${query}`, { signal }, source);
 }
 
 // The server words each check's `message` in this locale for API readers;
@@ -615,12 +632,13 @@ export interface ModelCallHold {
 export function getModelCallHolds(
   models: Array<{ name: string; token_source: "managed" | "byok" }>,
   signal?: AbortSignal,
+  source?: ApiSource,
 ) {
-  return request<{ holds: ModelCallHold[]; box_hold_cents: number }>("/models/call-holds", {
-    method: "POST",
-    body: JSON.stringify({ models }),
-    signal,
-  });
+  return request<{ holds: ModelCallHold[]; box_hold_cents: number }>(
+    "/models/call-holds",
+    { method: "POST", body: JSON.stringify({ models }), signal },
+    source,
+  );
 }
 
 export async function runWizardPreflight(
@@ -1867,8 +1885,8 @@ export interface HubPreview {
 }
 
 /** List the caller's connectors (one entry per supported provider). */
-export function getConnectors() {
-  return request<ConnectorListResponse>("/connectors");
+export function getConnectors(source?: ApiSource) {
+  return request<ConnectorListResponse>("/connectors", undefined, source);
 }
 
 /** A secret saved on the account; its value never comes back from the server. */
