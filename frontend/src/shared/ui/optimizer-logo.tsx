@@ -2,24 +2,18 @@ import type { ComponentType } from "react";
 
 import {
   ArrowsClockwise,
-  Crosshair,
   Cube,
   DiceFive,
   GitBranch,
   MagicWand,
-  PushPin,
   Robot,
   SquaresFour,
-  TreeStructure,
   Wrench,
 } from "@/shared/ui/icons";
 import { cn } from "@/shared/lib/utils";
 
 const OPTIMIZER_ICONS: Record<string, ComponentType<{ className?: string }>> = {
   auto: MagicWand,
-  dspy_gepa: TreeStructure,
-  dspy_miprov2: Crosshair,
-  dspy_bootstrap_fewshot: PushPin,
   gepa: GitBranch,
   best_of_n: DiceFive,
   autoresearch: Robot,

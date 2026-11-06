@@ -45,7 +45,6 @@ Authorization: Bearer skyd_...
 | `GET /models`                                   | 列出你可以使用的模型。                       |
 | `GET /optimizers`                               | 列出适合某个设置的优化器。                   |
 | `GET /blackbox/engines`                         | 列出原生引擎以及每个引擎是否可用。           |
-| `POST /optimize` | 为 DSPy 程序启动一次运行。 |
 | `POST /blackbox/run`                            | 在 GitHub 仓库上启动运行。                   |
 | `GET /optimizations`                            | 列出你的运行。                               |
 | `GET /optimizations/{optimization_id}`          | 返回一次运行：状态、进度、日志和结果。       |
@@ -56,10 +55,10 @@ Authorization: Bearer skyd_...
 
 ## 启动运行
 
-`POST /optimize` 接受与提交向导相同的设置。示例会改进一个把客服消息归类到标签的 DSPy 程序。
+Skynet 就是 Optimize Anything：每次运行都优化一个仓库。`POST /blackbox/run` 接受与提交向导相同的设置。示例会改进一个把客服消息归类到标签的仓库。
 
 ```bash tab="curl"
-curl https://api.skynetml.com/optimize \
+curl https://api.skynetml.com/blackbox/run \
   -H "Authorization: Bearer $SKYNET_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: support-labels-001" \
@@ -69,56 +68,62 @@ curl https://api.skynetml.com/optimize \
 ```json tab="run.json"
 {
   "name": "Support labels",
-  "task": {
-    "objective": "Sort each support message into billing, bug or other.",
-    "artifact": {
-      "kind": "dspy_program",
-      "starting_version": "Label this support message as billing, bug or other."
+  "objective": "Sort each support message into billing, bug or other.",
+  "recipe": "repo",
+  "target": {
+    "kind": "repo",
+    "repo": {
+      "provider": "github",
+      "repository": "your-org/support-labels",
+      "branch": "main",
+      "editable_paths": ["serve.py", "prompts/"]
     }
   },
-  "data": {
-    "mode": "pairs",
-    "cases": [
-      { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
-      { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
-      {
-        "input": { "message": "Do you have a Hebrew interface?" },
-        "expected": { "label": "other" }
-      }
-    ]
+  "cases": [
+    { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
+    { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
+    {
+      "input": { "message": "Do you have a Hebrew interface?" },
+      "expected": { "label": "other" }
+    }
+  ],
+  "input_fields": ["message"],
+  "expected_field": "label",
+  "scorer": {
+    "kind": "python",
+    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "model": { "name": "<model from GET /models>" }
   },
-  "optimizer": { "choice": "auto", "budget": { "max_scorer_runs": 200 } },
-  "models": {
-    "task_model": { "name": "<model from GET /models>" },
-    "reflection_model": { "name": "<model from GET /models>" }
-  },
-  "workspace": {
-    "run_code": "import dspy\n\nprogram = dspy.Predict(\"message -> label\")\n\n\ndef run(artifact, input):\n    return program(message=input[\"message\"]).label\n",
-    "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
-  },
+  "strategy": { "mode": "auto" },
+  "budget": { "max_scorer_runs": 200 },
+  "reflection_model_config": { "name": "<model from GET /models>" },
   "max_cost_cents": 500
 }
 ```
 
 重要字段：
 
-- `task.artifact.kind` 取值为 `dspy_program`。
-- `data.mode` 取值为 `pairs`（带期望输出的输入）或 `single`（恰好一个用例）。
-- `optimizer.choice` 取值为 `auto`，或 `GET /optimizers` 返回的某个优化器名称。
+- `target.repo.repository` 是 GitHub 仓库，格式为 `owner/name`。请先在 **设置 → 连接器** 中连接 GitHub。
+- `target.repo.editable_paths` 列出优化器可以修改的文件和文件夹。`"."` 表示整个仓库。
+- `target.repo.commit` 是可选字段。它是一个 40 个字符的 SHA。如果不设置，Skynet 使用该分支上的最新提交。
+- `target.repo.secrets` 是可选字段。每个密钥有 `name` 和 `value`。它会以环境变量的形式传给你的代码和评分器。
+- `scorer.metric_code` 定义 `score(repo_path, case)`。`scorer.model` 是你的代码和评分器可以通过模型网关调用的模型。
+- `strategy.mode` 取值为 `auto`（默认）或 `single`。使用 `single` 时，把 `strategy.engine` 设为 `GET /blackbox/engines` 返回的某个引擎名称。
 - `max_cost_cents` 是本次运行的支出上限，单位为美分。
 - `is_private` 默认为 `false`。设为 `true` 可将运行设为私有。
 
-关于 `run_code` 和 `metric_code` 的规则，请阅读[指标与评分器](/docs/concepts/scorers)。
+关于 `metric_code` 的规则，请阅读[指标与评分器](/docs/concepts/scorers)。
 
 ### 响应
 
 | 状态码 | 含义                                                                                                          |
 | ------ | ------------------------------------------------------------------------------------------------------------- |
 | `201`  | Skynet 已将运行加入队列。响应体包含 `optimization_id` 和 `status`。                                           |
+| `400`  | 目标不是仓库，或者评分器无法加载。                                                                            |
 | `202`  | 设置检查仍在进行。等待 `Retry-After` 请求头中给出的秒数，然后用相同的 `Idempotency-Key` 发送相同的请求体。 |
 | `402`  | 你的余额不足。                                                                                                |
 | `409`  | 你达到了配额，或者设置检查已过期。                                                                            |
-| `422`  | 请求或工作区代码与优化器不匹配。                                                                              |
+| `422`  | 请求与优化器不匹配。                                                                                          |
 
 > [!NOTE]
 > 请始终发送 `Idempotency-Key` 请求头。如果你用相同的键再次发送相同的请求，Skynet 会返回第一次的运行，不会启动第二次运行。
@@ -154,7 +159,7 @@ curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 
-要在新输入上运行最佳版本，请发送 `POST /serve/{optimization_id}`。关于每个分数的含义，请阅读[结果](/docs/guides/results)。
+要在新输入上运行最佳版本，请发送 `POST /serve/{optimization_id}`，并带上 `Idempotency-Key` 请求头。仓库中必须有一个 `serve.py` 文件，其中定义了 `def serve(input)`。关于请求、响应以及每个分数的含义，请阅读[结果](/docs/guides/results)。
 
 ## 限制
 

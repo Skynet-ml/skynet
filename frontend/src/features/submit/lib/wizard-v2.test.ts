@@ -232,8 +232,6 @@ test("unchanged defaults, a role with no default and an untracked setup leave th
 });
 test("the Settings default engine applies only from Auto and only when it fits the task", () => {
   assert.equal(presetEngine("auto", "gepa", "repo", "pairs"), "gepa");
-  assert.equal(presetEngine("auto", "dspy_gepa", "repo", "pairs"), null);
-  assert.equal(presetEngine("auto", "dspy_gepa", "dspy_program", "pairs"), "dspy_gepa");
   assert.equal(presetEngine("auto", "gepa", "dspy_program", "pairs"), null);
   assert.equal(presetEngine("best_of_n", "gepa", "repo", "pairs"), null);
   assert.equal(presetEngine("auto", "auto", "repo", "pairs"), null);
@@ -425,17 +423,17 @@ test("programTargetOptimizer returns a black-box engine to Auto", () => {
   assert.deepEqual(programTargetOptimizer("gepa"), { choice: "auto" });
   assert.deepEqual(programTargetOptimizer("shinka_evolve"), { choice: "auto" });
   assert.equal(programTargetOptimizer("auto"), null);
-  assert.equal(programTargetOptimizer("dspy_miprov2"), null);
+  assert.deepEqual(programTargetOptimizer("dspy_miprov2"), { choice: "auto" });
 });
 
-test("repoTargetSlices runs one case at a time and replaces Auto", () => {
+test("repoTargetSlices runs one case at a time, keeps Auto and replaces a DSPy optimizer", () => {
   assert.deepEqual(repoTargetSlices("auto"), {
     inputs: { mode: "single" },
-    optimizer: { choice: "gepa" },
+    optimizer: null,
   });
   assert.deepEqual(repoTargetSlices("dspy_miprov2"), {
     inputs: { mode: "single" },
-    optimizer: { choice: "gepa" },
+    optimizer: { choice: "auto" },
   });
   assert.deepEqual(repoTargetSlices("shinka_evolve"), {
     inputs: { mode: "single" },
@@ -447,7 +445,7 @@ test("targetPatch switches to a repository and back to a DSPy program", () => {
   const toRepo = targetPatch("repo", null, "auto");
   assert.deepEqual(toRepo.task, { repo: emptyRepoDraft() });
   assert.deepEqual(toRepo.inputs, { mode: "single" });
-  assert.deepEqual(toRepo.optimizer, { choice: "gepa" });
+  assert.equal(toRepo.optimizer, null);
   const kept = { ...emptyRepoDraft(), repository: "acme/bot" };
   assert.equal(targetPatch("repo", kept, "gepa").task.repo, kept);
   assert.deepEqual(targetPatch("dspy_program", kept, "gepa"), {
@@ -467,4 +465,10 @@ test("withRepository picks a repository from its default branch", () => {
   });
   assert.equal(withRepository(pinned, "acme/old"), pinned);
   assert.equal(withRepository(null, "acme/bot").repository, "acme/bot");
+});
+
+test("withRepository clears the created-by-Skynet flag for another repository", () => {
+  const created = { ...emptyRepoDraft(), repository: "acme/new", createdBySkynet: true };
+  assert.equal(withRepository(created, "acme/other").createdBySkynet, false);
+  assert.equal(withRepository(created, "acme/new").createdBySkynet, true);
 });

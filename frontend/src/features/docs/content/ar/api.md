@@ -45,7 +45,6 @@ Authorization: Bearer skyd_...
 | `GET /models`                                   | تسرد النماذج التي يمكنك استخدامها.                         |
 | `GET /optimizers`                               | تسرد المُحسِّنات المناسبة لإعداد معيّن.                     |
 | `GET /blackbox/engines`                         | تسرد المحرّكات الأصلية وتوضّح إن كان كل منها متاحًا.        |
-| `POST /optimize` | يبدأ تشغيلًا لبرنامج DSPy. |
 | `POST /blackbox/run`                            | تبدأ تشغيلًا على مستودع GitHub.                            |
 | `GET /optimizations`                            | تسرد عمليات التشغيل الخاصة بك.                             |
 | `GET /optimizations/{optimization_id}`          | تُرجع تشغيلًا واحدًا: الحالة والتقدّم والسجلات والنتيجة.     |
@@ -56,10 +55,10 @@ Authorization: Bearer skyd_...
 
 ## بدء تشغيل
 
-تأخذ `POST /optimize` الإعداد نفسه الذي يأخذه معالج الإرسال. يحسّن المثال برنامج DSPy يصنّف رسائل الدعم إلى تسميات.
+Skynet هو Optimize Anything: كل تشغيل يحسّن مستودعًا. تأخذ `POST /blackbox/run` الإعداد نفسه الذي يأخذه معالج الإرسال. يحسّن المثال مستودعًا يصنّف رسائل الدعم إلى تسميات.
 
 ```bash tab="curl"
-curl https://api.skynetml.com/optimize \
+curl https://api.skynetml.com/blackbox/run \
   -H "Authorization: Bearer $SKYNET_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: support-labels-001" \
@@ -69,56 +68,62 @@ curl https://api.skynetml.com/optimize \
 ```json tab="run.json"
 {
   "name": "Support labels",
-  "task": {
-    "objective": "Sort each support message into billing, bug or other.",
-    "artifact": {
-      "kind": "dspy_program",
-      "starting_version": "Label this support message as billing, bug or other."
+  "objective": "Sort each support message into billing, bug or other.",
+  "recipe": "repo",
+  "target": {
+    "kind": "repo",
+    "repo": {
+      "provider": "github",
+      "repository": "your-org/support-labels",
+      "branch": "main",
+      "editable_paths": ["serve.py", "prompts/"]
     }
   },
-  "data": {
-    "mode": "pairs",
-    "cases": [
-      { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
-      { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
-      {
-        "input": { "message": "Do you have a Hebrew interface?" },
-        "expected": { "label": "other" }
-      }
-    ]
+  "cases": [
+    { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
+    { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
+    {
+      "input": { "message": "Do you have a Hebrew interface?" },
+      "expected": { "label": "other" }
+    }
+  ],
+  "input_fields": ["message"],
+  "expected_field": "label",
+  "scorer": {
+    "kind": "python",
+    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "model": { "name": "<model from GET /models>" }
   },
-  "optimizer": { "choice": "auto", "budget": { "max_scorer_runs": 200 } },
-  "models": {
-    "task_model": { "name": "<model from GET /models>" },
-    "reflection_model": { "name": "<model from GET /models>" }
-  },
-  "workspace": {
-    "run_code": "import dspy\n\nprogram = dspy.Predict(\"message -> label\")\n\n\ndef run(artifact, input):\n    return program(message=input[\"message\"]).label\n",
-    "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
-  },
+  "strategy": { "mode": "auto" },
+  "budget": { "max_scorer_runs": 200 },
+  "reflection_model_config": { "name": "<model from GET /models>" },
   "max_cost_cents": 500
 }
 ```
 
 حقول مهمة:
 
-- قيمة `task.artifact.kind` هي `dspy_program`.
-- قيمة `data.mode` هي `pairs` (مُدخلات مع مخرجات متوقعة) أو `single` (حالة واحدة بالضبط).
-- قيمة `optimizer.choice` هي `auto` أو اسم مُحسِّن واحد من `GET /optimizers`.
+- الحقل `target.repo.repository` هو مستودع GitHub بالصيغة `owner/name`. اربط GitHub أولًا في **الإعدادات ← الموصّلات**.
+- يسرد الحقل `target.repo.editable_paths` الملفات والمجلدات التي يمكن للمُحسِّن تغييرها. تعني القيمة `"."` المستودع كله.
+- الحقل `target.repo.commit` اختياري. وهو SHA من 40 حرفًا. بدونه، يستخدم Skynet أحدث إيداع في الفرع.
+- الحقل `target.repo.secrets` اختياري. لكل سرّ `name` و`value`. ويصل إلى كودك وإلى مُقيِّمك كمتغير بيئة.
+- يعرّف الحقل `scorer.metric_code` الدالة `score(repo_path, case)`. والحقل `scorer.model` هو النموذج الذي يستطيع كودك ومُقيِّمك استدعاءه عبر بوابة النماذج.
+- قيمة `strategy.mode` هي `auto` (الافتراضية) أو `single`. مع `single`، اضبط `strategy.engine` على اسم محرّك واحد من `GET /blackbox/engines`.
 - الحقل `max_cost_cents` هو حد الإنفاق لهذا التشغيل، بالسنت الأمريكي.
 - قيمة `is_private` الافتراضية هي `false`. اضبطها على `true` لإبقاء التشغيل خاصًا.
 
-اقرأ [المقاييس والمُقيِّمات](/docs/concepts/scorers) لمعرفة قواعد `run_code` و`metric_code`.
+اقرأ [المقاييس والمُقيِّمات](/docs/concepts/scorers) لمعرفة قواعد `metric_code`.
 
 ### الاستجابات
 
 | الحالة | المعنى                                                                                                                       |
 | ------ | ---------------------------------------------------------------------------------------------------------------------------- |
 | `201`  | وضع Skynet التشغيل في قائمة الانتظار. يحتوي الجسم على `optimization_id` و`status`.                                           |
+| `400`  | الهدف ليس مستودعًا، أو أن المُقيِّم لا يُحمَّل.                                                                                  |
 | `202`  | فحص الإعداد ما زال قيد التنفيذ. انتظر عدد الثواني المذكور في الترويسة `Retry-After`. ثم أرسل الجسم نفسه مع `Idempotency-Key` نفسه. |
 | `402`  | رصيدك منخفض جدًا.                                                                                                            |
 | `409`  | بلغت حصة استخدام، أو أن فحص الإعداد قديم.                                                                                    |
-| `422`  | الطلب أو كود مساحة العمل لا يناسب المُحسِّن.                                                                                  |
+| `422`  | الطلب لا يناسب المُحسِّن.                                                                                  |
 
 > [!NOTE]
 > أرسل دائمًا الترويسة `Idempotency-Key`. إذا أرسلت الطلب نفسه مرة أخرى بالمفتاح نفسه، يُرجع Skynet التشغيل الأول. ولا يبدأ تشغيلًا ثانيًا.
@@ -154,7 +159,7 @@ curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 
-لتشغيل أفضل نسخة على إدخال جديد، أرسل `POST /serve/{optimization_id}`. اقرأ [النتائج](/docs/guides/results) لتعرف معنى كل درجة.
+لتشغيل أفضل نسخة على إدخال جديد، أرسل `POST /serve/{optimization_id}` مع الترويسة `Idempotency-Key`. يجب أن يحتوي المستودع على ملف `serve.py` فيه `def serve(input)`. اقرأ [النتائج](/docs/guides/results) لتعرف الطلب والاستجابة ومعنى كل درجة.
 
 ## الحدود
 

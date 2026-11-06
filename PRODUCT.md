@@ -19,8 +19,8 @@ Open decision: a control that lets each user choose how much abstraction Skynet 
 
 Skynet is a self-hostable platform for building, optimizing and serving LLM programs, with GEPA prompt optimization at its core. Users can:
 
-- Turn a dataset and a task into an optimized DSPy program, and see the held-out lift it earned.
-- Use "Optimize Anything" to hill-climb a DSPy program or a repository against a scorer they write.
+- Turn a dataset and a task into a new GitHub repository with a first solution, then optimize it and see the held-out lift it earned.
+- Use "Optimize Anything" to hill-climb an existing repository against a scorer they write. Every run optimizes a repository.
 
 Success means the user ends up with a measurably better artifact they can trust and use, together with evidence of how much better it is.
 

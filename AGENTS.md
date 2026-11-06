@@ -1,6 +1,6 @@
 # AGENTS.md — Skynet working rules
 
-Skynet optimizes DSPy programs and repositories. Stack: FastAPI (`backend/`), Next.js (`frontend/`), PostgreSQL.
+Skynet is Optimize Anything: every run optimizes a repository. Stack: FastAPI (`backend/`), Next.js (`frontend/`), PostgreSQL.
 
 Every coding agent (Devin, Claude Code, Codex and others) reads this file
 first. Its rules always apply; nested `AGENTS.md` files only add rules. Read
@@ -178,13 +178,12 @@ Applies to every `backend/` file you touch (not `.venv/`, `__pycache__/` or
 
 ## Product and runtime model
 
-- **Skynet is Optimize Anything.** It is one product. Skynet optimizes DSPy
-  programs and repositories. Do not describe DSPy and Optimize Anything as
-  two separate paths or products, in code comments, docs, UI copy or
-  marketing text.
-- **DSPy programs** are one artifact type inside Optimize Anything. Skynet
-  optimizes them with the DSPy optimizers. A prompt is the instruction of a
-  DSPy program's predictor.
+- **Skynet is Optimize Anything: every run optimizes a repository.** It is
+  one product. A run uses a GitHub repository that the user connects, or a
+  new repository that Skynet creates. Never describe two paths or products,
+  in code comments, docs, UI copy or marketing text.
+- **DSPy is not an artifact type.** It is only a library that a user's
+  repository (or Skynet's own agents) can use.
 - **Engines.** The native engines come from the pinned upstream GEPA
   implementation and include GEPA, Best-of-N and Meta-Harness, plus Skynet's
   own AutoResearch and the pinned AutoSaddler and ShinkaEvolve packages.

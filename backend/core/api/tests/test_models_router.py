@@ -26,8 +26,7 @@ from ..model_catalog import CatalogModel, CatalogProvider, ModelCatalogResponse
 from ..routers import models as models_router_module
 from ..routers.models import _validate_discover_url, create_models_router
 from .conftest import bypass_auth
-from .test_local_mode import _local_submit_client
-from .test_submissions_router import unified_payload
+from .test_local_mode import _local_submit_client, _run_payload
 
 
 def _make_catalog(*model_ids: str) -> ModelCatalogResponse:
@@ -369,7 +368,7 @@ def test_agent_models_in_hosted_mode_are_the_catalog(models_client: TestClient) 
 def test_listed_agent_model_submits_as_a_subscription_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sent_source: dict[str, str]
 ) -> None:
-    """Accept a local agent model id from ``/models/for-agent`` as a subscription model on ``/optimize``.
+    """Accept a local agent model id from ``/models/for-agent`` as a subscription model on ``/blackbox/run``.
 
     The agent wizard copies only the listed ``name`` into the run; the web
     form adds ``token_source: managed``. Neither sends a ``cli_provider``.
@@ -377,12 +376,12 @@ def test_listed_agent_model_submits_as_a_subscription_run(
     name = _local_agent_client(tmp_path, monkeypatch).get("/models/for-agent").json()["models"][0]["name"]
     client, store = _local_submit_client(monkeypatch, local_mode=True)
 
-    resp = client.post("/optimize", json=unified_payload(models={"reflection_model": {"name": name, **sent_source}}))
+    resp = client.post("/blackbox/run", json=_run_payload(reflection_model_config={"name": name, **sent_source}))
 
     assert resp.status_code == 201, resp.text
     payload = store._jobs[resp.json()["optimization_id"]]["payload"]
     assert payload["token_source"] == "subscription"
-    reflection = payload["models"]["reflection_model"]
+    reflection = payload["reflection_model_config"]
     assert (reflection["name"], reflection["token_source"], reflection["cli_provider"]) == (
         name,
         "subscription",
@@ -391,7 +390,7 @@ def test_listed_agent_model_submits_as_a_subscription_run(
 
 
 def test_hosted_submit_ignores_the_subscription_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep a hosted ``/optimize`` blind to a ``subscription/<cli>/`` name.
+    """Keep a hosted ``/blackbox/run`` blind to a ``subscription/<cli>/`` name.
 
     The name stays a managed model, so the empty wallet refuses it with 402,
     as before; it never becomes a subscription run.
@@ -399,8 +398,8 @@ def test_hosted_submit_ignores_the_subscription_prefix(monkeypatch: pytest.Monke
     client, store = _local_submit_client(monkeypatch, local_mode=False)
 
     resp = client.post(
-        "/optimize",
-        json=unified_payload(models={"reflection_model": {"name": "subscription/claude/anthropic/claude-haiku-4.5"}}),
+        "/blackbox/run",
+        json=_run_payload(reflection_model_config={"name": "subscription/claude/anthropic/claude-haiku-4.5"}),
     )
 
     assert resp.status_code == 402

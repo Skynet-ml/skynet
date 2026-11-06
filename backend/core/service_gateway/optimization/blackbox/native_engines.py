@@ -874,6 +874,9 @@ class AutoResearchEngine:
         self.example_ids: list[str] = []
         self._ids: dict[str, str] = {}
         self._lock = threading.Lock()
+        # Set by ``_layout`` when a repository run starts from a non-empty
+        # starting patch rather than from the fetched commit itself.
+        self.repo_seed = False
 
     def run(self, task: Task, server: EvalServer) -> Result:
         """Run research rounds until the budget, the target score or the evidence says stop.
@@ -1162,6 +1165,13 @@ class AutoResearchEngine:
             checkout_script = self.work_dir / "checkout.sh"
             checkout_script.write_text(CHECKOUT_SCRIPT.format(base=self.repo["base"]), encoding="utf-8")
             checkout_script.chmod(0o755)
+            seed = seed_as_text(task.seed_candidate) if task.seed_candidate is not None else ""
+            self.repo_seed = bool(seed.strip())
+            if self.repo_seed:
+                # The seed stays a patch against the fetched commit, so every
+                # version the agent saves still diffs against that commit.
+                (self.work_dir / "archive" / f"seed{self.suffix}").write_text(seed, encoding="utf-8")
+                subprocess.run(["./checkout.sh", "seed"], cwd=self.work_dir, check=True, capture_output=True)
         else:
             (self.work_dir / "work" / "seed.txt").write_text(seed_as_text(task.seed_candidate), encoding="utf-8")
             script = EVAL_SCRIPT.format(
@@ -1196,6 +1206,12 @@ class AutoResearchEngine:
             if self.example_ids
             else "one unit, since the evaluator scores the repository as a whole"
         )
+        seed = (
+            "- The run starts from a starting version, `archive/seed.patch`, not from the bare starting commit. "
+            "`repo/` holds it when the run begins, and `./checkout.sh seed` restores it.\n"
+            if self.repo_seed
+            else ""
+        )
         return (
             "# Research brief\n\n"
             "You are running one round of a multi-round research effort to improve a code repository against a "
@@ -1214,6 +1230,7 @@ class AutoResearchEngine:
             "`archive/index.tsv`.\n"
             "- `./checkout.sh <id>` resets `repo/` to that version, and `./checkout.sh base` to the starting "
             "commit. It throws away unsaved work in `repo/`.\n"
+            f"{seed}"
             "- `notebook.md` is yours and is the only memory that survives between rounds. Later rounds, "
             "possibly a different session of you, depend on it.\n\n"
             "## Evaluating\n\n"
@@ -1375,6 +1392,12 @@ class AutoResearchEngine:
             Markdown for the directive section.
         """
         leader = self._ids[front[0]] if front else ("the starting commit" if self.repo else "the seed")
+        if directive == "survey" and self.repo_seed:
+            return (
+                "**Survey.** First give the starting version a full evaluation (`./checkout.sh seed`, then "
+                "`./eval.sh`) to anchor the baseline. Then map the failure modes across examples and test your most "
+                "promising hypotheses."
+            )
         if directive == "survey" and self.repo:
             return (
                 "**Survey.** First give the untouched checkout a full evaluation (`./checkout.sh base`, then "

@@ -57,7 +57,7 @@ Los conectores que importan registros incluyen tablas de bases de datos, trazas 
 | Profundidad de carpetas                 | 3 carpetas                                                              |
 | Tipos de archivo                        | `.py`, `.txt`, `.md`, `.json`, `.yaml`, `.csv`, `.toml`, `.ini`, `.cfg` |
 
-`run.py` y `metric.py` son los archivos de entrada de una ejecución. No puedes eliminarlos, renombrarlos ni moverlos.
+`scorer.py` contiene tu evaluador. Skynet llama a su función `score(repo_path, case)` para cada caso.
 
 ## Frecuencia de solicitudes
 

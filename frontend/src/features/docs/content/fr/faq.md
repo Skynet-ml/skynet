@@ -4,16 +4,15 @@ Cette page répond aux questions fréquentes sur Skynet. Chaque réponse renvoie
 
 ### Qu'est-ce que Skynet ?
 
-Skynet est une plateforme qui optimise des programmes DSPy et des dépôts selon vos propres données et votre métrique. Vous importez un jeu de données, décrivez la tâche et lancez une exécution. L'exécution essaie de nouvelles versions et les note sur des données mises de côté. Pour commencer, lisez le [Démarrage rapide](/docs/quickstart).
+Skynet est une plateforme qui optimise des dépôts selon vos propres données et votre évaluateur. Vous importez un jeu de données, décrivez la tâche et lancez une exécution. L'exécution essaie de nouvelles versions et les note sur des données mises de côté. Pour commencer, lisez le [Démarrage rapide](/docs/quickstart).
 
 ### Que peut optimiser Skynet ?
 
-Skynet, c'est Optimize Anything. Il optimise des programmes DSPy et des dépôts dans un seul produit. Le type d'artefact détermine les moteurs qui peuvent travailler dessus :
+Skynet, c'est Optimize Anything : chaque exécution optimise un dépôt. Utilisez un dépôt GitHub que vous avez déjà, ou laissez Skynet en créer un nouveau à partir de votre tâche et de vos données. Le code peut utiliser n'importe quelle bibliothèque, par exemple DSPy.
 
-- Les dépôts utilisent les moteurs natifs : GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler et ShinkaEvolve.
-- Les programmes DSPy utilisent les optimiseurs DSPy : DSPy GEPA, DSPy MIPROv2 et DSPy BootstrapFewShot.
+Tous les moteurs travaillent sur des dépôts : GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler et ShinkaEvolve.
 
-Sur un programme DSPy, **Auto** utilise DSPy GEPA. Sur un dépôt, vous choisissez un moteur natif. Lisez [Fonctionnement de l'optimisation](/docs/concepts/optimization) et [Moteurs](/docs/concepts/engines).
+**Auto** est le choix par défaut. Il explore avec plusieurs moteurs, puis poursuit GEPA à partir de la meilleure version. Lisez [Fonctionnement de l'optimisation](/docs/concepts/optimization) et [Moteurs](/docs/concepts/engines).
 
 ### Quelles langues l'interface prend-elle en charge ?
 

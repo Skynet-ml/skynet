@@ -4,16 +4,15 @@ Bu sayfa Skynet hakkında sık sorulan soruları yanıtlar. Her yanıt, ayrınt�
 
 ### Skynet nedir?
 
-Skynet, DSPy programlarını ve depoları kendi verilerinize ve metriğinize göre optimize eden bir platformdur. Bir veri kümesi yükler, görevi tanımlar ve bir çalıştırma başlatırsınız. Çalıştırma yeni sürümler dener ve bunları ayrılmış veriler üzerinde puanlar. Başlamak için [Hızlı başlangıç](/docs/quickstart) sayfasını okuyun.
+Skynet, depoları kendi verilerinize ve puanlayıcınıza göre optimize eden bir platformdur. Bir veri kümesi yükler, görevi tanımlar ve bir çalıştırma başlatırsınız. Çalıştırma yeni sürümler dener ve bunları ayrılmış veriler üzerinde puanlar. Başlamak için [Hızlı başlangıç](/docs/quickstart) sayfasını okuyun.
 
 ### Skynet neyi optimize edebilir?
 
-Skynet, Optimize Anything'dir. DSPy programlarını ve depoları tek bir üründe optimize eder. Yapıt türü, hangi motorların onun üzerinde çalışabileceğini belirler:
+Skynet, Optimize Anything'dir: her çalıştırma bir depoyu optimize eder. Elinizde olan bir GitHub deposunu kullanın veya Skynet'in görevinizden ve verinizden yeni bir depo oluşturmasına izin verin. Kod herhangi bir kütüphaneyi kullanabilir, örneğin DSPy.
 
-- Depolar yerel motorları kullanır: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler ve ShinkaEvolve.
-- DSPy programları DSPy optimize edicilerini kullanır: DSPy GEPA, DSPy MIPROv2 ve DSPy BootstrapFewShot.
+Her motor depolar üzerinde çalışır: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler ve ShinkaEvolve.
 
-Bir DSPy programında **Auto**, DSPy GEPA'yı kullanır. Bir depoda tek bir yerel motor seçersiniz. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) ve [Motorlar](/docs/concepts/engines) sayfalarını okuyun.
+**Auto** varsayılandır. Birkaç motorla keşif yapar, ardından en iyi sürümden GEPA ile devam eder. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) ve [Motorlar](/docs/concepts/engines) sayfalarını okuyun.
 
 ### Arayüz hangi dilleri destekliyor?
 

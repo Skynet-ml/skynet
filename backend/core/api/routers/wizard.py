@@ -51,7 +51,7 @@ class WizardUpdateRequest(BaseModel):
     )
     artifact_kind: OptimizerTarget | None = Field(
         default=None,
-        description="Task step: what is optimized. 'dspy_program' for a DSPy program, 'repo' for a GitHub repository.",
+        description="Task step: what is optimized. Every run optimizes a GitHub repository, so send 'repo'.",
     )
     starting_version: BlackboxCandidate | None = Field(
         default=None,
@@ -86,8 +86,8 @@ class WizardUpdateRequest(BaseModel):
     optimizer_choice: OptimizerChoice | None = Field(
         default=None,
         description=(
-            "Optimizer step: 'auto' or one optimizer id. Only the optimizers that fit the artifact kind "
-            "and data mode are offered (see GET /optimizers)."
+            "Optimizer step: 'auto' or one repository engine id (gepa, best_of_n, autoresearch, "
+            "meta_harness, autosaddler, shinka_evolve). Other ids are rejected (see GET /optimizers)."
         ),
     )
     primary_model: dict[str, Any] | None = Field(
@@ -109,7 +109,7 @@ class WizardUpdateRequest(BaseModel):
 
     run_code: str | None = Field(
         default=None,
-        description="Metric step: the whole run.py, which runs the program on one input. Replaces the file.",
+        description="Metric step: the whole run.py, which runs the repository checkout on one input. Replaces the file.",
     )
     metric_code: str | None = Field(
         default=None,
@@ -215,7 +215,7 @@ def create_wizard_router() -> APIRouter:
 
         BATCHING — make ONE call per turn covering every field you intend
         to set together (``task_objective`` + ``artifact_kind`` +
-        ``starting_version`` + …), not one call per field. Sequential
+        ``repository`` + …), not one call per field. Sequential
         same-turn calls render as duplicate spinner pills in the UI and
         waste turns on identical round-trips.
 
@@ -264,20 +264,17 @@ def create_wizard_router() -> APIRouter:
         if supplied.get("starting_version") is not None:
             patch["starting_version"] = supplied["starting_version"]
 
-        # The pairing can only be checked when one patch names both sides of
-        # it; otherwise the wizard's step issue flags a stale choice.
-        if (
-            req.optimizer_choice is not None
-            and req.artifact_kind is not None
-            and req.data_mode is not None
-            and req.optimizer_choice not in optimizers_for(req.artifact_kind, req.data_mode)
-        ):
-            raise DomainError(
-                "submit.unified.optimizer_not_allowed",
-                status=422,
-                optimizer=req.optimizer_choice,
-                allowed=", ".join(optimizers_for(req.artifact_kind, req.data_mode)),
-            )
+        # Skynet is repo-only (SKY-316), so a choice sent alone is checked
+        # against the repository engines; the repo list ignores the data mode.
+        if req.optimizer_choice is not None:
+            allowed = optimizers_for(req.artifact_kind or "repo", req.data_mode or "single")
+            if req.optimizer_choice not in allowed:
+                raise DomainError(
+                    "submit.unified.optimizer_not_allowed",
+                    status=422,
+                    optimizer=req.optimizer_choice,
+                    allowed=", ".join(allowed),
+                )
 
         if "model_config" in supplied and supplied["model_config"] is not None:
             cleaned = validate_model_config_dict(supplied["model_config"], "model_config")

@@ -30,9 +30,7 @@ from ..routers._helpers import (
     clear_program_cache,
     enforce_job_quota,
     enforce_storage_quota,
-    load_pair_program,
     load_program,
-    load_react_chat_inputs,
     strip_api_key,
 )
 from ..routers._helpers import (
@@ -431,8 +429,6 @@ def test_load_program_deleted_job_raises_404_before_cache() -> None:
     ("loader", "args"),
     [
         (load_program, ("protected-completed", _TEST_USER)),
-        (load_pair_program, ("protected-completed", 0, _TEST_USER)),
-        (load_react_chat_inputs, ("protected-completed", _TEST_USER)),
     ],
 )
 def test_protected_completed_loaders_reject_before_authored_code_materialization(

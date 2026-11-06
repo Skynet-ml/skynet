@@ -80,6 +80,7 @@
     "contract.run_missing": "執行程式碼一定要定義 run(artifact, input)。",
     "contract.shape.blackbox": "評分函數一定要回傳 (score, side_info)，而 side_info 係包含 feedback 字串嘅 dict。",
     "optimization.grid_search_retired": "網格搜尋已經唔可以再開始、繼續或者複製。你仍然可以睇呢次運行；請改為由精靈開始一個新嘅優化。",
+    "optimization.dspy_run_retired": "Skynet 而家只會優化程式碼庫。DSPy 程式運行已經唔可以再開始、繼續、複製、提供服務或者排程。你仍然可以睇呢次運行；請改為開始一個新嘅程式碼庫優化。",
     "submit.unified.contract_failed": "程式碼唔符合優化器嘅要求：{error}",
     "submit.unified.contract_budget": "支出上限太低，唔夠喺樣本上面行程式碼：{error} 請調高上限再檢查一次。",
     "submit.preflight.scorer_ready": "評估器載入緊；評分等緊第一個生成嘅候選。",

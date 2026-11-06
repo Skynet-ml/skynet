@@ -253,6 +253,13 @@ export const TOOL_META: Record<string, ToolMetaDef> = {
     severity: "info",
     icon: Database,
   },
+  create_github_repository_connectors_github_repos_post: {
+    title: () => msg("agent.tool.github_create_repo.title"),
+    description: () => msg("agent.tool.github_create_repo.description"),
+    confirmLabel: () => msg("agent.tool.github_create_repo.confirm"),
+    severity: "warning",
+    icon: Sparkle,
+  },
   pause_job_optimizations: {
     title: () => formatMsg("agent.tool.pause_job.title", { p1: TERMS.optimization }),
     description: () => msg("agent.tool.pause_job.description"),

@@ -12,13 +12,10 @@ import {
 } from "./continuous.ts";
 import type { ContinuousCycle, ContinuousPlan } from "@/shared/types/continuous";
 
-const form = { permitted: { task_model: true, reflection_model: false } };
-
-test("the enable form mirrors the backend rules", () => {
-  assert.equal(enableProblem(form), null);
+test("the enable form needs the reflection model switch", () => {
   assert.equal(enableProblem({ permitted: { task_model: false, reflection_model: true } }), null);
   assert.equal(
-    enableProblem({ permitted: { task_model: false, reflection_model: false } }),
+    enableProblem({ permitted: { task_model: true, reflection_model: false } }),
     "continuous_tab.form.need_permission",
   );
 });

@@ -1,11 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  DEFAULT_PREFS,
-  PREF_KEYS,
-  parseAgentPreferencePatch,
-  readPref,
-} from "./prefs.ts";
+import { registerHooks } from "node:module";
+
+const unifiedRunUrl = new URL("../../../shared/types/unified-run.ts", import.meta.url).href;
+
+// prefs.ts imports unified-run through the "@/" alias, which node cannot resolve alone.
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier === "@/shared/types/unified-run") return { shortCircuit: true, url: unifiedRunUrl };
+    return nextResolve(specifier, context);
+  },
+});
+
+const { DEFAULT_PREFS, PREF_KEYS, parseAgentPreferencePatch, readPref } = await import("./prefs.ts");
 
 test("parseAgentPreferencePatch accepts the validated agent response envelope", () => {
   assert.deepEqual(
@@ -54,4 +61,27 @@ test("new optimizations default to Auto, the catalog's models and the wizard's o
   assert.deepEqual(readPref("optimizerTaskModel"), { name: "" });
   assert.deepEqual(readPref("optimizerReflectionModel"), { name: "" });
   assert.equal(readPref("optimizerMaxRuns"), null);
+});
+
+test("a saved DSPy default engine reads as Auto; a repository engine stays", () => {
+  const store = new Map<string, string>();
+  const g = globalThis as { window?: unknown };
+  g.window = {
+    localStorage: {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => store.set(k, v),
+    },
+  };
+  try {
+    for (const legacy of ["dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"]) {
+      store.set(PREF_KEYS.optimizerEngine, JSON.stringify(legacy));
+      assert.equal(readPref("optimizerEngine"), "auto");
+    }
+    store.set(PREF_KEYS.optimizerEngine, JSON.stringify("shinka_evolve"));
+    assert.equal(readPref("optimizerEngine"), "shinka_evolve");
+    store.set(PREF_KEYS.optimizerEngine, JSON.stringify("unknown_engine"));
+    assert.equal(readPref("optimizerEngine"), "auto");
+  } finally {
+    delete g.window;
+  }
 });

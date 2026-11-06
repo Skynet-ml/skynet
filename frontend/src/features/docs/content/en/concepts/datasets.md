@@ -1,4 +1,4 @@
-A dataset is a table of cases. Each row is one case. Skynet runs your artifact on the cases, scores each output, and uses the scores to compare versions. This page explains how Skynet reads the cases, what the column roles do, and how it splits the cases into train, validation and test sets.
+A dataset is a table of cases. Each row is one case. Skynet scores each version of your repository on the cases with your scorer, and uses the scores to compare versions. This page explains how Skynet reads the cases, what the column roles do, and how it splits the cases into train, validation and test sets.
 
 ## Load the data
 
@@ -17,8 +17,8 @@ Under **How to read the data**, give each column one role:
 
 | Role   | What Skynet does with the column                         |
 | ------ | -------------------------------------------------------- |
-| Input  | Puts the value in `input`, which your run code receives  |
-| Output | Puts the value in `expected`, which your metric receives |
+| Input  | Puts the value in `case["input"]`, which your scorer receives  |
+| Output | Puts the value in `case["expected"]`, which your scorer receives |
 | Skip   | Does not use the column                                  |
 
 Each column also has a kind: **Text** or **Image**.
@@ -49,7 +49,7 @@ with the roles `message` = Input, `label` = Output and `id` = Skip, your code re
 ```
 
 > [!TIP]
-> Read the expected value by the column name in your metric, for example `expected["label"]`.
+> Read the expected value by the column name in your scorer, for example `case["expected"]["label"]`.
 
 ## Data modes
 
@@ -111,7 +111,7 @@ In manual selection, each field takes a fraction from 0 to 1, in steps of 0.05. 
 
 ## Contract samples
 
-The contract check in the **Metric & run** step runs your code on 3 sample cases. Skynet takes these samples from the train and val cases only, never from test.
+The contract check in the **Metric & run** step runs your setup and your scorer on the starting version, on 3 sample cases. Skynet takes these samples from the train and val cases only, never from test.
 
 ## Related pages
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -39,7 +38,7 @@ from core.billing.protected_credentials import scrub_execution_credentials
 from core.billing.runtime import BudgetRuntime, PaidResult
 from core.billing.service import StripeBillingService
 from core.billing.signals import BudgetReached
-from core.models import UnifiedRunRequest
+from core.models import BlackboxRunRequest
 from core.storage.models import (
     Base,
     BillingCustomerModel,
@@ -52,7 +51,7 @@ from core.storage.models import (
 from core.storage.preflights import PreflightStore, WizardPreflightModel
 from core.storage.remote import RemoteDBJobStore
 
-ROUTE = "/optimize"
+ROUTE = "/blackbox/run"
 
 
 class _SQLiteJobStore(RemoteDBJobStore):
@@ -142,6 +141,20 @@ class _Harness:
             return session.scalar(select(func.count()).select_from(model))
 
 
+def _stage_without_sandbox(payload: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], None]:
+    """Return the repository payload as staged, with a fixture environment.
+
+    Args:
+        payload: Protected repository payload.
+        **kwargs: Owner and budget binding, unused by the fixture.
+
+    Returns:
+        The payload with a repository environment, and no staged checkout.
+    """
+    payload["target"]["repo"]["environment"] = {"setup_command": "npm ci"}
+    return payload, None
+
+
 @pytest.fixture
 def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Harness]:
     """Serve public routes with real persistence and no worker or paid provider traffic.
@@ -171,6 +184,11 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Harnes
     monkeypatch.setattr(preflight_execution, "ModelGateway", _Gateway)
     monkeypatch.setattr(preflight_execution, "bind_protected_sandbox", lambda *args, **kwargs: None)
     monkeypatch.setattr(preflight_execution, "_verify_anything", verify_anything)
+    # Repository staging clones from GitHub inside a sandbox; the fixture
+    # keeps the payload and only records the environment the check reports.
+    monkeypatch.setattr(preflight_execution, "stage_repository", _stage_without_sandbox)
+    monkeypatch.setattr(preflight_execution, "infer_repo_setup", lambda *args, **kwargs: None)
+    monkeypatch.setattr(preflight_execution, "bind_repo_scorer", lambda *args, **kwargs: None)
     # The unified sandbox verifier is replaced the same way so no sandbox or
     # provider is reached.
     monkeypatch.setattr(preflight_execution, "_verify_unified", verify_anything)
@@ -196,6 +214,38 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Harnes
 
 
 def _payload(*, total: int = 20) -> dict[str, Any]:
+    """Build a valid repository request body with no budget or verification metadata.
+
+    Args:
+        total: Approved total setup and run allowance.
+
+    Returns:
+        Request exercising the production schema and canonicalization.
+    """
+    return {
+        "username": "spoofed-owner",
+        "name": "repo-run",
+        "objective": "Make the tests pass.",
+        "recipe": "repo",
+        "scorer": {"kind": "python", "metric_code": "def score(repo_path, case=None):\n    return 1.0"},
+        "strategy": {"mode": "single", "engine": "gepa"},
+        "target": {
+            "kind": "repo",
+            "repo": {
+                "provider": "github",
+                "repository": "example/site",
+                "branch": "main",
+                "commit": "0" * 40,
+                "editable_paths": ["src", "README.md"],
+            },
+            "setup_command": "npm ci",
+        },
+        "reflection_model_config": {"name": "fixture/text"},
+        "max_cost_cents": total,
+    }
+
+
+def _unified_payload(*, total: int = 20) -> dict[str, Any]:
     """Build a valid unified request body with no budget or verification metadata.
 
     Args:
@@ -246,7 +296,7 @@ def _prepare(harness: _Harness) -> tuple[dict, dict]:
         "/wizard/preflight",
         json={
             "scope": "execution",
-            "workflow": "unified",
+            "workflow": "anything",
             "payload": payload,
             "execution_budget_id": budget.id,
             "execution_budget_revision": budget.revision,
@@ -446,7 +496,7 @@ def test_invalid_evidence_cannot_queue(harness: _Harness, attack: str) -> None:
     elif attack == "fingerprint":
         payload["preflight_fingerprint"] = "0" * 64
     elif attack == "changed":
-        payload["task"]["objective"] = "A different objective"
+        payload["objective"] = "A different objective"
     elif attack == "foreign":
         harness.username = "bob"
     else:
@@ -500,7 +550,7 @@ def test_a_check_stopped_by_the_limit_says_the_limit_is_too_low(
         """Stop like a limit or a wallet that cannot cover one model call."""
         raise stop("The next operation needs more than the limit allows.")
 
-    monkeypatch.setattr(preflight_execution, "_verify_unified", stopped)
+    monkeypatch.setattr(preflight_execution, "_verify_anything", stopped)
     response = harness.client.post(ROUTE, json=_payload(total=1))
     assert response.status_code == 409, response.text
     assert response.json()["detail"].startswith(detail)
@@ -633,11 +683,10 @@ def test_concurrent_attachment_keeps_one_complete_root(harness: _Harness) -> Non
         harness: Real file-backed store and completed setup evidence.
     """
     payload, _checked = _prepare(harness)
-    typed = UnifiedRunRequest.model_validate(payload)
+    typed = BlackboxRunRequest.model_validate(payload)
     typed.username = "alice"
     normalize_model_token_sources(typed)
-    submissions._default_unified_seed(typed)
-    canonical = submissions._protected_submission(typed, harness.store, "unified")
+    canonical = submissions._protected_submission(typed, harness.store, "anything")
     assert canonical is not None
 
     def attach(identity: str) -> str:
@@ -653,7 +702,7 @@ def test_concurrent_attachment_keeps_one_complete_root(harness: _Harness) -> Non
                 preflight_id=payload["preflight_id"],
                 preflight_fingerprint=payload["preflight_fingerprint"],
                 preflight_payload=canonical,
-                preflight_workflow="unified",
+                preflight_workflow="anything",
             )
             return identity
         except BudgetConflictError:
@@ -705,163 +754,6 @@ def test_legacy_commitment_is_counted_once_during_protected_submission(harness: 
     assert StripeBillingService(engine=harness.store.engine).spendable_cents("alice") == 39
 
 
-class _HeldCheck:
-    """Hold the paid setup check open until the test releases it."""
-
-    def __init__(self, harness: _Harness) -> None:
-        """Wrap the harness's measured setup adapter.
-
-        Args:
-            harness: Real API fixture whose setup check is held.
-        """
-        self.started = threading.Event()
-        self.release = threading.Event()
-        verify = harness.verify
-
-        def held(*args: Any, **kwargs: Any) -> dict[str, Any]:
-            """Signal the check started, then wait for the release."""
-            self.started.set()
-            assert self.release.wait(timeout=30)
-            return verify(*args, **kwargs)
-
-        harness.verify = held
-
-
-def test_same_key_retry_during_running_check_returns_the_original_run(harness: _Harness) -> None:
-    """Join a dropped request's running check instead of refusing or paying for a second one.
-
-    Args:
-        harness: Real persistence with a held setup check.
-    """
-    held = _HeldCheck(harness)
-    headers = {"Idempotency-Key": "dropped"}
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        first = executor.submit(harness.client.post, ROUTE, json=_payload(), headers=headers)
-        assert held.started.wait(timeout=10)
-        with ThreadPoolExecutor(max_workers=1) as retrying:
-            retry = retrying.submit(harness.client.post, ROUTE, json=_payload(), headers=headers)
-            held.release.set()
-            retried = retry.result(timeout=30)
-        original = first.result(timeout=30)
-
-    assert original.status_code == retried.status_code == 201, (original.text, retried.text)
-    assert retried.json()["optimization_id"] == original.json()["optimization_id"]
-    assert len(harness.calls) == 1
-    assert harness.count(JobModel) == harness.count(ExecutionBudgetModel) == harness.count(WizardPreflightModel) == 1
-
-
-def test_slow_check_answers_202_and_a_same_key_retry_collects_the_run(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Answer before a proxy timeout, then hand the finished run to the client's retry.
-
-    Args:
-        harness: Real persistence with a held setup check.
-        monkeypatch: Shorten the in-request wait.
-    """
-    monkeypatch.setattr(submissions, "_SUBMISSION_WAIT_SECONDS", 0.2)
-    held = _HeldCheck(harness)
-    headers = {"Idempotency-Key": "slow"}
-    try:
-        accepted = harness.client.post(ROUTE, json=_payload(), headers=headers)
-    finally:
-        held.release.set()
-
-    assert accepted.status_code == 202, accepted.text
-    assert accepted.headers["Retry-After"] == "5"
-    assert accepted.json()["code"] == "submission.in_progress"
-    monkeypatch.setattr(submissions, "_SUBMISSION_WAIT_SECONDS", 30.0)
-    collected = harness.client.post(ROUTE, json=_payload(), headers=headers)
-    assert collected.status_code == 201, collected.text
-    replayed = harness.client.post(ROUTE, json=_payload(), headers=headers)
-    assert replayed.status_code == 201, replayed.text
-    assert replayed.json()["optimization_id"] == collected.json()["optimization_id"]
-    assert len(harness.calls) == 1
-    assert harness.count(JobModel) == harness.count(ExecutionBudgetModel) == 1
-
-
-def test_failed_check_after_202_is_reported_to_the_retry_without_running_again(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Deliver a background check's failure to the retry instead of paying for the check twice.
-
-    Args:
-        harness: Real persistence with a held, failing setup check.
-        monkeypatch: Shorten the in-request wait.
-    """
-    monkeypatch.setattr(submissions, "_SUBMISSION_WAIT_SECONDS", 0.2)
-    harness.result_status = "failed"
-    held = _HeldCheck(harness)
-    headers = {"Idempotency-Key": "fails"}
-    try:
-        accepted = harness.client.post(ROUTE, json=_payload(), headers=headers)
-    finally:
-        held.release.set()
-
-    assert accepted.status_code == 202, accepted.text
-    monkeypatch.setattr(submissions, "_SUBMISSION_WAIT_SECONDS", 30.0)
-    refused = harness.client.post(ROUTE, json=_payload(), headers=headers)
-    assert refused.status_code == 409, refused.text
-    assert refused.json()["detail"].startswith("Payload validation failed")
-    assert len(harness.calls) == 1
-    assert harness.count(JobModel) == 0
-
-
-def test_keyless_failed_check_after_202_is_reported_to_an_identical_retry(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Deliver a keyless request's background failure to its identical retry without a second check.
-
-    Args:
-        harness: Real persistence with a held, failing setup check.
-        monkeypatch: Shorten the in-request wait.
-    """
-    monkeypatch.setattr(submissions, "_SUBMISSION_WAIT_SECONDS", 0.2)
-    harness.result_status = "failed"
-    held = _HeldCheck(harness)
-    try:
-        accepted = harness.client.post(ROUTE, json=_payload())
-    finally:
-        held.release.set()
-
-    assert accepted.status_code == 202, accepted.text
-    monkeypatch.setattr(submissions, "_SUBMISSION_WAIT_SECONDS", 30.0)
-    refused = harness.client.post(ROUTE, json=_payload())
-    assert refused.status_code == 409, refused.text
-    assert refused.json()["detail"].startswith("Payload validation failed")
-    assert len(harness.calls) == 1
-    assert harness.count(JobModel) == 0
-
-
-def test_same_key_retry_on_another_replica_answers_202_while_the_check_runs(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Report a check another process still runs as in progress, not a refusal or a duplicate.
-
-    Args:
-        harness: Real persistence with a held setup check.
-        monkeypatch: Give the retry its own process-local submission registry.
-    """
-    held = _HeldCheck(harness)
-    headers = {"Idempotency-Key": "replica"}
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        first = executor.submit(harness.client.post, ROUTE, json=_payload(), headers=headers)
-        assert held.started.wait(timeout=10)
-        monkeypatch.setattr(submissions, "_IN_FLIGHT_SUBMISSIONS", submissions._InFlightSubmissions())
-        try:
-            elsewhere = harness.client.post(ROUTE, json=_payload(), headers=headers)
-        finally:
-            held.release.set()
-        original = first.result(timeout=30)
-
-    assert elsewhere.status_code == 202, elsewhere.text
-    assert original.status_code == 201, original.text
-    collected = harness.client.post(ROUTE, json=_payload(), headers=headers)
-    assert collected.json()["optimization_id"] == original.json()["optimization_id"]
-    assert len(harness.calls) == 1
-    assert harness.count(JobModel) == harness.count(ExecutionBudgetModel) == 1
-
-
 def test_parallel_submissions_with_their_own_keys_both_start(harness: _Harness) -> None:
     """Start two different simultaneous submissions from one account without a server error.
 
@@ -894,7 +786,7 @@ def _check_models(harness: _Harness, models: dict[str, Any]) -> tuple[Any, str]:
     """
     budget = harness.budgets.create(harness.username, 20, idempotency_key="models")
     payload = {
-        **_payload(),
+        **_unified_payload(),
         "models": models,
         "execution_budget_id": budget.id,
         "execution_budget_revision": budget.revision,

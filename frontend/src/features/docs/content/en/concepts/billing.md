@@ -91,15 +91,26 @@ When a model call uses your key:
 
 Any fees from an external scorer or MCP provider go directly to that provider. They are not part of the run's spending limit.
 
+## Model calls from your code
+
+Your repository code and your scorer can call a model through Skynet's model gateway. Read [How optimization works](/docs/concepts/optimization).
+
+- A call on Skynet's keys is metered against the run budget, like any other model call. The usage markup applies.
+- A call on your own key (BYOK) goes to your provider key. Skynet charges no model fee for it.
+
 ## Sandbox usage
 
-Your run code and metric run in a sandbox. Skynet meters sandbox compute:
+Your repository code and your scorer run in a sandbox. Skynet meters sandbox compute:
 
 1. Before a sandbox starts, Skynet reserves an amount from the run's limit.
 2. When the sandbox finishes, Skynet charges the final usage that the sandbox provider reports.
 3. The usage markup applies to sandbox compute.
 
 Sandbox compute is part of the run's spending limit, also when the model calls use your own key.
+
+## Serving
+
+Each call to the serve endpoint of a finished run is billed on its own. The caller pays from the caller's balance. Set `max_cost_cents` in the request to cap one call. Read [Results](/docs/guides/results).
 
 ## Plans
 

@@ -1,4 +1,4 @@
-"""Continuous optimization plans on a successful unified run.
+"""Continuous optimization plans on a successful repository run.
 
 * ``GET  /optimizations/{id}/continuous`` — the plan this run belongs to, its
   checks, this month's usage and the next scheduled check.
@@ -32,6 +32,7 @@ from ...models.common import OptimizationStatus
 from ...storage.models import ContinuousCycleModel, ContinuousPlanModel
 from ...worker import continuous as engine_mod
 from ...worker.continuous_schedule import ScheduleRule, drop_past_slots, next_runs
+from ...worker.repo_staging import is_repo_payload
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..converters import job_owner
 from ..errors import DomainError
@@ -136,17 +137,21 @@ class ContinuousStateResponse(BaseModel):
     held_out: bool = True
 
 
-def _is_unified(job: dict[str, Any]) -> bool:
-    """Say whether a job row is a unified run with a stored request.
+def _is_rerunnable(job: dict[str, Any]) -> bool:
+    """Say whether a job row is a run a check can copy: a repository run with inline cases.
+
+    A repository run qualifies only with inline cases, since a check holds out
+    the same test cases to compare its candidate with the incumbent. A DSPy run
+    never qualifies, because Skynet no longer starts DSPy runs (SKY-316).
 
     Args:
         job: A job row with its payload.
 
     Returns:
-        ``True`` for a unified run.
+        ``True`` for a repository run with inline cases.
     """
     payload = job.get("payload") or {}
-    return isinstance(payload.get("task"), dict) and isinstance(payload.get("data"), dict) and "workspace" in payload
+    return is_repo_payload(payload) and bool(payload.get("cases"))
 
 
 def _source_budget_cents(job_store, job: dict[str, Any], username: str) -> int | None:
@@ -405,7 +410,7 @@ def create_continuous_router(*, job_store) -> APIRouter:
             session.commit()
             held_out = engine_mod.has_held_out(job)
             eligible = (
-                plan is None and job["status"] == OptimizationStatus.success.value and _is_unified(job) and held_out
+                plan is None and job["status"] == OptimizationStatus.success.value and _is_rerunnable(job) and held_out
             )
             return ContinuousStateResponse(
                 plan=_plan_item(session, plan) if plan else None, eligible=eligible, held_out=held_out
@@ -423,7 +428,7 @@ def create_continuous_router(*, job_store) -> APIRouter:
         """Create a plan that reuses this run's setup on a schedule.
 
         Args:
-            optimization_id: A successful unified run the caller owns.
+            optimization_id: A successful repository run the caller owns.
             body: Schedule, model switches and limits.
             current_user: The caller.
 
@@ -431,13 +436,13 @@ def create_continuous_router(*, job_store) -> APIRouter:
             The new plan.
 
         Raises:
-            DomainError: 409 when the run did not succeed, is not a unified
-                run, keeps no test cases apart, or already has a plan.
+            DomainError: 409 when the run did not succeed, is not a repository
+                run with inline cases, keeps no test cases apart, or already has a plan.
         """
         job = _owned_job(job_store, optimization_id, current_user, payload=True)
         # A run still in flight takes a waiting plan, set up from the submit wizard.
         waiting = job["status"] in _IN_FLIGHT
-        if (job["status"] != OptimizationStatus.success.value and not waiting) or not _is_unified(job):
+        if (job["status"] != OptimizationStatus.success.value and not waiting) or not _is_rerunnable(job):
             raise DomainError("continuous.not_eligible", status=409)
         if not engine_mod.has_held_out(job):
             raise DomainError("continuous.no_test_split", status=409)

@@ -61,7 +61,7 @@ Nessuno strumento aggiunge fondi, modifica il tuo saldo o cambia le impostazioni
 4. L'agente chiama `get_run` finché l'esecuzione non termina. Gli stati finali sono `success`, `failed`, `cancelled` e `stopped`.
 
 > [!TIP]
-> Indica il tuo limite di spesa all'agente nel prompt, ad esempio «Ottimizza questo prompt. Spendi al massimo 10 $.» L'agente userà quel limite in `start_run`.
+> Indica il tuo limite di spesa all'agente nel prompt, ad esempio «Ottimizza questo repository. Spendi al massimo 10 $.» L'agente userà quel limite in `start_run`.
 
 L'esecuzione si arresta quando raggiunge il suo limite di spesa. Leggi [Fatturazione](/docs/concepts/billing) per sapere come Skynet addebita un'esecuzione.
 

@@ -80,6 +80,7 @@
     "contract.run_missing": "运行代码必须定义 run(artifact, input)。",
     "contract.shape.blackbox": "评分函数必须返回 (score, side_info)，其中 side_info 是包含 feedback 字符串的 dict。",
     "optimization.grid_search_retired": "网格搜索已无法开始、恢复或克隆。你仍可查看此运行；请改为从向导开始新的优化。",
+    "optimization.dspy_run_retired": "Skynet 现在只优化代码仓库。DSPy 程序运行已无法开始、恢复、克隆、提供服务或排程。你仍可查看此运行；请改为开始新的代码仓库优化。",
     "submit.unified.contract_failed": "代码不符合优化器的要求：{error}",
     "submit.unified.contract_budget": "支出上限太低，无法在样本上运行代码：{error} 请提高上限后重新检查。",
     "submit.preflight.scorer_ready": "评估器正在加载；评分在等待第一个生成的候选。",

@@ -61,7 +61,7 @@ Nenhuma ferramenta adiciona fundos, altera o seu saldo ou altera as configuraç�
 4. O agente chama `get_run` até a execução terminar. Os status finais são `success`, `failed`, `cancelled` e `stopped`.
 
 > [!TIP]
-> Informe ao agente o seu limite de gastos no prompt, por exemplo "Otimize este prompt. Gaste no máximo US$ 10." O agente então usa esse limite em `start_run`.
+> Informe ao agente o seu limite de gastos no prompt, por exemplo "Otimize este repositório. Gaste no máximo US$ 10." O agente então usa esse limite em `start_run`.
 
 A execução para quando atinge o limite de gastos. Leia [Cobrança](/docs/concepts/billing) para saber como o Skynet cobra uma execução.
 

@@ -1,4 +1,4 @@
-Veri kümesi, vakalardan oluşan bir tablodur. Her satır bir vakadır. Skynet yapıtınızı bu vakalar üzerinde çalıştırır, her çıktıyı puanlar ve sürümleri karşılaştırmak için bu puanları kullanır. Bu sayfa, Skynet'in vakaları nasıl okuduğunu, sütun rollerinin ne işe yaradığını ve vakaları eğitim, doğrulama ve test kümelerine nasıl böldüğünü açıklar.
+Veri kümesi, vakalardan oluşan bir tablodur. Her satır bir vakadır. Skynet deponuzun her sürümünü bu vakalar üzerinde puanlayıcınızla puanlar ve sürümleri karşılaştırmak için bu puanları kullanır. Bu sayfa, Skynet'in vakaları nasıl okuduğunu, sütun rollerinin ne işe yaradığını ve vakaları eğitim, doğrulama ve test kümelerine nasıl böldüğünü açıklar.
 
 ## Verileri yükleyin
 
@@ -17,8 +17,8 @@ Kayıtlı veri kümelerini yönetmek için [Veri kümeleri](/docs/guides/dataset
 
 | Rol    | Skynet'in sütunla yaptığı                                     |
 | ------ | ------------------------------------------------------------- |
-| Girdi  | Değeri, çalıştırma kodunuzun aldığı `input` içine koyar       |
-| Çıktı  | Değeri, metriğinizin aldığı `expected` içine koyar            |
+| Girdi  | Değeri, puanlayıcınızın aldığı `case["input"]` içine koyar       |
+| Çıktı  | Değeri, puanlayıcınızın aldığı `case["expected"]` içine koyar            |
 | Atla   | Sütunu kullanmaz                                              |
 
 Her sütunun ayrıca bir türü vardır: **Metin** veya **Görüntü**.
@@ -49,7 +49,7 @@ Skynet her satır için bir vaka oluşturur:
 ```
 
 > [!TIP]
-> Metriğinizde beklenen değeri sütun adıyla okuyun, örneğin `expected["label"]`.
+> Puanlayıcınızda beklenen değeri sütun adıyla okuyun, örneğin `case["expected"]["label"]`.
 
 ## Veri modları
 
@@ -111,7 +111,7 @@ Manuel seçimde her alan 0 ile 1 arasında, 0,05'lik adımlarla bir oran alır. 
 
 ## Sözleşme örnekleri
 
-**Metrik ve çalıştırma** adımındaki sözleşme kontrolü, kodunuzu 3 örnek vaka üzerinde çalıştırır. Skynet bu örnekleri yalnızca eğitim ve doğrulama vakalarından alır, hiçbir zaman testten almaz.
+**Metrik ve çalıştırma** adımındaki sözleşme kontrolü, kurulumunuzu ve puanlayıcınızı başlangıç sürümünde, 3 örnek vaka üzerinde çalıştırır. Skynet bu örnekleri yalnızca eğitim ve doğrulama vakalarından alır, hiçbir zaman testten almaz.
 
 ## İlgili sayfalar
 

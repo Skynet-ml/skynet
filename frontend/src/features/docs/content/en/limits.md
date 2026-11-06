@@ -57,7 +57,7 @@ Connectors that import records include database tables, LLM traces and Notion da
 | Folder depth                 | 3 folders                                                               |
 | File types                   | `.py`, `.txt`, `.md`, `.json`, `.yaml`, `.csv`, `.toml`, `.ini`, `.cfg` |
 
-`run.py` and `metric.py` are the entry files of a run. You cannot delete, rename or move them.
+`scorer.py` holds your scorer. Skynet calls its `score(repo_path, case)` function for each case.
 
 ## Request rates
 

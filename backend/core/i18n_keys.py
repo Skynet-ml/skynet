@@ -298,6 +298,7 @@ class I18nKey(StrEnum):
     OPTIMIZATION_CORRUPT_COLUMN_MAPPING = 'optimization.corrupt_column_mapping'
     OPTIMIZATION_CORRUPT_RESULT = 'optimization.corrupt_result'
     OPTIMIZATION_DATASET_UNAVAILABLE = 'optimization.dataset_unavailable'
+    OPTIMIZATION_DSPY_RUN_RETIRED = 'optimization.dspy_run_retired'
     OPTIMIZATION_FAILED_NO_ARTIFACT = 'optimization.failed_no_artifact'
     OPTIMIZATION_GRID_SEARCH_RETIRED = 'optimization.grid_search_retired'
     OPTIMIZATION_INSUFFICIENT_ROLE = 'optimization.insufficient_role'
