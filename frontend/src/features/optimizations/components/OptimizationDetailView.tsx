@@ -892,6 +892,9 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     !isPairContext &&
     jobIsBlackbox &&
     !isLegacyDspyRun &&
+    // Same check as the backend's is_repo_payload: old text and agent
+    // blackbox runs have no serve.py to run.
+    (payload?.payload?.target as { kind?: string } | undefined)?.kind === "repo" &&
     job.status === "success" &&
     effectiveRole == null;
 
