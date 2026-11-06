@@ -449,10 +449,10 @@ function DayRow({
             {formatDay(day.date, locale)}
           </span>
           <span className="truncate text-xs text-muted-foreground">
-            {msg("usage.day.calls", { count: day.calls })}
+            {day.calls != null && msg("usage.day.calls", { count: day.calls })}
             {day.tokens != null && (
               <>
-                {" · "}
+                {day.calls != null && " · "}
                 <span
                   dir="ltr"
                   className="tabular-nums"
@@ -501,7 +501,7 @@ function DayRow({
                   <LedgerRow key={entry.id} entry={entry} locale={locale} />
                 ))}
               </ul>
-              {calls.length < day.calls && (
+              {day.calls != null && calls.length < day.calls && (
                 <p className="border-t border-border/40 py-2 text-[0.6875rem] text-muted-foreground">
                   {msg("usage.day.truncated", {
                     shown: calls.length.toLocaleString(locale),

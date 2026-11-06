@@ -12,11 +12,11 @@ export interface UsageDayInput {
   output_tokens?: number;
 }
 
-/** One rendered day row. `tokens` is null when the backend sent no token counts. */
+/** One rendered day row. `calls` and `tokens` are null when the backend did not send them. */
 export interface UsageDayRow {
   date: string;
   cents: number;
-  calls: number;
+  calls: number | null;
   tokens: number | null;
   inputTokens: number;
   outputTokens: number;
@@ -36,13 +36,13 @@ export function usageDayRows(byDay: readonly UsageDayInput[]): UsageDayRow[] {
     const row = merged.get(day.date) ?? {
       date: day.date,
       cents: 0,
-      calls: 0,
+      calls: null,
       tokens: null,
       inputTokens: 0,
       outputTokens: 0,
     };
     row.cents += day.billed_cents;
-    row.calls += day.runs ?? 0;
+    if (day.runs != null) row.calls = (row.calls ?? 0) + day.runs;
     if (day.input_tokens != null || day.output_tokens != null) {
       row.inputTokens += day.input_tokens ?? 0;
       row.outputTokens += day.output_tokens ?? 0;
@@ -51,7 +51,7 @@ export function usageDayRows(byDay: readonly UsageDayInput[]): UsageDayRow[] {
     merged.set(day.date, row);
   }
   return [...merged.values()]
-    .filter((row) => row.cents > 0 || row.calls > 0)
+    .filter((row) => row.cents > 0 || (row.calls ?? 0) > 0)
     .sort((a, b) => b.date.localeCompare(a.date));
 }
 

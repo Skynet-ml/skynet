@@ -32,10 +32,10 @@ test("usageDayRows merges repeated dates and drops days with no billed call", ()
   assert.equal(rows[0].tokens, 13);
 });
 
-test("usageDayRows keeps tokens null when an older backend sends only cents", () => {
+test("usageDayRows keeps calls and tokens null when an older backend sends only cents", () => {
   const [row] = usageDayRows([{ date: "2026-11-02", billed_cents: 30 }]);
   assert.equal(row.tokens, null);
-  assert.equal(row.calls, 0);
+  assert.equal(row.calls, null);
   assert.equal(row.cents, 30);
 });
 
