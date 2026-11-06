@@ -193,6 +193,10 @@ export async function fetchWithAuthRetry(url: string, init: RequestInit): Promis
   const fresh = await refreshAuthTokenOn401();
   const final = fresh ? await send(fresh) : res;
   if (final.status === 401) {
+    if (final !== res && (await isHostedLinkRevoked(url, final))) {
+      announceHostedLinkChange();
+      return final;
+    }
     const body = await final
       .clone()
       .text()
@@ -2456,10 +2460,11 @@ export async function downloadRepositoryArchive(
 export async function downloadProgramExport(
   optimizationId: string,
   pairIndex?: number,
+  source?: ApiSource,
 ): Promise<void> {
   const pairQuery = pairIndex == null ? "" : `?pair_index=${encodeURIComponent(String(pairIndex))}`;
   const res = await fetchWithAuthRetry(
-    `${apiBase()}/optimizations/${optimizationId}/program-export${pairQuery}`,
+    apiUrl(`/optimizations/${optimizationId}/program-export${pairQuery}`, source),
     {
       method: "GET",
     },

@@ -23,6 +23,7 @@ import { msg } from "@/shared/lib/messages";
 import { CopyButton } from "@/shared/ui/copy-button";
 import { readOnlyEditorHeight } from "@/shared/ui/code-editor-height";
 import { LazyCodeEditor as CodeEditor } from "@/shared/ui/lazy-code-editor";
+import type { ApiSource } from "@/shared/lib/api-route";
 import { ExportMenu } from "./ExportMenu";
 
 // Reuses the detail page's read-only DAG (its own 480px canvas) to frame the
@@ -57,6 +58,7 @@ export function ArtifactTab({
   optimizedNodes,
   workflowSpec,
   isShare,
+  source,
 }: {
   job: OptimizationStatusResponse;
   activePair?: PairResult | null;
@@ -71,6 +73,7 @@ export function ArtifactTab({
   /** The run's workflow graph, for ordering and labelling the per-node view. */
   workflowSpec?: WorkflowSpec | null;
   isShare?: boolean;
+  source?: ApiSource;
 }) {
   const exportPair = activePair ?? job.grid_result?.best_pair ?? null;
   const hasProgram =
@@ -120,6 +123,7 @@ export function ArtifactTab({
             pickleBase64={pickleBase64}
             programPairIndex={exportPair?.pair_index}
             isShare={isShare}
+            source={source}
           />
         </div>
       )}

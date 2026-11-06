@@ -29,7 +29,8 @@ export interface PairSelectionStripProps {
   onPrev: () => void;
   onNext: () => void;
   onCancel: () => void;
-  onDeleted: () => void;
+  /** Omitted when the run's source has no pair-delete route (hosted runs). */
+  onDeleted?: () => void;
 }
 
 export function PairSelectionStrip({
@@ -57,7 +58,7 @@ export function PairSelectionStrip({
       await deleteGridPair(job.optimization_id, activePair.pair_index);
       setDeleteOpen(false);
       window.dispatchEvent(new Event("optimizations-changed"));
-      onDeleted();
+      onDeleted?.();
     } catch (err) {
       toast.error(userErrorMessage(err, msg("optimization.delete.failed")));
     } finally {
@@ -111,7 +112,7 @@ export function PairSelectionStrip({
                 </Button>
               </TooltipButton>
             )}
-            {jobTerminal && (
+            {jobTerminal && onDeleted && (
               <TooltipButton
                 tooltip={msg("auto.features.optimizations.components.gridoverview.18")}
               >

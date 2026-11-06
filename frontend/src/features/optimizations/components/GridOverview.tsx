@@ -880,24 +880,26 @@ function GridOverviewImpl({
                   </span>
                 )}
 
-                <TooltipButton
-                  tooltip={msg("auto.features.optimizations.components.gridoverview.18")}
-                >
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    className="pointer-events-auto shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                    aria-label={msg(
-                      "auto.features.optimizations.components.gridoverview.literal.29",
-                    )}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setPendingDelete(pr);
-                    }}
+                {onPairDeleted && (
+                  <TooltipButton
+                    tooltip={msg("auto.features.optimizations.components.gridoverview.18")}
                   >
-                    <Trash className="size-3.5" />
-                  </Button>
-                </TooltipButton>
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      className="pointer-events-auto shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                      aria-label={msg(
+                        "auto.features.optimizations.components.gridoverview.literal.29",
+                      )}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setPendingDelete(pr);
+                      }}
+                    >
+                      <Trash className="size-3.5" />
+                    </Button>
+                  </TooltipButton>
+                )}
 
                 <OpenIcon className="size-4 text-muted-foreground/30 group-hover:text-muted-foreground transition-colors shrink-0" />
               </div>

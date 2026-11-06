@@ -12,6 +12,7 @@ import {
 } from "@/shared/ui/compact-popover-menu";
 import { cn } from "@/shared/lib/utils";
 import { downloadProgramExport } from "@/shared/lib/api";
+import type { ApiSource } from "@/shared/lib/api-route";
 import { msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
@@ -90,6 +91,7 @@ export function ExportMenu({
   pickleBase64,
   programPairIndex,
   isShare,
+  source,
 }: {
   job: OptimizationStatusResponse;
   optimizedPrompt: OptimizedPredictor | null;
@@ -103,6 +105,8 @@ export function ExportMenu({
   programPairIndex?: number;
   /** The /program-export endpoint is authed, so the public share view hides the ZIP item. */
   isShare?: boolean;
+  /** Which backend the run lives on; the ZIP download follows it. */
+  source?: ApiSource;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -173,7 +177,7 @@ export function ExportMenu({
                 onClick={async () => {
                   setOpen(false);
                   try {
-                    await downloadProgramExport(job.optimization_id, programPairIndex);
+                    await downloadProgramExport(job.optimization_id, programPairIndex, source);
                     track(TelemetryEvent.ArtifactDownloaded, { kind: "program_zip" });
                   } catch (err) {
                     toast.error(userErrorMessage(err, msg("optimization.file.parse_error")));

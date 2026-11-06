@@ -1157,17 +1157,20 @@ export function OptimizationDetailView({
   // it via sharing. Mutations gate on this so a viewer can't cancel/delete/manage.
   const effectiveRole = job.effective_role ?? null;
   const canEditRun = effectiveRole == null || effectiveRole === "editor";
-  const canDeleteRun = effectiveRole == null;
+  // Delete, share and pair delete call local-only routes, so a hosted run hides them.
+  const canDeleteRun = effectiveRole == null && source === "local";
   // Grid searches are retired: their stored runs stay readable, but the backend
   // refuses to clone, retry or resume one, so those actions are hidden.
+  const canRerun = job.optimization_type !== "grid_search";
   // Clone and Retry open the local submit form, which cannot read a hosted run.
-  const canRerun = job.optimization_type !== "grid_search" && source === "local";
+  // Resume calls the run's own source, so it stays for hosted runs.
+  const canClone = canRerun && source === "local";
   // Sharing is owner-only: members (even editors) can't invite, change roles,
   // or set general access. null = the owner's own run / admin / co-owner.
   // Never on the public /share/<token> route: there the job is seeded from
   // shareData and carries no effective_role, so it would read as owner-level
   // and leak the management controls to viewers (even anonymous visitors).
-  const canManageShare = !isShare && effectiveRole == null;
+  const canManageShare = !isShare && effectiveRole == null && source === "local";
   // Share banner: surface the caller's granted tier whenever they're NOT the
   // owner — both the public /share link and an explicit member grant. "viewer"
   // maps to the viewer tier, "editor" to the editor tier. null / "owner" is the
@@ -1180,16 +1183,19 @@ export function OptimizationDetailView({
   // button, on wide screens, and otherwise no action row.
   const canRestart =
     canEditRun &&
+    canRerun &&
     (job.status === "failed" || job.status === "cancelled" || job.status === "paused") &&
     !isBudgetPause(job);
+  const showResume = canRestart && !!job.resumable;
+  const showRetry = canRestart && !job.resumable && canClone;
   const canCancel = canEditRun && isActive;
   const headerActionCounts = isShare
     ? { wide: shareCanInteract ? 1 : null, phone: null }
     : {
         wide:
           Number(canManageShare) +
-          1 +
-          Number(canRestart) +
+          Number(canClone) +
+          Number(showResume || showRetry) +
           Number(canCancel && !!job.pausable) +
           Number(canCancel) +
           Number(canDeleteRun && isTerminal),
@@ -1343,7 +1349,7 @@ export function OptimizationDetailView({
             {!isShare && (
               <div className="flex w-full flex-wrap items-center justify-end gap-1 sm:w-auto sm:shrink-0 sm:flex-nowrap sm:gap-2">
                 {canManageShare && <ShareDialog optimizationId={job.optimization_id} />}
-                {!isPhone && canRerun && (
+                {!isPhone && canClone && (
                   <TooltipButton tooltip={msg("auto.app.optimizations.id.page.4")}>
                     <Button
                       variant="ghost"
@@ -1355,42 +1361,36 @@ export function OptimizationDetailView({
                     </Button>
                   </TooltipButton>
                 )}
-                {!isPhone &&
-                  canEditRun &&
-                  canRerun &&
-                  (job.status === "failed" ||
-                    job.status === "cancelled" ||
-                    job.status === "paused") &&
-                  !isBudgetPause(job) &&
-                  (job.resumable ? (
-                    <TooltipButton tooltip={msg("optimization.resume_tooltip")}>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        onClick={handleResume}
-                        disabled={resuming}
-                        aria-label={msg("optimization.resume")}
-                      >
-                        {/* Mirror the triangle to point in the reading direction — left in RTL, right in LTR. */}
-                        <Play
-                          className={`size-4${getActiveDir() === "rtl" ? " -scale-x-100" : ""}${
-                            resuming ? " animate-spin" : ""
-                          }`}
-                        />
-                      </Button>
-                    </TooltipButton>
-                  ) : (
-                    <TooltipButton tooltip={msg("optimization.configure_new.tooltip")}>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        onClick={handleRetry}
-                        aria-label={msg("optimization.configure_new.label")}
-                      >
-                        <ArrowCounterClockwise className="size-4" />
-                      </Button>
-                    </TooltipButton>
-                  ))}
+                {!isPhone && showResume && (
+                  <TooltipButton tooltip={msg("optimization.resume_tooltip")}>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={handleResume}
+                      disabled={resuming}
+                      aria-label={msg("optimization.resume")}
+                    >
+                      {/* Mirror the triangle to point in the reading direction — left in RTL, right in LTR. */}
+                      <Play
+                        className={`size-4${getActiveDir() === "rtl" ? " -scale-x-100" : ""}${
+                          resuming ? " animate-spin" : ""
+                        }`}
+                      />
+                    </Button>
+                  </TooltipButton>
+                )}
+                {!isPhone && showRetry && (
+                  <TooltipButton tooltip={msg("optimization.configure_new.tooltip")}>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={handleRetry}
+                      aria-label={msg("optimization.configure_new.label")}
+                    >
+                      <ArrowCounterClockwise className="size-4" />
+                    </Button>
+                  </TooltipButton>
+                )}
                 {!isPhone && canEditRun && isActive && job.pausable && (
                   <TooltipButton tooltip={msg("optimization.pause_tooltip")}>
                     <Button
@@ -1472,7 +1472,7 @@ export function OptimizationDetailView({
           onPrev={() => router.push(pairHref(id, activePair.pair_index - 1, source))}
           onNext={() => router.push(pairHref(id, activePair.pair_index + 1, source))}
           onCancel={handleCancel}
-          onDeleted={() => router.push(pairHref(id, null, source))}
+          onDeleted={source === "local" ? () => router.push(pairHref(id, null, source)) : undefined}
         />
       )}
 
@@ -1709,7 +1709,7 @@ export function OptimizationDetailView({
                 activePairIndex={activePairIndex}
                 activePair={activePair}
                 onPairSelect={handlePairSelect}
-                onPairDeleted={handlePairDeleted}
+                onPairDeleted={source === "local" ? handlePairDeleted : undefined}
                 payload={payload}
               />
             </TabsContent>
@@ -1804,6 +1804,7 @@ export function OptimizationDetailView({
                   optimizedNodes={optimizedNodes}
                   workflowSpec={workflowSpec}
                   isShare={isShare}
+                  source={source}
                 />
               </TabsContent>
             )}
