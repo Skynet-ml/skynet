@@ -296,7 +296,9 @@ function UnifiedWizardFrame() {
   useLayoutEffect(() => {
     setScreenNavigator?.({ screen: visibleScreen, forward, goToScreen, goForwardTo });
   }, [visibleScreen, forward, goToScreen, goForwardTo, setScreenNavigator]);
-  useEffect(
+  // A layout cleanup: a new frame (an account switch remounts it) registers in
+  // layout effects, and this old frame's nulls must land before them.
+  useLayoutEffect(
     () => () => {
       setWizardScreen?.(null);
       setScreenIssue?.(null);
