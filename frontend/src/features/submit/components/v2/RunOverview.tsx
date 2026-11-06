@@ -631,8 +631,9 @@ export function RunOverview({
 /** Mac or Web for a linked Mac app's run; nothing anywhere else. */
 function RunOnChoice() {
   const shell = useWizardV2ShellOptional();
-  if (!shell?.hostedChoice) return null;
-  const { runOn, setRunOn, hostedBlock, submitting } = shell;
+  // A Web choice stays visible after the link drops, so the user can see why and pick the Mac.
+  if (!shell || !(shell.hostedChoice || shell.runOn === "hosted")) return null;
+  const { runOn, setRunOn, hostedBlock, submitting, retryHostedCatalog } = shell;
   const options = [
     { source: "local", label: "submit.v2.run_on.mac", icon: Desktop },
     { source: "hosted", label: "submit.v2.run_on.web", icon: Globe },
@@ -670,13 +671,24 @@ function RunOnChoice() {
         </div>
       </div>
       {runOn === "hosted" &&
-        (hostedBlock ? (
-          <p role="alert" className="flex items-start gap-1.5 text-xs text-destructive">
+        (hostedBlock && hostedBlock !== "submit.v2.run_on.blocked.catalog_loading" ? (
+          <p role="alert" className="flex flex-wrap items-start gap-1.5 text-xs text-destructive">
             <Warning className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
             {msg(hostedBlock)}
+            {hostedBlock === "submit.v2.run_on.blocked.catalog_failed" && (
+              <button
+                type="button"
+                onClick={retryHostedCatalog}
+                className="font-medium underline underline-offset-2 hover:text-foreground"
+              >
+                {msg("submit.v2.run_on.retry")}
+              </button>
+            )}
           </p>
         ) : (
-          <p className="text-xs text-muted-foreground">{msg("submit.v2.run_on.web_hint")}</p>
+          <p className="text-xs text-muted-foreground">
+            {msg(hostedBlock ?? "submit.v2.run_on.web_hint")}
+          </p>
         ))}
     </div>
   );

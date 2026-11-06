@@ -548,6 +548,10 @@ export function submitRepoRun(
   opts?: { idempotencyKey?: string },
   source?: ApiSource,
 ) {
+  // `request` sends hosted calls to the Mac when the link is gone; a run the
+  // user chose to start on the web must fail instead.
+  if (source === "hosted" && !hostedRunsAvailable())
+    return Promise.reject(new Error(msg("submit.v2.run_on.blocked.unlinked")));
   return request<OptimizationSubmissionResponse>(
     "/blackbox/run",
     {
