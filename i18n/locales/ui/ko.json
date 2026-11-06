@@ -4483,5 +4483,6 @@
   "usage.day.calls": "{count, plural, other {호출 #회}}",
   "usage.day.empty": "이 날에는 청구된 호출이 없습니다.",
   "usage.day.load_error": "이 날의 호출을 불러오지 못했습니다.",
-  "usage.day.truncated": "{total}회 중 최근 {shown}회를 표시합니다."
+  "usage.day.truncated": "{total}회 중 최근 {shown}회를 표시합니다.",
+  "usage.day.loading": "이 날의 호출을 불러오는 중…"
 }

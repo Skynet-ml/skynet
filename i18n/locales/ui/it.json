@@ -4483,5 +4483,6 @@
   "usage.day.calls": "{count, plural, one {# chiamata} other {# chiamate}}",
   "usage.day.empty": "Nessuna chiamata addebitata in questo giorno.",
   "usage.day.load_error": "Impossibile caricare le chiamate di questo giorno.",
-  "usage.day.truncated": "Sono mostrate le ultime {shown} di {total} chiamate."
+  "usage.day.truncated": "Sono mostrate le ultime {shown} di {total} chiamate.",
+  "usage.day.loading": "Caricamento delle chiamate di questo giorno…"
 }

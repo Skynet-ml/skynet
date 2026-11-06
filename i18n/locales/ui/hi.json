@@ -4483,5 +4483,6 @@
   "usage.day.calls": "{count, plural, one {# कॉल} other {# कॉल}}",
   "usage.day.empty": "इस दिन कोई बिल की गई कॉल नहीं है।",
   "usage.day.load_error": "इस दिन की कॉल लोड नहीं हो सकीं।",
-  "usage.day.truncated": "{total} में से नवीनतम {shown} कॉल दिखाई जा रही हैं।"
+  "usage.day.truncated": "{total} में से नवीनतम {shown} कॉल दिखाई जा रही हैं।",
+  "usage.day.loading": "इस दिन की कॉल लोड हो रही हैं…"
 }

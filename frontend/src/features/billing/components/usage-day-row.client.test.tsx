@@ -1,0 +1,222 @@
+/*
+ * node --test cannot load .tsx, so usage-day-row.render.test.ts runs this file
+ * through jiti inside `npm run test:unit`. To run it by hand from frontend/:
+ * JITI_JSX=1 JITI_ALIAS="{\"@/\":\"$PWD/src/\"}" npx jiti <this file>
+ */
+import assert from "node:assert/strict";
+import { after, test } from "node:test";
+import * as React from "react";
+import { JSDOM } from "jsdom";
+import { buildActiveCatalog } from "@/shared/lib/messages.server";
+import type { BillingUsageEntry } from "@/shared/lib/api";
+import type { UsageDayRow } from "../lib/usage-days";
+
+// Los Angeles is west of UTC: a call at 01:30 UTC is still the day before there.
+process.env.TZ = "America/Los_Angeles";
+
+const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+  url: "https://example.test/settings",
+  pretendToBeVisual: true,
+});
+Object.assign(globalThis, {
+  React,
+  window: dom.window,
+  self: dom.window,
+  document: dom.window.document,
+  HTMLElement: dom.window.HTMLElement,
+  Element: dom.window.Element,
+  Node: dom.window.Node,
+  Event: dom.window.Event,
+  MouseEvent: dom.window.MouseEvent,
+  CustomEvent: dom.window.CustomEvent,
+  MutationObserver: dom.window.MutationObserver,
+  getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+  requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window),
+  cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window),
+  IS_REACT_ACT_ENVIRONMENT: true,
+  ResizeObserver: class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  },
+});
+Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
+dom.window.matchMedia = (query: string) => ({
+  matches: false,
+  media: query,
+  onchange: null,
+  addListener() {},
+  removeListener() {},
+  addEventListener() {},
+  removeEventListener() {},
+  dispatchEvent: () => true,
+});
+(dom.window as unknown as { __APP_MESSAGES__: unknown }).__APP_MESSAGES__ =
+  buildActiveCatalog("en");
+
+const { createRoot } = await import("react-dom/client");
+const { DayRow } = await import("./UsageTab");
+
+after(() => dom.window.close());
+
+const day: UsageDayRow = {
+  date: "2026-11-06",
+  cents: 30,
+  calls: 3,
+  tokens: 1500,
+  inputTokens: 1200,
+  outputTokens: 300,
+};
+
+const call = (id: string, at: string): BillingUsageEntry => ({
+  id,
+  at,
+  label: `Run ${id}`,
+  model: "openai/gpt-5-mini",
+  cents: -10,
+  kind: "run",
+});
+
+/** Mount one DayRow, run `body`, then unmount. */
+async function withDayRow(
+  props: { day?: UsageDayRow; loadCalls: (date: string) => Promise<BillingUsageEntry[]> },
+  body: (container: HTMLElement) => Promise<void>,
+) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await React.act(async () => {
+      root.render(
+        <ul>
+          <DayRow day={props.day ?? day} locale="en-US" loadCalls={props.loadCalls} />
+        </ul>,
+      );
+    });
+    await body(container);
+  } finally {
+    await React.act(async () => root.unmount());
+    container.remove();
+  }
+}
+
+/** Click the day button inside React's act. */
+async function clickDay(container: HTMLElement) {
+  const button = container.querySelector("button[aria-expanded]");
+  assert.ok(button);
+  await React.act(async () => {
+    button.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+  });
+}
+
+void test("a closed day shows its UTC label, call count and cost, and loads nothing", async () => {
+  let loads = 0;
+  await withDayRow(
+    {
+      loadCalls: async () => {
+        loads += 1;
+        return [];
+      },
+    },
+    async (container) => {
+      const button = container.querySelector("button[aria-expanded]");
+      assert.equal(button?.getAttribute("aria-expanded"), "false");
+      assert.equal(button?.hasAttribute("aria-controls"), false);
+      assert.match(container.textContent ?? "", /Nov 6/);
+      assert.match(container.textContent ?? "", /3 calls/);
+      assert.match(container.textContent ?? "", /\$0\.30/);
+      assert.equal(loads, 0);
+    },
+  );
+});
+
+void test("opening a day shows a labeled spinner, then its calls with UTC dates and a truncation note", async () => {
+  let resolve: (rows: BillingUsageEntry[]) => void = () => {};
+  const asked: string[] = [];
+  await withDayRow(
+    {
+      loadCalls: (date) => {
+        asked.push(date);
+        return new Promise((done) => {
+          resolve = done;
+        });
+      },
+    },
+    async (container) => {
+      await clickDay(container);
+      const button = container.querySelector("button[aria-expanded]");
+      assert.equal(button?.getAttribute("aria-expanded"), "true");
+      const panelId = button?.getAttribute("aria-controls");
+      assert.ok(panelId && container.querySelector(`[id="${panelId}"]`));
+      assert.deepEqual(asked, ["2026-11-06"]);
+
+      const spinner = container.querySelector('[role="status"]');
+      assert.equal(spinner?.getAttribute("aria-busy"), "true");
+      assert.equal(spinner?.getAttribute("aria-label"), "Loading the calls for this day…");
+
+      await React.act(async () => {
+        resolve([call("a", "2026-11-06T01:30:00+00:00"), call("b", "2026-11-06T00:05:00+00:00")]);
+      });
+      assert.equal(container.querySelector('[role="status"]'), null);
+      const rows = container.querySelectorAll(`[id="${panelId}"] li`);
+      assert.equal(rows.length, 2);
+      // West of UTC the local date would be Nov 5; the call must match its day row.
+      assert.match(rows[0]?.textContent ?? "", /Nov 6, 2026/);
+      assert.doesNotMatch(container.textContent ?? "", /Nov 5/);
+      assert.match(container.textContent ?? "", /Showing the latest 2 of 3 calls\./);
+    },
+  );
+});
+
+void test("a failed load shows the error, and a retry loads the calls", async () => {
+  let attempt = 0;
+  await withDayRow(
+    {
+      day: { ...day, calls: 1 },
+      loadCalls: async () => {
+        attempt += 1;
+        if (attempt === 1) throw new Error("network");
+        return [call("a", "2026-11-06T12:00:00+00:00")];
+      },
+    },
+    async (container) => {
+      await clickDay(container);
+      assert.match(container.textContent ?? "", /We couldn't load the calls for this day\./);
+      const retry = [...container.querySelectorAll("button")].find(
+        (button) => !button.hasAttribute("aria-expanded"),
+      );
+      assert.ok(retry);
+      await React.act(async () => {
+        retry.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+      });
+      assert.equal(attempt, 2);
+      assert.doesNotMatch(container.textContent ?? "", /couldn't load/);
+      assert.match(container.textContent ?? "", /Run a/);
+      assert.doesNotMatch(container.textContent ?? "", /Showing the latest/);
+    },
+  );
+});
+
+void test("closing the day hides its calls, and opening it again reloads them", async () => {
+  let loads = 0;
+  await withDayRow(
+    {
+      loadCalls: async () => {
+        loads += 1;
+        return [];
+      },
+    },
+    async (container) => {
+      await clickDay(container);
+      assert.match(container.textContent ?? "", /No billed calls on this day\./);
+      await clickDay(container);
+      assert.equal(
+        container.querySelector("button[aria-expanded]")?.getAttribute("aria-expanded"),
+        "false",
+      );
+      assert.doesNotMatch(container.textContent ?? "", /No billed calls/);
+      await clickDay(container);
+      assert.equal(loads, 2);
+    },
+  );
+});

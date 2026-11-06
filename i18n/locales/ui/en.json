@@ -4483,5 +4483,6 @@
   "usage.day.calls": "{count, plural, one {# call} other {# calls}}",
   "usage.day.empty": "No billed calls on this day.",
   "usage.day.load_error": "We couldn't load the calls for this day.",
-  "usage.day.truncated": "Showing the latest {shown} of {total} calls."
+  "usage.day.truncated": "Showing the latest {shown} of {total} calls.",
+  "usage.day.loading": "Loading the calls for this day…"
 }

@@ -4483,5 +4483,6 @@
   "usage.day.calls": "{count, plural, other {# 次调用}}",
   "usage.day.empty": "这一天没有计费调用。",
   "usage.day.load_error": "无法加载这一天的调用。",
-  "usage.day.truncated": "显示 {total} 次中最新的 {shown} 次。"
+  "usage.day.truncated": "显示 {total} 次中最新的 {shown} 次。",
+  "usage.day.loading": "正在加载这一天的调用…"
 }

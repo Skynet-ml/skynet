@@ -4483,5 +4483,6 @@
   "usage.day.calls": "{count, plural, one {# llamada} other {# llamadas}}",
   "usage.day.empty": "No hay llamadas facturadas este día.",
   "usage.day.load_error": "No pudimos cargar las llamadas de este día.",
-  "usage.day.truncated": "Se muestran las {shown} más recientes de {total} llamadas."
+  "usage.day.truncated": "Se muestran las {shown} más recientes de {total} llamadas.",
+  "usage.day.loading": "Cargando las llamadas de este día…"
 }

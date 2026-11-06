@@ -65,12 +65,12 @@ test("usageDayRows keeps calls and tokens null when an older backend sends only 
   assert.equal(row.cents, 30);
 });
 
-test("dayWindow spans the whole UTC day inside the range", () => {
+test("dayWindow spans the whole UTC day up to the next midnight inside the range", () => {
   assert.deepEqual(
     dayWindow("2026-11-02", "2026-10-01T00:00:00.000Z", "2026-11-06T10:00:00.000Z"),
     {
       startIso: "2026-11-02T00:00:00.000Z",
-      endIso: "2026-11-02T23:59:59.999Z",
+      endIso: "2026-11-03T00:00:00.000Z",
     },
   );
 });
@@ -87,7 +87,7 @@ test("dayWindow clips the first and last day to the range bounds", () => {
     dayWindow("2026-10-07", "2026-10-07T08:30:00.000Z", "2026-11-06T10:00:00.000Z"),
     {
       startIso: "2026-10-07T08:30:00.000Z",
-      endIso: "2026-10-07T23:59:59.999Z",
+      endIso: "2026-10-08T00:00:00.000Z",
     },
   );
 });
@@ -103,5 +103,27 @@ test("dayCalls keeps only the billed run calls of that day", () => {
   assert.deepEqual(
     dayCalls(entries, "2026-11-02").map((entry) => entry.id),
     ["a", "e"],
+  );
+});
+
+test("dayWindow keeps a call in the last millisecond of the day, and dayCalls drops the next midnight", () => {
+  const { startIso, endIso } = dayWindow(
+    "2026-11-02",
+    "2026-10-01T00:00:00.000Z",
+    "2026-11-06T10:00:00.000Z",
+  );
+  const late = "2026-11-02T23:59:59.999500+00:00";
+  const midnight = "2026-11-03T00:00:00+00:00";
+  // The backend compares at microsecond precision with `created_at <= end`.
+  assert.ok(Date.parse(late) <= Date.parse(endIso) && Date.parse(late) >= Date.parse(startIso));
+  assert.deepEqual(
+    dayCalls(
+      [
+        { id: "late", at: late, kind: "run", cents: -2 },
+        { id: "next", at: midnight, kind: "run", cents: -3 },
+      ],
+      "2026-11-02",
+    ).map((entry) => entry.id),
+    ["late"],
   );
 });

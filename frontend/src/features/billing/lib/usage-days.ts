@@ -80,16 +80,21 @@ export function formatUsageCallDate(iso: string, locale: string): string {
 /**
  * The UTC bounds of one `YYYY-MM-DD` day, clipped to the selected range so the
  * drill-down never shows calls that the day row did not count.
+ *
+ * The end is the next day's midnight, not `23:59:59.999`: the backend keeps
+ * microseconds and filters `created_at <= end`, so a call in the last
+ * millisecond of the day would drop out. `dayCalls` removes a call that falls
+ * exactly on the next midnight.
  */
 export function dayWindow(
   date: string,
   rangeStartIso: string,
   rangeEndIso: string,
 ): { startIso: string; endIso: string } {
-  const dayStart = `${date}T00:00:00.000Z`;
-  const dayEnd = `${date}T23:59:59.999Z`;
-  const startMs = Math.max(Date.parse(dayStart), Date.parse(rangeStartIso));
-  const endMs = Math.min(Date.parse(dayEnd), Date.parse(rangeEndIso));
+  const dayStartMs = Date.parse(`${date}T00:00:00.000Z`);
+  const nextDayStartMs = dayStartMs + 24 * 60 * 60 * 1000;
+  const startMs = Math.max(dayStartMs, Date.parse(rangeStartIso));
+  const endMs = Math.min(nextDayStartMs, Date.parse(rangeEndIso));
   return { startIso: new Date(startMs).toISOString(), endIso: new Date(endMs).toISOString() };
 }
 

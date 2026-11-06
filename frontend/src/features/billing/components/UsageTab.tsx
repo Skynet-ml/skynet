@@ -390,13 +390,13 @@ function LedgerRow({
 }
 
 /** Load the billed calls of one UTC day. */
-type LoadDayCalls = (date: string) => Promise<BillingUsageEntry[]>;
+export type LoadDayCalls = (date: string) => Promise<BillingUsageEntry[]>;
 
 /**
  * One day of Remote usage: date, tokens, call count and cost. A click opens
  * the day's single calls, which load on the first open.
  */
-function DayRow({
+export function DayRow({
   day,
   locale,
   loadCalls,
@@ -497,7 +497,12 @@ function DayRow({
               }
             />
           ) : calls == null ? (
-            <div className="flex h-14 items-center justify-center" aria-busy="true">
+            <div
+              className="flex h-14 items-center justify-center"
+              role="status"
+              aria-busy="true"
+              aria-label={msg("usage.day.loading")}
+            >
               <ArrowsClockwise
                 className="size-4 animate-spin text-muted-foreground"
                 aria-hidden="true"
@@ -799,12 +804,7 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
           ) : (
             <ul className="flex flex-col">
               {days.map((day) => (
-                <DayRow
-                  key={day.date}
-                  day={day}
-                  locale={locale}
-                  loadCalls={loadDayCalls}
-                />
+                <DayRow key={day.date} day={day} locale={locale} loadCalls={loadDayCalls} />
               ))}
             </ul>
           )}

@@ -4483,5 +4483,6 @@
   "usage.day.calls": "{count, plural, one {استدعاء واحد} other {# استدعاءات}}",
   "usage.day.empty": "لا توجد استدعاءات مدفوعة في هذا اليوم.",
   "usage.day.load_error": "تعذّر تحميل استدعاءات هذا اليوم.",
-  "usage.day.truncated": "عرض أحدث {shown} من {total} استدعاء."
+  "usage.day.truncated": "عرض أحدث {shown} من {total} استدعاء.",
+  "usage.day.loading": "جارٍ تحميل استدعاءات هذا اليوم…"
 }

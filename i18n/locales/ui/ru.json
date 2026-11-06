@@ -4483,5 +4483,6 @@
   "usage.day.calls": "{count, plural, one {# вызов} few {# вызова} many {# вызовов} other {# вызова}}",
   "usage.day.empty": "В этот день нет оплаченных вызовов.",
   "usage.day.load_error": "Не удалось загрузить вызовы за этот день.",
-  "usage.day.truncated": "Показаны последние {shown} из {total} вызовов."
+  "usage.day.truncated": "Показаны последние {shown} из {total} вызовов.",
+  "usage.day.loading": "Загрузка вызовов за этот день…"
 }

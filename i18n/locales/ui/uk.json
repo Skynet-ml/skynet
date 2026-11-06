@@ -4483,5 +4483,6 @@
   "usage.day.calls": "{count, plural, one {# виклик} few {# виклики} many {# викликів} other {# виклику}}",
   "usage.day.empty": "Цього дня немає оплачених викликів.",
   "usage.day.load_error": "Не вдалося завантажити виклики за цей день.",
-  "usage.day.truncated": "Показано останні {shown} із {total} викликів."
+  "usage.day.truncated": "Показано останні {shown} із {total} викликів.",
+  "usage.day.loading": "Завантаження викликів за цей день…"
 }
