@@ -24,6 +24,7 @@ registerHooks({
 // The classic JSX transform the test loader applies reads a global React.
 (globalThis as { React?: typeof React }).React = React;
 const { RunOverview } = await import("./RunOverview");
+const { hostedRunBlock } = await import("../../hooks/use-unified-wizard");
 
 const cc: ContractCheckState = {
   staticResult: null,
@@ -120,5 +121,51 @@ void describe("RunOverview", () => {
     const mixed = render(state);
     assert.match(mixed, /billing\.mode\.managed</);
     assert.doesNotMatch(mixed, /subscription\.mode</);
+  });
+
+  void it("shows no Mac or Web choice outside a linked Mac's wizard", () => {
+    const state = initialWizardV2State("expert");
+    assert.doesNotMatch(render(state), /submit\.v2\.run_on\./);
+  });
+});
+
+void describe("hostedRunBlock", () => {
+  const repoState = () => {
+    const state = initialWizardV2State("expert");
+    state.task.repo = {
+      repository: "acme/agent",
+      branch: "main",
+      commit: "",
+      editablePaths: ["."],
+      setupCommand: "",
+    };
+    return state;
+  };
+
+  void it("lets a plain repository run start on the web", () => {
+    assert.equal(hostedRunBlock(repoState(), [{ name: "openai/gpt-5" }]), null);
+  });
+
+  void it("keeps every Mac-only input off the web", () => {
+    assert.equal(
+      hostedRunBlock(initialWizardV2State("expert"), []),
+      "submit.v2.run_on.blocked.repo_only",
+    );
+    const cli = repoState();
+    assert.equal(
+      hostedRunBlock(cli, [
+        { name: "openai/gpt-5", token_source: "subscription", cli_provider: "codex" },
+      ]),
+      "submit.v2.run_on.blocked.cli_model",
+    );
+    const proposer = repoState();
+    proposer.optimizer.proposer = { ...proposer.optimizer.proposer, host_cli: "claude" };
+    assert.equal(hostedRunBlock(proposer, []), "submit.v2.run_on.blocked.host_cli");
+    const staged = repoState();
+    staged.task.needsData = true;
+    staged.inputs.stagedDatasetId = "staged-1";
+    assert.equal(hostedRunBlock(staged, []), "submit.v2.run_on.blocked.staged_data");
+    staged.inputs.cases = [{ question: "2+2" }] as unknown as typeof staged.inputs.cases;
+    assert.equal(hostedRunBlock(staged, []), null);
   });
 });

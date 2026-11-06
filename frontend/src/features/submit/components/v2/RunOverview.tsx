@@ -40,6 +40,7 @@ import { cn } from "@/shared/lib/utils";
 import { readRewardSpec } from "@/shared/lib/reward";
 import type { ModelConfig } from "@/shared/types/api";
 import type { ContractCheckState } from "../../hooks/use-contract-check";
+import { useWizardV2ShellOptional } from "../../hooks/use-unified-wizard";
 import { economyEligible } from "../../lib/model-config";
 import { aggregateTokenSource, runModels, storedMetricModel } from "../../lib/run-floor";
 import { metricUsesModel } from "../../lib/scorer-dependencies";
@@ -297,6 +298,7 @@ export function RunOverview({
             <CheckStatus cc={cc} guided={guided} />
           )}
         </div>
+        <RunOnChoice />
       </header>
       <div
         role="tablist"
@@ -622,6 +624,60 @@ export function RunOverview({
           </AnimatePresence>
         </div>
       </motion.div>
+    </div>
+  );
+}
+
+/** Mac or Web for a linked Mac app's run; nothing anywhere else. */
+function RunOnChoice() {
+  const shell = useWizardV2ShellOptional();
+  if (!shell?.hostedChoice) return null;
+  const { runOn, setRunOn, hostedBlock, submitting } = shell;
+  const options = [
+    { source: "local", label: "submit.v2.run_on.mac", icon: Desktop },
+    { source: "hosted", label: "submit.v2.run_on.web", icon: Globe },
+  ] as const;
+  return (
+    <div className="space-y-1.5">
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <span id="run-on-label" className="text-xs font-medium text-muted-foreground">
+          {msg("submit.v2.run_on.label")}
+        </span>
+        <div
+          role="radiogroup"
+          aria-labelledby="run-on-label"
+          className="inline-flex gap-0.5 rounded-lg bg-secondary/50 p-0.5"
+        >
+          {options.map(({ source, label, icon: Icon }) => (
+            <button
+              key={source}
+              type="button"
+              role="radio"
+              aria-checked={runOn === source}
+              disabled={submitting}
+              onClick={() => setRunOn(source)}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-60",
+                runOn === source
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" aria-hidden />
+              {msg(label)}
+            </button>
+          ))}
+        </div>
+      </div>
+      {runOn === "hosted" &&
+        (hostedBlock ? (
+          <p role="alert" className="flex items-start gap-1.5 text-xs text-destructive">
+            <Warning className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+            {msg(hostedBlock)}
+          </p>
+        ) : (
+          <p className="text-xs text-muted-foreground">{msg("submit.v2.run_on.web_hint")}</p>
+        ))}
     </div>
   );
 }

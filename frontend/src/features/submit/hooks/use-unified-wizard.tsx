@@ -33,6 +33,7 @@ import {
   getOptimizerCatalog,
   getConnectors,
   getStagedDataset,
+  hostedRunsAvailable,
   isInsufficientFundsError,
   isStorageQuotaError,
   setupDraftApi,
@@ -40,6 +41,7 @@ import {
   submitUnifiedRun,
   enableContinuous,
 } from "@/shared/lib/api";
+import { runHref, type ApiSource } from "@/shared/lib/api-route";
 import { contractCheckMessage } from "@/shared/lib/i18n";
 import {
   SETUP_CHAT_KEPT_EVENT,
@@ -161,6 +163,29 @@ export interface WizardV2Shell extends WizardV2Context {
   cloneLoading: boolean;
   /** Why the last Run click on this exact setup did not start a run. */
   runFailure: RunFailure | null;
+  /** A linked Mac may start the run on the web instead of on the Mac. */
+  hostedChoice: boolean;
+  runOn: ApiSource;
+  setRunOn: (source: ApiSource) => void;
+  /** Why this setup cannot run on the web; null when it can, or when it runs on the Mac. */
+  hostedBlock: MessageKey | null;
+}
+
+/**
+ * Why a setup cannot start on the web from the Mac app, or null when it can.
+ * Only a repository run goes to hosted, and nothing that lives only on this
+ * Mac may go with it: CLI-plan models, the host CLI proposer, a staged dataset.
+ */
+export function hostedRunBlock(
+  state: Pick<WizardV2State, "task" | "inputs" | "optimizer">,
+  models: readonly ModelConfig[],
+): MessageKey | null {
+  if (!state.task.repo) return "submit.v2.run_on.blocked.repo_only";
+  if (models.some(isSubscriptionModel)) return "submit.v2.run_on.blocked.cli_model";
+  if (state.optimizer.proposer.host_cli) return "submit.v2.run_on.blocked.host_cli";
+  if (state.task.needsData && state.inputs.cases.length === 0 && state.inputs.stagedDatasetId)
+    return "submit.v2.run_on.blocked.staged_data";
+  return null;
 }
 
 type SliceName = "task" | "inputs" | "optimizer" | "workspace" | "meta";
@@ -363,22 +388,31 @@ export function WizardV2Provider({
   // offers is kept and reported as a step issue, never swapped silently.
   const kind = optimizerTarget(state.task);
   const mode = state.inputs.mode;
-  const [optimizerCatalog, setOptimizerCatalog] = useState<OptimizerCatalogResponse | null>(null);
+  // A linked Mac picks where the run starts; every server read below follows
+  // that choice, so a web run is never judged on the Mac's catalog or prices.
+  const hostedChoice = hostedRunsAvailable();
+  const [runOn, setRunOn] = useState<ApiSource>("local");
+  const runSource: ApiSource = hostedChoice && runOn === "hosted" ? "hosted" : "local";
+  const [catalogEntry, setCatalogEntry] = useState<{
+    source: ApiSource;
+    catalog: OptimizerCatalogResponse;
+  } | null>(null);
+  const optimizerCatalog = catalogEntry?.source === runSource ? catalogEntry.catalog : null;
   const [optimizerCatalogLoading, setOptimizerCatalogLoading] = useState(false);
   useEffect(() => {
     if (!kind || !mode) return;
     const controller = new AbortController();
     setOptimizerCatalogLoading(true);
-    getOptimizerCatalog(kind, mode, controller.signal)
+    getOptimizerCatalog(kind, mode, controller.signal, runSource)
       .then((catalog) => {
-        if (!controller.signal.aborted) setOptimizerCatalog(catalog);
+        if (!controller.signal.aborted) setCatalogEntry({ source: runSource, catalog });
       })
       .catch(() => {})
       .finally(() => {
         if (!controller.signal.aborted) setOptimizerCatalogLoading(false);
       });
     return () => controller.abort();
-  }, [kind, mode]);
+  }, [kind, mode, runSource]);
 
   const stepIssue = useCallback(
     (step: WizardStepId) => computeStepIssue(state, step, optimizerCatalog),
@@ -473,8 +507,12 @@ export function WizardV2Provider({
     (model): model is ModelConfig & { token_source?: "managed" | "byok" } =>
       !isSubscriptionModel(model),
   );
-  const { holds: callHolds, boxHoldCents, settled: costSettled } = useModelCallHolds(pricedModels);
+  const { holds: callHolds, boxHoldCents, settled: costSettled } = useModelCallHolds(
+    pricedModels,
+    runSource,
+  );
   const tokenSource = aggregateTokenSource(submittedModels);
+  const hostedBlock = runSource === "hosted" ? hostedRunBlock(state, submittedModels) : null;
   // The floor waits for the server's box hold, since the boxes are most of it.
   const runFloor =
     boxHoldCents == null || !costSettled
@@ -611,12 +649,13 @@ export function WizardV2Provider({
   };
 
   // A submitted run opens on its page once the splash has played.
-  const openSubmitted = async (optimizationId: string) => {
+  const openSubmitted = async (optimizationId: string, source: ApiSource = "local") => {
     submittedRef.current = true;
     void deleteSetupDraft(accountId, setupDraftApi);
     forgetWizardSession();
-    await fileNewRun(optimizationId, state.meta.folderId);
-    const jobUrl = `/optimizations/${optimizationId}`;
+    // Folders live on the Mac and hold only its own runs.
+    if (source === "local") await fileNewRun(optimizationId, state.meta.folderId);
+    const jobUrl = runHref(optimizationId, source);
     setSubmitPhase("splash");
     window.dispatchEvent(new Event("sidebar:collapse"));
     setTimeout(() => {
@@ -656,7 +695,7 @@ export function WizardV2Provider({
     // The server stages the checkout through the user's GitHub link, and
     // without one its setup check fails with a generic validation error.
     // When the connector list cannot load, the server still decides.
-    const github = await getConnectors().then(
+    const github = await getConnectors(runSource).then(
       (res) => res.connectors.find((c) => c.provider === "github"),
       () => undefined,
     );
@@ -667,14 +706,14 @@ export function WizardV2Provider({
       return;
     }
     try {
-      const result = await submitRepoRun(request);
+      const result = await submitRepoRun(request, undefined, runSource);
       track(TelemetryEvent.RunSubmitted, {
         artifact_kind: "repo",
         data_mode: "single",
         optimizer: state.optimizer.choice,
         optimizer_resolved: resolvedOptimizer,
       });
-      await openSubmitted(result.optimization_id);
+      await openSubmitted(result.optimization_id, runSource);
     } catch (err) {
       submitFailed(err);
     }
@@ -682,6 +721,10 @@ export function WizardV2Provider({
 
   const submit = async () => {
     if (submittingRef.current || busy) return;
+    if (hostedBlock) {
+      toast.error(msg(hostedBlock));
+      return;
+    }
     const blocked = firstBlockedStep();
     if (blocked && blocked !== "metric") {
       dispatch({ type: "go", step: blocked });
@@ -1189,6 +1232,10 @@ export function WizardV2Provider({
     submitPhase,
     advancing,
     runFailure: currentRunFailure(runFailure, preflight.identity),
+    hostedChoice,
+    runOn: runSource,
+    setRunOn,
+    hostedBlock,
   };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
@@ -1198,6 +1245,11 @@ export function useWizardV2Shell(): WizardV2Shell {
   const context = useContext(Ctx);
   if (!context) throw new Error("WizardV2Provider is required");
   return context;
+}
+
+/** The shell's context, or null outside the wizard. */
+export function useWizardV2ShellOptional(): WizardV2Shell | null {
+  return useContext(Ctx);
 }
 
 export function useWizardV2(): WizardV2Context {
