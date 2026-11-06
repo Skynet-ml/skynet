@@ -355,6 +355,12 @@ def create_agent_history_router(*, job_store) -> APIRouter:
                 raise DomainError("agent.conversation.not_found", status=404)
             if row.username != user.username:
                 raise DomainError("agent.conversation.forbidden", status=403)
+            if row.source_share_token is not None:
+                # History reopens a continued copy without the share link, and the
+                # model reads these rows, so they must follow the live share too.
+                share = session.get(AgentChatShareModel, row.source_share_token)
+                if share is not None:
+                    _refresh_fork(session, share, conversation_id)
             msgs = (
                 session.query(AgentMessageModel)
                 .options(
@@ -989,8 +995,11 @@ def _refresh_fork(session: Session, share: AgentChatShareModel, fork_id: str) ->
     ):
         calls = rebuilt.get((cast(str, row.role), row.created_at))
         if calls:
-            row.tool_calls = calls.pop(0)
-            changed = True
+            fresh = calls.pop(0)
+            # Write only real changes, so later opens of an unchanged link do not commit.
+            if row.tool_calls != fresh:
+                row.tool_calls = fresh
+                changed = True
     if changed:
         session.commit()
 

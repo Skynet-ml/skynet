@@ -425,6 +425,20 @@ def test_reopen_marks_an_unticked_item_not_shared() -> None:
     assert "Alice run" not in bob.get(f"/agent/conversations/{fork_id}").text
 
 
+def test_history_open_follows_the_live_share() -> None:
+    """Loading the copy from history, without the link, drops an unticked item and names a new one."""
+    client, store = _client(_ALICE)
+    _private_chat(store)
+    token = _share(client, "continue_data", [{"kind": "run", "id": "run-a"}])
+    bob = _mount(store, _BOB)
+    fork_id = bob.post(f"/agent/shared-conversations/{token}/open").json()["conversation_id"]
+
+    _share(client, "continue_data", [{"kind": "dataset", "id": "ds-a"}])
+
+    assert _copy_statuses(bob, fork_id) == ["not_shared", "shared", "not_shared"]
+    assert "Alice run" not in bob.get(f"/agent/conversations/{fork_id}").text
+
+
 def test_shared_item_read_is_allowed_for_a_ticked_item() -> None:
     """Bob reads the ticked run and file through his copy, masked and read-only."""
     client, store = _client(_ALICE)
