@@ -29,7 +29,8 @@ export function callbackPath(raw: string, origin: string): string | null {
         url.port === here.port &&
         LOOPBACK_HOSTS.has(url.hostname) &&
         LOOPBACK_HOSTS.has(here.hostname));
-    return sameOrigin ? url.pathname + url.search + url.hash : null;
+    // A same-origin URL can still have a ``//host`` path, which the router opens as another site.
+    return sameOrigin ? safeReturnPath(url.pathname + url.search + url.hash) : null;
   } catch {
     return null;
   }

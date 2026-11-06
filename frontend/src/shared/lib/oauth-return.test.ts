@@ -26,4 +26,6 @@ test("callbackPath keeps same-origin paths and treats loopback hosts as one", ()
   assert.equal(callbackPath("https://app.skynetml.com/mcp/authorize?a=1", web), "/mcp/authorize?a=1");
   assert.equal(callbackPath("http://localhost/x", web), null);
   assert.equal(callbackPath("//evil.example/x", web), null);
+  assert.equal(callbackPath("https://app.skynetml.com//evil.example", web), null);
+  assert.equal(callbackPath("http://localhost:3012//evil.example/x", mac), null);
 });
