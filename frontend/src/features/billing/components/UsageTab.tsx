@@ -399,21 +399,34 @@ function DayRow({
   const [loading, setLoading] = React.useState(false);
   const [failed, setFailed] = React.useState(false);
   const panelId = React.useId();
+  const requestId = React.useRef(0);
 
+  // Only the newest request may write, so a slow answer for an older range or
+  // account never replaces the calls of the current one.
   const fetchCalls = React.useCallback(() => {
+    const id = ++requestId.current;
     setLoading(true);
     setFailed(false);
     loadCalls(day.date)
-      .then(setCalls)
-      .catch(() => setFailed(true))
-      .finally(() => setLoading(false));
+      .then((rows) => {
+        if (id === requestId.current) setCalls(rows);
+      })
+      .catch(() => {
+        if (id === requestId.current) setFailed(true);
+      })
+      .finally(() => {
+        if (id === requestId.current) setLoading(false);
+      });
   }, [day.date, loadCalls]);
 
-  const toggle = () => {
-    const next = !open;
-    setOpen(next);
-    if (next && calls == null && !loading) fetchCalls();
-  };
+  // Every usage reload (wallet re-read, account link change, new range) gives a
+  // new loader or new day totals, so an open day reloads its calls instead of
+  // keeping the first list.
+  React.useEffect(() => {
+    if (open) fetchCalls();
+  }, [open, fetchCalls, day.calls, day.cents]);
+
+  const toggle = () => setOpen((value) => !value);
 
   return (
     <li className="border-b border-border/40 last:border-b-0">
@@ -776,7 +789,7 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
             <ul className="flex flex-col">
               {days.map((day) => (
                 <DayRow
-                  key={`${data.start}:${day.date}`}
+                  key={day.date}
                   day={day}
                   locale={locale}
                   loadCalls={loadDayCalls}
