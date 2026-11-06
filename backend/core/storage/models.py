@@ -1737,6 +1737,23 @@ class SetupDraftModel(Base):
     )
 
 
+# A repository run an MCP client builds one step at a time (SKY-320). Each
+# step tool saves its part of ``spec`` and the submit tool turns the whole
+# spec into a repository run request. The rows are agent scratch state, so
+# the store caps how many each account keeps and drops old ones.
+class McpRunDraftModel(Base):
+    """Repository run setup that an MCP client builds step by step."""
+
+    __tablename__ = "mcp_run_drafts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    username: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSON_STORE, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
 class TaggingSessionModel(Base):
     """Persisted text-labeling (tagger) session — one row per saved session.
 

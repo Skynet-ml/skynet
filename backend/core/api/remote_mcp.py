@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
+import httpx
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastmcp import FastMCP
@@ -62,9 +63,18 @@ _STORED_REASON_TERMS = ("cancellationReason", "pauseReason")
 
 _INSTRUCTIONS = (
     "Skynet optimizes repositories against a metric. "
-    "Start a repository run in the Skynet app; check_run and start_run refuse DSPy program runs. "
-    "Use list_runs and get_run to follow the account's runs until the status is terminal. stop_run ends a run early."
+    "To start a repository run, call repo_draft_start and follow each step's next_tool: "
+    "every step saves part of the run and reports what to fix. "
+    "repo_draft_review prices the run; repo_draft_submit starts it after the user agrees to the price. "
+    "check_run and start_run refuse DSPy program runs. "
+    "Use list_runs and get_run to follow the account's runs until the status is terminal. stop_run ends a run early. "
+    "Tools named platform_* call the Skynet API directly."
 )
+
+# Adds more tools to the server. It gets the server and the model catalog
+# client factory. Feature modules that import from this module register
+# through it, so this module never imports them.
+McpExtension = Callable[[FastMCP, Callable[[], httpx.Client]], None]
 
 
 def _principal() -> McpPrincipal:
@@ -264,6 +274,8 @@ def build_remote_mcp(
     service: Any,
     job_store: Any,
     get_worker: Callable[[], Any],
+    http_client: Callable[[], httpx.Client] | None = None,
+    extensions: Sequence[McpExtension] = (),
 ) -> FastMCP:
     """Build the remote MCP server and its tools.
 
@@ -271,10 +283,13 @@ def build_remote_mcp(
         service: Optimization service handed to the worker.
         job_store: Store that holds runs, budgets and grants.
         get_worker: Returns the background worker.
+        http_client: Factory for the model catalog client.
+        extensions: Registrars that add more tools to the server.
 
     Returns:
         The FastMCP server.
     """
+    make_client = http_client or (lambda: httpx.Client(timeout=10, follow_redirects=False, trust_env=False))
     mcp = FastMCP(name="Skynet", instructions=_INSTRUCTIONS)
     read_only = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
 
@@ -346,6 +361,8 @@ def build_remote_mcp(
         user = _user(SCOPE_WRITE)
         return guarded(lambda: stop_run(optimization_id, user, job_store=job_store, worker=get_worker()))
 
+    for extend in extensions:
+        extend(mcp, make_client)
     return mcp
 
 
@@ -440,7 +457,14 @@ class RemoteMcpDispatch:
         await self.mcp_app(inner, receive, send)
 
 
-def mount_remote_mcp(app: FastAPI, *, service: Any, job_store: Any, get_worker: Callable[[], Any]) -> None:
+def mount_remote_mcp(
+    app: FastAPI,
+    *,
+    service: Any,
+    job_store: Any,
+    get_worker: Callable[[], Any],
+    extensions: Sequence[McpExtension] = (),
+) -> None:
     """Serve the remote MCP server at the resource URL and chain its lifespan.
 
     The dispatch is the outermost middleware, so MCP responses skip the API's
@@ -451,8 +475,9 @@ def mount_remote_mcp(app: FastAPI, *, service: Any, job_store: Any, get_worker: 
         service: Optimization service handed to the worker.
         job_store: Store that holds runs, budgets and grants.
         get_worker: Returns the background worker.
+        extensions: Registrars that add more tools to the server.
     """
-    mcp = build_remote_mcp(service=service, job_store=job_store, get_worker=get_worker)
+    mcp = build_remote_mcp(service=service, job_store=job_store, get_worker=get_worker, extensions=extensions)
     mcp_app = mcp.http_app(path="/", stateless_http=True, json_response=True)
     app.add_middleware(RemoteMcpDispatch, mcp_app=mcp_app, job_store=job_store)
     parent_lifespan = app.router.lifespan_context

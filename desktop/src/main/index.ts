@@ -302,6 +302,9 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
     REMOTE_DB_URL: databaseUrl(secrets.pgPassword, ports.postgres),
     BACKEND_AUTH_SECRET: secrets.backendAuthSecret,
     ALLOWED_ORIGINS: feOrigin,
+    // The MCP OAuth authorize step sends the browser to this origin's
+    // /mcp/authorize consent page, so outside agents connect as on the web.
+    APP_PUBLIC_URL: feOrigin,
     APP_LOCAL_STATE_DIR: localStateDir,
     APP_LOCAL_SANDBOX_IMAGE: sandboxImage,
     ...binEnv,
