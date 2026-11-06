@@ -24,6 +24,7 @@ from sqlalchemy.pool import StaticPool
 from core.api.errors import DomainError
 from core.api.routers._helpers import enforce_storage_quota
 from core.config import settings
+from core.storage import remote as remote_store
 from core.storage.models import (
     EMBEDDING_DIM,
     AgentStagedDatasetModel,
@@ -405,6 +406,7 @@ def test_local_mode_budget_is_used_bytes_plus_free_disk(
     two_gb = 2 * 1024 * 1024 * 1024
     monkeypatch.setattr(settings, "local_mode", True)
     monkeypatch.setattr(settings, "local_state_dir", str(tmp_path))
+    monkeypatch.setattr(remote_store, "_local_postgres_free_bytes", lambda: None)
     measured: list[Path] = []
     monkeypatch.setattr(shutil, "disk_usage", lambda path: measured.append(path) or SimpleNamespace(free=two_gb))
     store.set_user_storage_quota_override("alice", 1, updated_by="admin")
@@ -424,6 +426,7 @@ def test_local_mode_gate_blocks_only_writes_larger_than_free_disk(
     free = 1024 * 1024 * 1024
     monkeypatch.setattr(settings, "local_mode", True)
     monkeypatch.setattr(settings, "local_state_dir", "")
+    monkeypatch.setattr(remote_store, "_local_postgres_free_bytes", lambda: None)
     measured: list[Path] = []
     monkeypatch.setattr(shutil, "disk_usage", lambda path: measured.append(path) or SimpleNamespace(free=free))
 
@@ -433,6 +436,40 @@ def test_local_mode_gate_blocks_only_writes_larger_than_free_disk(
     assert exc.value.code == "user.storage.quota_exceeded"
     assert set(measured) == {Path.home()}
 
+
+
+def test_local_mode_budget_uses_the_smaller_docker_disk(
+    store: _SQLiteJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the Docker disk has less room than the Mac disk, the budget shows the Docker room."""
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(settings, "local_state_dir", "")
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: SimpleNamespace(free=200 * 1024**3))
+    monkeypatch.setattr(remote_store, "_local_postgres_free_bytes", lambda: 30 * 1024**3)
+
+    assert store.get_effective_user_storage_quota("alice") == 30 * 1024**3
+
+
+def test_local_postgres_free_bytes_reads_df_and_fails_soft(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Docker probe parses ``df`` output and returns None when Docker cannot answer."""
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="   Avail\n32212254720\n")
+
+    monkeypatch.setattr(remote_store.shutil, "which", lambda name: "/usr/local/bin/docker")
+    monkeypatch.setattr(remote_store.subprocess, "run", fake_run)
+    assert remote_store._local_postgres_free_bytes() == 32212254720
+    assert calls[0][:3] == ["/usr/local/bin/docker", "exec", "skynet-local-postgres"]
+
+    monkeypatch.setattr(
+        remote_store.subprocess, "run", lambda args, **_: SimpleNamespace(returncode=1, stdout="")
+    )
+    assert remote_store._local_postgres_free_bytes() is None
+
+    monkeypatch.setattr(remote_store.shutil, "which", lambda name: None)
+    assert remote_store._local_postgres_free_bytes() is None
 
 def test_storage_quota_override_replaces_default(store: _SQLiteJobStore) -> None:
     """An override becomes the user's effective budget, case-insensitively."""
