@@ -4472,7 +4472,7 @@
   "localUsage.resets": "Se restablece {time}",
   "localUsage.used": "{percent} usado",
   "localUsage.noWindows": "{cli} no informa una ventana de límite para este plan.",
-  "localUsage.reconnect": "{cli} necesita que vuelvas a iniciar sesión. Ejecuta {command} en una terminal y luego selecciona Actualizar.",
+  "localUsage.reconnect": "El uso de {cli} no está actualizado. Ejecuta {command} en una terminal para actualizarlo e inicia sesión si te lo pide. Luego selecciona Actualizar.",
   "localUsage.unavailable": "No se pudo leer el uso del plan desde {cli}.",
   "localUsage.skynet.5h": "Ejecuciones de {term.appName} en las últimas 5 horas: {calls} llamadas, {tokens} tokens",
   "localUsage.skynet.7d": "Ejecuciones de {term.appName} en los últimos 7 días: {calls} llamadas, {tokens} tokens",

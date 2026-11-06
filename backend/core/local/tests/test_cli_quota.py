@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import stat
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -180,3 +181,42 @@ def test_quotas_are_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     assert first == second
     assert set(first) == {"claude", "codex"}
     assert sorted(calls) == ["claude", "codex"]
+
+
+def test_concurrent_reads_share_one_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two requests at the same time read each CLI once, and both get the answer."""
+    calls: list[str] = []
+    started = threading.Event()
+
+    def slow(cli: str) -> dict[str, Any]:
+        """Count the read, and hold it until the second request waits."""
+        calls.append(cli)
+        started.set()
+        time.sleep(0.2)
+        return {"status": "ok", "windows": []}
+
+    monkeypatch.setattr(cli_quota, "read_claude_quota", lambda: slow("claude"))
+    monkeypatch.setattr(cli_quota, "read_codex_quota", lambda _s: slow("codex"))
+    results: list[dict[str, Any]] = []
+    first = threading.Thread(target=lambda: results.append(cli_quota.read_cli_quotas(Settings())))
+    first.start()
+    started.wait(timeout=5)
+    results.append(cli_quota.read_cli_quotas(Settings()))
+    first.join(timeout=5)
+    assert len(results) == 2
+    assert results[0] == results[1]
+    assert sorted(calls) == ["claude", "codex"]
+
+
+def test_clis_are_read_in_parallel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each reader waits for the other, which only passes when both run at once."""
+    barrier = threading.Barrier(2, timeout=5)
+
+    def meet() -> dict[str, Any]:
+        """Wait at the barrier for the other CLI's read."""
+        barrier.wait()
+        return {"status": "ok", "windows": []}
+
+    monkeypatch.setattr(cli_quota, "read_claude_quota", meet)
+    monkeypatch.setattr(cli_quota, "read_codex_quota", lambda _s: meet())
+    assert set(cli_quota.read_cli_quotas(Settings())) == {"claude", "codex"}

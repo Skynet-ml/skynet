@@ -4472,7 +4472,7 @@
   "localUsage.resets": "{time} にリセット",
   "localUsage.used": "{percent} 使用済み",
   "localUsage.noWindows": "{cli} はこのプランの上限ウィンドウを報告していません。",
-  "localUsage.reconnect": "{cli} に再度サインインしてください。ターミナルで {command} を実行し、更新を選択してください。",
+  "localUsage.reconnect": "{cli} の使用状況が最新ではありません。ターミナルで {command} を実行して更新し、求められたらサインインしてください。その後、更新を選択してください。",
   "localUsage.unavailable": "{cli} からプランの利用状況を読み取れませんでした。",
   "localUsage.skynet.5h": "過去 5 時間の {term.appName} 実行: {calls} 回の呼び出し、{tokens} トークン",
   "localUsage.skynet.7d": "過去 7 日間の {term.appName} 実行: {calls} 回の呼び出し、{tokens} トークン",
