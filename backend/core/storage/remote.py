@@ -2156,7 +2156,8 @@ class RemoteDBJobStore:
         """Return the unified storage budget in bytes the user is held to.
 
         In local mode (the Mac app) the budget is the used bytes plus the free
-        disk space. Otherwise it resolves an admin per-user override first (a
+        space on the Mac disk that holds the local state folder (the Docker VM
+        disk of the Postgres volume is not measured). Otherwise it resolves an admin per-user override first (a
         live DB row that replaces the default ceiling for that user), falling
         back to the static ``settings.user_storage_quota_bytes`` default.
         Staying a method keeps the save/run gate, the usage meter, and the
@@ -2171,8 +2172,9 @@ class RemoteDBJobStore:
         if settings.local_mode:
             # The Mac app keeps its data on the user's own disk, so the web
             # budget only blocks them (SKY-344). The budget is what Skynet
-            # already uses plus the free disk, so the gate fires only when the
-            # disk cannot hold the write.
+            # already uses plus the free space on the Mac disk. Postgres runs
+            # in a Docker volume, and the Docker VM disk can fill up first;
+            # this check does not see that limit.
             state_dir = Path(settings.local_state_dir)
             disk = state_dir if settings.local_state_dir and state_dir.is_dir() else Path.home()
             free = shutil.disk_usage(disk).free

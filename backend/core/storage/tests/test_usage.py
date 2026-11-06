@@ -405,7 +405,8 @@ def test_local_mode_budget_is_used_bytes_plus_free_disk(
     two_gb = 2 * 1024 * 1024 * 1024
     monkeypatch.setattr(settings, "local_mode", True)
     monkeypatch.setattr(settings, "local_state_dir", str(tmp_path))
-    monkeypatch.setattr(shutil, "disk_usage", lambda path: SimpleNamespace(free=two_gb))
+    measured: list[Path] = []
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: measured.append(path) or SimpleNamespace(free=two_gb))
     store.set_user_storage_quota_override("alice", 1, updated_by="admin")
     _insert_dataset(store, dataset_id="ds-1", owner="alice", name="Set", byte_size=600 * 1024 * 1024)
 
@@ -413,6 +414,7 @@ def test_local_mode_budget_is_used_bytes_plus_free_disk(
 
     assert budget == 600 * 1024 * 1024 + two_gb
     assert budget > settings.user_storage_quota_bytes
+    assert measured == [tmp_path]
 
 
 def test_local_mode_gate_blocks_only_writes_larger_than_free_disk(
@@ -422,12 +424,14 @@ def test_local_mode_gate_blocks_only_writes_larger_than_free_disk(
     free = 1024 * 1024 * 1024
     monkeypatch.setattr(settings, "local_mode", True)
     monkeypatch.setattr(settings, "local_state_dir", "")
-    monkeypatch.setattr(shutil, "disk_usage", lambda path: SimpleNamespace(free=free))
+    measured: list[Path] = []
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: measured.append(path) or SimpleNamespace(free=free))
 
     enforce_storage_quota(store, "alice", incoming_bytes=900 * 1024 * 1024)
     with pytest.raises(DomainError) as exc:
         enforce_storage_quota(store, "alice", incoming_bytes=free + 1)
     assert exc.value.code == "user.storage.quota_exceeded"
+    assert set(measured) == {Path.home()}
 
 
 def test_storage_quota_override_replaces_default(store: _SQLiteJobStore) -> None:
