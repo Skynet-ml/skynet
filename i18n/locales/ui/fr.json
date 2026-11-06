@@ -4472,7 +4472,7 @@
   "localUsage.resets": "Réinitialisation {time}",
   "localUsage.used": "{percent} utilisé",
   "localUsage.noWindows": "{cli} n’indique aucune fenêtre de limite pour ce forfait.",
-  "localUsage.reconnect": "{cli} vous demande de vous reconnecter. Exécutez {command} dans un terminal, puis sélectionnez Actualiser.",
+  "localUsage.reconnect": "L’utilisation de {cli} n’est pas à jour. Exécutez {command} dans un terminal pour la mettre à jour, et connectez-vous si on vous le demande. Puis sélectionnez Actualiser.",
   "localUsage.unavailable": "Impossible de lire l’utilisation du forfait depuis {cli}.",
   "localUsage.skynet.5h": "Exécutions {term.appName} des 5 dernières heures : {calls} appels, {tokens} jetons",
   "localUsage.skynet.7d": "Exécutions {term.appName} des 7 derniers jours : {calls} appels, {tokens} jetons",

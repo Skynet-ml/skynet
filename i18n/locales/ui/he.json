@@ -4472,7 +4472,7 @@
   "localUsage.resets": "מתאפס {time}",
   "localUsage.used": "{percent} בשימוש",
   "localUsage.noWindows": "{cli} לא מדווח על חלון מגבלה למנוי הזה.",
-  "localUsage.reconnect": "צריך להתחבר מחדש ל-{cli}. הריצו {command} בטרמינל, ואז לחצו על רענון.",
+  "localUsage.reconnect": "נתוני השימוש של {cli} לא עדכניים. הריצו {command} בטרמינל כדי לעדכן אותם, והתחברו אם תתבקשו. אחר כך לחצו על רענון.",
   "localUsage.unavailable": "לא ניתן לקרוא את השימוש במנוי מ-{cli}.",
   "localUsage.skynet.5h": "ריצות של {term.appName} ב-5 השעות האחרונות: {calls} קריאות, {tokens} טוקנים",
   "localUsage.skynet.7d": "ריצות של {term.appName} ב-7 הימים האחרונים: {calls} קריאות, {tokens} טוקנים",

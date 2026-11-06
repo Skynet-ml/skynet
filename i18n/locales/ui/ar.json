@@ -4472,7 +4472,7 @@
   "localUsage.resets": "يُعاد الضبط {time}",
   "localUsage.used": "{percent} مستخدم",
   "localUsage.noWindows": "لا يُبلغ {cli} عن نافذة حد لهذه الخطة.",
-  "localUsage.reconnect": "يجب تسجيل الدخول مجددًا إلى {cli}. شغّل {command} في الطرفية، ثم اختر تحديث.",
+  "localUsage.reconnect": "بيانات استخدام {cli} غير محدّثة. شغّل {command} في الطرفية لتحديثها، وسجّل الدخول إذا طُلب منك. ثم اختر تحديث.",
   "localUsage.unavailable": "تعذرت قراءة استخدام الخطة من {cli}.",
   "localUsage.skynet.5h": "تشغيلات {term.appName} في آخر 5 ساعات: {calls} استدعاءات، {tokens} رموز",
   "localUsage.skynet.7d": "تشغيلات {term.appName} في آخر 7 أيام: {calls} استدعاءات، {tokens} رموز",

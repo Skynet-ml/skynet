@@ -4472,7 +4472,7 @@
   "localUsage.resets": "{time} sıfırlanır",
   "localUsage.used": "{percent} kullanıldı",
   "localUsage.noWindows": "{cli} bu plan için bir sınır aralığı bildirmiyor.",
-  "localUsage.reconnect": "{cli} için yeniden oturum açmanız gerekiyor. Terminalde {command} komutunu çalıştırın, sonra Yenile'yi seçin.",
+  "localUsage.reconnect": "{cli} kullanımı güncel değil. Güncellemek için terminalde {command} komutunu çalıştırın ve istenirse oturum açın. Sonra Yenile'yi seçin.",
   "localUsage.unavailable": "{cli} plan kullanımı okunamadı.",
   "localUsage.skynet.5h": "Son 5 saatteki {term.appName} çalıştırmaları: {calls} çağrı, {tokens} token",
   "localUsage.skynet.7d": "Son 7 gündeki {term.appName} çalıştırmaları: {calls} çağrı, {tokens} token",
