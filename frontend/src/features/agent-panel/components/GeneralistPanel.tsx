@@ -52,7 +52,7 @@ import { useColorTheme } from "@/shared/providers/theme-provider";
 import { useConversationStore } from "../hooks/use-conversation-store";
 import { useGeneralistAgent, type SessionEventContext } from "../hooks/use-generalist-agent";
 import { useGeneralistPanelState } from "../hooks/use-panel-state";
-import { getConversation } from "../lib/conversation-api";
+import { getConversation, isHostedConversation } from "../lib/conversation-api";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { ShareChatDialog } from "./ShareChatDialog";
 import { TRUST_MODE_HUE, useTrustMode } from "../hooks/use-trust-mode";
@@ -95,6 +95,7 @@ import { InferenceFormCard } from "./InferenceFormCard";
 import { MinimizedPill } from "./MinimizedPill";
 import { PresenceStrip } from "./PresenceStrip";
 import { ToolCallRow } from "./ToolCallRow";
+import { ChatSourceContext } from "./JobSummaryCard";
 import { ToolsCarousel } from "./ToolsCarousel";
 import { TrustToggle } from "./TrustToggle";
 import { getToolKind, getToolRenderer } from "./tool-renderers";
@@ -564,6 +565,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // its text changes with every chunk.
   const agentMessages = agent.messages;
   const agentConversationId = agent.conversationId;
+  // A web chat opens read-only on the Mac; it continues on the web.
+  const webChat = agentConversationId !== null && isHostedConversation(agentConversationId);
   const liveChatRef = React.useRef({ id: agentConversationId, messages: agentMessages });
   React.useEffect(() => {
     liveChatRef.current = { id: agentConversationId, messages: agentMessages };
@@ -684,6 +687,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
 
   const handleDatasetConfirm = React.useCallback(
     async (callId: string, confirmed: ConfirmedDataset) => {
+      // A web chat must not stage rows or change the Mac's wizard.
+      if (webChat) return;
       confirmedDatasetCallsRef.current.add(callId);
       // Stage the rows on the backend before notifying the agent so the
       // very next turn's wizard_state carries ``staged_dataset_id``. The
@@ -757,11 +762,12 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         : undefined;
       agent.send(note, wizardOverride);
     },
-    [agent, wizardCtx],
+    [agent, wizardCtx, webChat],
   );
 
   const handleLibraryPick = React.useCallback(
     (callId: string, picked: ConfirmedLibraryDataset) => {
+      if (webChat) return;
       confirmedDatasetCallsRef.current.add(callId);
       // By-reference twin of handleDatasetConfirm: no staging call — the run
       // materializes rows from ``source_dataset_id`` on submit. Set the same
@@ -794,7 +800,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       };
       agent.send(note, wizardOverride);
     },
-    [agent, wizardCtx],
+    [agent, wizardCtx, webChat],
   );
 
   const handleSubmit = React.useCallback(() => {
@@ -867,10 +873,20 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         return (
           <DatasetUploadCard
             call={call}
+            disabled={webChat}
             alreadyConfirmed={confirmedDatasetCallsRef.current.has(call.id)}
             onConfirm={(confirmed) => handleDatasetConfirm(call.id, confirmed)}
           />
         );
+      }
+      // A web chat's library and inference cards would act on the Mac's data.
+      if (
+        webChat &&
+        (call.tool === REQUEST_LIBRARY_TOOL ||
+          call.tool === REQUEST_INFERENCE_TOOL ||
+          call.tool === REQUEST_PAIR_INFERENCE_TOOL)
+      ) {
+        return <ToolCallRow call={call} isRetry={ctx.isRetry} summary={null} />;
       }
       if (call.tool === REQUEST_LIBRARY_TOOL) {
         return (
@@ -893,7 +909,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
       const summary = renderer?.summary?.(call) ?? null;
       return <ToolCallRow call={call} isRetry={ctx.isRetry} summary={summary} />;
     },
-    [handleDatasetConfirm, handleLibraryPick, streaming],
+    [handleDatasetConfirm, handleLibraryPick, streaming, webChat],
   );
 
   // Every call is a step in the turn's activity group except the ones the
@@ -1001,7 +1017,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             </TooltipContent>
           </Tooltip>
           )}
-          {!inSetup && canShare && agent.conversationId && agent.messages.length > 0 && (
+          {!inSetup &&
+            canShare &&
+            !webChat &&
+            agent.conversationId &&
+            agent.messages.length > 0 && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -1091,56 +1111,64 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
           agent.pendingApproval?.id ?? "",
         ]}
       >
-        <ChatTranscript
-          key={chatView.key}
-          messages={agent.messages}
-          streaming={streaming}
-          editAndResend={agent.editAndResend}
-          renderToolCall={renderToolCall}
-          isStepCall={isStepCall}
-          isPinnedCall={isPinnedCall}
-          stepKind={stepKind}
-          onRunCode={handleRunCode}
-          animatePairs
-          trailing={({ isEditingAny }) => (
-            <>
-              {choices && !isEditingAny && !streaming && !agent.pendingApproval && !agent.error && (
-                <QuestionChoices
-                  options={choices}
-                  onSelect={(label) => agent.send(label)}
-                  hint={msg("agent.choices.hint")}
-                  ariaLabel={msg("agent.choices.label")}
-                />
-              )}
-              {agent.pendingApproval && (
-                <ApprovalCard payload={agent.pendingApproval} onResolve={agent.confirmApproval} />
-              )}
-              {agent.error && (
-                <ChatErrorBanner
-                  message={agent.error}
-                  retryLabel={msg(
-                    "auto.features.agent.panel.components.generalistpanel.error_retry",
-                  )}
-                  onRetry={
-                    agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
-                      ? undefined
-                      : agent.retry
-                  }
-                  action={
-                    agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS ? (
-                      <Button size="sm" className="h-7" onClick={() => openSettingsTo("billing")}>
-                        {msg("billing.action.add_funds")}
-                      </Button>
-                    ) : undefined
-                  }
-                />
-              )}
-            </>
-          )}
-        />
+        <ChatSourceContext.Provider value={webChat ? "hosted" : "local"}>
+          <ChatTranscript
+            key={chatView.key}
+            messages={agent.messages}
+            streaming={streaming}
+            editAndResend={webChat ? () => false : agent.editAndResend}
+            renderToolCall={renderToolCall}
+            isStepCall={isStepCall}
+            isPinnedCall={isPinnedCall}
+            stepKind={stepKind}
+            onRunCode={handleRunCode}
+            animatePairs
+            trailing={({ isEditingAny }) => (
+              <>
+                {choices && !webChat && !isEditingAny && !streaming && !agent.pendingApproval && !agent.error && (
+                  <QuestionChoices
+                    options={choices}
+                    onSelect={(label) => agent.send(label)}
+                    hint={msg("agent.choices.hint")}
+                    ariaLabel={msg("agent.choices.label")}
+                  />
+                )}
+                {agent.pendingApproval && (
+                  <ApprovalCard payload={agent.pendingApproval} onResolve={agent.confirmApproval} />
+                )}
+                {agent.error && (
+                  <ChatErrorBanner
+                    message={agent.error}
+                    retryLabel={msg(
+                      "auto.features.agent.panel.components.generalistpanel.error_retry",
+                    )}
+                    onRetry={
+                      webChat || agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS
+                        ? undefined
+                        : agent.retry
+                    }
+                    action={
+                      agent.errorCode === I18N_KEY.BILLING_INSUFFICIENT_FUNDS ? (
+                        <Button size="sm" className="h-7" onClick={() => openSettingsTo("billing")}>
+                          {msg("billing.action.add_funds")}
+                        </Button>
+                      ) : undefined
+                    }
+                  />
+                )}
+              </>
+            )}
+          />
+        </ChatSourceContext.Provider>
       </AgentThread>
 
+      {webChat && (
+        <p className="px-3 pb-1 text-[0.75rem] text-muted-foreground">
+          {msg("agent.web_chat.read_only")}
+        </p>
+      )}
       <Composer
+        disabled={webChat}
         value={draft}
         onChange={setDraft}
         onSubmit={handleSubmit}

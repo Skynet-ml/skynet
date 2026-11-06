@@ -1616,6 +1616,21 @@ class Settings(BaseSettings):
             self.byok_vault_key = SecretStr(load_or_create_vault_key(self.local_state_dir))
         return self
 
+    @model_validator(mode="after")
+    def _local_mcp_url(self) -> Settings:
+        """Serve the remote MCP server on the Mac app's own loopback port.
+
+        The internal agent already uses ``/mcp`` on this host, so the local
+        server takes ``/remote-mcp``. An explicit ``MCP_RESOURCE_URL`` wins.
+
+        Returns:
+            The settings instance, with ``mcp_resource_url`` set in local mode
+            when a state directory is configured.
+        """
+        if self.local_mode and not self.mcp_resource_url.strip() and self.local_state_dir:
+            self.mcp_resource_url = f"http://{self.api_host}:{self.port}/remote-mcp"
+        return self
+
     @property
     def cors_origins_list(self) -> list[str]:
         """Return ``cors_origins`` parsed into a list of trimmed, non-empty origins."""

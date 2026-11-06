@@ -13,15 +13,18 @@ import hashlib
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from ...registry.core import ServiceRegistry
 from ...storage.models import (
     Base,
     BillingCustomerModel,
@@ -30,9 +33,11 @@ from ...storage.models import (
     DesktopTokenModel,
     UserModel,
 )
+from .. import auth as auth_mod
 from .. import desktop_auth
 from ..account_data_service import delete_account, export_account
-from ..auth import AuthenticatedUser, get_authenticated_user, hash_api_token
+from ..app import create_app
+from ..auth import AuthenticatedUser, get_authenticated_user, hash_api_token, is_admin
 from ..desktop_auth import DesktopPrincipal, get_desktop_principal
 from ..errors import DomainError
 from ..routers import desktop_link
@@ -116,6 +121,30 @@ def harness() -> Any:
     @app.get("/session-only")
     def session_only(user: _SessionUserDep) -> dict[str, str]:
         """Stand in for any normal session route.
+
+        Args:
+            user: Authenticated caller.
+
+        Returns:
+            The caller's username.
+        """
+        return {"username": user.username}
+
+    @app.get("/optimizations")
+    def optimizations(user: _SessionUserDep) -> dict[str, Any]:
+        """Stand in for an account-data route on the desktop sync allowlist.
+
+        Args:
+            user: Authenticated caller.
+
+        Returns:
+            The caller's username and admin status.
+        """
+        return {"username": user.username, "admin": is_admin(user)}
+
+    @app.get("/account/export")
+    def account_export(user: _SessionUserDep) -> dict[str, str]:
+        """Stand in for a sensitive route that the allowlist excludes.
 
         Args:
             user: Authenticated caller.
@@ -487,6 +516,207 @@ def test_desktop_token_is_refused_on_session_routes(harness: Any) -> None:
         assert _code(response) == "auth.desktop_token_not_allowed"
         assert client.get("/settings/api-token", headers=_bearer(token)).status_code == 401
         assert client.get("/settings/desktop-links", headers=_bearer(token)).status_code == 401
+
+
+def test_sync_token_opens_allowlisted_account_routes(harness: Any) -> None:
+    """A ``sync`` access token acts as its account on an allowlisted route."""
+    client, _, _ = harness
+    pair = _link(client)
+    client.app.dependency_overrides.clear()
+    response = client.get("/optimizations", headers=_bearer(pair["access_token"]))
+    assert response.status_code == 200, response.text
+    assert response.json() == {"username": "alice@example.test", "admin": False}
+
+
+def test_sync_token_is_refused_on_excluded_routes(harness: Any) -> None:
+    """A route outside the allowlist refuses even a ``sync`` access token."""
+    client, _, _ = harness
+    pair = _link(client)
+    client.app.dependency_overrides.clear()
+    response = client.get("/account/export", headers=_bearer(pair["access_token"]))
+    assert response.status_code == 401
+    assert _code(response) == "auth.desktop_token_not_allowed"
+
+
+def test_allowlisted_route_needs_the_sync_scope(harness: Any) -> None:
+    """A link without ``sync`` gets 403 on an allowlisted route."""
+    client, _, _ = harness
+    pair = _link(client, scope="identity")
+    client.app.dependency_overrides.clear()
+    response = client.get("/optimizations", headers=_bearer(pair["access_token"]))
+    assert response.status_code == 403
+    assert _code(response) == "desktop.scope_missing"
+
+
+def test_allowlisted_route_refuses_a_refresh_token(harness: Any) -> None:
+    """Only the access token opens an allowlisted route."""
+    client, _, _ = harness
+    pair = _link(client)
+    client.app.dependency_overrides.clear()
+    response = client.get("/optimizations", headers=_bearer(pair["refresh_token"]))
+    assert response.status_code == 401
+    assert _code(response) == "auth.invalid_token"
+
+
+def test_allowlisted_route_refuses_a_revoked_link(harness: Any) -> None:
+    """A revoke closes the allowlisted routes on the next call."""
+    client, _, _ = harness
+    pair = _link(client)
+    assert client.delete(f"/settings/desktop-links/{pair['link_id']}").status_code in (200, 204)
+    client.app.dependency_overrides.clear()
+    response = client.get("/optimizations", headers=_bearer(pair["access_token"]))
+    assert response.status_code == 401
+    assert _code(response) == "desktop.link_revoked"
+
+
+def test_sync_token_is_never_admin(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An admin account that calls through the Mac link gets no admin rights."""
+    monkeypatch.setattr(auth_mod.settings, "admin_usernames", "alice@example.test")
+    client, _, _ = harness
+    pair = _link(client)
+    client.app.dependency_overrides.clear()
+    response = client.get("/optimizations", headers=_bearer(pair["access_token"]))
+    assert response.status_code == 200, response.text
+    assert response.json()["admin"] is False
+
+
+_POLICY_CASES: list[tuple[str, bool]] = [
+    ("/optimizations", True),
+    ("/optimizations/{optimization_id}/cancel", True),
+    ("/datasets/library", True),
+    ("/agent/conversations", True),
+    ("/billing/wallet", True),
+    ("/account/experience", True),
+    ("/settings/user-preferences", True),
+    ("/notifications", True),
+    ("/admin/quotas", False),
+    ("/settings/api-token", False),
+    ("/settings/desktop-links", False),
+    ("/desktop/link/authorize", False),
+    ("/local/status", False),
+    ("/auth/security/totp/setup", False),
+    ("/oauth/consent", False),
+    ("/secrets", False),
+    ("/telemetry/summary", False),
+    ("/account/export", False),
+    ("/account/delete", False),
+    ("/account/package-registry", True),
+    ("/agent/protected-settings", False),
+    ("/billing/checkout", False),
+    ("/billing/subscription/checkout", False),
+    ("/billing/portal", False),
+    ("/billing/payment-methods/{payment_method_id}", False),
+    ("/billing/byok/keys", False),
+    ("/billing/byok/openrouter/oauth/start", False),
+    ("/connectors/{provider}", True),
+    ("/connectors/{provider}/credentials", False),
+    ("/connectors/{provider}/oauth/start", False),
+    ("/connectors/{provider}/picker", False),
+    ("/connectors/github/file", True),
+    ("/connectors/huggingface/token", False),
+    ("/connectors/huggingface/oauth/start", False),
+    ("/notifications/slack/oauth/start", False),
+    ("/optimizations/{optimization_id}/sharing/transfer", True),
+    ("/optimizations/{optimization_id}/visibility", True),
+    ("/datasets/library/{dataset_id}/sharing/members", True),
+    ("/folders/{folder_id}/sharing/transfer", True),
+    ("/tagging-sessions/{session_id}/sharing/members", True),
+    ("/agent/conversations/{conversation_id}/share", True),
+    ("/notifications/push/subscriptions", True),
+    ("/notifications/slack", True),
+]
+
+# Path words that often mark a credential, payment, export or access grant.
+# The test checks path words only, not what a route does: a new open route
+# with one of these words fails until someone reviews it.
+_SENSITIVE_SEGMENTS = frozenset(
+    {
+        "checkout",
+        "credentials",
+        "delete",
+        "export",
+        "keys",
+        "oauth",
+        "payment-methods",
+        "picker",
+        "portal",
+        "secrets",
+        "share",
+        "sharing",
+        "token",
+        "tokens",
+        "visibility",
+    }
+)
+
+# Reviewed open routes that carry a sensitive path word. A web session may
+# share, claim and export the account's own items, so the Mac token may too.
+# None of them returns a stored credential.
+_REVIEWED_SENSITIVE_OPEN = frozenset(
+    {
+        "/agent/conversations/{conversation_id}/share",
+        "/datasets/library/{dataset_id}/sharing",
+        "/datasets/library/{dataset_id}/sharing/members",
+        "/datasets/library/{dataset_id}/sharing/members/{username}",
+        "/datasets/library/{dataset_id}/sharing/transfer",
+        "/datasets/share/{token}",
+        "/datasets/share/{token}/claim",
+        "/folders/share/{token}/claim",
+        "/folders/{folder_id}/sharing",
+        "/folders/{folder_id}/sharing/members",
+        "/folders/{folder_id}/sharing/members/{username}",
+        "/folders/{folder_id}/sharing/transfer",
+        "/optimizations/{optimization_id}/export",
+        "/optimizations/{optimization_id}/sharing",
+        "/optimizations/{optimization_id}/sharing/members",
+        "/optimizations/{optimization_id}/sharing/members/{username}",
+        "/optimizations/{optimization_id}/sharing/transfer",
+        "/optimizations/{optimization_id}/visibility",
+        "/share/{token}",
+        "/share/{token}/claim",
+        "/share/{token}/serve",
+        "/tagging-sessions/share/{token}/claim",
+        "/tagging-sessions/{session_id}/sharing",
+        "/tagging-sessions/{session_id}/sharing/members",
+        "/tagging-sessions/{session_id}/sharing/members/{username}",
+        "/tagging-sessions/{session_id}/sharing/transfer",
+    }
+)
+
+
+@pytest.fixture(scope="module")
+def live_route_paths() -> set[str]:
+    """Build the real app without starting it and return its route templates.
+
+    Returns:
+        Every ``APIRoute`` template that the production app serves.
+    """
+    with (
+        patch("core.api.app.get_job_store", return_value=MagicMock()),
+        patch("core.api.app.get_worker", return_value=MagicMock()),
+        patch("core.api.app.DspyService"),
+    ):
+        application = create_app(registry=ServiceRegistry())
+    return {route.path for route in application.routes if isinstance(route, APIRoute)}
+
+
+@pytest.mark.parametrize(("path", "allowed"), _POLICY_CASES)
+def test_sync_route_policy(path: str, allowed: bool) -> None:
+    """The allowlist gives web-session rights and keeps secrets, money and admin closed."""
+    assert desktop_auth.desktop_sync_route_allowed(path) is allowed
+
+
+def test_policy_cases_are_live_routes(live_route_paths: set[str]) -> None:
+    """Every policy case names a route the app really serves."""
+    assert {path for path, _ in _POLICY_CASES} - live_route_paths == set()
+
+
+def test_no_open_route_is_sensitive(live_route_paths: set[str]) -> None:
+    """Every live sync route with a sensitive segment is one that someone reviewed."""
+    opened = {path for path in live_route_paths if desktop_auth.desktop_sync_route_allowed(path)}
+    assert opened
+    sensitive = {path for path in opened if _SENSITIVE_SEGMENTS & set(path.split("/"))}
+    assert sensitive == _REVIEWED_SENSITIVE_OPEN
 
 
 def test_session_jwt_and_pat_are_refused_on_desktop_routes(harness: Any) -> None:

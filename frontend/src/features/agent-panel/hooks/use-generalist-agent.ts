@@ -12,6 +12,7 @@ import { readPref } from "@/features/settings";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { I18N_KEY } from "@/shared/lib/i18n";
 import { getActiveLocale } from "@/shared/lib/runtime-locale";
+import { parseSourceKey } from "@/shared/lib/api-route";
 import { liveEffort, sentFastMode } from "@/shared/lib/effort-slider";
 import {
   appendReasoning,
@@ -882,6 +883,12 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       hidden = false,
       editUserTurn: { text: string; occurrence: number } | null = null,
     ) => {
+      // A web chat is read-only on the Mac: refuse before any turn shows.
+      const conversationId = sessionsRef.current.get(key)?.conversationId;
+      if (conversationId && parseSourceKey(conversationId).source === "hosted") {
+        patchSession(key, { error: msg("agent.web_chat.read_only"), errorCode: null });
+        return;
+      }
       // A resend within the same session replaces its own in-flight or queued
       // turn — other sessions' streams are untouched.
       abortSession(key);

@@ -44,6 +44,8 @@ import {
 import { LiveElapsed } from "./LiveElapsed";
 import { PhoneJobList } from "./PhoneJobList";
 import type { OptimizationSummaryResponse, PaginatedJobsResponse } from "@/shared/types/api";
+import type { ApiSource } from "@/shared/lib/api-route";
+import { runKey } from "@/features/sidebar";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { TERMS } from "@/shared/lib/terms";
@@ -157,7 +159,7 @@ type JobsTabProps = {
   togglePageSelection: () => void;
   pageOffset: number;
   setPageOffset: React.Dispatch<React.SetStateAction<number>>;
-  onOpenJob: (id: string) => void;
+  onOpenJob: (id: string, source?: ApiSource) => void;
 };
 
 const MotionTableRow = motion.create(TableRow);
@@ -443,7 +445,7 @@ export function JobsTab({
                       const isSelected = selectedIds.has(job.optimization_id);
                       return (
                         <MotionTableRow
-                          key={job.optimization_id}
+                          key={runKey(job)}
                           layout="position"
                           initial={ROW_MOTION.initial}
                           animate={ROW_MOTION.animate}
@@ -459,7 +461,7 @@ export function JobsTab({
                             if (target.closest("button, a, input")) return;
                             const td = target.closest("td");
                             if (!td || td === td.parentElement?.firstElementChild) return;
-                            onOpenJob(job.optimization_id);
+                            onOpenJob(job.optimization_id, job.source);
                           }}
                         >
                           <TableCell className="w-12 px-0 text-center">
@@ -495,7 +497,7 @@ export function JobsTab({
                                 <button
                                   type="button"
                                   dir="ltr"
-                                  onClick={() => onOpenJob(job.optimization_id)}
+                                  onClick={() => onOpenJob(job.optimization_id, job.source)}
                                   className="font-mono text-xs text-primary truncate min-w-0 rounded-md cursor-pointer underline-offset-2 group-hover:underline focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
                                   aria-label={formatMsg(
                                     "auto.features.dashboard.components.jobstab.template.3",

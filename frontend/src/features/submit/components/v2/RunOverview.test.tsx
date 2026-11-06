@@ -12,6 +12,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { setClientLocale } from "@/shared/lib/runtime-locale";
 import { TooltipProvider } from "@/shared/ui/primitives/tooltip";
 import type { ContractCheckState } from "../../hooks/use-contract-check";
+import type { BlackboxRunRequest } from "@/shared/types/api";
 import { initialWizardV2State, type WizardV2State } from "../../lib/wizard-v2";
 
 // The model picker this screen reuses imports a stylesheet, which Node cannot load.
@@ -24,6 +25,7 @@ registerHooks({
 // The classic JSX transform the test loader applies reads a global React.
 (globalThis as { React?: typeof React }).React = React;
 const { RunOverview } = await import("./RunOverview");
+const { hostedRunBlock } = await import("../../hooks/use-unified-wizard");
 
 const cc: ContractCheckState = {
   staticResult: null,
@@ -120,5 +122,74 @@ void describe("RunOverview", () => {
     const mixed = render(state);
     assert.match(mixed, /billing\.mode\.managed</);
     assert.doesNotMatch(mixed, /subscription\.mode</);
+  });
+
+  void it("shows no Mac or Web choice outside a linked Mac's wizard", () => {
+    const state = initialWizardV2State("expert");
+    assert.doesNotMatch(render(state), /submit\.v2\.run_on\./);
+  });
+});
+
+void describe("hostedRunBlock", () => {
+  const request = (extra: Partial<BlackboxRunRequest> = {}) =>
+    ({
+      task_model_config: null,
+      reflection_model_config: { name: "openai/gpt-5" },
+      extra_reflection_model_configs: [],
+      scorer: { model: null },
+      proposer: null,
+      staged_dataset_id: null,
+      ...extra,
+    }) as unknown as BlackboxRunRequest;
+  const block = (over: Partial<Parameters<typeof hostedRunBlock>[0]> = {}) =>
+    hostedRunBlock({ repo: true, request: request(), linked: true, catalog: "ready", ...over });
+  const cliModel = { name: "openai/gpt-5", token_source: "subscription", cli_provider: "codex" };
+
+  void it("lets a plain repository run start on the web", () => {
+    assert.equal(block(), null);
+  });
+
+  void it("stops a web run when the Mac lost its link", () => {
+    assert.equal(block({ linked: false }), "submit.v2.run_on.blocked.unlinked");
+  });
+
+  void it("keeps a web run waiting for the web catalog", () => {
+    assert.equal(block({ catalog: "loading" }), "submit.v2.run_on.blocked.catalog_loading");
+    assert.equal(block({ catalog: "failed" }), "submit.v2.run_on.blocked.catalog_failed");
+  });
+
+  void it("judges the models the request sends", () => {
+    assert.equal(block({ repo: false }), "submit.v2.run_on.blocked.repo_only");
+    assert.equal(
+      block({ request: request({ scorer: { model: cliModel } } as Partial<BlackboxRunRequest>) }),
+      "submit.v2.run_on.blocked.cli_model",
+    );
+    assert.equal(
+      block({
+        request: request({
+          extra_reflection_model_configs: [cliModel],
+        } as Partial<BlackboxRunRequest>),
+      }),
+      "submit.v2.run_on.blocked.cli_model",
+    );
+    assert.equal(
+      block({
+        request: request({ reflection_model_config: cliModel } as Partial<BlackboxRunRequest>),
+      }),
+      "submit.v2.run_on.blocked.cli_model",
+    );
+  });
+
+  void it("keeps the other Mac-only inputs off the web", () => {
+    assert.equal(
+      block({
+        request: request({ proposer: { host_cli: "claude" } } as Partial<BlackboxRunRequest>),
+      }),
+      "submit.v2.run_on.blocked.host_cli",
+    );
+    assert.equal(
+      block({ request: request({ staged_dataset_id: "staged-1" }) }),
+      "submit.v2.run_on.blocked.staged_data",
+    );
   });
 });

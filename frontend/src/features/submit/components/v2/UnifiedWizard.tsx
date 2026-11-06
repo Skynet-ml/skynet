@@ -13,7 +13,12 @@ import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { slideVariants } from "../../constants";
 import { ExecutionBudgetProvider } from "../../hooks/use-execution-budget";
 import { WizardV2Provider, useWizardV2Shell, v2Text } from "../../hooks/use-unified-wizard";
-import { budgetContinueBlock, budgetShortfall, type BudgetShortfall } from "../../lib/budget-limit";
+import {
+  budgetContinueBlock,
+  budgetShortfall,
+  runBalance,
+  type BudgetShortfall,
+} from "../../lib/budget-limit";
 import type { RunFailureCause } from "../../lib/run-failure";
 import {
   WIZARD_SCREEN_KEY,
@@ -115,10 +120,15 @@ function UnifiedWizardFrame() {
   const { goNext, goPrev, advancing, submitting } = w;
   const visibleScreen = stepPages(current, w.state)[page] ?? "";
   useEffect(() => keepSessionValue(WIZARD_SCREEN_KEY, visibleScreen), [visibleScreen]);
-  const { totalCents, available: balanceKnown } = useBalance();
+  const { totalCents, available: balanceKnown, shown } = useBalance();
   const { runFloor, budgetUncapped, maxCostCents } = w;
   const floorCents = runFloor?.floorCents ?? null;
-  const balance = balanceKnown ? totalCents : null;
+  // A Web run spends the linked account's balance, not the Mac's wallet.
+  const balance = runBalance(
+    w.runOn,
+    { available: balanceKnown, totalCents },
+    { available: shown.available, totalCents: shown.totalCents },
+  );
   // A run its limit or balance can't open would only fail at its first model
   // call, so Continue holds (the agent's too) on the screen that sets the
   // limit and on the last one before the metric step's editor and checks.

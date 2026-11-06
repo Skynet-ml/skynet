@@ -70,6 +70,7 @@ import {
   type RunView,
 } from "../lib/run-view";
 import { ROW_MOTION, rowTransition } from "../lib/row-motion";
+import { runKey } from "../lib/merge-runs";
 import { FolderShareDialog } from "./FolderShareDialog";
 import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
 import { SharedItemMenuItems, useSharedItemActions } from "@/shared/ui/shared-item-menu";
@@ -518,7 +519,7 @@ function FolderNode({
                 <AnimatePresence initial={false}>
                   {visibleRuns.map((job, idx) => (
                     <motion.div
-                      key={job.optimization_id}
+                      key={runKey(job)}
                       layout="position"
                       initial={ROW_MOTION.initial}
                       animate={ROW_MOTION.animate}

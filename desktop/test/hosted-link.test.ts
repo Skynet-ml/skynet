@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HostedLinkClient, LOCAL_USER_EMAIL, mintSessionToken } from "../src/main/hosted-link";
+import { HostedLinkClient, type LinkCheck, LOCAL_USER_EMAIL, mintSessionToken, watchLink } from "../src/main/hosted-link";
 
 const decode = (part: string) => JSON.parse(Buffer.from(part, "base64url").toString("utf8"));
 
@@ -82,5 +82,117 @@ describe("HostedLinkClient start and finish requests", () => {
   it("reports a refused finish with the backend detail", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ detail: "Start the link again." }), { status: 400 })));
     expect(await new HostedLinkClient("http://127.0.0.1:1", "s").finish("c", "s")).toEqual({ ok: false, reason: "failed", detail: "Start the link again." });
+  });
+});
+
+describe("HostedLinkClient.verified", () => {
+  // Route each local API path to a status; the gate calls status, then whoami.
+  const routes = (statusBody: unknown, whoami: number | Error) =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/local/hosted-link/status")) return new Response(JSON.stringify(statusBody), { status: 200 });
+        if (whoami instanceof Error) throw whoami;
+        return new Response(JSON.stringify({ email: "a@b.c" }), { status: whoami });
+      }),
+    );
+  const client = () => new HostedLinkClient("http://127.0.0.1:1", "s");
+
+  it("is signed out without a local link, and does not ask hosted", async () => {
+    routes({ linked: false }, 200);
+    expect(await client().verified()).toBe("signed_out");
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+  });
+
+  it("is linked when hosted knows the link", async () => {
+    routes({ linked: true }, 200);
+    expect(await client().verified()).toBe("linked");
+  });
+
+  it("is signed out when hosted revoked the link (local API answers 401)", async () => {
+    routes({ linked: true }, 401);
+    expect(await client().verified()).toBe("signed_out");
+  });
+
+  it("is signed out when the local API deleted the link meanwhile (409)", async () => {
+    routes({ linked: true }, 409);
+    expect(await client().verified()).toBe("signed_out");
+  });
+
+  it("is unreachable, not linked, when hosted does not answer", async () => {
+    routes({ linked: true }, 503);
+    expect(await client().verified()).toBe("unreachable");
+    routes({ linked: true }, new DOMException("timeout", "TimeoutError"));
+    expect(await client().verified()).toBe("unreachable");
+  });
+
+  it("is failed, not linked, when hosted answers with another error", async () => {
+    routes({ linked: true }, 502);
+    expect(await client().verified()).toBe("failed");
+    routes({ linked: true }, 500);
+    expect(await client().verified()).toBe("failed");
+  });
+});
+
+describe("watchLink", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("calls onLost once when the link disappears, then stops", async () => {
+    vi.useFakeTimers();
+    const answers: LinkCheck[] = ["linked", "linked", "signed_out", "signed_out"];
+    const isLinked = vi.fn(async () => answers.shift() ?? "signed_out");
+    const onLost = vi.fn();
+    watchLink(isLinked, onLost, 1_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(onLost).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(onLost).toHaveBeenCalledTimes(1);
+    expect(onLost).toHaveBeenCalledWith("signed_out");
+    expect(isLinked).toHaveBeenCalledTimes(3);
+  });
+
+  it("reports at once when hosted stops answering", async () => {
+    vi.useFakeTimers();
+    const answers: LinkCheck[] = ["linked", "unreachable"];
+    const onLost = vi.fn();
+    watchLink(async () => answers.shift() ?? "linked", onLost, 1_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(onLost).toHaveBeenCalledTimes(1);
+    expect(onLost).toHaveBeenCalledWith("unreachable");
+  });
+
+  it("ignores a failed check and stops on the returned function", async () => {
+    vi.useFakeTimers();
+    const isLinked = vi.fn(async () => {
+      throw new Error("API down");
+    });
+    const onLost = vi.fn();
+    const stop = watchLink(isLinked, onLost, 1_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    stop();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(onLost).not.toHaveBeenCalled();
+    expect(isLinked).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("watchLink stop", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("does not call onLost for a check that ends after stop", async () => {
+    vi.useFakeTimers();
+    let answer: (result: LinkCheck) => void = () => {};
+    const isLinked = vi.fn(() => new Promise<LinkCheck>((resolve) => (answer = resolve)));
+    const onLost = vi.fn();
+    const stop = watchLink(isLinked, onLost, 1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    stop();
+    answer("signed_out");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onLost).not.toHaveBeenCalled();
   });
 });

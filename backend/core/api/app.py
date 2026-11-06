@@ -92,6 +92,8 @@ from .observability import (
 )
 from .rate_limit import build_login_throttle
 from .remote_mcp import mount_remote_mcp
+from .remote_mcp_repo import register_repo_tools
+from .remote_mcp_routes import register_route_tools
 from .routers.account_data import create_account_data_router
 from .routers.account_security import create_account_security_router
 from .routers.accounts import create_accounts_router
@@ -120,6 +122,7 @@ from .routers.experience import create_experience_router
 from .routers.folders import create_folders_router
 from .routers.generalist_agent import create_generalist_agent_router
 from .routers.local_hosted_link import create_local_hosted_link_router
+from .routers.local_hosted_proxy import create_local_hosted_proxy_router
 from .routers.local_notifications import create_local_notifications_router
 from .routers.local_runtime import create_local_runtime_router
 from .routers.mcp_oauth import create_mcp_oauth_router
@@ -1366,6 +1369,7 @@ def create_app(
     app.include_router(create_account_security_router(job_store=job_store), tags=["Auth"])
     app.include_router(create_local_runtime_router(), tags=["Auth"])
     app.include_router(create_local_hosted_link_router(job_store=job_store), tags=["Auth"])
+    app.include_router(create_local_hosted_proxy_router(job_store=job_store), tags=["Auth"])
     app.include_router(create_account_data_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_notification_preferences_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_local_notifications_router(job_store=job_store), tags=["Settings"])
@@ -1425,6 +1429,15 @@ def create_app(
         mount_mcp_on_app(app)
     except ImportError as exc:
         logger.warning("FastMCP not available, skipping /mcp mount: %s", exc)
-    mount_remote_mcp(app, service=service, job_store=job_store, get_worker=lambda: worker)
+    mount_remote_mcp(
+        app,
+        service=service,
+        job_store=job_store,
+        get_worker=lambda: worker,
+        extensions=[
+            partial(register_repo_tools, service=service, job_store=job_store),
+            register_route_tools(app),
+        ],
+    )
 
     return app

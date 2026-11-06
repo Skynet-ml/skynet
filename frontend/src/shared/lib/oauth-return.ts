@@ -11,6 +11,31 @@ export function safeReturnPath(raw: string | null): string | null {
   return raw;
 }
 
+// Next.js writes a loopback host as ``localhost`` in the login gate's
+// ``callbackUrl``, while the Mac app serves its pages on 127.0.0.1.
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * The in-app path of a login ``callbackUrl``, or null when it points at another
+ * origin. Two loopback hosts on the same scheme and port count as one origin.
+ */
+export function callbackPath(raw: string, origin: string): string | null {
+  try {
+    const url = new URL(raw, origin);
+    const here = new URL(origin);
+    const sameOrigin =
+      url.origin === here.origin ||
+      (url.protocol === here.protocol &&
+        url.port === here.port &&
+        LOOPBACK_HOSTS.has(url.hostname) &&
+        LOOPBACK_HOSTS.has(here.hostname));
+    // A same-origin URL can still have a ``//host`` path, which the router opens as another site.
+    return sameOrigin ? safeReturnPath(url.pathname + url.search + url.hash) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Remember the in-app path the next OAuth callback should return to. */
 export function rememberOAuthReturn(path: string): void {
   try {

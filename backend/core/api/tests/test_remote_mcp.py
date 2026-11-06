@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from ... import i18n
-from ...config import settings
+from ...config import Settings, settings
 from ...models import BlackboxRunRequest
 from ...models.optimizations import JobCancelResponse
 from ...models.unified import UnifiedRunRequest
@@ -613,3 +613,28 @@ def test_viewer_grant_can_read_but_not_stop(harness: Any, monkeypatch: pytest.Mo
     error = json.loads(_error_text(_call(client, "stop_run", {"optimization_id": "opt-bob"})))
     assert error["code"] == "optimization.insufficient_role"
     assert "cancel" not in calls
+
+
+LOCAL_URL = "http://127.0.0.1:8123/remote-mcp"
+
+
+def test_local_mode_serves_the_mcp_on_the_app_port(tmp_path: Any) -> None:
+    """Set the local MCP URL from the API host and port when none is configured."""
+    local = Settings(
+        _env_file=None,
+        local_mode=True,
+        local_state_dir=str(tmp_path),
+        api_host="127.0.0.1",
+        port=8123,
+        mcp_resource_url="",
+    )
+    assert local.mcp_resource_url == LOCAL_URL
+    explicit = Settings(
+        _env_file=None,
+        local_mode=True,
+        local_state_dir=str(tmp_path),
+        api_host="127.0.0.1",
+        port=8123,
+        mcp_resource_url="http://127.0.0.1:8123/other",
+    )
+    assert explicit.mcp_resource_url == "http://127.0.0.1:8123/other"

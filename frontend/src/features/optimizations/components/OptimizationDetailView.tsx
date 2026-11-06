@@ -46,14 +46,15 @@ import {
   STORAGE_CHANGED_EVENT,
   getContinuousState,
   unhideSharedItem,
+  apiUrl,
 } from "@/shared/lib/api";
+import { pairHref, type ApiSource } from "@/shared/lib/api-route";
 import type { WorkflowSpec } from "@/shared/types/api";
 import { OptimizationDetailSkeleton } from "./OptimizationDetailSkeleton";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import { formatBytes } from "@/shared/lib/formatters";
 import { TERMS } from "@/shared/lib/terms";
-import { getRuntimeEnv } from "@/shared/lib/runtime-env";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
 import { ACTIVE_STATUSES, TERMINAL_STATUSES } from "@/shared/constants/job-status";
@@ -316,7 +317,14 @@ function FailureCopyButton({ text }: { text: string }) {
   );
 }
 
-export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimizationData } = {}) {
+export function OptimizationDetailView({
+  shareData,
+  source = "local",
+}: {
+  shareData?: SharedOptimizationData;
+  /** Where the run lives, as the gate resolved it; a hosted run reads through the hosted proxy. */
+  source?: ApiSource;
+} = {}) {
   const params = useParams<{ id?: string; token?: string }>();
   const isShare = !!shareData;
   const id = shareData?.optimization_id ?? (params.id as string);
@@ -354,8 +362,8 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const memberRole = isShare ? shareRole : (job?.effective_role ?? null);
   useEffect(() => {
     if (memberRole !== "viewer" && memberRole !== "editor") return;
-    void unhideSharedItem("optimizations", id).catch(() => {});
-  }, [memberRole, id]);
+    void unhideSharedItem("optimizations", id, source).catch(() => {});
+  }, [memberRole, id, source]);
   const [payload, setPayload] = useState<OptimizationPayloadResponse | null>(null);
   const [loading, setLoading] = useState(true);
   // Shapes the loading skeleton like this run's kind when an earlier fetch saw it.
@@ -366,10 +374,13 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   // sidebar's Optimize button resumes ongoing work — never a finished run the
   // user merely opened to look at. Share views aren't the caller's to resume.
   useEffect(() => {
-    if (skipNetwork || !id || !job || !ACTIVE_STATUSES.has(job.status)) return;
+    // The recent-session resume link opens local runs only.
+    if (skipNetwork || source === "hosted" || !id || !job || !ACTIVE_STATUSES.has(job.status)) {
+      return;
+    }
     markRecentSession("optimization", id);
     return () => markRecentSession("optimization", id);
-  }, [id, skipNetwork, job?.status]);
+  }, [id, source, skipNetwork, job?.status]);
   // Funnel milestone: the user has seen a finished run's results. Once per
   // run per mount — the poll re-renders, and a run that finishes while open
   // counts the moment it flips to success.
@@ -397,7 +408,6 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     } as unknown as OptimizationPayloadResponse);
     setLoading(false);
   }, [shareData]);
-
 
   const activePairIndex =
     searchParams.get("pair") != null ? parseInt(searchParams.get("pair")!, 10) : null;
@@ -443,7 +453,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const quotaToastShownRef = useRef(false);
   const logStreamStatus = useRunLogStream(
     !skipNetwork && authReady && hasJob && jobRunning
-      ? `${getRuntimeEnv().apiUrl}/optimizations/${encodeURIComponent(id)}/logs/stream`
+      ? apiUrl(`/optimizations/${encodeURIComponent(id)}/logs/stream`, source)
       : "",
     () => maxLogId(fetchedLogsRef.current),
     (entries) => {
@@ -501,7 +511,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
             sinceLog: prev.logs?.length ?? 0,
           }
         : undefined;
-      const data = await getJob(id, cursor);
+      const data = await getJob(id, cursor, source);
       rememberRunKind(id, data.optimization_type);
       setJob((cur) => mergeJobDelta(cur, data));
       setError(null);
@@ -521,15 +531,15 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
       setLoading(false);
       fetchingRef.current = false;
     }
-  }, [id]);
+  }, [id, source]);
 
   useEffect(() => {
     if (skipNetwork) return;
     if (!authReady) return;
-    getOptimizationPayload(id)
+    getOptimizationPayload(id, source)
       .then(setPayload)
       .catch(() => {});
-  }, [id, skipNetwork, authReady]);
+  }, [id, source, skipNetwork, authReady]);
 
   useEffect(() => {
     jobRef.current = job;
@@ -560,9 +570,8 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     void fetchJob();
   }, [id, skipNetwork, authReady, fetchJob]);
 
-  const API = getRuntimeEnv().apiUrl;
   useStreamWithPollFallback({
-    url: skipNetwork ? "" : `${API}/optimizations/${encodeURIComponent(id)}/stream`,
+    url: skipNetwork ? "" : apiUrl(`/optimizations/${encodeURIComponent(id)}/stream`, source),
     enabled: !skipNetwork && authReady,
     onMessage: (event) => {
       try {
@@ -641,7 +650,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const handleCancel = async () => {
     if (skipNetwork) return;
     try {
-      await cancelJob(id);
+      await cancelJob(id, source);
       toast.success(msg("optimization.cancel.sent"));
       void fetchJob();
     } catch (err) {
@@ -658,7 +667,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     if (skipNetwork || resuming) return;
     setResuming(true);
     try {
-      await resumeJob(id);
+      await resumeJob(id, source);
       toast.success(msg("optimization.resume.success"));
       window.dispatchEvent(new Event("optimizations-changed"));
       // Resume continues the same run in place — refresh this view rather than
@@ -675,7 +684,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     if (skipNetwork || pausing) return;
     setPausing(true);
     try {
-      await pauseJob(id);
+      await pauseJob(id, source);
       toast.success(msg("optimization.pause.success"));
       window.dispatchEvent(new Event("optimizations-changed"));
       // Pause suspends the same run in place — refresh this view rather than navigating.
@@ -733,7 +742,14 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const endedRun = jobStatus === "failed" || jobStatus === "cancelled" || jobStatus === "stopped";
   const [endedRunHasPlan, setEndedRunHasPlan] = useState(false);
   useEffect(() => {
-    if (!endedRun || !jobIsBlackbox || !jobId || skipNetwork || isPairContext) {
+    if (
+      !endedRun ||
+      !jobIsBlackbox ||
+      !jobId ||
+      skipNetwork ||
+      isPairContext ||
+      source === "hosted"
+    ) {
       setEndedRunHasPlan(false);
       return;
     }
@@ -748,8 +764,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     return () => {
       cancelled = true;
     };
-  }, [endedRun, jobIsBlackbox, jobId, skipNetwork, isPairContext]);
-
+  }, [endedRun, jobIsBlackbox, jobId, skipNetwork, isPairContext, source]);
 
   const isActive = job ? ACTIVE_STATUSES.has(job.status) : false;
   const startedAt = job?.started_at ?? null;
@@ -761,8 +776,8 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   // on every parent state tick (live elapsed, SSE patches) just because these
   // handlers were freshly allocated.
   const handlePairSelect = useCallback(
-    (pi: number) => router.push(`/optimizations/${id}?pair=${pi}`),
-    [id, router],
+    (pi: number) => router.push(pairHref(id, pi, source)),
+    [id, router, source],
   );
   const handlePairDeleted = useCallback(
     (pi: number) => {
@@ -772,11 +787,11 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
         /* localStorage unavailable — nothing to clean up */
       }
       if (activePairIndex === pi) {
-        router.replace(`/optimizations/${id}`);
+        router.replace(pairHref(id, null, source));
       }
       void fetchJob();
     },
-    [id, activePairIndex, router, fetchJob],
+    [id, activePairIndex, router, fetchJob, source],
   );
 
   if (loading || !authReady) {
@@ -806,16 +821,20 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   // it via sharing. Mutations gate on this so a viewer can't cancel/delete/manage.
   const effectiveRole = job.effective_role ?? null;
   const canEditRun = effectiveRole == null || effectiveRole === "editor";
-  const canDeleteRun = effectiveRole == null;
+  // Delete, share and pair delete call local-only routes, so a hosted run hides them.
+  const canDeleteRun = effectiveRole == null && source === "local";
   // Grid searches are retired: their stored runs stay readable, but the backend
   // refuses to clone, retry or resume one, so those actions are hidden.
   const canRerun = job.optimization_type !== "grid_search";
+  // Clone and Retry open the local submit form, which cannot read a hosted run.
+  // Resume calls the run's own source, so it stays for hosted runs.
+  const canClone = canRerun && source === "local";
   // Sharing is owner-only: members (even editors) can't invite, change roles,
   // or set general access. null = the owner's own run / admin / co-owner.
   // Never on the public /share/<token> route: there the job is seeded from
   // shareData and carries no effective_role, so it would read as owner-level
   // and leak the management controls to viewers (even anonymous visitors).
-  const canManageShare = !isShare && effectiveRole == null;
+  const canManageShare = !isShare && effectiveRole == null && source === "local";
   // Share banner: surface the caller's granted tier whenever they're NOT the
   // owner — both the public /share link and an explicit member grant. "viewer"
   // maps to the viewer tier, "editor" to the editor tier. null / "owner" is the
@@ -828,16 +847,21 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   // button, on wide screens, and otherwise no action row.
   const canRestart =
     canEditRun &&
+    canRerun &&
     (job.status === "failed" || job.status === "cancelled" || job.status === "paused") &&
     !isBudgetPause(job);
+  const showResume = canRestart && !!job.resumable;
+  const showRetry = canRestart && !job.resumable && canClone;
   const canCancel = canEditRun && isActive;
+  // /storage lists the local account's storage, which has no hosted view.
+  const showStorageLink = !isPairContext && source === "local" && (job.stored_bytes ?? 0) > 0;
   const headerActionCounts = isShare
     ? { wide: shareCanInteract ? 1 : null, phone: null }
     : {
         wide:
           Number(canManageShare) +
-          1 +
-          Number(canRestart) +
+          Number(canClone) +
+          Number(showResume || showRetry) +
           Number(canCancel && !!job.pausable) +
           Number(canCancel) +
           Number(canDeleteRun && isTerminal),
@@ -874,12 +898,15 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const showConfigTab = levelShowsTab("config");
   const showRewardTab = jobIsBlackbox && hasRewardTab(payload?.payload) && levelShowsTab("reward");
   // Usage reads the run's billing records, which only an authenticated viewer can fetch.
-  const showUsageTab = !skipNetwork;
+  // The billing reads behind it have no hosted route.
+  const showUsageTab = !skipNetwork && source === "local";
   // Continuous optimization starts from the owner's own successful repository
   // run; the backend still decides whether this run can carry a plan. Legacy
   // DSPy program runs stay readable but get no new cycles.
+  // Continuous plans are managed on hosted itself, not through the Mac.
   const showContinuousTab =
     !skipNetwork &&
+    source === "local" &&
     !isPairContext &&
     jobIsBlackbox &&
     !isLegacyDspyRun &&
@@ -982,7 +1009,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
                     {job.estimated_remaining}
                   </span>
                 )}
-                {!isPairContext && !isPhone && (job.stored_bytes ?? 0) > 0 && (
+                {showStorageLink && !isPhone && (
                   <Link
                     href="/storage"
                     title={msg("optimization.storage_label")}
@@ -1006,7 +1033,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
             {!isShare && (
               <div className="flex w-full flex-wrap items-center justify-end gap-1 sm:w-auto sm:shrink-0 sm:flex-nowrap sm:gap-2">
                 {canManageShare && <ShareDialog optimizationId={job.optimization_id} />}
-                {!isPhone && canRerun && (
+                {!isPhone && canClone && (
                   <TooltipButton tooltip={msg("auto.app.optimizations.id.page.4")}>
                     <Button
                       variant="ghost"
@@ -1018,42 +1045,36 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
                     </Button>
                   </TooltipButton>
                 )}
-                {!isPhone &&
-                  canEditRun &&
-                  canRerun &&
-                  (job.status === "failed" ||
-                    job.status === "cancelled" ||
-                    job.status === "paused") &&
-                  !isBudgetPause(job) &&
-                  (job.resumable ? (
-                    <TooltipButton tooltip={msg("optimization.resume_tooltip")}>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        onClick={handleResume}
-                        disabled={resuming}
-                        aria-label={msg("optimization.resume")}
-                      >
-                        {/* Mirror the triangle to point in the reading direction — left in RTL, right in LTR. */}
-                        <Play
-                          className={`size-4${getActiveDir() === "rtl" ? " -scale-x-100" : ""}${
-                            resuming ? " animate-spin" : ""
-                          }`}
-                        />
-                      </Button>
-                    </TooltipButton>
-                  ) : (
-                    <TooltipButton tooltip={msg("optimization.configure_new.tooltip")}>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        onClick={handleRetry}
-                        aria-label={msg("optimization.configure_new.label")}
-                      >
-                        <ArrowCounterClockwise className="size-4" />
-                      </Button>
-                    </TooltipButton>
-                  ))}
+                {!isPhone && showResume && (
+                  <TooltipButton tooltip={msg("optimization.resume_tooltip")}>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={handleResume}
+                      disabled={resuming}
+                      aria-label={msg("optimization.resume")}
+                    >
+                      {/* Mirror the triangle to point in the reading direction — left in RTL, right in LTR. */}
+                      <Play
+                        className={`size-4${getActiveDir() === "rtl" ? " -scale-x-100" : ""}${
+                          resuming ? " animate-spin" : ""
+                        }`}
+                      />
+                    </Button>
+                  </TooltipButton>
+                )}
+                {!isPhone && showRetry && (
+                  <TooltipButton tooltip={msg("optimization.configure_new.tooltip")}>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={handleRetry}
+                      aria-label={msg("optimization.configure_new.label")}
+                    >
+                      <ArrowCounterClockwise className="size-4" />
+                    </Button>
+                  </TooltipButton>
+                )}
                 {!isPhone && canEditRun && isActive && job.pausable && (
                   <TooltipButton tooltip={msg("optimization.pause_tooltip")}>
                     <Button
@@ -1114,6 +1135,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
 
       <RunLifecycleNotice
         job={job}
+        source={source}
         canEdit={canEditRun && !skipNetwork}
         onBudgetChanged={() => {
           window.dispatchEvent(new Event("optimizations-changed"));
@@ -1130,11 +1152,11 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
           isBest={isBestPair}
           jobActive={isActive}
           jobTerminal={isTerminal}
-          onBack={() => router.push(`/optimizations/${id}`)}
-          onPrev={() => router.push(`/optimizations/${id}?pair=${activePair.pair_index - 1}`)}
-          onNext={() => router.push(`/optimizations/${id}?pair=${activePair.pair_index + 1}`)}
+          onBack={() => router.push(pairHref(id, null, source))}
+          onPrev={() => router.push(pairHref(id, activePair.pair_index - 1, source))}
+          onNext={() => router.push(pairHref(id, activePair.pair_index + 1, source))}
           onCancel={handleCancel}
-          onDeleted={() => router.push(`/optimizations/${id}`)}
+          onDeleted={source === "local" ? () => router.push(pairHref(id, null, source)) : undefined}
         />
       )}
 
@@ -1222,7 +1244,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => router.push(`/optimizations/${id}`)}
+                onClick={() => router.push(pairHref(id, null, source))}
               >
                 {msg("auto.app.optimizations.id.page.13")}
               </Button>
@@ -1254,7 +1276,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
                     job.execution_budget ?? job.terminal_evidence?.execution_budget,
                     isActive,
                   ) != null,
-                storageLink: !isPairContext && (job.stored_bytes ?? 0) > 0,
+                storageLink: showStorageLink,
                 access: sharedTier ? { tier: sharedTier, owner: sharedByOwner ?? null } : null,
                 actions: headerActionCounts,
                 tabs:
@@ -1362,8 +1384,9 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
                 activePairIndex={activePairIndex}
                 activePair={activePair}
                 onPairSelect={handlePairSelect}
-                onPairDeleted={handlePairDeleted}
+                onPairDeleted={source === "local" ? handlePairDeleted : undefined}
                 payload={payload}
+                source={source}
               />
             </TabsContent>
 
@@ -1371,6 +1394,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
               <TabsContent value="data">
                 <DataTab
                   job={job}
+                  source={source}
                   pairIndex={isPairContext ? activePair.pair_index : undefined}
                   sharedDataset={shareData?.dataset ?? undefined}
                   sharedTestResults={shareData?.test_results ?? undefined}
@@ -1382,6 +1406,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
               <TabsContent value="best" className="mt-4">
                 <BestVersionTab
                   result={job.blackbox_result}
+                  source={source}
                   jobName={job.name}
                   repository={payloadRecipe === "repo"}
                   optimizationId={job.optimization_id}

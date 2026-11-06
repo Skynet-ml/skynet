@@ -16,6 +16,8 @@ import { formatMsg, msg } from "@/shared/lib/messages";
 import { TERMS } from "@/shared/lib/terms";
 import { cn } from "@/shared/lib/utils";
 import type { OptimizationSummaryResponse } from "@/shared/types/api";
+import type { ApiSource } from "@/shared/lib/api-route";
+import { runKey } from "@/features/sidebar";
 import { LiveElapsed } from "./LiveElapsed";
 import { formatScore } from "../lib/status-badges";
 
@@ -23,7 +25,7 @@ type PhoneJobListProps = {
   items: OptimizationSummaryResponse[];
   showOwner: boolean;
   sessionUser: string;
-  onOpenJob: (id: string) => void;
+  onOpenJob: (id: string, source?: ApiSource) => void;
 };
 
 // Phone replacement for the jobs table: one tappable card per run carrying
@@ -43,7 +45,7 @@ export function PhoneJobList({ items, showOwner, sessionUser, onOpenJob }: Phone
               : null;
           return (
             <motion.li
-              key={job.optimization_id}
+              key={runKey(job)}
               layout="position"
               initial={{ opacity: 0, y: 4 }}
               animate={{ opacity: 1, y: 0 }}
@@ -56,7 +58,7 @@ export function PhoneJobList({ items, showOwner, sessionUser, onOpenJob }: Phone
             >
               <button
                 type="button"
-                onClick={() => onOpenJob(job.optimization_id)}
+                onClick={() => onOpenJob(job.optimization_id, job.source)}
                 aria-label={formatMsg("auto.features.dashboard.components.jobstab.template.3", {
                   p1: TERMS.optimization,
                 })}

@@ -306,87 +306,95 @@ function ConversationRow({
             <span className={cn("truncate", unread && !active && "font-semibold text-foreground")}>
               {row.title || msg("auto.features.agent.panel.components.conversationdrawer.untitled")}
             </span>
+            {row.source === "hosted" && (
+              <span className="shrink-0 rounded border border-border px-1 text-[0.625rem] font-medium text-muted-foreground">
+                {msg("agent.web_chat.tag")}
+              </span>
+            )}
           </div>
           {row.preview && (
             <div className="truncate text-[0.6875rem] text-muted-foreground">{row.preview}</div>
           )}
         </div>
-        <PopoverPrimitive.Root open={menuOpen} onOpenChange={setMenuOpen}>
-          <PopoverPrimitive.Trigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              onClick={(e) => {
-                e.stopPropagation();
-              }}
-              className="shrink-0 text-muted-foreground hover:text-foreground"
-              autoTooltip={false}
-              aria-label={msg("auto.features.agent.panel.components.conversationdrawer.row_menu")}
-            >
-              <DotsThree
-                className={cn(
-                  "size-3.5 transition-colors duration-150 motion-reduce:transition-none",
-                  menuOpen && "text-foreground",
-                )}
-                aria-hidden="true"
-              />
-            </Button>
-          </PopoverPrimitive.Trigger>
-          <PopoverPrimitive.Portal>
-            <PopoverPrimitive.Content
-              align="end"
-              side="bottom"
-              sideOffset={6}
-              collisionPadding={8}
-              className={COMPACT_POPOVER_PANEL_CLASS}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <button
+        {/* A web chat is read-only on the Mac: no rename, pin or delete. */}
+        {row.source !== "hosted" && (
+          <PopoverPrimitive.Root open={menuOpen} onOpenChange={setMenuOpen}>
+            <PopoverPrimitive.Trigger asChild>
+              <Button
                 type="button"
-                onClick={() => {
-                  setEditing(true);
-                  setMenuOpen(false);
+                variant="ghost"
+                size="icon-xs"
+                onClick={(e) => {
+                  e.stopPropagation();
                 }}
-                className={COMPACT_POPOVER_ITEM_CLASS}
+                className="shrink-0 text-muted-foreground hover:text-foreground"
+                autoTooltip={false}
+                aria-label={msg("auto.features.agent.panel.components.conversationdrawer.row_menu")}
               >
-                <PencilSimple className={COMPACT_POPOVER_ICON_CLASS} />
-                {msg("auto.features.agent.panel.components.conversationdrawer.rename")}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  onTogglePin(row.id, !row.pinned);
-                  setMenuOpen(false);
-                }}
-                className={COMPACT_POPOVER_ITEM_CLASS}
+                <DotsThree
+                  className={cn(
+                    "size-3.5 transition-colors duration-150 motion-reduce:transition-none",
+                    menuOpen && "text-foreground",
+                  )}
+                  aria-hidden="true"
+                />
+              </Button>
+            </PopoverPrimitive.Trigger>
+            <PopoverPrimitive.Portal>
+              <PopoverPrimitive.Content
+                align="end"
+                side="bottom"
+                sideOffset={6}
+                collisionPadding={8}
+                className={COMPACT_POPOVER_PANEL_CLASS}
+                onClick={(e) => e.stopPropagation()}
               >
-                {row.pinned ? (
-                  <PushPinSlash className={COMPACT_POPOVER_ICON_CLASS} />
-                ) : (
-                  <PushPin className={COMPACT_POPOVER_ICON_CLASS} />
-                )}
-                {row.pinned
-                  ? msg("auto.features.agent.panel.components.conversationdrawer.unpin")
-                  : msg("auto.features.agent.panel.components.conversationdrawer.pin")}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  onDelete(row.id);
-                  setMenuOpen(false);
-                }}
-                className={cn(
-                  COMPACT_POPOVER_ITEM_CLASS,
-                  "text-destructive hover:bg-destructive/10 focus-visible:bg-destructive/10",
-                )}
-              >
-                <Trash className={cn(COMPACT_POPOVER_ICON_CLASS, "text-destructive")} />
-                {msg("auto.features.agent.panel.components.conversationdrawer.delete")}
-              </button>
-            </PopoverPrimitive.Content>
-          </PopoverPrimitive.Portal>
-        </PopoverPrimitive.Root>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditing(true);
+                    setMenuOpen(false);
+                  }}
+                  className={COMPACT_POPOVER_ITEM_CLASS}
+                >
+                  <PencilSimple className={COMPACT_POPOVER_ICON_CLASS} />
+                  {msg("auto.features.agent.panel.components.conversationdrawer.rename")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onTogglePin(row.id, !row.pinned);
+                    setMenuOpen(false);
+                  }}
+                  className={COMPACT_POPOVER_ITEM_CLASS}
+                >
+                  {row.pinned ? (
+                    <PushPinSlash className={COMPACT_POPOVER_ICON_CLASS} />
+                  ) : (
+                    <PushPin className={COMPACT_POPOVER_ICON_CLASS} />
+                  )}
+                  {row.pinned
+                    ? msg("auto.features.agent.panel.components.conversationdrawer.unpin")
+                    : msg("auto.features.agent.panel.components.conversationdrawer.pin")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onDelete(row.id);
+                    setMenuOpen(false);
+                  }}
+                  className={cn(
+                    COMPACT_POPOVER_ITEM_CLASS,
+                    "text-destructive hover:bg-destructive/10 focus-visible:bg-destructive/10",
+                  )}
+                >
+                  <Trash className={cn(COMPACT_POPOVER_ICON_CLASS, "text-destructive")} />
+                  {msg("auto.features.agent.panel.components.conversationdrawer.delete")}
+                </button>
+              </PopoverPrimitive.Content>
+            </PopoverPrimitive.Portal>
+          </PopoverPrimitive.Root>
+        )}
       </div>
     </li>
   );

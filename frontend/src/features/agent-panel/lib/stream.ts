@@ -12,6 +12,7 @@ import { getRuntimeEnv } from "@/shared/lib/runtime-env";
 import { readServerSentEvents } from "@/shared/lib/sse";
 import { dispatchGeneralistEvent } from "./stream-events";
 import { announceWalletChange, fetchWithAuthRetry } from "@/shared/lib/api";
+import { parseSourceKey } from "@/shared/lib/api-route";
 
 // Resolve lazily — a module-load const races the injected window.__APP_ENV__
 // and freezes the build-time localhost fallback. See shared/lib/api.ts.
@@ -85,6 +86,12 @@ export async function streamGeneralistAgent(
   req: GeneralistAgentRequest,
   handlers: GeneralistAgentHandlers,
 ): Promise<void> {
+  // A web chat opens read-only on the Mac: no turn goes to hosted, and the
+  // local agent never writes into a hosted conversation id.
+  if (req.conversation_id && parseSourceKey(req.conversation_id).source === "hosted") {
+    handlers.onError(msg("agent.web_chat.read_only"));
+    return;
+  }
   let res: Response;
   try {
     res = await fetchWithAuthRetry(`${apiBase()}/optimizations/generalist-agent`, {
