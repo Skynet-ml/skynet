@@ -76,6 +76,8 @@ test("the return screen is the latest screen a go-back left, until the wizard re
   assert.equal(nextReturnScreen("budget", { action: "continue", from: "optimizer", to: "budget" }), "budget");
   // A go-back from past the old screen means the user moved on: the newer screen wins.
   assert.equal(nextReturnScreen("budget", back("overview")), "overview");
+  // The user moved on to metric while the agent's turn from budget ran.
+  assert.equal(nextReturnScreen(null, back("budget"), "metric"), "metric");
 });
 
 test("the wizard reaches the return screen on it or past it", () => {

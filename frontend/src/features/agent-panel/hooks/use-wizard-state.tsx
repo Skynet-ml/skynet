@@ -152,8 +152,15 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       setReturnScreen(null);
     }
   }
+  // A ref: a stream handler can hold an old navigateScreen, but the move must
+  // use the screen the wizard shows when it arrives.
+  const wizardScreenRef = React.useRef(wizardScreen);
+  React.useEffect(() => {
+    wizardScreenRef.current = wizardScreen;
+  }, [wizardScreen]);
   const navigateScreen = React.useCallback((nav: ScreenNav) => {
-    setReturnScreen((prev) => nextReturnScreen(prev, nav));
+    const shown = wizardScreenRef.current;
+    setReturnScreen((prev) => nextReturnScreen(prev, nav, shown));
     runScreenNav(nav, navigatorRef.current);
   }, []);
   const setField = React.useCallback<WizardStateContextValue["setField"]>(

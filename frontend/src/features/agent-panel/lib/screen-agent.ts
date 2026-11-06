@@ -119,6 +119,12 @@ const SCREEN_ORDER: readonly string[] = [
   "overview",
 ];
 
+/** The later of two screens in the wizard's order; null when both are null. */
+function laterScreen(a: string | null, b: string | null): string | null {
+  if (a === null || b === null) return a ?? b;
+  return SCREEN_ORDER.indexOf(a) > SCREEN_ORDER.indexOf(b) ? a : b;
+}
+
 /**
  * The screen the user returns to after an agent's go-back edit. The first
  * go-back sets it; a second go-back from a screen before it keeps it. A
@@ -129,15 +135,15 @@ const SCREEN_ORDER: readonly string[] = [
  * Args:
  *   current: The return screen so far, or null.
  *   nav: The move the agent asked for.
+ *   shown: The screen the wizard shows when the move arrives. The user can
+ *     move on while the agent works, so it can be later than ``nav.from``.
  *
  * Returns:
  *   The return screen after the move.
  */
-export function nextReturnScreen(current: string | null, nav: ScreenNav): string | null {
+export function nextReturnScreen(current: string | null, nav: ScreenNav, shown: string | null = null): string | null {
   if (nav.action !== "back") return current;
-  const from = nav.from || null;
-  if (current === null || from === null) return current ?? from;
-  return SCREEN_ORDER.indexOf(current) > SCREEN_ORDER.indexOf(from) ? current : from;
+  return laterScreen(current, laterScreen(nav.from || null, shown));
 }
 
 /**
