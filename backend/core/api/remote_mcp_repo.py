@@ -223,6 +223,10 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
         return [f"The scorer has a syntax error on line {error.lineno}: {error.msg}."], []
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)]
     named = next((node for name in _SCORER_NAMES for node in functions if node.name == name), None)
+    if named is None and _binds_scorer_name(tree):
+        # The runner takes any callable bound to the name, such as an import
+        # or an instance, so only the run's setup check can check it.
+        return [], ["Skynet cannot check an imported or assigned scorer before the run's setup check."]
     scorer = named or (functions[0] if len(functions) == 1 else None)
     if scorer is None:
         return ["The scorer must define score(repo_path) or score(repo_path, case)."], []
@@ -230,10 +234,65 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
     positional = len(args.posonlyargs) + len(args.args)
     if args.vararg is None and positional < 1:
         return [f"The scorer function {scorer.name} takes no arguments. Use score(repo_path)."], []
+    issues: list[str] = []
+    notes: list[str] = []
+    if _returns_bare_number(scorer):
+        issues.append(
+            f"The scorer function {scorer.name} returns a bare number. Return (score, feedback) "
+            "or {'score': ..., 'feedback': ...}, because the engines learn from the feedback."
+        )
     if has_cases and args.vararg is None and positional < 2:
         # The runner calls a one-argument scorer without the case, so this runs.
-        return [], [f"The scorer function {scorer.name} does not take the case, so every case gets the same score."]
-    return [], []
+        notes.append(f"The scorer function {scorer.name} does not take the case, so every case gets the same score.")
+    return issues, notes
+
+
+def _binds_scorer_name(tree: ast.Module) -> bool:
+    """Tell whether a top-level import or assignment binds a scorer name.
+
+    Args:
+        tree: The parsed scorer module.
+
+    Returns:
+        True when ``score`` or ``metric`` is imported or assigned at the top level.
+    """
+    for node in tree.body:
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            names = [alias.asname or alias.name.split(".")[0] for alias in node.names]
+        elif isinstance(node, ast.Assign):
+            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+        elif isinstance(node, ast.AnnAssign | ast.AugAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+        else:
+            continue
+        if any(name in _SCORER_NAMES for name in names):
+            return True
+    return False
+
+
+def _returns_bare_number(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Tell whether ``function`` has a ``return`` of a number literal.
+
+    The runner refuses a bare number, so this catches the common mistake
+    before the paid run. Nested functions are not checked.
+
+    Args:
+        function: The scorer function node.
+
+    Returns:
+        True when one of its own ``return`` statements gives a number literal.
+    """
+    pending: list[ast.AST] = list(function.body)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
+            continue
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Constant):
+            value = node.value.value
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                return True
+        pending.extend(ast.iter_child_nodes(node))
+    return False
 
 
 def _model_entries(models: dict[str, Any]) -> list[tuple[str, str, str | None]]:
@@ -743,8 +802,8 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
             Field(
                 min_length=1,
                 max_length=200_000,
-                description="Python that defines score(repo_path) or score(repo_path, case) and returns a float, "
-                "or a (float, dict) pair with feedback.",
+                description="Python that defines score(repo_path) or score(repo_path, case). It returns a "
+                "(score, feedback) pair or a {'score': float, 'feedback': str} dict. A bare number fails the run.",
             ),
         ],
         timeout_seconds: Annotated[float, Field(gt=0, le=600)] = 60,

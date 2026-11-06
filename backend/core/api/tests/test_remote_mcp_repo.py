@@ -39,7 +39,7 @@ from .test_remote_mcp import (
 )
 
 WRITE_TOKEN = "skym_at_read-write-token"
-SCORER = "def score(repo_path):\n    return 1.0\n"
+SCORER = 'def score(repo_path):\n    return 1.0, "ok"\n'
 
 
 @pytest.fixture
@@ -144,6 +144,14 @@ def test_each_step_gives_feedback_and_the_next_tool(harness: Any) -> None:
     assert body["issues"] == []
     assert body["notes"] == ["The scorer function score does not take the case, so every case gets the same score."]
     body = _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code="def score(path, case):\n  return 1\n")
+    assert "returns a bare number" in body["issues"][0]
+    assert body["next_tool"] == "repo_draft_set_scorer"
+    body = _step(
+        client,
+        "repo_draft_set_scorer",
+        draft_id=draft_id,
+        metric_code="def score(path, case):\n  def inner():\n    return 1\n  return {'score': 1.0, 'feedback': 'ok'}\n",
+    )
     assert body["issues"] == []
     assert body["notes"] == []
     assert body["next_tool"] == "repo_draft_set_models"
@@ -344,3 +352,18 @@ def test_save_step_locks_the_draft_row(harness: Any, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(remote_mcp_repo, "_load_draft", spy)
     _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code=SCORER)
     assert locks == [True]
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "from mylib import score\n",
+        "class S:\n  def __call__(self, path):\n    return 1.0, 'ok'\n\nscore = S()\n",
+        "def _mk():\n  return lambda path: (1.0, 'ok')\n\nscore = _mk()\n",
+    ],
+)
+def test_imported_or_assigned_scorer_is_a_note(code: str) -> None:
+    """Leave an imported or assigned scorer to the run's setup check, like the runner accepts it."""
+    issues, notes = remote_mcp_repo.scorer_issues(code, has_cases=True)
+    assert issues == []
+    assert "imported or assigned" in notes[0]
