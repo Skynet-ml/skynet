@@ -52,7 +52,7 @@ import { useColorTheme } from "@/shared/providers/theme-provider";
 import { useConversationStore } from "../hooks/use-conversation-store";
 import { useGeneralistAgent, type SessionEventContext } from "../hooks/use-generalist-agent";
 import { useGeneralistPanelState } from "../hooks/use-panel-state";
-import { getConversation } from "../lib/conversation-api";
+import { getConversation, isHostedConversation } from "../lib/conversation-api";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { ShareChatDialog } from "./ShareChatDialog";
 import { TRUST_MODE_HUE, useTrustMode } from "../hooks/use-trust-mode";
@@ -564,6 +564,8 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   // its text changes with every chunk.
   const agentMessages = agent.messages;
   const agentConversationId = agent.conversationId;
+  // A web chat opens read-only on the Mac; it continues on the web.
+  const webChat = agentConversationId !== null && isHostedConversation(agentConversationId);
   const liveChatRef = React.useRef({ id: agentConversationId, messages: agentMessages });
   React.useEffect(() => {
     liveChatRef.current = { id: agentConversationId, messages: agentMessages };
@@ -1001,7 +1003,11 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
             </TooltipContent>
           </Tooltip>
           )}
-          {!inSetup && canShare && agent.conversationId && agent.messages.length > 0 && (
+          {!inSetup &&
+            canShare &&
+            !webChat &&
+            agent.conversationId &&
+            agent.messages.length > 0 && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -1140,7 +1146,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
         />
       </AgentThread>
 
+      {webChat && (
+        <p className="px-3 pb-1 text-[0.75rem] text-muted-foreground">
+          {msg("agent.web_chat.read_only")}
+        </p>
+      )}
       <Composer
+        disabled={webChat}
         value={draft}
         onChange={setDraft}
         onSubmit={handleSubmit}
