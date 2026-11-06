@@ -1012,6 +1012,9 @@ class WizardState(TypedDict, total=False):
     # What the wizard's own Continue button would refuse on this screen, in
     # the user's language; absent when Continue is open.
     screen_issue: str
+    # The later screen a go-back left from; Continue returns the user there
+    # when every screen between them is done. Absent with no go-back pending.
+    return_screen: str
     # The setup is a copy of an earlier run and arrived filled in: its agent
     # waits for the user and sees the whole setup, not one screen's slice.
     cloned_run: bool
@@ -1467,7 +1470,9 @@ def screen_snapshot(state: WizardState) -> dict[str, Any]:
     if state.get("cloned_run"):
         # A cloned run's agent sees the whole copied setup, with the client's
         # raw notes and issue read the same way as on any other screen.
-        snapshot = {key: value for key, value in state.items() if key not in {"screen_issue", "screen_notes"}}
+        snapshot = {
+            key: value for key, value in state.items() if key not in {"screen_issue", "screen_notes", "return_screen"}
+        }
     else:
         screen = state.get("wizard_screen") or ""
         keep = (
@@ -1488,6 +1493,9 @@ def screen_snapshot(state: WizardState) -> dict[str, Any]:
     issue = str(state.get("screen_issue") or "").strip()
     if issue:
         snapshot["continue_blocked_by"] = issue
+    back = str(state.get("return_screen") or "").strip()
+    if back:
+        snapshot["continue_returns_to"] = back
     return snapshot
 
 
@@ -1551,6 +1559,29 @@ def screen_tools(allowed: set[str], state: WizardState) -> set[str]:
     screen = state.get("wizard_screen") or ""
     own = _SCREEN_ALLOWED_TOOLS.get(screen, frozenset())
     return {name for name in allowed if name in own}
+
+
+def _return_target(screen: str, state: WizardState) -> str | None:
+    """Pick the later screen Continue jumps back to after a go-back edit.
+
+    Args:
+        screen: The screen on view, already checked as done.
+        state: The wizard snapshot with this turn's writes merged in.
+
+    Returns:
+        ``return_screen`` when it is after ``screen`` and every screen between
+        them passes ``_screen_problems``; otherwise ``None``, so Continue moves
+        on by one screen.
+    """
+    back = str(state.get("return_screen") or "")
+    if screen not in _SCREEN_ORDER or back not in _SCREEN_ORDER:
+        return None
+    here, there = _SCREEN_ORDER.index(screen), _SCREEN_ORDER.index(back)
+    if there <= here + 1:
+        return None
+    if any(_screen_problems(between, state) for between in _SCREEN_ORDER[here + 1 : there]):
+        return None
+    return back
 
 
 def _screen_problems(screen: str, state: WizardState) -> list[str]:
@@ -1771,7 +1802,8 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
 
     async def continue_to_next_screen(note: str | None = None) -> Any:
         """Move the wizard on by one screen, once this screen is complete."""
-        problems = _screen_problems(screen, cast(WizardState, {**state, **turn.wizard_patch}))
+        merged = cast(WizardState, {**state, **turn.wizard_patch})
+        problems = _screen_problems(screen, merged)
         issue = str(state.get("screen_issue") or "").strip()
         # The wizard's own check ran on the turn-start values; once this turn
         # wrote fields it is stale, and the backend checks above stand alone.
@@ -1784,7 +1816,10 @@ def screen_nav_tools(state: WizardState, turn: _TurnAuthoringFlag) -> list[dspy.
         if note and note.strip():
             _append_note(notes, screen, note)
         turn.screen_moved = True
-        return {"screen_nav": {"action": "continue", "from": screen}, "wizard_state": {"screen_notes": list(notes)}}
+        nav: dict[str, str] = {"action": "continue", "from": screen}
+        if target := _return_target(screen, merged):
+            nav["to"] = target
+        return {"screen_nav": nav, "wizard_state": {"screen_notes": list(notes)}}
 
     async def go_back_to_screen(screen_id: str, request: str) -> Any:
         """Send the user back to an earlier screen with what to change there."""
@@ -2425,7 +2460,10 @@ This screen:
   a write to any other field is refused. You see and edit this screen
   only. When the user asks for something
   that belongs to an earlier screen, call ``go_back_to_screen`` with what
-  they want there. When it belongs to a later screen, change nothing for
+  they want there. When ``wizard_state.continue_returns_to`` is set, the
+  user came back from that screen to change something here: once the
+  change is done, ``continue_to_next_screen`` takes them straight back
+  there, so say that, not that they go on to the next screen. When it belongs to a later screen, change nothing for
   it: save it with ``remember_for_later`` and say it will be handled there.
 * ``job_name``, ``job_description`` and ``is_private`` show on no screen.
   Set them only when the user asks for them this turn, with one exception:
@@ -2433,6 +2471,7 @@ This screen:
   name, so put a short name drawn from the user's task into your first
   ``update_wizard_state`` call, beside this screen's fields. Never write
   a placeholder name: with no task from the user yet, write nothing.
+  Leave out every field you do not set; never send an empty string for it.
 * When the user says something a later screen needs (a budget, a model
   preference, "keep it cheap"), call ``remember_for_later`` with it.
 * When this screen is complete and the user wants to move on, call
@@ -2501,6 +2540,14 @@ _ASK_FOR_BUDGET = (
     "above the minimum, set it and call ``continue_to_next_screen`` in the same turn; do not ask whether to "
     "continue."
 )
+# Agents told users a cheap task model was "for scoring many versions" and
+# picked an older generation while a newer one was listed.
+_MODEL_ROLES = (
+    "The task model (``model_config``) runs the artifact on each input; the metric scores the outputs, so "
+    "never describe the task model as the scorer. The reflection model reads the results and writes the "
+    "next versions. Prefer the newest generation ``list_models_for_agent`` lists in a family (5.5 over 4.5) "
+    "unless the user asks for another model or a lower cost."
+)
 SCREEN_FOCUS: dict[str, str] = {
     "brief": (
         "Brief: get what the run should improve, in the user's words, into ``task_objective``, and any "
@@ -2518,7 +2565,10 @@ SCREEN_FOCUS: dict[str, str] = {
         "``starting_version``, the predictor instructions being improved, taken from the user verbatim. "
         "For a GitHub repository (``repo``) set ``repository`` as ``owner/name`` and no starting version. "
         "When ``github_connected`` is true, find the repository the user names with "
-        "``list_github_repositories`` (pass its name as ``search``) and copy its ``full_name``. When it is "
+        "``list_github_repositories`` (pass its name as ``search``) and copy its ``full_name``. The search "
+        "matches words in the name and the description. When it finds nothing, or the user describes the "
+        'repository ("my CV site") instead of naming it, call it with no ``search`` and choose by name and '
+        "description; ask the user when more than one fits. When it is "
         "false, tell the user to link GitHub with the Connect GitHub button on this screen; never ask for a token."
     ),
     "source": (
@@ -2529,7 +2579,7 @@ SCREEN_FOCUS: dict[str, str] = {
     ),
     "plan": (
         "Plan: choose ``optimizer_choice`` (``auto`` unless the user names one) and the task and reflection "
-        "models from ``list_models_for_agent``. " + _ASK_FOR_BUDGET
+        "models from ``list_models_for_agent``. " + _MODEL_ROLES + " " + _ASK_FOR_BUDGET
     ),
     "optimizer": (
         "Optimizer: choose ``optimizer_choice``; ``auto`` is right unless the user names one, and "
@@ -2537,7 +2587,7 @@ SCREEN_FOCUS: dict[str, str] = {
     ),
     "models": (
         "Models: choose ``reflection_model_config`` (always needed) and ``model_config`` (the task model) "
-        "from ``list_models_for_agent``, fitting the chosen optimizer."
+        "from ``list_models_for_agent``, fitting the chosen optimizer. " + _MODEL_ROLES
     ),
     "budget": ("Budget: " + _ASK_FOR_BUDGET),
     "metric": (

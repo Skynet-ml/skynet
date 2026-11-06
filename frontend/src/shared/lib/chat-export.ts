@@ -69,8 +69,10 @@ function statsLine(message: AgentMessage): string | null {
  */
 function messageLines(message: AgentMessage, depth: ChatExportDepth): string[] {
   const internals = depth === "internals";
-  const heading = message.role === "user" ? "## You" : "## Agent";
-  const out = [message.hidden && internals ? `${heading} (sent by the app)` : heading];
+  // A hidden user turn is a request the app wrote (a wizard step, a go-back),
+  // not words the user typed, so it must not read as "You".
+  const heading = message.role !== "user" ? "## Agent" : message.hidden ? "## App (wizard request)" : "## You";
+  const out = [heading];
   if (internals && message.plan?.trim()) out.push(`#### Plan\n${message.plan.trim()}`);
   if (internals) {
     const calls = message.toolCalls ?? [];

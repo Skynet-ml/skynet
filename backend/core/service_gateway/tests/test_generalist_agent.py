@@ -593,6 +593,38 @@ async def test_continue_judges_this_turns_writes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_continue_returns_to_the_screen_a_go_back_left() -> None:
+    """After a go-back edit, Continue jumps back once every screen between is done."""
+    state = {**_READY, "wizard_screen": "optimizer", "return_screen": "budget"}
+    result = await _nav_tools(state)["continue_to_next_screen"].acall()
+    assert result["screen_nav"] == {"action": "continue", "from": "optimizer", "to": "budget"}
+
+
+@pytest.mark.asyncio
+async def test_continue_moves_one_screen_when_a_screen_between_is_not_done() -> None:
+    """A screen between that still needs work keeps the plain one-screen move."""
+    state = {**_READY, "reflection_model_config": {}, "wizard_screen": "optimizer", "return_screen": "budget"}
+    result = await _nav_tools(state)["continue_to_next_screen"].acall()
+    assert result["screen_nav"] == {"action": "continue", "from": "optimizer"}
+
+
+@pytest.mark.parametrize("back", ["models", "brief", "nowhere"])
+@pytest.mark.asyncio
+async def test_continue_ignores_a_return_screen_that_is_not_a_jump_ahead(back: str) -> None:
+    """The next screen, an earlier one or an unknown one gives no ``to``."""
+    state = {**_READY, "wizard_screen": "optimizer", "return_screen": back}
+    result = await _nav_tools(state)["continue_to_next_screen"].acall()
+    assert result["screen_nav"] == {"action": "continue", "from": "optimizer"}
+
+
+def test_snapshot_tells_the_agent_where_continue_returns() -> None:
+    """The screen agent sees the pending return, not the raw field."""
+    snapshot = screen_snapshot(cast(WizardState, {**_READY, "wizard_screen": "optimizer", "return_screen": "budget"}))
+    assert snapshot["continue_returns_to"] == "budget"
+    assert "return_screen" not in snapshot
+
+
+@pytest.mark.asyncio
 async def test_continue_moves_on_and_saves_its_note() -> None:
     """A done screen moves on, and the optional note is kept like ``remember_for_later``."""
     state = {**_READY, "wizard_screen": "brief"}

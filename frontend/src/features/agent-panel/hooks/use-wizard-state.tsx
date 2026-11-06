@@ -11,7 +11,7 @@ import {
 } from "@/shared/types/unified-run";
 
 import type { ScreenNav, ScreenNavigator } from "../lib/screen-agent";
-import { runScreenNav } from "../lib/screen-agent";
+import { nextReturnScreen, runScreenNav } from "../lib/screen-agent";
 import { rolesFields } from "../lib/wizard-write";
 import type { ScreenNote, WizardState } from "../lib/types";
 
@@ -66,6 +66,12 @@ interface WizardStateContextValue {
   setRestoredSetup: (restored: boolean) => void;
   /** Move the wizard as a screen agent asked, through the frame's handlers. */
   navigateScreen: (nav: ScreenNav) => void;
+  /**
+   * The screen the agent's go-back left, until the wizard reaches it again.
+   * The agent's next Continue jumps there, so the user does not walk every
+   * finished screen between.
+   */
+  returnScreen: string | null;
   /** The wizard's agent is running or waiting on a turn. */
   agentBusy: boolean;
   setAgentBusy: (busy: boolean) => void;
@@ -134,7 +140,10 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
   const setScreenNavigator = React.useCallback((navigator: ScreenNavigator | null) => {
     navigatorRef.current = navigator;
   }, []);
+  const [returnScreen, setReturnScreen] = React.useState<string | null>(null);
+  if (returnScreen !== null && returnScreen === wizardScreen) setReturnScreen(null);
   const navigateScreen = React.useCallback((nav: ScreenNav) => {
+    setReturnScreen((prev) => nextReturnScreen(prev, nav));
     runScreenNav(nav, navigatorRef.current);
   }, []);
   const setField = React.useCallback<WizardStateContextValue["setField"]>(
@@ -223,6 +232,7 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
     setPulseKeys([]);
     setAutoFeedback(null);
     setWriteBefore({});
+    setReturnScreen(null);
   }, []);
 
   const overriddenFields = React.useMemo(() => Array.from(overridden).sort(), [overridden]);
@@ -243,6 +253,7 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       setScreenIssue,
       setScreenNavigator,
       navigateScreen,
+      returnScreen,
       reopenedScreen,
       setReopenedScreen,
       restoredSetup,
@@ -271,6 +282,7 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       screenIssue,
       setScreenNavigator,
       navigateScreen,
+      returnScreen,
       reopenedScreen,
       restoredSetup,
       agentBusy,

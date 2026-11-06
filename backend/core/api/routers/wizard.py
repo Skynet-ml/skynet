@@ -245,6 +245,11 @@ def create_wizard_router() -> APIRouter:
         for key in ("job_name", "job_description", "task_objective"):
             if key in supplied and supplied[key] is not None:
                 val = supplied[key]
+                # The description is optional, so an empty one clears it; agents
+                # sent "" for it and lost the whole write to a 422.
+                if key == "job_description" and isinstance(val, str) and not val.strip():
+                    patch[key] = ""
+                    continue
                 if not isinstance(val, str) or not val.strip():
                     raise DomainError("wizard.field_non_empty_string", status=422, field=key)
                 patch[key] = val.strip()

@@ -53,7 +53,8 @@ export function hideKickoffs(messages: AgentMessage[]): AgentMessage[] {
 
 /** A move the screen agent asked for, read from its tool result. */
 export type ScreenNav =
-  | { action: "continue"; from: string }
+  /** ``to`` is a later screen to jump to, after a go-back edit: the user returns where they were. */
+  | { action: "continue"; from: string; to?: string }
   | { action: "back"; from: string; screen: string; request: string };
 
 /** What the wizard frame exposes so the agent can move it. */
@@ -64,6 +65,8 @@ export interface ScreenNavigator {
   forward: () => void;
   /** Jump back to an earlier screen. */
   goToScreen: (screen: string) => void;
+  /** Jump forward to a later screen; the Continue button's checks still apply. */
+  goForwardTo: (screen: string) => void;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -75,7 +78,11 @@ export function parseScreenNav(result: unknown): ScreenNav | null {
   if (!isRecord(result) || !isRecord(result.screen_nav)) return null;
   const nav = result.screen_nav;
   const from = typeof nav.from === "string" ? nav.from : "";
-  if (nav.action === "continue") return { action: "continue", from };
+  if (nav.action === "continue") {
+    return typeof nav.to === "string" && nav.to
+      ? { action: "continue", from, to: nav.to }
+      : { action: "continue", from };
+  }
   if (nav.action === "back" && typeof nav.screen === "string" && nav.screen) {
     const request = typeof nav.request === "string" ? nav.request : "";
     return { action: "back", from, screen: nav.screen, request };
@@ -90,8 +97,26 @@ export function runScreenNav(nav: ScreenNav, navigator: ScreenNavigator | null):
     // The wizard may already have moved past the agent's screen by itself;
     // continuing again would skip the next one unseen.
     if (nav.from && nav.from !== navigator.screen) return;
-    navigator.forward();
+    if (nav.to) navigator.goForwardTo(nav.to);
+    else navigator.forward();
   } else navigator.goToScreen(nav.screen);
+}
+
+/**
+ * The screen the user returns to after an agent's go-back edit. The first
+ * go-back sets it; a second go-back from the earlier screen keeps it. Any
+ * other move keeps it until the wizard reaches it.
+ *
+ * Args:
+ *   current: The return screen so far, or null.
+ *   nav: The move the agent asked for.
+ *
+ * Returns:
+ *   The return screen after the move.
+ */
+export function nextReturnScreen(current: string | null, nav: ScreenNav): string | null {
+  if (nav.action === "back") return current ?? (nav.from || null);
+  return nav.to ? null : current;
 }
 
 /**

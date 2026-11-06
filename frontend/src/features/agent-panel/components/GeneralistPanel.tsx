@@ -208,9 +208,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
     const screen = wizardCtx?.wizardScreen;
     if (screen == null) return merged;
     const issue = wizardCtx?.screenIssue;
-    return issue
-      ? { ...merged, wizard_screen: screen, screen_issue: issue }
-      : { ...merged, wizard_screen: screen };
+    const back = wizardCtx?.returnScreen;
+    return {
+      ...merged,
+      wizard_screen: screen,
+      ...(issue ? { screen_issue: issue } : {}),
+      ...(back ? { return_screen: back } : {}),
+    };
   })();
   // The setup has one agent and one chat, which lives as long as the draft:
   // a reload or a return to a left setup brings it back, and submitting or
