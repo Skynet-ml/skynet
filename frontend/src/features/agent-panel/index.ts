@@ -5,6 +5,7 @@ export { MinimizedPill } from "./components/MinimizedPill";
 export { ApprovalCard } from "./components/ApprovalCard";
 export { ToolCallRow } from "./components/ToolCallRow";
 export { SharedChatView } from "./components/SharedChatView";
+export { shareLinkTypeLabel } from "./components/ShareChatDialog";
 export { CodingCallRows } from "./components/CodeAuthoringActivity";
 export { ToolsCarousel } from "./components/ToolsCarousel";
 export { Carousel, CarouselNav } from "./components/Carousel";
@@ -26,9 +27,15 @@ export {
   deleteConversation,
   getSharedConversation,
   listSharedConversations,
+  openSharedConversation,
   revokeConversationShare,
 } from "./lib/conversation-api";
-export type { SharedConversation, SharedConversationSummary } from "./lib/conversation-api";
+export type {
+  ShareLinkType,
+  SharedConversation,
+  SharedConversationSummary,
+  SharedItemOption,
+} from "./lib/conversation-api";
 export type {
   ApprovalResolvedPayload,
   ChatTurn,

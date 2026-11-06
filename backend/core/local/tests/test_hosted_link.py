@@ -944,10 +944,10 @@ def test_hosted_request_posts_json_and_accepts_empty_answer(engine: Engine, host
     assert secret is not None
     hosted.expired_access.add(secret.access_token)
 
-    body = {"local_id": "c-1", "title": "T", "messages": []}
-    answer = hosted_link.hosted_request(engine, _USER, "POST", "/desktop/v1/shared-chats", body)
+    body = {"name": "T", "items": []}
+    answer = hosted_link.hosted_request(engine, _USER, "POST", "/desktop/v1/echo", body)
 
-    assert answer == {"token": "fake-share-token"}
-    assert hosted.shared_chats == [body]
+    assert answer == {"ok": True}
+    assert hosted.echo_bodies == [body]
     assert hosted.refresh_count == 1
-    assert hosted_link.hosted_request(engine, _USER, "DELETE", "/desktop/v1/shared-chats/c-1") is None
+    assert hosted_link.hosted_request(engine, _USER, "DELETE", "/desktop/v1/echo/c-1") is None

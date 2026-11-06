@@ -61,6 +61,8 @@ const TOOL_KINDS: Record<string, ActivityKind> = {
   serve_info_serve: "read",
   serve_pair_info_serve: "read",
   blackbox_engines_blackbox_engines_get: "read",
+  shared_chat_item: "read",
+  read_shared_chat_item: "read",
 };
 
 /**
@@ -117,7 +119,46 @@ function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
+// A shared chat replaces each private tool call of the owner with a
+// ``shared_chat_item`` row. It names only the items that the link ticks;
+// every other call shows as "Not shared" (SKY-294).
+function sharedItemLabels(call: AgentToolCall): string | null {
+  const result = getResult(call);
+  if (!result || typeof result !== "object") return null;
+  const r = result as Record<string, unknown>;
+  if (r.status !== "shared" || !Array.isArray(r.items)) return null;
+  const labels = r.items
+    .map((item) => (item && typeof item === "object" ? (item as Record<string, unknown>).label : null))
+    .filter((label): label is string => typeof label === "string" && label.length > 0);
+  return labels.length > 0 ? truncate(labels.join(", "), 80) : null;
+}
+
 const RENDERERS: Record<string, ToolRenderer> = {
+  shared_chat_item: {
+    summary: (call) => {
+      const labels = sharedItemLabels(call);
+      return labels
+        ? formatMsg("shared.agent.share_item_shared", { p1: labels })
+        : msg("shared.agent.share_item_not_shared");
+    },
+  },
+
+  read_shared_chat_item: {
+    summary: (call) => {
+      const result = getResult(call);
+      const label =
+        result && typeof result === "object" ? (result as Record<string, unknown>).label : null;
+      return byStatus(call, {
+        running: msg("shared.agent.share_item_reading"),
+        done:
+          typeof label === "string" && label
+            ? formatMsg("shared.agent.share_item_read", { p1: truncate(label, 80) })
+            : msg("shared.agent.share_item_reading"),
+        error: msg("shared.agent.share_item_not_available"),
+      });
+    },
+  },
+
   delete_job_optimizations: {
     summary: (call) => {
       const id = pickId(getArgs(call));

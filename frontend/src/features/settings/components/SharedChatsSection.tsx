@@ -6,6 +6,7 @@ import { toast } from "react-toastify";
 import {
   listSharedConversations,
   revokeConversationShare,
+  shareLinkTypeLabel,
   type SharedConversationSummary,
 } from "@/features/agent-panel";
 import { msg, formatMsg } from "@/shared/lib/messages";
@@ -18,10 +19,9 @@ import { Button } from "@/shared/ui/primitives/button";
 import { RetryIconButton } from "@/shared/ui/retry-icon-button";
 
 /**
- * The user's shared agent chats: each row copies its public link or stops
- * sharing it. In the Mac app the list and the revoke go through the local
- * backend to the linked hosted account; the parent renders this section only
- * when sharing can work.
+ * The user's shared agent chats: each row shows the link type and the shared
+ * items, copies the link, or stops sharing it. The parent renders this
+ * section only in the hosted app, where chats can be shared.
  */
 export function SharedChatsSection() {
   const [items, setItems] = React.useState<SharedConversationSummary[] | null>(null);
@@ -95,6 +95,19 @@ export function SharedChatsSection() {
                 <div className="flex min-w-0 flex-1 flex-col">
                   <span className="truncate text-sm text-foreground">
                     {item.title || msg("auto.features.agent.panel.components.conversationdrawer.untitled")}
+                  </span>
+                  <span className="truncate text-xs text-muted-foreground" dir="auto">
+                    {shareLinkTypeLabel(item.linkType)}
+                    {item.items.length > 0 && (
+                      <>
+                        {" · "}
+                        {item.items
+                          .map((shared) =>
+                            shared.available ? shared.label : msg("shared.agent.share_item_deleted"),
+                          )
+                          .join(", ")}
+                      </>
+                    )}
                   </span>
                   {item.sharedAt && (
                     <span className="text-xs text-muted-foreground/80">
