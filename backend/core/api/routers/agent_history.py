@@ -35,6 +35,7 @@ from sqlalchemy import or_, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, load_only
+from sqlalchemy.orm.exc import StaleDataError
 
 from ...config import settings
 from ...models import (
@@ -361,6 +362,10 @@ def create_agent_history_router(*, job_store) -> APIRouter:
                 share = session.get(AgentChatShareModel, row.source_share_token)
                 if share is not None:
                     _refresh_fork(session, share, conversation_id)
+                    # A delete of the copy can race the refresh commit.
+                    row = session.get(AgentConversationModel, conversation_id)
+                    if row is None:
+                        raise DomainError("agent.conversation.not_found", status=404)
             msgs = (
                 session.query(AgentMessageModel)
                 .options(
@@ -984,6 +989,8 @@ def _refresh_fork(session: Session, share: AgentChatShareModel, fork_id: str) ->
     fork = session.get(AgentConversationModel, fork_id)
     if fork is None or share.updated_at is None or share.updated_at <= fork.created_at:
         return
+    ticked = _share_refs(share)
+    labels = _owned_item_labels(session, cast(str, share.username), ticked)
     rebuilt: dict[tuple[str, Any], list[Any]] = {}
     for m in _recipient_messages(session, share):
         rebuilt.setdefault((m.role, m.created_at), []).append(m.tool_calls)
@@ -996,12 +1003,50 @@ def _refresh_fork(session: Session, share: AgentChatShareModel, fork_id: str) ->
         calls = rebuilt.get((cast(str, row.role), row.created_at))
         if calls:
             fresh = calls.pop(0)
-            # Write only real changes, so later opens of an unchanged link do not commit.
-            if row.tool_calls != fresh:
-                row.tool_calls = fresh
-                changed = True
+        else:
+            # The source turn fell out of the shared window, so only narrow the items it already names.
+            fresh = [_narrowed_call(call, ticked, labels) for call in (row.tool_calls or [])] or None
+        # Write only real changes, so later opens of an unchanged link do not commit.
+        if row.tool_calls != fresh:
+            row.tool_calls = fresh
+            changed = True
     if changed:
-        session.commit()
+        try:
+            session.commit()
+        except StaleDataError:
+            # The recipient deleted or changed the copy at the same moment; their change wins.
+            session.rollback()
+
+
+def _narrowed_call(call: Any, ticked: list[tuple[str, str]], labels: dict[tuple[str, str], str]) -> Any:
+    """Drop the items that the link no longer shares from one copied ``shared_chat_item`` call.
+
+    Args:
+        call: One copied tool call.
+        ticked: The items the link shares.
+        labels: The labels of the ticked items that still exist.
+
+    Returns:
+        The call with only shared items, marked ``not_shared`` when none are
+        left; any other call unchanged.
+    """
+    if not isinstance(call, dict) or call.get("tool") != "shared_chat_item":
+        return call
+    result = (call.get("payload") or {}).get("result") or {}
+    refs = [(str(i.get("kind")), str(i.get("id"))) for i in result.get("items") or [] if isinstance(i, dict)]
+    shared = [ref for ref in refs if ref in ticked and ref in labels]
+    items = [{"kind": kind, "id": item_id, "label": labels[(kind, item_id)]} for kind, item_id in shared]
+    return {
+        **call,
+        "payload": {
+            "arguments": {},
+            "result": {
+                "status": "shared" if items else "not_shared",
+                "items": items,
+                "hint": _SHARED_HINT if items else _NOT_SHARED_HINT,
+            },
+        },
+    }
 
 
 def _share_refs(share: AgentChatShareModel) -> list[tuple[str, str]]:

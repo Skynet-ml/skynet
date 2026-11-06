@@ -439,6 +439,49 @@ def test_history_open_follows_the_live_share() -> None:
     assert "Alice run" not in bob.get(f"/agent/conversations/{fork_id}").text
 
 
+def test_copied_turn_outside_the_window_drops_an_unshared_item(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A copied turn that left the shared window still loses an item the link stops sharing."""
+    monkeypatch.setattr(agent_history, "MAX_SHARED_MESSAGES", 2)
+    client, store = _client(_ALICE)
+    _private_chat(store)
+    token = _share(client, "continue_data", [{"kind": "run", "id": "run-a"}])
+    bob = _mount(store, _BOB)
+    fork_id = bob.post(f"/agent/shared-conversations/{token}/open").json()["conversation_id"]
+    assert _copy_statuses(bob, fork_id)[0] == "shared"
+    _add_message(store, "c-1", "user", "more")
+    _add_message(store, "c-1", "assistant", "sure")
+
+    _share(client, "continue")
+
+    assert _copy_statuses(bob, fork_id) == ["not_shared", "not_shared", "not_shared"]
+    assert "Alice run" not in bob.get(f"/agent/conversations/{fork_id}").text
+
+
+def test_history_open_returns_404_when_the_copy_is_deleted_during_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A delete of the copy that races the refresh commit gives 404, not 500."""
+    monkeypatch.setattr(agent_history, "MAX_SHARED_MESSAGES", 2)
+    client, store = _client(_ALICE)
+    _private_chat(store)
+    token = _share(client, "continue_data", [{"kind": "run", "id": "run-a"}])
+    bob = _mount(store, _BOB)
+    fork_id = bob.post(f"/agent/shared-conversations/{token}/open").json()["conversation_id"]
+    _add_message(store, "c-1", "user", "more")
+    _add_message(store, "c-1", "assistant", "sure")
+    _share(client, "continue")
+    real = agent_history._narrowed_call
+
+    def _delete_then_narrow(call, ticked, labels):
+        """Delete Bob's copy in another session after the refresh loaded its rows."""
+        with store._session_factory() as other:
+            other.query(AgentMessageModel).filter_by(conversation_id=fork_id).delete()
+            other.query(AgentConversationModel).filter_by(id=fork_id).delete()
+            other.commit()
+        return real(call, ticked, labels)
+
+    monkeypatch.setattr(agent_history, "_narrowed_call", _delete_then_narrow)
+    assert bob.get(f"/agent/conversations/{fork_id}").status_code == 404
+
+
 def test_shared_item_read_is_allowed_for_a_ticked_item() -> None:
     """Bob reads the ticked run and file through his copy, masked and read-only."""
     client, store = _client(_ALICE)
