@@ -5,6 +5,7 @@ import {
   allLoaded,
   appendRuns,
   countFrom,
+  hostedRetryDelay,
   loadRuns,
   mergeRuns,
   refreshLimit,
@@ -85,6 +86,19 @@ test("a hosted failure leaves the local runs", async () => {
   }, true);
   assert.deepEqual(merged.items.map(runKey), ["local:a"]);
   assert.equal(merged.total, 1);
+  assert.equal(merged.hostedFailed, true);
+});
+
+test("a hosted answer or hosted off is not a hosted failure", async () => {
+  const page = async () => ({ items: [], total: 0 });
+  assert.equal((await loadRuns(page, true)).hostedFailed, false);
+  assert.equal((await loadRuns(page, false)).hostedFailed, false);
+});
+
+test("hosted retries come soon, then stop", () => {
+  assert.equal(hostedRetryDelay(0), null);
+  assert.deepEqual([1, 2, 3].map(hostedRetryDelay), [1000, 2000, 4000]);
+  assert.equal(hostedRetryDelay(4), null);
 });
 
 test("hosted is not asked when it is off", async () => {

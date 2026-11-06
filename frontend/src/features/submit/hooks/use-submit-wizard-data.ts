@@ -3,7 +3,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getModelCallHolds } from "@/shared/lib/api";
 import type { ApiSource } from "@/shared/lib/api-route";
-import { getModelCatalog, cachedCatalog } from "@/shared/lib/model-catalog";
+import {
+  cachedCatalog,
+  cachedHostedCatalog,
+  getHostedModelCatalog,
+  getModelCatalog,
+} from "@/shared/lib/model-catalog";
 import type { ModelCatalogResponse, ModelConfig } from "@/shared/types/api";
 import { MAX_RECENT, RECENT_KEY } from "../constants";
 import { callHoldKey } from "../lib/run-floor";
@@ -77,21 +82,35 @@ export function useRecentModelConfigs() {
   return { recentConfigs, saveToRecent, clearRecentConfigs, removeRecentConfig };
 }
 
-export function useModelCatalog() {
-  const [catalog, setCatalog] = useState<ModelCatalogResponse | null>(cachedCatalog);
+/** The model catalog of the server the run goes to: the web's for a Remote run, else this server's. */
+export function useModelCatalog(source: ApiSource = "local") {
+  const pick = source === "hosted" ? cachedHostedCatalog : cachedCatalog;
+  const [loaded, setLoaded] = useState<{ source: ApiSource; catalog: ModelCatalogResponse } | null>(
+    () => {
+      const cached = pick();
+      return cached ? { source, catalog: cached } : null;
+    },
+  );
+  const catalog = loaded?.source === source ? loaded.catalog : pick();
+  // A failed web catalog fetch tries again a few times while Remote stays chosen.
+  const [retries, setRetries] = useState(0);
 
   useEffect(() => {
     if (catalog) return;
     let cancelled = false;
-    getModelCatalog()
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    (source === "hosted" ? getHostedModelCatalog() : getModelCatalog())
       .then((c) => {
-        if (!cancelled) setCatalog(c);
+        if (!cancelled) setLoaded({ source, catalog: c });
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled && retries < 3) timer = setTimeout(() => setRetries((n) => n + 1), 2000);
+      });
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
-  }, [catalog]);
+  }, [catalog, source, retries]);
 
   return catalog;
 }

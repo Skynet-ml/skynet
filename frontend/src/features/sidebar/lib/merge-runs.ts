@@ -101,12 +101,30 @@ export function allLoaded(runs: RunLike[], totals: SourceTotals): boolean {
 export async function loadRuns<P extends RunPage>(
   load: (source: ApiSource) => Promise<P>,
   withHosted: boolean,
-): Promise<P & { totals: SourceTotals }> {
+): Promise<P & { totals: SourceTotals; hostedFailed: boolean }> {
+  let hostedFailed = false;
   const [local, hosted] = await Promise.all([
     load("local"),
-    withHosted ? load("hosted").catch(() => null) : Promise.resolve(null),
+    withHosted
+      ? load("hosted").catch(() => {
+          hostedFailed = true;
+          return null;
+        })
+      : Promise.resolve(null),
   ]);
-  return mergeRuns(local, hosted);
+  return { ...mergeRuns(local, hosted), hostedFailed };
+}
+
+// SKY-340: a failed first hosted page used to wait for the 30 s list poll, so
+// a cold start showed "no runs" for seconds. Retry soon, a few times, instead.
+const HOSTED_RETRY_MS = [1000, 2000, 4000];
+
+/**
+ * The wait before the next hosted retry after `failures` failed loads in a
+ * row, or null when the retries are used up (the normal poll takes over).
+ */
+export function hostedRetryDelay(failures: number): number | null {
+  return failures >= 1 && failures <= HOSTED_RETRY_MS.length ? (HOSTED_RETRY_MS[failures - 1] ?? null) : null;
 }
 
 /** Add two count objects field by field; a missing hosted side returns the local counts. */

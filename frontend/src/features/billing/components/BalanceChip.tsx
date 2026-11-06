@@ -23,7 +23,7 @@ import { LinkAccountPrompt } from "./LinkAccountPrompt";
  * an alarm.
  */
 export function BalanceChip({ className }: { className?: string }) {
-  const { wallet, shown, syncing } = useBalance();
+  const { shownWallet, shown, syncing } = useBalance();
   const { status, totalCents, loading, available, linkNeeded, hosted } = shown;
   const { locale } = useLocale();
   const { openTo } = useSettingsModal();
@@ -122,25 +122,7 @@ export function BalanceChip({ className }: { className?: string }) {
             <p className="px-4 pb-4 text-xs text-muted-foreground">
               {msg("billing.popover.unavailable")}
             </p>
-          ) : hosted ? (
-            // Hosted sends one total, so the Mac app shows no paid/grant split.
-            <div className="px-4 pb-3 text-start">
-              <span
-                dir="ltr"
-                className="inline-block text-2xl font-semibold text-foreground tabular-nums"
-              >
-                {formatCentsUsd(totalCents, locale)}
-              </span>
-              <p className="pt-1 text-xs text-muted-foreground">
-                {msg("billing.local.hosted_note")}
-              </p>
-              {status === "low" && (
-                <p className="pt-1 text-xs text-muted-foreground/80">
-                  {msg("billing.chip.low_note")}
-                </p>
-              )}
-            </div>
-          ) : (
+          ) : !shownWallet ? null : (
             <>
               {/* Balance sits directly under the title. An inline-block (not a
                   full-width `text-right` block) lets the parent's logical
@@ -158,20 +140,20 @@ export function BalanceChip({ className }: { className?: string }) {
                 <div className="flex items-center justify-between gap-3">
                   <dt className="text-muted-foreground">{msg("billing.popover.paid")}</dt>
                   <dd dir="ltr" className="font-medium text-foreground tabular-nums">
-                    {formatCentsUsd(wallet.paidBalanceCents, locale)}
+                    {formatCentsUsd(shownWallet.paidBalanceCents, locale)}
                   </dd>
                 </div>
                 {/* Only legacy accounts still hold a grant — new accounts have
                     none, so an empty 0/0 row would advertise a perk that no
                     longer exists. */}
-                {wallet.freeGrant.centsTotal > 0 && (
+                {shownWallet.freeGrant.centsTotal > 0 && (
                   <div className="flex items-center justify-between gap-3">
                     <dt className="text-muted-foreground">{msg("billing.popover.free_grant")}</dt>
                     <dd dir="ltr" className="font-medium text-foreground tabular-nums">
-                      {formatCentsUsd(wallet.freeGrant.centsRemaining, locale)}
+                      {formatCentsUsd(shownWallet.freeGrant.centsRemaining, locale)}
                       <span className="text-muted-foreground">
                         {" / "}
-                        {formatCentsUsd(wallet.freeGrant.centsTotal, locale)}
+                        {formatCentsUsd(shownWallet.freeGrant.centsTotal, locale)}
                       </span>
                     </dd>
                   </div>
@@ -181,6 +163,7 @@ export function BalanceChip({ className }: { className?: string }) {
                 {status === "low" && (
                   <p className="text-muted-foreground/80">{msg("billing.chip.low_note")}</p>
                 )}
+                {hosted && <p className="text-muted-foreground">{msg("billing.local.hosted_note")}</p>}
               </dl>
             </>
           )}

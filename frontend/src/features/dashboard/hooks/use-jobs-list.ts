@@ -5,7 +5,7 @@ import {
   hostedRunsAvailable,
   type OptimizationCounts,
 } from "@/shared/lib/api";
-import { loadRuns, sumCounts } from "@/features/sidebar";
+import { loadRuns, sumCounts, useHostedRetry } from "@/features/sidebar";
 import type { PaginatedJobsResponse } from "@/shared/types/api";
 import { msg } from "@/shared/lib/messages";
 import { FETCH_PAGE_SIZE } from "../constants";
@@ -34,6 +34,8 @@ export function useJobsList({ sessionUser, isAdmin }: UseJobsListArgs): UseJobsL
   const [error, setError] = useState<string | null>(null);
   const [pageOffset, setPageOffset] = useState(0);
   const [counts, setCounts] = useState<OptimizationCounts | null>(null);
+
+  const hostedRetry = useHostedRetry();
 
   const fetchJobs = useCallback(async () => {
     try {
@@ -66,6 +68,7 @@ export function useJobsList({ sessionUser, isAdmin }: UseJobsListArgs): UseJobsL
           ? getOptimizationCounts(undefined, includeShared, "hosted").catch(() => null)
           : null,
       ]);
+      hostedRetry.failed(result.hostedFailed);
       setData(result);
       if (countsResult) setCounts(sumCounts(countsResult, hostedCounts));
       setError(null);
@@ -75,19 +78,21 @@ export function useJobsList({ sessionUser, isAdmin }: UseJobsListArgs): UseJobsL
       setLoading(false);
       setInitialLoad(false);
     }
-  }, [sessionUser, isAdmin, pageOffset]);
+  }, [sessionUser, isAdmin, pageOffset, hostedRetry.failed]);
 
   useEffect(() => {
     if (!data) setLoading(true);
     void fetchJobs();
     // fetchJobs changes whenever sessionUser/isAdmin/pageOffset change, so
     // `data` deliberately stays out of the dep array to avoid a refetch loop.
-  }, [fetchJobs]);
+  }, [fetchJobs, hostedRetry.reloadKey]);
 
   return {
     data,
     setData,
-    loading,
+    // An empty list with a hosted retry still to come is loading, so it does
+    // not show "no runs"; a list with rows keeps its pager usable.
+    loading: loading || (hostedRetry.pending && !data?.total),
     initialLoad,
     error,
     pageOffset,

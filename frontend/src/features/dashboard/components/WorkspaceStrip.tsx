@@ -179,7 +179,8 @@ export function WorkspaceStripSkeleton() {
  */
 export function WorkspaceStrip() {
   const { tagging, datasets, loading } = useWorkspaceSummary();
-  const { wallet, shown } = useBalance();
+  const { shownWallet, shown } = useBalance();
+  const activity = shownWallet?.usage ?? [];
   const walletLoading = shown.loading;
   const { openTo } = useSettingsModal();
   const hostedAvailable = useHostedFeaturesAvailable();
@@ -280,10 +281,10 @@ export function WorkspaceStrip() {
             </span>
           </div>
         )}
-        {wallet.usage.length === 0 ? (
+        {activity.length === 0 ? (
           <>{showFundHint && <EmptyHint text={msg("dashboard.workspace.balance.cta")} />}</>
         ) : (
-          wallet.usage.slice(0, 3).map((entry) => (
+          activity.slice(0, 3).map((entry) => (
             <div key={entry.id} className="flex items-baseline justify-between gap-3 text-xs">
               <span className="min-w-0 truncate text-foreground/80" dir="auto">
                 {entry.label}

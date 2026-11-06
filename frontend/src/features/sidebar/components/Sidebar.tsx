@@ -67,6 +67,7 @@ import {
   loadRuns,
   refreshLimit,
   runKey,
+  useHostedRetry,
 } from "@/features/sidebar";
 import { AccountMenu } from "@/shared/layout/account-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
@@ -306,6 +307,7 @@ export function Sidebar() {
     }
   }, []);
 
+  const hostedRetry = useHostedRetry();
   const fetchData = React.useCallback(async () => {
     void fetchFolders();
     try {
@@ -325,6 +327,7 @@ export function Sidebar() {
       // Drop the response if the user has since toggled away — applying it
       // would clobber the newer tab's list with stale rows.
       if (tabRef.current !== tab) return;
+      hostedRetry.failed(res.hostedFailed);
       setJobs(res.items);
       setActiveCount(res.items.filter((j) => isActiveStatus(j.status)).length);
       setLoadedAll(allLoaded(res.items, res.totals));
@@ -334,7 +337,7 @@ export function Sidebar() {
     } catch (err) {
       console.warn("sidebar fetch failed:", err);
     }
-  }, [sessionUser, isAdmin, tab, fetchFolders]);
+  }, [sessionUser, isAdmin, tab, fetchFolders, hostedRetry.failed]);
 
   React.useEffect(() => {
     // Dep change (login / admin toggle) — reset depth so the next fetch
@@ -358,6 +361,12 @@ export function Sidebar() {
       window.removeEventListener("optimizations-changed", onJobsChanged);
     };
   }, [fetchData]);
+
+  // A hosted retry or a relink refetches the loaded depth; it must not reset
+  // the pages the user has scrolled to.
+  React.useEffect(() => {
+    if (hostedRetry.reloadKey) void fetchData();
+  }, [hostedRetry.reloadKey]);
 
   // Live updates while jobs are active: subscribe to the shared dashboard SSE
   // stream (3s server cadence) so the running badge and per-job status pills
@@ -826,7 +835,11 @@ export function Sidebar() {
                     {msg("sidebar.filter.no_match")}
                   </p>
                 )}
-                {loadedAll && groupedJobs.length === 0 && !showFolders && jobs.length === 0 && (
+                {loadedAll &&
+                  !hostedRetry.pending &&
+                  groupedJobs.length === 0 &&
+                  !showFolders &&
+                  jobs.length === 0 && (
                   <EmptyState
                     icon={PaperPlaneTilt}
                     iconWrap="tile"
@@ -838,7 +851,9 @@ export function Sidebar() {
                 )}
               </motion.div>
             </AnimatePresence>
-            {loadingMore && jobs.length === 0 && <SidebarRunsSkeleton groups={runGroupsHint} />}
+            {(loadingMore || hostedRetry.pending) && jobs.length === 0 && (
+              <SidebarRunsSkeleton groups={runGroupsHint} />
+            )}
             {loadingMore && jobs.length > 0 && (
               <div className="px-1 pt-1 pb-2" aria-hidden="true">
                 <SidebarMoreSkeleton />

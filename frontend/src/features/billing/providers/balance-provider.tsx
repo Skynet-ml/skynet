@@ -5,8 +5,8 @@ import { useSession } from "next-auth/react";
 import { toast } from "react-toastify";
 import { msg } from "@/shared/lib/messages";
 import {
-  getLocalHostedBalance,
   getLocalHostedLinkStatus,
+  getLocalHostedWallet,
   getWallet,
   HOSTED_LINK_CHANGED_EVENT,
   WALLET_CHANGED_EVENT,
@@ -54,6 +54,12 @@ interface BalanceContextValue {
    * `totalCents`.
    */
   shown: ShownBalance;
+  /**
+   * The wallet whose paid balance, grant and activity surfaces show next to
+   * `shown`. On the web it is `wallet`. In the Mac app it is the linked
+   * account's wallet, or null when no linked wallet loaded: never the local credit.
+   */
+  shownWallet: WalletBalance | null;
   /** Re-fetch the wallet from the backend — call after a checkout/portal return. */
   refresh: () => void;
   /**
@@ -146,7 +152,9 @@ export function BalanceProvider({ children }: { children: React.ReactNode }) {
       () =>
         loadHostedBalance({
           linked: () => getLocalHostedLinkStatus().then((s) => s.linked),
-          balance: getLocalHostedBalance,
+          wallet: () => getLocalHostedWallet().then((r) => applyWalletResponse(EMPTY_WALLET, r)),
+          total: totalCents,
+          status: walletStatus,
         }),
       setHosted,
     ),
@@ -198,6 +206,7 @@ export function BalanceProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     if (sessionStatus !== "authenticated") return;
     const reread = () => {
+      if (local) void readHosted(true);
       void getWallet()
         .then((r) => {
           setWallet((prev) => applyWalletResponse(prev, r));
@@ -208,7 +217,7 @@ export function BalanceProvider({ children }: { children: React.ReactNode }) {
     };
     window.addEventListener(WALLET_CHANGED_EVENT, reread);
     return () => window.removeEventListener(WALLET_CHANGED_EVENT, reread);
-  }, [sessionStatus]);
+  }, [sessionStatus, local, readHosted]);
 
   // Post-checkout sync [FG-3]: Stripe webhooks aren't instant, so on a success
   // return we poll the wallet (without toggling `loading`, to avoid wiping the
@@ -276,8 +285,10 @@ export function BalanceProvider({ children }: { children: React.ReactNode }) {
       totalCents: total,
       status,
     });
+    const shownWallet = !local ? wallet : hosted.kind === "hosted" ? hosted.wallet : null;
     return {
       wallet,
+      shownWallet,
       loading,
       syncing,
       available,

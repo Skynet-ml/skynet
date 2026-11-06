@@ -3,26 +3,34 @@
  *
  * The local backend seeds its single user with a large credit, so budget
  * checks never block a run that costs nothing on this Mac. That credit is not
- * money, so the app shows the linked Skynet account's balance instead, or asks
+ * money, so the app shows the linked Skynet account's wallet instead, or asks
  * the user to link an account. Local budget checks still read the local wallet.
  */
 
-import type { WalletStatus } from "./wallet";
+import type { WalletBalance, WalletStatus } from "./wallet";
 
-/** What the Mac app shows in place of the local wallet balance. */
+/** What the Mac app shows in place of the local wallet. */
 export type HostedBalance =
   | { kind: "loading" }
   | { kind: "link" }
   | { kind: "unavailable" }
-  | { kind: "hosted"; cents: number; status: WalletStatus };
+  | { kind: "hosted"; cents: number; status: WalletStatus; wallet: WalletBalance };
 
 interface HostedBalanceApi {
   linked: () => Promise<boolean>;
-  balance: () => Promise<{ available_cents: number; low_balance: boolean }>;
+  /** The linked account's `/billing/wallet`, the same call the web app makes. */
+  wallet: () => Promise<WalletBalance>;
+  /** The web's total and status rules, so both apps show one number. */
+  total: (wallet: WalletBalance) => number;
+  status: (wallet: WalletBalance) => WalletStatus;
 }
 
 /**
- * Read the linked account's balance through the local API.
+ * Read the linked account's wallet through the local API.
+ *
+ * The Mac app reads the same wallet as the web and applies the same rules, so
+ * the two show one number. The desktop balance route subtracts the holds of
+ * running jobs, so it must not be shown (SKY-340).
  *
  * A 401 or 409 means the link is gone (the local API deletes a link that
  * hosted revoked), so the user must link again. Any other failure is
@@ -31,8 +39,8 @@ interface HostedBalanceApi {
 export async function loadHostedBalance(api: HostedBalanceApi): Promise<HostedBalance> {
   try {
     if (!(await api.linked())) return { kind: "link" };
-    const { available_cents: cents, low_balance: low } = await api.balance();
-    return { kind: "hosted", cents, status: cents <= 0 ? "empty" : low ? "low" : "healthy" };
+    const wallet = await api.wallet();
+    return { kind: "hosted", cents: api.total(wallet), status: api.status(wallet), wallet };
   } catch (err) {
     const status = (err as { status?: unknown } | null)?.status;
     return status === 401 || status === 409 ? { kind: "link" } : { kind: "unavailable" };
