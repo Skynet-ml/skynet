@@ -4480,9 +4480,9 @@
   "localUsage.loadFailed": "تعذّر تحميل استخدام CLI.",
   "localUsage.refresh": "تحديث",
   "usage.panel.by_day": "الاستخدام حسب اليوم",
-  "usage.day.calls": "{count, plural, one {استدعاء واحد} other {# استدعاءات}}",
+  "usage.day.calls": "{count, plural, zero {لا استدعاءات} one {استدعاء واحد} two {استدعاءان} few {# استدعاءات} many {# استدعاءً} other {# استدعاء}}",
   "usage.day.empty": "لا توجد استدعاءات مدفوعة في هذا اليوم.",
   "usage.day.load_error": "تعذّر تحميل استدعاءات هذا اليوم.",
-  "usage.day.truncated": "عرض أحدث {shown} من {total} استدعاء.",
+  "usage.day.truncated": "عرض أحدث {shown} من أصل {total} من الاستدعاءات.",
   "usage.day.loading": "جارٍ تحميل استدعاءات هذا اليوم…"
 }

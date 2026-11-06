@@ -416,6 +416,8 @@ export function DayRow({
   // account never replaces the calls of the current one.
   const fetchCalls = React.useCallback(() => {
     const id = ++requestId.current;
+    // Clear the old list so a reload shows the spinner, not stale calls.
+    setCalls(null);
     setLoading(true);
     setFailed(false);
     loadCalls(day.date)
@@ -482,6 +484,10 @@ export function DayRow({
           {formatCentsUsd(day.cents, locale)}
         </span>
       </button>
+      {/* Stays mounted, so screen readers announce the text when a load starts. */}
+      <span role="status" className="sr-only">
+        {open && loading ? msg("usage.day.loading") : ""}
+      </span>
       {open && (
         <div id={panelId} className="mb-3 ms-6 rounded-lg border border-border/50 bg-muted/10 px-3">
           {failed ? (
@@ -497,12 +503,7 @@ export function DayRow({
               }
             />
           ) : calls == null ? (
-            <div
-              className="flex h-14 items-center justify-center"
-              role="status"
-              aria-busy="true"
-              aria-label={msg("usage.day.loading")}
-            >
+            <div className="flex h-14 items-center justify-center" aria-hidden="true">
               <ArrowsClockwise
                 className="size-4 animate-spin text-muted-foreground"
                 aria-hidden="true"

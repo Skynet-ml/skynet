@@ -150,14 +150,14 @@ void test("opening a day shows a labeled spinner, then its calls with UTC dates 
       assert.ok(panelId && container.querySelector(`[id="${panelId}"]`));
       assert.deepEqual(asked, ["2026-11-06"]);
 
-      const spinner = container.querySelector('[role="status"]');
-      assert.equal(spinner?.getAttribute("aria-busy"), "true");
-      assert.equal(spinner?.getAttribute("aria-label"), "Loading the calls for this day…");
+      const status = container.querySelector('[role="status"]');
+      assert.equal(status?.textContent, "Loading the calls for this day…");
 
       await React.act(async () => {
         resolve([call("a", "2026-11-06T01:30:00+00:00"), call("b", "2026-11-06T00:05:00+00:00")]);
       });
-      assert.equal(container.querySelector('[role="status"]'), null);
+      // The status region stays mounted for screen readers; only its text clears.
+      assert.equal(container.querySelector('[role="status"]')?.textContent, "");
       const rows = container.querySelectorAll(`[id="${panelId}"] li`);
       assert.equal(rows.length, 2);
       // West of UTC the local date would be Nov 5; the call must match its day row.
@@ -201,9 +201,10 @@ void test("closing the day hides its calls, and opening it again reloads them", 
   let loads = 0;
   await withDayRow(
     {
-      loadCalls: async () => {
+      // The second load never settles, so the test sees the reload state.
+      loadCalls: (): Promise<BillingUsageEntry[]> => {
         loads += 1;
-        return [];
+        return loads === 1 ? Promise.resolve([]) : new Promise(() => {});
       },
     },
     async (container) => {
@@ -217,6 +218,11 @@ void test("closing the day hides its calls, and opening it again reloads them", 
       assert.doesNotMatch(container.textContent ?? "", /No billed calls/);
       await clickDay(container);
       assert.equal(loads, 2);
+      assert.doesNotMatch(container.textContent ?? "", /No billed calls/);
+      assert.equal(
+        container.querySelector('[role="status"]')?.textContent,
+        "Loading the calls for this day…",
+      );
     },
   );
 });
