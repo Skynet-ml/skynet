@@ -159,3 +159,22 @@ describe("watchLink", () => {
     expect(isLinked).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("watchLink stop", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("does not call onLost for a check that ends after stop", async () => {
+    vi.useFakeTimers();
+    let answer: (linked: boolean) => void = () => {};
+    const isLinked = vi.fn(() => new Promise<boolean>((resolve) => (answer = resolve)));
+    const onLost = vi.fn();
+    const stop = watchLink(isLinked, onLost, 1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    stop();
+    answer(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onLost).not.toHaveBeenCalled();
+  });
+});

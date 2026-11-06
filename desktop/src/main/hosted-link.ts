@@ -108,12 +108,18 @@ export class HostedLinkClient {
  */
 export function watchLink(isLinked: () => Promise<boolean>, onLost: () => void, everyMs = 30_000): () => void {
   let checking = false;
+  let stopped = false;
+  const stop = () => {
+    stopped = true;
+    clearInterval(timer);
+  };
   const timer = setInterval(async () => {
     if (checking) return;
     checking = true;
     try {
-      if (!(await isLinked())) {
-        clearInterval(timer);
+      // A check can end after stop(); it must not report a loss then.
+      if (!(await isLinked()) && !stopped) {
+        stop();
         onLost();
       }
     } catch {
@@ -122,5 +128,5 @@ export function watchLink(isLinked: () => Promise<boolean>, onLost: () => void, 
       checking = false;
     }
   }, everyMs);
-  return () => clearInterval(timer);
+  return stop;
 }

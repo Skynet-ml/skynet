@@ -392,14 +392,17 @@ async function openApp(): Promise<void> {
   useAppSize();
   stopLinkWatch?.();
   const client = hostedLink;
-  if (client) stopLinkWatch = watchLink(() => client.linked(), () => void signInAgain());
+  // Each check reads the local link; every 10th (5 min) also asks hosted, so an
+  // idle app also sees a link that hosted revoked.
+  let checks = 0;
+  if (client) stopLinkWatch = watchLink(() => (++checks % 10 === 0 ? client.verified() : client.linked()), () => void signInAgain());
   await loadAppUrl(frontendUrl);
 }
 
 /** The link is gone while the app runs: close the app and ask for a sign-in again. */
 async function signInAgain(): Promise<void> {
-  stopLinkWatch = null;
   if (quitting || state.kind !== "ready") return;
+  stopLinkWatch = null;
   log("the account link is gone; asking for a sign-in again");
   showOnboarding({ ...state, kind: "sign_in", url: undefined, signIn: "waiting", error: undefined });
   await signIn();
@@ -449,6 +452,11 @@ async function handleAppUrl(raw: string): Promise<void> {
     if (isOpenAppUrl(raw)) {
       if (win?.isMinimized()) win.restore();
       win?.focus();
+      // A sign-in started in the web app ends on that page, not on
+      // skynet://link/callback, so the sign-in step checks the link here.
+      if (state.kind === "sign_in" && hostedLink && !finishingSignIn && (await hostedLink.linked().catch(() => false))) {
+        await openApp();
+      }
       return;
     }
     return log("ignored an unknown skynet:// URL");
