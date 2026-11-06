@@ -24,7 +24,7 @@ from core.api.preflight_execution import _verify_model_routes
 from core.billing import model_gateway as gateway_module
 from core.billing.budgets import BudgetInsufficientError, BudgetService
 from core.billing.byok_upstreams import UPSTREAMS
-from core.billing.model_dispatch import ModelHTTPResult
+from core.billing.model_dispatch import ModelHTTPResult, response_complete
 from core.billing.model_gateway import (
     EMBEDDING_ROUTE_KEY,
     PARENT_HOSTS_KEY,
@@ -733,6 +733,79 @@ def test_byok_only_supplies_default_output_limit_for_anthropic_messages(
     )
     gateway._routes[route["token"]].dispatch(path, {"model": route["model"]})
     assert sent[0].get("max_tokens") == expected
+
+
+def test_anthropic_byok_messages_moves_completion_limit_to_max_tokens(gateway: ModelGateway) -> None:
+    """Forward the caller's max_completion_tokens to Anthropic as max_tokens only."""
+    sent: list[dict] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Capture the exact forwarded request."""
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "generation", "usage": {}})
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider))
+    route = gateway.register(
+        model="fixture/text",
+        api_key="private",
+        role="task",
+        policy=ChargePolicy("byok_model"),
+        upstream=UPSTREAMS["anthropic"],
+    )
+    gateway._routes[route["token"]].dispatch("/messages", {"model": route["model"], "max_completion_tokens": 50})
+    assert sent[0] == {"model": route["model"], "max_tokens": 50}
+
+
+@pytest.mark.parametrize("limit", [0, -1, "50", True, 1.5])
+def test_anthropic_byok_messages_rejects_invalid_completion_limit(gateway: ModelGateway, limit: object) -> None:
+    """Refuse an invalid max_completion_tokens on /messages before any provider call."""
+    sent: list[httpx.Request] = []
+    gateway._client.close()
+    gateway._client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: sent.append(request) or httpx.Response(200, json={}))
+    )
+    route = gateway.register(
+        model="fixture/text",
+        api_key="private",
+        role="task",
+        policy=ChargePolicy("byok_model"),
+        upstream=UPSTREAMS["anthropic"],
+    )
+    with pytest.raises(UnpricedOperationError, match="positive output token limit"):
+        gateway._routes[route["token"]].dispatch("/messages", {"model": route["model"], "max_completion_tokens": limit})
+    assert sent == []
+
+
+_STREAM_WITHOUT_DONE = (
+    b'data: {"id":"gen-1","choices":[{"delta":{"content":"hi"},"finish_reason":null}]}\n\n'
+    b'data: {"id":"gen-1","choices":[{"delta":{},"finish_reason":"stop"}],'
+    b'"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\n'
+)
+
+
+def test_byok_stream_without_done_line_ends_at_finish_reason(gateway: ModelGateway) -> None:
+    """Pass a BYOK stream that closes with a finish_reason chunk and no [DONE] line."""
+    gateway._client.close()
+    gateway._client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, content=_STREAM_WITHOUT_DONE
+            )
+        )
+    )
+    route = gateway.register(
+        model="fixture/text",
+        api_key="private",
+        role="task",
+        policy=ChargePolicy("byok_model"),
+        upstream=UPSTREAMS["openai"],
+    )
+    result = gateway._routes[route["token"]].dispatch(
+        "/chat/completions", {"model": route["model"], "stream": True, "max_tokens": 5}
+    )
+    assert result.status == 200
+    assert response_complete(_STREAM_WITHOUT_DONE, "text/event-stream") is False
 
 
 @pytest.mark.parametrize(
