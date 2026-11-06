@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import shutil
+import subprocess
 import threading
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -467,6 +470,37 @@ def _top_level_jobs():
         A SQLAlchemy boolean clause for ``query.filter``.
     """
     return JobModel.parent_optimization_id.is_(None)
+
+
+# Must match PG_CONTAINER in desktop/src/main/postgres.ts.
+_LOCAL_PG_CONTAINER = "skynet-local-postgres"
+_LOCAL_PG_DATA = "/var/lib/postgresql/data"
+
+
+def _local_postgres_free_bytes() -> int | None:
+    """Return the free bytes of the Docker disk under the Mac app's Postgres volume.
+
+    Returns:
+        The free bytes, or ``None`` when Docker or the container is not there
+        (for example a local-mode backend that a developer runs by hand).
+    """
+    docker = shutil.which("docker")
+    if docker is None:
+        return None
+    try:
+        result = subprocess.run(
+            [docker, "exec", _LOCAL_PG_CONTAINER, "df", "-B1", "--output=avail", _LOCAL_PG_DATA],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    lines = result.stdout.split()
+    if result.returncode != 0 or not lines or not lines[-1].isdigit():
+        return None
+    return int(lines[-1])
 
 
 class RemoteDBJobStore:
@@ -2153,11 +2187,13 @@ class RemoteDBJobStore:
     def get_effective_user_storage_quota(self, username: str) -> int:
         """Return the unified storage budget in bytes the user is held to.
 
-        Resolves an admin per-user override first (a live DB row that replaces
-        the default ceiling for that user), falling back to the static
-        ``settings.user_storage_quota_bytes`` default. Staying a method keeps the
-        save/run gate, the usage meter, and the quota modal resolving the budget
-        through one seam that tests can stub.
+        In local mode (the Mac app) the budget is the used bytes plus the free
+        space: the smaller of the Mac disk free space and the Docker disk free
+        space under the Postgres volume. Otherwise it resolves an admin
+        per-user override first (a live DB row that replaces the default ceiling for that user), falling
+        back to the static ``settings.user_storage_quota_bytes`` default.
+        Staying a method keeps the save/run gate, the usage meter, and the
+        quota modal resolving the budget through one seam that tests can stub.
 
         Args:
             username: Owner whose effective byte budget is resolved.
@@ -2165,6 +2201,19 @@ class RemoteDBJobStore:
         Returns:
             The byte budget the user's total storage is checked against.
         """
+        if settings.local_mode:
+            # The Mac app keeps its data on the user's own disk, so the web
+            # budget only blocks them (SKY-344). The budget is what Skynet
+            # already uses plus the real free space. Postgres runs in a Docker
+            # volume, and the Docker VM disk can fill up before the Mac disk,
+            # so the smaller of the two counts.
+            state_dir = Path(settings.local_state_dir)
+            disk = state_dir if settings.local_state_dir and state_dir.is_dir() else Path.home()
+            free = shutil.disk_usage(disk).free
+            docker_free = _local_postgres_free_bytes()
+            if docker_free is not None:
+                free = min(free, docker_free)
+            return self.compute_user_storage(username).total + free
         override = self.get_user_storage_quota_override(username)
         if override is not None:
             return override
