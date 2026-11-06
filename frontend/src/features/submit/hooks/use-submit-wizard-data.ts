@@ -92,8 +92,9 @@ export function useModelCatalog(source: ApiSource = "local") {
     },
   );
   const catalog = loaded?.source === source ? loaded.catalog : pick();
-  // A failed web catalog fetch tries again a few times while Remote stays chosen.
-  const [retries, setRetries] = useState(0);
+  // A failed catalog fetch tries again a few times; each source choice starts a new count.
+  const [retry, setRetry] = useState<{ source: ApiSource; n: number }>({ source, n: 0 });
+  const retries = retry.source === source ? retry.n : 0;
 
   useEffect(() => {
     if (catalog) return;
@@ -104,7 +105,7 @@ export function useModelCatalog(source: ApiSource = "local") {
         if (!cancelled) setLoaded({ source, catalog: c });
       })
       .catch(() => {
-        if (!cancelled && retries < 3) timer = setTimeout(() => setRetries((n) => n + 1), 2000);
+        if (!cancelled && retries < 3) timer = setTimeout(() => setRetry({ source, n: retries + 1 }), 2000);
       });
     return () => {
       cancelled = true;
