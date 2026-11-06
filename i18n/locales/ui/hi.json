@@ -4461,5 +4461,10 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "सेटिंग्स → API में टोकन बनाएँ। इसे Bearer टोकन के रूप में भेजें, और हर कॉल में नया Idempotency-Key दें।",
   "serve_tab.api.endpoint": "एंडपॉइंट",
-  "serve_tab.api.copy": "एंडपॉइंट URL कॉपी करें"
+  "serve_tab.api.copy": "एंडपॉइंट URL कॉपी करें",
+  "usage.panel.by_day": "दिन के अनुसार उपयोग",
+  "usage.day.calls": "{count, plural, one {# कॉल} other {# कॉल}}",
+  "usage.day.empty": "इस दिन कोई बिल की गई कॉल नहीं है।",
+  "usage.day.load_error": "इस दिन की कॉल लोड नहीं हो सकीं।",
+  "usage.day.truncated": "{total} में से नवीनतम {shown} कॉल दिखाई जा रही हैं।"
 }

@@ -4461,5 +4461,10 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "Створіть токен у розділі Налаштування → API. Надсилайте його як Bearer-токен із новим Idempotency-Key під час кожного виклику.",
   "serve_tab.api.endpoint": "Ендпоінт",
-  "serve_tab.api.copy": "Скопіювати URL ендпоінта"
+  "serve_tab.api.copy": "Скопіювати URL ендпоінта",
+  "usage.panel.by_day": "Використання за днями",
+  "usage.day.calls": "{count, plural, one {# виклик} few {# виклики} many {# викликів} other {# виклику}}",
+  "usage.day.empty": "Цього дня немає оплачених викликів.",
+  "usage.day.load_error": "Не вдалося завантажити виклики за цей день.",
+  "usage.day.truncated": "Показано останні {shown} із {total} викликів."
 }

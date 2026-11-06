@@ -4461,5 +4461,10 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "喺 設定 → API 產生權杖。用 Bearer 權杖傳送，每次呼叫都附上新嘅 Idempotency-Key。",
   "serve_tab.api.endpoint": "端點",
-  "serve_tab.api.copy": "複製端點網址"
+  "serve_tab.api.copy": "複製端點網址",
+  "usage.panel.by_day": "每日用量",
+  "usage.day.calls": "{count, plural, other {# 次調用}}",
+  "usage.day.empty": "呢日冇收費嘅調用。",
+  "usage.day.load_error": "載入唔到呢日嘅調用。",
+  "usage.day.truncated": "顯示 {total} 次之中最新嘅 {shown} 次。"
 }

@@ -4461,5 +4461,10 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "Genera un token en Ajustes → API. Envíalo como token Bearer con una Idempotency-Key nueva en cada llamada.",
   "serve_tab.api.endpoint": "Endpoint",
-  "serve_tab.api.copy": "Copiar la URL del endpoint"
+  "serve_tab.api.copy": "Copiar la URL del endpoint",
+  "usage.panel.by_day": "Uso por día",
+  "usage.day.calls": "{count, plural, one {# llamada} other {# llamadas}}",
+  "usage.day.empty": "No hay llamadas facturadas este día.",
+  "usage.day.load_error": "No pudimos cargar las llamadas de este día.",
+  "usage.day.truncated": "Se muestran las {shown} más recientes de {total} llamadas."
 }

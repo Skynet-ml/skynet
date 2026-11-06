@@ -316,6 +316,9 @@ class UsageDayResponse(BaseModel):
 
     date: str = Field(description="Calendar day (YYYY-MM-DD, UTC).")
     billed_cents: int = Field(description="Gross run spend billed that day, in cents.")
+    runs: int = Field(default=0, description="Billed runs (debited ledger rows) that day.")
+    input_tokens: int = Field(default=0, description="Measured input tokens behind that day's billed runs.")
+    output_tokens: int = Field(default=0, description="Measured output tokens behind that day's billed runs.")
 
 
 class UsageModelResponse(BaseModel):
@@ -663,7 +666,16 @@ def create_billing_router(*, job_store) -> APIRouter:
             end=snapshot.end,
             billed_cents=snapshot.billed_cents,
             runs=snapshot.runs,
-            by_day=[UsageDayResponse(date=day.date, billed_cents=day.billed_cents) for day in snapshot.by_day],
+            by_day=[
+                UsageDayResponse(
+                    date=day.date,
+                    billed_cents=day.billed_cents,
+                    runs=day.runs,
+                    input_tokens=day.input_tokens,
+                    output_tokens=day.output_tokens,
+                )
+                for day in snapshot.by_day
+            ],
             by_model=[
                 UsageModelResponse(
                     model=row.model,

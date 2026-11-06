@@ -4461,5 +4461,10 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "در تنظیمات ← API یک توکن بسازید. آن را به‌صورت توکن Bearer با یک Idempotency-Key تازه در هر فراخوانی بفرستید.",
   "serve_tab.api.endpoint": "نقطه پایانی",
-  "serve_tab.api.copy": "کپی نشانی نقطه پایانی"
+  "serve_tab.api.copy": "کپی نشانی نقطه پایانی",
+  "usage.panel.by_day": "مصرف روزانه",
+  "usage.day.calls": "{count, plural, one {# فراخوانی} other {# فراخوانی}}",
+  "usage.day.empty": "در این روز هیچ فراخوانی پولی ثبت نشده است.",
+  "usage.day.load_error": "بارگیری فراخوانی‌های این روز ممکن نشد.",
+  "usage.day.truncated": "نمایش {shown} فراخوانی اخیر از {total}."
 }

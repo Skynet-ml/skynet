@@ -223,10 +223,13 @@ class WalletSnapshot:
 
 @dataclass(frozen=True)
 class UsageDayRow:
-    """One calendar day's billed run spend, in cents."""
+    """One calendar day's billed run spend, in cents, with its run count and tokens."""
 
     date: str
     billed_cents: int
+    runs: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -1182,8 +1185,8 @@ class StripeBillingService:
         """Aggregate the account's wallet ledger over a date window for the dashboard.
 
         A pure DB read — no Stripe call. Sums run rows in ``[start, end]`` into
-        gross billed spend, a run count, a per-day billed series (ascending by
-        date), and a per-model spend series (descending by spend); top-ups
+        gross billed spend, a run count, a per-day series of billed cents, runs
+        and tokens (ascending by date), and a per-model spend series (descending by spend); top-ups
         and grants are excluded from those rollups. The most recent :data:`USAGE_ENTRY_LIMIT` raw ledger rows in the
         window ride along as ``entries`` for the activity list and the per-run
         breakdown, while the rollups span every row in range regardless of that
@@ -1223,7 +1226,7 @@ class StripeBillingService:
             )
         billed = 0
         runs = 0
-        per_day: dict[str, int] = {}
+        per_day: dict[str, list[int]] = {}
         per_model: dict[str | None, list[int]] = {}
         # Only debits count as spend; a positive ``run`` row (a legacy
         # correction) is ignored by the rollups but still rides in ``entries``.
@@ -1234,13 +1237,26 @@ class StripeBillingService:
             billed += spent
             runs += 1
             day = row.created_at.date().isoformat()
-            per_day[day] = per_day.get(day, 0) + spent
+            day_vals = per_day.setdefault(day, [0, 0, 0, 0])
+            day_vals[0] += spent
+            day_vals[1] += 1
+            day_vals[2] += row.input_tokens or 0
+            day_vals[3] += row.output_tokens or 0
             model = per_model.setdefault(row.model, [0, 0, 0, 0])
             model[0] += spent
             model[1] += 1
             model[2] += row.input_tokens or 0
             model[3] += row.output_tokens or 0
-        by_day = [UsageDayRow(date=date, billed_cents=cents) for date, cents in sorted(per_day.items())]
+        by_day = [
+            UsageDayRow(
+                date=date,
+                billed_cents=vals[0],
+                runs=vals[1],
+                input_tokens=vals[2],
+                output_tokens=vals[3],
+            )
+            for date, vals in sorted(per_day.items())
+        ]
         by_model = [
             UsageModelRow(
                 model=model,

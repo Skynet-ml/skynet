@@ -4461,5 +4461,10 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "設定 → API でトークンを生成してください。Bearer トークンとして送信し、呼び出しごとに新しい Idempotency-Key を付けてください。",
   "serve_tab.api.endpoint": "エンドポイント",
-  "serve_tab.api.copy": "エンドポイント URL をコピー"
+  "serve_tab.api.copy": "エンドポイント URL をコピー",
+  "usage.panel.by_day": "日別の使用量",
+  "usage.day.calls": "{count, plural, other {# 件の呼び出し}}",
+  "usage.day.empty": "この日に課金された呼び出しはありません。",
+  "usage.day.load_error": "この日の呼び出しを読み込めませんでした。",
+  "usage.day.truncated": "{total} 件中、最新の {shown} 件を表示しています。"
 }

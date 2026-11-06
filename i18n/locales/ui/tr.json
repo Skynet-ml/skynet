@@ -4461,5 +4461,10 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "Ayarlar → API bölümünde bir belirteç oluşturun. Bunu her çağrıda yeni bir Idempotency-Key ile Bearer belirteci olarak gönderin.",
   "serve_tab.api.endpoint": "Uç nokta",
-  "serve_tab.api.copy": "Uç nokta URL'sini kopyala"
+  "serve_tab.api.copy": "Uç nokta URL'sini kopyala",
+  "usage.panel.by_day": "Günlük kullanım",
+  "usage.day.calls": "{count, plural, other {# çağrı}}",
+  "usage.day.empty": "Bu gün faturalanan çağrı yok.",
+  "usage.day.load_error": "Bu günün çağrıları yüklenemedi.",
+  "usage.day.truncated": "{total} çağrının en son {shown} tanesi gösteriliyor."
 }

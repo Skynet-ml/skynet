@@ -4461,5 +4461,10 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "Erstellen Sie ein Token unter Einstellungen → API. Senden Sie es als Bearer-Token mit einem neuen Idempotency-Key pro Aufruf.",
   "serve_tab.api.endpoint": "Endpunkt",
-  "serve_tab.api.copy": "Endpunkt-URL kopieren"
+  "serve_tab.api.copy": "Endpunkt-URL kopieren",
+  "usage.panel.by_day": "Nutzung pro Tag",
+  "usage.day.calls": "{count, plural, one {# Aufruf} other {# Aufrufe}}",
+  "usage.day.empty": "Keine abgerechneten Aufrufe an diesem Tag.",
+  "usage.day.load_error": "Die Aufrufe für diesen Tag konnten nicht geladen werden.",
+  "usage.day.truncated": "Die neuesten {shown} von {total} Aufrufen werden angezeigt."
 }

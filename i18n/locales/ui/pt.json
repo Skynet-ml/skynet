@@ -4461,5 +4461,10 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "Gere um token em Configurações → API. Envie-o como token Bearer com uma nova Idempotency-Key em cada chamada.",
   "serve_tab.api.endpoint": "Endpoint",
-  "serve_tab.api.copy": "Copiar a URL do endpoint"
+  "serve_tab.api.copy": "Copiar a URL do endpoint",
+  "usage.panel.by_day": "Uso por dia",
+  "usage.day.calls": "{count, plural, one {# chamada} other {# chamadas}}",
+  "usage.day.empty": "Nenhuma chamada cobrada neste dia.",
+  "usage.day.load_error": "Não foi possível carregar as chamadas deste dia.",
+  "usage.day.truncated": "Mostrando as {shown} mais recentes de {total} chamadas."
 }

@@ -4461,5 +4461,10 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "Generate a token in Settings → API. Send it as a bearer token with a new Idempotency-Key on each call.",
   "serve_tab.api.endpoint": "Endpoint",
-  "serve_tab.api.copy": "Copy endpoint URL"
+  "serve_tab.api.copy": "Copy endpoint URL",
+  "usage.panel.by_day": "Usage by day",
+  "usage.day.calls": "{count, plural, one {# call} other {# calls}}",
+  "usage.day.empty": "No billed calls on this day.",
+  "usage.day.load_error": "We couldn't load the calls for this day.",
+  "usage.day.truncated": "Showing the latest {shown} of {total} calls."
 }

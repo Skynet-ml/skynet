@@ -4461,5 +4461,10 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "在 设置 → API 中生成令牌。以 Bearer 令牌发送，并在每次调用时附带新的 Idempotency-Key。",
   "serve_tab.api.endpoint": "端点",
-  "serve_tab.api.copy": "复制端点 URL"
+  "serve_tab.api.copy": "复制端点 URL",
+  "usage.panel.by_day": "每日用量",
+  "usage.day.calls": "{count, plural, other {# 次调用}}",
+  "usage.day.empty": "这一天没有计费调用。",
+  "usage.day.load_error": "无法加载这一天的调用。",
+  "usage.day.truncated": "显示 {total} 次中最新的 {shown} 次。"
 }

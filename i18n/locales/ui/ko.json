@@ -4461,5 +4461,10 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "설정 → API에서 토큰을 생성하세요. Bearer 토큰으로 보내고, 호출할 때마다 새 Idempotency-Key를 붙이세요.",
   "serve_tab.api.endpoint": "엔드포인트",
-  "serve_tab.api.copy": "엔드포인트 URL 복사"
+  "serve_tab.api.copy": "엔드포인트 URL 복사",
+  "usage.panel.by_day": "일별 사용량",
+  "usage.day.calls": "{count, plural, other {호출 #회}}",
+  "usage.day.empty": "이 날에는 청구된 호출이 없습니다.",
+  "usage.day.load_error": "이 날의 호출을 불러오지 못했습니다.",
+  "usage.day.truncated": "{total}회 중 최근 {shown}회를 표시합니다."
 }

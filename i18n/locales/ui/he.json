@@ -4461,5 +4461,10 @@
   "serve_tab.api.title": "API",
   "serve_tab.api.token_hint": "צרו טוקן בהגדרות ← API. שלחו אותו כטוקן Bearer, עם Idempotency-Key חדש בכל קריאה.",
   "serve_tab.api.endpoint": "נקודת קצה",
-  "serve_tab.api.copy": "העתקת כתובת נקודת הקצה"
+  "serve_tab.api.copy": "העתקת כתובת נקודת הקצה",
+  "usage.panel.by_day": "ניצול לפי יום",
+  "usage.day.calls": "{count, plural, one {קריאה אחת} other {# קריאות}}",
+  "usage.day.empty": "אין קריאות בחיוב ביום הזה.",
+  "usage.day.load_error": "לא הצלחנו לטעון את הקריאות של היום הזה.",
+  "usage.day.truncated": "מוצגות {shown} הקריאות האחרונות מתוך {total}."
 }
