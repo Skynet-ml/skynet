@@ -89,7 +89,8 @@ source as an issue. In the Mac app, name a subscription model
 
 The scorer is `score(repo_path, case)`. It returns a `(score, feedback)` pair
 or a `{"score": ..., "feedback": ...}` dict. The engines learn from the
-feedback, so a bare number fails the run. A scorer that takes only `repo_path`
+feedback, so a bare number fails the run. A bare number on only some paths,
+such as an error path, gives a note: the runner refuses only those scores. A scorer that takes only `repo_path`
 also works, but the step adds a note when the draft has data: every case gets
 the same score.
 

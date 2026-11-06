@@ -237,10 +237,18 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
         return [f"The scorer function {scorer.name} takes no arguments. Use score(repo_path)."], []
     issues: list[str] = []
     notes: list[str] = []
-    if _returns_bare_number(scorer):
+    bare, total = _bare_number_returns(scorer)
+    if bare and bare == total:
         issues.append(
             f"The scorer function {scorer.name} returns a bare number. Return (score, feedback) "
             "or {'score': ..., 'feedback': ...}, because the engines learn from the feedback."
+        )
+    elif bare:
+        # A bare number fails only the scorer call that returns it, such as an
+        # error path, so the run can still work.
+        notes.append(
+            f"Some returns of the scorer function {scorer.name} give a bare number. "
+            "The runner refuses that score, so return (score, feedback) there too."
         )
     if has_cases and args.vararg is None and positional < 2:
         # The runner calls a one-argument scorer without the case, so this runs.
@@ -284,8 +292,8 @@ def _scorer_binding(tree: ast.Module) -> tuple[bool, ast.FunctionDef | ast.Async
     return False, None
 
 
-def _returns_bare_number(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    """Tell whether ``function`` has a ``return`` of a number literal.
+def _bare_number_returns(function: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[int, int]:
+    """Count the ``return`` statements of ``function`` that give a number literal.
 
     The runner refuses a bare number, so this catches the common mistake
     before the paid run. Nested functions are not checked.
@@ -294,22 +302,25 @@ def _returns_bare_number(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bo
         function: The scorer function node.
 
     Returns:
-        True when one of its own ``return`` statements gives a number literal.
+        The number of its own returns that give a number literal, and the
+        number of its own returns that give a value.
     """
+    bare = total = 0
     pending: list[ast.AST] = list(function.body)
     while pending:
         node = pending.pop()
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
             continue
-        if isinstance(node, ast.Return):
+        if isinstance(node, ast.Return) and node.value is not None:
+            total += 1
             value = node.value
             if isinstance(value, ast.UnaryOp):
                 value = value.operand
             # The runner refuses bools too: they are ints.
             if isinstance(value, ast.Constant) and isinstance(value.value, int | float):
-                return True
+                bare += 1
         pending.extend(ast.iter_child_nodes(node))
-    return False
+    return bare, total
 
 
 def _model_entries(models: dict[str, Any]) -> list[tuple[str, str, str | None]]:

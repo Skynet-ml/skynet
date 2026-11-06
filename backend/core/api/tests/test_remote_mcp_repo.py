@@ -377,3 +377,17 @@ def test_bare_number_return_is_an_issue(value: str) -> None:
     """Flag a number, negative number or bool literal, which the runner refuses."""
     issues, _notes = remote_mcp_repo.scorer_issues(f"def score(path):\n  return {value}\n", has_cases=False)
     assert "returns a bare number" in issues[0]
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "def score(path):\n  if not path:\n    return 0.0\n  return 1.0, 'ok'\n",
+        "def score(path):\n  try:\n    return {'score': 1.0, 'feedback': 'ok'}\n  except Exception:\n    return False\n",
+    ],
+)
+def test_bare_number_on_one_path_is_a_note(code: str) -> None:
+    """Allow a bare number on an error path, which fails only that scorer call."""
+    issues, notes = remote_mcp_repo.scorer_issues(code, has_cases=False)
+    assert issues == []
+    assert "Some returns" in notes[0]
