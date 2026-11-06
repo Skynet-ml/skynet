@@ -169,6 +169,8 @@ export interface WizardV2Shell extends WizardV2Context {
   /** The user's choice; it stays Web when the link drops, so a Web run never starts on the Mac. */
   runOn: ApiSource;
   setRunOn: (source: ApiSource) => void;
+  /** Where the run starts: the web only when the Mac is linked and the user chose it. */
+  runSource: ApiSource;
   /** Why this setup cannot run on the web; null when it can, or when it runs on the Mac. */
   hostedBlock: MessageKey | null;
   /** Load the hosted optimizer catalog again after a failed load. */
@@ -376,7 +378,6 @@ export function WizardV2Provider({
   const router = useRouter();
   const { data: session } = useSession();
   const guided = level === "guided";
-  const modelCatalog = useModelCatalog();
   const pricing = usePricingTerms();
   const budget = useExecutionBudget();
   const budgetSession = budget.session;
@@ -418,6 +419,7 @@ export function WizardV2Provider({
   const hostedChoice = hostedRunsAvailable();
   const [runOn, setRunOn] = useState<ApiSource>("local");
   const runSource: ApiSource = hostedChoice && runOn === "hosted" ? "hosted" : "local";
+  const modelCatalog = useModelCatalog(runSource);
   const [catalogEntry, setCatalogEntry] = useState<{
     source: ApiSource;
     catalog: OptimizerCatalogResponse;
@@ -1283,6 +1285,7 @@ export function WizardV2Provider({
     hostedChoice,
     runOn,
     setRunOn,
+    runSource,
     hostedBlock,
     retryHostedCatalog,
   };

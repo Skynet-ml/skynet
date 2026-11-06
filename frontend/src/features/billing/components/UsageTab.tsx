@@ -22,6 +22,7 @@ import { RetryIconButton } from "@/shared/ui/retry-icon-button";
 import { AppDatePicker, toISODate } from "@/shared/ui/app-date-picker";
 import { ExportTableMenu } from "@/shared/ui/export-table-menu";
 import { Segmented } from "@/shared/ui/segmented";
+import { ResourceModeSwitch, useResourceMode } from "@/shared/ui/resource-mode-switch";
 import { PanelHeading } from "@/shared/ui/panel-heading";
 import { Button } from "@/shared/ui/primitives/button";
 import { useBalance } from "../providers/balance-provider";
@@ -382,8 +383,12 @@ function LedgerRow({ entry, locale }: { entry: BillingUsageEntry; locale: string
  * comes from the backend `GET /billing/usage` rollup; if a local read fails the
  * tab derives the same shape client-side from the wallet's recent ledger so the
  * surface still renders. A failed web-account read shows an error instead.
+ *
+ * `localPanel` is the one mount point for extra Local-mode usage (SKY-341
+ * plugs its CLI subscription panel in here). It renders only in Local mode,
+ * in every state: loaded, loading, empty and failed.
  */
-export function UsageTab() {
+export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) {
   const { wallet } = useBalance();
   const { locale } = useLocale();
   const [range, setRange] = React.useState<RangeKey>("30d");
@@ -409,19 +414,21 @@ export function UsageTab() {
     [customFrom, customTo],
   );
 
+  const resources = useResourceMode();
+  const source = resources.mode;
   const load = React.useCallback(() => {
     const { startIso, endIso, startMs, endMs } = rangeBounds(range, customFrom, customTo);
     const id = ++reqId.current;
     setLoading(true);
     setFailed(false);
-    getUsage(startIso, endIso)
+    getUsage(startIso, endIso, source)
       .then((resp) => {
         if (id === reqId.current) setData(resp);
       })
       .catch(() => {
         if (id !== reqId.current) return;
         // The local wallet ledger cannot stand in for the web account's usage.
-        if (hostedRunsAvailable()) {
+        if (source === "hosted" && hostedRunsAvailable()) {
           setData(null);
           setFailed(true);
         } else {
@@ -431,7 +438,7 @@ export function UsageTab() {
       .finally(() => {
         if (id === reqId.current) setLoading(false);
       });
-  }, [range, customFrom, customTo, wallet.usage]);
+  }, [range, customFrom, customTo, wallet.usage, source]);
 
   React.useEffect(() => {
     load();
@@ -464,6 +471,7 @@ export function UsageTab() {
           />
         </div>
         <div className="flex items-center gap-2">
+          <ResourceModeSwitch {...resources} />
           <ExportTableMenu
             iconOnly
             disabled={entries.length === 0}
@@ -510,6 +518,8 @@ export function UsageTab() {
     </div>
   );
 
+  const panel = source === "local" ? localPanel : null;
+
   if (failed) {
     return (
       <div className="flex flex-col gap-5">
@@ -521,6 +531,7 @@ export function UsageTab() {
             <RetryIconButton label={msg("billing.wallet.retry")} loading={loading} onClick={load} />
           }
         />
+        {panel}
       </div>
     );
   }
@@ -535,6 +546,7 @@ export function UsageTab() {
             aria-hidden="true"
           />
         </div>
+        {panel}
       </div>
     );
   }
@@ -551,6 +563,7 @@ export function UsageTab() {
           title={msg("usage.empty.title")}
           description={msg("usage.empty.desc")}
         />
+        {panel}
       </div>
     );
   }
@@ -574,6 +587,8 @@ export function UsageTab() {
           value={formatCents(data.runs, locale)}
         />
       </div>
+
+      {panel}
 
       <div className="flex flex-col gap-3">
         <PanelHeading className="mb-0">{msg("usage.panel.over_time")}</PanelHeading>

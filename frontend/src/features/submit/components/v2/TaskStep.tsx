@@ -17,6 +17,7 @@ import { targetPatch, taskIssue } from "../../lib/wizard-v2";
 import { AuthoringShell } from "../steps/AuthoringShell";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { RepoTargetCard } from "./RepoTargetCard";
+import { RunPlaceCard } from "./RunPlaceCard";
 import { WizardScreen } from "./WizardScreen";
 
 /**
@@ -54,6 +55,7 @@ export function TaskStep({ page }: { page: number }) {
         active={page === 0}
         className="relative flex flex-col gap-5 px-4 py-5 sm:px-6 sm:py-6"
       >
+        <RunPlaceCard />
         <TaskField
           id="v2-objective"
           field="task_objective"
