@@ -384,3 +384,25 @@ def test_bare_number_on_an_error_path_is_an_issue() -> None:
     code = "def score(path):\n  if not path:\n    return 0.0\n  return 1.0, 'ok'\n"
     issues, _notes = remote_mcp_repo.scorer_issues(code, has_cases=False)
     assert "returns a bare number" in issues[0]
+
+
+@pytest.mark.parametrize(
+    ("code", "issue"),
+    [
+        ("async def score(p, case):\n  return 1.0, 'ok'\n", "is async"),
+        ("def score(p, case):\n  yield 1.0, 'ok'\n", "uses yield"),
+        ("def score(p, case, extra):\n  return 1.0, 'ok'\n", "needs more arguments"),
+        ("def score(p, *, mode):\n  return 1.0, 'ok'\n", "needs more arguments"),
+        ("def score(p):\n  return " + "-" * 200_000 + "1\n", "cannot parse"),
+    ],
+)
+def test_scorer_the_runner_cannot_call_is_an_issue(code: str, issue: str) -> None:
+    """Flag a scorer that the runner cannot call or parse, before the paid run."""
+    issues, _notes = remote_mcp_repo.scorer_issues(code, has_cases=True)
+    assert issue in issues[0]
+
+
+def test_optional_extra_arguments_are_fine() -> None:
+    """Accept extra arguments with defaults and a nested generator."""
+    code = "def score(p, case=None, extra=1, *, mode='a'):\n  def gen():\n    yield 1\n  return 1.0, 'ok'\n"
+    assert remote_mcp_repo.scorer_issues(code, has_cases=True) == ([], [])

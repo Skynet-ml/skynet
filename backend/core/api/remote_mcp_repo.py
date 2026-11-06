@@ -19,7 +19,7 @@ from __future__ import annotations
 import ast
 import json
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, Literal
@@ -221,6 +221,9 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
         tree = ast.parse(metric_code)
     except SyntaxError as error:
         return [f"The scorer has a syntax error on line {error.lineno}: {error.msg}."], []
+    except (ValueError, MemoryError, RecursionError):
+        # Very deep nesting makes the parser give up without a SyntaxError.
+        return ["Skynet cannot parse the scorer. Make it simpler."], []
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)]
     bound, named = _scorer_binding(tree)
     if bound and named is None:
@@ -235,6 +238,15 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
     positional = len(args.posonlyargs) + len(args.args)
     if args.vararg is None and positional < 1:
         return [f"The scorer function {scorer.name} takes no arguments. Use score(repo_path)."], []
+    # The runner calls the scorer with at most (repo_path, case) and without
+    # await, so a coroutine or a generator result stops the run.
+    if isinstance(scorer, ast.AsyncFunctionDef):
+        return [f"The scorer function {scorer.name} is async. Use a plain def."], []
+    if any(isinstance(node, ast.Yield | ast.YieldFrom) for node in _own_nodes(scorer)):
+        return [f"The scorer function {scorer.name} uses yield. Return the score instead."], []
+    required = positional - len(args.defaults)
+    if required > 2 or any(default is None for default in args.kw_defaults):
+        return [f"The scorer function {scorer.name} needs more arguments than (repo_path, case)."], []
     issues: list[str] = []
     notes: list[str] = []
     if _returns_bare_number(scorer):
@@ -297,11 +309,7 @@ def _returns_bare_number(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bo
     Returns:
         True when one of its own ``return`` statements gives a number literal.
     """
-    pending: list[ast.AST] = list(function.body)
-    while pending:
-        node = pending.pop()
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
-            continue
+    for node in _own_nodes(function):
         if isinstance(node, ast.Return):
             value = node.value
             if isinstance(value, ast.UnaryOp):
@@ -309,8 +317,25 @@ def _returns_bare_number(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bo
             # The runner refuses bools too: they are ints.
             if isinstance(value, ast.Constant) and isinstance(value.value, int | float):
                 return True
-        pending.extend(ast.iter_child_nodes(node))
     return False
+
+
+def _own_nodes(function: ast.FunctionDef | ast.AsyncFunctionDef) -> Iterator[ast.AST]:
+    """Yield the nodes of ``function``'s body, without nested functions or classes.
+
+    Args:
+        function: The scorer function node.
+
+    Yields:
+        Each node that runs as part of ``function`` itself.
+    """
+    pending: list[ast.AST] = list(function.body)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
+            continue
+        yield node
+        pending.extend(ast.iter_child_nodes(node))
 
 
 def _model_entries(models: dict[str, Any]) -> list[tuple[str, str, str | None]]:
