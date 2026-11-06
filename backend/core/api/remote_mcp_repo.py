@@ -39,6 +39,7 @@ from ..config import settings
 from ..connectors import github
 from ..connectors.vault import ConnectorVault
 from ..exceptions import ServiceError
+from ..local.cli_catalog import parse_subscription_model_id
 from ..models.blackbox import (
     BLACKBOX_ENGINE_SHINKA_EVOLVE,
     BLACKBOX_ITERATION_LIMIT_ENGINES,
@@ -204,42 +205,66 @@ def repository_issues(job_store: Any, username: str, repo: dict[str, Any]) -> tu
     return issues, notes, top_level
 
 
-def scorer_issues(metric_code: str, has_cases: bool) -> list[str]:
+def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[str]]:
     """Check scorer code statically: it parses and defines the scorer function.
 
     The code never runs here. The run's setup check runs it in the sandbox.
 
     Args:
         metric_code: The scorer source.
-        has_cases: Whether the draft has data, so the scorer gets a case.
+        has_cases: Whether the draft has data, so the scorer can get a case.
 
     Returns:
-        The issues.
+        The issues and the notes.
     """
     try:
         tree = ast.parse(metric_code)
     except SyntaxError as error:
-        return [f"The scorer has a syntax error on line {error.lineno}: {error.msg}."]
+        return [f"The scorer has a syntax error on line {error.lineno}: {error.msg}."], []
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)]
     named = next((node for name in _SCORER_NAMES for node in functions if node.name == name), None)
     scorer = named or (functions[0] if len(functions) == 1 else None)
     if scorer is None:
-        return ["The scorer must define score(repo_path) or score(repo_path, case)."]
+        return ["The scorer must define score(repo_path) or score(repo_path, case)."], []
     args = scorer.args
     positional = len(args.posonlyargs) + len(args.args)
-    if args.vararg is None and positional < (2 if has_cases else 1):
-        wanted = "score(repo_path, case)" if has_cases else "score(repo_path)"
-        return [f"The scorer function {scorer.name} takes too few arguments. Use {wanted}."]
-    return []
+    if args.vararg is None and positional < 1:
+        return [f"The scorer function {scorer.name} takes no arguments. Use score(repo_path)."], []
+    if has_cases and args.vararg is None and positional < 2:
+        # The runner calls a one-argument scorer without the case, so this runs.
+        return [], [f"The scorer function {scorer.name} does not take the case, so every case gets the same score."]
+    return [], []
 
 
-def _model_entries(models: dict[str, Any]) -> list[tuple[str, str]]:
-    """List the ``(name, token_source)`` of every model of the draft's models part."""
-    source = models["token_source"]
+def _model_entries(models: dict[str, Any]) -> list[tuple[str, str, str | None]]:
+    """List the ``(name, token_source, cli_provider)`` of every model of the draft's models part.
+
+    Like ``normalize_model_token_sources``, the Mac app reads a
+    ``subscription/<cli>/<slug>`` name as a subscription model on that CLI,
+    whatever source the step names.
+
+    Args:
+        models: The draft's models part.
+
+    Returns:
+        One entry for each model; ``cli_provider`` is ``None`` unless the
+        name is a subscription model id.
+    """
     names = [models["reflection_model"], *models.get("extra_models", [])]
     if models.get("scorer_model"):
         names.append(models["scorer_model"])
-    return [(name, source) for name in names]
+    entries: list[tuple[str, str, str | None]] = []
+    for name in names:
+        parsed = parse_subscription_model_id(name.strip("/"))
+        source = "subscription" if parsed is not None and settings.local_mode else models["token_source"]
+        entries.append((name, source, parsed[0] if parsed is not None and source == "subscription" else None))
+    return entries
+
+
+def _model_config(entry: tuple[str, str, str | None]) -> dict[str, Any]:
+    """Build the request model config of one ``_model_entries`` entry."""
+    name, source, cli = entry
+    return {"name": name, "token_source": source, **({"cli_provider": cli} if cli else {})}
 
 
 def model_issues(models: dict[str, Any], http_client: Callable[[], httpx.Client]) -> tuple[list[str], list[str]]:
@@ -255,16 +280,21 @@ def model_issues(models: dict[str, Any], http_client: Callable[[], httpx.Client]
     Returns:
         The issues and the notes.
     """
-    source = models["token_source"]
-    if settings.local_mode and source == "managed":
+    entries = _model_entries(models)
+    sources = {source for _, source, _ in entries}
+    if settings.local_mode and "managed" in sources:
         return ["The Mac app cannot use managed models. Use token_source 'subscription' or 'byok'."], []
-    if not settings.local_mode and source == "subscription":
+    if not settings.local_mode and "subscription" in sources:
         return ["A subscription model runs only in the Mac app. Use token_source 'managed' or 'byok'."], []
-    if source != "managed":
-        return [], ["Skynet cannot check a model on your own key or subscription before the run starts."]
-    issues: list[str] = []
+    issues = [
+        f"Name the subscription model '{name}' as subscription/<codex|claude>/<model>, so Skynet knows the CLI."
+        for name, source, cli in entries
+        if source == "subscription" and cli is None
+    ]
+    if "managed" not in sources:
+        return issues, ["Skynet cannot check a model on your own key or subscription before the run starts."]
     with http_client() as client:
-        for name, source in _model_entries(models):
+        for name, source, _cli in entries:
             if call_hold_cents(name, source, client=client) is None:
                 issues.append(f"Skynet has no verified price for model '{name}'. Choose another model.")
     return issues, []
@@ -317,7 +347,8 @@ def build_request(spec: dict[str, Any]) -> BlackboxRunRequest:
     data = spec.get("data") or {}
     models = spec["models"]
     scorer = spec["scorer"]
-    source = models["token_source"]
+    entries = _model_entries(models)
+    extra_count = len(models.get("extra_models", []))
     body: dict[str, Any] = {
         "name": spec.get("name"),
         "description": spec.get("description"),
@@ -327,11 +358,7 @@ def build_request(spec: dict[str, Any]) -> BlackboxRunRequest:
             "kind": "python",
             "metric_code": scorer["metric_code"],
             "timeout_seconds": scorer["timeout_seconds"],
-            **(
-                {"model": {"name": models["scorer_model"], "token_source": source}}
-                if models.get("scorer_model")
-                else {}
-            ),
+            **({"model": _model_config(entries[-1])} if models.get("scorer_model") else {}),
         },
         "cases": data.get("cases"),
         "staged_dataset_id": data.get("staged_dataset_id"),
@@ -345,11 +372,9 @@ def build_request(spec: dict[str, Any]) -> BlackboxRunRequest:
             "repo": {key: spec["repository"].get(key) for key in ("repository", "branch", "commit", "editable_paths")},
         },
         "task_model_config": None,
-        "reflection_model_config": {"name": models["reflection_model"], "token_source": source},
-        "extra_reflection_model_configs": [
-            {"name": name, "token_source": source} for name in models.get("extra_models", [])
-        ],
-        "token_source": source,
+        "reflection_model_config": _model_config(entries[0]),
+        "extra_reflection_model_configs": [_model_config(entry) for entry in entries[1 : 1 + extra_count]],
+        "token_source": models["token_source"],
     }
     return BlackboxRunRequest.model_validate(body)
 
@@ -375,11 +400,11 @@ def repo_floor_cents(spec: dict[str, Any], http_client: Callable[[], httpx.Clien
     entries = _model_entries(spec["models"])
     boxes = math.ceil(box_hold_cents())
     unpriced: list[str] = []
-    if all(source == "subscription" for _, source in entries):
+    if all(source == "subscription" for _, source, _cli in entries):
         return boxes, unpriced
     holds: list[Decimal] = []
     with http_client() as client:
-        for name, source in entries:
+        for name, source, _cli in entries:
             hold = call_hold_cents(name, source, client=client)
             if hold is None:
                 unpriced.append(name)
@@ -420,7 +445,9 @@ def review_draft(
             notes.append(f"The staged dataset has {len(rows)} cases.")
         except DomainError as error:
             issues.append(f"The staged dataset cannot be read ({error.code}). Stage it again and set the data step.")
-    issues += scorer_issues(spec["scorer"]["metric_code"], bool(data))
+    scorer_found, scorer_notes = scorer_issues(spec["scorer"]["metric_code"], bool(data))
+    issues += scorer_found
+    notes += scorer_notes
     issues += model_issues(spec["models"], http_client)[0]
     issues += engine_issues(spec)
     try:
@@ -730,7 +757,8 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
 
         def check(spec: dict[str, Any], _username: str) -> tuple[list[str], list[str], dict[str, Any]]:
             """Check the scorer code without running it."""
-            return scorer_issues(metric_code, bool(spec.get("data"))), [], {}
+            issues, notes = scorer_issues(metric_code, bool(spec.get("data")))
+            return issues, notes, {}
 
         return save_step(draft_id, "scorer", part, check)
 

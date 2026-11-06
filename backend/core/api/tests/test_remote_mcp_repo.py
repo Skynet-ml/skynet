@@ -141,10 +141,11 @@ def test_each_step_gives_feedback_and_the_next_tool(harness: Any) -> None:
     body = _step(client, "repo_draft_set_data", draft_id=draft_id, cases=[{"q": 1}, {"q": 2}])
     assert body["notes"] == ["The run has 2 inline cases."]
     body = _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code=SCORER)
-    assert body["issues"] == ["The scorer function score takes too few arguments. Use score(repo_path, case)."]
-    assert body["next_tool"] == "repo_draft_set_scorer"
+    assert body["issues"] == []
+    assert body["notes"] == ["The scorer function score does not take the case, so every case gets the same score."]
     body = _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code="def score(path, case):\n  return 1\n")
     assert body["issues"] == []
+    assert body["notes"] == []
     assert body["next_tool"] == "repo_draft_set_models"
 
 
@@ -294,7 +295,24 @@ def test_models_step_refuses_a_source_this_server_cannot_run(harness: Any, monke
     body = _step(
         client, "repo_draft_set_models", draft_id=draft_id, reflection_model="openai/gpt-5", token_source="subscription"
     )
+    assert "subscription/<codex|claude>/<model>" in body["issues"][0]
+
+
+def test_subscription_draft_is_ready_in_the_mac_app(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read a subscription/<cli>/<slug> name as a subscription model on that CLI, and price only the boxes."""
+    client, _engine, _calls = harness
+    monkeypatch.setattr(settings, "local_mode", True)
+    draft_id = _complete_draft(client)
+    body = _step(client, "repo_draft_set_models", draft_id=draft_id, reflection_model="subscription/claude/claude-x")
     assert body["issues"] == []
+    review = _payload(_call(client, "repo_draft_review", {"draft_id": draft_id}))
+    assert review["issues"] == []
+    assert review["ready"] is True
+    assert review["min_max_cost_cents"] == 41
+    with Session(_engine) as session:
+        spec = session.get(McpRunDraftModel, draft_id).spec
+    config = remote_mcp_repo.build_request(spec).reflection_model_settings
+    assert (config.token_source, config.cli_provider) == ("subscription", "claude")
 
 
 def test_expired_draft_is_refused(harness: Any) -> None:

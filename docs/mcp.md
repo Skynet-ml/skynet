@@ -84,7 +84,12 @@ A draft expires 7 days after its last change, and the tools refuse it. Each
 
 The hosted server runs `managed` and `byok` models. The Mac app runs
 `subscription` and `byok` models. The models step reports any other token
-source as an issue.
+source as an issue. In the Mac app, name a subscription model
+`subscription/<codex|claude>/<model>`, so Skynet knows which CLI runs it.
+
+The scorer is `score(repo_path, case)`. A scorer that takes only `repo_path`
+also works, but the step adds a note when the draft has data: every case gets
+the same score.
 
 After the submit, use `get_run`, `list_runs` and `stop_run` to follow the run.
 
