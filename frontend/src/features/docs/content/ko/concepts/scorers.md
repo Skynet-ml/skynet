@@ -1,47 +1,50 @@
-메트릭은 출력이 얼마나 좋은지 Skynet에 알려 줍니다. 메트릭은 `metric.py` 안의 Python 함수입니다. 모든 엔진이 같은 함수를 호출합니다. 이 페이지는 계약, 반환값, 예제를 제공합니다.
+채점기는 리포지토리의 한 버전이 얼마나 좋은지 Skynet에 알려 줍니다. 채점기는 `scorer.py` 안의 Python 함수입니다. 모든 엔진이 같은 함수를 호출합니다. 이 페이지는 계약, 반환값, 예제를 제공합니다.
 
 ## 계약
 
 ```python
-def score(input, output, expected=None):
+def score(repo_path, case):
     ...
     return score_value, {"feedback": "..."}
 ```
 
-| 인수       | 담긴 내용                                                     |
-| ---------- | ------------------------------------------------------------- |
-| `input`    | 케이스의 입력 필드를 담은 dict                                |
-| `output`   | 해당 케이스에서 `run(artifact, input)`이 반환한 값            |
-| `expected` | 케이스의 기댓값. 케이스에 기댓값이 없으면 `None`              |
+| 인수        | 담긴 내용                                                                 |
+| ----------- | ------------------------------------------------------------------------- |
+| `repo_path` | 설정 명령이 실행된 후의 리포지토리 한 버전의 폴더                         |
+| `case`      | dict입니다. `case["input"]`는 입력 필드를 담습니다. `case["expected"]`는 기댓값 또는 `None`을 담습니다 |
 
-함수가 인수를 두 개만 받으면 Skynet은 `score(input, output)`을 호출합니다.
+함수가 인수를 하나만 받으면 Skynet은 `score(repo_path)`를 호출합니다. 채점기가 자체 테스트를 실행하고 케이스가 필요 없을 때 이 형태를 사용하세요.
 
-DSPy 프로그램에서는 Skynet이 DSPy 메트릭 호출을 이 같은 함수에 맞게 변환합니다. 모든 아티팩트 종류에 대해 메트릭 하나만 작성하면 됩니다. [최적화의 작동 방식](/docs/concepts/optimization)을 읽어 보세요.
+채점기는 샌드박스 안의 버전 폴더에서 실행됩니다. 리포지토리의 코드를 가져오거나, 명령을 실행하거나, `serve.py`의 `serve()`를 호출할 수 있습니다. [최적화의 작동 방식](/docs/concepts/optimization)을 읽어 보세요.
 
 ## 반환값
 
-`score`는 쌍(항목이 두 개인 튜플 또는 리스트)을 반환해야 합니다.
+`score`는 피드백이 있는 점수를 반환해야 합니다. 다음 형태가 유효합니다.
 
-1. **점수.** 숫자입니다. 옵티마이저는 이 값을 높이려고 합니다.
-2. **부가 정보.** dict입니다. 문자열 값을 가진 `"feedback"` 키가 있어야 합니다.
+1. 쌍: 숫자 하나와, 피드백 문자열 또는 `"feedback"` 키가 있는 dict.
+2. `"score"`에 숫자, `"feedback"`에 문자열이 있는 dict.
 
-부가 정보에는 `"scores"` 키도 넣을 수 있습니다. 이름을 숫자에 매핑합니다. 예: `{"format": 1.0, "accuracy": 0.5}`.
+피드백은 비어 있지 않은 문자열이어야 합니다.
 
-반환값의 형태가 다르면 계약 검사의 **메트릭 반환값** 항목에서 실패합니다.
+부가 정보에는 `"scores"` 키도 넣을 수 있습니다. 이름을 이름 있는 점수에 매핑합니다. 각 이름 있는 점수에는 자체 점수와 피드백이 있습니다. 예: `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
 
-| 반환값                                                 | 유효 여부                                  |
-| ------------------------------------------------------ | ------------------------------------------ |
-| `(0.8, {"feedback": "Close. Missing the date."})`      | 예                                         |
-| `[1.0, {"feedback": "OK", "scores": {"format": 1.0}}]` | 예                                         |
-| `0.8`                                                  | 아니요. 부가 정보가 없습니다.              |
-| `(0.8, "Close.")`                                      | 아니요. 부가 정보가 dict가 아닙니다.       |
-| `(0.8, {})`                                            | 아니요. 피드백 문자열이 없습니다.          |
-| `("0.8", {"feedback": "OK"})`                          | 아니요. 점수가 문자열입니다.               |
-| `(0.8, {"feedback": "OK", "scores": {"a": "high"}})`   | 아니요. 이름 있는 점수가 숫자가 아닙니다.  |
+부가 정보에는 같은 형태의 `"cases"` 키도 넣을 수 있습니다. 각 항목은 케이스 하나의 결과입니다. 모든 엔진은 각 케이스를 별도의 목표로 사용합니다.
+
+반환값의 형태가 다르면 검사가 실패하고 그 이유를 보여 줍니다.
+
+| 반환값                                                                          | 유효 여부                                  |
+| ------------------------------------------------------------------------------- | ------------------------------------------ |
+| `(0.8, {"feedback": "Close. Missing the date."})`                               | 예                                         |
+| `(0.8, "Close. Missing the date.")`                                             | 예                                         |
+| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | 예                              |
+| `0.8`                                                                           | 아니요. 피드백이 없습니다.                 |
+| `(0.8, {})`                                                                     | 아니요. 피드백 문자열이 없습니다.          |
+| `("0.8", {"feedback": "OK"})`                                                   | 아니요. 점수가 문자열입니다.               |
+| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | 아니요. 이름 있는 점수가 숫자가 아닙니다. |
 
 ## 유용한 피드백 작성하기
 
-GEPA, DSPy GEPA, Auto는 피드백 텍스트를 읽고 다음 버전을 작성합니다. 무엇이 틀렸는지, 올바른 출력은 어떤 모습인지 알려 주세요.
+GEPA와 Auto는 피드백 텍스트를 읽고 다음 버전을 작성합니다. 무엇이 틀렸는지, 올바른 출력은 어떤 모습인지 알려 주세요.
 
 | 약한 피드백   | 유용한 피드백                                                                       |
 | ------------- | ----------------------------------------------------------------------------------- |
@@ -49,98 +52,80 @@ GEPA, DSPy GEPA, Auto는 피드백 텍스트를 읽고 다음 버전을 작성�
 | "형식 오류."  | "출력이 유효한 JSON이 아닙니다. 마지막 필드 뒤에 쉼표가 남아 있습니다."             |
 
 > [!NOTE]
-> 옵티마이저는 메트릭 소스를 절대 보지 않습니다. DSPy 옵티마이저에서는 리플렉션 모델이 피드백 텍스트만 봅니다. 기댓값은 메트릭 안에만 머뭅니다.
+> 코딩 에이전트는 채점기 소스, 기댓값, 실행 시크릿을 절대 보지 않습니다. 코딩 에이전트는 점수와 피드백 텍스트만 봅니다.
 
 ## 예제
 
 ### 정확히 일치
 
-```python tab="metric.py"
-def score(input, output, expected=None):
-    want = expected["label"]
-    if output == want:
+```python tab="scorer.py"
+import importlib.util
+
+
+def score(repo_path, case):
+    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    got = module.serve(case["input"])
+    want = case["expected"]["label"]
+    if got == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
 ```
 
-`expected`는 출력 열 이름을 키로 하는 dict입니다. [데이터셋과 분할](/docs/concepts/datasets)을 읽어 보세요.
+`case["expected"]`는 출력 열 이름을 키로 하는 dict입니다. [데이터셋과 분할](/docs/concepts/datasets)을 읽어 보세요.
 
-### 여러 검사
+### 리포지토리의 테스트 실행
 
-```python tab="metric.py"
-import json
+```python tab="scorer.py"
+import subprocess
 
 
-def score(input, output, expected=None):
-    try:
-        data = json.loads(output)
-    except ValueError as exc:
-        return 0.0, {"feedback": f"Output is not valid JSON: {exc}", "scores": {"format": 0.0, "fields": 0.0}}
-    want = expected["fields"]
-    found = [key for key in want if key in data]
-    fields = len(found) / len(want) if want else 1.0
-    missing = [key for key in want if key not in data]
-    feedback = "All fields present." if not missing else f"Missing fields: {', '.join(missing)}."
-    return 0.5 + 0.5 * fields, {"feedback": feedback, "scores": {"format": 1.0, "fields": fields}}
+def score(repo_path):
+    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
+    if result.returncode == 0:
+        return 1.0, {"feedback": "All tests pass."}
+    return 0.0, {"feedback": result.stdout[-2000:]}
 ```
 
 ### 모델을 심사자로 사용
 
-메트릭은 모델을 호출할 수 있습니다. `skynet` 헬퍼 모듈에서 `llm`을 가져오세요. 메트릭에서 하는 호출은 메트릭 모델로 갑니다.
+채점기는 모델을 호출할 수 있습니다. `skynet` 헬퍼 모듈에서 `llm`을 가져오세요. 호출은 Skynet의 모델 게이트웨이를 거쳐 실행의 채점기 모델로 갑니다.
 
-```python tab="metric.py"
+```python tab="scorer.py"
+import importlib.util
+
 from skynet import llm
 
 
-def score(input, output, expected=None):
+def score(repo_path, case):
+    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    answer = module.serve(case["input"])
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {input['question']}\nAnswer: {output}",
-        model="openai/gpt-4.1-mini",
+        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
         temperature=0,
         max_tokens=512,
-        reasoning_effort="low",
     )
     passed = str(verdict).strip().upper().startswith("PASS")
     return (1.0 if passed else 0.0), {"feedback": str(verdict)}
 ```
 
-메트릭은 자체 `llm()` 호출에서 모델을 지정합니다. 표시된 네 인수는 모두 선택 사항입니다. `model=`을 생략하면 메트릭은 리플렉션 모델을 사용합니다.
+채점기는 `OPENAI_BASE_URL`, `APP_API_KEY`, `APP_MODEL` 환경 변수로 OpenAI 호환 클라이언트를 사용할 수도 있습니다. 게이트웨이는 실행의 채점기 모델만 받습니다.
 
-## 정확도, 속도, 비용
+## 모델 호출과 시크릿
 
-메트릭은 정확도를 측정된 실행 시간 및 모델 비용과 함께 섞을 수 있습니다. 모듈 수준에서 `REWARD_SPEC`을 정의하고 `reward`의 값을 반환하세요.
-
-```python tab="metric.py"
-from skynet import reward
-
-REWARD_SPEC = {
-    "weights": {"accuracy": 0.7, "speed": 0.2, "cost": 0.1},
-    "accuracy": {},
-    "speed": {"reference": 2000},
-    "cost": {"reference": 0.01},
-}
-
-
-def score(input, output, expected=None):
-    ok = output == expected["label"]
-    return reward(REWARD_SPEC, 1.0 if ok else 0.0, "Correct." if ok else "Wrong label.")
-```
-
-- `weights`에는 `accuracy`, `speed`, `cost`가 있어야 합니다. 각 가중치는 0 이상이며, 모두 0일 수는 없습니다. Skynet은 합이 1이 되도록 가중치를 조정합니다.
-- `speed.reference`의 단위는 밀리초입니다. `cost.reference`의 단위는 미국 달러입니다. 둘 다 양수여야 합니다.
-- `accuracy.reference`가 없으면 정확도는 0에서 1 사이의 점수입니다. 있으면 정확도는 오차이며, 낮을수록 좋습니다.
-
-Skynet은 시간과 비용을 직접 측정합니다. 실행 코드는 이 값을 바꿀 수 없습니다. Skynet이 시간이나 비용을 측정할 수 없으면 그 부분은 0점이 되고, 피드백에 그 사실이 표시됩니다.
-
-메트릭은 `skynet`의 `observation()`과 `service_cost()`로 측정값을 직접 읽을 수도 있습니다.
+- Skynet 키로 하는 호출은 실행 예산에 대해 계량됩니다. 내 키(BYOK)를 쓰면 호출은 내 제공업체 키로 가며, Skynet 모델 요금은 없습니다. [예산과 결제](/docs/concepts/billing)를 읽어 보세요.
+- 실행 시크릿은 환경 변수로 채점기에 전달됩니다. 변수 이름은 시크릿 이름입니다. 예: `os.environ["SEARCH_API_KEY"]`.
+- Skynet은 채점기 출력과 로그에서 시크릿 값을 숨깁니다.
 
 ## 제한
 
 | 항목                 | 값                             |
 | -------------------- | ------------------------------ |
-| 메트릭 타임아웃      | 기본 60초, 최대 600초          |
-| 계약 검사 샘플       | 케이스 3개                     |
+| 채점기 타임아웃      | 기본 60초, 최대 600초          |
 
 ## 관련 페이지
 

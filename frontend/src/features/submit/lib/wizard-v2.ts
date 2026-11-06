@@ -52,6 +52,8 @@ export interface RepoDraft {
   commit: string;
   editablePaths: string[];
   setupCommand: string;
+  /** True when the wizard created this repository through `POST /connectors/github/repos`. */
+  createdBySkynet?: boolean;
 }
 
 /** The whole repository, the editable paths a new repository run starts with. */
@@ -249,15 +251,14 @@ export function repoIssue(repo: RepoDraft): string | null {
 
 /**
  * The inputs and optimizer patches that go with switching to a repository
- * target: one case at a time, and a named engine in place of Auto, which has
- * no repository strategy.
+ * target: one case at a time, and Auto in place of a DSPy optimizer.
  */
 export function repoTargetSlices(choice: OptimizerChoice): {
   inputs: Partial<InputsSlice>;
   optimizer: Partial<OptimizerSlice> | null;
 } {
   const fits = optimizersFor("repo", "single").includes(choice);
-  return { inputs: { mode: "single" }, optimizer: fits ? null : { choice: "gepa" } };
+  return { inputs: { mode: "single" }, optimizer: fits ? null : { choice: "auto" } };
 }
 
 /** The optimizer patch for leaving a repository target: a black-box engine goes back to Auto. */
@@ -293,7 +294,8 @@ export function targetPatch(
 export function withRepository(repo: RepoDraft | null, repository: string): RepoDraft {
   const base = repo ?? emptyRepoDraft();
   if (base.repository === repository) return base;
-  return { ...base, repository, branch: "", commit: "" };
+  // Another repository is not the one Skynet created, so the flag must not carry over.
+  return { ...base, repository, branch: "", commit: "", ...(base.createdBySkynet ? { createdBySkynet: false } : {}) };
 }
 
 /** What the optimizer catalog is keyed on: `"repo"` for a repository run, else the artifact kind. */

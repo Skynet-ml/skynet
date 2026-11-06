@@ -1,4 +1,4 @@
-El asistente de envío configura e inicia una ejecución. Tiene cuatro pasos: **Tarea**, **Entradas**, **Optimizador** y **Métrica y ejecución**. Cada paso tiene una o más pantallas. Esta guía explica cada pantalla, desde la tarea hasta la comprobación del contrato y el inicio de la ejecución.
+El asistente de envío configura e inicia una ejecución. Tiene cuatro pasos: **Tarea**, **Entradas**, **Optimizador** y **Métrica y ejecución**. Cada paso tiene una o más pantallas. Esta guía explica cada pantalla, desde la tarea hasta la comprobación y el inicio de la ejecución.
 
 > [!NOTE]
 > El asistente muestra más o menos ajustes según el nivel de experiencia: **Guiado**, **Estándar** o **Experto**. Guiado es el nivel predeterminado. Cambia el nivel en **Ajustes → Cuenta**, en **Cuánto mostrar**. Algunas etiquetas son más sencillas en el nivel Guiado. Esta guía usa las etiquetas de los niveles Estándar y Experto, y da entre paréntesis la etiqueta del nivel Guiado cuando es distinta.
@@ -9,25 +9,37 @@ El asistente de envío configura e inicia una ejecución. Tiene cuatro pasos: **
 
 Describe tu tarea al asistente de IA en el chat **Entrevista sobre la tarea**. El asistente de IA escribe dos campos por ti:
 
-- **Objetivo** (Guiado: **Meta**): lo que el artefacto optimizado debe hacer bien.
+- **Objetivo** (Guiado: **Meta**): lo que el código optimizado debe hacer bien.
 - **Contexto** (Guiado: **Contexto adicional**): el contexto, las restricciones y cómo es un buen resultado.
 
 Puedes editar los dos campos. El asistente de IA no sobrescribe tus ediciones.
 
-### Qué se optimizará
+### De dónde viene el código
 
-En **Qué se optimiza**, selecciona **Programa DSPy** o **Un repositorio de GitHub**.
+Skynet es Optimize Anything: cada ejecución optimiza un repositorio. Selecciona una de dos opciones:
 
-Después da la **Versión inicial** (Guiado: **Desde dónde empezamos**). Pega la versión actual, o deja que el asistente de IA escriba un borrador.
+- **Usar un repositorio**: optimiza código de un repositorio de GitHub que conectaste.
+- **Crear un repositorio nuevo**: Skynet crea un repositorio de GitHub nuevo en tu cuenta. El asistente de IA escribe una primera solución a partir de tu tarea y tus datos. Esa solución es la versión inicial.
 
-### Optimizar un repositorio
+Conecta GitHub en **Ajustes → Conectores** antes de empezar.
 
-También puedes optimizar código de un repositorio. Rellena estos campos:
+### Usar un repositorio
+
+Rellena estos campos:
 
 - **Repositorio**: elige un repositorio, o escríbelo como `owner/name`.
 - **Commit**: un SHA de 40 caracteres. Déjalo vacío para usar el último commit de la rama.
 - **Rutas que el optimizador puede cambiar**: un archivo o una carpeta por línea. Un punto significa el repositorio completo.
 - **Comando de instalación**: se ejecuta en cada copia nueva del repositorio antes de puntuar. Déjalo vacío y Skynet encontrará el comando.
+
+### Crear un repositorio nuevo
+
+Rellena estos campos:
+
+- **Nombre**: el nombre del repositorio nuevo. Tu cuenta de GitHub no debe tener ya un repositorio con este nombre.
+- **Privado** o **Público**: quién puede ver el repositorio en GitHub.
+
+Skynet sube cada candidato a su propia rama. La rama `skynet/best` apunta a la mejor versión.
 
 ## Paso 2: Entradas
 
@@ -61,8 +73,8 @@ El asistente solo muestra los optimizadores que encajan con tu tarea y tus entra
 
 ### Modelos
 
-- **Modelo de tarea**: el modelo al que llama tu código de ejecución. Déjalo vacío si tu código de ejecución no llama a un modelo. Un programa DSPy debe tener un modelo de tarea.
 - **Modelo de reflexión**: el modelo que lee las puntuaciones y los comentarios y escribe los siguientes candidatos. Con un optimizador de agente de código, es el modelo del agente.
+- **Modelo de tarea**: el modelo al que pueden llamar el código de tu repositorio y tu evaluador a través de la pasarela de modelos de Skynet. Lee [Cómo funciona la optimización](/docs/concepts/optimization).
 
 ### Presupuesto
 
@@ -77,44 +89,38 @@ El asistente no te deja continuar si el límite o tu saldo es inferior al import
 
 ## Paso 4: Métrica y ejecución
 
-### Código y métrica
+### Evaluador
 
-Escribe dos archivos:
+Escribe `scorer.py`. Define `score(repo_path, case)` y devuelve una puntuación con comentarios. El asistente de IA puede escribirlo por ti. Lee [Métricas y evaluadores](/docs/concepts/scorers).
 
-- `run.py`: el código de ejecución que ejecuta tu artefacto sobre un caso.
-- `metric.py`: la métrica que puntúa la salida y escribe los comentarios.
+El repositorio puede tener un archivo `serve.py` con `def serve(input)`. Skynet lo usa para servir la mejor versión después de la ejecución. Lee [Leer los resultados](/docs/guides/results).
 
-El **Agente de código** puede escribir y cambiar cualquier archivo por ti. Comprueba su código y corrige lo que falla. Puedes añadir hasta 20 archivos adicionales. Lee [Métricas y evaluadores](/docs/concepts/scorers).
+### Secretos
 
-La métrica define su modelo en su propia llamada a `llm()`. Sin `model=`, la métrica usa el modelo de reflexión.
+Añade secretos, como las claves de API que necesita tu código. Cada secreto llega a tu código y a tu evaluador como una variable de entorno con el mismo nombre. El agente de código no puede verlos. Skynet oculta sus valores en los registros.
 
-### Comprobación del contrato
+### Comprobación
 
-La **Comprobación del contrato** (Guiado: **Ejecución de prueba**) ejecuta tu código y tu métrica en el sandbox sobre 3 casos de muestra. Comprueba:
+La comprobación (Guiado: **Ejecución de prueba**) ejecuta la instalación y tu evaluador sobre la versión inicial en el sandbox. Comprueba:
 
-- la firma del código de ejecución,
-- la firma de la métrica,
-- el modelo de la métrica,
-- el código de ejecución sobre las muestras,
-- el valor que devuelve la métrica.
+- la firma del evaluador,
+- el comando de instalación,
+- el valor que devuelve el evaluador sobre los casos de muestra.
 
-Selecciona **Comprobar** (Guiado: **Probar**). No puedes iniciar la ejecución hasta que la comprobación sea correcta. Si cambias el código o la configuración después de una comprobación correcta, vuelve a ejecutar la comprobación.
+Selecciona **Comprobar** (Guiado: **Probar**). No puedes iniciar la ejecución hasta que la comprobación sea correcta. Si cambias el evaluador o la configuración después de una comprobación correcta, vuelve a ejecutar la comprobación.
 
 > [!TIP]
-> Abre cada muestra para ver su entrada, su salida y sus comentarios. Unos buenos comentarios dan al optimizador más información con la que trabajar que la puntuación sola.
+> Abre cada muestra para ver su puntuación y sus comentarios. Unos buenos comentarios dan al optimizador más información con la que trabajar que la puntuación sola.
 
 ### Ejecución programada
 
-Puedes volver a ejecutar la optimización de forma programada después de que termine correctamente. El valor predeterminado es **Desactivada**.
+Puedes volver a ejecutar la optimización de forma programada después de que termine correctamente. Cada ciclo programado empieza desde la mejor versión actual del repositorio. El valor predeterminado es **Desactivada**.
 
 ### Listo para ejecutar
 
 La última pantalla muestra un resumen en cinco pestañas: **General**, **Datos**, **Modelos**, **Presupuesto** y **Recompensa**. Revisa la configuración y luego inicia la optimización.
 
 El resumen también muestra la visibilidad de la ejecución. Las ejecuciones nuevas son públicas por defecto. Cámbiala más tarde en el cuadro de diálogo **Compartir y privacidad** de la página de la ejecución. Lee [Compartir y publicar](/docs/guides/sharing).
-
-> [!NOTE]
-> Una ejecución de repositorio solo tiene en este paso la pantalla **Código y métrica** y el resumen. Skynet comprueba la configuración con el repositorio cuando inicias la ejecución.
 
 ## Después de iniciar
 

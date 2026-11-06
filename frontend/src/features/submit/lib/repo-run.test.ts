@@ -64,11 +64,33 @@ test("a repository run submits its repo, commit, paths and setup command", () =>
   assert.equal(request.task_model_config, null);
 });
 
-test("Auto cannot optimize a repository", () => {
+test("a repository Skynet created is flagged in the run request", () => {
+  const state = repoState();
+  state.task.repo = { ...state.task.repo!, createdBySkynet: true };
+  const request = repoRunRequest(state, options);
+  assert.ok(request);
+  assert.equal(request.target.repo?.created_by_skynet, true);
+  assert.equal(repoRunRequest(repoState(), options)?.target.repo?.created_by_skynet, undefined);
+});
+
+test("Auto on a repository sends the auto strategy", () => {
   const state = repoState();
   state.optimizer.choice = "auto";
-  assert.equal(repoRunRequest(state, options), null);
-  assert.equal(computeStepIssue(state, "optimizer", null), "submit.v2.optimizer.issue.choice");
+  const request = repoRunRequest(state, options);
+  assert.ok(request);
+  assert.deepEqual(request.strategy, { mode: "auto" });
+  assert.equal(request.shinka, null);
+  assert.deepEqual(request.extra_reflection_model_configs, []);
+  assert.equal(computeStepIssue(state, "optimizer", null), null);
+});
+
+test("a repository run waits for a reflection model and a scorer", () => {
+  const noModel = repoState();
+  noModel.optimizer.reflectionModel = null;
+  assert.equal(repoRunRequest(noModel, options), null);
+  const noScorer = repoState();
+  noScorer.workspace.metricCode = "  ";
+  assert.equal(repoRunRequest(noScorer, options), null);
 });
 
 test("a repository clone drops a stored scorer model the code does not name", () => {

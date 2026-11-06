@@ -80,6 +80,7 @@
     "contract.run_missing": "Çalıştırma kodu run(artifact, input) tanımlamalıdır.",
     "contract.shape.blackbox": "Puanlama fonksiyonu (score, side_info) döndürmelidir; side_info, feedback dizesi içeren bir dict olmalıdır.",
     "optimization.grid_search_retired": "Izgara aramaları artık başlatılamaz, sürdürülemez veya kopyalanamaz. Bu çalıştırma okunabilir kalır; bunun yerine sihirbazdan yeni bir optimizasyon başlatın.",
+    "optimization.dspy_run_retired": "Skynet artık yalnızca depoları optimize eder. DSPy program çalıştırmaları artık başlatılamaz, sürdürülemez, kopyalanamaz, sunulamaz veya zamanlanamaz. Bu çalıştırma okunabilir kalır; bunun yerine yeni bir depo optimizasyonu başlatın.",
     "submit.unified.contract_failed": "Kod, optimize edicinin ihtiyaç duyduğu şeyle uyumlu değil: {error}",
     "submit.unified.contract_budget": "Harcama limiti, kodu örnekler üzerinde çalıştırmak için çok düşük: {error} Limiti yükseltip tekrar kontrol edin.",
     "submit.preflight.scorer_ready": "Değerlendirici yükleniyor; puanlama ilk üretilen adayı bekliyor.",

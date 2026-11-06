@@ -17,6 +17,7 @@ from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.model_catalog import CatalogModel, ModelCatalogResponse
 from core.api.routers import wizard_preflight
 from core.billing.model_dispatch import ModelHTTPResult
+from core.billing.model_gateway import ROUTE_KEY
 from core.billing.openrouter_quotes import resolve_model_slug
 from core.billing.operation_pricing import ChargePolicy
 from core.billing.protected_credentials import has_exposed_execution_credentials
@@ -495,6 +496,41 @@ def test_binding_hands_the_guest_a_route_and_closes_the_box(tmp_path: Path) -> N
     staged.close_scorers()
     assert staged.scorers == []
     assert box.closed
+
+
+def test_binding_gives_the_box_only_the_scorer_models_scoped_route(tmp_path: Path) -> None:
+    """The scorer's model reaches the box as its scoped route; the box stays offline."""
+    payload, staged = _binding(tmp_path, None)
+    route = {"url": "http://127.0.0.1:1/v1", "token": "route-token", "model": "vendor/judge", "role": "judge"}
+    payload["scorer"]["model"] = {"name": "vendor/judge", "token_source": "byok", "extra": {ROUTE_KEY: route}}
+    gateway = _Gateway()
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    bound = gateway.evaluator._gateway
+    assert (bound.url, bound.model, bound.api_key, bound.protected) == (
+        route["url"],
+        "vendor/judge",
+        "route-token",
+        True,
+    )
+    assert gateway.evaluator._model_env() == {"APP_API_KEY": "route-token", "APP_MODEL": "vendor/judge"}
+    box = gateway.boxes[0]
+    assert box.spec.network_disabled is True
+    assert box.spec.allowed_hosts == ()
+    assert payload["target"]["repo"]["environment"]["network"] == {"setup": [], "versions": []}
+    staged.close_scorers()
+
+
+def test_binding_refuses_a_scorer_model_without_a_scoped_route(tmp_path: Path) -> None:
+    """A model the parent did not scope would carry a provider key, so no box opens."""
+    payload, staged = _binding(tmp_path, None)
+    payload["scorer"]["model"] = {"name": "vendor/judge", "token_source": "byok", "extra": {"api_key": "user-key"}}
+    gateway = _Gateway()
+
+    with pytest.raises(ServiceError, match="scoped route"):
+        repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+    assert gateway.boxes == []
 
 
 def _ruled_binding(tmp_path: Path, rules: tuple[str, ...]) -> tuple[dict[str, Any], repo_staging.StagedRepository]:

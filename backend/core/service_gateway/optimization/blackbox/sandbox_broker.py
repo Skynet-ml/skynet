@@ -228,6 +228,7 @@ class SandboxBroker:
         vcpus: int = 2,
         tags: Mapping[str, str] | None = None,
         command_runner: SandboxCommandRunner | None = None,
+        parent_command_runner: SandboxCommandRunner | None = None,
     ) -> None:
         """Bind one parent-owned runtime and deployment-selected resource profile.
 
@@ -238,6 +239,9 @@ class SandboxBroker:
             vcpus: Fixed allocation selected by the parent.
             tags: Parent-owned job identity used by cleanup and reconciliation.
             command_runner: Optional model mailbox command wrapper.
+            parent_command_runner: Mailbox wrapper for the parent's own boxes.
+                Those boxes run untrusted repository code, so this one may
+                serve only model routes; without it they get no model access.
         """
         self._runtime = runtime
         self._image = image
@@ -258,6 +262,7 @@ class SandboxBroker:
         self._vcpus = vcpus
         self._tags = dict(tags or {})
         self._command_runner = command_runner
+        self._parent_command_runner = parent_command_runner
         self._sessions: dict[str, _OwnedSession] = {}
         # Kept apart from ``_sessions`` so no guest handle can ever address them.
         self._parent_sessions: list[ParentSandboxSession] = []
@@ -396,7 +401,7 @@ class SandboxBroker:
                     operation_key=spec.operation_key,
                 )
             ),
-            self._command_runner,
+            self._parent_command_runner,
         )
         with self._lock:
             closing = self._closed

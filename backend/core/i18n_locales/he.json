@@ -367,6 +367,7 @@
     "email.account.sign_in.intro": "קוד הכניסה שלך ל-{term.appName} הוא {code}.",
     "email.account.sign_in.ignore": "אם לא ניסית להיכנס, אפשר להתעלם מהמייל הזה.",
     "optimization.grid_search_retired": "כבר אי אפשר להפעיל, להמשיך או לשכפל חיפושי רשת. ההרצה הזו נשארת זמינה לצפייה; כדי להמשיך, התחילו אופטימיזציה חדשה מהאשף.",
+    "optimization.dspy_run_retired": "Skynet מבצע עכשיו אופטימיזציה למאגרי קוד בלבד. כבר אי אפשר להפעיל, להמשיך, לשכפל, להגיש או לתזמן הרצות של תוכניות DSPy. ההרצה הזו נשארת זמינה לצפייה; כדי להמשיך, התחילו אופטימיזציה חדשה של מאגר.",
     "submit.unified.optimizer_not_allowed": "האופטימייזר '{optimizer}' לא מתאים להגדרה הזו. בחרו אחד מאלה: {allowed}.",
     "submit.unified.single_needs_one_case": "ריצה עם קלט יחיד צריכה בדיוק קלט אחד.",
     "submit.unified.pairs_need_cases": "ריצה על זוגות קלט/פלט צריכה לפחות שני זוגות או דאטאסט שהועלה.",

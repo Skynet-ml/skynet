@@ -143,9 +143,11 @@ function errorText(err: unknown): string {
 }
 
 /**
- * Continuous optimization of a successful run: enable a plan, see the next
- * check, pause or resume it, and review each cycle. A check that finds no
- * better model starts no run and is left out of the history. A candidate becomes the incumbent only when the owner approves it.
+ * Continuous optimization of a successful repository run: enable a plan, see
+ * the next check, pause or resume it, and review each cycle. A cycle re-runs
+ * the repository from the current best version with a better model. A check
+ * that finds no better model starts no run and is left out of the history. A
+ * candidate becomes the incumbent only when the owner approves it.
  */
 export function ContinuousTab({ optimizationId }: { optimizationId: string }) {
   const [state, setState] = useState<ContinuousState | null>(null);
@@ -351,7 +353,9 @@ function NotStartedView({
                   ? "continuous_tab.waiting.description"
                   : plan.pause_reason === "no_test_split"
                     ? "continuous_tab.no_test_split.description"
-                    : "continuous_tab.ended.description",
+                    : plan.pause_reason === "dspy_retired"
+                      ? "optimization.legacy_dspy.notice"
+                      : "continuous_tab.ended.description",
               )}
             </p>
           </div>

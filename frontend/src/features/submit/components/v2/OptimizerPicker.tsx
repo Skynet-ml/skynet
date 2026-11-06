@@ -5,7 +5,7 @@ import { useRef, type KeyboardEvent } from "react";
 import { Warning } from "@/shared/ui/icons";
 import { Label } from "@/shared/ui/primitives/label";
 import { msg } from "@/shared/lib/messages";
-import type { OptimizerTarget, DataMode, OptimizerChoice } from "@/shared/types/unified-run";
+import type { OptimizerTarget, DataMode } from "@/shared/types/unified-run";
 import { OPTIMIZER_NAMES } from "@/shared/lib/optimizer-names";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
@@ -21,15 +21,20 @@ import { StepCard } from "../blackbox/shared";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { OptimizerSourceLinks } from "./OptimizerSourceLinks";
 
-/** The display name of an optimizer choice in the active locale. */
-export function optimizerLabel(choice: OptimizerChoice, guided: boolean): string {
-  return choice === "auto" ? v2Msg("submit.v2.optimizer.option.auto.label", guided) : OPTIMIZER_NAMES[choice];
+/**
+ * The display name of an optimizer id in the active locale. A stored id with
+ * no name, such as a retired DSPy optimizer, shows as the raw id.
+ */
+export function optimizerLabel(choice: string, guided: boolean): string {
+  if (choice === "auto") return v2Msg("submit.v2.optimizer.option.auto.label", guided);
+  return OPTIMIZER_NAMES[choice as keyof typeof OPTIMIZER_NAMES] ?? choice;
 }
 
-// Only a DSPy program offers Auto; a repository run lists the engines alone.
-function optimizerDescription(view: OptimizerOptionView, guided: boolean): string {
+// Auto composes different engines for a repository than for a DSPy program, so it gets its own words.
+function optimizerDescription(view: OptimizerOptionView, kind: OptimizerTarget, guided: boolean): string {
   if (view.id !== "auto") return v2Msg(`submit.v2.optimizer.option.${view.id}.desc`, guided);
-  return v2Msg("submit.v2.optimizer.option.auto.desc_dspy", guided);
+  const key = kind === "repo" ? "submit.v2.optimizer.option.auto.desc_repo" : "submit.v2.optimizer.option.auto.desc_dspy";
+  return v2Msg(key, guided);
 }
 
 /**
@@ -134,7 +139,7 @@ export function OptimizerPicker({
                     engine={{
                       id: option.id,
                       label,
-                      description: optimizerDescription(option, guided || plain),
+                      description: optimizerDescription(option, kind, guided || plain),
                       available: option.available,
                       unavailable_reason: option.unavailableReason,
                     }}

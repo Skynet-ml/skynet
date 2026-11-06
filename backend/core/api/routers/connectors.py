@@ -16,11 +16,12 @@ storage quota apply exactly as they do to an upload.
 
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -28,6 +29,7 @@ from ...config import settings
 from ...connectors import github, registry
 from ...connectors import huggingface as hf
 from ...connectors import oauth as generic_oauth
+from ...connectors.github_create_repo import RepoCreateError, create_repository_with_files
 from ...connectors.pruning import browse_importable
 from ...connectors.transport import label
 from ...connectors.vault import ConnectorSecret, ConnectorVault
@@ -39,6 +41,14 @@ from .dataset_library import SaveDatasetResponse, _summary, save_rows_gated
 
 SEARCH_LIMIT_MAX = 100
 GITHUB_FILE_MAX_BYTES = 1024 * 1024
+# GitHub's own rule for a repository name: letters, digits, ``.``, ``-`` and ``_``, at most 100.
+# GitHub itself refuses ``.`` and ``..``; the route maps that refusal to 422.
+GITHUB_REPO_NAME_PATTERN = r"^[A-Za-z0-9._-]{1,100}$"
+GITHUB_OBJECTIVE_MAX_CHARS = 20000
+GITHUB_SCORER_MAX_CHARS = 200_000
+GITHUB_CASES_MAX_ITEMS = 10_000
+# The cases file goes into one git commit from memory; this keeps the push small.
+GITHUB_CASES_MAX_BYTES = 5 * 1024 * 1024
 
 # Some providers resolve a folder's web link with its own API call (OneDrive),
 # so it runs beside the listing instead of after it.
@@ -223,6 +233,23 @@ class GithubFileResponse(BaseModel):
     binary: bool = Field(default=False, description="The content holds a NUL byte or is not valid UTF-8.")
     too_large: bool = Field(default=False, description="The file is over the 1 MiB read cap.")
     missing: bool = Field(default=False, description="No regular file exists at this path and ref.")
+
+
+# Body for ``POST /connectors/github/repos``: a new repository seeded with the task, scorer and cases.
+class GithubCreateRepositoryRequest(BaseModel):
+    name: str = Field(pattern=GITHUB_REPO_NAME_PATTERN)
+    private: bool = True
+    description: str | None = Field(default=None, max_length=350)
+    objective: str = Field(min_length=1, max_length=GITHUB_OBJECTIVE_MAX_CHARS)
+    scorer_code: str | None = Field(default=None, max_length=GITHUB_SCORER_MAX_CHARS)
+    cases: list[dict[str, Any]] | None = Field(default=None, max_length=GITHUB_CASES_MAX_ITEMS)
+
+
+# The new repository and the commit that seeds it.
+class GithubCreatedRepository(BaseModel):
+    full_name: str
+    default_branch: str
+    commit: str
 
 
 def connector_secret(vault: ConnectorVault, username: str, provider: str) -> ConnectorSecret:
@@ -615,6 +642,70 @@ def create_connectors_router(*, job_store) -> APIRouter:
         """
         repos = github.list_repositories(_secret(user.username, github.PROVIDER), search)
         return GithubRepositoriesResponse(repositories=[GithubRepository(**r) for r in repos])
+
+    @router.post(
+        "/connectors/github/repos",
+        response_model=GithubCreatedRepository,
+        status_code=201,
+        summary="Create a GitHub repository seeded with the run's objective, scorer and cases",
+        tags=["agent"],
+    )
+    def create_github_repository(
+        body: GithubCreateRepositoryRequest,
+        user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
+    ) -> GithubCreatedRepository:
+        """Create a repository in the linked account, seeded with the run's task, scorer and data.
+
+        The first commit holds ``README.md`` with the objective, plus
+        ``scorer.py`` when a scorer is given and ``data/cases.jsonl`` (one JSON
+        object per line) when cases are given.
+
+        Args:
+            body: Name, visibility, optional description, the objective text,
+                and the optional scorer code and cases.
+            user: Authenticated caller.
+
+        Returns:
+            The new repository, its default branch and the first commit.
+
+        Raises:
+            DomainError: 409 ``connectors.not_connected`` when GitHub is not linked.
+            HTTPException: 409 for a taken name, 413 for oversized cases,
+                422 for a name GitHub refuses, 502 when GitHub refuses the request or the first push fails.
+        """
+        files = {"README.md": f"# {body.name}\n\n{body.objective.strip()}\n"}
+        if body.scorer_code and body.scorer_code.strip():
+            files["scorer.py"] = body.scorer_code if body.scorer_code.endswith("\n") else body.scorer_code + "\n"
+        if body.cases:
+            cases = "".join(json.dumps(case, ensure_ascii=False) + "\n" for case in body.cases)
+            if len(cases.encode("utf-8")) > GITHUB_CASES_MAX_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"The cases are larger than {GITHUB_CASES_MAX_BYTES // (1024 * 1024)} MiB. Use fewer cases.",
+                )
+            files["data/cases.jsonl"] = cases
+        token = _secret(user.username, github.PROVIDER).access_token
+        try:
+            created = create_repository_with_files(
+                token,
+                body.name,
+                files,
+                private=body.private,
+                description=body.description or None,
+            )
+        except RepoCreateError as error:
+            message = str(error)
+            # The library words its errors for the user but has no error kind, so the wording picks the status.
+            if "already has a repository" in message:
+                status = 409
+            elif "does not accept" in message:
+                status = 422
+            else:
+                status = 502
+            raise HTTPException(status_code=status, detail=message) from error
+        return GithubCreatedRepository(
+            full_name=created.full_name, default_branch=created.default_branch, commit=created.commit
+        )
 
     @router.get(
         "/connectors/github/branches",

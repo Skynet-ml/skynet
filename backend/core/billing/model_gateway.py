@@ -782,6 +782,32 @@ class ModelGateway:
         self._observe(route, body, response)
         return response
 
+    def dispatch_route(
+        self, token: str, path: str, body: Mapping[str, Any], headers: Mapping[str, str]
+    ) -> ModelHTTPResult:
+        """Serve a model request from a parent box, which may reach only its model routes.
+
+        The parent's own boxes run untrusted repository code, so they get no
+        evaluator, package, tool, control or other capability, even when that
+        code learns one of their tokens. Refusing here, before the evaluator,
+        also keeps a version from calling back into the scorer that runs it.
+
+        Args:
+            token: Scoped model route credential registered by this parent.
+            path: Model protocol path.
+            body: Exact model request emitted by the box's SDK.
+            headers: Permitted protocol headers.
+
+        Returns:
+            Model response after authoritative admission and settlement.
+
+        Raises:
+            ValueError: When the token is not a model route or the path is a capability.
+        """
+        if token not in self._routes or path.startswith("/v1/_") or path in self._capabilities:
+            raise ValueError("A parent box reaches only its scoped model route.")
+        return self.dispatch_guest(token, path, body, headers)
+
     def observe_role(self, role: str, observer: Callable[[Mapping[str, Any]], None]) -> None:
         """Show every answered model call of one role to a parent-side observer.
 

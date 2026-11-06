@@ -4,16 +4,15 @@ Diese Seite beantwortet häufige Fragen zu Skynet. Jede Antwort verweist auf die
 
 ### Was ist Skynet?
 
-Skynet ist eine Plattform, die DSPy-Programme und Repositorys anhand Ihrer eigenen Daten und Metrik optimiert. Sie laden einen Datensatz hoch, beschreiben die Aufgabe und starten einen Durchlauf. Der Durchlauf probiert neue Versionen aus und bewertet sie auf zurückgehaltenen Daten. Lesen Sie zum Einstieg den [Schnellstart](/docs/quickstart).
+Skynet ist eine Plattform, die Repositorys anhand Ihrer eigenen Daten und Ihres Scorers optimiert. Sie laden einen Datensatz hoch, beschreiben die Aufgabe und starten einen Durchlauf. Der Durchlauf probiert neue Versionen aus und bewertet sie auf zurückgehaltenen Daten. Lesen Sie zum Einstieg den [Schnellstart](/docs/quickstart).
 
 ### Was kann Skynet optimieren?
 
-Skynet ist Optimize Anything. Es optimiert DSPy-Programme und Repositorys in einem Produkt. Die Artefaktart entscheidet, welche Engines damit arbeiten können:
+Skynet ist Optimize Anything: Jeder Durchlauf optimiert ein Repository. Verwenden Sie ein GitHub-Repository, das Sie bereits haben, oder lassen Sie Skynet aus Ihrer Aufgabe und Ihren Daten ein neues erstellen. Der Code kann jede Bibliothek verwenden, zum Beispiel DSPy.
 
-- Repositorys nutzen die nativen Engines: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler und ShinkaEvolve.
-- DSPy-Programme verwenden die DSPy-Optimierer: DSPy GEPA, DSPy MIPROv2 und DSPy BootstrapFewShot.
+Jede Engine arbeitet mit Repositorys: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler und ShinkaEvolve.
 
-Bei einem DSPy-Programm verwendet **Auto** DSPy GEPA. Bei einem Repository wählen Sie eine native Engine. Lesen Sie [So funktioniert die Optimierung](/docs/concepts/optimization) und [Engines](/docs/concepts/engines).
+**Auto** ist die Standardeinstellung. Es erkundet mit mehreren Engines und setzt dann GEPA ab der besten Version fort. Lesen Sie [So funktioniert die Optimierung](/docs/concepts/optimization) und [Engines](/docs/concepts/engines).
 
 ### Welche Sprachen unterstützt die Oberfläche?
 

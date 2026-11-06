@@ -2,12 +2,10 @@
 
 import * as React from "react";
 
-import { Brain, GithubLogo } from "@/shared/ui/icons";
 import { ExpandableTextarea } from "@/shared/ui/expandable-textarea";
 import { PingDot } from "@/shared/ui/ping-dot";
 import { Label } from "@/shared/ui/primitives/label";
 import { TEXTAREA_SURFACE_CLASS } from "@/shared/ui/primitives/textarea";
-import { Segmented } from "@/shared/ui/segmented";
 import {
   AgentPanelDock,
   isGeneralistAgentEnabled,
@@ -17,28 +15,30 @@ import {
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
 import { targetPatch, taskIssue } from "../../lib/wizard-v2";
 import { AuthoringShell } from "../steps/AuthoringShell";
-import { ArtifactConfirmCard, v2Msg } from "./ArtifactConfirmCard";
+import { v2Msg } from "./ArtifactConfirmCard";
 import { RepoTargetCard } from "./RepoTargetCard";
 import { WizardScreen } from "./WizardScreen";
 
 /**
  * Step 1, Task + Artifact: the setup agent in the side panel writes the
- * objective, background and starting version; the main pane shows them
- * editable. Screen 0 holds the objective and background, screen 1 the
- * artifact.
+ * objective and background; the main pane shows them editable. Screen 0
+ * holds the objective and background, screen 1 the repository. Every run
+ * optimizes a repository.
  */
 export function TaskStep({ page }: { page: number }) {
   const { state, guided, patchTask, patchInputs, patchOptimizer } = useWizardV2();
   const task = state.task;
   const t = (key: string) => v2Msg(key, guided);
-  const startingLocked = useAgentFieldLock("starting_version");
 
-  const setTarget = (target: "dspy_program" | "repo") => {
-    const patch = targetPatch(target, task.repo, state.optimizer.choice);
+  // A fresh wizard and an older draft both start without a repository target;
+  // move them onto one so the repository card and the repo optimizers apply.
+  React.useEffect(() => {
+    if (task.repo) return;
+    const patch = targetPatch("repo", null, state.optimizer.choice);
     patchTask(patch.task);
     if (patch.inputs) patchInputs(patch.inputs);
     if (patch.optimizer) patchOptimizer(patch.optimizer);
-  };
+  }, [task.repo]);
 
   return (
     <AuthoringShell
@@ -78,42 +78,17 @@ export function TaskStep({ page }: { page: number }) {
         active={page === 1}
         className="relative flex flex-col gap-5 px-4 py-5 sm:px-6 sm:py-6"
       >
-        <Segmented<"dspy_program" | "repo">
-          label={t("submit.v2.repo.target_label")}
-          value={task.repo ? "repo" : "dspy_program"}
-          onChange={setTarget}
-          className="w-full"
-          options={[
-            {
-              value: "dspy_program",
-              label: t("submit.v2.task.artifact.kind.dspy_program"),
-              tip: t("submit.v2.task.artifact.kind.dspy_program.desc"),
-              icon: <Brain className="size-3.5" aria-hidden="true" />,
-            },
-            {
-              value: "repo",
-              label: t("submit.blackbox.repo.kind_repo"),
-              tip: t("submit.blackbox.repo.kind_repo_desc"),
-              icon: <GithubLogo className="size-3.5" aria-hidden="true" />,
-            },
-          ]}
-        />
-        {task.repo ? (
+        {task.repo && (
           <RepoTargetCard
             repo={task.repo}
             onChange={(repo) => patchTask({ repo })}
             issue={taskIssue(task)}
             guided={guided}
-          />
-        ) : (
-          <ArtifactConfirmCard
-            kind={task.artifactKind}
-            startingVersion={task.startingVersion}
-            onStartingVersionChange={(startingVersion) => patchTask({ startingVersion })}
-            rationale={task.artifactRationale}
-            issue={taskIssue(task)}
-            writing={startingLocked}
-            guided={guided}
+            seed={{
+              objective: task.objective,
+              scorerCode: state.workspace.metricCode,
+              cases: state.inputs.cases,
+            }}
           />
         )}
       </WizardScreen>

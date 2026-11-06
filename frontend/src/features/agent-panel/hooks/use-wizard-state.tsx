@@ -3,10 +3,8 @@
 import * as React from "react";
 
 import {
-  BLACKBOX_OPTIMIZERS,
-  DSPY_OPTIMIZERS,
+  storedOptimizerChoice,
   type DataMode,
-  type OptimizerChoice,
   type OptimizerTarget,
 } from "@/shared/types/unified-run";
 
@@ -328,9 +326,9 @@ export function useAgentFieldLock(field: keyof WizardState | ReadonlyArray<keyof
   return fields.some((f) => writing.includes(f));
 }
 
-const ARTIFACT_KINDS: readonly OptimizerTarget[] = ["dspy_program", "repo"];
+// Skynet is repo-only (SKY-316): an agent that still names a DSPy program gets no artifact write.
+const ARTIFACT_KINDS: readonly OptimizerTarget[] = ["repo"];
 const DATA_MODES: readonly DataMode[] = ["single", "pairs"];
-const OPTIMIZER_CHOICES: readonly string[] = ["auto", ...DSPY_OPTIMIZERS, ...BLACKBOX_OPTIMIZERS];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -374,6 +372,7 @@ export function extractWizardPatch(result: unknown): Partial<WizardState> {
     "model_configured",
     "shuffle",
     "is_private",
+    "repo_created_by_skynet",
   ] as const) {
     if (typeof wrap[key] === "boolean") patch[key] = wrap[key] as boolean;
   }
@@ -404,11 +403,9 @@ export function extractWizardPatch(result: unknown): Partial<WizardState> {
   if (startingVersion !== null) patch.starting_version = startingVersion;
   const mode = DATA_MODES.find((m) => m === wrap.data_mode);
   if (mode) patch.data_mode = mode;
-  if (
-    typeof wrap.optimizer_choice === "string" &&
-    OPTIMIZER_CHOICES.includes(wrap.optimizer_choice)
-  )
-    patch.optimizer_choice = wrap.optimizer_choice as OptimizerChoice;
+  // A DSPy optimizer id from the agent maps to Auto, since only repository engines run.
+  const choice = storedOptimizerChoice(wrap.optimizer_choice);
+  if (choice) patch.optimizer_choice = choice;
 
   if (isRecord(wrap.workflow) && Array.isArray(wrap.workflow.nodes)) {
     patch.workflow = wrap.workflow as unknown as WizardState["workflow"];

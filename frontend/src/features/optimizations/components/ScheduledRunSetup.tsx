@@ -26,7 +26,6 @@ const STEP_TITLES: Record<WalkStep, MessageKey> = {
 };
 
 const MODEL_SWITCHES: Array<{ role: keyof ContinuousPermitted; label: MessageKey }> = [
-  { role: "task_model", label: "continuous_tab.permit.task_model" },
   { role: "reflection_model", label: "continuous_tab.permit.reflection_model" },
 ];
 
@@ -50,7 +49,7 @@ export function ScheduledRunSetup({
   initial?: ContinuousEnableRequest | null;
 }) {
   const [permitted, setPermitted] = useState<ContinuousPermitted>(
-    () => initial?.permitted ?? { task_model: true, reflection_model: true },
+    () => initial?.permitted ?? { task_model: false, reflection_model: true },
   );
   const [schedule, setSchedule] = useState<ScheduleRule>(
     () => initial?.schedule ?? defaultRule(browserTimeZone()),

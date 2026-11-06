@@ -80,7 +80,8 @@ export interface ContinuousPlan {
    * While paused: `user` (the owner paused it), `allowance` (monthly limit
    * spent), `funds` (wallet too low) or `failing` (checks failed in a row).
    * While ended: the first run's status (`failed`, `cancelled`, `stopped`), `missing`,
-   * or `no_test_split` (the run kept no test cases apart).
+   * `no_test_split` (the run kept no test cases apart) or `dspy_retired`
+   * (the source is a legacy DSPy run, which cannot be scheduled).
    */
   pause_reason:
     | "user"
@@ -92,6 +93,7 @@ export interface ContinuousPlan {
     | "stopped"
     | "missing"
     | "no_test_split"
+    | "dspy_retired"
     | null;
   schedule: ScheduleRule;
   next_check_at: string | null;

@@ -2,21 +2,20 @@ The run page shows the progress and the results of a run. This guide explains th
 
 ## Tabs on the run page
 
-The run page shows only the tabs that apply to the run. Some tabs depend on the path, the status and your experience level.
+The run page shows only the tabs that apply to the run. Some tabs depend on the status and your experience level.
 
-| Tab                | When it shows                                                 | What it contains                                                                 |
-| ------------------ | ------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| **Overview**       | Always                                                        | Progress, scores and the score history                                           |
-| **Usage**          | A successful run with a program that Skynet can serve         | A form to run the optimized program, and integration code                        |
-| **Artifact** | A repository run with a result | The versions of your artifact, with the best version |
-| **Data**           | A finished DSPy program run                                   | The data split into train, validation and test sets, and the test set evaluation |
-| **Code**           | When the run has code to show                                 | The run code and the metric                                                      |
-| **Reward** | A repository run whose metric declares reward parts | The reward parts and their weights |
-| **Artifact** | A finished DSPy program run | The optimized output and **Export results** |
-| **Logs**           | Most runs                                                     | The run log                                                                      |
-| **Usage and cost** | When you are signed in                                        | What the run spent                                                               |
-| **Scheduled run** | A successful DSPy program run | A schedule to run the optimization again |
-| **Config**         | Always                                                        | The run configuration                                                            |
+| Tab                | When it shows                                              | What it contains                                                                 |
+| ------------------ | ---------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| **Overview**       | Always                                                     | Progress, scores and the score history                                           |
+| **Usage**          | A successful run whose repository has a `serve.py` file    | A form to call the best version, and integration code                            |
+| **Artifact**       | A run with a result                                        | The versions of your repository, with the best version                           |
+| **Data**           | A finished run with cases                                  | The data split into train, validation and test sets                              |
+| **Code**           | When the run has code to show                              | The scorer                                                                       |
+| **Reward**         | A run whose scorer declares reward parts                   | The reward parts and their weights                                               |
+| **Logs**           | Most runs                                                  | The run log                                                                      |
+| **Usage and cost** | When you are signed in                                     | What the run spent                                                               |
+| **Scheduled run**  | A successful run                                           | A schedule to run the optimization again from the best version                   |
+| **Config**         | Always                                                     | The run configuration                                                            |
 
 > [!NOTE]
 > At the **Guided** level, the run page hides the **Data**, **Code**, **Logs** and **Config** tabs. A direct link to one of these tabs still opens it. Change the level in **Settings → Account**.
@@ -29,13 +28,11 @@ The **Overview** tab shows:
 
 - **Improvement**: the change from the starting version to the best version.
 - **Score progression**: the score over the run.
-- **Score breakdown**: each metric, with the **Baseline**, **Optimized** and **Change** columns.
+- **Score breakdown**: each score, with the **Baseline**, **Optimized** and **Change** columns.
 
 While the run is active, the overview also shows **Elapsed**, **Remaining** and **Rate**.
 
-For a repository run, the overview also shows **Named scores** when your metric reports named scores.
-
-For a DSPy program run, the **Data** tab has a **Test set evaluation**. It shows the baseline and optimized score for each test case.
+The overview also shows **Named scores** when your scorer reports named scores.
 
 ### When the best version is the starting version
 
@@ -45,38 +42,37 @@ If the run stopped at its budget, the run page tells you which version Skynet sa
 
 ## Export the best version
 
-### Repository runs
-
-The **Artifact** tab lists the **Versions** of your artifact. For each version you can:
+The **Artifact** tab lists the **Versions** of your repository. For each version you can:
 
 - Copy the version.
 - Download the version as a file.
-- For a repository run, download the version as a zip of the whole repository.
+- Download the version as a zip of the whole repository.
 
 You can compare a version with another version. The tab also shows the **Scorer feedback** for a version.
 
-### DSPy program runs
+### Branches in a new repository
 
-The **Artifact** tab has an **Export results** panel. Open the **Download** menu. It shows the formats that the run has:
-
-| Option            | Format                                           |
-| ----------------- | ------------------------------------------------ |
-| DSPy program      | `.zip`, a self-contained export that you can run |
-| Optimized program | `.pkl`                                           |
-| Prompt            | `.json`                                          |
-| Optimized code    | `.py`                                            |
-| Logs              | `.csv`                                           |
+When Skynet created the repository for the run, it pushes each candidate to its own branch, `skynet/candidate-<version id>`. The `skynet/best` branch always points at the best version. It moves when a better version appears.
 
 ## Serve the best version
 
-You can call an optimized DSPy program from your own code. The **Usage** tab has two parts:
+You can call the best version from your own code. The repository must have a `serve.py` file at its root that defines `serve(input)`:
 
-- A form. Enter the input fields and select **Run** to get a prediction.
-- **Integration code** in cURL, Python, JavaScript, Go and DSPy.
+```python tab="serve.py"
+def serve(input):
+    return {"label": classify(input["message"])}
+```
 
-The program always runs on the model settings that it was optimized with. You must give all input fields. Skynet ignores extra fields.
+- `input` is the dict of input fields from the request.
+- The return value must be JSON-serializable. A dict becomes `outputs`. Any other value becomes `{"output": value}`.
+- `serve.py` can call a model with `llm` from the `skynet` helper module. It does not get the run's secrets.
 
-To call the program, create an API token in **Settings → API**. Then send a request:
+Skynet runs the best version in the same protected sandbox as the run. The **Usage** tab has two parts:
+
+- A form. Enter the input fields and select **Run** to get a result.
+- **Integration code** in cURL, Python, JavaScript and Go.
+
+To call the best version, create an API token in **Settings → API**. Then send a request. The `Idempotency-Key` header is required:
 
 ```bash tab="cURL"
 export APP_API_TOKEN=skyd_...
@@ -84,7 +80,7 @@ curl -X POST "$API_URL/serve/<optimization_id>" \
   -H "Authorization: Bearer $APP_API_TOKEN" \
   -H "Idempotency-Key: $(uuidgen)" \
   -H "Content-Type: application/json" \
-  -d '{"inputs": {"question": "What is DSPy?"}}'
+  -d '{"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5}'
 ```
 
 ```python tab="Python"
@@ -98,19 +94,17 @@ response = requests.post(
         "Authorization": f"Bearer {os.environ['APP_API_TOKEN']}",
         "Idempotency-Key": str(uuid.uuid4()),
     },
-    json={"inputs": {"question": "What is DSPy?"}},
+    json={"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5},
 )
 print(response.json()["outputs"])
 ```
 
-Replace `question` with the input fields of your program. The **Integration code** on the **Usage** tab fills in the real URL and field names for you.
+Replace `message` with the input fields of your run. The **Integration code** on the **Usage** tab fills in the real URL and field names for you.
 
-The response contains `outputs`, the `input_fields`, the `output_fields` and the `model_used`.
+The response contains `outputs`, the `input_fields`, the `output_fields`, the `model_used`, `cents_charged` and `budget`.
 
 > [!TIP]
-> The request body also accepts `max_cost_cents`. It sets the most this one call may cost, in cents. Some runs require it.
-
-To get partial outputs as they arrive, send the same request to `/serve/<optimization_id>/stream`. The response is a stream of server-sent events.
+> Each call is billed on its own, from the balance of the caller. `max_cost_cents` sets the most this one call may cost, in cents. If you send the same `Idempotency-Key` again, Skynet does not charge the call again.
 
 Read [API](/docs/api) for authentication and the other endpoints.
 

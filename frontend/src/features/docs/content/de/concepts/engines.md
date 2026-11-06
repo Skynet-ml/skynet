@@ -1,30 +1,27 @@
-Eine Engine ist die Suchmethode, die neue Versionen Ihres Artefakts vorschlägt. Skynet hat sechs native Engines für Repositorys, drei DSPy-Optimierer für DSPy-Programme und **Auto**. Diese Seite erklärt, was jede tut, wann Sie sie wählen und welche Einstellungen sie hat.
+Eine Engine ist die Suchmethode, die neue Versionen Ihres Repositorys vorschlägt. Skynet hat sechs native Engines und **Auto**. Jede Engine arbeitet mit Repositorys. Diese Seite erklärt, was jede tut, wann Sie sie wählen und welche Einstellungen sie hat.
 
-Lesen Sie zuerst [So funktioniert die Optimierung](/docs/concepts/optimization), wenn Sie nicht wissen, welche Engines zu Ihrem Artefakt passen.
+Lesen Sie zuerst [So funktioniert die Optimierung](/docs/concepts/optimization), wenn Sie nicht wissen, welche Engine zu Ihrer Aufgabe passt.
 
 ## Schnellvergleich
 
-| Engine                | Artefaktarten      | Einstellungen für den Coding-Agenten | Einstellung „Max. Iterationen“ |
-| --------------------- | ------------------ | ------------------------------------ | ------------------------------ |
-| Auto | DSPy-Programm | Nein | Nein |
-| GEPA | Repository | Nein | Nein |
-| Best-of-N | Repository | Nein | Nein |
-| AutoResearch | Repository | Ja | Nein |
-| Meta-Harness | Repository | Ja | Ja |
-| AutoSaddler | Repository | Ja | Ja |
-| ShinkaEvolve | Repository | Nein. Es hat eine eigene Editor-Einstellung. | Ja |
-| DSPy GEPA             | DSPy-Programm      | Nein                                 | Nein                           |
-| DSPy MIPROv2          | DSPy-Programm      | Nein                                 | Nein                           |
-| DSPy BootstrapFewShot | DSPy-Programm      | Nein                                 | Nein                           |
+| Engine       | Einstellungen für den Coding-Agenten         | Einstellung „Max. Iterationen“ |
+| ------------ | -------------------------------------------- | ------------------------------ |
+| Auto         | Nein                                         | Nein                           |
+| GEPA         | Nein                                         | Nein                           |
+| Best-of-N    | Nein                                         | Nein                           |
+| AutoResearch | Ja                                           | Nein                           |
+| Meta-Harness | Ja                                           | Ja                             |
+| AutoSaddler  | Ja                                           | Ja                             |
+| ShinkaEvolve | Nein. Es hat eine eigene Editor-Einstellung. | Ja                             |
 
-Der Assistent kennzeichnet GEPA, DSPy GEPA und Auto als Optimierer, die den Feedback-Text Ihrer Metrik verwenden.
+Der Assistent kennzeichnet GEPA und Auto als Optimierer, die den Feedback-Text Ihres Scorers verwenden.
 
 ## Auto
 
-Auto ist die Standardwahl. Was es ausführt, hängt vom Artefakttyp ab:
+Auto ist die Standardwahl für jeden Durchlauf. Es arbeitet in zwei Phasen:
 
-- **DSPy-Programm**: Auto führt DSPy GEPA aus.
-- **Repository**: Auto ist nicht verfügbar. Wählen Sie eine native Engine.
+1. Es erkundet mit GEPA, AutoResearch, Meta-Harness, AutoSaddler und ShinkaEvolve.
+2. Es setzt GEPA ab der besten Version fort, die die Erkundung gefunden hat.
 
 **Wählen Sie sie, wenn** Sie nicht wissen, welche Engine passt. Hier fangen Sie am besten an.
 
@@ -32,7 +29,7 @@ Auto ist die Standardwahl. Was es ausführt, hängt vom Artefakttyp ab:
 
 „Reflektierende Evolution mit einer Pareto-Front von Versionen.“ Das Reflexionsmodell liest Score und Feedback jedes Falls und schreibt eine bessere Version. GEPA behält eine Front von Versionen, von denen jede bei einigen Fällen die beste ist.
 
-**Wählen Sie sie, wenn** Ihre Metrik konkretes Feedback gibt und Sie eine starke einzelne Engine möchten.
+**Wählen Sie sie, wenn** Ihr Scorer konkretes Feedback gibt und Sie eine starke einzelne Engine möchten.
 
 ## Best-of-N
 
@@ -54,25 +51,15 @@ Ein Coding-Agent schlägt in jeder Iteration eine Reihe von Kandidaten vor. Er n
 
 ## AutoSaddler
 
-Ein Coding-Agent liest das Feedback Ihrer Metrik und patcht die Version. Skynet behält nur Patches, die ein neuer Bewertungslauf bestätigt.
+Ein Coding-Agent liest das Feedback Ihres Scorers und patcht die Version. Skynet behält nur Patches, die ein neuer Bewertungslauf bestätigt.
 
-**Wählen Sie sie, wenn** das Feedback Ihrer Metrik auf klare, lokale Fehler zeigt.
+**Wählen Sie sie, wenn** das Feedback Ihres Scorers auf klare, lokale Fehler zeigt.
 
 ## ShinkaEvolve
 
 „Entwickelt viele Versionen parallel auf Inseln und lernt, welche Modelle sie am meisten verbessern.“ Es ist eine evolutionäre Suche über eine Population von Kandidaten, mit Mutationen und Kreuzungen, die ein Modell schreibt.
 
 **Wählen Sie sie, wenn** Sie breit erkunden möchten und ein größeres Budget haben.
-
-## DSPy-Optimierer
-
-| Optimierer            | Was er tut                                                                                                                         |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| DSPy GEPA             | Liest das Feedback der Metrik und entwickelt die Anweisungen jedes Predictors weiter.                                              |
-| DSPy MIPROv2          | Schlägt Anweisungen und Few-Shot-Demos gemeinsam vor und durchsucht ihre Kombinationen mit Bayes'scher Optimierung.                |
-| DSPy BootstrapFewShot | Sammelt durchgearbeitete Beispiele, die das Programm richtig löst, und fügt sie als Few-Shot-Demos hinzu. Er verwendet kein Reflexionsmodell. |
-
-DSPy MIPROv2 und DSPy BootstrapFewShot benötigen Paare (Fälle mit erwarteten Ausgaben).
 
 ## Einstellungen
 
@@ -84,7 +71,7 @@ DSPy MIPROv2 und DSPy BootstrapFewShot benötigen Paare (Fälle mit erwarteten A
 | Stoppen bei Bewertung   | Aus      | 0 oder mehr                                                    |
 | Max. Iterationen        | Aus      | 1 bis 1000. Nur Meta-Harness, AutoSaddler und ShinkaEvolve.    |
 
-Ein Bewertungslauf ist ein Aufruf Ihrer Metrik auf einem Fall. Die abschließende Neubewertung der Ausgangsversion und des Gewinners zählt nicht gegen **Max. Bewertungsläufe**.
+Ein Bewertungslauf ist ein Aufruf Ihres Scorers auf einem Fall. Die abschließende Neubewertung der Ausgangsversion und des Gewinners zählt nicht gegen **Max. Bewertungsläufe**.
 
 ### Einstellungen für den Coding-Agenten
 

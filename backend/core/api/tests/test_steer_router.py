@@ -10,11 +10,10 @@ from pydantic import ValidationError
 from ...service_gateway.agents.steering import SteerStore
 from ..routers import generalist_agent as agent_mod
 from ..routers.generalist_agent import GeneralistAgentRequest, SteerWithdrawResponse
-from ..routers.serve import ServeChatRequest
 from .conftest import bypass_auth
 
 
-@pytest.mark.parametrize("model", [GeneralistAgentRequest, ServeChatRequest])
+@pytest.mark.parametrize("model", [GeneralistAgentRequest])
 def test_turn_steer_key_rejects_empty(model: type) -> None:
     """Reject an explicitly empty key without making omitted keys mandatory.
 

@@ -98,7 +98,7 @@ Une exécution doit savoir quelles colonnes sont des entrées et quelle colonne 
 
 Dans l'assistant de soumission, l'étape « Comment lire les données » affiche chaque colonne avec trois choix :
 
-- **Entrée** : le programme reçoit cette valeur.
+- **Entrée** : votre évaluateur reçoit cette valeur dans `case["input"]`.
 - **Sortie** : la réponse attendue à laquelle l'évaluateur compare la sortie.
 - **Ignorer** : l'exécution ignore cette colonne.
 

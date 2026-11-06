@@ -91,15 +91,26 @@ Quand un appel de modèle utilise votre clé :
 
 Les éventuels frais d'un évaluateur externe ou d'un fournisseur MCP sont payés directement à ce fournisseur. Ils ne font pas partie du plafond de dépenses de l'exécution.
 
+## Appels de modèle depuis votre code
+
+Le code de votre dépôt et votre évaluateur peuvent appeler un modèle via la passerelle de modèles de Skynet. Lisez [Fonctionnement de l'optimisation](/docs/concepts/optimization).
+
+- Un appel sur les clés de Skynet est décompté du budget de l'exécution, comme tout autre appel de modèle. La majoration d'utilisation s'applique.
+- Un appel sur votre propre clé (BYOK) passe par la clé de votre fournisseur. Skynet ne facture aucuns frais de modèle pour cet appel.
+
 ## Utilisation de la sandbox
 
-Votre code d'exécution et votre métrique s'exécutent dans une sandbox. Skynet mesure le calcul en sandbox :
+Le code de votre dépôt et votre évaluateur s'exécutent dans une sandbox. Skynet mesure le calcul en sandbox :
 
 1. Avant le démarrage d'une sandbox, Skynet réserve un montant sur le plafond de l'exécution.
 2. Quand la sandbox se termine, Skynet facture l'utilisation finale indiquée par le fournisseur de la sandbox.
 3. La majoration d'utilisation s'applique au calcul en sandbox.
 
 Le calcul en sandbox fait partie du plafond de dépenses de l'exécution, y compris quand les appels de modèle utilisent votre propre clé.
+
+## Service (serving)
+
+Chaque appel au point de terminaison serve d'une exécution terminée est facturé séparément. L'appelant paie avec son propre solde. Définissez `max_cost_cents` dans la requête pour plafonner un appel. Lisez [Résultats](/docs/guides/results).
 
 ## Offres
 

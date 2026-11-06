@@ -75,6 +75,9 @@ class _Gateway:
     def dispatch_guest(self, *_args: Any) -> None:
         """Accept guest model calls; none happen in these tests."""
 
+    def dispatch_route(self, *_args: Any) -> None:
+        """Accept parent box model calls; none happen in these tests."""
+
     def bind_sandbox(self, broker: Any, **values: Any) -> None:
         """Keep the broker and its profile.
 

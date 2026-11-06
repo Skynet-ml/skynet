@@ -68,12 +68,11 @@ def test_blank_workspace_code_rejected(wizard_client: TestClient, field: str) ->
 
 
 def test_task_fields_round_trip(wizard_client: TestClient) -> None:
-    """Objective, background, artifact kind and starting version land under their v2 keys."""
+    """Objective, background and artifact kind land under their v2 keys."""
     body = {
         "task_objective": "  Make it shorter  ",
         "task_background": "Support replies.",
-        "artifact_kind": "dspy_program",
-        "starting_version": {"predict": "You are a helpful bot."},
+        "artifact_kind": "repo",
     }
     resp = wizard_client.post("/wizard/update", json=body)
 
@@ -81,8 +80,7 @@ def test_task_fields_round_trip(wizard_client: TestClient) -> None:
     patch = resp.json()["wizard_state"]
     assert patch["task_objective"] == "Make it shorter"
     assert patch["task_background"] == "Support replies."
-    assert patch["artifact_kind"] == "dspy_program"
-    assert patch["starting_version"] == {"predict": "You are a helpful bot."}
+    assert patch["artifact_kind"] == "repo"
 
 
 def test_repo_target_round_trips_without_a_starting_version(wizard_client: TestClient) -> None:
@@ -162,29 +160,36 @@ def test_inputs_fields_round_trip(wizard_client: TestClient) -> None:
     assert patch["shuffle"] is False
 
 
-def test_optimizer_choice_fitting_setup_accepted(wizard_client: TestClient) -> None:
-    """A DSPy optimizer fits a DSPy program with pairs."""
+@pytest.mark.parametrize("choice", ["auto", "gepa", "shinka_evolve"])
+def test_optimizer_choice_fitting_setup_accepted(wizard_client: TestClient, choice: str) -> None:
+    """Auto and the repository engines fit a repository run with pairs."""
     resp = wizard_client.post(
         "/wizard/update",
-        json={"artifact_kind": "dspy_program", "data_mode": "pairs", "optimizer_choice": "dspy_miprov2"},
+        json={"artifact_kind": "repo", "data_mode": "pairs", "optimizer_choice": choice},
     )
 
     assert resp.status_code == 200
-    assert resp.json()["wizard_state"]["optimizer_choice"] == "dspy_miprov2"
+    assert resp.json()["wizard_state"]["optimizer_choice"] == choice
 
 
-def test_optimizer_choice_outside_setup_rejected(wizard_client: TestClient) -> None:
-    """A black-box engine does not fit a DSPy program."""
-    resp = wizard_client.post(
-        "/wizard/update",
-        json={"artifact_kind": "dspy_program", "data_mode": "single", "optimizer_choice": "best_of_n"},
-    )
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"artifact_kind": "repo", "data_mode": "pairs", "optimizer_choice": "dspy_miprov2"},
+        {"optimizer_choice": "dspy_gepa"},
+        {"data_mode": "single", "optimizer_choice": "dspy_bootstrap_fewshot"},
+        {"artifact_kind": "dspy_program", "optimizer_choice": "gepa"},
+    ],
+)
+def test_optimizer_choice_outside_setup_rejected(wizard_client: TestClient, body: dict) -> None:
+    """Skynet is repo-only, so the DSPy optimizers and DSPy targets are refused."""
+    resp = wizard_client.post("/wizard/update", json=body)
 
     assert resp.status_code == 422
 
 
 def test_optimizer_choice_alone_is_echoed(wizard_client: TestClient) -> None:
-    """Without the artifact and mode in the same patch the choice is echoed as-is."""
+    """A repository engine sent alone is checked against the repo list and echoed."""
     resp = wizard_client.post("/wizard/update", json={"optimizer_choice": "gepa"})
 
     assert resp.status_code == 200

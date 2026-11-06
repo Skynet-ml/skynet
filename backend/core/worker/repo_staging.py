@@ -14,14 +14,23 @@ from pathlib import Path
 from typing import Any
 
 from ..api.model_catalog import agent_model_id, catalog_snapshot, lowest_effort_from_low, strongest_model_id
+from ..billing.model_gateway import ROUTE_KEY
 from ..billing.operation_pricing import ChargePolicy
 from ..billing.protected_credentials import ProtectedCredentialVault, resolve_repo_secrets
 from ..billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ..brand import APP_NAME
 from ..config import settings
-from ..connectors.github_publish import RepoPublishError, open_pull_request, push_version
+from ..connectors.github_publish import (
+    BEST_BRANCH,
+    RepoPublishError,
+    open_pull_request,
+    push_candidates,
+    push_version,
+)
 from ..connectors.github_repo import RepoFetchError, RepoSnapshot, fetch_snapshot, github_token, resolve_commit
 from ..connectors.saved_secrets import SavedSecretStore
+from ..exceptions import ServiceError
+from ..models.common import ModelConfig
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     ConstraintsError,
     effective_environment,
@@ -41,10 +50,15 @@ from ..service_gateway.optimization.blackbox.rule_judge import (
     run_log_emitter,
 )
 from ..service_gateway.optimization.blackbox.sandbox import SandboxSpec
+from ..service_gateway.optimization.blackbox.sandbox_scorer import ScorerGateway, scorer_gateway
 
 logger = logging.getLogger(__name__)
 
 PULL_REQUEST_DETAIL = "pull_request"
+CANDIDATE_BRANCHES_DETAIL = "candidate_branches"
+# A long run can record hundreds of versions; only the top scorers get a branch,
+# so a created repository does not fill with branches nobody reads.
+MAX_CANDIDATE_BRANCHES = 10
 ENVIRONMENT_KEY = "environment"
 # Rules the run is held to; a resumed run must arrive at exactly these again.
 _ENFORCED_FIELDS = ("commit", "editable_paths", "protected_paths", "readonly_paths", "services", "rules")
@@ -413,7 +427,9 @@ def bind_repo_scorer(
 
     Raises:
         ConstraintsError: When the repository's plain-language rules cannot be judged.
+        ServiceError: When the scorer has a model but no scoped route from the trusted parent.
     """
+    model_gateway = _repo_model_gateway(payload["scorer"])
     rule_judge = _rule_judge(staged, gateway, owner_id=owner_id, managed_key=managed_key)
     descriptor = payload["_budget_gateway_descriptor"]
     target = payload["target"]
@@ -439,6 +455,7 @@ def bind_repo_scorer(
         str(scorer_spec["metric_code"]),
         timeout_seconds=float(scorer_spec["timeout_seconds"]),
         rule_judge=rule_judge,
+        gateway=model_gateway,
     )
     environment = target["repo"].get(ENVIRONMENT_KEY)
     if isinstance(environment, dict):
@@ -449,6 +466,30 @@ def bind_repo_scorer(
     # guest that writes versions exists; either failing fails the run.
     scorer.prepare()
     payload["_skynet_evaluator_route"] = gateway.bind_evaluator(scorer)
+
+
+def _repo_model_gateway(scorer_spec: dict[str, Any]) -> ScorerGateway | None:
+    """Resolve the scoped model route the repository box may call.
+
+    Only the trusted parent's opaque route may reach the box. The other
+    gateways ``scorer_gateway`` can return carry a provider key or need
+    network the offline box does not have, so they are refused.
+
+    Args:
+        scorer_spec: The payload's scorer, after the gateway scoped its model.
+
+    Returns:
+        The route, or ``None`` when the scorer names no model.
+
+    Raises:
+        ServiceError: When the scorer has a model but no scoped route.
+    """
+    model = scorer_spec.get("model")
+    if not isinstance(model, dict):
+        return None
+    if not isinstance((model.get("extra") or {}).get(ROUTE_KEY), dict):
+        raise ServiceError("Repository scorers reach a model only through the trusted parent's scoped route.")
+    return scorer_gateway(ModelConfig.model_validate(model), settings)
 
 
 def _version_score(result: dict[str, Any], candidate: str) -> float | None:
@@ -466,6 +507,20 @@ def _version_score(result: dict[str, Any], candidate: str) -> float | None:
             score = version.get("score")
             return float(score) if isinstance(score, int | float) else None
     return None
+
+
+def _ranking_score(result: dict[str, Any], candidate: str) -> float:
+    """Return a version's score for ranking, with unscored versions last.
+
+    Args:
+        result: Finished black-box result.
+        candidate: The version's patch.
+
+    Returns:
+        The recorded score, or negative infinity when the run never scored it.
+    """
+    score = _version_score(result, candidate)
+    return float("-inf") if score is None else score
 
 
 def _version_illegal(result: dict[str, Any], candidate: str) -> bool:
@@ -550,6 +605,10 @@ def publish_improvement(
 ) -> dict[str, Any] | None:
     """Open a draft pull request with the run's best version when it beat the start.
 
+    A repository Skynet created for the run has no one else's code to review
+    against, so it gets every version on its own branch instead (see
+    :func:`publish_candidates`).
+
     Never raises: the run already finished, so a failure is recorded on the
     result for its owner to read instead.
 
@@ -563,9 +622,14 @@ def publish_improvement(
         app_url: Public origin of the web app.
 
     Returns:
-        What was recorded under ``details.pull_request``, or ``None`` when the
-        run did not improve.
+        What was recorded under ``details.pull_request`` (or
+        ``details.candidate_branches`` for a created repository), or ``None``
+        when the run did not improve an existing repository.
     """
+    if payload["target"]["repo"].get("created_by_skynet"):
+        return publish_candidates(
+            result, payload, staged, username=username, engine=engine, optimization_id=optimization_id
+        )
     patch = improved_patch(result)
     if patch is None:
         return None
@@ -607,4 +671,105 @@ def publish_improvement(
             outcome = {"error": "The pull request could not be opened."}
     details = result.setdefault("details", {})
     details[PULL_REQUEST_DETAIL] = outcome
+    return outcome
+
+
+def _candidate_versions(
+    result: dict[str, Any], repo: dict[str, Any], staged: StagedRepository, run: str
+) -> tuple[list[tuple[str, str]], int]:
+    """Number the run's versions that may reach the repository.
+
+    Args:
+        result: Finished black-box result.
+        repo: The payload's repository source.
+        staged: The fetched tree, whose read-only paths still apply.
+        run: Short run id that starts every version id.
+
+    Returns:
+        ``(id, patch)`` pairs in first-seen order, ids ``<run>-1`` upward, and
+        how many versions were left out.
+    """
+    versions: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    skipped = 0
+    for index, version in enumerate(result.get("versions") or [], start=1):
+        patch = version.get("candidate") if isinstance(version, dict) else None
+        if not isinstance(patch, str) or patch in seen:
+            continue
+        seen.add(patch)
+        # The patches came back from the guest, so the editing rules are
+        # checked again before any of them reaches the repository.
+        if _version_illegal(result, patch) or patch_violations(
+            patch, repo["editable_paths"], staged.snapshot.readonly_paths, staged.protected_paths
+        ):
+            skipped += 1
+            continue
+        versions.append((f"{run}-{index}", patch))
+    return versions, skipped
+
+
+def publish_candidates(
+    result: dict[str, Any],
+    payload: dict[str, Any],
+    staged: StagedRepository,
+    *,
+    username: str,
+    engine: Any,
+    optimization_id: str,
+) -> dict[str, Any]:
+    """Push the top versions of a run on a created repository to their own branches.
+
+    At most ``MAX_CANDIDATE_BRANCHES`` versions get a branch, the best one
+    always among them. ``skynet/best`` moves to the improved version, or to the starting code
+    when nothing beat it. Never raises: a failure is recorded on the result.
+
+    Args:
+        result: Finished black-box result, updated in place.
+        payload: The staged payload, which pins the commit.
+        staged: The fetched tree, whose read-only paths still apply.
+        username: Owner of the run and of the GitHub connection.
+        engine: SQLAlchemy engine holding the connector vault.
+        optimization_id: The run, named in every version id.
+
+    Returns:
+        What was recorded under ``details.candidate_branches``.
+    """
+    repo = payload["target"]["repo"]
+    # A later run on the same repository (a retry, clone or scheduled cycle)
+    # makes different commits for the same version number. Branch names carry
+    # the run id so those pushes never need to rewrite an earlier run's branch.
+    run = optimization_id[:12]
+    versions, skipped = _candidate_versions(result, repo, staged, run)
+    best_patch = improved_patch(result) or ""
+    best_id = next((version_id for version_id, patch in versions if patch == best_patch), None)
+    left_out = 0
+    if len(versions) > MAX_CANDIDATE_BRANCHES:
+        ranked = sorted(
+            versions,
+            key=lambda pair: (pair[0] == best_id, _ranking_score(result, pair[1])),
+            reverse=True,
+        )
+        kept = {version_id for version_id, _ in ranked[:MAX_CANDIDATE_BRANCHES]}
+        left_out = len(versions) - len(kept)
+        versions = [pair for pair in versions if pair[0] in kept]
+    if best_id is None:
+        best_id = f"{run}-start"
+        versions.append((best_id, ""))
+    outcome: dict[str, Any]
+    try:
+        pushed = push_candidates(repo["repository"], repo["commit"], versions, best_id, github_token(engine, username))
+        outcome = {
+            "repository": repo["repository"],
+            "best_branch": BEST_BRANCH,
+            "best_version": best_id,
+            "branches": pushed,
+            "skipped": skipped,
+            "left_out": left_out,
+        }
+    except (RepoFetchError, RepoPublishError) as error:
+        outcome = {"error": str(error)}
+    except Exception:  # isolation boundary: a finished run must keep its result
+        logger.exception("Pushing the candidate branches of %s failed", repo["repository"])
+        outcome = {"error": "The candidate branches could not be pushed."}
+    result.setdefault("details", {})[CANDIDATE_BRANCHES_DETAIL] = outcome
     return outcome
