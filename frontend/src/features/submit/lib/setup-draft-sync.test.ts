@@ -74,11 +74,18 @@ function fakeServer(stored: Body = null, fail = false) {
     calls,
     saves: new Map<string, { seq: number; revision: number }>(),
     evicted: 0,
-    slot: (changed: boolean): Slot => ({
-      revision: server.revision,
-      changed,
-      draft: server.stored,
-    }),
+    slot: (changed: boolean): Slot => {
+      const made = server.stored
+        ? [...server.saves].find(([, entry]) => entry.revision === server.revision)
+        : undefined;
+      return {
+        revision: server.revision,
+        changed,
+        draft: server.stored,
+        writer: made?.[0] ?? null,
+        seq: made?.[1].seq ?? null,
+      };
+    },
     get: async (_signal?: AbortSignal) => {
       calls.push("get");
       if (server.fail) throw new Error("offline");
@@ -549,6 +556,126 @@ test("N6: an edit in a stale tab does not replace another setup saved elsewhere"
   await sync.loadSetupDraft("a", server);
   assert.deepEqual(server.stored, other);
   assert.equal(localDraft(), null);
+});
+
+test("an edit left while the page's own debounced save is in flight lands on the next load", async () => {
+  for (const how of ["reload", "new tab"]) {
+    reset();
+    const start = editedDraft(1000, "A");
+    const server = fakeServer(sync.toServerDraft(start));
+    session.setItem(WIZARD_SESSION_KEY, start.values[WIZARD_SESSION_KEY]);
+    await sync.loadSetupDraft("a", server);
+    // Each put reaches the server only when released, and the closed page never reads its answer.
+    const put = server.put;
+    const waiting: Array<() => Promise<void>> = [];
+    server.put = (...args: Parameters<typeof put>) =>
+      new Promise((_, reject) => {
+        waiting.push(async () => {
+          await put(...args);
+          reject(new Error("page closed"));
+        });
+      });
+    const debounced = editedDraft(2000, "B");
+    session.setItem(WIZARD_SESSION_KEY, debounced.values[WIZARD_SESSION_KEY]);
+    void sync.saveSetupDraft(debounced, server);
+    await settle();
+    const left = editedDraft(3000, "C");
+    session.setItem(WIZARD_SESSION_KEY, left.values[WIZARD_SESSION_KEY]);
+    void sync.saveSetupDraft(left, server, true);
+    await settle();
+    assert.equal(waiting.length, 2, how);
+    await waiting[0]();
+    await settle();
+    await waiting[1]();
+    await settle();
+    server.put = put;
+    assert.deepEqual(server.stored, sync.toServerDraft(debounced), "the leave save was stale");
+    sameSetup(localDraft(), left);
+
+    sync.resetSetupDraftSyncForTests();
+    if (how === "new tab") session.items.clear();
+    await sync.loadSetupDraft("a", server);
+    assert.deepEqual(server.stored, sync.toServerDraft(left), how);
+    assert.equal(localDraft(), null, how);
+    const later = editedDraft(4000, "D");
+    session.setItem(WIZARD_SESSION_KEY, later.values[WIZARD_SESSION_KEY]);
+    assert.equal(await sync.saveSetupDraft(later, server), true, how);
+    assert.deepEqual(server.stored, sync.toServerDraft(later), how);
+  }
+});
+
+test("a page's leave save and its earlier debounced save keep the newer edit in either order", async () => {
+  for (const order of ["debounced first", "leave first"]) {
+    reset();
+    const start = editedDraft(1000, "A");
+    const server = fakeServer(sync.toServerDraft(start));
+    await sync.loadSetupDraft("a", server);
+    // Each put reaches the server and answers the page only when the test says so.
+    const put = server.put;
+    const calls: Array<{ apply: () => Promise<void>; answer: () => void }> = [];
+    server.put = (...args: Parameters<typeof put>) =>
+      new Promise((resolve) => {
+        let slot: Awaited<ReturnType<typeof put>>;
+        calls.push({
+          apply: async () => {
+            slot = await put(...args);
+          },
+          answer: () => resolve(slot),
+        });
+      });
+    const debounced = editedDraft(2000, "B");
+    const savedDebounced = sync.saveSetupDraft(debounced, server);
+    await settle();
+    const left = editedDraft(3000, "C");
+    const savedLeft = sync.saveSetupDraft(left, server, true);
+    await settle();
+    const [first, second] = order === "debounced first" ? calls : [calls[1], calls[0]];
+    await first.apply();
+    await second.apply();
+    server.put = put;
+    second.answer();
+    await settle();
+    first.answer();
+    assert.equal(await savedLeft, true, order);
+    assert.equal(await savedDebounced, true, order);
+    assert.deepEqual(server.stored, sync.toServerDraft(left), order);
+  }
+});
+
+test("a reload of the tab that saved last does not send another tab's superseded copy over it", async () => {
+  reset();
+  const start = editedDraft(1000, "S");
+  const server = fakeServer(sync.toServerDraft(start));
+  session.setItem(WIZARD_SESSION_KEY, start.values[WIZARD_SESSION_KEY]);
+  await sync.loadSetupDraft("a", server);
+  const theirs = editedDraft(2000, "Z");
+  session.setItem(WIZARD_SESSION_KEY, theirs.values[WIZARD_SESSION_KEY]);
+  assert.equal(await sync.saveSetupDraft(theirs, server), true);
+  const firstTab = new Map(session.items);
+
+  // The second tab read the same setup before the first tab's save.
+  sync.resetSetupDraftSyncForTests();
+  session.items.clear();
+  session.setItem(WIZARD_SESSION_KEY, start.values[WIZARD_SESSION_KEY]);
+  const get = server.get;
+  server.get = async () => ({ revision: 1, changed: false, draft: sync.toServerDraft(start) });
+  await sync.loadSetupDraft("a", server);
+  server.get = get;
+  const stale = editedDraft(3000, "X");
+  session.setItem(WIZARD_SESSION_KEY, stale.values[WIZARD_SESSION_KEY]);
+  assert.equal(await sync.saveSetupDraft(stale, server), false);
+  sameSetup(localDraft(), stale);
+
+  // The first tab reloads.
+  sync.resetSetupDraftSyncForTests();
+  session.items = firstTab;
+  await sync.loadSetupDraft("a", server);
+  assert.deepEqual(server.stored, sync.toServerDraft(theirs));
+  assert.equal(localDraft(), null);
+  const later = editedDraft(4000, "Z2");
+  session.setItem(WIZARD_SESSION_KEY, later.values[WIZARD_SESSION_KEY]);
+  assert.equal(await sync.saveSetupDraft(later, server), true);
+  assert.deepEqual(server.stored, sync.toServerDraft(later));
 });
 
 test("N6: a reloaded stale tab keeps another setup saved elsewhere on load, leave and submit", async () => {

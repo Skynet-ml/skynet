@@ -149,11 +149,11 @@ def test_missing_draft_reads_null_and_put_round_trips() -> None:
     """A new account has an empty slot; a saved draft reads back the same."""
     client, _, _ = _harness()
 
-    assert client.get(_PATH).json() == {"revision": 0, "changed": False, "draft": None}
+    assert client.get(_PATH).json() == {"revision": 0, "changed": False, "draft": None, "writer": None, "seq": None}
     saved = client.put(_PATH, json=_draft(), params={"base_revision": 0})
 
     assert saved.status_code == 200
-    assert saved.json() == {"revision": 1, "changed": True, "draft": _draft()}
+    assert saved.json() == {"revision": 1, "changed": True, "draft": _draft(), "writer": None, "seq": None}
     assert _stored(client) == _draft()
 
 
@@ -194,7 +194,13 @@ def test_a_save_from_the_current_revision_replaces_the_draft() -> None:
     _put(client, _draft())
     second = _draft(left_at=5, values={"k": "second"}, chat=None)
 
-    assert _put(client, second, base=1) == {"revision": 2, "changed": True, "draft": second}
+    assert _put(client, second, base=1) == {
+        "revision": 2,
+        "changed": True,
+        "draft": second,
+        "writer": None,
+        "seq": None,
+    }
 
     assert _stored(client) == second
     with Session(engine) as session:
@@ -233,9 +239,9 @@ def test_delete_removes_the_draft_and_its_chat() -> None:
     client, engine, _ = _harness()
     _put(client, _draft())
 
-    assert _delete(client, 1) == {"revision": 2, "changed": True, "draft": None}
+    assert _delete(client, 1) == {"revision": 2, "changed": True, "draft": None, "writer": None, "seq": None}
 
-    assert client.get(_PATH).json() == {"revision": 2, "changed": False, "draft": None}
+    assert client.get(_PATH).json() == {"revision": 2, "changed": False, "draft": None, "writer": None, "seq": None}
     with Session(engine) as session:
         row = session.get(SetupDraftModel, "alice")
         assert (row.deleted, row.draft_values, row.chat, row.revision) == (True, {}, None, 2)
@@ -262,7 +268,7 @@ def test_a_save_sent_before_a_delete_cannot_bring_the_setup_back() -> None:
 
     late = _put(client, _draft(), base=1)
 
-    assert late == {"revision": 2, "changed": False, "draft": None}
+    assert late == {"revision": 2, "changed": False, "draft": None, "writer": None, "seq": None}
     assert _stored(client) is None
     assert _put(client, _draft(left_at=1), base=2)["changed"] is True
 
@@ -307,6 +313,22 @@ def test_a_copy_that_never_landed_goes_on_top_of_a_later_edit() -> None:
 
     assert _send_copy(client, copy, base=2, copy_base=1, writer="page-a", seq=2)["changed"] is True
     assert _stored(client)["values"] == {"k": "page A"}
+
+
+def test_the_slot_names_the_page_and_count_of_the_save_that_made_it() -> None:
+    """A page can tell its own earlier save from another page's setup; a delete or an unmarked save names none."""
+    client, _, _ = _harness()
+    made = client.put(_PATH, json=_draft(), params={"base_revision": 0, "writer": "page-a", "seq": 2}).json()
+    assert (made["writer"], made["seq"]) == ("page-a", 2)
+    stale = client.put(_PATH, json=_draft(), params={"base_revision": 0, "writer": "page-b", "seq": 1}).json()
+    assert (stale["changed"], stale["writer"], stale["seq"]) == (False, "page-a", 2)
+    assert client.get(_PATH).json()["writer"] == "page-a"
+
+    unmarked = _put(client, _draft(values={"k": "device B"}), base=1)
+    assert (unmarked["writer"], unmarked["seq"]) == (None, None)
+    client.put(_PATH, json=_draft(), params={"base_revision": 2, "writer": "page-a", "seq": 3})
+    deleted = _delete(client, 3)
+    assert (deleted["writer"], deleted["seq"]) == (None, None)
 
 
 def test_a_copy_is_refused_after_a_delete_newer_than_its_base() -> None:

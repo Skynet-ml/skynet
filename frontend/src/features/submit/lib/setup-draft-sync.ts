@@ -321,6 +321,8 @@ export function saveSetupDraft(
   // device stays.
   const ownSlot = (slot: ServerSetupDraftSlot, read: number | null) => {
     if (!slot.draft) return slot.revision === (read ?? 0) + 1;
+    // An earlier save of this page that landed first is this page's setup too.
+    if (slot.writer === writer) return true;
     const left = fromServerDraft(account, slot.draft);
     return (
       bodyKey(account, toServerDraft(left)) === takenBody ||
@@ -345,6 +347,8 @@ export function saveSetupDraft(
       // it. This setup holds an edit the server never took, so it goes once
       // more on top of the same setup.
       if (!slot.changed && deletes === deletesBefore) {
+        // A later save of this page holds the slot already; this older one must not replace it.
+        if (slot.draft && slot.writer === writer && (slot.seq ?? 0) > save.seq) return true;
         if (!ownSlot(slot, read?.account === account ? read.revision : null)) {
           // Later saves from this page must not land on the newer setup either.
           known = read;
@@ -543,13 +547,20 @@ export function loadSetupDraft(
     // The copy goes on top only of the revision it builds on, of the same
     // setup, or of an empty slot (the server refuses it after a delete); a
     // newer setup from another device stays.
+    // The setup this tab reopens counts only for the tab's own copy or a copy
+    // with no base: another tab's copy refused as superseded must not replace it.
+    const tabCopy = copyIsTab || mark.copyBase === 0;
     const ownSlot = (at: ServerSetupDraftSlot) => {
       if (!at.draft || at.revision === mark.copyBase) return true;
+      // An earlier save of the page that made the copy landed after the copy's base;
+      // the server refuses the copy when the copy's own save landed.
+      if (at.writer != null && at.writer === mark.writer) return true;
       const left = fromServerDraft(account, at.draft);
       return (
-        bodyKey(account, toServerDraft(left)) === reopened ||
         left.values[WIZARD_SESSION_KEY] === local.values[WIZARD_SESSION_KEY] ||
-        (tabSetup !== null && left.values[WIZARD_SESSION_KEY] === tabSetup)
+        (tabCopy &&
+          (bodyKey(account, toServerDraft(left)) === reopened ||
+            (tabSetup !== null && left.values[WIZARD_SESSION_KEY] === tabSetup)))
       );
     };
     const superseded = (at: ServerSetupDraftSlot) => {

@@ -87,6 +87,11 @@ class SetupDraftSlot(BaseModel):
     revision: int = Field(ge=0, description="The slot's revision; a save or delete must name it to change the slot.")
     changed: bool = Field(description="True when this call wrote the draft or the delete; false when it was stale.")
     draft: SetupDraft | None = Field(description="The stored draft, or null when there is none or it was deleted.")
+    # A page tells its own earlier save from another page's setup by these two.
+    writer: str | None = Field(
+        default=None, description="The page whose save made this revision, or null when unknown or deleted."
+    )
+    seq: int | None = Field(default=None, description="That page's count for the save, or null when unknown.")
 
 
 def _storable(value: Any) -> bool:
@@ -181,7 +186,8 @@ def _slot(row: SetupDraftModel | None, *, changed: bool) -> SetupDraftSlot:
         changed: Whether this call wrote the row.
 
     Returns:
-        The slot as the browser reads it.
+        The slot as the browser reads it, with the page and count of the save
+        that made the current revision when the row still lists it.
     """
     if row is None:
         return SetupDraftSlot(revision=0, changed=changed, draft=None)
@@ -192,7 +198,14 @@ def _slot(row: SetupDraftModel | None, *, changed: bool) -> SetupDraftSlot:
             left_at=row.left_at, values=row.draft_values, chat=row.chat, staged_dataset_id=row.staged_dataset_id
         )
     )
-    return SetupDraftSlot(revision=row.revision, changed=changed, draft=draft)
+    made = next((entry for entry in row.saves or [] if entry[2] == row.revision), None) if draft else None
+    return SetupDraftSlot(
+        revision=row.revision,
+        changed=changed,
+        draft=draft,
+        writer=made[0] if made else None,
+        seq=made[1] if made else None,
+    )
 
 
 def _revision(row: SetupDraftModel | None) -> int:

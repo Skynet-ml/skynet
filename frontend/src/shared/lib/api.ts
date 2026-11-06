@@ -3413,6 +3413,9 @@ export interface ServerSetupDraftSlot {
   /** False when the call named a revision that was no longer current. */
   changed: boolean;
   draft: ServerSetupDraft | null;
+  /** The page and count of the save that made this revision, when the server still lists it. */
+  writer?: string | null;
+  seq?: number | null;
 }
 
 /** The page and count of a save; a browser copy sent again also names the revision it builds on. */
