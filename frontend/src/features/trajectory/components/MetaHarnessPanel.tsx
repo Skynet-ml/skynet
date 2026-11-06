@@ -29,6 +29,7 @@ import {
 } from "../lib/meta-harness";
 import { displayCandidateId, type BlackboxTrajectoryContext } from "../lib/types";
 import { rememberTrajectoryView } from "../lib/climb-view-hint";
+import type { ApiSource } from "@/shared/lib/api-route";
 import { AgentRunViewer } from "./AgentRunViewer";
 import { MetaHarnessClimb } from "./MetaHarnessClimb";
 import { TimelineScrubber } from "./TimelineScrubber";
@@ -68,6 +69,8 @@ export interface MetaHarnessPanelProps {
   // Run configuration of the black-box run, forwarded to the drawer so it
   // names versions by kind and shows per-case scores only when cases exist.
   blackbox?: BlackboxTrajectoryContext | null;
+  // Where the run lives; the agent-run drawer reads from the same backend.
+  source?: ApiSource;
 }
 
 /**
@@ -78,7 +81,7 @@ export interface MetaHarnessPanelProps {
  * with the best so far as a staircase, and a version's drawer shows how it did
  * case by case, each score opening the agent run behind it.
  */
-export function MetaHarnessPanel({ job, engine, blackbox }: MetaHarnessPanelProps) {
+export function MetaHarnessPanel({ job, engine, blackbox, source }: MetaHarnessPanelProps) {
   const live = isLive(job);
   const optimizationId = job.optimization_id;
 
@@ -287,6 +290,7 @@ export function MetaHarnessPanel({ job, engine, blackbox }: MetaHarnessPanelProp
             run={openRun}
             open={runOpen}
             onOpenChange={setRunOpen}
+            source={source}
           />
           <TrajectoryDrawer
             selection={drawerSelection}

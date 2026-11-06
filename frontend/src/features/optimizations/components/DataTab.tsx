@@ -28,6 +28,7 @@ import { msg } from "@/shared/lib/messages";
 import { DatasetRowReader } from "@/features/datasets";
 import { tip } from "@/shared/lib/tooltips";
 import { getOptimizationDataset, getTestResults, getPairTestResults } from "@/shared/lib/api";
+import type { ApiSource } from "@/shared/lib/api-route";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import type {
   OptimizationDatasetResponse,
@@ -75,8 +76,11 @@ export function DataTab({
   pairIndex,
   sharedDataset,
   sharedTestResults,
+  source,
 }: {
   job: OptimizationStatusResponse;
+  /** Where the run lives; a hosted run reads through the hosted proxy. */
+  source?: ApiSource;
   pairIndex?: number | null;
   /** Public share view: render this injected split instead of fetching (no per-example scores). */
   sharedDataset?: OptimizationDatasetResponse | null;
@@ -103,11 +107,11 @@ export function DataTab({
       setLoading(false);
       return;
     }
-    getOptimizationDataset(job.optimization_id)
+    getOptimizationDataset(job.optimization_id, source)
       .then(setDataset)
       .catch(() => setError(msg("auto.features.optimizations.components.datatab.literal.1")))
       .finally(() => setLoading(false));
-  }, [job.optimization_id, sharedDataset]);
+  }, [job.optimization_id, sharedDataset, source]);
 
   // Share view: index the injected baseline/optimized results by example index
   // (mirrors the fetch path's reshaping) instead of calling the authed endpoint.
@@ -125,8 +129,8 @@ export function DataTab({
     setTestResultsLoading(true);
     const fetchResults =
       pairIndex != null
-        ? getPairTestResults(job.optimization_id, pairIndex)
-        : getTestResults(job.optimization_id);
+        ? getPairTestResults(job.optimization_id, pairIndex, source)
+        : getTestResults(job.optimization_id, source);
     fetchResults
       .then((res) => {
         const optimized: Record<number, EvalExampleResult> = {};
@@ -141,7 +145,7 @@ export function DataTab({
         console.warn("test results fetch failed:", err);
       })
       .finally(() => setTestResultsLoading(false));
-  }, [job.optimization_id, job.status, pairIndex, sharedDataset]);
+  }, [job.optimization_id, job.status, pairIndex, sharedDataset, source]);
 
   const inputFields = useMemo(
     () => (dataset ? Object.values(dataset.column_mapping.inputs) : []),

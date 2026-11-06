@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { listJobs, getOptimizationCounts, type OptimizationCounts } from "@/shared/lib/api";
+import {
+  listJobs,
+  getOptimizationCounts,
+  hostedRunsAvailable,
+  type OptimizationCounts,
+} from "@/shared/lib/api";
+import { loadRuns, sumCounts } from "@/features/sidebar";
 import type { PaginatedJobsResponse } from "@/shared/types/api";
 import { msg } from "@/shared/lib/messages";
 import { FETCH_PAGE_SIZE } from "../constants";
@@ -40,12 +46,28 @@ export function useJobsList({ sessionUser, isAdmin }: UseJobsListArgs): UseJobsL
       // frontend suppressed the flag while the backend scoped the caller to
       // owner-only — silently hiding every shared run.
       const includeShared = true;
-      const [result, countsResult] = await Promise.all([
-        listJobs({ username, limit: FETCH_PAGE_SIZE, offset: pageOffset, include_shared: includeShared }),
+      // The Mac app with a linked account lists hosted runs too. Each side
+      // pages with the same offset, so a merged page is approximate.
+      const withHosted = hostedRunsAvailable();
+      const [result, countsResult, hostedCounts] = await Promise.all([
+        loadRuns(
+          (source) =>
+            listJobs({
+              username,
+              limit: FETCH_PAGE_SIZE,
+              offset: pageOffset,
+              include_shared: includeShared,
+              source,
+            }),
+          withHosted,
+        ),
         getOptimizationCounts(username, includeShared).catch(() => null),
+        withHosted
+          ? getOptimizationCounts(undefined, includeShared, "hosted").catch(() => null)
+          : null,
       ]);
       setData(result);
-      if (countsResult) setCounts(countsResult);
+      if (countsResult) setCounts(sumCounts(countsResult, hostedCounts));
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : msg("dashboard.load_error"));
