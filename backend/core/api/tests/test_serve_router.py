@@ -230,7 +230,7 @@ def _repo_job(status: str = "success", commit: str | None = _REPO_COMMIT) -> dic
         "payload_overview": {"username": "alice", "optimization_type": "run"},
         "payload": {
             "username": "alice",
-            "engine": "gepa",
+            "strategy": {"engine": "gepa"},
             "target": {"kind": "repo", "repo": {"repository": "acme/app", "commit": commit, "ref": "main"}},
             "scorer": {"model": {"name": "fixture/model"}},
             "token_source": "managed",

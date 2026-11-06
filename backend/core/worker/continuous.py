@@ -560,6 +560,12 @@ def _repo_cycle_payload(
     for role, better in new_models.items():
         field = _REPO_MODEL_FIELDS[role]
         copy[field] = _swapped(copy[field], better)
+    repo = (copy.get("target") or {}).get("repo")
+    if isinstance(repo, dict):
+        # A check must not move ``skynet/best`` before the owner approves it,
+        # and a check with no gain would reset it to the bare commit. Checks
+        # publish a draft pull request instead, as on any other repository.
+        repo["created_by_skynet"] = False
     _name_and_fund(copy, plan, incumbent, sequence)
     return BlackboxRunRequest.model_validate(copy)
 

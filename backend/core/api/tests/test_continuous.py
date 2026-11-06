@@ -1922,6 +1922,24 @@ def test_a_repository_run_with_cases_can_enable_a_plan(env: _Env) -> None:
     assert _enable(env, source_id, permitted={"reflection_model": True})["id"]
 
 
+def test_a_check_on_a_created_repository_publishes_a_draft_pull_request(env: _Env) -> None:
+    """A check never moves ``skynet/best`` before the owner approves it, so it uses the draft pull request path."""
+    payload = _incumbent_payload()
+    payload["target"]["repo"]["created_by_skynet"] = True
+    response = env.client.post("/blackbox/run", json=payload)
+    assert response.status_code == 201, response.text
+    source_id = response.json()["optimization_id"]
+    _finish(env, source_id, result=_result(0.5, INCUMBENT_SCORE))
+    _enable(env, source_id, permitted={"task_model": True, "reflection_model": True})
+    env.better()
+    env.sweep(_due(env))
+    cycle = env.cycles()[-1]
+
+    assert cycle.status == "optimizing", cycle.detail_code
+    assert env.payload(source_id)["target"]["repo"]["created_by_skynet"] is True
+    assert env.payload(cycle.optimization_id)["target"]["repo"]["created_by_skynet"] is False
+
+
 def test_a_scheduled_check_reruns_a_repository_run_from_its_best_patch(env: _Env) -> None:
     """A check re-runs the repository run from the incumbent's best patch, on the same commit, cases and split."""
     source_id = _incumbent(env)

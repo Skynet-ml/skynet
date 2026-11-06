@@ -453,7 +453,7 @@ def create_serve_router(*, job_store) -> APIRouter:
         return ServeInfoResponse(
             optimization_id=optimization_id,
             module_name=SERVE_FILE,
-            optimizer_name=str(stored.get("engine") or ""),
+            optimizer_name=str((stored.get("strategy") or {}).get("engine") or ""),
             model_name=str(model.get("name") or "") if isinstance(model, dict) else "",
             input_fields=[],
             output_fields=[],
