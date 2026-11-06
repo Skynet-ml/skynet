@@ -6,7 +6,6 @@ import { useCompletionNotification } from "@/shared/hooks/use-completion-notific
 import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { toast } from "react-toastify";
 import {
   ClockCounterClockwise,
   SidebarSimple,
@@ -50,9 +49,9 @@ import { useColorTheme } from "@/shared/providers/theme-provider";
 import { useConversationStore } from "../hooks/use-conversation-store";
 import { useGeneralistAgent, type SessionEventContext } from "../hooks/use-generalist-agent";
 import { useGeneralistPanelState } from "../hooks/use-panel-state";
-import { createConversationShare, getConversation } from "../lib/conversation-api";
-import { useHostedFeaturesAvailable } from "@/shared/hooks/use-hosted-features";
-import { sharedChatUrl } from "@/shared/lib/share-link";
+import { getConversation } from "../lib/conversation-api";
+import { isLocalMode } from "@/shared/lib/runtime-env";
+import { ShareChatDialog } from "./ShareChatDialog";
 import { TRUST_MODE_HUE, useTrustMode } from "../hooks/use-trust-mode";
 import { extractWizardPatch, useWizardStateOptional } from "../hooks/use-wizard-state";
 import {
@@ -845,26 +844,10 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
   );
   const stepKind = React.useCallback((call: AgentToolCall) => getToolKind(call.tool), []);
 
-  // In the Mac app the local backend publishes the chat to the linked hosted
-  // account on each click, so the link opens for anyone and shows the latest
-  // messages. Without a linked account no link can work, so the button hides.
-  const canShare = useHostedFeaturesAvailable();
-  const handleShareConversation = React.useCallback(async () => {
-    const id = agent.conversationId;
-    if (!id) return;
-    const token = await createConversationShare(id);
-    const url = token ? sharedChatUrl(token) : null;
-    if (!url) {
-      toast.error(msg("share.error"));
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(url);
-      toast.success(msg("share.link_copied"));
-    } catch {
-      toast.error(msg("clipboard.copy_failed"));
-    }
-  }, [agent.conversationId]);
+  // A share link opens the chat in hosted Skynet, so only the hosted app
+  // shares chats; the Mac app has no share button (SKY-294).
+  const canShare = !isLocalMode();
+  const [shareOpen, setShareOpen] = React.useState(false);
 
   const emptyState = (
     <EmptyState
@@ -958,7 +941,7 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                   type="button"
                   variant="ghost"
                   size="icon-xs"
-                  onClick={() => void handleShareConversation()}
+                  onClick={() => setShareOpen(true)}
                   className="text-muted-foreground hover:text-foreground"
                   aria-label={msg("shared.agent.share_conversation")}
                 >
@@ -969,6 +952,13 @@ export function GeneralistPanel({ wizardState }: GeneralistPanelProps = {}) {
                 {msg("shared.agent.share_conversation")}
               </TooltipContent>
             </Tooltip>
+          )}
+          {canShare && agent.conversationId && (
+            <ShareChatDialog
+              conversationId={agent.conversationId}
+              open={shareOpen}
+              onOpenChange={setShareOpen}
+            />
           )}
           {!inSetup && agent.messages.length > 0 && (
             <Tooltip>

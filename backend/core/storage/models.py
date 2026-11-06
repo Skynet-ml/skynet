@@ -1570,10 +1570,10 @@ class AgentConversationModel(Base):
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # Unguessable public read-only link token; NULL when the chat is not shared.
-    share_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # When the current share link was made; NULL while the chat is not shared.
-    shared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The share link this chat was continued from, when another user's link
+    # made it. Not a foreign key: a revoke deletes the link row and clears this
+    # column, and every shared-item read checks the live link row.
+    source_share_token: Mapped[str | None] = mapped_column(String(48), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
@@ -1584,7 +1584,38 @@ class AgentConversationModel(Base):
     __table_args__ = (
         Index("ix_agent_conversations_user_updated", "username", "updated_at"),
         Index("ix_agent_conversations_user_pinned", "username", "pinned"),
-        Index("ix_agent_conversations_share_token", "share_token", unique=True),
+        # One continued copy per user and link, so a second open finds the first.
+        Index("ix_agent_conversations_source_share", "source_share_token", "username", unique=True),
+    )
+
+
+class AgentChatShareModel(Base):
+    """The one live share link of an agent conversation.
+
+    ``link_type`` is ``view`` (anyone can read the chat), ``continue`` (a
+    signed-in user continues it as their own chat) or ``continue_data``
+    (as ``continue``, and the user can read the ticked ``items`` live,
+    read-only). ``items`` holds ``{"kind", "id"}`` entries. A revoke deletes
+    the row, so the token and every grant stop at once.
+    """
+
+    __tablename__ = "agent_chat_shares"
+
+    token: Mapped[str] = mapped_column(String(48), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("agent_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    username: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    link_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    items: Mapped[list[dict[str, Any]]] = mapped_column(JSON_STORE, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
 
 

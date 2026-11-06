@@ -1038,6 +1038,9 @@ _ALWAYS_TOOLS = frozenset(
         # Read-only wallet: balance, free grant, plan, and recent ledger —
         # lets the agent answer "how much money do I have left / what did I spend?".
         "get_wallet_for_agent",
+        # Read-only, live grant: a chat continued from a share link reads the
+        # runs, datasets and files that the owner ticked (SKY-294).
+        "read_shared_chat_item",
         "serve_info_serve",
         "serve_pair_info_serve",
         # UI-trigger tool — calling it renders an inline inference-input
