@@ -314,8 +314,13 @@ export function saveSetupDraft(
       (signal) => server.put(body, base, outlivesPage, signal, save),
       SETUP_DRAFT_WRITE_TIMEOUT_MS,
     ).then((slot) => learn(account, slot));
-  const keepCopy = () =>
-    keepLocalSetupDraft({ ...draft, save, baseRevision: knownRevision(account) ?? 0 });
+  // A page that never read the slot keeps no base, so its copy differs from one built on revision 0.
+  const keepCopy = () => {
+    const base = knownRevision(account);
+    keepLocalSetupDraft(
+      base === null ? { ...draft, save } : { ...draft, save, baseRevision: base },
+    );
+  };
   // A stale save goes once more only on top of this page's own setup, or of
   // the delete of the revision this page knew; a newer setup from another
   // device stays.
@@ -549,7 +554,7 @@ export function loadSetupDraft(
     // newer setup from another device stays.
     // The setup this tab reopens counts only for the tab's own copy or a copy
     // with no base: another tab's copy refused as superseded must not replace it.
-    const tabCopy = copyIsTab || mark.copyBase === 0;
+    const tabCopy = copyIsTab || local.baseRevision === undefined;
     const ownSlot = (at: ServerSetupDraftSlot) => {
       if (!at.draft || at.revision === mark.copyBase) return true;
       // An earlier save of the page that made the copy landed after the copy's base;

@@ -678,6 +678,39 @@ test("a reload of the tab that saved last does not send another tab's superseded
   assert.deepEqual(server.stored, sync.toServerDraft(later));
 });
 
+test("a reload of a tab that saved over revision 0 keeps its setup from another tab's superseded copy", async () => {
+  reset();
+  const server = fakeServer(null);
+  assert.equal(await sync.loadSetupDraft("a", server), null);
+  const theirs = editedDraft(2000, "Z");
+  session.setItem(WIZARD_SESSION_KEY, theirs.values[WIZARD_SESSION_KEY]);
+  assert.equal(await sync.saveSetupDraft(theirs, server), true);
+  const firstTab = new Map(session.items);
+
+  // The second tab read the empty slot before the first tab's save.
+  sync.resetSetupDraftSyncForTests();
+  session.items.clear();
+  const get = server.get;
+  server.get = async () => ({ revision: 0, changed: false, draft: null });
+  assert.equal(await sync.loadSetupDraft("a", server), null);
+  server.get = get;
+  const stale = editedDraft(3000, "X");
+  session.setItem(WIZARD_SESSION_KEY, stale.values[WIZARD_SESSION_KEY]);
+  assert.equal(await sync.saveSetupDraft(stale, server), false);
+  sameSetup(localDraft(), stale);
+
+  // The first tab reloads with no pagehide.
+  sync.resetSetupDraftSyncForTests();
+  session.items = firstTab;
+  await sync.loadSetupDraft("a", server);
+  assert.deepEqual(server.stored, sync.toServerDraft(theirs));
+  assert.equal(localDraft(), null);
+  const later = editedDraft(4000, "Z2");
+  session.setItem(WIZARD_SESSION_KEY, later.values[WIZARD_SESSION_KEY]);
+  assert.equal(await sync.saveSetupDraft(later, server), true);
+  assert.deepEqual(server.stored, sync.toServerDraft(later));
+});
+
 test("N6: a reloaded stale tab keeps another setup saved elsewhere on load, leave and submit", async () => {
   reset();
   const mine = editedDraft(1000, "A");
