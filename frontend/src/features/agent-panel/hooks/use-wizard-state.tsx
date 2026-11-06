@@ -137,18 +137,21 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
   // A ref, not state: the frame re-registers on every render that changes its
   // handlers, and the agent reads it only when a move arrives.
   const navigatorRef = React.useRef<ScreenNavigator | null>(null);
+  const [returnScreen, setReturnScreen] = React.useState<string | null>(null);
   const setScreenNavigator = React.useCallback((navigator: ScreenNavigator | null) => {
     navigatorRef.current = navigator;
+    // Null means the wizard unmounted. The provider outlives it, so the next
+    // setup must not inherit this one's return screen. The screen alone cannot
+    // say so: on an account switch the new frame's screen lands in the same
+    // render as the old frame's null.
+    if (navigator === null) setReturnScreen(null);
   }, []);
-  const [returnScreen, setReturnScreen] = React.useState<string | null>(null);
   // Clear it when the wizard moves to it or past it, not while the wizard
   // still shows the screen the go-back left: that screen is the return screen.
-  // A null screen means the wizard closed; the provider outlives it, so the
-  // next setup must not inherit this one's return screen.
   const [seenScreen, setSeenScreen] = React.useState<string | null>(wizardScreen);
   if (seenScreen !== wizardScreen) {
     setSeenScreen(wizardScreen);
-    if (returnScreen !== null && (wizardScreen === null || reachedReturnScreen(returnScreen, wizardScreen))) {
+    if (returnScreen !== null && reachedReturnScreen(returnScreen, wizardScreen)) {
       setReturnScreen(null);
     }
   }
