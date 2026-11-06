@@ -114,6 +114,12 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   the exact setup failure and record the coverage gap. Do not ask Gilad to
   create one. Never sign up for a normal check. Never borrow a personal
   session. Never print or commit passwords, tokens, cookies or email codes.
+- The staging test accounts `pool-1` to `pool-4` live in AWS Secrets
+  Manager: secret `skynet/staging/test-accounts`, account 669242775630,
+  region `us-east-2`, profile `skynet`. The secret is a JSON object keyed by
+  slot, with `email`, `password`, `app`, `api` and `status`. Read it only
+  inside your own script, and use only the slot that the orchestrator gave
+  you. Never print the value.
 - Never add funds, grant credits, change balances or change live billing
   configuration. Never deploy production.
 - Sign-in, sign-up exceptions, served-commit check: `skynet-test-accounts`.
