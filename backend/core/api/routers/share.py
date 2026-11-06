@@ -119,7 +119,7 @@ from ._helpers import (
 )
 from .constants import TERMINAL_STATUSES
 from .optimizations._local import remap_test_indices
-from .serve import ServeInferenceEvent, _artifact_prompt_fields, _column_mapping_fields
+from .serve import ServeInferenceEvent, _artifact_prompt_fields, _column_mapping_fields, require_serving_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -1274,8 +1274,8 @@ def create_share_router(*, job_store) -> APIRouter:
         Raises:
             DomainError: 404 when the token is unknown/revoked; 400 (bad inputs,
                 missing replay key, or no model);
-                409 when the optimization is not in a serveable state;
-                410 for a DSPy program run.
+                409 when the optimization is not in a serveable state or its
+                owner did not turn serving on; 410 for a DSPy program run.
         """
         with Session(job_store.engine) as session:
             role = resolve_share_access(session, token, current_user)
@@ -1307,6 +1307,7 @@ def create_share_router(*, job_store) -> APIRouter:
                 raise DomainError("share.not_found", status=404)
             if not is_repo_payload(job_data.get("payload") or {}):
                 raise DomainError(I18nKey.OPTIMIZATION_DSPY_RUN_RETIRED, status=410)
+            require_serving_enabled(job_data)
 
             owner_user = AuthenticatedUser(username=owner, role="user", groups=())
             artifact, overview, _model_name = load_program_metadata(job_store, optimization_id, owner_user)

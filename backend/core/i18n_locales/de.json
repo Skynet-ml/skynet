@@ -471,6 +471,7 @@
     "budget.conflict": "Dieses Budget wurde in einem anderen Tab geändert. Lade den Kontostand neu, bevor du es aktualisierst.",
     "budget.not_found": "Dieses Budget ist für dein Konto nicht verfügbar. Erstelle ein neues Einrichtungsbudget.",
     "budget.invalid": "Gib ein Ausgabenlimit ein, das bereits verbrauchte oder reservierte Beträge abdeckt.",
-    "budget.below_minimum": "Das Ausgabenlimit liegt unter dem Minimum, das dieser Lauf benötigt. Geben Sie ein höheres Limit ein."
+    "budget.below_minimum": "Das Ausgabenlimit liegt unter dem Minimum, das dieser Lauf benötigt. Geben Sie ein höheres Limit ein.",
+    "serve.not_enabled": "Die Bereitstellung ist für diesen Lauf aus. Schalten Sie sie zuerst im Tab „Bereitstellung“ des Laufs ein."
   }
 }

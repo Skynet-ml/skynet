@@ -991,6 +991,8 @@ export interface ServeInfoResponse {
   demo_count: number;
   /** Example input values (from a demo or the dataset) to prefill usage snippets. */
   sample_inputs?: Record<string, string>;
+  /** Whether the run's owner turned serving on; serve calls refuse while it is off. */
+  serving_enabled?: boolean;
 }
 
 export interface ServeResponse {

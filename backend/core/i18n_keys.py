@@ -346,6 +346,7 @@ class I18nKey(StrEnum):
     SERVE_MISSING_INPUTS = 'serve.missing_inputs'
     SERVE_NO_DECLARED_INPUTS = 'serve.no_declared_inputs'
     SERVE_NO_MODEL_CONFIG = 'serve.no_model_config'
+    SERVE_NOT_ENABLED = 'serve.not_enabled'
     SERVE_PROTECTED_INTERACTION_FAILED = 'serve.protected_interaction_failed'
     SERVE_SUBSCRIPTION_MODEL_HOSTED = 'serve.subscription_model_hosted'
     SUBMISSION_BYOK_EMBEDDINGS_UNSUPPORTED = 'submission.byok_embeddings_unsupported'

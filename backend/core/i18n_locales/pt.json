@@ -471,6 +471,7 @@
     "budget.conflict": "Este orçamento mudou em outra aba. Atualize o saldo antes de alterá-lo.",
     "budget.not_found": "Este orçamento não está disponível para sua conta. Crie um novo orçamento de configuração.",
     "budget.invalid": "Informe um limite de gastos que cubra os valores já gastos ou reservados.",
-    "budget.below_minimum": "O limite de gastos está abaixo do mínimo de que esta execução precisa. Introduza um limite mais alto."
+    "budget.below_minimum": "O limite de gastos está abaixo do mínimo de que esta execução precisa. Introduza um limite mais alto.",
+    "serve.not_enabled": "O serviço está desligado nesta execução. Ligue-o primeiro na aba Servir da execução."
   }
 }

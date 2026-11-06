@@ -471,6 +471,7 @@
     "budget.conflict": "呢個預算喺另一個分頁改過。更新之前請重新整理餘額。",
     "budget.not_found": "你嘅帳戶無法使用呢個預算。請建立新嘅設定預算。",
     "budget.invalid": "請輸入可以涵蓋已花費或者已預留用量嘅支出上限。",
-    "budget.below_minimum": "開支上限低過呢次運行需要嘅最低金額。請輸入更高嘅上限。"
+    "budget.below_minimum": "開支上限低過呢次運行需要嘅最低金額。請輸入更高嘅上限。",
+    "serve.not_enabled": "呢次執行嘅服務閂咗。請先喺執行嘅服務分頁開啟。"
   }
 }

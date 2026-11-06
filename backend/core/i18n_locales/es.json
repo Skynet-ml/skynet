@@ -471,6 +471,7 @@
     "budget.conflict": "Este presupuesto cambió en otra pestaña. Actualiza su saldo antes de modificarlo.",
     "budget.not_found": "Este presupuesto no está disponible para tu cuenta. Crea un nuevo presupuesto de configuración.",
     "budget.invalid": "Introduce un límite de gasto que cubra el consumo ya gastado o reservado.",
-    "budget.below_minimum": "El límite de gasto es inferior al mínimo que necesita esta ejecución. Introduce un límite más alto."
+    "budget.below_minimum": "El límite de gasto es inferior al mínimo que necesita esta ejecución. Introduce un límite más alto.",
+    "serve.not_enabled": "El servicio está desactivado para esta ejecución. Actívalo primero en la pestaña Servir de la ejecución."
   }
 }

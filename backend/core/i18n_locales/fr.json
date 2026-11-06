@@ -471,6 +471,7 @@
     "budget.conflict": "Ce budget a changé dans un autre onglet. Actualisez son solde avant de le modifier.",
     "budget.not_found": "Ce budget n’est pas disponible pour votre compte. Créez un nouveau budget de configuration.",
     "budget.invalid": "Saisissez un plafond de dépenses couvrant les montants déjà dépensés ou réservés.",
-    "budget.below_minimum": "La limite de dépenses est inférieure au minimum requis pour cette exécution. Saisissez une limite plus élevée."
+    "budget.below_minimum": "La limite de dépenses est inférieure au minimum requis pour cette exécution. Saisissez une limite plus élevée.",
+    "serve.not_enabled": "Le service est désactivé pour cette exécution. Activez-le d’abord dans l’onglet Service de l’exécution."
   }
 }
