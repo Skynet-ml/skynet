@@ -102,6 +102,17 @@ def test_recorded_cap_skips_the_cli_until_it_resets(tmp_path: Path) -> None:
     assert len(calls(tmp_path, "claude")) == 1
 
 
+def test_cap_evidence_says_whether_a_cli_started(tmp_path: Path) -> None:
+    """Mark a 429 that a saved cap answered as not dispatched; a CLI's own 429 has no mark."""
+    fake_cli(tmp_path, "claude", CAPPED)
+    dispatcher = CliDispatcher(None, "claude", MODEL, "judge", local_settings(tmp_path))
+    _, ran = dispatcher._answer("/chat/completions", REQUEST)
+    _, skipped = dispatcher._answer("/chat/completions", REQUEST)
+    assert (ran["status"], "dispatched" in ran) == (429, False)
+    assert (skipped["status"], skipped["dispatched"]) == (429, False)
+    assert len(calls(tmp_path, "claude")) == 1
+
+
 def test_fallback_order_that_names_droid_skips_it(tmp_path: Path) -> None:
     """Skip droid in a saved fallback order: it is not a runner, so it never starts."""
     fake_cli(tmp_path, "claude", CAPPED)

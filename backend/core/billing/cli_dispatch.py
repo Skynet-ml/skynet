@@ -690,6 +690,7 @@ class CliDispatcher:
         effort = request.get(CLI_EFFORT_KEY)
         fast = request.get(CLI_FAST_KEY) is True
         capped: SubscriptionRateLimitedError | None = None
+        ran = False
         evidence: dict[str, Any] = {"provider": "subscription", "model": self.model, "cli": self.cli}
         for provider in self._providers():
             if stream is not None and stream.started:
@@ -706,6 +707,7 @@ class CliDispatcher:
                 )
                 continue
             started = time.monotonic()
+            ran = True
             try:
                 completion = self._run(provider, model_arg, prompt, schema, stream, prefix, effort, fast)
             except SubscriptionRateLimitedError as error:
@@ -735,6 +737,9 @@ class CliDispatcher:
         reset_at = capped.reset_at.isoformat() if capped and capped.reset_at else None
         message = capped.message if capped else "No subscription CLI can serve this model."
         evidence.update(cli=provider, status=429, failure=message)
+        if not ran:
+            # The local usage panel must not count a call that no CLI started (SKY-341).
+            evidence["dispatched"] = False
         return (
             _error(429, "subscription.rate_limited", message, provider=provider, reset_at=reset_at),
             evidence,

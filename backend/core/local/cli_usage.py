@@ -9,7 +9,8 @@ each CLI call inside a run settles a zero-cent row in
 This module only reads. It never changes credits, balances or wallet
 numbers. No CLI reports a used-percent for Skynet's calls, so the only
 window fact is the cap reset time that :func:`.cli_probe.read_cli_limits`
-saved when a CLI reported a limit.
+saved when a CLI reported a limit. A 429 row marked ``dispatched: false``
+never started a CLI (a saved cap or no CLI for the model), so it is skipped.
 """
 
 from __future__ import annotations
@@ -124,7 +125,7 @@ def local_cli_usage(
     last_used: dict[str, datetime] = {}
     for evidence, created_at, budget_id in rows:
         cli = evidence.get("cli") if isinstance(evidence, dict) else None
-        if cli not in totals:
+        if cli not in totals or evidence.get("dispatched") is False:
             continue
         created_at = _utc(created_at)
         last_used[cli] = max(last_used.get(cli, created_at), created_at)

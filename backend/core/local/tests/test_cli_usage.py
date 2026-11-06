@@ -239,6 +239,23 @@ def test_proposer_error_and_dispatcher_failure_count_as_failed(engine, state_dir
     assert (window["calls"], window["failed_calls"]) == (3, 2)
 
 
+def test_skips_a_call_that_no_cli_started(engine, state_dir) -> None:
+    """A 429 that a saved cap answered before any CLI started is not a call and not a last use."""
+    with Session(engine) as session:
+        budget = _budget(session)
+        _call(session, budget, _ok("claude", 10, 2), timedelta(hours=3))
+        _call(
+            session,
+            budget,
+            {"provider": "subscription", "cli": "claude", "status": 429, "failure": "x", "dispatched": False},
+            timedelta(hours=1),
+        )
+        session.commit()
+    claude = _by_cli(local_cli_usage(engine, state_dir, _USER, now=_NOW))["claude"]
+    assert (claude["windows"]["5h"]["calls"], claude["windows"]["5h"]["failed_calls"]) == (1, 0)
+    assert claude["last_used_at"] == (_NOW - timedelta(hours=3)).isoformat()
+
+
 def test_reports_only_an_active_cap(engine, state_dir) -> None:
     """A saved cap shows while it lasts and disappears after its reset time."""
     write_cli_limit(state_dir, "codex", _NOW + timedelta(hours=2), "limit reached")
