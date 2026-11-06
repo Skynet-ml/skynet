@@ -117,6 +117,10 @@ class HostAgentRequestError(ValueError):
     """Raised for a request the capability refuses before any CLI runs."""
 
 
+class CliStartError(OSError):
+    """Raised when the CLI process itself could not start."""
+
+
 _failures: weakref.WeakKeyDictionary[ModelGateway, HostAgentFailure] = weakref.WeakKeyDictionary()
 _failures_lock = threading.Lock()
 
@@ -805,22 +809,26 @@ def run_group(
 
     Raises:
         subprocess.TimeoutExpired: When the command ran longer than ``timeout``.
-        OSError: When the command could not start.
+        CliStartError: When the command could not start.
+        OSError: When stopping the turn's processes failed after the command ran.
     """
     root = root or cwd
     marker_value = uuid.uuid4().hex
     marker = f"{TURN_MARKER_ENV}={marker_value}"
-    process = subprocess.Popen(
-        argv,
-        cwd=cwd,
-        env={**env, TURN_MARKER_ENV: marker_value},
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        errors="replace",
-        start_new_session=True,
-    )
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env={**env, TURN_MARKER_ENV: marker_value},
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise CliStartError(*error.args) from error
     try:
         stdout, stderr = process.communicate(stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -1218,8 +1226,11 @@ def run_host_agent(
                 )
             except subprocess.TimeoutExpired:
                 return _error(FAILED_KEY, f"The {cli} turn ran longer than {settings.host_agent_timeout_seconds:.0f}s.")
-            except OSError as error:
+            except CliStartError as error:
                 return _not_started(_error(FAILED_KEY, f"The {cli} CLI could not start: {error}"))
+            except OSError as error:
+                # The CLI ran, so the turn counts as local use; only the cleanup after it failed.
+                return _error(FAILED_KEY, f"The {cli} turn could not be cleaned up: {error}")
         elapsed_ms = int((time.monotonic() - started) * 1000)
         # The transcript and the error text go to the guest like the files do.
         stdout, stderr = _redact(completed.stdout, secret_values), _redact(completed.stderr, secret_values)

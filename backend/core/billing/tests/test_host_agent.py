@@ -872,6 +872,26 @@ def test_turn_that_no_cli_started_is_marked_for_the_usage_panel(
     assert sorted(record.evidence.get("dispatched", True) for record in records) == [False, True]
 
 
+def test_only_a_cli_that_could_not_start_is_marked_not_started(
+    local: Settings, guest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed start is not local use; a cleanup error after the CLI ran still is."""
+    monkeypatch.setenv("FAKE_CLI_NAME", "claude")
+    body = {"model": "", "prompt": "x", "workspace_tar_b64": _workspace_tar(guest)}
+
+    def broken_cleanup(*args: object, **kwargs: object) -> None:
+        """Fail like a ``ps`` fork error after the CLI ran."""
+        raise OSError("fork failed")
+
+    monkeypatch.setattr(host_agent, "_stop_turn", broken_cleanup)
+    ran = run_host_agent(body, local, cli="claude", permission="workspace_only")
+    monkeypatch.setattr(host_agent.subprocess, "Popen", broken_cleanup)
+    refused = run_host_agent(body, local, cli="claude", permission="workspace_only")
+
+    assert (ran["status"], host_agent.NOT_STARTED_KEY in ran) == ("error", False)
+    assert (refused["status"], refused.get(host_agent.NOT_STARTED_KEY)) == ("error", True)
+
+
 def test_oversized_workspace_is_refused(gateway: ModelGateway, local: Settings, tmp_path: Path) -> None:
     """A request above 32 MB is refused with 413 before any CLI runs."""
     token = bind_host_agent(gateway, local, cli="claude", permission="workspace_only")

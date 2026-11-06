@@ -454,6 +454,20 @@ def _held_from(text: str, start: int) -> int:
     return len(text)
 
 
+def _note_capped_runs(evidence: dict[str, Any], capped_runs: list[str]) -> None:
+    """Record the fallback CLIs that ran and hit a cap before the CLI the evidence names.
+
+    One operation keeps one evidence row, so without this list the local usage
+    panel would miss those calls (SKY-341).
+
+    Args:
+        evidence: The call's evidence, changed in place.
+        capped_runs: The CLIs that started and answered with a usage cap.
+    """
+    if capped_runs:
+        evidence["capped_runs"] = list(capped_runs)
+
+
 def _error(status: int, code: str, message: str, **fields: Any) -> ModelHTTPResult:
     """Build a JSON error answer in the gateway's error shape.
 
@@ -691,6 +705,7 @@ class CliDispatcher:
         fast = request.get(CLI_FAST_KEY) is True
         capped: SubscriptionRateLimitedError | None = None
         ran: str | None = None
+        capped_runs: list[str] = []
         evidence: dict[str, Any] = {"provider": "subscription", "model": self.model, "cli": self.cli}
         for provider in self._providers():
             if stream is not None and stream.started:
@@ -712,6 +727,7 @@ class CliDispatcher:
                 completion = self._run(provider, model_arg, prompt, schema, stream, prefix, effort, fast)
             except SubscriptionRateLimitedError as error:
                 capped = error
+                capped_runs.append(provider)
                 if error.reset_at is not None:
                     # Without a state directory the cap still answers 429; only the UI hint is lost.
                     with contextlib.suppress(OSError, ValueError):
@@ -719,8 +735,10 @@ class CliDispatcher:
                 continue
             except CliRunError as error:
                 evidence.update(cli=provider, status=502, failure=error.message)
+                _note_capped_runs(evidence, capped_runs)
                 return _error(502, "subscription.cli_failed", error.message, provider=provider), evidence
             usage = self._usage(provider, completion)
+            _note_capped_runs(evidence, capped_runs)
             evidence.update(
                 cli=provider,
                 status=200,
@@ -738,6 +756,7 @@ class CliDispatcher:
         message = capped.message if capped else "No subscription CLI can serve this model."
         # A later fallback can be skipped for its saved cap; the call belongs to the CLI that ran.
         evidence.update(cli=ran or provider, status=429, failure=message)
+        _note_capped_runs(evidence, capped_runs[:-1])
         if ran is None:
             # The local usage panel must not count a call that no CLI started (SKY-341).
             evidence["dispatched"] = False

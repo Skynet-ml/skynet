@@ -256,6 +256,19 @@ def test_skips_a_call_that_no_cli_started(engine, state_dir) -> None:
     assert claude["last_used_at"] == (_NOW - timedelta(hours=3)).isoformat()
 
 
+def test_counts_each_fallback_cli_that_ran(engine, state_dir) -> None:
+    """A capped CLI in ``capped_runs`` counts as one failed call next to the CLI that answered."""
+    with Session(engine) as session:
+        budget = _budget(session)
+        _call(session, budget, {**_ok("codex", 10, 2), "capped_runs": ["claude"]}, timedelta(hours=1))
+        session.commit()
+    clis = _by_cli(local_cli_usage(engine, state_dir, _USER, now=_NOW))
+    claude, codex = clis["claude"]["windows"]["5h"], clis["codex"]["windows"]["5h"]
+    assert (claude["calls"], claude["failed_calls"], claude["runs"], claude["input_tokens"]) == (1, 1, 1, 0)
+    assert (codex["calls"], codex["failed_calls"], codex["input_tokens"]) == (1, 0, 10)
+    assert clis["claude"]["last_used_at"] == (_NOW - timedelta(hours=1)).isoformat()
+
+
 def test_reports_only_an_active_cap(engine, state_dir) -> None:
     """A saved cap shows while it lasts and disappears after its reset time."""
     write_cli_limit(state_dir, "codex", _NOW + timedelta(hours=2), "limit reached")

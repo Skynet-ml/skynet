@@ -11,6 +11,8 @@ numbers. No CLI reports a used-percent for Skynet's calls, so the only
 window fact is the cap reset time that :func:`.cli_probe.read_cli_limits`
 saved when a CLI reported a limit. A 429 row marked ``dispatched: false``
 never started a CLI (a saved cap or no CLI for the model), so it is skipped.
+One operation keeps one row, so a row's ``capped_runs`` lists the fallback
+CLIs that also ran and hit a cap; each counts as one failed call.
 """
 
 from __future__ import annotations
@@ -57,6 +59,26 @@ def _tokens(evidence: dict[str, Any], key: str) -> int:
     usage = evidence.get("usage")
     value = usage.get(key) if isinstance(usage, dict) else None
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _calls(evidence: Any) -> list[tuple[str, bool, dict[str, Any]]]:
+    """List the CLI calls that one evidence row stands for.
+
+    Args:
+        evidence: The stored evidence JSON of one operation.
+
+    Returns:
+        ``(cli, failed, evidence)`` for each call: the named CLI first, then
+        each CLI in ``capped_runs`` as a failed call with no tokens. Empty for
+        a row that started no CLI.
+    """
+    if not isinstance(evidence, dict) or evidence.get("dispatched") is False:
+        return []
+    calls = [(str(evidence.get("cli")), evidence.get("status") not in _OK_STATUSES, evidence)]
+    capped_runs = evidence.get("capped_runs")
+    if isinstance(capped_runs, list):
+        calls.extend((str(cli), True, {}) for cli in capped_runs)
+    return calls
 
 
 def _empty_window() -> dict[str, int]:
@@ -124,21 +146,20 @@ def local_cli_usage(
     runs: dict[tuple[str, str], set[str]] = {}
     last_used: dict[str, datetime] = {}
     for evidence, created_at, budget_id in rows:
-        cli = evidence.get("cli") if isinstance(evidence, dict) else None
-        if cli not in totals or evidence.get("dispatched") is False:
-            continue
         created_at = _utc(created_at)
-        last_used[cli] = max(last_used.get(cli, created_at), created_at)
-        failed = evidence.get("status") not in _OK_STATUSES
-        for name, span in WINDOWS:
-            if created_at < now - span:
+        for cli, failed, call in _calls(evidence):
+            if cli not in totals:
                 continue
-            window = totals[cli][name]
-            window["calls"] += 1
-            window["failed_calls"] += int(failed)
-            window["input_tokens"] += _tokens(evidence, "prompt_tokens")
-            window["output_tokens"] += _tokens(evidence, "completion_tokens")
-            runs.setdefault((cli, name), set()).add(budget_id)
+            last_used[cli] = max(last_used.get(cli, created_at), created_at)
+            for name, span in WINDOWS:
+                if created_at < now - span:
+                    continue
+                window = totals[cli][name]
+                window["calls"] += 1
+                window["failed_calls"] += int(failed)
+                window["input_tokens"] += _tokens(call, "prompt_tokens")
+                window["output_tokens"] += _tokens(call, "completion_tokens")
+                runs.setdefault((cli, name), set()).add(budget_id)
     for (cli, name), budgets in runs.items():
         totals[cli][name]["runs"] = len(budgets)
     limits = read_cli_limits(settings)

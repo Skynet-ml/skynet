@@ -121,7 +121,20 @@ def test_cap_evidence_names_the_cli_that_ran(tmp_path: Path, monkeypatch: pytest
     cli_dispatch.write_cli_limit(settings, "codex", datetime(2099, 1, 1, tzinfo=UTC), "codex is capped")
     _, evidence = CliDispatcher(None, "claude", MODEL, "judge", settings)._answer("/chat/completions", REQUEST)
     assert (evidence["status"], evidence["cli"], "dispatched" in evidence) == (429, "claude", False)
+    assert "capped_runs" not in evidence
     assert len(calls(tmp_path, "claude")) == 1
+
+
+def test_evidence_lists_a_capped_cli_that_ran_before_the_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the capped first CLI in ``capped_runs`` when a fallback CLI answers."""
+    fake_cli(tmp_path, "claude", CAPPED)
+    fake_app_server(tmp_path, emitting(*CODEX_TURN))
+    monkeypatch.setattr(cli_dispatch, "cli_model_arg", lambda provider, model: model)
+    settings = local_settings(tmp_path, cli_fallback_order="claude,codex")
+    _, evidence = CliDispatcher(None, "claude", MODEL, "judge", settings)._answer("/chat/completions", REQUEST)
+    assert (evidence["status"], evidence["cli"], evidence["capped_runs"]) == (200, "codex", ["claude"])
 
 
 def test_fallback_order_that_names_droid_skips_it(tmp_path: Path) -> None:
