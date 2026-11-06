@@ -1,30 +1,27 @@
-Un moteur est la méthode de recherche qui propose de nouvelles versions de votre artefact. Skynet a six moteurs natifs pour les dépôts, trois optimiseurs DSPy pour les programmes DSPy, et **Auto**. Cette page explique ce que fait chacun, quand le choisir et quels paramètres il a.
+Un moteur est la méthode de recherche qui propose de nouvelles versions de votre dépôt. Skynet a six moteurs natifs et **Auto**. Tous les moteurs travaillent sur des dépôts. Cette page explique ce que fait chacun, quand le choisir et quels paramètres il a.
 
-Lisez d'abord [Fonctionnement de l'optimisation](/docs/concepts/optimization) si vous ne savez pas quels moteurs conviennent à votre artefact.
+Lisez d'abord [Fonctionnement de l'optimisation](/docs/concepts/optimization) si vous ne savez pas quel moteur convient à votre tâche.
 
 ## Comparaison rapide
 
-| Moteur                | Types d'artefacts    | Paramètres de l'agent de code              | Paramètre Itérations max |
-| --------------------- | -------------------- | ------------------------------------------ | ------------------------ |
-| Auto | Programme DSPy | Non | Non |
-| GEPA | Dépôt | Non | Non |
-| Best-of-N | Dépôt | Non | Non |
-| AutoResearch | Dépôt | Oui | Non |
-| Meta-Harness | Dépôt | Oui | Oui |
-| AutoSaddler | Dépôt | Oui | Oui |
-| ShinkaEvolve | Dépôt | Non. Il a son propre paramètre d'éditeur. | Oui |
-| DSPy GEPA             | Programme DSPy       | Non                                        | Non                      |
-| DSPy MIPROv2          | Programme DSPy       | Non                                        | Non                      |
-| DSPy BootstrapFewShot | Programme DSPy       | Non                                        | Non                      |
+| Moteur       | Paramètres de l'agent de code             | Paramètre Itérations max |
+| ------------ | ----------------------------------------- | ------------------------ |
+| Auto         | Non                                       | Non                      |
+| GEPA         | Non                                       | Non                      |
+| Best-of-N    | Non                                       | Non                      |
+| AutoResearch | Oui                                       | Non                      |
+| Meta-Harness | Oui                                       | Oui                      |
+| AutoSaddler  | Oui                                       | Oui                      |
+| ShinkaEvolve | Non. Il a son propre paramètre d'éditeur. | Oui                      |
 
-L'assistant signale GEPA, DSPy GEPA et Auto comme des optimiseurs qui utilisent le texte de retour de votre métrique.
+L'assistant signale GEPA et Auto comme des optimiseurs qui utilisent le texte de retour de votre évaluateur.
 
 ## Auto
 
-Auto est l'option par défaut. Ce qu'il exécute dépend du type d'artefact :
+Auto est l'option par défaut pour chaque exécution. Il fonctionne en deux phases :
 
-- **Programme DSPy** : Auto exécute DSPy GEPA.
-- **Dépôt** : Auto n'est pas disponible. Choisissez un moteur natif.
+1. Il explore avec GEPA, AutoResearch, Meta-Harness, AutoSaddler et ShinkaEvolve.
+2. Il poursuit GEPA à partir de la meilleure version trouvée pendant l'exploration.
 
 **Choisissez-le quand** vous ne savez pas quel moteur convient. C'est le meilleur point de départ.
 
@@ -32,7 +29,7 @@ Auto est l'option par défaut. Ce qu'il exécute dépend du type d'artefact :
 
 « Évolution réflexive avec un front de Pareto de versions. » Le modèle de réflexion lit le score et le retour de chaque cas et écrit une meilleure version. GEPA conserve un front de versions qui sont chacune les meilleures sur certains cas.
 
-**Choisissez-le quand** votre métrique donne un retour précis et que vous voulez un moteur unique performant.
+**Choisissez-le quand** votre évaluateur donne un retour précis et que vous voulez un moteur unique performant.
 
 ## Best-of-N
 
@@ -54,25 +51,15 @@ Un agent de code propose un lot de candidats à chaque itération. Il s'appuie s
 
 ## AutoSaddler
 
-Un agent de code lit le retour de votre métrique et corrige la version. Skynet ne conserve que les correctifs qu'une nouvelle exécution de l'évaluateur confirme.
+Un agent de code lit le retour de votre évaluateur et corrige la version. Skynet ne conserve que les correctifs qu'une nouvelle exécution de l'évaluateur confirme.
 
-**Choisissez-le quand** le retour de votre métrique pointe des défauts clairs et localisés.
+**Choisissez-le quand** le retour de votre évaluateur pointe des défauts clairs et localisés.
 
 ## ShinkaEvolve
 
 « Fait évoluer de nombreuses versions dans des îles parallèles et apprend quels modèles les améliorent le plus. » C'est une recherche évolutionnaire sur une population de candidats, avec des mutations et des croisements écrits par un modèle.
 
 **Choisissez-le quand** vous voulez une exploration large et que vous disposez d'un budget plus important.
-
-## Optimiseurs DSPy
-
-| Optimiseur            | Ce qu'il fait                                                                                                                     |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| DSPy GEPA             | Lit le retour de la métrique et fait évoluer les instructions de chaque prédicteur.                                               |
-| DSPy MIPROv2          | Propose ensemble des instructions et des démonstrations few-shot, et explore leurs combinaisons par optimisation bayésienne.       |
-| DSPy BootstrapFewShot | Collecte des exemples résolus que le programme réussit et les ajoute comme démonstrations few-shot. Il n'utilise pas de modèle de réflexion. |
-
-DSPy MIPROv2 et DSPy BootstrapFewShot ont besoin de paires (des cas avec des sorties attendues).
 
 ## Paramètres
 
@@ -84,7 +71,7 @@ DSPy MIPROv2 et DSPy BootstrapFewShot ont besoin de paires (des cas avec des sor
 | Arrêter au score                 | Désactivé   | 0 ou plus                                                       |
 | Itérations max.                  | Désactivé   | 1 à 1000. Uniquement Meta-Harness, AutoSaddler et ShinkaEvolve. |
 
-Une exécution de l'évaluateur correspond à un appel de votre métrique sur un cas. La notation finale de la version de départ et de la version gagnante ne compte pas dans **Exécutions du scoreur max.**
+Une exécution de l'évaluateur correspond à un appel de votre évaluateur sur un cas. La notation finale de la version de départ et de la version gagnante ne compte pas dans **Exécutions du scoreur max.**
 
 ### Paramètres de l'agent de code
 

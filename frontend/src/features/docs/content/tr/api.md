@@ -45,7 +45,6 @@ Başvuru belgesi `https://api.skynetml.com/openapi.public.json` adresindeki Open
 | `GET /models`                                   | Kullanabileceğiniz modelleri listeler.                                |
 | `GET /optimizers`                               | Bir kuruluma uyan optimize edicileri listeler.                        |
 | `GET /blackbox/engines`                         | Yerel motorları ve her birinin kullanılabilir olup olmadığını listeler. |
-| `POST /optimize` | Bir DSPy programı için çalıştırma başlatır. |
 | `POST /blackbox/run`                            | Bir GitHub deposu üzerinde çalıştırma başlatır.                       |
 | `GET /optimizations`                            | Çalıştırmalarınızı listeler.                                          |
 | `GET /optimizations/{optimization_id}`          | Tek bir çalıştırmayı döndürür: durum, ilerleme, günlükler ve sonuç.   |
@@ -56,10 +55,10 @@ Başvuru belgesi `https://api.skynetml.com/openapi.public.json` adresindeki Open
 
 ## Bir çalıştırma başlatma
 
-`POST /optimize`, gönderme sihirbazıyla aynı kurulumu alır. Örnek, destek mesajlarını etiketlere ayıran bir DSPy programını iyileştirir.
+Skynet, Optimize Anything'dir: her çalıştırma bir depoyu optimize eder. `POST /blackbox/run`, gönderme sihirbazıyla aynı kurulumu alır. Örnek, destek mesajlarını etiketlere ayıran bir depoyu iyileştirir.
 
 ```bash tab="curl"
-curl https://api.skynetml.com/optimize \
+curl https://api.skynetml.com/blackbox/run \
   -H "Authorization: Bearer $SKYNET_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: support-labels-001" \
@@ -69,56 +68,62 @@ curl https://api.skynetml.com/optimize \
 ```json tab="run.json"
 {
   "name": "Support labels",
-  "task": {
-    "objective": "Sort each support message into billing, bug or other.",
-    "artifact": {
-      "kind": "dspy_program",
-      "starting_version": "Label this support message as billing, bug or other."
+  "objective": "Sort each support message into billing, bug or other.",
+  "recipe": "repo",
+  "target": {
+    "kind": "repo",
+    "repo": {
+      "provider": "github",
+      "repository": "your-org/support-labels",
+      "branch": "main",
+      "editable_paths": ["serve.py", "prompts/"]
     }
   },
-  "data": {
-    "mode": "pairs",
-    "cases": [
-      { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
-      { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
-      {
-        "input": { "message": "Do you have a Hebrew interface?" },
-        "expected": { "label": "other" }
-      }
-    ]
+  "cases": [
+    { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
+    { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
+    {
+      "input": { "message": "Do you have a Hebrew interface?" },
+      "expected": { "label": "other" }
+    }
+  ],
+  "input_fields": ["message"],
+  "expected_field": "label",
+  "scorer": {
+    "kind": "python",
+    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "model": { "name": "<model from GET /models>" }
   },
-  "optimizer": { "choice": "auto", "budget": { "max_scorer_runs": 200 } },
-  "models": {
-    "task_model": { "name": "<model from GET /models>" },
-    "reflection_model": { "name": "<model from GET /models>" }
-  },
-  "workspace": {
-    "run_code": "import dspy\n\nprogram = dspy.Predict(\"message -> label\")\n\n\ndef run(artifact, input):\n    return program(message=input[\"message\"]).label\n",
-    "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
-  },
+  "strategy": { "mode": "auto" },
+  "budget": { "max_scorer_runs": 200 },
+  "reflection_model_config": { "name": "<model from GET /models>" },
   "max_cost_cents": 500
 }
 ```
 
 Önemli alanlar:
 
-- `task.artifact.kind` değeri `dspy_program`'dır.
-- `data.mode` değeri `pairs` (beklenen çıktılarla birlikte girdiler) veya `single`'dır (tam olarak bir vaka).
-- `optimizer.choice` değeri `auto` veya `GET /optimizers` tarafından döndürülen bir optimize edici adıdır.
+- `target.repo.repository`, `owner/name` biçimindeki GitHub deposudur. Önce GitHub'ı **Ayarlar → Bağlayıcılar** bölümünde bağlayın.
+- `target.repo.editable_paths`, optimize edicinin değiştirebileceği dosya ve klasörleri listeler. `"."` deponun tamamı demektir.
+- `target.repo.commit` isteğe bağlıdır. 40 karakterlik bir SHA'dır. Verilmezse Skynet daldaki en son commit'i kullanır.
+- `target.repo.secrets` isteğe bağlıdır. Her gizli değerin bir `name` ve bir `value` alanı vardır. Kodunuza ve puanlayıcınıza bir ortam değişkeni olarak ulaşır.
+- `scorer.metric_code`, `score(repo_path, case)` fonksiyonunu tanımlar. `scorer.model`, kodunuzun ve puanlayıcınızın model ağ geçidi üzerinden çağırabileceği modeldir.
+- `strategy.mode` değeri `auto` (varsayılan) veya `single`'dır. `single` ile `strategy.engine` alanını `GET /blackbox/engines` tarafından döndürülen bir motor adına ayarlayın.
 - `max_cost_cents`, bu çalıştırmanın ABD senti cinsinden harcama limitidir.
 - `is_private` varsayılan olarak `false`'tur. Çalıştırmayı özel tutmak için `true` olarak ayarlayın.
 
-`run_code` ve `metric_code` kuralları için [Metrikler ve puanlayıcılar](/docs/concepts/scorers) sayfasını okuyun.
+`metric_code` kuralları için [Metrikler ve puanlayıcılar](/docs/concepts/scorers) sayfasını okuyun.
 
 ### Yanıtlar
 
 | Durum | Anlamı                                                                                                                                           |
 | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `201` | Skynet çalıştırmayı kuyruğa aldı. Gövde `optimization_id` ve `status` içerir.                                                                    |
+| `400` | Hedef bir depo değil veya puanlayıcı yüklenmiyor. |
 | `202` | Kurulum kontrolü hâlâ çalışıyor. `Retry-After` başlığındaki saniye kadar bekleyin. Ardından aynı gövdeyi aynı `Idempotency-Key` ile gönderin. |
 | `402` | Bakiyeniz çok düşük.                                                                                                                             |
 | `409` | Bir kotaya ulaştınız veya kurulum kontrolü güncel değil.                                                                                         |
-| `422` | İstek veya çalışma alanı kodu optimize ediciye uymuyor.                                                                                          |
+| `422` | İstek optimize ediciye uymuyor. |
 
 > [!NOTE]
 > Her zaman bir `Idempotency-Key` başlığı gönderin. Aynı isteği aynı anahtarla yeniden gönderirseniz Skynet ilk çalıştırmayı döndürür. İkinci bir çalıştırma başlatmaz.
@@ -154,7 +159,7 @@ curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 
-En iyi sürümü yeni bir girdi üzerinde çalıştırmak için `POST /serve/{optimization_id}` gönderin. Her puanın ne anlama geldiği için [Sonuçlar](/docs/guides/results) sayfasını okuyun.
+En iyi sürümü yeni bir girdi üzerinde çalıştırmak için `Idempotency-Key` başlığıyla `POST /serve/{optimization_id}` gönderin. Depoda `def serve(input)` içeren bir `serve.py` dosyası olmalıdır. İstek, yanıt ve her puanın ne anlama geldiği için [Sonuçlar](/docs/guides/results) sayfasını okuyun.
 
 ## Limitler
 

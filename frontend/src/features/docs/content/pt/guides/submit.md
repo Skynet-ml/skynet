@@ -1,4 +1,4 @@
-O assistente de envio configura e inicia uma execução. Ele tem quatro etapas: **Tarefa**, **Entradas**, **Otimizador** e **Métrica e execução**. Cada etapa tem uma ou mais telas. Este guia explica cada tela, da tarefa à verificação do contrato e ao início da execução.
+O assistente de envio configura e inicia uma execução. Ele tem quatro etapas: **Tarefa**, **Entradas**, **Otimizador** e **Métrica e execução**. Cada etapa tem uma ou mais telas. Este guia explica cada tela, da tarefa à verificação e ao início da execução.
 
 > [!NOTE]
 > O assistente mostra mais ou menos configurações conforme o nível de experiência: **Guiado**, **Padrão** ou **Especialista**. Guiado é o padrão. Altere o nível em **Definições → Conta**, em **Quanto mostrar**. Alguns rótulos são mais simples no nível Guiado. Este guia usa os rótulos dos níveis Padrão e Especialista e indica entre parênteses o rótulo do nível Guiado quando ele é diferente.
@@ -9,25 +9,37 @@ O assistente de envio configura e inicia uma execução. Ele tem quatro etapas: 
 
 Descreva a sua tarefa ao assistente na conversa **Entrevista sobre a tarefa**. O assistente preenche dois campos para você:
 
-- **Objetivo** (Guiado: **Meta**): o que o artefato otimizado precisa fazer bem.
+- **Objetivo** (Guiado: **Meta**): o que o código otimizado precisa fazer bem.
 - **Contexto** (Guiado: **Contexto adicional**): contexto, restrições e como é um bom resultado.
 
 Você pode editar os dois campos. O assistente não sobrescreve as suas edições.
 
-### O que será otimizado
+### De onde vem o código
 
-Em **O que será otimizado**, selecione **Programa DSPy** ou **Um repositório GitHub**.
+O Skynet é o Optimize Anything: cada execução otimiza um repositório. Selecione uma de duas opções:
 
-Depois informe a **Versão inicial** (Guiado: **De onde partimos**). Cole a versão atual ou deixe o assistente escrever um rascunho.
+- **Usar um repositório**: otimize código em um repositório GitHub que você conectou.
+- **Criar um repositório novo**: o Skynet cria um novo repositório GitHub na sua conta. O assistente escreve uma primeira solução a partir da sua tarefa e dos seus dados. Essa solução é a versão inicial.
 
-### Otimizar um repositório
+Conecte o GitHub em **Definições → Conectores** antes de começar.
 
-Você também pode otimizar código em um repositório. Defina estes campos:
+### Usar um repositório
+
+Defina estes campos:
 
 - **Repositório**: escolha um repositório ou escreva-o como `owner/name`.
 - **Commit**: um SHA de 40 caracteres. Deixe vazio para usar o commit mais recente do branch.
 - **Caminhos que o otimizador pode alterar**: um arquivo ou uma pasta por linha. Um ponto significa o repositório inteiro.
 - **Comando de configuração**: é executado em cada checkout novo antes da pontuação. Deixe vazio e o Skynet encontra o comando.
+
+### Criar um repositório novo
+
+Defina estes campos:
+
+- **Nome**: o nome do novo repositório. A sua conta GitHub não pode já ter um repositório com esse nome.
+- **Privado** ou **Público**: quem pode ver o repositório no GitHub.
+
+O Skynet envia cada candidato para o seu próprio branch. O branch `skynet/best` aponta para a melhor versão.
 
 ## Etapa 2: Entradas
 
@@ -61,8 +73,8 @@ O assistente lista apenas os otimizadores adequados à sua tarefa e às suas ent
 
 ### Modelos
 
-- **Modelo da tarefa**: o modelo que o seu código de execução chama. Deixe vazio se o seu código de execução não chamar um modelo. Um programa DSPy precisa ter um modelo da tarefa.
 - **Modelo de reflexão**: o modelo que lê as pontuações e o feedback e escreve os próximos candidatos. Com um otimizador baseado em agente de programação, este é o modelo do agente.
+- **Modelo da tarefa**: o modelo que o código do seu repositório e o seu avaliador podem chamar pelo gateway de modelos do Skynet. Leia [Como a otimização funciona](/docs/concepts/optimization).
 
 ### Orçamento
 
@@ -77,44 +89,38 @@ O assistente não deixa você continuar se o limite ou o seu saldo estiver abaix
 
 ## Etapa 4: Métrica e execução
 
-### Código e métrica
+### Avaliador
 
-Escreva dois arquivos:
+Escreva `scorer.py`. Ele define `score(repo_path, case)` e retorna uma pontuação com feedback. O assistente pode escrevê-lo para você. Leia [Métricas e avaliadores](/docs/concepts/scorers).
 
-- `run.py`: o código de execução que executa o seu artefato em um caso.
-- `metric.py`: a métrica que pontua a saída e escreve o feedback.
+O repositório pode ter um arquivo `serve.py` com `def serve(input)`. O Skynet o usa para servir a melhor versão depois da execução. Leia [Ler os resultados](/docs/guides/results).
 
-O **Agente de programação** pode escrever e alterar qualquer arquivo para você. Ele verifica o próprio código e corrige o que falha. Você pode adicionar até 20 arquivos extras. Leia [Métricas e avaliadores](/docs/concepts/scorers).
+### Segredos
 
-A métrica define seu modelo na própria chamada a `llm()`. Sem `model=`, a métrica usa o modelo de reflexão.
+Adicione segredos, como chaves de API de que o seu código precisa. Cada segredo chega ao seu código e ao seu avaliador como uma variável de ambiente com o mesmo nome. O agente de programação não pode vê-los. O Skynet oculta os valores deles nos registos.
 
-### Verificação do contrato
+### Verificação
 
-A **Verificação do contrato** (Guiado: **Execução de teste**) executa o seu código e a sua métrica na sandbox em 3 casos de amostra. Ela verifica:
+A verificação (Guiado: **Execução de teste**) executa a configuração e o seu avaliador na versão inicial, na sandbox. Ela verifica:
 
-- a assinatura do código de execução,
-- a assinatura da métrica,
-- o modelo da métrica,
-- o código de execução nas amostras,
-- o valor devolvido pela métrica.
+- a assinatura do avaliador,
+- o comando de configuração,
+- o valor devolvido pelo avaliador nos casos de amostra.
 
-Selecione **Verificar** (Guiado: **Testar**). Você não pode iniciar a execução até a verificação passar. Se você alterar o código ou a configuração depois de uma verificação aprovada, execute a verificação de novo.
+Selecione **Verificar** (Guiado: **Testar**). Você não pode iniciar a execução até a verificação passar. Se você alterar o avaliador ou a configuração depois de uma verificação aprovada, execute a verificação de novo.
 
 > [!TIP]
-> Abra cada amostra para ver a entrada, a saída e o feedback. Um bom feedback dá ao otimizador mais material de trabalho do que a pontuação sozinha.
+> Abra cada amostra para ver a pontuação e o feedback. Um bom feedback dá ao otimizador mais material de trabalho do que a pontuação sozinha.
 
 ### Execução agendada
 
-Você pode executar a otimização de novo de forma agendada depois que ela for bem-sucedida. O padrão é **Desativada**.
+Você pode executar a otimização de novo de forma agendada depois que ela for bem-sucedida. Cada ciclo agendado começa a partir da melhor versão atual do repositório. O padrão é **Desativada**.
 
 ### Pronto para executar
 
 A última tela mostra um resumo em cinco abas: **Geral**, **Dados**, **Modelos**, **Orçamento** e **Recompensa**. Confira a configuração e inicie a otimização.
 
 O resumo também mostra a visibilidade da execução. Por padrão, novas execuções são públicas. Altere isso depois na caixa de diálogo **Partilha e privacidade** da página da execução. Leia [Compartilhar e publicar](/docs/guides/sharing).
-
-> [!NOTE]
-> Uma execução de repositório tem apenas a tela **Código e métrica** e o resumo nesta etapa. O Skynet verifica a configuração com o repositório quando você inicia a execução.
 
 ## Depois de iniciar
 

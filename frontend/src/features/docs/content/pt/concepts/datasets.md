@@ -1,4 +1,4 @@
-Um conjunto de dados é uma tabela de casos. Cada linha é um caso. O Skynet executa o seu artefato nos casos, pontua cada saída e usa as pontuações para comparar versões. Esta página explica como o Skynet lê os casos, o que fazem os papéis das colunas e como ele divide os casos em conjuntos de treino, validação e teste.
+Um conjunto de dados é uma tabela de casos. Cada linha é um caso. O Skynet pontua cada versão do seu repositório nos casos com o seu avaliador e usa as pontuações para comparar versões. Esta página explica como o Skynet lê os casos, o que fazem os papéis das colunas e como ele divide os casos em conjuntos de treino, validação e teste.
 
 ## Carregar os dados
 
@@ -17,8 +17,8 @@ Em **Como ler os dados**, atribua um papel a cada coluna:
 
 | Papel   | O que o Skynet faz com a coluna                                     |
 | ------- | ------------------------------------------------------------------- |
-| Entrada | Coloca o valor em `input`, que o seu código de execução recebe      |
-| Saída   | Coloca o valor em `expected`, que a sua métrica recebe              |
+| Entrada | Coloca o valor em `case["input"]`, que o seu avaliador recebe      |
+| Saída   | Coloca o valor em `case["expected"]`, que o seu avaliador recebe              |
 | Ignorar | Não usa a coluna                                                    |
 
 Cada coluna também tem um tipo: **Texto** ou **Imagem**.
@@ -49,7 +49,7 @@ com os papéis `message` = Entrada, `label` = Saída e `id` = Ignorar, o seu có
 ```
 
 > [!TIP]
-> Na sua métrica, leia o valor esperado pelo nome da coluna, por exemplo `expected["label"]`.
+> No seu avaliador, leia o valor esperado pelo nome da coluna, por exemplo `case["expected"]["label"]`.
 
 ## Modos de dados
 
@@ -111,7 +111,7 @@ Na seleção manual, cada campo aceita uma fração de 0 a 1, em passos de 0,05.
 
 ## Amostras do contrato
 
-A verificação do contrato na etapa **Métrica e execução** executa o seu código em 3 casos de amostra. O Skynet tira essas amostras apenas dos casos de treino e validação, nunca do teste.
+A verificação do contrato na etapa **Métrica e execução** executa a sua configuração e o seu avaliador na versão inicial, em 3 casos de amostra. O Skynet tira essas amostras apenas dos casos de treino e validação, nunca do teste.
 
 ## Páginas relacionadas
 

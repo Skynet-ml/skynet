@@ -24,7 +24,7 @@ def test_guest_event_framing_and_protocol_keep_their_image_names() -> None:
     """The guest frames events with the prefix older images print and the worker parses."""
     assert isolated_runner.EVENT_PREFIX == "SKYNET_JOB_EVENT "
     assert vercel_dspy.EVENT_PREFIX == isolated_runner.EVENT_PREFIX
-    assert SANDBOX_PROTOCOL == 6
+    assert SANDBOX_PROTOCOL == 7
 
 
 def test_payload_route_keys_keep_their_image_names() -> None:

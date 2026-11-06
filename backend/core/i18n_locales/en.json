@@ -367,6 +367,7 @@
     "email.account.sign_in.intro": "Your {term.appName} sign-in code is {code}.",
     "email.account.sign_in.ignore": "If you didn't try to sign in, you can ignore this email.",
     "optimization.grid_search_retired": "Grid searches can no longer be started, resumed or cloned. This run stays readable; start a new optimization from the wizard instead.",
+    "optimization.dspy_run_retired": "Skynet now optimizes repositories only. DSPy program runs can no longer be started, resumed, cloned, served or scheduled. This run stays readable; start a new repository optimization instead.",
     "submit.unified.optimizer_not_allowed": "The optimizer '{optimizer}' does not fit this setup. Choose one of: {allowed}.",
     "submit.unified.single_needs_one_case": "A single-input run needs exactly one input.",
     "submit.unified.pairs_need_cases": "A run on input/output pairs needs at least two pairs or an uploaded dataset.",

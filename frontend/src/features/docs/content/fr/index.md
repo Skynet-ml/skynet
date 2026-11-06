@@ -1,34 +1,31 @@
-Skynet améliore un artefact que vous possédez déjà. Vous lui fournissez une version de départ, un ensemble de cas et une métrique. Skynet propose de nouvelles versions, exécute chacune d'elles sur vos cas, note la sortie avec votre métrique et conserve la meilleure version.
+Skynet améliore du code que vous possédez déjà, ou du code qu'il rédige pour vous. Skynet, c'est Optimize Anything : chaque exécution optimise un dépôt. Vous lui fournissez un dépôt, un ensemble de cas et un évaluateur. Skynet propose de nouvelles versions du dépôt, note chacune avec votre évaluateur et conserve la meilleure version.
 
 ## Ce que Skynet optimise
 
-Skynet travaille sur deux types d'artefacts :
+Chaque exécution optimise un dépôt. Vous pouvez commencer de deux façons :
 
-| Type d'artefact | Ce qui change                                                       |
-| --------------- | ------------------------------------------------------------------- |
-| Dépôt | Les fichiers des chemins que vous autorisez |
-| Programme DSPy  | Les instructions des prédicteurs d'un `dspy.Module`                 |
+| Départ                  | Ce qui se passe                                                                                          |
+| ----------------------- | -------------------------------------------------------------------------------------------------------- |
+| Utiliser un dépôt       | Skynet modifie les fichiers des chemins que vous autorisez, dans un dépôt GitHub que vous connectez.      |
+| Créer un nouveau dépôt  | Vous fournissez une tâche et des données. Skynet crée un nouveau dépôt GitHub dans votre compte et rédige une première solution. |
 
-Chaque exécution suit le même contrat. Votre code d'exécution définit `run(artifact, input)`. Votre métrique définit `score(input, output, expected=None)`. La métrique renvoie un score et un retour écrit. L'optimiseur lit ce retour pour améliorer la version suivante.
+Le code du dépôt peut être de toute nature : un pipeline de prompts, un harnais d'agent, un script ou une bibliothèque. Il peut utiliser n'importe quelle bibliothèque, par exemple DSPy.
+
+Chaque exécution suit le même contrat. Votre évaluateur définit `score(repo_path, case)`. Il renvoie un score et un retour écrit. L'optimiseur lit ce retour pour améliorer la version suivante.
 
 > [!NOTE]
-> Votre code d'exécution et votre métrique s'exécutent dans une sandbox, dans des processus séparés. Le code d'exécution ne peut voir ni le source de la métrique ni les valeurs attendues.
+> Chaque version s'exécute dans une sandbox. L'agent de code qui rédige les versions ne peut voir ni le source de l'évaluateur ni les valeurs attendues.
 
 ## Un seul produit, plusieurs moteurs
 
-Skynet, c'est Optimize Anything. Le type d'artefact détermine les moteurs qui peuvent travailler dessus :
-
-- Les dépôts utilisent les moteurs natifs : GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler et ShinkaEvolve.
-- Les artefacts Programme DSPy utilisent les optimiseurs DSPy : DSPy GEPA, DSPy MIPROv2 et DSPy BootstrapFewShot.
-
-Sur un programme DSPy, **Auto** utilise DSPy GEPA. Sur un dépôt, vous choisissez un moteur natif. Lisez [Fonctionnement de l'optimisation](/docs/concepts/optimization) et [Moteurs](/docs/concepts/engines).
+**Auto** est l'option par défaut pour chaque exécution. Il essaie GEPA, AutoResearch, Meta-Harness, AutoSaddler et ShinkaEvolve, puis poursuit GEPA à partir de la meilleure version. Vous pouvez aussi choisir un seul moteur : GEPA, Best-of-N, AutoResearch, Meta-Harness, AutoSaddler ou ShinkaEvolve. Lisez [Fonctionnement de l'optimisation](/docs/concepts/optimization) et [Moteurs](/docs/concepts/engines).
 
 ## Déroulement d'une exécution
 
-1. Vous décrivez la tâche et définissez la version de départ.
+1. Vous décrivez la tâche, puis choisissez un dépôt ou demandez à Skynet d'en créer un.
 2. Vous fournissez les cas. Skynet les répartit en ensembles d'entraînement, de validation et de test.
 3. Vous choisissez un optimiseur, les modèles et un budget.
-4. Vous écrivez le code d'exécution et la métrique. Une vérification du contrat les exécute sur des cas d'exemple.
+4. Vous écrivez l'évaluateur. Une vérification de la configuration l'exécute sur la version de départ.
 5. Skynet lance l'optimisation et affiche les résultats.
 
 Skynet sélectionne les versions sur les cas de validation. Il indique le score final sur les cas de test. Les moteurs ne voient jamais les cas de test.
@@ -41,7 +38,7 @@ Skynet sélectionne les versions sur les cas de validation. Il indique le score 
 | Comprendre le fonctionnement de l'optimisation | [Fonctionnement de l'optimisation](/docs/concepts/optimization) |
 | Choisir un moteur                           | [Moteurs](/docs/concepts/engines)                            |
 | Préparer vos données                        | [Jeux de données et répartitions](/docs/concepts/datasets)   |
-| Écrire une métrique                         | [Métriques et évaluateurs](/docs/concepts/scorers)           |
+| Écrire un évaluateur                        | [Métriques et évaluateurs](/docs/concepts/scorers)           |
 | Remplir l'assistant                         | [Lancer une exécution](/docs/guides/submit)                  |
 | Lire vos résultats                          | [Résultats](/docs/guides/results)                            |
 | Comprendre les coûts                        | [Facturation](/docs/concepts/billing)                        |
@@ -50,4 +47,4 @@ Skynet sélectionne les versions sur les cas de validation. Il indique le score 
 | Consulter les limites                       | [Limites](/docs/limits)                                      |
 
 > [!TIP]
-> Commencez avec un petit jeu de données et les paramètres par défaut. Rédigez un retour de métrique précis. Un bon retour donne à l'optimiseur plus de matière que le score seul.
+> Commencez avec un petit jeu de données et les paramètres par défaut. Rédigez un retour d'évaluateur précis. Un bon retour donne à l'optimiseur plus de matière que le score seul.

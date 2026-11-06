@@ -98,7 +98,7 @@ Bir çalıştırma, hangi sütunların girdi olduğunu ve hangi sütunun beklene
 
 Gönderme sihirbazında "Veriler nasıl okunacak" adımı her sütunu üç seçenekle gösterir:
 
-- **Girdi**: program bu değeri alır.
+- **Girdi**: puanlayıcınız bu değeri `case["input"]` içinde alır.
 - **Çıktı**: puanlayıcının karşılaştırdığı beklenen yanıt.
 - **Atla**: çalıştırma bu sütunu yok sayar.
 

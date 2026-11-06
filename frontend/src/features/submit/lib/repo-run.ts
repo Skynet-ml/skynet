@@ -27,10 +27,11 @@ export function repoRunRequest(
 ): BlackboxRunRequest | null {
   const { task, inputs, optimizer, workspace, meta } = state;
   const repo = task.repo;
-  if (!repo || optimizer.choice === "auto" || !hasModel(optimizer.reflectionModel)) return null;
+  if (!repo || !hasModel(optimizer.reflectionModel)) return null;
   if (!workspace.metricCode.trim()) return null;
+  const auto = optimizer.choice === "auto";
   const engine = optimizer.choice as BlackboxEngineId;
-  const shinka = engine === "shinka_evolve";
+  const shinka = !auto && engine === "shinka_evolve";
   const editablePaths = repo.editablePaths.map((path) => path.trim()).filter(Boolean);
   const metricModel = storedMetricModel(workspace.metricModel, workspace.metricCode);
   return {
@@ -58,7 +59,8 @@ export function repoRunRequest(
         expected_field: inputs.expectedField,
       }),
     budget: optimizer.budget,
-    strategy: { mode: "single", engine },
+    // Auto composes the repository engines on the server; a named engine runs alone.
+    strategy: auto ? { mode: "auto" } : { mode: "single", engine },
     proposer: optimizer.proposer,
     target: {
       kind: "repo",
@@ -68,6 +70,7 @@ export function repoRunRequest(
         branch: repo.branch.trim() || null,
         commit: repo.commit.trim() || null,
         editable_paths: editablePaths,
+        ...(repo.createdBySkynet ? { created_by_skynet: true } : {}),
       },
       setup_command: repo.setupCommand.trim() || null,
     },

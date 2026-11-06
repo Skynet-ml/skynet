@@ -17,8 +17,6 @@
   "optimizations.duration.lt_0_1s": "<0.1s",
   "optimizations.duration.seconds": "{value}s",
   "optimizations.grid.response_time_seconds": "{value}s",
-  "optimizations.reasoning_effort.short.med": "med",
-  "optimizations.serve.field_separator": ": ",
   "settings.admin.storage.edit_hint": "Presiona Intro para guardar, Esc para cancelar",
   "submit.dataset.library_loaded": "Cargado “{name}” ({count} filas)",
   "tagger.library.saved": "“{name}” guardado en la biblioteca",

@@ -1,47 +1,50 @@
-The metric tells Skynet how good an output is. It is a Python function in `metric.py`. Every engine calls the same function. This page gives the contract, the return value, and examples.
+The scorer tells Skynet how good one version of your repository is. It is a Python function in `scorer.py`. Every engine calls the same function. This page gives the contract, the return value, and examples.
 
 ## The contract
 
 ```python
-def score(input, output, expected=None):
+def score(repo_path, case):
     ...
     return score_value, {"feedback": "..."}
 ```
 
-| Argument   | What it holds                                                    |
-| ---------- | ---------------------------------------------------------------- |
-| `input`    | A dict with the input fields of the case                         |
-| `output`   | What your `run(artifact, input)` returned for the case           |
-| `expected` | The expected value of the case, or `None` when the case has none |
+| Argument    | What it holds                                                                    |
+| ----------- | -------------------------------------------------------------------------------- |
+| `repo_path` | The folder of one version of the repository, after the setup command ran         |
+| `case`      | A dict. `case["input"]` holds the input fields. `case["expected"]` holds the expected value, or `None` |
 
-If your function takes only two arguments, Skynet calls `score(input, output)`.
+If your function takes only one argument, Skynet calls `score(repo_path)`. Use this form when the scorer runs its own tests and needs no cases.
 
-For a DSPy program, Skynet adapts the DSPy metric call to this same function. You write one metric for every artifact kind. Read [How optimization works](/docs/concepts/optimization).
+The scorer runs in the sandbox, in the folder of the version. It can import code from the repository, run a command, or call `serve()` from `serve.py`. Read [How optimization works](/docs/concepts/optimization).
 
 ## The return value
 
-`score` must return a pair (a tuple or a list of two items):
+`score` must return a score with feedback. These shapes are valid:
 
-1. **The score.** A number. The optimizer tries to make it higher.
-2. **The side info.** A dict. It must have a `"feedback"` key with a string value.
+1. A pair: a number, and a feedback string or a dict with a `"feedback"` key.
+2. A dict with a number under `"score"` and a string under `"feedback"`.
 
-The side info can also have a `"scores"` key. It maps names to numbers, for example `{"format": 1.0, "accuracy": 0.5}`.
+The feedback must be a string that is not empty.
 
-If the return value has a different shape, the contract check fails at **Metric return value**.
+The side info can also have a `"scores"` key. It maps names to named scores. Each named score has its own score and feedback, for example `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
 
-| Return value                                           | Valid                              |
-| ------------------------------------------------------ | ---------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`      | Yes                                |
-| `[1.0, {"feedback": "OK", "scores": {"format": 1.0}}]` | Yes                                |
-| `0.8`                                                  | No. There is no side info.         |
-| `(0.8, "Close.")`                                      | No. The side info is not a dict.   |
-| `(0.8, {})`                                            | No. There is no feedback string.   |
-| `("0.8", {"feedback": "OK"})`                          | No. The score is a string.         |
-| `(0.8, {"feedback": "OK", "scores": {"a": "high"}})`   | No. A named score is not a number. |
+The side info can also have a `"cases"` key with the same shape. Each entry is the result of one case. Every engine uses each case as its own objective.
+
+If the return value has a different shape, the check fails and shows the reason.
+
+| Return value                                                                    | Valid                                  |
+| ------------------------------------------------------------------------------- | -------------------------------------- |
+| `(0.8, {"feedback": "Close. Missing the date."})`                               | Yes                                    |
+| `(0.8, "Close. Missing the date.")`                                             | Yes                                    |
+| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | Yes                         |
+| `0.8`                                                                           | No. There is no feedback.              |
+| `(0.8, {})`                                                                     | No. There is no feedback string.       |
+| `("0.8", {"feedback": "OK"})`                                                   | No. The score is a string.             |
+| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | No. A named score is not a number.    |
 
 ## Write useful feedback
 
-GEPA, DSPy GEPA and Auto read the feedback text to write the next version. Say what is wrong and what a correct output looks like.
+GEPA and Auto read the feedback text to write the next version. Say what is wrong and what a correct output looks like.
 
 | Weak feedback | Useful feedback                                                               |
 | ------------- | ----------------------------------------------------------------------------- |
@@ -49,98 +52,80 @@ GEPA, DSPy GEPA and Auto read the feedback text to write the next version. Say w
 | "Bad format." | "The output is not valid JSON. It has a trailing comma after the last field." |
 
 > [!NOTE]
-> The optimizer never sees your metric source. With a DSPy optimizer, the reflection model sees only the feedback text. Your expected values stay with the metric.
+> The coding agent never sees your scorer source, the expected values or the run secrets. It sees only the scores and the feedback text.
 
 ## Examples
 
 ### Exact match
 
-```python tab="metric.py"
-def score(input, output, expected=None):
-    want = expected["label"]
-    if output == want:
+```python tab="scorer.py"
+import importlib.util
+
+
+def score(repo_path, case):
+    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    got = module.serve(case["input"])
+    want = case["expected"]["label"]
+    if got == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
 ```
 
-`expected` is a dict keyed by the name of your Output column. Read [Datasets and splits](/docs/concepts/datasets).
+`case["expected"]` is a dict keyed by the name of your Output column. Read [Datasets and splits](/docs/concepts/datasets).
 
-### Several checks
+### Run the tests of the repository
 
-```python tab="metric.py"
-import json
+```python tab="scorer.py"
+import subprocess
 
 
-def score(input, output, expected=None):
-    try:
-        data = json.loads(output)
-    except ValueError as exc:
-        return 0.0, {"feedback": f"Output is not valid JSON: {exc}", "scores": {"format": 0.0, "fields": 0.0}}
-    want = expected["fields"]
-    found = [key for key in want if key in data]
-    fields = len(found) / len(want) if want else 1.0
-    missing = [key for key in want if key not in data]
-    feedback = "All fields present." if not missing else f"Missing fields: {', '.join(missing)}."
-    return 0.5 + 0.5 * fields, {"feedback": feedback, "scores": {"format": 1.0, "fields": fields}}
+def score(repo_path):
+    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
+    if result.returncode == 0:
+        return 1.0, {"feedback": "All tests pass."}
+    return 0.0, {"feedback": result.stdout[-2000:]}
 ```
 
 ### Model as judge
 
-The metric can call a model. Import `llm` from the `skynet` helper module. A call from the metric goes to the metric model.
+The scorer can call a model. Import `llm` from the `skynet` helper module. The call goes through Skynet's model gateway to the scorer model of the run.
 
-```python tab="metric.py"
+```python tab="scorer.py"
+import importlib.util
+
 from skynet import llm
 
 
-def score(input, output, expected=None):
+def score(repo_path, case):
+    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    answer = module.serve(case["input"])
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {input['question']}\nAnswer: {output}",
-        model="openai/gpt-4.1-mini",
+        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
         temperature=0,
         max_tokens=512,
-        reasoning_effort="low",
     )
     passed = str(verdict).strip().upper().startswith("PASS")
     return (1.0 if passed else 0.0), {"feedback": str(verdict)}
 ```
 
-The metric sets its model in its own `llm()` call. All four arguments shown are optional. Without `model=`, the metric uses the reflection model.
+The scorer can also use any OpenAI-compatible client with the `OPENAI_BASE_URL`, `APP_API_KEY` and `APP_MODEL` environment variables. The gateway accepts only the scorer model of the run.
 
-## Accuracy, speed and cost
+## Model calls and secrets
 
-A metric can blend accuracy with the measured run time and the model cost. Define `REWARD_SPEC` at module level and return the value of `reward`.
-
-```python tab="metric.py"
-from skynet import reward
-
-REWARD_SPEC = {
-    "weights": {"accuracy": 0.7, "speed": 0.2, "cost": 0.1},
-    "accuracy": {},
-    "speed": {"reference": 2000},
-    "cost": {"reference": 0.01},
-}
-
-
-def score(input, output, expected=None):
-    ok = output == expected["label"]
-    return reward(REWARD_SPEC, 1.0 if ok else 0.0, "Correct." if ok else "Wrong label.")
-```
-
-- `weights` must have `accuracy`, `speed` and `cost`. Each weight is 0 or more, and not all can be 0. Skynet scales them to add up to 1.
-- `speed.reference` is in milliseconds. `cost.reference` is in US dollars. Both must be positive.
-- Without `accuracy.reference`, accuracy is a score from 0 to 1. With it, accuracy is an error, and lower is better.
-
-Skynet measures the time and the cost itself. The run code cannot change them. If Skynet cannot measure the time or the cost, that part scores 0 and the feedback says so.
-
-The metric can also read the measurements directly with `observation()` and `service_cost()` from `skynet`.
+- Calls on Skynet's keys are metered against the run budget. With your own key (BYOK), the call goes to your provider key, with no Skynet model fee. Read [Billing](/docs/concepts/billing).
+- Run secrets reach the scorer as environment variables. The variable name is the secret name, for example `os.environ["SEARCH_API_KEY"]`.
+- Skynet hides secret values in the scorer output and in the logs.
 
 ## Limits
 
-| Item                   | Value                              |
-| ---------------------- | ---------------------------------- |
-| Metric timeout         | 60 seconds by default, at most 600 |
-| Contract check samples | 3 cases                            |
+| Item           | Value                              |
+| -------------- | ---------------------------------- |
+| Scorer timeout | 60 seconds by default, at most 600 |
 
 ## Related pages
 

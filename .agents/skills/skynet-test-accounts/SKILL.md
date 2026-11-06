@@ -1,6 +1,6 @@
 ---
 name: skynet-test-accounts
-description: Use this skill before any signed-in check on Skynet shared staging or a PR preview (pr-<n>.staging.skynetml.com), for acceptance checks, video evidence or API calls with a user token. It says which target to use, how to confirm the served commit with /api/version and /health, how Devin signs in with SKYNET_DEVIN_<n> or SKYNET_PR_<n> secrets, how local agents use the orchestrator's account pool, the DNS-over-HTTPS fallback, and the rules for secrets and test data.
+description: Use this skill before any signed-in check on Skynet shared staging or a PR preview (pr-<n>.staging.skynetml.com), for acceptance checks, video evidence or API calls with a user token. It says which target to use, how to confirm the served commit with /api/version and /health, how Devin signs in with SKYNET_DEVIN_<n> or SKYNET_PR_<n> secrets, how local agents read the pool accounts from AWS Secrets Manager, the DNS-over-HTTPS fallback, and the rules for secrets and test data.
 ---
 
 # Skynet test accounts and targets
@@ -76,11 +76,11 @@ The sign-up ban covers normal checks. It has two exceptions:
    a sign-up is part of the test. Do it only when the issue covers an auth
    change. Put the issue label in the account name, and record each account
    you create in the PR.
-2. **Sign-ups by the orchestrator's tools**: its account-pool tools
-   (section 5) and the preview merger, which signs up and runs a real
-   optimization in each preview (`docs/agents/pr-previews.md`).
+2. **Sign-ups by the orchestrator**: the setup of the staging pool
+   accounts (section 5), and the preview merger, which signs up and runs a
+   real optimization in each preview (`docs/agents/pr-previews.md`).
 
-Devin cannot use either exception: it has no access to these tools and
+Devin cannot use either exception: it cannot run these setups, and it
 cannot read email codes. When Devin needs an account that setup did not
 provide, it reports the setup failure and the coverage gap, as above.
 
@@ -113,32 +113,44 @@ printf 'authorization: Bearer %s\n' "$TOKEN" | curl -s --doh-url https://cloudfl
 is not 200, run the script once more. If it still fails, stop and report the
 exact status.
 
-## 5. Sign in: local agents with the orchestrator's account pool
+## 5. Sign in: local agents with the staging account pool
 
 Cloud agents such as Devin skip this section.
 
-- The orchestrator claims an account for you and gives you: the target
-  (`staging` or `preview <n>`), the slot (`pool-1` to `pool-4` for staging,
-  or `pr-<n>` for a preview), a secret access-file path, a context-file
-  path, and the tools to use. Read the context file first.
-- If you did not get these and your task needs a signed-in check, stop and
-  report "no test account was handed over". Do not claim a slot yourself
-  unless the orchestrator tells you to.
-- Use the orchestrator's tools to confirm the served commit and to check or
-  refresh the login. The tool paths are machine-local; they are never in
-  this repository.
-- `STALE_DEPLOYMENT` means the target does not run your head yet. Wait, or
-  report it.
-- `PR preview <n> is not running.` means the preview is down or deleted.
-  Report it. Do not create previews yourself.
-- When you finish, also after a failed check, tell the orchestrator. It
-  releases the slot (`release <slot> <claimId>`). A forgotten claim blocks
-  other agents for up to 6 hours.
+The credentials for `pool-1` to `pool-4` are in AWS Secrets Manager:
+`skynet/staging/test-accounts` (account 669242775630, region `us-east-2`,
+profile `skynet`). It is a JSON object keyed by slot. Each slot has
+`email`, `password`, `name`, `target`, `app`, `api` and `status`
+(`verified` means the account can sign in).
+
+- The orchestrator gives you one slot. Use only that slot. If you did not
+  get a slot and your task needs a signed-in check, stop and report "no test
+  account was handed over".
+- Check your AWS login first: `aws sts get-caller-identity --profile skynet`.
+  If it fails, report it. Do not run the sign-in.
+- Read only your slot, inside your own script. Load it without printing, and
+  sign in with `devin-login.sh`. Set `SLOT` to your slot:
+
+```bash
+export SLOT="pool-<n>"   # your slot, for example pool-2
+eval "$(aws secretsmanager get-secret-value --profile skynet --region us-east-2 \
+  --secret-id skynet/staging/test-accounts --query SecretString --output text |
+  python3 -c 'import json,os,shlex,sys;a=json.load(sys.stdin)[os.environ["SLOT"]];print("export SKYNET_POOL_EMAIL=%s SKYNET_POOL_PASSWORD=%s" % (shlex.quote(a["email"]), shlex.quote(a["password"])))')"
+export PREFIX=SKYNET_POOL APP=https://staging.skynetml.com API=https://api-staging.skynetml.com
+. .agents/skills/skynet-test-accounts/devin-login.sh
+```
+
+- Then follow section 4: expect `login check: HTTP 200`, and send the token
+  in a header from stdin.
+- The pool accounts exist on shared staging only. A PR preview has an empty
+  database, so it needs its own account (section 4).
+- When you finish, also after a failed check, tell the orchestrator, so it
+  can give the slot to another agent.
 
 ## 6. Secrets
 
 - Read credentials only inside your own script (environment variables or the
-  access file). Never print, `cat` or echo them.
+  Secrets Manager secret). Never print, `cat` or echo them.
 - Never put passwords, tokens, cookies or email codes in prompts, logs,
   screenshots, videos, commits, PR text or Linear.
 - In evidence, name the account by slot (`devin-2`, `pool-2`, `pr-827`) and

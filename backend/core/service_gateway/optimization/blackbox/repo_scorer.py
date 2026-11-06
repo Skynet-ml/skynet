@@ -23,10 +23,11 @@ from typing import Any
 
 from ....billing.model_dispatch import ModelHTTPResult
 from . import runner, sandbox_log
+from .harness import ENV_API_KEY, ENV_MODEL
 from .repo_workspace import REPO_DIR, RepoWorkspace, redact
 from .rule_judge import ILLEGAL_APPROACH_KEY, ILLEGAL_SCORE, RuleJudge, RuleJudgeUnavailableError
 from .sandbox import SandboxSession
-from .sandbox_scorer import RUNNER_SOURCE
+from .sandbox_scorer import RUNNER_SOURCE, ScorerGateway, _raise_control
 
 CASES_KEY = "cases"
 # The guest names no real endpoint: its requests reach only the parent relay.
@@ -83,6 +84,7 @@ class RepoScorer:
         *,
         timeout_seconds: float,
         rule_judge: RuleJudge | None = None,
+        gateway: ScorerGateway | None = None,
     ) -> None:
         """Bind the user's scorer code to a repository workspace.
 
@@ -94,8 +96,13 @@ class RepoScorer:
                 has an ``optimize.toml``: path-rule refusals then get the fixed
                 illegal-action message, and every changed version passes the
                 final rule judge before it is scored.
+            gateway: The run's scoped model route from the trusted parent.
+                The scorer's ``llm()`` and the version's own code reach it
+                with ``APP_API_KEY`` and ``APP_MODEL``; the box itself stays
+                offline and talks to the parent through the model mailbox.
         """
         self._workspace = workspace
+        self._gateway = gateway
         self._code = code
         self._timeout_seconds = timeout_seconds
         self._rule_judge = rule_judge
@@ -118,8 +125,15 @@ class RepoScorer:
             RepoScoreError: When the version breaks the path rules or does not
                 apply, changes a protected file while it runs, the rule judge
                 cannot check it, or the scorer fails or returns no score.
+            BudgetReached: When the run's budget stopped a model call.
+            BudgetError: When a model call had insufficient budget coverage.
+            UsagePendingError: When a model call needs reconciliation.
+            UnpricedOperationError: When the parent cannot bound a model call.
         """
+        gateway = self._gateway
         secrets = list(self._workspace.secrets.values())
+        if gateway is not None and gateway.api_key:
+            secrets.append(gateway.api_key)
         judge = self._rule_judge
         # The judge runs outside the lock: a slow verdict must not hold up the
         # checkout and scoring of other versions.
@@ -149,7 +163,12 @@ class RepoScorer:
             session.write_files(
                 {
                     f"{CALLS_DIR}/{self._calls:06d}/{runner.INPUT_FILE}": json.dumps(
-                        {"code": self._code, "candidate": f"{root}/{checkout.path}", "case": case, "gateway": None}
+                        {
+                            "code": self._code,
+                            "candidate": f"{root}/{checkout.path}",
+                            "case": case,
+                            "gateway": gateway.runner_payload() if gateway is not None else None,
+                        }
                     )
                 }
             )
@@ -165,7 +184,7 @@ class RepoScorer:
                     # __pycache__ into it and fail the protected-path check.
                     # Skipping the bytecode beats ignoring __pycache__, where a
                     # version could plant a .pyc that the judge then loads.
-                    env={**self._workspace.secrets, "PYTHONDONTWRITEBYTECODE": "1"},
+                    env={**self._workspace.secrets, **self._model_env(), "PYTHONDONTWRITEBYTECODE": "1"},
                     timeout_seconds=self._timeout_seconds,
                     on_output=sandbox_log.ignore_output,
                 )
@@ -181,10 +200,25 @@ class RepoScorer:
             output = redact((result.stderr or result.stdout)[-2_000:], secrets)
             raise RepoScoreError(f"The scorer did not finish (exit {result.exit_code}): {output}")
         output = json.loads(redact(text, secrets))
+        _raise_control(output)
         if output.get("error") or output.get("score") is None:
             raise RepoScoreError(str(output.get("error") or "The scorer returned no score."))
         side_info = fold_case_scores(output.get("side_info") or {})
         return {**side_info, "score": float(output["score"])}
+
+    def _model_env(self) -> dict[str, str]:
+        """Return the env that points code in the box at the run's model route.
+
+        The route values come after the run secrets, so a secret named like
+        them cannot redirect the box to another key.
+
+        Returns:
+            ``APP_API_KEY`` and ``APP_MODEL``, or nothing without a route.
+        """
+        gateway = self._gateway
+        if gateway is None or not gateway.api_key:
+            return {}
+        return {ENV_API_KEY: gateway.api_key, ENV_MODEL: gateway.model}
 
     def prepare(self) -> None:
         """Set the repository up and take its box offline before any version is sent.

@@ -193,6 +193,7 @@ def bind_protected_sandbox(
         max_lifetime_seconds=lifetime,
         tags={JOB_TAG: owner_id},
         command_runner=mailbox.run,
+        parent_command_runner=ModelMailbox(gateway.dispatch_route).run,
     )
     gateway.bind_sandbox(broker, image=image, lifetime_seconds=lifetime)
     if parent_hosts:

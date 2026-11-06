@@ -1584,8 +1584,8 @@ def test_shinka_duplicate_rejection_names_its_embeddings_route() -> None:
     assert unscoped == {"model": "openai/text-embedding-3-small", "url": "https://gw.example/v1", "token": "run-key"}
 
 
-def test_engine_catalog_for_a_repository_offers_every_engine_but_not_auto() -> None:
-    """A repository run can pick any single engine the deployment offers, ShinkaEvolve included, never Auto."""
+def test_engine_catalog_for_a_repository_offers_every_engine_and_auto() -> None:
+    """A repository run can pick Auto or any single engine the deployment offers, ShinkaEvolve included."""
     catalog = service_mod.engine_catalog("repo")
 
     available = {entry.id for entry in catalog.engines if entry.available}
@@ -1594,8 +1594,9 @@ def test_engine_catalog_for_a_repository_offers_every_engine_but_not_auto() -> N
     shinka = next(entry for entry in catalog.engines if entry.id == "shinka_evolve")
     assert shinka.available is (shinka.id in text_available)
     assert "gepa" in available
-    assert catalog.auto_available is False
-    assert catalog.auto_unavailable_reason
+    text_catalog = service_mod.engine_catalog("text")
+    assert catalog.auto_available is text_catalog.auto_available
+    assert catalog.auto_unavailable_reason == text_catalog.auto_unavailable_reason
     assert all(entry.unavailable_reason for entry in catalog.engines if not entry.available)
 
 

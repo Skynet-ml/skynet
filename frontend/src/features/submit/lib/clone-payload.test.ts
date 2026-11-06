@@ -58,7 +58,8 @@ test("a unified run clones every slice it stored", () => {
   assert.deepEqual(slices.inputs.inputFields, ["ticket"]);
   assert.deepEqual(slices.inputs.split, { train: 0.6, val: 0.2, test: 0.2 });
   assert.equal(slices.inputs.shuffle, false);
-  assert.equal(slices.optimizer.choice, "dspy_gepa");
+  // A retired DSPy optimizer clones as Auto.
+  assert.equal(slices.optimizer.choice, "auto");
   assert.equal(slices.optimizer.reflectionModel?.name, "gpt-x");
   assert.equal("metricModelMode" in slices.workspace, false);
   assert.deepEqual(slices.workspace.metricModel, { name: "judge-y" });

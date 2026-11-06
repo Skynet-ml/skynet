@@ -18,9 +18,6 @@ export type OptimizerTarget = ArtifactKind | "repo";
 export type DataMode = "single" | "pairs";
 export type OptimizerChoice =
   | "auto"
-  | "dspy_gepa"
-  | "dspy_miprov2"
-  | "dspy_bootstrap_fewshot"
   | "gepa"
   | "best_of_n"
   | "autoresearch"
@@ -31,7 +28,9 @@ export type OptimizerFamily = "auto" | "dspy" | "blackbox";
 export type UnifiedCandidate = string | Record<string, string>;
 
 export const UNIFIED_PAYLOAD_KIND = "unified_v1";
-export const DSPY_OPTIMIZERS = ["dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"] as const;
+// Retired DSPy optimizer ids. They are no longer choices, but stored runs,
+// saved Settings defaults and resolved ids can still carry them.
+export const DSPY_OPTIMIZERS: readonly string[] = ["dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"];
 export const BLACKBOX_OPTIMIZERS = [
   "gepa",
   "best_of_n",
@@ -46,17 +45,25 @@ export const MIN_PAIRS_FOR_HELD_OUT = 5;
 export const CONTRACT_SAMPLE_MAX = 5;
 
 /**
- * Optimizer choices that fit a target and data mode. A DSPy program lists
- * `"auto"` first; a repository run lists only the black-box engines, as Auto
- * has no repository strategy.
+ * Optimizer choices that fit a target and data mode, `"auto"` first. A
+ * repository run lists Auto and the six repository engines; a DSPy program
+ * lists only Auto, as its DSPy optimizers are retired.
  */
 export function optimizersFor(target: OptimizerTarget, mode: DataMode): OptimizerChoice[] {
-  if (target === "dspy_program") {
-    return mode === "pairs"
-      ? ["auto", "dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"]
-      : ["auto", "dspy_gepa"];
-  }
-  return [...BLACKBOX_OPTIMIZERS];
+  if (target === "dspy_program") return ["auto"];
+  return ["auto", ...BLACKBOX_OPTIMIZERS];
+}
+
+/**
+ * A stored optimizer id as a current choice. A retired DSPy optimizer id
+ * becomes `"auto"`; any other unknown value gives null.
+ */
+export function storedOptimizerChoice(value: unknown): OptimizerChoice | null {
+  if (typeof value !== "string") return null;
+  if (DSPY_OPTIMIZERS.includes(value)) return "auto";
+  return value === "auto" || (BLACKBOX_OPTIMIZERS as readonly string[]).includes(value)
+    ? (value as OptimizerChoice)
+    : null;
 }
 
 /** The optimizer that actually runs: Auto is DSPy GEPA on a DSPy program, else the black-box Auto strategy. */
@@ -66,7 +73,7 @@ export function resolveOptimizer(choice: OptimizerChoice, target: OptimizerTarge
 }
 
 export function optimizerFamily(resolved: string): OptimizerFamily {
-  if ((DSPY_OPTIMIZERS as readonly string[]).includes(resolved)) return "dspy";
+  if (DSPY_OPTIMIZERS.includes(resolved)) return "dspy";
   if (resolved === "auto") return "auto";
   return "blackbox";
 }

@@ -16,8 +16,8 @@ Phased exposure (the gate):
   ``profile_datasets``. A repository run gets ``validate_code`` without one.
 * On the Metric screen: the hand-off to the workspace coding agent
   (:mod:`.workspace_coder`), which reads a repository run's checkout.
-* Unlocked once name + task + inputs + run/metric code + reflection model
-  are all set: ``submit_unified_run`` (``POST /optimize``).
+* No submit tool: every run optimizes a GitHub repository, and the wizard's
+  own Run button submits it.
 * Always available post-submit: ``cancel_job``, rename/pin.
 
 Tool docstrings become the agent prompt, so we rely on the trimming in
@@ -141,6 +141,8 @@ _DESTRUCTIVE_TOOLS: frozenset[str] = frozenset(
         "delete_job_optimizations",
         "bulk_delete_jobs_optimizations_bulk_delete_post",
         "submit_unified_run_optimize_post",
+        # Creates a repository the user can see on GitHub.
+        "create_github_repository_connectors_github_repos_post",
         "cancel_job_optimizations",
         "bulk_cancel_jobs_optimizations_bulk_cancel_post",
         "clone_job_optimizations",
@@ -651,8 +653,6 @@ class _ApprovalGatedTool:
         # routes read that as "not supplied", but the step-order check and the
         # snapshot fill go by which keys are present.
         kwargs = {key: value for key, value in kwargs.items() if value is not None}
-        if self._tool_name in _SUBMIT_TOOLS:
-            self._inject_unified_snapshot(kwargs)
         # Profiling a staged dataset needs the same rehydration submit relies
         # on: the rows live behind an opaque id, never inline in the model's
         # args, so without this the agent passes an empty dataset, the profile
@@ -758,6 +758,10 @@ class _ApprovalGatedTool:
                     self._authoring_flag.wizard_patch["artifact_kind"] = "repo"
                 if str(kwargs.get("job_name") or "").strip():
                     self._authoring_flag.job_named = True
+            elif self._tool_name == GITHUB_CREATE_REPO_TOOL and isinstance(shown, dict) and shown.get("full_name"):
+                created = {"artifact_kind": "repo", "repository": shown["full_name"], "repo_created_by_skynet": True}
+                shown = {**shown, "wizard_state": created}
+                self._authoring_flag.wizard_patch.update(created)
             self._emit(
                 {
                     "event": "tool_end",
@@ -806,83 +810,6 @@ class _ApprovalGatedTool:
             else:
                 previous[key] = current.get(key)
         return previous
-
-    def _inject_unified_snapshot(self, kwargs: dict[str, Any]) -> None:
-        """Fill a ``POST /optimize`` submit from the wizard snapshot.
-
-        The model has historically re-typed its own broken code (and dropped
-        fields) into submit arguments, so the workspace code always comes from
-        the snapshot, which the Metric screen writes and checks. Every other
-        value fills in only when the agent left it out, except privacy, which
-        is forced: the request model defaults to public and a run must only go
-        public when the user asked for it.
-
-        Args:
-            kwargs: The submit tool's keyword arguments, mutated in place.
-        """
-        state = self._wizard_state
-        kwargs["is_private"] = bool(state.get("is_private", True))
-        if not kwargs.get("name"):
-            snapshot_name = str(state.get("job_name") or "").strip()
-            if snapshot_name:
-                kwargs["name"] = snapshot_name
-        if not kwargs.get("description"):
-            snapshot_desc = str(state.get("job_description") or "").strip()
-            if snapshot_desc:
-                # The wizard patch accepts 500 characters; the submit model caps at 280.
-                kwargs["description"] = snapshot_desc[:280]
-
-        task = dict(kwargs.get("task") or {})
-        for arg, state_key in (("objective", "task_objective"), ("background", "task_background")):
-            snapshot_text = str(state.get(state_key) or "").strip()
-            if not task.get(arg) and snapshot_text:
-                task[arg] = snapshot_text
-        if not task.get("artifact") and state.get("artifact_kind") and state.get("starting_version") is not None:
-            task["artifact"] = {"kind": state["artifact_kind"], "starting_version": state["starting_version"]}
-        if task:
-            kwargs["task"] = task
-
-        data = dict(kwargs.get("data") or {})
-        if not data.get("mode") and state.get("data_mode"):
-            data["mode"] = state["data_mode"]
-        if self._staged_dataset_id and not data.get("cases") and not data.get("staged_dataset_id"):
-            data["staged_dataset_id"] = self._staged_dataset_id
-        for arg, state_key in (("input_fields", "input_fields"), ("expected_field", "expected_field")):
-            if data.get(arg) is None and state.get(state_key):
-                data[arg] = state[state_key]
-        if data.get("split") is None and isinstance(state.get("split_fractions"), dict):
-            data["split"] = state["split_fractions"]
-        if data.get("shuffle") is None and state.get("shuffle") is not None:
-            data["shuffle"] = bool(state["shuffle"])
-        if data:
-            kwargs["data"] = data
-
-        optimizer = dict(kwargs.get("optimizer") or {})
-        if not optimizer.get("choice") and state.get("optimizer_choice"):
-            optimizer["choice"] = state["optimizer_choice"]
-        if optimizer:
-            kwargs["optimizer"] = optimizer
-
-        models = dict(kwargs.get("models") or {})
-        for arg, state_key in (("task_model", "model_config"), ("reflection_model", "reflection_model_config")):
-            snapshot_model = state.get(state_key)
-            if not models.get(arg) and isinstance(snapshot_model, dict) and snapshot_model.get("name"):
-                models[arg] = snapshot_model
-        if models:
-            kwargs["models"] = models
-
-        workspace = dict(kwargs.get("workspace") or {})
-        for code_field in ("run_code", "metric_code"):
-            snapshot_code = state.get(code_field)
-            if snapshot_code:
-                workspace[code_field] = snapshot_code
-        if workspace:
-            kwargs["workspace"] = workspace
-
-        if kwargs.get("seed") is None and state.get("seed") is not None:
-            kwargs["seed"] = state["seed"]
-        if "max_cost_cents" not in kwargs and state.get("max_cost_cents") is not None:
-            kwargs["max_cost_cents"] = state["max_cost_cents"]
 
     def _keep_existing_job_name(self, serialized: Any) -> Any:
         """Drop a staged sample's default ``job_name`` when the run is already named.
@@ -977,11 +904,14 @@ class WizardState(TypedDict, total=False):
     is_private: bool
     task_objective: str
     task_background: str
-    # ``dspy_program``, or ``repo`` for a run that optimizes a GitHub repository.
+    # Always ``repo`` for a new run: every run optimizes a GitHub repository.
+    # Older runs may still carry ``dspy_program`` and a starting version.
     artifact_kind: str
     starting_version: str | dict[str, str]
-    # The repository a ``repo`` run optimizes, as ``owner/name``.
+    # The repository the run optimizes, as ``owner/name``.
     repository: str
+    # True when the agent created ``repository`` through the create route.
+    repo_created_by_skynet: bool
     # Whether the user linked a GitHub account; absent while the wizard does not know yet.
     github_connected: bool
     data_mode: str
@@ -1022,6 +952,9 @@ class WizardState(TypedDict, total=False):
 
 # The repository picker's own listing; it answers 409 when GitHub is not linked.
 GITHUB_REPOS_TOOL = "list_github_repositories_connectors_github_repos_get"
+# The picker's "create a repository" route. The wizard marks a repository it
+# made this way, so the run request sends ``created_by_skynet``.
+GITHUB_CREATE_REPO_TOOL = "create_github_repository_connectors_github_repos_post"
 
 _ALWAYS_TOOLS = frozenset(
     {
@@ -1045,17 +978,12 @@ _ALWAYS_TOOLS = frozenset(
         # runs, datasets and files that the owner ticked (SKY-294).
         "read_shared_chat_item",
         "serve_info_serve",
-        "serve_pair_info_serve",
         # UI-trigger tool — calling it renders an inline inference-input
         # card in the chat. The card fetches the field schema via
         # /serve/{id}/info and runs the actual inference via /serve/{id};
         # the agent NEVER calls serve_program directly because it cannot
         # know the user's inputs.
         "request_user_inference",
-        # Grid-search twin of request_user_inference: renders the inference card
-        # for one pair. The agent picks pair_index from serve_pair_info /
-        # get_grid_search_result; the card runs the pair inference client-side.
-        "request_user_pair_inference",
         "discover_models_models_discover_post",
         "rename_job_optimizations",
         "toggle_pin_job_optimizations",
@@ -1079,6 +1007,7 @@ _ALWAYS_TOOLS = frozenset(
         # Generalized wizard patch — any editable field, partial updates.
         "update_wizard_state",
         GITHUB_REPOS_TOOL,
+        GITHUB_CREATE_REPO_TOOL,
         "update_user_preferences",
         # Account settings. change_setting asks in Ask and Auto-safe;
         # change_protected_setting asks in every mode (_ALWAYS_CONFIRM_TOOLS).
@@ -1125,9 +1054,6 @@ _DATASET_READY_TOOLS = frozenset(
         "validate_datasets_validate_post",
     }
 )
-# The one submit surface: ``POST /optimize`` takes every optimizer, so there
-# is never a second submit tool for the model to waver on.
-_SUBMIT_TOOLS = frozenset({"submit_unified_run_optimize_post"})
 _POST_SUBMIT_TOOLS = frozenset(
     {
         "pause_job_optimizations",
@@ -1148,17 +1074,15 @@ def _name_set(state: WizardState) -> bool:
 
 
 def _task_ready(state: WizardState) -> bool:
-    """Return True when the Task step has an objective and a complete artifact.
+    """Return True when the Task step has an objective and a repository.
 
-    A DSPy program needs a starting version; a repository run needs only the
-    repository, since the checkout itself is the starting version.
+    Every run optimizes a repository, and its checkout is the starting
+    version, so no starting version is needed.
     """
     objective = state.get("task_objective") or ""
     if not (isinstance(objective, str) and objective.strip()):
         return False
-    if state.get("artifact_kind") == "repo":
-        return bool(str(state.get("repository") or "").strip())
-    return bool(state.get("artifact_kind") and state.get("starting_version") not in (None, "", {}))
+    return bool(str(state.get("repository") or "").strip())
 
 
 def _dataset_ready(state: WizardState) -> bool:
@@ -1209,12 +1133,6 @@ def tools_for(state: WizardState) -> set[str]:
     is_repo = state.get("artifact_kind") == "repo"
     if is_repo:
         allowed.add(VALIDATE_CODE_TOOL)
-    name_set = _name_set(state)
-    task_ready = _task_ready(state)
-    # A repository run is submitted by the wizard's own Run button; the
-    # unified submit tool has no repository target.
-    if not is_repo and name_set and task_ready and _inputs_ready(state) and _code_ready(state) and _model_ready(state):
-        allowed |= _SUBMIT_TOOLS
     return allowed
 
 
@@ -1249,10 +1167,7 @@ _PREREQ_STEPS = (0, 1, 2)
 # What the agent must DO to satisfy each gating step (used in the error hint).
 _STEP_FIX_HINT = {
     0: "set ``job_name`` via update_wizard_state",
-    1: (
-        "set ``task_objective``, ``artifact_kind`` and ``starting_version`` (or ``repository`` "
-        "for a ``repo`` run) via update_wizard_state"
-    ),
+    1: "set ``task_objective`` and ``repository`` (owner/name) via update_wizard_state",
     2: "set ``data_mode`` (and attach the dataset via request_user_dataset for pairs)",
 }
 
@@ -1320,7 +1235,7 @@ def validate_wizard_patch_order(patch: dict[str, Any], state: WizardState) -> st
 # so nothing changes out of sight. Mirrors the frontend's ``wizard-pages``.
 _SCREEN_FIELDS: dict[str, frozenset[str]] = {
     "brief": frozenset({"task_objective", "task_background"}),
-    "artifact": frozenset({"artifact_kind", "starting_version", "repository"}),
+    "artifact": frozenset({"artifact_kind", "repository"}),
     "source": frozenset({"data_mode", "staged_dataset_id", "split_fractions", "shuffle", "seed"}),
     "plan": frozenset({"optimizer_choice", "model_config", "reflection_model_config", "spending_limit_usd"}),
     "optimizer": frozenset({"optimizer_choice"}),
@@ -1384,7 +1299,6 @@ _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
         {
             "task_objective",
             "artifact_kind",
-            "starting_version",
             "repository",
             "input_fields",
             "expected_field",
@@ -1415,7 +1329,7 @@ _SCREEN_ORDER: tuple[str, ...] = (
 # reach past the screen the user is on.
 _SCREEN_ALLOWED_TOOLS: dict[str, frozenset[str]] = {
     "brief": frozenset({"update_wizard_state"}),
-    "artifact": frozenset({"update_wizard_state", GITHUB_REPOS_TOOL}),
+    "artifact": frozenset({"update_wizard_state", GITHUB_REPOS_TOOL, GITHUB_CREATE_REPO_TOOL}),
     "source": frozenset(
         {
             "update_wizard_state",
@@ -1597,9 +1511,7 @@ def _screen_problems(screen: str, state: WizardState) -> list[str]:
     if screen == "brief" and not str(state.get("task_objective") or "").strip():
         return ["task_objective is empty"]
     if screen == "artifact" and not _task_ready(state):
-        if state.get("artifact_kind") == "repo":
-            return ["repository must be set as owner/name"]
-        return ["artifact_kind and starting_version must both be set"]
+        return ["repository must be set as owner/name"]
     if screen == "source" and not _inputs_ready(state):
         return ["data_mode must be set, and pairs need a dataset attached"]
     if screen in ("plan", "models") and not _model_ready(state):
@@ -2110,7 +2022,7 @@ The wizard screen on view:
   looking at, and each turn you may change only the fields on it (plus
   ``job_name``, ``job_description`` and ``is_private``, which show on no
   screen). Screens: ``brief`` (task_objective, task_background),
-  ``artifact`` (artifact_kind, starting_version, repository), ``source`` (data_mode,
+  ``artifact`` (artifact_kind, repository), ``source`` (data_mode,
   staged_dataset_id, split_fractions, shuffle, seed), ``plan``
   (optimizer_choice, model_config, reflection_model_config,
   spending_limit_usd), ``optimizer`` (optimizer_choice), ``models``
@@ -2143,27 +2055,28 @@ Rules:
        authoring code or submitting, even when the user only described
        the task in prose. NEVER leave the run unnamed.
     2. Task — set ``task_objective`` (what "better" means, in the
-       user's words), ``task_background`` (context) and ``artifact_kind``.
-       ``dspy_program`` optimizes a DSPy program: a prompt the user brings
-       becomes the instruction of its predictor, and ``starting_version``
-       is a map of predictor names to instructions. ``repo`` optimizes a
-       GitHub repository: set ``repository`` (``owner/name``) and no
-       starting version. Get the starting version, the repository and the
-       objective from the user; never invent them.
+       user's words) and ``task_background`` (context). Every run
+       optimizes a GitHub repository: set ``repository``
+       (``owner/name``); ``artifact_kind`` is always ``repo`` and there
+       is no starting version. Call
+       ``list_github_repositories_connectors_github_repos_get`` to find
+       the user's repository. When the user has none, offer
+       ``create_github_repository_connectors_github_repos_post`` with a
+       name they agree to; it sets the repository on the wizard. Get the
+       repository and the objective from the user; never invent them.
     3. Inputs — set ``data_mode``: ``single`` for one input, ``pairs``
        for many input/output examples. For pairs, call
        ``request_user_dataset`` so the user attaches them; part of the
        pairs is held out automatically to measure the result.
     4. Optimizer — ``optimizer_choice`` (``auto`` is the default and is
        right unless the user names one; ``optimizer_catalog`` lists what
-       fits the artifact and data mode), ``reflection_model_config``
+       fits the run and data mode), ``reflection_model_config``
        (always needed) and ``model_config`` (the task model).
-    5. Code — on the Metric screen the wizard writes the code the run
-       needs: run code plus a metric, the same for every artifact, a
-       ``dspy_program`` included. Point the user to that screen; its
-       validity check confirms the code fits the data before Run.
-    6. Submit — ``submit_unified_run_optimize_post`` unlocks once name + task + inputs +
-       run/metric code + reflection model are all present.
+    5. Code — on the Metric screen the wizard writes the scorer that
+       reads the repository's checkout. Point the user to that screen;
+       its validity check confirms the code before Run.
+    6. Run — you never submit the run. The user starts it with the
+       wizard's own Run button once every screen is done.
   Do NOT skip ahead. Field order is ENFORCED: if you set an
   ``update_wizard_state`` field whose earlier steps aren't filled yet
   (e.g. ``optimizer_choice`` before the inputs), the call is rejected
@@ -2175,8 +2088,7 @@ Rules:
   own once the earlier step lands in a future ``wizard_state``.
 * If a tool returns an error, surface it to the user in
   ``reply_language`` and ask
-  how to proceed — do not retry blindly. A 422/400 on submit is proof
-  a wizard field is missing, not proof the submit tool is unavailable.
+  how to proceed — do not retry blindly.
 * Never invent optimization IDs or model names. Get them from the
   discovery tools first.
 * When choosing a model, call ``list_models_for_agent`` and copy
@@ -2196,27 +2108,23 @@ Rules:
       of the turn. Do not re-call it to look up a second model — the
       first response already lists the matches.
 * When the user asks to submit in any language (e.g. "submit", "send it",
-  "approved", or the same in Hebrew): if
-  ``submit_unified_run_optimize_post`` is in your tool list THIS turn, call it;
-  if it isn't, identify the missing wizard field and patch it via
-  ``update_wizard_state`` / ``request_user_dataset`` (missing code is
-  written on the wizard's Metric screen). Never reply that you have no
-  access to the submit tool — that's a hallucinated refusal.
+  "approved", or the same in Hebrew): find any missing wizard field and
+  patch it via ``update_wizard_state`` / ``request_user_dataset``
+  (missing code is written on the wizard's Metric screen). When nothing
+  is missing, tell the user to press the wizard's Run button.
 
 Supported backend capabilities (these are the ONLY valid values —
 never claim, suggest, or pass any others):
-* Optimizers (``optimizer_choice``): ``auto``; the DSPy optimizers
-  ``dspy_gepa``, ``dspy_miprov2`` and ``dspy_bootstrap_fewshot`` (only for
-  a ``dspy_program`` artifact; a single input allows only ``dspy_gepa``);
-  and the engines ``gepa``, ``best_of_n``, ``autoresearch``,
-  ``meta_harness``, ``autosaddler`` and ``shinka_evolve`` (for every other
-  artifact). ``optimizer_catalog`` says which are available right now.
+* Optimizers (``optimizer_choice``): ``auto``, the default, which
+  composes the eligible engines; keep it unless the user names an
+  engine. The engines are ``gepa``, ``best_of_n``, ``autoresearch``,
+  ``meta_harness``, ``autosaddler`` and ``shinka_evolve``.
+  ``optimizer_catalog`` says which are available right now.
   There is no grid search and no model sweep: one run uses one task model
   and one reflection model.
-* Workspace code: every run is plain Python, run code plus a metric,
-  under one contract for every artifact (a ``dspy_program``'s run code
-  builds its dspy module); the metric's shape depends on the optimizer.
-  Both are written on the wizard's Metric screen, never here.
+* Workspace code: the run's scorer is plain Python that reads the
+  repository's checkout. It is written on the wizard's Metric screen,
+  never here.
 * The optimizer never sees the metric code; it learns only from scores
   and feedback. Do not paste the metric into the objective or background.
 
@@ -2257,7 +2165,7 @@ Capabilities worth knowing about:
   that, and prefer ``resume_job`` for a paused job).
 * Any wizard field: ``update_wizard_state`` patches any subset of
   editable fields — job_name, job_description, is_private,
-  task_objective, task_background, artifact_kind, starting_version,
+  task_objective, task_background, artifact_kind,
   repository, data_mode, staged_dataset_id, split_fractions, shuffle, seed,
   optimizer_choice, model_config (task model), reflection_model_config,
   plus spending_limit_usd (dollars; send null to remove the limit).
@@ -2306,8 +2214,7 @@ Capabilities worth knowing about:
   and its agent, which writes the code and runs the validity check. When
   the code is missing or the user wants it changed, send them to the
   Metric screen; the code lands in your next turn's
-  ``wizard_state`` (``run_code`` + ``metric_code``), and only then does
-  ``submit_unified_run_optimize_post`` unlock.
+  ``wizard_state`` (``run_code`` + ``metric_code``).
 * Logs: ``get_job_logs`` returns the log trail when the user is
   debugging a failed run.
 * Cross-corpus search: ``public_search`` does semantic + structured
@@ -2333,79 +2240,42 @@ Capabilities worth knowing about:
   guessing them would waste an LLM call. After ``request_user_inference``
   returns, stop and wait for the next user message — the form result
   arrives as a follow-up turn.
-* Submitting an optimization: when the user asks to run / start /
-  submit / launch an optimization, you submit it yourself by calling
-  ``submit_unified_run_optimize_post``. It becomes available only after the wizard
-  is fully populated: ``job_name``, the task fields, the inputs
-  (``data_mode``, plus a staged dataset for pairs), ``run_code`` and
-  ``metric_code``, and ``reflection_model_config.name``. If a
-  prerequisite is missing, do NOT tell the user that you can't submit —
-  identify which fields are blank from the wizard_state snapshot and
-  patch them, or ask one targeted question (in ``reply_language``) to
-  fill the single biggest gap, then submit on the next turn. Completing
-  the wizard is NOT submitting: setting the final field only UNLOCKS
-  the submit tool on your NEXT turn. A run is submitted ONLY when
-  ``submit_unified_run_optimize_post`` returns a successful result in your
-  trajectory this turn.
-* Wizard handoff for submit: the runtime fills ``task``, ``data``,
-  ``optimizer.choice``, ``models``, ``workspace``, ``name``,
-  ``description``, ``seed`` and the spending limit from the wizard
-  snapshot when you leave them unset. Change them with
-  ``update_wizard_state`` (so the user sees them in the wizard), not by
-  typing them into the submit arguments. A single input you may pass
-  yourself as ``data.cases`` with exactly one case.
+* Starting a run: you never submit a run, and you have no submit
+  tool. When the user asks to run / start / submit / launch, find the
+  blank wizard fields in the wizard_state snapshot and patch them, or
+  ask one targeted question (in ``reply_language``) to fill the single
+  biggest gap. When nothing is missing, tell the user to press the
+  wizard's Run button.
 * Run privacy: runs are private by default (excluded from public
   Explore). Set ``is_private`` to false via update_wizard_state ONLY
   when the user explicitly asks to make the run public.
-* Dataset handoff for submit: never inline dataset rows into the
-  submit tool arguments. The wizard stages the parsed rows on the
-  backend after upload and surfaces a ``staged_dataset_id`` in the
-  wizard_state snapshot; the runtime attaches it to the submit as
-  ``data.staged_dataset_id``. If it is absent when the user asks to
-  submit a pairs run, the dataset is not staged yet: call
+* Never inline dataset rows into tool arguments. The wizard stages the
+  parsed rows on the backend after upload and surfaces a
+  ``staged_dataset_id`` in the wizard_state snapshot. If it is absent
+  for a pairs run, the dataset is not staged yet: call
   ``request_user_dataset`` and stop. Do NOT ask the user to re-upload
   an already-staged dataset.
-* Code handoff for submit: never pass ``run_code`` or ``metric_code``
-  into the submit call. The runtime injects the code the Metric screen
-  holds from the wizard snapshot, overriding anything you supply. If they
-  are blank in the snapshot the code isn't written yet: point the user
-  to the Metric screen and stop.
 
 CRITICAL — never fabricate tool results:
-* If ``submit_unified_run_optimize_post`` (or any other tool) is NOT in your
-  current tool list, you have NOT called it. Do not invent an
-  optimization ID, status payload, or confirmation message.
-  Fabricating a submission and reporting "the run was created
-  successfully" with a made-up ``opt_xxx`` id when no such call was
-  made is a critical failure.
-* The only valid optimization IDs are the ones returned by an actual
-  successful ``submit_unified_run_optimize_post``
-  tool result that appeared in your trajectory THIS TURN. If you did
-  not see such a tool result, you have no ID to report.
-* If you discover mid-turn that the submit tool is unavailable
-  because the wizard is incomplete, fix the wizard (via
-  ``update_wizard_state``) or ask the user
-  one targeted question — but tell the truth about the current
-  state. Do not pretend a submission happened.
+* If a tool is NOT in your current tool list, you have NOT called it.
+  Do not invent an optimization ID, status payload, or confirmation
+  message. Never report that a run started: the user starts it with
+  the wizard's Run button.
+* The only valid optimization IDs are the ones a tool result in your
+  trajectory returned. If you did not see such a tool result, you have
+  no ID to report.
 
 CRITICAL — never claim you lack a tool you actually have:
 * Tool availability is determined ONLY by what appears in your
-  current tool list. If ``submit_unified_run_optimize_post`` is in your tool
-  list this turn, you DO have access to it — full stop.
-* A failure on a previous turn (e.g. an earlier
-  ``submit_unified_run_optimize_post`` returned a 422) is
-  NOT evidence that the tool is missing or unavailable. It is
-  evidence of a missing wizard field. Earlier assistant turns in the
-  conversation carry the calls that turn made and what each returned
-  (clipped). Diagnose the field from that trace, patch it via
-  ``update_wizard_state``, and call submit again on the next turn. The
-  trace is for your eyes only: never echo it to the user, and never
-  treat a traced result as a call made THIS turn.
-* Never tell the user — in Hebrew, English, or any other language
-  — that you "do not have access to the submit tool" or "the
-  submit option is not exposed to me" when the tool is in fact in
-  your current tool list. That is a hallucinated refusal and it
-  breaks the user's trust.
+  current tool list. If a tool is in your tool list this turn, you DO
+  have access to it — full stop.
+* A failure on a previous turn (e.g. a 422) is NOT evidence that the
+  tool is missing or unavailable. It is evidence of a missing or wrong
+  field. Earlier assistant turns in the conversation carry the calls
+  that turn made and what each returned (clipped). Diagnose the field
+  from that trace and fix it. The trace is for your eyes only: never
+  echo it to the user, and never treat a traced result as a call made
+  THIS turn.
 """.replace("{app_name}", APP_NAME)
 
 
@@ -2547,7 +2417,7 @@ _ASK_FOR_BUDGET = (
 # Agents told users a cheap task model was "for scoring many versions" and
 # picked an older generation while a newer one was listed.
 _MODEL_ROLES = (
-    "The task model (``model_config``) runs the artifact on each input; the metric scores the outputs, so "
+    "The task model (``model_config``) does the task on each input; the metric scores the outputs, so "
     "never describe the task model as the scorer. The reflection model reads the results and writes the "
     "next versions. Prefer the newest generation ``list_models_for_agent`` lists in a family (5.5 over 4.5) "
     "unless the user asks for another model or a lower cost."
@@ -2565,15 +2435,17 @@ SCREEN_FOCUS: dict[str, str] = {
         "accept in ``task_objective``; the screen is not complete until they accept one."
     ),
     "artifact": (
-        "Artifact: set ``artifact_kind``. For a DSPy program (``dspy_program``) also set "
-        "``starting_version``, the predictor instructions being improved, taken from the user verbatim. "
-        "For a GitHub repository (``repo``) set ``repository`` as ``owner/name`` and no starting version. "
+        "Repository: every run optimizes a GitHub repository. Set ``repository`` as ``owner/name`` and "
+        "``artifact_kind`` ``repo``; there is no starting version. "
         "When ``github_connected`` is true, find the repository the user names with "
         "``list_github_repositories`` (pass its name as ``search``) and copy its ``full_name``. The search "
         "matches words in the name and the description. When it finds nothing, or the user describes the "
         'repository ("my CV site") instead of naming it, call it with no ``search`` and choose by name and '
-        "description; ask the user when more than one fits. When it is "
-        "false, tell the user to link GitHub with the Connect GitHub button on this screen; never ask for a token."
+        "description; ask the user when more than one fits. When the user has no repository for this task, "
+        "offer to create one with ``create_github_repository`` (a ``name`` the user agrees to and the "
+        "``objective`` from ``task_objective``); the user approves it, and the wizard selects the new "
+        "repository. When ``github_connected`` is false, tell the user to link GitHub with the Connect "
+        "GitHub button on this screen; never ask for a token."
     ),
     "source": (
         "Data: set ``data_mode`` (``single`` for one input, ``pairs`` for input/output examples) and, for "
@@ -2587,7 +2459,7 @@ SCREEN_FOCUS: dict[str, str] = {
     ),
     "optimizer": (
         "Optimizer: choose ``optimizer_choice``; ``auto`` is right unless the user names one, and "
-        "``optimizer_catalog`` lists what fits this artifact and data."
+        "``optimizer_catalog`` lists what fits this repository and data."
     ),
     "models": (
         "Models: choose ``reflection_model_config`` (always needed) and ``model_config`` (the task model) "
@@ -2595,12 +2467,9 @@ SCREEN_FOCUS: dict[str, str] = {
     ),
     "budget": ("Budget: " + _ASK_FOR_BUDGET),
     "metric": (
-        "Metric: for a DSPy program, write ``run_code`` (runs the program on one input) and ``metric_code`` "
-        "(scores its output) with ``update_wizard_state``, from the task, the starting version and the input "
-        "fields, or hand the work to the coding agent with ``hand_off_to_coding_agent``. Each write replaces "
-        "the whole file, so send the full code; the user may have edited it, so start from the code in "
-        "``wizard_state``. For a repository run (``artifact_kind`` ``repo``) you cannot read the "
-        "repository: never guess its code and never ``fetch_url`` it. Call ``hand_off_to_coding_agent`` "
+        "Metric: each write of ``metric_code`` with ``update_wizard_state`` replaces the whole file, so send "
+        "the full code; the user may have edited it, so start from the code in ``wizard_state``. You cannot "
+        "read the repository: never guess its code and never ``fetch_url`` it. Call ``hand_off_to_coding_agent`` "
         "with what the user wants measured; it reads the repository and writes ``metric_code`` (a "
         "repository run has no ``run_code``). Its result is where you go on from: the code is already in "
         "the editor, so say in one sentence what it measures and which files it read, and ask the user its "

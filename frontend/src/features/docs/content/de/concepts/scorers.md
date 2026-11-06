@@ -1,47 +1,50 @@
-Die Metrik sagt Skynet, wie gut eine Ausgabe ist. Sie ist eine Python-Funktion in `metric.py`. Jede Engine ruft dieselbe Funktion auf. Diese Seite beschreibt den Vertrag, den Rückgabewert und Beispiele.
+Der Scorer sagt Skynet, wie gut eine Version Ihres Repositorys ist. Er ist eine Python-Funktion in `scorer.py`. Jede Engine ruft dieselbe Funktion auf. Diese Seite beschreibt den Vertrag, den Rückgabewert und Beispiele.
 
 ## Der Vertrag
 
 ```python
-def score(input, output, expected=None):
+def score(repo_path, case):
     ...
     return score_value, {"feedback": "..."}
 ```
 
-| Argument   | Was es enthält                                                         |
-| ---------- | ---------------------------------------------------------------------- |
-| `input`    | Ein Dict mit den Eingabefeldern des Falls                              |
-| `output`   | Was Ihre `run(artifact, input)` für den Fall zurückgegeben hat         |
-| `expected` | Der erwartete Wert des Falls oder `None`, wenn der Fall keinen hat     |
+| Argument    | Was es enthält                                                                   |
+| ----------- | -------------------------------------------------------------------------------- |
+| `repo_path` | Der Ordner einer Version des Repositorys, nachdem der Setup-Befehl gelaufen ist  |
+| `case`      | Ein Dict. `case["input"]` enthält die Eingabefelder. `case["expected"]` enthält den erwarteten Wert oder `None` |
 
-Nimmt Ihre Funktion nur zwei Argumente, ruft Skynet `score(input, output)` auf.
+Nimmt Ihre Funktion nur ein Argument, ruft Skynet `score(repo_path)` auf. Verwenden Sie diese Form, wenn der Scorer eigene Tests ausführt und keine Fälle braucht.
 
-Bei einem DSPy-Programm passt Skynet den Metrikaufruf von DSPy an dieselbe Funktion an. Sie schreiben eine Metrik für jede Artefaktart. Lesen Sie [So funktioniert die Optimierung](/docs/concepts/optimization).
+Der Scorer läuft in der Sandbox, im Ordner der Version. Er kann Code aus dem Repository importieren, einen Befehl ausführen oder `serve()` aus `serve.py` aufrufen. Lesen Sie [So funktioniert die Optimierung](/docs/concepts/optimization).
 
 ## Der Rückgabewert
 
-`score` muss ein Paar zurückgeben (ein Tupel oder eine Liste mit zwei Elementen):
+`score` muss einen Score mit Feedback zurückgeben. Diese Formen sind gültig:
 
-1. **Der Score.** Eine Zahl. Der Optimierer versucht, sie zu erhöhen.
-2. **Die Zusatzinformationen.** Ein Dict. Es muss einen Schlüssel `"feedback"` mit einem String-Wert haben.
+1. Ein Paar: eine Zahl und ein Feedback-String oder ein Dict mit einem Schlüssel `"feedback"`.
+2. Ein Dict mit einer Zahl unter `"score"` und einem String unter `"feedback"`.
 
-Die Zusatzinformationen können auch einen Schlüssel `"scores"` haben. Er ordnet Namen Zahlen zu, zum Beispiel `{"format": 1.0, "accuracy": 0.5}`.
+Das Feedback muss ein String sein, der nicht leer ist.
 
-Hat der Rückgabewert eine andere Form, schlägt die Vertragsprüfung bei **Rückgabewert der Metrik** fehl.
+Die Zusatzinformationen können auch einen Schlüssel `"scores"` haben. Er ordnet Namen benannten Scores zu. Jeder benannte Score hat einen eigenen Score und ein eigenes Feedback, zum Beispiel `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
 
-| Rückgabewert                                           | Gültig                                         |
-| ------------------------------------------------------ | ---------------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`      | Ja                                             |
-| `[1.0, {"feedback": "OK", "scores": {"format": 1.0}}]` | Ja                                             |
-| `0.8`                                                  | Nein. Es gibt keine Zusatzinformationen.       |
-| `(0.8, "Close.")`                                      | Nein. Die Zusatzinformationen sind kein Dict.  |
-| `(0.8, {})`                                            | Nein. Es gibt keinen Feedback-String.          |
-| `("0.8", {"feedback": "OK"})`                          | Nein. Der Score ist ein String.                |
-| `(0.8, {"feedback": "OK", "scores": {"a": "high"}})`   | Nein. Ein benannter Score ist keine Zahl.      |
+Die Zusatzinformationen können auch einen Schlüssel `"cases"` mit derselben Form haben. Jeder Eintrag ist das Ergebnis eines Falls. Jede Engine verwendet jeden Fall als eigenes Ziel.
+
+Hat der Rückgabewert eine andere Form, schlägt die Prüfung fehl und zeigt den Grund.
+
+| Rückgabewert                                                                    | Gültig                                 |
+| ------------------------------------------------------------------------------- | -------------------------------------- |
+| `(0.8, {"feedback": "Close. Missing the date."})`                               | Ja                                     |
+| `(0.8, "Close. Missing the date.")`                                             | Ja                                     |
+| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | Ja                          |
+| `0.8`                                                                           | Nein. Es gibt kein Feedback.           |
+| `(0.8, {})`                                                                     | Nein. Es gibt keinen Feedback-String.  |
+| `("0.8", {"feedback": "OK"})`                                                   | Nein. Der Score ist ein String.        |
+| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | Nein. Ein benannter Score ist keine Zahl. |
 
 ## Nützliches Feedback schreiben
 
-GEPA, DSPy GEPA und Auto lesen den Feedback-Text, um die nächste Version zu schreiben. Sagen Sie, was falsch ist und wie eine korrekte Ausgabe aussieht.
+GEPA und Auto lesen den Feedback-Text, um die nächste Version zu schreiben. Sagen Sie, was falsch ist und wie eine korrekte Ausgabe aussieht.
 
 | Schwaches Feedback | Nützliches Feedback                                                           |
 | ------------------ | ----------------------------------------------------------------------------- |
@@ -49,98 +52,80 @@ GEPA, DSPy GEPA und Auto lesen den Feedback-Text, um die nächste Version zu sch
 | "Bad format."      | "The output is not valid JSON. It has a trailing comma after the last field." |
 
 > [!NOTE]
-> Der Optimierer sieht den Quelltext Ihrer Metrik nie. Bei einem DSPy-Optimierer sieht das Reflexionsmodell nur den Feedback-Text. Ihre erwarteten Werte bleiben bei der Metrik.
+> Der Coding-Agent sieht nie den Quelltext Ihres Scorers, die erwarteten Werte oder die Secrets des Durchlaufs. Er sieht nur die Scores und den Feedback-Text.
 
 ## Beispiele
 
 ### Exakte Übereinstimmung
 
-```python tab="metric.py"
-def score(input, output, expected=None):
-    want = expected["label"]
-    if output == want:
+```python tab="scorer.py"
+import importlib.util
+
+
+def score(repo_path, case):
+    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    got = module.serve(case["input"])
+    want = case["expected"]["label"]
+    if got == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
 ```
 
-`expected` ist ein Dict mit dem Namen Ihrer Ausgabespalte als Schlüssel. Lesen Sie [Datensätze und Aufteilungen](/docs/concepts/datasets).
+`case["expected"]` ist ein Dict, dessen Schlüssel der Name Ihrer Ausgabespalte ist. Lesen Sie [Datensätze und Aufteilungen](/docs/concepts/datasets).
 
-### Mehrere Prüfungen
+### Die Tests des Repositorys ausführen
 
-```python tab="metric.py"
-import json
+```python tab="scorer.py"
+import subprocess
 
 
-def score(input, output, expected=None):
-    try:
-        data = json.loads(output)
-    except ValueError as exc:
-        return 0.0, {"feedback": f"Output is not valid JSON: {exc}", "scores": {"format": 0.0, "fields": 0.0}}
-    want = expected["fields"]
-    found = [key for key in want if key in data]
-    fields = len(found) / len(want) if want else 1.0
-    missing = [key for key in want if key not in data]
-    feedback = "All fields present." if not missing else f"Missing fields: {', '.join(missing)}."
-    return 0.5 + 0.5 * fields, {"feedback": feedback, "scores": {"format": 1.0, "fields": fields}}
+def score(repo_path):
+    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
+    if result.returncode == 0:
+        return 1.0, {"feedback": "All tests pass."}
+    return 0.0, {"feedback": result.stdout[-2000:]}
 ```
 
 ### Modell als Bewerter
 
-Die Metrik kann ein Modell aufrufen. Importieren Sie `llm` aus dem Hilfsmodul `skynet`. Ein Aufruf aus der Metrik geht an das Metrikmodell.
+Der Scorer kann ein Modell aufrufen. Importieren Sie `llm` aus dem Hilfsmodul `skynet`. Der Aufruf geht über das Modell-Gateway von Skynet an das Scorer-Modell des Durchlaufs.
 
-```python tab="metric.py"
+```python tab="scorer.py"
+import importlib.util
+
 from skynet import llm
 
 
-def score(input, output, expected=None):
+def score(repo_path, case):
+    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    answer = module.serve(case["input"])
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {input['question']}\nAnswer: {output}",
-        model="openai/gpt-4.1-mini",
+        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
         temperature=0,
         max_tokens=512,
-        reasoning_effort="low",
     )
     passed = str(verdict).strip().upper().startswith("PASS")
     return (1.0 if passed else 0.0), {"feedback": str(verdict)}
 ```
 
-Die Metrik legt ihr Modell in ihrem eigenen `llm()`-Aufruf fest. Alle vier gezeigten Argumente sind optional. Ohne `model=` verwendet die Metrik das Reflexionsmodell.
+Der Scorer kann auch jeden OpenAI-kompatiblen Client mit den Umgebungsvariablen `OPENAI_BASE_URL`, `APP_API_KEY` und `APP_MODEL` verwenden. Das Gateway akzeptiert nur das Scorer-Modell des Durchlaufs.
 
-## Genauigkeit, Geschwindigkeit und Kosten
+## Modellaufrufe und Secrets
 
-Eine Metrik kann die Genauigkeit mit der gemessenen Laufzeit und den Modellkosten verrechnen. Definieren Sie `REWARD_SPEC` auf Modulebene und geben Sie den Wert von `reward` zurück.
-
-```python tab="metric.py"
-from skynet import reward
-
-REWARD_SPEC = {
-    "weights": {"accuracy": 0.7, "speed": 0.2, "cost": 0.1},
-    "accuracy": {},
-    "speed": {"reference": 2000},
-    "cost": {"reference": 0.01},
-}
-
-
-def score(input, output, expected=None):
-    ok = output == expected["label"]
-    return reward(REWARD_SPEC, 1.0 if ok else 0.0, "Correct." if ok else "Wrong label.")
-```
-
-- `weights` muss `accuracy`, `speed` und `cost` enthalten. Jedes Gewicht ist 0 oder größer, und nicht alle dürfen 0 sein. Skynet skaliert sie so, dass sie zusammen 1 ergeben.
-- `speed.reference` ist in Millisekunden angegeben. `cost.reference` ist in US-Dollar angegeben. Beide müssen positiv sein.
-- Ohne `accuracy.reference` ist die Genauigkeit ein Score von 0 bis 1. Mit diesem Wert ist die Genauigkeit ein Fehler, und niedriger ist besser.
-
-Skynet misst Zeit und Kosten selbst. Der Ausführungscode kann sie nicht ändern. Kann Skynet die Zeit oder die Kosten nicht messen, erhält dieser Teil den Score 0, und das Feedback weist darauf hin.
-
-Die Metrik kann die Messwerte auch direkt mit `observation()` und `service_cost()` aus `skynet` lesen.
+- Aufrufe über die Schlüssel von Skynet werden auf das Laufbudget angerechnet. Mit Ihrem eigenen Schlüssel (BYOK) geht der Aufruf an Ihren Anbieterschlüssel, ohne Modellgebühr von Skynet. Lesen Sie [Abrechnung](/docs/concepts/billing).
+- Die Secrets des Durchlaufs erreichen den Scorer als Umgebungsvariablen. Der Variablenname ist der Name des Secrets, zum Beispiel `os.environ["SEARCH_API_KEY"]`.
+- Skynet verbirgt Secret-Werte in der Ausgabe des Scorers und in den Logs.
 
 ## Limits
 
-| Element                               | Wert                                    |
-| ------------------------------------- | --------------------------------------- |
-| Timeout der Metrik                    | Standardmäßig 60 Sekunden, höchstens 600 |
-| Beispielfälle der Vertragsprüfung     | 3 Fälle                                 |
+| Element            | Wert                                     |
+| ------------------ | ---------------------------------------- |
+| Timeout des Scorers | Standardmäßig 60 Sekunden, höchstens 600 |
 
 ## Verwandte Seiten
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
 from sqlalchemy import Engine, select
@@ -274,6 +275,7 @@ def run_protected_interaction(
     credential_binding_id: str | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
     require_tool_approval: bool = False,
+    stage_payload: Callable[[dict[str, Any]], AbstractContextManager[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Run or replay one caller-funded interaction with no reusable allowance.
 
@@ -289,6 +291,10 @@ def run_protected_interaction(
         credential_binding_id: Original run budget binding those credentials.
         on_event: Optional thread-safe SSE receiver.
         require_tool_approval: Whether every live MCP tool call pauses for approval.
+        stage_payload: Optional context that adds parent-only staging, such as a
+            fetched repository tree, to the resolved payload. It runs only for a
+            claimed attempt and stays out of the request fingerprint, so a replay
+            never fetches again.
 
     Returns:
         Guest result with the closed budget and exact settled charge.
@@ -377,20 +383,26 @@ def run_protected_interaction(
                             if on_event is None:
                                 raise ValueError("Tool approval requires a live event stream.")
                             authorizer = _tool_authorizer(on_event)
-                        protected = gateway.protect_payload(
-                            parent_payload,
-                            managed_key=(
-                                settings.openrouter_api_key.get_secret_value() if settings.openrouter_api_key else ""
-                            ),
-                            allow_private_tools=settings.discover_allow_private,
-                            authorize_tool=authorizer,
-                            on_tool_event=on_event if kind == "react_chat" else None,
-                            # Interactions stay unbatched until SKY-283: a synchronous call
-                            # hits the 120 s ALB limit long before a batch answers, and a
-                            # batch that outlives the box leaves an unsettled hold.
-                            allow_batch=False,
+                        staging = (
+                            stage_payload(parent_payload) if stage_payload is not None else nullcontext(parent_payload)
                         )
-                        run_vercel_dspy(protected, f"interaction-{document['id']}", events, "spawn")
+                        with staging as staged_payload:
+                            protected = gateway.protect_payload(
+                                staged_payload,
+                                managed_key=(
+                                    settings.openrouter_api_key.get_secret_value()
+                                    if settings.openrouter_api_key
+                                    else ""
+                                ),
+                                allow_private_tools=settings.discover_allow_private,
+                                authorize_tool=authorizer,
+                                on_tool_event=on_event if kind == "react_chat" else None,
+                                # Interactions stay unbatched until SKY-283: a synchronous call
+                                # hits the 120 s ALB limit long before a batch answers, and a
+                                # batch that outlives the box leaves an unsettled hold.
+                                allow_batch=False,
+                            )
+                            run_vercel_dspy(protected, f"interaction-{document['id']}", events, "spawn")
                     except Exception as error:
                         events.error = str(error)
                     finally:

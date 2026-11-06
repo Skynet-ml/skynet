@@ -170,7 +170,9 @@ class BlackboxRepoSecret(BaseModel):
 # folders (relative, ``/``-separated) an agent may change; the rest of the
 # repository is read-only context; ``.`` makes the whole repository editable.
 # Submodules and Git LFS files are fetched
-# read-only.
+# read-only. ``created_by_skynet`` marks a repository Skynet created for the
+# run: its finished run pushes every version to its own branch and moves
+# ``skynet/best`` to the winner, instead of opening a pull request.
 class BlackboxRepoSource(BaseModel):
     provider: Literal["github"] = "github"
     repository: str = Field(pattern=REPO_NAME_PATTERN)
@@ -178,6 +180,7 @@ class BlackboxRepoSource(BaseModel):
     commit: str | None = Field(default=None, pattern=REPO_COMMIT_PATTERN)
     editable_paths: list[str] = Field(min_length=1, max_length=200)
     secrets: list[BlackboxRepoSecret] = Field(default_factory=list, max_length=100)
+    created_by_skynet: bool = False
 
     @model_validator(mode="after")
     def _ensure_clean_paths(self) -> BlackboxRepoSource:
@@ -531,7 +534,8 @@ class BlackboxRunRequest(BaseModel):
 
         Raises:
             ValueError: When the seed is multi-part, the scorer is not Python
-                code, or the run is not a single-engine run.
+                code, or a single-engine run names an engine that does not
+                optimize a repository.
         """
         multi_part = isinstance(self.seed_candidate, dict)
         if multi_part:
@@ -539,8 +543,8 @@ class BlackboxRunRequest(BaseModel):
         if self.scorer.kind != "python":
             raise ValueError("A repository run is scored by Python code that receives the checkout's path.")
         self.seed_candidate = self.seed_candidate or ""
-        if self.strategy.mode != "single" or self.strategy.engine not in BLACKBOX_REPO_ENGINES:
-            raise ValueError("A repository target runs one engine; Auto mode does not optimize a repository.")
+        if self.strategy.mode == "single" and self.strategy.engine not in BLACKBOX_REPO_ENGINES:
+            raise ValueError("A repository target runs Auto or one repository engine.")
 
 
 # ``POST /blackbox/scorer/dry-run``: score one version on one case before

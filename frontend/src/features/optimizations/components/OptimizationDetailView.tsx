@@ -1,8 +1,6 @@
 "use client";
 
 import { notifyCopied } from "@/shared/lib/notify";
-import { formatBudgetUsd } from "@/features/billing";
-import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -15,7 +13,6 @@ import {
   Terminal,
   TrendUp,
   Timer,
-  PaperPlaneTilt,
   Copy,
   Database,
   Gear,
@@ -45,19 +42,13 @@ import {
   pauseJob,
   resumeJob,
   getOptimizationPayload,
-  getServeInfo,
-  getPairServeInfo,
-  serveProgram,
-  serveProgramStream,
-  servePairProgramStream,
-  serveSharedOptimization,
   STORAGE_CHANGED_EVENT,
   getContinuousState,
   unhideSharedItem,
   apiUrl,
 } from "@/shared/lib/api";
 import { pairHref, type ApiSource } from "@/shared/lib/api-route";
-import type { ServeInfoResponse, WorkflowNodeTrace, WorkflowSpec } from "@/shared/types/api";
+import type { WorkflowSpec } from "@/shared/types/api";
 import { OptimizationDetailSkeleton } from "./OptimizationDetailSkeleton";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
@@ -78,7 +69,6 @@ import type { SharedOptimizationData } from "@/shared/lib/api";
 import { extractScoresFromLogs } from "../lib/extract-scores";
 import { extractBlackboxScorePoints } from "../lib/blackbox";
 import { extractCandidates, scopeToLatestLane } from "@/features/trajectory";
-import { isReactModuleName } from "../lib/is-react-module";
 import { reconstructGridResult } from "../lib/reconstruct-grid";
 import {
   rememberRunKind,
@@ -99,7 +89,6 @@ import { RunAccessBanner } from "./RunAccessBanner";
 import { StatusBadge } from "@/shared/ui/status-badge";
 import { ConfigTab } from "./ConfigTab";
 import { CodeTab } from "./CodeTab";
-import { ArtifactTab } from "./ArtifactTab";
 import { PairSelectionStrip } from "./PairSelectionStrip";
 import { OverviewTab } from "./OverviewTab";
 import { HeldOutNotice, isNotHeldOut } from "./RewardComparison";
@@ -108,12 +97,8 @@ import { RunLifecycleNotice } from "./RunLifecycleNotice";
 import { isBudgetPause } from "../lib/run-lifecycle";
 import { RunCostChip } from "./RunCostChip";
 import { BestVersionTab } from "./BestVersionTab";
-import { GridServeTab } from "./GridServeTab";
 import { UsageTab } from "./UsageTab";
 import { ContinuousTab } from "./ContinuousTab";
-import { ReactServeChat } from "./ReactServeChat";
-import { ReactServeApi } from "./ReactServeApi";
-import { RunPlayground } from "./RunPlayground";
 import { linkifyMessage } from "@/shared/lib/linkify";
 import { useStreamWithPollFallback } from "@/shared/hooks/use-stream-with-poll-fallback";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
@@ -342,18 +327,16 @@ export function OptimizationDetailView({
   const isShare = !!shareData;
   const id = shareData?.optimization_id ?? (params.id as string);
   // The /share/[token] route carries the capability token in the URL; the
-  // shared serve + clone-with-token paths need it. shareData itself omits it.
+  // clone-with-token path needs it. shareData itself omits it.
   const shareToken = params.token ?? null;
   const shareRole = shareData?.role ?? null;
-  // Cloning is viewer+ (it makes the caller's own copy, no spend). Serving/chat
-  // spends the owner's key, so it's editor+ only (see shareCanServe).
+  // Cloning is viewer+ (it makes the caller's own copy, no spend).
   const shareCanInteract = isShare && shareRole != null;
-  const shareCanServe = isShare && (shareRole === "editor" || shareRole === "owner");
   const router = useRouter();
   const searchParams = useSearchParams();
   const [detailTab, setDetailTab] = useState(() => requestedDetailTab(searchParams.get("tab")));
-  // Phones get the view-first subset: Overview, Usage (chat), Artifact, Logs,
-  // Usage and cost. Data/Code/LM activity/Config are desk work; a deep link to one of
+  // Phones get the view-first subset: Overview, Best version, Logs, Usage and
+  // cost. Data/Code/LM activity/Config are desk work; a deep link to one of
   // those tabs lands on Overview instead of an empty pane.
   const isPhone = useIsPhone();
   const activeDetailTab = shownDetailTab(detailTab, isPhone);
@@ -423,29 +406,6 @@ export function OptimizationDetailView({
     } as unknown as OptimizationPayloadResponse);
     setLoading(false);
   }, [shareData]);
-
-  const [serveInfo, setServeInfo] = useState<ServeInfoResponse | null>(null);
-  const [serveInfoError, setServeInfoError] = useState<string | null>(null);
-  const [serveLoading, setServeLoading] = useState(false);
-  const [runHistory, setRunHistory] = useState<
-    Array<{
-      inputs: Record<string, string>;
-      outputs: Record<string, unknown>;
-      model: string;
-      ts: number;
-      nodeTraces?: WorkflowNodeTrace[] | null;
-      centsCharged?: string | null;
-    }>
-  >([]);
-  const [streamingRun, setStreamingRun] = useState<{
-    inputs: Record<string, string>;
-    partial: Record<string, string>;
-  } | null>(null);
-  const streamReqIdRef = useRef(0);
-  const streamAbortRef = useRef<AbortController | null>(null);
-  const chatScrollRef = useRef<HTMLDivElement>(null);
-  const textareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
-  const [serveError, setServeError] = useState<string | null>(null);
 
   const activePairIndex =
     searchParams.get("pair") != null ? parseInt(searchParams.get("pair")!, 10) : null;
@@ -734,267 +694,6 @@ export function OptimizationDetailView({
     }
   };
 
-  // Share view: seed the playground serve info from the public composite.
-  // It is non-null only for viewer+ (the backend nulls it for anonymous view).
-  useEffect(() => {
-    if (!shareData) return;
-    setServeInfo(shareData.serve_info ?? null);
-    setServeInfoError(null);
-  }, [shareData]);
-
-  useEffect(() => {
-    if (skipNetwork) return;
-    if (job?.status !== "success") return;
-    // The hosted proxy carries no serving: a hosted run shows no Playground.
-    if (source === "hosted") return;
-    // Black-box runs have no servable program.
-    if (job.optimization_type === "blackbox") return;
-    // A failure here used to be swallowed as `setServeInfo(null)`, which
-    // silently blanked the Usage tab (e.g. when an expired bearer 401'd).
-    // request() now self-heals a stale token; a persistent failure surfaces.
-    const onFail = (err: unknown) => {
-      setServeInfo(null);
-      setServeInfoError(
-        err instanceof Error
-          ? err.message
-          : formatMsg("auto.app.optimizations.id.page.template.1", { p1: TERMS.optimization }),
-      );
-    };
-    const isGrid = job.optimization_type === "grid_search";
-    // The grid summary never reads this: its Usage tab (GridServeTab) loads
-    // each pair's own serve info. Asking anyway 409s on a grid with no pair
-    // results, as does a pair link to a pair that isn't there.
-    if (isGrid && !isPairContext) return;
-    const loader =
-      isGrid && activePairIndex != null ? getPairServeInfo(id, activePairIndex) : getServeInfo(id);
-    loader
-      .then((info) => {
-        setServeInfo(info);
-        setServeInfoError(null);
-      })
-      .catch(onFail);
-  }, [
-    id,
-    job?.status,
-    job?.optimization_type,
-    activePairIndex,
-    isPairContext,
-    skipNetwork,
-    source,
-  ]);
-
-  useEffect(() => {
-    if (chatScrollRef.current) {
-      const el = chatScrollRef.current;
-      if (el.scrollHeight - el.scrollTop - el.clientHeight < 300) {
-        el.scrollTop = el.scrollHeight;
-      }
-    }
-  }, [runHistory, streamingRun]);
-
-  useEffect(() => {
-    return () => {
-      streamAbortRef.current?.abort();
-    };
-  }, []);
-
-  useEffect(() => {
-    // Share view has no pair switching; skip so the seeded share serveInfo
-    // (set from the public composite above) is not clobbered to null on mount.
-    if (isShare) return;
-    streamAbortRef.current?.abort();
-    setRunHistory([]);
-    setStreamingRun(null);
-    setServeLoading(false);
-    setServeError(null);
-    setServeInfo(null);
-    setServeInfoError(null);
-  }, [activePairIndex, isShare]);
-
-  const readServeInputs = () => {
-    const vals: Record<string, string> = {};
-    for (const f of serveInfo?.input_fields ?? []) vals[f] = textareaRefs.current[f]?.value ?? "";
-    return vals;
-  };
-
-  const handleServe = async (overrideInputs?: Record<string, string>) => {
-    if (!serveInfo) return;
-    const inputs = overrideInputs ?? readServeInputs();
-    const missing = serveInfo.input_fields.filter((f) => !inputs[f]?.trim());
-    if (missing.length > 0) {
-      toast.error(
-        <div>
-          {msg("auto.app.optimizations.id.page.1")}
-          <br />
-          {missing.join(", ")}
-        </div>,
-      );
-      return;
-    }
-    const idempotencyKey = crypto.randomUUID();
-    // Abort any in-flight stream, then start a new one tagged with a fresh id
-    streamAbortRef.current?.abort();
-    const reqId = ++streamReqIdRef.current;
-    const controller = new AbortController();
-    streamAbortRef.current = controller;
-    setServeLoading(true);
-    setServeError(null);
-    setStreamingRun({ inputs: { ...inputs }, partial: {} });
-    if (!overrideInputs) {
-      Object.values(textareaRefs.current).forEach((el) => {
-        if (el) {
-          el.value = "";
-          el.style.height = "auto";
-        }
-      });
-    }
-    const isStale = () => reqId !== streamReqIdRef.current;
-
-    // Share view runs inference through the token-gated, non-streaming
-    // /share/{token}/serve endpoint (owner key applied server-side).
-    if (isShare) {
-      if (!shareToken) {
-        setStreamingRun(null);
-        setServeLoading(false);
-        return;
-      }
-      try {
-        const res = await serveSharedOptimization(shareToken, inputs, idempotencyKey);
-        if (isStale()) return;
-        setRunHistory((prev) => {
-          const next = [
-            {
-              inputs: { ...inputs },
-              outputs: res.outputs,
-              model: res.model_used,
-              ts: Date.now(),
-              centsCharged: res.cents_charged,
-            },
-            ...prev,
-          ];
-          return next.length > 50 ? next.slice(0, 50) : next;
-        });
-        setStreamingRun(null);
-        if (res.cents_charged != null) {
-          toast.success(
-            formatMsg("optimizations.serve.request_spent", {
-              cents: formatBudgetUsd(String(res.cents_charged), getActiveIntlLocale()),
-            }),
-          );
-        }
-      } catch (err) {
-        if (isStale()) return;
-        setServeError(err instanceof Error ? err.message : msg("share.inference_failed"));
-        setStreamingRun(null);
-      } finally {
-        if (!isStale()) setServeLoading(false);
-      }
-      return;
-    }
-    // Workflow runs serve through the blocking endpoint: the response carries
-    // the per-node trace the playground replays, which the SSE final event
-    // does not.
-    if ((job?.module_name ?? "").toLowerCase() === "workflow" && activePairIndex == null) {
-      try {
-        const res = await serveProgram(id, inputs, idempotencyKey);
-        if (isStale()) return;
-        setRunHistory((prev) => {
-          const next = [
-            {
-              inputs: { ...inputs },
-              outputs: res.outputs,
-              model: res.model_used,
-              ts: Date.now(),
-              nodeTraces: res.node_traces ?? null,
-              centsCharged: res.cents_charged,
-            },
-            ...prev,
-          ];
-          return next.length > 50 ? next.slice(0, 50) : next;
-        });
-        setStreamingRun(null);
-        if (res.cents_charged != null) {
-          toast.success(
-            formatMsg("optimizations.serve.request_spent", {
-              cents: formatBudgetUsd(String(res.cents_charged), getActiveIntlLocale()),
-            }),
-          );
-        }
-      } catch (err) {
-        if (isStale()) return;
-        setServeError(err instanceof Error ? err.message : msg("share.inference_failed"));
-        setStreamingRun(null);
-      } finally {
-        if (!isStale()) setServeLoading(false);
-      }
-      return;
-    }
-    const streamFn =
-      job?.optimization_type === "grid_search" && activePairIndex != null
-        ? (i: Record<string, string>, h: Parameters<typeof serveProgramStream>[3]) =>
-            servePairProgramStream(id, activePairIndex, i, idempotencyKey, h)
-        : (i: Record<string, string>, h: Parameters<typeof serveProgramStream>[3]) =>
-            serveProgramStream(id, i, idempotencyKey, h);
-    await streamFn(inputs, {
-      signal: controller.signal,
-      onToken: (field, chunk) => {
-        if (isStale()) return;
-        setStreamingRun((prev) =>
-          prev
-            ? {
-                ...prev,
-                partial: { ...prev.partial, [field]: (prev.partial[field] ?? "") + chunk },
-              }
-            : prev,
-        );
-      },
-      onFinal: (res) => {
-        if (isStale()) return;
-        setRunHistory((prev) => {
-          // Cap history so the chat panel stays responsive across long sessions.
-          const next = [
-            {
-              inputs: { ...inputs },
-              outputs: res.outputs,
-              model: res.model_used,
-              ts: Date.now(),
-              centsCharged: res.cents_charged,
-            },
-            ...prev,
-          ];
-          return next.length > 50 ? next.slice(0, 50) : next;
-        });
-        setStreamingRun(null);
-        if (res.cents_charged != null) {
-          toast.success(
-            formatMsg("optimizations.serve.request_spent", {
-              cents: formatBudgetUsd(String(res.cents_charged), getActiveIntlLocale()),
-            }),
-          );
-        }
-      },
-      onError: (errorMsg) => {
-        if (isStale()) return;
-        setServeError(errorMsg);
-        setStreamingRun(null);
-      },
-    });
-    if (!isStale()) setServeLoading(false);
-  };
-
-  const handleStopServe = () => {
-    streamReqIdRef.current += 1;
-    streamAbortRef.current?.abort();
-    streamAbortRef.current = null;
-    setServeLoading(false);
-    setStreamingRun(null);
-  };
-
-  const handleClearHistory = () => {
-    setRunHistory([]);
-    setServeError(null);
-  };
-
   const metrics = job?.latest_metrics ?? {};
 
   const signatureCode = (payload?.payload?.signature_code as string) ?? null;
@@ -1012,6 +711,13 @@ export function OptimizationDetailView({
   // Black-box runs announce each scored version as a candidate event rather
   // than a GEPA log line, so the chart reads the newest lane's candidates.
   const jobIsBlackbox = job?.optimization_type === "blackbox";
+  // Skynet is repo-only now. Stored DSPy program runs still open read-only,
+  // but they get no serve, artifact or continuous UI.
+  const isLegacyDspyRun =
+    job?.optimization_type === "run" ||
+    job?.optimization_type === "grid_search" ||
+    payload?.payload?.payload_kind === "unified_v1" ||
+    !!job?.result?.program_artifact;
   const jobProgressEvents = job?.progress_events;
   const blackboxCandidates = useMemo(
     () => (jobIsBlackbox ? extractCandidates(scopeToLatestLane(jobProgressEvents ?? [])) : []),
@@ -1057,50 +763,6 @@ export function OptimizationDetailView({
       cancelled = true;
     };
   }, [endedRun, jobIsBlackbox, jobId, skipNetwork, isPairContext, source]);
-
-  // Optimized prompt picks the pair's artifact in pair view, otherwise falls
-  // back to the run's artifact, otherwise to the grid's best pair (for the
-  // grid-root overview banner/code tab).
-  const optimizedPrompt = isPairContext
-    ? (activePair.program_artifact?.optimized_prompt ?? null)
-    : (job?.result?.program_artifact?.optimized_prompt ??
-      job?.grid_result?.best_pair?.program_artifact?.optimized_prompt ??
-      null);
-
-  // The real optimized artifact for a react run lives in react_overlay (tuned
-  // tool descriptions / display names), not the reasoning-predictor prompt.
-  const reactOverlay = isPairContext
-    ? (activePair.program_artifact?.react_overlay ?? null)
-    : (job?.result?.program_artifact?.react_overlay ?? null);
-
-  // Flex optimizes the program's code alongside its prompt; the rewritten
-  // module source is the headline artifact for those runs.
-  const optimizedModuleSrc = isPairContext
-    ? (activePair.program_artifact?.optimized_module_src ?? null)
-    : (job?.result?.program_artifact?.optimized_module_src ??
-      job?.grid_result?.best_pair?.program_artifact?.optimized_module_src ??
-      null);
-  // A workflow is not itself a Flex, so its flex nodes arrive keyed by node.
-  const optimizedComponentSrcs = isPairContext
-    ? activePair.program_artifact?.optimized_component_srcs
-    : (job?.result?.program_artifact?.optimized_component_srcs ??
-      job?.grid_result?.best_pair?.program_artifact?.optimized_component_srcs);
-
-  // The unified per-node view of a workflow's optimized surface — each node's
-  // prompt, react overlay, or rewritten code, keyed "n_<node_id>". Present only
-  // for workflow runs, where it supersedes the scalar prompt/flex/react
-  // projections above in the artifact tab.
-  const optimizedNodes = isPairContext
-    ? activePair.program_artifact?.optimized_nodes
-    : (job?.result?.program_artifact?.optimized_nodes ??
-      job?.grid_result?.best_pair?.program_artifact?.optimized_nodes);
-
-  // Artifact tab appears once the run has produced something durable — an
-  // optimized prompt, tuned react tools, or downloadable program files.
-  const artifactFiles = isPairContext
-    ? (activePair.program_artifact ?? null)
-    : (job?.result?.program_artifact ?? job?.grid_result?.best_pair?.program_artifact ?? null);
-  const showArtifactTab = !!(optimizedPrompt || reactOverlay || artifactFiles);
 
   const isActive = job ? ACTIVE_STATUSES.has(job.status) : false;
   const startedAt = job?.started_at ?? null;
@@ -1214,17 +876,9 @@ export function OptimizationDetailView({
     : false;
 
   // Tab gating uniform across run and pair contexts.
-  // Share view: only editor+ may run inference (it spends the owner's key),
-  // and only through the single non-streaming /share serve endpoint, so it
-  // needs a seeded serveInfo (the backend nulls serve_info below editor).
   // The level trims desk tabs, but a deep link to one still opens it: the
   // linked tab is kept rather than stranding the link on Overview.
   const levelShowsTab = (tab: string) => isShare || levelTabGate(tab) || tab === linkedDetailTab;
-  const showPlaygroundTab = isShare
-    ? shareCanServe && job.status === "success" && !!serveInfo
-    : source === "local" &&
-      job.status === "success" &&
-      (job.optimization_type === "grid_search" || !!serveInfo);
   const showDataTab =
     (isShare
       ? !!shareData?.dataset
@@ -1240,16 +894,18 @@ export function OptimizationDetailView({
   const showConfigTab = levelShowsTab("config");
   const showRewardTab = jobIsBlackbox && hasRewardTab(payload?.payload) && levelShowsTab("reward");
   // Usage reads the run's billing records, which only an authenticated viewer can fetch.
-  // The serve and billing reads behind it have no hosted route.
+  // The billing reads behind it have no hosted route.
   const showUsageTab = !skipNetwork && source === "local";
-  // Continuous optimization starts from the owner's own successful black-box
-  // run; the backend still decides whether this run can carry a plan.
+  // Continuous optimization starts from the owner's own successful repository
+  // run; the backend still decides whether this run can carry a plan. Legacy
+  // DSPy program runs stay readable but get no new cycles.
   // Continuous plans are managed on hosted itself, not through the Mac.
   const showContinuousTab =
     !skipNetwork &&
     source === "local" &&
     !isPairContext &&
     jobIsBlackbox &&
+    !isLegacyDspyRun &&
     (job.status === "success" || endedRunHasPlan);
 
   const pairCount = effectiveJob?.grid_result?.pair_results.length ?? 0;
@@ -1268,6 +924,17 @@ export function OptimizationDetailView({
             <HeldOutNotice splitCounts={job.blackbox_result.split_counts} />
           </FadeIn>
         )}
+      {isLegacyDspyRun && (
+        <FadeIn delay={0.1} className="mb-3">
+          <p
+            role="note"
+            data-notice="legacy-dspy"
+            className="rounded-xl border border-border/40 bg-muted/40 px-4 py-3 text-xs text-muted-foreground"
+          >
+            {msg("optimization.legacy_dspy.notice")}
+          </p>
+        </FadeIn>
+      )}
       <FadeIn delay={0.1}>
         <div className="rounded-xl border border-border/40 bg-card p-4 sm:p-5">
           <div className="flex flex-wrap items-start justify-between gap-4 sm:flex-nowrap">
@@ -1598,29 +1265,20 @@ export function OptimizationDetailView({
                 tabs:
                   1 +
                   Number(showConfigTab) +
-                  Number(showPlaygroundTab) +
                   Number(showBestVersionTab) +
                   Number(showDataTab) +
                   Number(showCodeTab) +
-                  Number(showArtifactTab) +
                   Number(showLogsTab) +
                   Number(showUsageTab) +
                   Number(showContinuousTab),
                 phoneTabs:
-                  1 +
-                  Number(showPlaygroundTab) +
-                  Number(showBestVersionTab) +
-                  Number(showArtifactTab) +
-                  Number(showLogsTab) +
-                  Number(showUsageTab),
+                  1 + Number(showBestVersionTab) + Number(showLogsTab) + Number(showUsageTab),
                 tabIds: [
                   "overview",
-                  ...(showPlaygroundTab ? ["playground"] : []),
                   ...(showBestVersionTab ? ["best"] : []),
                   ...(showDataTab ? ["data"] : []),
                   ...(showCodeTab ? ["code"] : []),
                   ...(showRewardTab ? ["reward"] : []),
-                  ...(showArtifactTab ? ["artifact"] : []),
                   ...(showLogsTab ? ["logs"] : []),
                   ...(showUsageTab ? ["usage"] : []),
                   ...(showContinuousTab ? ["continuous"] : []),
@@ -1637,12 +1295,6 @@ export function OptimizationDetailView({
                 {msg("auto.app.optimizations.id.page.14")}
                 {pingActive && <PingDot className="ms-1" />}
               </TabsTrigger>
-              {showPlaygroundTab && (
-                <TabsTrigger value="playground" className={tabCls}>
-                  <PaperPlaneTilt className="size-3.5" />
-                  {msg("auto.app.optimizations.id.page.15")}
-                </TabsTrigger>
-              )}
               {showBestVersionTab && (
                 <TabsTrigger value="best" className={tabCls}>
                   <Package className="size-3.5" />
@@ -1665,12 +1317,6 @@ export function OptimizationDetailView({
                 <TabsTrigger value="reward" className={tabCls}>
                   <Trophy className="size-3.5" />
                   {msg("reward_tab.title")}
-                </TabsTrigger>
-              )}
-              {showArtifactTab && (
-                <TabsTrigger value="artifact" className={tabCls}>
-                  <Package className="size-3.5" />
-                  {msg("optimization.artifact.tab")}
                 </TabsTrigger>
               )}
               {showLogsTab && (
@@ -1714,40 +1360,6 @@ export function OptimizationDetailView({
               />
             </TabsContent>
 
-            {showPlaygroundTab && (
-              <TabsContent value="playground" className="space-y-4 mt-4">
-                {!isShare && job.optimization_type === "grid_search" && !isPairContext ? (
-                  <GridServeTab job={job} />
-                ) : !isShare &&
-                  !isPairContext &&
-                  (isReactModuleName(serveInfo?.module_name) ||
-                    isReactModuleName(job.module_name)) ? (
-                  <>
-                    <ReactServeChat optimizationId={job.optimization_id} />
-                    <ReactServeApi optimizationId={job.optimization_id} />
-                  </>
-                ) : serveInfo ? (
-                  <RunPlayground
-                    serveInfo={serveInfo}
-                    runHistory={runHistory}
-                    setRunHistory={setRunHistory}
-                    streamingRun={streamingRun}
-                    serveLoading={serveLoading}
-                    serveError={serveError}
-                    setServeError={setServeError}
-                    textareaRefs={textareaRefs}
-                    chatScrollRef={chatScrollRef}
-                    handleServe={handleServe}
-                    handleStopServe={handleStopServe}
-                    optimizationId={job.optimization_id}
-                    pairIndex={isPairContext ? activePair.pair_index : undefined}
-                    onClearHistory={handleClearHistory}
-                    isShare={isShare}
-                  />
-                ) : null}
-              </TabsContent>
-            )}
-
             {showDataTab && !isPhone && (
               <TabsContent value="data">
                 <DataTab
@@ -1788,23 +1400,6 @@ export function OptimizationDetailView({
                 <RewardTab
                   payload={payload?.payload}
                   result={job.status === "success" ? (job.blackbox_result ?? null) : null}
-                />
-              </TabsContent>
-            )}
-
-            {showArtifactTab && (
-              <TabsContent value="artifact" className="space-y-6 mt-4">
-                <ArtifactTab
-                  job={job}
-                  activePair={activePair}
-                  optimizedPrompt={optimizedPrompt}
-                  reactOverlay={reactOverlay}
-                  optimizedModuleSrc={optimizedModuleSrc}
-                  optimizedComponentSrcs={optimizedComponentSrcs}
-                  optimizedNodes={optimizedNodes}
-                  workflowSpec={workflowSpec}
-                  isShare={isShare}
-                  source={source}
                 />
               </TabsContent>
             )}

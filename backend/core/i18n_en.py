@@ -321,6 +321,10 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "wizard.split_fractions_not_object": "split_fractions must be an object with train/val/test keys.",
     "wizard.split_fractions_sum": "split_fractions must sum to 1.0, got {total}",
     "workflow.validation_failed": "Workflow validation failed: {error}",
+    "optimization.dspy_run_retired": (
+        "Skynet now optimizes repositories only. DSPy program runs can no longer be started, resumed, cloned, "
+        "served or scheduled. This run stays readable; start a new repository optimization instead."
+    ),
 }
 
 

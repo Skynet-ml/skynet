@@ -572,6 +572,8 @@ export interface BlackboxRepoSource {
   commit?: string | null;
   editable_paths: string[];
   secrets?: BlackboxRepoSecret[];
+  /** True when Skynet created the repository for this run. */
+  created_by_skynet?: boolean;
 }
 
 export interface BlackboxTarget {

@@ -24,6 +24,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from ...i18n_en import t_en
 from ...models import ProgramArtifact, RunResponse, ServeInfoResponse
 from ...storage.models import Base, JobModel
 from ...storage.remote import RemoteDBJobStore
@@ -838,10 +839,23 @@ def _seed_serveable(store: _MemStore, optimization_id: str = "opt-share-1") -> t
     return object(), result, overview
 
 
+def _make_repo(store: _MemStore, optimization_id: str = "opt-share-1") -> None:
+    """Turn the seeded job into a repository run, the only kind shared serve accepts.
+
+    Args:
+        store: The seeded store.
+        optimization_id: Optimization id of the seeded job.
+    """
+    current = store.get_job(optimization_id)
+    target = {"kind": "repo", "repo": {"url": "https://github.com/example/app", "ref": "main"}}
+    store.update_job(optimization_id, payload={**current["payload"], "target": target})
+
+
 def test_serve_allowed_for_editor_member() -> None:
     """An editor member can run inference with their own request budget."""
     store = _MemStore()
     _seed_job(store, username="alice")
+    _make_repo(store)
     token = _enable_anyone(store)
     owner = _client(store, user="alice")
     owner.post("/optimizations/opt-share-1/sharing/members", json={"username": "erin", "role": "editor"})
@@ -881,6 +895,28 @@ def test_serve_allowed_for_editor_member() -> None:
     # The owner's secret key/base_url must never surface in the serve response.
     assert "sk-SECRET" not in resp.text
     assert "secret.internal" not in resp.text
+
+
+def test_serve_refuses_a_shared_dspy_run_with_410() -> None:
+    """A shared DSPy program run stays readable but can no longer serve."""
+    store = _MemStore()
+    _seed_job(store, username="alice")
+    token = _enable_anyone(store, role="editor")
+    editor = _client(store, user="bob")
+
+    with pytest.MonkeyPatch.context() as mp:
+        calls: list[object] = []
+        mp.setattr(share_module, "run_protected_interaction", lambda *a, **_k: calls.append(a))
+        resp = editor.post(
+            f"/share/{token}/serve",
+            json={"inputs": {"question": "hi"}, "max_cost_cents": 10},
+            headers={"Idempotency-Key": "dspy-call"},
+        )
+
+    assert editor.get(f"/share/{token}").status_code == 200
+    assert resp.status_code == 410
+    assert resp.json()["detail"] == t_en("optimization.dspy_run_retired")
+    assert calls == []
 
 
 def test_serve_viewer_requires_a_replay_key() -> None:
@@ -945,6 +981,7 @@ def test_signed_in_stranger_gets_editor_link_role_and_can_serve() -> None:
     """An ``anyone -> editor`` link makes a signed-in non-member an editor who can serve."""
     store = _MemStore()
     _seed_job(store, username="alice")
+    _make_repo(store)
     token = _enable_anyone(store, role="editor")
 
     stranger = _client(store, user="bob")
@@ -1095,6 +1132,7 @@ def _shared_serve(
         The editor's client, the share token, and the list telemetry writes land in.
     """
     _seed_job(store, username="alice")
+    _make_repo(store)
     token = _enable_anyone(store)
     _client(store, user="alice").post(
         "/optimizations/opt-share-1/sharing/members", json={"username": "erin", "role": "editor"}

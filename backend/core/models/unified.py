@@ -1,6 +1,7 @@
 """Request/response models for the unified (wizard v2) optimization run.
 
-One payload optimizes a DSPy program with any DSPy optimizer. Every optimizer
+One payload optimizes a DSPy program with a DSPy optimizer. New runs can no
+longer pick one (SKY-316); the models stay so stored payloads parse. Every optimizer
 runs through the black-box engine layer against the same workspace contract
 (a ``run(artifact, input)`` function plus a ``score(input, output,
 expected=None)`` metric). Stored runs keep the ``blackbox`` optimization type
@@ -81,7 +82,7 @@ OPTIMIZER_AUTO = "auto"
 
 
 def optimizers_for(target: OptimizerTarget, data_mode: DataMode) -> list[OptimizerChoice]:
-    """List the optimizer choices that fit a target and data mode.
+    """List the optimizer choices a new run may pick for a target and data mode.
 
     Runtime availability (sandbox, installed engines) is filtered separately
     by the catalog route; this is the static relevance rule.
@@ -91,15 +92,27 @@ def optimizers_for(target: OptimizerTarget, data_mode: DataMode) -> list[Optimiz
         data_mode: Whether the run has one input or input/output pairs.
 
     Returns:
-        The allowed choices. A DSPy program lists ``"auto"`` first; a
-        repository run lists only the black-box engines, because Auto has no
-        repository strategy.
+        The allowed choices. A repository run lists ``"auto"`` first, then the
+        black-box engines. A DSPy program lists nothing: Skynet now optimizes
+        repositories only (SKY-316), so a new run cannot pick a DSPy optimizer.
     """
     if target == ARTIFACT_KIND_DSPY_PROGRAM:
-        if data_mode == "pairs":
-            return ["auto", "dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"]
-        return ["auto", "dspy_gepa"]
-    return ["gepa", "best_of_n", "autoresearch", "meta_harness", "autosaddler", "shinka_evolve"]
+        return []
+    return [OPTIMIZER_AUTO, *BLACKBOX_OPTIMIZERS]
+
+
+def _stored_optimizers_for(data_mode: DataMode) -> list[OptimizerChoice]:
+    """List the optimizer choices a stored DSPy-program payload may carry.
+
+    Args:
+        data_mode: Whether the run has one input or input/output pairs.
+
+    Returns:
+        The choices the old unified flow offered for this data mode.
+    """
+    if data_mode == "pairs":
+        return ["auto", "dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"]
+    return ["auto", "dspy_gepa"]
 
 
 def resolve_optimizer(choice: OptimizerChoice, target: OptimizerTarget) -> str:
@@ -358,14 +371,18 @@ class UnifiedRunRequest(BaseModel):
     def _ensure_optimizer_allowed(self) -> UnifiedRunRequest:
         """Reject an optimizer that does not fit the artifact kind and data mode.
 
+        The rule is the old unified flow's, not :func:`optimizers_for`: the
+        worker and the read paths re-parse stored payloads. New DSPy runs
+        cannot start, because ``POST /optimize`` refuses them with a 410.
+
         Returns:
             The validated request instance.
 
         Raises:
-            ValueError: When ``optimizer.choice`` is not among
-                :func:`optimizers_for` for this artifact kind and data mode.
+            ValueError: When ``optimizer.choice`` is not among the stored
+                choices for this data mode.
         """
-        allowed = optimizers_for(self.task.artifact.kind, self.data.mode)
+        allowed = _stored_optimizers_for(self.data.mode)
         if self.optimizer.choice not in allowed:
             raise ValueError(
                 t_en(
@@ -388,8 +405,8 @@ class OptimizerOption(BaseModel):
     native_proposer: bool
 
 
-# ``GET /optimizers``. ``auto_resolves_to`` lists what Auto runs: DSPy GEPA
-# for a DSPy program, otherwise the engines the Auto strategy explores.
+# ``GET /optimizers``. ``auto_resolves_to`` lists what Auto runs when a new
+# run may pick Auto (a repository run); a DSPy program has no options.
 # ``run_entry`` and ``metric_signature`` are the one contract every optimizer runs.
 class OptimizerCatalogResponse(BaseModel):
     artifact_kind: OptimizerTarget

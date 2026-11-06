@@ -19,8 +19,6 @@
   "optimizations.duration.lt_0_1s": "<0.1s",
   "optimizations.duration.seconds": "{value}s",
   "optimizations.grid.response_time_seconds": "{value}s",
-  "optimizations.reasoning_effort.short.min": "min",
-  "optimizations.serve.field_separator": ": ",
   "share.role.editor_desc": "Accès en lecture, plus l'exécution du modèle, le clavardage et le renommage",
   "tooltip.submit.blackbox.scorer_install": "S’exécute une fois dans la sandbox cloud hors ligne. Utilisez les paquets déjà présents dans l’image épinglée ou les artefacts de paquets gérés par le déploiement ; les dépôts apt et registres de paquets publics sont indisponibles.",
   "submit.budget.byok_note": "Votre fournisseur facture les jetons du modèle sur votre clé. {term.appName} ne facture aucuns frais de modèle. Le budget de l’exécution couvre uniquement l’utilisation du bac à sable.",

@@ -45,7 +45,6 @@ A referência lê o documento OpenAPI em `https://api.skynetml.com/openapi.publi
 | `GET /models`                                   | Lista os modelos que você pode usar.                           |
 | `GET /optimizers`                               | Lista os otimizadores adequados a uma configuração.            |
 | `GET /blackbox/engines`                         | Lista os motores nativos e se cada um está disponível.         |
-| `POST /optimize` | Inicia uma execução para um programa DSPy. |
 | `POST /blackbox/run`                            | Inicia uma execução em um repositório do GitHub.               |
 | `GET /optimizations`                            | Lista as suas execuções.                                       |
 | `GET /optimizations/{optimization_id}`          | Retorna uma execução: status, progresso, logs e resultado.     |
@@ -56,10 +55,10 @@ A referência lê o documento OpenAPI em `https://api.skynetml.com/openapi.publi
 
 ## Iniciar uma execução
 
-`POST /optimize` recebe a mesma configuração que o assistente de envio. O exemplo melhora um programa DSPy que classifica mensagens de suporte em rótulos.
+O Skynet é o Optimize Anything: toda execução otimiza um repositório. `POST /blackbox/run` recebe a mesma configuração que o assistente de envio. O exemplo melhora um repositório que classifica mensagens de suporte em rótulos.
 
 ```bash tab="curl"
-curl https://api.skynetml.com/optimize \
+curl https://api.skynetml.com/blackbox/run \
   -H "Authorization: Bearer $SKYNET_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: support-labels-001" \
@@ -69,56 +68,62 @@ curl https://api.skynetml.com/optimize \
 ```json tab="run.json"
 {
   "name": "Support labels",
-  "task": {
-    "objective": "Sort each support message into billing, bug or other.",
-    "artifact": {
-      "kind": "dspy_program",
-      "starting_version": "Label this support message as billing, bug or other."
+  "objective": "Sort each support message into billing, bug or other.",
+  "recipe": "repo",
+  "target": {
+    "kind": "repo",
+    "repo": {
+      "provider": "github",
+      "repository": "your-org/support-labels",
+      "branch": "main",
+      "editable_paths": ["serve.py", "prompts/"]
     }
   },
-  "data": {
-    "mode": "pairs",
-    "cases": [
-      { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
-      { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
-      {
-        "input": { "message": "Do you have a Hebrew interface?" },
-        "expected": { "label": "other" }
-      }
-    ]
+  "cases": [
+    { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
+    { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
+    {
+      "input": { "message": "Do you have a Hebrew interface?" },
+      "expected": { "label": "other" }
+    }
+  ],
+  "input_fields": ["message"],
+  "expected_field": "label",
+  "scorer": {
+    "kind": "python",
+    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "model": { "name": "<model from GET /models>" }
   },
-  "optimizer": { "choice": "auto", "budget": { "max_scorer_runs": 200 } },
-  "models": {
-    "task_model": { "name": "<model from GET /models>" },
-    "reflection_model": { "name": "<model from GET /models>" }
-  },
-  "workspace": {
-    "run_code": "import dspy\n\nprogram = dspy.Predict(\"message -> label\")\n\n\ndef run(artifact, input):\n    return program(message=input[\"message\"]).label\n",
-    "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
-  },
+  "strategy": { "mode": "auto" },
+  "budget": { "max_scorer_runs": 200 },
+  "reflection_model_config": { "name": "<model from GET /models>" },
   "max_cost_cents": 500
 }
 ```
 
 Campos importantes:
 
-- `task.artifact.kind` é `dspy_program`.
-- `data.mode` é `pairs` (entradas com saídas esperadas) ou `single` (exatamente um caso).
-- `optimizer.choice` é `auto` ou o nome de um otimizador retornado por `GET /optimizers`.
+- `target.repo.repository` é o repositório do GitHub no formato `owner/name`. Conecte o GitHub antes em **Definições → Conectores**.
+- `target.repo.editable_paths` lista os arquivos e pastas que o otimizador pode alterar. `"."` significa o repositório inteiro.
+- `target.repo.commit` é opcional. É um SHA de 40 caracteres. Sem ele, o Skynet usa o commit mais recente do branch.
+- `target.repo.secrets` é opcional. Cada segredo tem um `name` e um `value`. Ele chega ao seu código e ao seu avaliador como uma variável de ambiente.
+- `scorer.metric_code` define `score(repo_path, case)`. `scorer.model` é o modelo que o seu código e o seu avaliador podem chamar pelo gateway de modelos.
+- `strategy.mode` é `auto` (o padrão) ou `single`. Com `single`, defina `strategy.engine` como o nome de um motor retornado por `GET /blackbox/engines`.
 - `max_cost_cents` é o limite de gastos desta execução, em centavos de dólar americano.
 - `is_private` é `false` por padrão. Defina como `true` para manter a execução privada.
 
-Leia [Métricas e avaliadores](/docs/concepts/scorers) para ver as regras de `run_code` e `metric_code`.
+Leia [Métricas e avaliadores](/docs/concepts/scorers) para ver as regras de `metric_code`.
 
 ### Respostas
 
 | Status | Significado                                                                                                                                              |
 | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `201`  | O Skynet colocou a execução na fila. O corpo contém `optimization_id` e `status`.                                                                        |
+| `400`  | O alvo não é um repositório, ou o avaliador não carrega.                                                                                                 |
 | `202`  | A verificação da configuração ainda está em andamento. Aguarde os segundos do cabeçalho `Retry-After`. Depois envie o mesmo corpo com a mesma `Idempotency-Key`. |
 | `402`  | O seu saldo é insuficiente.                                                                                                                              |
 | `409`  | Você atingiu uma cota, ou a verificação da configuração está desatualizada.                                                                              |
-| `422`  | A requisição ou o código do workspace não é compatível com o otimizador.                                                                                 |
+| `422`  | A requisição não é compatível com o otimizador.                                                                                                          |
 
 > [!NOTE]
 > Envie sempre um cabeçalho `Idempotency-Key`. Se você enviar a mesma requisição de novo com a mesma chave, o Skynet retorna a primeira execução. Ele não inicia uma segunda execução.
@@ -154,7 +159,7 @@ curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 
-Para executar a melhor versão em uma nova entrada, envie `POST /serve/{optimization_id}`. Leia [Resultados](/docs/guides/results) para saber o que cada pontuação significa.
+Para executar a melhor versão em uma nova entrada, envie `POST /serve/{optimization_id}` com um cabeçalho `Idempotency-Key`. O repositório precisa ter um arquivo `serve.py` com `def serve(input)`. Leia [Resultados](/docs/guides/results) para ver a requisição, a resposta e o que cada pontuação significa.
 
 ## Limites
 

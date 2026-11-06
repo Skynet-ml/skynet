@@ -35,8 +35,8 @@ function switches(initial?: ContinuousEnableRequest | null): Record<string, stri
 }
 
 void describe("ScheduledRunSetup", () => {
-  void it("turns both model switches on for a new plan", () => {
-    assert.deepEqual(switches(), { task_model: "true", reflection_model: "true" });
+  void it("shows only the reflection model switch, on for a new plan", () => {
+    assert.deepEqual(switches(), { reflection_model: "true" });
   });
 
   void it("keeps a switch the user turned off when a saved plan is edited again", () => {
@@ -49,8 +49,8 @@ void describe("ScheduledRunSetup", () => {
         month_day: 1,
         timezone: "UTC",
       },
-      permitted: { task_model: false, reflection_model: true },
+      permitted: { task_model: true, reflection_model: false },
     };
-    assert.deepEqual(switches(saved), { task_model: "false", reflection_model: "true" });
+    assert.deepEqual(switches(saved), { reflection_model: "false" });
   });
 });

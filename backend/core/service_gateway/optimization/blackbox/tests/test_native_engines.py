@@ -396,6 +396,66 @@ def test_autoresearch_edits_a_repository_checkout_and_scores_its_patch(tmp_path:
     assert (output / "autoresearch" / "best_candidate.patch").read_text() == result.best_candidate
 
 
+def test_autoresearch_applies_a_non_empty_starting_patch_before_the_first_round(
+    tmp_path: Path, fake_home: Path
+) -> None:
+    """A repository run that starts from a patch puts it in ``repo/`` and names it in the brief."""
+    checkout = _repo_checkout(tmp_path, {"src/app.py": "x = 1\n", "README.md": "hi\n"})
+    (checkout / "src" / "app.py").write_text("seeded\n")
+    seed = subprocess.run(
+        ["git", "diff", "--binary", repo_tree.BASE_REF], cwd=checkout, check=True, capture_output=True, text=True
+    ).stdout
+    subprocess.run(["git", "checkout", "--", "."], cwd=checkout, check=True)
+    assert seed.strip()
+    task = Task(name="repo", seed_candidate=seed, objective="make it better")
+    seen: list[str] = []
+
+    def evaluate(candidate: str, example: dict[str, Any] | None = None) -> tuple[float, dict[str, Any]]:
+        """Record each scored patch."""
+        seen.append(candidate)
+        return 0.5, {"feedback": "ok"}
+
+    single = EvalServer(task, evaluate, BudgetTracker(max_evals=3))
+    single.start()
+    try:
+        _install_fake(
+            fake_home,
+            "def run(*argv):\n"
+            "    return subprocess.run(list(argv), capture_output=True, text=True)\n"
+            "if count == 1:\n"
+            "    assert pathlib.Path('repo/src/app.py').read_text() == 'seeded\\n'\n"
+            "    assert 'checkout.sh seed' in pathlib.Path('BRIEF.md').read_text()\n"
+            "    assert 'checkout.sh seed' in pathlib.Path('STATE.md').read_text()\n"
+            "    assert run('./eval.sh').returncode == 0\n"
+            "    assert run('./checkout.sh', 'base').returncode == 0\n"
+            "    assert pathlib.Path('repo/src/app.py').read_text() == 'x = 1\\n'\n"
+            "    assert run('./checkout.sh', 'seed').returncode == 0\n"
+            "    assert pathlib.Path('repo/src/app.py').read_text() == 'seeded\\n'\n"
+            "    pathlib.Path('checks-passed').write_text('yes')\n",
+        )
+        config = _config(
+            "autoresearch",
+            ralph=False,
+            repo={
+                "checkout": str(checkout),
+                "base": repo_tree.BASE_REF,
+                "editable_paths": ["src"],
+                "readonly_paths": [],
+                "tools": str(Path(repo_tree.__file__).parent),
+            },
+        )
+        config.run_dir = str(tmp_path / "run")
+        engine = native_engines.AutoResearchEngine(config)
+        engine.run(task, single)
+    finally:
+        single.stop()
+    assert engine.repo_seed is True
+    assert (engine.work_dir / "checks-passed").exists()
+    assert seen
+    assert repo_tree.patch_paths(seen[0]) == ["src/app.py"]
+    assert "+seeded" in seen[0]
+
+
 def _repo_config(tmp_path: Path, checkout: Path, **knobs: Any) -> OptimizeAnythingConfig:
     """Build a ``gepa_repo`` config over ``checkout`` whose editable path is ``src``.
 

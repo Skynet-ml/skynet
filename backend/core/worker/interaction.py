@@ -14,6 +14,12 @@ from ..models.artifacts import ProgramArtifact
 from ..models.common import ColumnMapping, ModelConfig
 from ..registry.resolvers import ResolverError, resolve_module_factory
 from ..service_gateway.language_models import build_language_model
+from ..service_gateway.optimization.blackbox.repo_serving import (
+    INTERACTION_KIND as REPO_SERVE_KIND,
+)
+from ..service_gateway.optimization.blackbox.repo_serving import (
+    run_repo_serve,
+)
 from ..service_gateway.optimization.data import load_metric_from_code, load_signature_from_code
 from ..service_gateway.optimization.workflow import capture_node_traces
 
@@ -201,4 +207,6 @@ def run_interaction(
         return _run_program(payload, descriptor, emit)
     if descriptor.get("kind") == "evaluate":
         return _run_evaluation(payload, descriptor)
+    if descriptor.get("kind") == REPO_SERVE_KIND:
+        return run_repo_serve(payload, descriptor)
     raise ValueError("Unsupported protected interaction kind.")
