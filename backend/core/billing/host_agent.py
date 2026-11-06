@@ -828,7 +828,7 @@ def run_group(
             start_new_session=True,
         )
     except OSError as error:
-        raise CliStartError(*error.args) from error
+        raise CliStartError(error.errno, error.strerror, error.filename) from error
     try:
         stdout, stderr = process.communicate(stdin, timeout=timeout)
     except subprocess.TimeoutExpired:

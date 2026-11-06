@@ -10,7 +10,8 @@ This module only reads. It never changes credits, balances or wallet
 numbers. No CLI reports a used-percent for Skynet's calls, so the only
 window fact is the cap reset time that :func:`.cli_probe.read_cli_limits`
 saved when a CLI reported a limit. A 429 row marked ``dispatched: false``
-never started a CLI (a saved cap or no CLI for the model), so it is skipped.
+or a 502 row marked the same way never started the CLI it names (a saved cap,
+no CLI for the model, or a CLI that is not installed), so that CLI is skipped.
 One operation keeps one row, so a row's ``capped_runs`` lists the fallback
 CLIs that also ran and hit a cap; each counts as one failed call.
 """
@@ -68,13 +69,15 @@ def _calls(evidence: Any) -> list[tuple[str, bool, dict[str, Any]]]:
         evidence: The stored evidence JSON of one operation.
 
     Returns:
-        ``(cli, failed, evidence)`` for each call: the named CLI first, then
-        each CLI in ``capped_runs`` as a failed call with no tokens. Empty for
-        a row that started no CLI.
+        ``(cli, failed, evidence)`` for each call: the named CLI first unless
+        the row marks it ``dispatched: false``, then each CLI in
+        ``capped_runs`` as a failed call with no tokens.
     """
-    if not isinstance(evidence, dict) or evidence.get("dispatched") is False:
+    if not isinstance(evidence, dict):
         return []
-    calls = [(str(evidence.get("cli")), evidence.get("status") not in _OK_STATUSES, evidence)]
+    calls: list[tuple[str, bool, dict[str, Any]]] = []
+    if evidence.get("dispatched") is not False:
+        calls.append((str(evidence.get("cli")), evidence.get("status") not in _OK_STATUSES, evidence))
     capped_runs = evidence.get("capped_runs")
     if isinstance(capped_runs, list):
         calls.extend((str(cli), True, {}) for cli in capped_runs)

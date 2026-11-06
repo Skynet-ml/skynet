@@ -735,6 +735,9 @@ class CliDispatcher:
                 continue
             except CliRunError as error:
                 evidence.update(cli=provider, status=502, failure=error.message)
+                if not error.started:
+                    # The local usage panel must not count a CLI that never started (SKY-341).
+                    evidence["dispatched"] = False
                 _note_capped_runs(evidence, capped_runs)
                 return _error(502, "subscription.cli_failed", error.message, provider=provider), evidence
             usage = self._usage(provider, completion)
@@ -854,7 +857,9 @@ class CliDispatcher:
         if self.role != NEXT_PROMPT_ROLE:
             slot = _semaphore(pool, 1)
             if not slot.acquire(blocking=False):
-                raise CliRunError(provider, f"{provider} is already running a {self.role} call", transient=False)
+                raise CliRunError(
+                    provider, f"{provider} is already running a {self.role} call", transient=False, started=False
+                )
             try:
                 return self._run_side_call(provider, model_arg, prompt, schema, _LABEL_CLI_TIMEOUT_SECONDS, {})
             finally:
@@ -863,10 +868,12 @@ class CliDispatcher:
         slot = _semaphore(pool, _NEXT_PROMPT_POOL_SIZE)
         try:
             if not slot.acquire(timeout=_NEXT_PROMPT_SLOT_WAIT_SECONDS):
-                raise CliRunError(provider, f"{provider} is still running older suggestions", transient=False)
+                raise CliRunError(
+                    provider, f"{provider} is still running older suggestions", transient=False, started=False
+                )
             try:
                 if replaced.is_set():
-                    raise CliRunError(provider, "a newer suggestion replaced this one", transient=False)
+                    raise CliRunError(provider, "a newer suggestion replaced this one", transient=False, started=False)
                 stop = {"on_delta": _stop_when_replaced(replaced, provider)}
                 return self._run_side_call(provider, model_arg, prompt, schema, _NEXT_PROMPT_CLI_TIMEOUT_SECONDS, stop)
             finally:

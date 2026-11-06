@@ -137,6 +137,16 @@ def test_evidence_lists_a_capped_cli_that_ran_before_the_answer(
     assert (evidence["status"], evidence["cli"], evidence["capped_runs"]) == (200, "codex", ["claude"])
 
 
+def test_evidence_marks_a_fallback_cli_that_is_not_installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing fallback CLI never started: the row keeps the capped CLI that ran."""
+    fake_cli(tmp_path, "claude", CAPPED)
+    monkeypatch.setattr(cli_dispatch, "cli_model_arg", lambda provider, model: model)
+    settings = local_settings(tmp_path, cli_fallback_order="claude,codex")
+    _, evidence = CliDispatcher(None, "claude", MODEL, "judge", settings)._answer("/chat/completions", REQUEST)
+    assert (evidence["status"], evidence["cli"], evidence["dispatched"]) == (502, "codex", False)
+    assert evidence["capped_runs"] == ["claude"]
+
+
 def test_fallback_order_that_names_droid_skips_it(tmp_path: Path) -> None:
     """Skip droid in a saved fallback order: it is not a runner, so it never starts."""
     fake_cli(tmp_path, "claude", CAPPED)

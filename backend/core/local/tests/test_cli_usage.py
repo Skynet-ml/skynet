@@ -269,6 +269,29 @@ def test_counts_each_fallback_cli_that_ran(engine, state_dir) -> None:
     assert clis["claude"]["last_used_at"] == (_NOW - timedelta(hours=1)).isoformat()
 
 
+def test_a_cli_that_never_started_is_skipped_but_its_capped_runs_count(engine, state_dir) -> None:
+    """A not-installed fallback is not a call; the capped CLI that ran before it still is."""
+    with Session(engine) as session:
+        budget = _budget(session)
+        _call(
+            session,
+            budget,
+            {
+                "provider": "subscription",
+                "cli": "codex",
+                "status": 502,
+                "failure": "codex is not installed",
+                "dispatched": False,
+                "capped_runs": ["claude"],
+            },
+            timedelta(hours=1),
+        )
+        session.commit()
+    clis = _by_cli(local_cli_usage(engine, state_dir, _USER, now=_NOW))
+    assert (clis["codex"]["windows"]["5h"]["calls"], clis["codex"]["last_used_at"]) == (0, None)
+    assert (clis["claude"]["windows"]["5h"]["calls"], clis["claude"]["windows"]["5h"]["failed_calls"]) == (1, 1)
+
+
 def test_reports_only_an_active_cap(engine, state_dir) -> None:
     """A saved cap shows while it lasts and disappears after its reset time."""
     write_cli_limit(state_dir, "codex", _NOW + timedelta(hours=2), "limit reached")

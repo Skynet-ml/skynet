@@ -892,6 +892,13 @@ def test_only_a_cli_that_could_not_start_is_marked_not_started(
     assert (refused["status"], refused.get(host_agent.NOT_STARTED_KEY)) == ("error", True)
 
 
+def test_failed_start_keeps_the_missing_binary_in_the_message(tmp_path: Path) -> None:
+    """The start error names the binary, so the user can see which CLI is missing."""
+    missing = str(tmp_path / "no-such-cli")
+    with pytest.raises(host_agent.CliStartError, match="no-such-cli"):
+        host_agent.run_group([missing], cwd=tmp_path, env=dict(os.environ), stdin="", timeout=1)
+
+
 def test_oversized_workspace_is_refused(gateway: ModelGateway, local: Settings, tmp_path: Path) -> None:
     """A request above 32 MB is refused with 413 before any CLI runs."""
     token = bind_host_agent(gateway, local, cli="claude", permission="workspace_only")
