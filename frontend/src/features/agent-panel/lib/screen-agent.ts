@@ -141,6 +141,25 @@ export function nextReturnScreen(current: string | null, nav: ScreenNav): string
 }
 
 /**
+ * Whether the wizard reached the return screen: it shows that screen or a
+ * later one, for example after a stepper jump past it.
+ *
+ * Args:
+ *   returnScreen: The screen the user returns to.
+ *   screen: The screen the wizard shows, or null.
+ *
+ * Returns:
+ *   True when the return screen is no longer ahead of the wizard.
+ */
+export function reachedReturnScreen(returnScreen: string, screen: string | null): boolean {
+  if (screen === null) return false;
+  if (screen === returnScreen) return true;
+  const here = SCREEN_ORDER.indexOf(screen);
+  const there = SCREEN_ORDER.indexOf(returnScreen);
+  return here >= 0 && there >= 0 && here > there;
+}
+
+/**
  * Where the setup's chat is kept for the tab: its id, the screens its agent
  * already had a turn on, and its messages. The server never saves a setup
  * chat, so a reload that reopens the setup reopens its chat from here and

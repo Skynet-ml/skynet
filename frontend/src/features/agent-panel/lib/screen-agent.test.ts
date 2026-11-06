@@ -27,6 +27,7 @@ const {
   legacySetupChatId,
   newSetupChatId,
   nextReturnScreen,
+  reachedReturnScreen,
   opensWithKickoff,
   parseScreenNav,
   registerSetupChatFlush,
@@ -75,6 +76,13 @@ test("the return screen is the latest screen a go-back left, until the wizard re
   assert.equal(nextReturnScreen("budget", { action: "continue", from: "optimizer", to: "budget" }), "budget");
   // A go-back from past the old screen means the user moved on: the newer screen wins.
   assert.equal(nextReturnScreen("budget", back("overview")), "overview");
+});
+
+test("the wizard reaches the return screen on it or past it", () => {
+  assert.equal(reachedReturnScreen("budget", "budget"), true);
+  assert.equal(reachedReturnScreen("budget", "metric"), true);
+  assert.equal(reachedReturnScreen("budget", "brief"), false);
+  assert.equal(reachedReturnScreen("budget", null), false);
 });
 
 test("a back result jumps to the named screen with its request", () => {

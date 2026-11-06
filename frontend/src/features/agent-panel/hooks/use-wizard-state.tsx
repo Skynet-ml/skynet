@@ -11,7 +11,7 @@ import {
 } from "@/shared/types/unified-run";
 
 import type { ScreenNav, ScreenNavigator } from "../lib/screen-agent";
-import { nextReturnScreen, runScreenNav } from "../lib/screen-agent";
+import { nextReturnScreen, reachedReturnScreen, runScreenNav } from "../lib/screen-agent";
 import { rolesFields } from "../lib/wizard-write";
 import type { ScreenNote, WizardState } from "../lib/types";
 
@@ -141,7 +141,13 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
     navigatorRef.current = navigator;
   }, []);
   const [returnScreen, setReturnScreen] = React.useState<string | null>(null);
-  if (returnScreen !== null && returnScreen === wizardScreen) setReturnScreen(null);
+  // Clear it when the wizard moves to it or past it, not while the wizard
+  // still shows the screen the go-back left: that screen is the return screen.
+  const [seenScreen, setSeenScreen] = React.useState<string | null>(wizardScreen);
+  if (seenScreen !== wizardScreen) {
+    setSeenScreen(wizardScreen);
+    if (returnScreen !== null && reachedReturnScreen(returnScreen, wizardScreen)) setReturnScreen(null);
+  }
   const navigateScreen = React.useCallback((nav: ScreenNav) => {
     setReturnScreen((prev) => nextReturnScreen(prev, nav));
     runScreenNav(nav, navigatorRef.current);
