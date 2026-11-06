@@ -48,19 +48,27 @@ export function readColorTheme(): ColorTheme {
   } catch {
     /* no document.cookie: fall through to localStorage */
   }
+  let saved: ColorTheme | null = null;
   try {
-    return parseColorTheme(window.localStorage.getItem(COLOR_THEME_STORAGE_KEY)) ?? "system";
+    saved = parseColorTheme(window.localStorage.getItem(COLOR_THEME_STORAGE_KEY));
   } catch {
     return "system";
+  }
+  // Copy a pre-cookie choice into the cookie, so the next port finds it too.
+  if (saved) writeCookie(saved);
+  return saved ?? "system";
+}
+
+function writeCookie(theme: ColorTheme): void {
+  try {
+    document.cookie = `${COLOR_THEME_COOKIE}=${theme};path=/;max-age=${COLOR_THEME_COOKIE_MAX_AGE};samesite=lax`;
+  } catch {
+    /* cookies unavailable: localStorage still keeps it for this port */
   }
 }
 
 export function writeColorTheme(theme: ColorTheme): void {
-  try {
-    document.cookie = `${COLOR_THEME_COOKIE}=${theme};path=/;max-age=${COLOR_THEME_COOKIE_MAX_AGE};samesite=lax`;
-  } catch {
-    /* cookies unavailable: localStorage below still keeps it for this port */
-  }
+  writeCookie(theme);
   try {
     if (theme === "system") window.localStorage.removeItem(COLOR_THEME_STORAGE_KEY);
     else window.localStorage.setItem(COLOR_THEME_STORAGE_KEY, theme);

@@ -99,6 +99,22 @@ test("a choice saved before the cookie existed is still read", () => {
   assert.equal(initPaintsDark(), true);
 });
 
+test("a choice saved before the cookie existed carries to the next port", () => {
+  const cookies = cookieJar();
+  onPort(memoryStorage({ [COLOR_THEME_STORAGE_KEY]: "dark" }), cookies);
+  readColorTheme();
+
+  onPort(memoryStorage(), cookies);
+  assert.equal(readColorTheme(), "dark");
+  assert.equal(initPaintsDark(), true);
+});
+
+test("an unknown cookie value falls back to localStorage", () => {
+  onPort(memoryStorage({ [COLOR_THEME_STORAGE_KEY]: "dark" }), cookieJar({ [COLOR_THEME_COOKIE]: "blue" }));
+  assert.equal(readColorTheme(), "dark");
+  assert.equal(initPaintsDark(), true);
+});
+
 test("the legacy gray value in the cookie reads as dark", () => {
   onPort(memoryStorage(), cookieJar({ [COLOR_THEME_COOKIE]: "gray" }));
   assert.equal(readColorTheme(), "dark");
