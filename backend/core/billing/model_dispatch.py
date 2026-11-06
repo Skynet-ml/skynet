@@ -179,8 +179,19 @@ def usage_charge(usage: Mapping[str, Any]) -> Decimal | None:
     )
 
 
-def response_complete(body: bytes, content_type: str) -> bool:
-    """Require a terminal protocol marker before treating streamed usage as final."""
+def response_complete(body: bytes, content_type: str, finish_reason_ends: bool = False) -> bool:
+    """Require a terminal protocol marker before treating streamed usage as final.
+
+    Args:
+        body: Raw provider response.
+        content_type: Provider response content type.
+        finish_reason_ends: Also accept a chunk with a ``finish_reason``. BYOK
+            providers bill the user directly, and not every OpenAI-compatible
+            provider promises a closing ``[DONE]`` line.
+
+    Returns:
+        Whether the response reached its end.
+    """
     if "text/event-stream" not in content_type:
         return True
     for line in body.decode("utf-8", errors="replace").splitlines():
@@ -194,6 +205,13 @@ def response_complete(body: bytes, content_type: str) -> bool:
         except ValueError:
             continue
         if isinstance(event, dict) and event.get("type") == "message_stop":
+            return True
+        if (
+            finish_reason_ends
+            and isinstance(event, dict)
+            and isinstance(event.get("choices"), list)
+            and any(isinstance(choice, dict) and choice.get("finish_reason") for choice in event["choices"])
+        ):
             return True
     return False
 
@@ -399,6 +417,8 @@ class ProviderDispatcher:
                     field = (
                         "max_output_tokens"
                         if path == "/responses"
+                        else "max_tokens"
+                        if path == "/messages"
                         else "max_completion_tokens"
                         if "max_completion_tokens" in routed
                         else "max_tokens"
@@ -493,7 +513,9 @@ class ProviderDispatcher:
                 interrupted = interrupted or not complete
                 failure = responses_failure(content, content_type)
             else:
-                interrupted = interrupted or not response_complete(content, content_type)
+                interrupted = interrupted or not response_complete(
+                    content, content_type, finish_reason_ends=self.policy.kind == "byok_model"
+                )
                 identity, usage = response_usage(content, content_type)
             evidence: dict[str, Any] = {
                 "provider": self.upstream.slug,
