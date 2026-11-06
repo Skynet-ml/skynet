@@ -58,6 +58,22 @@ export class HostedLinkClient {
     return body.linked === true;
   }
 
+  /**
+   * Whether the Mac is linked, checked with hosted. The local link row can
+   * outlive a link that hosted revoked or let expire; hosted whoami then
+   * answers 401 (the local API deletes the link) or 409 (no link). Any other
+   * failure means hosted did not answer, so the stored link stands.
+   */
+  async verified(): Promise<boolean> {
+    if (!(await this.linked())) return false;
+    try {
+      const res = await this.call("GET", "/local/hosted-link/whoami");
+      return res.status !== 401 && res.status !== 409;
+    } catch {
+      return true;
+    }
+  }
+
   async start(): Promise<StartResult> {
     // The consent page opens in the default browser and hands the result back through skynet://.
     const res = await this.call("POST", "/local/hosted-link/start", { app_callback: true });
@@ -83,4 +99,28 @@ export class HostedLinkClient {
     const body = (await res.json().catch(() => ({}))) as { detail?: string };
     return { ok: false, reason: res.status === 503 ? "unreachable" : "failed", detail: body.detail ?? `HTTP ${res.status}` };
   }
+}
+
+/**
+ * Check the link every `everyMs` and call `onLost` once when it is gone. A
+ * failed check is skipped: the crash watcher handles a stopped API.
+ * Returns the function that stops the checks.
+ */
+export function watchLink(isLinked: () => Promise<boolean>, onLost: () => void, everyMs = 30_000): () => void {
+  let checking = false;
+  const timer = setInterval(async () => {
+    if (checking) return;
+    checking = true;
+    try {
+      if (!(await isLinked())) {
+        clearInterval(timer);
+        onLost();
+      }
+    } catch {
+      // Try again on the next tick.
+    } finally {
+      checking = false;
+    }
+  }, everyMs);
+  return () => clearInterval(timer);
 }

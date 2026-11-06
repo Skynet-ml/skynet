@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { app, BrowserWindow, clipboard, ipcMain, nativeTheme, screen, shell } from "electron";
 import { APP_SCHEME, appUrlFromArgv, appWindowUrl, HOSTED_APP_ORIGINS, hostedAppOrigin, parseLinkCallback, webDocsUrl } from "./app-url";
-import { HostedLinkClient } from "./hosted-link";
+import { HostedLinkClient, watchLink } from "./hosted-link";
 import { isOpenAppUrl, parseTheme, pickTheme, type Theme } from "./theme";
 import { childPath, probeClis, probeDocker, readCliLimits, searchDirs } from "./cli-detect";
 import { allocatePorts, type PortPlan } from "./ports";
@@ -69,6 +69,7 @@ let hostedOrigin: string = HOSTED_APP_ORIGINS.production;
 let sweptOrphans = false;
 let sweptSandboxes = false;
 let hostedLink: HostedLinkClient | null = null;
+let stopLinkWatch: (() => void) | null = null;
 let signInUrl: string | null = null;
 let finishingSignIn = false;
 
@@ -369,12 +370,13 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
   watchForCrash(apiProc, "The API");
   watchForCrash(feProc, "The web app");
 
-  // The app opens only for a Mac linked to a Skynet account.
+  // The app opens only for a Mac linked to a Skynet account. Hosted confirms
+  // the link, because the local link row can outlive a revoked link (SKY-329).
   hostedLink = new HostedLinkClient(apiOrigin, secrets.backendAuthSecret);
   await hostedLink.ensureLocalUser();
   let linked = false;
   try {
-    linked = await hostedLink.linked();
+    linked = await hostedLink.verified();
   } catch (err) {
     log(`account status check failed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -388,7 +390,19 @@ async function openApp(): Promise<void> {
   if (quitting || !frontendUrl || (state.kind !== "starting" && state.kind !== "sign_in")) return;
   setState({ ...state, kind: "ready", url: frontendUrl, signIn: undefined });
   useAppSize();
+  stopLinkWatch?.();
+  const client = hostedLink;
+  if (client) stopLinkWatch = watchLink(() => client.linked(), () => void signInAgain());
   await loadAppUrl(frontendUrl);
+}
+
+/** The link is gone while the app runs: close the app and ask for a sign-in again. */
+async function signInAgain(): Promise<void> {
+  stopLinkWatch = null;
+  if (quitting || state.kind !== "ready") return;
+  log("the account link is gone; asking for a sign-in again");
+  showOnboarding({ ...state, kind: "sign_in", url: undefined, signIn: "waiting", error: undefined });
+  await signIn();
 }
 
 /**
@@ -494,6 +508,8 @@ const FRONTEND_STOP_GRACE_MS = 2_000;
 /** Stop the web server and the API, then Postgres and the sandbox containers. */
 async function stopStack(): Promise<void> {
   killActiveCommands();
+  stopLinkWatch?.();
+  stopLinkWatch = null;
   hostedLink = null;
   signInUrl = null;
   const fe = frontend;
