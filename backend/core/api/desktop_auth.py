@@ -4,10 +4,12 @@ A linked Mac holds an opaque ``skyl_at_`` access token and a rotating
 ``skyl_rt_`` refresh token. Hosted stores only their SHA-256 hashes, like the
 ``skyd_`` personal access tokens, so a revoke takes effect on the next call.
 
-A desktop token never opens a normal session route:
-:func:`core.api.auth.get_authenticated_user` refuses every ``skyl_`` token.
-Only routes that depend on :func:`get_desktop_principal` accept it, and each
-of those routes names the one scope it needs.
+Routes that depend on :func:`get_desktop_principal` accept a desktop token
+and each names the one scope it needs. The Mac app also uses its web account
+through the normal session routes (SKY-223):
+:func:`core.api.auth.get_authenticated_user` accepts a ``sync`` access token
+on the routes that :func:`desktop_sync_route_allowed` opens, and refuses it
+everywhere else.
 """
 
 from __future__ import annotations
@@ -23,9 +25,9 @@ from sqlalchemy import ColumnElement, exists, select, update
 from sqlalchemy.orm import Session
 
 from ..storage.models import DesktopLinkModel, DesktopTokenModel
-from .auth import DESKTOP_TOKEN_PREFIX, hash_api_token
 from .errors import DomainError
 from .monthly_active_users import enforce_monthly_active_user_limit
+from .token_hashing import DESKTOP_TOKEN_PREFIX, hash_api_token
 
 ACCESS_TOKEN_PREFIX = f"{DESKTOP_TOKEN_PREFIX}at_"
 REFRESH_TOKEN_PREFIX = f"{DESKTOP_TOKEN_PREFIX}rt_"
@@ -38,6 +40,93 @@ DESKTOP_SCOPES: tuple[str, ...] = ("identity", "balance:read", "sync", "models",
 ACCESS_TOKEN_TTL = timedelta(hours=1)
 REFRESH_TOKEN_IDLE_TTL = timedelta(days=30)
 LINK_ABSOLUTE_TTL = timedelta(days=365)
+
+# Session-route templates a ``sync`` token may call: the account's own web data.
+# A new top-level router stays closed until someone adds it here.
+_SYNC_ROUTE_PREFIXES: tuple[str, ...] = (
+    "/account",
+    "/agent",
+    "/analytics",
+    "/billing",
+    "/blackbox",
+    "/connectors",
+    "/continuous",
+    "/dashboard",
+    "/datasets",
+    "/execution-budgets",
+    "/execution-runtimes",
+    "/folders",
+    "/models",
+    "/notifications",
+    "/optimizations",
+    "/optimize",
+    "/optimizers",
+    "/serve",
+    "/settings/user-preferences",
+    "/share",
+    "/shared-with-me",
+    "/tagging-sessions",
+    "/transcribe",
+    "/usage",
+    "/users/search",
+    "/wizard",
+    "/workflows",
+)
+# Inside the open prefixes, these stay on the web app only: account export and
+# deletion, payments, and stored credentials. A stolen Mac token must not reach
+# them.
+_SYNC_ROUTE_EXCLUDED_PREFIXES: tuple[str, ...] = (
+    "/account/delete",
+    "/account/export",
+    "/agent/protected-settings",
+    "/billing/byok/keys",
+    "/billing/byok/openrouter",
+    "/billing/checkout",
+    "/billing/payment-methods",
+    "/billing/portal",
+    "/billing/subscription",
+    "/billing/webhook",
+    "/connectors/huggingface/oauth",
+    "/connectors/huggingface/token",
+    "/connectors/{provider}/credentials",
+    "/connectors/{provider}/oauth",
+    "/notifications/slack/oauth",
+)
+_SYNC_ROUTE_EXCLUDED: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("DELETE", "/connectors/huggingface"),
+        ("DELETE", "/connectors/{provider}"),
+    }
+)
+
+
+def _under(path: str, prefixes: tuple[str, ...]) -> bool:
+    """Return whether ``path`` is one of ``prefixes`` or below one of them.
+
+    Args:
+        path: Route template, for example ``/optimizations/{job_id}``.
+        prefixes: Path prefixes without a trailing slash.
+
+    Returns:
+        True on a whole-segment match.
+    """
+    return any(path == prefix or path.startswith(f"{prefix}/") for prefix in prefixes)
+
+
+def desktop_sync_route_allowed(method: str, path: str) -> bool:
+    """Return whether a ``sync`` desktop token may call this session route.
+
+    Args:
+        method: HTTP method.
+        path: The matched route template, never the raw URL, so path
+            parameters cannot change the decision.
+
+    Returns:
+        True when the route serves the account's own web data.
+    """
+    if not _under(path, _SYNC_ROUTE_PREFIXES) or _under(path, _SYNC_ROUTE_EXCLUDED_PREFIXES):
+        return False
+    return (method.upper(), path) not in _SYNC_ROUTE_EXCLUDED
 
 
 @dataclass(frozen=True)
@@ -118,7 +207,7 @@ def link_is_live(session: Session, link: DesktopLinkModel, now: datetime) -> boo
     return bool(session.scalar(select(has_live_refresh_token(link.id, now))))
 
 
-def _resolve_principal(request: Request, token: str, scope: str) -> DesktopPrincipal:
+def resolve_desktop_principal(request: Request, token: str, scope: str) -> DesktopPrincipal:
     """Check a desktop access token and return its principal.
 
     Args:
@@ -208,7 +297,7 @@ def get_desktop_principal(scope: str) -> Callable[..., DesktopPrincipal]:
         """
         if not authorization or not authorization.startswith("Bearer "):
             raise DomainError("auth.missing_token", status=401)
-        principal = _resolve_principal(request, authorization.removeprefix("Bearer ").strip(), scope)
+        principal = resolve_desktop_principal(request, authorization.removeprefix("Bearer ").strip(), scope)
         request.state.auth_channel = "desktop"
         return principal
 

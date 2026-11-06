@@ -30,9 +30,10 @@ from ...storage.models import (
     DesktopTokenModel,
     UserModel,
 )
+from .. import auth as auth_mod
 from .. import desktop_auth
 from ..account_data_service import delete_account, export_account
-from ..auth import AuthenticatedUser, get_authenticated_user, hash_api_token
+from ..auth import AuthenticatedUser, get_authenticated_user, hash_api_token, is_admin
 from ..desktop_auth import DesktopPrincipal, get_desktop_principal
 from ..errors import DomainError
 from ..routers import desktop_link
@@ -116,6 +117,30 @@ def harness() -> Any:
     @app.get("/session-only")
     def session_only(user: _SessionUserDep) -> dict[str, str]:
         """Stand in for any normal session route.
+
+        Args:
+            user: Authenticated caller.
+
+        Returns:
+            The caller's username.
+        """
+        return {"username": user.username}
+
+    @app.get("/optimizations")
+    def optimizations(user: _SessionUserDep) -> dict[str, Any]:
+        """Stand in for an account-data route on the desktop sync allowlist.
+
+        Args:
+            user: Authenticated caller.
+
+        Returns:
+            The caller's username and admin status.
+        """
+        return {"username": user.username, "admin": is_admin(user)}
+
+    @app.get("/account/export")
+    def account_export(user: _SessionUserDep) -> dict[str, str]:
+        """Stand in for a sensitive route that the allowlist excludes.
 
         Args:
             user: Authenticated caller.
@@ -487,6 +512,109 @@ def test_desktop_token_is_refused_on_session_routes(harness: Any) -> None:
         assert _code(response) == "auth.desktop_token_not_allowed"
         assert client.get("/settings/api-token", headers=_bearer(token)).status_code == 401
         assert client.get("/settings/desktop-links", headers=_bearer(token)).status_code == 401
+
+
+def test_sync_token_opens_allowlisted_account_routes(harness: Any) -> None:
+    """A ``sync`` access token acts as its account on an allowlisted route."""
+    client, _, _ = harness
+    pair = _link(client)
+    client.app.dependency_overrides.clear()
+    response = client.get("/optimizations", headers=_bearer(pair["access_token"]))
+    assert response.status_code == 200, response.text
+    assert response.json() == {"username": "alice@example.test", "admin": False}
+
+
+def test_sync_token_is_refused_on_excluded_routes(harness: Any) -> None:
+    """A route outside the allowlist refuses even a ``sync`` access token."""
+    client, _, _ = harness
+    pair = _link(client)
+    client.app.dependency_overrides.clear()
+    response = client.get("/account/export", headers=_bearer(pair["access_token"]))
+    assert response.status_code == 401
+    assert _code(response) == "auth.desktop_token_not_allowed"
+
+
+def test_allowlisted_route_needs_the_sync_scope(harness: Any) -> None:
+    """A link without ``sync`` gets 403 on an allowlisted route."""
+    client, _, _ = harness
+    pair = _link(client, scope="identity")
+    client.app.dependency_overrides.clear()
+    response = client.get("/optimizations", headers=_bearer(pair["access_token"]))
+    assert response.status_code == 403
+    assert _code(response) == "desktop.scope_missing"
+
+
+def test_allowlisted_route_refuses_a_refresh_token(harness: Any) -> None:
+    """Only the access token opens an allowlisted route."""
+    client, _, _ = harness
+    pair = _link(client)
+    client.app.dependency_overrides.clear()
+    response = client.get("/optimizations", headers=_bearer(pair["refresh_token"]))
+    assert response.status_code == 401
+    assert _code(response) == "auth.invalid_token"
+
+
+def test_allowlisted_route_refuses_a_revoked_link(harness: Any) -> None:
+    """A revoke closes the allowlisted routes on the next call."""
+    client, _, _ = harness
+    pair = _link(client)
+    assert client.delete(f"/settings/desktop-links/{pair['link_id']}").status_code in (200, 204)
+    client.app.dependency_overrides.clear()
+    response = client.get("/optimizations", headers=_bearer(pair["access_token"]))
+    assert response.status_code == 401
+    assert _code(response) == "desktop.link_revoked"
+
+
+def test_sync_token_is_never_admin(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An admin account that calls through the Mac link gets no admin rights."""
+    monkeypatch.setattr(auth_mod.settings, "admin_usernames", "alice@example.test")
+    client, _, _ = harness
+    pair = _link(client)
+    client.app.dependency_overrides.clear()
+    response = client.get("/optimizations", headers=_bearer(pair["access_token"]))
+    assert response.status_code == 200, response.text
+    assert response.json()["admin"] is False
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "allowed"),
+    [
+        ("GET", "/optimizations", True),
+        ("POST", "/optimizations/{job_id}/cancel", True),
+        ("GET", "/datasets", True),
+        ("GET", "/agent/conversations", True),
+        ("GET", "/billing/wallet", True),
+        ("GET", "/account/experience", True),
+        ("GET", "/connectors/{provider}/browse", True),
+        ("POST", "/settings/user-preferences", True),
+        ("GET", "/optimizationsx", False),
+        ("GET", "/admin/users", False),
+        ("GET", "/settings/api-token", False),
+        ("GET", "/settings/desktop-links", False),
+        ("POST", "/desktop/link/authorize", False),
+        ("GET", "/local/status", False),
+        ("POST", "/auth/security/totp/setup", False),
+        ("POST", "/oauth/consent", False),
+        ("GET", "/account/export", False),
+        ("POST", "/account/delete", False),
+        ("POST", "/billing/checkout", False),
+        ("POST", "/billing/subscription/checkout", False),
+        ("POST", "/billing/portal", False),
+        ("DELETE", "/billing/payment-methods/{payment_method_id}", False),
+        ("PUT", "/billing/byok/keys", False),
+        ("POST", "/billing/byok/openrouter/oauth/start", False),
+        ("PUT", "/connectors/{provider}/credentials", False),
+        ("PUT", "/connectors/huggingface/token", False),
+        ("POST", "/connectors/{provider}/oauth/start", False),
+        ("DELETE", "/connectors/{provider}", False),
+        ("GET", "/secrets", False),
+        ("POST", "/agent/protected-settings", False),
+        ("GET", "/telemetry/summary", False),
+    ],
+)
+def test_sync_route_policy(method: str, path: str, allowed: bool) -> None:
+    """The allowlist opens account data and keeps credentials and admin closed."""
+    assert desktop_auth.desktop_sync_route_allowed(method, path) is allowed
 
 
 def test_session_jwt_and_pat_are_refused_on_desktop_routes(harness: Any) -> None:

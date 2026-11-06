@@ -19,8 +19,10 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..storage.models import ApiTokenModel, UserModel
+from .desktop_auth import desktop_sync_route_allowed, resolve_desktop_principal
 from .errors import DomainError
 from .monthly_active_users import enforce_monthly_active_user_limit
+from .token_hashing import DESKTOP_TOKEN_PREFIX, hash_api_token
 
 _EXPECTED_ALGORITHM = "HS256"
 # Both spellings verify so the frontend and backend can deploy in either order;
@@ -41,10 +43,7 @@ _API_TOKEN_SECRET_BYTES = 32
 # The age comes from ``created_at``, so no schema change is needed.
 API_TOKEN_MAX_AGE = timedelta(days=365)
 
-# Desktop link tokens (SKY-124) carry this prefix. They work only on the
-# scoped desktop routes in :mod:`core.api.desktop_auth`; this module refuses
-# them so a linked Mac can never open a full-account session route.
-DESKTOP_TOKEN_PREFIX = "skyl_"
+__all__ = ["DESKTOP_TOKEN_PREFIX", "hash_api_token"]
 
 
 @dataclass(frozen=True)
@@ -54,6 +53,8 @@ class AuthenticatedUser:
     username: str
     role: str
     groups: tuple[str, ...]
+    # True for a Mac link token (SKY-223); such a caller is never an admin.
+    desktop: bool = False
 
 
 def _decode_base64url(value: str) -> bytes:
@@ -162,18 +163,6 @@ def is_api_token(token: str) -> bool:
         True when ``token`` carries the PAT prefix.
     """
     return token.startswith(API_TOKEN_PREFIX)
-
-
-def hash_api_token(token: str) -> str:
-    """Return the hex SHA-256 hash persisted at rest for ``token``.
-
-    Args:
-        token: Raw token (with prefix).
-
-    Returns:
-        Lowercase hex SHA-256 digest of the token.
-    """
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def token_last4(token: str) -> str:
@@ -297,6 +286,32 @@ def _authenticate_api_token(request: Request, token: str) -> AuthenticatedUser:
     return AuthenticatedUser(username=username, role=role, groups=())
 
 
+def _authenticate_desktop_token(request: Request, token: str) -> AuthenticatedUser:
+    """Resolve a Mac link token on a route of the desktop sync allowlist.
+
+    The Mac app reads and writes its web account through hosted (SKY-223).
+    The link must carry the ``sync`` scope. Credential, security, billing
+    payment and admin routes stay closed to it.
+
+    Args:
+        request: Incoming request; its matched route template selects the policy.
+        token: Raw ``skyl_`` token from the Authorization header.
+
+    Returns:
+        The link's account, as a non-admin user.
+
+    Raises:
+        DomainError: 401 ``auth.desktop_token_not_allowed`` off the allowlist,
+            or the desktop token errors of :func:`resolve_desktop_principal`.
+    """
+    route_path = getattr(request.scope.get("route"), "path", None)
+    if route_path is None or not desktop_sync_route_allowed(request.method, route_path):
+        raise DomainError("auth.desktop_token_not_allowed", status=401)
+    principal = resolve_desktop_principal(request, token, "sync")
+    request.state.auth_channel = "desktop"
+    return AuthenticatedUser(username=principal.username, role="user", groups=(), desktop=True)
+
+
 def get_authenticated_user(request: Request, authorization: str | None = Header(default=None)) -> AuthenticatedUser:
     """Verify the bearer credential and return the authenticated user.
 
@@ -304,8 +319,8 @@ def get_authenticated_user(request: Request, authorization: str | None = Header(
     personal access token (``skyd_…``, resolved against the ``api_tokens``
     table) for programmatic API access, or the short-lived HS256 session JWT
     the frontend mints for the web app. The PAT prefix selects the path.
-    A desktop link token (``skyl_…``) is refused: it is valid only on the
-    scoped desktop routes.
+    A desktop link token (``skyl_…``) works only on the routes of the desktop
+    sync allowlist, with the ``sync`` scope; elsewhere it is refused.
 
     A PAT call is stamped ``request.state.auth_channel = "api_token"`` so
     downstream telemetry can tell a production integration from the web app
@@ -321,13 +336,15 @@ def get_authenticated_user(request: Request, authorization: str | None = Header(
 
     Raises:
         DomainError: When authentication is missing or invalid, or 401
-            ``auth.desktop_token_not_allowed`` for a desktop link token.
+            ``auth.desktop_token_not_allowed`` for a desktop link token on a
+            route outside the desktop sync allowlist.
     """
     if not authorization or not authorization.startswith("Bearer "):
         raise DomainError("auth.missing_token", status=401)
     token = authorization.removeprefix("Bearer ").strip()
     if token.startswith(DESKTOP_TOKEN_PREFIX):
-        raise DomainError("auth.desktop_token_not_allowed", status=401)
+        # The desktop check already enforces the MAU cap.
+        return _authenticate_desktop_token(request, token)
     if is_api_token(token):
         user = _authenticate_api_token(request, token)
         request.state.auth_channel = "api_token"
@@ -371,6 +388,8 @@ def is_admin(user: AuthenticatedUser) -> bool:
     # claim so the admin UI (tab visibility) and the API can't drift apart and
     # leave a frontend-admin staring at a 403. admin_usernames/admin_groups
     # below remain a break-glass override independent of the frontend.
+    if user.desktop:
+        return False
     if user.role == "admin":
         return True
     if user.username in settings.admin_usernames_set:
