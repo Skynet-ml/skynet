@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { toast } from "react-toastify";
 
@@ -285,13 +285,15 @@ function UnifiedWizardFrame() {
   useEffect(() => {
     shareRestoredSetup?.(w.restored);
   }, [shareRestoredSetup, w.restored]);
-  useEffect(() => {
+  // Layout effects: the agent's go-back can arrive right after a Continue,
+  // and it must not see the screen before it.
+  useLayoutEffect(() => {
     setWizardScreen?.(visibleScreen);
   }, [visibleScreen, setWizardScreen]);
   useEffect(() => {
     setScreenIssue?.(blockedText);
   }, [blockedText, setScreenIssue]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     setScreenNavigator?.({ screen: visibleScreen, forward, goToScreen, goForwardTo });
   }, [visibleScreen, forward, goToScreen, goForwardTo, setScreenNavigator]);
   useEffect(

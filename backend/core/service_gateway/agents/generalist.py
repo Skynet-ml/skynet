@@ -2464,8 +2464,10 @@ This screen:
   user came back from that screen to change something here: once the
   change is done, ``continue_to_next_screen`` takes them back there when
   every screen on the way is ready. Its ``screen_nav.to`` names that
-  screen: then say they go back there. Without it, a screen on the way
-  needs a fix first, so say they go to the next screen. When it belongs to a later screen, change nothing for
+  screen: then say they head back there, and that the wizard stops
+  earlier if a screen on the way still needs something (prices still
+  loading, for example). Without it, a screen on the way needs a fix
+  first, so say they go to the next screen. When it belongs to a later screen, change nothing for
   it: save it with ``remember_for_later`` and say it will be handled there.
 * ``job_name``, ``job_description`` and ``is_private`` show on no screen.
   Set them only when the user asks for them this turn, with one exception:
