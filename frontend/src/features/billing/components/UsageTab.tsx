@@ -159,7 +159,6 @@ function deriveUsage(
   };
 }
 
-/** Locale-aware short date (e.g. `Jun 26`) for a `YYYY-MM-DD` bucket key. */
 /** Sum the per-day series into chart buckets, ascending by day. */
 function bucketDays(byDay: BillingUsageResponse["by_day"], locale: string): Bucket[] {
   const map = new Map<string, number>();
