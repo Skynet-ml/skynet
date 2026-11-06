@@ -2,7 +2,7 @@
 
 import { ProgressBar } from "@/shared/ui/progress-bar";
 import * as React from "react";
-import { ArrowsClockwise, ChartBar, Coins, Sparkle, type Icon } from "@/shared/ui/icons";
+import { ArrowsClockwise, CaretDown, ChartBar, Coins, Sparkle, type Icon } from "@/shared/ui/icons";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { ChartTooltip, ChartEmptyState } from "@/shared/charts/chart-utils";
 import { EmptyState } from "@/shared/ui/empty-state";
@@ -27,6 +27,14 @@ import { PanelHeading } from "@/shared/ui/panel-heading";
 import { Button } from "@/shared/ui/primitives/button";
 import { useBalance } from "../providers/balance-provider";
 import { formatCents, formatCentsUsd, formatResetDate, type UsageEntry } from "../lib/wallet";
+import {
+  dayCalls,
+  dayWindow,
+  formatUsageCallDate,
+  formatUsageDay,
+  usageDayRows,
+  type UsageDayRow,
+} from "../lib/usage-days";
 
 /** A fixed look-back preset. `all` drops the lower bound. */
 type PresetRange = "7d" | "30d" | "90d" | "all";
@@ -120,7 +128,7 @@ function deriveUsage(
   });
   let billed = 0;
   let runs = 0;
-  const perDay = new Map<string, number>();
+  const perDay = new Map<string, { cents: number; runs: number }>();
   const perModel = new Map<string | null, { cents: number; runs: number }>();
   for (const entry of inRange) {
     if (entry.kind !== "run" || entry.cents >= 0) continue;
@@ -128,7 +136,10 @@ function deriveUsage(
     billed += spent;
     runs += 1;
     const day = entry.at.slice(0, 10);
-    perDay.set(day, (perDay.get(day) ?? 0) + spent);
+    const dayTotal = perDay.get(day) ?? { cents: 0, runs: 0 };
+    dayTotal.cents += spent;
+    dayTotal.runs += 1;
+    perDay.set(day, dayTotal);
     const model = perModel.get(entry.model) ?? { cents: 0, runs: 0 };
     model.cents += spent;
     model.runs += 1;
@@ -141,19 +152,12 @@ function deriveUsage(
     runs,
     by_day: [...perDay.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, value]) => ({ date, billed_cents: value })),
+      .map(([date, value]) => ({ date, billed_cents: value.cents, runs: value.runs })),
     by_model: [...perModel.entries()]
       .sort(([, a], [, b]) => b.cents - a.cents)
       .map(([model, value]) => ({ model, cents: value.cents, runs: value.runs })),
     entries: inRange.slice(0, ENTRY_CAP),
   };
-}
-
-/** Locale-aware short date (e.g. `Jun 26`) for a `YYYY-MM-DD` bucket key. */
-function formatDay(iso: string, locale: string): string {
-  return new Intl.DateTimeFormat(locale, { month: "short", day: "numeric" }).format(
-    new Date(`${iso}T00:00:00Z`),
-  );
 }
 
 /** Sum the per-day series into chart buckets, ascending by day. */
@@ -164,7 +168,7 @@ function bucketDays(byDay: BillingUsageResponse["by_day"], locale: string): Buck
   }
   return [...map.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, billed]) => ({ key, label: formatDay(key, locale), billed }));
+    .map(([key, billed]) => ({ key, label: formatUsageDay(key, locale), billed }));
 }
 
 function StatCard({ icon: Icon, label, value }: { icon: Icon; label: string; value: string }) {
@@ -333,8 +337,19 @@ function RunBreakdown({ entries, locale }: { entries: BillingUsageEntry[]; local
   );
 }
 
-/** One activity-list row. Numerals and model ids stay LTR-islanded. */
-function LedgerRow({ entry, locale }: { entry: BillingUsageEntry; locale: string }) {
+/**
+ * One activity-list row. Numerals and model ids stay LTR-islanded. `utc` shows
+ * the UTC date, so a call inside an open UTC day matches the day's label.
+ */
+function LedgerRow({
+  entry,
+  locale,
+  utc = false,
+}: {
+  entry: BillingUsageEntry;
+  locale: string;
+  utc?: boolean;
+}) {
   const credited = entry.cents > 0;
   const free = entry.cents === 0;
   return (
@@ -367,9 +382,154 @@ function LedgerRow({ entry, locale }: { entry: BillingUsageEntry; locale: string
           </span>
         )}
         <span dir="ltr" className="text-[0.6875rem] text-muted-foreground/70">
-          {formatResetDate(entry.at, locale)}
+          {utc ? formatUsageCallDate(entry.at, locale) : formatResetDate(entry.at, locale)}
         </span>
       </span>
+    </li>
+  );
+}
+
+/** Load the billed calls of one UTC day. */
+export type LoadDayCalls = (date: string) => Promise<BillingUsageEntry[]>;
+
+/**
+ * One day of Remote usage: date, tokens, call count and cost. A click opens
+ * the day's single calls, which load on the first open.
+ */
+export function DayRow({
+  day,
+  locale,
+  loadCalls,
+}: {
+  day: UsageDayRow;
+  locale: string;
+  loadCalls: LoadDayCalls;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [calls, setCalls] = React.useState<BillingUsageEntry[] | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [failed, setFailed] = React.useState(false);
+  const panelId = React.useId();
+  const requestId = React.useRef(0);
+
+  // Only the newest request may write, so a slow answer for an older range or
+  // account never replaces the calls of the current one.
+  const fetchCalls = React.useCallback(() => {
+    const id = ++requestId.current;
+    // Clear the old list so a reload shows the spinner, not stale calls.
+    setCalls(null);
+    setLoading(true);
+    setFailed(false);
+    loadCalls(day.date)
+      .then((rows) => {
+        if (id === requestId.current) setCalls(rows);
+      })
+      .catch(() => {
+        if (id === requestId.current) setFailed(true);
+      })
+      .finally(() => {
+        if (id === requestId.current) setLoading(false);
+      });
+  }, [day.date, loadCalls]);
+
+  // Every usage reload (wallet re-read, account link change, new range) gives a
+  // new loader or new day totals, so an open day reloads its calls instead of
+  // keeping the first list.
+  React.useEffect(() => {
+    if (open) fetchCalls();
+  }, [open, fetchCalls, day.calls, day.cents]);
+
+  const toggle = () => setOpen((value) => !value);
+
+  return (
+    <li className="border-b border-border/40 last:border-b-0">
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={open}
+        aria-controls={open ? panelId : undefined}
+        className="flex w-full items-center gap-3 rounded-md py-3 text-start outline-none hover:bg-muted/30 focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <CaretDown
+          className={cn(
+            "size-3.5 shrink-0 text-muted-foreground transition-transform",
+            !open && "-rotate-90 rtl:rotate-90",
+          )}
+          aria-hidden="true"
+        />
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate text-sm font-medium text-foreground">
+            {formatUsageDay(day.date, locale)}
+          </span>
+          <span className="truncate text-xs text-muted-foreground">
+            {day.calls != null && msg("usage.day.calls", { count: day.calls })}
+            {day.tokens != null && (
+              <>
+                {day.calls != null && " · "}
+                <span
+                  dir="ltr"
+                  className="tabular-nums"
+                  title={msg("usage.tokens.split", {
+                    input: day.inputTokens.toLocaleString(locale),
+                    output: day.outputTokens.toLocaleString(locale),
+                  })}
+                >
+                  {msg("usage.tokens.count", { count: formatTokens(day.tokens, locale) })}
+                </span>
+              </>
+            )}
+          </span>
+        </span>
+        <span dir="ltr" className="shrink-0 text-sm font-medium tabular-nums text-foreground">
+          {formatCentsUsd(day.cents, locale)}
+        </span>
+      </button>
+      {/* Stays mounted, so screen readers announce the text when a load starts. */}
+      <span role="status" className="sr-only">
+        {open && loading ? msg("usage.day.loading") : ""}
+      </span>
+      {open && (
+        <div id={panelId} className="mb-3 ms-6 rounded-lg border border-border/50 bg-muted/10 px-3">
+          {failed ? (
+            <InlineErrorRow
+              message={msg("usage.day.load_error")}
+              className="items-center py-2"
+              action={
+                <RetryIconButton
+                  label={msg("billing.wallet.retry")}
+                  loading={loading}
+                  onClick={fetchCalls}
+                />
+              }
+            />
+          ) : calls == null ? (
+            <div className="flex h-14 items-center justify-center" aria-hidden="true">
+              <ArrowsClockwise
+                className="size-4 animate-spin text-muted-foreground"
+                aria-hidden="true"
+              />
+            </div>
+          ) : calls.length === 0 ? (
+            <p className="py-3 text-xs text-muted-foreground">{msg("usage.day.empty")}</p>
+          ) : (
+            <>
+              <ul className="flex max-h-72 flex-col overflow-y-auto pe-1">
+                {calls.map((entry) => (
+                  <LedgerRow key={entry.id} entry={entry} locale={locale} utc />
+                ))}
+              </ul>
+              {day.calls != null && calls.length < day.calls && (
+                <p className="border-t border-border/40 py-2 text-[0.6875rem] text-muted-foreground">
+                  {msg("usage.day.truncated", {
+                    shown: calls.length.toLocaleString(locale),
+                    total: day.calls.toLocaleString(locale),
+                  })}
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
     </li>
   );
 }
@@ -379,7 +539,9 @@ function LedgerRow({ entry, locale }: { entry: BillingUsageEntry; locale: string
  *
  * A full personal spend dashboard over the balance ledger: a date-ranged
  * window, headline stats (spent · runs), a billed-spend time series, per-model
- * and per-run breakdowns, and the raw activity list. Data
+ * and per-run breakdowns, and an activity list. In Remote mode the list has
+ * one row per UTC day that opens to the day's single calls; in Local mode it
+ * lists each ledger row. Data
  * comes from the backend `GET /billing/usage` rollup; if a local read fails the
  * tab derives the same shape client-side from the wallet's recent ledger so the
  * surface still renders. A failed web-account read shows an error instead.
@@ -445,6 +607,32 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
   }, [load]);
 
   React.useEffect(() => onLinkChange(load), [load]);
+
+  // A day's calls come from the same rollup with a one-day window, so a busy
+  // day is not cut short by the entry cap of the whole range. The window is
+  // clipped to the bounds the day rows were counted with, not a fresh "now".
+  const rangeStart = data?.start;
+  const rangeEnd = data?.end;
+  const loadDayCalls = React.useCallback<LoadDayCalls>(
+    (date) => {
+      if (rangeStart == null || rangeEnd == null) return Promise.resolve([]);
+      const { startIso, endIso } = dayWindow(date, rangeStart, rangeEnd);
+      return getUsage(startIso, endIso, source)
+        .then((resp) => dayCalls(resp.entries, date))
+        .catch((error: unknown) => {
+          if (source === "hosted" && hostedRunsAvailable()) throw error;
+          const startMs = Date.parse(startIso);
+          const endMs = Date.parse(endIso);
+          return dayCalls(wallet.usage, date).filter((entry) => {
+            const at = Date.parse(entry.at);
+            return at >= startMs && at <= endMs;
+          });
+        });
+    },
+    [rangeStart, rangeEnd, source, wallet.usage],
+  );
+
+  const days = React.useMemo(() => usageDayRows(data?.by_day ?? []), [data?.by_day]);
 
   const buckets = React.useMemo(
     () => bucketDays(data?.by_day ?? [], locale),
@@ -609,20 +797,35 @@ export function UsageTab({ localPanel }: { localPanel?: React.ReactNode } = {}) 
         </div>
       </div>
 
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center justify-between gap-3">
-          <PanelHeading className="mb-0">{msg("usage.panel.recent")}</PanelHeading>
+      {source === "hosted" ? (
+        <div className="flex flex-col gap-2">
+          <PanelHeading className="mb-0">{msg("usage.panel.by_day")}</PanelHeading>
+          {days.length === 0 ? (
+            <EmptyState variant="list" title={msg("billing.wallet.filter_empty")} />
+          ) : (
+            <ul className="flex flex-col">
+              {days.map((day) => (
+                <DayRow key={day.date} day={day} locale={locale} loadCalls={loadDayCalls} />
+              ))}
+            </ul>
+          )}
         </div>
-        {entries.length === 0 ? (
-          <EmptyState variant="list" title={msg("billing.wallet.filter_empty")} />
-        ) : (
-          <ul className="flex max-h-72 flex-col overflow-y-auto pe-1">
-            {entries.map((entry) => (
-              <LedgerRow key={entry.id} entry={entry} locale={locale} />
-            ))}
-          </ul>
-        )}
-      </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <PanelHeading className="mb-0">{msg("usage.panel.recent")}</PanelHeading>
+          </div>
+          {entries.length === 0 ? (
+            <EmptyState variant="list" title={msg("billing.wallet.filter_empty")} />
+          ) : (
+            <ul className="flex max-h-72 flex-col overflow-y-auto pe-1">
+              {entries.map((entry) => (
+                <LedgerRow key={entry.id} entry={entry} locale={locale} />
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
   );
 }

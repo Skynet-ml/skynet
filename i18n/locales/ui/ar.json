@@ -4478,5 +4478,11 @@
   "localUsage.skynet.7d": "تشغيلات {term.appName} في آخر 7 أيام: {calls} استدعاءات، {tokens} رموز",
   "localUsage.loading": "جارٍ تحميل استخدام CLI…",
   "localUsage.loadFailed": "تعذّر تحميل استخدام CLI.",
-  "localUsage.refresh": "تحديث"
+  "localUsage.refresh": "تحديث",
+  "usage.panel.by_day": "الاستخدام حسب اليوم",
+  "usage.day.calls": "{count, plural, zero {لا استدعاءات} one {استدعاء واحد} two {استدعاءان} few {# استدعاءات} many {# استدعاءً} other {# استدعاء}}",
+  "usage.day.empty": "لا توجد استدعاءات مدفوعة في هذا اليوم.",
+  "usage.day.load_error": "تعذّر تحميل استدعاءات هذا اليوم.",
+  "usage.day.truncated": "عرض أحدث {shown} من أصل {total} من الاستدعاءات.",
+  "usage.day.loading": "جارٍ تحميل استدعاءات هذا اليوم…"
 }

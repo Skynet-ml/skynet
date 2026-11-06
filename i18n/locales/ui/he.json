@@ -4478,5 +4478,11 @@
   "localUsage.skynet.7d": "ריצות של {term.appName} ב-7 הימים האחרונים: {calls} קריאות, {tokens} טוקנים",
   "localUsage.loading": "טוען שימוש ב-CLI…",
   "localUsage.loadFailed": "לא ניתן לטעון את השימוש ב-CLI.",
-  "localUsage.refresh": "רענון"
+  "localUsage.refresh": "רענון",
+  "usage.panel.by_day": "ניצול לפי יום",
+  "usage.day.calls": "{count, plural, one {קריאה אחת} other {# קריאות}}",
+  "usage.day.empty": "אין קריאות בחיוב ביום הזה.",
+  "usage.day.load_error": "לא הצלחנו לטעון את הקריאות של היום הזה.",
+  "usage.day.truncated": "מוצגות {shown} הקריאות האחרונות מתוך {total}.",
+  "usage.day.loading": "טוען את הקריאות של היום הזה…"
 }

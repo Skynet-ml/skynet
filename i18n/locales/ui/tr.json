@@ -4478,5 +4478,11 @@
   "localUsage.skynet.7d": "Son 7 gündeki {term.appName} çalıştırmaları: {calls} çağrı, {tokens} token",
   "localUsage.loading": "CLI kullanımı yükleniyor…",
   "localUsage.loadFailed": "CLI kullanımı yüklenemedi.",
-  "localUsage.refresh": "Yenile"
+  "localUsage.refresh": "Yenile",
+  "usage.panel.by_day": "Günlük kullanım",
+  "usage.day.calls": "{count, plural, other {# çağrı}}",
+  "usage.day.empty": "Bu gün faturalanan çağrı yok.",
+  "usage.day.load_error": "Bu günün çağrıları yüklenemedi.",
+  "usage.day.truncated": "{total} çağrının en son {shown} tanesi gösteriliyor.",
+  "usage.day.loading": "Bu günün çağrıları yükleniyor…"
 }

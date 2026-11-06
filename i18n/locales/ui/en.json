@@ -4478,5 +4478,11 @@
   "localUsage.skynet.7d": "{term.appName} runs in the last 7 days: {calls} calls, {tokens} tokens",
   "localUsage.loading": "Loading CLI use…",
   "localUsage.loadFailed": "Could not load CLI use.",
-  "localUsage.refresh": "Refresh"
+  "localUsage.refresh": "Refresh",
+  "usage.panel.by_day": "Usage by day",
+  "usage.day.calls": "{count, plural, one {# call} other {# calls}}",
+  "usage.day.empty": "No billed calls on this day.",
+  "usage.day.load_error": "We couldn't load the calls for this day.",
+  "usage.day.truncated": "Showing the latest {shown} of {total} calls.",
+  "usage.day.loading": "Loading the calls for this day…"
 }

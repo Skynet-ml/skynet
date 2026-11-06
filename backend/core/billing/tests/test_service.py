@@ -665,6 +665,31 @@ def test_get_usage_aggregates_runs_by_day_and_model(engine: object) -> None:
     assert [d.date for d in snapshot.by_day] == [day2.date().isoformat(), day1.date().isoformat()]
     day1_row = next(d for d in snapshot.by_day if d.date == day1.date().isoformat())
     assert day1_row.billed_cents == 350
+    assert day1_row.runs == 2
+    day2_row = next(d for d in snapshot.by_day if d.date == day2.date().isoformat())
+    assert (day2_row.billed_cents, day2_row.runs) == (100, 1)
+
+
+def test_get_usage_rolls_up_token_counts_per_day(engine: object) -> None:
+    """Per-day token sums cover only billed runs; legacy rows add zero tokens."""
+    user = "u@x.com"
+    now = datetime.now(UTC)
+    day1 = now - timedelta(days=1)
+    day2 = now - timedelta(days=2)
+    _add_ledger(engine, user, delta=-30, kind="run", model="m", when=day1, input_tokens=1000, output_tokens=200)
+    _add_ledger(engine, user, delta=-10, kind="run", model="m", when=day1)
+    _add_ledger(engine, user, delta=-20, kind="run", model="m", when=day2, input_tokens=500, output_tokens=100)
+    # A top-up on a billed day adds neither a run nor tokens to that day.
+    _add_ledger(engine, user, delta=500, kind="topup", model=None, when=day2, input_tokens=9, output_tokens=9)
+
+    service = StripeBillingService(engine=engine)
+    snapshot = service.get_usage(user, now - timedelta(days=3), now)
+
+    rows = {d.date: d for d in snapshot.by_day}
+    assert (rows[day1.date().isoformat()].runs, rows[day1.date().isoformat()].input_tokens) == (2, 1000)
+    assert rows[day1.date().isoformat()].output_tokens == 200
+    assert (rows[day2.date().isoformat()].runs, rows[day2.date().isoformat()].input_tokens) == (1, 500)
+    assert rows[day2.date().isoformat()].output_tokens == 100
 
 
 def test_debit_run_stamps_token_counts(engine: object) -> None:

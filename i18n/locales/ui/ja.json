@@ -4478,5 +4478,11 @@
   "localUsage.skynet.7d": "過去 7 日間の {term.appName} 実行: {calls} 回の呼び出し、{tokens} トークン",
   "localUsage.loading": "CLI の使用量を読み込み中…",
   "localUsage.loadFailed": "CLI の使用量を読み込めませんでした。",
-  "localUsage.refresh": "更新"
+  "localUsage.refresh": "更新",
+  "usage.panel.by_day": "日別の使用量",
+  "usage.day.calls": "{count, plural, other {# 件の呼び出し}}",
+  "usage.day.empty": "この日に課金された呼び出しはありません。",
+  "usage.day.load_error": "この日の呼び出しを読み込めませんでした。",
+  "usage.day.truncated": "{total} 件中、最新の {shown} 件を表示しています。",
+  "usage.day.loading": "この日の呼び出しを読み込んでいます…"
 }

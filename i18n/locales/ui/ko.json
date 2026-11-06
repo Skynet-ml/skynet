@@ -4478,5 +4478,11 @@
   "localUsage.skynet.7d": "최근 7일 {term.appName} 실행: 호출 {calls}회, 토큰 {tokens}개",
   "localUsage.loading": "CLI 사용량 불러오는 중…",
   "localUsage.loadFailed": "CLI 사용량을 불러올 수 없습니다.",
-  "localUsage.refresh": "새로고침"
+  "localUsage.refresh": "새로고침",
+  "usage.panel.by_day": "일별 사용량",
+  "usage.day.calls": "{count, plural, other {호출 #회}}",
+  "usage.day.empty": "이 날에는 청구된 호출이 없습니다.",
+  "usage.day.load_error": "이 날의 호출을 불러오지 못했습니다.",
+  "usage.day.truncated": "{total}회 중 최근 {shown}회를 표시합니다.",
+  "usage.day.loading": "이 날의 호출을 불러오는 중…"
 }

@@ -4478,5 +4478,11 @@
   "localUsage.skynet.7d": "Exécutions {term.appName} des 7 derniers jours : {calls} appels, {tokens} jetons",
   "localUsage.loading": "Chargement de l’utilisation CLI…",
   "localUsage.loadFailed": "Impossible de charger l’utilisation CLI.",
-  "localUsage.refresh": "Actualiser"
+  "localUsage.refresh": "Actualiser",
+  "usage.panel.by_day": "Utilisation par jour",
+  "usage.day.calls": "{count, plural, one {# appel} other {# appels}}",
+  "usage.day.empty": "Aucun appel facturé ce jour-là.",
+  "usage.day.load_error": "Impossible de charger les appels de ce jour.",
+  "usage.day.truncated": "Affichage des {shown} derniers appels sur {total}.",
+  "usage.day.loading": "Chargement des appels de ce jour…"
 }

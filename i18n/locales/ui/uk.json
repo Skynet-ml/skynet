@@ -4478,5 +4478,11 @@
   "localUsage.skynet.7d": "Запуски {term.appName} за останні 7 днів: викликів {calls}, токенів {tokens}",
   "localUsage.loading": "Завантаження використання CLI…",
   "localUsage.loadFailed": "Не вдалося завантажити використання CLI.",
-  "localUsage.refresh": "Оновити"
+  "localUsage.refresh": "Оновити",
+  "usage.panel.by_day": "Використання за днями",
+  "usage.day.calls": "{count, plural, one {# виклик} few {# виклики} many {# викликів} other {# виклику}}",
+  "usage.day.empty": "Цього дня немає оплачених викликів.",
+  "usage.day.load_error": "Не вдалося завантажити виклики за цей день.",
+  "usage.day.truncated": "Показано останні {shown} із {total} викликів.",
+  "usage.day.loading": "Завантаження викликів за цей день…"
 }

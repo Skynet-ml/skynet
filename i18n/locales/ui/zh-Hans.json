@@ -4478,5 +4478,11 @@
   "localUsage.skynet.7d": "过去 7 天的 {term.appName} 运行：{calls} 次调用，{tokens} 个 token",
   "localUsage.loading": "正在加载 CLI 用量…",
   "localUsage.loadFailed": "无法加载 CLI 用量。",
-  "localUsage.refresh": "刷新"
+  "localUsage.refresh": "刷新",
+  "usage.panel.by_day": "每日用量",
+  "usage.day.calls": "{count, plural, other {# 次调用}}",
+  "usage.day.empty": "这一天没有计费调用。",
+  "usage.day.load_error": "无法加载这一天的调用。",
+  "usage.day.truncated": "显示 {total} 次中最新的 {shown} 次。",
+  "usage.day.loading": "正在加载这一天的调用…"
 }

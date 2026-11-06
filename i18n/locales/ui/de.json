@@ -4478,5 +4478,11 @@
   "localUsage.skynet.7d": "{term.appName}-Läufe in den letzten 7 Tagen: {calls} Aufrufe, {tokens} Tokens",
   "localUsage.loading": "CLI-Nutzung wird geladen…",
   "localUsage.loadFailed": "CLI-Nutzung konnte nicht geladen werden.",
-  "localUsage.refresh": "Aktualisieren"
+  "localUsage.refresh": "Aktualisieren",
+  "usage.panel.by_day": "Nutzung pro Tag",
+  "usage.day.calls": "{count, plural, one {# Aufruf} other {# Aufrufe}}",
+  "usage.day.empty": "Keine abgerechneten Aufrufe an diesem Tag.",
+  "usage.day.load_error": "Die Aufrufe für diesen Tag konnten nicht geladen werden.",
+  "usage.day.truncated": "Die neuesten {shown} von {total} Aufrufen werden angezeigt.",
+  "usage.day.loading": "Die Aufrufe für diesen Tag werden geladen…"
 }

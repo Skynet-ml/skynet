@@ -4478,5 +4478,11 @@
   "localUsage.skynet.7d": "Esecuzioni di {term.appName} negli ultimi 7 giorni: {calls} chiamate, {tokens} token",
   "localUsage.loading": "Caricamento dell’uso CLI…",
   "localUsage.loadFailed": "Impossibile caricare l’uso CLI.",
-  "localUsage.refresh": "Aggiorna"
+  "localUsage.refresh": "Aggiorna",
+  "usage.panel.by_day": "Utilizzo per giorno",
+  "usage.day.calls": "{count, plural, one {# chiamata} other {# chiamate}}",
+  "usage.day.empty": "Nessuna chiamata addebitata in questo giorno.",
+  "usage.day.load_error": "Impossibile caricare le chiamate di questo giorno.",
+  "usage.day.truncated": "Sono mostrate le ultime {shown} di {total} chiamate.",
+  "usage.day.loading": "Caricamento delle chiamate di questo giorno…"
 }

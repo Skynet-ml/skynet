@@ -4478,5 +4478,11 @@
   "localUsage.skynet.7d": "اجراهای {term.appName} در ۷ روز گذشته: {calls} فراخوانی، {tokens} توکن",
   "localUsage.loading": "در حال بارگذاری مصرف CLI…",
   "localUsage.loadFailed": "بارگذاری مصرف CLI ممکن نشد.",
-  "localUsage.refresh": "بازخوانی"
+  "localUsage.refresh": "بازخوانی",
+  "usage.panel.by_day": "مصرف روزانه",
+  "usage.day.calls": "{count, plural, one {# فراخوانی} other {# فراخوانی}}",
+  "usage.day.empty": "در این روز هیچ فراخوانی پولی ثبت نشده است.",
+  "usage.day.load_error": "بارگیری فراخوانی‌های این روز ممکن نشد.",
+  "usage.day.truncated": "نمایش {shown} فراخوانی اخیر از {total}.",
+  "usage.day.loading": "در حال بارگیری فراخوانی‌های این روز…"
 }

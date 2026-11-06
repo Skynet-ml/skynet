@@ -1625,10 +1625,14 @@ export function getWallet() {
   return cachedGet<BillingWalletResponse>("/billing/wallet", 0);
 }
 
-/** One day's billed run spend (the usage dashboard's time series). */
+/** One day's billed run spend, calls and tokens (the usage dashboard's time series). */
 interface BillingUsageDay {
   date: string;
   billed_cents: number;
+  // Optional: a backend older than this frontend sends only date and cents.
+  runs?: number;
+  input_tokens?: number;
+  output_tokens?: number;
 }
 
 /** One model's share of run spend over the window. */
