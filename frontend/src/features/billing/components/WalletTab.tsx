@@ -47,6 +47,7 @@ import {
   type BillingTransaction,
   type BillingTransactionsResponse,
 } from "@/shared/lib/api";
+import { onLinkChange } from "@/shared/hooks/use-linked-account";
 import { LinkAccountPrompt } from "./LinkAccountPrompt";
 import { useBalance } from "../providers/balance-provider";
 import {
@@ -357,6 +358,8 @@ function TransactionHistory() {
   React.useEffect(() => {
     load();
   }, [load]);
+
+  React.useEffect(() => onLinkChange(load), [load]);
 
   return (
     <section

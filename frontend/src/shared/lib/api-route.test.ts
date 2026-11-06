@@ -4,11 +4,14 @@ import { test } from "node:test";
 import {
   apiPath,
   hostedAvailable,
+  hostedRouteOpen,
   isHostedPath,
   pairHref,
+  parseSourceKey,
   resolveSource,
   runHref,
   sourceFromParam,
+  sourceKey,
 } from "./api-route.ts";
 
 test("apiPath keeps local paths and prefixes hosted ones with the proxy", () => {
@@ -51,4 +54,36 @@ test("pairHref keeps the source and adds the pair param", () => {
   assert.equal(pairHref("abc", 0, "hosted"), "/optimizations/abc?source=hosted&pair=0");
   assert.equal(pairHref("abc", null, "hosted"), "/optimizations/abc?source=hosted");
   assert.equal(pairHref("abc", null), "/optimizations/abc");
+});
+
+test("sourceKey keeps local IDs bare and keeps hosted IDs apart", () => {
+  assert.equal(sourceKey("local", "abc"), "abc");
+  assert.equal(sourceKey("hosted", "abc"), "hosted:abc");
+  assert.notEqual(sourceKey("hosted", "abc"), sourceKey("local", "abc"));
+  assert.deepEqual(parseSourceKey("hosted:abc"), { source: "hosted", id: "abc" });
+  assert.deepEqual(parseSourceKey("abc"), { source: "local", id: "abc" });
+});
+
+test("hostedRouteOpen closes keys, payments, protected settings and account actions", () => {
+  for (const closed of [
+    "/billing/byok/keys",
+    "/billing/byok/keys/abc",
+    "/billing/payment-methods?x=1",
+    "/billing/checkout",
+    "/billing/portal",
+    "/billing/subscription",
+    "/agent/protected-settings",
+    "/account/delete",
+    "/account/export",
+  ]) {
+    assert.equal(hostedRouteOpen(closed), false, closed);
+  }
+  for (const open of [
+    "/billing/usage?start=1",
+    "/billing/transactions",
+    "/agent/conversations",
+    "/billing/byok",
+  ]) {
+    assert.equal(hostedRouteOpen(open), true, open);
+  }
 });

@@ -11,7 +11,9 @@ import { parseMessageTime } from "@/shared/ui/agent/message-time";
 import { parseTurnStats } from "@/shared/ui/agent/turn-stats";
 import { parseThinkingRows } from "@/shared/lib/thinking-segments";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
-import { fetchWithAuthRetry } from "@/shared/lib/api";
+import { apiUrl, fetchWithAuthRetry, hostedRunsAvailable } from "@/shared/lib/api";
+import { parseSourceKey, sourceKey } from "@/shared/lib/api-route";
+import type { ApiSource } from "@/shared/lib/api-route";
 
 // Resolve lazily — a module-load const races the injected window.__APP_ENV__
 // and freezes the build-time localhost fallback. See shared/lib/api.ts.
@@ -25,6 +27,8 @@ export interface ConversationSummary {
   createdAt: string;
   updatedAt: string;
   preview: string | null;
+  /** "hosted" for a web chat a linked Mac shows read-only; its id is a hosted key. */
+  source?: ApiSource;
 }
 
 export interface ConversationDetail extends ConversationSummary {
@@ -57,9 +61,10 @@ interface RawDetail extends RawSummary {
   messages: RawMessage[];
 }
 
-function toSummary(raw: RawSummary): ConversationSummary {
+function toSummary(raw: RawSummary, source: ApiSource = "local"): ConversationSummary {
   return {
-    id: raw.id,
+    id: sourceKey(source, raw.id),
+    ...(source === "hosted" ? { source } : {}),
     title: raw.title,
     pinned: Boolean(raw.pinned),
     archivedAt: raw.archived_at,
@@ -127,32 +132,65 @@ export async function listConversations(
   if (params?.limit) q.set("limit", String(params.limit));
   if (params?.offset) q.set("offset", String(params.offset));
   const qs = q.toString();
+  const path = `/agent/conversations${qs ? `?${qs}` : ""}`;
+  // Chats made on the Mac stay local; a linked Mac only adds the web chats
+  // beside them. A failed hosted read keeps the local list.
+  const [local, hosted] = await Promise.all([
+    readSummaries(`${apiBase()}${path}`, "local", signal),
+    hostedRunsAvailable() ? readSummaries(apiUrl(path, "hosted"), "hosted", signal) : null,
+  ]);
+  if (local === null || hosted === null) return local;
+  return [...local, ...hosted].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+/**
+ * Read one conversation list from `url`, keyed for `source`.
+ *
+ * Args:
+ *   url: The full list URL.
+ *   source: Where the list comes from; hosted rows get hosted keys.
+ *   signal: Aborts the read.
+ *
+ * Returns:
+ *   The rows, or null on any failure.
+ */
+async function readSummaries(
+  url: string,
+  source: ApiSource,
+  signal?: AbortSignal,
+): Promise<ConversationSummary[] | null> {
   try {
-    const res = await fetchWithAuthRetry(`${apiBase()}/agent/conversations${qs ? `?${qs}` : ""}`, {
-      method: "GET",
-      signal,
-    });
+    const res = await fetchWithAuthRetry(url, { method: "GET", signal });
     if (!res.ok) return null;
     const rows = (await res.json()) as RawSummary[];
-    return rows.map(toSummary);
+    return rows.map((row) => toSummary(row, source));
   } catch {
     return null;
   }
+}
+
+/** Whether `conversationId` is a web chat's hosted key: the Mac never writes to one. */
+export function isHostedConversation(conversationId: string): boolean {
+  return parseSourceKey(conversationId).source === "hosted";
 }
 
 export async function getConversation(
   conversationId: string,
   signal?: AbortSignal,
 ): Promise<ConversationDetail | null> {
+  const { source, id } = parseSourceKey(conversationId);
+  // An unlinked Mac would send a web id to the local backend.
+  if (source === "hosted" && !hostedRunsAvailable()) return null;
+  const path = `/agent/conversations/${encodeURIComponent(id)}`;
   try {
     const res = await fetchWithAuthRetry(
-      `${apiBase()}/agent/conversations/${encodeURIComponent(conversationId)}`,
+      source === "hosted" ? apiUrl(path, "hosted") : `${apiBase()}${path}`,
       { method: "GET", signal },
     );
     if (!res.ok) return null;
     const raw = (await res.json()) as RawDetail;
     return {
-      ...toSummary(raw),
+      ...toSummary(raw, source),
       messages: raw.messages.map(toMessage),
     };
   } catch {
@@ -169,6 +207,7 @@ export async function patchConversation(
   conversationId: string,
   patch: ConversationPatch,
 ): Promise<ConversationSummary | null> {
+  if (isHostedConversation(conversationId)) return null;
   try {
     const res = await fetchWithAuthRetry(
       `${apiBase()}/agent/conversations/${encodeURIComponent(conversationId)}`,
@@ -187,6 +226,7 @@ export async function patchConversation(
 }
 
 export async function deleteConversation(conversationId: string): Promise<boolean> {
+  if (isHostedConversation(conversationId)) return false;
   try {
     const res = await fetchWithAuthRetry(
       `${apiBase()}/agent/conversations/${encodeURIComponent(conversationId)}`,
@@ -231,6 +271,7 @@ function toShareState(raw: RawShareState): ChatShareState {
 
 /** Read the chat's share link and the private items it can grant; null on failure. */
 export async function getChatShareState(conversationId: string): Promise<ChatShareState | null> {
+  if (isHostedConversation(conversationId)) return null;
   try {
     const res = await fetchWithAuthRetry(
       `${apiBase()}/agent/conversations/${encodeURIComponent(conversationId)}/share`,
@@ -252,6 +293,7 @@ export async function saveChatShare(
   linkType: ShareLinkType,
   items: ReadonlyArray<Pick<SharedItemOption, "kind" | "id">>,
 ): Promise<ChatShareState | null> {
+  if (isHostedConversation(conversationId)) return null;
   try {
     const res = await fetchWithAuthRetry(
       `${apiBase()}/agent/conversations/${encodeURIComponent(conversationId)}/share`,
@@ -308,6 +350,7 @@ export async function listSharedConversations(): Promise<SharedConversationSumma
 
 /** Stop sharing a chat: its public link then answers "not found". Returns false on failure. */
 export async function revokeConversationShare(conversationId: string): Promise<boolean> {
+  if (isHostedConversation(conversationId)) return false;
   try {
     const res = await fetchWithAuthRetry(
       `${apiBase()}/agent/conversations/${encodeURIComponent(conversationId)}/share`,

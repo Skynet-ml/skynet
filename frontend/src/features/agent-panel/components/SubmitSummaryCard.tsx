@@ -10,6 +10,8 @@ import { cn } from "@/shared/lib/utils";
 import { TERMS } from "@/shared/lib/terms";
 
 import type { AgentToolCall } from "@/shared/ui/agent/types";
+import { runHref } from "@/shared/lib/api-route";
+import { ChatSourceContext } from "./JobSummaryCard";
 
 interface SubmitSummaryCardProps {
   call: AgentToolCall;
@@ -51,6 +53,7 @@ function extractResult(call: AgentToolCall): SubmitResult | null {
  * resulting job and can jump to it.
  */
 export function SubmitSummaryCard({ call, className }: SubmitSummaryCardProps) {
+  const source = React.useContext(ChatSourceContext);
   const result = extractResult(call);
   const isError = call.status === "error";
   const jobId = result?.id;
@@ -94,7 +97,7 @@ export function SubmitSummaryCard({ call, className }: SubmitSummaryCardProps) {
 
       {jobId && (
         <Link
-          href={`/optimizations/${jobId}`}
+          href={runHref(jobId, source)}
           className={cn(
             "flex items-center justify-between gap-2 px-4 py-2.5",
             "text-[0.75rem] text-primary hover:bg-[#DFE7D9]/50 dark:hover:bg-[#3e4539]/50 transition-colors",
