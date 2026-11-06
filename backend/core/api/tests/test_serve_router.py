@@ -17,8 +17,10 @@ from ...service_gateway.optimization.blackbox import repo_serving
 from ...service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
 from ...storage.models import ExecutionBudgetModel, ExecutionOperationModel, JobModel
 from ..auth import AuthenticatedUser, get_authenticated_user
+from ..routers import _helpers as helpers_module
 from ..routers import serve as serve_module
 from ..routers.serve import create_serve_router
+from ..sharing_access import ShareRole
 from .conftest import TEST_USER, bypass_auth
 from .mocks import _BaseFakeJobStore, make_artifact, make_grid_job, make_run_result
 from .test_protected_interactions import interactions as _interactions_fixture
@@ -215,19 +217,22 @@ _REPO_COMMIT = "c" * 40
 _BEST_PATCH = "diff --git a/serve.py b/serve.py\n"
 
 
-def _repo_job(status: str = "success", commit: str | None = _REPO_COMMIT) -> dict[str, Any]:
+def _repo_job(
+    status: str = "success", commit: str | None = _REPO_COMMIT, *, serving_enabled: bool = True
+) -> dict[str, Any]:
     """Build a finished repository run whose best version beat its starting code.
 
     Args:
         status: Stored job status.
         commit: Pinned commit, or ``None`` for a run that never pinned one.
+        serving_enabled: Whether the owner turned serving on for the run.
 
     Returns:
         Job fields for a store row.
     """
     return {
         "status": status,
-        "payload_overview": {"username": "alice", "optimization_type": "run"},
+        "payload_overview": {"username": "alice", "optimization_type": "run", "serving_enabled": serving_enabled},
         "payload": {
             "username": "alice",
             "strategy": {"engine": "gepa"},
@@ -399,3 +404,136 @@ def test_repo_serve_info_reports_serve_py(serve_client: TestClient, serve_store:
     assert response.json()["module_name"] == "serve.py"
     assert response.json()["optimizer_name"] == "gepa"
     assert response.json()["model_name"] == "fixture/model"
+
+
+def _client_as(store: _FakeJobStore, user: AuthenticatedUser) -> TestClient:
+    """Build a serve-router client that authenticates every call as ``user``.
+
+    Args:
+        store: Fake job store wired into the router factory.
+        user: Caller identity for every request.
+
+    Returns:
+        A ``TestClient`` over a minimal FastAPI app.
+    """
+    app = FastAPI()
+    app.include_router(create_serve_router(job_store=store))
+    _wire_http_handler(app)
+    app.dependency_overrides[get_authenticated_user] = lambda: user
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_owner_turns_serving_on_and_off(serve_store: _FakeJobStore) -> None:
+    """The owner turns serving on and off, and the info route reports each state."""
+    serve_store.seed_job("repo-run", **_repo_job(serving_enabled=False))
+    client = _client_as(serve_store, AuthenticatedUser("alice", "user", ()))
+
+    assert client.get("/serve/repo-run/info").json()["serving_enabled"] is False
+
+    on = client.put("/serve/repo-run/enabled", json={"enabled": True})
+    assert on.status_code == 200, on.text
+    assert on.json() == {"optimization_id": "repo-run", "serving_enabled": True}
+    assert client.get("/serve/repo-run/info").json()["serving_enabled"] is True
+    assert serve_store.get_job("repo-run")["payload_overview"]["username"] == "alice"
+
+    off = client.put("/serve/repo-run/enabled", json={"enabled": False})
+    assert off.json() == {"optimization_id": "repo-run", "serving_enabled": False}
+    assert client.get("/serve/repo-run/info").json()["serving_enabled"] is False
+
+
+def test_setting_the_same_serving_state_twice_is_idempotent(serve_store: _FakeJobStore) -> None:
+    """Setting the same switch state twice returns the same reply."""
+    serve_store.seed_job("repo-run", **_repo_job(serving_enabled=False))
+    client = _client_as(serve_store, AuthenticatedUser("alice", "user", ()))
+
+    first = client.put("/serve/repo-run/enabled", json={"enabled": True})
+    second = client.put("/serve/repo-run/enabled", json={"enabled": True})
+
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json() == {"optimization_id": "repo-run", "serving_enabled": True}
+
+
+def test_serve_info_defaults_serving_to_off(serve_client: TestClient, serve_store: _FakeJobStore) -> None:
+    """A run that never stored the switch reports serving as off."""
+    job = _repo_job()
+    job["payload_overview"] = {"username": "alice", "optimization_type": "run"}
+    serve_store.seed_job("repo-run", **job)
+
+    assert serve_client.get("/serve/repo-run/info").json()["serving_enabled"] is False
+
+
+def test_a_shared_editor_cannot_turn_serving_on(serve_store: _FakeJobStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the owner may change the switch; a shared editor gets 403."""
+    serve_store.seed_job("repo-run", **_repo_job(serving_enabled=False))
+    monkeypatch.setattr(helpers_module, "_grant_role", lambda _store, _id, username: ShareRole.editor)
+    client = _client_as(serve_store, AuthenticatedUser("bob", "user", ()))
+
+    response = client.put("/serve/repo-run/enabled", json={"enabled": True})
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "optimization.insufficient_role"
+    assert serve_store.get_job("repo-run")["payload_overview"]["serving_enabled"] is False
+
+
+def test_a_stranger_cannot_see_the_serving_switch(serve_store: _FakeJobStore) -> None:
+    """A caller with no access gets 404, so the run stays hidden."""
+    serve_store.seed_job("repo-run", **_repo_job(serving_enabled=False))
+    client = _client_as(serve_store, AuthenticatedUser("mallory", "user", ()))
+
+    response = client.put("/serve/repo-run/enabled", json={"enabled": True})
+
+    assert response.status_code == 404
+
+
+def test_serving_switch_refuses_a_dspy_run(serve_client: TestClient, serve_store: _FakeJobStore) -> None:
+    """A DSPy program run cannot be served, so its switch refuses with 410."""
+    _seed_dspy_run(serve_store)
+
+    response = serve_client.put("/serve/dspy-run/enabled", json={"enabled": True})
+
+    assert response.status_code == 410
+    assert response.json()["code"] == _RETIRED
+
+
+def test_serving_switch_refuses_an_unfinished_run(serve_client: TestClient, serve_store: _FakeJobStore) -> None:
+    """A run that did not succeed keeps its switch off and gets 409."""
+    serve_store.seed_job("repo-run", **_repo_job(status="running", serving_enabled=False))
+
+    response = serve_client.put("/serve/repo-run/enabled", json={"enabled": True})
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "optimization.not_success_status_for_serve"
+    assert serve_store.get_job("repo-run")["payload_overview"]["serving_enabled"] is False
+
+
+def test_request_form_refuses_while_serving_is_off(serve_client: TestClient, serve_store: _FakeJobStore) -> None:
+    """The agent's inference card refuses while serving is off."""
+    serve_store.seed_job("repo-run", **_repo_job(serving_enabled=False))
+
+    response = serve_client.post("/serve/repo-run/request-form", json={})
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "serve.not_enabled"
+
+
+def test_repo_serve_waits_for_the_owner_to_turn_serving_on(
+    repo_serve: tuple[TestClient, _Harness, dict[str, Any]],
+) -> None:
+    """A serve call does no billing or sandbox work until serving is on."""
+    client, harness, state = repo_serve
+    body = {"inputs": {"question": "hello"}, "max_cost_cents": 10}
+    assert client.put("/serve/repo-run/enabled", json={"enabled": False}).status_code == 200
+
+    refused = client.post("/serve/repo-run", json=body, headers={"Idempotency-Key": "off-call"})
+
+    assert refused.status_code == 409
+    assert refused.json()["code"] == "serve.not_enabled"
+    assert state["calls"] == []
+    assert state["fetches"] == []
+    assert harness.count(ExecutionBudgetModel) == 0
+
+    assert client.put("/serve/repo-run/enabled", json={"enabled": True}).status_code == 200
+    served = client.post("/serve/repo-run", json=body, headers={"Idempotency-Key": "on-call"})
+
+    assert served.status_code == 200, served.text
+    assert len(state["calls"]) == 1

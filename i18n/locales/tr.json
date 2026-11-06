@@ -471,6 +471,7 @@
     "budget.conflict": "Bu bütçe başka bir sekmede değişti. Güncellemeden önce bakiyesini yenileyin.",
     "budget.not_found": "Bu bütçe hesabınız için kullanılamıyor. Yeni bir kurulum bütçesi oluşturun.",
     "budget.invalid": "Önceden harcanmış veya ayrılmış kullanımı karşılayan bir harcama limiti girin.",
-    "budget.below_minimum": "Harcama limiti bu çalıştırmanın ihtiyaç duyduğu minimumun altında. Daha yüksek bir limit girin."
+    "budget.below_minimum": "Harcama limiti bu çalıştırmanın ihtiyaç duyduğu minimumun altında. Daha yüksek bir limit girin.",
+    "serve.not_enabled": "Bu çalıştırmada sunum kapalı. Önce çalıştırmanın Sunum sekmesinden açın."
   }
 }

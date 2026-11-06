@@ -848,7 +848,11 @@ def _make_repo(store: _MemStore, optimization_id: str = "opt-share-1") -> None:
     """
     current = store.get_job(optimization_id)
     target = {"kind": "repo", "repo": {"url": "https://github.com/example/app", "ref": "main"}}
-    store.update_job(optimization_id, payload={**current["payload"], "target": target})
+    store.update_job(
+        optimization_id,
+        payload={**current["payload"], "target": target},
+        payload_overview={**current["payload_overview"], "serving_enabled": True},
+    )
 
 
 def test_serve_allowed_for_editor_member() -> None:
@@ -895,6 +899,30 @@ def test_serve_allowed_for_editor_member() -> None:
     # The owner's secret key/base_url must never surface in the serve response.
     assert "sk-SECRET" not in resp.text
     assert "secret.internal" not in resp.text
+
+
+def test_serve_refuses_a_shared_repo_run_while_serving_is_off() -> None:
+    """A shared repository run refuses inference until its owner turns serving on."""
+    store = _MemStore()
+    _seed_job(store, username="alice")
+    _make_repo(store)
+    current = store.get_job("opt-share-1")
+    store.update_job("opt-share-1", payload_overview={**current["payload_overview"], "serving_enabled": False})
+    token = _enable_anyone(store, role="editor")
+    editor = _client(store, user="bob")
+
+    with pytest.MonkeyPatch.context() as mp:
+        calls: list[object] = []
+        mp.setattr(share_module, "run_protected_interaction", lambda *a, **_k: calls.append(a))
+        resp = editor.post(
+            f"/share/{token}/serve",
+            json={"inputs": {"question": "hi"}, "max_cost_cents": 10},
+            headers={"Idempotency-Key": "off-call"},
+        )
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == t_en("serve.not_enabled")
+    assert calls == []
 
 
 def test_serve_refuses_a_shared_dspy_run_with_410() -> None:

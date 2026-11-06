@@ -26,6 +26,7 @@ import {
   Coins,
   Repeat,
   Trophy,
+  PaperPlaneTilt,
 } from "@/shared/ui/icons";
 import { toast } from "react-toastify";
 
@@ -98,6 +99,7 @@ import { RunCostChip } from "./RunCostChip";
 import { BestVersionTab } from "./BestVersionTab";
 import { UsageTab } from "./UsageTab";
 import { ContinuousTab } from "./ContinuousTab";
+import { ServeTab } from "./ServeTab";
 import { linkifyMessage } from "@/shared/lib/linkify";
 import { useStreamWithPollFallback } from "@/shared/hooks/use-stream-with-poll-fallback";
 import { useIsPhone } from "@/shared/hooks/use-device-class";
@@ -703,7 +705,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   // than a GEPA log line, so the chart reads the newest lane's candidates.
   const jobIsBlackbox = job?.optimization_type === "blackbox";
   // Skynet is repo-only now. Stored DSPy program runs still open read-only,
-  // but they get no serve, artifact or continuous UI.
+  // but they get no Serve tab, artifact or continuous UI.
   const isLegacyDspyRun =
     job?.optimization_type === "run" ||
     job?.optimization_type === "grid_search" ||
@@ -882,6 +884,16 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     jobIsBlackbox &&
     !isLegacyDspyRun &&
     (job.status === "success" || endedRunHasPlan);
+
+  // Serving a repository run is opt-in and billed per call, so only its owner
+  // (or an owner-tier grant) sees the tab, and only once the run succeeded.
+  const showServeTab =
+    !skipNetwork &&
+    !isPairContext &&
+    jobIsBlackbox &&
+    !isLegacyDspyRun &&
+    job.status === "success" &&
+    effectiveRole == null;
 
   const pairCount = effectiveJob?.grid_result?.pair_results.length ?? 0;
   const isBestPair =
@@ -1250,12 +1262,14 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
                   Number(showCodeTab) +
                   Number(showLogsTab) +
                   Number(showUsageTab) +
+                  Number(showServeTab) +
                   Number(showContinuousTab),
                 phoneTabs:
                   1 +
                   Number(showBestVersionTab) +
                   Number(showLogsTab) +
-                  Number(showUsageTab),
+                  Number(showUsageTab) +
+                  Number(showServeTab),
                 tabIds: [
                   "overview",
                   ...(showBestVersionTab ? ["best"] : []),
@@ -1264,6 +1278,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
                   ...(showRewardTab ? ["reward"] : []),
                   ...(showLogsTab ? ["logs"] : []),
                   ...(showUsageTab ? ["usage"] : []),
+                  ...(showServeTab ? ["playground"] : []),
                   ...(showContinuousTab ? ["continuous"] : []),
                   ...(showConfigTab ? ["config"] : []),
                 ],
@@ -1314,6 +1329,12 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
                   <Coins className="size-3.5" />
                   {msg("usage_tab.title")}
                   {pingActive && <PingDot className="ms-1" />}
+                </TabsTrigger>
+              )}
+              {showServeTab && (
+                <TabsTrigger value="playground" className={tabCls}>
+                  <PaperPlaneTilt className="size-3.5" />
+                  {msg("serve_tab.title")}
                 </TabsTrigger>
               )}
               {!isPhone && showContinuousTab && (
@@ -1397,6 +1418,12 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
             {showUsageTab && (
               <TabsContent value="usage" className="mt-4">
                 <UsageTab job={job} pairIndex={isPairContext ? activePair.pair_index : null} />
+              </TabsContent>
+            )}
+
+            {showServeTab && (
+              <TabsContent value="playground">
+                <ServeTab optimizationId={job.optimization_id} />
               </TabsContent>
             )}
 

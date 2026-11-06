@@ -228,6 +228,7 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "optimization.not_success_status_for_test_results": "Optimization is in state '{status}' — only successfully completed optimizations have test results.",
     "serve.caller_tool_connection_required": "This optimization uses an owner-bound tool connection. Connect the tool to your account before invoking it.",
     "serve.protected_interaction_failed": "The sandboxed request failed: {error}",
+    "serve.not_enabled": "Serving is off for this run. Turn it on in the run's Serve tab first.",
     "serve.subscription_model_hosted": (
         f"This run used a local subscription model. Serve it in the {APP_NAME} Mac app, "
         "or start a new optimization with a managed model or your own provider key."

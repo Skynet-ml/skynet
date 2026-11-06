@@ -471,6 +471,7 @@
     "budget.conflict": "此预算已在其他标签页中更改。更新前请刷新余额。",
     "budget.not_found": "此预算对您的账户不可用。请创建新的设置预算。",
     "budget.invalid": "请输入能够覆盖已花费或已预留用量的支出上限。",
-    "budget.below_minimum": "支出上限低于本次运行所需的最低金额。请输入更高的上限。"
+    "budget.below_minimum": "支出上限低于本次运行所需的最低金额。请输入更高的上限。",
+    "serve.not_enabled": "此运行的服务已关闭。请先在运行的服务标签页中开启。"
   }
 }

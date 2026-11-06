@@ -122,6 +122,7 @@
     "sandbox.docker_unavailable": "Docker לא פועל במחשב הזה. הפעילו את Docker Desktop או OrbStack ונסו שוב.",
     "sandbox.docker_image_missing": "סביבת הבידוד המקומית עדיין לא נבנתה. הפעילו מחדש את האפליקציה כדי לבנות אותה.",
     "optimization.not_success_status_for_serve": "ה{term.optimization} במצב '{status}' — רק {term.optimizationPlural} שהושלמו בהצלחה אפשר להגיש.",
+    "serve.not_enabled": "ההגשה כבויה בהרצה הזו. הפעילו אותה קודם בלשונית ההגשה של ההרצה.",
     "optimization.not_success_status_for_test_results": "ה{term.optimization} במצב '{status}' — רק ל{term.optimizationPlural} שהושלמו בהצלחה יש תוצאות {term.splitTest}.",
     "optimization.cancelled_no_artifact": "ה{term.optimization} בוטלה ולא ייצרה תוצר.",
     "optimization.failed_no_artifact": "ה{term.optimization} נכשלה ולא ייצרה תוצר. שגיאה: {error}",

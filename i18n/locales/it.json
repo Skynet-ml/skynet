@@ -471,6 +471,7 @@
     "budget.conflict": "Questo budget è cambiato in un’altra scheda. Aggiorna il saldo prima di modificarlo.",
     "budget.not_found": "Questo budget non è disponibile per il tuo account. Crea un nuovo budget di configurazione.",
     "budget.invalid": "Inserisci un limite di spesa che copra gli importi già spesi o riservati.",
-    "budget.below_minimum": "Il limite di spesa è inferiore al minimo richiesto da questa esecuzione. Inserisci un limite più alto."
+    "budget.below_minimum": "Il limite di spesa è inferiore al minimo richiesto da questa esecuzione. Inserisci un limite più alto.",
+    "serve.not_enabled": "Il servizio è disattivato per questa esecuzione. Attivalo prima nella scheda Servizio dell’esecuzione."
   }
 }

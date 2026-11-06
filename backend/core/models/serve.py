@@ -124,3 +124,16 @@ class ServeInfoResponse(BaseModel):
     instructions: str | None = None
     demo_count: int = 0
     sample_inputs: dict[str, str] = Field(default_factory=dict)
+    serving_enabled: bool = False
+
+
+# Body of PUT /serve/{id}/enabled. Serving is opt-in per run because each call
+# runs the best version in a billed sandbox.
+class ServingEnabledRequest(BaseModel):
+    enabled: bool
+
+
+# Reply of PUT /serve/{id}/enabled: the stored switch state after the update.
+class ServingEnabledResponse(BaseModel):
+    optimization_id: str
+    serving_enabled: bool

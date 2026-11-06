@@ -23,15 +23,17 @@ from pydantic import BaseModel, Field
 from ...constants import PAYLOAD_OVERVIEW_COLUMN_MAPPING
 from ...i18n_keys import I18nKey
 from ...models import OptimizationStatus, ServeInfoResponse, ServeRequest, ServeResponse
+from ...models.serve import ServingEnabledRequest, ServingEnabledResponse
 from ...service_gateway.optimization.blackbox.repo_serving import INTERACTION_KIND as REPO_SERVE_KIND
 from ...service_gateway.optimization.blackbox.repo_serving import SERVE_FILE, serve_payload, staged_snapshot
 from ...telemetry.server_events import record_server_event
 from ...worker.repo_staging import improved_patch, is_repo_payload
 from ..auth import AuthenticatedUser, get_authenticated_user
-from ..converters import job_owner, status_to_job_status
+from ..converters import job_owner, parse_overview, status_to_job_status
 from ..errors import DomainError
 from ..protected_interaction import run_protected_interaction
-from ._helpers import load_job_for_user
+from ..sharing_access import ShareRole
+from ._helpers import load_job_for_user, require_role_at_least
 
 logger = logging.getLogger(__name__)
 
@@ -399,6 +401,31 @@ def _column_mapping_fields(overview: dict[str, Any]) -> tuple[list[str], list[st
     return _names("inputs"), _names("outputs")
 
 
+def serving_enabled(job_data: dict[str, Any]) -> bool:
+    """Tell whether the owner turned serving on for a run.
+
+    Args:
+        job_data: Stored job row.
+
+    Returns:
+        ``True`` only when the run's overview stores ``serving_enabled`` as true.
+    """
+    return parse_overview(job_data).get("serving_enabled") is True
+
+
+def require_serving_enabled(job_data: dict[str, Any]) -> None:
+    """Refuse a serve call before any billing or sandbox work when serving is off.
+
+    Args:
+        job_data: Stored job row of a serveable repository run.
+
+    Raises:
+        DomainError: 409 ``serve.not_enabled`` when the owner did not turn serving on.
+    """
+    if not serving_enabled(job_data):
+        raise DomainError("serve.not_enabled", status=409)
+
+
 def _dspy_serve_retired() -> DomainError:
     """Build the refusal for a DSPy program serve call.
 
@@ -457,7 +484,43 @@ def create_serve_router(*, job_store) -> APIRouter:
             model_name=str(model.get("name") or "") if isinstance(model, dict) else "",
             input_fields=[],
             output_fields=[],
+            serving_enabled=serving_enabled(job_data),
         )
+
+    @router.put(
+        "/serve/{optimization_id}/enabled",
+        response_model=ServingEnabledResponse,
+        summary="Turn serving on or off for a finished repository run",
+    )
+    def set_serving_enabled(
+        optimization_id: str,
+        req: ServingEnabledRequest,
+        current_user: AuthenticatedUserDep,
+    ) -> ServingEnabledResponse:
+        """Store the owner's serving switch for a finished repository run.
+
+        Setting the same value again is a no-op that returns the same reply.
+
+        Args:
+            optimization_id: Optimization id whose switch changes.
+            req: Body with the wanted switch state.
+            current_user: Authenticated caller resolved from the bearer token.
+
+        Returns:
+            The stored switch state.
+
+        Raises:
+            DomainError: 404 if unknown or inaccessible, 403 for a caller below
+                owner, 409 if the run did not succeed, 410 for a DSPy program run.
+        """
+        job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.owner)
+        if _repo_run(job_data) is None:
+            raise _dspy_serve_retired()
+        overview = parse_overview(job_data)
+        if overview.get("serving_enabled") is not req.enabled:
+            overview["serving_enabled"] = req.enabled
+            job_store.set_payload_overview(optimization_id, overview)
+        return ServingEnabledResponse(optimization_id=optimization_id, serving_enabled=req.enabled)
 
     @router.post(
         "/serve/{optimization_id}/request-form",
@@ -489,10 +552,12 @@ def create_serve_router(*, job_store) -> APIRouter:
 
         Raises:
             DomainError: 404 if unknown or inaccessible, 409 if the run is not
-                in a serveable state, 410 for a DSPy program run.
+                in a serveable state or serving is off, 410 for a DSPy program run.
         """
-        if _repo_run(load_job_for_user(job_store, optimization_id, current_user)) is None:
+        job_data = load_job_for_user(job_store, optimization_id, current_user)
+        if _repo_run(job_data) is None:
             raise _dspy_serve_retired()
+        require_serving_enabled(job_data)
         return RequestUserInferenceResponse(
             optimization_id=optimization_id,
             awaiting_inputs=True,
@@ -553,8 +618,8 @@ def create_serve_router(*, job_store) -> APIRouter:
 
         Raises:
             DomainError: 400 without a replay key, 404 if unknown or
-                inaccessible, 409 if not serveable, 410 for a DSPy program
-                run, 502 when the sandbox call fails.
+                inaccessible, 409 if not serveable or serving is off, 410 for a
+                DSPy program run, 502 when the sandbox call fails.
         """
         with ServeInferenceEvent(
             job_store,
@@ -566,6 +631,7 @@ def create_serve_router(*, job_store) -> APIRouter:
             job_data = load_job_for_user(job_store, optimization_id, current_user)
             if _repo_run(job_data) is None:
                 raise _dspy_serve_retired()
+            require_serving_enabled(job_data)
             return ServeResponse.model_validate(
                 _repo_serve_call(
                     job_store=job_store,

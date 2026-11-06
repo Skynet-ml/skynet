@@ -3739,6 +3739,14 @@ export function getServeInfo(optimizationId: string) {
   return request<ServeInfoResponse>(`/serve/${optimizationId}/info`);
 }
 
+/** Turn serving on or off for a finished repository run (owner only). */
+export function setServingEnabled(optimizationId: string, enabled: boolean) {
+  return request<{ optimization_id: string; serving_enabled: boolean }>(
+    `/serve/${optimizationId}/enabled`,
+    { method: "PUT", body: JSON.stringify({ enabled }) },
+  );
+}
+
 export function getPairServeInfo(optimizationId: string, pairIndex: number) {
   return request<ServeInfoResponse>(`/serve/${optimizationId}/pair/${pairIndex}/info`);
 }
@@ -3752,7 +3760,7 @@ export function getPairTestResults(optimizationId: string, pairIndex: number) {
 
 export function serveProgram(
   optimizationId: string,
-  inputs: Record<string, string>,
+  inputs: Record<string, unknown>,
   idempotencyKey: string,
 ) {
   return request<ServeResponse>(`/serve/${optimizationId}`, {
