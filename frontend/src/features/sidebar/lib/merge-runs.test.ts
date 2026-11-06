@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { allLoaded, countFrom, loadRuns, mergeRuns, runKey, sumCounts } from "./merge-runs.ts";
+import {
+  allLoaded,
+  appendRuns,
+  countFrom,
+  loadRuns,
+  mergeRuns,
+  refreshLimit,
+  runKey,
+  sumCounts,
+} from "./merge-runs.ts";
 
 const run = (optimization_id: string, created_at: string | null) => ({
   optimization_id,
@@ -121,4 +130,45 @@ test("sumCounts adds the numeric fields", () => {
   );
   const local = { total: 1 };
   assert.equal(sumCounts(local, null), local);
+});
+
+const tagged = (source: "local" | "hosted", id: string, created_at: string) => ({
+  optimization_id: id,
+  created_at,
+  source,
+});
+
+test("appending a page skips shown rows and re-sorts both sides newest first", () => {
+  const prev = [
+    tagged("hosted", "h1", "2026-11-05T10:00:00Z"),
+    tagged("local", "l1", "2026-11-04T10:00:00Z"),
+  ];
+  const page = [
+    tagged("local", "l1", "2026-11-04T10:00:00Z"),
+    tagged("local", "l2", "2026-11-04T12:00:00Z"),
+    tagged("hosted", "h2", "2026-11-01T10:00:00Z"),
+  ];
+  assert.deepEqual(appendRuns(prev, page).map(runKey), [
+    "hosted:h1",
+    "local:l2",
+    "local:l1",
+    "hosted:h2",
+  ]);
+});
+
+test("appending to a local-only list keeps the server order", () => {
+  const prev = [tagged("local", "b", "2026-11-01T10:00:00Z")];
+  const page = [tagged("local", "a", "2026-11-03T10:00:00Z")];
+  assert.deepEqual(appendRuns(prev, page).map(runKey), ["local:b", "local:a"]);
+});
+
+test("a refresh asks each side for its own loaded rows, not the merged count", () => {
+  const runs = [
+    ...Array.from({ length: 30 }, (_, i) => tagged("local", `l${i}`, "2026-11-01T10:00:00Z")),
+    ...Array.from({ length: 25 }, (_, i) => tagged("hosted", `h${i}`, "2026-11-01T10:00:00Z")),
+  ];
+  assert.equal(refreshLimit(runs, "local", 20, 200), 30);
+  assert.equal(refreshLimit(runs, "hosted", 20, 200), 25);
+  assert.equal(refreshLimit([], "hosted", 20, 200), 20);
+  assert.equal(refreshLimit(runs, "local", 20, 10), 10);
 });

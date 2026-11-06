@@ -851,6 +851,8 @@ export function OptimizationDetailView({
   const showResume = canRestart && !!job.resumable;
   const showRetry = canRestart && !job.resumable && canClone;
   const canCancel = canEditRun && isActive;
+  // /storage lists the local account's storage, which has no hosted view.
+  const showStorageLink = !isPairContext && source === "local" && (job.stored_bytes ?? 0) > 0;
   const headerActionCounts = isShare
     ? { wide: shareCanInteract ? 1 : null, phone: null }
     : {
@@ -992,7 +994,7 @@ export function OptimizationDetailView({
                     {job.estimated_remaining}
                   </span>
                 )}
-                {!isPairContext && !isPhone && (job.stored_bytes ?? 0) > 0 && (
+                {showStorageLink && !isPhone && (
                   <Link
                     href="/storage"
                     title={msg("optimization.storage_label")}
@@ -1259,7 +1261,7 @@ export function OptimizationDetailView({
                     job.execution_budget ?? job.terminal_evidence?.execution_budget,
                     isActive,
                   ) != null,
-                storageLink: !isPairContext && (job.stored_bytes ?? 0) > 0,
+                storageLink: showStorageLink,
                 access: sharedTier ? { tier: sharedTier, owner: sharedByOwner ?? null } : null,
                 actions: headerActionCounts,
                 tabs:
@@ -1357,6 +1359,7 @@ export function OptimizationDetailView({
                 onPairSelect={handlePairSelect}
                 onPairDeleted={source === "local" ? handlePairDeleted : undefined}
                 payload={payload}
+                source={source}
               />
             </TabsContent>
 

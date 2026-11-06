@@ -56,6 +56,33 @@ export function mergeRuns<P extends RunPage>(
 }
 
 /**
+ * Add the next merged page under the runs already shown, skipping rows
+ * already there. With hosted rows present the result is re-sorted newest
+ * first, because each page interleaves the two sides on its own; a local-only
+ * list keeps the server's order, as `mergeRuns` does.
+ */
+export function appendRuns<R extends RunLike>(prev: R[], page: R[]): R[] {
+  const existing = new Set(prev.map(runKey));
+  const merged = [...prev, ...page.filter((run) => !existing.has(runKey(run)))];
+  if (!merged.some((run) => run.source === "hosted")) return merged;
+  return merged.sort((a, b) => createdMs(b) - createdMs(a));
+}
+
+/**
+ * The page size for one side when a refresh re-reads every loaded row: that
+ * side's own loaded count, at least `pageSize` and at most `cap`. The merged
+ * count would ask each side for the other side's rows too.
+ */
+export function refreshLimit(
+  runs: RunLike[],
+  source: ApiSource,
+  pageSize: number,
+  cap: number,
+): number {
+  return Math.min(cap, Math.max(pageSize, countFrom(runs, source)));
+}
+
+/**
  * Whether every run is loaded. Each side compares its own loaded runs with
  * its own total: hosted rows from an earlier page must not count toward the
  * local total when this page's hosted call failed.

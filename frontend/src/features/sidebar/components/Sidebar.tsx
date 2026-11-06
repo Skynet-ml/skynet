@@ -59,7 +59,15 @@ import { PingDot } from "@/shared/ui/ping-dot";
 import { useJobsStream } from "@/shared/hooks/use-jobs-stream";
 import { toast } from "react-toastify";
 import { useSession } from "next-auth/react";
-import { allLoaded, countFrom, groupJobsByRecency, loadRuns, runKey } from "@/features/sidebar";
+import {
+  allLoaded,
+  appendRuns,
+  countFrom,
+  groupJobsByRecency,
+  loadRuns,
+  refreshLimit,
+  runKey,
+} from "@/features/sidebar";
 import { AccountMenu } from "@/shared/layout/account-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { ShareDialog } from "@/features/optimizations";
@@ -277,11 +285,11 @@ export function Sidebar() {
   );
 
   // Sidebar infinite scroll: fetchData (polling + external invalidation)
-  // re-requests ``max(PAGE_SIZE, loadedItemsRef.current)`` rows so a
+  // re-requests each side's loaded row count (at least PAGE_SIZE) so a
   // background 30s refresh doesn't truncate the user's scrolled position
   // back to page 1. The ref lives outside React state so fetchData doesn't
-  // need to be re-created when the loaded count changes.
-  const loadedItemsRef = React.useRef(0);
+  // need to be re-created when the loaded rows change.
+  const loadedItemsRef = React.useRef<SidebarJobItem[]>([]);
   // Synchronous in-flight guard: setLoadingMore is async, so the observer
   // can fire twice before React re-renders. The ref blocks the second call.
   const loadingMoreRef = React.useRef(false);
@@ -301,28 +309,26 @@ export function Sidebar() {
   const fetchData = React.useCallback(async () => {
     void fetchFolders();
     try {
-      const limit = Math.min(200, Math.max(PAGE_SIZE, loadedItemsRef.current));
       // The Mac app with a linked account lists hosted runs too; a hosted
       // failure leaves the local runs alone.
-      const res = await loadRuns(
-        (source) =>
-          tab === "shared"
-            ? listJobsSharedWithMe({ limit, offset: 0, source })
-            : listJobsSidebar({
-                username: isAdmin ? undefined : sessionUser || undefined,
-                limit,
-                offset: 0,
-                source,
-              }),
-        hostedRunsAvailable(),
-      );
+      const res = await loadRuns((source) => {
+        const limit = refreshLimit(loadedItemsRef.current, source, PAGE_SIZE, 200);
+        return tab === "shared"
+          ? listJobsSharedWithMe({ limit, offset: 0, source })
+          : listJobsSidebar({
+              username: isAdmin ? undefined : sessionUser || undefined,
+              limit,
+              offset: 0,
+              source,
+            });
+      }, hostedRunsAvailable());
       // Drop the response if the user has since toggled away — applying it
       // would clobber the newer tab's list with stale rows.
       if (tabRef.current !== tab) return;
       setJobs(res.items);
       setActiveCount(res.items.filter((j) => isActiveStatus(j.status)).length);
       setLoadedAll(allLoaded(res.items, res.totals));
-      loadedItemsRef.current = res.items.length;
+      loadedItemsRef.current = res.items;
       switchingRef.current = false;
       setRenderedTab(tab);
     } catch (err) {
@@ -333,7 +339,7 @@ export function Sidebar() {
   React.useEffect(() => {
     // Dep change (login / admin toggle) — reset depth so the next fetch
     // starts fresh at one page.
-    loadedItemsRef.current = 0;
+    loadedItemsRef.current = [];
     void fetchData();
     const tick = () => {
       if (document.visibilityState === "visible") void fetchData();
@@ -384,10 +390,8 @@ export function Sidebar() {
       setJobs((prev) => {
         // Dedupe in case a new job was inserted above the offset between the
         // previous fetch and this one.
-        const existing = new Set(prev.map(runKey));
-        const appended = res.items.filter((j) => !existing.has(runKey(j)));
-        const merged = [...prev, ...appended];
-        loadedItemsRef.current = merged.length;
+        const merged = appendRuns(prev, res.items);
+        loadedItemsRef.current = merged;
         setLoadedAll(allLoaded(merged, res.totals));
         return merged;
       });

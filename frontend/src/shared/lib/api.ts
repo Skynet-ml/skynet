@@ -2434,10 +2434,17 @@ export function getTestResults(optimizationId: string, source?: ApiSource) {
  * Fetch one sandboxed agent run. ``sinceTranscript`` is a code-point offset
  * into the transcript: a live viewer asks only for what it has not seen.
  */
-export function getAgentRun(optimizationId: string, runId: number, sinceTranscript = 0) {
+export function getAgentRun(
+  optimizationId: string,
+  runId: number,
+  sinceTranscript = 0,
+  source?: ApiSource,
+) {
   const q = new URLSearchParams({ since_transcript: String(sinceTranscript) });
   return request<BlackboxAgentRunResponse>(
     `/optimizations/${optimizationId}/agent-runs/${runId}?${q.toString()}`,
+    undefined,
+    source,
   );
 }
 

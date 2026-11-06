@@ -47,6 +47,7 @@ import { buildVersions, versionForPrompt } from "../lib/blackbox-versions";
 import { VersionFeedback } from "./BlackboxFinalScores";
 import { sideInfoFeedback, sideInfoNamedScores } from "@/shared/lib/blackbox-scores";
 import { RepoCandidateBrowser } from "./RepoCandidateBrowser";
+import type { ApiSource } from "@/shared/lib/api-route";
 
 const ScoreChart = dynamic(() => import("@/shared/ui/score-chart").then((m) => m.ScoreChart), {
   ssr: false,
@@ -119,6 +120,7 @@ function OverviewTabImpl({
   onPairSelect,
   onPairDeleted,
   payload,
+  source,
 }: {
   job: OptimizationStatusResponse;
   isActive: boolean;
@@ -130,6 +132,8 @@ function OverviewTabImpl({
   // The submitted payload: a black-box run's recipe and cases tell the
   // candidate tree what a candidate is and whether per-case scores exist.
   payload?: OptimizationPayloadResponse | null;
+  // Where the run lives; panels that read more of the run follow it.
+  source?: ApiSource;
 }) {
   const metrics = job.latest_metrics ?? {};
   const isPairContext = activePair != null;
@@ -574,7 +578,12 @@ function OverviewTabImpl({
       )}
 
       {renderRunBlocks && climbEngine !== null && (
-        <MetaHarnessPanel job={job} engine={climbEngine} blackbox={blackboxTrajectory} />
+        <MetaHarnessPanel
+          job={job}
+          engine={climbEngine}
+          blackbox={blackboxTrajectory}
+          source={source}
+        />
       )}
 
       {renderRunBlocks && !showClimb && (
