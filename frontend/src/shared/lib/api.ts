@@ -1277,11 +1277,13 @@ export function getLocalHostedWhoami() {
   );
 }
 
-/** Read the linked hosted account's balance. Calls hosted through the local API. */
-export function getLocalHostedBalance() {
-  return request<{ available_cents: number; currency: string; low_balance: boolean }>(
-    "/local/hosted-link/balance",
-  );
+/**
+ * Read the linked hosted account's wallet through the local hosted proxy: the
+ * same `/billing/wallet` the web app reads, so both show one balance. Call it
+ * only after the link status says linked.
+ */
+export function getLocalHostedWallet() {
+  return request<BillingWalletResponse>(apiPath("/billing/wallet", "hosted"));
 }
 
 /** Unlink the Mac app from its hosted account. Local runs and settings stay. */
@@ -1656,12 +1658,13 @@ export interface BillingUsageResponse {
  * `start`/`end` are ISO-8601; omit both for the backend's default 30-day window.
  * A linked Mac reads the hosted account's usage; otherwise the local backend's.
  */
-export function getUsage(start?: string, end?: string) {
+/** Usage for a time range: the web account's by default, or this server's own with `source` "local". */
+export function getUsage(start?: string, end?: string, source: ApiSource = "hosted") {
   const params = new URLSearchParams();
   if (start) params.set("start", start);
   if (end) params.set("end", end);
   const qs = params.toString();
-  return request<BillingUsageResponse>(`/billing/usage${qs ? `?${qs}` : ""}`, undefined, "hosted");
+  return request<BillingUsageResponse>(`/billing/usage${qs ? `?${qs}` : ""}`, undefined, source);
 }
 
 /** Display-safe billing address fields stored on the Stripe customer. */
@@ -1810,6 +1813,11 @@ export function getProviderKeys() {
 }
 
 /** List BYOK models available through the caller's verified stored connections. */
+/** The web account's managed model catalog, read through the Mac's hosted proxy (SKY-340). */
+export function getHostedModels() {
+  return request<ModelCatalogResponse>("/models", undefined, "hosted");
+}
+
 export function getByokModels() {
   return request<ModelCatalogResponse>("/billing/byok/models");
 }
@@ -3019,8 +3027,9 @@ export interface StorageUsageResponse {
 }
 
 /** Fetch the caller's unified storage usage backing the meter and quota modal. */
-export function getStorageUsage() {
-  return cachedGet<StorageUsageResponse>("/usage/storage", 0);
+/** Stored bytes: this server's own by default, or the web account's with `source` "hosted". */
+export function getStorageUsage(source?: ApiSource) {
+  return cachedGet<StorageUsageResponse>("/usage/storage", 0, source);
 }
 
 /**

@@ -1,5 +1,5 @@
 import type { CatalogModel, ModelCatalogResponse } from "@/shared/types/api";
-import { getByokModels } from "@/shared/lib/api";
+import { getByokModels, getHostedModels } from "@/shared/lib/api";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
 
 // Resolve lazily — a module-load const races the injected window.__APP_ENV__
@@ -60,6 +60,35 @@ export function getModelCatalog(): Promise<ModelCatalogResponse> {
 /** Synchronously inspect the cached catalog (returns null only before first fetch resolves). */
 export function cachedCatalog(): ModelCatalogResponse | null {
   return _cache;
+}
+
+// The web catalog for a Remote run from a linked Mac (SKY-340): hosted prices
+// and offers its own models, so the Mac's local list must not stand in for it.
+let _hostedCache: ModelCatalogResponse | null = null;
+let _hostedReady: Promise<ModelCatalogResponse> | null = null;
+
+export function getHostedModelCatalog(): Promise<ModelCatalogResponse> {
+  if (_hostedReady) return _hostedReady;
+  if (typeof window === "undefined") return Promise.resolve(EMPTY_CATALOG);
+  _hostedReady = (async () => {
+    try {
+      const data: unknown = await getHostedModels();
+      if (!isModelCatalogResponse(data)) throw new Error("Invalid hosted catalog response");
+      _hostedCache = data;
+      return data;
+    } catch (err) {
+      // Reset and reject, so a caller never keeps an empty list as the web's
+      // catalog and the next ask can retry after a dropped link.
+      _hostedReady = null;
+      throw err;
+    }
+  })();
+  return _hostedReady;
+}
+
+/** Synchronously inspect the cached web catalog (null before its first fetch resolves). */
+export function cachedHostedCatalog(): ModelCatalogResponse | null {
+  return _hostedCache;
 }
 
 // BYOK catalog — every offered provider's models, regardless of platform keys

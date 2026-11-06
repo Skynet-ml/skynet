@@ -6,7 +6,8 @@ import type { CatalogModel } from "@/shared/types/api";
 
 // The catalog module fetches through these at load; the ranking helpers don't need them.
 const stubs: Record<string, string> = {
-  "@/shared/lib/api": "export const getByokModels = async () => ({ providers: [], models: [] });",
+  "@/shared/lib/api":
+    "export const getByokModels = async () => ({ providers: [], models: [] }); export const getHostedModels = getByokModels;",
   "@/shared/lib/runtime-env": "export const getRuntimeEnv = () => ({ apiUrl: '' });",
 };
 
