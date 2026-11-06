@@ -57,7 +57,12 @@ import type {
   ContinuousState,
   ScheduleRule,
 } from "@/shared/types/continuous";
-import { getRuntimeEnv } from "@/shared/lib/runtime-env";
+import { getRuntimeEnv, isLocalMode } from "@/shared/lib/runtime-env";
+import { apiPath, hostedAvailable, isHostedPath, resolveSource } from "@/shared/lib/api-route";
+import type { ApiSource } from "@/shared/lib/api-route";
+// A cycle (use-linked-account imports this module), safe because both sides
+// only call each other at request time, never while the modules load.
+import { wasLinked } from "@/shared/hooks/use-linked-account";
 import { getActiveLocale } from "@/shared/lib/runtime-locale";
 import { readServerSentEvents, type ServerSentEvent } from "@/shared/lib/sse";
 
@@ -71,6 +76,28 @@ const apiBase = () => getRuntimeEnv().apiUrl;
 const JOB_CACHE_MS = 1000;
 const QUEUE_CACHE_MS = 5000;
 const SIDEBAR_CACHE_MS = 3000;
+
+/** Whether the Mac app can read its linked hosted account's runs. Always false on the web. */
+export function hostedRunsAvailable(): boolean {
+  return hostedAvailable(isLocalMode(), isLocalMode() && wasLinked());
+}
+
+/** The routed path for `source`; hosted falls back to local when not linked. */
+function routedPath(path: string, source?: ApiSource): string {
+  return apiPath(path, resolveSource(source, isLocalMode(), isLocalMode() && wasLinked()));
+}
+
+/** Full URL for raw stream callers (SSE, NDJSON) that pass it to {@link fetchWithAuthRetry}. */
+export function apiUrl(path: string, source?: ApiSource): string {
+  return `${apiBase()}${routedPath(path, source)}`;
+}
+
+/** Hosted revoked the Mac's link: let the link state re-read instead of refreshing the local token. */
+const HOSTED_LINK_REVOKED_CODE = "hosted_link.revoked";
+
+function announceHostedLinkChange(): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(HOSTED_LINK_CHANGED_EVENT));
+}
 
 const apiUrlAtLoad = apiBase();
 if (
@@ -157,6 +184,15 @@ export async function fetchWithAuthRetry(url: string, init: RequestInit): Promis
     });
   const res = await send(_authToken);
   if (res.status !== 401) return res;
+  // A 401 through the hosted proxy is about the link, not the local session.
+  if (isHostedPath(url)) {
+    const body = await res
+      .clone()
+      .text()
+      .catch(() => "");
+    if (parseError(body).code === HOSTED_LINK_REVOKED_CODE) announceHostedLinkChange();
+    return res;
+  }
   const fresh = await refreshAuthTokenOn401();
   const final = fresh ? await send(fresh) : res;
   if (final.status === 401) {
@@ -169,8 +205,9 @@ export async function fetchWithAuthRetry(url: string, init: RequestInit): Promis
   return final;
 }
 
-function cachedGet<T>(path: string, maxAge = GET_CACHE_MS): Promise<T> {
-  const key = path;
+function cachedGet<T>(path: string, maxAge = GET_CACHE_MS, source?: ApiSource): Promise<T> {
+  // The routed path keeps local and hosted answers apart; IDs can repeat across them.
+  const key = routedPath(path, source);
   const startGen = _cacheGen;
 
   const cached = _cache.get(key);
@@ -181,7 +218,7 @@ function cachedGet<T>(path: string, maxAge = GET_CACHE_MS): Promise<T> {
   const existing = _inflight.get(key);
   if (existing) return existing as Promise<T>;
 
-  const promise = request<T>(path)
+  const promise = request<T>(path, undefined, source)
     .then((data) => {
       if (startGen === _cacheGen) _cache.set(key, { data, ts: Date.now() });
       if (_inflight.get(key) === promise) _inflight.delete(key);
@@ -202,9 +239,10 @@ function cachedGet<T>(path: string, maxAge = GET_CACHE_MS): Promise<T> {
  */
 export function invalidateCache(...pathSubstrings: string[]) {
   _cacheGen++;
+  const prefixes = pathSubstrings.flatMap((s) => [s, apiPath(s, "hosted")]);
   const matches = (key: string) =>
-    pathSubstrings.length === 0 ||
-    pathSubstrings.some((s) => key === s || key.startsWith(`${s}/`) || key.startsWith(`${s}?`));
+    prefixes.length === 0 ||
+    prefixes.some((s) => key === s || key.startsWith(`${s}/`) || key.startsWith(`${s}?`));
   for (const [key] of _cache) if (matches(key)) _cache.delete(key);
   for (const [key] of _inflight) if (matches(key)) _inflight.delete(key);
 }
@@ -296,9 +334,11 @@ function endpointTag(path: string): string {
     .join("/");
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, source?: ApiSource): Promise<T> {
+  const routed = routedPath(path, source);
+  const hosted = isHostedPath(routed);
   const send = (token: string | undefined) =>
-    fetch(`${apiBase()}${path}`, {
+    fetch(`${apiBase()}${routed}`, {
       ...init,
       headers: {
         // FormData bodies must keep the browser's own multipart boundary header.
@@ -312,7 +352,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await send(_authToken);
-    if (res.status === 401) {
+    // A 401 through the hosted proxy is about the link, not the local session.
+    if (res.status === 401 && !hosted) {
       const fresh = await refreshAuthTokenOn401();
       if (fresh) res = await send(fresh);
     }
@@ -364,15 +405,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     // A missing account cannot recover by refreshing the bearer; the session
     // provider signs the browser out instead of letting every call fail.
-    if (res.status === 401 && parsed.code === ACCOUNT_MISSING_CODE) {
+    if (res.status === 401 && parsed.code === ACCOUNT_MISSING_CODE && !hosted) {
       announceAccountMissing();
+    }
+    if (hosted && res.status === 401 && parsed.code === HOSTED_LINK_REVOKED_CODE) {
+      announceHostedLinkChange();
     }
     // The framework's bare "Not Found" / "Method Not Allowed" means this server
     // has no such route: it runs an older version than the app. Say that
     // instead of echoing the framework's words.
     const missingRoute =
-      (res.status === 404 && parsed.message === "Not Found") ||
-      (res.status === 405 && parsed.message === "Method Not Allowed");
+      !hosted &&
+      ((res.status === 404 && parsed.message === "Not Found") ||
+        (res.status === 405 && parsed.message === "Method Not Allowed"));
     if (missingRoute) {
       const params = { method: init?.method ?? "GET", path: endpointTag(path) };
       throw new ApiError(msg(ROUTE_MISSING_CODE, params), {
@@ -645,16 +690,22 @@ export function listJobs(params?: {
   limit?: number;
   offset?: number;
   include_shared?: boolean;
+  source?: ApiSource;
 }) {
   const q = new URLSearchParams();
   if (params?.status) q.set("status", params.status);
-  if (params?.username) q.set("username", params.username);
+  // The local username means nothing to hosted, which scopes runs to the linked account.
+  if (params?.username && params.source !== "hosted") q.set("username", params.username);
   if (params?.optimization_type) q.set("optimization_type", params.optimization_type);
   if (params?.limit) q.set("limit", String(params.limit));
   if (params?.offset) q.set("offset", String(params.offset));
   if (params?.include_shared) q.set("include_shared", "true");
   const qs = q.toString();
-  return cachedGet<PaginatedJobsResponse>(`/optimizations${qs ? `?${qs}` : ""}`);
+  return cachedGet<PaginatedJobsResponse>(
+    `/optimizations${qs ? `?${qs}` : ""}`,
+    GET_CACHE_MS,
+    params?.source,
+  );
 }
 
 export interface OptimizationCounts {
@@ -670,12 +721,20 @@ export interface OptimizationCounts {
   shared?: number;
 }
 
-export function getOptimizationCounts(username?: string, includeShared?: boolean) {
+export function getOptimizationCounts(
+  username?: string,
+  includeShared?: boolean,
+  source?: ApiSource,
+) {
   const q = new URLSearchParams();
-  if (username) q.set("username", username);
+  if (username && source !== "hosted") q.set("username", username);
   if (includeShared) q.set("include_shared", "true");
   const qs = q.toString();
-  return cachedGet<OptimizationCounts>(`/optimizations/counts${qs ? `?${qs}` : ""}`);
+  return cachedGet<OptimizationCounts>(
+    `/optimizations/counts${qs ? `?${qs}` : ""}`,
+    GET_CACHE_MS,
+    source,
+  );
 }
 
 export interface StorageQuotaOverride {
@@ -2197,6 +2256,7 @@ export function getDashboardAnalytics(params?: {
 export function getJob(
   optimizationId: string,
   cursor?: { sinceProgress: number; sinceLog: number },
+  source?: ApiSource,
 ) {
   // A delta fetch asks only for stream rows past what the caller already
   // holds. The response is a tail slice (stateful w.r.t. the caller's buffer),
@@ -2208,9 +2268,17 @@ export function getJob(
       since_progress: String(cursor.sinceProgress),
       since_log: String(cursor.sinceLog),
     });
-    return request<OptimizationStatusResponse>(`/optimizations/${optimizationId}?${q.toString()}`);
+    return request<OptimizationStatusResponse>(
+      `/optimizations/${optimizationId}?${q.toString()}`,
+      undefined,
+      source,
+    );
   }
-  return cachedGet<OptimizationStatusResponse>(`/optimizations/${optimizationId}`, JOB_CACHE_MS);
+  return cachedGet<OptimizationStatusResponse>(
+    `/optimizations/${optimizationId}`,
+    JOB_CACHE_MS,
+    source,
+  );
 }
 
 /** A run's charges and model activity, pre-aggregated per role, model, stage, pair and candidate. */
@@ -2274,8 +2342,12 @@ export function reviewContinuousCycle(planId: string, cycleId: string, approve: 
   );
 }
 
-export function getOptimizationPayload(optimizationId: string) {
-  return request<OptimizationPayloadResponse>(`/optimizations/${optimizationId}/payload`);
+export function getOptimizationPayload(optimizationId: string, source?: ApiSource) {
+  return request<OptimizationPayloadResponse>(
+    `/optimizations/${optimizationId}/payload`,
+    undefined,
+    source,
+  );
 }
 
 export function getOptimizationDataset(optimizationId: string) {
@@ -3069,10 +3141,11 @@ export function serveSharedOptimization(
   });
 }
 
-export async function cancelJob(optimizationId: string) {
+export async function cancelJob(optimizationId: string, source?: ApiSource) {
   const res = await request<{ optimization_id: string; status: string }>(
     `/optimizations/${optimizationId}/cancel`,
     { method: "POST" },
+    source,
   );
   invalidateCache("/optimizations");
   return res;
@@ -3093,10 +3166,11 @@ export async function bulkCancelJobs(optimizationIds: string[]) {
 // Pause suspends a running run at its checkpoint (status → "paused"), keeping it
 // resumable. Like cancel it acts on the SAME run in place, so callers refresh the
 // current view rather than navigating.
-export async function pauseJob(optimizationId: string) {
+export async function pauseJob(optimizationId: string, source?: ApiSource) {
   const res = await request<{ optimization_id: string; status: string }>(
     `/optimizations/${optimizationId}/pause`,
     { method: "POST" },
+    source,
   );
   invalidateCache("/optimizations");
   return res;
@@ -3116,10 +3190,11 @@ export async function restartJob(optimizationId: string) {
 }
 // Resume continues the SAME run from its checkpoint (no new id), so callers
 // refresh the current view rather than navigating.
-export async function resumeJob(optimizationId: string) {
+export async function resumeJob(optimizationId: string, source?: ApiSource) {
   const res = await request<{ optimization_id: string; status: string }>(
     `/optimizations/${optimizationId}/resume`,
     { method: "POST" },
+    source,
   );
   invalidateCache("/optimizations");
   return res;
@@ -3524,22 +3599,34 @@ export interface SidebarJobItem {
   folder_id?: string | null;
   /** True when the run belongs to a continuous plan (an automation). */
   automated?: boolean;
+  /** Set by the Mac app's merged lists: which backend owns the run. */
+  source?: ApiSource;
 }
 
-export function listJobsSidebar(params?: { username?: string; limit?: number; offset?: number }) {
+export function listJobsSidebar(params?: {
+  username?: string;
+  limit?: number;
+  offset?: number;
+  source?: ApiSource;
+}) {
   const q = new URLSearchParams();
-  if (params?.username) q.set("username", params.username);
+  if (params?.username && params.source !== "hosted") q.set("username", params.username);
   if (params?.limit) q.set("limit", String(params.limit));
   if (params?.offset) q.set("offset", String(params.offset));
   const qs = q.toString();
   return cachedGet<{ items: SidebarJobItem[]; total: number }>(
     `/optimizations/sidebar${qs ? `?${qs}` : ""}`,
     SIDEBAR_CACHE_MS,
+    params?.source,
   );
 }
 
 /** List optimizations another user shared with the caller (Drive-style). */
-export function listJobsSharedWithMe(params?: { limit?: number; offset?: number }) {
+export function listJobsSharedWithMe(params?: {
+  limit?: number;
+  offset?: number;
+  source?: ApiSource;
+}) {
   const q = new URLSearchParams();
   if (params?.limit) q.set("limit", String(params.limit));
   if (params?.offset) q.set("offset", String(params.offset));
@@ -3547,6 +3634,7 @@ export function listJobsSharedWithMe(params?: { limit?: number; offset?: number 
   return cachedGet<{ items: SidebarJobItem[]; total: number }>(
     `/optimizations/shared-with-me${qs ? `?${qs}` : ""}`,
     SIDEBAR_CACHE_MS,
+    params?.source,
   );
 }
 

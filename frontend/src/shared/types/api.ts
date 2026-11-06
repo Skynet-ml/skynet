@@ -1,4 +1,5 @@
 import type { ExecutionBudget, JobExecutionBudget } from "./execution-budget";
+import type { ApiSource } from "@/shared/lib/api-route";
 
 export type JobStatus =
   | "pending"
@@ -243,6 +244,8 @@ interface BudgetProjection {
 
 export interface OptimizationSummaryResponse {
   optimization_id: string;
+  /** Client-side tag: which backend listed the run (the Mac app merges local and hosted). */
+  source?: ApiSource;
   optimization_type: OptimizationType;
   status: JobStatus;
   stop_reason?: string | null;

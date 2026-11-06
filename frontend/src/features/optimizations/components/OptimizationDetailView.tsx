@@ -54,14 +54,15 @@ import {
   STORAGE_CHANGED_EVENT,
   getContinuousState,
   unhideSharedItem,
+  apiUrl,
 } from "@/shared/lib/api";
+import type { ApiSource } from "@/shared/lib/api-route";
 import type { ServeInfoResponse, WorkflowNodeTrace, WorkflowSpec } from "@/shared/types/api";
 import { OptimizationDetailSkeleton } from "./OptimizationDetailSkeleton";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import { formatBytes } from "@/shared/lib/formatters";
 import { TERMS } from "@/shared/lib/terms";
-import { getRuntimeEnv } from "@/shared/lib/runtime-env";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { track, TelemetryEvent } from "@/shared/lib/telemetry";
 import { ACTIVE_STATUSES, TERMINAL_STATUSES } from "@/shared/constants/job-status";
@@ -343,6 +344,9 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const shareCanServe = isShare && (shareRole === "editor" || shareRole === "owner");
   const router = useRouter();
   const searchParams = useSearchParams();
+  // A hosted run (Mac app, linked account) reads through the local hosted proxy.
+  // An inline compare (not sourceFromParam) keeps it a primitive for the React Compiler.
+  const source: ApiSource = searchParams.get("source") === "hosted" ? "hosted" : "local";
   const [detailTab, setDetailTab] = useState(() => requestedDetailTab(searchParams.get("tab")));
   // Phones get the view-first subset: Overview, Usage (chat), Artifact, Logs,
   // Usage and cost. Data/Code/LM activity/Config are desk work; a deep link to one of
@@ -381,10 +385,13 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   // sidebar's Optimize button resumes ongoing work — never a finished run the
   // user merely opened to look at. Share views aren't the caller's to resume.
   useEffect(() => {
-    if (skipNetwork || !id || !job || !ACTIVE_STATUSES.has(job.status)) return;
+    // The recent-session resume link opens local runs only.
+    if (skipNetwork || source === "hosted" || !id || !job || !ACTIVE_STATUSES.has(job.status)) {
+      return;
+    }
     markRecentSession("optimization", id);
     return () => markRecentSession("optimization", id);
-  }, [id, skipNetwork, job?.status]);
+  }, [id, source, skipNetwork, job?.status]);
   // Funnel milestone: the user has seen a finished run's results. Once per
   // run per mount — the poll re-renders, and a run that finishes while open
   // counts the moment it flips to success.
@@ -480,7 +487,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const quotaToastShownRef = useRef(false);
   const logStreamStatus = useRunLogStream(
     !skipNetwork && authReady && hasJob && jobRunning
-      ? `${getRuntimeEnv().apiUrl}/optimizations/${encodeURIComponent(id)}/logs/stream`
+      ? apiUrl(`/optimizations/${encodeURIComponent(id)}/logs/stream`, source)
       : "",
     () => maxLogId(fetchedLogsRef.current),
     (entries) => {
@@ -538,7 +545,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
             sinceLog: prev.logs?.length ?? 0,
           }
         : undefined;
-      const data = await getJob(id, cursor);
+      const data = await getJob(id, cursor, source);
       rememberRunKind(id, data.optimization_type);
       setJob((cur) => mergeJobDelta(cur, data));
       setError(null);
@@ -558,15 +565,15 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
       setLoading(false);
       fetchingRef.current = false;
     }
-  }, [id]);
+  }, [id, source]);
 
   useEffect(() => {
     if (skipNetwork) return;
     if (!authReady) return;
-    getOptimizationPayload(id)
+    getOptimizationPayload(id, source)
       .then(setPayload)
       .catch(() => {});
-  }, [id, skipNetwork, authReady]);
+  }, [id, source, skipNetwork, authReady]);
 
   useEffect(() => {
     jobRef.current = job;
@@ -597,9 +604,8 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     void fetchJob();
   }, [id, skipNetwork, authReady, fetchJob]);
 
-  const API = getRuntimeEnv().apiUrl;
   useStreamWithPollFallback({
-    url: skipNetwork ? "" : `${API}/optimizations/${encodeURIComponent(id)}/stream`,
+    url: skipNetwork ? "" : apiUrl(`/optimizations/${encodeURIComponent(id)}/stream`, source),
     enabled: !skipNetwork && authReady,
     onMessage: (event) => {
       try {
@@ -678,7 +684,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const handleCancel = async () => {
     if (skipNetwork) return;
     try {
-      await cancelJob(id);
+      await cancelJob(id, source);
       toast.success(msg("optimization.cancel.sent"));
       void fetchJob();
     } catch (err) {
@@ -695,7 +701,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     if (skipNetwork || resuming) return;
     setResuming(true);
     try {
-      await resumeJob(id);
+      await resumeJob(id, source);
       toast.success(msg("optimization.resume.success"));
       window.dispatchEvent(new Event("optimizations-changed"));
       // Resume continues the same run in place — refresh this view rather than
@@ -712,7 +718,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     if (skipNetwork || pausing) return;
     setPausing(true);
     try {
-      await pauseJob(id);
+      await pauseJob(id, source);
       toast.success(msg("optimization.pause.success"));
       window.dispatchEvent(new Event("optimizations-changed"));
       // Pause suspends the same run in place — refresh this view rather than navigating.
