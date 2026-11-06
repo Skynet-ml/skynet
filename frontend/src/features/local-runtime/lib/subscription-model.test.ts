@@ -248,6 +248,62 @@ test("each CLI menu row takes only the levels the CLI takes for that model", () 
   assert.deepEqual(effortsFor("subscription/codex/openai/gpt-6.1-sol", codex), full);
 });
 
+test("the config dialog's CLI models take the same levels as the menu, not the catalog's", () => {
+  const full = ["low", "medium", "high", "xhigh", "max"];
+  const claude = cli({
+    models: ["anthropic/claude-opus-4.5", "anthropic/claude-haiku-4.5"],
+    efforts: {
+      "anthropic/claude-opus-4.5": ["low", "medium", "high"],
+      "anthropic/claude-haiku-4.5": [],
+    },
+  });
+  // The OpenRouter catalog lists more levels for Opus 4.5 than Claude Code takes.
+  const catalog = [
+    {
+      value: "openrouter/anthropic/claude-opus-4.5",
+      label: "Claude Opus 4.5",
+      provider: "anthropic",
+      supports_thinking: true,
+      supports_vision: true,
+      available: true,
+      reasoning_efforts: ["none", "low", "medium", "high", "xhigh", "max"],
+      reasoning_default_enabled: false,
+      default_reasoning_effort: "high",
+    },
+  ] as Parameters<typeof subscriptionCatalogModels>[1];
+  const dialog = subscriptionCatalogModels(claude, catalog);
+  const menu = subscriptionMenuModels(claude, catalog);
+  assert.deepEqual(effortsFor("anthropic/claude-opus-4.5", dialog), ["low", "medium", "high"]);
+  assert.deepEqual(
+    effortsFor("anthropic/claude-opus-4.5", dialog),
+    effortsFor("subscription/claude/anthropic/claude-opus-4.5", menu),
+  );
+  const opus = dialog.find((m) => m.value === "anthropic/claude-opus-4.5")!;
+  // The catalog's label stays; its thinking default does not reach the CLI model.
+  assert.equal(opus.label, "Claude Opus 4.5");
+  assert.equal(opus.reasoning_default_enabled, true);
+  assert.equal(unpickedEffort(opus), null);
+  const haiku = dialog.find((m) => m.value === "anthropic/claude-haiku-4.5")!;
+  assert.equal(haiku.supports_thinking, false);
+  assert.deepEqual(haiku.reasoning_efforts, []);
+
+  const codex = subscriptionCatalogModels(
+    cli({ id: "codex", models: ["openai/gpt-6.1-sol"], efforts: { "openai/gpt-6.1-sol": full } }),
+    [],
+  );
+  assert.deepEqual(effortsFor("openai/gpt-6.1-sol", codex), full);
+  assert.equal(codex[0]!.supports_thinking, true);
+
+  // An OpenRouter model outside the CLI list keeps the catalog's levels.
+  assert.deepEqual(effortsFor("openrouter/anthropic/claude-opus-4.5", catalog), [
+    "none",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ]);
+});
 test("a CLI status with no effort table offers no effort", () => {
   const [row] = subscriptionMenuModels(cli({ models: ["anthropic/claude-opus-5.5"] }), []);
   assert.equal(row!.supports_thinking, false);

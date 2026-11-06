@@ -1,4 +1,5 @@
 import { isCliProvider } from "@/shared/lib/cli-providers";
+import { cliEffort } from "@/shared/lib/effort-slider";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import type { ModelConfig } from "@/shared/types/api";
 
@@ -9,6 +10,33 @@ import type { ModelConfig } from "@/shared/types/api";
 export function economyEligible(config: ModelConfig | null | undefined): boolean {
   if (!config?.name.trim() || isLocalMode()) return false;
   return (config.token_source ?? "managed") === "managed" && config.cli_provider == null;
+}
+
+/**
+ * Whether the config dialog's effort picker is the slider: only for a local CLI
+ * model, and only when no saved level still runs with thinking on, since the
+ * slider's default stop clears the level.
+ */
+export function usesEffortSlider(
+  tokenSource: ModelConfig["token_source"],
+  thinkingDefaultOn: boolean,
+): boolean {
+  return tokenSource === "subscription" && thinkingDefaultOn;
+}
+
+/**
+ * The saved effort the config dialog keeps for a CLI model: the level the
+ * backend runs for it (cliEffort), so the slider and Save match the run. Max
+ * or a retired level becomes the model's top level; a level the CLI does not
+ * take becomes the default. `cliLevels` is undefined until the CLI's model
+ * list loads, and for every other source; the saved effort then stays as it is.
+ */
+export function runnableEffort(
+  stored: string | undefined,
+  cliLevels: readonly string[] | undefined,
+): string | undefined {
+  if (!stored || !cliLevels) return stored;
+  return cliEffort(stored, cliLevels) ?? undefined;
 }
 
 /**

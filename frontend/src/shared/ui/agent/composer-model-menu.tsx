@@ -8,10 +8,10 @@ import {
   RETIRED_AUTO_MODEL,
 } from "@/features/local-runtime";
 import { Check, CaretDown, CaretRight, Lightning } from "@/shared/ui/icons";
-import { EffortSlider } from "@/shared/ui/agent/effort-slider";
+import { EffortSlider, effortHint } from "@/shared/ui/agent/effort-slider";
 
 import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
-import { liveEffort } from "@/shared/lib/effort-slider";
+import { cliEffort, liveEffort } from "@/shared/lib/effort-slider";
 import { effortLabel, effortsFor, unpickedEffort } from "@/shared/lib/model-efforts";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
@@ -83,27 +83,6 @@ export function hiddenPickEffortStale(
   return !current?.supports_thinking || !efforts.includes(effort);
 }
 
-function effortHint(level: string | null): string {
-  switch (level) {
-    case "none":
-      return msg("agent.model_menu.effort_none_hint");
-    case "minimal":
-      return msg("agent.model_menu.effort_minimal_hint");
-    case "low":
-      return msg("agent.model_menu.effort_low_hint");
-    case "medium":
-      return msg("agent.model_menu.effort_medium_hint");
-    case "high":
-      return msg("agent.model_menu.effort_high_hint");
-    case "xhigh":
-      return msg("agent.model_menu.effort_xhigh_hint");
-    case "max":
-      return msg("agent.model_menu.effort_max_hint");
-    default:
-      return msg("agent.model_menu.effort_default_hint");
-  }
-}
-
 /**
  * The composer's model menu, structured like Codex's: a quiet chip naming the
  * current choice ("gpt-5 High") opens a compact two-row menu — Model and
@@ -112,7 +91,8 @@ function effortHint(level: string | null): string {
  * whole menu; the choice applies from the next turn of the surrounding
  * conversation. The thinking row is visible but inert on models without
  * reasoning support. The model submenu shows only the featured shortlist
- * the catalog derives from provider metadata.
+ * the catalog derives from provider metadata. A local CLI model with effort
+ * levels opens on the effort slider instead; its model name opens the list.
  */
 export function ComposerModelMenu({
   value: rawValue,
@@ -205,11 +185,25 @@ export function ComposerModelMenu({
     current,
     efforts,
   );
-  const shownEffort = effortStale ? null : effort;
   // A local CLI row gets the slider; hosted and OpenRouter rows keep the list.
   const cliRow = !!current && menuModelGroup(current) === "local";
+  // A CLI row shows the level the backend runs, so Max on a model whose top is lower shows that top.
+  const shownEffort = effortStale ? null : cliRow ? cliEffort(savedEffort, efforts) : effort;
   const fastShown = cliRow && !!current?.supports_fast && !!onFastChange;
   const sliderRef = React.useRef<HTMLDivElement>(null);
+  // A CLI model with effort levels opens straight on the slider; its model
+  // name swaps the panel to the model list, so there is one path to it.
+  const sliderMenu = cliRow && canThink && efforts.length > 0;
+  const [view, setView] = React.useState<"slider" | "models">("slider");
+  const listRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    if (view !== "models") return;
+    const list = listRef.current;
+    const row =
+      list?.querySelector<HTMLElement>("[data-current]") ??
+      list?.querySelector<HTMLElement>('[role="menuitem"]');
+    row?.focus();
+  }, [view]);
 
   const pick = (model: string | null) => {
     onChange(model);
@@ -227,8 +221,68 @@ export function ComposerModelMenu({
     if (fast && !available.find((m) => m.value === target)?.supports_fast) onFastChange?.(false);
   };
 
+  const modelRows = (
+    <div
+      ref={listRef}
+      className="max-h-[min(18rem,var(--radix-dropdown-menu-content-available-height))] overflow-y-auto py-1"
+    >
+      {currentExtra && (
+        <MenuItem
+          selected
+          label={modelDisplayName(currentExtra.value, available)}
+          icon={<ProviderLogo slug={modelProviderSlug(currentExtra.value)} size={16} />}
+          onSelect={() => pick(currentExtra.value)}
+        />
+      )}
+      {featured.map((m, i) => (
+        <React.Fragment key={m.value}>
+          {grouped && (i === 0 || menuModelGroup(featured[i - 1]!) !== menuModelGroup(m)) && (
+            <DropdownMenuLabel>{msg(MENU_GROUP_LABELS[menuModelGroup(m)])}</DropdownMenuLabel>
+          )}
+          <MenuItem
+            selected={effective === m.value}
+            label={modelDisplayName(m.value, available)}
+            icon={<ProviderLogo slug={modelProviderSlug(m.value)} size={16} />}
+            onSelect={() => pick(m.value)}
+          />
+        </React.Fragment>
+      ))}
+    </div>
+  );
+
+  const slider = (
+    <EffortSlider
+      ref={sliderRef}
+      efforts={efforts}
+      value={shownEffort}
+      onChange={onEffortChange}
+      modelName={displayName}
+      onPickModel={() => setView("models")}
+      hintFor={effortHint}
+      fast={
+        fastShown
+          ? {
+              on: fast,
+              onChange: onFastChange!,
+              note: msg(
+                effective?.startsWith("subscription/claude/")
+                  ? "agent.model_menu.fast_claude_note"
+                  : "agent.model_menu.fast_codex_note",
+              ),
+            }
+          : null
+      }
+    />
+  );
+
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
+    <DropdownMenu
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) setView("slider");
+      }}
+    >
       <DropdownMenuTrigger asChild>
         <button
           type="button"
@@ -262,83 +316,46 @@ export function ComposerModelMenu({
           <CaretDown className="size-3 shrink-0 text-muted-foreground" />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" sideOffset={6} className="w-64">
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger className="py-2.5">
-            <span className="shrink-0">{msg("agent.model_menu.model")}</span>
-            <span className="ms-auto truncate text-muted-foreground" dir="ltr">
-              {displayName}
-            </span>
-            <CaretRight className="size-3.5 shrink-0 text-muted-foreground rtl:rotate-180" />
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent className="w-72 overflow-hidden p-0">
-            <div className="max-h-[min(18rem,var(--radix-dropdown-menu-content-available-height))] overflow-y-auto py-1">
-              {currentExtra && (
-                <MenuItem
-                  selected
-                  label={modelDisplayName(currentExtra.value, available)}
-                  icon={<ProviderLogo slug={modelProviderSlug(currentExtra.value)} size={16} />}
-                  onSelect={() => pick(currentExtra.value)}
-                />
-              )}
-              {featured.map((m, i) => (
-                <React.Fragment key={m.value}>
-                  {grouped &&
-                    (i === 0 || menuModelGroup(featured[i - 1]!) !== menuModelGroup(m)) && (
-                      <DropdownMenuLabel>
-                        {msg(MENU_GROUP_LABELS[menuModelGroup(m)])}
-                      </DropdownMenuLabel>
-                    )}
-                  <MenuItem
-                    selected={effective === m.value}
-                    label={modelDisplayName(m.value, available)}
-                    icon={<ProviderLogo slug={modelProviderSlug(m.value)} size={16} />}
-                    onSelect={() => pick(m.value)}
-                  />
-                </React.Fragment>
-              ))}
-            </div>
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger disabled={!canThink || efforts.length === 0} className="py-2.5">
-            <span className="shrink-0">{msg("agent.model_menu.effort_label")}</span>
-            <span className="ms-auto truncate text-muted-foreground">
-              {shownEffort ? effortLabel(shownEffort) : msg("agent.model_menu.effort_default")}
-            </span>
-            <CaretRight className="size-3.5 shrink-0 text-muted-foreground rtl:rotate-180" />
-          </DropdownMenuSubTrigger>
-          {cliRow ? (
-            <DropdownMenuSubContent
-              className="w-72 p-0"
-              // Radix focuses the panel when the keyboard opens it; the slider takes it.
-              onFocus={(e) => {
-                if (e.target === e.currentTarget) sliderRef.current?.focus();
-              }}
-            >
-              <EffortSlider
-                ref={sliderRef}
-                efforts={efforts}
-                value={shownEffort}
-                onChange={onEffortChange}
-                modelName={displayName}
-                hintFor={effortHint}
-                fast={
-                  fastShown
-                    ? {
-                        on: fast,
-                        onChange: onFastChange!,
-                        note: msg(
-                          effective?.startsWith("subscription/claude/")
-                            ? "agent.model_menu.fast_claude_note"
-                            : "agent.model_menu.fast_codex_note",
-                        ),
-                      }
-                    : null
-                }
-              />
+      {sliderMenu ? (
+        <DropdownMenuContent
+          align="start"
+          sideOffset={6}
+          className="w-80 overflow-hidden p-0"
+          onEscapeKeyDown={(e) => {
+            if (view !== "models") return;
+            e.preventDefault();
+            setView("slider");
+            requestAnimationFrame(() => sliderRef.current?.focus());
+          }}
+          // Radix focuses the panel when it opens; the slider takes it.
+          onFocus={(e) => {
+            if (e.target === e.currentTarget && view === "slider") sliderRef.current?.focus();
+          }}
+        >
+          {view === "slider" ? slider : modelRows}
+        </DropdownMenuContent>
+      ) : (
+        <DropdownMenuContent align="start" sideOffset={6} className="w-64">
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger className="py-2.5">
+              <span className="shrink-0">{msg("agent.model_menu.model")}</span>
+              <span className="ms-auto truncate text-muted-foreground" dir="ltr">
+                {displayName}
+              </span>
+              <CaretRight className="size-3.5 shrink-0 text-muted-foreground rtl:rotate-180" />
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="w-72 overflow-hidden p-0">
+              {modelRows}
             </DropdownMenuSubContent>
-          ) : (
+          </DropdownMenuSub>
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger disabled={!canThink || efforts.length === 0} className="py-2.5">
+              <span className="shrink-0">{msg("agent.model_menu.effort_label")}</span>
+              <span className="ms-auto truncate text-muted-foreground">
+                {shownEffort ? effortLabel(shownEffort) : msg("agent.model_menu.effort_default")}
+              </span>
+              <CaretRight className="size-3.5 shrink-0 text-muted-foreground rtl:rotate-180" />
+            </DropdownMenuSubTrigger>
             <DropdownMenuSubContent className="w-60">
               {[null, ...efforts].map((level) => (
                 <MenuItem
@@ -357,9 +374,9 @@ export function ComposerModelMenu({
                 />
               ))}
             </DropdownMenuSubContent>
-          )}
-        </DropdownMenuSub>
-      </DropdownMenuContent>
+          </DropdownMenuSub>
+        </DropdownMenuContent>
+      )}
     </DropdownMenu>
   );
 }
@@ -381,7 +398,7 @@ function MenuItem({
   dir?: "ltr" | "auto";
 }) {
   return (
-    <DropdownMenuItem onSelect={onSelect}>
+    <DropdownMenuItem onSelect={onSelect} data-current={selected || undefined}>
       {icon}
       <span className="flex min-w-0 flex-1 flex-col">
         <span

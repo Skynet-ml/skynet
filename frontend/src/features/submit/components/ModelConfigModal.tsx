@@ -26,10 +26,12 @@ import { Separator } from "@/shared/ui/primitives/separator";
 import { ModelPicker, modelSupportsThinking } from "./ModelPicker";
 import { ProviderLogo } from "@/shared/ui/provider-logo";
 import { modelDisplayName, modelProviderSlug } from "@/shared/lib/model-provider";
-import { effortLabel, effortsFor, unpickedEffort } from "@/shared/lib/model-efforts";
+import { effortsFor, unpickedEffort } from "@/shared/lib/model-efforts";
 import { NumberInput } from "@/shared/ui/number-input";
 import { Segmented } from "@/shared/ui/segmented";
 import { Disclosure } from "./Disclosure";
+import { ReasoningEffortControl } from "./ReasoningEffortControl";
+import { runnableEffort, usesEffortSlider } from "../lib/model-config";
 import { cn } from "@/shared/lib/utils";
 import type { ModelConfig, CatalogModel } from "@/shared/types/api";
 import { HelpTip } from "@/shared/ui/help-tip";
@@ -263,7 +265,12 @@ export function ModelConfigModal({
   };
   const { mandatory: thinkingMandatory, defaultOn: thinkingDefaultOn } = thinkingInfo(draft.name);
   const canThink = modelSupportsThinking(draft.name, detectionModels);
-  const storedEffort = draft.extra?.reasoning_effort as string | undefined;
+  const savedEffort = draft.extra?.reasoning_effort as string | undefined;
+  const cliLevels =
+    mode === "subscription"
+      ? subscriptionModels?.find((m) => m.value === draft.name)?.reasoning_efforts
+      : undefined;
+  const storedEffort = runnableEffort(savedEffort, cliLevels ?? undefined);
   const thinkingEnabled =
     thinkingMandatory || (storedEffort ? storedEffort !== "none" : thinkingDefaultOn);
   const reasoningEffort =
@@ -292,8 +299,8 @@ export function ModelConfigModal({
     });
   };
 
-  const setEffort = (level: string) => {
-    setDraft((p) => ({ ...p, extra: { ...p.extra, reasoning_effort: level } }));
+  const setEffort = (level: string | null) => {
+    setDraft((p) => ({ ...p, extra: withEffort(p.extra, level) }));
   };
 
   const handleSave = () => {
@@ -308,7 +315,13 @@ export function ModelConfigModal({
         extra: withEffort(undefined, storedEffort ?? null),
       });
     } else {
-      onSave(withoutInlineConnection(draft));
+      onSave(
+        withoutInlineConnection(
+          storedEffort === savedEffort
+            ? draft
+            : { ...draft, extra: withEffort(draft.extra, storedEffort ?? null) },
+        ),
+      );
     }
     onOpenChange(false);
   };
@@ -561,11 +574,15 @@ export function ModelConfigModal({
                       <div className="space-y-3">
                         <div className="flex items-center justify-between">
                           <Label>{msg("auto.features.submit.components.modelconfigmodal.8")}</Label>
-                          <Switch
-                            checked={thinkingEnabled}
-                            onCheckedChange={setThinking}
-                            disabled={thinkingMandatory}
-                          />
+                          {/* A CLI has no off level: the backend drops "none" and the
+                              CLI runs its default, so a CLI model gets no switch. */}
+                          {mode !== "subscription" && (
+                            <Switch
+                              checked={thinkingEnabled}
+                              onCheckedChange={setThinking}
+                              disabled={thinkingMandatory}
+                            />
+                          )}
                         </div>
                         {thinkingMandatory && (
                           <p className="text-xs text-muted-foreground">
@@ -573,20 +590,13 @@ export function ModelConfigModal({
                           </p>
                         )}
                         {thinkingEnabled && effortLadder.length > 0 && (
-                          <div className="space-y-2 p-3 border rounded-lg bg-muted/30">
-                            <Label>
-                              {msg("auto.features.submit.components.modelconfigmodal.9")}
-                            </Label>
-                            <Segmented
-                              label={msg("auto.features.submit.components.modelconfigmodal.9")}
-                              value={reasoningEffort}
-                              onChange={setEffort}
-                              options={effortLadder.map((val) => ({
-                                value: val,
-                                label: effortLabel(val),
-                              }))}
-                            />
-                          </div>
+                          <ReasoningEffortControl
+                            cli={usesEffortSlider(mode, thinkingDefaultOn)}
+                            efforts={effortLadder}
+                            stored={storedEffort ?? null}
+                            fallback={reasoningEffort}
+                            onChange={setEffort}
+                          />
                         )}
                       </div>
                     </>
