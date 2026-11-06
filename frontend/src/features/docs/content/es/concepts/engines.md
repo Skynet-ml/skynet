@@ -1,30 +1,27 @@
-Un motor es el método de búsqueda que propone nuevas versiones de tu artefacto. Skynet tiene seis motores nativos para repositorios, tres optimizadores DSPy para programas DSPy y **Auto**. Esta página explica qué hace cada uno, cuándo elegirlo y qué ajustes tiene.
+Un motor es el método de búsqueda que propone nuevas versiones de tu repositorio. Skynet tiene seis motores nativos y **Auto**. Todos los motores trabajan con repositorios. Esta página explica qué hace cada uno, cuándo elegirlo y qué ajustes tiene.
 
-Lee primero [Cómo funciona la optimización](/docs/concepts/optimization) si no sabes qué motores encajan con tu artefacto.
+Lee primero [Cómo funciona la optimización](/docs/concepts/optimization) si no sabes qué motor encaja con tu tarea.
 
 ## Comparación rápida
 
-| Motor                 | Tipos de artefacto       | Ajustes del agente de código          | Ajuste de iteraciones máx. |
-| --------------------- | ------------------------ | ------------------------------------- | -------------------------- |
-| Auto | Programa DSPy | No | No |
-| GEPA | Repositorio | No | No |
-| Best-of-N | Repositorio | No | No |
-| AutoResearch | Repositorio | Sí | No |
-| Meta-Harness | Repositorio | Sí | Sí |
-| AutoSaddler | Repositorio | Sí | Sí |
-| ShinkaEvolve | Repositorio | No. Tiene su propio ajuste de editor. | Sí |
-| DSPy GEPA             | Programa DSPy            | No                                    | No                         |
-| DSPy MIPROv2          | Programa DSPy            | No                                    | No                         |
-| DSPy BootstrapFewShot | Programa DSPy            | No                                    | No                         |
+| Motor        | Ajustes del agente de código          | Ajuste de iteraciones máx. |
+| ------------ | ------------------------------------- | -------------------------- |
+| Auto         | No                                    | No                         |
+| GEPA         | No                                    | No                         |
+| Best-of-N    | No                                    | No                         |
+| AutoResearch | Sí                                    | No                         |
+| Meta-Harness | Sí                                    | Sí                         |
+| AutoSaddler  | Sí                                    | Sí                         |
+| ShinkaEvolve | No. Tiene su propio ajuste de editor. | Sí                         |
 
-El asistente marca GEPA, DSPy GEPA y Auto como optimizadores que usan el texto de los comentarios de tu métrica.
+El asistente marca GEPA y Auto como optimizadores que usan el texto de los comentarios de tu evaluador.
 
 ## Auto
 
-Auto es la opción predeterminada. Lo que ejecuta depende del tipo de artefacto:
+Auto es la opción predeterminada para todas las ejecuciones. Trabaja en dos fases:
 
-- **Programa DSPy**: Auto ejecuta DSPy GEPA.
-- **Repositorio**: Auto no está disponible. Selecciona un motor nativo.
+1. Explora con GEPA, AutoResearch, Meta-Harness, AutoSaddler y ShinkaEvolve.
+2. Continúa GEPA desde la mejor versión que encontró la exploración.
 
 **Elígelo cuando** no sepas qué motor encaja. Es el mejor punto de partida.
 
@@ -32,7 +29,7 @@ Auto es la opción predeterminada. Lo que ejecuta depende del tipo de artefacto:
 
 «Evolución reflexiva con un frente de Pareto de versiones». El modelo de reflexión lee la puntuación y los comentarios de cada caso y escribe una versión mejor. GEPA mantiene un frente de versiones, cada una de las cuales es la mejor en algunos casos.
 
-**Elígelo cuando** tu métrica dé comentarios concretos y quieras un único motor potente.
+**Elígelo cuando** tu evaluador dé comentarios concretos y quieras un único motor potente.
 
 ## Best-of-N
 
@@ -54,25 +51,15 @@ Un agente de código propone un lote de candidatos en cada iteración. Usa el hi
 
 ## AutoSaddler
 
-Un agente de código lee los comentarios de tu métrica y aplica parches a la versión. Skynet solo conserva los parches que confirma una nueva ejecución del evaluador.
+Un agente de código lee los comentarios de tu evaluador y aplica parches a la versión. Skynet solo conserva los parches que confirma una nueva ejecución del evaluador.
 
-**Elígelo cuando** los comentarios de tu métrica señalen defectos claros y localizados.
+**Elígelo cuando** los comentarios de tu evaluador señalen defectos claros y localizados.
 
 ## ShinkaEvolve
 
 «Evoluciona muchas versiones en islas paralelas y aprende qué modelos las mejoran más». Es una búsqueda evolutiva sobre una población de candidatos, con mutaciones y cruces que escribe un modelo.
 
 **Elígelo cuando** quieras una exploración amplia y tengas un presupuesto mayor.
-
-## Optimizadores de DSPy
-
-| Optimizador           | Qué hace                                                                                                                            |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| DSPy GEPA             | Lee los comentarios de la métrica y hace evolucionar las instrucciones de cada predictor.                                          |
-| DSPy MIPROv2          | Propone instrucciones y demostraciones few-shot a la vez, y busca sus combinaciones con optimización bayesiana.                    |
-| DSPy BootstrapFewShot | Reúne ejemplos resueltos que el programa acierta y los añade como demostraciones few-shot. No usa un modelo de reflexión.          |
-
-DSPy MIPROv2 y DSPy BootstrapFewShot necesitan pares (casos con salidas esperadas).
 
 ## Ajustes
 
@@ -84,7 +71,7 @@ DSPy MIPROv2 y DSPy BootstrapFewShot necesitan pares (casos con salidas esperada
 | Detener al llegar a la puntuación       | Desactivado          | 0 o más                                                           |
 | Iteraciones máx.                        | Desactivado          | De 1 a 1000. Solo Meta-Harness, AutoSaddler y ShinkaEvolve.       |
 
-Una ejecución del evaluador es una llamada de tu métrica sobre un caso. La nueva puntuación final de la versión inicial y de la ganadora no cuenta para **Máximo de ejecuciones del evaluador**.
+Una ejecución del evaluador es una llamada de tu evaluador sobre un caso. La nueva puntuación final de la versión inicial y de la ganadora no cuenta para **Máximo de ejecuciones del evaluador**.
 
 ### Ajustes del agente de código
 

@@ -98,7 +98,7 @@ A run must know which columns are inputs and which column is the expected output
 
 In the submit wizard, the step "How to read the data" shows each column with three choices:
 
-- **Input**: the program receives this value.
+- **Input**: your scorer receives this value in `case["input"]`.
 - **Output**: the expected answer that the scorer compares against.
 - **Skip**: the run ignores this column.
 

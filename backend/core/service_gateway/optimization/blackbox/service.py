@@ -111,7 +111,7 @@ logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str, dict[str, Any]], None]
 
-_REPO_ENGINE_REASON = "Auto mode does not optimize a repository; pick one engine."
+_REPO_ENGINE_REASON = "This engine does not optimize a repository."
 
 # Progress events per run are capped near this many so a 100k-run budget
 # does not flood the job log.
@@ -210,8 +210,8 @@ def engine_catalog(target_kind: str) -> BlackboxEngineCatalogResponse:
             if not spec.hidden
         ],
         auto_engines=list(AUTO_ENGINES),
-        auto_available=auto_reason is None and target_kind != BLACKBOX_TARGET_REPO,
-        auto_unavailable_reason=auto_reason or (_REPO_ENGINE_REASON if target_kind == BLACKBOX_TARGET_REPO else None),
+        auto_available=auto_reason is None,
+        auto_unavailable_reason=auto_reason,
         auto_checkpoint_recovery_supported=False,
         auto_checkpoint_recovery_reason="The Auto recipe cannot restore its multi-engine search from one checkpoint.",
         proposer_runtimes=runtimes,

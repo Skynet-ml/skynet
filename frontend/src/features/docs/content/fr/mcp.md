@@ -61,7 +61,7 @@ Aucun outil n'ajoute de fonds, ne modifie votre solde ni ne change les paramètr
 4. L'agent appelle `get_run` jusqu'à la fin de l'exécution. Les statuts finaux sont `success`, `failed`, `cancelled` et `stopped`.
 
 > [!TIP]
-> Indiquez votre plafond de dépenses à l'agent dans votre prompt, par exemple « Optimise ce prompt. Dépense au maximum 10 $. » L'agent utilise alors ce plafond dans `start_run`.
+> Indiquez votre plafond de dépenses à l'agent dans votre prompt, par exemple « Optimise ce dépôt. Dépense au maximum 10 $. » L'agent utilise alors ce plafond dans `start_run`.
 
 L'exécution s'arrête quand elle atteint son plafond de dépenses. Lisez [Facturation](/docs/concepts/billing) pour savoir comment Skynet facture une exécution.
 

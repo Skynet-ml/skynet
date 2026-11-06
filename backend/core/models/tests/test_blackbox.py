@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from core.models import blackbox as blackbox_models
 from core.models.blackbox import (
     BlackboxRepoSecret,
     BlackboxRepoSource,
@@ -205,10 +206,21 @@ def test_repo_run_starts_from_the_empty_patch() -> None:
     assert request.target.repo.editable_paths == ["src"]
 
 
-def test_repo_run_rejects_auto_mode() -> None:
-    """Auto mode never takes a repository; a repository run picks one engine."""
+def test_repo_run_accepts_auto_mode() -> None:
+    """Auto mode takes a repository: it is the default way to optimize one."""
+    request = BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "auto"}))
+    assert request.strategy.mode == "auto"
+
+
+def test_repo_run_rejects_a_single_engine_that_does_not_edit_a_checkout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A single engine outside the repository set still fails validation.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(blackbox_models, "BLACKBOX_REPO_ENGINES", frozenset({"gepa"}))
     with pytest.raises(ValidationError, match="repository target"):
-        BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "auto"}))
+        BlackboxRunRequest.model_validate(_repo_request(strategy={"mode": "single", "engine": "best_of_n"}))
 
 
 @pytest.mark.parametrize("engine", ["gepa", "best_of_n", "meta_harness", "autosaddler"])

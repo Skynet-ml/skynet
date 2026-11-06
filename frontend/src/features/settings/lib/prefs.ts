@@ -1,5 +1,5 @@
 import type { ModelConfig } from "@/shared/types/api";
-import type { OptimizerChoice } from "@/shared/types/unified-run";
+import { storedOptimizerChoice, type OptimizerChoice } from "@/shared/types/unified-run";
 
 type CodeAssistDefault = "auto" | "manual";
 type SplitModeDefault = "auto" | "manual";
@@ -118,7 +118,11 @@ export function readPref<K extends keyof UserPrefs>(key: K): UserPrefs[K] {
   try {
     const raw = window.localStorage.getItem(PREF_KEYS[key]);
     if (raw == null) return DEFAULT_PREFS[key];
-    return JSON.parse(raw) as UserPrefs[K];
+    const value: unknown = JSON.parse(raw);
+    // A saved default can name a retired DSPy optimizer; it reads as Auto.
+    if (key === "optimizerEngine")
+      return (storedOptimizerChoice(value) ?? DEFAULT_PREFS.optimizerEngine) as UserPrefs[K];
+    return value as UserPrefs[K];
   } catch {
     return DEFAULT_PREFS[key];
   }

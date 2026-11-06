@@ -1,9 +1,10 @@
 import type { ModelConfig, SplitFractions } from "@/shared/types/api";
-import type {
-  ArtifactKind,
-  DataMode,
-  OptimizerChoice,
-  UnifiedCase,
+import {
+  storedOptimizerChoice,
+  type ArtifactKind,
+  type DataMode,
+  type OptimizerChoice,
+  type UnifiedCase,
 } from "@/shared/types/unified-run";
 import type {
   InputsSlice,
@@ -123,9 +124,6 @@ function cloneMeta(payload: ClonePayload, jobName?: string | null): Partial<Meta
 
 const OPTIMIZER_CHOICES: readonly OptimizerChoice[] = [
   "auto",
-  "dspy_gepa",
-  "dspy_miprov2",
-  "dspy_bootstrap_fewshot",
   "gepa",
   "best_of_n",
   "autoresearch",
@@ -204,8 +202,8 @@ function cloneUnified(payload: ClonePayload): Omit<CloneSlices, "meta"> {
     extraReflectionModels: modelConfigs(models.extra_reflection_models),
     ...engineKnobs(optimizer),
   };
-  if (typeof optimizer.choice === "string")
-    optimizerSlice.choice = optimizer.choice as OptimizerChoice;
+  const choice = storedOptimizerChoice(optimizer.choice);
+  if (choice) optimizerSlice.choice = choice;
 
   const metricCode = typeof workspace.metric_code === "string" ? workspace.metric_code : "";
   const reflection = modelConfig(models.reflection_model);

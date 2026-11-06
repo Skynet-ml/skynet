@@ -80,6 +80,7 @@
     "contract.run_missing": "Der Ausführungscode muss run(artifact, input) definieren.",
     "contract.shape.blackbox": "Die Bewertungsfunktion muss (score, side_info) zurückgeben, wobei side_info ein dict mit einem feedback-String ist.",
     "optimization.grid_search_retired": "Rastersuchen können nicht mehr gestartet, fortgesetzt oder geklont werden. Dieser Lauf bleibt lesbar; starten Sie stattdessen eine neue Optimierung im Assistenten.",
+    "optimization.dspy_run_retired": "Skynet optimiert jetzt nur noch Repositorys. DSPy-Programmläufe können nicht mehr gestartet, fortgesetzt, geklont, bereitgestellt oder geplant werden. Dieser Lauf bleibt lesbar; starten Sie stattdessen eine neue Repository-Optimierung.",
     "submit.unified.contract_failed": "Der Code entspricht nicht dem, was der Optimierer braucht: {error}",
     "submit.unified.contract_budget": "Das Ausgabenlimit ist zu niedrig, um den Code an Beispielen auszuführen: {error} Erhöhe das Limit und prüfe erneut.",
     "submit.preflight.scorer_ready": "Der Evaluator lädt; die Bewertung wartet auf den ersten erzeugten Kandidaten.",

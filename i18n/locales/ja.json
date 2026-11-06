@@ -80,6 +80,7 @@
     "contract.run_missing": "実行コードには run(artifact, input) を定義する必要があります。",
     "contract.shape.blackbox": "スコア関数は (score, side_info) を返す必要があります。side_info は feedback 文字列を含む dict です。",
     "optimization.grid_search_retired": "グリッドサーチは開始、再開、複製ができなくなりました。この実行は引き続き閲覧できます。代わりにウィザードから新しい最適化を開始してください。",
+    "optimization.dspy_run_retired": "Skynet は現在リポジトリのみを最適化します。DSPy プログラムの実行は、開始、再開、複製、提供、スケジュールができなくなりました。この実行は引き続き閲覧できます。代わりにリポジトリの新しい最適化を開始してください。",
     "submit.unified.contract_failed": "コードがオプティマイザーの要件を満たしていません: {error}",
     "submit.unified.contract_budget": "サンプルでコードを実行するには支出上限が低すぎます: {error} 上限を引き上げてから再度確認してください。",
     "submit.preflight.scorer_ready": "評価器を読み込み中です。スコア付けは最初に生成される候補を待っています。",

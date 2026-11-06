@@ -88,12 +88,12 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> Any:
         lambda request, *, username, workflow, supplied_key: SimpleNamespace(budget=None, job=supplied_key),
     )
 
-    def submit(username: str, replay_key: str | None, work: Any) -> Any:
+    def submit(request: Any, *, service: Any, job_store: Any, current_user: Any, idempotency_key: str) -> Any:
         """Record the submission instead of starting a run."""
-        calls["submits"].append({"username": username, "key": replay_key})
+        calls["submits"].append({"username": current_user.username, "key": idempotency_key})
         return SimpleNamespace(model_dump=lambda mode: {"optimization_id": f"opt-{len(calls['submits'])}"})
 
-    monkeypatch.setattr(remote_mcp_repo, "_submit_within_proxy_timeout", submit)
+    monkeypatch.setattr(remote_mcp_repo, "submit_repo_payload", submit)
     app = FastAPI()
     mount_remote_mcp(
         app,

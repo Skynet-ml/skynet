@@ -1,4 +1,4 @@
-L'assistant de soumission configure et démarre une exécution. Il comporte quatre étapes : **Tâche**, **Entrées**, **Optimiseur** et **Métrique et exécution**. Chaque étape comporte un ou plusieurs écrans. Ce guide présente chaque écran, de la tâche jusqu'à la vérification du contrat et au démarrage de l'exécution.
+L'assistant de soumission configure et démarre une exécution. Il comporte quatre étapes : **Tâche**, **Entrées**, **Optimiseur** et **Métrique et exécution**. Chaque étape comporte un ou plusieurs écrans. Ce guide présente chaque écran, de la tâche jusqu'à la vérification et au démarrage de l'exécution.
 
 > [!NOTE]
 > L'assistant affiche plus ou moins de paramètres selon le niveau d'expérience : **Guidé**, **Standard** ou **Expert**. Guidé est le niveau par défaut. Changez de niveau dans **Paramètres → Compte**, sous **Quantité d'informations affichées**. Certains libellés sont plus simples au niveau Guidé. Ce guide utilise les libellés des niveaux Standard et Expert et donne entre parenthèses le libellé du niveau Guidé quand il est différent.
@@ -9,25 +9,37 @@ L'assistant de soumission configure et démarre une exécution. Il comporte quat
 
 Décrivez votre tâche à l'assistant IA dans la discussion **Entretien sur la tâche**. L'assistant IA rédige deux champs pour vous :
 
-- **Objectif** (Guidé : **But**) : ce que l'artefact optimisé doit bien faire.
+- **Objectif** (Guidé : **But**) : ce que le code optimisé doit bien faire.
 - **Contexte** (Guidé : **Contexte supplémentaire**) : le contexte, les contraintes et ce à quoi ressemble un bon résultat.
 
 Vous pouvez modifier les deux champs. L'assistant IA n'écrase pas vos modifications.
 
-### Ce qui sera optimisé
+### D'où vient le code
 
-Dans **Ce qui est optimisé**, sélectionnez **Programme DSPy** ou **Un dépôt GitHub**.
+Skynet, c'est Optimize Anything : chaque exécution optimise un dépôt. Sélectionnez l'un de ces deux choix :
 
-Indiquez ensuite la **Version de départ** (Guidé : **Notre point de départ**). Collez la version actuelle, ou laissez l'assistant IA rédiger un brouillon.
+- **Utiliser un dépôt** : optimiser le code d'un dépôt GitHub que vous avez connecté.
+- **Créer un nouveau dépôt** : Skynet crée un nouveau dépôt GitHub dans votre compte. L'assistant IA rédige une première solution à partir de votre tâche et de vos données. Cette solution est la version de départ.
 
-### Optimiser un dépôt
+Connectez GitHub dans **Paramètres → Connecteurs** avant de commencer.
 
-Vous pouvez aussi optimiser le code d'un dépôt. Renseignez ces champs :
+### Utiliser un dépôt
+
+Renseignez ces champs :
 
 - **Dépôt** : choisissez un dépôt, ou saisissez-le sous la forme `owner/name`.
 - **Commit** : un SHA de 40 caractères. Laissez le champ vide pour utiliser le dernier commit de la branche.
 - **Chemins que l'optimiseur peut modifier** : un fichier ou un dossier par ligne. Un point désigne le dépôt entier.
 - **Commande d'installation** : s'exécute dans chaque nouvelle copie de travail avant la notation. Laissez le champ vide et Skynet trouve la commande.
+
+### Créer un nouveau dépôt
+
+Renseignez ces champs :
+
+- **Nom** : le nom du nouveau dépôt. Votre compte GitHub ne doit pas déjà avoir un dépôt de ce nom.
+- **Privé** ou **Public** : qui peut voir le dépôt sur GitHub.
+
+Skynet pousse chaque candidat sur sa propre branche. La branche `skynet/best` pointe vers la meilleure version.
 
 ## Étape 2 : Entrées
 
@@ -61,8 +73,8 @@ L'assistant ne liste que les optimiseurs adaptés à votre tâche et à vos entr
 
 ### Modèles
 
-- **Modèle de tâche** : le modèle qu'appelle votre code d'exécution. Laissez le champ vide si votre code d'exécution n'appelle pas de modèle. Un programme DSPy doit avoir un modèle de tâche.
 - **Modèle de réflexion** : le modèle qui lit les scores et les retours et rédige les candidats suivants. Avec un optimiseur basé sur un agent de code, c'est le modèle de l'agent.
+- **Modèle de tâche** : le modèle que le code de votre dépôt et votre évaluateur peuvent appeler via la passerelle de modèles de Skynet. Lisez [Fonctionnement de l'optimisation](/docs/concepts/optimization).
 
 ### Budget
 
@@ -77,44 +89,38 @@ L'assistant ne vous laisse pas continuer si le plafond ou votre solde est infér
 
 ## Étape 4 : Métrique et exécution
 
-### Code et métrique
+### Évaluateur
 
-Rédigez deux fichiers :
+Rédigez `scorer.py`. Ce fichier définit `score(repo_path, case)` et renvoie un score avec un retour. L'assistant IA peut le rédiger pour vous. Lisez [Métriques et évaluateurs](/docs/concepts/scorers).
 
-- `run.py` : le code d'exécution qui exécute votre artefact sur un cas.
-- `metric.py` : la métrique qui note la sortie et rédige le retour.
+Le dépôt peut contenir un fichier `serve.py` avec `def serve(input)`. Skynet l'utilise pour servir la meilleure version après l'exécution. Lisez [Lire les résultats](/docs/guides/results).
 
-L'**Agent de code** peut rédiger et modifier n'importe quel fichier pour vous. Il vérifie son code et corrige ce qui échoue. Vous pouvez ajouter jusqu'à 20 fichiers supplémentaires. Lisez [Métriques et évaluateurs](/docs/concepts/scorers).
+### Secrets
 
-La métrique définit son modèle dans son propre appel à `llm()`. Sans `model=`, la métrique utilise le modèle de réflexion.
+Ajoutez des secrets, par exemple les clés d'API dont votre code a besoin. Chaque secret arrive à votre code et à votre évaluateur sous forme de variable d'environnement de même nom. L'agent de code ne peut pas les voir. Skynet masque leurs valeurs dans les journaux.
 
-### Vérification du contrat
+### Vérification
 
-La **Vérification du contrat** (Guidé : **Exécution de test**) exécute votre code et votre métrique dans la sandbox sur 3 cas d'exemple. Elle vérifie :
+La vérification (Guidé : **Exécution de test**) exécute l'installation et votre évaluateur sur la version de départ, dans la sandbox. Elle vérifie :
 
-- la signature du code d'exécution,
-- la signature de la métrique,
-- le modèle de la métrique,
-- le code d'exécution sur les exemples,
-- la valeur de retour de la métrique.
+- la signature de l'évaluateur,
+- la commande d'installation,
+- la valeur de retour de l'évaluateur sur les cas d'exemple.
 
-Sélectionnez **Vérifier** (Guidé : **Tester**). Vous ne pouvez pas démarrer l'exécution tant que la vérification n'a pas réussi. Si vous modifiez le code ou la configuration après une réussite, relancez la vérification.
+Sélectionnez **Vérifier** (Guidé : **Tester**). Vous ne pouvez pas démarrer l'exécution tant que la vérification n'a pas réussi. Si vous modifiez l'évaluateur ou l'installation après une réussite, relancez la vérification.
 
 > [!TIP]
-> Ouvrez chaque exemple pour voir son entrée, sa sortie et son retour. Un bon retour donne à l'optimiseur plus de matière que le score seul.
+> Ouvrez chaque exemple pour voir son score et son retour. Un bon retour donne à l'optimiseur plus de matière que le score seul.
 
 ### Exécution planifiée
 
-Vous pouvez relancer l'optimisation selon une planification après sa réussite. La valeur par défaut est **Désactivée**.
+Vous pouvez relancer l'optimisation selon une planification après sa réussite. Chaque cycle planifié part de la meilleure version actuelle du dépôt. La valeur par défaut est **Désactivée**.
 
 ### Prêt à lancer
 
 Le dernier écran affiche un récapitulatif en cinq onglets : **Général**, **Données**, **Modèles**, **Budget** et **Récompense**. Vérifiez la configuration, puis démarrez l'optimisation.
 
 Le récapitulatif affiche aussi la visibilité de l'exécution. Les nouvelles exécutions sont publiques par défaut. Modifiez-la plus tard dans la boîte de dialogue **Partage et confidentialité** de la page de l'exécution. Lisez [Partager et publier](/docs/guides/sharing).
-
-> [!NOTE]
-> Une exécution sur un dépôt ne comporte, à cette étape, que l'écran **Code et métrique** et le récapitulatif. Skynet vérifie la configuration par rapport au dépôt au démarrage de l'exécution.
 
 ## Après le démarrage
 

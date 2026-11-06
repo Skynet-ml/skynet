@@ -57,7 +57,7 @@ Les connecteurs qui importent des enregistrements comprennent les tables de base
 | Profondeur des dossiers                  | 3 dossiers                                                              |
 | Types de fichiers                        | `.py`, `.txt`, `.md`, `.json`, `.yaml`, `.csv`, `.toml`, `.ini`, `.cfg` |
 
-`run.py` et `metric.py` sont les fichiers d'entrée d'une exécution. Vous ne pouvez ni les supprimer, ni les renommer, ni les déplacer.
+`scorer.py` contient votre évaluateur. Skynet appelle sa fonction `score(repo_path, case)` pour chaque cas.
 
 ## Débits de requêtes
 

@@ -31,6 +31,8 @@ export interface WizardState {
   starting_version?: string | Record<string, string>;
   /** The repository a repository run optimizes, as `owner/name`. */
   repository?: string;
+  /** The agent created `repository` on GitHub, so the run request marks it `created_by_skynet`. */
+  repo_created_by_skynet?: boolean;
   /** Whether the user linked a GitHub account; unset until the wizard knows. */
   github_connected?: boolean;
   data_mode?: DataMode;

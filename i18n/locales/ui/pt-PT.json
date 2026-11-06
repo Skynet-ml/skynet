@@ -15,7 +15,6 @@
   "optimizations.duration.lt_0_1s": "<0.1s",
   "optimizations.duration.seconds": "{value}s",
   "optimizations.grid.response_time_seconds": "{value}s",
-  "optimizations.serve.field_separator": ": ",
   "share.you": "(o próprio)",
   "tooltip.submit.blackbox.scorer_install": "É executado uma vez na sandbox offline na nuvem. Use pacotes já presentes na imagem fixada ou artefatos de pacotes geridos pela implantação; os repositórios públicos de apt e de pacotes não estão disponíveis.",
   "submit.budget.byok_note": "O fornecedor cobra os tokens do modelo na sua chave. {term.appName} não cobra taxas pelo modelo. O orçamento da execução cobre apenas a utilização da sandbox.",

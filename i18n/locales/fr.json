@@ -80,6 +80,7 @@
     "contract.run_missing": "Le code d'exécution doit définir run(artifact, input).",
     "contract.shape.blackbox": "La fonction de score doit renvoyer (score, side_info), où side_info est un dict contenant une chaîne feedback.",
     "optimization.grid_search_retired": "Les recherches en grille ne peuvent plus être lancées, reprises ni clonées. Cette exécution reste consultable ; lancez plutôt une nouvelle optimisation depuis l'assistant.",
+    "optimization.dspy_run_retired": "Skynet optimise désormais uniquement des dépôts. Les exécutions de programmes DSPy ne peuvent plus être lancées, reprises, clonées, servies ni planifiées. Cette exécution reste consultable ; lancez plutôt une nouvelle optimisation de dépôt.",
     "submit.unified.contract_failed": "Le code ne correspond pas à ce dont l'optimiseur a besoin : {error}",
     "submit.unified.contract_budget": "La limite de dépenses est trop basse pour exécuter le code sur des exemples : {error} Augmentez la limite et relancez la vérification.",
     "submit.preflight.scorer_ready": "L’évaluateur se charge ; la notation attend le premier candidat généré.",

@@ -98,7 +98,7 @@ Ein Durchlauf muss wissen, welche Spalten Eingaben sind und welche Spalte die er
 
 Im Einreichungsassistenten zeigt der Schritt „So werden die Daten gelesen“ jede Spalte mit drei Optionen:
 
-- **Eingabe**: Das Programm erhält diesen Wert.
+- **Eingabe**: Ihr Scorer erhält diesen Wert in `case["input"]`.
 - **Ausgabe**: die erwartete Antwort, mit der der Scorer vergleicht.
 - **Überspringen**: Der Durchlauf ignoriert diese Spalte.
 

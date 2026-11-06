@@ -45,7 +45,6 @@ Authorization: Bearer skyd_...
 | `GET /models`                                   | उन मॉडलों की सूची देता है जिन्हें आप इस्तेमाल कर सकते हैं।        |
 | `GET /optimizers`                               | किसी सेटअप के लिए उपयुक्त ऑप्टिमाइज़रों की सूची देता है।           |
 | `GET /blackbox/engines`                         | नेटिव इंजनों की सूची देता है और बताता है कि हर इंजन उपलब्ध है या नहीं। |
-| `POST /optimize` | DSPy प्रोग्राम के लिए रन शुरू करता है। |
 | `POST /blackbox/run`                            | किसी GitHub रिपॉज़िटरी पर रन शुरू करता है।                       |
 | `GET /optimizations`                            | आपके रन की सूची देता है।                                       |
 | `GET /optimizations/{optimization_id}`          | एक रन लौटाता है: स्थिति, प्रगति, लॉग और परिणाम।                  |
@@ -56,10 +55,10 @@ Authorization: Bearer skyd_...
 
 ## रन शुरू करें
 
-`POST /optimize` वही सेटअप लेता है जो सबमिट विज़ार्ड लेता है। यह उदाहरण एक ऐसे DSPy प्रोग्राम को बेहतर बनाता है जो सपोर्ट संदेशों को लेबल में बाँटता है।
+Skynet, Optimize Anything है: हर रन एक रिपॉज़िटरी को ऑप्टिमाइज़ करता है। `POST /blackbox/run` वही सेटअप लेता है जो सबमिट विज़ार्ड लेता है। यह उदाहरण एक ऐसी रिपॉज़िटरी को बेहतर बनाता है जो सपोर्ट संदेशों को लेबल में बाँटती है।
 
 ```bash tab="curl"
-curl https://api.skynetml.com/optimize \
+curl https://api.skynetml.com/blackbox/run \
   -H "Authorization: Bearer $SKYNET_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: support-labels-001" \
@@ -69,56 +68,62 @@ curl https://api.skynetml.com/optimize \
 ```json tab="run.json"
 {
   "name": "Support labels",
-  "task": {
-    "objective": "Sort each support message into billing, bug or other.",
-    "artifact": {
-      "kind": "dspy_program",
-      "starting_version": "Label this support message as billing, bug or other."
+  "objective": "Sort each support message into billing, bug or other.",
+  "recipe": "repo",
+  "target": {
+    "kind": "repo",
+    "repo": {
+      "provider": "github",
+      "repository": "your-org/support-labels",
+      "branch": "main",
+      "editable_paths": ["serve.py", "prompts/"]
     }
   },
-  "data": {
-    "mode": "pairs",
-    "cases": [
-      { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
-      { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
-      {
-        "input": { "message": "Do you have a Hebrew interface?" },
-        "expected": { "label": "other" }
-      }
-    ]
+  "cases": [
+    { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
+    { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
+    {
+      "input": { "message": "Do you have a Hebrew interface?" },
+      "expected": { "label": "other" }
+    }
+  ],
+  "input_fields": ["message"],
+  "expected_field": "label",
+  "scorer": {
+    "kind": "python",
+    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "model": { "name": "<model from GET /models>" }
   },
-  "optimizer": { "choice": "auto", "budget": { "max_scorer_runs": 200 } },
-  "models": {
-    "task_model": { "name": "<model from GET /models>" },
-    "reflection_model": { "name": "<model from GET /models>" }
-  },
-  "workspace": {
-    "run_code": "import dspy\n\nprogram = dspy.Predict(\"message -> label\")\n\n\ndef run(artifact, input):\n    return program(message=input[\"message\"]).label\n",
-    "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
-  },
+  "strategy": { "mode": "auto" },
+  "budget": { "max_scorer_runs": 200 },
+  "reflection_model_config": { "name": "<model from GET /models>" },
   "max_cost_cents": 500
 }
 ```
 
 महत्वपूर्ण फ़ील्ड:
 
-- `task.artifact.kind` का मान `dspy_program` होता है।
-- `data.mode` का मान `pairs` (अपेक्षित आउटपुट वाले इनपुट) या `single` (ठीक एक केस) होता है।
-- `optimizer.choice` का मान `auto` या `GET /optimizers` से मिला कोई एक ऑप्टिमाइज़र नाम होता है।
+- `target.repo.repository`, `owner/name` रूप में GitHub रिपॉज़िटरी है। पहले **सेटिंग्स → कनेक्टर** में GitHub जोड़ें।
+- `target.repo.editable_paths` उन फ़ाइलों और फ़ोल्डरों की सूची है जिन्हें ऑप्टिमाइज़र बदल सकता है। `"."` का मतलब पूरी रिपॉज़िटरी है।
+- `target.repo.commit` वैकल्पिक है। यह 40 अक्षरों का SHA है। इसके बिना Skynet ब्रांच का नवीनतम कमिट इस्तेमाल करता है।
+- `target.repo.secrets` वैकल्पिक है। हर सीक्रेट में `name` और `value` होता है। यह आपके कोड और आपके स्कोरर तक एनवायरनमेंट वेरिएबल के रूप में पहुँचता है।
+- `scorer.metric_code`, `score(repo_path, case)` को परिभाषित करता है। `scorer.model` वह मॉडल है जिसे आपका कोड और आपका स्कोरर मॉडल गेटवे से कॉल कर सकते हैं।
+- `strategy.mode` का मान `auto` (डिफ़ॉल्ट) या `single` होता है। `single` के साथ, `strategy.engine` में `GET /blackbox/engines` से एक इंजन का नाम दें।
 - `max_cost_cents` इस रन की खर्च सीमा है, अमेरिकी सेंट में।
 - `is_private` डिफ़ॉल्ट रूप से `false` होता है। रन को निजी रखने के लिए इसे `true` पर सेट करें।
 
-`run_code` और `metric_code` के नियमों के लिए [मेट्रिक और स्कोरर](/docs/concepts/scorers) पढ़ें।
+`metric_code` के नियमों के लिए [मेट्रिक और स्कोरर](/docs/concepts/scorers) पढ़ें।
 
 ### रिस्पॉन्स
 
 | स्थिति | अर्थ                                                                                                                                                       |
 | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `201`  | Skynet ने रन को कतार में डाल दिया। बॉडी में `optimization_id` और `status` होते हैं।                                                                          |
+| `400`  | लक्ष्य कोई रिपॉज़िटरी नहीं है, या स्कोरर लोड नहीं होता। |
 | `202`  | सेटअप जाँच अभी चल रही है। `Retry-After` हेडर में दिए गए सेकंड तक इंतज़ार करें। फिर वही बॉडी उसी `Idempotency-Key` के साथ दोबारा भेजें।                          |
 | `402`  | आपका बैलेंस बहुत कम है।                                                                                                                                     |
 | `409`  | आप किसी कोटा तक पहुँच गए हैं, या सेटअप जाँच पुरानी हो चुकी है।                                                                                                 |
-| `422`  | अनुरोध या वर्कस्पेस कोड ऑप्टिमाइज़र के अनुरूप नहीं है।                                                                                                         |
+| `422`  | अनुरोध ऑप्टिमाइज़र के अनुरूप नहीं है।                                                                                                         |
 
 > [!NOTE]
 > हमेशा `Idempotency-Key` हेडर भेजें। अगर आप वही अनुरोध उसी कुंजी के साथ दोबारा भेजते हैं, तो Skynet पहला रन लौटाता है। वह दूसरा रन शुरू नहीं करता।
@@ -154,7 +159,7 @@ curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 
-सबसे अच्छे संस्करण को किसी नए इनपुट पर चलाने के लिए `POST /serve/{optimization_id}` भेजें। हर स्कोर का क्या मतलब है, यह जानने के लिए [परिणाम](/docs/guides/results) पढ़ें।
+सबसे अच्छे संस्करण को किसी नए इनपुट पर चलाने के लिए `Idempotency-Key` हेडर के साथ `POST /serve/{optimization_id}` भेजें। रिपॉज़िटरी में `def serve(input)` वाली एक `serve.py` फ़ाइल होनी चाहिए। अनुरोध, रिस्पॉन्स और हर स्कोर का मतलब जानने के लिए [परिणाम](/docs/guides/results) पढ़ें।
 
 ## सीमाएँ
 

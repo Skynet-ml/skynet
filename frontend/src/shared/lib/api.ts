@@ -59,7 +59,7 @@ import type {
 } from "@/shared/types/continuous";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
 import { getActiveLocale } from "@/shared/lib/runtime-locale";
-import { readServerSentEvents, type ServerSentEvent } from "@/shared/lib/sse";
+import { readServerSentEvents } from "@/shared/lib/sse";
 
 // Resolve the runtime API base lazily on every call. Capturing it once at
 // module load races the injected `window.__APP_ENV__` script: the framework
@@ -1975,6 +1975,31 @@ export function listGithubRepositories(search: string) {
   return request<{ repositories: GithubRepository[] }>(`/connectors/github/repos?${params}`);
 }
 
+/** What a new repository is seeded with: the task as README.md, plus the scorer and cases when given. */
+export interface CreateGithubRepositoryRequest {
+  name: string;
+  private: boolean;
+  description?: string | null;
+  objective: string;
+  scorer_code?: string | null;
+  cases?: Array<Record<string, unknown>> | null;
+}
+
+/** The new repository, its default branch and the commit that seeds it. */
+export interface CreatedGithubRepository {
+  full_name: string;
+  default_branch: string;
+  commit: string;
+}
+
+/** Create a repository in the linked GitHub account and push its first commit. */
+export function createGithubRepository(body: CreateGithubRepositoryRequest) {
+  return request<CreatedGithubRepository>("/connectors/github/repos", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 /** A repository's branch names and its default branch. */
 export function listGithubBranches(repo: string) {
   const params = new URLSearchParams({ repo });
@@ -2351,40 +2376,6 @@ export async function downloadRepositoryArchive(
   const a = document.createElement("a");
   a.href = url;
   a.download = fileName;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
-}
-
-/**
- * Download the self-contained, runnable DSPy program export as a zip and hand
- * it to the browser. Unlike the other `request`-based calls this returns binary
- * (a `StreamingResponse` attachment), so it goes through `fetchWithAuthRetry`
- * and reads the body as a Blob rather than JSON.
- */
-export async function downloadProgramExport(
-  optimizationId: string,
-  pairIndex?: number,
-): Promise<void> {
-  const pairQuery = pairIndex == null ? "" : `?pair_index=${encodeURIComponent(String(pairIndex))}`;
-  const res = await fetchWithAuthRetry(
-    `${apiBase()}/optimizations/${optimizationId}/program-export${pairQuery}`,
-    {
-      method: "GET",
-    },
-  );
-  if (!res.ok) {
-    const parsed = parseError(await res.text().catch(() => ""));
-    throw new ApiError(
-      parsed.message ?? formatMsg("auto.shared.lib.api.template.1", { p1: res.status }),
-      { status: res.status, code: parsed.code, params: parsed.params },
-    );
-  }
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  const pairSuffix = pairIndex == null ? "" : `_pair_${pairIndex}`;
-  a.download = `dspy_program_${optimizationId.slice(0, 8)}${pairSuffix}.zip`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
@@ -3051,22 +3042,6 @@ export interface ClaimShareResult {
  */
 export function claimSharedOptimization(token: string) {
   return request<ClaimShareResult>(`/share/${encodeURIComponent(token)}/claim`, { method: "POST" });
-}
-
-/**
- * Run one inference through a shared optimization with a caller-funded budget.
- * Any signed-in viewer may serve; the run owner's wallet and BYOK key remain isolated.
- */
-export function serveSharedOptimization(
-  token: string,
-  inputs: Record<string, string>,
-  idempotencyKey: string,
-) {
-  return request<ServeResponse>(`/share/${encodeURIComponent(token)}/serve`, {
-    method: "POST",
-    headers: { "Idempotency-Key": idempotencyKey },
-    body: JSON.stringify({ inputs }),
-  });
 }
 
 export async function cancelJob(optimizationId: string) {
@@ -3801,140 +3776,6 @@ export function servePairProgram(
   });
 }
 
-export interface StreamServeHandlers {
-  onToken: (field: string, chunk: string) => void;
-  onFinal: (result: {
-    outputs: Record<string, unknown>;
-    model_used: string;
-    input_fields: string[];
-    output_fields: string[];
-    cents_charged?: string | null;
-    budget?: ExecutionBudget | null;
-  }) => void;
-  onError: (message: string) => void;
-  signal?: AbortSignal;
-}
-
-/** Stream program inference via SSE. Calls handlers as tokens arrive. */
-export async function serveProgramStream(
-  optimizationId: string,
-  inputs: Record<string, string>,
-  idempotencyKey: string,
-  handlers: StreamServeHandlers,
-): Promise<void> {
-  let res: Response;
-  try {
-    res = await fetchWithAuthRetry(`${apiBase()}/serve/${optimizationId}/stream`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-        "Idempotency-Key": idempotencyKey,
-      },
-      body: JSON.stringify({ inputs }),
-      signal: handlers.signal,
-    });
-  } catch (err) {
-    if ((err as Error)?.name === "AbortError") return;
-    handlers.onError(msg("auto.shared.lib.api.literal.4"));
-    return;
-  }
-  if (!res.ok || !res.body) {
-    const text = await res.text().catch(() => "");
-    handlers.onError(
-      parseErrorMessage(text) ?? formatMsg("auto.shared.lib.api.template.3", { p1: res.status }),
-    );
-    return;
-  }
-  const processEvent = ({ event, data }: ServerSentEvent) => {
-    if (event === "token") {
-      handlers.onToken(String(data.field ?? ""), String(data.chunk ?? ""));
-    } else if (event === "final") {
-      handlers.onFinal({
-        outputs: (data.outputs as Record<string, unknown>) ?? {},
-        model_used: String(data.model_used ?? ""),
-        input_fields: (data.input_fields as string[]) ?? [],
-        output_fields: (data.output_fields as string[]) ?? [],
-        cents_charged: typeof data.cents_charged === "string" ? data.cents_charged : null,
-        budget: (data.budget as ExecutionBudget | null) ?? null,
-      });
-    } else if (event === "error") {
-      handlers.onError(
-        parseErrorMessage(JSON.stringify(data)) ?? msg("auto.shared.lib.api.literal.5"),
-      );
-    }
-  };
-  try {
-    await readServerSentEvents(res.body, processEvent);
-  } catch (err) {
-    if ((err as Error)?.name !== "AbortError") {
-      handlers.onError(err instanceof Error ? err.message : msg("auto.shared.lib.api.literal.6"));
-    }
-  }
-}
-
-/** Stream pair program inference via SSE. Same as serveProgramStream but for a specific grid pair. */
-export async function servePairProgramStream(
-  optimizationId: string,
-  pairIndex: number,
-  inputs: Record<string, string>,
-  idempotencyKey: string,
-  handlers: StreamServeHandlers,
-): Promise<void> {
-  let res: Response;
-  try {
-    res = await fetchWithAuthRetry(
-      `${apiBase()}/serve/${optimizationId}/pair/${pairIndex}/stream`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "text/event-stream",
-          "Idempotency-Key": idempotencyKey,
-        },
-        body: JSON.stringify({ inputs }),
-        signal: handlers.signal,
-      },
-    );
-  } catch (err) {
-    if ((err as Error)?.name === "AbortError") return;
-    handlers.onError(msg("auto.shared.lib.api.literal.7"));
-    return;
-  }
-  if (!res.ok || !res.body) {
-    const text = await res.text().catch(() => "");
-    handlers.onError(
-      parseErrorMessage(text) ?? formatMsg("auto.shared.lib.api.template.4", { p1: res.status }),
-    );
-    return;
-  }
-  const processEvent = ({ event, data }: ServerSentEvent) => {
-    if (event === "token") {
-      handlers.onToken(String(data.field ?? ""), String(data.chunk ?? ""));
-    } else if (event === "final") {
-      handlers.onFinal({
-        outputs: (data.outputs as Record<string, unknown>) ?? {},
-        model_used: String(data.model_used ?? ""),
-        input_fields: (data.input_fields as string[]) ?? [],
-        output_fields: (data.output_fields as string[]) ?? [],
-        cents_charged: typeof data.cents_charged === "string" ? data.cents_charged : null,
-        budget: (data.budget as ExecutionBudget | null) ?? null,
-      });
-    } else if (event === "error") {
-      handlers.onError(
-        parseErrorMessage(JSON.stringify(data)) ?? msg("auto.shared.lib.api.literal.8"),
-      );
-    }
-  };
-  try {
-    await readServerSentEvents(res.body, processEvent);
-  } catch (err) {
-    if ((err as Error)?.name !== "AbortError") {
-      handlers.onError(err instanceof Error ? err.message : msg("auto.shared.lib.api.literal.9"));
-    }
-  }
-}
-
 /** Deliver a message into the running turn opened with `steerKey`; resolves
  *  the message's id, which a later `steer_applied` event or withdraw names. */
 export async function postAgentSteer(steerKey: string, text: string): Promise<string> {
@@ -3964,14 +3805,6 @@ export async function fetchNextPromptSuggestion(
     signal,
   });
   return typeof res.suggestion === "string" ? res.suggestion : "";
-}
-
-/** Read a `steer_applied` event's payload. */
-export function parseSteerApplied(data: Record<string, unknown>): { ids: string[]; text: string } {
-  return {
-    ids: Array.isArray(data.ids) ? data.ids.map(String) : [],
-    text: String(data.text ?? ""),
-  };
 }
 
 /** Take back explicit ids and report which messages the agent already read. */

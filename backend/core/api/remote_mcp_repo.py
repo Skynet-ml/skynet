@@ -25,7 +25,6 @@ from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 import httpx
-from fastapi.responses import JSONResponse
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
@@ -33,6 +32,7 @@ from pydantic import Field, ValidationError
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from ..billing.budgets import BudgetConflictError, BudgetError, BudgetService
 from ..billing.operation_pricing import json_fingerprint
 from ..billing.service import StripeBillingService
 from ..config import settings
@@ -53,23 +53,15 @@ from ..storage.models import McpRunDraftModel
 from .auth import AuthenticatedUser
 from .errors import DomainError
 from .mcp_oauth import SCOPE_READ, SCOPE_WRITE
-from .remote_mcp import (
-    _MIN_CALL_HOLD_CENTS,
-    _MIN_SUGGESTED_LIMIT_CENTS,
-    _PENDING_RETRY_SECONDS,
-    _domain_tool_error,
-    _refuse_lower_limit,
-    _user,
-)
+from .remote_mcp import _domain_tool_error, _user
 from .routers.connectors import connector_secret
 from .routers.models import box_hold_cents, call_hold_cents
 from .routers.submissions import (
     _BLACKBOX_WORKFLOW,
-    _submit_within_proxy_timeout,
-    resolve_submission_replay_keys,
     staged_repo_cases,
     submit_repo_payload,
 )
+from .submission_idempotency import resolve_submission_replay_keys
 
 STEPS = ("repository", "data", "scorer", "models", "engine", "budget")
 _REQUIRED_STEPS = ("repository", "scorer", "models", "engine")
@@ -78,11 +70,62 @@ _STEP_TOOLS = {step: f"repo_draft_set_{step}" for step in STEPS}
 # that never submits cannot grow the table without limit.
 _MAX_DRAFTS_PER_ACCOUNT = 20
 _DRAFT_MAX_AGE = timedelta(days=7)
+# Matches the wizard: a model call reserves at least one dollar, and the
+# default limit is at least five dollars.
+_MIN_CALL_HOLD_CENTS = 100
+_MIN_SUGGESTED_LIMIT_CENTS = 500
+_PENDING_RETRY_SECONDS = 5
 _TREE_SAMPLE = 60
 _SCORER_NAMES = ("score", "metric")
 
 TokenSource = Literal["managed", "byok", "subscription"]
 StepCheck = Callable[[dict[str, Any], str], tuple[list[str], list[str], dict[str, Any]]]
+
+
+def _refuse_lower_limit(job_store: Any, username: str, budget_key: str, max_cost_cents: int) -> None:
+    """Refuse a retry that asks for less than the budget its key already made.
+
+    The submission reuses the budget a known key made, so the run would keep
+    the higher limit without a word. A retry that asks for more is allowed:
+    the submission lowers a first limit to what the balance can back. A retry
+    with the first limit is allowed too, also after the user raised the
+    total in the app: ``BudgetService.create`` returns the existing budget
+    unchanged when ``max_cost_cents`` equals its creation total. Known limit:
+    the budget stores only a hash of the creation total. If the balance cap
+    lowered the first limit and the user then raised the total, the original
+    request gets this refusal, which names the run.
+
+    Args:
+        job_store: Store whose engine holds the budgets.
+        username: Account that asks.
+        budget_key: Budget creation key of the agent's idempotency key.
+        max_cost_cents: Spending limit of this call.
+
+    Raises:
+        ToolError: When the key's budget total is above ``max_cost_cents``.
+    """
+    engine = getattr(job_store, "engine", None)
+    if engine is None:
+        return
+    service = BudgetService(engine=engine)
+    try:
+        existing = service.find_by_creation_key(username, budget_key)
+        if existing is None or max_cost_cents >= existing.total_cents:
+            return
+        service.create(username, max_cost_cents, idempotency_key=budget_key, uncapped=settings.local_mode)
+    except BudgetConflictError as error:
+        detail = f"This idempotency_key already has a limit of {existing.total_cents} cents. "
+        payload: dict[str, Any] = {"code": "budget.conflict", "status": 409}
+        if existing.job_id:
+            payload["optimization_id"] = existing.job_id
+            detail += "Use get_run or stop_run on optimization_id, or a new key for a run with a lower limit."
+        else:
+            detail += "Use a new key for a run with a lower limit."
+        payload["detail"] = detail
+        raise ToolError(json.dumps(payload)) from error
+    except BudgetError:
+        # The submission reads the same wallet next and reports this with its own code.
+        return
 
 
 def _now() -> datetime:
@@ -599,8 +642,8 @@ def submit_draft(
         http_client: Factory for the model catalog client.
 
     Returns:
-        The submission, or ``status: in_progress`` while its setup check runs or
-        other usage on the account settles.
+        The submission, or ``status: in_progress`` while other usage on the
+        account settles.
 
     Raises:
         ToolError: When the draft has issues, or the limit is below its floor.
@@ -628,12 +671,8 @@ def submit_draft(
     if replay_keys.budget is not None:
         _refuse_lower_limit(job_store, user.username, replay_keys.budget, max_cost_cents)
     try:
-        result = _submit_within_proxy_timeout(
-            user.username,
-            replay_keys.job,
-            lambda: submit_repo_payload(
-                request, service=service, job_store=job_store, current_user=user, idempotency_key=key
-            ),
+        result = submit_repo_payload(
+            request, service=service, job_store=job_store, current_user=user, idempotency_key=key
         )
     except DomainError as error:
         if error.code != "budget.pending":
@@ -642,12 +681,6 @@ def submit_draft(
             "status": "in_progress",
             "retry_after_seconds": _PENDING_RETRY_SECONDS,
             "detail": "Other usage on this account must settle first. Call repo_draft_submit again with the same arguments.",
-        }
-    if isinstance(result, JSONResponse):
-        return {
-            "status": "in_progress",
-            "retry_after_seconds": int(result.headers.get("Retry-After", "5")),
-            "detail": "The setup check is still running. Call repo_draft_submit again with the same arguments.",
         }
     return {**result.model_dump(mode="json"), "next_tool": "get_run"}
 

@@ -11,25 +11,22 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from ... import i18n
-from ...billing.budgets import BudgetService
 from ...config import Settings, settings
 from ...models import BlackboxRunRequest
 from ...models.optimizations import JobCancelResponse
 from ...models.unified import UnifiedRunRequest
-from ...storage.models import Base, BillingCustomerModel, McpGrantModel, McpTokenModel, UserModel
+from ...storage.models import Base, McpGrantModel, McpTokenModel, UserModel
 from .. import mcp_oauth, remote_mcp
 from ..auth import hash_api_token
 from ..errors import DomainError
@@ -273,246 +270,26 @@ def test_read_scope_cannot_start_or_stop(
         """Fail the test if a write reaches the service layer."""
         raise AssertionError("service layer called")
 
-    monkeypatch.setattr(remote_mcp, "submit_unified_payload", forbidden)
-    monkeypatch.setattr(remote_mcp, "_submit_within_proxy_timeout", forbidden)
     monkeypatch.setattr(remote_mcp, "cancel_optimization", forbidden)
     text = _error_text(_call(client, tool, arguments, token=READ_TOKEN))
     assert "insufficient_scope" in text
     assert "runs:write" in text
 
 
-def test_start_run_creates_a_budget_with_the_agent_limit(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Submit through the service layer with max_cost_cents and no reused budget."""
-    client, _store, calls = harness
-
-    def submit(spec: Any, *, service: Any, job_store: Any, current_user: Any, idempotency_key: Any) -> Any:
-        """Record what the tool submits."""
-        calls["submit"] = (spec, service, current_user, idempotency_key)
-        return SimpleNamespace(model_dump=lambda mode: {"optimization_id": "opt-1", "status": "pending"})
-
-    def within_timeout(username: str, replay_key: str, work: Any) -> Any:
-        """Run the submission like the proxy-timeout wrapper does."""
-        calls["timeout"] = (username, replay_key)
-        return work()
-
-    monkeypatch.setattr(remote_mcp, "submit_unified_payload", submit)
-    monkeypatch.setattr(remote_mcp, "_submit_within_proxy_timeout", within_timeout)
-    spec = unified_payload(execution_budget_id="eb-someone-else", max_cost_cents=99_999)
-    body = _payload(_call(client, "start_run", {"spec": spec, "max_cost_cents": 700, "idempotency_key": "k-1"}))
-    assert body == {"optimization_id": "opt-1", "status": "pending"}
-    submitted, service, user, key = calls["submit"]
-    assert submitted.max_cost_cents == 700
-    assert submitted.execution_budget_id is None
-    assert service == "svc"
-    assert (user.username, user.role) == (USER, "user")
-    assert key == "k-1"
-    assert calls["timeout"][0] == USER
-
-
-def test_start_run_refuses_a_reused_key_with_a_lower_limit(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Refuse a retry that lowers max_cost_cents; replay one that keeps or raises it."""
-    client, store, _calls = harness
-    spec = unified_payload()
-    budget_key = remote_mcp.resolve_submission_replay_keys(
-        UnifiedRunRequest.model_validate(spec), username=USER, workflow=remote_mcp.UNIFIED_WORKFLOW, supplied_key="k-1"
-    ).budget
-    with Session(store.engine) as session:
-        session.add(BillingCustomerModel(username=USER, stripe_customer_id="cus_local", balance_cents=5_000))
-        session.commit()
-    # 700 stands for a first request of 900 that the balance cap lowered.
-    BudgetService(engine=store.engine).create(USER, 700, idempotency_key=budget_key)
-    submitted: list[int] = []
-    monkeypatch.setattr(
-        remote_mcp,
-        "submit_unified_payload",
-        lambda spec, **kwargs: submitted.append(spec.max_cost_cents) or SimpleNamespace(model_dump=lambda mode: {}),
-    )
-
-    error = _error_text(_call(client, "start_run", {"spec": spec, "max_cost_cents": 500, "idempotency_key": "k-1"}))
-    assert json.loads(error)["code"] == "budget.conflict"
-    assert "700 cents" in json.loads(error)["detail"]
-    assert submitted == []
-    for limit in (700, 900):
-        _payload(_call(client, "start_run", {"spec": spec, "max_cost_cents": limit, "idempotency_key": "k-1"}))
-    assert submitted == [700, 900]
-
-
-def test_start_run_replays_a_first_limit_after_the_user_raised_it(
-    harness: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Replay a same-limit retry after an edit in the app; name the run on a lower one."""
-    client, store, _calls = harness
-    spec = unified_payload()
-    budget_key = remote_mcp.resolve_submission_replay_keys(
-        UnifiedRunRequest.model_validate(spec), username=USER, workflow=remote_mcp.UNIFIED_WORKFLOW, supplied_key="k-2"
-    ).budget
-    with Session(store.engine) as session:
-        session.add(BillingCustomerModel(username=USER, stripe_customer_id="cus_local", balance_cents=5_000))
-        session.commit()
-    service = BudgetService(engine=store.engine)
-    first = service.create(USER, 700, idempotency_key=budget_key, uncapped=settings.local_mode)
-    first = service.attach_to_job(first.id, USER, "run-k2", expected_revision=first.revision)
-    service.update_total(first.id, USER, 1_500, expected_revision=first.revision, uncapped=settings.local_mode)
-    submitted: list[int] = []
-    monkeypatch.setattr(
-        remote_mcp,
-        "submit_unified_payload",
-        lambda spec, **kwargs: submitted.append(spec.max_cost_cents) or SimpleNamespace(model_dump=lambda mode: {}),
-    )
-
-    _payload(_call(client, "start_run", {"spec": spec, "max_cost_cents": 700, "idempotency_key": "k-2"}))
-    assert submitted == [700]
-    error = json.loads(
-        _error_text(_call(client, "start_run", {"spec": spec, "max_cost_cents": 600, "idempotency_key": "k-2"}))
-    )
-    assert error["code"] == "budget.conflict"
-    assert "1500 cents" in error["detail"]
-    assert error["optimization_id"] == "run-k2"
-    assert submitted == [700]
-
-
-def test_start_run_reports_a_slow_setup_check(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Tell the agent to retry while the setup check still runs."""
-    client, _store, _calls = harness
-    monkeypatch.setattr(
-        remote_mcp,
-        "_submit_within_proxy_timeout",
-        lambda username, key, work: JSONResponse(status_code=202, content={}, headers={"Retry-After": "7"}),
-    )
-    body = _payload(_call(client, "start_run", {"spec": unified_payload(), "max_cost_cents": 500}))
-    assert body["status"] == "in_progress"
-    assert body["retry_after_seconds"] == 7
-
-
-def test_start_run_reports_unsettled_usage_as_in_progress(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Tell the agent to retry while earlier usage settles, not to give up."""
-    client, _store, _calls = harness
-
-    def pending(username: str, key: str, work: Any) -> Any:
-        """Refuse like a preflight that waits for usage reconciliation."""
-        raise DomainError("budget.pending", status=409)
-
-    monkeypatch.setattr(remote_mcp, "_submit_within_proxy_timeout", pending)
-    result = _call(client, "start_run", {"spec": unified_payload(), "max_cost_cents": 500})
-    assert result.get("isError") is not True
-    body = _payload(result)
-    assert body["status"] == "in_progress"
-    assert body["retry_after_seconds"] == 5
-    assert body["detail"].startswith("Other usage on this account must settle first.")
-
-
-def test_start_run_refuses_a_zero_budget(harness: Any) -> None:
-    """Require a positive spending limit."""
-    client, _store, _calls = harness
-    result = _call(client, "start_run", {"spec": unified_payload(), "max_cost_cents": 0})
-    assert result.get("isError") is True
-
-
-def test_start_run_reports_service_errors(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pass a service-layer refusal, like a low balance, to the agent."""
-    client, _store, _calls = harness
-
-    def refuse(username: str, key: str, work: Any) -> Any:
-        """Refuse like the budget preflight."""
-        raise DomainError("billing.insufficient_balance", status=402)
-
-    monkeypatch.setattr(remote_mcp, "_submit_within_proxy_timeout", refuse)
-    text = _error_text(_call(client, "start_run", {"spec": unified_payload(), "max_cost_cents": 500}))
-    assert json.loads(text)["code"] == "billing.insufficient_balance"
-
-
 @pytest.mark.parametrize(
-    ("limit", "named", "key"), [(1, True, None), (500, False, None), (1, True, "k1"), (500, False, "k1")]
+    ("tool", "arguments", "token"),
+    [
+        ("start_run", {"spec": unified_payload(), "max_cost_cents": 500}, WRITE_TOKEN),
+        ("check_run", {"spec": unified_payload()}, READ_TOKEN),
+    ],
 )
-def test_start_run_names_the_minimum_of_a_too_low_limit(
-    harness: Any, monkeypatch: pytest.MonkeyPatch, limit: int, named: bool, key: str | None
-) -> None:
-    """Give the agent the floor check_run reports, and a new key to retry with, when the limit is too low."""
+def test_run_tools_refuse_dspy_program_runs(harness: Any, tool: str, arguments: dict[str, Any], token: str) -> None:
+    """Refuse a DSPy program run with a 410 that says runs optimize repositories (SKY-316)."""
     client, _store, _calls = harness
-    monkeypatch.setattr(remote_mcp, "box_hold_cents", lambda: Decimal("18.2"))
-    monkeypatch.setattr(remote_mcp, "call_hold_cents", lambda name, source, *, client: Decimal("100.5"))
-
-    def refuse(username: str, key: str, work: Any) -> Any:
-        """Refuse like a setup check the limit stopped."""
-        raise DomainError("budget.below_minimum", status=409)
-
-    monkeypatch.setattr(remote_mcp, "_submit_within_proxy_timeout", refuse)
-    arguments: dict[str, Any] = {"spec": unified_payload(), "max_cost_cents": limit}
-    if key:
-        arguments["idempotency_key"] = key
-    error = json.loads(_error_text(_call(client, "start_run", arguments)))
-    assert error["code"] == "budget.below_minimum"
-    assert error["min_max_cost_cents"] == 19 + 101
-    assert ("minimum of 120 cents" in error["detail"]) is named
-    assert error["detail"].startswith("max_cost_cents" if named else "The spending limit is below")
-    # A same-key retry reuses the first budget and its low limit, so it can never pass.
-    assert ("new idempotency_key" in error["detail"]) is bool(key)
-
-
-def test_check_run_estimates_the_floor(harness: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Return the checks, the wizard's floor, a suggested limit and the balance."""
-    client, _store, calls = harness
-    monkeypatch.setattr(remote_mcp, "enforce_submission_rate", lambda username: calls.setdefault("rate", username))
-    monkeypatch.setattr(remote_mcp, "box_hold_cents", lambda: Decimal("40.2"))
-    monkeypatch.setattr(remote_mcp, "call_hold_cents", lambda name, source, *, client: Decimal("150.5"))
-
-    class _Billing:
-        """Stand in for the billing service."""
-
-        def __init__(self, engine: Any) -> None:
-            """Accept the engine."""
-
-        def spendable_cents(self, username: str) -> int:
-            """Return a fixed balance."""
-            return 2500
-
-    monkeypatch.setattr(remote_mcp, "StripeBillingService", _Billing)
-    body = _payload(_call(client, "check_run", {"spec": unified_payload()}, token=READ_TOKEN))
-    assert body["min_max_cost_cents"] == 41 + 151
-    assert body["suggested_max_cost_cents"] == 500
-    assert body["spendable_cents"] == 2500
-    assert "checks" in body
-    assert calls["rate"] == USER
-
-
-def test_effective_sources_match_submit_for_legacy_subscription() -> None:
-    """Resolve the metric source after inheriting the job-level source."""
-    payload = unified_payload(
-        token_source="subscription",
-        models={"reflection_model": {"name": "openai/reflection"}},
-        workspace={"run_code": "pass", "metric_code": "from skynet import llm\nllm('x', model='anthropic/claude-x')"},
-    )
-    floor_spec = UnifiedRunRequest.model_validate(payload)
-    submit_spec = UnifiedRunRequest.model_validate(payload)
-    assert (
-        dict(remote_mcp._effective_sources(floor_spec))["anthropic/claude-x"]
-        == {config.name: config.token_source for config in request_model_configs(submit_spec)}["anthropic/claude-x"]
-    )
-
-
-def test_floor_includes_declared_metric_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Price the code-declared model even when the client omitted the metric role."""
-    spec = remote_mcp.UnifiedRunRequest.model_validate(
-        unified_payload(
-            workspace={
-                "run_code": "pass",
-                "metric_code": "from skynet import llm\nllm('x', model='anthropic/expensive')",
-            }
-        )
-    )
-    monkeypatch.setattr(remote_mcp, "box_hold_cents", lambda: Decimal(10))
-    monkeypatch.setattr(
-        remote_mcp,
-        "call_hold_cents",
-        lambda name, source, *, client: Decimal(250) if name == "anthropic/expensive" else Decimal(1),
-    )
-    assert remote_mcp._floor_cents(spec, remote_mcp.httpx.Client) == (260, [])
-    monkeypatch.setattr(
-        remote_mcp,
-        "call_hold_cents",
-        lambda name, source, *, client: None if name == "anthropic/expensive" else Decimal(1),
-    )
-    assert remote_mcp._floor_cents(spec, remote_mcp.httpx.Client) == (110, ["anthropic/expensive"])
+    error = json.loads(_error_text(_call(client, tool, arguments, token=token)))
+    assert error["code"] == "optimization.dspy_run_retired"
+    assert error["status"] == 410
+    assert "repositories" in error["detail"]
 
 
 def test_declared_task_model_normalizes_with_task_source() -> None:

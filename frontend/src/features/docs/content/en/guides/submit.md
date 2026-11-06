@@ -1,4 +1,4 @@
-The submit wizard sets up and starts a run. It has four steps: **Task**, **Inputs**, **Optimizer** and **Metric & run**. Each step has one or more screens. This guide explains each screen, from the task to the contract check and the start of the run.
+The submit wizard sets up and starts a run. It has four steps: **Task**, **Inputs**, **Optimizer** and **Metric & run**. Each step has one or more screens. This guide explains each screen, from the task to the check and the start of the run.
 
 > [!NOTE]
 > The wizard shows more or fewer settings for each experience level: **Guided**, **Standard** or **Expert**. Guided is the default. Change the level in **Settings → Account**, in **How much to show**. Some labels are simpler at the Guided level. This guide uses the Standard and Expert labels and gives the Guided label in brackets where it is different.
@@ -9,25 +9,37 @@ The submit wizard sets up and starts a run. It has four steps: **Task**, **Input
 
 Describe your task to the assistant in the **Task interview** chat. The assistant writes two fields for you:
 
-- **Objective** (Guided: **Goal**): what the optimized artifact must do well.
+- **Objective** (Guided: **Goal**): what the optimized code must do well.
 - **Background** (Guided: **Extra context**): context, constraints and what a good result looks like.
 
 You can edit both fields. The assistant does not overwrite your edits.
 
-### What will be optimized
+### Where the code comes from
 
-In **What gets optimized**, select **DSPy program** or **A GitHub repository**.
+Skynet is Optimize Anything: every run optimizes a repository. Select one of two choices:
 
-Then give the **Starting version** (Guided: **Where we start from**). Paste the current version, or let the assistant write a draft.
+- **Use a repository**: optimize code in a GitHub repository that you connected.
+- **Create a new repository**: Skynet creates a new GitHub repository in your account. The assistant writes a first solution from your task and data. That solution is the starting version.
 
-### Optimize a repository
+Connect GitHub in **Settings → Connectors** before you start.
 
-You can also optimize code in a repository. Set these fields:
+### Use a repository
+
+Set these fields:
 
 - **Repository**: pick a repository, or write it as `owner/name`.
 - **Commit**: a 40-character SHA. Leave it empty to use the latest commit on the branch.
 - **Paths the optimizer may change**: one file or folder on each line. A dot means the whole repository.
 - **Setup command**: runs in each fresh checkout before scoring. Leave it empty and Skynet finds the command.
+
+### Create a new repository
+
+Set these fields:
+
+- **Name**: the name of the new repository. Your GitHub account must not already have a repository with this name.
+- **Private** or **Public**: who can see the repository on GitHub.
+
+Skynet pushes each candidate to its own branch. The `skynet/best` branch points at the best version.
 
 ## Step 2: Inputs
 
@@ -61,8 +73,8 @@ The wizard lists only the optimizers that fit your task and inputs. **Auto** is 
 
 ### Models
 
-- **Task model**: the model that your run code calls. Leave it empty if your run code does not call a model. A DSPy program must have a task model.
 - **Reflection model**: the model that reads the scores and feedback and writes the next candidates. With a coding-agent optimizer, this is the agent's model.
+- **Task model**: the model that your repository code and your scorer can call through Skynet's model gateway. Read [How optimization works](/docs/concepts/optimization).
 
 ### Budget
 
@@ -77,44 +89,38 @@ The wizard does not let you continue if the limit or your balance is below the a
 
 ## Step 4: Metric & run
 
-### Code and metric
+### Scorer
 
-Write two files:
+Write `scorer.py`. It defines `score(repo_path, case)` and returns a score with feedback. The assistant can write it for you. Read [Metrics and scorers](/docs/concepts/scorers).
 
-- `run.py`: the run code that runs your artifact on one case.
-- `metric.py`: the metric that scores the output and writes feedback.
+The repository can have a `serve.py` file with `def serve(input)`. Skynet uses it to serve the best version after the run. Read [Read the results](/docs/guides/results).
 
-The **Coding agent** can write and change any file for you. It checks its code and fixes what fails. You can add up to 20 extra files. Read [Metrics and scorers](/docs/concepts/scorers).
+### Secrets
 
-The metric sets its model in its own `llm()` call. Without `model=`, the metric uses the reflection model.
+Add secrets, such as API keys that your code needs. Each secret reaches your code and your scorer as an environment variable with the same name. The coding agent cannot see them. Skynet hides their values in the logs.
 
-### Contract check
+### Check
 
-The **Contract check** (Guided: **Test run**) runs your code and metric in the sandbox on 3 sample cases. It checks:
+The check (Guided: **Test run**) runs the setup and your scorer on the starting version in the sandbox. It checks:
 
-- the run code signature,
-- the metric signature,
-- the metric model,
-- the run code on the samples,
-- the metric return value.
+- the scorer signature,
+- the setup command,
+- the scorer return value on the sample cases.
 
-Select **Check** (Guided: **Test it**). You cannot start the run until the check passes. If you change the code or the setup after a pass, run the check again.
+Select **Check** (Guided: **Test it**). You cannot start the run until the check passes. If you change the scorer or the setup after a pass, run the check again.
 
 > [!TIP]
-> Open each sample to see its input, output and feedback. Good feedback gives the optimizer more to work with than the score alone.
+> Open each sample to see its score and feedback. Good feedback gives the optimizer more to work with than the score alone.
 
 ### Scheduled run
 
-You can run the optimization again on a schedule after it succeeds. The default is **Off**.
+You can run the optimization again on a schedule after it succeeds. Each scheduled cycle starts from the current best version of the repository. The default is **Off**.
 
 ### Ready to run
 
 The last screen shows a summary in five tabs: **General**, **Data**, **Models**, **Budget** and **Reward**. Check the setup, then start the optimization.
 
 The summary also shows the run's visibility. New runs are public by default. Change it later in the **Share and privacy** dialog on the run page. Read [Share and publish](/docs/guides/sharing).
-
-> [!NOTE]
-> A repository run has only the **Code and metric** screen and the summary in this step. Skynet checks the setup against the repository when you start the run.
 
 ## After you start
 

@@ -80,6 +80,7 @@
     "contract.run_missing": "يجب أن يعرّف كود التشغيل run(artifact, input).",
     "contract.shape.blackbox": "يجب أن تُرجع دالة التقييم (score, side_info)، حيث side_info قاموس dict يحتوي على نص feedback.",
     "optimization.grid_search_retired": "لم يعد بالإمكان بدء بحث الشبكة أو استئنافه أو نسخه. لا يزال بإمكانك عرض هذا التشغيل؛ ابدأ تحسينًا جديدًا من المعالج بدلًا من ذلك.",
+    "optimization.dspy_run_retired": "يحسّن Skynet المستودعات فقط الآن. لم يعد بالإمكان بدء تشغيلات برامج DSPy أو استئنافها أو نسخها أو تقديمها أو جدولتها. يبقى هذا التشغيل متاحًا للقراءة؛ ابدأ بدلًا من ذلك تحسينًا جديدًا لمستودع.",
     "submit.unified.contract_failed": "الكود لا يطابق ما يحتاجه المُحسِّن: {error}",
     "submit.unified.contract_budget": "حد الإنفاق منخفض جدًا لتشغيل الكود على العينات: {error} ارفع الحد وتحقق مرة أخرى.",
     "submit.preflight.scorer_ready": "يتم تحميل المُقيِّم؛ ينتظر التقييم أول مرشح يتم توليده.",

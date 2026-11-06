@@ -285,6 +285,16 @@ function UnifiedWizardFrame() {
   useEffect(() => {
     shareRestoredSetup?.(w.restored);
   }, [shareRestoredSetup, w.restored]);
+  // The agent's create-repository write lands as a plain repository pick,
+  // which clears the mark; set it again once the wizard holds that repository.
+  const agentCreatedRepo = wizardCtx?.state.repo_created_by_skynet ? wizardCtx.state.repository : undefined;
+  const taskRepo = w.state.task.repo;
+  const patchTask = w.patchTask;
+  useEffect(() => {
+    if (!agentCreatedRepo || !taskRepo || taskRepo.createdBySkynet) return;
+    if (taskRepo.repository !== agentCreatedRepo) return;
+    patchTask({ repo: { ...taskRepo, createdBySkynet: true } });
+  }, [agentCreatedRepo, taskRepo, patchTask]);
   // Layout effects: the agent's go-back can arrive right after a Continue,
   // and it must not see the screen before it.
   useLayoutEffect(() => {

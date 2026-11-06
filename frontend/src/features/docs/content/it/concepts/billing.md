@@ -91,15 +91,26 @@ Quando una chiamata al modello usa la tua chiave:
 
 Eventuali commissioni di uno scorer esterno o di un provider MCP vanno direttamente a quel provider. Non fanno parte del limite di spesa dell'esecuzione.
 
+## Chiamate ai modelli dal tuo codice
+
+Il codice del tuo repository e il tuo scorer possono chiamare un modello tramite il gateway dei modelli di Skynet. Leggi [Come funziona l'ottimizzazione](/docs/concepts/optimization).
+
+- Una chiamata con le chiavi di Skynet viene misurata sul budget dell'esecuzione, come qualsiasi altra chiamata al modello. Si applica il ricarico sull'utilizzo.
+- Una chiamata con la tua chiave (BYOK) va alla chiave del tuo provider. Skynet non applica costi per il modello.
+
 ## Uso della sandbox
 
-Il codice di esecuzione e la metrica girano in una sandbox. Skynet misura il calcolo della sandbox:
+Il codice del tuo repository e il tuo scorer girano in una sandbox. Skynet misura il calcolo della sandbox:
 
 1. Prima che una sandbox parta, Skynet riserva un importo dal limite dell'esecuzione.
 2. Quando la sandbox termina, Skynet addebita l'uso finale riportato dal provider della sandbox.
 3. Il ricarico sull'utilizzo si applica al calcolo della sandbox.
 
 Il calcolo della sandbox fa parte del limite di spesa dell'esecuzione, anche quando le chiamate ai modelli usano la tua chiave.
+
+## Serving
+
+Ogni chiamata all'endpoint di serving di un'esecuzione terminata viene fatturata a parte. Chi chiama paga con il proprio saldo. Imposta `max_cost_cents` nella richiesta per limitare una chiamata. Leggi [Risultati](/docs/guides/results).
 
 ## Piani
 

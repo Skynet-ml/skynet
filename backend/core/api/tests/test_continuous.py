@@ -193,45 +193,49 @@ class _Env:
         return self.store.get_job(optimization_id, include_payload=True)["payload"]
 
 
-def _cases(answers: list[str]) -> list[dict[str, Any]]:
-    """Build rows with the incumbent's case schema.
+# The incumbent repository run's best version: a patch on its pinned commit.
+REPO_BEST_PATCH = "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+REPO_COMMIT = "a" * 40
+
+
+def _stage_without_sandbox(payload: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], None]:
+    """Record an empty setup environment, as staging does after it clones the repository.
 
     Args:
-        answers: One expected answer per row.
+        payload: The protected repository request.
+        **kwargs: Staging options, unused here.
 
     Returns:
-        Rows with ``question`` and ``answer`` columns.
+        The request and no staged checkout.
     """
-    return [{"question": f"Q{index}?", "answer": answer} for index, answer in enumerate(answers)]
+    payload["target"]["repo"]["environment"] = {}
+    return payload, None
 
 
 def _incumbent_payload() -> dict[str, Any]:
-    """Build a unified run request whose cases come from a dataset table.
+    """Build a repository run request with inline cases.
 
     Returns:
         A request body without budget evidence.
     """
-    rows = _cases(["A"] * 10)
     return {
         "name": "Support answers",
-        "task": {
-            "objective": "Answer the question in one word.",
-            "artifact": {"kind": "dspy_program", "starting_version": "Answer briefly: "},
+        "objective": "Make the tests pass.",
+        "recipe": "repo",
+        "scorer": {"kind": "python", "metric_code": "def score(repo_path, case=None):\n    return 1.0"},
+        "strategy": {"mode": "single", "engine": "gepa"},
+        "target": {
+            "kind": "repo",
+            "repo": {
+                "provider": "github",
+                "repository": "example/site",
+                "branch": "main",
+                "commit": REPO_COMMIT,
+                "editable_paths": ["src"],
+            },
         },
-        "data": {
-            "mode": "pairs",
-            "cases": submissions.rows_to_cases(rows, input_fields=["question"], expected_field="answer"),
-            "input_fields": ["question"],
-            "expected_field": "answer",
-        },
-        "optimizer": {"choice": "dspy_gepa"},
-        "models": {"reflection_model": {"name": "fixture/text"}, "task_model": {"name": "fixture/task"}},
-        "workspace": {
-            "run_code": "def run(artifact, input):\n    return artifact + input['question']\n",
-            "metric_code": (
-                "def score(input, output, expected=None):\n    return float(output == expected), {'feedback': ''}\n"
-            ),
-        },
+        "cases": [{"input": {"path": f"/page/{index}"}, "expected": None} for index in range(10)],
+        "reflection_model_config": {"name": "fixture/text"},
         "max_cost_cents": CYCLE_BUDGET,
     }
 
@@ -255,7 +259,7 @@ def _result(baseline: float, best: float, *, test: int = 2, held_out: bool = Tru
         "engine_used": "gepa",
         "baseline_score": baseline,
         "best_score": best,
-        "best_candidate": "Answer in one word: ",
+        "best_candidate": REPO_BEST_PATCH,
         "regression_guard_applied": guard,
         "runtime_seconds": 1.0,
         "split_counts": {
@@ -310,7 +314,11 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Env]:
     monkeypatch.setattr(preflight_execution, "ModelGateway", _Gateway)
     monkeypatch.setattr(preflight_execution, "bind_protected_sandbox", lambda *args, **kwargs: None)
     monkeypatch.setattr(preflight_execution, "_verify_anything", verify)
-    monkeypatch.setattr(preflight_execution, "_verify_unified", verify)
+    # Staging clones the repository in a sandbox; the fixture preflight stands in for that sandbox.
+    monkeypatch.setattr(preflight_execution, "stage_repository", _stage_without_sandbox)
+    monkeypatch.setattr(preflight_execution, "infer_repo_setup", lambda *args, **kwargs: None)
+    monkeypatch.setattr(preflight_execution, "bind_repo_scorer", lambda *args, **kwargs: None)
+    monkeypatch.setattr(submissions, "validate_blackbox_payload", lambda payload: None)
     monkeypatch.setattr(submissions.settings, "usage_markup", 1.0)
     monkeypatch.setattr(submissions.settings, "worker_enabled", False)
     monkeypatch.setattr(submissions.settings, "submissions_paused", False)
@@ -348,7 +356,7 @@ def _incumbent(env: _Env, score: float = INCUMBENT_SCORE, name: str | None = Non
     Returns:
         The incumbent's optimization id.
     """
-    response = env.client.post("/optimize", json={**_incumbent_payload(), **({"name": name} if name else {})})
+    response = env.client.post("/blackbox/run", json={**_incumbent_payload(), **({"name": name} if name else {})})
     assert response.status_code == 201, response.text
     optimization_id = response.json()["optimization_id"]
     _finish(env, optimization_id, result=_result(0.5, score))
@@ -429,14 +437,14 @@ def _refuse_after_charging(env: _Env, code: str, billed: int) -> None:
             DomainError: Always, with ``code``.
         """
         budget_key = continuous.resolve_submission_replay_keys(
-            payload, username="alice", workflow=continuous.UNIFIED_WORKFLOW, supplied_key=kwargs["idempotency_key"]
+            payload, username="alice", workflow=submissions._BLACKBOX_WORKFLOW, supplied_key=kwargs["idempotency_key"]
         ).budget
         budget = BudgetService(engine=env.store.engine).create("alice", CYCLE_BUDGET, idempotency_key=budget_key)
         with Session(env.store.engine) as session, session.begin():
             session.get(ExecutionBudgetModel, budget.id).billed_cents = billed
         raise DomainError(code, status=409)
 
-    env.monkeypatch.setattr(continuous, "submit_unified_payload", refuse)
+    env.monkeypatch.setattr(continuous, "submit_repo_payload", refuse)
 
 
 def test_enable_inspect_pause_resume_and_next_check(env: _Env) -> None:
@@ -490,7 +498,7 @@ def test_enable_inspect_pause_resume_and_next_check(env: _Env) -> None:
 
 def test_only_a_successful_unified_run_can_enable(env: _Env) -> None:
     """A failed run is not eligible, and a plan needs at least one model switch on."""
-    response = env.client.post("/optimize", json=_incumbent_payload())
+    response = env.client.post("/blackbox/run", json=_incumbent_payload())
     optimization_id = response.json()["optimization_id"]
     _finish(env, optimization_id, status="failed")
     assert env.client.get(f"/optimizations/{optimization_id}/continuous").json()["eligible"] is False
@@ -508,27 +516,73 @@ def test_only_a_successful_unified_run_can_enable(env: _Env) -> None:
         assert no_switch.status_code == 422, permitted
 
 
+def _make_dspy(env: _Env, optimization_id: str) -> None:
+    """Rewrite a stored run as a DSPy run, the kind Skynet stored before it became repository-only.
+
+    Args:
+        env: Test environment.
+        optimization_id: The run to rewrite.
+    """
+    env.store.update_job(
+        optimization_id,
+        payload={
+            "name": "Old DSPy run",
+            "models": {"task_model": {"name": "fixture/task"}, "reflection_model": {"name": "fixture/text"}},
+            "data": {"cases": [{"question": "Q?", "answer": "A"}]},
+        },
+    )
+
+
+def test_a_dspy_run_cannot_enable_a_plan(env: _Env) -> None:
+    """A stored DSPy run stays readable but is never eligible, since Skynet no longer starts DSPy runs."""
+    optimization_id = _incumbent(env)
+    _make_dspy(env, optimization_id)
+
+    state = env.client.get(f"/optimizations/{optimization_id}/continuous")
+    assert state.status_code == 200
+    assert state.json()["eligible"] is False
+    refused = env.client.post(
+        f"/optimizations/{optimization_id}/continuous",
+        json={"schedule": WEEKLY, "permitted": {"reflection_model": True}, "cycle_budget_cents": CYCLE_BUDGET},
+    )
+    assert (refused.status_code, refused.json()["code"]) == (409, "continuous.not_eligible")
+
+
+def test_a_plan_on_a_dspy_run_ends_instead_of_starting_a_run(env: _Env) -> None:
+    """A plan whose incumbent is a DSPy run skips its check, starts no run and ends for good."""
+    source_id = _incumbent(env)
+    _enable(env, source_id)
+    _make_dspy(env, source_id)
+    env.better()
+    jobs = env.count(JobModel)
+    budgets = env.count(ExecutionBudgetModel)
+
+    env.sweep(_due(env))
+
+    [cycle] = env.cycles()
+    assert (cycle.status, cycle.detail_code, cycle.optimization_id) == (
+        "skipped",
+        "optimization.dspy_run_retired",
+        None,
+    )
+    assert (env.count(JobModel), env.count(ExecutionBudgetModel)) == (jobs, budgets)
+    plan = env.plan()
+    assert (plan.status, plan.pause_reason, plan.next_check_at) == ("ended", "dspy_retired", None)
+
+
 def test_a_better_model_starts_one_run_on_the_incumbents_exact_request(env: _Env) -> None:
     """A better model starts one funded run: the incumbent's request and cases, with only the models swapped."""
     source_id, _, cycle = _started(env)
 
-    assert cycle.changes == ["reflection_model", "task_model"]
+    assert cycle.changes == ["reflection_model"]
     assert cycle.detail_code == "continuous.run_started"
     assert cycle.snapshot["compared_against"] == source_id
-    assert cycle.snapshot["new_models"] == {
-        "task_model": {"name": "fixture/strong", "byok_provider": None},
-        "reflection_model": {"name": "fixture/strong", "byok_provider": None},
-    }
+    assert cycle.snapshot["new_models"] == {"reflection_model": {"name": "fixture/strong", "byok_provider": None}}
     incumbent, payload = env.payload(source_id), env.payload(cycle.optimization_id)
-    assert cycle.snapshot["old_models"] == {
-        role: incumbent["models"][role]["name"] for role in ("task_model", "reflection_model")
-    }
-    assert payload["models"]["task_model"]["name"] == "fixture/strong"
-    assert payload["models"]["reflection_model"]["name"] == "fixture/strong"
-    for key in ("task", "workspace", "optimizer", "seed"):
+    assert cycle.snapshot["old_models"] == {"reflection_model": "fixture/text"}
+    assert payload["reflection_model_config"]["name"] == "fixture/strong"
+    for key in ("objective", "scorer", "strategy", "target", "seed", "cases"):
         assert payload[key] == incumbent[key], key
-    assert payload["data"]["cases"] == incumbent["data"]["cases"]
-    assert payload["data"]["split"] == incumbent["data"]["split"]
     assert continuous.held_out_fingerprint(payload) == continuous.held_out_fingerprint(incumbent) is not None
     assert payload["preflight_id"]
     job = env.store.get_job(cycle.optimization_id, include_payload=False)
@@ -624,23 +678,23 @@ def test_a_price_that_rises_on_one_side_is_not_better(env: _Env, price_in: float
 
 def test_the_highest_rated_qualifying_model_is_tried(env: _Env) -> None:
     """Of the models that qualify, the highest-rated one is tried, even when a cheaper one also qualifies."""
-    _enable(env, _incumbent(env), permitted={"task_model": True})
+    _enable(env, _incumbent(env), permitted={"reflection_model": True})
     env.catalog(**CURRENT_MODELS, cheap=(50.0, 5e-7), best=(55.0, 1e-6), pricey=(90.0, 3e-6))
 
     env.sweep(_due(env))
 
     [cycle] = env.cycles()
-    assert env.payload(cycle.optimization_id)["models"]["task_model"]["name"] == "fixture/best"
+    assert env.payload(cycle.optimization_id)["reflection_model_config"]["name"] == "fixture/best"
 
 
 def test_only_switched_on_roles_change(env: _Env) -> None:
-    """With only the reflection switch on, the task model stays the incumbent's own."""
-    _, _, cycle = _started(env, permitted={"reflection_model": True})
+    """A repository run has no task model, so only the reflection model changes, even with both switches on."""
+    _, _, cycle = _started(env)
 
     payload = env.payload(cycle.optimization_id)
     assert cycle.changes == ["reflection_model"]
-    assert payload["models"]["task_model"]["name"] == "fixture/task"
-    assert payload["models"]["reflection_model"]["name"] == "fixture/strong"
+    assert payload.get("task_model_config") is None
+    assert payload["reflection_model_config"]["name"] == "fixture/strong"
 
 
 def test_an_old_plan_with_the_models_switch_tries_a_better_model(env: _Env) -> None:
@@ -654,7 +708,7 @@ def test_an_old_plan_with_the_models_switch_tries_a_better_model(env: _Env) -> N
     env.sweep(_due(env))
 
     [cycle] = env.cycles()
-    assert (cycle.status, cycle.changes) == ("optimizing", ["reflection_model", "task_model"])
+    assert (cycle.status, cycle.changes) == ("optimizing", ["reflection_model"])
 
 
 def test_an_old_plan_without_the_models_switch_stays_skipped(env: _Env) -> None:
@@ -974,19 +1028,22 @@ def test_a_gain_of_exactly_the_margin_is_reviewable(env: _Env) -> None:
 def test_a_model_that_loses_is_not_tried_again_and_the_next_best_gets_its_turn(env: _Env) -> None:
     """A compared loss marks the model tried, so the next check picks the next best model instead."""
     source_id = _incumbent(env)
-    _enable(env, source_id, permitted={"task_model": True})
+    _enable(env, source_id, permitted={"reflection_model": True})
     env.catalog(**CURRENT_MODELS, middle=(50.0, 1e-6), strong=(60.0, 1e-6))
     env.sweep(_due(env))
     [first] = env.cycles()
-    assert env.payload(first.optimization_id)["models"]["task_model"]["name"] == "fixture/strong"
+    assert env.payload(first.optimization_id)["reflection_model_config"]["name"] == "fixture/strong"
     _finish(env, first.optimization_id, result=_result(0.8, 0.5))
     env.sweep(_due(env) - timedelta(days=1))
-    assert env.plan().baseline_snapshot == {"incumbent": source_id, "tried_models": ["task_model:fixture/strong"]}
+    assert env.plan().baseline_snapshot == {
+        "incumbent": source_id,
+        "tried_models": ["reflection_model:fixture/strong"],
+    }
 
     env.sweep(_due(env))
     latest = env.cycles()[-1]
     assert latest.status == "optimizing"
-    assert env.payload(latest.optimization_id)["models"]["task_model"]["name"] == "fixture/middle"
+    assert env.payload(latest.optimization_id)["reflection_model_config"]["name"] == "fixture/middle"
     _finish(env, latest.optimization_id, result=_result(0.8, 0.705))
     env.sweep(_due(env) - timedelta(days=1))
 
@@ -1011,7 +1068,7 @@ def test_a_failed_run_keeps_the_incumbent_and_leaves_its_model_untried(env: _Env
 
     latest = env.cycles()[-1]
     assert latest.status == "optimizing"
-    assert env.payload(latest.optimization_id)["models"]["task_model"]["name"] == "fixture/strong"
+    assert env.payload(latest.optimization_id)["reflection_model_config"]["name"] == "fixture/strong"
 
 
 def test_a_run_on_other_test_cases_is_unscored_and_leaves_its_model_untried(env: _Env) -> None:
@@ -1020,10 +1077,7 @@ def test_a_run_on_other_test_cases_is_unscored_and_leaves_its_model_untried(env:
     with Session(env.store.engine) as session, session.begin():
         job = session.get(JobModel, cycle.optimization_id)
         payload = dict(job.payload)
-        payload["data"] = {
-            **payload["data"],
-            "cases": [{**case, "expected": {"answer": "Z"}} for case in payload["data"]["cases"]],
-        }
+        payload["cases"] = [{**case, "expected": {"answer": "Z"}} for case in payload["cases"]]
         job.payload = payload
     _finish(env, cycle.optimization_id, result=_result(0.5, 0.9))
 
@@ -1036,7 +1090,7 @@ def test_a_run_on_other_test_cases_is_unscored_and_leaves_its_model_untried(env:
     env.sweep(_due(env))
     latest = env.cycles()[-1]
     assert latest.status == "optimizing"
-    assert env.payload(latest.optimization_id)["models"]["task_model"]["name"] == "fixture/strong"
+    assert env.payload(latest.optimization_id)["reflection_model_config"]["name"] == "fixture/strong"
 
 
 def test_a_better_model_waits_for_explicit_approval_and_a_rejection_keeps_the_incumbent(env: _Env) -> None:
@@ -1079,8 +1133,8 @@ def test_approval_makes_the_new_run_current_and_later_checks_start_from_its_mode
     env.sweep(_due(env))
     latest = env.cycles()[-1]
     assert latest.snapshot["compared_against"] == cycle.optimization_id
-    assert latest.snapshot["old_models"] == {"task_model": "fixture/strong", "reflection_model": "fixture/strong"}
-    assert env.payload(latest.optimization_id)["models"]["task_model"]["name"] == "fixture/stronger"
+    assert latest.snapshot["old_models"] == {"reflection_model": "fixture/strong"}
+    assert env.payload(latest.optimization_id)["reflection_model_config"]["name"] == "fixture/stronger"
     _finish(env, latest.optimization_id, result=_result(0.5, 0.905))
     env.sweep(_due(env) - timedelta(days=1))
     latest = env.cycles()[-1]
@@ -1093,7 +1147,7 @@ def test_pending_setup_usage_retries_the_same_check(env: _Env, monkeypatch: pyte
     _enable(env, source_id)
     env.better()
     budgets_before = env.count(ExecutionBudgetModel)
-    submit = continuous.submit_unified_payload
+    submit = continuous.submit_repo_payload
     _refuse_after_charging(env, "budget.pending", 2)
     now = _due(env)
     env.sweep(now)
@@ -1103,7 +1157,7 @@ def test_pending_setup_usage_retries_the_same_check(env: _Env, monkeypatch: pyte
     assert cycle.execution_budget_id is not None
     assert cycle.detail_params["attempts"] == 0
 
-    monkeypatch.setattr(continuous, "submit_unified_payload", submit)
+    monkeypatch.setattr(continuous, "submit_repo_payload", submit)
     env.sweep(now + continuous.CYCLE_LEASE + timedelta(seconds=1))
     [retried] = env.cycles()
     assert retried.id == cycle.id
@@ -1118,16 +1172,16 @@ def test_a_pending_retry_after_a_catalog_change_keeps_its_first_models_and_budge
     """A retried check replays the models it first chose, so its key meets the same request and budget."""
     _enable(env, _incumbent(env))
     env.better()
-    submit = continuous.submit_unified_payload
+    submit = continuous.submit_repo_payload
     _refuse_after_charging(env, "budget.pending", 2)
     now = _due(env)
     env.sweep(now)
     [cycle] = env.cycles()
-    first_old = {"task_model": "fixture/first-task", "reflection_model": "fixture/first-reflection"}
+    first_old = {"reflection_model": "fixture/first-reflection"}
     env.edit_cycle(cycle.id, snapshot={**cycle.snapshot, "old_models": first_old})
     env.catalog(**CURRENT_MODELS, strong=(60.0, 1e-6), stronger=(70.0, 1e-6))
 
-    monkeypatch.setattr(continuous, "submit_unified_payload", submit)
+    monkeypatch.setattr(continuous, "submit_repo_payload", submit)
     env.sweep(now + continuous.CYCLE_LEASE + timedelta(seconds=1))
 
     [retried] = env.cycles()
@@ -1135,8 +1189,7 @@ def test_a_pending_retry_after_a_catalog_change_keeps_its_first_models_and_budge
     assert retried.snapshot["budget_key"] == cycle.snapshot["budget_key"]
     assert retried.snapshot["old_models"] == first_old
     assert retried.execution_budget_id == cycle.execution_budget_id
-    models = env.payload(retried.optimization_id)["models"]
-    assert (models["task_model"]["name"], models["reflection_model"]["name"]) == ("fixture/strong", "fixture/strong")
+    assert env.payload(retried.optimization_id)["reflection_model_config"]["name"] == "fixture/strong"
 
 
 @pytest.mark.parametrize("lacking", ["absent", None, {}])
@@ -1147,24 +1200,23 @@ def test_a_retry_naming_a_role_the_incumbent_lacks_fails_instead_of_sticking(
     incumbent_id = _incumbent(env)
     _enable(env, incumbent_id)
     env.better()
-    submit = continuous.submit_unified_payload
+    submit = continuous.submit_repo_payload
     _refuse_after_charging(env, "budget.pending", 2)
     now = _due(env)
     env.sweep(now)
     [cycle] = env.cycles()
     env.edit_cycle(cycle.id, snapshot={k: v for k, v in cycle.snapshot.items() if k != "old_models"})
-    payload = env.payload(incumbent_id)
-    models = {**payload["models"], "task_model": lacking}
+    payload = {**env.payload(incumbent_id), "reflection_model_config": lacking}
     if lacking == "absent":
-        del models["task_model"]
-    env.store.update_job(incumbent_id, payload={**payload, "models": models})
+        del payload["reflection_model_config"]
+    env.store.update_job(incumbent_id, payload=payload)
 
-    monkeypatch.setattr(continuous, "submit_unified_payload", submit)
+    monkeypatch.setattr(continuous, "submit_repo_payload", submit)
     env.sweep(now + continuous.CYCLE_LEASE + timedelta(seconds=1))
 
     [retried] = env.cycles()
     assert (retried.id, retried.status, retried.detail_code) == (cycle.id, "failed", "continuous.run_rejected")
-    assert retried.detail_params == {"reason": "the incumbent has no task_model"}
+    assert retried.detail_params == {"reason": "the incumbent has no reflection_model"}
 
 
 def test_a_crashed_check_never_takes_another_users_budget_with_its_key(env: _Env) -> None:
@@ -1184,10 +1236,10 @@ def test_the_new_run_inlines_the_cases_instead_of_a_staged_upload(env: _Env) -> 
     """A run copied from one that also named a staged upload is sent with the cases inline and no upload."""
     source_id = _incumbent(env)
     payload = env.payload(source_id)
-    env.store.update_job(source_id, payload={**payload, "data": {**payload["data"], "staged_dataset_id": "gone"}})
+    env.store.update_job(source_id, payload={**payload, "staged_dataset_id": "gone"})
     _enable(env, source_id)
     env.better()
-    submit = continuous.submit_unified_payload
+    submit = continuous.submit_repo_payload
     sent: list[Any] = []
 
     def record(request: Any, **kwargs: Any) -> Any:
@@ -1200,19 +1252,19 @@ def test_the_new_run_inlines_the_cases_instead_of_a_staged_upload(env: _Env) -> 
         Returns:
             The submission response.
         """
-        sent.append(request.data.staged_dataset_id)
+        sent.append(request.staged_dataset_id)
         return submit(request, **kwargs)
 
-    env.monkeypatch.setattr(continuous, "submit_unified_payload", record)
+    env.monkeypatch.setattr(continuous, "submit_repo_payload", record)
 
     env.sweep(_due(env))
 
     assert sent == [None]
     [cycle] = env.cycles()
     assert cycle.status == "optimizing", cycle.detail_code
-    copied = env.payload(cycle.optimization_id)["data"]
+    copied = env.payload(cycle.optimization_id)
     assert copied.get("staged_dataset_id") is None
-    assert copied["cases"] == payload["data"]["cases"]
+    assert copied["cases"] == payload["cases"]
 
 
 def test_an_unavailable_hosted_model_is_never_chosen(env: _Env) -> None:
@@ -1267,14 +1319,14 @@ def test_a_pending_retry_at_the_allowance_edge_is_not_paused(env: _Env, monkeypa
     source_id = _incumbent(env)
     _enable(env, source_id, monthly_limit_cents=CYCLE_BUDGET, cycle_budget_cents=CYCLE_BUDGET)
     env.better()
-    submit = continuous.submit_unified_payload
+    submit = continuous.submit_repo_payload
     _refuse_after_charging(env, "budget.pending", 2)
     now = _due(env)
     env.sweep(now)
     [cycle] = env.cycles()
     assert cycle.execution_budget_id is not None
 
-    monkeypatch.setattr(continuous, "submit_unified_payload", submit)
+    monkeypatch.setattr(continuous, "submit_repo_payload", submit)
     env.sweep(now + continuous.CYCLE_LEASE + timedelta(seconds=1))
     [retried] = env.cycles()
     assert (retried.id, retried.status) == (cycle.id, "optimizing")
@@ -1354,7 +1406,7 @@ def test_another_users_run_with_a_checks_key_is_never_linked(env: _Env) -> None:
     [claimed] = continuous._claim_due(env.store.engine, _due(env))
     env.harness.username = "bob"
     forged = env.client.post(
-        "/optimize", json=_incumbent_payload(), headers={"Idempotency-Key": f"continuous:{claimed}"}
+        "/blackbox/run", json=_incumbent_payload(), headers={"Idempotency-Key": f"continuous:{claimed}"}
     )
     assert forged.status_code == 201, forged.text
     env.harness.username = "alice"
@@ -1432,7 +1484,7 @@ def test_a_plan_saved_before_rules_reads_as_a_rule(env: _Env) -> None:
 
 def test_the_sidebar_flags_every_run_of_a_plan(env: _Env) -> None:
     """The source run and a run a check started are automated; an unrelated run is not."""
-    other_id = env.client.post("/optimize", json=_incumbent_payload()).json()["optimization_id"]
+    other_id = env.client.post("/blackbox/run", json=_incumbent_payload()).json()["optimization_id"]
     source_id, _, cycle = _started(env)
     assert automated_run_ids(env.store, [source_id, cycle.optimization_id, other_id]) == {
         source_id,
@@ -1463,7 +1515,7 @@ def test_a_plan_without_amounts_reuses_the_run_budget_and_has_no_monthly_limit(e
 
 def test_a_plan_set_up_while_the_run_works_waits_for_its_success(env: _Env) -> None:
     """A plan made from the submit wizard waits, then starts when the run succeeds."""
-    optimization_id = env.client.post("/optimize", json=_incumbent_payload()).json()["optimization_id"]
+    optimization_id = env.client.post("/blackbox/run", json=_incumbent_payload()).json()["optimization_id"]
     plan = _enable(env, optimization_id, monthly_limit_cents=None, cycle_budget_cents=None)
     assert (plan["status"], plan["next_check_at"]) == ("waiting", None)
     assert env.client.post(f"/continuous/{plan['id']}/pause").status_code == 409
@@ -1477,7 +1529,7 @@ def test_a_plan_set_up_while_the_run_works_waits_for_its_success(env: _Env) -> N
 
 def test_a_waiting_plan_ends_with_a_failed_run(env: _Env) -> None:
     """A waiting plan ends, with the reason kept, when its run fails; the owner can then delete it."""
-    optimization_id = env.client.post("/optimize", json=_incumbent_payload()).json()["optimization_id"]
+    optimization_id = env.client.post("/blackbox/run", json=_incumbent_payload()).json()["optimization_id"]
     plan = _enable(env, optimization_id, permitted={"task_model": True})
     _finish(env, optimization_id, status="failed")
     env.sweep(datetime.now(UTC))
@@ -1501,7 +1553,7 @@ def test_a_waiting_plan_ends_with_a_failed_run(env: _Env) -> None:
 
 def test_a_run_without_test_cases_cannot_start_a_plan(env: _Env) -> None:
     """A plan could never replace a run that kept no test cases apart, so none starts from it."""
-    optimization_id = env.client.post("/optimize", json=_incumbent_payload()).json()["optimization_id"]
+    optimization_id = env.client.post("/blackbox/run", json=_incumbent_payload()).json()["optimization_id"]
     _finish(env, optimization_id, result=_result(0.5, 0.7, test=0, held_out=False))
     state = env.client.get(f"/optimizations/{optimization_id}/continuous").json()
     assert (state["eligible"], state["held_out"]) == (False, False)
@@ -1513,10 +1565,11 @@ def test_a_run_without_test_cases_cannot_start_a_plan(env: _Env) -> None:
 
 
 def test_a_run_in_flight_without_a_test_split_cannot_start_a_plan(env: _Env) -> None:
-    """The submit wizard cannot set up a plan for a run whose split keeps no test cases."""
+    """The submit wizard cannot set up a plan for a run whose cases are too few for a test split."""
     payload = _incumbent_payload()
-    payload["data"]["split"] = {"train": 0.8, "val": 0.2, "test": 0.0}
-    optimization_id = env.client.post("/optimize", json=payload).json()["optimization_id"]
+    # Two cases split into one train and one validation case, with none held out.
+    payload["cases"] = payload["cases"][:2]
+    optimization_id = env.client.post("/blackbox/run", json=payload).json()["optimization_id"]
     refused = env.client.post(
         f"/optimizations/{optimization_id}/continuous",
         json={"schedule": WEEKLY, "permitted": {"task_model": True}, "cycle_budget_cents": CYCLE_BUDGET},
@@ -1526,7 +1579,7 @@ def test_a_run_in_flight_without_a_test_split_cannot_start_a_plan(env: _Env) -> 
 
 def test_a_waiting_plan_ends_when_its_run_keeps_no_test_cases(env: _Env) -> None:
     """A run with too few cases for a test split succeeds, and its waiting plan ends with the reason."""
-    optimization_id = env.client.post("/optimize", json=_incumbent_payload()).json()["optimization_id"]
+    optimization_id = env.client.post("/blackbox/run", json=_incumbent_payload()).json()["optimization_id"]
     plan = _enable(env, optimization_id, monthly_limit_cents=None, cycle_budget_cents=None)
     assert plan["status"] == "waiting"
     _finish(env, optimization_id, result=_result(0.5, 0.7, test=0, held_out=False))
@@ -1542,7 +1595,7 @@ def test_a_plan_deleted_while_its_check_submits_keeps_the_run(
     source_id = _incumbent(env)
     plan = _enable(env, source_id)
     env.better()
-    submit = continuous.submit_unified_payload
+    submit = continuous.submit_repo_payload
     submitted: list[str] = []
 
     def delete_then_submit(*args: Any, **kwargs: Any) -> Any:
@@ -1560,7 +1613,7 @@ def test_a_plan_deleted_while_its_check_submits_keeps_the_run(
         submitted.append(response.optimization_id)
         return response
 
-    monkeypatch.setattr(continuous, "submit_unified_payload", delete_then_submit)
+    monkeypatch.setattr(continuous, "submit_repo_payload", delete_then_submit)
     env.sweep(_due(env))
 
     assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
@@ -1638,7 +1691,7 @@ def test_a_worker_that_lost_its_lease_stops_before_it_submits(env: _Env) -> None
     payload = continuous._cycle_payload(
         env.plan(),
         continuous._incumbent(env.store, source_id),
-        {"task_model": {"name": "fixture/strong", "byok_provider": None}},
+        {"reflection_model": {"name": "fixture/strong", "byok_provider": None}},
         1,
     )
     jobs = env.count(JobModel)
@@ -1656,7 +1709,7 @@ def test_a_worker_that_lost_its_lease_while_submitting_writes_nothing(
     """A late worker leaves the outcome to the worker that took over, which links the same run."""
     _enable(env, _incumbent(env))
     env.better()
-    submit = continuous.submit_unified_payload
+    submit = continuous.submit_repo_payload
     taken_over = datetime.now(UTC) + timedelta(hours=1)
 
     def submit_then_lose_the_lease(*args: Any, **kwargs: Any) -> Any:
@@ -1673,13 +1726,13 @@ def test_a_worker_that_lost_its_lease_while_submitting_writes_nothing(
         env.edit_cycle(env.cycles()[0].id, lease_until=taken_over)
         return response
 
-    monkeypatch.setattr(continuous, "submit_unified_payload", submit_then_lose_the_lease)
+    monkeypatch.setattr(continuous, "submit_repo_payload", submit_then_lose_the_lease)
     env.sweep(_due(env))
     [cycle] = env.cycles()
     assert (cycle.status, cycle.optimization_id) == ("checking", None)
     jobs = env.count(JobModel)
 
-    monkeypatch.setattr(continuous, "submit_unified_payload", submit)
+    monkeypatch.setattr(continuous, "submit_repo_payload", submit)
     env.sweep(taken_over + timedelta(seconds=1))
     [linked] = env.cycles()
     assert linked.status == "optimizing"
@@ -1859,3 +1912,66 @@ def test_a_replacement_billed_another_way_in_another_role_gives_the_next_best_it
     found = continuous.find_better_models(None, plan, models, _picks(*ranked))
 
     assert {role: better["name"] for role, better in found.items()} == expected
+
+
+def test_a_repository_run_with_cases_can_enable_a_plan(env: _Env) -> None:
+    """A successful repository run with inline cases is eligible, the same as a unified run."""
+    source_id = _incumbent(env)
+
+    assert env.client.get(f"/optimizations/{source_id}/continuous").json()["eligible"] is True
+    assert _enable(env, source_id, permitted={"reflection_model": True})["id"]
+
+
+def test_a_check_on_a_created_repository_publishes_a_draft_pull_request(env: _Env) -> None:
+    """A check never moves ``skynet/best`` before the owner approves it, so it uses the draft pull request path."""
+    payload = _incumbent_payload()
+    payload["target"]["repo"]["created_by_skynet"] = True
+    response = env.client.post("/blackbox/run", json=payload)
+    assert response.status_code == 201, response.text
+    source_id = response.json()["optimization_id"]
+    _finish(env, source_id, result=_result(0.5, INCUMBENT_SCORE))
+    _enable(env, source_id, permitted={"task_model": True, "reflection_model": True})
+    env.better()
+    env.sweep(_due(env))
+    cycle = env.cycles()[-1]
+
+    assert cycle.status == "optimizing", cycle.detail_code
+    assert env.payload(source_id)["target"]["repo"]["created_by_skynet"] is True
+    assert env.payload(cycle.optimization_id)["target"]["repo"]["created_by_skynet"] is False
+
+
+def test_a_scheduled_check_reruns_a_repository_run_from_its_best_patch(env: _Env) -> None:
+    """A check re-runs the repository run from the incumbent's best patch, on the same commit, cases and split."""
+    source_id = _incumbent(env)
+    _enable(env, source_id, permitted={"task_model": True, "reflection_model": True})
+    env.better()
+    env.sweep(_due(env))
+    cycle = env.cycles()[-1]
+
+    assert cycle.status == "optimizing", cycle.detail_code
+    assert cycle.changes == ["reflection_model"]
+    incumbent, payload = env.payload(source_id), env.payload(cycle.optimization_id)
+    assert payload["target"]["kind"] == "repo"
+    assert payload["seed_candidate"] == REPO_BEST_PATCH
+    assert payload["reflection_model_config"]["name"] == "fixture/strong"
+    assert payload.get("task_model_config") is None
+    assert payload["target"]["repo"]["commit"] == incumbent["target"]["repo"]["commit"] == REPO_COMMIT
+    for key in ("cases", "seed", "scorer", "strategy"):
+        assert payload[key] == incumbent[key], key
+    assert continuous.held_out_fingerprint(payload) == continuous.held_out_fingerprint(incumbent) is not None
+    assert payload["preflight_id"]
+    job = env.store.get_job(cycle.optimization_id, include_payload=False)
+    assert BudgetService(engine=env.store.engine).get(job["execution_budget_id"], "alice").total_cents == CYCLE_BUDGET
+
+
+def test_a_repository_fingerprint_changes_with_the_commit_or_the_scorer(env: _Env) -> None:
+    """Scores on another commit or under other scorer code are not comparable."""
+    incumbent = env.payload(_incumbent(env))
+    other_commit = {**incumbent, "target": {**incumbent["target"], "repo": {**incumbent["target"]["repo"]}}}
+    other_commit["target"]["repo"]["commit"] = "b" * 40
+    other_scorer = {**incumbent, "scorer": {**incumbent["scorer"], "metric_code": "def score(p, case=None): return 0"}}
+
+    base = continuous.held_out_fingerprint(incumbent)
+    assert base is not None
+    assert continuous.held_out_fingerprint(other_commit) != base
+    assert continuous.held_out_fingerprint(other_scorer) != base

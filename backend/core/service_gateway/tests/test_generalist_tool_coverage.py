@@ -14,13 +14,17 @@ from core.service_gateway.agents.generalist import (
     _DESTRUCTIVE_TOOLS,
     _POST_SUBMIT_TOOLS,
     _SAFE_MUTATIONS,
-    _SUBMIT_TOOLS,
     _needs_approval,
 )
 
 # Agent-tagged routes the generalist deliberately does not see. Each one has a
 # reason; a new agent route must be added to a generalist list or here.
 _HIDDEN_FROM_GENERALIST = {
+    # Every run optimizes a repository, and the wizard's own Run button submits it (SKY-316).
+    "submit_unified_run_optimize_post",
+    # Grid-search pairs are DSPy programs, and these routes refuse every call with 410 (SKY-316).
+    "serve_pair_info_serve",
+    "request_user_pair_inference",
     # The chat's inference card runs this itself; the agent cannot know the user's inputs.
     "serve_program_serve",
     # Needs a black-box run ordinal the agent has no listing for, and returns a full transcript.
@@ -66,7 +70,7 @@ def agent_tool_names() -> set[str]:
 
 def test_every_generalist_tool_name_matches_an_agent_route(agent_tool_names: set[str]) -> None:
     """A tool name with no agent route would silently drop out of the agent's tool list."""
-    listed = _ALWAYS_TOOLS | _DATASET_READY_TOOLS | _SUBMIT_TOOLS | _POST_SUBMIT_TOOLS
+    listed = _ALWAYS_TOOLS | _DATASET_READY_TOOLS | _POST_SUBMIT_TOOLS
     assert sorted(listed - agent_tool_names) == []
 
 
@@ -77,7 +81,7 @@ def test_every_gated_tool_name_matches_an_agent_route(agent_tool_names: set[str]
 
 def test_every_agent_route_is_exposed_or_deliberately_hidden(agent_tool_names: set[str]) -> None:
     """A new agent route must be given to the generalist or listed with a reason it is hidden."""
-    listed = _ALWAYS_TOOLS | _DATASET_READY_TOOLS | _SUBMIT_TOOLS | _POST_SUBMIT_TOOLS
+    listed = _ALWAYS_TOOLS | _DATASET_READY_TOOLS | _POST_SUBMIT_TOOLS
     assert sorted(agent_tool_names - listed - _HIDDEN_FROM_GENERALIST) == []
     assert sorted(_HIDDEN_FROM_GENERALIST - agent_tool_names) == []
 

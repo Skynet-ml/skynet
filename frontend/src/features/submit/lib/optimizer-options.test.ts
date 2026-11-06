@@ -56,7 +56,7 @@ test("Auto leads and the list follows the setup's allowed optimizers", () => {
     guided: false,
     choice: "auto",
   }).map((view) => view.id);
-  assert.deepEqual(ids, ["auto", "dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"]);
+  assert.deepEqual(ids, ["auto"]);
   const single = optimizerOptions({
     kind: "dspy_program",
     mode: "single",
@@ -64,7 +64,7 @@ test("Auto leads and the list follows the setup's allowed optimizers", () => {
     guided: false,
     choice: "auto",
   }).map((view) => view.id);
-  assert.deepEqual(single, ["auto", "dspy_gepa"]);
+  assert.deepEqual(single, ["auto"]);
   const blackbox = optimizerOptions({
     kind: "repo",
     mode: "pairs",
@@ -72,8 +72,9 @@ test("Auto leads and the list follows the setup's allowed optimizers", () => {
     guided: false,
     choice: "auto",
   });
-  assert.equal(blackbox[0].id, "gepa");
-  assert.equal(blackbox.length, 6);
+  assert.equal(blackbox[0].id, "auto");
+  assert.equal(blackbox[0].family, "auto");
+  assert.equal(blackbox.length, 7);
 });
 
 test("without a matching catalog every option is pending, not unavailable", () => {
@@ -123,11 +124,11 @@ test("catalog entries outside the allowed list are dropped", () => {
     guided: false,
     choice: "auto",
   }).map((view) => view.id);
-  assert.deepEqual(views, ["auto", "dspy_gepa"]);
+  assert.deepEqual(views, ["auto"]);
 });
 
 test("fallback flags come from the shared rules while the catalog loads", () => {
-  const [auto, gepa] = optimizerOptions({
+  const [auto] = optimizerOptions({
     kind: "dspy_program",
     mode: "pairs",
     catalog: null,
@@ -135,14 +136,16 @@ test("fallback flags come from the shared rules while the catalog loads", () => 
     choice: "auto",
   });
   assert.equal(auto.family, "dspy");
-  assert.equal(gepa.usesFeedback, true);
-  const meta = optimizerOptions({
+  assert.equal(auto.usesFeedback, true);
+  const repo = optimizerOptions({
     kind: "repo",
     mode: "pairs",
     catalog: null,
     guided: false,
     choice: "auto",
-  }).find((view) => view.id === "meta_harness");
+  });
+  assert.equal(repo.find((view) => view.id === "gepa")?.usesFeedback, true);
+  const meta = repo.find((view) => view.id === "meta_harness");
   assert.equal(meta?.nativeProposer, true);
   assert.equal(meta?.supportsIterationLimit, true);
 });
@@ -173,11 +176,19 @@ test("an unavailable choice reports the catalog's reason", () => {
   );
 });
 
-test("a repository run offers every engine but Auto, and Auto is not an allowed choice", () => {
+test("a repository run offers Auto first, then the six repository engines", () => {
   const input = { kind: "repo", mode: "single", catalog: null, choice: "auto" } as const;
   const ids = optimizerOptions({ ...input, guided: false }).map((view) => view.id);
-  assert.ok(ids.length > 0);
-  assert.ok(!ids.includes("auto"));
-  assert.deepEqual(optimizerChoiceIssue(input), { kind: "not_allowed" });
+  assert.deepEqual(ids, [
+    "auto",
+    "gepa",
+    "best_of_n",
+    "autoresearch",
+    "meta_harness",
+    "autosaddler",
+    "shinka_evolve",
+  ]);
+  assert.equal(optimizerChoiceIssue(input), null);
   assert.equal(optimizerChoiceIssue({ ...input, choice: "gepa" }), null);
+  assert.deepEqual(optimizerChoiceIssue({ ...input, choice: "dspy_gepa" }), { kind: "not_allowed" });
 });
