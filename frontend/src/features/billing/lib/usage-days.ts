@@ -56,6 +56,18 @@ export function usageDayRows(byDay: readonly UsageDayInput[]): UsageDayRow[] {
 }
 
 /**
+ * The short label of one `YYYY-MM-DD` UTC day. It formats in UTC, because the
+ * browser's own zone would show the day before west of UTC.
+ */
+export function formatUsageDay(date: string, locale: string): string {
+  return new Intl.DateTimeFormat(locale, {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(`${date}T00:00:00Z`));
+}
+
+/**
  * The UTC bounds of one `YYYY-MM-DD` day, clipped to the selected range so the
  * drill-down never shows calls that the day row did not count.
  */

@@ -27,7 +27,13 @@ import { PanelHeading } from "@/shared/ui/panel-heading";
 import { Button } from "@/shared/ui/primitives/button";
 import { useBalance } from "../providers/balance-provider";
 import { formatCents, formatCentsUsd, formatResetDate, type UsageEntry } from "../lib/wallet";
-import { dayCalls, dayWindow, usageDayRows, type UsageDayRow } from "../lib/usage-days";
+import {
+  dayCalls,
+  dayWindow,
+  formatUsageDay,
+  usageDayRows,
+  type UsageDayRow,
+} from "../lib/usage-days";
 
 /** A fixed look-back preset. `all` drops the lower bound. */
 type PresetRange = "7d" | "30d" | "90d" | "all";
@@ -154,12 +160,6 @@ function deriveUsage(
 }
 
 /** Locale-aware short date (e.g. `Jun 26`) for a `YYYY-MM-DD` bucket key. */
-function formatDay(iso: string, locale: string): string {
-  return new Intl.DateTimeFormat(locale, { month: "short", day: "numeric" }).format(
-    new Date(`${iso}T00:00:00Z`),
-  );
-}
-
 /** Sum the per-day series into chart buckets, ascending by day. */
 function bucketDays(byDay: BillingUsageResponse["by_day"], locale: string): Bucket[] {
   const map = new Map<string, number>();
@@ -168,7 +168,7 @@ function bucketDays(byDay: BillingUsageResponse["by_day"], locale: string): Buck
   }
   return [...map.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, billed]) => ({ key, label: formatDay(key, locale), billed }));
+    .map(([key, billed]) => ({ key, label: formatUsageDay(key, locale), billed }));
 }
 
 function StatCard({ icon: Icon, label, value }: { icon: Icon; label: string; value: string }) {
@@ -446,7 +446,7 @@ function DayRow({
         />
         <span className="flex min-w-0 flex-1 flex-col">
           <span className="truncate text-sm font-medium text-foreground">
-            {formatDay(day.date, locale)}
+            {formatUsageDay(day.date, locale)}
           </span>
           <span className="truncate text-xs text-muted-foreground">
             {day.calls != null && msg("usage.day.calls", { count: day.calls })}

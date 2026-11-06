@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dayCalls, dayWindow, usageDayRows } from "./usage-days.ts";
+import { dayCalls, dayWindow, formatUsageDay, usageDayRows } from "./usage-days.ts";
+
+test("formatUsageDay labels the UTC day itself, also west of UTC", () => {
+  const previous = process.env.TZ;
+  process.env.TZ = "America/Los_Angeles";
+  try {
+    assert.equal(formatUsageDay("2026-11-06", "en-US"), "Nov 6");
+  } finally {
+    process.env.TZ = previous;
+  }
+});
 
 test("usageDayRows lists one row per day, newest first, with cost, calls and tokens", () => {
   const rows = usageDayRows([
