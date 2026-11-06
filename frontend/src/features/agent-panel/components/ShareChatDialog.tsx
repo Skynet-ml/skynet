@@ -81,6 +81,7 @@ export function ShareChatDialog({
   const loadSeq = React.useRef(0);
   const load = React.useCallback(async () => {
     const seq = ++loadSeq.current;
+    setBusy(false);
     setLoadFailed(false);
     setState(null);
     const next = await getChatShareState(conversationId);
@@ -94,7 +95,12 @@ export function ShareChatDialog({
     if (open) void load();
   }, [open, load]);
 
-  const candidates = state?.candidates ?? [];
+  const candidateKeys = new Set((state?.candidates ?? []).map(itemKey));
+  // Saved items the chat no longer names still belong to the link, so list them too.
+  const candidates = [
+    ...(state?.candidates ?? []),
+    ...(state?.items ?? []).filter((item) => !candidateKeys.has(itemKey(item))),
+  ];
   // Keep the data option for a saved data link, so the select still shows its value.
   const canShareData = candidates.length > 0 || state?.linkType === "continue_data";
   const types: ShareLinkType[] = canShareData ? ["view", "continue", "continue_data"] : ["view", "continue"];
@@ -105,7 +111,8 @@ export function ShareChatDialog({
     linkType !== state.linkType ||
     (linkType === "continue_data" &&
       (ticked.size !== savedKeys.size || [...ticked].some((key) => !savedKeys.has(key))));
-  const pickedCount = candidates.filter((item) => ticked.has(itemKey(item))).length;
+  // Deleted items do not count: the server drops them, so a link of only deleted items is empty.
+  const pickedCount = candidates.filter((item) => item.available && ticked.has(itemKey(item))).length;
   const missingItems = linkType === "continue_data" && pickedCount === 0;
 
   const toggle = (key: string) =>
@@ -117,10 +124,13 @@ export function ShareChatDialog({
     });
 
   const save = async () => {
+    const seq = loadSeq.current;
     setBusy(true);
     const picked = candidates.filter((item) => ticked.has(itemKey(item)));
     const next = await saveChatShare(conversationId, linkType, picked);
     setBusy(false);
+    // The dialog moved to another chat while the request ran.
+    if (seq !== loadSeq.current) return;
     if (!next) {
       toast.error(msg("share.error"));
       return;
@@ -130,9 +140,11 @@ export function ShareChatDialog({
   };
 
   const revoke = async () => {
+    const seq = loadSeq.current;
     setBusy(true);
     const ok = await revokeConversationShare(conversationId);
     setBusy(false);
+    if (seq !== loadSeq.current) return;
     if (!ok) {
       toast.error(msg("settings.privacy.shared_chats.stop_error"));
       return;

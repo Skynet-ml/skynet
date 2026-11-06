@@ -458,6 +458,24 @@ def test_deleted_item_reads_as_404() -> None:
     assert listed[0]["items"] == [{"kind": "run", "id": "run-a", "label": "", "available": False}]
 
 
+def test_ticked_item_stays_available_after_chat_stops_naming_it() -> None:
+    """The owner state matches the grant: a ticked item the chat no longer names still reads."""
+    client, store = _client(_ALICE)
+    _private_chat(store)
+    token = _share(client, "continue_data", [{"kind": "run", "id": "run-a"}])
+    with store._session_factory() as session:
+        session.query(AgentMessageModel).filter_by(conversation_id="c-1", role="assistant").delete()
+        session.commit()
+
+    state = client.get("/agent/conversations/c-1/share").json()
+    assert state["items"] == [{"kind": "run", "id": "run-a", "label": "Alice run", "available": True}]
+    bob = _mount(store, _BOB)
+    bob.post(f"/agent/shared-conversations/{token}/open")
+    assert bob.get("/agent/shared-items/run/run-a").status_code == 200
+    assert _share(client, "continue_data", [{"kind": "run", "id": "run-a"}]) == token
+    assert bob.get("/agent/shared-items/run/run-a").status_code == 200
+
+
 def test_shared_list_is_owner_only_with_type_and_items() -> None:
     """The list shows the owner's links with type and items; revoked links drop out."""
     client, store = _client(_ALICE)

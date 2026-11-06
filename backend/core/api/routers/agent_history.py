@@ -484,7 +484,7 @@ def create_agent_history_router(*, job_store) -> APIRouter:
         with Session(job_store.engine) as session:
             row = _owned_conversation(session, conversation_id, user.username)
             candidates = _item_candidates(session, row)
-            return _share_state(_share_of(session, conversation_id), candidates)
+            return _share_state(session, _share_of(session, conversation_id), candidates)
 
     @router.post(
         "/agent/conversations/{conversation_id}/share",
@@ -497,8 +497,9 @@ def create_agent_history_router(*, job_store) -> APIRouter:
         """Create the conversation's share link, or change its type and items in place.
 
         The token stays the same while the link lives. Only ``continue_data``
-        links keep items, and only items that the chat refers to and the
-        caller owns are kept; other items are dropped.
+        links keep items, and only items that the chat refers to (or that the
+        link already shares) and the caller owns are kept; other items are
+        dropped.
 
         Args:
             conversation_id: UUID of the conversation to share.
@@ -520,7 +521,11 @@ def create_agent_history_router(*, job_store) -> APIRouter:
         with Session(job_store.engine) as session:
             row = _owned_conversation(session, conversation_id, user.username)
             candidates = _item_candidates(session, row)
+            share = _share_of(session, conversation_id)
             allowed = {(c.kind, c.id) for c in candidates}
+            # A shared item stays shareable after older turns push it out of the candidate window.
+            if share is not None:
+                allowed |= set(_owned_item_labels(session, user.username, _share_refs(share)))
             items: list[dict[str, str]] = []
             if body.link_type == "continue_data":
                 for item in body.items:
@@ -530,7 +535,6 @@ def create_agent_history_router(*, job_store) -> APIRouter:
                 if not items:
                     raise DomainError("agent_settings.invalid_value", status=422, field="items")
             now = datetime.now(UTC)
-            share = _share_of(session, conversation_id)
             if share is None:
                 live = session.query(AgentChatShareModel).filter(AgentChatShareModel.username == user.username).count()
                 if live >= MAX_SHARED_CHATS:
@@ -557,7 +561,7 @@ def create_agent_history_router(*, job_store) -> APIRouter:
                 share.items = items
                 share.updated_at = now
                 session.commit()
-            return _share_state(share, candidates)
+            return _share_state(session, share, candidates)
 
     @router.delete(
         "/agent/conversations/{conversation_id}/share",
@@ -609,7 +613,7 @@ def create_agent_history_router(*, job_store) -> APIRouter:
                 .join(AgentConversationModel, AgentConversationModel.id == AgentChatShareModel.conversation_id)
                 .filter(AgentChatShareModel.username == user.username)
                 .order_by(AgentChatShareModel.updated_at.desc())
-                .limit(MAX_LIST)
+                .limit(MAX_SHARED_CHATS)
                 .all()
             )
             summaries = []
@@ -1104,19 +1108,23 @@ def _item_candidates(session: Session, row: AgentConversationModel) -> list[Shar
     return _item_options(owned, labels)
 
 
-def _share_state(share: AgentChatShareModel | None, candidates: list[SharedItemOption]) -> ChatShareState:
+def _share_state(
+    session: Session, share: AgentChatShareModel | None, candidates: list[SharedItemOption]
+) -> ChatShareState:
     """Build the owner's view of a conversation's share link.
 
     Args:
+        session: Active SQLAlchemy session.
         share: The live share row, or ``None``.
         candidates: The items that the link may share.
 
     Returns:
-        The link state.
+        The link state. A ticked item is ``available`` while it exists, even
+        when the chat no longer names it, because the grant still covers it.
     """
     if share is None:
         return ChatShareState(token=None, link_type=None, items=[], candidates=candidates)
-    labels = {(c.kind, c.id): c.label for c in candidates}
+    labels = _owned_item_labels(session, cast(str, share.username), _share_refs(share))
     return ChatShareState(
         token=cast(str, share.token),
         link_type=cast(str, share.link_type),
