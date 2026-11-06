@@ -45,7 +45,7 @@ Authorization: Bearer skyd_...
 | `GET /models`                                   | उन मॉडलों की सूची देता है जिन्हें आप इस्तेमाल कर सकते हैं।        |
 | `GET /optimizers`                               | किसी सेटअप के लिए उपयुक्त ऑप्टिमाइज़रों की सूची देता है।           |
 | `GET /blackbox/engines`                         | नेटिव इंजनों की सूची देता है और बताता है कि हर इंजन उपलब्ध है या नहीं। |
-| `POST /optimize`                                | प्रॉम्प्ट, कोड, टेक्स्ट या DSPy प्रोग्राम के लिए रन शुरू करता है।   |
+| `POST /optimize` | DSPy प्रोग्राम के लिए रन शुरू करता है। |
 | `POST /blackbox/run`                            | किसी GitHub रिपॉज़िटरी पर रन शुरू करता है।                       |
 | `GET /optimizations`                            | आपके रन की सूची देता है।                                       |
 | `GET /optimizations/{optimization_id}`          | एक रन लौटाता है: स्थिति, प्रगति, लॉग और परिणाम।                  |
@@ -56,7 +56,7 @@ Authorization: Bearer skyd_...
 
 ## रन शुरू करें
 
-`POST /optimize` वही सेटअप लेता है जो सबमिट विज़ार्ड लेता है। यह उदाहरण एक ऐसे प्रॉम्प्ट को बेहतर बनाता है जो सपोर्ट संदेशों को लेबल में बाँटता है।
+`POST /optimize` वही सेटअप लेता है जो सबमिट विज़ार्ड लेता है। यह उदाहरण एक ऐसे DSPy प्रोग्राम को बेहतर बनाता है जो सपोर्ट संदेशों को लेबल में बाँटता है।
 
 ```bash tab="curl"
 curl https://api.skynetml.com/optimize \
@@ -72,7 +72,7 @@ curl https://api.skynetml.com/optimize \
   "task": {
     "objective": "Sort each support message into billing, bug or other.",
     "artifact": {
-      "kind": "prompt",
+      "kind": "dspy_program",
       "starting_version": "Label this support message as billing, bug or other."
     }
   },
@@ -93,7 +93,7 @@ curl https://api.skynetml.com/optimize \
     "reflection_model": { "name": "<model from GET /models>" }
   },
   "workspace": {
-    "run_code": "from skynet import llm\n\ndef run(artifact, input):\n    return llm(artifact, input=input[\"message\"])\n",
+    "run_code": "import dspy\n\nprogram = dspy.Predict(\"message -> label\")\n\n\ndef run(artifact, input):\n    return program(message=input[\"message\"]).label\n",
     "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
   },
   "max_cost_cents": 500
@@ -102,7 +102,7 @@ curl https://api.skynetml.com/optimize \
 
 महत्वपूर्ण फ़ील्ड:
 
-- `task.artifact.kind` का मान `prompt`, `code`, `text` या `dspy_program` होता है।
+- `task.artifact.kind` का मान `dspy_program` होता है।
 - `data.mode` का मान `pairs` (अपेक्षित आउटपुट वाले इनपुट) या `single` (ठीक एक केस) होता है।
 - `optimizer.choice` का मान `auto` या `GET /optimizers` से मिला कोई एक ऑप्टिमाइज़र नाम होता है।
 - `max_cost_cents` इस रन की खर्च सीमा है, अमेरिकी सेंट में।

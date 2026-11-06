@@ -28,7 +28,7 @@ from pydantic import AliasChoices, BaseModel, Field
 
 from ...billing import ProviderKeyVault, StripeBillingService, openrouter_oauth
 from ...billing.byok_vault import ProviderKeyView, ResolvedConnection
-from ...billing.pricing import PLATFORM_FEE_FRACTION, usage_markup
+from ...billing.pricing import BYOK_FEE_FRACTION, usage_markup
 from ...billing.service import (
     CUSTOM_CENTS_MAX,
     CUSTOM_CENTS_MIN,
@@ -281,7 +281,7 @@ class PricingTermsResponse(BaseModel):
 
     usage_markup: float = Field(description="Multiplier on provider cost for platform-paid tokens and sandbox compute.")
     byok_fee_fraction: float = Field(
-        description="Platform fee on a BYOK run, as a fraction of its at-cost model price."
+        description="Skynet model fee for BYOK calls, as a fraction of provider cost; currently zero."
     )
     purchase_fee_rate: float = Field(description="Top-up service fee, as a fraction of the top-up amount.")
     purchase_fee_fixed_cents: int = Field(description="Flat top-up service fee, in cents.")
@@ -291,11 +291,11 @@ def _pricing_terms() -> PricingTermsResponse:
     """Snapshot the current pricing terms from the billing modules.
 
     Returns:
-        The markup, BYOK fee and top-up fee the backend charges right now.
+        The current markup, BYOK fee fraction (zero), and top-up fee.
     """
     return PricingTermsResponse(
         usage_markup=usage_markup(),
-        byok_fee_fraction=PLATFORM_FEE_FRACTION,
+        byok_fee_fraction=BYOK_FEE_FRACTION,
         purchase_fee_rate=PURCHASE_FEE_RATE,
         purchase_fee_fixed_cents=PURCHASE_FEE_FIXED_CENTS,
     )

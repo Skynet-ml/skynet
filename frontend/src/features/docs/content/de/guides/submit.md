@@ -16,14 +16,7 @@ Sie können beide Felder bearbeiten. Der Assistent überschreibt Ihre Änderunge
 
 ### Was optimiert wird
 
-Wählen Sie den **Artefakttyp**:
-
-| Artefakttyp   | Was sich ändert                                         |
-| ------------- | ------------------------------------------------------- |
-| Prompt        | Anweisungen, die an ein Sprachmodell gesendet werden    |
-| Code          | Der Quelltext eines Programms                           |
-| DSPy-Programm | Die Predictor-Anweisungen eines DSPy-Moduls             |
-| Text          | Jeder andere Text, etwa ein Dokument oder eine Vorlage  |
+Wählen Sie unter **Was optimiert wird** die Option **DSPy-Programm** oder **Ein GitHub-Repository**.
 
 Geben Sie dann die **Ausgangsversion** an (Geführt: **Unser Ausgangspunkt**). Fügen Sie die aktuelle Version ein oder lassen Sie den Assistenten einen Entwurf schreiben.
 
@@ -93,7 +86,7 @@ Schreiben Sie zwei Dateien:
 
 Der **Coding-Agent** kann jede Datei für Sie schreiben und ändern. Er prüft seinen Code und behebt, was fehlschlägt. Sie können bis zu 20 zusätzliche Dateien hinzufügen. Lesen Sie [Metriken und Scorer](/docs/concepts/scorers).
 
-Ruft Ihre Metrik `llm()` auf, legen Sie das **Metrikmodell** fest. Standardmäßig verwendet sie das Reflexionsmodell.
+Die Metrik legt ihr Modell in ihrem eigenen `llm()`-Aufruf fest. Ohne `model=` verwendet die Metrik das Reflexionsmodell.
 
 ### Vertragsprüfung
 

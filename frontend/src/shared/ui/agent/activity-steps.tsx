@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   BookOpen,
   CaretRight,
@@ -26,6 +25,8 @@ import {
   type ActivityStatus,
 } from "@/shared/lib/activity-summary";
 
+import { Reveal } from "./reveal";
+
 /** The icon a kind of step shows, on its summary line and on a row with no icon of its own. */
 export const ACTIVITY_ICONS: Record<ActivityKind, Icon> = {
   edit: PencilSimple,
@@ -48,25 +49,6 @@ const SUMMARY_KEYS = {
 } as const;
 
 const ERROR_TONE = "text-[var(--danger)]";
-
-function Reveal({ open, children }: { open: boolean; children: React.ReactNode }) {
-  const reduce = useReducedMotion();
-  return (
-    <AnimatePresence initial={false}>
-      {open && (
-        <motion.div
-          initial={reduce ? false : { height: 0, opacity: 0 }}
-          animate={{ height: "auto", opacity: 1 }}
-          exit={reduce ? undefined : { height: 0, opacity: 0 }}
-          transition={reduce ? { duration: 0 } : { duration: 0.18, ease: [0.2, 0.8, 0.2, 1] }}
-          className="overflow-hidden"
-        >
-          {children}
-        </motion.div>
-      )}
-    </AnimatePresence>
-  );
-}
 
 interface StepRowProps {
   icon: Icon;
@@ -122,7 +104,7 @@ export function StepRow({
       {canOpen && (
         <CaretRight
           className={cn(
-            "size-3 shrink-0 transition-[transform,opacity] duration-150",
+            "size-3 shrink-0 transition-[transform,opacity] duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]",
             open ? "rotate-90" : "rtl:-scale-x-100 opacity-0 group-hover:opacity-100",
           )}
           aria-hidden
@@ -223,7 +205,7 @@ export function ActivityGroup({
         <span className={cn("truncate", summary.running && "agent-shimmer-text")}>{label}</span>
         <CaretRight
           className={cn(
-            "size-3 shrink-0 transition-transform duration-150",
+            "size-3 shrink-0 transition-transform duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]",
             open ? "rotate-90" : "rtl:-scale-x-100",
           )}
           aria-hidden

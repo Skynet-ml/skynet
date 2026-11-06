@@ -6,7 +6,6 @@ export { ApprovalCard } from "./components/ApprovalCard";
 export { ToolCallRow } from "./components/ToolCallRow";
 export { SharedChatView } from "./components/SharedChatView";
 export { shareLinkTypeLabel } from "./components/ShareChatDialog";
-export { CodingCallRows } from "./components/CodeAuthoringActivity";
 export { ToolsCarousel } from "./components/ToolsCarousel";
 export { Carousel, CarouselNav } from "./components/Carousel";
 export { ToolHeader } from "./components/ToolHeader";
@@ -20,9 +19,12 @@ export { useTrustMode } from "./hooks/use-trust-mode";
 export {
   WizardStateProvider,
   extractWizardPatch,
+  useAgentFieldLock,
   useWizardStateOptional,
 } from "./hooks/use-wizard-state";
 export { isGeneralistAgentEnabled } from "./lib/feature-flag";
+export { lockedCodeFiles } from "./lib/wizard-write";
+export { SETUP_CHAT_KEY, decodeSetupChat } from "./lib/screen-agent";
 export {
   deleteConversation,
   getSharedConversation,
@@ -45,3 +47,5 @@ export type {
   TrustMode,
 } from "./lib/types";
 export { queueAgentPrompt } from "./lib/prompt-queue";
+export { dispatchGeneralistEvent } from "./lib/stream-events";
+export type { GeneralistAgentHandlers } from "./lib/stream";

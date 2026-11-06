@@ -38,6 +38,7 @@ def vault(monkeypatch: pytest.MonkeyPatch) -> Iterator[ProviderKeyVault]:
         A provider-key vault whose tables exist for the test.
     """
     _invalidate_byok_user_catalog()
+    monkeypatch.setattr("core.billing.byok_vault._pinned_address", lambda *args, **kwargs: "8.8.8.8")
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     monkeypatch.setattr(
@@ -72,8 +73,7 @@ def _static_catalog() -> ModelCatalogResponse:
 
 def _save_verified(vault: ProviderKeyVault, provider: str, secret: str, **kwargs: str) -> None:
     """Save a key that verifies without touching the network."""
-    response = SimpleNamespace(status_code=200, is_success=True)
-    with patch("core.billing.byok_vault.httpx.get", return_value=response):
+    with patch.object(ProviderKeyVault, "_probe", return_value="verified"):
         vault.save_key(ALICE, provider, secret, **kwargs)
 
 

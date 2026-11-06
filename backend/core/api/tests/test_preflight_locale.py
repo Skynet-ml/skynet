@@ -22,16 +22,23 @@ ERROR = "SyntaxError: invalid syntax"
 TRACE = 'File "metric.py", line 1\n    def score(:\n' + ERROR
 
 
+def test_missing_scorer_model_message_has_localized_code() -> None:
+    """Give the retired picker message a catalog code."""
+    message = "Set the model with llm(model=...) in the metric code."
+    assert wizard_preflight._message_code(message) == ("submit.preflight.scorer_model", {})
+    assert t_locale("he", "submit.preflight.scorer_model") != message
+
+
 def _spec() -> dict[str, Any]:
     """Build a unified spec as the wizard sends it."""
     return {
-        "task": {"objective": "o", "artifact": {"kind": "prompt", "starting_version": "p"}},
+        "task": {"objective": "o", "artifact": {"kind": "dspy_program", "starting_version": "p"}},
         "data": {
             "mode": "pairs",
             "cases": [{"input": {"q": str(i)}, "expected": "p"} for i in range(3)],
             "input_fields": ["q"],
         },
-        "optimizer": {"choice": "best_of_n"},
+        "optimizer": {"choice": "dspy_gepa"},
         "models": {"reflection_model": {"name": "openrouter/task"}},
         "workspace": {"run_code": RUN_CODE, "metric_code": METRIC_CODE},
     }

@@ -1,4 +1,4 @@
-Skynet, c'est Optimize Anything : un seul produit qui améliore n'importe quel artefact à partir de vos données et de votre métrique. Chaque exécution suit le même contrat d'exécution et le même contrat de métrique. Le type d'artefact détermine les moteurs qui peuvent travailler dessus.
+Skynet, c'est Optimize Anything : un seul produit qui améliore un programme DSPy ou un dépôt selon votre métrique. Le type d'artefact détermine les moteurs qui peuvent travailler dessus.
 
 ## Le contrat commun
 
@@ -34,21 +34,19 @@ Lisez [Métriques et évaluateurs](/docs/concepts/scorers) pour le contrat compl
 
 | Type d'artefact | Moteurs                                                                      |
 | --------------- | ---------------------------------------------------------------------------- |
-| Prompt          | Auto, GEPA, Best-of-N, AutoResearch, Meta-Harness, AutoSaddler, ShinkaEvolve |
-| Code            | Les mêmes que pour Prompt                                                    |
-| Texte           | Les mêmes que pour Prompt                                                    |
+| Dépôt | GEPA, Best-of-N, AutoResearch, Meta-Harness, AutoSaddler, ShinkaEvolve |
 | Programme DSPy  | Auto, DSPy GEPA, DSPy MIPROv2, DSPy BootstrapFewShot                         |
 
 Les moteurs se répartissent en deux familles :
 
-- Les **moteurs natifs** traitent l'artefact comme une boîte noire. Ils fonctionnent sur les artefacts Prompt, Code et Texte.
+- Les **moteurs natifs** traitent l'artefact comme une boîte noire. Ils fonctionnent sur les dépôts.
 - Les **optimiseurs DSPy** travaillent à l'intérieur d'un programme DSPy. Ils ne fonctionnent que sur les artefacts Programme DSPy.
 
 DSPy MIPROv2 et DSPy BootstrapFewShot ont besoin de paires (des cas avec des sorties attendues). Avec une entrée unique, un programme DSPy ne peut utiliser qu'Auto et DSPy GEPA.
 
-## Artefacts Prompt, Code et Texte
+## Dépôts
 
-Les moteurs natifs traitent l'artefact comme une boîte noire. Un moteur propose une nouvelle version, exécute `run(artifact, input)` sur les cas, puis lit le score et le retour.
+Les moteurs natifs modifient les fichiers des chemins que vous autorisez. Votre métrique note chaque version du dépôt.
 
 Les six moteurs natifs utilisent des méthodes de recherche différentes :
 
@@ -86,18 +84,16 @@ DSPy BootstrapFewShot n'utilise pas de modèle de réflexion.
 
 **Auto** est le choix par défaut dans l'assistant.
 
-- Sur un artefact Prompt, Code ou Texte, Auto explore avec cinq moteurs natifs, puis poursuit avec GEPA à partir de la meilleure version.
+- **Dépôt** : Auto n'est pas disponible. Choisissez un moteur natif.
 - Sur un programme DSPy, Auto exécute DSPy GEPA.
 
-Les deux formes d'Auto lisent le texte de retour de votre métrique.
+Auto lit le texte de feedback de votre métrique.
 
 ## Quel moteur choisir
 
 | Votre situation                                                   | À utiliser                                                              |
 | ----------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| Vous avez un prompt qu'un modèle exécute                          | Un artefact Prompt. Commencez avec Auto.                                |
-| Vous avez du code à rendre plus rapide, moins cher ou plus correct | Un artefact Code. Commencez avec Auto.                                 |
-| Vous avez un document ou une configuration                        | Un artefact Texte. Commencez avec Auto.                                 |
+| Vous avez du code dans un dépôt GitHub | Un dépôt. Choisissez un moteur natif. |
 | Vous avez un programme DSPy                                       | Un artefact Programme DSPy. Commencez avec Auto.                        |
 | Vous voulez des démonstrations few-shot choisies dans vos données | Un artefact Programme DSPy avec DSPy BootstrapFewShot ou DSPy MIPROv2   |
 

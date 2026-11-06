@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import run_log
+from ..api.errors import DomainError, domain_service_error
 from ..billing import (
     OpenRouterKeyProvisioner,
     ProviderKeyVault,
@@ -38,12 +39,16 @@ from ..billing import (
     payload_uses_token_source,
 )
 from ..billing.budgets import BudgetService
+from ..billing.byok_bridge import provider_slug_for_model
+from ..billing.byok_upstreams import validate_byok_novelty
+from ..billing.byok_vault import byok_provider_for_litellm
 from ..billing.host_agent import (
     attach_host_agent_token,
     bind_host_agent,
     failure_message,
     host_agent_failure,
     host_proposer,
+    host_reasoning_effort,
 )
 from ..billing.metering import debit_at_fallback_price
 from ..billing.model_gateway import ModelGateway
@@ -77,7 +82,7 @@ from ..constants import (
 )
 from ..exceptions import INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
 from ..i18n import CANCELLATION_REASON, SAMPLE_DATASETS
-from ..models import BlackboxRunRequest, RunRequest, UnifiedRunRequest
+from ..models import BlackboxRunRequest, ModelConfig, RunRequest, UnifiedRunRequest
 from ..models.results import TerminalOutcome, result_scores
 from ..notifications import notify_job_completed
 from ..notifications.run_watcher import RunNotificationWatcher
@@ -132,7 +137,7 @@ from .repo_staging import (
 )
 from .subprocess_runner import run_service_in_subprocess, set_fork_service
 from .tagging_job import TaggingAutotagPayload, run_autotag_job
-from .unified_aliases import alias_unified_model_roles, strip_unified_model_aliases
+from .unified_aliases import alias_blackbox_metric_model, alias_unified_model_roles, strip_unified_model_aliases
 from .vercel_dspy import run_vercel_dspy
 
 logger = logging.getLogger(__name__)
@@ -289,6 +294,31 @@ def _raise_if_cancelled(cancel_event: threading.Event | None, optimization_id: s
     """
     if cancel_event and cancel_event.is_set():
         raise CancellationError(f"Optimization {optimization_id} cancelled by user")
+
+
+def _reflection_api_bases(
+    engine: Any, username: str, model: ModelConfig, token_source: str, novelty: bool
+) -> dict[str, str | None]:
+    """Resolve the saved reflection endpoint for novelty validation.
+
+    Args:
+        engine: The job store database engine, if available.
+        username: The owner of the provider connection.
+        model: The reflection model settings.
+        token_source: The run's default token source.
+        novelty: Whether novelty is enabled.
+
+    Returns:
+        The verified provider endpoint, if one is needed and available.
+    """
+    if engine is None or not novelty or (model.token_source or token_source) != TOKEN_SOURCE_BYOK:
+        return {}
+    prefix = provider_slug_for_model(model.name)
+    provider = model.byok_provider or (byok_provider_for_litellm(prefix) if prefix else "")
+    if not provider:
+        return {}
+    connection = ProviderKeyVault(engine=engine).resolve_connection(username, provider, verified_only=True)
+    return {provider: connection.api_base} if connection is not None else {}
 
 
 class BackgroundWorker:
@@ -770,12 +800,39 @@ class BackgroundWorker:
             # this job's selected sandbox. The legacy validators exec authored
             # modules in a broader subprocess, before that boundary exists.
             if isinstance(execution_payload, UnifiedRunRequest):
-                validate_unified_payload(execution_payload)
+                try:
+                    validate_unified_payload(execution_payload)
+                    model = execution_payload.models.reflection_model
+                    novelty = bool(execution_payload.optimizer.shinka and execution_payload.optimizer.shinka.novelty)
+                    api_bases = _reflection_api_bases(
+                        getattr(self._job_store, "engine", None),
+                        execution_payload.username,
+                        model,
+                        execution_payload.token_source,
+                        novelty,
+                    )
+                    reflection = model.model_dump()
+                    reflection["token_source"] = model.token_source or execution_payload.token_source
+                    validate_byok_novelty(reflection, novelty, api_bases=api_bases)
+                except DomainError as error:
+                    raise domain_service_error(error) from error
             elif isinstance(execution_payload, BlackboxRunRequest):
-                validate_blackbox_payload(
-                    execution_payload,
-                    verify_scorer=not protected_execution,
-                )
+                try:
+                    model = execution_payload.reflection_model_settings
+                    api_bases = _reflection_api_bases(
+                        getattr(self._job_store, "engine", None),
+                        execution_payload.username,
+                        model,
+                        execution_payload.token_source,
+                        bool(execution_payload.shinka and execution_payload.shinka.novelty),
+                    )
+                    validate_blackbox_payload(
+                        execution_payload,
+                        verify_scorer=not protected_execution,
+                        api_bases=api_bases,
+                    )
+                except DomainError as error:
+                    raise domain_service_error(error) from error
             elif optimization_type == OPTIMIZATION_TYPE_RUN and not protected_execution:
                 service.validate_payload(execution_payload)
 
@@ -840,17 +897,22 @@ class BackgroundWorker:
                 byok_engine = getattr(self._job_store, "engine", None)
                 if is_unified:
                     alias_unified_model_roles(payload_dict)
+                elif optimization_type == OPTIMIZATION_TYPE_BLACKBOX:
+                    alias_blackbox_metric_model(payload_dict)
                 if byok_engine is not None and payload_uses_token_source(
                     payload_dict,
                     TOKEN_SOURCE_BYOK,
                     default_token_source=token_source,
                 ):
-                    inject_byok_connections(
-                        payload_dict,
-                        username=execution_payload.username,
-                        vault=ProviderKeyVault(engine=byok_engine),
-                        default_token_source=token_source,
-                    )
+                    try:
+                        inject_byok_connections(
+                            payload_dict,
+                            username=execution_payload.username,
+                            vault=ProviderKeyVault(engine=byok_engine),
+                            default_token_source=token_source,
+                        )
+                    except DomainError as error:
+                        raise domain_service_error(error) from error
                 # Managed-run mirror of the BYOK seam: when key provisioning is
                 # configured, dispatch under a per-user OpenRouter runtime key
                 # whose spend limit was just synced to the account's balance —
@@ -918,22 +980,30 @@ class BackgroundWorker:
                         binding_id=job_data["execution_budget_id"],
                         vault=ProtectedCredentialVault(engine=byok_engine),
                     )
-                    payload_dict = budget_gateway.protect_payload(
-                        parent_payload,
-                        managed_key=(
-                            settings.openrouter_api_key.get_secret_value()
-                            if settings.openrouter_api_key is not None
-                            else ""
-                        ),
-                        allow_private_tools=settings.discover_allow_private,
-                    )
+                    try:
+                        payload_dict = budget_gateway.protect_payload(
+                            parent_payload,
+                            managed_key=(
+                                settings.openrouter_api_key.get_secret_value()
+                                if settings.openrouter_api_key is not None
+                                else ""
+                            ),
+                            allow_private_tools=settings.discover_allow_private,
+                        )
+                    except DomainError as error:
+                        raise domain_service_error(error) from error
                     host = host_proposer(payload_dict)
                     if host is not None:
                         # The CLI and permission come from the stored run settings,
                         # never from the guest, and only this run's proposer gets the token.
-                        attach_host_agent_token(
-                            payload_dict, bind_host_agent(budget_gateway, settings, cli=host[0], permission=host[1])
+                        host_token = bind_host_agent(
+                            budget_gateway,
+                            settings,
+                            cli=host[0],
+                            permission=host[1],
+                            reasoning_effort=host_reasoning_effort(payload_dict),
                         )
+                        attach_host_agent_token(payload_dict, host_token)
                     # The wizard leaves the ceiling unset for a budget without a
                     # limit, while the guest's proposer still plans its spend
                     # against one, so the parent hands it the ledger's allowance.
@@ -1901,9 +1971,8 @@ class BackgroundWorker:
         but wrapped so a billing-DB hiccup can never flip job status — the local
         ledger is the balance source of truth, independent of whether Stripe is
         configured. A managed run is charged its full per-token cost; a BYOK run is
-        charged only Skynet's platform fee (the provider tokens were paid on the
-        user's own key), so the balance still meters a BYOK run without double-charging
-        for inference. A no-op when the store exposes no SQL engine (legacy/in-memory),
+        charged no model fee because the provider bills the user's key. A no-op
+        when the store exposes no SQL engine (legacy/in-memory),
         the caller is anonymous, or the run reported no token usage. A failed debit
         is logged at ``ERROR`` (forwarded as an alert) and retried at the fallback
         frontier price, so a metering fault never gives the tokens away.
@@ -1915,8 +1984,8 @@ class BackgroundWorker:
             run_name: Run name for the ledger row's human label.
             model: Model id stamped on the ledger row, or ``None``.
             optimization_id: Finished legacy job whose own wallet commitment is consumed.
-            token_source: ``"managed"`` (full cost) or ``"byok"`` (platform fee
-                only); defaults to managed.
+            token_source: ``"managed"`` (full cost) or ``"byok"`` (no model charge);
+                defaults to managed.
             token_sources_by_model: Optional model-to-source map for mixed jobs.
             settlement_key: Idempotency key for this leg's debit, so a retried
                 or re-claimed leg is never charged twice.

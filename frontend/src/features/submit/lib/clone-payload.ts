@@ -13,6 +13,7 @@ import type {
   TaskSlice,
   WorkspaceSlice,
 } from "./wizard-v2";
+import { scanMetricDeclarations, scanMetricModel, storedMetricModel } from "./run-floor";
 
 /**
  * `?clone=` hydration for the wizard. A stored payload is one of three
@@ -22,8 +23,6 @@ import type {
  * mapped best effort and leave the rest for the user to fill. A legacy
  * repository target becomes the task's repository: repo, branch, commit,
  * editable paths and setup command.
- *
- * Only type imports here, so node tests can load this file directly.
  */
 export type ClonePayload = Record<string, unknown>;
 
@@ -35,7 +34,7 @@ export interface CloneSlices {
   meta: Partial<MetaSlice>;
 }
 
-const ARTIFACT_KINDS: readonly ArtifactKind[] = ["prompt", "code", "dspy_program", "text"];
+const ARTIFACT_KINDS: readonly ArtifactKind[] = ["dspy_program"];
 const DATA_MODES: readonly DataMode[] = ["single", "pairs"];
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -55,6 +54,42 @@ function modelConfig(value: unknown): ModelConfig | null {
     extra: Object.keys(extra).length > 0 ? extra : undefined,
     ...(economy === true && { economy_mode: true }),
   };
+}
+
+function sameValue(left: unknown, right: unknown): boolean {
+  if (left == null || right == null) return left == null && right == null;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) &&
+      left.length === right.length && left.every((value, index) => sameValue(value, right[index]));
+  }
+  if (isRecord(left) && isRecord(right)) {
+    return [...new Set([...Object.keys(left), ...Object.keys(right)])]
+      .every((key) => sameValue(left[key], right[key]));
+  }
+  return left === right;
+}
+
+function retainedMetricModel(
+  metric: ModelConfig | null,
+  code: string,
+  task: ModelConfig | null,
+  reflection: ModelConfig | null,
+  extras: ModelConfig[],
+): ModelConfig | null {
+  metric = storedMetricModel(metric, code);
+  if (!metric || !reflection) return metric;
+  const declaration = scanMetricDeclarations(code);
+  const scan = scanMetricModel(code, reflection.name);
+  if (!scan.uses || scan.unknown || declaration.unsafe || declaration.names.length > 1) return metric;
+  const name = scan.name;
+  if (declaration.names.length && !name) return metric;
+  const derived = name
+    ? [task, reflection, ...extras].find((role) => role?.name === name)
+    : reflection;
+  if (!derived) return metric;
+  const fields = ["name", "byok_provider", "cli_provider", "base_url", "temperature", "max_tokens", "extra", "economy_mode"] as const;
+  return (metric.token_source || "managed") === (derived.token_source || "managed") &&
+    fields.every((key) => sameValue(metric[key], derived[key])) ? null : metric;
 }
 
 /** A starting version is text or a map of named text parts; anything else is dropped. */
@@ -172,23 +207,19 @@ function cloneUnified(payload: ClonePayload): Omit<CloneSlices, "meta"> {
   if (typeof optimizer.choice === "string")
     optimizerSlice.choice = optimizer.choice as OptimizerChoice;
 
+  const metricCode = typeof workspace.metric_code === "string" ? workspace.metric_code : "";
+  const reflection = modelConfig(models.reflection_model);
   const metricModel = modelConfig(models.metric_model);
-  const reflection = optimizerSlice.reflectionModel;
-  // A metric model that is the reflection model, economy choice included, was
-  // inherited, not picked.
-  const picked =
-    metricModel &&
-    (metricModel.name !== reflection?.name ||
-      Boolean(metricModel.economy_mode) !== Boolean(reflection?.economy_mode))
-      ? metricModel
-      : null;
+
   const workspaceSlice: Partial<WorkspaceSlice> = {
     runCode: typeof workspace.run_code === "string" ? workspace.run_code : "",
-    metricCode: typeof workspace.metric_code === "string" ? workspace.metric_code : "",
+    metricCode,
+    metricModel: retainedMetricModel(
+      metricModel, metricCode, optimizerSlice.taskModel ?? null, reflection,
+      optimizerSlice.extraReflectionModels ?? [],
+    ),
     // A payload stored before extra files existed has none.
     files: extraFiles(workspace.files),
-    metricModelMode: picked ? "explicit" : "inherit",
-    metricModel: picked,
   };
   if (typeof workspace.metric_timeout_seconds === "number")
     workspaceSlice.metricTimeoutSeconds = workspace.metric_timeout_seconds;
@@ -231,41 +262,30 @@ function legacyRepo(target: unknown): RepoDraft | null {
   };
 }
 
+/** A `/blackbox/run` payload is a repository run, scored one case at a time. */
 function cloneLegacyBlackbox(payload: ClonePayload): Omit<CloneSlices, "meta"> {
-  const seed = startingVersion(payload.seed_candidate);
   const task: Partial<TaskSlice> = {
     objective: text(payload.objective) ?? "",
     background: text(payload.background) ?? "",
   };
-  if (seed !== undefined) task.startingVersion = seed;
   const repo = legacyRepo(payload.target);
-  if (repo) {
-    // The wizard keys its engine catalog on a kind and mode, so a repository
-    // run stands in as one piece of code scored once per round.
-    task.repo = repo;
-    task.artifactKind = "code";
-  }
-  // Legacy cases are flat rows the scorer read whole; an `expected` key, when
-  // present, was the answer the scorer compared against.
-  const cases = Array.isArray(payload.cases)
-    ? payload.cases.filter(isRecord).map((row): UnifiedCase => {
-        const { expected, ...input } = row;
-        return { input, expected: expected ?? null };
-      })
-    : [];
+  if (repo) task.repo = repo;
   const scorer = isRecord(payload.scorer) ? payload.scorer : {};
-  const workspace: Partial<WorkspaceSlice> = {};
+  const reflection = modelConfig(payload.reflection_model_config ?? payload.reflection_model_settings);
+  const metricModel = modelConfig(scorer.model);
+  const metricCode = typeof scorer.metric_code === "string" ? scorer.metric_code : "";
+  const workspace: Partial<WorkspaceSlice> = {
+    metricModel: retainedMetricModel(
+      metricModel, metricCode, modelConfig(payload.task_model_config ?? payload.task_model_settings),
+      reflection, modelConfigs(payload.extra_reflection_model_configs ?? payload.extra_reflection_model_settings),
+    ),
+  };
   if (typeof scorer.metric_code === "string") workspace.metricCode = scorer.metric_code;
   if (typeof scorer.timeout_seconds === "number")
     workspace.metricTimeoutSeconds = scorer.timeout_seconds;
-  const scorerModel = modelConfig(scorer.model);
-  if (scorerModel) {
-    workspace.metricModelMode = "explicit";
-    workspace.metricModel = scorerModel;
-  }
   return {
     task,
-    inputs: repo ? { mode: "single" } : inputsFromCases(cases, []),
+    inputs: { mode: "single" },
     // Stored payloads may be dumped by alias or by field name.
     optimizer: {
       taskModel: modelConfig(payload.task_model_config ?? payload.task_model_settings),
@@ -301,7 +321,8 @@ function cloneLegacyDspy(payload: ClonePayload): Omit<CloneSlices, "meta"> {
         outputCols.length > 0 ? Object.fromEntries(outputCols.map((col) => [col, row[col]])) : null,
     }),
   );
-  const inputs: Partial<InputsSlice> = inputCols.length > 0 ? inputsFromCases(cases, inputCols) : {};
+  const inputs: Partial<InputsSlice> =
+    inputCols.length > 0 ? inputsFromCases(cases, inputCols) : {};
   const fractions = split(payload.split_fractions);
   if (fractions) inputs.split = fractions;
   if (typeof payload.shuffle === "boolean") inputs.shuffle = payload.shuffle;
@@ -351,7 +372,7 @@ function runEconomyToModels(body: Omit<CloneSlices, "meta">): void {
     config && (config.token_source ?? "managed") === "managed"
       ? ({ ...config, economy_mode: true } as T)
       : config;
-  const { optimizer, workspace } = body;
+  const { optimizer } = body;
   body.optimizer = {
     ...optimizer,
     ...(optimizer.taskModel !== undefined && { taskModel: economy(optimizer.taskModel) }),
@@ -362,6 +383,5 @@ function runEconomyToModels(body: Omit<CloneSlices, "meta">): void {
       extraReflectionModels: optimizer.extraReflectionModels.map(economy),
     }),
   };
-  if (workspace.metricModel !== undefined)
-    body.workspace = { ...workspace, metricModel: economy(workspace.metricModel) };
+  if (body.workspace.metricModel) body.workspace.metricModel = economy(body.workspace.metricModel);
 }

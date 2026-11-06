@@ -25,6 +25,10 @@ from .signals import BudgetReached
 _METADATA_ADDRESSES = frozenset({ipaddress.ip_address("169.254.169.254"), ipaddress.ip_address("fd00:ec2::254")})
 
 
+class EndpointResolutionError(ValueError):
+    """Identify temporary endpoint DNS resolution failures."""
+
+
 def _pinned_address(url: str, allow_private: bool, *, label: str = "MCP endpoint") -> str:
     """Apply endpoint-discovery policy once and pin its permitted destination address.
 
@@ -35,6 +39,10 @@ def _pinned_address(url: str, allow_private: bool, *, label: str = "MCP endpoint
 
     Returns:
         A verified IP literal used for every connection to this endpoint.
+
+    Raises:
+        EndpointResolutionError: When DNS cannot resolve the hostname.
+        ValueError: When the endpoint or resolved address is unsafe.
     """
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
@@ -44,9 +52,9 @@ def _pinned_address(url: str, allow_private: bool, *, label: str = "MCP endpoint
     try:
         infos = socket.getaddrinfo(parsed.hostname, parsed.port, type=socket.SOCK_STREAM)
     except (socket.gaierror, ValueError) as error:
-        raise ValueError(f"The {label} hostname could not be resolved.") from error
+        raise EndpointResolutionError(f"The {label} hostname could not be resolved.") from error
     if not infos:
-        raise ValueError(f"The {label} hostname has no resolved addresses.")
+        raise EndpointResolutionError(f"The {label} hostname has no resolved addresses.")
     for info in infos:
         address = ipaddress.ip_address(info[4][0])
         if address in _METADATA_ADDRESSES:
@@ -56,7 +64,7 @@ def _pinned_address(url: str, allow_private: bool, *, label: str = "MCP endpoint
     return infos[0][4][0]
 
 
-class _PinnedTransport(httpx.AsyncBaseTransport):
+class _PinnedTransport(httpx.AsyncBaseTransport, httpx.BaseTransport):
     """Keep DNS resolution and redirects from expanding the selected MCP destination."""
 
     def __init__(self, url: str, address: str) -> None:
@@ -64,27 +72,63 @@ class _PinnedTransport(httpx.AsyncBaseTransport):
         self.origin = httpx.URL(url)
         self.address = address
         self.transport = httpx.AsyncHTTPTransport(retries=0, trust_env=False)
+        self.sync_transport: httpx.HTTPTransport | None = None
 
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        """Dial only the pinned address while verifying TLS against its original hostname."""
+    def _pin_request(self, request: httpx.Request) -> httpx.Request:
+        """Retain the original authority while selecting the verified address.
+
+        Args:
+            request: Request addressed to the registered origin.
+
+        Returns:
+            A request addressed to the pinned IP with the original Host and SNI.
+
+        Raises:
+            ValueError: When the request targets a different origin.
+        """
         if (request.url.scheme, request.url.host, request.url.port) != (
             self.origin.scheme,
             self.origin.host,
             self.origin.port,
         ):
             raise ValueError("The MCP connection attempted to leave its registered origin.")
-        pinned = httpx.Request(
+        return httpx.Request(
             request.method,
             request.url.copy_with(host=self.address),
             headers=request.headers,
             stream=request.stream,
             extensions={**request.extensions, "sni_hostname": self.origin.host},
         )
-        return await self.transport.handle_async_request(pinned)
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        """Dial only the pinned address while verifying TLS against its original hostname."""
+        return await self.transport.handle_async_request(self._pin_request(request))
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        """Use the same origin and TLS pin for synchronous model requests.
+
+        Args:
+            request: Request addressed to the registered origin.
+
+        Returns:
+            The upstream response.
+
+        Raises:
+            ValueError: When the request targets a different origin.
+        """
+        if self.sync_transport is None:
+            self.sync_transport = httpx.HTTPTransport(retries=0, trust_env=False)
+        return self.sync_transport.handle_request(self._pin_request(request))
+
+    def close(self) -> None:
+        """Release synchronous connections to the pinned endpoint."""
+        if self.sync_transport is not None:
+            self.sync_transport.close()
 
     async def aclose(self) -> None:
         """Release the selected endpoint's connection resources."""
         await self.transport.aclose()
+        self.close()
 
 
 class McpToolsBroker:

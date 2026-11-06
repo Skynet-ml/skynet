@@ -10,6 +10,7 @@ import { holdQuitUntilStopped, stopServices } from "./quit";
 import { databaseUrl, removeSandboxContainers, startPostgres, stopPostgres, type DockerCtx } from "./postgres";
 import { ensureSandboxImage } from "./sandbox-image";
 import { ensurePrivateDir, loadOrCreateSecrets } from "./secrets";
+import { finishSteps, loadStepTimes, newTimeline, saveStepTimes, startStep, type Timeline } from "./step-timing";
 import { clearPids, psStartOf, recordPid, sweepOrphans } from "./stack-pids";
 import { buildChildEnv, loginShellPath } from "./shell-env";
 import {
@@ -244,10 +245,12 @@ async function check(): Promise<void> {
 }
 
 async function startStack(base: OnboardingState, loginPath: string): Promise<void> {
+  let timeline: Timeline = newTimeline(loadStepTimes(dataDir));
   const step = (name: string) => {
     // A quit during first-launch setup must not start the next service after shutdown ran.
     if (quitting) throw new Error("Skynet is quitting");
-    setState({ ...base, kind: "starting", step: name });
+    timeline = startStep(timeline, name, Date.now());
+    setState({ ...base, kind: "starting", step: name, timeline });
   };
   const ctx = dockerCtx as DockerCtx;
   const binEnv: Record<string, string> = { APP_DOCKER_BIN: ctx.docker };
@@ -357,11 +360,16 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
   });
 
   if (quitting) return;
+  try {
+    saveStepTimes(dataDir, finishSteps(timeline, Date.now()));
+  } catch (err) {
+    log(`could not save step times: ${err instanceof Error ? err.message : String(err)}`);
+  }
   frontendUrl = feOrigin;
   watchForCrash(apiProc, "The API");
   watchForCrash(feProc, "The web app");
 
-  // Sign-in to a Skynet account comes first; "Use without signing in" skips it.
+  // The app opens only for a Mac linked to a Skynet account.
   hostedLink = new HostedLinkClient(apiOrigin, secrets.backendAuthSecret);
   await hostedLink.ensureLocalUser();
   let linked = false;
@@ -387,7 +395,7 @@ async function openApp(): Promise<void> {
  * Open the hosted sign-in (skynetml.com) in the default browser. The page
  * links the account and opens skynet://link/callback, which brings the result
  * back to handleAppUrl. Without a hosted link (or on an error) the onboarding
- * card offers a retry and "Use without signing in".
+ * card offers a retry.
  */
 async function signIn(): Promise<void> {
   if (state.kind !== "sign_in" || !hostedLink) return;
@@ -462,11 +470,6 @@ async function handleAppUrl(raw: string): Promise<void> {
   } finally {
     finishingSignIn = false;
   }
-}
-
-function skipSignIn(): void {
-  log("sign-in skipped");
-  void openApp();
 }
 
 function watchForCrash(proc: ManagedProcess, label: string): void {
@@ -626,7 +629,6 @@ ipcMain.handle("onboarding:open-logs", () => shell.openPath(logsDir));
 ipcMain.handle("onboarding:sign-in", () => {
   void signIn();
 });
-ipcMain.handle("onboarding:skip-sign-in", () => skipSignIn());
 ipcMain.on("theme:changed", (event, value: unknown) => {
   const theme = parseTheme(value);
   if (event.sender !== win?.webContents || !theme || theme === reportedTheme) return;

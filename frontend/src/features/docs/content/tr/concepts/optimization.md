@@ -1,4 +1,4 @@
-Skynet, Optimize Anything'dir: herhangi bir yapıtı verinize ve metriğinize göre iyileştiren tek bir ürün. Her çalıştırma aynı çalıştırma sözleşmesini ve aynı metrik sözleşmesini kullanır. Hangi motorların bir yapıt üzerinde çalışabileceğine yapıt türü karar verir.
+Skynet, Optimize Anything'dir: bir DSPy programını veya bir depoyu metriğinize göre iyileştiren tek bir ürün. Yapıt türü, hangi motorların onun üzerinde çalışabileceğini belirler.
 
 ## Ortak sözleşme
 
@@ -34,21 +34,19 @@ Metrik sözleşmesinin tamamı için [Metrikler ve puanlayıcılar](/docs/concep
 
 | Yapıt türü    | Motorlar                                                                     |
 | ------------- | ---------------------------------------------------------------------------- |
-| İstem         | Auto, GEPA, Best-of-N, AutoResearch, Meta-Harness, AutoSaddler, ShinkaEvolve |
-| Kod           | İstem ile aynı                                                               |
-| Metin         | İstem ile aynı                                                               |
+| Depo | GEPA, Best-of-N, AutoResearch, Meta-Harness, AutoSaddler, ShinkaEvolve |
 | DSPy programı | Auto, DSPy GEPA, DSPy MIPROv2, DSPy BootstrapFewShot                         |
 
 Motorlar iki aileye ayrılır:
 
-- **Yerel motorlar** yapıta kara kutu olarak davranır. İstem, Kod ve Metin yapıtları üzerinde çalışırlar.
+- **Yerel motorlar** yapıta kara kutu olarak davranır. Depolar üzerinde çalışırlar.
 - **DSPy optimize edicileri** bir DSPy programının içinde çalışır. Yalnızca DSPy programı yapıtları üzerinde çalışırlar.
 
 DSPy MIPROv2 ve DSPy BootstrapFewShot çiftlere (beklenen çıktıları olan vakalara) ihtiyaç duyar. Tek bir girdiyle bir DSPy programı yalnızca Auto ve DSPy GEPA'yı kullanabilir.
 
-## İstem, Kod ve Metin yapıtları
+## Depolar
 
-Yerel motorlar yapıta kara kutu olarak davranır. Bir motor yeni bir sürüm önerir, vakalar üzerinde `run(artifact, input)` çalıştırır ve puanı ve geri bildirimi okur.
+Yerel motorlar, izin verdiğiniz yollardaki dosyaları değiştirir. Metriğiniz deponun her sürümünü puanlar.
 
 Altı yerel motor farklı arama yöntemleri kullanır:
 
@@ -86,18 +84,16 @@ DSPy BootstrapFewShot bir yansıtma modeli kullanmaz.
 
 **Auto**, sihirbazdaki varsayılan seçimdir.
 
-- Bir İstem, Kod veya Metin yapıtında Auto beş yerel motorla keşif yapar, ardından en iyi sürümden GEPA ile devam eder.
+- **Depo**: Auto kullanılamaz. Tek bir yerel motor seçin.
 - Bir DSPy programında Auto, DSPy GEPA'yı çalıştırır.
 
-Auto'nun her iki biçimi de metriğinizden gelen geri bildirim metnini okur.
+Auto, metriğinizin geri bildirim metnini okur.
 
 ## Hangi motoru seçmeli
 
 | Durumunuz                                                     | Kullanın                                                                 |
 | ------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Bir modelin çalıştırdığı bir isteminiz var                    | Bir İstem yapıtı. Auto ile başlayın.                                     |
-| Daha hızlı, daha ucuz veya daha doğru hâle getirilecek kodunuz var | Bir Kod yapıtı. Auto ile başlayın.                                  |
-| Bir belgeniz veya bir yapılandırmanız var                     | Bir Metin yapıtı. Auto ile başlayın.                                     |
+| Bir GitHub deposunda kodunuz var | Bir depo. Tek bir yerel motor seçin. |
 | Bir DSPy programınız var                                      | Bir DSPy programı yapıtı. Auto ile başlayın.                             |
 | Verinizden seçilmiş az örnekli demolar istiyorsunuz           | DSPy BootstrapFewShot veya DSPy MIPROv2 ile bir DSPy programı yapıtı      |
 

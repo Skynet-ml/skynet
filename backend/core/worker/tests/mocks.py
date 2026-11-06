@@ -85,14 +85,14 @@ REAL_UNIFIED_PAYLOAD: dict = {
     "username": _GEPA["username"],
     "task": {
         "objective": "Answer the question correctly.",
-        "artifact": {"kind": "prompt", "starting_version": "Answer the question."},
+        "artifact": {"kind": "dspy_program", "starting_version": "Answer the question."},
     },
     "data": {
         "mode": "pairs",
         "cases": [{"input": {"question": "Q1"}, "expected": "A1"}, {"input": {"question": "Q2"}, "expected": "A2"}],
         "input_fields": ["question"],
     },
-    "optimizer": {"choice": "gepa"},
+    "optimizer": {"choice": "dspy_gepa"},
     "models": {"reflection_model": {"name": _GEPA["model_settings"]["name"]}},
     "workspace": {
         "run_code": "def run(artifact, input):\n    return artifact\n",

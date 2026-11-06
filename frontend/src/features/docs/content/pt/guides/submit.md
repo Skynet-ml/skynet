@@ -16,14 +16,7 @@ Você pode editar os dois campos. O assistente não sobrescreve as suas ediçõe
 
 ### O que será otimizado
 
-Selecione o **Tipo de artefacto**:
-
-| Tipo de artefato | O que muda                                            |
-| ---------------- | ----------------------------------------------------- |
-| Prompt           | Instruções enviadas a um modelo de linguagem          |
-| Código           | O código-fonte de um programa                         |
-| Programa DSPy    | As instruções dos preditores de um módulo DSPy        |
-| Texto            | Qualquer outro texto, como um documento ou um modelo  |
+Em **O que será otimizado**, selecione **Programa DSPy** ou **Um repositório GitHub**.
 
 Depois informe a **Versão inicial** (Guiado: **De onde partimos**). Cole a versão atual ou deixe o assistente escrever um rascunho.
 
@@ -93,7 +86,7 @@ Escreva dois arquivos:
 
 O **Agente de programação** pode escrever e alterar qualquer arquivo para você. Ele verifica o próprio código e corrige o que falha. Você pode adicionar até 20 arquivos extras. Leia [Métricas e avaliadores](/docs/concepts/scorers).
 
-Se a sua métrica chamar `llm()`, defina o **Modelo da métrica**. Por padrão, ela usa o modelo de reflexão.
+A métrica define seu modelo na própria chamada a `llm()`. Sem `model=`, a métrica usa o modelo de reflexão.
 
 ### Verificação do contrato
 

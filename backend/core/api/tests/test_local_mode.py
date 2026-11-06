@@ -354,7 +354,7 @@ def test_host_cli_proposer_is_refused_outside_local_mode(monkeypatch: pytest.Mon
     client, store = _local_submit_client(monkeypatch, local_mode=False)
 
     resp = client.post(
-        "/optimize", json=unified_payload(optimizer={"choice": "gepa", "proposer": {"host_cli": "codex"}})
+        "/optimize", json=unified_payload(optimizer={"choice": "dspy_gepa", "proposer": {"host_cli": "codex"}})
     )
 
     assert resp.status_code == 422
@@ -375,7 +375,7 @@ def test_droid_is_not_a_host_cli_option(monkeypatch: pytest.MonkeyPatch) -> None
         json=unified_payload(
             token_source="subscription",
             models=_SUBSCRIPTION_MODELS,
-            optimizer={"choice": "gepa", "proposer": {"host_cli": "droid"}},
+            optimizer={"choice": "dspy_gepa", "proposer": {"host_cli": "droid"}},
         ),
     )
 
@@ -501,6 +501,20 @@ def test_hosted_execution_check_refuses_a_subscription_model(monkeypatch: pytest
 
     assert refused.value.status_code == 422
     assert refused.value.code == "models.subscription_local_only"
+
+
+def test_hosted_execution_checks_local_mode_before_byok_admission(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the local-only refusal ahead of BYOK admission for a full request."""
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(wizard_preflight, "enforce_submission_rate", lambda *_: None)
+    app = FastAPI()
+    app.include_router(wizard_preflight.create_wizard_preflight_router(job_store=object()))
+    app.dependency_overrides[get_authenticated_user] = lambda: AuthenticatedUser("alice", "user", ())
+    models = {**_SUBSCRIPTION_MODELS, "task_model": {"name": "bare-model", "token_source": "byok"}}
+    with TestClient(app) as client:
+        response = client.post("/wizard/preflight", json=_execution_request(models=models).model_dump(mode="json"))
+    assert response.status_code == 422
+    assert response.json()["detail"] == DomainError("models.subscription_local_only").detail
 
 
 def test_local_execution_check_keeps_a_subscription_model(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -662,7 +676,7 @@ def test_explicit_proposer_pick_overrides_the_agent_engine(
         json=unified_payload(
             token_source="subscription",
             models=_SUBSCRIPTION_MODELS,
-            optimizer={"choice": "gepa", "proposer": {"host_cli": pick}},
+            optimizer={"choice": "dspy_gepa", "proposer": {"host_cli": pick}},
         ),
     )
 
@@ -772,7 +786,7 @@ def test_local_proposer_stays_in_the_sandbox_without_an_engine_cli(
         json=unified_payload(
             token_source="subscription",
             models=_SUBSCRIPTION_MODELS,
-            optimizer={"choice": "gepa", "proposer": proposer},
+            optimizer={"choice": "dspy_gepa", "proposer": proposer},
         ),
     )
 

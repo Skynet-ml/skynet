@@ -11,7 +11,6 @@ module so no network call is made.
 from __future__ import annotations
 
 import importlib.util
-import math
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -34,7 +33,6 @@ from core.billing.service import (
     CUSTOM_CENTS_MIN,
     FREE_GRANT_CENTS,
     PACK_CENTS,
-    PLATFORM_FEE_FRACTION,
     StripeBillingService,
     committed_spend_cents,
     cost_ceiling_budget,
@@ -500,8 +498,8 @@ def test_spendable_cents_zero_for_new_account(engine: object) -> None:
     assert StripeBillingService(engine=engine).spendable_cents("new@x.com") == 0
 
 
-def test_debit_run_byok_charges_only_platform_fee(engine: object) -> None:
-    """A BYOK run debits only the infra platform fee — a fraction of the full cost."""
+def test_debit_run_byok_has_no_model_charge(engine: object) -> None:
+    """A BYOK model call does not debit the wallet."""
     with Session(engine) as session:
         session.add(
             BillingCustomerModel(
@@ -523,9 +521,7 @@ def test_debit_run_byok_charges_only_platform_fee(engine: object) -> None:
     )
     fee = platform_fee_cents_for_usage(usages)
     assert cost == fee
-    # The provider tokens ran on the user's own key, so only the compute/storage
-    # share is charged — more than zero, well under the managed full cost.
-    assert 0 < fee < cents_for_usage(usages)
+    assert fee == 0
     snapshot = service.get_wallet("u@x.com")
     assert snapshot.paid_balance_cents == 100 - fee
 
@@ -549,7 +545,7 @@ def test_debit_run_managed_still_charges_full_cost(engine: object) -> None:
 
 
 def test_mixed_run_cost_prices_each_model_by_its_source() -> None:
-    """Mixed jobs charge managed tokens in full and BYOK tokens at the platform fee."""
+    """Mixed jobs charge managed tokens and not BYOK tokens."""
     managed = ModelUsage(model="managed/model", input_tokens=100_000, output_tokens=0)
     byok = ModelUsage(model="byok/model", input_tokens=200_000, output_tokens=0)
 
@@ -562,7 +558,7 @@ def test_mixed_run_cost_prices_each_model_by_its_source() -> None:
         },
     )
 
-    assert cost == cents_for_usage([managed]) + platform_fee_cents_for_usage([byok])
+    assert cost == cents_for_usage([managed])
 
 
 def test_cost_ceiling_budget_managed_is_the_balance(engine: object) -> None:
@@ -571,15 +567,12 @@ def test_cost_ceiling_budget_managed_is_the_balance(engine: object) -> None:
     assert cost_ceiling_budget(100, TOKEN_SOURCE_MANAGED) == 100
 
 
-def test_cost_ceiling_budget_byok_is_fee_aware_and_larger(engine: object) -> None:
-    """A BYOK ceiling is the largest full-cost budget whose platform fee fits the balance."""
+def test_cost_ceiling_budget_byok_has_no_model_cap(engine: object) -> None:
+    """A BYOK model ceiling does not depend on a fee."""
     assert cost_ceiling_budget(0, TOKEN_SOURCE_BYOK) == 0
     budget = cost_ceiling_budget(100, TOKEN_SOURCE_BYOK)
-    # The run only spends the fee fraction, so the same balance backs a
-    # proportionally larger — but finite — ceiling, maximal within the balance.
     assert budget > 100
-    assert math.ceil(budget * PLATFORM_FEE_FRACTION) <= 100
-    assert math.ceil((budget + 1) * PLATFORM_FEE_FRACTION) > 100
+    assert budget == cost_ceiling_budget(1, TOKEN_SOURCE_BYOK)
 
 
 def test_committed_spend_cents_managed_is_the_full_budget() -> None:
@@ -589,10 +582,10 @@ def test_committed_spend_cents_managed_is_the_full_budget() -> None:
     assert committed_spend_cents(-5, TOKEN_SOURCE_MANAGED) == 0
 
 
-def test_committed_spend_cents_byok_is_fee_sized() -> None:
-    """A BYOK run commits only the platform fee of its ceiling, at least one cent."""
-    assert committed_spend_cents(1000, TOKEN_SOURCE_BYOK) == math.ceil(1000 * PLATFORM_FEE_FRACTION)
-    assert committed_spend_cents(1, TOKEN_SOURCE_BYOK) == 1
+def test_committed_spend_cents_byok_is_zero() -> None:
+    """A BYOK model commits no wallet balance."""
+    assert committed_spend_cents(1000, TOKEN_SOURCE_BYOK) == 0
+    assert committed_spend_cents(1, TOKEN_SOURCE_BYOK) == 0
     assert committed_spend_cents(0, TOKEN_SOURCE_BYOK) == 0
 
 
@@ -1574,10 +1567,10 @@ def test_wallet_plan_reports_availability(engine: object, configured: None, pro_
     assert plan.available is True
 
 
-def test_byok_platform_fee_ignores_the_usage_markup() -> None:
-    """BYOK pays 5% of the at-cost model price; only managed spend is marked up."""
+def test_byok_model_charge_stays_zero_with_usage_markup() -> None:
+    """BYOK model usage is free; managed spend is marked up."""
     usages = _usages(2_000_000)
-    assert platform_fee_cents_for_usage(usages) == 10
+    assert platform_fee_cents_for_usage(usages) == 0
     assert cents_for_usage(usages) == 230
 
 

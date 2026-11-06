@@ -49,9 +49,19 @@ def test_model_config_prefixed_accepted(wizard_client: TestClient) -> None:
 
 
 @pytest.mark.parametrize("field", ["run_code", "metric_code"])
-def test_workspace_code_rejected(wizard_client: TestClient, field: str) -> None:
-    """Workspace code cannot be hand-patched — the Metric & run step's coding agent writes it."""
-    resp = wizard_client.post("/wizard/update", json={field: "def run(artifact, input):\n    return input"})
+def test_workspace_code_round_trips_unchanged(wizard_client: TestClient, field: str) -> None:
+    """The wizard's agent writes workspace code; it comes back with its whitespace kept."""
+    code = "def run(artifact, input):\n    return input\n"
+    resp = wizard_client.post("/wizard/update", json={field: code})
+
+    assert resp.status_code == 200
+    assert resp.json()["wizard_state"] == {field: code}
+
+
+@pytest.mark.parametrize("field", ["run_code", "metric_code"])
+def test_blank_workspace_code_rejected(wizard_client: TestClient, field: str) -> None:
+    """Blank code would wipe the file, so the endpoint refuses it."""
+    resp = wizard_client.post("/wizard/update", json={field: "   "})
 
     assert resp.status_code == 422
     assert field in resp.json()["detail"]
@@ -62,8 +72,8 @@ def test_task_fields_round_trip(wizard_client: TestClient) -> None:
     body = {
         "task_objective": "  Make it shorter  ",
         "task_background": "Support replies.",
-        "artifact_kind": "prompt",
-        "starting_version": "You are a helpful bot.",
+        "artifact_kind": "dspy_program",
+        "starting_version": {"predict": "You are a helpful bot."},
     }
     resp = wizard_client.post("/wizard/update", json=body)
 
@@ -71,8 +81,33 @@ def test_task_fields_round_trip(wizard_client: TestClient) -> None:
     patch = resp.json()["wizard_state"]
     assert patch["task_objective"] == "Make it shorter"
     assert patch["task_background"] == "Support replies."
-    assert patch["artifact_kind"] == "prompt"
-    assert patch["starting_version"] == "You are a helpful bot."
+    assert patch["artifact_kind"] == "dspy_program"
+    assert patch["starting_version"] == {"predict": "You are a helpful bot."}
+
+
+def test_repo_target_round_trips_without_a_starting_version(wizard_client: TestClient) -> None:
+    """A repository run takes the repo kind and an owner/name, with no starting version."""
+    resp = wizard_client.post("/wizard/update", json={"artifact_kind": "repo", "repository": "acme/support-bot"})
+
+    assert resp.status_code == 200
+    patch = resp.json()["wizard_state"]
+    assert patch == {"artifact_kind": "repo", "repository": "acme/support-bot"}
+
+
+@pytest.mark.parametrize("name", ["acme", "acme/bot/extra", "https://github.com/acme/bot", "acme/ bot"])
+def test_malformed_repository_rejected(wizard_client: TestClient, name: str) -> None:
+    """Only a bare owner/name reaches the repository picker."""
+    resp = wizard_client.post("/wizard/update", json={"repository": name})
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("kind", ["prompt", "code", "text"])
+def test_other_artifact_kinds_are_refused_for_new_runs(wizard_client: TestClient, kind: str) -> None:
+    """New runs take a DSPy program or a repository, nothing else."""
+    resp = wizard_client.post("/wizard/update", json={"artifact_kind": kind})
+
+    assert resp.status_code == 422
 
 
 def test_multi_part_starting_version_round_trips(wizard_client: TestClient) -> None:
@@ -143,7 +178,6 @@ def test_optimizer_choice_alone_is_echoed(wizard_client: TestClient) -> None:
 @pytest.mark.parametrize(
     "body",
     [
-        {"artifact_kind": "repo"},
         {"data_mode": "many"},
         {"optimizer_choice": "grid_search"},
         {"spending_limit_usd": 0},

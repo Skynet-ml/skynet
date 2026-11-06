@@ -2,14 +2,12 @@ Skynet は、すでにお持ちのアーティファクトを改善します。�
 
 ## Skynet が最適化するもの
 
-Skynet は 4 種類のアーティファクトを扱います。
+Skynet は 2 種類のアーティファクトを扱います。
 
 | アーティファクトの種類 | 変更される内容                                         |
 | ---------------------- | ------------------------------------------------------ |
-| プロンプト             | プロンプトのテキスト                                   |
-| コード                 | ソースコード                                           |
+| リポジトリ | 変更を許可したパスにあるファイル |
 | DSPy プログラム        | `dspy.Module` 内の各 predictor の指示文                |
-| テキスト               | その他のテキスト（ドキュメントや設定ファイルなど）     |
 
 すべての実行は同じコントラクトに従います。実行コードは `run(artifact, input)` を定義します。メトリクスは `score(input, output, expected=None)` を定義します。メトリクスはスコアと文章によるフィードバックを返します。オプティマイザーはそのフィードバックを読んで、次のバージョンをより良くします。
 
@@ -20,10 +18,10 @@ Skynet は 4 種類のアーティファクトを扱います。
 
 Skynet は Optimize Anything です。アーティファクトの種類によって、使えるエンジンが決まります。
 
-- プロンプト、コード、テキストのアーティファクトは、ネイティブエンジン（GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler、ShinkaEvolve）を使います。
+- リポジトリは、ネイティブエンジン（GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler、ShinkaEvolve）を使います。
 - DSPy プログラムのアーティファクトは、DSPy オプティマイザー（DSPy GEPA、DSPy MIPROv2、DSPy BootstrapFewShot）を使います。
 
-**Auto** は自動で選択します。DSPy プログラムでは、Auto は DSPy GEPA を使います。その他のアーティファクトの種類では、Auto は 5 つのネイティブエンジンを組み合わせます。詳しくは [最適化の仕組み](/docs/concepts/optimization) と [エンジン](/docs/concepts/engines) をお読みください。
+DSPy プログラムでは、**Auto** は DSPy GEPA を使います。リポジトリでは、ネイティブエンジンを 1 つ選びます。[最適化の仕組み](/docs/concepts/optimization) と [エンジン](/docs/concepts/engines) を参照してください。
 
 ## 実行の流れ
 

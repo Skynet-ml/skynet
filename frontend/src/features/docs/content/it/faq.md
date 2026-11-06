@@ -4,16 +4,16 @@ Questa pagina risponde alle domande più comuni su Skynet. Ogni risposta rimanda
 
 ### Che cos'è Skynet?
 
-Skynet è una piattaforma che ottimizza prompt, programmi, agenti e workflow sui tuoi dati e sulla tua metrica. Carichi un dataset, descrivi l'attività e avvii un'esecuzione. L'esecuzione prova nuove versioni e assegna loro un punteggio su dati tenuti da parte. Per iniziare, leggi l'[Avvio rapido](/docs/quickstart).
+Skynet è una piattaforma che ottimizza programmi DSPy e repository con i tuoi dati e la tua metrica. Carichi un dataset, descrivi l'attività e avvii un'esecuzione. L'esecuzione prova nuove versioni e assegna loro un punteggio su dati tenuti da parte. Per iniziare, leggi l'[Avvio rapido](/docs/quickstart).
 
 ### Che cosa può ottimizzare Skynet?
 
-Skynet è Optimize Anything. Ottimizza prompt, codice, testo e programmi DSPy in un unico prodotto. Il tipo di artefatto determina quali motori possono lavorarci:
+Skynet è Optimize Anything. Ottimizza programmi DSPy e repository in un unico prodotto. Il tipo di artefatto decide quali motori possono lavorarci:
 
-- Gli artefatti Prompt, Codice e Testo usano i motori nativi: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler e ShinkaEvolve.
+- I repository usano i motori nativi: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler e ShinkaEvolve.
 - I programmi DSPy usano gli ottimizzatori DSPy: DSPy GEPA, DSPy MIPROv2 e DSPy BootstrapFewShot.
 
-**Auto** combina i motori adatti alla tua attività. Vedi [Come funziona l'ottimizzazione](/docs/concepts/optimization) e [Motori](/docs/concepts/engines).
+Su un programma DSPy, **Auto** usa DSPy GEPA. Su un repository, scegli un motore nativo. Leggi [Come funziona l'ottimizzazione](/docs/concepts/optimization) e [Motori](/docs/concepts/engines).
 
 ### Quali lingue supporta l'interfaccia?
 
@@ -42,17 +42,17 @@ Imposta **Visibilità** su **Privata** quando invii un'esecuzione per tenerla fu
 
 ### I provider di modelli si addestrano sui miei prompt?
 
-Per impostazione predefinita, no. L'opzione predefinita di **Privacy dei dati dei modelli** è **Nessun addestramento**. Invia i prompt solo ai provider che non li usano per l'addestramento e non li conservano. Questa impostazione si applica alle chiamate che Skynet addebita al tuo saldo. Le chiamate con la tua chiave seguono le impostazioni di privacy del tuo account OpenRouter. Vedi [Sicurezza](/docs/security).
+Per impostazione predefinita, no. L'opzione predefinita di **Privacy dei dati dei modelli** è **Nessun addestramento**. Invia i prompt solo ai provider che non li usano per l'addestramento e non li conservano. Questa impostazione si applica alle chiamate che Skynet addebita al tuo saldo. Le chiamate BYOK tramite OpenRouter seguono le impostazioni di privacy del tuo account OpenRouter. Le chiamate BYOK dirette seguono la politica sui dati del provider. Vedi [Sicurezza](/docs/security).
 
 ## Fatturazione
 
 ### Come addebita Skynet le esecuzioni?
 
-Skynet usa un saldo prepagato. L'uso dei modelli ospitati, le commissioni di Skynet e l'uso della sandbox vengono misurati. Prima che inizi un lavoro a pagamento, Skynet riserva un margine nel tuo portafoglio e nel budget dell'esecuzione. Vedi [Fatturazione](/docs/concepts/billing).
+Skynet usa un saldo prepagato. L'uso dei modelli gestiti e il relativo ricarico, insieme all'uso della sandbox, sono misurati. La ricarica del saldo prevede una commissione. Prima che inizi un lavoro a pagamento, Skynet riserva un margine nel tuo portafoglio e nel budget dell'esecuzione. Vedi [Fatturazione](/docs/concepts/billing).
 
 ### Posso usare la chiave del mio provider di modelli?
 
-Sì. Con la tua chiave (BYOK), il provider addebita direttamente sulla tua chiave le chiamate ai modelli. Il tuo saldo Skynet paga comunque la commissione della piattaforma e l'uso della sandbox. Skynet cifra la tua chiave e non la mostra mai più. Vedi [Fatturazione](/docs/concepts/billing) e [Sicurezza](/docs/security).
+Sì. Con la tua chiave (BYOK), il provider addebita i token del modello sulla tua chiave. Skynet non applica costi per il modello. Il budget dell’esecuzione copre solo l’uso della sandbox. Skynet cifra la tua chiave e non la mostra mai più. Vedi [Fatturazione](/docs/concepts/billing) e [Sicurezza](/docs/security).
 
 ### Posso usare Skynet senza pagare le chiamate ai modelli?
 

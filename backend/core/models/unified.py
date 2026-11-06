@@ -1,11 +1,10 @@
 """Request/response models for the unified (wizard v2) optimization run.
 
-One payload covers every optimizer: the DSPy optimizers and the black-box
-engines all run through the black-box engine layer against the same workspace
-contract (a ``run(artifact, input)`` function plus a ``score(input, output,
-expected=None)`` metric, whatever the artifact kind or optimizer). Stored runs keep the ``blackbox``
-optimization type and are told apart from legacy black-box runs by
-``payload_kind``.
+One payload optimizes a DSPy program with any DSPy optimizer. Every optimizer
+runs through the black-box engine layer against the same workspace contract
+(a ``run(artifact, input)`` function plus a ``score(input, output,
+expected=None)`` metric). Stored runs keep the ``blackbox`` optimization type
+and are told apart from repository runs by ``payload_kind``.
 
 Pydantic class docstrings are part of the OpenAPI contract — see AGENTS.md
 "Pydantic class docstrings" — so per-model annotations live in comments
@@ -15,9 +14,9 @@ above each class, not in class bodies.
 from __future__ import annotations
 
 import re
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from ..i18n_en import t_en
 from ..i18n_keys import I18nKey
@@ -32,11 +31,11 @@ from .common import ModelConfig, SplitFractions
 from .scorer_dependencies import ScorerDependencyLock
 
 UNIFIED_PAYLOAD_KIND = "unified_v1"
-# Every path rides each agent turn's prompt, so a repository's list is capped.
-REPO_FILES_MAX = 2000
-REPO_FILE_PATH_MAX = 1024
 
-ArtifactKind = Literal["prompt", "code", "dspy_program", "text"]
+ArtifactKind = Literal["dspy_program"]
+# What the optimizer catalog is asked about: a unified run's artifact, or a
+# repository run, which has no artifact and runs only the black-box engines.
+OptimizerTarget = Literal["dspy_program", "repo"]
 DataMode = Literal["single", "pairs"]
 OptimizerChoice = Literal[
     "auto",
@@ -81,39 +80,41 @@ ARTIFACT_KIND_DSPY_PROGRAM = "dspy_program"
 OPTIMIZER_AUTO = "auto"
 
 
-def optimizers_for(artifact_kind: ArtifactKind, data_mode: DataMode) -> list[OptimizerChoice]:
-    """List the optimizer choices that fit an artifact kind and data mode.
+def optimizers_for(target: OptimizerTarget, data_mode: DataMode) -> list[OptimizerChoice]:
+    """List the optimizer choices that fit a target and data mode.
 
     Runtime availability (sandbox, installed engines) is filtered separately
     by the catalog route; this is the static relevance rule.
 
     Args:
-        artifact_kind: What is being optimized.
+        target: A DSPy program, or ``"repo"`` for a repository run.
         data_mode: Whether the run has one input or input/output pairs.
 
     Returns:
-        The allowed choices, ``"auto"`` first.
+        The allowed choices. A DSPy program lists ``"auto"`` first; a
+        repository run lists only the black-box engines, because Auto has no
+        repository strategy.
     """
-    if artifact_kind == ARTIFACT_KIND_DSPY_PROGRAM:
+    if target == ARTIFACT_KIND_DSPY_PROGRAM:
         if data_mode == "pairs":
             return ["auto", "dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"]
         return ["auto", "dspy_gepa"]
-    return ["auto", "gepa", "best_of_n", "autoresearch", "meta_harness", "autosaddler", "shinka_evolve"]
+    return ["gepa", "best_of_n", "autoresearch", "meta_harness", "autosaddler", "shinka_evolve"]
 
 
-def resolve_optimizer(choice: OptimizerChoice, artifact_kind: ArtifactKind) -> str:
+def resolve_optimizer(choice: OptimizerChoice, target: OptimizerTarget) -> str:
     """Resolve the user's choice to the optimizer that actually runs.
 
     Args:
         choice: The optimizer the user picked.
-        artifact_kind: What is being optimized.
+        target: A DSPy program, or ``"repo"`` for a repository run.
 
     Returns:
         ``"dspy_gepa"`` for Auto on a DSPy program, ``"auto"`` (the black-box
-        Auto strategy) for Auto on anything else, otherwise ``choice``.
+        Auto strategy) for Auto on a repository, otherwise ``choice``.
     """
     if choice == OPTIMIZER_AUTO:
-        return "dspy_gepa" if artifact_kind == ARTIFACT_KIND_DSPY_PROGRAM else OPTIMIZER_AUTO
+        return "dspy_gepa" if target == ARTIFACT_KIND_DSPY_PROGRAM else OPTIMIZER_AUTO
     return choice
 
 
@@ -284,7 +285,7 @@ class UnifiedOptimizer(BaseModel):
 
 
 # ``task_model`` is what ``skynet.llm`` calls inside run code;
-# ``metric_model`` is what it calls inside the metric.
+# ``metric_model`` is derived from the metric code and used inside the metric.
 class UnifiedModels(BaseModel):
     task_model: ModelConfig | None = None
     reflection_model: ModelConfig
@@ -391,7 +392,7 @@ class OptimizerOption(BaseModel):
 # for a DSPy program, otherwise the engines the Auto strategy explores.
 # ``run_entry`` and ``metric_signature`` are the one contract every optimizer runs.
 class OptimizerCatalogResponse(BaseModel):
-    artifact_kind: ArtifactKind
+    artifact_kind: OptimizerTarget
     data_mode: DataMode
     run_entry: str
     metric_signature: str
@@ -456,8 +457,7 @@ class WorkspaceFileLint(BaseModel):
 # check depends on, so the wizard can tell when a passing check went stale.
 # ``files`` is the static check's lint of each Python file that parses, so
 # each editor shows its own findings; lint never decides ``ok``.
-# ``uses_llm`` is whether the metric code calls ``llm``, so the wizard asks for
-# a metric model only when the metric needs one.
+# ``uses_llm`` indicates whether the metric uses the helper; its model is derived from the code.
 class ContractCheckResponse(BaseModel):
     ok: bool
     optimizer_resolved: str
@@ -467,94 +467,6 @@ class ContractCheckResponse(BaseModel):
     fingerprint: str
     files: list[WorkspaceFileLint] = Field(default_factory=list)
     terminal: dict[str, Any] | None = None
-
-
-class UnifiedChatTurn(BaseModel):
-    role: Literal["user", "assistant"]
-    content: str = Field(max_length=8000)
-
-
-# One clickable answer the task interview offers.
-class InterviewOption(BaseModel):
-    label: str = Field(max_length=80)
-    description: str = Field(default="", max_length=400)
-
-
-# ``POST /optimizations/task-interview``: one turn of the step-1 interview.
-class TaskInterviewRequest(BaseModel):
-    turns: list[UnifiedChatTurn] = Field(default_factory=list, max_length=40)
-    objective: str = ""
-    background: str = ""
-    artifact_kind: ArtifactKind | None = None
-    starting_version: BlackboxCandidate | None = None
-    sample_cases: list[dict[str, Any]] = Field(default_factory=list, max_length=5)
-    locale: str | None = None
-    model: str | None = None
-    reasoning_effort: str | None = None
-    # Applies only to a local CLI model that takes fast mode.
-    fast_mode: bool = False
-
-
-# Data of the interview's terminal ``interview_done`` event.
-class TaskInterviewTurnResult(BaseModel):
-    message: str
-    options: list[InterviewOption] = Field(default_factory=list)
-    done: bool
-    objective: str = ""
-    background: str = ""
-    artifact_kind: ArtifactKind | None = None
-    starting_version: BlackboxCandidate | None = None
-    artifact_rationale: str = ""
-    model: str | None = None
-    served_model: str | None = None
-
-
-# ``POST /optimizations/infer-inputs``: decide single input vs pairs from the
-# task and a sample of the uploaded data.
-class InputsInferenceRequest(BaseModel):
-    objective: str
-    background: str = ""
-    artifact_kind: ArtifactKind
-    starting_version: BlackboxCandidate | None = None
-    columns: list[str] = Field(default_factory=list)
-    sample_rows: list[dict[str, Any]] = Field(default_factory=list, max_length=5)
-    row_count: int = Field(default=0, ge=0)
-    user_note: str = Field(default="", max_length=4000)
-    locale: str | None = None
-    model: str | None = None
-
-
-class InputsInferenceResponse(BaseModel):
-    mode: DataMode
-    input_fields: list[str]
-    expected_field: str | None = None
-    single_input: dict[str, Any] | None = None
-    rationale: str
-    suggested_split: SplitFractions
-    held_out_count: int
-    warnings: list[str] = Field(default_factory=list)
-    model: str | None = None
-
-
-# What the code agent needs to write run code and a metric for a unified run.
-# ``focus`` names which of the two the user is working on. ``target`` is
-# ``"repo"`` for a repository run: the optimizer edits the repository itself,
-# so there is no run code and the agent writes only the repository scorer.
-# ``repo_files`` lists a repository run's file paths, which the agent may open
-# read-only.
-class UnifiedAuthoringContext(BaseModel):
-    task: UnifiedTask
-    data_mode: DataMode
-    input_fields: list[str] = Field(default_factory=list)
-    expected_field: str | None = None
-    sample_cases: list[dict[str, Any]] = Field(default_factory=list, max_length=5)
-    optimizer: OptimizerChoice
-    metric_has_model: bool = False
-    focus: Literal["run", "metric"] = "run"
-    target: Literal["artifact", "repo"] = "artifact"
-    repo_files: list[Annotated[str, StringConstraints(min_length=1, max_length=REPO_FILE_PATH_MAX)]] = Field(
-        default_factory=list, max_length=REPO_FILES_MAX
-    )
 
 
 __all__ = [
@@ -568,8 +480,6 @@ __all__ = [
     "METRIC_FILE",
     "METRIC_SIGNATURE",
     "MIN_PAIRS_FOR_HELD_OUT",
-    "REPO_FILES_MAX",
-    "REPO_FILE_PATH_MAX",
     "RUN_ENTRY",
     "RUN_FILE",
     "UNIFIED_PAYLOAD_KIND",
@@ -581,19 +491,13 @@ __all__ = [
     "ContractCheckResponse",
     "ContractSample",
     "DataMode",
-    "InputsInferenceRequest",
-    "InputsInferenceResponse",
-    "InterviewOption",
     "OptimizerCatalogResponse",
     "OptimizerChoice",
     "OptimizerFamily",
     "OptimizerOption",
-    "TaskInterviewRequest",
-    "TaskInterviewTurnResult",
+    "OptimizerTarget",
     "UnifiedArtifact",
-    "UnifiedAuthoringContext",
     "UnifiedCase",
-    "UnifiedChatTurn",
     "UnifiedData",
     "UnifiedModels",
     "UnifiedOptimizer",

@@ -45,7 +45,7 @@ Authorization: Bearer skyd_...
 | `GET /models`                                   | Возвращает список доступных вам моделей.                      |
 | `GET /optimizers`                               | Возвращает оптимизаторы, подходящие для настройки.            |
 | `GET /blackbox/engines`                         | Возвращает нативные движки и доступность каждого из них.      |
-| `POST /optimize`                                | Начинает запуск для промпта, кода, текста или программы DSPy. |
+| `POST /optimize` | Запускает оптимизацию для программы DSPy. |
 | `POST /blackbox/run`                            | Начинает запуск на репозитории GitHub.                        |
 | `GET /optimizations`                            | Возвращает список ваших запусков.                             |
 | `GET /optimizations/{optimization_id}`          | Возвращает один запуск: статус, прогресс, логи и результат.   |
@@ -56,7 +56,7 @@ Authorization: Bearer skyd_...
 
 ## Начать запуск
 
-`POST /optimize` принимает те же настройки, что и мастер отправки. В этом примере улучшается промпт, который распределяет обращения в поддержку по меткам.
+`POST /optimize` принимает те же настройки, что и мастер отправки. В примере улучшается программа DSPy, которая распределяет обращения в поддержку по меткам.
 
 ```bash tab="curl"
 curl https://api.skynetml.com/optimize \
@@ -72,7 +72,7 @@ curl https://api.skynetml.com/optimize \
   "task": {
     "objective": "Sort each support message into billing, bug or other.",
     "artifact": {
-      "kind": "prompt",
+      "kind": "dspy_program",
       "starting_version": "Label this support message as billing, bug or other."
     }
   },
@@ -93,7 +93,7 @@ curl https://api.skynetml.com/optimize \
     "reflection_model": { "name": "<model from GET /models>" }
   },
   "workspace": {
-    "run_code": "from skynet import llm\n\ndef run(artifact, input):\n    return llm(artifact, input=input[\"message\"])\n",
+    "run_code": "import dspy\n\nprogram = dspy.Predict(\"message -> label\")\n\n\ndef run(artifact, input):\n    return program(message=input[\"message\"]).label\n",
     "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
   },
   "max_cost_cents": 500
@@ -102,7 +102,7 @@ curl https://api.skynetml.com/optimize \
 
 Важные поля:
 
-- `task.artifact.kind` — это `prompt`, `code`, `text` или `dspy_program`.
+- `task.artifact.kind` — это `dspy_program`.
 - `data.mode` — это `pairs` (входы с ожидаемыми выходами) или `single` (ровно один пример).
 - `optimizer.choice` — это `auto` или имя одного оптимизатора из `GET /optimizers`.
 - `max_cost_cents` — лимит расходов для этого запуска в центах США.

@@ -24,7 +24,7 @@ import { sessionIdentity } from "@/shared/lib/session-identity";
 import { TERMS } from "@/shared/lib/terms";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { useColumnFilters, useColumnResize } from "@/shared/ui/excel-filter";
-import { ACTIVE_STATUSES, getJobTypeLabel, getStatusLabel } from "@/shared/constants/job-status";
+import { ACTIVE_STATUSES, getStatusLabel } from "@/shared/constants/job-status";
 import type { OptimizationSummaryResponse } from "@/shared/types/api";
 import { bulkCancelJobs, bulkPinOptimizations, pauseJob, resumeJob } from "@/shared/lib/api";
 import { transformChartData } from "../lib/transform-chart-data";
@@ -120,8 +120,6 @@ export function DashboardView() {
     dateTo: analyticsFilters.dateTo,
     owner: analyticsFilters.owner,
     access: analyticsFilters.access,
-    jobType: analyticsFilters.jobType,
-    module: analyticsFilters.module,
     improvement: analyticsFilters.improvement,
     runtime: analyticsFilters.runtime,
     dataset: analyticsFilters.dataset,
@@ -398,8 +396,6 @@ export function DashboardView() {
       ),
       role,
       status: unique("status", getStatusLabel),
-      optimization_type: unique("optimization_type", getJobTypeLabel),
-      module_name: unique("module_name"),
       optimizer_name: unique("optimizer_name"),
     };
   }, [data, sessionUser]);

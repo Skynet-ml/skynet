@@ -96,12 +96,16 @@ def score(input, output, expected=None):
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
         input=f"Question: {input['question']}\nAnswer: {output}",
+        model="openai/gpt-4.1-mini",
+        temperature=0,
+        max_tokens=512,
+        reasoning_effort="low",
     )
     passed = str(verdict).strip().upper().startswith("PASS")
     return (1.0 if passed else 0.0), {"feedback": str(verdict)}
 ```
 
-**メトリクスのモデル** を選択しない場合、メトリクスはリフレクションモデルと同じモデルを使います。
+メトリクスは自身の `llm()` 呼び出しでモデルを指定します。表示した4つの引数はすべて省略できます。`model=` を省略すると、メトリクスはリフレクションモデルを使います。
 
 ## 精度、速度、コスト
 

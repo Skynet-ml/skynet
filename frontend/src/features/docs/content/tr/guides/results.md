@@ -8,14 +8,14 @@
 | ----------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | **Genel bakış**               | Her zaman                                                              | İlerleme, puanlar ve puan geçmişi                                                       |
 | **Kullanım**                  | Skynet'in sunabileceği bir programa sahip başarılı bir çalıştırma      | Optimize edilmiş programı çalıştırmak için bir form ve entegrasyon kodu                 |
-| **Yapay nesne**               | Sonucu olan bir İstem, Kod veya Metin çalıştırması                     | Yapıtınızın sürümleri ve en iyi sürüm                                                   |
+| **Yapay nesne** | Sonucu olan bir depo çalıştırması | Yapıtınızın sürümleri ve en iyi sürüm |
 | **Veri**                      | Bitmiş bir DSPy programı çalıştırması                                  | Eğitim, doğrulama ve test kümelerine bölünmüş veri ve test kümesi değerlendirmesi       |
 | **Kod**                       | Çalıştırmanın gösterilecek kodu olduğunda                              | Çalıştırma kodu ve metrik                                                               |
-| **Ödül**                      | Metriği ödül bileşenleri bildiren bir İstem, Kod veya Metin çalıştırması | Ödül bileşenleri ve ağırlıkları                                                       |
-| **Yapay nesne**               | Optimize edilmiş bir istemi veya dosyaları olan bir çalıştırma         | Optimize edilmiş çıktı ve **Sonuçları dışa aktar**                                      |
+| **Ödül** | Metriği ödül parçaları bildiren bir depo çalıştırması | Ödül bileşenleri ve ağırlıkları |
+| **Yapay nesne** | Bitmiş bir DSPy programı çalıştırması | Optimize edilmiş çıktı ve **Sonuçları dışa aktar** |
 | **Günlükler**                 | Çoğu çalıştırma                                                        | Çalıştırma günlüğü                                                                      |
 | **Kullanım ve maliyet**       | Oturum açtığınızda                                                     | Çalıştırmanın harcadığı tutar                                                           |
-| **Zamanlanmış çalıştırma**    | Başarılı bir İstem, Kod veya Metin çalıştırması                        | Optimizasyonu yeniden çalıştırmak için bir zamanlama                                    |
+| **Zamanlanmış çalıştırma** | Başarılı bir DSPy programı çalıştırması | Optimizasyonu yeniden çalıştırmak için bir zamanlama |
 | **Yapılandırma**              | Her zaman                                                              | Çalıştırma yapılandırması                                                               |
 
 > [!NOTE]
@@ -33,7 +33,7 @@ Skynet sürümleri doğrulama vakaları üzerinde seçer. Nihai puanı test vaka
 
 Çalıştırma etkinken genel bakış **Geçen süre**, **Kalan** ve **Hız** değerlerini de gösterir.
 
-Bir İstem, Kod veya Metin çalıştırmasında, metriğiniz adlandırılmış puanlar bildirdiğinde genel bakış **Adlandırılmış puanlar** bölümünü de gösterir.
+Bir depo çalıştırmasında, metriğiniz adlandırılmış puanlar bildirdiğinde genel bakış **Adlandırılmış puanlar** bölümünü de gösterir.
 
 Bir DSPy programı çalıştırmasında **Veri** sekmesinde bir **Test kümesi değerlendirmesi** bulunur. Her test vakası için temel puanı ve optimize edilmiş puanı gösterir.
 
@@ -45,7 +45,7 @@ Bazen hiçbir aday başlangıç sürümünü geçemez. Bu durumda Skynet başlan
 
 ## En iyi sürümü dışa aktarın
 
-### İstem, Kod ve Metin çalıştırmaları
+### Depo çalıştırmaları
 
 **Yapay nesne** sekmesi yapıtınızın **Sürümler** listesini gösterir. Her sürüm için şunları yapabilirsiniz:
 

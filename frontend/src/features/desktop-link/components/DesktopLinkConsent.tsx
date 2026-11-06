@@ -16,7 +16,6 @@ import {
   parseLinkRequest,
   scopeMessageKey,
 } from "../lib/consent";
-import { DesktopSkipLink } from "./DesktopSkipLink";
 
 type Phase = "ready" | "linking" | "returning";
 
@@ -45,7 +44,6 @@ export function DesktopLinkConsent({ query }: { query: string }) {
           {msg("desktop_link.error_title")}
         </h1>
         <InlineErrorRow message={msg(errorMessageKey(parsed.problem) as MessageKey)} />
-        <DesktopSkipLink />
       </ConsentFrame>
     );
   }
@@ -159,7 +157,6 @@ export function DesktopLinkConsent({ query }: { query: string }) {
           </Button>
         </div>
       )}
-      {phase === "ready" && <DesktopSkipLink />}
     </ConsentFrame>
   );
 }

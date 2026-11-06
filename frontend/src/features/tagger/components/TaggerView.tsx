@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { TaggerSessionDetail } from "@/shared/lib/api";
+import { unhideSharedItem, type TaggerSessionDetail } from "@/shared/lib/api";
 import { DataHubTabs } from "@/shared/ui/data-hub-tabs";
 import { PageContainer } from "@/shared/layout/page-container";
 import { Button } from "@/shared/ui/primitives/button";
@@ -52,6 +52,14 @@ export function TaggerView({ initialSession }: { initialSession?: TaggerSessionD
   useEffect(() => {
     if (new URLSearchParams(window.location.search).has("dataset")) setStartingNew(true);
   }, []);
+
+  // Opening a session shared with the caller shows it in their list again if
+  // they hid it there.
+  const sharedSessionId =
+    initialSession && initialSession.role !== "owner" ? initialSession.id : null;
+  useEffect(() => {
+    if (sharedSessionId) void unhideSharedItem("tagging-sessions", sharedSessionId).catch(() => {});
+  }, [sharedSessionId]);
 
   if (!initialSession && !startingNew) {
     // The shell leaves /tagger unwrapped for the annotation surfaces; the

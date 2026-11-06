@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const { effortFill, liveEffort, retiredLevel, sentFastMode, sliderStops, stepEffort } =
+const { effortFill, liveEffort, sentFastMode, sliderStops, stepEffort } =
   await import("./effort-slider.ts");
 
 const claude = ["low", "medium", "high", "xhigh", "max"];
@@ -57,11 +57,7 @@ test("a saved retired level reads as max", () => {
   assert.equal(liveEffort(null), null);
 });
 
-test("the picker greys out the CLI's retired level and never offers it as a stop", () => {
-  assert.equal(retiredLevel("subscription/codex/openai/gpt-6.1-sol"), "ultra");
-  assert.equal(retiredLevel("subscription/claude/anthropic/claude-opus-5-5"), "ultracode");
-  assert.equal(retiredLevel("anthropic/claude-opus-5-5"), null);
-  assert.equal(retiredLevel(null), null);
+test("the picker never offers the CLI's retired level as a stop", () => {
   for (const level of ["ultra", "ultracode"]) {
     assert.ok(!sliderStops(claude).includes(level));
     for (const key of ["ArrowRight", "ArrowUp", "End", "PageUp"]) {

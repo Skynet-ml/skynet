@@ -1,4 +1,4 @@
-Questa pagina mostra come avviare la tua prima esecuzione in circa dieci minuti. Accedi, carichi un piccolo dataset, compili i quattro passaggi della procedura guidata e avvii l'esecuzione. L'esempio migliora un prompt che classifica i messaggi di assistenza in etichette.
+Questa pagina mostra come avviare la tua prima esecuzione in circa dieci minuti. Accedi, carichi un piccolo dataset, compili i quattro passaggi della procedura guidata e avvii l'esecuzione. L'esempio migliora un programma DSPy che classifica i messaggi di assistenza in etichette.
 
 ## Prima di iniziare
 
@@ -25,8 +25,8 @@ Il primo passaggio è **Attività**. Chiede «Cosa vuoi ottimizzare?»
 
 1. In **Obiettivo**, scrivi che cos'è un buon risultato. Usa parole semplici, ad esempio «Classifica ogni messaggio di assistenza come billing, bug o other.»
 2. Facoltativo: in **Contesto**, aggiungi informazioni utili all'ottimizzatore.
-3. In **Tipo di artefatto**, seleziona **Prompt**.
-4. In **Versione iniziale**, incolla il tuo prompt attuale.
+3. In **Cosa viene ottimizzato**, seleziona **Programma DSPy**.
+4. In **Versione iniziale**, incolla l'istruzione attuale del tuo programma.
 
 ## 3. Input
 
@@ -47,7 +47,7 @@ Il terzo passaggio è **Ottimizzatore** («Ottimizzatore, modelli e budget»).
 
 - Lascia l'ottimizzatore su **Auto**.
 - Seleziona un **Modello di riflessione**. L'ottimizzatore lo usa per scrivere nuove versioni. Questo modello è obbligatorio.
-- Facoltativo: seleziona un **Modello dell'attività**. Il tuo codice di esecuzione lo usa.
+- Seleziona un **Modello dell'attività**. Il tuo programma lo usa. Un programma DSPy deve averne uno.
 - In **Budget**, lascia **Esecuzioni dello scorer max** al valore predefinito di 200.
 
 Leggi [Motori](/docs/concepts/engines) per scegliere un motore specifico.
@@ -57,11 +57,13 @@ Leggi [Motori](/docs/concepts/engines) per scegliere un motore specifico.
 L'ultimo passaggio è **Metrica ed esecuzione** («Codice e metrica»). Scrivi due file.
 
 ```python tab="run.py"
-from skynet import llm
+import dspy
+
+program = dspy.Predict("message -> label")
 
 
 def run(artifact, input):
-    return llm(artifact, input=input["message"])
+    return program(message=input["message"]).label
 ```
 
 ```python tab="metric.py"
@@ -73,7 +75,7 @@ def score(input, output, expected=None):
     return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`artifact` è la versione corrente del tuo prompt. `input` contiene le colonne Input di un caso. `expected` contiene la colonna Output, con il nome della colonna come chiave.
+`artifact` è l'istruzione attuale proposta dall'ottimizzatore. Skynet la applica a `program`. `input` contiene le colonne Input di un caso. `expected` contiene la colonna Output, con il nome della colonna come chiave.
 
 Poi seleziona **Controlla** in **Controllo del contratto**. Il controllo esegue il tuo codice e la tua metrica nella sandbox su 3 casi di esempio. Verifica:
 

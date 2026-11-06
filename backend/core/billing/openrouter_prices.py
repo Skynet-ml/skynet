@@ -292,6 +292,18 @@ def live_prices(model_id: str) -> TokenPrices | None:
         neither prices it.
     """
     _refresh_if_stale()
+    return cached_prices(model_id)
+
+
+def cached_prices(model_id: str) -> TokenPrices | None:
+    """Read cached or listed prices without refreshing the provider catalog.
+
+    Args:
+        model_id: The model id as billed.
+
+    Returns:
+        The known token prices, or None.
+    """
     candidates = _slug_candidates(model_id)
     with _lock:
         for slug in candidates:

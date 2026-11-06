@@ -4,16 +4,16 @@
 
 ### 什么是 Skynet？
 
-Skynet 是一个平台，它基于你自己的数据和指标来优化提示词、程序、智能体和工作流。你上传数据集、描述任务，然后开始运行。运行会尝试新版本，并在留出的数据上为它们打分。要开始使用，请阅读[快速入门](/docs/quickstart)。
+Skynet 是一个根据你自己的数据和指标优化 DSPy 程序和仓库的平台。你上传数据集、描述任务，然后开始运行。运行会尝试新版本，并在留出的数据上为它们打分。要开始使用，请阅读[快速入门](/docs/quickstart)。
 
 ### Skynet 能优化什么？
 
-Skynet 就是 Optimize Anything。它在一个产品中优化提示词、代码、文本和 DSPy 程序。产物类型决定了哪些引擎可以处理它：
+Skynet 就是 Optimize Anything。它在一个产品中优化 DSPy 程序和仓库。产物类型决定哪些引擎可以处理它：
 
-- 提示词、代码和文本产物使用原生引擎：GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler 和 ShinkaEvolve。
+- 仓库使用原生引擎：GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler 和 ShinkaEvolve。
 - DSPy 程序使用 DSPy 优化器：DSPy GEPA、DSPy MIPROv2 和 DSPy BootstrapFewShot。
 
-**Auto** 会组合适合你任务的引擎。请参阅[优化的工作原理](/docs/concepts/optimization)和[引擎](/docs/concepts/engines)。
+对于 DSPy 程序，**Auto** 使用 DSPy GEPA。对于仓库，你需要选择一个原生引擎。请阅读 [优化的工作原理](/docs/concepts/optimization) 和 [引擎](/docs/concepts/engines)。
 
 ### 界面支持哪些语言？
 
@@ -42,17 +42,17 @@ Skynet 就是 Optimize Anything。它在一个产品中优化提示词、代码�
 
 ### 模型提供商会用我的提示词训练吗？
 
-默认不会。**模型数据隐私** 的默认选项是 **禁止训练**。它只会把提示词发送给不使用提示词训练、也不保留提示词的提供商。此设置适用于 Skynet 从你的余额中计费的调用。使用你自己密钥的调用遵循你的 OpenRouter 账户的隐私设置。请参阅[安全](/docs/security)。
+默认不会。**模型数据隐私** 的默认选项是 **禁止训练**。它只会把提示词发送给不使用提示词训练、也不保留提示词的提供商。此设置适用于 Skynet 从你的余额中计费的调用。通过 OpenRouter 的 BYOK 调用遵循你的 OpenRouter 账户隐私设置。直接连接提供商的 BYOK 调用遵循该提供商的数据政策。请参阅[安全](/docs/security)。
 
 ## 计费
 
 ### Skynet 如何为运行收费？
 
-Skynet 使用预付余额。托管模型用量、Skynet 费用和沙箱用量均按量计费。在付费工作开始之前，Skynet 会在你的钱包和运行预算中预留余量。请参阅[计费](/docs/concepts/billing)。
+Skynet 使用预付余额。托管模型用量及加价和沙箱用量均按量计费。充值时收取手续费。在付费工作开始之前，Skynet 会在你的钱包和运行预算中预留余量。请参阅[计费](/docs/concepts/billing)。
 
 ### 我可以使用自己的模型提供商密钥吗？
 
-可以。使用你自己的密钥（BYOK）时，提供商会直接从你的密钥为模型调用收费。你的 Skynet 余额仍然支付平台费和沙箱用量。Skynet 会加密你的密钥，并且永远不会再次显示它。请参阅[计费](/docs/concepts/billing)和[安全](/docs/security)。
+可以。使用自己的密钥（BYOK）时，提供商会将模型令牌费用计入你的密钥。Skynet 不收取模型费用。运行预算只涵盖沙箱用量。Skynet 会加密你的密钥，并且永远不会再次显示它。请参阅[计费](/docs/concepts/billing)和[安全](/docs/security)。
 
 ### 我可以在不为模型调用付费的情况下运行 Skynet 吗？
 

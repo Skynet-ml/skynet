@@ -4,16 +4,16 @@ Cette page répond aux questions fréquentes sur Skynet. Chaque réponse renvoie
 
 ### Qu'est-ce que Skynet ?
 
-Skynet est une plateforme qui optimise des prompts, des programmes, des agents et des workflows à partir de vos propres données et de votre métrique. Vous importez un jeu de données, décrivez la tâche et lancez une exécution. L'exécution essaie de nouvelles versions et les note sur des données mises de côté. Pour commencer, lisez le [Démarrage rapide](/docs/quickstart).
+Skynet est une plateforme qui optimise des programmes DSPy et des dépôts selon vos propres données et votre métrique. Vous importez un jeu de données, décrivez la tâche et lancez une exécution. L'exécution essaie de nouvelles versions et les note sur des données mises de côté. Pour commencer, lisez le [Démarrage rapide](/docs/quickstart).
 
 ### Que peut optimiser Skynet ?
 
-Skynet, c'est Optimize Anything. Il optimise des prompts, du code, du texte et des programmes DSPy dans un seul produit. Le type d'artefact détermine les moteurs qui peuvent travailler dessus :
+Skynet, c'est Optimize Anything. Il optimise des programmes DSPy et des dépôts dans un seul produit. Le type d'artefact détermine les moteurs qui peuvent travailler dessus :
 
-- Les artefacts Prompt, Code et Texte utilisent les moteurs natifs : GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler et ShinkaEvolve.
+- Les dépôts utilisent les moteurs natifs : GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler et ShinkaEvolve.
 - Les programmes DSPy utilisent les optimiseurs DSPy : DSPy GEPA, DSPy MIPROv2 et DSPy BootstrapFewShot.
 
-**Auto** combine les moteurs adaptés à votre tâche. Voir [Fonctionnement de l'optimisation](/docs/concepts/optimization) et [Moteurs](/docs/concepts/engines).
+Sur un programme DSPy, **Auto** utilise DSPy GEPA. Sur un dépôt, vous choisissez un moteur natif. Lisez [Fonctionnement de l'optimisation](/docs/concepts/optimization) et [Moteurs](/docs/concepts/engines).
 
 ### Quelles langues l'interface prend-elle en charge ?
 
@@ -42,17 +42,17 @@ Réglez **Visibilité** sur **Privé** lorsque vous soumettez une exécution pou
 
 ### Les fournisseurs de modèles s'entraînent-ils sur mes prompts ?
 
-Par défaut, non. L'option par défaut de **Confidentialité des données des modèles** est **Sans entraînement**. Elle n'envoie les prompts qu'à des fournisseurs qui ne s'entraînent pas dessus et ne les conservent pas. Ce paramètre s'applique aux appels que Skynet facture sur votre solde. Les appels effectués avec votre propre clé suivent les paramètres de confidentialité de votre compte OpenRouter. Voir [Sécurité](/docs/security).
+Par défaut, non. L'option par défaut de **Confidentialité des données des modèles** est **Sans entraînement**. Elle n'envoie les prompts qu'à des fournisseurs qui ne s'entraînent pas dessus et ne les conservent pas. Ce paramètre s'applique aux appels que Skynet facture sur votre solde. Les appels BYOK via OpenRouter suivent les paramètres de confidentialité de votre compte OpenRouter. Les appels BYOK directs suivent la politique de données du fournisseur. Voir [Sécurité](/docs/security).
 
 ## Facturation
 
 ### Comment Skynet facture-t-il les exécutions ?
 
-Skynet utilise un solde prépayé. L'utilisation des modèles hébergés, les frais Skynet et l'utilisation de la sandbox sont mesurés. Avant le début de tout travail payant, Skynet réserve une marge dans votre portefeuille et dans le budget de l'exécution. Voir [Facturation](/docs/concepts/billing).
+Skynet utilise un solde prépayé. L'utilisation des modèles gérés et leur majoration, ainsi que l'utilisation de la sandbox, sont mesurées. Des frais s'appliquent aux recharges. Avant le début de tout travail payant, Skynet réserve une marge dans votre portefeuille et dans le budget de l'exécution. Voir [Facturation](/docs/concepts/billing).
 
 ### Puis-je utiliser ma propre clé de fournisseur de modèles ?
 
-Oui. Avec votre propre clé (BYOK), le fournisseur facture directement les appels de modèle sur votre clé. Votre solde Skynet paie toujours les frais de plateforme et l'utilisation de la sandbox. Skynet chiffre votre clé et ne l'affiche plus jamais. Voir [Facturation](/docs/concepts/billing) et [Sécurité](/docs/security).
+Oui. Avec votre propre clé (BYOK), votre fournisseur facture les jetons du modèle sur votre clé. Skynet ne facture aucuns frais de modèle. Le budget de l’exécution couvre uniquement l’utilisation du bac à sable. Skynet chiffre votre clé et ne l'affiche plus jamais. Voir [Facturation](/docs/concepts/billing) et [Sécurité](/docs/security).
 
 ### Puis-je utiliser Skynet sans payer les appels de modèle ?
 

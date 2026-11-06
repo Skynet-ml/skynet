@@ -1,8 +1,7 @@
 /**
- * One agent per wizard screen. Each screen keeps its own conversation, so
- * moving to a screen resumes the chat held there or starts a fresh one, and
- * the agent's Continue / Back tools move the wizard through the same code
- * its buttons run.
+ * One agent drives the whole setup in one conversation. Each screen it
+ * reaches gets a turn of its own, and the agent's Continue / Back tools move
+ * the wizard through the same code its buttons run.
  */
 
 import type { AgentMessage } from "@/shared/ui/agent/types";
@@ -11,6 +10,16 @@ import type { AgentMessage } from "@/shared/ui/agent/types";
 // either way, and one fixed text lets a reopened chat recognize it.
 export const SCREEN_KICKOFF =
   "[The wizard opened this screen; I typed nothing.] If what you know is enough, fill this screen in and continue; otherwise ask me the one thing you need.";
+
+/**
+ * Whether a screen opens with a kickoff turn. The Check screen does not: its
+ * check starts as it opens, so a kickoff turn would have no result to explain
+ * and could continue past the screen before the result lands. Only the
+ * automatic failure message and the user's own messages start turns there.
+ */
+export function opensWithKickoff(screen: string): boolean {
+  return screen !== "check";
+}
 
 /** A reopened chat stores the wizard's kickoff as a user turn; it stays unshown. */
 export function hideKickoffs(messages: AgentMessage[]): AgentMessage[] {
@@ -33,12 +42,6 @@ export interface ScreenNavigator {
   /** Jump back to an earlier screen. */
   goToScreen: (screen: string) => void;
 }
-
-/** What the panel does with the chat when the screen on view changes. */
-export type ScreenSwitch =
-  | { kind: "stay" }
-  | { kind: "resume"; conversationId: string }
-  | { kind: "fresh" };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -69,55 +72,81 @@ export function runScreenNav(nav: ScreenNav, navigator: ScreenNavigator | null):
 }
 
 /**
- * Decide which chat to show once the screen on view changes, and remember
- * the chat the user is leaving under its screen.
- *
- * @param chats Screen to conversation id; updated in place.
- * @param from The screen being left, or null when the wizard just mounted.
- * @param leavingConversationId The chat on view, null before its first turn.
- * @param to The screen now on view.
+ * Where the setup's chat id is kept for the tab, with the screens its agent
+ * already had a turn on, so a reload that reopens the setup reopens its chat
+ * and does not start those screens over.
  */
-export function switchScreenChat(
-  chats: Map<string, string>,
-  from: string | null,
-  leavingConversationId: string | null,
-  to: string,
-): ScreenSwitch {
-  if (from === to) return { kind: "stay" };
-  if (from !== null && leavingConversationId) chats.set(from, leavingConversationId);
-  const held = chats.get(to);
-  return held ? { kind: "resume", conversationId: held } : { kind: "fresh" };
+export const SETUP_CHAT_KEY = "skynet.agent.setup-chat.v1";
+
+/** The setup's chat as the tab keeps it. */
+export interface SetupChat {
+  id: string;
+  kicked: string[];
 }
 
-/**
- * Where each screen's chat id is kept for the tab, so a reload that reopens
- * the setup reopens each screen's chat with it.
- */
-export const SCREEN_CHATS_KEY = "skynet.agent.screen-chats.v1";
+/** Write the setup's chat for the tab. */
+export function encodeSetupChat(chat: SetupChat): string {
+  return JSON.stringify(chat);
+}
 
-/**
- * Read back the screen-to-chat map kept for the tab.
- *
- * @param raw The stored text, or null.
- * @returns The map; empty when missing or malformed.
- */
-export function decodeScreenChats(raw: string | null): Map<string, string> {
-  const chats = new Map<string, string>();
-  if (!raw) return chats;
-  let parsed: unknown;
+/** Read the setup's chat back; null when nothing usable is kept. */
+export function decodeSetupChat(raw: string | null): SetupChat | null {
+  if (!raw) return null;
   try {
-    parsed = JSON.parse(raw);
+    const value: unknown = JSON.parse(raw);
+    if (!isRecord(value) || typeof value.id !== "string" || !value.id) return null;
+    const kicked = Array.isArray(value.kicked)
+      ? value.kicked.filter((s): s is string => typeof s === "string")
+      : [];
+    return { id: value.id, kicked };
   } catch {
-    return chats;
+    return null;
   }
-  if (!isRecord(parsed)) return chats;
-  for (const [screen, id] of Object.entries(parsed)) {
-    if (typeof id === "string" && id) chats.set(screen, id);
-  }
-  return chats;
 }
 
-/** Serialize the screen-to-chat map for the tab's session storage. */
-export function encodeScreenChats(chats: ReadonlyMap<string, string>): string {
-  return JSON.stringify(Object.fromEntries(chats));
+/**
+ * What the panel does with a message the wizard queued for the agent.
+ *
+ * Args:
+ *   input.docked: The chat is on view, so the user sees the exchange.
+ *   input.busy: A turn is running; two at once leave tool calls hanging.
+ *   input.silent: A cloned run whose user has not written to the agent yet.
+ *
+ * Returns:
+ *   "skip" drops it, "wait" holds it, "send" sends it now.
+ */
+export function autoFeedbackAction(input: {
+  docked: boolean;
+  busy: boolean;
+  silent: boolean;
+}): "skip" | "wait" | "send" {
+  if (input.silent) return "skip";
+  if (!input.docked || input.busy) return "wait";
+  return "send";
+}
+
+/** An automatic turn the panel sent, until the agent finishes it. */
+export interface AutoTurn {
+  id: number;
+  /** The agent started on it; a send takes a render to show as busy. */
+  started: boolean;
+}
+
+/**
+ * Follow an automatic turn through the agent's busy flag.
+ *
+ * Args:
+ *   turn: The turn in flight, or null.
+ *   busy: The agent is running or waiting on a turn.
+ *
+ * Returns:
+ *   The turn still in flight, and the id of the one that just ended.
+ */
+export function trackAutoTurn(
+  turn: AutoTurn | null,
+  busy: boolean,
+): { turn: AutoTurn | null; ended: number | null } {
+  if (!turn) return { turn: null, ended: null };
+  if (busy) return { turn: turn.started ? turn : { ...turn, started: true }, ended: null };
+  return turn.started ? { turn: null, ended: turn.id } : { turn, ended: null };
 }

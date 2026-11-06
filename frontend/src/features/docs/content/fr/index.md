@@ -2,14 +2,12 @@ Skynet améliore un artefact que vous possédez déjà. Vous lui fournissez une 
 
 ## Ce que Skynet optimise
 
-Skynet travaille sur quatre types d'artefacts :
+Skynet travaille sur deux types d'artefacts :
 
 | Type d'artefact | Ce qui change                                                       |
 | --------------- | ------------------------------------------------------------------- |
-| Prompt          | Le texte du prompt                                                  |
-| Code            | Le code source                                                      |
+| Dépôt | Les fichiers des chemins que vous autorisez |
 | Programme DSPy  | Les instructions des prédicteurs d'un `dspy.Module`                 |
-| Texte           | Tout autre texte, par exemple un document ou un fichier de configuration |
 
 Chaque exécution suit le même contrat. Votre code d'exécution définit `run(artifact, input)`. Votre métrique définit `score(input, output, expected=None)`. La métrique renvoie un score et un retour écrit. L'optimiseur lit ce retour pour améliorer la version suivante.
 
@@ -20,10 +18,10 @@ Chaque exécution suit le même contrat. Votre code d'exécution définit `run(a
 
 Skynet, c'est Optimize Anything. Le type d'artefact détermine les moteurs qui peuvent travailler dessus :
 
-- Les artefacts Prompt, Code et Texte utilisent les moteurs natifs : GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler et ShinkaEvolve.
+- Les dépôts utilisent les moteurs natifs : GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler et ShinkaEvolve.
 - Les artefacts Programme DSPy utilisent les optimiseurs DSPy : DSPy GEPA, DSPy MIPROv2 et DSPy BootstrapFewShot.
 
-**Auto** choisit pour vous. Sur un programme DSPy, Auto utilise DSPy GEPA. Sur les autres types d'artefacts, Auto combine cinq moteurs natifs. Lisez [Fonctionnement de l'optimisation](/docs/concepts/optimization) et [Moteurs](/docs/concepts/engines).
+Sur un programme DSPy, **Auto** utilise DSPy GEPA. Sur un dépôt, vous choisissez un moteur natif. Lisez [Fonctionnement de l'optimisation](/docs/concepts/optimization) et [Moteurs](/docs/concepts/engines).
 
 ## Déroulement d'une exécution
 

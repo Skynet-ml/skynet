@@ -57,13 +57,12 @@ Quand un budget a déjà de l'activité, la carte **Plafond de dépenses** de l'
 
 ## Frais
 
-Skynet applique trois frais en plus du coût du fournisseur.
+Skynet applique deux frais en plus du coût du fournisseur.
 
 | Frais                                  | Valeur par défaut actuelle                    | S'applique à                                                  |
 | -------------------------------------- | --------------------------------------------- | ------------------------------------------------------------- |
 | Frais de recharge                      | 12,5 % du montant, plus 0,35 $                | Chaque recharge                                               |
 | Majoration d'utilisation               | Coût du fournisseur × 1,15 (coût plus 15 %)   | Appels de modèle sur les clés de Skynet, et calcul en sandbox |
-| Frais de plateforme pour votre propre clé | 5 % du coût du modèle                      | Appels de modèle sur votre propre clé de fournisseur          |
 
 ### Frais de recharge
 
@@ -87,8 +86,8 @@ Vous pouvez effectuer des appels de modèle avec votre propre clé de fournisseu
 Quand un appel de modèle utilise votre clé :
 
 - Votre fournisseur facture les jetons du modèle sur votre clé.
-- Skynet prélève sur votre solde des frais de plateforme de 5 % du coût du modèle. Skynet n'ajoute pas la majoration d'utilisation à ces frais.
-- Le plafond de dépenses de l'exécution ne couvre que les frais de plateforme et l'utilisation de la sandbox.
+- Skynet ne facture aucuns frais de modèle.
+- Le budget de l’exécution couvre uniquement l’utilisation du bac à sable.
 
 Les éventuels frais d'un évaluateur externe ou d'un fournisseur MCP sont payés directement à ce fournisseur. Ils ne font pas partie du plafond de dépenses de l'exécution.
 

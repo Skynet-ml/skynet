@@ -15,7 +15,14 @@ Klicken Sie auf **Was ich kann**, um eine Liste der Werkzeuge des Agenten zu seh
 
 Geben Sie Ihre Nachricht ein und drücken Sie die Eingabetaste. Sie können auch auf **Diktieren** klicken und Ihre Nachricht sprechen.
 
-Ist der Agent beschäftigt, wartet Ihre Nachricht unter **Ausstehende Nachrichten**. Sie können eine ausstehende Nachricht bearbeiten, löschen oder neu anordnen. Klicken Sie auf **Steuern**, um sie in die laufende Arbeit zu senden. Der Agent liest sie bei seinem nächsten Schritt.
+Während der Agent arbeitet, bleibt das Eingabefeld verfügbar:
+
+- **Enter** steuert die laufende Arbeit, sofern dies unterstützt wird. Der Agent liest die Nachricht beim nächsten Schritt. **Tab** stellt eine neue Runde in die Warteschlange. Ohne Steuerungsfunktion reiht auch Enter die Nachricht ein.
+- Unter **Ausstehende Nachrichten** können Sie Nachrichten bearbeiten, löschen und durch Ziehen neu anordnen. **Steuern** übergibt eine wartende Nachricht an die laufende Arbeit, sofern verfügbar.
+- Eine als **Nicht bestätigt** markierte Nachricht hat den Agenten möglicherweise schon erreicht. Sende sie im Leerlauf ausdrücklich über ihr Menü. Du kannst sie jederzeit bearbeiten oder löschen. Andere Nachrichten in der Warteschlange können vorher fortfahren.
+- **Stoppen** beendet die laufende Runde und pausiert die Warteschlange. Ungelesene Steuerungsnachrichten kehren zurück. Nichts startet automatisch. **Esc** im Eingabefeld bewirkt dasselbe, außer bei geöffnetem Menü oder während einer IME-Texteingabe. Esc schließt zuerst einen Vorschlag oder ein Menü dieses Eingabefelds.
+- Im Ruhezustand sendet **Jetzt senden** die erste Nachricht der pausierten Warteschlange. Die übrigen folgen der Reihe nach. Auch ein normaler Rundenabschluss startet die nächste Nachricht.
+- Nach der Anmeldung steuert **Enter** den Dokumentationsassistenten, sobald er eine sichere Schrittgrenze meldet. Er liest die Nachricht beim nächsten ohnehin geplanten Modellschritt. **Tab** reiht sie immer ein. Vor der Meldung, ohne Anmeldung und in geschützten Chats mit bereitgestellten Programmen reihen Enter und Tab Nachrichten ein. Nach einem Anfragelimit pausiert der Dokumentationsassistent die übrigen Nachrichten.
 
 ## Was der Agent kann
 
@@ -98,7 +105,7 @@ Das Modellmenü im Eingabebereich hat diese Gruppen:
 
 Bei einigen Modellen können Sie den Denkaufwand festlegen. Die Stufen sind **Ohne**, **Minimal**, **Niedrig**, **Mittel**, **Hoch**, **Besonders hoch** und **Max**. **Standard** verwendet die Standardstufe des Modells.
 
-Um ein Standardmodell für neue Chats festzulegen, öffnen Sie **Einstellungen** > **Agentenbereich** > **Standardmodell**. Die Einstellung **Sprachdiktat** befindet sich im selben Tab.
+Um ein Standardmodell für neue Chats festzulegen, öffnen Sie **Einstellungen** > **Agentenbereich** > **Standardmodell**.
 
 ### Kosten
 

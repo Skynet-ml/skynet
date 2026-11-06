@@ -40,6 +40,7 @@ import { getSiteUrl } from "@/shared/lib/site-config";
 import { COLOR_THEME_INIT_SCRIPT } from "@/shared/lib/color-theme";
 import { LEGACY_NAMES_SCRIPT } from "@/shared/lib/legacy-names";
 import { auth } from "@/shared/lib/auth";
+import { DOCS_LOCALES, DOCS_PATH_HEADER, docsPathLocale, pickRequestLocale } from "@/features/docs";
 import "@fontsource-variable/heebo/index.css";
 import "@fontsource-variable/onest/index.css";
 import "@fontsource-variable/bricolage-grotesque/opsz.css";
@@ -73,7 +74,8 @@ function ogLocale(locale: Locale): string {
 }
 
 /**
- * Resolve the request's locale by precedence: an explicit switcher cookie wins,
+ * Resolve the request's locale by precedence: a docs page's URL locale wins (the
+ * proxy sends the path in DOCS_PATH_HEADER), then an explicit switcher cookie,
  * else the browser's `Accept-Language` is auto-detected (q-weighted, honoring
  * regional variants like `pt-BR` and primary-language matches like `en-AU -> en`),
  * else the English default. A returning visitor who picked a language keeps it;
@@ -83,10 +85,15 @@ function ogLocale(locale: Locale): string {
  */
 const resolveRequestLocale = cache(async (): Promise<Locale> => {
   const jar = await cookies();
-  const cookieLocale = jar.get(LOCALE_COOKIE)?.value ?? jar.get(LEGACY_LOCALE_COOKIE)?.value;
-  if (isLocale(cookieLocale)) return cookieLocale;
-  const detected = localeFromAcceptLanguage((await headers()).get("accept-language"));
-  return detected ?? DEFAULT_LOCALE;
+  const requestHeaders = await headers();
+  return pickRequestLocale(
+    {
+      docsLocale: docsPathLocale(requestHeaders.get(DOCS_PATH_HEADER), DOCS_LOCALES),
+      cookieLocale: jar.get(LOCALE_COOKIE)?.value ?? jar.get(LEGACY_LOCALE_COOKIE)?.value,
+      acceptLanguage: requestHeaders.get("accept-language"),
+    },
+    { isLocale, fromAcceptLanguage: localeFromAcceptLanguage, fallback: DEFAULT_LOCALE },
+  );
 });
 
 /**

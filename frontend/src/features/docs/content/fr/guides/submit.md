@@ -16,14 +16,7 @@ Vous pouvez modifier les deux champs. L'assistant IA n'écrase pas vos modificat
 
 ### Ce qui sera optimisé
 
-Sélectionnez le **Type d'artefact** :
-
-| Type d'artefact | Ce qui change                                             |
-| --------------- | --------------------------------------------------------- |
-| Prompt          | Les instructions envoyées à un modèle de langage          |
-| Code            | Le source d'un programme                                  |
-| Programme DSPy  | Les instructions des prédicteurs d'un module DSPy         |
-| Texte           | Tout autre texte, comme un document ou un modèle de texte |
+Dans **Ce qui est optimisé**, sélectionnez **Programme DSPy** ou **Un dépôt GitHub**.
 
 Indiquez ensuite la **Version de départ** (Guidé : **Notre point de départ**). Collez la version actuelle, ou laissez l'assistant IA rédiger un brouillon.
 
@@ -93,7 +86,7 @@ Rédigez deux fichiers :
 
 L'**Agent de code** peut rédiger et modifier n'importe quel fichier pour vous. Il vérifie son code et corrige ce qui échoue. Vous pouvez ajouter jusqu'à 20 fichiers supplémentaires. Lisez [Métriques et évaluateurs](/docs/concepts/scorers).
 
-Si votre métrique appelle `llm()`, définissez le **Modèle de la métrique**. Par défaut, elle utilise le modèle de réflexion.
+La métrique définit son modèle dans son propre appel à `llm()`. Sans `model=`, la métrique utilise le modèle de réflexion.
 
 ### Vérification du contrat
 

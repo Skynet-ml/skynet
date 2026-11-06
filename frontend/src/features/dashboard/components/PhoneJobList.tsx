@@ -10,8 +10,8 @@ import {
 } from "@/shared/ui/list-row";
 import { PingDot } from "@/shared/ui/ping-dot";
 import { StatusBadge } from "@/shared/ui/status-badge";
-import { formatId, formatRelativeTime, moduleLabel } from "@/shared/lib";
-import { ACTIVE_STATUSES, getJobTypeLabel } from "@/shared/constants/job-status";
+import { formatId, formatRelativeTime } from "@/shared/lib";
+import { ACTIVE_STATUSES } from "@/shared/constants/job-status";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { TERMS } from "@/shared/lib/terms";
 import { cn } from "@/shared/lib/utils";
@@ -27,7 +27,7 @@ type PhoneJobListProps = {
 };
 
 // Phone replacement for the jobs table: one tappable card per run carrying
-// only what a glance needs (name, status, type/module, age, score, elapsed).
+// only what a glance needs (name, status, owner, age, score, elapsed).
 // Selection, column filters, resize and export stay desktop-only.
 export function PhoneJobList({ items, showOwner, sessionUser, onOpenJob }: PhoneJobListProps) {
   return (
@@ -74,33 +74,27 @@ export function PhoneJobList({ items, showOwner, sessionUser, onOpenJob }: Phone
                     </span>
                     <StatusBadge status={job.status} compact className="shrink-0" />
                   </div>
-                  <div className={cn(LIST_ROW_META_CLASS, "mt-0")}>
-                    {job.name && (
-                      <>
+                  {(job.name || owner) && (
+                    <div className={cn(LIST_ROW_META_CLASS, "mt-0")}>
+                      {job.name && (
                         <span className="font-mono text-primary/80" dir="ltr">
                           {formatId(job.optimization_id)}
                         </span>
-                        <span aria-hidden="true" className={LIST_ROW_META_DOT_CLASS}>
-                          ·
-                        </span>
-                      </>
-                    )}
-                    <span className="truncate">{getJobTypeLabel(job.optimization_type)}</span>
-                    <span aria-hidden="true" className={LIST_ROW_META_DOT_CLASS}>
-                      ·
-                    </span>
-                    <span className="truncate">{moduleLabel(job.module_name)}</span>
-                    {owner && (
-                      <>
-                        <span aria-hidden="true" className={LIST_ROW_META_DOT_CLASS}>
-                          ·
-                        </span>
-                        <span className="truncate font-semibold text-foreground/80" dir="auto">
-                          {owner}
-                        </span>
-                      </>
-                    )}
-                  </div>
+                      )}
+                      {owner && (
+                        <>
+                          {job.name && (
+                            <span aria-hidden="true" className={LIST_ROW_META_DOT_CLASS}>
+                              ·
+                            </span>
+                          )}
+                          <span className="truncate font-semibold text-foreground/80" dir="auto">
+                            {owner}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  )}
                   <div className="flex items-center gap-2 text-xs text-muted-foreground tabular-nums">
                     <span>{formatRelativeTime(job.created_at)}</span>
                     <span aria-hidden="true" className={LIST_ROW_META_DOT_CLASS}>

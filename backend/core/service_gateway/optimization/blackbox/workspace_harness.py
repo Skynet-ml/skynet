@@ -360,6 +360,9 @@ def _client(gateway: Any, key_env: str) -> Any:
         reasoning_effort=gateway.get("reasoning_effort"),
         timeout_seconds=float(gateway.get("timeout_seconds") or 120.0),
         protected=bool(gateway.get("protected")),
+        declared_model=gateway.get("declared_model"),
+        subscription=bool(gateway.get("subscription")),
+        gateway_reasoning=bool(gateway.get("gateway_reasoning")),
     )
 
 

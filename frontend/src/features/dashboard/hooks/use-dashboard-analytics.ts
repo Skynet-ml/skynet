@@ -14,8 +14,6 @@ type UseDashboardAnalyticsArgs = {
   dateTo: string | null;
   owner: string | null;
   access: string | null;
-  jobType: string | null;
-  module: string | null;
   improvement: AnalyticsBucket | null;
   runtime: AnalyticsBucket | null;
   dataset: AnalyticsBucket | null;
@@ -47,8 +45,6 @@ export function useDashboardAnalytics({
   dateTo,
   owner,
   access,
-  jobType,
-  module,
   improvement,
   runtime,
   dataset,
@@ -73,8 +69,6 @@ export function useDashboardAnalytics({
         include_shared: includeShared,
         owner: owner ?? undefined,
         access: access ?? undefined,
-        job_type: jobType ?? undefined,
-        module: module ?? undefined,
         improvement_min: improvement?.lower,
         improvement_max: improvement?.upper,
         runtime_min: runtime?.lower,
@@ -99,8 +93,6 @@ export function useDashboardAnalytics({
     dateTo,
     owner,
     access,
-    jobType,
-    module,
     improvement,
     runtime,
     dataset,

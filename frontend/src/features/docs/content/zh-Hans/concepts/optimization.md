@@ -1,4 +1,4 @@
-Skynet 就是 Optimize Anything：一个基于你的数据和指标改进任意产物的产品。每次运行都使用同一个运行契约和同一个指标契约。产物类型决定了哪些引擎可以处理它。
+Skynet 就是 Optimize Anything：一个根据你的指标改进 DSPy 程序或仓库的产品。产物类型决定哪些引擎可以处理它。
 
 ## 共享契约
 
@@ -34,21 +34,19 @@ def score(input, output, expected=None):
 
 | 产物类型  | 引擎                                                                         |
 | --------- | ---------------------------------------------------------------------------- |
-| 提示词    | Auto、GEPA、Best-of-N、AutoResearch、Meta-Harness、AutoSaddler、ShinkaEvolve |
-| 代码      | 与提示词相同                                                                 |
-| 文本      | 与提示词相同                                                                 |
+| 仓库 | GEPA、Best-of-N、AutoResearch、Meta-Harness、AutoSaddler、ShinkaEvolve |
 | DSPy 程序 | Auto、DSPy GEPA、DSPy MIPROv2、DSPy BootstrapFewShot                         |
 
 引擎分为两个系列：
 
-- **原生引擎** 把产物当作黑盒。它们处理提示词、代码和文本产物。
+- **原生引擎** 把产物当作黑盒。它们处理仓库。
 - **DSPy 优化器** 在 DSPy 程序内部工作。它们只处理 DSPy 程序产物。
 
 DSPy MIPROv2 和 DSPy BootstrapFewShot 需要成对数据（带期望输出的用例）。如果只有单个输入，DSPy 程序只能使用 Auto 和 DSPy GEPA。
 
-## 提示词、代码和文本产物
+## 仓库
 
-原生引擎把产物当作黑盒。引擎提出一个新版本，在用例上运行 `run(artifact, input)`，然后读取分数和反馈。
+原生引擎修改你允许的路径中的文件。你的指标为仓库的每个版本打分。
 
 六个原生引擎使用不同的搜索方法：
 
@@ -86,18 +84,16 @@ DSPy BootstrapFewShot 不使用反思模型。
 
 **Auto** 是向导中的默认选项。
 
-- 对于提示词、代码或文本产物，Auto 先用五个原生引擎进行探索，然后从最佳版本出发用 GEPA 继续优化。
+- **仓库**：Auto 不可用。请选择一个原生引擎。
 - 对于 DSPy 程序，Auto 运行 DSPy GEPA。
 
-两种形式的 Auto 都会读取你的指标给出的反馈文本。
+Auto 会读取你的指标返回的反馈文本。
 
 ## 该选哪个引擎
 
 | 你的情况                                     | 使用                                                        |
 | -------------------------------------------- | ----------------------------------------------------------- |
-| 你有一个由模型运行的提示词                   | 提示词产物。从 Auto 开始。                                  |
-| 你有想要更快、更便宜或更正确的代码           | 代码产物。从 Auto 开始。                                    |
-| 你有一份文档或一份配置                       | 文本产物。从 Auto 开始。                                    |
+| 你在 GitHub 仓库中有代码 | 仓库。请选择一个原生引擎。 |
 | 你有一个 DSPy 程序                           | DSPy 程序产物。从 Auto 开始。                               |
 | 你希望从数据中挑选 few-shot 示例             | 使用 DSPy BootstrapFewShot 或 DSPy MIPROv2 的 DSPy 程序产物 |
 

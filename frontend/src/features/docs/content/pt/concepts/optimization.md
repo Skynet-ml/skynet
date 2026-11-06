@@ -1,4 +1,4 @@
-O Skynet é o Optimize Anything: um único produto que melhora qualquer artefato com base nos seus dados e na sua métrica. Toda execução usa o mesmo contrato de execução e o mesmo contrato de métrica. O tipo de artefato define quais motores podem trabalhar nele.
+O Skynet é o Optimize Anything: um único produto que melhora um programa DSPy ou um repositório com base na sua métrica. O tipo de artefato decide quais motores podem trabalhar nele.
 
 ## O contrato comum
 
@@ -34,21 +34,19 @@ Leia [Métricas e avaliadores](/docs/concepts/scorers) para ver o contrato compl
 
 | Tipo de artefato | Motores                                                                      |
 | ---------------- | ---------------------------------------------------------------------------- |
-| Prompt           | Auto, GEPA, Best-of-N, AutoResearch, Meta-Harness, AutoSaddler, ShinkaEvolve |
-| Código           | Os mesmos do Prompt                                                          |
-| Texto            | Os mesmos do Prompt                                                          |
+| Repositório | GEPA, Best-of-N, AutoResearch, Meta-Harness, AutoSaddler, ShinkaEvolve |
 | Programa DSPy    | Auto, DSPy GEPA, DSPy MIPROv2, DSPy BootstrapFewShot                         |
 
 Os motores se dividem em duas famílias:
 
-- Os **motores nativos** tratam o artefato como uma caixa-preta. Eles trabalham com artefatos de Prompt, Código e Texto.
+- Os **motores nativos** tratam o artefato como uma caixa-preta. Eles trabalham com repositórios.
 - Os **otimizadores DSPy** trabalham dentro de um programa DSPy. Eles trabalham apenas com artefatos de programa DSPy.
 
 O DSPy MIPROv2 e o DSPy BootstrapFewShot precisam de pares (casos com saídas esperadas). Com uma única entrada, um programa DSPy só pode usar Auto e DSPy GEPA.
 
-## Artefatos de Prompt, Código e Texto
+## Repositórios
 
-Os motores nativos tratam o artefato como uma caixa-preta. Um motor propõe uma nova versão, executa `run(artifact, input)` nos casos e lê a pontuação e o feedback.
+Os motores nativos alteram os arquivos nos caminhos que você permite. Sua métrica pontua cada versão do repositório.
 
 Os seis motores nativos usam métodos de busca diferentes:
 
@@ -86,18 +84,16 @@ O DSPy BootstrapFewShot não usa um modelo de reflexão.
 
 O **Auto** é a escolha padrão no assistente.
 
-- Em um artefato de Prompt, Código ou Texto, o Auto explora com cinco motores nativos e depois continua com o GEPA a partir da melhor versão.
+- **Repositório**: O Auto não está disponível. Escolha um motor nativo.
 - Em um programa DSPy, o Auto executa o DSPy GEPA.
 
-As duas formas do Auto leem o texto de feedback da sua métrica.
+O Auto lê o texto de feedback da sua métrica.
 
 ## Qual motor escolher
 
 | A sua situação                                                    | Use                                                                    |
 | ----------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| Você tem um prompt que um modelo executa                          | Um artefato de Prompt. Comece com Auto.                                |
-| Você tem código para tornar mais rápido, mais barato ou mais correto | Um artefato de Código. Comece com Auto.                             |
-| Você tem um documento ou uma configuração                         | Um artefato de Texto. Comece com Auto.                                 |
+| Você tem código em um repositório do GitHub | Um repositório. Escolha um motor nativo. |
 | Você tem um programa DSPy                                         | Um artefato de programa DSPy. Comece com Auto.                         |
 | Você quer demonstrações few-shot escolhidas a partir dos seus dados | Um artefato de programa DSPy com DSPy BootstrapFewShot ou DSPy MIPROv2 |
 

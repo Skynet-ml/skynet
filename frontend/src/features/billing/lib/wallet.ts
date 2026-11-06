@@ -5,8 +5,8 @@
  * top up and every run spends against the balance; there is no free allowance.
  * The balance is spendable on any model. Amounts are stored as integer US cents
  * and shown to users in dollars. Platform-paid usage (model tokens and sandbox compute) bills at
- * provider cost times the backend's usage markup; a BYOK run is charged only a
- * small platform fee on the at-cost model price; a top-up adds a service fee.
+ * provider cost times the backend's usage markup. BYOK model calls have no Skynet
+ * charge; sandbox usage is still billed. A top-up adds a service fee.
  * Those rates come from the backend (`PricingTerms` on the wallet response).
  *
  * Everything here is framework-agnostic (no React / `next/*`) so it imports from
@@ -52,7 +52,7 @@ export const LOW_BALANCE_USD = 0.5;
 export interface PricingTerms {
   /** Multiplier on provider cost for platform-paid model tokens and sandbox compute. */
   usageMarkup: number;
-  /** BYOK platform fee, as a fraction of the at-cost model price. */
+  /** BYOK model fee as a fraction of provider cost; currently zero. */
   byokFeeFraction: number;
   /** Top-up service fee, as a fraction of the top-up amount. */
   purchaseFeeRate: number;
@@ -67,7 +67,7 @@ export interface PricingTerms {
  */
 export const DEFAULT_PRICING_TERMS: PricingTerms = {
   usageMarkup: 1.15,
-  byokFeeFraction: 0.05,
+  byokFeeFraction: 0,
   purchaseFeeRate: 0.125,
   purchaseFeeFixedCents: 35,
 };

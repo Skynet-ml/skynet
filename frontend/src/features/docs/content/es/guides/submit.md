@@ -16,14 +16,7 @@ Puedes editar los dos campos. El asistente de IA no sobrescribe tus ediciones.
 
 ### Qué se optimizará
 
-Selecciona el **Tipo de artefacto**:
-
-| Tipo de artefacto | Qué cambia                                                 |
-| ----------------- | ---------------------------------------------------------- |
-| Prompt            | Las instrucciones que se envían a un modelo de lenguaje    |
-| Código            | El código fuente de un programa                            |
-| Programa DSPy     | Las instrucciones de los predictores de un módulo DSPy     |
-| Texto             | Cualquier otro texto, como un documento o una plantilla    |
+En **Qué se optimiza**, selecciona **Programa DSPy** o **Un repositorio de GitHub**.
 
 Después da la **Versión inicial** (Guiado: **Desde dónde empezamos**). Pega la versión actual, o deja que el asistente de IA escriba un borrador.
 
@@ -93,7 +86,7 @@ Escribe dos archivos:
 
 El **Agente de código** puede escribir y cambiar cualquier archivo por ti. Comprueba su código y corrige lo que falla. Puedes añadir hasta 20 archivos adicionales. Lee [Métricas y evaluadores](/docs/concepts/scorers).
 
-Si tu métrica llama a `llm()`, fija el **Modelo de la métrica**. Por defecto usa el modelo de reflexión.
+La métrica define su modelo en su propia llamada a `llm()`. Sin `model=`, la métrica usa el modelo de reflexión.
 
 ### Comprobación del contrato
 

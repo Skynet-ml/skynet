@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import type { BlackboxHarness, ModelConfig } from "@/shared/types/api";
-import type { ArtifactKind, OptimizerChoice } from "@/shared/types/unified-run";
+import type { OptimizerTarget, OptimizerChoice } from "@/shared/types/unified-run";
 import { resolveOptimizer } from "@/shared/types/unified-run";
 import { HarnessLogo } from "@/shared/ui/harness-logo";
 import { HelpTip } from "@/shared/ui/help-tip";
@@ -66,7 +66,7 @@ type Editing = {
  * and the proposer settings of the engines that drive a coding agent. The
  * metric model lives with the metric in step 4.
  */
-export function ModelsSection({ kind, choice }: { kind: ArtifactKind; choice: OptimizerChoice }) {
+export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice: OptimizerChoice }) {
   const { state, patchOptimizer, guided } = useWizardV2();
   const t = (key: string) => v2Msg(key, guided);
   const level = useExperienceLevel();

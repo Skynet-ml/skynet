@@ -87,12 +87,15 @@ class ScorerGateway:
     reasoning_effort: str | None = None
     timeout_seconds: float = 120.0
     protected: bool = False
+    subscription: bool = False
+    gateway_reasoning: bool = False
 
     def runner_payload(self) -> dict[str, Any]:
         """Return the ``gateway`` section of a runner call — the key travels separately."""
         payload = {
             "url": self.url,
             "model": self.model,
+            "declared_model": self.billing_model,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "reasoning_effort": self.reasoning_effort,
@@ -100,6 +103,10 @@ class ScorerGateway:
         }
         if self.protected:
             payload["protected"] = True
+        if self.subscription:
+            payload["subscription"] = True
+        if self.gateway_reasoning:
+            payload["gateway_reasoning"] = True
         return payload
 
     def injected_headers(self) -> dict[str, dict[str, str]]:
@@ -149,10 +156,18 @@ def scorer_gateway(config: ModelConfig, settings: Settings) -> ScorerGateway:
         "max_tokens": config.max_tokens,
         "reasoning_effort": effort if isinstance(effort, str) and effort else None,
         "timeout_seconds": settings.lm_request_timeout_seconds,
+        "subscription": config.token_source == "subscription",
     }
     route = config.extra.get(ROUTE_KEY)
     if isinstance(route, dict):
-        return ScorerGateway(url=route["url"], model=route["model"], api_key=route["token"], protected=True, **common)
+        return ScorerGateway(
+            url=route["url"],
+            model=route["model"],
+            api_key=route["token"],
+            protected=True,
+            gateway_reasoning=config.token_source != "subscription",
+            **common,
+        )
     own_key = config.extra.get("api_key")
     if isinstance(own_key, str) and own_key:
         base_url = config.base_url or config.extra.get("api_base")
@@ -169,7 +184,11 @@ def scorer_gateway(config: ModelConfig, settings: Settings) -> ScorerGateway:
     if gateway is None:
         raise ServiceError(_GATEWAY_MISSING)
     return ScorerGateway(
-        url=gateway.url, model=name.removeprefix(_OPENROUTER_PREFIX), api_key=gateway.api_key, **common
+        url=gateway.url,
+        model=name.removeprefix(_OPENROUTER_PREFIX),
+        api_key=gateway.api_key,
+        gateway_reasoning=not bool(getattr(settings, "blackbox_agent_gateway_url", None)),
+        **common,
     )
 
 

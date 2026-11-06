@@ -16,8 +16,6 @@ const SEARCH_DEBOUNCE_MS = 180;
 export interface FacetFilters {
   models: string[];
   optimizers: string[];
-  types: string[];
-  modules: string[];
   dateFrom: string | null;
   dateTo: string | null;
 }
@@ -62,8 +60,6 @@ export function useFacetOptions(
   const filterKey = JSON.stringify([
     filters.models,
     filters.optimizers,
-    filters.types,
-    filters.modules,
     filters.dateFrom,
     filters.dateTo,
   ]);
@@ -83,9 +79,7 @@ export function useFacetOptions(
         : corpus === "shared"
           ? { shared_with_username: sessionUser }
           : {};
-    const [models, optimizers, types, modules, dateFrom, dateTo] = JSON.parse(filterKey) as [
-      string[],
-      string[],
+    const [models, optimizers, dateFrom, dateTo] = JSON.parse(filterKey) as [
       string[],
       string[],
       string | null,
@@ -94,8 +88,6 @@ export function useFacetOptions(
     const context: FacetContext = {
       models,
       optimizers,
-      optimization_types: types,
-      modules,
       date_from: dateFrom ?? undefined,
       date_to: dateTo ?? undefined,
     };

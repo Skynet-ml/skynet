@@ -2,14 +2,12 @@ Skynet משפר תוצר שכבר יש לך. נותנים לו גרסת התחל
 
 ## מה Skynet משפר
 
-Skynet עובד עם ארבעה סוגי תוצרים:
+Skynet עובד עם שני סוגי תוצרים:
 
 | סוג התוצר   | מה משתנה                                |
 | ----------- | --------------------------------------- |
-| פרומפט      | הטקסט של הפרומפט                        |
-| קוד         | קוד המקור                               |
+| מאגר קוד | הקבצים בנתיבים שמותר למנוע לשנות |
 | תוכנית DSPy | ההוראות של ה-predictors ב-`dspy.Module` |
-| טקסט        | כל טקסט אחר, למשל מסמך או קובץ הגדרות   |
 
 כל ריצה משתמשת באותו חוזה. קוד ההרצה שלך מגדיר `run(artifact, input)`. פונקציית המדידה שלך מגדירה `score(input, output, expected=None)`. פונקציית המדידה מחזירה ציון ומשוב כתוב. האופטימייזר קורא את המשוב כדי לשפר את הגרסה הבאה.
 
@@ -20,10 +18,10 @@ Skynet עובד עם ארבעה סוגי תוצרים:
 
 Skynet הוא Optimize Anything. סוג התוצר קובע אילו מנועים יכולים לעבוד עליו:
 
-- תוצרים מסוג פרומפט, קוד וטקסט משתמשים במנועים המובנים: GEPA,‏ Best-of-N,‏ Meta-Harness,‏ AutoResearch,‏ AutoSaddler ו-ShinkaEvolve.
+- מאגרי קוד משתמשים במנועים המובנים: GEPA,‏ Best-of-N,‏ Meta-Harness,‏ AutoResearch,‏ AutoSaddler ו-ShinkaEvolve.
 - תוצרים מסוג תוכנית DSPy משתמשים באופטימייזרים של DSPy: DSPy GEPA,‏ DSPy MIPROv2 ו-DSPy BootstrapFewShot.
 
-**Auto** בוחר בשבילך. בתוכנית DSPy,‏ Auto משתמש ב-DSPy GEPA. בסוגי תוצרים אחרים, Auto משלב חמישה מנועים מובנים. קרא/י את [איך האופטימיזציה עובדת](/docs/concepts/optimization) ואת [מנועים](/docs/concepts/engines).
+בתוכנית DSPy,‏ **Auto** משתמש ב-DSPy GEPA. במאגר קוד בוחרים מנוע מובנה אחד. קרא/י את [איך האופטימיזציה עובדת](/docs/concepts/optimization) ואת [מנועים](/docs/concepts/engines).
 
 ## איך ריצה עובדת
 

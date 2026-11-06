@@ -35,7 +35,7 @@ function option(id: OptimizerOption["id"], available = true, reason?: string): O
 
 function catalog(
   options: OptimizerOption[],
-  artifact_kind: OptimizerCatalogResponse["artifact_kind"] = "prompt",
+  artifact_kind: OptimizerCatalogResponse["artifact_kind"] = "repo",
   data_mode: OptimizerCatalogResponse["data_mode"] = "pairs",
 ): OptimizerCatalogResponse {
   return {
@@ -66,20 +66,20 @@ test("Auto leads and the list follows the setup's allowed optimizers", () => {
   }).map((view) => view.id);
   assert.deepEqual(single, ["auto", "dspy_gepa"]);
   const blackbox = optimizerOptions({
-    kind: "code",
+    kind: "repo",
     mode: "pairs",
     catalog: null,
     guided: false,
     choice: "auto",
   });
-  assert.equal(blackbox[0].id, "auto");
-  assert.equal(blackbox.length, 7);
+  assert.equal(blackbox[0].id, "gepa");
+  assert.equal(blackbox.length, 6);
 });
 
 test("without a matching catalog every option is pending, not unavailable", () => {
-  const stale = catalog([option("gepa", false, "no key")], "code", "pairs");
+  const stale = catalog([option("gepa", false, "no key")], "repo", "pairs");
   const views = optimizerOptions({
-    kind: "prompt",
+    kind: "dspy_program",
     mode: "pairs",
     catalog: stale,
     guided: false,
@@ -90,11 +90,11 @@ test("without a matching catalog every option is pending, not unavailable", () =
 
 test("unavailable options show disabled with their reason", () => {
   const views = optimizerOptions({
-    kind: "prompt",
+    kind: "repo",
     mode: "pairs",
-    catalog: catalog([option("auto"), option("gepa", false, "  sandbox down ")]),
+    catalog: catalog([option("gepa", false, "  sandbox down ")]),
     guided: false,
-    choice: "auto",
+    choice: "gepa",
   });
   const gepa = views.find((view) => view.id === "gepa");
   assert.equal(gepa?.available, false);
@@ -104,15 +104,15 @@ test("unavailable options show disabled with their reason", () => {
 });
 
 test("guided hides unavailable options but keeps the current choice", () => {
-  const cat = catalog([option("auto"), option("gepa", false), option("best_of_n", false)]);
+  const cat = catalog([option("gepa", false), option("best_of_n", false), option("autoresearch")]);
   const views = optimizerOptions({
-    kind: "prompt",
+    kind: "repo",
     mode: "pairs",
     catalog: cat,
     guided: true,
     choice: "gepa",
   }).map((view) => view.id);
-  assert.deepEqual(views, ["auto", "gepa"]);
+  assert.deepEqual(views, ["gepa", "autoresearch"]);
 });
 
 test("catalog entries outside the allowed list are dropped", () => {
@@ -137,7 +137,7 @@ test("fallback flags come from the shared rules while the catalog loads", () => 
   assert.equal(auto.family, "dspy");
   assert.equal(gepa.usesFeedback, true);
   const meta = optimizerOptions({
-    kind: "code",
+    kind: "repo",
     mode: "pairs",
     catalog: null,
     guided: false,
@@ -156,25 +156,25 @@ test("a choice the setup no longer allows is reported, never reset", () => {
   });
   assert.deepEqual(issue, { kind: "not_allowed" });
   assert.deepEqual(
-    optimizerChoiceIssue({ kind: "prompt", mode: "pairs", catalog: null, choice: "dspy_gepa" }),
+    optimizerChoiceIssue({ kind: "repo", mode: "pairs", catalog: null, choice: "dspy_gepa" }),
     { kind: "not_allowed" },
   );
 });
 
 test("an unavailable choice reports the catalog's reason", () => {
-  const cat = catalog([option("auto"), option("shinka_evolve", false, "no GPU")]);
+  const cat = catalog([option("gepa"), option("shinka_evolve", false, "no GPU")]);
   assert.deepEqual(
-    optimizerChoiceIssue({ kind: "prompt", mode: "pairs", catalog: cat, choice: "shinka_evolve" }),
+    optimizerChoiceIssue({ kind: "repo", mode: "pairs", catalog: cat, choice: "shinka_evolve" }),
     { kind: "unavailable", reason: "no GPU" },
   );
   assert.equal(
-    optimizerChoiceIssue({ kind: "prompt", mode: "pairs", catalog: cat, choice: "auto" }),
+    optimizerChoiceIssue({ kind: "repo", mode: "pairs", catalog: cat, choice: "gepa" }),
     null,
   );
 });
 
 test("a repository run offers every engine but Auto, and Auto is not an allowed choice", () => {
-  const input = { kind: "code", mode: "single", catalog: null, choice: "auto", repo: true } as const;
+  const input = { kind: "repo", mode: "single", catalog: null, choice: "auto" } as const;
   const ids = optimizerOptions({ ...input, guided: false }).map((view) => view.id);
   assert.ok(ids.length > 0);
   assert.ok(!ids.includes("auto"));

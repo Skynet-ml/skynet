@@ -25,6 +25,8 @@ from core.service_gateway.agents import generalist as generalist_module
 from core.service_gateway.agents.code import AgentStoppedError, _agent_error_payload, _SubmitArgExtractor
 from core.service_gateway.agents.docs_retrieval import DocsCorpus
 from core.service_gateway.agents.generalist import (
+    AUTOMATIC_TURN_PREFIX,
+    CLONE_FOCUS,
     GENERALIST_SYSTEM_PROMPT,
     SCREEN_FOCUS,
     ApprovalRegistry,
@@ -32,6 +34,7 @@ from core.service_gateway.agents.generalist import (
     ThinkingTrail,
     WizardState,
     _clean_summary,
+    _history_from_chat,
     _needs_approval,
     _screen_needs_approval,
     _screen_problems,
@@ -46,6 +49,7 @@ from core.service_gateway.agents.generalist import (
     screen_signature,
     screen_snapshot,
     screen_tools,
+    screen_turn_guard,
     tools_for,
     validate_wizard_patch_order,
     validate_wizard_screen,
@@ -56,7 +60,7 @@ _SUBMIT = "submit_unified_run_optimize_post"
 _READY: dict[str, Any] = {
     "job_name": "My run",
     "task_objective": "Answer support questions",
-    "artifact_kind": "prompt",
+    "artifact_kind": "dspy_program",
     "starting_version": "You are a helpful agent.",
     "data_mode": "pairs",
     "dataset_ready": True,
@@ -145,7 +149,7 @@ def test_order_rejects_task_before_name() -> None:
 
 def test_order_allows_name_and_task_in_one_patch() -> None:
     """A single patch may set the name AND the task — each satisfies its own step."""
-    patch = {"job_name": "My run", "task_objective": "x", "artifact_kind": "prompt", "starting_version": "s"}
+    patch = {"job_name": "My run", "task_objective": "x", "artifact_kind": "dspy_program", "starting_version": "s"}
     assert validate_wizard_patch_order(patch, WizardState()) is None
 
 
@@ -183,7 +187,7 @@ def test_screen_allows_visible_and_screenless_fields() -> None:
 
 def test_screen_rejects_fields_off_the_visible_screen() -> None:
     """A field from another screen is refused and named in the error."""
-    patch = {"task_objective": "x", "artifact_kind": "prompt", "data_mode": "pairs"}
+    patch = {"task_objective": "x", "artifact_kind": "dspy_program", "data_mode": "pairs"}
     err = validate_wizard_screen("update_wizard_state", patch, WizardState(wizard_screen="brief"))
     assert err is not None
     assert "artifact_kind" in err
@@ -212,10 +216,61 @@ def test_screen_allows_only_screenless_fields_on_a_screen_without_fields() -> No
     assert validate_wizard_screen("update_wizard_state", {"seed": 1}, state) is not None
 
 
-def test_screen_leaves_code_fields_to_the_tool_refusal() -> None:
-    """Run and metric code are not screen-scoped; ``update_wizard_state`` refuses them itself."""
-    state = WizardState(wizard_screen="metric")
-    assert validate_wizard_screen("update_wizard_state", {"run_code": "x", "metric_code": "y"}, state) is None
+def test_screen_lets_only_the_code_screens_write_code() -> None:
+    """The Metric and Check screens write run and metric code; earlier screens may not."""
+    code = {"run_code": "x", "metric_code": "y"}
+    assert validate_wizard_screen("update_wizard_state", code, WizardState(wizard_screen="metric")) is None
+    assert validate_wizard_screen("update_wizard_state", code, WizardState(wizard_screen="check")) is None
+    assert validate_wizard_screen("update_wizard_state", code, WizardState(wizard_screen="brief")) is not None
+
+
+@pytest.mark.asyncio
+async def test_wrap_reports_previous_values_of_a_wizard_write() -> None:
+    """A wizard write's tool_end carries what each field held before, for the chat's field card."""
+    events: list[dict] = []
+    tool = _wrap_tool_with_approval(
+        _make_fake_tool("update_wizard_state", return_value={"wizard_state": {"run_code": "new"}}),
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=events.append,
+        outer_loop=asyncio.get_running_loop(),
+        wizard_state=cast(WizardState, {**_READY, "wizard_screen": "metric", "run_code": "old"}),
+    )
+    await tool.func._async_body(run_code="new", metric_code="score", job_description="Sorts mail")
+    end = next(e for e in events if e["event"] == "tool_end")
+    assert end["data"]["status"] == "ok"
+    assert end["data"]["result"]["previous"] == {
+        "run_code": "old",
+        "metric_code": _READY["metric_code"],
+        "job_description": None,
+    }
+    assert end["data"]["result"]["wizard_state"] == {"run_code": "new"}
+
+
+def test_cloned_setup_snapshot_holds_the_whole_setup() -> None:
+    """A cloned run's agent sees every field, not only the screen on view."""
+    state = cast(WizardState, {"wizard_screen": "brief", "cloned_run": True, "optimizer_choice": "auto"})
+    assert screen_snapshot(state)["optimizer_choice"] == "auto"
+    assert "optimizer_choice" not in screen_snapshot(WizardState(wizard_screen="brief", optimizer_choice="auto"))
+
+
+def test_cloned_setup_signature_waits_for_the_user() -> None:
+    """A cloned run's prompt says the setup arrived filled in, so the agent does not refill it."""
+    assert CLONE_FOCUS in screen_signature("brief", cloned=True).instructions
+    assert CLONE_FOCUS not in screen_signature("brief").instructions
+
+
+def test_screen_signature_explains_automatic_check_messages() -> None:
+    """The prompt tells the agent that a check-failure message comes from the wizard."""
+    assert AUTOMATIC_TURN_PREFIX in screen_signature("check").instructions
+
+
+def test_check_signature_holds_continue_until_the_check_passes() -> None:
+    """The Check prompt tells the agent not to continue while the check runs or after it failed."""
+    assert (
+        "Do not call ``continue_to_next_screen`` while the check runs or after it failed."
+        in screen_signature("check").instructions
+    )
 
 
 @pytest.mark.asyncio
@@ -248,10 +303,11 @@ _FULL_SNAPSHOT: dict[str, Any] = {
     "is_private": False,
     "task_objective": "Classify tickets",
     "task_background": "b",
-    "artifact_kind": "prompt",
+    "artifact_kind": "dspy_program",
     "starting_version": "v1",
     "data_mode": "pairs",
     "dataset_ready": True,
+    "dataset_columns": ["text", "label"],
     "input_fields": ["text"],
     "optimizer_choice": "auto",
     "model_config": {"name": "openai/gpt-4o"},
@@ -267,7 +323,10 @@ _FULL_SNAPSHOT: dict[str, Any] = {
     [
         ("brief", {"task_objective", "task_background"}),
         ("artifact", {"artifact_kind", "starting_version", "task_objective"}),
-        ("source", {"data_mode", "dataset_ready", "input_fields", "task_objective", "artifact_kind"}),
+        (
+            "source",
+            {"data_mode", "dataset_ready", "dataset_columns", "input_fields", "task_objective", "artifact_kind"},
+        ),
         (
             "plan",
             {
@@ -290,7 +349,7 @@ _FULL_SNAPSHOT: dict[str, Any] = {
 def test_screen_snapshot_keeps_screen_fields_and_read_only_extras(screen: str, expected: set[str]) -> None:
     """A screen sees its own fields plus the values it depends on, nothing else."""
     trimmed = screen_snapshot(cast(WizardState, {**_FULL_SNAPSHOT, "wizard_screen": screen}))
-    assert set(trimmed) == expected | {"wizard_screen", "job_name"}
+    assert set(trimmed) == expected | {"wizard_screen", "job_name", "editable_fields"}
     assert trimmed["wizard_screen"] == screen
 
 
@@ -331,12 +390,12 @@ def test_screen_snapshot_shows_notes_only_from_earlier_screens() -> None:
 
 def test_screen_snapshot_caps_client_notes() -> None:
     """Notes from the client are capped in count and length."""
-    notes = [{"screen": "brief", "note": f"{i} " + "x" * 400} for i in range(15)]
+    notes = [{"screen": "brief", "note": f"{i} " + "x" * 1100} for i in range(15)]
     state = cast(WizardState, {"wizard_screen": "budget", "screen_notes": notes})
     shown = screen_snapshot(state)["notes_from_earlier_screens"]
     assert len(shown) == 10
     assert shown[0].startswith("brief: 5 ")
-    assert all(len(line) <= len("brief: ") + 200 for line in shown)
+    assert all(len(line) <= len("brief: ") + 1000 for line in shown)
 
 
 def test_screen_snapshot_names_what_blocks_continue() -> None:
@@ -345,13 +404,94 @@ def test_screen_snapshot_names_what_blocks_continue() -> None:
     assert screen_snapshot(state)["continue_blocked_by"] == "Describe the task first"
 
 
+def test_screen_snapshot_lists_the_fields_the_screen_takes() -> None:
+    """The snapshot names the writable fields, so the agent need not guess them from refusals."""
+    snapshot = screen_snapshot(cast(WizardState, {"wizard_screen": "brief", "job_name": "Tickets"}))
+    assert snapshot["editable_fields"] == [
+        "is_private",
+        "job_description",
+        "job_name",
+        "task_background",
+        "task_objective",
+    ]
+    assert "optimizer_choice" not in snapshot["editable_fields"]
+
+
+def test_artifact_snapshot_carries_the_repository_and_github_link() -> None:
+    """The artifact screen sees the chosen repository and whether GitHub is linked."""
+    state = cast(
+        WizardState,
+        {
+            **_READY,
+            "wizard_screen": "artifact",
+            "artifact_kind": "repo",
+            "repository": "acme/support-bot",
+            "github_connected": False,
+        },
+    )
+    snapshot = screen_snapshot(state)
+    assert snapshot["artifact_kind"] == "repo"
+    assert snapshot["repository"] == "acme/support-bot"
+    assert snapshot["github_connected"] is False
+    assert "repository" in snapshot["editable_fields"]
+
+
+def test_repo_target_needs_a_repository_not_a_starting_version() -> None:
+    """A repository run completes the Task step with its repository alone."""
+    repo = cast(
+        WizardState,
+        {"job_name": "Bot", "task_objective": "Fix flaky tests", "artifact_kind": "repo", "wizard_screen": "artifact"},
+    )
+    assert (
+        validate_wizard_screen("update_wizard_state", {"artifact_kind": "repo", "repository": "acme/bot"}, repo) is None
+    )
+    assert _screen_problems("artifact", repo) == ["repository must be set as owner/name"]
+    chosen = cast(WizardState, {**repo, "repository": "acme/bot"})
+    assert _screen_problems("artifact", chosen) == []
+    assert validate_wizard_patch_order({"data_mode": "single"}, chosen) is None
+
+
+def test_repo_target_never_unlocks_the_unified_submit() -> None:
+    """The wizard's own Run button submits a repository run, not the agent's submit tool."""
+    assert _SUBMIT in tools_for(cast(WizardState, _READY))
+    repo = cast(WizardState, {**_READY, "artifact_kind": "repo", "repository": "acme/bot"})
+    assert _SUBMIT not in tools_for(repo)
+
+
+def test_screen_prompts_forbid_unconfirmed_claims() -> None:
+    """Both prompts tell the agent not to claim writes or screen moves a tool did not confirm."""
+    assert "Say only what a tool result confirms." in (GENERALIST_SYSTEM_PROMPT or "")
+    assert "Say only what a tool result confirms." in screen_signature("brief").instructions
+    assert "the only kind new runs take" not in SCREEN_FOCUS["artifact"]
+
+
+def test_screen_snapshot_of_a_clone_names_notes_and_what_blocks_continue() -> None:
+    """A cloned run keeps its whole setup and still gets the named notes and blocker."""
+    state = cast(
+        WizardState,
+        {
+            "wizard_screen": "budget",
+            "cloned_run": True,
+            "optimizer_choice": "auto",
+            "screen_issue": "Set a budget first",
+            "screen_notes": [{"screen": "brief", "note": "keep it cheap"}],
+        },
+    )
+    snapshot = screen_snapshot(state)
+    assert snapshot["optimizer_choice"] == "auto"
+    assert snapshot["continue_blocked_by"] == "Set a budget first"
+    assert snapshot["notes_from_earlier_screens"] == ["brief: keep it cheap"]
+    assert "screen_issue" not in snapshot
+    assert "screen_notes" not in snapshot
+
+
 @pytest.mark.parametrize(
     ("screen", "kept"),
     [
         ("brief", {"update_wizard_state"}),
-        ("metric", {"validate_code_validate_code_post"}),
+        ("metric", {"update_wizard_state", "validate_code_validate_code_post"}),
         ("budget", {"update_wizard_state", "get_wallet_for_agent"}),
-        ("overview", {_SUBMIT, "get_wallet_for_agent"}),
+        ("overview", {"get_wallet_for_agent"}),
     ],
 )
 def test_screen_tools_keep_only_the_screens_own_tools(screen: str, kept: set[str]) -> None:
@@ -388,16 +528,33 @@ def _nav_tools(state: dict[str, Any], turn: _TurnAuthoringFlag | None = None) ->
 
 @pytest.mark.asyncio
 async def test_remember_for_later_appends_a_capped_note() -> None:
-    """A note lands in the wizard state with its screen, clipped and capped."""
+    """A note lands whole in the wizard state with its screen; the oldest note drops out."""
     old = [{"screen": "brief", "note": str(i)} for i in range(10)]
     tools = _nav_tools({"wizard_screen": "artifact", "screen_notes": old})
-    result = await tools["remember_for_later"].acall(note="keep   it\ncheap " + "x" * 300)
+    long_note = "keep   it\ncheap " + "x" * 900
+    result = await tools["remember_for_later"].acall(note=long_note)
     notes = result["wizard_state"]["screen_notes"]
     assert len(notes) == 10
     assert notes[0] == {"screen": "brief", "note": "1"}
-    assert notes[-1]["screen"] == "artifact"
-    assert notes[-1]["note"].startswith("keep it cheap ")
-    assert len(notes[-1]["note"]) == 200
+    assert notes[-1] == {"screen": "artifact", "note": "keep it cheap " + "x" * 900}
+
+
+@pytest.mark.asyncio
+async def test_remember_for_later_refuses_a_note_over_the_limit() -> None:
+    """A note over the limit is refused with its length, never cut."""
+    result = await _nav_tools({"wizard_screen": "brief"})["remember_for_later"].acall(note="x" * 1001)
+    assert isinstance(result, str)
+    assert "1001" in result
+    assert "1000" in result
+
+
+@pytest.mark.asyncio
+async def test_continue_refuses_a_note_over_the_limit() -> None:
+    """Continue does not move on while its note is too long."""
+    state = {**_READY, "wizard_screen": "brief"}
+    result = await _nav_tools(state)["continue_to_next_screen"].acall(note="x" * 1001)
+    assert isinstance(result, str)
+    assert "1000" in result
 
 
 @pytest.mark.asyncio
@@ -468,12 +625,18 @@ async def test_go_back_only_to_an_earlier_screen() -> None:
 
 @pytest.mark.parametrize("screen", list(SCREEN_FOCUS))
 def test_screen_signature_is_short_and_names_the_screen(screen: str) -> None:
-    """Each screen agent gets its own short instructions, not the full prompt."""
+    """Each screen gets its own short instructions, not the full prompt."""
     instructions = screen_signature(screen).instructions
-    assert f"the ``{screen}`` screen" in instructions
+    assert f"The screen on view is ``{screen}``" in instructions
     assert SCREEN_FOCUS[screen] in instructions
     assert "remember_for_later" in instructions
     assert len(instructions) < len(GENERALIST_SYSTEM_PROMPT or "")
+
+
+def test_source_signature_sets_the_column_roles() -> None:
+    """The Data prompt tells the agent to set the column roles, so it fills the roles card."""
+    assert "``set_column_roles``" in SCREEN_FOCUS["source"]
+    assert SCREEN_FOCUS["source"] in screen_signature("source").instructions
 
 
 def test_screen_signature_names_the_reply_language() -> None:
@@ -636,19 +799,18 @@ def test_auto_safe_gates_only_destructive() -> None:
     assert _needs_approval("submit_unified_run_optimize_post", "auto_safe") is True
 
 
-def test_screen_agent_fills_its_own_screen_without_asking() -> None:
-    """A screen agent's form writes skip Ask; everything else keeps the usual gate."""
-    assert _screen_needs_approval("update_wizard_state", "ask") is False
-    assert _screen_needs_approval("set_column_roles_datasets_column_roles_post", "ask") is False
-    assert _screen_needs_approval("stage_sample_dataset_datasets_samples", "ask") is True
-    assert _screen_needs_approval("submit_unified_run_optimize_post", "ask") is True
-    assert _screen_needs_approval("delete_job_optimizations", "auto_safe") is True
+def test_screen_agent_never_asks() -> None:
+    """A screen agent works without approvals in every trust mode."""
+    for mode in ("ask", "auto_safe", "yolo"):
+        assert _screen_needs_approval("update_wizard_state", mode) is False
+        assert _screen_needs_approval("stage_sample_dataset_datasets_samples", mode) is False
 
 
 def _make_fake_tool(name: str, return_value: str = "ok") -> dspy.Tool:
     """Build a ``dspy.Tool`` whose async ``func`` returns the given value."""
 
     async def func(**kwargs):
+        """Return the fixed value."""
         return return_value
 
     return dspy.Tool(func=func, name=name, desc="test tool", args={}, arg_types={}, arg_desc={})
@@ -740,6 +902,7 @@ def _make_recording_tool(name: str) -> tuple[dspy.Tool, dict]:
     seen: dict = {}
 
     async def func(**kwargs):
+        """Record the kwargs and return ``ok``."""
         seen.update(kwargs)
         return "ok"
 
@@ -776,7 +939,7 @@ async def test_submit_fills_unified_payload_from_snapshot() -> None:
     assert seen["task"] == {
         "objective": "Answer support questions",
         "background": "Tier-1 support",
-        "artifact": {"kind": "prompt", "starting_version": "You are a helpful agent."},
+        "artifact": {"kind": "dspy_program", "starting_version": "You are a helpful agent."},
     }
     assert seen["data"] == {
         "mode": "pairs",
@@ -1019,10 +1182,35 @@ async def test_submit_runs_through_the_wrapper() -> None:
     assert submit_seen["name"] == "My run"
 
 
-def test_system_prompt_sends_code_requests_to_the_metric_coding_agent() -> None:
-    """The prompt points code requests at the Metric screen's coding agent."""
+@pytest.mark.asyncio
+async def test_continue_after_a_repository_only_write_counts_a_repository_run() -> None:
+    """A repository write without ``artifact_kind`` lets Continue pass the artifact screen."""
+    flag = _TurnAuthoringFlag()
+    state = {
+        "wizard_screen": "artifact",
+        "job_name": "My run",
+        "task_objective": "Sort tickets",
+        "artifact_kind": "dspy_program",
+    }
+    update, _ = _make_recording_tool("update_wizard_state")
+    _wrap_tool_with_approval(
+        update,
+        trust_mode="yolo",
+        registry=ApprovalRegistry(),
+        emit=lambda _e: None,
+        outer_loop=asyncio.get_running_loop(),
+        wizard_state=cast(WizardState, state),
+        authoring_flag=flag,
+    )
+    assert await update.func._async_body(repository="acme/app") == "ok"
+    result = await _nav_tools(state, flag)["continue_to_next_screen"].acall()
+    assert result["screen_nav"] == {"action": "continue", "from": "artifact"}
+
+
+def test_system_prompt_sends_code_requests_to_the_metric_screen() -> None:
+    """Outside the wizard the prompt points code requests at the wizard's Metric screen."""
     prompt = " ".join((GENERALIST_SYSTEM_PROMPT or "").split())
-    assert "tell them to ask that coding agent on the Metric screen" in prompt
+    assert "send them to the Metric screen" in prompt
 
 
 def _approval_engine():
@@ -1887,25 +2075,29 @@ def test_mcp_session_bounds_each_tool_call(monkeypatch: pytest.MonkeyPatch) -> N
 
     @asynccontextmanager
     async def fake_transport(url: str, headers: dict[str, str] | None = None) -> AsyncIterator[tuple[Any, Any, Any]]:
+        """Yield empty transport streams."""
         yield (None, None, None)
 
     class FakeSession:
         def __init__(self, read: Any, write: Any, **kwargs: Any) -> None:
+            """Record the session kwargs."""
             seen.update(kwargs)
 
         async def __aenter__(self) -> FakeSession:
+            """Return this session."""
             return self
 
         async def __aexit__(self, *exc: object) -> None:
-            return None
+            """Close nothing."""
 
         async def initialize(self) -> None:
-            return None
+            """Skip the handshake."""
 
     monkeypatch.setattr(generalist_module, "streamablehttp_client", fake_transport)
     monkeypatch.setattr(generalist_module, "ClientSession", FakeSession)
 
     async def run() -> None:
+        """Open and close one MCP session."""
         async with generalist_module._mcp_session("http://mcp"):
             pass
 
@@ -1928,3 +2120,124 @@ def test_every_folder_agent_mutation_has_an_approval_gate() -> None:
     for name in ("delete_folder", "move_folder", "move_runs_to_folder", "update_folder"):
         assert _needs_approval(name, "auto_safe") is True
     assert _needs_approval("create_folder", "auto_safe") is False
+
+
+def _turn_guard(state: dict[str, Any], message: str = "hi") -> tuple[Any, _TurnAuthoringFlag, list[dict]]:
+    """Build a screen turn's end guard with its flag and captured events.
+
+    Args:
+        state: The wizard snapshot.
+        message: The message that started the turn.
+
+    Returns:
+        The guard (or ``None``), the turn flag and the emitted events.
+    """
+    turn = _TurnAuthoringFlag()
+    events: list[dict] = []
+    return screen_turn_guard(cast(WizardState, state), turn, message, events.append), turn, events
+
+
+def test_turn_guard_refuses_a_statement_once_on_a_done_screen() -> None:
+    """A done screen's statement-only reply is refused once, and the shown text is taken back."""
+    guard, _, events = _turn_guard({**_READY, "wizard_screen": "brief"})
+    refusal = guard({"assistant_message": "I saved the goal."})
+    assert refusal
+    assert "continue_to_next_screen" in refusal
+    assert [event["event"] for event in events] == ["message_reset", "tool_start", "tool_end"]
+    assert events[1]["data"]["tool"] == "turn_check"
+    assert events[1]["data"]["arguments"] == {"reply": "I saved the goal."}
+    assert events[2]["data"]["result"] == {"missing": [], "feedback": refusal}
+    assert guard({"assistant_message": "I saved the goal."}) is None
+
+
+def test_turn_guard_names_what_an_unfinished_screen_needs() -> None:
+    """On an unfinished screen the refusal says what to ask for."""
+    guard, _, _ = _turn_guard({"wizard_screen": "brief"})
+    refusal = guard({"assistant_message": "Noted."})
+    assert refusal
+    assert "task_objective" in refusal
+
+
+def test_turn_guard_accepts_a_question_or_a_move() -> None:
+    """A question, in any script's question mark, or a screen move ends the turn."""
+    guard, turn, _ = _turn_guard({**_READY, "wizard_screen": "brief"})
+    assert guard({"assistant_message": "How much may it spend?"}) is None
+    assert guard({"assistant_message": "\u0643\u0645\u061f"}) is None
+    turn.screen_moved = True
+    assert guard({"assistant_message": "Moved on."}) is None
+    assert not turn.end_refused
+
+
+@pytest.mark.asyncio
+async def test_screen_moves_mark_the_turn() -> None:
+    """Continue and Back set the flag the turn guard reads."""
+    turn = _TurnAuthoringFlag()
+    await _nav_tools({**_READY, "wizard_screen": "brief"}, turn)["continue_to_next_screen"].acall()
+    assert turn.screen_moved
+    back = _TurnAuthoringFlag()
+    await _nav_tools({"wizard_screen": "budget"}, back)["go_back_to_screen"].acall(screen_id="brief", request="x")
+    assert back.screen_moved
+
+
+@pytest.mark.asyncio
+async def test_ask_user_shows_one_question_with_choices() -> None:
+    """A question with 2-4 options goes to the panel once a turn and lets the turn end."""
+    turn = _TurnAuthoringFlag()
+    ask = _nav_tools({"wizard_screen": "brief"}, turn)["ask_user"]
+    options = '[{"label": "Exact match", "description": "Same text scores 1."}, "Judge model", {"label": " "}]'
+    result = await ask.acall(question=" Which measure? ", options_json=options)
+    assert result == {
+        "question": "Which measure?",
+        "options": [
+            {"label": "Exact match", "description": "Same text scores 1."},
+            {"label": "Judge model", "description": ""},
+        ],
+    }
+    assert turn.asked
+    assert "already shown" in await ask.acall(question="Again?", options_json=options)
+    guard, guard_turn, _ = _turn_guard({**_READY, "wizard_screen": "brief"})
+    guard_turn.asked = True
+    assert guard({"assistant_message": "Pick a measure."}) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("options_json", ["not json", "[]", '["Only one"]', '{"label": "x"}'])
+async def test_ask_user_refuses_too_few_options(options_json: str) -> None:
+    """Bad JSON or fewer than two options shows nothing and leaves the turn open."""
+    turn = _TurnAuthoringFlag()
+    result = await _nav_tools({"wizard_screen": "brief"}, turn)["ask_user"].acall(
+        question="Which?", options_json=options_json
+    )
+    assert isinstance(result, str)
+    assert not turn.asked
+
+
+@pytest.mark.parametrize(
+    ("state", "message"),
+    [
+        ({}, "hi"),
+        ({"wizard_screen": "check"}, "hi"),
+        ({"wizard_screen": "overview"}, "hi"),
+        ({"wizard_screen": "brief", "cloned_run": True}, "hi"),
+        ({"wizard_screen": "metric"}, f"{AUTOMATIC_TURN_PREFIX} failed"),
+    ],
+)
+def test_turn_guard_is_off_where_a_statement_may_end_the_turn(state: dict[str, Any], message: str) -> None:
+    """No wizard, the Check and Overview screens, cloned runs and automatic turns get no guard."""
+    assert _turn_guard(state, message)[0] is None
+
+
+def test_chat_replay_drops_turn_checks() -> None:
+    """A turn check in a stored trace never replays as a tool the agent called."""
+    history = _history_from_chat(
+        [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "Which file?",
+                "tools": [{"tool": "turn_check", "status": "done", "result": {"missing": []}}],
+            },
+        ]
+    )
+    names = [call.name for event in history.messages for call in getattr(event.get("tool_calls"), "tool_calls", [])]
+    assert names == ["submit"]

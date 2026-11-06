@@ -45,7 +45,7 @@ Authorization: Bearer skyd_...
 | `GET /models`                                   | تسرد النماذج التي يمكنك استخدامها.                         |
 | `GET /optimizers`                               | تسرد المُحسِّنات المناسبة لإعداد معيّن.                     |
 | `GET /blackbox/engines`                         | تسرد المحرّكات الأصلية وتوضّح إن كان كل منها متاحًا.        |
-| `POST /optimize`                                | تبدأ تشغيلًا لموجّه أو كود أو نص أو برنامج DSPy.           |
+| `POST /optimize` | يبدأ تشغيلًا لبرنامج DSPy. |
 | `POST /blackbox/run`                            | تبدأ تشغيلًا على مستودع GitHub.                            |
 | `GET /optimizations`                            | تسرد عمليات التشغيل الخاصة بك.                             |
 | `GET /optimizations/{optimization_id}`          | تُرجع تشغيلًا واحدًا: الحالة والتقدّم والسجلات والنتيجة.     |
@@ -56,7 +56,7 @@ Authorization: Bearer skyd_...
 
 ## بدء تشغيل
 
-تأخذ `POST /optimize` الإعداد نفسه الذي يأخذه معالج الإرسال. يحسّن هذا المثال موجّهًا يصنّف رسائل الدعم إلى تسميات.
+تأخذ `POST /optimize` الإعداد نفسه الذي يأخذه معالج الإرسال. يحسّن المثال برنامج DSPy يصنّف رسائل الدعم إلى تسميات.
 
 ```bash tab="curl"
 curl https://api.skynetml.com/optimize \
@@ -72,7 +72,7 @@ curl https://api.skynetml.com/optimize \
   "task": {
     "objective": "Sort each support message into billing, bug or other.",
     "artifact": {
-      "kind": "prompt",
+      "kind": "dspy_program",
       "starting_version": "Label this support message as billing, bug or other."
     }
   },
@@ -93,7 +93,7 @@ curl https://api.skynetml.com/optimize \
     "reflection_model": { "name": "<model from GET /models>" }
   },
   "workspace": {
-    "run_code": "from skynet import llm\n\ndef run(artifact, input):\n    return llm(artifact, input=input[\"message\"])\n",
+    "run_code": "import dspy\n\nprogram = dspy.Predict(\"message -> label\")\n\n\ndef run(artifact, input):\n    return program(message=input[\"message\"]).label\n",
     "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
   },
   "max_cost_cents": 500
@@ -102,7 +102,7 @@ curl https://api.skynetml.com/optimize \
 
 حقول مهمة:
 
-- قيمة `task.artifact.kind` هي `prompt` أو `code` أو `text` أو `dspy_program`.
+- قيمة `task.artifact.kind` هي `dspy_program`.
 - قيمة `data.mode` هي `pairs` (مُدخلات مع مخرجات متوقعة) أو `single` (حالة واحدة بالضبط).
 - قيمة `optimizer.choice` هي `auto` أو اسم مُحسِّن واحد من `GET /optimizers`.
 - الحقل `max_cost_cents` هو حد الإنفاق لهذا التشغيل، بالسنت الأمريكي.

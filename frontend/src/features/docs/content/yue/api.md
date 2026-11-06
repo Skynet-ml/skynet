@@ -45,7 +45,7 @@ Authorization: Bearer skyd_...
 | `GET /models`                                   | 列出你可以用嘅模型。                                   |
 | `GET /optimizers`                               | 列出適合某個設定嘅優化器。                             |
 | `GET /blackbox/engines`                         | 列出原生引擎，同埋每個引擎係咪可用。                   |
-| `POST /optimize`                                | 為提示詞、程式碼、文字或者 DSPy 程式開始一次運行。     |
+| `POST /optimize` | 為 DSPy 程式開始一次運行。 |
 | `POST /blackbox/run`                            | 喺一個 GitHub 儲存庫上開始一次運行。                   |
 | `GET /optimizations`                            | 列出你嘅運行。                                         |
 | `GET /optimizations/{optimization_id}`          | 回傳一次運行：狀態、進度、日誌同結果。                 |
@@ -56,7 +56,7 @@ Authorization: Bearer skyd_...
 
 ## 開始一次運行
 
-`POST /optimize` 接受同提交精靈一樣嘅設定。呢個例子會改良一個將客服訊息分類做唔同標籤嘅提示詞。
+`POST /optimize` 接受同提交精靈一樣嘅設定。例子會改良一個將客服訊息分類做唔同標籤嘅 DSPy 程式。
 
 ```bash tab="curl"
 curl https://api.skynetml.com/optimize \
@@ -72,7 +72,7 @@ curl https://api.skynetml.com/optimize \
   "task": {
     "objective": "Sort each support message into billing, bug or other.",
     "artifact": {
-      "kind": "prompt",
+      "kind": "dspy_program",
       "starting_version": "Label this support message as billing, bug or other."
     }
   },
@@ -93,7 +93,7 @@ curl https://api.skynetml.com/optimize \
     "reflection_model": { "name": "<model from GET /models>" }
   },
   "workspace": {
-    "run_code": "from skynet import llm\n\ndef run(artifact, input):\n    return llm(artifact, input=input[\"message\"])\n",
+    "run_code": "import dspy\n\nprogram = dspy.Predict(\"message -> label\")\n\n\ndef run(artifact, input):\n    return program(message=input[\"message\"]).label\n",
     "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
   },
   "max_cost_cents": 500
@@ -102,7 +102,7 @@ curl https://api.skynetml.com/optimize \
 
 重要欄位：
 
-- `task.artifact.kind` 係 `prompt`、`code`、`text` 或者 `dspy_program`。
+- `task.artifact.kind` 係 `dspy_program`。
 - `data.mode` 係 `pairs`（輸入連埋預期輸出）或者 `single`（啱啱好一個案例）。
 - `optimizer.choice` 係 `auto`，或者 `GET /optimizers` 入面其中一個優化器名稱。
 - `max_cost_cents` 係呢次運行嘅花費上限，單位係美仙。

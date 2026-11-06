@@ -28,9 +28,8 @@ import { TrajectoryDrawer, type DrawerSelection } from "./TrajectoryDrawer";
 const NEWEST_HIGHLIGHT_MS = 2200;
 
 // A black-box run rendered with nothing but the job in hand still gets
-// black-box terminology — just no recipe, cases or renders to go on.
+// black-box terminology — just no cases or renders to go on.
 const BLACKBOX_FALLBACK: BlackboxTrajectoryContext = {
-  recipe: null,
   hasCases: false,
   rendersByText: new Map(),
 };

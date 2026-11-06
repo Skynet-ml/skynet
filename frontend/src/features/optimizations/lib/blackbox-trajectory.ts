@@ -8,7 +8,6 @@ export function buildBlackboxTrajectoryContext(
   payload: OptimizationPayloadResponse | null,
 ): BlackboxTrajectoryContext {
   const submitted = payload?.payload ?? {};
-  const recipe = submitted.recipe;
   const cases = Array.isArray(submitted.cases) ? submitted.cases.length : 0;
   // The submitted payload loads separately from the job, so the case count a
   // finished run recorded (split counts on older runs) stands in for it while
@@ -21,7 +20,6 @@ export function buildBlackboxTrajectoryContext(
     if (images.length > 0) rendersByText.set(blackboxCandidateKey(version.candidate), images);
   }
   return {
-    recipe: recipe === "prompt" || recipe === "code" || recipe === "anything" ? recipe : null,
     hasCases: cases > 0 || recordedCases > 0,
     rendersByText,
   };

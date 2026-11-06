@@ -3,8 +3,7 @@
 A run's cost in cents is the provider cost of its tokens times the configured
 usage markup (``settings.usage_markup``, env ``USAGE_MARKUP``), converted to
 cents at :data:`CENT_USD_VALUE`. The markup applies to
-every platform-paid metered charge; a BYOK run pays only
-:data:`PLATFORM_FEE_FRACTION` of the at-cost model price instead.
+every platform-paid metered charge. BYOK model calls carry no Skynet charge.
 
 Provider cost comes, in order of preference, from:
 
@@ -29,7 +28,7 @@ from dataclasses import dataclass, fields, replace
 import litellm
 
 from ..config import settings
-from .openrouter_prices import TokenPrices, live_prices
+from .openrouter_prices import TokenPrices, cached_prices, live_prices
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +36,9 @@ logger = logging.getLogger(__name__)
 # to the balance.
 CENT_USD_VALUE = 0.01
 
-# The platform fee charged on a run whose provider tokens are paid directly
-# through the user's own key (BYOK): a small share of the equivalent at-cost
-# model price, mirroring OpenRouter's 5% BYOK fee. The usage markup never
-# applies on top of it.
+# Retain the prior fraction for historical snapshots and the frontend transition.
 PLATFORM_FEE_FRACTION = 0.05
+BYOK_FEE_FRACTION = 0.0
 
 # Rates for a model neither OpenRouter nor LiteLLM prices, set at a frontier
 # model's list price so an unknown model can only be over-charged, never given
@@ -163,6 +160,18 @@ def known_token_prices(model_id: str) -> TokenPrices | None:
     return live_prices(model_id) or _static_prices(model_id)
 
 
+def cached_token_prices(model_id: str) -> TokenPrices | None:
+    """Return known prices without making a catalog request.
+
+    Args:
+        model_id: The model id as recorded.
+
+    Returns:
+        Cached or static prices, or None.
+    """
+    return cached_prices(model_id) or _static_prices(model_id)
+
+
 def model_token_costs(model_id: str) -> tuple[float, float]:
     """Return a model's ``(input, output)`` per-token cost in USD, at cost.
 
@@ -236,7 +245,7 @@ def cents_for_usage(usages: Iterable[ModelUsage], *, markup: float | None = None
     Args:
         usages: Per-model usage (measured or projected).
         markup: Multiplier on provider cost; ``None`` uses :func:`usage_markup`.
-            Pass ``1.0`` for the at-cost value a BYOK fee is computed from.
+            Pass ``1.0`` for the at-cost value.
 
     Returns:
         The non-negative cost in cents; any non-zero usage costs at least one cent.

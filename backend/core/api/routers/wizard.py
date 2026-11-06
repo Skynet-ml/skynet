@@ -17,7 +17,7 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...models import ArtifactKind, DataMode, OptimizerChoice, optimizers_for
+from ...models import DataMode, OptimizerChoice, OptimizerTarget, optimizers_for
 from ...models.blackbox import BlackboxCandidate
 from ..errors import DomainError
 
@@ -49,13 +49,21 @@ class WizardUpdateRequest(BaseModel):
         max_length=20_000,
         description="Task step: context the optimizer should know about the task.",
     )
-    artifact_kind: ArtifactKind | None = Field(
+    artifact_kind: OptimizerTarget | None = Field(
         default=None,
-        description="Task step: what is optimized. One of: 'prompt', 'code', 'text', 'dspy_program'.",
+        description="Task step: what is optimized. 'dspy_program' for a DSPy program, 'repo' for a GitHub repository.",
     )
     starting_version: BlackboxCandidate | None = Field(
         default=None,
-        description="Task step: the starting version, a string or a map of named parts to strings.",
+        description=(
+            "Task step: the starting version, a string or a map of named parts to strings. A 'repo' run has none."
+        ),
+    )
+    repository: str | None = Field(
+        default=None,
+        max_length=201,
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+        description="Task step: the GitHub repository a 'repo' run optimizes, as owner/name.",
     )
 
     data_mode: DataMode | None = Field(
@@ -101,11 +109,11 @@ class WizardUpdateRequest(BaseModel):
 
     run_code: str | None = Field(
         default=None,
-        description="Refused: workspace run code is written only by the Metric & run step's coding agent.",
+        description="Metric step: the whole run.py, which runs the program on one input. Replaces the file.",
     )
     metric_code: str | None = Field(
         default=None,
-        description="Refused: metric code is written only by the Metric & run step's coding agent.",
+        description="Metric step: the whole metric.py, which scores one output. Replaces the file.",
     )
 
 
@@ -202,8 +210,8 @@ def create_wizard_router() -> APIRouter:
         task and artifact, the inputs and split, the optimizer with its
         models and spending limit, and the workspace code. Supply only the
         fields you want to change — the rest are left untouched on the
-        frontend. Workspace code (``run_code``, ``metric_code``) is refused
-        here; the Metric & run step's coding agent writes it.
+        frontend. Workspace code (``run_code``, ``metric_code``) replaces
+        the whole file; the wizard's setup check runs it before Run.
 
         BATCHING — make ONE call per turn covering every field you intend
         to set together (``task_objective`` + ``artifact_kind`` +
@@ -221,18 +229,18 @@ def create_wizard_router() -> APIRouter:
             DomainError: 422 if any supplied field fails validation
                 (blank text, bad split sum, malformed model dict, an
                 optimizer that does not fit the artifact and data mode,
-                workspace code sent directly, etc.).
+                blank workspace code, etc.).
         """
         supplied = req.model_dump(by_alias=True, exclude_unset=True)
         patch: dict[str, Any] = {}
 
-        # Workspace code is written ONLY by the Metric & run step's coding
-        # agent, which checks and repairs it in the workspace. Accepting it
-        # here would let the agent inject unchecked code straight into the
-        # workspace, so the endpoint rejects it outright.
+        # Code keeps its own whitespace: indentation is part of it.
         for code_field in ("run_code", "metric_code"):
-            if supplied.get(code_field) is not None:
-                raise DomainError("wizard.code_via_authoring_only", status=422, field=code_field)
+            code = supplied.get(code_field)
+            if code is not None:
+                if not code.strip():
+                    raise DomainError("wizard.field_non_empty_string", status=422, field=code_field)
+                patch[code_field] = code
 
         for key in ("job_name", "job_description", "task_objective"):
             if key in supplied and supplied[key] is not None:
@@ -244,7 +252,7 @@ def create_wizard_router() -> APIRouter:
         if supplied.get("task_background") is not None:
             patch["task_background"] = supplied["task_background"].strip()
 
-        for literal_key in ("artifact_kind", "data_mode", "optimizer_choice", "staged_dataset_id"):
+        for literal_key in ("artifact_kind", "data_mode", "optimizer_choice", "staged_dataset_id", "repository"):
             if supplied.get(literal_key) is not None:
                 patch[literal_key] = supplied[literal_key]
 

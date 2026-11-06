@@ -280,7 +280,8 @@ def test_call_holds_price_one_call_like_the_gateway_reservation() -> None:
     managed, byok = resp.json()["holds"]
     assert managed["cents"] == float(ChargePolicy("managed_model").convert(provider_usd).total)
     assert byok["cents"] == float(ChargePolicy("byok_model").convert(provider_usd).total)
-    assert managed["cents"] > byok["cents"] > 0
+    assert managed["cents"] > 0
+    assert byok["cents"] == 0
 
 
 def test_call_holds_leave_an_unpriced_model_unknown() -> None:

@@ -4,16 +4,16 @@ This page answers common questions about Skynet. Each answer links to the page w
 
 ### What is Skynet?
 
-Skynet is a platform that optimizes prompts, programs, agents and workflows against your own data and metric. You upload a dataset, describe the task, and start a run. The run tries new versions and scores them on held-out data. To start, read the [Quickstart](/docs/quickstart).
+Skynet is a platform that optimizes DSPy programs and repositories against your own data and metric. You upload a dataset, describe the task, and start a run. The run tries new versions and scores them on held-out data. To start, read the [Quickstart](/docs/quickstart).
 
 ### What can Skynet optimize?
 
-Skynet is Optimize Anything. It optimizes prompts, code, text and DSPy programs in one product. The artifact kind decides which engines can work on it:
+Skynet is Optimize Anything. It optimizes DSPy programs and repositories in one product. The artifact kind decides which engines can work on it:
 
-- Prompt, Code and Text artifacts use the native engines: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler and ShinkaEvolve.
+- Repositories use the native engines: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler and ShinkaEvolve.
 - DSPy programs use the DSPy optimizers: DSPy GEPA, DSPy MIPROv2 and DSPy BootstrapFewShot.
 
-**Auto** combines the engines that fit your task. See [How optimization works](/docs/concepts/optimization) and [Engines](/docs/concepts/engines).
+On a DSPy program, **Auto** uses DSPy GEPA. On a repository, you select one native engine. Read [How optimization works](/docs/concepts/optimization) and [Engines](/docs/concepts/engines).
 
 ### Which languages does the interface support?
 
@@ -42,17 +42,17 @@ Set **Visibility** to **Private** when you submit a run to keep it out of public
 
 ### Do model providers train on my prompts?
 
-By default, no. The default **Model data privacy** option is **No training**. It sends prompts only to providers that do not train on them and do not keep them. This setting applies to calls that Skynet bills to your balance. Calls on your own key follow your OpenRouter account's privacy settings. See [Security](/docs/security).
+By default, no. The default **Model data privacy** option is **No training**. It sends prompts only to providers that do not train on them and do not keep them. This setting applies to calls that Skynet bills to your balance. BYOK calls through OpenRouter follow your OpenRouter account's privacy settings. Native provider BYOK calls follow that provider's data policy. See [Security](/docs/security).
 
 ## Billing
 
 ### How does Skynet charge for runs?
 
-Skynet uses a prepaid balance. Hosted model usage, Skynet fees and sandbox usage are metered. Before paid work starts, Skynet reserves headroom in your wallet and in the run budget. See [Billing](/docs/concepts/billing).
+Skynet uses a prepaid balance. Managed model usage and markup and sandbox usage are metered. A fee applies to balance top-ups. Before paid work starts, Skynet reserves headroom in your wallet and in the run budget. See [Billing](/docs/concepts/billing).
 
 ### Can I use my own model provider key?
 
-Yes. With your own key (BYOK), the provider charges your key directly for model calls. Your Skynet balance still pays the platform fee and sandbox usage. Skynet encrypts your key and never shows it again. See [Billing](/docs/concepts/billing) and [Security](/docs/security).
+Yes. With your own key (BYOK), your provider bills model tokens to your key. Skynet charges no model fee. The run budget covers sandbox usage only. Skynet encrypts your key and never shows it again. See [Billing](/docs/concepts/billing) and [Security](/docs/security).
 
 ### Can I run Skynet without paying for model calls?
 

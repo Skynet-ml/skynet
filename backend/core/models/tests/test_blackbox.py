@@ -183,7 +183,7 @@ def _repo_request(**overrides: object) -> dict:
         The request payload.
     """
     payload = {
-        "recipe": "anything",
+        "recipe": "repo",
         "scorer": {"kind": "python", "metric_code": "def score(repo_path):\n    return 1.0\n"},
         "reflection_model_config": {"name": "gpt-4o"},
         "budget": {"max_evals": 10},

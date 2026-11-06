@@ -2,14 +2,12 @@ Skynet 會改良你手上已經有嘅成品。你畀佢一個起始版本、一�
 
 ## Skynet 最佳化啲乜
 
-Skynet 處理四種成品類型：
+Skynet 處理兩種成品類型：
 
 | 成品類型     | 改動嘅內容                                   |
 | ------------ | -------------------------------------------- |
-| 提示詞       | 提示詞嘅文字                                 |
-| 程式碼       | 原始碼                                       |
+| 倉庫 | 你准改嘅路徑入面嘅檔案 |
 | DSPy 程式    | `dspy.Module` 入面各個預測器（predictor）嘅指令 |
-| 文字         | 任何其他文字，例如一份文件或者一個設定檔     |
 
 每次運行都用同一份合約。你嘅運行程式碼定義 `run(artifact, input)`。你嘅指標定義 `score(input, output, expected=None)`。指標會回傳一個分數同書面回饋。優化器會讀呢啲回饋，令下一個版本更好。
 
@@ -20,10 +18,10 @@ Skynet 處理四種成品類型：
 
 Skynet 就係 Optimize Anything。成品類型決定邊啲引擎可以處理佢：
 
-- 提示詞、程式碼同文字成品用原生引擎：GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler 同 ShinkaEvolve。
+- 倉庫用原生引擎：GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler 同 ShinkaEvolve。
 - DSPy 程式成品用 DSPy 優化器：DSPy GEPA、DSPy MIPROv2 同 DSPy BootstrapFewShot。
 
-**Auto** 會幫你揀。喺 DSPy 程式上，Auto 用 DSPy GEPA。喺其他成品類型上，Auto 會結合五個原生引擎。請睇 [最佳化點樣運作](/docs/concepts/optimization) 同 [引擎](/docs/concepts/engines)。
+喺 DSPy 程式上，**Auto** 會用 DSPy GEPA。喺倉庫上，你揀一個原生引擎。睇吓 [最佳化點樣運作](/docs/concepts/optimization) 同 [引擎](/docs/concepts/engines)。
 
 ## 一次運行點樣進行
 

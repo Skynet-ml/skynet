@@ -23,8 +23,6 @@ from core.service_gateway.agents.generalist import (
 _HIDDEN_FROM_GENERALIST = {
     # The chat's inference card runs this itself; the agent cannot know the user's inputs.
     "serve_program_serve",
-    # Only the Metric screen's coding agent writes run and metric code.
-    "edit_code_optimizations_edit_code_post",
     # Needs a black-box run ordinal the agent has no listing for, and returns a full transcript.
     "get_agent_run_optimizations",
     # Folder organizing and the per-run cost breakdown are their own feature;

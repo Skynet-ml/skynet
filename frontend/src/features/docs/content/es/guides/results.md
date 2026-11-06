@@ -8,14 +8,14 @@ La página de la ejecución solo muestra las pestañas que se aplican a la ejecu
 | ----------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
 | **Resumen**             | Siempre                                                                        | El progreso, las puntuaciones y el historial de puntuaciones                                     |
 | **Uso**                 | Una ejecución correcta con un programa que Skynet puede servir                 | Un formulario para ejecutar el programa optimizado, y código de integración                      |
-| **Artefacto**           | Una ejecución de tipo Prompt, Código o Texto con un resultado                  | Las versiones de tu artefacto, con la mejor versión                                              |
+| **Artefacto** | Una ejecución de repositorio con resultado | Las versiones de tu artefacto, con la mejor versión |
 | **Datos**               | Una ejecución terminada de un programa DSPy                                    | La división de los datos en los conjuntos de entrenamiento, validación y prueba, y la evaluación del conjunto de prueba |
 | **Código**              | Cuando la ejecución tiene código que mostrar                                   | El código de ejecución y la métrica                                                              |
-| **Recompensa**          | Una ejecución de tipo Prompt, Código o Texto cuya métrica declara partes de recompensa | Las partes de la recompensa y sus pesos                                                  |
-| **Artefacto**           | Una ejecución con un prompt o archivos optimizados                             | La salida optimizada y **Exportar resultados**                                                   |
+| **Recompensa** | Una ejecución de repositorio cuya métrica declara partes de recompensa | Las partes de la recompensa y sus pesos |
+| **Artefacto** | Una ejecución terminada de un programa DSPy | La salida optimizada y **Exportar resultados** |
 | **Registros**           | La mayoría de las ejecuciones                                                  | El registro de la ejecución                                                                      |
 | **Uso y coste**         | Cuando has iniciado sesión                                                     | Lo que gastó la ejecución                                                                        |
-| **Ejecución programada** | Una ejecución correcta de tipo Prompt, Código o Texto                         | Una programación para volver a ejecutar la optimización                                          |
+| **Ejecución programada** | Una ejecución correcta de un programa DSPy | Una programación para volver a ejecutar la optimización |
 | **Configuración**       | Siempre                                                                        | La configuración de la ejecución                                                                 |
 
 > [!NOTE]
@@ -33,7 +33,7 @@ La pestaña **Resumen** muestra:
 
 Mientras la ejecución está activa, el resumen también muestra **Transcurrido**, **Restante** y **Tasa**.
 
-En una ejecución de tipo Prompt, Código o Texto, el resumen también muestra **Puntuaciones con nombre** cuando tu métrica informa puntuaciones con nombre.
+En una ejecución de repositorio, el resumen también muestra **Puntuaciones con nombre** cuando tu métrica informa puntuaciones con nombre.
 
 En una ejecución de un programa DSPy, la pestaña **Datos** tiene una **Evaluación del conjunto de prueba**. Muestra la puntuación de la línea base y la optimizada para cada caso de prueba.
 
@@ -45,7 +45,7 @@ Si la ejecución se detuvo al llegar a su presupuesto, la página de la ejecuci�
 
 ## Exportar la mejor versión
 
-### Ejecuciones de tipo Prompt, Código y Texto
+### Ejecuciones de repositorio
 
 La pestaña **Artefacto** muestra las **Versiones** de tu artefacto. Para cada versión puedes:
 

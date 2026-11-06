@@ -16,14 +16,7 @@ Görevinizi **Görev görüşmesi** sohbetinde asistana anlatın. Asistan sizin 
 
 ### Ne optimize edilecek
 
-**Yapıt türü** seçin:
-
-| Yapıt türü    | Ne değişir                                         |
-| ------------- | -------------------------------------------------- |
-| İstem         | Bir dil modeline gönderilen talimatlar             |
-| Kod           | Bir programın kaynak kodu                          |
-| DSPy programı | Bir DSPy modülünün tahminci (predictor) talimatları |
-| Metin         | Belge veya şablon gibi başka herhangi bir metin    |
+**Neyin optimize edileceği** alanında **DSPy programı** veya **Bir GitHub deposu** seçeneğini seçin.
 
 Ardından **Başlangıç sürümü** (Rehberli: **Nereden başlıyoruz**) değerini verin. Geçerli sürümü yapıştırın veya asistanın bir taslak yazmasına izin verin.
 
@@ -93,7 +86,7 @@ Limit veya bakiyeniz başlamak için gereken tutarın altındaysa sihirbaz devam
 
 **Kodlama ajanı** sizin için herhangi bir dosyayı yazabilir ve değiştirebilir. Kodunu kontrol eder ve başarısız olanı düzeltir. En fazla 20 ek dosya ekleyebilirsiniz. [Metrikler ve puanlayıcılar](/docs/concepts/scorers) sayfasını okuyun.
 
-Metriğiniz `llm()` çağırıyorsa **Metrik modeli** değerini belirleyin. Varsayılan olarak yansıtma modelini kullanır.
+Metrik, modelini kendi `llm()` çağrısında belirler. `model=` olmadan metrik yansıtma modelini kullanır.
 
 ### Sözleşme kontrolü
 

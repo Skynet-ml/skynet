@@ -1,7 +1,7 @@
 """replace agent chat share tokens with typed share links
 
 Revision ID: c4e6a8b0d2f4
-Revises: a1c3e5f7b9d2
+Revises: a7c9e1f3b5d7
 Create Date: 2026-11-02 12:00:00.000000
 
 SKY-294 replaces the read-only chat link with a typed link: view only,
@@ -27,7 +27,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from alembic import op
 
 revision: str = "c4e6a8b0d2f4"
-down_revision: str | None = "a1c3e5f7b9d2"
+down_revision: str | None = "a7c9e1f3b5d7"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

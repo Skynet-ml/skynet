@@ -1,7 +1,7 @@
 """Routes for submitting optimization jobs. [PUBLIC DEV API]
 
-``POST /optimize`` — one optimization run of a prompt, code, text or DSPy
-program, for every optimizer.
+``POST /optimize`` — one optimization run of a DSPy program, for every DSPy
+optimizer.
 ``POST /blackbox/run`` — one optimization of a GitHub repository.
 ``GET /optimizers`` — the optimizers that fit a setup, with availability.
 ``GET /blackbox/engines`` — the engine catalog with per-deployment availability.
@@ -19,7 +19,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import Future, wait
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Literal, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header
@@ -29,13 +29,15 @@ from pydantic import ValidationError
 from ...billing import (
     ProviderKeyVault,
     StripeBillingService,
-    byok_prefix_routable,
     byok_provider_for_litellm,
     cost_ceiling_budget,
-    provider_slug_for_model,
 )
 from ...billing.budget_amounts import MAX_CENTS
 from ...billing.budgets import BudgetError, BudgetService
+from ...billing.byok_bridge import byok_upstream_routable
+from ...billing.byok_upstreams import UPSTREAMS, byok_model_prefix, resolve_upstream, validate_byok_novelty
+from ...billing.byok_vault import safe_connection_params
+from ...billing.operation_pricing import UnpricedOperationError
 from ...billing.protected_credentials import ProtectedCredentialVault, protect_execution_credentials
 from ...config import settings
 from ...constants import (
@@ -74,10 +76,8 @@ from ...constants import (
 from ...exceptions import ServiceError
 from ...i18n_keys import I18nKey
 from ...models import (
-    DSPY_OPTIMIZERS,
     FEEDBACK_OPTIMIZERS,
     UNIFIED_PAYLOAD_KIND,
-    ArtifactKind,
     BlackboxEngineCatalogResponse,
     BlackboxRunRequest,
     DataMode,
@@ -86,6 +86,7 @@ from ...models import (
     OptimizerCatalogResponse,
     OptimizerChoice,
     OptimizerOption,
+    OptimizerTarget,
     UnifiedData,
     UnifiedRunRequest,
     optimizer_family,
@@ -561,8 +562,7 @@ def _enforce_balance(job_store, username: str, token_source: str) -> int | None:
     Concurrent dispatch is serialized by the shared ledger. There is no free
     allowance — a brand-new account is gated until it tops up. Both run
     modes are gated: a managed run spends its full per-token cost, and a BYOK
-    run still spends Skynet's platform fee (the provider tokens are on the
-    user's own key), so a zero balance can cover neither. The returned balance
+    run may spend on sandbox usage even though its model calls carry no fee. The returned balance
     feeds the per-run cost ceiling (see :func:`_cap_cost_ceiling_to_balance`) so
     a run can never spend past what the account holds.
 
@@ -679,8 +679,8 @@ def _cap_cost_ceiling_to_balance(
     spend more than the account holds. This clamps ``max_cost_cents`` to
     the balance-backed budget: a user-set cap still wins when it is tighter, but an
     absent or larger cap is lowered to the budget. For a managed run the budget is
-    the spendable balance; for a BYOK run it is proportionally larger, since the run
-    only spends the platform fee (see :func:`cost_ceiling_budget`). The run's
+    the spendable balance; for a BYOK run it is effectively uncapped, since model calls
+    carry no Skynet fee (see :func:`cost_ceiling_budget`). The run's
     ``CostCeilingCallback`` then hard-stops it once usage crosses that budget, so an
     over-ambitious run fails mid-flight (and is never billed) instead of driving the
     balance negative. A no-op for engine-less stores, where ``spendable`` is ``None``.
@@ -698,7 +698,7 @@ def _cap_cost_ceiling_to_balance(
     payload.max_cost_cents = budget if current is None else min(current, budget)
 
 
-def _enforce_byok_connections(job_store, username: str, model_configs: list[ModelConfig]) -> None:
+def _enforce_byok_connections(job_store, username: str, model_configs: list[ModelConfig]) -> dict[str, str | None]:
     """Refuse BYOK models without a verified saved provider connection.
 
     In BYOK mode every model authenticates with the user's own provider key,
@@ -706,13 +706,16 @@ def _enforce_byok_connections(job_store, username: str, model_configs: list[Mode
     connection for a model's provider, the run would have nothing to authenticate
     with, so reject it at submit with a clear, translated error rather than
     letting the job fail mid-run. Managed runs are exempt (they spend the
-    account balance). Models with no ``provider/`` prefix are skipped — there is no
-    provider to resolve a key for. A no-op when the store exposes no SQL engine.
+    account balance). Models without a resolvable provider are rejected.
+    Connection checks are skipped when the store exposes no SQL engine.
 
     Args:
         job_store: Job-store instance whose ORM engine backs the billing tables.
         username: Account attempting the submission.
         model_configs: Executable configs with normalized per-model sources.
+
+    Returns:
+        Saved provider endpoints for the verified connections.
 
     Raises:
         DomainError: 400 ``billing.byok_missing_connection`` listing the providers
@@ -720,33 +723,72 @@ def _enforce_byok_connections(job_store, username: str, model_configs: list[Mode
             ``billing.byok_model_not_served`` when a model's prefix names a
             provider its chosen connection cannot route to.
     """
-    engine = getattr(job_store, "engine", None)
-    if engine is None or not username:
-        return
-    vault = ProviderKeyVault(engine=engine)
     # A model id carries a LiteLLM prefix (``gemini``, ``together_ai``) but the
     # key is saved under the vault slug (``google``, ``together``); bridge the two
     # exactly as the run path does so the gate sees the same connections it will.
     providers: set[str] = set()
-    routes: list[tuple[str, str | None, str]] = []
+    routes: list[tuple[ModelConfig, str, str | None, str]] = []
     for config in model_configs:
         if config.token_source != TOKEN_SOURCE_BYOK:
             continue
         name = config.normalized_identifier()
-        prefix = provider_slug_for_model(name)
         provider = (config.byok_provider or "").strip()
+        prefix = byok_model_prefix(name, provider)
         if not provider and prefix is not None:
             provider = byok_provider_for_litellm(prefix)
-        if provider:
-            providers.add(provider)
-            routes.append((name, prefix, provider))
+        if not provider or (not config.byok_provider and provider not in UPSTREAMS):
+            raise DomainError("submission.byok_provider_unsupported", status=400)
+        providers.add(provider)
+        routes.append((config, name, prefix, provider))
+    engine = getattr(job_store, "engine", None)
+    if engine is None or not username:
+        return {}
+    vault = ProviderKeyVault(engine=engine)
     missing = sorted(provider for provider in providers if not vault.has_verified_connection(username, provider))
     if missing:
         raise DomainError("billing.byok_missing_connection", status=400, provider=", ".join(missing))
     api_bases = {view.provider: view.api_base for view in vault.list_keys(username).keys if view.status == "verified"}
-    for name, prefix, provider in routes:
-        if not byok_prefix_routable(prefix, provider, api_base=api_bases.get(provider)):
+    for config, name, prefix, provider in routes:
+        try:
+            upstream = resolve_upstream(
+                {
+                    **config.model_dump(),
+                    "name": name,
+                    "byok_provider": provider,
+                    "base_url": api_bases.get(provider),
+                    "extra": safe_connection_params(config.extra),
+                }
+            )
+        except UnpricedOperationError as error:
+            raise DomainError("submission.byok_provider_unsupported", status=400) from error
+        prefix = byok_model_prefix(name, config.byok_provider, custom=upstream.slug == "custom")
+        if not byok_upstream_routable(prefix, provider, upstream):
             raise DomainError("billing.byok_model_not_served", status=400, model=name, provider=provider)
+    return api_bases
+
+
+def _admit_byok_models(
+    job_store: Any, username: str, configs: list[ModelConfig], reflection: ModelConfig | None, novelty: bool
+) -> dict[str, str | None]:
+    """Admit model connections and novelty before setup or submission.
+
+    Args:
+        job_store: Store holding verified connections.
+        username: Connection owner.
+        configs: Normalized executable model configurations.
+        reflection: Reflection model when the request has one.
+        novelty: Whether novelty checking is enabled.
+
+    Returns:
+        Verified provider endpoint bases.
+
+    Raises:
+        DomainError: When a connection or novelty route is unsupported.
+    """
+    bases = _enforce_byok_connections(job_store, username, configs)
+    if reflection is not None:
+        validate_byok_novelty(reflection.model_dump(), novelty, api_bases=bases)
+    return bases
 
 
 def rows_to_cases(rows: list[dict], *, input_fields: list[str], expected_field: str | None) -> list[dict]:
@@ -817,6 +859,64 @@ def _materialize_unified_cases(payload: UnifiedRunRequest, *, job_store, usernam
         )
     except ValidationError as error:
         raise DomainError(_UNIFIED_CONTRACT_FAILED, status=422, error=_first_error(error)) from error
+
+
+def _materialize_repo_cases(payload: BlackboxRunRequest, *, job_store, username: str) -> None:
+    """Inline a repository run's staged dataset into ``payload.cases``.
+
+    Rows map to cases the same way as a unified run's, through
+    ``input_fields`` and ``expected_field``. Inline cases win over a staged
+    id, and the id is always cleared so the stored payload never holds it.
+
+    Args:
+        payload: The repository run request, mutated in place.
+        job_store: Backend exposing ``get_staged_dataset``.
+        username: Authenticated submitter; staging rows are scoped to one owner.
+
+    Raises:
+        DomainError: 400 ``submission.staged_dataset_not_found`` when the id
+            is unknown or owned by another user.
+    """
+    staged_id = payload.staged_dataset_id
+    payload.staged_dataset_id = None
+    if not staged_id or payload.cases:
+        return
+    payload.cases = staged_repo_cases(
+        staged_id,
+        input_fields=payload.input_fields,
+        expected_field=payload.expected_field,
+        job_store=job_store,
+        username=username,
+    )
+
+
+def staged_repo_cases(
+    staged_id: str, *, input_fields: list[str], expected_field: str | None, job_store, username: str
+) -> list[dict]:
+    """Read one owner's staged dataset as repository run cases.
+
+    Args:
+        staged_id: The staged dataset id the caller sent.
+        input_fields: Columns that form each case's input; empty means every column.
+        expected_field: Column holding the expected answer, if any.
+        job_store: Backend exposing ``get_staged_dataset``.
+        username: Authenticated submitter; staging rows are scoped to one owner.
+
+    Returns:
+        The staged rows mapped onto cases.
+
+    Raises:
+        DomainError: 400 ``submission.staged_dataset_not_found`` when the id
+            is unknown or owned by another user.
+    """
+    rows = job_store.get_staged_dataset(staged_id, username)
+    if not rows:
+        raise DomainError(
+            I18nKey.SUBMISSION_STAGED_DATASET_NOT_FOUND,
+            status=400,
+            staged_dataset_id=staged_id,
+        )
+    return rows_to_cases(rows, input_fields=input_fields, expected_field=expected_field)
 
 
 def _first_error(error: ValidationError) -> str:
@@ -916,15 +1016,15 @@ def _unified_overview(
 
 def _optimizer_option(
     option_id: OptimizerChoice,
-    artifact_kind: ArtifactKind,
+    artifact_kind: OptimizerTarget,
     catalog: BlackboxEngineCatalogResponse,
 ) -> OptimizerOption:
     """Describe one optimizer choice with its availability on this deployment.
 
     Args:
         option_id: The optimizer choice being described.
-        artifact_kind: What the run optimizes; fixes Auto's resolution.
-        catalog: The black-box engine catalog for text targets.
+        artifact_kind: A DSPy program, or ``"repo"``; fixes Auto's resolution.
+        catalog: The black-box engine catalog for the run's target.
 
     Returns:
         The catalog option.
@@ -1017,7 +1117,13 @@ def submit_unified_payload(
         _spendable = _enforce_balance(job_store, payload.username, payload.token_source)
         if payload.execution_budget_id is None:
             _cap_cost_ceiling_to_balance(payload, _spendable, payload.token_source)
-    _enforce_byok_connections(job_store, payload.username, _model_configs)
+    _admit_byok_models(
+        job_store,
+        payload.username,
+        _model_configs,
+        payload.models.reflection_model,
+        bool(payload.optimizer.shinka and payload.optimizer.shinka.novelty),
+    )
 
     try:
         validate_unified_payload(payload)
@@ -1106,10 +1212,10 @@ def create_submissions_router(*, service, job_store) -> APIRouter:
         current_user: AuthenticatedUserDep,
         idempotency_key: IdempotencyKeyHeader = None,
     ) -> OptimizationSubmissionResponse | JSONResponse:
-        """Queue one optimization of a prompt, code, text or DSPy program.
+        """Queue one optimization of a DSPy program.
 
-        Every optimizer (the DSPy optimizers and the black-box engines) runs
-        through the black-box engine layer against the workspace code, so the
+        Every DSPy optimizer runs through the black-box engine layer against
+        the workspace code, so the
         run is stored as a black-box run marked ``payload_kind=unified_v1``.
         The persisted owner is the authenticated caller, not whatever the
         client posted.
@@ -1161,8 +1267,8 @@ def create_submissions_router(*, service, job_store) -> APIRouter:
     ) -> OptimizationSubmissionResponse:
         """Queue a black-box optimization of a GitHub repository against a scorer.
 
-        Only repository targets come through here; prompts, code, text and
-        DSPy programs submit to ``/optimize``. Without an execution budget the
+        Only repository targets come through here; DSPy programs submit to
+        ``/optimize``. Without an execution budget the
         server creates one and runs the setup check itself, which stages the
         repository and infers a setup command when none is given. The
         persisted owner is the authenticated caller.
@@ -1183,7 +1289,7 @@ def create_submissions_router(*, service, job_store) -> APIRouter:
         if payload.target.kind != BLACKBOX_TARGET_REPO or payload.target.repo is None:
             raise DomainError("submission.validation_failed", status=400)
         payload.username = current_user.username
-        payload.staged_dataset_id = None
+        _materialize_repo_cases(payload, job_store=job_store, username=payload.username)
 
         replay_keys = resolve_submission_replay_keys(
             payload,
@@ -1214,7 +1320,13 @@ def create_submissions_router(*, service, job_store) -> APIRouter:
             _spendable = _enforce_balance(job_store, payload.username, payload.token_source)
             if payload.execution_budget_id is None:
                 _cap_cost_ceiling_to_balance(payload, _spendable, payload.token_source)
-        _enforce_byok_connections(job_store, payload.username, _model_configs)
+        _admit_byok_models(
+            job_store,
+            payload.username,
+            _model_configs,
+            payload.reflection_model_settings,
+            bool(payload.shinka and payload.shinka.novelty),
+        )
 
         _ensure_api_budget(
             payload,
@@ -1299,29 +1411,30 @@ def create_submissions_router(*, service, job_store) -> APIRouter:
     )
     def optimizer_catalog(
         current_user: AuthenticatedUserDep,
-        artifact_kind: ArtifactKind,
+        artifact_kind: OptimizerTarget,
         data_mode: DataMode,
     ) -> OptimizerCatalogResponse:
-        """Describe the optimizers the wizard may offer for one artifact kind and data mode.
+        """Describe the optimizers the wizard may offer for a DSPy program or a repository.
 
-        DSPy optimizers are always available; black-box engines and the
-        black-box Auto strategy carry this deployment's availability.
+        DSPy optimizers are always available; the black-box engines a
+        repository run takes carry this deployment's availability.
 
         Args:
             current_user: Authenticated caller resolved from the bearer token.
-            artifact_kind: What the run optimizes.
+            artifact_kind: ``dspy_program``, or ``repo`` for a repository run.
             data_mode: Whether the run has one input or input/output pairs.
 
         Returns:
-            The relevant options, Auto first, with what Auto resolves to.
+            The relevant options, with what Auto resolves to. A repository
+            run has no Auto, so its ``auto_resolves_to`` is empty.
         """
         del current_user
-        catalog = engine_catalog(BLACKBOX_TARGET_TEXT)
+        repo = artifact_kind == BLACKBOX_TARGET_REPO
+        catalog = engine_catalog(BLACKBOX_TARGET_REPO if repo else BLACKBOX_TARGET_TEXT)
         options = [
             _optimizer_option(option, artifact_kind, catalog) for option in optimizers_for(artifact_kind, data_mode)
         ]
-        auto_resolved = resolve_optimizer("auto", artifact_kind)
-        auto_resolves_to = [auto_resolved] if auto_resolved in DSPY_OPTIMIZERS else list(catalog.auto_engines)
+        auto_resolves_to = [] if repo else [resolve_optimizer("auto", artifact_kind)]
         return OptimizerCatalogResponse(
             artifact_kind=artifact_kind,
             data_mode=data_mode,

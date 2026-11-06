@@ -22,7 +22,9 @@ from typing import Any
 from ..api.errors import DomainError
 from ..constants import TOKEN_SOURCE_BYOK
 from ..models.common import ModelConfig
+from .byok_upstreams import ProviderUpstream, byok_model_prefix, resolve_upstream
 from .byok_vault import ProviderKeyVault, byok_provider_for_litellm, safe_connection_params
+from .operation_pricing import UnpricedOperationError
 
 # Payload keys holding ModelConfig blocks. Runs persist their configs under the
 # field *aliases* (``model_settings`` → ``"model_config"``); grids use the plain
@@ -54,10 +56,8 @@ def provider_slug_for_model(name: str) -> str | None:
 def byok_prefix_routable(prefix: str | None, provider: str, *, api_base: str | None) -> bool:
     """Decide whether a model prefix can be served through a saved connection.
 
-    A native key only serves its own provider's models (``openrouter/...`` never
-    rides an ``openai`` key, and vice versa). A connection with a custom
-    ``api_base`` is an OpenAI-compatible endpoint, so it additionally accepts the
-    ``openai/`` prefix the custom catalog emits for it.
+    Native IDs can contain namespaces that resemble other providers. A custom
+    ``api_base`` accepts the ``openai/`` prefix the custom catalog emits.
 
     Args:
         prefix: The model string's LiteLLM provider prefix, or ``None`` for a
@@ -73,6 +73,22 @@ def byok_prefix_routable(prefix: str | None, provider: str, *, api_base: str | N
     if byok_provider_for_litellm(prefix) == provider:
         return True
     return bool(api_base) and prefix == "openai"
+
+
+def byok_upstream_routable(prefix: str | None, provider: str, upstream: ProviderUpstream | None) -> bool:
+    """Apply the custom endpoint prefix exception only to custom upstreams.
+
+    Args:
+        prefix: Model provider prefix, or None for a bare model.
+        provider: Saved connection provider.
+        upstream: Resolved provider route, if supported by the protected gateway.
+
+    Returns:
+        Whether the connection can route the model.
+    """
+    return byok_prefix_routable(
+        prefix, provider, api_base=upstream.base_url if upstream is not None and upstream.slug == "custom" else None
+    )
 
 
 def _model_config_dicts(payload_dict: dict[str, Any]) -> list[dict[str, Any]]:
@@ -174,8 +190,8 @@ def inject_byok_connections(
     for cfg in _model_config_dicts(payload_dict):
         if (cfg.get("token_source") or default_token_source) != TOKEN_SOURCE_BYOK:
             continue
-        prefix = provider_slug_for_model(cfg.get("name", ""))
         configured_provider = str(cfg.get("byok_provider") or "").strip() or None
+        prefix = byok_model_prefix(cfg.get("name", ""), configured_provider)
         if prefix is None and configured_provider is None:
             continue
         # The model id carries a LiteLLM prefix (``gemini``, ``together_ai``);
@@ -188,15 +204,22 @@ def inject_byok_connections(
                 f"No saved {provider} connection for this account. "
                 "Add one in Settings → Providers to run with your own key."
             )
-        if not byok_prefix_routable(prefix, provider, api_base=resolved.api_base):
+        extra = cfg.get("extra")
+        extra = {} if not isinstance(extra, dict) else safe_connection_params(extra)
+        try:
+            upstream = resolve_upstream(
+                {**cfg, "byok_provider": provider, "base_url": resolved.api_base, "extra": extra}
+            )
+        except UnpricedOperationError as error:
+            raise DomainError(error.code or "submission.byok_provider_unsupported", status=400) from error
+        prefix = byok_model_prefix(cfg.get("name", ""), configured_provider, custom=upstream.slug == "custom")
+        if not byok_upstream_routable(prefix, provider, upstream):
             raise DomainError(
                 "billing.byok_model_not_served",
                 status=400,
                 model=str(cfg.get("name", "")),
                 provider=provider,
             )
-        extra = cfg.get("extra")
-        extra = {} if not isinstance(extra, dict) else safe_connection_params(extra)
         cfg["extra"] = extra
         extra.update(safe_connection_params(resolved.params))
         extra["api_key"] = resolved.secret

@@ -16,7 +16,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { toast } from "react-toastify";
 
-import { useWizardStateOptional } from "@/features/agent-panel";
+import { SETUP_CHAT_KEY, useWizardStateOptional } from "@/features/agent-panel";
+import { useConnectors } from "@/features/connectors";
 import { formatBudgetUsd, usePricingTerms } from "@/features/billing";
 import {
   useExperienceLevel,
@@ -39,6 +40,7 @@ import {
   enableContinuous,
 } from "@/shared/lib/api";
 import { contractCheckMessage } from "@/shared/lib/i18n";
+import { clearSetupDraft, writeSetupDraft } from "@/shared/lib/setup-draft";
 import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import type { ContinuousEnableRequest } from "@/shared/types/continuous";
@@ -64,11 +66,20 @@ import {
   aggregateTokenSource,
   callHoldKey,
   isSubscriptionModel,
+  metricModelUnpriced,
+  storedMetricModel,
   runFloor as computeRunFloor,
   runModels,
 } from "../lib/run-floor";
 import { fileNewRun } from "../lib/file-new-run";
-import { inputsFromRoles, rowsToCases, singleInputCase, type Row } from "../lib/inputs-mode";
+import {
+  inputsFromRoles,
+  inputsWithRoles,
+  rolesFromFields,
+  rowsToCases,
+  singleInputCase,
+  type Row,
+} from "../lib/inputs-mode";
 import { prepareModelConfig } from "../lib/model-config";
 import {
   checkedRunRequest,
@@ -91,6 +102,7 @@ import {
   encodeWizardSession,
   keepSessionValue,
   readSessionValue,
+  setupWorthKeeping,
 } from "../lib/session-state";
 import { metricUsesModel } from "../lib/scorer-dependencies";
 import { computeStepIssue, hasModel, runBlockedReason as blockedReason } from "../lib/step-issue";
@@ -102,8 +114,10 @@ import {
   defaultModels,
   deleteWorkspaceFile,
   initialWizardV2State,
+  optimizerTarget,
   presetEngine,
-  resolvedMetricModel,
+  targetPatch,
+  withRepository,
   type InputsSlice,
   type MetaSlice,
   type OptimizerSlice,
@@ -116,11 +130,11 @@ import {
   withDefaultModels,
   withLevel,
   withOptimizerPatch,
-  withQuestionInputs,
   writeWorkspaceFile,
   type ModelRole,
 } from "../lib/wizard-v2";
 import { useExecutionBudget } from "./use-execution-budget";
+import { tableRows } from "./use-inputs-data";
 import { useModelCallHolds, useModelCatalog } from "./use-submit-wizard-data";
 import { useWizardPreflight } from "./use-wizard-preflight";
 
@@ -235,7 +249,8 @@ function readWizardSession(): string | null {
 
 function forgetWizardSession() {
   try {
-    for (const key of [WIZARD_SESSION_KEY, ...WIZARD_VIEW_KEYS]) window.sessionStorage.removeItem(key);
+    for (const key of [WIZARD_SESSION_KEY, ...WIZARD_VIEW_KEYS])
+      window.sessionStorage.removeItem(key);
   } catch {}
 }
 
@@ -267,14 +282,11 @@ export function WizardV2Provider({
       WIZARD_V2_STEPS as readonly string[],
     );
   });
-  const [stored, dispatch] = useReducer(reducer, undefined, () => {
+  const [state, dispatch] = useReducer(reducer, undefined, () => {
     if (restored) return restored;
     const initial = initialWizardV2State(level, readPref("optimizerMaxRuns"));
     return { ...initial, meta: { ...initial.meta, folderId } };
   });
-  // A single-answer task's one case is derived, never stored, so it always
-  // matches the question.
-  const state = useMemo(() => withQuestionInputs(stored), [stored]);
   const router = useRouter();
   const { data: session } = useSession();
   const guided = level === "guided";
@@ -311,7 +323,7 @@ export function WizardV2Provider({
 
   // The catalog follows the setup it was asked for; a choice it no longer
   // offers is kept and reported as a step issue, never swapped silently.
-  const kind = state.task.artifactKind;
+  const kind = optimizerTarget(state.task);
   const mode = state.inputs.mode;
   const [optimizerCatalog, setOptimizerCatalog] = useState<OptimizerCatalogResponse | null>(null);
   const [optimizerCatalogLoading, setOptimizerCatalogLoading] = useState(false);
@@ -403,31 +415,31 @@ export function WizardV2Provider({
   const snapshot = contractSnapshot(state);
   const contractStale = state.workspace.lastCheckSnapshot !== snapshot;
 
-  const [agentWriting, setAgentWriting] = useState(false);
-  const [inputsInferring, setInputsInferring] = useState(false);
+  // While the wizard's agent works, missing code reads as being written.
+  const agentWriting = useWizardStateOptional()?.agentBusy ?? false;
   const runBlockedReason = useMemo(
     () => blockedReason(state, optimizerCatalog, { message: contractCheckMessage, agentWriting }),
     [state, optimizerCatalog, agentWriting],
   );
 
   const metricCallsModel = metricUsesModel(state);
-  const metricModel = metricCallsModel ? resolvedMetricModel(state) : null;
-  const submittedModels = runModels(state.optimizer, metricModel);
+  const submittedModels = runModels(
+    state.optimizer,
+    metricCallsModel,
+    state.workspace.metricCode,
+    storedMetricModel(state.workspace.metricModel, state.workspace.metricCode),
+  );
   // A CLI-subscription model bills to the user's own plan, so it has no
   // server hold to fetch and adds nothing to the floor.
   const pricedModels = submittedModels.filter(
     (model): model is ModelConfig & { token_source?: "managed" | "byok" } =>
       !isSubscriptionModel(model),
   );
-  const {
-    holds: callHolds,
-    boxHoldCents,
-    settled: costSettled,
-  } = useModelCallHolds(pricedModels);
+  const { holds: callHolds, boxHoldCents, settled: costSettled } = useModelCallHolds(pricedModels);
   const tokenSource = aggregateTokenSource(submittedModels);
   // The floor waits for the server's box hold, since the boxes are most of it.
   const runFloor =
-    boxHoldCents == null
+    boxHoldCents == null || !costSettled
       ? null
       : computeRunFloor({
           boxHoldCents,
@@ -436,6 +448,7 @@ export function WizardV2Provider({
               callHolds.get(callHoldKey(model.name, model.token_source ?? "managed")) ?? null,
           ),
           tokenSource,
+          unknownModel: metricModelUnpriced(state.workspace.metricCode),
         });
 
   // The spending limit lives on the server budget, like the slice mirror the
@@ -471,7 +484,9 @@ export function WizardV2Provider({
     if (inputs.cases.length === 0 && !inputs.stagedDatasetId) return null;
     if (!hasModel(optimizer.reflectionModel)) return null;
     if (!workspace.runCode.trim() || !workspace.metricCode.trim()) return null;
-    const metric = metricUsesModel(state) ? resolvedMetricModel(state) : null;
+    const metricModel = metricUsesModel(state)
+      ? storedMetricModel(workspace.metricModel, workspace.metricCode)
+      : null;
     return {
       payload_kind: "unified_v1",
       name: meta.name.trim() || undefined,
@@ -501,11 +516,11 @@ export function WizardV2Provider({
       models: {
         task_model: hasModel(optimizer.taskModel) ? prepareModelConfig(optimizer.taskModel) : null,
         reflection_model: prepareModelConfig(optimizer.reflectionModel),
+        metric_model: hasModel(metricModel) ? prepareModelConfig(metricModel) : null,
         extra_reflection_models:
           optimizer.choice === "shinka_evolve"
             ? optimizer.extraReflectionModels.filter(hasModel).map(prepareModelConfig)
             : [],
-        metric_model: hasModel(metric) ? prepareModelConfig(metric) : null,
       },
       workspace: {
         run_code: workspace.runCode,
@@ -539,6 +554,13 @@ export function WizardV2Provider({
   const submittedRef = useRef(false);
   const wizardCtx = useWizardStateOptional();
   const wizardCtxRef = useRef(wizardCtx);
+  // The setup agent picks a repository only from a linked account's list.
+  const connectors = useConnectors(wizardCtx !== null);
+  const githubStatus = connectors.byProvider("github");
+  const githubConnected =
+    connectors.loading || connectors.error
+      ? undefined
+      : githubStatus?.connected === true && githubStatus.status !== "invalid";
   useEffect(() => {
     wizardCtxRef.current = wizardCtx;
   }, [wizardCtx]);
@@ -767,9 +789,9 @@ export function WizardV2Provider({
   useEffect(() => {
     if (submittedRef.current) return;
     try {
-      window.sessionStorage.setItem(WIZARD_SESSION_KEY, encodeWizardSession(accountId, stored));
+      window.sessionStorage.setItem(WIZARD_SESSION_KEY, encodeWizardSession(accountId, state));
     } catch {}
-  }, [accountId, stored]);
+  }, [accountId, state]);
   useEffect(() => {
     if (submittedRef.current) return;
     if (scheduledRun) keepSessionValue(WIZARD_SCHEDULE_KEY, JSON.stringify(scheduledRun));
@@ -779,9 +801,38 @@ export function WizardV2Provider({
       } catch {}
     }
   }, [scheduledRun]);
-  // Leaving the page inside the app ends the setup; only a reload, which runs
-  // no cleanup, finds it again.
-  useEffect(() => forgetWizardSession, []);
+  // Leaving the page ends the tab's setup but keeps a copy in this browser
+  // for a short time, which /submit offers back on return. A reload or a tab
+  // close runs no cleanup, so the page hide keeps the copy too; the mount
+  // drops it again, as a reload finds the tab's own setup.
+  const leftStateRef = useRef(state);
+  useEffect(() => {
+    leftStateRef.current = state;
+  }, [state]);
+  useEffect(() => {
+    const keep = () => {
+      const left = leftStateRef.current;
+      if (submittedRef.current || !setupWorthKeeping(left)) {
+        clearSetupDraft();
+        return;
+      }
+      const values: Record<string, string> = {
+        [WIZARD_SESSION_KEY]: encodeWizardSession(accountId, left),
+      };
+      for (const key of [...WIZARD_VIEW_KEYS, SETUP_CHAT_KEY]) {
+        const value = readSessionValue(key);
+        if (value !== null) values[key] = value;
+      }
+      writeSetupDraft({ account: accountId, leftAt: Date.now(), values });
+    };
+    clearSetupDraft();
+    window.addEventListener("pagehide", keep);
+    return () => {
+      window.removeEventListener("pagehide", keep);
+      keep();
+      forgetWizardSession();
+    };
+  }, [accountId]);
 
   // A table the agent panel staged reaches the wizard by event while it is
   // open, or through the session key when it mounts later.
@@ -826,6 +877,10 @@ export function WizardV2Provider({
     const shared = wizardCtx?.state;
     const keys = wizardCtx?.agentPulseKeys ?? [];
     if (!shared || keys.length === 0) return;
+    let rolesWritten = false;
+    // Both target keys can land in one pulse while `state` is still the
+    // render's; the draft written first is the base for the second.
+    let repo = state.task.repo;
     for (const key of keys) {
       switch (key) {
         case "job_name":
@@ -846,9 +901,27 @@ export function WizardV2Provider({
           if (typeof shared.task_background === "string")
             patchTask({ background: shared.task_background });
           break;
-        case "artifact_kind":
-          if (shared.artifact_kind) patchTask({ artifactKind: shared.artifact_kind });
+        case "artifact_kind": {
+          const target = shared.artifact_kind;
+          if (target !== "repo" && target !== "dspy_program") break;
+          const patch = targetPatch(target, repo, state.optimizer.choice);
+          patchTask(patch.task);
+          if (patch.inputs) patchInputs(patch.inputs);
+          if (patch.optimizer) patchOptimizer(patch.optimizer);
+          repo = patch.task.repo ?? null;
           break;
+        }
+        case "repository": {
+          if (typeof shared.repository !== "string" || !shared.repository) break;
+          if (!repo) {
+            const patch = targetPatch("repo", null, state.optimizer.choice);
+            if (patch.inputs) patchInputs(patch.inputs);
+            if (patch.optimizer) patchOptimizer(patch.optimizer);
+          }
+          repo = withRepository(repo, shared.repository);
+          patchTask({ repo });
+          break;
+        }
         case "starting_version":
           if (shared.starting_version !== undefined)
             patchTask({ startingVersion: shared.starting_version });
@@ -857,11 +930,8 @@ export function WizardV2Provider({
           if (shared.data_mode) patchInputs({ mode: shared.data_mode });
           break;
         case "input_fields":
-          if (shared.input_fields) patchInputs({ inputFields: shared.input_fields });
-          break;
         case "expected_field":
-          if (typeof shared.expected_field === "string")
-            patchInputs({ expectedField: shared.expected_field });
+          rolesWritten = true;
           break;
         case "split_fractions":
           if (shared.split_fractions) patchInputs({ split: shared.split_fractions });
@@ -914,7 +984,12 @@ export function WizardV2Provider({
             .then((res) => {
               if (!mountedRef.current || res.rows.length === 0) return;
               const columns = res.columns.length > 0 ? res.columns : Object.keys(res.rows[0] ?? {});
-              patchInputs(inputsFromRows(res.rows, columns, "dataset.json", stagedId, null));
+              const roles = rolesFromFields(
+                columns,
+                shared.input_fields,
+                typeof shared.expected_field === "string" ? shared.expected_field : null,
+              );
+              patchInputs(inputsFromRows(res.rows, columns, "dataset.json", stagedId, roles));
             })
             .catch(() => {
               /* best effort: a failed fetch leaves the wizard's own inputs */
@@ -922,6 +997,19 @@ export function WizardV2Provider({
           break;
         }
       }
+    }
+    // Applied after the loop so the mode the roles imply wins over a data_mode
+    // in the same pulse, and once even when both role keys arrive.
+    if (rolesWritten) {
+      const inputs = state.inputs;
+      patchInputs(
+        inputsWithRoles(
+          inputs.columns,
+          shared.input_fields ?? inputs.inputFields,
+          typeof shared.expected_field === "string" ? shared.expected_field : inputs.expectedField,
+          tableRows(inputs),
+        ),
+      );
     }
     // Runs once per agent pulse; the keys and state are read from that render.
   }, [agentPulseTick]);
@@ -938,18 +1026,30 @@ export function WizardV2Provider({
       is_private: meta.isPrivate,
       task_objective: task.objective || undefined,
       task_background: task.background || undefined,
-      artifact_kind: task.artifactKind ?? undefined,
-      starting_version: task.startingVersion ?? undefined,
+      artifact_kind: task.repo ? ("repo" as const) : (task.artifactKind ?? undefined),
+      starting_version: task.repo ? undefined : (task.startingVersion ?? undefined),
+      repository: task.repo?.repository.trim() || undefined,
+      github_connected: githubConnected,
       data_mode: inputs.mode ?? undefined,
       staged_dataset_id: inputs.stagedDatasetId ?? undefined,
       optimizer_choice: optimizer.choice,
       run_code: workspace.runCode || undefined,
       metric_code: workspace.metricCode || undefined,
+      dataset_columns: inputs.columns.length > 0 ? inputs.columns : undefined,
+      input_fields: inputs.inputFields.length > 0 ? inputs.inputFields : undefined,
+      expected_field: inputs.expectedField ?? undefined,
       spending_floor_cents: runFloor?.floorCents,
+      cloned_run: cloning || undefined,
     } as const;
     for (const key of Object.keys(outgoing) as Array<keyof typeof outgoing>) {
       const value = outgoing[key];
-      if (s[key] === value) continue;
+      const held = s[key];
+      // A list is rebuilt on every render; only a changed one is a new value.
+      const same =
+        Array.isArray(value) && Array.isArray(held)
+          ? value.length === held.length && value.every((v, i) => v === held[i])
+          : held === value;
+      if (same) continue;
       if (value === undefined) wizardCtx.clearField(key);
       else wizardCtx.setField(key, value, "user");
     }
@@ -964,7 +1064,7 @@ export function WizardV2Provider({
       handDataFlagRef.current = false;
       if (s.dataset_ready) wizardCtx.clearField("dataset_ready");
     }
-  }, [wizardCtx, state, runFloor]);
+  }, [wizardCtx, state, runFloor, cloning, githubConnected]);
 
   const value: WizardV2Shell = {
     restored: restored !== null,
@@ -992,9 +1092,6 @@ export function WizardV2Provider({
     optimizerCatalogLoading,
     contractStale,
     runBlockedReason,
-    setAgentWriting,
-    inputsInferring,
-    setInputsInferring,
     buildPayload,
     ensureBudget,
     submit,

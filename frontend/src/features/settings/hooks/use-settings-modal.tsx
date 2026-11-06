@@ -2,6 +2,8 @@
 
 import * as React from "react";
 
+import { takeOAuthReturn } from "@/shared/lib/oauth-return";
+
 interface SettingsModalContextValue {
   open: boolean;
   setOpen: (open: boolean) => void;
@@ -37,6 +39,12 @@ export function SettingsModalProvider({ children }: { children: React.ReactNode 
     const url = new URL(window.location.href);
     const requestedTab = url.searchParams.get("settings");
     if (!requestedTab) return;
+    // A failed link stays here, where the Connectors tab explains the error.
+    const back = requestedTab === "connectors" ? takeOAuthReturn() : null;
+    if (back && !url.searchParams.has("connector_error")) {
+      window.location.replace(back);
+      return;
+    }
     setTargetTab(requestedTab);
     setOpenState(true);
     url.searchParams.delete("settings");

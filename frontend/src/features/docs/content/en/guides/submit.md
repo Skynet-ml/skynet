@@ -16,14 +16,7 @@ You can edit both fields. The assistant does not overwrite your edits.
 
 ### What will be optimized
 
-Select the **Artifact type**:
-
-| Artifact type | What changes                                     |
-| ------------- | ------------------------------------------------ |
-| Prompt        | Instructions sent to a language model            |
-| Code          | The source of a program                          |
-| DSPy program  | The predictor instructions of a DSPy module      |
-| Text          | Any other text, such as a document or a template |
+In **What gets optimized**, select **DSPy program** or **A GitHub repository**.
 
 Then give the **Starting version** (Guided: **Where we start from**). Paste the current version, or let the assistant write a draft.
 
@@ -93,7 +86,7 @@ Write two files:
 
 The **Coding agent** can write and change any file for you. It checks its code and fixes what fails. You can add up to 20 extra files. Read [Metrics and scorers](/docs/concepts/scorers).
 
-If your metric calls `llm()`, set the **Metric model**. By default it uses the reflection model.
+The metric sets its model in its own `llm()` call. Without `model=`, the metric uses the reflection model.
 
 ### Contract check
 

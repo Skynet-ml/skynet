@@ -4,16 +4,16 @@ Bu sayfa Skynet hakkında sık sorulan soruları yanıtlar. Her yanıt, ayrınt�
 
 ### Skynet nedir?
 
-Skynet; istemleri, programları, ajanları ve iş akışlarını kendi verinize ve metriğinize göre optimize eden bir platformdur. Bir veri kümesi yükler, görevi tanımlar ve bir çalıştırma başlatırsınız. Çalıştırma yeni sürümler dener ve bunları ayrılmış veriler üzerinde puanlar. Başlamak için [Hızlı başlangıç](/docs/quickstart) sayfasını okuyun.
+Skynet, DSPy programlarını ve depoları kendi verilerinize ve metriğinize göre optimize eden bir platformdur. Bir veri kümesi yükler, görevi tanımlar ve bir çalıştırma başlatırsınız. Çalıştırma yeni sürümler dener ve bunları ayrılmış veriler üzerinde puanlar. Başlamak için [Hızlı başlangıç](/docs/quickstart) sayfasını okuyun.
 
 ### Skynet neyi optimize edebilir?
 
-Skynet, Optimize Anything'dir. İstemleri, kodu, metni ve DSPy programlarını tek bir üründe optimize eder. Hangi motorların bir yapıt üzerinde çalışabileceğine yapıt türü karar verir:
+Skynet, Optimize Anything'dir. DSPy programlarını ve depoları tek bir üründe optimize eder. Yapıt türü, hangi motorların onun üzerinde çalışabileceğini belirler:
 
-- İstem, Kod ve Metin yapıtları yerel motorları kullanır: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler ve ShinkaEvolve.
+- Depolar yerel motorları kullanır: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler ve ShinkaEvolve.
 - DSPy programları DSPy optimize edicilerini kullanır: DSPy GEPA, DSPy MIPROv2 ve DSPy BootstrapFewShot.
 
-**Auto**, görevinize uyan motorları birleştirir. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) ve [Motorlar](/docs/concepts/engines) sayfalarına bakın.
+Bir DSPy programında **Auto**, DSPy GEPA'yı kullanır. Bir depoda tek bir yerel motor seçersiniz. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) ve [Motorlar](/docs/concepts/engines) sayfalarını okuyun.
 
 ### Arayüz hangi dilleri destekliyor?
 
@@ -42,17 +42,17 @@ Bir çalıştırmayı genel aramanın dışında tutmak için gönderirken **Gö
 
 ### Model sağlayıcıları istemlerimle model eğitiyor mu?
 
-Varsayılan olarak hayır. Varsayılan **Model veri gizliliği** seçeneği **Eğitim yok**'tur. İstemleri yalnızca bunlarla eğitim yapmayan ve bunları saklamayan sağlayıcılara gönderir. Bu ayar, Skynet'in bakiyenizden faturalandırdığı çağrılar için geçerlidir. Kendi anahtarınızla yapılan çağrılar OpenRouter hesabınızın gizlilik ayarlarına uyar. [Güvenlik](/docs/security) sayfasına bakın.
+Varsayılan olarak hayır. Varsayılan **Model veri gizliliği** seçeneği **Eğitim yok**'tur. İstemleri yalnızca bunlarla eğitim yapmayan ve bunları saklamayan sağlayıcılara gönderir. Bu ayar, Skynet'in bakiyenizden faturalandırdığı çağrılar için geçerlidir. OpenRouter üzerinden BYOK çağrıları OpenRouter hesabınızın gizlilik ayarlarına uyar. Doğrudan sağlayıcıya yapılan BYOK çağrıları sağlayıcının veri politikasına uyar. [Güvenlik](/docs/security) sayfasına bakın.
 
 ## Faturalandırma
 
 ### Skynet çalıştırmalar için nasıl ücret alır?
 
-Skynet ön ödemeli bir bakiye kullanır. Barındırılan model kullanımı, Skynet ücretleri ve sandbox kullanımı ölçülür. Ücretli iş başlamadan önce Skynet cüzdanınızda ve çalıştırma bütçesinde pay ayırır. [Faturalandırma](/docs/concepts/billing) sayfasına bakın.
+Skynet ön ödemeli bir bakiye kullanır. Yönetilen model kullanımı ve ek ücreti ile sandbox kullanımı ölçülür. Bakiye yüklemede ücret alınır. Ücretli iş başlamadan önce Skynet cüzdanınızda ve çalıştırma bütçesinde pay ayırır. [Faturalandırma](/docs/concepts/billing) sayfasına bakın.
 
 ### Kendi model sağlayıcı anahtarımı kullanabilir miyim?
 
-Evet. Kendi anahtarınızla (BYOK) sağlayıcı, model çağrıları için ücreti doğrudan anahtarınızdan alır. Skynet bakiyeniz yine de platform ücretini ve sandbox kullanımını öder. Skynet anahtarınızı şifreler ve bir daha asla göstermez. [Faturalandırma](/docs/concepts/billing) ve [Güvenlik](/docs/security) sayfalarına bakın.
+Evet. Kendi anahtarınızla (BYOK) sağlayıcınız model belirteçlerini kendi anahtarınıza faturalandırır. Skynet model ücreti almaz. Çalışma bütçesi yalnızca sandbox kullanımını kapsar. Skynet anahtarınızı şifreler ve bir daha asla göstermez. [Faturalandırma](/docs/concepts/billing) ve [Güvenlik](/docs/security) sayfalarına bakın.
 
 ### Skynet'i model çağrılarına ödeme yapmadan çalıştırabilir miyim?
 

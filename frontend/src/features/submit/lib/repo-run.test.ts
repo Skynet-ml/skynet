@@ -27,7 +27,6 @@ const model = { name: "openai/gpt-default", token_source: "managed" as const };
 function repoState() {
   const state = initialWizardV2State();
   state.task.objective = "Make the build faster.";
-  state.task.artifactKind = "code";
   state.task.repo = {
     ...emptyRepoDraft(),
     repository: "example/site",
@@ -70,6 +69,44 @@ test("Auto cannot optimize a repository", () => {
   state.optimizer.choice = "auto";
   assert.equal(repoRunRequest(state, options), null);
   assert.equal(computeStepIssue(state, "optimizer", null), "submit.v2.optimizer.issue.choice");
+});
+
+test("a repository clone drops a stored scorer model the code does not name", () => {
+  const state = repoState();
+  state.workspace.metricModel = { name: "anthropic/legacy", token_source: "byok" };
+  assert.equal(repoRunRequest(state, options)?.scorer.model, undefined);
+  state.workspace.metricCode = "def score(repo_path, case=None):\n    return llm('x')";
+  assert.equal(repoRunRequest(state, options)?.scorer.model, undefined);
+});
+
+test("a repository clone drops a stored scorer model the code replaces", () => {
+  const state = repoState();
+  state.workspace.metricModel = { name: "anthropic/legacy", token_source: "byok" };
+  state.workspace.metricCode = "llm('x', model='anthropic/judge')";
+  assert.equal(repoRunRequest(state, options)?.scorer.model, undefined);
+  state.workspace.metricCode = "llm('x', model='anthropic/legacy')";
+  assert.deepEqual(
+    repoRunRequest(state, options)?.scorer.model,
+    prepareModelConfig(state.workspace.metricModel),
+  );
+});
+
+test("a new repository scorer leaves its declared model to the backend", () => {
+  const state = repoState();
+  state.workspace.metricCode = "llm(model='anthropic/judge')";
+  assert.equal(repoRunRequest(state, options)?.scorer.model, undefined);
+});
+
+test("a new repository scorer leaves reflection fallback to the backend", () => {
+  const state = repoState();
+  state.workspace.metricCode = "llm('x')";
+  assert.equal(repoRunRequest(state, options)?.scorer.model, undefined);
+});
+
+test("a repository run leaves ambiguous declarations for backend validation", () => {
+  const state = repoState();
+  state.workspace.metricCode = "llm('x'); llm('y', model='anthropic/judge')";
+  assert.equal(repoRunRequest(state, options)?.scorer.model, undefined);
 });
 
 test("a repository run skips inputs and needs only the scorer", () => {
@@ -127,4 +164,32 @@ test("a repository run sends economy on the models that chose it, not for the ru
   assert.equal(request.reflection_model_config?.extra?.economy_mode, true);
   assert.equal(request.extra_reflection_model_configs?.[0]?.extra, undefined);
   assert.equal("economy_mode" in request, false);
+});
+
+test("a repository run sends its cases only when it needs data", () => {
+  const state = repoState();
+  state.inputs.cases = [{ input: { url: "/" } }];
+  state.inputs.inputFields = ["url"];
+  assert.equal(repoRunRequest(state, options)?.cases, undefined);
+  state.task.needsData = true;
+  assert.deepEqual(repoRunRequest(state, options)?.cases, [{ input: { url: "/" } }]);
+  assert.equal(computeStepIssue(state, "inputs", null), null);
+  state.inputs.cases = [];
+  state.inputs.mode = null;
+  assert.equal(repoRunRequest(state, options)?.cases, undefined);
+  assert.notEqual(computeStepIssue(state, "inputs", null), null);
+});
+
+test("a repository run sends a staged dataset by reference", () => {
+  const state = repoState();
+  state.task.needsData = true;
+  state.inputs.stagedDatasetId = "ds-1";
+  state.inputs.inputFields = ["url"];
+  state.inputs.expectedField = null;
+  const request = repoRunRequest(state, options);
+  assert.equal(request?.cases, undefined);
+  assert.equal(request?.staged_dataset_id, "ds-1");
+  assert.deepEqual(request?.input_fields, ["url"]);
+  state.task.needsData = false;
+  assert.equal(repoRunRequest(state, options)?.staged_dataset_id, undefined);
 });

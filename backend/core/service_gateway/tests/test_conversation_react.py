@@ -234,3 +234,33 @@ def test_forced_submit_never_replays_native_thinking() -> None:
     assert "next_thought" not in rendered
     assert prediction.reply == "done"
     assert prediction.history.messages[0]["next_thought"].content == "PRIVATE THINKING"
+
+
+def test_submit_guard_refusal_keeps_the_loop_going() -> None:
+    """A refused submit reads as a tool result; the next submit ends the turn."""
+    lm = _ScriptedLM([("submit", {"reply": "done"}), ("submit", {"reply": "done?"})])
+    seen: list[str] = []
+
+    def guard(outputs: dict[str, Any]) -> str | None:
+        """Refuse a reply with no question mark."""
+        seen.append(outputs["reply"])
+        return None if "?" in outputs["reply"] else "Ask a question."
+
+    signature = dspy.Signature("user_message: str -> reply: str", "Be helpful.")
+    program = ConversationReAct(signature, tools=[_lookup], max_iters=5, submit_guard=guard)
+    with dspy.context(lm=lm):
+        result = program(user_message="hi")
+    assert result.reply == "done?"
+    assert seen == ["done", "done?"]
+    assert "Ask a question." in json.dumps(dump_history(result.history))
+
+
+def test_submit_guard_never_refuses_the_forced_submit() -> None:
+    """At the loop's budget the forced submit ends the turn even if the guard objects."""
+    lm = _ScriptedLM([("submit", {"reply": "done"}), ("submit", {"reply": "still done"})])
+    signature = dspy.Signature("user_message: str -> reply: str", "Be helpful.")
+    program = ConversationReAct(signature, tools=[_lookup], max_iters=1, submit_guard=lambda _: "No.")
+    with dspy.context(lm=lm):
+        result = program(user_message="hi")
+    assert result.reply == "still done"
+    assert result.termination_reason == "forced_submit"

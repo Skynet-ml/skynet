@@ -55,6 +55,35 @@ def _case(q: str = "x", expected: Any = None) -> dict[str, Any]:
     return {"input": {"q": q}, "expected": expected}
 
 
+def test_workspace_client_forwards_subscription_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pass the explicit effort through a subscription gateway to the CLI."""
+    sent: list[dict[str, Any]] = []
+
+    def post(_self: Any, data: bytes) -> dict[str, Any]:
+        """Capture the request and return a completion."""
+        sent.append(json.loads(data))
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(runner.GatewayClient, "_post", post)
+    client = workspace_harness._client(
+        {"url": "http://localhost/v1", "model": "openai/gpt-5", "subscription": True}, "TEST_KEY"
+    )
+    assert client("judge", reasoning_effort="high") == "ok"
+    assert sent[0]["skynet_cli_effort"] == "high"
+    assert client("judge") == "ok"
+    assert "skynet_cli_effort" not in sent[1]
+    managed = workspace_harness._client({"url": "http://localhost/v1", "model": "openai/gpt-5"}, "TEST_KEY")
+    assert managed("judge", reasoning_effort="high") == "ok"
+    assert "skynet_cli_effort" not in sent[2]
+    assert "reasoning" not in sent[2]
+    routed = workspace_harness._client(
+        {"url": "http://localhost/v1", "model": "openai/gpt-5", "gateway_reasoning": True}, "TEST_KEY"
+    )
+    assert routed("judge", reasoning_effort="high") == "ok"
+    assert sent[3]["reasoning"] == {"effort": "high", "summary": "auto"}
+    assert workspace_harness._client(None, "TEST_KEY") is None
+
+
 def test_blackbox_metric_passes_with_score_and_side_info() -> None:
     """``score(input, output, expected)`` returning ``(float, dict)`` is normalized."""
     reply = _workspace(BLACKBOX_METRIC).handle({"candidate": "p", "case": _case("x", "x")})

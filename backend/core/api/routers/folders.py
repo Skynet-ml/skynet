@@ -577,7 +577,8 @@ def create_folders_router(*, job_store) -> APIRouter:
             roots.update(
                 session.scalars(
                     select(RunFolderShareGrantModel.folder_id).where(
-                        RunFolderShareGrantModel.grantee_username == username
+                        RunFolderShareGrantModel.grantee_username == username,
+                        RunFolderShareGrantModel.hidden_at.is_(None),
                     )
                 ).all()
             )

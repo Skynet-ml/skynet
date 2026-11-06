@@ -179,7 +179,13 @@ def test_an_invalid_spec_is_refused(raw: Any) -> None:
         reward_spec(raw)
 
 
-GEOCODE_RUN = "from skynet import llm\ndef run(artifact, input):\n    return llm(artifact, input['message'])\n"
+GEOCODE_RUN = (
+    "import dspy\n"
+    "from skynet import llm\n"
+    "program = dspy.Predict('message -> coordinates')\n"
+    "def run(artifact, input):\n"
+    "    return llm(program.signature.instructions, input['message'])\n"
+)
 GEOCODE_METRIC = """
 import math
 from skynet import reward
@@ -225,7 +231,7 @@ def _geocode_workspace(url: str) -> Workspace:
             "run_code": GEOCODE_RUN,
             "metric_code": GEOCODE_METRIC,
             "files": {},
-            "artifact_kind": "prompt",
+            "artifact_kind": "dspy_program",
             "input_fields": ["message"],
             "gateways": {"task": task, "metric": None},
         }
@@ -279,11 +285,13 @@ def test_geocoding_spoofed_speed_in_the_output_changes_nothing() -> None:
     """The run code cannot make itself look fast or cheap: it has no say over time or cost."""
     spoof_run = (
         "import time\n"
+        "import dspy\n"
         "from skynet import llm\n"
+        "program = dspy.Predict('message -> coordinates')\n"
         "def run(artifact, input):\n"
         "    time.sleep(0.3)\n"
         "    print('task_ms=1 cost=0')\n"
-        "    return llm(artifact, input['message'])\n"
+        "    return llm(program.signature.instructions, input['message'])\n"
     )
     with FakeGateway("32.0853,34.7818", cost=0.0004) as gateway:
         workspace = _geocode_workspace(gateway.url)

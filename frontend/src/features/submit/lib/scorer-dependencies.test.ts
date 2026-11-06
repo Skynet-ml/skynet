@@ -1,11 +1,43 @@
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 import test from "node:test";
-import { metricUsesModel, scorerCallsModel, withScorerImports } from "./scorer-dependencies.ts";
+
+const srcUrl = new URL("../../../", import.meta.url).href;
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier === "./run-floor") {
+      return nextResolve("./run-floor.ts", context);
+    }
+    if (specifier.startsWith("@/")) {
+      return { shortCircuit: true, url: new URL(`${specifier.slice(2)}.ts`, srcUrl).href };
+    }
+    return nextResolve(specifier, context);
+  },
+});
+const { metricUsesModel, scorerCallsModel, withScorerImports } = await import(
+  "./scorer-dependencies.ts"
+);
+
+test("ignores unrelated llm names", () => {
+  assert.equal(scorerCallsModel("llm = 'judge'"), true);
+  assert.equal(scorerCallsModel("output.llm"), false);
+  assert.equal(scorerCallsModel('skynet.llm("judge")'), false);
+  assert.equal(scorerCallsModel("def score(llm): return llm('x')"), true);
+  assert.equal(scorerCallsModel("from other import foo as llm\nllm('x')"), true);
+});
+
+test("detects a rebound imported or injected helper", () => {
+  for (const code of [
+    "from skynet import llm\nllm = partial(llm)\nllm('x')",
+    "llm = partial(llm)\nllm('x')",
+    "from skynet import llm as judge\njudge = other\njudge('x')",
+  ])
+    assert.equal(scorerCallsModel(code), true);
+});
 
 test("detects direct, qualified and aliased model calls but ignores comments and strings", () => {
   for (const code of [
     'llm("judge")',
-    'skynet.llm("judge")',
     'from skynet import llm as judge\njudge("x")',
     "from skynet import (\n    llm,\n)\n\ndef score(i, o, e):\n    return llm(o)",
     "import skynet\n\ndef score(i, o, e):\n    return skynet.llm(o)",

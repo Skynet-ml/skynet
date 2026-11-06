@@ -66,7 +66,7 @@ Vous pouvez ajouter vos propres clés de fournisseur de modèles.
 - Skynet ne conserve que les quatre derniers caractères et un statut : non vérifiée, vérifiée ou invalide.
 - Quand vous saisissez une clé, Skynet envoie une petite requête de test pour la vérifier.
 
-Quand vous utilisez votre propre clé, le fournisseur facture directement votre clé. Skynet prélève toujours ses frais de plateforme et l'utilisation de la sandbox sur votre solde.
+Votre fournisseur facture les jetons du modèle sur votre clé. Skynet ne facture aucuns frais de modèle. Le budget de l’exécution couvre uniquement l’utilisation du bac à sable.
 
 Skynet retire aussi les secrets des journaux et des messages d'erreur. Il les remplace par `[REDACTED]`.
 
@@ -102,7 +102,7 @@ Le paramètre **Confidentialité des données des modèles** détermine ce que l
 | **Aucune conservation**  | Uniquement les points de terminaison couverts par un accord de non-conservation des données. Certains modèles peuvent être indisponibles. |
 
 > [!NOTE]
-> Les optimisations effectuées avec votre propre clé suivent les paramètres de confidentialité de votre compte OpenRouter.
+> Les appels BYOK via OpenRouter suivent les paramètres de confidentialité de votre compte OpenRouter. Les appels BYOK directs suivent la politique de données du fournisseur.
 
 ## Visibilité des exécutions
 

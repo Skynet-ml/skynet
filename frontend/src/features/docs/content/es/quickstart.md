@@ -1,4 +1,4 @@
-Esta página muestra cómo iniciar tu primera ejecución en unos diez minutos. Inicias sesión, subes un conjunto de datos pequeño, completas los cuatro pasos del asistente e inicias la ejecución. El ejemplo mejora un prompt que clasifica mensajes de soporte en etiquetas.
+Esta página muestra cómo iniciar tu primera ejecución en unos diez minutos. Inicias sesión, subes un conjunto de datos pequeño, completas los cuatro pasos del asistente e inicias la ejecución. El ejemplo mejora un programa DSPy que clasifica mensajes de soporte en etiquetas.
 
 ## Antes de empezar
 
@@ -25,8 +25,8 @@ El primer paso es **Tarea**. Pregunta «¿Qué quieres optimizar?».
 
 1. En **Objetivo**, escribe qué es un buen resultado. Usa palabras sencillas, por ejemplo «Clasifica cada mensaje de soporte como facturación, error u otro».
 2. Opcional: en **Contexto**, añade información que ayude al optimizador.
-3. En **Tipo de artefacto**, selecciona **Prompt**.
-4. En **Versión inicial**, pega tu prompt actual.
+3. En **Qué se optimiza**, selecciona **Programa DSPy**.
+4. En **Versión inicial**, pega la instrucción actual de tu programa.
 
 ## 3. Entradas
 
@@ -47,7 +47,7 @@ El tercer paso es **Optimizador** («Optimizador, modelos y presupuesto»).
 
 - Deja el optimizador en **Auto**.
 - Selecciona un **Modelo de reflexión**. El optimizador lo usa para escribir versiones nuevas. Este modelo es obligatorio.
-- Opcional: selecciona un **Modelo de tarea**. Tu código de ejecución lo usa.
+- Selecciona un **Modelo de tarea**. Tu programa lo usa. Un programa DSPy debe tener uno.
 - En **Presupuesto**, deja **Máximo de ejecuciones del evaluador** en su valor predeterminado de 200.
 
 Lee [Motores](/docs/concepts/engines) para elegir un motor concreto.
@@ -57,11 +57,13 @@ Lee [Motores](/docs/concepts/engines) para elegir un motor concreto.
 El último paso es **Métrica y ejecución** («Código y métrica»). Escribes dos archivos.
 
 ```python tab="run.py"
-from skynet import llm
+import dspy
+
+program = dspy.Predict("message -> label")
 
 
 def run(artifact, input):
-    return llm(artifact, input=input["message"])
+    return program(message=input["message"]).label
 ```
 
 ```python tab="metric.py"
@@ -73,7 +75,7 @@ def score(input, output, expected=None):
     return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`artifact` es la versión actual de tu prompt. `input` contiene las columnas de entrada de un caso. `expected` contiene la columna de salida, con su nombre de columna como clave.
+`artifact` es la instrucción actual que propone el optimizador. Skynet la aplica a `program`. `input` contiene las columnas de entrada de un caso. `expected` contiene la columna de salida, con su nombre de columna como clave.
 
 Después selecciona **Comprobar** en **Comprobación del contrato**. La comprobación ejecuta tu código y tu métrica en el sandbox sobre 3 casos de muestra. Comprueba:
 

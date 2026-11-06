@@ -3,10 +3,12 @@
  *
  * A repository run optimizes a GitHub checkout against a Python scorer, so it
  * carries the task, the repository target, the engine and the models; it has
- * no artifact, inputs or run code.
+ * no artifact or run code, and carries cases only when the interview found
+ * the run needs data.
  */
 import type { BlackboxEngineId, BlackboxRunRequest, ModelConfig } from "@/shared/types/api";
 import { prepareModelConfig } from "./model-config";
+import { storedMetricModel } from "./run-floor";
 import type { WizardV2State } from "./wizard-v2";
 
 export interface RepoRunOptions {
@@ -23,13 +25,14 @@ export function repoRunRequest(
   state: WizardV2State,
   { username, tokenSource, maxCostCents }: RepoRunOptions,
 ): BlackboxRunRequest | null {
-  const { task, optimizer, workspace, meta } = state;
+  const { task, inputs, optimizer, workspace, meta } = state;
   const repo = task.repo;
   if (!repo || optimizer.choice === "auto" || !hasModel(optimizer.reflectionModel)) return null;
   if (!workspace.metricCode.trim()) return null;
   const engine = optimizer.choice as BlackboxEngineId;
   const shinka = engine === "shinka_evolve";
   const editablePaths = repo.editablePaths.map((path) => path.trim()).filter(Boolean);
+  const metricModel = storedMetricModel(workspace.metricModel, workspace.metricCode);
   return {
     name: meta.name.trim() || undefined,
     description: meta.description.trim() || undefined,
@@ -40,8 +43,20 @@ export function repoRunRequest(
     scorer: {
       kind: "python",
       metric_code: workspace.metricCode,
+      ...(hasModel(metricModel) && { model: prepareModelConfig(metricModel) }),
       timeout_seconds: workspace.metricTimeoutSeconds,
     },
+    // The scorer gets each case as `score(repo_path, case)`.
+    ...(task.needsData && inputs.cases.length > 0
+      ? { cases: inputs.cases as unknown as Array<Record<string, unknown>> }
+      : {}),
+    ...(task.needsData &&
+      inputs.cases.length === 0 &&
+      inputs.stagedDatasetId && {
+        staged_dataset_id: inputs.stagedDatasetId,
+        input_fields: inputs.inputFields,
+        expected_field: inputs.expectedField,
+      }),
     budget: optimizer.budget,
     strategy: { mode: "single", engine },
     proposer: optimizer.proposer,

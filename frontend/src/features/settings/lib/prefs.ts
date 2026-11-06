@@ -28,8 +28,6 @@ export interface UserPrefs {
   composerModel: string | null;
   // Companion thinking level for composerModel; null runs the model default.
   composerEffort: string | null;
-  // Shows/hides the dictation mic in the shared composer.
-  dictationEnabled: boolean;
   // Seed for the assist model in new tagging sessions; empty name = the
   // server's default tagging model.
   taggerAssistModel: ModelConfig;
@@ -46,14 +44,13 @@ export interface UserPrefs {
 }
 
 export type AgentPreferencePatch = Partial<
-  Pick<UserPrefs, "wizardCodeAssist" | "wizardSplitMode" | "taggerAssist" | "dictationEnabled">
+  Pick<UserPrefs, "wizardCodeAssist" | "wizardSplitMode" | "taggerAssist">
 >;
 
 const AGENT_PREFERENCE_FIELDS: Record<string, keyof AgentPreferencePatch> = {
   wizard_code_assist: "wizardCodeAssist",
   wizard_split_mode: "wizardSplitMode",
   tagger_assist: "taggerAssist",
-  dictation_enabled: "dictationEnabled",
 };
 
 function parsePreferenceResult(value: unknown): Record<string, unknown> | null {
@@ -99,7 +96,6 @@ export const PREF_KEYS: Record<keyof UserPrefs, string> = {
   taggerAssist: "app.prefs.tagger.assist",
   composerModel: "app.prefs.composer.model",
   composerEffort: "app.prefs.composer.effort",
-  dictationEnabled: "app.prefs.composer.dictation",
   taggerAssistModel: "app.prefs.tagger.assist-model",
   optimizerEngine: "app.prefs.optimizer.engine",
   optimizerTaskModel: "app.prefs.optimizer.task-model",
@@ -117,7 +113,6 @@ export const DEFAULT_PREFS: UserPrefs = {
   // live prices and benchmarks.
   composerModel: null,
   composerEffort: null,
-  dictationEnabled: true,
   taggerAssistModel: { name: "" },
   optimizerEngine: "auto",
   optimizerTaskModel: { name: "" },

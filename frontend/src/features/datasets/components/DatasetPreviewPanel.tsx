@@ -99,4 +99,3 @@ export function DatasetPreviewPanel({
 }
 
 /** The grow/shrink toggle every dataset table puts in its toolbar. */
-export { ExpandToggleButton as ExpandTableButton };

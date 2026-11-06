@@ -11,7 +11,7 @@ import { Check, CaretDown, CaretRight, Lightning } from "@/shared/ui/icons";
 import { EffortSlider } from "@/shared/ui/agent/effort-slider";
 
 import { cachedCatalog, getModelCatalog } from "@/shared/lib/model-catalog";
-import { liveEffort, retiredLevel } from "@/shared/lib/effort-slider";
+import { liveEffort } from "@/shared/lib/effort-slider";
 import { effortLabel, effortsFor, unpickedEffort } from "@/shared/lib/model-efforts";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
@@ -323,7 +323,6 @@ export function ComposerModelMenu({
                 onChange={onEffortChange}
                 modelName={displayName}
                 hintFor={effortHint}
-                retired={retiredLevel(effective)}
                 fast={
                   fastShown
                     ? {

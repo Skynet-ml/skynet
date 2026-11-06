@@ -8,14 +8,14 @@ A página da execução mostra apenas as abas que se aplicam à execução. Algu
 | ------------------------ | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | **Visão geral**          | Sempre                                                                 | Progresso, pontuações e o histórico de pontuações                                     |
 | **Utilização**           | Uma execução bem-sucedida com um programa que o Skynet pode servir     | Um formulário para executar o programa otimizado e código de integração               |
-| **Artefacto**            | Uma execução de Prompt, Código ou Texto com resultado                  | As versões do seu artefato, incluindo a melhor versão                                 |
+| **Artefacto** | Uma execução de repositório com resultado | As versões do seu artefato, incluindo a melhor versão |
 | **Dados**                | Uma execução de programa DSPy concluída                                | Os dados divididos em conjuntos de treino, validação e teste, e a avaliação do conjunto de teste |
 | **Código**               | Quando a execução tem código para mostrar                              | O código de execução e a métrica                                                      |
-| **Recompensa**           | Uma execução de Prompt, Código ou Texto cuja métrica declara partes da recompensa | As partes da recompensa e os pesos delas                                   |
-| **Artefacto**            | Uma execução com um prompt ou arquivos otimizados                      | A saída otimizada e **Exportar resultados**                                           |
+| **Recompensa** | Uma execução de repositório cuja métrica declara partes de recompensa | As partes da recompensa e os pesos delas |
+| **Artefacto** | Uma execução de programa DSPy concluída | A saída otimizada e **Exportar resultados** |
 | **Registos**             | A maioria das execuções                                                | O log da execução                                                                     |
 | **Utilização e custo**   | Quando você tem sessão iniciada                                        | O que a execução gastou                                                               |
-| **Execução agendada**    | Uma execução de Prompt, Código ou Texto bem-sucedida                   | Um agendamento para executar a otimização de novo                                     |
+| **Execução agendada** | Uma execução bem-sucedida de programa DSPy | Um agendamento para executar a otimização de novo |
 | **Configuração**         | Sempre                                                                 | A configuração da execução                                                            |
 
 > [!NOTE]
@@ -33,7 +33,7 @@ A aba **Visão geral** mostra:
 
 Enquanto a execução está ativa, a visão geral também mostra **Decorrido**, **Restante** e **Taxa**.
 
-Para uma execução de Prompt, Código ou Texto, a visão geral também mostra **Pontuações nomeadas** quando a sua métrica informa pontuações nomeadas.
+Em uma execução de repositório, a visão geral também mostra **Pontuações nomeadas** quando sua métrica informa pontuações nomeadas.
 
 Para uma execução de programa DSPy, a aba **Dados** tem uma **Avaliação do conjunto de teste**. Ela mostra a pontuação de linha de base e a pontuação otimizada de cada caso de teste.
 
@@ -45,7 +45,7 @@ Se a execução parou no limite do orçamento, a página da execução informa q
 
 ## Exportar a melhor versão
 
-### Execuções de Prompt, Código e Texto
+### Execuções de repositório
 
 A aba **Artefacto** lista as **Versões** do seu artefato. Para cada versão, você pode:
 

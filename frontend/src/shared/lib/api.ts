@@ -30,27 +30,18 @@ import type {
   ValidateDatasetRequest,
   ValidateDatasetResponse,
   WorkflowDryRunResponse,
-  WorkflowSpec,
 } from "@/shared/types/api";
 import type {
-  ArtifactKind,
   CheckTerminalEvent,
   ContractCheckRequest,
   ContractCheckResponse,
   DataMode,
-  FileVerification,
-  InputsInferenceRequest,
-  InputsInferenceResponse,
   OptimizerCatalogResponse,
-  TaskInterviewRequest,
-  TaskInterviewTurnResult,
-  UnifiedAuthoringContext,
+  OptimizerTarget,
   UnifiedRunRequest,
 } from "@/shared/types/unified-run";
-import { kickoffOpening } from "@/shared/lib/agent-kickoff";
 import { formatMsg, msg } from "@/shared/lib/messages";
-import type { TurnStats } from "@/shared/ui/agent/types";
-import { parseTurnStats } from "@/shared/ui/agent/turn-stats";
+import { forgetOAuthReturn } from "@/shared/lib/oauth-return";
 import { I18N_KEY, tI18n } from "@/shared/lib/i18n";
 import { reportHandledError } from "@/shared/lib/report-error";
 import {
@@ -69,7 +60,6 @@ import type {
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
 import { getActiveLocale } from "@/shared/lib/runtime-locale";
 import { readServerSentEvents, type ServerSentEvent } from "@/shared/lib/sse";
-import { streamResumableTurn } from "@/shared/lib/resumable-turn";
 
 // Resolve the runtime API base lazily on every call. Capturing it once at
 // module load races the injected `window.__APP_ENV__` script: the framework
@@ -504,8 +494,8 @@ export function submitRepoRun(req: BlackboxRunRequest, opts?: { idempotencyKey?:
   });
 }
 
-export function getOptimizerCatalog(kind: ArtifactKind, mode: DataMode, signal?: AbortSignal) {
-  const query = `artifact_kind=${encodeURIComponent(kind)}&data_mode=${encodeURIComponent(mode)}`;
+export function getOptimizerCatalog(target: OptimizerTarget, mode: DataMode, signal?: AbortSignal) {
+  const query = `artifact_kind=${encodeURIComponent(target)}&data_mode=${encodeURIComponent(mode)}`;
   return request<OptimizerCatalogResponse>(`/optimizers?${query}`, { signal });
 }
 
@@ -547,14 +537,6 @@ export function staticContractCheck(req: ContractCheckRequest, signal?: AbortSig
   return request<ContractCheckResponse>("/optimizations/contract-check/static", {
     method: "POST",
     body: JSON.stringify({ ...req, locale: getActiveLocale() }),
-    signal,
-  });
-}
-
-export function inferInputs(req: InputsInferenceRequest, signal?: AbortSignal) {
-  return request<InputsInferenceResponse>("/optimizations/infer-inputs", {
-    method: "POST",
-    body: JSON.stringify(req),
     signal,
   });
 }
@@ -1958,6 +1940,8 @@ export function removeConnector(provider: ConnectorProvider) {
  * ``fields`` carries what must be named before sign-in (Azure's storage account).
  */
 export function startConnectorOAuth(provider: ConnectorProvider, fields?: Record<string, string>) {
+  // A caller that wants the callback to return to it remembers its path after this resolves.
+  forgetOAuthReturn();
   return request<{ authorize_url: string }>(`/connectors/${provider}/oauth/start`, {
     method: "POST",
     ...(fields ? { body: JSON.stringify({ fields }) } : {}),
@@ -3591,6 +3575,42 @@ export async function deleteFolder(folderId: string) {
   return result;
 }
 
+/** A kind of item another user can share with the caller. */
+export type SharedItemKind = "optimizations" | "datasets" | "tagging-sessions" | "folders";
+
+function invalidateSharedLists() {
+  invalidateCache("/folders", "/optimizations", "/datasets/library", "/tagging-sessions");
+}
+
+/** Hide a shared item from the caller's own lists. Access does not change. */
+export async function hideSharedItem(kind: SharedItemKind, id: string) {
+  await request<void>(`/shared-with-me/${kind}/${encodeURIComponent(id)}/hide`, { method: "POST" });
+  invalidateSharedLists();
+}
+
+/** Show a hidden shared item again. A no-op when nothing is hidden. */
+export async function unhideSharedItem(kind: SharedItemKind, id: string) {
+  await request<void>(`/shared-with-me/${kind}/${encodeURIComponent(id)}/hide`, {
+    method: "DELETE",
+  });
+  invalidateSharedLists();
+}
+
+/** Lower the caller's own role on a shared item. The server refuses a raise. */
+export async function lowerSharedRole(kind: SharedItemKind, id: string, role: MemberRole) {
+  await request<void>(`/shared-with-me/${kind}/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ role }),
+  });
+  invalidateSharedLists();
+}
+
+/** Remove the caller's own access to a shared item. */
+export async function removeSharedAccess(kind: SharedItemKind, id: string) {
+  await request<void>(`/shared-with-me/${kind}/${encodeURIComponent(id)}`, { method: "DELETE" });
+  invalidateSharedLists();
+}
+
 /** Move a folder under another folder, or to the top level with null. */
 export async function moveFolder(folderId: string, parentId: string | null) {
   const folder = await request<RunFolder>(`/folders/${folderId}/move`, {
@@ -3859,369 +3879,12 @@ export async function servePairProgramStream(
   }
 }
 
-export interface CodeAgentChatTurn {
-  role: "user" | "assistant";
-  content: string;
-}
-
-export interface CodeAgentRequest {
-  dataset_columns: string[];
-  // Plain string roles (input/output/ignore); the code agent only consumes
-  // the input/output roles.
-  column_roles: Record<string, string>;
-  column_kinds?: Record<string, "text" | "image">;
-  sample_rows: Array<Record<string, unknown>>;
-  user_message?: string;
-  chat_history?: CodeAgentChatTurn[];
-  prior_signature?: string;
-  prior_metric?: string;
-  prior_signature_validation?: string;
-  prior_metric_validation?: string;
-  // Unified authoring: the workspace's files besides run.py and metric.py.
-  prior_files?: Record<string, string>;
-  initial_signature?: string;
-  initial_metric?: string;
-  // Workflow graph currently on the canvas. Non-null switches both agent
-  // modes to their graph-aware paths (seed drafts the DAG, chat gets graph
-  // tools).
-  prior_workflow?: WorkflowSpec | null;
-  initial_workflow?: WorkflowSpec | null;
-  // Active UI locale code; the backend derives the agent's reply language
-  // from it (fallback: Hebrew).
-  locale?: string;
-  // Directives confirmed at the end of the Signature & Metric interview;
-  // the seed authors honor every directive. Empty when no interview ran.
-  interview_brief?: string[];
-  // Catalog model id that authors the code (the composer's model menu).
-  // Absent runs the catalog's best-value default.
-  model?: string;
-  // Explicit reasoning-effort level for the chosen model; absent keeps its default.
-  reasoning_effort?: string;
-  // Runs a local CLI model in its fast mode; the backend ignores it elsewhere.
-  fast_mode?: boolean;
-  unified?: UnifiedAuthoringContext;
-  // Unified authoring only: the agent opens the conversation itself; the server
-  // supplies the hidden opening message in place of `user_message`.
-  kickoff?: boolean;
-  // Client-generated id of this turn; messages posted to /agent-steer with
-  // it are delivered into the running turn.
-  steer_key?: string;
-}
-
-export type CodeAgentToolName =
-  | "edit_signature"
-  | "edit_run"
-  | "edit_metric"
-  | "write_file"
-  | "delete_file"
-  | "verify_code"
-  | "open_file"
-  | "edit_seed"
-  | "edit_scorer"
-  | "set_brief"
-  | "list_repo_folder"
-  | "read_repo_file"
-  | "add_node"
-  | "update_node"
-  | "remove_node"
-  | "connect"
-  | "disconnect";
-
-const CODE_AGENT_TOOLS = new Set<CodeAgentToolName>([
-  "edit_signature",
-  "edit_run",
-  "edit_metric",
-  "write_file",
-  "delete_file",
-  "verify_code",
-  "open_file",
-  "edit_seed",
-  "edit_scorer",
-  "set_brief",
-  "list_repo_folder",
-  "read_repo_file",
-  "add_node",
-  "update_node",
-  "remove_node",
-  "connect",
-  "disconnect",
-]);
-
-interface CodeAgentToolStart {
-  id: string;
-  tool: CodeAgentToolName;
-  reason: string;
-  /** The file a write_file / delete_file / open_file call is about. */
-  path?: string;
-}
-
-interface CodeAgentToolEnd {
-  id: string;
-  tool: CodeAgentToolName;
-  status: string;
-  path?: string;
-  /** The 1-based line an open_file call shows. */
-  line?: number;
-}
-
-/** A `verify_code` call's result: one verdict per workspace file. */
-export interface CodeAgentVerification {
-  id: string;
-  ok: boolean;
-  files: FileVerification[];
-}
-
-function parseVerification(data: unknown): CodeAgentVerification | null {
-  if (!data || typeof data !== "object") return null;
-  const raw = data as Record<string, unknown>;
-  const lines = (v: unknown) => (Array.isArray(v) ? v.map(String) : []);
-  const files = (Array.isArray(raw.files) ? raw.files : [])
-    .filter((f): f is Record<string, unknown> => !!f && typeof f === "object")
-    .map((f) => ({
-      path: String(f.path ?? ""),
-      ok: f.ok === true,
-      errors: lines(f.errors),
-      warnings: lines(f.warnings),
-    }))
-    .filter((f) => f.path);
-  return { id: String(raw.id ?? ""), ok: raw.ok === true, files };
-}
-
-function parseFiles(data: unknown): Record<string, string> | undefined {
-  if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
-  return Object.fromEntries(
-    Object.entries(data as Record<string, unknown>).filter(
-      (entry): entry is [string, string] => typeof entry[1] === "string",
-    ),
-  );
-}
-
-export interface AgentQuestion {
-  question: string;
-  options: Array<{ label: string; description: string }>;
-}
-
-export interface CodeAgentHandlers {
-  onSignaturePatch: (chunk: string) => void;
-  onMetricPatch: (chunk: string) => void;
-  // `source` names the emitting stream ("signature" | "metric" | "workflow" |
-  // "agent") — seed mode runs two authors in parallel over one SSE stream.
-  onReasoningPatch?: (chunk: string, source: string) => void;
-  // Unified seed: one parallel author ("signature" = run code, or "metric")
-  // finished, its contract check and repair included.
-  onArtifactDone?: (source: string) => void;
-  onMessagePatch?: (chunk: string) => void;
-  onSignatureReplace?: (code: string) => void;
-  onMetricReplace?: (code: string) => void;
-  // Unified chat: the code an edit_run ("signature") / edit_metric ("metric")
-  // call writes, while the model writes it; `reset` starts a new draft. The
-  // finished, checked code still arrives on the matching *Replace.
-  // A write_file draft has `source` "file" and names its `path`.
-  onCodeDraft?: (ev: { source: string; chunk: string; reset: boolean; path?: string }) => void;
-  // Unified chat: an extra workspace file written or deleted.
-  onFileReplace?: (path: string, code: string) => void;
-  onFileDelete?: (path: string) => void;
-  // Unified: a verify_code call's per-file result.
-  onVerifyResult?: (result: CodeAgentVerification) => void;
-  // Full-graph snapshot after a seed draft or a successful graph tool op;
-  // changedNodeId (null for seed/removals) drives the canvas pulse.
-  onWorkflowReplace?: (workflow: WorkflowSpec, changedNodeId: string | null) => void;
-  onToolStart?: (ev: CodeAgentToolStart) => void;
-  onToolEnd?: (ev: CodeAgentToolEnd) => void;
-  // Black-box chat: a question the agent asks with clickable answers.
-  onAsk?: (ask: AgentQuestion) => void;
-  // Black-box chat: objective / background text the agent wrote from the conversation.
-  onBrief?: (fields: { objective?: string; background?: string }) => void;
-  // The agent read these steered messages at a step boundary; `text` joins them.
-  onSteerApplied?: (ev: { ids: string[]; text: string }) => void;
-  onDone: (result: {
-    signature_code: string;
-    metric_code: string;
-    assistant_message: string;
-    model: string | null;
-    /** Concrete model selected by Auto Router, when the route was automatic. */
-    served_model: string | null;
-    stats: TurnStats | null;
-    workflow?: WorkflowSpec | null;
-    workflowValid?: boolean;
-    /**
-     * Seed-path validation outcome. The seed runner validates (and repairs)
-     * the generated code; these flags are absent on the chat path (where
-     * ``edit_signature``/``edit_metric`` already validate every edit), so a
-     * missing flag is treated as valid.
-     */
-    signatureValid?: boolean;
-    metricValid?: boolean;
-    validationError?: string | null;
-    /** Unified paths: the workspace's extra files after the turn. */
-    files?: Record<string, string>;
-    /** Unified paths: the turn's last verify_code result, or null when nothing was checked. */
-    verification?: CodeAgentVerification | null;
-  }) => void;
-  /** `code` is the server's error code when the request was refused (e.g. a quota). */
-  onError: (message: string, code?: string) => void;
-  signal?: AbortSignal;
-}
-
-/** Stream AI-generated signature + metric code via SSE. */
-export async function streamCodeAgent(
-  req: CodeAgentRequest,
-  handlers: CodeAgentHandlers,
-): Promise<void> {
-  const processEvent = ({ event, data }: ServerSentEvent) => {
-    const opening = kickoffOpening(event, data);
-    if (opening !== null) {
-      // Only a chat-mode kickoff gets it, so the empty code never lands.
-      handlers.onDone({
-        signature_code: "",
-        metric_code: "",
-        assistant_message: opening,
-        model: null,
-        served_model: null,
-        stats: null,
-      });
-    } else if (event === "signature_patch") {
-      handlers.onSignaturePatch(String(data.chunk ?? ""));
-    } else if (event === "metric_patch") {
-      handlers.onMetricPatch(String(data.chunk ?? ""));
-    } else if (event === "reasoning_patch") {
-      handlers.onReasoningPatch?.(
-        String(data.chunk ?? ""),
-        typeof data.source === "string" && data.source ? data.source : "agent",
-      );
-    } else if (event === "artifact_done") {
-      handlers.onArtifactDone?.(String(data.source ?? ""));
-    } else if (event === "message_patch") {
-      handlers.onMessagePatch?.(String(data.chunk ?? ""));
-    } else if (event === "code_draft") {
-      handlers.onCodeDraft?.({
-        source: String(data.source ?? ""),
-        chunk: String(data.chunk ?? ""),
-        reset: Boolean(data.reset),
-        ...(typeof data.path === "string" && data.path && { path: data.path }),
-      });
-    } else if (event === "file_replace") {
-      if (typeof data.path === "string" && data.path)
-        handlers.onFileReplace?.(data.path, String(data.code ?? ""));
-    } else if (event === "file_delete") {
-      if (typeof data.path === "string" && data.path) handlers.onFileDelete?.(data.path);
-    } else if (event === "verify_result") {
-      const result = parseVerification(data);
-      if (result) handlers.onVerifyResult?.(result);
-    } else if (event === "signature_replace") {
-      handlers.onSignatureReplace?.(String(data.code ?? ""));
-    } else if (event === "metric_replace") {
-      handlers.onMetricReplace?.(String(data.code ?? ""));
-    } else if (event === "workflow_replace") {
-      if (data.workflow && typeof data.workflow === "object") {
-        handlers.onWorkflowReplace?.(
-          data.workflow as WorkflowSpec,
-          typeof data.changed_node_id === "string" ? data.changed_node_id : null,
-        );
-      }
-    } else if (event === "tool_start") {
-      const tool = String(data.tool ?? "") as CodeAgentToolName;
-      if (CODE_AGENT_TOOLS.has(tool)) {
-        handlers.onToolStart?.({
-          id: String(data.id ?? ""),
-          tool,
-          reason: String(data.reason ?? ""),
-          ...(typeof data.path === "string" && data.path && { path: data.path }),
-        });
-      }
-    } else if (event === "tool_end") {
-      const tool = String(data.tool ?? "") as CodeAgentToolName;
-      if (CODE_AGENT_TOOLS.has(tool)) {
-        handlers.onToolEnd?.({
-          id: String(data.id ?? ""),
-          tool,
-          status: String(data.status ?? "ok"),
-          ...(typeof data.path === "string" && data.path && { path: data.path }),
-          ...(typeof data.line === "number" && data.line > 0 && { line: data.line }),
-        });
-      }
-    } else if (event === "ask") {
-      const options = Array.isArray(data.options) ? data.options : [];
-      handlers.onAsk?.({
-        question: String(data.question ?? ""),
-        options: options
-          .filter((o): o is Record<string, unknown> => !!o && typeof o === "object")
-          .map((o) => ({ label: String(o.label ?? ""), description: String(o.description ?? "") }))
-          .filter((o) => o.label.trim().length > 0),
-      });
-    } else if (event === "brief") {
-      handlers.onBrief?.({
-        ...(typeof data.objective === "string" ? { objective: data.objective } : {}),
-        ...(typeof data.background === "string" ? { background: data.background } : {}),
-      });
-    } else if (event === "steer_applied") {
-      handlers.onSteerApplied?.(parseSteerApplied(data));
-    } else if (event === "done") {
-      const rawModel = data.model;
-      const rawServedModel = data.served_model;
-      handlers.onDone({
-        signature_code: String(data.signature_code ?? ""),
-        metric_code: String(data.metric_code ?? ""),
-        assistant_message: String(data.assistant_message ?? ""),
-        model: typeof rawModel === "string" && rawModel.length > 0 ? rawModel : null,
-        served_model:
-          typeof rawServedModel === "string" && rawServedModel.length > 0 ? rawServedModel : null,
-        stats: parseTurnStats(data.stats),
-        workflow:
-          data.workflow && typeof data.workflow === "object"
-            ? (data.workflow as WorkflowSpec)
-            : null,
-        workflowValid: data.workflow_valid !== false,
-        // Absent on the chat path → treat as valid; the seed path sends
-        // explicit booleans after its validate-and-repair pass.
-        signatureValid: data.signature_valid !== false,
-        metricValid: data.metric_valid !== false,
-        validationError: typeof data.validation_error === "string" ? data.validation_error : null,
-        ...("files" in data && { files: parseFiles(data.files) ?? {} }),
-        ...("verification" in data && { verification: parseVerification(data.verification) }),
-      });
-    } else if (event === "error") {
-      handlers.onError(String(data.error ?? msg("auto.shared.lib.api.literal.12")));
-    }
-  };
-  // The turn outlives any one connection (the edge cuts requests at 15 min);
-  // streamResumableTurn reconnects and replays from the last event id.
-  const result = await streamResumableTurn({
-    fetch: fetchWithAuthRetry,
-    read: readServerSentEvents,
-    apiBase: apiBase(),
-    startPath: "/optimizations/ai-generate-code",
-    startInit: {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify(req),
-    },
-    onEvent: processEvent,
-    signal: handlers.signal,
-  });
-  if (result.status !== "failed" || result.started) announceWalletChange();
-  if (result.status !== "failed") return;
-  if (result.response) {
-    const res = result.response;
-    const text = await res.text().catch(() => "");
-    const parsed = parseError(text);
-    handlers.onError(
-      parsed.message ?? formatMsg("auto.shared.lib.api.template.5", { p1: res.status }),
-      parsed.code,
-    );
-  } else if (!result.started) {
-    handlers.onError(msg("auto.shared.lib.api.literal.11"));
-  } else {
-    const err = result.error;
-    handlers.onError(err instanceof Error ? err.message : msg("auto.shared.lib.api.literal.10"));
-  }
-}
-
 /** Deliver a message into the running turn opened with `steerKey`; resolves
  *  the message's id, which a later `steer_applied` event or withdraw names. */
 export async function postAgentSteer(steerKey: string, text: string): Promise<string> {
   const res = await request<{ id: string }>("/optimizations/agent-steer", {
     method: "POST",
+    signal: AbortSignal.timeout(30_000),
     body: JSON.stringify({ steer_key: steerKey, text }),
   });
   return String(res.id);
@@ -4255,14 +3918,16 @@ export function parseSteerApplied(data: Record<string, unknown>): { ids: string[
   };
 }
 
-/** Take back messages the turn opened with `steerKey` never read: only `ids`
- *  when given, otherwise all of them. Resolves the ids actually returned. */
-export async function withdrawAgentSteers(steerKey: string, ids?: string[]): Promise<string[]> {
-  const res = await request<{ ids: string[] }>("/optimizations/agent-steer/withdraw", {
+/** Take back explicit ids and report which messages the agent already read. */
+export async function withdrawAgentSteers(steerKey: string, ids: string[]): Promise<{ ids: string[]; delivered?: string[] }> {
+  const res = await request<{ ids: string[]; delivered?: string[] }>("/optimizations/agent-steer/withdraw", {
     method: "POST",
-    body: JSON.stringify(ids ? { steer_key: steerKey, ids } : { steer_key: steerKey }),
+    signal: AbortSignal.timeout(30_000),
+    body: JSON.stringify({ steer_key: steerKey, ids }),
   });
-  return Array.isArray(res.ids) ? res.ids.map(String) : [];
+  if (!Array.isArray(res.ids)) throw new Error("Invalid withdrawal outcome");
+  if (res.delivered !== undefined && !Array.isArray(res.delivered)) throw new Error("Invalid withdrawal outcome");
+  return { ids: res.ids.map(String), ...(res.delivered === undefined ? {} : { delivered: res.delivered.map(String) }) };
 }
 
 /**
@@ -4290,98 +3955,6 @@ export function parseInterviewOptions(raw: unknown): InterviewOption[] {
       return { label: String(item ?? "").trim(), description: "" };
     })
     .filter((option) => option.label);
-}
-
-export interface TaskInterviewHandlers {
-  onMessagePatch?: (chunk: string) => void;
-  onReasoning?: (chunk: string) => void;
-  /** The server is retrying a failed attempt; drop streamed partial text. */
-  onReset?: () => void;
-  onDone: (result: TaskInterviewTurnResult) => void;
-  /** `code` is the backend's error code when the turn was refused before it started. */
-  onError: (message: string, code?: string) => void;
-}
-
-function parseCandidate(raw: unknown): string | Record<string, string> | null {
-  if (typeof raw === "string") return raw;
-  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-    return Object.fromEntries(
-      Object.entries(raw as Record<string, unknown>).map(([k, v]) => [k, String(v ?? "")]),
-    );
-  }
-  return null;
-}
-
-/**
- * Stream one wizard Task-step interview turn over the resumable SSE
- * transport; the terminal `interview_done` carries the drafted task and
- * artifact.
- */
-export async function streamTaskInterviewTurn(
-  req: TaskInterviewRequest,
-  handlers: TaskInterviewHandlers,
-  signal?: AbortSignal,
-): Promise<TaskInterviewTurnResult | null> {
-  let outcome: TaskInterviewTurnResult | null = null;
-  let failed = false;
-  const result = await streamResumableTurn({
-    fetch: fetchWithAuthRetry,
-    read: readServerSentEvents,
-    apiBase: apiBase(),
-    startPath: "/optimizations/task-interview",
-    startInit: {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify(req),
-    },
-    signal,
-    onEvent: ({ event, data }) => {
-      switch (event) {
-        case "reasoning_patch":
-          handlers.onReasoning?.(String(data.chunk ?? ""));
-          break;
-        case "message_patch":
-          handlers.onMessagePatch?.(String(data.chunk ?? ""));
-          break;
-        case "message_reset":
-          handlers.onReset?.();
-          break;
-        case "interview_done": {
-          const kind = data.artifact_kind;
-          outcome = {
-            message: String(data.message ?? ""),
-            options: parseInterviewOptions(data.options),
-            done: data.done === true,
-            objective: typeof data.objective === "string" ? data.objective : "",
-            background: typeof data.background === "string" ? data.background : "",
-            artifact_kind:
-              kind === "prompt" || kind === "code" || kind === "dspy_program" || kind === "text"
-                ? kind
-                : null,
-            starting_version: parseCandidate(data.starting_version),
-            artifact_rationale:
-              typeof data.artifact_rationale === "string" ? data.artifact_rationale : "",
-            model: typeof data.model === "string" && data.model ? data.model : null,
-            served_model:
-              typeof data.served_model === "string" && data.served_model ? data.served_model : null,
-          };
-          handlers.onDone(outcome);
-          break;
-        }
-        case "error":
-          failed = true;
-          handlers.onError(msg("submit.code.interview.error"));
-          break;
-      }
-    },
-  });
-  if (result.status === "aborted") return null;
-  if (!outcome && !failed) {
-    const refused = result.status === "failed" ? result.response : undefined;
-    const code = refused ? parseError(await refused.text().catch(() => "")).code : undefined;
-    handlers.onError(msg("submit.code.interview.error"), code);
-  }
-  return outcome;
 }
 
 export interface PublicDashboardPoint {
@@ -4432,7 +4005,7 @@ export interface CorpusFacets {
   totals: FacetTotals;
 }
 
-export type FacetDimension = keyof FacetTotals;
+export type FacetDimension = "models" | "optimizers";
 
 /** The active structured filters, echoed back so facet counts are contextual. */
 export interface FacetContext {

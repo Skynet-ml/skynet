@@ -8,12 +8,29 @@ import { TERMS } from "@/shared/lib/terms";
 import { UUID_RE } from "../lib/entry-format";
 
 import { AnalyticsSummaryCard } from "./AnalyticsSummaryCard";
+import { GithubReposCard } from "./GithubReposCard";
 import { JobSummaryCard } from "./JobSummaryCard";
 import { SearchResultsCard } from "./SearchResultsCard";
+import {
+  AgentModelsCard,
+  DatasetProfileCard,
+  DiscoverModelsCard,
+  EngineCatalogCard,
+  LibraryDatasetsCard,
+  OptimizerCatalogCard,
+  SampleDatasetsCard,
+  StagedSampleCard,
+  ValidateCodeCard,
+  ValidateDatasetCard,
+} from "./SetupToolCards";
 import { SubmitSummaryCard } from "./SubmitSummaryCard";
 import { TaggingSessionsCard } from "./TaggingSessionsCard";
 import { TestResultsCard } from "./TestResultsCard";
 import { WalletCard } from "./WalletCard";
+import { TurnCheckCard } from "./TurnCheckCard";
+import { WizardBackCard, WizardContinueCard } from "./WizardNavCard";
+import { WizardNoteCard } from "./WizardNoteCard";
+import { WizardWriteCard } from "./WizardWriteCard";
 
 export interface ToolRenderer {
   /**
@@ -29,7 +46,6 @@ export interface ToolRenderer {
 // a file, ran a check, read results"). A tool not listed reads by its name:
 // get_/list_ tools read, anything else is a generic tool.
 const TOOL_KINDS: Record<string, ActivityKind> = {
-  edit_code_optimizations_edit_code_post: "edit",
   delete_job_optimizations: "act",
   bulk_delete_jobs_optimizations_bulk_delete_post: "act",
   rename_job_optimizations: "act",
@@ -45,6 +61,9 @@ const TOOL_KINDS: Record<string, ActivityKind> = {
   submit_unified_run_optimize_post: "act",
   update_user_preferences: "act",
   update_wizard_state: "act",
+  remember_for_later: "act",
+  continue_to_next_screen: "act",
+  go_back_to_screen: "act",
   set_column_roles_datasets_column_roles_post: "act",
   stage_sample_dataset_datasets_samples: "act",
   change_setting: "act",
@@ -54,6 +73,7 @@ const TOOL_KINDS: Record<string, ActivityKind> = {
   validate_datasets_validate_post: "check",
   public_search_dashboard_search_post: "search",
   web_search: "search",
+  search_docs: "search",
   discover_models_models_discover_post: "search",
   crawl_site: "read",
   fetch_url: "read",
@@ -388,15 +408,7 @@ const RENDERERS: Record<string, ToolRenderer> = {
         done: msg("auto.features.agent.panel.lib.tool.renderers.literal.47"),
       });
     },
-  },
-
-  edit_code_optimizations_edit_code_post: {
-    summary: (call) =>
-      byStatus(call, {
-        running: msg("auto.features.agent.panel.lib.tool.renderers.literal.48"),
-        done: msg("auto.features.agent.panel.lib.tool.renderers.literal.49"),
-        error: msg("auto.features.agent.panel.lib.tool.renderers.literal.50"),
-      }),
+    card: (call) => <ValidateCodeCard call={call} />,
   },
 
   profile_datasets_profile_post: {
@@ -408,6 +420,7 @@ const RENDERERS: Record<string, ToolRenderer> = {
         done: msg("auto.features.agent.panel.lib.tool.renderers.literal.51"),
         error: msg("auto.features.agent.panel.lib.tool.renderers.literal.52"),
       }),
+    card: (call) => <DatasetProfileCard call={call} />,
   },
 
   discover_models_models_discover_post: {
@@ -417,6 +430,7 @@ const RENDERERS: Record<string, ToolRenderer> = {
         done: msg("auto.features.agent.panel.lib.tool.renderers.literal.54"),
         error: msg("auto.features.agent.panel.lib.tool.renderers.literal.55"),
       }),
+    card: (call) => <DiscoverModelsCard call={call} />,
   },
 
   set_column_roles_datasets_column_roles_post: {
@@ -426,6 +440,7 @@ const RENDERERS: Record<string, ToolRenderer> = {
         done: msg("auto.features.agent.panel.lib.tool.renderers.literal.58"),
         error: msg("auto.features.agent.panel.lib.tool.renderers.literal.59"),
       }),
+    card: (call) => <WizardWriteCard call={call} />,
   },
 
   public_search_dashboard_search_post: {
@@ -450,6 +465,58 @@ const RENDERERS: Record<string, ToolRenderer> = {
 
   list_tagging_sessions_for_agent: {
     card: (call) => <TaggingSessionsCard call={call} />,
+  },
+
+  update_wizard_state: {
+    card: (call) => <WizardWriteCard call={call} />,
+  },
+
+  remember_for_later: {
+    card: (call) => <WizardNoteCard call={call} />,
+  },
+
+  continue_to_next_screen: {
+    card: (call) => <WizardContinueCard call={call} />,
+  },
+
+  go_back_to_screen: {
+    card: (call) => <WizardBackCard call={call} />,
+  },
+
+  turn_check: {
+    card: (call) => <TurnCheckCard call={call} />,
+  },
+
+  list_github_repositories_connectors_github_repos_get: {
+    card: (call) => <GithubReposCard call={call} />,
+  },
+
+  optimizer_catalog_optimizers_get: {
+    card: (call) => <OptimizerCatalogCard call={call} />,
+  },
+
+  blackbox_engines_blackbox_engines_get: {
+    card: (call) => <EngineCatalogCard call={call} />,
+  },
+
+  list_models_for_agent: {
+    card: (call) => <AgentModelsCard call={call} />,
+  },
+
+  validate_datasets_validate_post: {
+    card: (call) => <ValidateDatasetCard call={call} />,
+  },
+
+  list_datasets_for_agent: {
+    card: (call) => <LibraryDatasetsCard call={call} />,
+  },
+
+  list_sample_datasets_datasets_samples_get: {
+    card: (call) => <SampleDatasetsCard call={call} />,
+  },
+
+  stage_sample_dataset_datasets_samples: {
+    card: (call) => <StagedSampleCard call={call} />,
   },
 
 };

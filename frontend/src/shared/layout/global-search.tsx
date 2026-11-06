@@ -5,16 +5,24 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { signOut, useSession } from "next-auth/react";
 import { toast } from "react-toastify";
-import { ArrowUpRight, MagnifyingGlass, Robot, SignIn, SignOut } from "@/shared/ui/icons";
+import {
+  ArrowUpRight,
+  MagnifyingGlass,
+  PaperPlaneTilt,
+  Robot,
+  SignIn,
+  SignOut,
+  Sparkle,
+} from "@/shared/ui/icons";
 import type { Icon } from "@/shared/ui/icons";
 
-import { useGeneralistPanelStateOptional } from "@/features/agent-panel";
+import { queueAgentPrompt, useGeneralistPanelStateOptional } from "@/features/agent-panel";
 import { SETTINGS_TABS, useSettingsModal, visibleSettingsTabs } from "@/features/settings";
 import { APP_PAGES, matchesQuery, splitKeywords } from "@/shared/lib/app-pages";
 import { APP_PAGE_ICONS, appPageDescription, appPageKeywords, appPageLabel } from "@/shared/lib/app-pages-ui";
 import { useLocale } from "@/shared/providers";
 import { dirForLocale } from "@/shared/lib/locale";
-import { msg } from "@/shared/lib/messages";
+import { formatMsg, msg } from "@/shared/lib/messages";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { unlinkHostedAccount, useLinkedAccount } from "@/shared/hooks/use-linked-account";
 import { startHostedSignIn } from "@/shared/layout/account-menu";
@@ -27,7 +35,7 @@ import {
   DialogTitle,
 } from "@/shared/ui/primitives/dialog";
 
-type SearchGroup = "quick" | "navigate" | "actions" | "settings";
+type SearchGroup = "quick" | "navigate" | "actions" | "settings" | "ask";
 
 type SearchItem = {
   id: string;
@@ -39,7 +47,7 @@ type SearchItem = {
   run: () => void;
 };
 
-const GROUP_ORDER: SearchGroup[] = ["quick", "navigate", "actions", "settings"];
+const GROUP_ORDER: SearchGroup[] = ["quick", "navigate", "actions", "settings", "ask"];
 
 /** Render the global navigation/search trigger and its command palette. */
 export function GlobalSearch() {
@@ -61,7 +69,9 @@ export function GlobalSearch() {
   // Built from the same registries the sidebar and Settings rail render from,
   // so new pages and settings tabs become searchable without touching this file.
   const items = React.useMemo<SearchItem[]>(() => {
-    const pages: SearchItem[] = APP_PAGES.map((page) => ({
+    const pages: SearchItem[] = APP_PAGES.filter(
+      (page) => !(isLocalMode() && page.id === "download"),
+    ).map((page) => ({
       id: `page-${page.id}`,
       group: page.group,
       label: appPageLabel(page),
@@ -129,11 +139,28 @@ export function GlobalSearch() {
   }, [agentPanel, isAdmin, openTo, router, locale, linkState]);
 
   const filteredItems = React.useMemo(() => {
-    if (!query.trim()) return items.filter((item) => item.group !== "settings");
-    return items.filter((item) =>
+    const trimmed = query.trim();
+    if (!trimmed) return items.filter((item) => item.group !== "settings");
+    const matches = items.filter((item) =>
       matchesQuery([item.label, item.description, ...item.keywords], query),
     );
-  }, [items, query]);
+    if (!agentPanel) return matches;
+    // Last row, so it is the default only when no page, action or setting matches.
+    const ask: SearchItem = {
+      id: "ask-agent",
+      group: "ask",
+      // Isolate the query so a Hebrew question keeps its order inside English copy.
+      label: formatMsg("app.shell.search.ask_agent", { query: `\u2068${trimmed}\u2069` }),
+      description: msg("app.shell.search.ask_agent_hint"),
+      keywords: [],
+      icon: Sparkle,
+      run: () => {
+        agentPanel.setOpen(true);
+        queueAgentPrompt(trimmed);
+      },
+    };
+    return [...matches, ask];
+  }, [agentPanel, items, query]);
 
   React.useEffect(() => {
     setActiveIndex(0);
@@ -186,6 +213,7 @@ export function GlobalSearch() {
     navigate: msg("app.shell.search.navigate"),
     actions: msg("app.shell.search.actions"),
     settings: msg("app.shell.search.settings"),
+    ask: "",
   };
 
   return (
@@ -270,10 +298,20 @@ export function GlobalSearch() {
                 const groupItems = filteredItems.filter((item) => item.group === group);
                 if (groupItems.length === 0) return null;
                 return (
-                  <section key={group} className="pb-2 last:pb-0">
-                    <p className="px-2 pb-1.5 pt-2 text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground/65">
-                      {groupLabels[group]}
-                    </p>
+                  <section
+                    key={group}
+                    className={cn(
+                      "pb-2 last:pb-0",
+                      group === "ask" &&
+                        filteredItems.length > 1 &&
+                        "mt-1 border-t border-border/60 pt-2",
+                    )}
+                  >
+                    {group !== "ask" && (
+                      <p className="px-2 pb-1.5 pt-2 text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground/65">
+                        {groupLabels[group]}
+                      </p>
+                    )}
                     <div className="space-y-0.5">
                       {groupItems.map((item) => {
                         const index = filteredItems.indexOf(item);
@@ -306,7 +344,7 @@ export function GlobalSearch() {
                               <Icon className="size-[1.05rem]" aria-hidden="true" />
                             </span>
                             <span className="min-w-0 flex-1">
-                              <span className="block truncate text-sm font-medium">
+                              <span dir="auto" className="block truncate text-start text-sm font-medium">
                                 {item.label}
                               </span>
                               {item.description && (
@@ -317,8 +355,14 @@ export function GlobalSearch() {
                             </span>
                             {selected && (
                               <span className="hidden shrink-0 items-center gap-1.5 text-xs font-medium text-muted-foreground sm:flex">
-                                {msg("app.shell.search.open")}
-                                <ArrowUpRight className="size-3.5" aria-hidden="true" />
+                                {item.group === "ask"
+                                  ? msg("app.shell.search.ask")
+                                  : msg("app.shell.search.open")}
+                                {item.group === "ask" ? (
+                                  <PaperPlaneTilt className="size-3.5 rtl:-scale-x-100" aria-hidden="true" />
+                                ) : (
+                                  <ArrowUpRight className="size-3.5" aria-hidden="true" />
+                                )}
                               </span>
                             )}
                           </button>

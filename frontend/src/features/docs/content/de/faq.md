@@ -4,16 +4,16 @@ Diese Seite beantwortet häufige Fragen zu Skynet. Jede Antwort verweist auf die
 
 ### Was ist Skynet?
 
-Skynet ist eine Plattform, die Prompts, Programme, Agenten und Workflows anhand Ihrer eigenen Daten und Metrik optimiert. Sie laden einen Datensatz hoch, beschreiben die Aufgabe und starten einen Durchlauf. Der Durchlauf probiert neue Versionen aus und bewertet sie auf zurückgehaltenen Daten. Lesen Sie zum Einstieg den [Schnellstart](/docs/quickstart).
+Skynet ist eine Plattform, die DSPy-Programme und Repositorys anhand Ihrer eigenen Daten und Metrik optimiert. Sie laden einen Datensatz hoch, beschreiben die Aufgabe und starten einen Durchlauf. Der Durchlauf probiert neue Versionen aus und bewertet sie auf zurückgehaltenen Daten. Lesen Sie zum Einstieg den [Schnellstart](/docs/quickstart).
 
 ### Was kann Skynet optimieren?
 
-Skynet ist Optimize Anything. Es optimiert Prompts, Code, Text und DSPy-Programme in einem Produkt. Die Artefaktart entscheidet, welche Engines damit arbeiten können:
+Skynet ist Optimize Anything. Es optimiert DSPy-Programme und Repositorys in einem Produkt. Die Artefaktart entscheidet, welche Engines damit arbeiten können:
 
-- Prompt-, Code- und Text-Artefakte verwenden die nativen Engines: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler und ShinkaEvolve.
+- Repositorys nutzen die nativen Engines: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler und ShinkaEvolve.
 - DSPy-Programme verwenden die DSPy-Optimierer: DSPy GEPA, DSPy MIPROv2 und DSPy BootstrapFewShot.
 
-**Auto** kombiniert die Engines, die zu Ihrer Aufgabe passen. Siehe [So funktioniert die Optimierung](/docs/concepts/optimization) und [Engines](/docs/concepts/engines).
+Bei einem DSPy-Programm verwendet **Auto** DSPy GEPA. Bei einem Repository wählen Sie eine native Engine. Lesen Sie [So funktioniert die Optimierung](/docs/concepts/optimization) und [Engines](/docs/concepts/engines).
 
 ### Welche Sprachen unterstützt die Oberfläche?
 
@@ -42,17 +42,17 @@ Setzen Sie beim Einreichen eines Durchlaufs **Sichtbarkeit** auf **Privat**, dam
 
 ### Trainieren Modellanbieter mit meinen Prompts?
 
-Standardmäßig nicht. Die Standardoption für **Datenschutz bei Modellen** ist **Kein Training**. Sie sendet Prompts nur an Anbieter, die nicht damit trainieren und sie nicht speichern. Diese Einstellung gilt für Aufrufe, die Skynet über Ihr Guthaben abrechnet. Aufrufe mit Ihrem eigenen Schlüssel folgen den Datenschutzeinstellungen Ihres OpenRouter-Kontos. Siehe [Sicherheit](/docs/security).
+Standardmäßig nicht. Die Standardoption für **Datenschutz bei Modellen** ist **Kein Training**. Sie sendet Prompts nur an Anbieter, die nicht damit trainieren und sie nicht speichern. Diese Einstellung gilt für Aufrufe, die Skynet über Ihr Guthaben abrechnet. BYOK-Aufrufe über OpenRouter folgen den Datenschutzeinstellungen Ihres OpenRouter-Kontos. BYOK-Aufrufe direkt bei einem Anbieter folgen dessen Datenrichtlinie. Siehe [Sicherheit](/docs/security).
 
 ## Abrechnung
 
 ### Wie rechnet Skynet Durchläufe ab?
 
-Skynet verwendet ein Prepaid-Guthaben. Die Nutzung gehosteter Modelle, Skynet-Gebühren und die Sandbox-Nutzung werden gemessen. Bevor kostenpflichtige Arbeit beginnt, reserviert Skynet Spielraum in Ihrem Wallet und im Budget des Durchlaufs. Siehe [Budgets und Abrechnung](/docs/concepts/billing).
+Skynet verwendet ein Prepaid-Guthaben. Die Nutzung verwalteter Modelle und deren Aufschlag sowie die Sandbox-Nutzung werden gemessen. Beim Aufladen fällt eine Gebühr an. Bevor kostenpflichtige Arbeit beginnt, reserviert Skynet Spielraum in Ihrem Wallet und im Budget des Durchlaufs. Siehe [Budgets und Abrechnung](/docs/concepts/billing).
 
 ### Kann ich meinen eigenen Schlüssel eines Modellanbieters verwenden?
 
-Ja. Mit Ihrem eigenen Schlüssel (BYOK) belastet der Anbieter Ihren Schlüssel direkt für Modellaufrufe. Ihr Skynet-Guthaben bezahlt weiterhin die Plattformgebühr und die Sandbox-Nutzung. Skynet verschlüsselt Ihren Schlüssel und zeigt ihn nie wieder an. Siehe [Budgets und Abrechnung](/docs/concepts/billing) und [Sicherheit](/docs/security).
+Ja. Bei Nutzung eines eigenen Schlüssels (BYOK) gilt: Ihr Anbieter rechnet Modell-Tokens über Ihren Schlüssel ab. Skynet erhebt keine Modellgebühr. Das Laufbudget deckt nur die Nutzung der Sandbox ab. Skynet verschlüsselt Ihren Schlüssel und zeigt ihn nie wieder an. Siehe [Budgets und Abrechnung](/docs/concepts/billing) und [Sicherheit](/docs/security).
 
 ### Kann ich Skynet nutzen, ohne für Modellaufrufe zu bezahlen?
 

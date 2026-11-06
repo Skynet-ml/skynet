@@ -12,7 +12,9 @@ import type {
   SplitFractions,
 } from "@/shared/types/api";
 
-export type ArtifactKind = "prompt" | "code" | "dspy_program" | "text";
+export type ArtifactKind = "dspy_program";
+/** What the optimizer catalog is keyed on: a unified run's artifact, or a repository run. */
+export type OptimizerTarget = ArtifactKind | "repo";
 export type DataMode = "single" | "pairs";
 export type OptimizerChoice =
   | "auto"
@@ -43,19 +45,23 @@ const FEEDBACK_OPTIMIZERS: ReadonlySet<string> = new Set(["dspy_gepa", "gepa", "
 export const MIN_PAIRS_FOR_HELD_OUT = 5;
 export const CONTRACT_SAMPLE_MAX = 5;
 
-/** Optimizer choices that fit an artifact kind and data mode, `"auto"` first. */
-export function optimizersFor(kind: ArtifactKind, mode: DataMode): OptimizerChoice[] {
-  if (kind === "dspy_program") {
+/**
+ * Optimizer choices that fit a target and data mode. A DSPy program lists
+ * `"auto"` first; a repository run lists only the black-box engines, as Auto
+ * has no repository strategy.
+ */
+export function optimizersFor(target: OptimizerTarget, mode: DataMode): OptimizerChoice[] {
+  if (target === "dspy_program") {
     return mode === "pairs"
       ? ["auto", "dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"]
       : ["auto", "dspy_gepa"];
   }
-  return ["auto", ...BLACKBOX_OPTIMIZERS];
+  return [...BLACKBOX_OPTIMIZERS];
 }
 
 /** The optimizer that actually runs: Auto is DSPy GEPA on a DSPy program, else the black-box Auto strategy. */
-export function resolveOptimizer(choice: OptimizerChoice, kind: ArtifactKind): string {
-  if (choice === "auto") return kind === "dspy_program" ? "dspy_gepa" : "auto";
+export function resolveOptimizer(choice: OptimizerChoice, target: OptimizerTarget): string {
+  if (choice === "auto") return target === "dspy_program" ? "dspy_gepa" : "auto";
   return choice;
 }
 
@@ -66,8 +72,8 @@ export function optimizerFamily(resolved: string): OptimizerFamily {
 }
 
 /** Whether the resolved optimizer reads the metric's feedback text. */
-export function usesFeedback(choice: OptimizerChoice, kind: ArtifactKind): boolean {
-  return FEEDBACK_OPTIMIZERS.has(resolveOptimizer(choice, kind));
+export function usesFeedback(choice: OptimizerChoice, target: OptimizerTarget): boolean {
+  return FEEDBACK_OPTIMIZERS.has(resolveOptimizer(choice, target));
 }
 
 export interface UnifiedCase {
@@ -107,8 +113,8 @@ export interface UnifiedOptimizer {
 export interface UnifiedModels {
   task_model?: ModelConfig | null;
   reflection_model: ModelConfig;
-  extra_reflection_models?: ModelConfig[];
   metric_model?: ModelConfig | null;
+  extra_reflection_models?: ModelConfig[];
 }
 
 export interface UnifiedWorkspace {
@@ -169,9 +175,9 @@ export interface OptimizerOption {
 }
 
 export interface OptimizerCatalogResponse {
-  artifact_kind: ArtifactKind;
+  artifact_kind: OptimizerTarget;
   data_mode: DataMode;
-  /** The run code's entry point; the same for every artifact kind and optimizer. */
+  /** The run code's entry point; the same for every optimizer. */
   run_entry: string;
   /** The metric's exact signature, as the coding agent is told; the same for every optimizer. */
   metric_signature: string;
@@ -285,87 +291,7 @@ export interface WorkspaceFileLint {
   warnings: string[];
 }
 
-/** One file's verdict from the coding agent's `verify_code` check. */
-export interface FileVerification {
-  path: string;
-  ok: boolean;
-  errors: string[];
-  warnings: string[];
-}
-
 export interface UnifiedChatTurn {
   role: "user" | "assistant";
   content: string;
-}
-
-export interface InterviewOption {
-  label: string;
-  description?: string;
-}
-
-export interface TaskInterviewRequest {
-  turns?: UnifiedChatTurn[];
-  objective?: string;
-  background?: string;
-  artifact_kind?: ArtifactKind | null;
-  starting_version?: UnifiedCandidate | null;
-  sample_cases?: Array<Record<string, unknown>>;
-  locale?: string | null;
-  model?: string | null;
-  reasoning_effort?: string | null;
-  /** Runs a local CLI model in its fast mode; the backend ignores it elsewhere. */
-  fast_mode?: boolean;
-}
-
-export interface TaskInterviewTurnResult {
-  message: string;
-  options: InterviewOption[];
-  done: boolean;
-  objective: string;
-  background: string;
-  artifact_kind?: ArtifactKind | null;
-  starting_version?: UnifiedCandidate | null;
-  artifact_rationale: string;
-  model?: string | null;
-  served_model?: string | null;
-}
-
-export interface InputsInferenceRequest {
-  objective: string;
-  background?: string;
-  artifact_kind: ArtifactKind;
-  starting_version?: UnifiedCandidate | null;
-  columns?: string[];
-  sample_rows?: Array<Record<string, unknown>>;
-  row_count?: number;
-  user_note?: string;
-  locale?: string | null;
-  model?: string | null;
-}
-
-export interface InputsInferenceResponse {
-  mode: DataMode;
-  input_fields: string[];
-  expected_field?: string | null;
-  single_input?: Record<string, unknown> | null;
-  rationale: string;
-  suggested_split: SplitFractions;
-  held_out_count: number;
-  warnings: string[];
-  model?: string | null;
-}
-
-export interface UnifiedAuthoringContext {
-  task: UnifiedTask;
-  data_mode: DataMode;
-  input_fields?: string[];
-  expected_field?: string | null;
-  sample_cases?: Array<Record<string, unknown>>;
-  optimizer: OptimizerChoice;
-  metric_has_model?: boolean;
-  focus?: "run" | "metric";
-  /** "repo" for a repository run: no run code, the agent writes only the repository scorer. */
-  target?: "artifact" | "repo";
-  /** A repository run's file paths, which the agent may open read-only. */
-  repo_files?: string[];
 }

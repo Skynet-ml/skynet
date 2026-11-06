@@ -1,4 +1,4 @@
-Diese Seite zeigt, wie Sie Ihren ersten Durchlauf in etwa zehn Minuten starten. Sie melden sich an, laden einen kleinen Datensatz hoch, füllen die vier Schritte des Assistenten aus und starten den Durchlauf. Das Beispiel verbessert einen Prompt, der Support-Nachrichten Labels zuordnet.
+Diese Seite zeigt, wie Sie Ihren ersten Durchlauf in etwa zehn Minuten starten. Sie melden sich an, laden einen kleinen Datensatz hoch, füllen die vier Schritte des Assistenten aus und starten den Durchlauf. Das Beispiel verbessert ein DSPy-Programm, das Support-Nachrichten Labels zuordnet.
 
 ## Bevor Sie beginnen
 
@@ -25,8 +25,8 @@ Der erste Schritt ist **Aufgabe**. Er fragt: „Was möchten Sie optimieren?“
 
 1. Beschreiben Sie unter **Ziel**, was ein gutes Ergebnis ist. Verwenden Sie einfache Worte, zum Beispiel „Ordne jede Support-Nachricht billing, bug oder other zu.“
 2. Optional: Fügen Sie unter **Hintergrund** Kontext hinzu, der dem Optimierer hilft.
-3. Wählen Sie unter **Artefakttyp** die Option **Prompt**.
-4. Fügen Sie unter **Ausgangsversion** Ihren aktuellen Prompt ein.
+3. Wählen Sie unter **Was optimiert wird** die Option **DSPy-Programm**.
+4. Fügen Sie unter **Ausgangsversion** die aktuelle Anweisung Ihres Programms ein.
 
 ## 3. Eingaben
 
@@ -47,7 +47,7 @@ Der dritte Schritt ist **Optimierer** („Optimierer, Modelle und Budget“).
 
 - Belassen Sie den Optimierer auf **Auto**.
 - Wählen Sie ein **Reflexionsmodell**. Der Optimierer schreibt damit neue Versionen. Dieses Modell ist erforderlich.
-- Optional: Wählen Sie ein **Aufgabenmodell**. Ihr Ausführungscode verwendet es.
+- Wählen Sie ein **Aufgabenmodell**. Ihr Programm verwendet es. Ein DSPy-Programm braucht eines.
 - Belassen Sie unter **Budget** den Wert **Max. Bewertungsläufe** auf dem Standardwert 200.
 
 Unter [Engines](/docs/concepts/engines) erfahren Sie, wie Sie eine bestimmte Engine wählen.
@@ -57,11 +57,13 @@ Unter [Engines](/docs/concepts/engines) erfahren Sie, wie Sie eine bestimmte Eng
 Der letzte Schritt ist **Metrik & Ausführung** („Code und Metrik“). Sie schreiben zwei Dateien.
 
 ```python tab="run.py"
-from skynet import llm
+import dspy
+
+program = dspy.Predict("message -> label")
 
 
 def run(artifact, input):
-    return llm(artifact, input=input["message"])
+    return program(message=input["message"]).label
 ```
 
 ```python tab="metric.py"
@@ -73,7 +75,7 @@ def score(input, output, expected=None):
     return 0.0, {"feedback": f"Expected '{want}', got '{got}'."}
 ```
 
-`artifact` ist die aktuelle Version Ihres Prompts. `input` enthält die Eingabespalten eines Falls. `expected` enthält die Ausgabespalte, mit ihrem Spaltennamen als Schlüssel.
+`artifact` ist die aktuelle Anweisung, die der Optimierer vorschlägt. Skynet wendet sie auf `program` an. `input` enthält die Eingabespalten eines Falls. `expected` enthält die Ausgabespalte, mit ihrem Spaltennamen als Schlüssel.
 
 Wählen Sie dann unter **Vertragsprüfung** die Schaltfläche **Prüfen**. Die Prüfung führt Ihren Code und Ihre Metrik in der Sandbox auf 3 Beispielfällen aus. Sie prüft:
 

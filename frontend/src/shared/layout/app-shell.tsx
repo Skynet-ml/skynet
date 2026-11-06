@@ -52,6 +52,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const isPhone = useIsPhone();
   const { status } = useSession();
 
+  if (pathname === "/download") {
+    return (
+      <div className="min-h-dvh" dir={dir}>
+        {children}
+      </div>
+    );
+  }
+
   // Shared-optimization pages render bare — no sidebar, agent panel, or other
   // app chrome — to keep the focus on the shared item. The recipient is still
   // authenticated (the route is login-gated like the rest of the app). A chat

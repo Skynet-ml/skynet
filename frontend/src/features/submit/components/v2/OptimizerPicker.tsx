@@ -5,7 +5,8 @@ import { useRef, type KeyboardEvent } from "react";
 import { Warning } from "@/shared/ui/icons";
 import { Label } from "@/shared/ui/primitives/label";
 import { msg } from "@/shared/lib/messages";
-import type { ArtifactKind, DataMode, OptimizerChoice } from "@/shared/types/unified-run";
+import type { OptimizerTarget, DataMode, OptimizerChoice } from "@/shared/types/unified-run";
+import { OPTIMIZER_NAMES } from "@/shared/lib/optimizer-names";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
@@ -20,32 +21,15 @@ import { StepCard } from "../blackbox/shared";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { OptimizerSourceLinks } from "./OptimizerSourceLinks";
 
-// Product names stay untranslated in every locale; Auto is the one generic word.
-const OPTIMIZER_NAMES: Record<Exclude<OptimizerChoice, "auto">, string> = {
-  dspy_gepa: "DSPy GEPA",
-  dspy_miprov2: "MIPROv2",
-  dspy_bootstrap_fewshot: "BootstrapFewShot",
-  gepa: "GEPA",
-  best_of_n: "Best-of-N",
-  autoresearch: "AutoResearch",
-  meta_harness: "Meta-Harness",
-  autosaddler: "AutoSaddler",
-  shinka_evolve: "ShinkaEvolve",
-};
-
 /** The display name of an optimizer choice in the active locale. */
 export function optimizerLabel(choice: OptimizerChoice, guided: boolean): string {
   return choice === "auto" ? v2Msg("submit.v2.optimizer.option.auto.label", guided) : OPTIMIZER_NAMES[choice];
 }
 
-function optimizerDescription(view: OptimizerOptionView, kind: ArtifactKind, guided: boolean): string {
+// Only a DSPy program offers Auto; a repository run lists the engines alone.
+function optimizerDescription(view: OptimizerOptionView, guided: boolean): string {
   if (view.id !== "auto") return v2Msg(`submit.v2.optimizer.option.${view.id}.desc`, guided);
-  return v2Msg(
-    kind === "dspy_program"
-      ? "submit.v2.optimizer.option.auto.desc_dspy"
-      : "submit.v2.optimizer.option.auto.desc_blackbox",
-    guided,
-  );
+  return v2Msg("submit.v2.optimizer.option.auto.desc_dspy", guided);
 }
 
 /**
@@ -59,16 +43,15 @@ export function OptimizerPicker({
   mode,
   plain = false,
 }: {
-  kind: ArtifactKind;
+  kind: OptimizerTarget;
   mode: DataMode;
   plain?: boolean;
 }) {
   const { state, patchOptimizer, optimizerCatalog, optimizerCatalogLoading, guided } = useWizardV2();
   const t = (key: string, params?: Record<string, string>) => v2Msg(key, guided, params);
   const choice = state.optimizer.choice;
-  const repo = Boolean(state.task.repo);
-  const options = optimizerOptions({ kind, mode, catalog: optimizerCatalog, guided, choice, repo });
-  const issue = optimizerChoiceIssue({ kind, mode, catalog: optimizerCatalog, choice, repo });
+  const options = optimizerOptions({ kind, mode, catalog: optimizerCatalog, guided, choice });
+  const issue = optimizerChoiceIssue({ kind, mode, catalog: optimizerCatalog, choice });
   const selectedIndex = options.findIndex((option) => option.id === choice);
   const catalog =
     optimizerCatalog?.artifact_kind === kind && optimizerCatalog.data_mode === mode
@@ -151,7 +134,7 @@ export function OptimizerPicker({
                     engine={{
                       id: option.id,
                       label,
-                      description: optimizerDescription(option, kind, guided || plain),
+                      description: optimizerDescription(option, guided || plain),
                       available: option.available,
                       unavailable_reason: option.unavailableReason,
                     }}

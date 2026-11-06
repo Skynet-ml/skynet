@@ -9,7 +9,7 @@ import type { ActivityKind } from "@/shared/lib/activity-summary";
 
 import { RevealText } from "./reveal-text";
 import { ThinkingSection } from "./thinking-section";
-import { TurnActivity, type TurnThinking } from "./turn-activity";
+import { TurnActivity, type EarlierTurn, type TurnThinking } from "./turn-activity";
 import { turnStart, visibleThinking } from "./turn-timing";
 import type { AgentMessage, AgentThinking, AgentToolCall } from "./types";
 
@@ -24,6 +24,12 @@ const MessageMarkdown = dynamic(
 
 interface AgentBubbleProps {
   msg: AgentMessage;
+  /**
+   * Earlier replies of the same work block, oldest first. With a turn
+   * history they fold into it under one header, and ``msg`` is the reply
+   * that stays shown.
+   */
+  earlier?: readonly AgentMessage[];
   thinking?: AgentThinking;
   /** This turn is still running; defaults to the live thinking's flag. */
   streaming?: boolean;
@@ -33,6 +39,11 @@ interface AgentBubbleProps {
    * history; every other call keeps its rich card there.
    */
   isStepCall?: (call: AgentToolCall) => boolean;
+  /**
+   * Cards that stay shown when the turn's history folds, such as one the
+   * user must answer. Without it, every card stays shown.
+   */
+  isPinnedCall?: (call: AgentToolCall) => boolean;
   /** What kind of step a call is, for the summary line over the turn's steps. */
   stepKind?: (call: AgentToolCall) => ActivityKind;
   onRunCode?: (code: string, language: string) => void;
@@ -47,12 +58,40 @@ interface AgentBubbleProps {
   className?: string;
 }
 
+type VisibleCall = { call: AgentToolCall; isRetry: boolean; index: number };
+
+/** A turn's calls minus failures a later retry replaced, each flagged if it is a retry. */
+function visibleCalls(calls: readonly AgentToolCall[] | undefined): VisibleCall[] {
+  if (!calls?.length) return [];
+  const result: VisibleCall[] = [];
+  for (let i = 0; i < calls.length; i++) {
+    const call = calls[i];
+    if (!call) continue;
+    if (call.status === "error") {
+      const superseded = calls
+        .slice(i + 1)
+        .some(
+          (later) =>
+            later.tool === call.tool && (later.status === "done" || later.status === "running"),
+        );
+      if (superseded) continue;
+    }
+    const isRetry = calls
+      .slice(0, i)
+      .some((prior) => prior.tool === call.tool && prior.status === "error");
+    result.push({ call, isRetry, index: i });
+  }
+  return result;
+}
+
 export function AgentBubble({
   msg,
+  earlier,
   thinking: liveThinking,
   streaming,
   renderToolCall,
   isStepCall,
+  isPinnedCall,
   stepKind,
   onRunCode,
   allowLink,
@@ -61,31 +100,7 @@ export function AgentBubble({
   className,
 }: AgentBubbleProps) {
   const reduce = useReducedMotion();
-  const visibleToolCalls = React.useMemo<
-    Array<{ call: AgentToolCall; isRetry: boolean; index: number }>
-  >(() => {
-    const calls = msg.toolCalls;
-    if (!calls?.length) return [];
-    const result: Array<{ call: AgentToolCall; isRetry: boolean; index: number }> = [];
-    for (let i = 0; i < calls.length; i++) {
-      const call = calls[i];
-      if (!call) continue;
-      if (call.status === "error") {
-        const superseded = calls
-          .slice(i + 1)
-          .some(
-            (later) =>
-              later.tool === call.tool && (later.status === "done" || later.status === "running"),
-          );
-        if (superseded) continue;
-      }
-      const isRetry = calls
-        .slice(0, i)
-        .some((prior) => prior.tool === call.tool && prior.status === "error");
-      result.push({ call, isRetry, index: i });
-    }
-    return result;
-  }, [msg.toolCalls]);
+  const visibleToolCalls = React.useMemo(() => visibleCalls(msg.toolCalls), [msg.toolCalls]);
 
   const turnStreaming = streaming ?? Boolean(liveThinking?.streaming);
   // Segments saved on the message win: they stream live and outlast the
@@ -118,25 +133,41 @@ export function AgentBubble({
   const hasActivity = hasThinking || (withHistory ? visibleToolCalls.length > 0 : stepCalls.length > 0);
 
   const plan = msg.plan?.trim();
-  const answer = hasText && (
+  const renderAnswer = (content: string) => (
     <div className="text-sm leading-relaxed text-foreground">
-      <React.Suspense fallback={<span className="whitespace-pre-wrap">{msg.content}</span>}>
-        <MessageMarkdown content={msg.content} onRunCode={onRunCode} allowLink={allowLink} />
+      <React.Suspense fallback={<span className="whitespace-pre-wrap">{content}</span>}>
+        <MessageMarkdown content={content} onRunCode={onRunCode} allowLink={allowLink} />
       </React.Suspense>
     </div>
   );
+  const answer = hasText && renderAnswer(msg.content);
 
   // With a turn history, the plan and every call (cards too) sit in it in
   // the order they ran, and the answer comes last, as in Codex. ReActV2
   // takes back prose written before a tool (message_reset), so the
   // message's text is the turn's final answer.
   if (withHistory && renderToolCall) {
-    if (!turnStreaming && !hasText && !hasActivity && !plan) return null;
+    const earlierTurns: EarlierTurn[] = (earlier ?? []).map((m) => ({
+      thinking: (m.thinkingSegments ?? []).map((s) => ({ ...s, streaming: false })),
+      steps: visibleCalls(m.toolCalls).map((v) => ({
+        ...v,
+        card: !isStepCall?.(v.call),
+        pinned: isPinnedCall?.(v.call),
+      })),
+      plan: m.plan?.trim() || undefined,
+      answer: m.content.trim() ? renderAnswer(m.content) : null,
+      durationMs: m.stats?.durationMs,
+    }));
+    if (!turnStreaming && !hasText && !hasActivity && !plan && !earlierTurns.length) return null;
     return (
       <div className={cn("flex w-full min-w-0 flex-col gap-3", className)}>
         <TurnActivity
           thinking={allThinking}
-          steps={visibleToolCalls.map((v) => ({ ...v, card: !isStepCall?.(v.call) }))}
+          steps={visibleToolCalls.map((v) => ({
+            ...v,
+            card: !isStepCall?.(v.call),
+            pinned: isPinnedCall?.(v.call),
+          }))}
           streaming={turnStreaming}
           answering={hasText}
           plan={plan}
@@ -144,6 +175,7 @@ export function AgentBubble({
           stepKind={stepKind}
           durationMs={msg.stats?.durationMs}
           startedAt={turnStart(allThinking, [])}
+          earlier={earlierTurns}
         />
         {answer}
         {afterContent}

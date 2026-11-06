@@ -208,14 +208,14 @@ def _payload(*, total: int = 20) -> dict[str, Any]:
         "username": "spoofed-owner",
         "task": {
             "objective": "Answer the question in one word.",
-            "artifact": {"kind": "prompt", "starting_version": "Answer briefly: "},
+            "artifact": {"kind": "dspy_program", "starting_version": "Answer briefly: "},
         },
         "data": {
             "mode": "pairs",
             "cases": [{"input": {"question": f"Q{index}?"}, "expected": "A"} for index in range(10)],
             "input_fields": ["question"],
         },
-        "optimizer": {"choice": "gepa"},
+        "optimizer": {"choice": "dspy_gepa"},
         "models": {"reflection_model": {"name": "fixture/text"}, "task_model": {"name": "fixture/task"}},
         "workspace": {
             "run_code": "def run(artifact, input):\n    return artifact + input['question']\n",
@@ -261,6 +261,62 @@ def _prepare(harness: _Harness) -> tuple[dict, dict]:
         "preflight_id": checked["id"],
         "preflight_fingerprint": checked["fingerprint"],
     }, checked
+
+
+def test_anything_evaluation_protects_the_declared_scorer_model(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resolve the scorer before protecting an anything evaluation."""
+    seen: list[dict[str, Any]] = []
+    protect = _Gateway.protect_payload
+
+    def capture(gateway: _Gateway, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        """Capture the payload at the protected boundary."""
+        seen.append(payload)
+        return protect(gateway, payload, **kwargs)
+
+    monkeypatch.setattr(_Gateway, "protect_payload", capture)
+    budget = harness.budgets.create(harness.username, 20, idempotency_key="anything-evaluation")
+    payload = {
+        "reflection_model_config": {"name": "openai/reflection"},
+        "scorer": {"kind": "python", "metric_code": "llm(model='openai/judge')"},
+    }
+    response = harness.client.post(
+        "/wizard/preflight",
+        json={
+            "scope": "evaluation",
+            "workflow": "anything",
+            "payload": payload,
+            "execution_budget_id": budget.id,
+            "execution_budget_revision": budget.revision,
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "succeeded"
+    assert seen[0]["scorer"]["model"]["name"] == "openai/judge"
+    assert "model" not in payload["scorer"]
+
+
+def test_anything_evaluation_invalid_model_fails_setup(harness: _Harness) -> None:
+    """Return a setup failure for an unsafe metric declaration."""
+    budget = harness.budgets.create(harness.username, 20, idempotency_key="invalid-anything")
+    response = harness.client.post(
+        "/wizard/preflight",
+        json={
+            "scope": "evaluation",
+            "workflow": "anything",
+            "payload": {
+                "reflection_model_config": {"name": "openai/reflection"},
+                "scorer": {"kind": "python", "metric_code": "llm(model=choice)"},
+            },
+            "execution_budget_id": budget.id,
+            "execution_budget_revision": budget.revision,
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "failed"
+    assert response.json()["checks"][0]["key"] == "setup"
+    assert not harness.calls
 
 
 def test_legacy_submission_attaches_paid_setup_once(harness: _Harness) -> None:
@@ -886,15 +942,21 @@ def test_local_check_accepts_subscription_task_and_reflection_models(
     }
 
 
-def test_unusable_model_credentials_fail_the_check_instead_of_leaving_it_running(harness: _Harness) -> None:
+def test_unusable_model_credentials_fail_the_check_instead_of_leaving_it_running(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Record a failed check, not a row stuck at running, when a role has no usable credentials.
 
     Args:
         harness: Real setup and wallet services.
+        monkeypatch: Simulate a connection disappearing after admission.
     """
+    view = SimpleNamespace(provider="openai", api_base=None, status="verified")
+    vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
+    monkeypatch.setattr(submissions, "ProviderKeyVault", lambda **kwargs: vault)
     models = {
         "reflection_model": {"name": "fixture/text"},
-        "task_model": {"name": "bare-model", "token_source": "byok"},
+        "task_model": {"name": "gpt-4o", "token_source": "byok", "byok_provider": "openai"},
     }
 
     response, status = _check_models(harness, models)
@@ -903,7 +965,7 @@ def test_unusable_model_credentials_fail_the_check_instead_of_leaving_it_running
     body = response.json()
     assert body["status"] == "failed"
     assert status == "failed"
-    assert any("saved provider connection" in (check.get("message") or "") for check in body["checks"]), body
+    assert any("No verified openai connection" in (check.get("message") or "") for check in body["checks"]), body
     assert harness.calls == []
 
 

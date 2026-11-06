@@ -390,12 +390,13 @@ def test_estimate_prices_on_chosen_model() -> None:
     assert fallback["model"] == assist_model_name()
 
 
-def test_estimate_applies_byok_platform_fee() -> None:
-    """A BYOK estimate charges only the platform-fee share of the same usage."""
+def test_estimate_byok_model_is_free() -> None:
+    """A BYOK model estimate is zero and below the managed estimate."""
     rows = [{"id": i, "text": "x" * 4000} for i in range(100)]
     managed = estimate_cents_for_rows("instructions", rows, model="openai/gpt-test", token_source="managed")
     byok = estimate_cents_for_rows("instructions", rows, model="openai/gpt-test", token_source="byok")
-    assert 0 < byok["cents_low"] < managed["cents_low"]
+    assert byok["cents_low"] == 0 < managed["cents_low"]
+    assert byok["cents_high"] == 0 < managed["cents_high"]
 
 
 def test_effective_task_config_lifts_chosen_model() -> None:

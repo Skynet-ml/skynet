@@ -27,11 +27,11 @@ from typing import Any, Literal
 import dspy
 
 from ....billing.budgets import BudgetError
+from ....billing.byok_upstreams import validate_byok_novelty
 from ....billing.model_gateway import EMBEDDING_ROUTE_KEY, ROUTE_KEY, SHINKA_EMBEDDING_MODEL
 from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.pricing import (
     CENT_USD_VALUE,
-    PLATFORM_FEE_FRACTION,
     ModelUsage,
     cents_for_usage,
     combine_usages,
@@ -116,6 +116,10 @@ _REPO_ENGINE_REASON = "Auto mode does not optimize a repository; pick one engine
 # Progress events per run are capped near this many so a 100k-run budget
 # does not flood the job log.
 _PROGRESS_EVENTS = 100
+
+# No choice, or one of the catalog's ``ReasoningEffort`` levels (core/api/model_catalog.py). Pi and Prime Agent put
+# the effort into a shell command line, so a free-form value must never reach them.
+_NATIVE_EFFORTS = (None, "none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
 def _proposer_runtime() -> Literal["vercel", "docker"]:
@@ -244,6 +248,8 @@ class JobSpec:
     context: dict[str, Any] = field(default_factory=dict)
     # Further metered models (the DSPy task model) whose usage the run bills.
     extra_lms: list[Any] = field(default_factory=list)
+    extra_lm_sources: list[str | None] = field(default_factory=list)
+    scorer_token_source: str | None = None
 
 
 def job_spec_from_payload(payload: BlackboxRunRequest) -> JobSpec:
@@ -263,6 +269,7 @@ def job_spec_from_payload(payload: BlackboxRunRequest) -> JobSpec:
         budget=payload.budget,
         strategy=payload.strategy,
         reflection_model_settings=payload.reflection_model_settings,
+        scorer_token_source=payload.scorer.model.token_source if payload.scorer.model else None,
         target=payload.target,
         proposer=payload.proposer,
         proposer_runtime=payload.proposer_runtime,
@@ -341,35 +348,46 @@ def _shinka_embedding(payload: BlackboxRunRequest | JobSpec, gateway: GatewayCon
     return {"model": SHINKA_EMBEDDING_MODEL, "url": gateway.url, "token": gateway.api_key}
 
 
-def validate_blackbox_payload(payload: BlackboxRunRequest, *, verify_scorer: bool = True) -> None:
+def validate_blackbox_payload(
+    payload: BlackboxRunRequest, *, verify_scorer: bool = True, api_bases: dict[str, str | None] | None = None
+) -> None:
     """Reject a job before it is queued when it can never run.
 
     Args:
         payload: The submitted job.
         verify_scorer: Run legacy scorer loading; protected callers verify
             executable code inside the managed runtime.
+        api_bases: Available saved provider endpoints.
 
     Raises:
         ServiceError: When the job has an agent target but this deployment
             cannot run agents, the chosen engine is unknown/unavailable, or
             the python scorer code does not load.
     """
-    validate_job(payload)
+    validate_job(payload, api_bases=api_bases)
     if verify_scorer and payload.scorer.kind == "python":
         validate_scorer_code(str(payload.scorer.metric_code))
 
 
-def validate_job(payload: BlackboxRunRequest | JobSpec) -> None:
+def validate_job(payload: BlackboxRunRequest | JobSpec, *, api_bases: dict[str, str | None] | None = None) -> None:
     """Check that a job's engines can run here and its native proposer settings are usable.
 
     Args:
         payload: A legacy request or a unified run's job spec.
+        api_bases: Available saved provider endpoints.
 
     Raises:
         ServiceError: When the target cannot run here, the engine is unknown
             or unavailable, a native proposer gets custom model settings or no
             spending budget, or Auto has too few scorer runs.
     """
+    reflection = payload.reflection_model_settings.model_dump()
+    reflection["token_source"] = reflection.get("token_source") or getattr(payload, "token_source", None)
+    validate_byok_novelty(
+        reflection,
+        bool(payload.shinka and payload.shinka.novelty),
+        api_bases=api_bases,
+    )
     caps = engine_capabilities(payload.target)
     if caps.agent_target and not caps.sandbox:
         raise ServiceError(f"Agent targets cannot run on this deployment: {caps.sandbox_reason}")
@@ -381,12 +399,16 @@ def validate_job(payload: BlackboxRunRequest | JobSpec) -> None:
     needs_native = uses_native_runtime(payload)
     if needs_native:
         models = [payload.reflection_model_settings, *payload.extra_reflection_model_settings]
+        # The proposer CLI applies the main model's effort; the extra models feed
+        # ShinkaEvolve's own calls, which have no effort setting.
+        allowed = [{ROUTE_KEY, "reasoning_effort"}, *({ROUTE_KEY} for _ in payload.extra_reflection_model_settings)]
         if any(
             model.temperature is not None
             or model.max_tokens is not None
             or model.base_url
-            or any(key != ROUTE_KEY for key in model.extra)
-            for model in models
+            or any(key not in keys for key in model.extra)
+            or model.extra.get("reasoning_effort") not in _NATIVE_EFFORTS
+            for model, keys in zip(models, allowed, strict=True)
         ):
             raise ServiceError(
                 "Native proposers accept a model selection; custom sampling and routing settings are unsupported."
@@ -934,12 +956,15 @@ def run_job(
             logger.info("Scorer sandbox final usage is pending reconciliation")
 
 
-def _combined_usage(lms: list[Any], native: NativeOptions | None) -> list[ModelUsage]:
+def _combined_usage(
+    lms: list[Any], native: NativeOptions | None, *, excluded_native_models: frozenset[str] = frozenset()
+) -> list[ModelUsage]:
     """Preserve each native model's identity when combining token accounting.
 
     Args:
         lms: Metered DSPy models and scorer ledgers.
         native: Shared native usage collector, if the recipe uses one.
+        excluded_native_models: Native model IDs whose usage does not count toward this total.
 
     Returns:
         One usage row per model across both transports, with any reported cost
@@ -956,6 +981,7 @@ def _combined_usage(lms: list[Any], native: NativeOptions | None) -> list[ModelU
                 output_tokens=counts.get("completion_tokens", 0),
             )
             for model, counts in snapshot.items()
+            if model not in excluded_native_models
         )
     return combine_usages(usages)
 
@@ -1038,11 +1064,8 @@ def _run_job(
     lm = build_language_model(job.reflection_model_settings, disable_cache=True)
     reflection_lm, reflection_durations_ms = _reflection_caller(lm)
     token_budget = None
-    if job.max_cost_cents is not None:
-        cost_multiplier = (
-            PLATFORM_FEE_FRACTION if job.reflection_model_settings.token_source == "byok" else usage_markup()
-        )
-        token_budget = job.max_cost_cents * CENT_USD_VALUE / cost_multiplier
+    if job.max_cost_cents is not None and job.reflection_model_settings.token_source != "byok":
+        token_budget = job.max_cost_cents * CENT_USD_VALUE / usage_markup()
     native_options = None
     if uses_native_runtime(job):
         budget_route = job.reflection_model_settings.extra.get(ROUTE_KEY)
@@ -1051,9 +1074,10 @@ def _run_job(
             if budget_route
             else gateway_from_settings(settings)
         )
-        if gateway is None or token_budget is None:
+        if gateway is None or (token_budget is None and job.reflection_model_settings.token_source != "byok"):
             raise ServiceError("The upstream proposer needs a gateway and a total spending budget.")
         active_runtime = current_sandbox_runtime()
+        effort = job.reflection_model_settings.extra.get("reasoning_effort")
         native_options = NativeOptions(
             shinka=(job.shinka or BlackboxShinkaSettings()).model_dump(),
             shinka_models=_shinka_models(job, gateway),
@@ -1065,6 +1089,7 @@ def _run_job(
             budget_route=budget_route,
             max_token_cost=token_budget,
             proposer=job.proposer,
+            reasoning_effort=effort if isinstance(effort, str) and effort else None,
             repo=(
                 {
                     "chunks": [str(Path(chunk).resolve()) for chunk in repo_snapshot["chunks"]],
@@ -1101,8 +1126,24 @@ def _run_job(
     # the cost ceiling and the usage the worker bills.
     scorer_usage = getattr(base_scorer, "usage", None)
     lms = [lm, *job.extra_lms] + ([] if scorer_usage is None else [scorer_usage])
+    byok_reflection = job.reflection_model_settings.token_source == "byok"
+    billable_lms = (
+        ([] if byok_reflection else [lm])
+        + [
+            extra_lm
+            for index, extra_lm in enumerate(job.extra_lms)
+            if index >= len(job.extra_lm_sources) or job.extra_lm_sources[index] != "byok"
+        ]
+        + ([] if scorer_usage is None or job.scorer_token_source == "byok" else [scorer_usage])
+    )
+    native_sources: dict[str, set[str]] = {}
+    for config in (job.reflection_model_settings, *job.extra_reflection_model_settings):
+        route = config.extra.get(ROUTE_KEY) or {}
+        model = route.get("model", config.name)
+        native_sources.setdefault(model, set()).add(config.token_source)
+    excluded_native_models = frozenset(model for model, sources in native_sources.items() if sources == {"byok"})
     callbacks = (
-        [CostCeilingCallback(job.max_cost_cents, *lms)]
+        [CostCeilingCallback(job.max_cost_cents, *billable_lms)]
         if job.max_cost_cents is not None and job.execution_budget_id is None
         else []
     )
@@ -1110,15 +1151,22 @@ def _run_job(
 
         def check_budget() -> None:
             """Stop engine boundaries even when DSPy has caught a callback exception."""
-            if cents_for_usage(_combined_usage(lms, native_options)) >= job.max_cost_cents:
+            if (
+                cents_for_usage(
+                    _combined_usage(billable_lms, native_options, excluded_native_models=excluded_native_models)
+                )
+                >= job.max_cost_cents
+            ):
                 raise BudgetReached("The run's total spending budget has been reached.")
 
         ctx.check_budget = check_budget
 
         def remaining_cost_usd() -> float:
             """Return the run allowance after measured model usage across every lane."""
-            spent = raw_cost_usd(_combined_usage(lms, native_options))
-            return max(0.0, float(token_budget) - spent)
+            spent = raw_cost_usd(
+                _combined_usage(billable_lms, native_options, excluded_native_models=excluded_native_models)
+            )
+            return max(0.0, job.max_cost_cents * CENT_USD_VALUE / usage_markup() - spent)
 
         ctx.remaining_cost_usd = remaining_cost_usd
     iterations = f", up to {job.budget.max_iterations} iteration(s)" if job.budget.max_iterations else ""

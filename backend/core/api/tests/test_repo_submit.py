@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from ...constants import OPTIMIZATION_TYPE_BLACKBOX
+from ...i18n import t_locale
 from ...models.blackbox import BLACKBOX_MODULE_NAME
 from ..routers import submissions as _sub_mod
+from ..routers import wizard_preflight as _preflight
 from .test_submissions_router import _FakeJobStore, make_client
 
 
@@ -90,6 +93,39 @@ def test_non_repository_target_is_rejected(client_and_store: tuple[Any, _FakeJob
     assert store._jobs == {}
 
 
+def test_novelty_byok_preflight_and_submit_agree(
+    client_and_store: tuple[Any, _FakeJobStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject the same unsupported reflection route at both HTTP boundaries."""
+    client, store = client_and_store
+    view = SimpleNamespace(provider="anthropic", api_base=None, status="verified")
+    vault = SimpleNamespace(has_verified_connection=lambda *_: True, list_keys=lambda *_: SimpleNamespace(keys=[view]))
+    monkeypatch.setattr(_sub_mod, "ProviderKeyVault", lambda **kwargs: vault)
+    monkeypatch.setattr(_preflight, "enforce_submission_rate", lambda *_: None)
+    client.app.include_router(_preflight.create_wizard_preflight_router(job_store=store))
+    payload = repo_payload(
+        reflection_model_config={"name": "anthropic/claude-sonnet-4", "token_source": "byok"},
+        strategy={"mode": "single", "engine": "shinka_evolve"},
+        shinka={"novelty": True},
+    )
+    setup = client.post(
+        "/wizard/preflight",
+        json={
+            "workflow": "anything",
+            "scope": "execution",
+            "payload": payload,
+            "execution_budget_id": "draft",
+            "execution_budget_revision": 1,
+            "locale": "he",
+        },
+    )
+    submit = client.post("/blackbox/run", json=payload)
+    assert setup.status_code == submit.status_code == 400
+    assert setup.json()["code"] == submit.json()["code"] == "submission.byok_novelty_unsupported"
+    assert setup.json()["detail"] == t_locale("he", "submission.byok_novelty_unsupported")
+    assert not store._jobs
+
+
 def test_scorer_that_does_not_load_is_a_400(
     client_and_store: tuple[Any, _FakeJobStore], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -112,4 +148,76 @@ def test_scorer_that_does_not_load_is_a_400(
     resp = client.post("/blackbox/run", json=repo_payload())
 
     assert resp.status_code == 400
+    assert store._jobs == {}
+
+
+def test_staged_dataset_becomes_repo_cases(client_and_store: tuple[Any, _FakeJobStore]) -> None:
+    """A staged dataset reaches the stored run as cases, mapped by its columns."""
+    client, store = client_and_store
+    staged_id = store.stage_dataset("alice", "pages.csv", [{"url": "/", "note": "home"}, {"url": "/a", "note": "a"}])
+
+    resp = client.post(
+        "/blackbox/run",
+        json=repo_payload(staged_dataset_id=staged_id, input_fields=["url"], expected_field=None),
+    )
+
+    assert resp.status_code == 201, resp.json()
+    payload = store._jobs[resp.json()["optimization_id"]]["payload"]
+    assert payload["cases"] == [
+        {"input": {"url": "/"}, "expected": None},
+        {"input": {"url": "/a"}, "expected": None},
+    ]
+    assert payload["staged_dataset_id"] is None
+
+
+class _CapturedError(Exception):
+    """Stop the setup check once its payload is known."""
+
+
+def test_evaluation_check_reads_the_staged_dataset(
+    client_and_store: tuple[Any, _FakeJobStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The evaluation setup check dry-runs the scorer on the staged rows, not on no case."""
+    client, store = client_and_store
+    seen: dict[str, Any] = {}
+
+    def capture(request: Any, *_args: Any) -> Any:
+        """Record the payload the check would run.
+
+        Args:
+            request: The preflight request after the router prepared it.
+            *_args: The user and the store.
+
+        Raises:
+            _CapturedError: Always, to end the request.
+        """
+        seen.update(request.payload)
+        raise _CapturedError
+
+    monkeypatch.setattr(_preflight, "enforce_submission_rate", lambda *_: None)
+    monkeypatch.setattr(_preflight, "run_preflight", capture)
+    client.app.include_router(_preflight.create_wizard_preflight_router(job_store=store))
+    staged_id = store.stage_dataset("alice", "pages.csv", [{"url": "/", "note": "home"}])
+    body = {
+        "workflow": "anything",
+        "scope": "evaluation",
+        "payload": repo_payload(staged_dataset_id=staged_id, input_fields=["url"], expected_field=None),
+        "execution_budget_id": "draft",
+        "execution_budget_revision": 1,
+    }
+    resp = client.post("/wizard/preflight", json=body)
+    assert seen, resp.text
+    assert seen["cases"] == [{"input": {"url": "/"}, "expected": None}]
+    assert "staged_dataset_id" not in seen
+
+
+def test_unknown_staged_dataset_is_a_400(client_and_store: tuple[Any, _FakeJobStore]) -> None:
+    """A staged id the caller does not own never queues a job."""
+    client, store = client_and_store
+    other = store.stage_dataset("bob", "x.csv", [{"url": "/"}])
+
+    resp = client.post("/blackbox/run", json=repo_payload(staged_dataset_id=other))
+
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "submission.staged_dataset_not_found"
     assert store._jobs == {}

@@ -18,7 +18,6 @@ PREFERENCE_KEYS = (
     "wizard_code_assist",
     "wizard_split_mode",
     "tagger_assist",
-    "dictation_enabled",
 )
 
 

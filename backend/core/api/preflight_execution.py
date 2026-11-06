@@ -52,9 +52,10 @@ from ..worker.repo_staging import (
     is_repo_payload,
     stage_repository,
 )
-from ..worker.unified_aliases import alias_unified_model_roles, strip_unified_model_aliases
+from ..worker.unified_aliases import alias_blackbox_metric_model, alias_unified_model_roles, strip_unified_model_aliases
 from ..worker.vercel_dspy import run_vercel_dspy
 from .agent_engine import fill_proposer_host_cli
+from .errors import DomainError
 from .model_billing import enforce_local_mode_sources, enforce_raw_local_mode_sources, normalize_model_token_sources
 from .preflight_progress import report_preflight_phase
 from .routers.execution_budgets import ExecutionBudgetResponse, budget_http_error, budget_response
@@ -551,13 +552,12 @@ def _run_preflight(
         terminal.note("budget_ready", available_cents=int(snapshot.available_cents))
     try:
         with evidence.heartbeat(claim.document["id"], claim_token=claim.token):
-            source = request.payload
-            if request.workflow == "unified":
-                # Without the legacy aliases the metric model gets no metered
-                # route, and the guest falls back to a gateway only the backend has.
-                source = copy.deepcopy(source)
-                alias_unified_model_roles(source)
             try:
+                source = copy.deepcopy(request.payload)
+                if request.workflow == "unified":
+                    alias_unified_model_roles(source)
+                elif request.workflow == "anything":
+                    alias_blackbox_metric_model(source)
                 parent_payload = resolve_execution_credentials(
                     source,
                     username=user.username,
@@ -743,6 +743,12 @@ def _perform_preflight(
     except BudgetInsufficientError as error:
         field = BALANCE_FIELD if isinstance(error, AccountFundsError) else None
         result = {"checks": [_check(BUDGET_CHECK_KEY, "failed", str(error), field)]}
+    except DomainError as error:
+        result = {
+            "checks": [
+                {**_check("setup", "failed", error.detail), "message_code": error.code, "message_params": error.params}
+            ]
+        }
     except Exception as error:
         result = {"checks": [_check("setup", "failed", str(error))]}
     finally:
