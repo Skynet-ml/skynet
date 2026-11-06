@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { countFrom, loadRuns, mergeRuns, runKey, sumCounts } from "./merge-runs.ts";
+import { allLoaded, countFrom, loadRuns, mergeRuns, runKey, sumCounts } from "./merge-runs.ts";
 
 const run = (optimization_id: string, created_at: string | null) => ({
   optimization_id,
@@ -9,8 +9,14 @@ const run = (optimization_id: string, created_at: string | null) => ({
 });
 
 test("merge tags every run and orders both sides newest first", () => {
-  const local = { items: [run("a", "2026-11-03T10:00:00Z"), run("b", "2026-11-01T10:00:00Z")], total: 5 };
-  const hosted = { items: [run("c", "2026-11-04T10:00:00Z"), run("d", "2026-11-02T10:00:00Z")], total: 7 };
+  const local = {
+    items: [run("a", "2026-11-03T10:00:00Z"), run("b", "2026-11-01T10:00:00Z")],
+    total: 5,
+  };
+  const hosted = {
+    items: [run("c", "2026-11-04T10:00:00Z"), run("d", "2026-11-02T10:00:00Z")],
+    total: 7,
+  };
   const merged = mergeRuns(local, hosted);
   assert.deepEqual(
     merged.items.map((r) => `${r.source}:${r.optimization_id}`),
@@ -20,9 +26,16 @@ test("merge tags every run and orders both sides newest first", () => {
 });
 
 test("without hosted the local order and total stay as sent", () => {
-  const local = { items: [run("b", "2026-11-01T10:00:00Z"), run("a", "2026-11-03T10:00:00Z")], total: 2, limit: 20 };
+  const local = {
+    items: [run("b", "2026-11-01T10:00:00Z"), run("a", "2026-11-03T10:00:00Z")],
+    total: 2,
+    limit: 20,
+  };
   const merged = mergeRuns(local, null);
-  assert.deepEqual(merged.items.map((r) => r.optimization_id), ["b", "a"]);
+  assert.deepEqual(
+    merged.items.map((r) => r.optimization_id),
+    ["b", "a"],
+  );
   assert.ok(merged.items.every((r) => r.source === "local"));
   assert.equal(merged.total, 2);
   assert.equal(merged.limit, 20);
@@ -44,7 +57,10 @@ test("runs without a valid date sort last", () => {
     { items: [run("old", null)], total: 1 },
     { items: [run("new", "2026-11-02T10:00:00Z")], total: 1 },
   );
-  assert.deepEqual(merged.items.map((r) => r.optimization_id), ["new", "old"]);
+  assert.deepEqual(
+    merged.items.map((r) => r.optimization_id),
+    ["new", "old"],
+  );
 });
 
 test("countFrom counts the loaded runs of each side", () => {
@@ -78,6 +94,24 @@ test("a local failure still throws", async () => {
       return { items: [], total: 0 };
     }, true),
   );
+});
+
+test("allLoaded compares each side with its own total", () => {
+  const hostedRow = (id: string) => ({ ...run(id, null), source: "hosted" as const });
+  // A failed hosted page: 2 local of 5 plus 3 hosted rows from an earlier page is not done.
+  const loaded = [
+    run("a", null),
+    run("b", null),
+    hostedRow("h1"),
+    hostedRow("h2"),
+    hostedRow("h3"),
+  ];
+  assert.equal(allLoaded(loaded, { local: 5, hosted: null }), false);
+  assert.equal(allLoaded(loaded, { local: 2, hosted: null }), true);
+  assert.equal(allLoaded(loaded, { local: 2, hosted: 4 }), false);
+  assert.equal(allLoaded(loaded, { local: 2, hosted: 3 }), true);
+  const merged = mergeRuns({ items: [], total: 4 }, null);
+  assert.deepEqual(merged.totals, { local: 4, hosted: null });
 });
 
 test("sumCounts adds the numeric fields", () => {

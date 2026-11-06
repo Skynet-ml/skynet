@@ -9,6 +9,7 @@ import {
   ApiError,
   getJob,
   getPublicOptimization,
+  hostedRunsAvailable,
   setApiAuthToken,
   type SharedOptimizationData,
 } from "@/shared/lib/api";
@@ -44,7 +45,9 @@ export function OptimizationDetailGate() {
   // A grid pair deep link renders the pair strip above the tabs.
   const searchParams = useSearchParams();
   const isPairLink = searchParams.get("pair") != null;
-  const source = sourceFromParam(searchParams.get("source"));
+  // `?source=hosted` counts only where hosted can be read (a linked Mac); the
+  // web app and an unlinked Mac keep the local probe and its public fallback.
+  const source = hostedRunsAvailable() ? sourceFromParam(searchParams.get("source")) : "local";
   // Local and hosted IDs can repeat, so the latch keys on both.
   const runRef = `${source}:${id}`;
   const { data: session, status } = useSession();
@@ -142,5 +145,5 @@ export function OptimizationDetailGate() {
       </div>
     );
   }
-  return <OptimizationDetailView />;
+  return <OptimizationDetailView source={source} />;
 }

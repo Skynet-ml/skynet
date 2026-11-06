@@ -12,6 +12,12 @@ interface RunPage {
   total: number;
 }
 
+/** Each side's own total; `hosted` is null when hosted was off or failed. */
+export interface SourceTotals {
+  local: number;
+  hosted: number | null;
+}
+
 /**
  * The unique key of a run row. Local and hosted runs live in separate
  * databases, so an ID alone can repeat across the two lists.
@@ -35,14 +41,29 @@ function createdMs(run: RunLike): number {
  * the totals summed. Without a hosted page the local order stays as the
  * server sent it.
  */
-export function mergeRuns<P extends RunPage>(local: P, hosted: P | null): P {
+export function mergeRuns<P extends RunPage>(
+  local: P,
+  hosted: P | null,
+): P & { totals: SourceTotals } {
   const localItems = local.items.map((run) => ({ ...run, source: "local" as const }));
-  if (!hosted) return { ...local, items: localItems };
+  const totals = { local: local.total, hosted: hosted?.total ?? null };
+  if (!hosted) return { ...local, items: localItems, totals };
   const items = [
     ...localItems,
     ...hosted.items.map((run) => ({ ...run, source: "hosted" as const })),
   ].sort((a, b) => createdMs(b) - createdMs(a));
-  return { ...local, items, total: local.total + hosted.total };
+  return { ...local, items, total: local.total + hosted.total, totals };
+}
+
+/**
+ * Whether every run is loaded. Each side compares its own loaded runs with
+ * its own total: hosted rows from an earlier page must not count toward the
+ * local total when this page's hosted call failed.
+ */
+export function allLoaded(runs: RunLike[], totals: SourceTotals): boolean {
+  const localDone = countFrom(runs, "local") >= totals.local;
+  const hostedDone = totals.hosted == null || countFrom(runs, "hosted") >= totals.hosted;
+  return localDone && hostedDone;
 }
 
 /**
@@ -53,7 +74,7 @@ export function mergeRuns<P extends RunPage>(local: P, hosted: P | null): P {
 export async function loadRuns<P extends RunPage>(
   load: (source: ApiSource) => Promise<P>,
   withHosted: boolean,
-): Promise<P> {
+): Promise<P & { totals: SourceTotals }> {
   const [local, hosted] = await Promise.all([
     load("local"),
     withHosted ? load("hosted").catch(() => null) : Promise.resolve(null),

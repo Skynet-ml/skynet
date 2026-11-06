@@ -32,6 +32,7 @@ import type { BlackboxRunResult } from "@/shared/types/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import { downloadRepositoryArchive } from "@/shared/lib/api";
+import type { ApiSource } from "@/shared/lib/api-route";
 import { tip } from "@/shared/lib/tooltips";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 import { arrowPageStep, isEditableTarget } from "@/shared/lib/arrow-paging";
@@ -339,6 +340,7 @@ export function BestVersionTab({
   jobName,
   repository = false,
   optimizationId,
+  source,
 }: {
   result: BlackboxRunResult;
   jobName?: string | null;
@@ -346,6 +348,8 @@ export function BestVersionTab({
   repository?: boolean;
   /** Needed to browse a repository version's files at the pinned commit. */
   optimizationId?: string;
+  /** Where the run lives; a hosted run reads its repository through the hosted proxy. */
+  source?: ApiSource;
 }) {
   const versions = useMemo(() => buildVersions(result), [result]);
   const browse = repository && !!optimizationId;
@@ -392,6 +396,7 @@ export function BestVersionTab({
         optimizationId,
         current.text,
         `${slug}-v${current.number}.zip`,
+        source,
       );
     } catch (err) {
       toast.error(userErrorMessage(err, msg("optimization.blackbox.versions.archive_failed")));
@@ -463,6 +468,7 @@ export function BestVersionTab({
             {activeView === "files" && optimizationId && (
               <RepoVersionBrowser
                 optimizationId={optimizationId}
+                source={source}
                 version={current}
                 path={repoPath}
                 onPathChange={setRepoPath}

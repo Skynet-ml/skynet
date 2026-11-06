@@ -7,6 +7,7 @@ import { Button } from "@/shared/ui/primitives/button";
 import { NumberInput } from "@/shared/ui/number-input";
 import type { OptimizationStatusResponse } from "@/shared/types/api";
 import { resumeJob, updateExecutionBudget } from "@/shared/lib/api";
+import type { ApiSource } from "@/shared/lib/api-route";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
 import { TERMS } from "@/shared/lib/terms";
@@ -34,6 +35,8 @@ interface RunLifecycleNoticeProps {
   canEdit?: boolean;
   /** Called after a raise attempt so the owner refetches budget and status. */
   onBudgetChanged?: () => void;
+  /** Where the run lives; a hosted run raises its limit through the hosted proxy. */
+  source?: ApiSource;
 }
 
 /** Keep durable budget stop/pause evidence visible after its transition toast closes. */
@@ -41,6 +44,7 @@ export function RunLifecycleNotice({
   job,
   canEdit = false,
   onBudgetChanged,
+  source,
 }: RunLifecycleNoticeProps) {
   const budgetStop = isBudgetStop(job);
   const budgetPause = isBudgetPause(job);
@@ -126,8 +130,8 @@ export function RunLifecycleNotice({
     if (!budget || raising) return;
     setRaising(true);
     try {
-      await updateExecutionBudget(budget.id, requested, budget.revision);
-      await resumeJob(job.optimization_id);
+      await updateExecutionBudget(budget.id, requested, budget.revision, undefined, false, source);
+      await resumeJob(job.optimization_id, source);
       toast.success(msg("optimization.budget_raise.success"));
     } catch (err) {
       toast.error(userErrorMessage(err, msg("optimization.budget_raise.failed")));
@@ -140,10 +144,7 @@ export function RunLifecycleNotice({
   };
 
   return (
-    <section
-      className="space-y-2 rounded-xl border on-primary p-4"
-      role="status"
-    >
+    <section className="space-y-2 rounded-xl border on-primary p-4" role="status">
       <div className="flex items-start gap-2">
         <Info className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
         <div className="min-w-0 space-y-1">

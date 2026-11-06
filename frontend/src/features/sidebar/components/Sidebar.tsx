@@ -48,7 +48,7 @@ import {
   unhideSharedItem,
   hostedRunsAvailable,
 } from "@/shared/lib/api";
-import { runHref, sourceFromParam } from "@/shared/lib/api-route";
+import { pairHref, runHref, sourceFromParam } from "@/shared/lib/api-route";
 import type { RunFolder, SidebarJobItem } from "@/shared/lib/api";
 import {
   STATUS_DOT_COLOR,
@@ -59,7 +59,7 @@ import { PingDot } from "@/shared/ui/ping-dot";
 import { useJobsStream } from "@/shared/hooks/use-jobs-stream";
 import { toast } from "react-toastify";
 import { useSession } from "next-auth/react";
-import { countFrom, groupJobsByRecency, loadRuns, runKey } from "@/features/sidebar";
+import { allLoaded, countFrom, groupJobsByRecency, loadRuns, runKey } from "@/features/sidebar";
 import { AccountMenu } from "@/shared/layout/account-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
 import { ShareDialog } from "@/features/optimizations";
@@ -321,7 +321,7 @@ export function Sidebar() {
       if (tabRef.current !== tab) return;
       setJobs(res.items);
       setActiveCount(res.items.filter((j) => isActiveStatus(j.status)).length);
-      setLoadedAll(res.items.length >= res.total);
+      setLoadedAll(allLoaded(res.items, res.totals));
       loadedItemsRef.current = res.items.length;
       switchingRef.current = false;
       setRenderedTab(tab);
@@ -388,7 +388,7 @@ export function Sidebar() {
         const appended = res.items.filter((j) => !existing.has(runKey(j)));
         const merged = [...prev, ...appended];
         loadedItemsRef.current = merged.length;
-        setLoadedAll(merged.length >= res.total);
+        setLoadedAll(allLoaded(merged, res.totals));
         return merged;
       });
     } catch (err) {
@@ -1542,7 +1542,7 @@ function JobRow({
                 return (
                   <Link
                     key={i}
-                    href={`${runHref(job.optimization_id, job.source)}${job.source === "hosted" ? "&" : "?"}pair=${i}`}
+                    href={pairHref(job.optimization_id, i, job.source)}
                     className={cn(
                       "flex items-center gap-2 rounded-md px-2 py-1.5 text-[0.625rem] transition-all duration-150",
                       isPairActive

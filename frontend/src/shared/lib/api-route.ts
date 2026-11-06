@@ -45,3 +45,14 @@ export function runHref(optimizationId: string, source: ApiSource = "local"): st
     ? `/optimizations/${optimizationId}?source=hosted`
     : `/optimizations/${optimizationId}`;
 }
+
+/** The run page of one grid pair (or the run itself when `pairIndex` is null), keeping the source. */
+export function pairHref(
+  optimizationId: string,
+  pairIndex: number | null,
+  source: ApiSource = "local",
+): string {
+  const base = runHref(optimizationId, source);
+  if (pairIndex == null) return base;
+  return `${base}${base.includes("?") ? "&" : "?"}pair=${pairIndex}`;
+}

@@ -56,7 +56,7 @@ import {
   unhideSharedItem,
   apiUrl,
 } from "@/shared/lib/api";
-import type { ApiSource } from "@/shared/lib/api-route";
+import { pairHref, type ApiSource } from "@/shared/lib/api-route";
 import type { ServeInfoResponse, WorkflowNodeTrace, WorkflowSpec } from "@/shared/types/api";
 import { OptimizationDetailSkeleton } from "./OptimizationDetailSkeleton";
 import { formatMsg, msg } from "@/shared/lib/messages";
@@ -330,7 +330,14 @@ function FailureCopyButton({ text }: { text: string }) {
   );
 }
 
-export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimizationData } = {}) {
+export function OptimizationDetailView({
+  shareData,
+  source = "local",
+}: {
+  shareData?: SharedOptimizationData;
+  /** Where the run lives, as the gate resolved it; a hosted run reads through the hosted proxy. */
+  source?: ApiSource;
+} = {}) {
   const params = useParams<{ id?: string; token?: string }>();
   const isShare = !!shareData;
   const id = shareData?.optimization_id ?? (params.id as string);
@@ -344,9 +351,6 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const shareCanServe = isShare && (shareRole === "editor" || shareRole === "owner");
   const router = useRouter();
   const searchParams = useSearchParams();
-  // A hosted run (Mac app, linked account) reads through the local hosted proxy.
-  // An inline compare (not sourceFromParam) keeps it a primitive for the React Compiler.
-  const source: ApiSource = searchParams.get("source") === "hosted" ? "hosted" : "local";
   const [detailTab, setDetailTab] = useState(() => requestedDetailTab(searchParams.get("tab")));
   // Phones get the view-first subset: Overview, Usage (chat), Artifact, Logs,
   // Usage and cost. Data/Code/LM activity/Config are desk work; a deep link to one of
@@ -373,8 +377,8 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const memberRole = isShare ? shareRole : (job?.effective_role ?? null);
   useEffect(() => {
     if (memberRole !== "viewer" && memberRole !== "editor") return;
-    void unhideSharedItem("optimizations", id).catch(() => {});
-  }, [memberRole, id]);
+    void unhideSharedItem("optimizations", id, source).catch(() => {});
+  }, [memberRole, id, source]);
   const [payload, setPayload] = useState<OptimizationPayloadResponse | null>(null);
   const [loading, setLoading] = useState(true);
   // Shapes the loading skeleton like this run's kind when an earlier fetch saw it.
@@ -741,6 +745,8 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   useEffect(() => {
     if (skipNetwork) return;
     if (job?.status !== "success") return;
+    // The hosted proxy carries no serving: a hosted run shows no Playground.
+    if (source === "hosted") return;
     // Black-box runs have no servable program.
     if (job.optimization_type === "blackbox") return;
     // A failure here used to be swallowed as `setServeInfo(null)`, which
@@ -767,7 +773,15 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
         setServeInfoError(null);
       })
       .catch(onFail);
-  }, [id, job?.status, job?.optimization_type, activePairIndex, isPairContext, skipNetwork]);
+  }, [
+    id,
+    job?.status,
+    job?.optimization_type,
+    activePairIndex,
+    isPairContext,
+    skipNetwork,
+    source,
+  ]);
 
   useEffect(() => {
     if (chatScrollRef.current) {
@@ -1020,7 +1034,14 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const endedRun = jobStatus === "failed" || jobStatus === "cancelled" || jobStatus === "stopped";
   const [endedRunHasPlan, setEndedRunHasPlan] = useState(false);
   useEffect(() => {
-    if (!endedRun || !jobIsBlackbox || !jobId || skipNetwork || isPairContext) {
+    if (
+      !endedRun ||
+      !jobIsBlackbox ||
+      !jobId ||
+      skipNetwork ||
+      isPairContext ||
+      source === "hosted"
+    ) {
       setEndedRunHasPlan(false);
       return;
     }
@@ -1035,7 +1056,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
     return () => {
       cancelled = true;
     };
-  }, [endedRun, jobIsBlackbox, jobId, skipNetwork, isPairContext]);
+  }, [endedRun, jobIsBlackbox, jobId, skipNetwork, isPairContext, source]);
 
   // Optimized prompt picks the pair's artifact in pair view, otherwise falls
   // back to the run's artifact, otherwise to the grid's best pair (for the
@@ -1091,8 +1112,8 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   // on every parent state tick (live elapsed, SSE patches) just because these
   // handlers were freshly allocated.
   const handlePairSelect = useCallback(
-    (pi: number) => router.push(`/optimizations/${id}?pair=${pi}`),
-    [id, router],
+    (pi: number) => router.push(pairHref(id, pi, source)),
+    [id, router, source],
   );
   const handlePairDeleted = useCallback(
     (pi: number) => {
@@ -1102,11 +1123,11 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
         /* localStorage unavailable — nothing to clean up */
       }
       if (activePairIndex === pi) {
-        router.replace(`/optimizations/${id}`);
+        router.replace(pairHref(id, null, source));
       }
       void fetchJob();
     },
-    [id, activePairIndex, router, fetchJob],
+    [id, activePairIndex, router, fetchJob, source],
   );
 
   if (loading || !authReady) {
@@ -1139,7 +1160,8 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const canDeleteRun = effectiveRole == null;
   // Grid searches are retired: their stored runs stay readable, but the backend
   // refuses to clone, retry or resume one, so those actions are hidden.
-  const canRerun = job.optimization_type !== "grid_search";
+  // Clone and Retry open the local submit form, which cannot read a hosted run.
+  const canRerun = job.optimization_type !== "grid_search" && source === "local";
   // Sharing is owner-only: members (even editors) can't invite, change roles,
   // or set general access. null = the owner's own run / admin / co-owner.
   // Never on the public /share/<token> route: there the job is seeded from
@@ -1194,7 +1216,9 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const levelShowsTab = (tab: string) => isShare || levelTabGate(tab) || tab === linkedDetailTab;
   const showPlaygroundTab = isShare
     ? shareCanServe && job.status === "success" && !!serveInfo
-    : job.status === "success" && (job.optimization_type === "grid_search" || !!serveInfo);
+    : source === "local" &&
+      job.status === "success" &&
+      (job.optimization_type === "grid_search" || !!serveInfo);
   const showDataTab =
     (isShare
       ? !!shareData?.dataset
@@ -1210,11 +1234,14 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
   const showConfigTab = levelShowsTab("config");
   const showRewardTab = jobIsBlackbox && hasRewardTab(payload?.payload) && levelShowsTab("reward");
   // Usage reads the run's billing records, which only an authenticated viewer can fetch.
-  const showUsageTab = !skipNetwork;
+  // The serve and billing reads behind it have no hosted route.
+  const showUsageTab = !skipNetwork && source === "local";
   // Continuous optimization starts from the owner's own successful black-box
   // run; the backend still decides whether this run can carry a plan.
+  // Continuous plans are managed on hosted itself, not through the Mac.
   const showContinuousTab =
     !skipNetwork &&
+    source === "local" &&
     !isPairContext &&
     jobIsBlackbox &&
     (job.status === "success" || endedRunHasPlan);
@@ -1424,6 +1451,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
 
       <RunLifecycleNotice
         job={job}
+        source={source}
         canEdit={canEditRun && !skipNetwork}
         onBudgetChanged={() => {
           window.dispatchEvent(new Event("optimizations-changed"));
@@ -1440,11 +1468,11 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
           isBest={isBestPair}
           jobActive={isActive}
           jobTerminal={isTerminal}
-          onBack={() => router.push(`/optimizations/${id}`)}
-          onPrev={() => router.push(`/optimizations/${id}?pair=${activePair.pair_index - 1}`)}
-          onNext={() => router.push(`/optimizations/${id}?pair=${activePair.pair_index + 1}`)}
+          onBack={() => router.push(pairHref(id, null, source))}
+          onPrev={() => router.push(pairHref(id, activePair.pair_index - 1, source))}
+          onNext={() => router.push(pairHref(id, activePair.pair_index + 1, source))}
           onCancel={handleCancel}
-          onDeleted={() => router.push(`/optimizations/${id}`)}
+          onDeleted={() => router.push(pairHref(id, null, source))}
         />
       )}
 
@@ -1532,7 +1560,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => router.push(`/optimizations/${id}`)}
+                onClick={() => router.push(pairHref(id, null, source))}
               >
                 {msg("auto.app.optimizations.id.page.13")}
               </Button>
@@ -1724,6 +1752,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
               <TabsContent value="data">
                 <DataTab
                   job={job}
+                  source={source}
                   pairIndex={isPairContext ? activePair.pair_index : undefined}
                   sharedDataset={shareData?.dataset ?? undefined}
                   sharedTestResults={shareData?.test_results ?? undefined}
@@ -1735,6 +1764,7 @@ export function OptimizationDetailView({ shareData }: { shareData?: SharedOptimi
               <TabsContent value="best" className="mt-4">
                 <BestVersionTab
                   result={job.blackbox_result}
+                  source={source}
                   jobName={job.name}
                   repository={payloadRecipe === "repo"}
                   optimizationId={job.optimization_id}

@@ -184,13 +184,10 @@ export async function fetchWithAuthRetry(url: string, init: RequestInit): Promis
     });
   const res = await send(_authToken);
   if (res.status !== 401) return res;
-  // A 401 through the hosted proxy is about the link, not the local session.
-  if (isHostedPath(url)) {
-    const body = await res
-      .clone()
-      .text()
-      .catch(() => "");
-    if (parseError(body).code === HOSTED_LINK_REVOKED_CODE) announceHostedLinkChange();
+  // Through the hosted proxy, only `hosted_link.revoked` is about the link;
+  // any other 401 there is the local session expiring, so refresh as usual.
+  if (await isHostedLinkRevoked(url, res)) {
+    announceHostedLinkChange();
     return res;
   }
   const fresh = await refreshAuthTokenOn401();
@@ -203,6 +200,16 @@ export async function fetchWithAuthRetry(url: string, init: RequestInit): Promis
     if (isAccountMissingResponse(final.status, body)) announceAccountMissing();
   }
   return final;
+}
+
+/** Whether a 401 came from the hosted proxy for a revoked link; reads a clone so the body stays unread. */
+async function isHostedLinkRevoked(pathOrUrl: string, res: Response): Promise<boolean> {
+  if (!isHostedPath(pathOrUrl)) return false;
+  const body = await res
+    .clone()
+    .text()
+    .catch(() => "");
+  return parseError(body).code === HOSTED_LINK_REVOKED_CODE;
 }
 
 function cachedGet<T>(path: string, maxAge = GET_CACHE_MS, source?: ApiSource): Promise<T> {
@@ -352,8 +359,9 @@ async function request<T>(path: string, init?: RequestInit, source?: ApiSource):
   let res: Response;
   try {
     res = await send(_authToken);
-    // A 401 through the hosted proxy is about the link, not the local session.
-    if (res.status === 401 && !hosted) {
+    // A revoked link is not cured by a local token refresh; any other 401
+    // (also through the hosted proxy) is the local session expiring.
+    if (res.status === 401 && !(await isHostedLinkRevoked(routed, res))) {
       const fresh = await refreshAuthTokenOn401();
       if (fresh) res = await send(fresh);
     }
@@ -405,7 +413,7 @@ async function request<T>(path: string, init?: RequestInit, source?: ApiSource):
     }
     // A missing account cannot recover by refreshing the bearer; the session
     // provider signs the browser out instead of letting every call fail.
-    if (res.status === 401 && parsed.code === ACCOUNT_MISSING_CODE && !hosted) {
+    if (res.status === 401 && parsed.code === ACCOUNT_MISSING_CODE) {
       announceAccountMissing();
     }
     if (hosted && res.status === 401 && parsed.code === HOSTED_LINK_REVOKED_CODE) {
@@ -665,16 +673,21 @@ export function updateExecutionBudget(
   expectedRevision: number,
   signal?: AbortSignal,
   uncapped = false,
+  source?: ApiSource,
 ) {
-  return request<ExecutionBudget>(`/execution-budgets/${encodeURIComponent(budgetId)}`, {
-    method: "PATCH",
-    body: JSON.stringify({
-      total_cents: totalCents,
-      expected_revision: expectedRevision,
-      uncapped,
-    }),
-    signal,
-  });
+  return request<ExecutionBudget>(
+    `/execution-budgets/${encodeURIComponent(budgetId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({
+        total_cents: totalCents,
+        expected_revision: expectedRevision,
+        uncapped,
+      }),
+      signal,
+    },
+    source,
+  );
 }
 
 export function getBlackboxEngines(target: "text" | "agent" | "repo") {
@@ -2350,8 +2363,12 @@ export function getOptimizationPayload(optimizationId: string, source?: ApiSourc
   );
 }
 
-export function getOptimizationDataset(optimizationId: string) {
-  return request<OptimizationDatasetResponse>(`/optimizations/${optimizationId}/dataset`);
+export function getOptimizationDataset(optimizationId: string, source?: ApiSource) {
+  return request<OptimizationDatasetResponse>(
+    `/optimizations/${optimizationId}/dataset`,
+    undefined,
+    source,
+  );
 }
 
 // A repository run's pinned commit never changes, so its tree and files are
@@ -2359,27 +2376,29 @@ export function getOptimizationDataset(optimizationId: string) {
 const REPOSITORY_CACHE_MS = Number.POSITIVE_INFINITY;
 
 /** A repository run's file tree at its pinned commit. */
-export function getRepositoryTree(optimizationId: string) {
+export function getRepositoryTree(optimizationId: string, source?: ApiSource) {
   return cachedGet<RepositoryTreeResponse>(
     `/optimizations/${encodeURIComponent(optimizationId)}/repository/tree`,
     REPOSITORY_CACHE_MS,
+    source,
   );
 }
 
 /** One file of a repository run at its pinned commit. */
-export function getRepositoryFile(optimizationId: string, path: string) {
+export function getRepositoryFile(optimizationId: string, path: string, source?: ApiSource) {
   const q = new URLSearchParams({ path });
   return cachedGet<RepositoryFileResponse>(
     `/optimizations/${encodeURIComponent(optimizationId)}/repository/file?${q.toString()}`,
     REPOSITORY_CACHE_MS,
+    source,
   );
 }
 
-export function getTestResults(optimizationId: string) {
+export function getTestResults(optimizationId: string, source?: ApiSource) {
   return request<{
     baseline: EvalExampleResult[];
     optimized: EvalExampleResult[];
-  }>(`/optimizations/${optimizationId}/test-results`);
+  }>(`/optimizations/${optimizationId}/test-results`, undefined, source);
 }
 
 /**
@@ -2402,9 +2421,10 @@ export async function downloadRepositoryArchive(
   optimizationId: string,
   patch: string,
   fileName: string,
+  source?: ApiSource,
 ): Promise<void> {
   const res = await fetchWithAuthRetry(
-    `${apiBase()}/optimizations/${optimizationId}/repository/archive`,
+    apiUrl(`/optimizations/${optimizationId}/repository/archive`, source),
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3733,10 +3753,12 @@ export async function hideSharedItem(kind: SharedItemKind, id: string) {
 }
 
 /** Show a hidden shared item again. A no-op when nothing is hidden. */
-export async function unhideSharedItem(kind: SharedItemKind, id: string) {
-  await request<void>(`/shared-with-me/${kind}/${encodeURIComponent(id)}/hide`, {
-    method: "DELETE",
-  });
+export async function unhideSharedItem(kind: SharedItemKind, id: string, source?: ApiSource) {
+  await request<void>(
+    `/shared-with-me/${kind}/${encodeURIComponent(id)}/hide`,
+    { method: "DELETE" },
+    source,
+  );
   invalidateSharedLists();
 }
 
@@ -3856,11 +3878,11 @@ export function getPairServeInfo(optimizationId: string, pairIndex: number) {
   return request<ServeInfoResponse>(`/serve/${optimizationId}/pair/${pairIndex}/info`);
 }
 
-export function getPairTestResults(optimizationId: string, pairIndex: number) {
+export function getPairTestResults(optimizationId: string, pairIndex: number, source?: ApiSource) {
   return request<{
     baseline: EvalExampleResult[];
     optimized: EvalExampleResult[];
-  }>(`/optimizations/${optimizationId}/pair/${pairIndex}/test-results`);
+  }>(`/optimizations/${optimizationId}/pair/${pairIndex}/test-results`, undefined, source);
 }
 
 export function serveProgram(
@@ -4063,15 +4085,25 @@ export function parseSteerApplied(data: Record<string, unknown>): { ids: string[
 }
 
 /** Take back explicit ids and report which messages the agent already read. */
-export async function withdrawAgentSteers(steerKey: string, ids: string[]): Promise<{ ids: string[]; delivered?: string[] }> {
-  const res = await request<{ ids: string[]; delivered?: string[] }>("/optimizations/agent-steer/withdraw", {
-    method: "POST",
-    signal: AbortSignal.timeout(30_000),
-    body: JSON.stringify({ steer_key: steerKey, ids }),
-  });
+export async function withdrawAgentSteers(
+  steerKey: string,
+  ids: string[],
+): Promise<{ ids: string[]; delivered?: string[] }> {
+  const res = await request<{ ids: string[]; delivered?: string[] }>(
+    "/optimizations/agent-steer/withdraw",
+    {
+      method: "POST",
+      signal: AbortSignal.timeout(30_000),
+      body: JSON.stringify({ steer_key: steerKey, ids }),
+    },
+  );
   if (!Array.isArray(res.ids)) throw new Error("Invalid withdrawal outcome");
-  if (res.delivered !== undefined && !Array.isArray(res.delivered)) throw new Error("Invalid withdrawal outcome");
-  return { ids: res.ids.map(String), ...(res.delivered === undefined ? {} : { delivered: res.delivered.map(String) }) };
+  if (res.delivered !== undefined && !Array.isArray(res.delivered))
+    throw new Error("Invalid withdrawal outcome");
+  return {
+    ids: res.ids.map(String),
+    ...(res.delivered === undefined ? {} : { delivered: res.delivered.map(String) }),
+  };
 }
 
 /**
