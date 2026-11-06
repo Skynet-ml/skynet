@@ -24,6 +24,7 @@ import { LanguageSwitcher } from "@/shared/ui/language-switcher";
 import { BackLink } from "@/shared/ui/back-link";
 import { msg } from "@/shared/lib/messages";
 import { isLocalMode } from "@/shared/lib/runtime-env";
+import { callbackPath } from "@/shared/lib/oauth-return";
 import {
   getPasskeyRegistrationOptions,
   getSecurityStatus,
@@ -75,14 +76,7 @@ const TWOFA_LINK_CLASS =
 function postLoginTarget(): string {
   if (typeof window === "undefined") return "/";
   const cb = new URLSearchParams(window.location.search).get("callbackUrl");
-  if (!cb) return "/";
-  try {
-    const url = new URL(cb, window.location.origin);
-    if (url.origin === window.location.origin) return url.pathname + url.search + url.hash;
-  } catch {
-    // Malformed callbackUrl — ignore and use the default.
-  }
-  return "/";
+  return (cb && callbackPath(cb, window.location.origin)) || "/";
 }
 
 /**
