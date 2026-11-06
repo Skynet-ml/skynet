@@ -942,6 +942,8 @@
   "agent.error.insufficient_funds": "رصيدك فارغ. أضف رصيدًا لمواصلة الدردشة مع الوكيل.",
   "agent.parallel.background_count": "المحادثات قيد التشغيل في الخلفية: {p1}",
   "agent.parallel.busy_indicator": "محادثة قيد التشغيل في الخلفية",
+  "agent.web_chat.read_only": "هذه المحادثة من الويب. يمكنك قراءتها فقط على جهاز Mac هذا. تابعها على الويب.",
+  "agent.web_chat.tag": "الويب",
   "agent.parallel.queued": "في قائمة الانتظار…",
   "app.shell.search.button_aria": "البحث في كل شيء",
   "app.shell.search.command_key": "⌘",

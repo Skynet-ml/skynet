@@ -942,6 +942,8 @@
   "agent.error.insufficient_funds": "残高がありません。エージェントとのチャットを続けるには入金してください。",
   "agent.parallel.background_count": "バックグラウンドで実行中のチャット: {p1}",
   "agent.parallel.busy_indicator": "バックグラウンドでチャットを実行中",
+  "agent.web_chat.read_only": "このチャットはウェブのものです。この Mac では読むことしかできません。ウェブで続けてください。",
+  "agent.web_chat.tag": "ウェブ",
   "agent.parallel.queued": "待機中…",
   "app.shell.search.button_aria": "全体を検索",
   "app.shell.search.command_key": "⌘",

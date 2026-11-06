@@ -942,6 +942,8 @@
   "agent.error.insufficient_funds": "Ihr Guthaben ist aufgebraucht. Laden Sie Guthaben auf, um weiter mit dem Agenten zu chatten.",
   "agent.parallel.background_count": "Im Hintergrund laufende Chats: {p1}",
   "agent.parallel.busy_indicator": "Chat läuft im Hintergrund",
+  "agent.web_chat.read_only": "Dieser Chat stammt aus dem Web. Auf diesem Mac kannst du ihn nur lesen. Setze ihn im Web fort.",
+  "agent.web_chat.tag": "Web",
   "agent.parallel.queued": "In Warteschlange…",
   "app.shell.search.button_aria": "Alles durchsuchen",
   "app.shell.search.command_key": "⌘",

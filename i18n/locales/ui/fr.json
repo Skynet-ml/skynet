@@ -942,6 +942,8 @@
   "agent.error.insufficient_funds": "Votre solde est vide. Ajoutez des fonds pour continuer à discuter avec l'agent.",
   "agent.parallel.background_count": "Chats en cours d'exécution en arrière-plan : {p1}",
   "agent.parallel.busy_indicator": "Chat en cours en arrière-plan",
+  "agent.web_chat.read_only": "Cette conversation vient du web. Sur ce Mac, vous pouvez seulement la lire. Continuez-la sur le web.",
+  "agent.web_chat.tag": "Web",
   "agent.parallel.queued": "En file d'attente…",
   "app.shell.search.button_aria": "Tout rechercher",
   "app.shell.search.command_key": "⌘",

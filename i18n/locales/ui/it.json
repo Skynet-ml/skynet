@@ -942,6 +942,8 @@
   "agent.error.insufficient_funds": "Il tuo saldo è esaurito. Aggiungi fondi per continuare a chattare con l'agente.",
   "agent.parallel.background_count": "Chat in esecuzione in background: {p1}",
   "agent.parallel.busy_indicator": "Chat in esecuzione in background",
+  "agent.web_chat.read_only": "Questa chat viene dal web. Su questo Mac puoi solo leggerla. Continuala sul web.",
+  "agent.web_chat.tag": "Web",
   "agent.parallel.queued": "In coda…",
   "app.shell.search.button_aria": "Cerca ovunque",
   "app.shell.search.command_key": "⌘",

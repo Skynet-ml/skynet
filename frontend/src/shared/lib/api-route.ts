@@ -56,3 +56,44 @@ export function pairHref(
   if (pairIndex == null) return base;
   return `${base}${base.includes("?") ? "&" : "?"}pair=${pairIndex}`;
 }
+
+/** The prefix of a hosted item's key; a local item keeps its bare id. */
+const HOSTED_KEY_PREFIX = "hosted:";
+
+/**
+ * One key for an item that can come from either source, so a hosted ID never
+ * collides with a local one in a merged list. A local ID stays bare, so local
+ * links, stored read marks and the agent stream keep working unchanged.
+ */
+export function sourceKey(source: ApiSource, id: string): string {
+  return source === "hosted" ? `${HOSTED_KEY_PREFIX}${id}` : id;
+}
+
+/** Split a {@link sourceKey} into its source and the ID that source knows. */
+export function parseSourceKey(key: string): { source: ApiSource; id: string } {
+  return key.startsWith(HOSTED_KEY_PREFIX)
+    ? { source: "hosted", id: key.slice(HOSTED_KEY_PREFIX.length) }
+    : { source: "local", id: key };
+}
+
+/**
+ * Hosted routes that refuse the Mac's link token: keys, payments, protected
+ * agent settings and whole-account actions. The Mac never sends these through
+ * the hosted proxy, even when a caller asks for the hosted source.
+ */
+export const HOSTED_CLOSED_PATHS: readonly string[] = [
+  "/billing/byok/keys",
+  "/billing/payment-methods",
+  "/billing/checkout",
+  "/billing/portal",
+  "/billing/subscription",
+  "/agent/protected-settings",
+  "/account/delete",
+  "/account/export",
+];
+
+/** Whether `path` may go through the hosted proxy: it is not one of {@link HOSTED_CLOSED_PATHS}. */
+export function hostedRouteOpen(path: string): boolean {
+  const bare = path.split("?", 1)[0] ?? path;
+  return !HOSTED_CLOSED_PATHS.some((closed) => bare === closed || bare.startsWith(`${closed}/`));
+}

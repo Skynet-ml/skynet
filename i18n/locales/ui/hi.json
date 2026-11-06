@@ -942,6 +942,8 @@
   "agent.error.insufficient_funds": "आपका बैलेंस खाली है। एजेंट से बातचीत जारी रखने के लिए बैलेंस जोड़ें।",
   "agent.parallel.background_count": "बैकग्राउंड में चल रही चैट: {p1}",
   "agent.parallel.busy_indicator": "बैकग्राउंड में चैट चल रही है",
+  "agent.web_chat.read_only": "यह चैट वेब से है। इस Mac पर आप इसे केवल पढ़ सकते हैं। इसे वेब पर जारी रखें।",
+  "agent.web_chat.tag": "वेब",
   "agent.parallel.queued": "कतार में है…",
   "app.shell.search.button_aria": "सब कुछ खोजें",
   "app.shell.search.command_key": "⌘",

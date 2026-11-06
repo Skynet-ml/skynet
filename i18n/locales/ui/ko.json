@@ -942,6 +942,8 @@
   "agent.error.insufficient_funds": "잔액이 없습니다. 에이전트와 계속 대화하려면 충전하세요.",
   "agent.parallel.background_count": "백그라운드에서 실행 중인 채팅: {p1}",
   "agent.parallel.busy_indicator": "채팅이 백그라운드에서 실행 중입니다",
+  "agent.web_chat.read_only": "이 채팅은 웹에서 만든 것입니다. 이 Mac에서는 읽기만 할 수 있습니다. 웹에서 이어서 하세요.",
+  "agent.web_chat.tag": "웹",
   "agent.parallel.queued": "대기 중…",
   "app.shell.search.button_aria": "전체 검색",
   "app.shell.search.command_key": "⌘",

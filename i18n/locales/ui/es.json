@@ -942,6 +942,8 @@
   "agent.error.insufficient_funds": "Tu saldo está vacío. Añade fondos para seguir chateando con el agente.",
   "agent.parallel.background_count": "Chats ejecutándose en segundo plano: {p1}",
   "agent.parallel.busy_indicator": "Chat ejecutándose en segundo plano",
+  "agent.web_chat.read_only": "Este chat es de la web. En este Mac solo puedes leerlo. Continúalo en la web.",
+  "agent.web_chat.tag": "Web",
   "agent.parallel.queued": "En cola…",
   "app.shell.search.button_aria": "Buscar todo",
   "app.shell.search.command_key": "⌘",

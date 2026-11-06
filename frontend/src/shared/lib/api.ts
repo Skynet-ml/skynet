@@ -58,7 +58,13 @@ import type {
   ScheduleRule,
 } from "@/shared/types/continuous";
 import { getRuntimeEnv, isLocalMode } from "@/shared/lib/runtime-env";
-import { apiPath, hostedAvailable, isHostedPath, resolveSource } from "@/shared/lib/api-route";
+import {
+  apiPath,
+  hostedAvailable,
+  hostedRouteOpen,
+  isHostedPath,
+  resolveSource,
+} from "@/shared/lib/api-route";
 import type { ApiSource } from "@/shared/lib/api-route";
 // A cycle (use-linked-account imports this module), safe because both sides
 // only call each other at request time, never while the modules load.
@@ -82,9 +88,13 @@ export function hostedRunsAvailable(): boolean {
   return hostedAvailable(isLocalMode(), isLocalMode() && wasLinked());
 }
 
-/** The routed path for `source`; hosted falls back to local when not linked. */
+/**
+ * The routed path for `source`; hosted falls back to local when not linked.
+ * Closed routes (keys, payments, account actions) never leave the Mac.
+ */
 function routedPath(path: string, source?: ApiSource): string {
-  return apiPath(path, resolveSource(source, isLocalMode(), isLocalMode() && wasLinked()));
+  const asked = source === "hosted" && !hostedRouteOpen(path) ? "local" : source;
+  return apiPath(path, resolveSource(asked, isLocalMode(), isLocalMode() && wasLinked()));
 }
 
 /** Full URL for raw stream callers (SSE, NDJSON) that pass it to {@link fetchWithAuthRetry}. */
@@ -1644,13 +1654,14 @@ export interface BillingUsageResponse {
 /**
  * Fetch a date-ranged usage rollup (totals + per-day + per-model + recent rows).
  * `start`/`end` are ISO-8601; omit both for the backend's default 30-day window.
+ * A linked Mac reads the hosted account's usage; otherwise the local backend's.
  */
 export function getUsage(start?: string, end?: string) {
   const params = new URLSearchParams();
   if (start) params.set("start", start);
   if (end) params.set("end", end);
   const qs = params.toString();
-  return request<BillingUsageResponse>(`/billing/usage${qs ? `?${qs}` : ""}`);
+  return request<BillingUsageResponse>(`/billing/usage${qs ? `?${qs}` : ""}`, undefined, "hosted");
 }
 
 /** Display-safe billing address fields stored on the Stripe customer. */
@@ -1709,13 +1720,17 @@ export function getBillingProfile() {
   return request<BillingProfileResponse>("/billing/profile");
 }
 
-/** Fetch completed Stripe purchases over an optional ISO-8601 date window. */
+/** Fetch completed Stripe purchases over an optional ISO-8601 date window; a linked Mac reads hosted. */
 export function getBillingTransactions(start?: string, end?: string) {
   const params = new URLSearchParams();
   if (start) params.set("start", start);
   if (end) params.set("end", end);
   const qs = params.toString();
-  return request<BillingTransactionsResponse>(`/billing/transactions${qs ? `?${qs}` : ""}`);
+  return request<BillingTransactionsResponse>(
+    `/billing/transactions${qs ? `?${qs}` : ""}`,
+    undefined,
+    "hosted",
+  );
 }
 
 /** Start a Stripe Customer Portal session for billing or payment-method management. */

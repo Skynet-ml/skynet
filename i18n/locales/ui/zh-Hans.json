@@ -942,6 +942,8 @@
   "agent.error.insufficient_funds": "您的余额已用完。请充值以继续与智能体对话。",
   "agent.parallel.background_count": "后台运行的对话：{p1}",
   "agent.parallel.busy_indicator": "对话正在后台运行",
+  "agent.web_chat.read_only": "此对话来自网页。在这台 Mac 上只能阅读。请在网页上继续。",
+  "agent.web_chat.tag": "网页",
   "agent.parallel.queued": "排队中…",
   "app.shell.search.button_aria": "全站搜索",
   "app.shell.search.command_key": "⌘",

@@ -1002,6 +1002,8 @@
   "agent.model_menu.model": "模型",
   "agent.parallel.background_count": "背景執行中嘅對話：{p1}",
   "agent.parallel.busy_indicator": "對話喺背景執行緊",
+  "agent.web_chat.read_only": "呢個對話係嚟自網頁。喺呢部 Mac 你只可以睇。請喺網頁繼續。",
+  "agent.web_chat.tag": "網頁",
   "agent.parallel.queued": "排隊中…",
   "app.meta.description": "透過 DSPy 進行 Prompt 優化 — 自動提升語言模型效能",
   "app.shell.account.aria": "帳戶選單",
