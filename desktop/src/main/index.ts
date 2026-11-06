@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { app, BrowserWindow, clipboard, ipcMain, nativeTheme, screen, shell } from "electron";
 import { APP_SCHEME, appUrlFromArgv, appWindowUrl, HOSTED_APP_ORIGINS, hostedAppOrigin, parseLinkCallback, webDocsUrl } from "./app-url";
-import { HostedLinkClient } from "./hosted-link";
+import { HostedLinkClient, type LinkCheck, watchLink } from "./hosted-link";
 import { isOpenAppUrl, parseTheme, pickTheme, type Theme } from "./theme";
 import { childPath, probeClis, probeDocker, readCliLimits, searchDirs } from "./cli-detect";
 import { allocatePorts, type PortPlan } from "./ports";
@@ -69,8 +69,14 @@ let hostedOrigin: string = HOSTED_APP_ORIGINS.production;
 let sweptOrphans = false;
 let sweptSandboxes = false;
 let hostedLink: HostedLinkClient | null = null;
+let stopLinkWatch: (() => void) | null = null;
 let signInUrl: string | null = null;
 let finishingSignIn = false;
+let reconnectTimer: NodeJS.Timeout | null = null;
+let checkingLink = false;
+const RECONNECT_MS = 10_000;
+// Changes when the app opens or loses the link, so a check that started before can see it is stale.
+let linkEpoch = 0;
 
 // Setup screens are small; the window grows for the web app. The onboarding
 // page reports its content height, so each setup screen has no empty space.
@@ -369,26 +375,113 @@ async function startStack(base: OnboardingState, loginPath: string): Promise<voi
   watchForCrash(apiProc, "The API");
   watchForCrash(feProc, "The web app");
 
-  // The app opens only for a Mac linked to a Skynet account.
+  // The app opens only for a Mac linked to a Skynet account. Hosted confirms
+  // the link, because the local link row can outlive a revoked link (SKY-329).
   hostedLink = new HostedLinkClient(apiOrigin, secrets.backendAuthSecret);
   await hostedLink.ensureLocalUser();
-  let linked = false;
+  let result: LinkCheck = "unreachable";
   try {
-    linked = await hostedLink.linked();
+    result = await hostedLink.verified();
   } catch (err) {
     log(`account status check failed: ${err instanceof Error ? err.message : String(err)}`);
   }
-  if (linked) return openApp();
+  // The crash watcher can show the error step while the check waits; keep it.
+  if (quitting || state.kind !== "starting") return;
   setState({ ...base, kind: "sign_in", signIn: "waiting" });
-  await signIn();
+  await applyLinkCheck(result);
+}
+
+/**
+ * Act on a link check while the window shows the sign-in step. The Mac app
+ * works only with hosted: when hosted does not answer, the window stays
+ * blocked and the check runs again until hosted answers.
+ */
+async function applyLinkCheck(result: LinkCheck): Promise<void> {
+  if (quitting || state.kind !== "sign_in") return;
+  if (result === "linked") return openApp();
+  if (result === "signed_out") {
+    setState({ ...state, signIn: "waiting", error: undefined });
+    return signIn();
+  }
+  if (result === "failed") {
+    // Hosted answered but did not confirm the link: "Try again" starts a new
+    // sign-in, and the timer below still clears a short hosted error.
+    log("hosted did not confirm the account link; the app stays blocked");
+    setState({ ...state, signIn: "failed", error: undefined });
+  } else {
+    log("hosted does not answer; the app stays blocked until it does");
+    setState({ ...state, signIn: "unreachable", error: undefined });
+  }
+  scheduleRecheck();
+}
+
+function scheduleRecheck(): void {
+  stopReconnect();
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    void recheckLink();
+  }, RECONNECT_MS);
+}
+
+function stopReconnect(): void {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+}
+
+/** The window is blocked because hosted did not answer or did not confirm the link. */
+function blockedOnHosted(): boolean {
+  return state.kind === "sign_in" && (state.signIn === "unreachable" || state.signIn === "failed");
+}
+
+/** Check the link again while the window is blocked on hosted. */
+async function recheckLink(): Promise<void> {
+  if (quitting || !blockedOnHosted() || !hostedLink) return;
+  // A check that still runs can belong to an old step and be dropped, so a
+  // tick that meets it waits for the next tick instead of ending the retries.
+  if (checkingLink) return scheduleRecheck();
+  stopReconnect();
+  checkingLink = true;
+  const epoch = linkEpoch;
+  let result: LinkCheck = "unreachable";
+  try {
+    result = await hostedLink.verified();
+  } catch (err) {
+    log(`account status check failed: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    checkingLink = false;
+  }
+  // stopStack, a sign-in callback or a later link loss can change the step while the check runs.
+  if (!blockedOnHosted() || !hostedLink || epoch !== linkEpoch) return;
+  await applyLinkCheck(result);
 }
 
 async function openApp(): Promise<void> {
+  linkEpoch += 1;
   signInUrl = null;
+  stopReconnect();
   if (quitting || !frontendUrl || (state.kind !== "starting" && state.kind !== "sign_in")) return;
   setState({ ...state, kind: "ready", url: frontendUrl, signIn: undefined });
   useAppSize();
+  stopLinkWatch?.();
+  const client = hostedLink;
+  // Each check asks hosted, so the app is blocked within one interval when
+  // hosted revokes the link or stops answering.
+  if (client) stopLinkWatch = watchLink(() => client.verified(), (result) => void linkLost(result));
   await loadAppUrl(frontendUrl);
+}
+
+/**
+ * The link is gone or hosted does not answer while the app runs: block the
+ * window with the sign-in step. Local processes, such as running sandbox
+ * jobs, keep running.
+ */
+async function linkLost(result: Exclude<LinkCheck, "linked">): Promise<void> {
+  if (quitting || state.kind !== "ready") return;
+  linkEpoch += 1;
+  stopLinkWatch = null;
+  if (result === "signed_out") log("the account link is gone; asking for a sign-in again");
+  showOnboarding({ ...state, kind: "sign_in", url: undefined, signIn: "waiting", error: undefined });
+  await applyLinkCheck(result);
 }
 
 /**
@@ -399,6 +492,13 @@ async function openApp(): Promise<void> {
  */
 async function signIn(): Promise<void> {
   if (state.kind !== "sign_in" || !hostedLink) return;
+  // "Try again" on the unreachable step first asks hosted again; a Mac that is
+  // still linked then opens without a new sign-in.
+  if (state.signIn === "unreachable") return recheckLink();
+  // A new sign-in replaces the timed check and drops a check that still runs;
+  // a second start() would open a second browser tab.
+  stopReconnect();
+  linkEpoch += 1;
   let result;
   try {
     result = await hostedLink.start();
@@ -435,6 +535,13 @@ async function handleAppUrl(raw: string): Promise<void> {
     if (isOpenAppUrl(raw)) {
       if (win?.isMinimized()) win.restore();
       win?.focus();
+      // A sign-in started in the web app ends on that page, not on
+      // skynet://link/callback, so the sign-in step checks the link here.
+      // A slow check must not open the app after a later link loss.
+      const epoch = linkEpoch;
+      if (state.kind === "sign_in" && hostedLink && !finishingSignIn && (await hostedLink.verified().catch(() => "unreachable")) === "linked" && epoch === linkEpoch) {
+        await openApp();
+      }
       return;
     }
     return log("ignored an unknown skynet:// URL");
@@ -494,6 +601,9 @@ const FRONTEND_STOP_GRACE_MS = 2_000;
 /** Stop the web server and the API, then Postgres and the sandbox containers. */
 async function stopStack(): Promise<void> {
   killActiveCommands();
+  stopLinkWatch?.();
+  stopLinkWatch = null;
+  stopReconnect();
   hostedLink = null;
   signInUrl = null;
   const fe = frontend;

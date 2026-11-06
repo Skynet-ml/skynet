@@ -20,6 +20,7 @@ export function mintSessionToken(secret: string, email: string, now = Date.now()
 }
 
 export type StartResult = { ok: true; url: string } | { ok: false; reason: "unavailable" | "failed"; detail: string };
+export type LinkCheck = "linked" | "signed_out" | "unreachable" | "failed";
 export type FinishResult = { ok: true } | { ok: false; reason: "unreachable" | "failed"; detail: string };
 
 /** Talks to the local backend's /local/hosted-link routes as the local user. */
@@ -58,6 +59,26 @@ export class HostedLinkClient {
     return body.linked === true;
   }
 
+  /**
+   * Check the link with hosted. The local link row can outlive a link that
+   * hosted revoked or let expire; hosted whoami then answers 401 (the local
+   * API deletes the link) or 409 (no link). A network error, a timeout or a 503
+   * means hosted did not answer ("unreachable"). Any other error means hosted
+   * answered but did not confirm the link ("failed"). Neither opens the app.
+   */
+  async verified(): Promise<LinkCheck> {
+    if (!(await this.linked())) return "signed_out";
+    let res: Response;
+    try {
+      res = await this.call("GET", "/local/hosted-link/whoami");
+    } catch {
+      return "unreachable";
+    }
+    if (res.status === 401 || res.status === 409) return "signed_out";
+    if (res.ok) return "linked";
+    return res.status === 503 ? "unreachable" : "failed";
+  }
+
   async start(): Promise<StartResult> {
     // The consent page opens in the default browser and hands the result back through skynet://.
     const res = await this.call("POST", "/local/hosted-link/start", { app_callback: true });
@@ -83,4 +104,40 @@ export class HostedLinkClient {
     const body = (await res.json().catch(() => ({}))) as { detail?: string };
     return { ok: false, reason: res.status === 503 ? "unreachable" : "failed", detail: body.detail ?? `HTTP ${res.status}` };
   }
+}
+
+/**
+ * Check the link every `everyMs` and call `onLost` once with the result when
+ * the Mac is signed out or cannot reach hosted. A check that throws is
+ * skipped: the crash watcher handles a stopped local API.
+ * Returns the function that stops the checks.
+ */
+export function watchLink(
+  check: () => Promise<LinkCheck>,
+  onLost: (result: Exclude<LinkCheck, "linked">) => void,
+  everyMs = 30_000,
+): () => void {
+  let checking = false;
+  let stopped = false;
+  const stop = () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+  const timer = setInterval(async () => {
+    if (checking) return;
+    checking = true;
+    try {
+      const result = await check();
+      // A check can end after stop(); it must not report a loss then.
+      if (result !== "linked" && !stopped) {
+        stop();
+        onLost(result);
+      }
+    } catch {
+      // Try again on the next tick.
+    } finally {
+      checking = false;
+    }
+  }, everyMs);
+  return stop;
 }
