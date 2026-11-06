@@ -150,8 +150,12 @@ function deleteRevision(account: string): number | null {
   return foreign === account ? 0 : knownRevision(account);
 }
 
+// The account whose slot this page read once; known can turn null after that.
+let readSlot: string | null = null;
+
 function learn(account: string, slot: ServerSetupDraftSlot): ServerSetupDraftSlot {
   known = { account, revision: slot.revision };
+  readSlot = account;
   return slot;
 }
 
@@ -253,6 +257,7 @@ export function resetSetupDraftSyncForTests(): void {
   takenBody = null;
   known = null;
   foreign = null;
+  readSlot = null;
   writer = newWriter();
   saveCount = 0;
 }
@@ -316,7 +321,7 @@ export function saveSetupDraft(
     ).then((slot) => learn(account, slot));
   // A page that never read the slot keeps no base, so its copy differs from one built on revision 0.
   const keepCopy = () => {
-    const base = knownRevision(account);
+    const base = knownRevision(account) ?? (readSlot === account ? 0 : null);
     keepLocalSetupDraft(
       base === null ? { ...draft, save } : { ...draft, save, baseRevision: base },
     );

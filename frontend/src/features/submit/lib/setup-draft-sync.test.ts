@@ -711,6 +711,75 @@ test("a reload of a tab that saved over revision 0 keeps its setup from another 
   assert.deepEqual(server.stored, sync.toServerDraft(later));
 });
 
+test("a reload of the winning tab with no pagehide does not send a stale tab's refused copy", async () => {
+  reset();
+  const server = fakeServer(null);
+  assert.equal(await sync.loadSetupDraft("a", server), null);
+  const x = editedDraft(1000, "X");
+  session.setItem(WIZARD_SESSION_KEY, x.values[WIZARD_SESSION_KEY]);
+  assert.equal(await sync.saveSetupDraft(x, server), true);
+  const tabA = new Map(session.items);
+
+  // Tab C opens the setup, continues it and saves over it.
+  sync.resetSetupDraftSyncForTests();
+  session.items = new Map();
+  assert.ok(await sync.loadSetupDraft("a", server));
+  const y = editedDraft(2000, "Y");
+  session.setItem(WIZARD_SESSION_KEY, y.values[WIZARD_SESSION_KEY]);
+  assert.equal(await sync.saveSetupDraft(y, server), true);
+  const tabC = new Map(session.items);
+
+  // Tab A reloads, edits, and its save is refused.
+  sync.resetSetupDraftSyncForTests();
+  session.items = tabA;
+  await sync.loadSetupDraft("a", server);
+  assert.deepEqual(server.stored, sync.toServerDraft(y));
+  const x2 = editedDraft(3000, "X2");
+  session.setItem(WIZARD_SESSION_KEY, x2.values[WIZARD_SESSION_KEY]);
+  assert.equal(await sync.saveSetupDraft(x2, server), false);
+  sameSetup(localDraft(), x2);
+
+  // Tab C reloads with no pagehide (discard, crash or a reopened tab).
+  sync.resetSetupDraftSyncForTests();
+  session.items = tabC;
+  await sync.loadSetupDraft("a", server);
+  assert.deepEqual(server.stored, sync.toServerDraft(y));
+  assert.equal(localDraft(), null);
+});
+
+test("a stale tab that closes before its leave save is refused does not replace the winning tab's setup", async () => {
+  reset();
+  const server = fakeServer(null);
+  await sync.loadSetupDraft("a", server);
+  const x = editedDraft(1000, "X");
+  session.setItem(WIZARD_SESSION_KEY, x.values[WIZARD_SESSION_KEY]);
+  await sync.saveSetupDraft(x, server);
+  const tabA = new Map(session.items);
+  sync.resetSetupDraftSyncForTests();
+  session.items = new Map();
+  await sync.loadSetupDraft("a", server);
+  const y = editedDraft(2000, "Y");
+  session.setItem(WIZARD_SESSION_KEY, y.values[WIZARD_SESSION_KEY]);
+  await sync.saveSetupDraft(y, server);
+  const tabC = new Map(session.items);
+  sync.resetSetupDraftSyncForTests();
+  session.items = tabA;
+  await sync.loadSetupDraft("a", server);
+  const x2 = editedDraft(3000, "X2");
+  session.setItem(WIZARD_SESSION_KEY, x2.values[WIZARD_SESSION_KEY]);
+  const put = server.put;
+  server.put = async (...args: Parameters<typeof put>) => {
+    await put(...args);
+    throw new Error("page closed");
+  };
+  await sync.saveSetupDraft(x2, server, true);
+  server.put = put;
+  sync.resetSetupDraftSyncForTests();
+  session.items = tabC;
+  await sync.loadSetupDraft("a", server);
+  assert.deepEqual(server.stored, sync.toServerDraft(y));
+});
+
 test("N6: a reloaded stale tab keeps another setup saved elsewhere on load, leave and submit", async () => {
   reset();
   const mine = editedDraft(1000, "A");
