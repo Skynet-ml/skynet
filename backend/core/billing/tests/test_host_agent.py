@@ -854,6 +854,24 @@ def test_capped_turn_fails_the_run_with_its_reset_time(
     assert "claude" in message
 
 
+def test_turn_that_no_cli_started_is_marked_for_the_usage_panel(
+    gateway: ModelGateway, local: Settings, guest: Path, database: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn that a saved cap stops before the CLI starts records ``dispatched: false``; the guest never sees the marker."""
+    monkeypatch.setenv("FAKE_CLI_NAME", "claude")
+    monkeypatch.setenv("FAKE_CLI_MODE", "limit")
+    token = bind_host_agent(gateway, local, cli="claude", permission="workspace_only")
+    body = {"model": "", "prompt": "x", "workspace_tar_b64": _workspace_tar(guest)}
+
+    ran = _post(gateway, token, body)
+    skipped = _post(gateway, token, body)
+
+    assert ran.status_code == skipped.status_code == 429
+    assert host_agent.NOT_STARTED_KEY not in skipped.json()
+    records = run_usage.load_records(database, str(gateway.runtime.budget_id))
+    assert sorted(record.evidence.get("dispatched", True) for record in records) == [False, True]
+
+
 def test_oversized_workspace_is_refused(gateway: ModelGateway, local: Settings, tmp_path: Path) -> None:
     """A request above 32 MB is refused with 413 before any CLI runs."""
     token = bind_host_agent(gateway, local, cli="claude", permission="workspace_only")

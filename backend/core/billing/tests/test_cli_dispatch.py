@@ -113,6 +113,17 @@ def test_cap_evidence_says_whether_a_cli_started(tmp_path: Path) -> None:
     assert len(calls(tmp_path, "claude")) == 1
 
 
+def test_cap_evidence_names_the_cli_that_ran(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Credit a 429 to the CLI that ran, not to a later fallback that its saved cap skipped."""
+    fake_cli(tmp_path, "claude", CAPPED)
+    monkeypatch.setattr(cli_dispatch, "cli_model_arg", lambda provider, model: model)
+    settings = local_settings(tmp_path, cli_fallback_order="claude,codex")
+    cli_dispatch.write_cli_limit(settings, "codex", datetime(2099, 1, 1, tzinfo=UTC), "codex is capped")
+    _, evidence = CliDispatcher(None, "claude", MODEL, "judge", settings)._answer("/chat/completions", REQUEST)
+    assert (evidence["status"], evidence["cli"], "dispatched" in evidence) == (429, "claude", False)
+    assert len(calls(tmp_path, "claude")) == 1
+
+
 def test_fallback_order_that_names_droid_skips_it(tmp_path: Path) -> None:
     """Skip droid in a saved fallback order: it is not a runner, so it never starts."""
     fake_cli(tmp_path, "claude", CAPPED)
