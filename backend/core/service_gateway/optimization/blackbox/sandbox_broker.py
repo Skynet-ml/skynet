@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import threading
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Protocol
@@ -111,15 +111,22 @@ def _relative_path(value: Any) -> str:
 class ParentSandboxSession:
     """One box the trusted parent opened for itself; no guest capability names it."""
 
-    def __init__(self, session: SandboxSession, command_runner: SandboxCommandRunner | None) -> None:
+    def __init__(
+        self,
+        session: SandboxSession,
+        command_runner: SandboxCommandRunner | None,
+        on_close: Callable[[ParentSandboxSession], None] | None = None,
+    ) -> None:
         """Wrap a box with the run's model mailbox, as guest commands get.
 
         Args:
             session: The provider session.
             command_runner: Optional model mailbox command wrapper.
+            on_close: Called once with this box after it closes.
         """
         self._session = session
         self._command_runner = command_runner
+        self._on_close = on_close
         self._closed = False
 
     def write_files(self, files: Mapping[str, str]) -> None:
@@ -181,7 +188,11 @@ class ParentSandboxSession:
         if self._closed:
             return
         self._closed = True
-        self._session.close()
+        try:
+            self._session.close()
+        finally:
+            if self._on_close is not None:
+                self._on_close(self)
 
 
 class _ParentSandboxRuntime:
@@ -402,6 +413,7 @@ class SandboxBroker:
                 )
             ),
             self._parent_command_runner,
+            self._forget_parent,
         )
         with self._lock:
             closing = self._closed
@@ -411,6 +423,16 @@ class SandboxBroker:
             session.close()
             raise ServiceError("The sandbox broker closed during creation.")
         return session
+
+    def _forget_parent(self, session: ParentSandboxSession) -> None:
+        """Drop a closed parent box so a long run does not keep one per stage and evaluation.
+
+        Args:
+            session: The box that just closed.
+        """
+        with self._lock:
+            if session in self._parent_sessions:
+                self._parent_sessions.remove(session)
 
     def handle(self, action: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Perform one non-streaming action inside an owned guest sandbox.
