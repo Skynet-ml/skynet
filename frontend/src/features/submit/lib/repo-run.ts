@@ -6,7 +6,9 @@
  * no artifact or run code, and carries cases only when the interview found
  * the run needs data.
  */
+import type { ApiSource } from "@/shared/lib/api-route";
 import type { BlackboxEngineId, BlackboxRunRequest, ModelConfig } from "@/shared/types/api";
+import type { HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { prepareModelConfig } from "./model-config";
 import { storedMetricModel } from "./run-floor";
 import type { WizardV2State } from "./wizard-v2";
@@ -86,4 +88,38 @@ export function repoRunRequest(
     is_private: meta.isPrivate,
     max_cost_cents: maxCostCents ?? undefined,
   };
+}
+
+// The statuses whose suite the engine ships (`_FINISHED_HARDENING` in
+// backend/core/worker/repo_staging.py); keep the two in step.
+const FINISHED_HARDENING: ReadonlySet<HardeningStatus> = new Set(["clean_stop", "budget_stop", "done"]);
+
+/**
+ * The id of the setup's finished hardening job, which the run submit sends so
+ * the run's PR ships the job's exploit suite (SKY-373).
+ *
+ * Hardening runs only on the local backend, so a hosted run's worker cannot
+ * find the job; a hosted run sends no id and ships no suite.
+ *
+ * Args:
+ *   runOn: The backend the run goes to.
+ *   draftId: The setup's hardening draft id, or null when it never had one.
+ *   read: Reads the draft's newest hardening job from the local backend.
+ *
+ * Returns:
+ *   The job id, or null for a hosted run, a setup with no finished job, or a
+ *   failed read; the run then submits without one.
+ */
+export async function finishedHardeningJobId(
+  runOn: ApiSource,
+  draftId: string | null,
+  read: (draftId: string) => Promise<HardeningJob | null>,
+): Promise<string | null> {
+  if (runOn !== "local" || !draftId) return null;
+  try {
+    const job = await read(draftId);
+    return job && FINISHED_HARDENING.has(job.status) ? job.id : null;
+  } catch {
+    return null;
+  }
 }
