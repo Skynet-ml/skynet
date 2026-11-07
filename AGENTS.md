@@ -88,7 +88,7 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   (`.github/workflows/pr-files-scope.yml` checks this).
 - Never bypass branch protection or hooks. Never force-push.
 - The repository is **public**. Never commit secrets, passwords, tokens,
-  emails, account data, images or videos. Secret names are fine.
+  emails, account data, or evidence images or videos. Secret names are fine.
 
 ## Merge policy (MANDATORY)
 

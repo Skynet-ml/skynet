@@ -73,8 +73,8 @@ Use the repository template when there is one. Include, in this order:
 
 1. Problem and resulting behavior (one concrete before-and-after example when
    useful).
-2. Review evidence: the UI Before and After images (or video, with the reason),
-   or why there is no visible UI change.
+2. Review evidence: the UI Before and After images (or video, with the
+   reason), or why there is no visible UI change.
 3. Test scope and the results table.
 4. Material gaps or follow-up work, only when present.
 5. Automated review verdicts and the decision requested from Gilad.
@@ -275,8 +275,8 @@ A manual hold on a change or on a promotion still stops it.
   when the review confirms no meaningful visible change in normal use (for
   example payload or data-cleanup fixes for stale states, internal refactors,
   tests, i18n-only string moves). It needs no images or videos. The PR body
-  must say why the change is not visible. If the reviewer is unsure, keep the human
-  approval.
+  must say why the change is not visible. If the reviewer is unsure, keep
+  the human approval.
 - Just before the merge, check the full changed-file list, the current
   revision, base, evidence and review policy. Use a merge command that
   requires the reviewed head commit. Never bypass branch protection or queue
