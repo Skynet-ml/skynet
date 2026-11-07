@@ -36,13 +36,23 @@ EvalListener = Callable[["EvalServer", float | None], None]
 # no score (``None``), never 0: a crash is not a measurement (SKY-350).
 METRIC_ERROR = "metric_error"
 STATUS_KEY = "status"
-# SKY-367: the engines still need a number for every case, so evaluate() hands
-# them this value for a metric_error case. It is far below any real score, so a
-# crashed version always loses the search. Records, best picks, results and
-# publishing see ``None``. Progress events reach users only after the service
-# nulls this value and means it pulled down; an engine's own log line (the
-# native runtime's "Candidate scored") can still show such a mean.
-SEARCH_FLOOR = -1e9
+# SKY-367: the pinned upstream engines need a number for every case, and they
+# use negative infinity as their own "no score" value. A mean that takes it in
+# is negative infinity too, so a crashed version ranks below every scored one
+# and the order of the scored versions does not change.
+UNSCORED = float("-inf")
+
+
+def engine_score(score: float | None) -> float:
+    """Give a pinned upstream engine its own "no score" value for a metric error case.
+
+    Args:
+        score: A score from :meth:`EvalServer.evaluate`, ``None`` after a metric error.
+
+    Returns:
+        The score, or :data:`UNSCORED` when there is none.
+    """
+    return UNSCORED if score is None else score
 
 
 def is_metric_error(side_info: SideInfo) -> bool:
@@ -266,7 +276,7 @@ class EvalServer:
         """
         return EvalServer(self._scorer, max_evals=min(max_evals, self.remaining), parent=self)
 
-    def evaluate(self, candidate: Candidate, example: Any = None) -> tuple[float, SideInfo]:
+    def evaluate(self, candidate: Candidate, example: Any = None) -> tuple[float | None, SideInfo]:
         """Score one candidate on one case (or on its own in single-task mode).
 
         Args:
@@ -275,7 +285,7 @@ class EvalServer:
 
         Returns:
             The score and the scorer's side information. A metric error case
-            returns :data:`SEARCH_FLOOR` with ``status: metric_error``.
+            returns ``None`` with ``status: metric_error``.
 
         Raises:
             BudgetExhaustedError: When no scorer calls remain.
@@ -293,7 +303,7 @@ class EvalServer:
         else:
             logger.debug("scorer eval %d/%d score=%.3f", root.used, root.max_evals, score)
         self._account(candidate, score, side_info)
-        return (SEARCH_FLOOR if score is None else score), side_info
+        return score, side_info
 
     def charge(self, candidate: Candidate | None, score: float | None, side_info: SideInfo | None = None) -> None:
         """Count one evaluation scored outside the scorer against every budget in the chain.
@@ -376,8 +386,8 @@ class EvalServer:
             error = f"{type(exc).__name__}: {exc}"
             logger.warning("scorer raised on a candidate (%s): %s", METRIC_ERROR, error)
             return None, {"error": error, STATUS_KEY: METRIC_ERROR}
-        # A nested server (an Auto lane) scores through an outer evaluate(),
-        # which hands back the search floor; the status marks it as no score.
+        # A nested server (an Auto lane) scores through the upstream server,
+        # which hands back UNSCORED; the status marks it as no score.
         if score is None or is_metric_error(side_info):
             return None, {**side_info, STATUS_KEY: METRIC_ERROR}
         return score, side_info

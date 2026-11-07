@@ -625,6 +625,29 @@ def test_supervisor_stop_is_not_reported_as_a_reply_timeout(
     assert mailbox.error is None
 
 
+@pytest.mark.parametrize(("sent", "expected"), [(None, float("-inf")), (0.5, 0.5)])
+def test_box_mailbox_turns_a_null_parent_score_into_no_score(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sent: float | None, expected: float
+) -> None:
+    """A metric error reaches the box as null and the upstream engine sees its own no-score value (SKY-367)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "rpc").mkdir()
+    mailbox = native_runner.EvaluatorMailbox("nonce", 5.0)
+
+    def reply(prefix: str, payload: dict[str, Any]) -> None:
+        """Answer the request at once, as the parent does.
+
+        Args:
+            prefix: Event family, ignored.
+            payload: The evaluation request.
+        """
+        (tmp_path / "rpc" / f"{payload['id']}.json").write_text(json.dumps({"score": sent, "info": {"x": 1}}))
+
+    monkeypatch.setattr(mailbox, "emit", reply)
+
+    assert mailbox.evaluate("candidate") == (expected, {"x": 1})
+
+
 def test_native_usage_ledger_survives_lane_replacement() -> None:
     """Auto lanes share cumulative proposer usage when their cost caps differ."""
     options = NativeOptions("vercel", "claude-test", GatewayConfig("https://gateway.example", "key"), 1.0)

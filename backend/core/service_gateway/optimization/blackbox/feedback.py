@@ -221,7 +221,7 @@ def emit_scorer_feedback(
     progress_callback: Callable[[str, dict[str, Any]], None] | None,
     *,
     example_id: str,
-    score: float,
+    score: float | None,
     side_info: SideInfo,
     iteration: int | None = None,
     candidate_id: str | None = None,
@@ -236,7 +236,7 @@ def emit_scorer_feedback(
     Args:
         progress_callback: The lane's progress sink, if any.
         example_id: Display id of the case the scorer graded (``"?"`` when none).
-        score: The score the scorer returned.
+        score: The score the scorer returned, ``None`` after a metric error.
         side_info: What the scorer returned next to the score.
         iteration: The version the call scores. Engines that score from
             worker threads pass it explicitly; unset, it is read from the

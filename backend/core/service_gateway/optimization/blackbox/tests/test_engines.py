@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import pickle
 from pathlib import Path
 from typing import Any
@@ -247,6 +248,77 @@ def test_best_of_n_streams_each_completed_sample_as_a_root(tmp_path: Path) -> No
     assert candidates[1]["score"] == pytest.approx(0.0)
     assert [row["discovered_at_evals"] for row in candidates] == [2, 4]
     assert server.used == 5
+
+
+def _crash_on(text: str) -> Any:
+    """Build a vowel scorer that raises for one candidate text.
+
+    Args:
+        text: Candidate text that makes the scorer raise.
+
+    Returns:
+        A scorer with the ``vowel_scorer`` contract.
+    """
+
+    def score(candidate: Any, example: Any = None) -> tuple[float, dict[str, Any]]:
+        """Raise for the crash text, else score vowel density.
+
+        Args:
+            candidate: Proposal.
+            example: Dataset example.
+
+        Returns:
+            Vowel density and side info.
+
+        Raises:
+            RuntimeError: For the crash text.
+        """
+        if candidate == text:
+            raise RuntimeError("scorer bug")
+        return vowel_scorer(candidate, example)
+
+    return score
+
+
+def test_best_of_n_skips_a_sample_whose_metric_raises(tmp_path: Path) -> None:
+    """A raising metric neither crashes Best-of-N nor wins, and valid samples keep their order (SKY-367)."""
+    model = _SequenceModel(["broken", "aeiou", "xyz"])
+    sink: list[tuple[str, dict[str, Any]]] = []
+    server = EvalServer(_crash_on("broken"), max_evals=6)
+    task = Task(seed_candidate="seed", cases=[{"id": "a"}, {"id": "b"}])
+    ctx = EngineContext(
+        reflection_lm=model,
+        run_dir=str(tmp_path),
+        progress_callback=lambda event, metrics: sink.append((event, metrics)),
+    )
+
+    result = BestOfNEngine().run(task, server, ctx)
+
+    assert result.best_candidate == "aeiou"
+    assert result.best_score == 1.0
+    log = result.metadata["bon_cost_log"]
+    assert all(entry["score"] is None or math.isfinite(entry["score"]) for entry in log)
+    assert [entry["score"] for entry in log] == [None, 1.0, 0.0]
+    assert [entry["best_score"] for entry in log] == [None, 1.0, 1.0]
+    events = [metrics for event, metrics in sink if event == PROGRESS_CANDIDATE]
+    assert all(row.get("score") is None or math.isfinite(row["score"]) for row in events)
+
+
+def test_gepa_engine_survives_a_raising_metric_and_never_picks_it(tmp_path: Path) -> None:
+    """A real GEPA run with a raising metric finishes, and the crashed text is never best (SKY-367)."""
+    # The fake LM first proposes "aeiou": make that the crashed version.
+    server = EvalServer(_crash_on("aeiou"), max_evals=16)
+    task = Task(seed_candidate="hello world", objective="more vowels", cases=[{"i": 0}, {"i": 1}, {"i": 2}])
+
+    result = GepaEngine().run(task, server, make_ctx(str(tmp_path)))
+
+    assert server.used <= 16
+    assert result.best_candidate != "aeiou"
+    assert result.best_score is not None
+    assert math.isfinite(result.best_score)
+    tree = result.metadata["candidate_tree"]
+    assert all(node["candidate"] != "aeiou" for node in tree)
+    assert all(node["val_score"] is None or math.isfinite(node["val_score"]) for node in tree)
 
 
 @pytest.mark.parametrize("seed", ["seed", None])

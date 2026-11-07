@@ -90,7 +90,7 @@ class EvaluatorMailbox:
             **kwargs: Additional upstream evaluation context.
 
         Returns:
-            Parent score and feedback.
+            Parent score (negative infinity for a metric error) and feedback.
 
         Raises:
             EvaluationStopped: When the parent rejects evaluation or does not reply.
@@ -123,7 +123,11 @@ class EvaluatorMailbox:
                     self.error = kind(str(response["error"]))
                     self.stopped.set()
                     raise self.error
-                return float(response["score"]), dict(response.get("info") or {})
+                score = response.get("score")
+                # SKY-367: the parent sends null for a metric error. The pinned
+                # upstream engines need a number, and negative infinity is
+                # their own "no score" value.
+                return (float("-inf") if score is None else float(score)), dict(response.get("info") or {})
             time.sleep(0.05)
         if self.stopped.is_set():
             # The supervisor stopped the run and records why; claiming a reply

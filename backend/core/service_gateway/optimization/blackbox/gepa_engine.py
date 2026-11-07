@@ -8,6 +8,7 @@ eval server is the single scoring path, exactly like upstream ``gepa.oa``.
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,7 @@ from ..budget_stop import BudgetReached
 from ..trajectory import capture_proposal_prompts, trajectory_watch
 from .feedback import STR_CANDIDATE_KEY, emit_scorer_feedback, gepa_side_info
 from .native_runtime import run_native_engine
-from .protocol import BudgetExhaustedError, Candidate, EngineContext, EvalServer, Result, Task
+from .protocol import BudgetExhaustedError, Candidate, EngineContext, EvalServer, Result, Task, engine_score
 from .upstream import GEPA_SOURCE
 
 logger = logging.getLogger(__name__)
@@ -100,8 +101,10 @@ class GepaEngine:
                 example: The case, or ``None`` in single-task mode.
 
             Returns:
-                The score and side information, named scores as plain numbers
-                for GEPA's objective frontier and their feedback beside them.
+                The score (:data:`UNSCORED` after a metric error, so GEPA never
+                accepts or picks that version) and side information, named
+                scores as plain numbers for GEPA's objective frontier and their
+                feedback beside them.
             """
             if ctx.check_budget is not None:
                 ctx.check_budget()
@@ -114,7 +117,7 @@ class GepaEngine:
                 score=score,
                 side_info=side_info,
             )
-            return score, gepa_side_info(side_info)
+            return engine_score(score), gepa_side_info(side_info)
 
         kwargs: dict[str, Any] = {"seed_candidate": task.seed_candidate, "evaluator": evaluator, "config": config}
         # Train cases drive reflection and the validation cases rank versions.
@@ -140,7 +143,7 @@ class GepaEngine:
                 recovered = _load_result_from_state(run_dir, seed=ctx.seed, str_mode=task.str_mode)
                 if recovered is not None:
                     candidate = recovered.best_candidate
-                    score = float(recovered.val_aggregate_scores[recovered.best_idx])
+                    score = _val_score(recovered.val_aggregate_scores[recovered.best_idx])
                     exc.result = Result(
                         best_candidate=candidate,
                         best_score=score,
@@ -166,7 +169,7 @@ class GepaEngine:
             best = next(iter(best.values()), "")
         return Result(
             best_candidate=best,
-            best_score=float(gepa_result.val_aggregate_scores[gepa_result.best_idx]),
+            best_score=_val_score(gepa_result.val_aggregate_scores[gepa_result.best_idx]),
             total_evals=server.used,
             metadata={
                 "upstream_source": GEPA_SOURCE,
@@ -235,11 +238,25 @@ def _candidate_tree(gepa_result: GEPAResult[Any, Any], *, str_mode: bool) -> lis
             {
                 "candidate": unwrapped,
                 "parents": [None if parent is None else int(parent) for parent in gepa_result.parents[index]],
-                "val_score": None if score is None else float(score),
+                "val_score": _val_score(score),
                 "discovery_evals": int(gepa_result.discovery_eval_counts[index]),
             }
         )
     return nodes
+
+
+def _val_score(score: float | None) -> float | None:
+    """Turn GEPA's validation mean into a reported score.
+
+    Args:
+        score: GEPA's mean, ``-inf`` when a case of it had a metric error.
+
+    Returns:
+        The mean, or ``None`` when it is missing or not finite.
+    """
+    if score is None or not math.isfinite(score):
+        return None
+    return float(score)
 
 
 def _load_result_from_state(run_dir: str, *, seed: int, str_mode: bool) -> GEPAResult[Any, Any] | None:

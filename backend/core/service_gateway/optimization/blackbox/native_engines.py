@@ -402,7 +402,7 @@ def best_aggregate_candidate(server: EvalServer) -> tuple[str, float] | None:
     for entry in server.progress_log:
         candidate = by_id.get(entry.get("candidate_id"))
         score = entry.get("val_score")
-        if candidate is None or not isinstance(score, int | float):
+        if candidate is None or not isinstance(score, int | float) or not math.isfinite(score):
             continue
         if best is None or score > best[1]:
             best = (candidate, float(score))
@@ -2207,6 +2207,9 @@ class BestValsetVersion:
         if event["num_examples_evaluated"] < event["total_valset_size"]:
             return
         score = float(event["average_score"])
+        # SKY-367: an average with a metric error is negative infinity; it is never best.
+        if not math.isfinite(score):
+            return
         if self.best is None or score > self.best[1]:
             self.best = (next(iter(event["candidate"].values()), ""), score)
 
@@ -2546,6 +2549,10 @@ class BestOfNRepoEngine:
                 sample["outcome"] = "budget_exhausted"
                 break
             score = float(score)
+            if not math.isfinite(score):
+                # SKY-367: a sample with a metric error has no score and is never best.
+                sample["outcome"] = "metric_error"
+                continue
             server.log_progress(score, candidate=patch["candidate"])
             sample["score"] = score
             if self.best is None or score > self.best[1]:

@@ -100,7 +100,6 @@ from .harness import GatewayConfig
 from .native_runtime import NATIVE_ENGINES, NativeOptions, native_runtime_unavailable_reason
 from .protocol import (
     METRIC_ERROR,
-    SEARCH_FLOOR,
     Candidate,
     EngineContext,
     EvalServer,
@@ -116,7 +115,7 @@ from .rule_judge import ILLEGAL_APPROACH_KEY
 from .runner import side_info_json_default
 from .sandbox import current_sandbox_runtime, sandbox_runtime_from_settings
 from .scorer import JobScorer, RemoteScorer, build_scorer
-from .upstream import AUTO_ENGINES, GEPA_REVISION
+from .upstream import AUTO_ENGINES, GEPA_REVISION, finite_json
 
 logger = logging.getLogger(__name__)
 
@@ -798,55 +797,32 @@ def _progress_listener(progress_callback: ProgressCallback | None) -> Callable[[
     return on_eval
 
 
-def _scrub_search_floor(value: Any) -> Any:
-    """Replace every number the search floor reached with ``None``, at any depth.
+def _without_unscored(progress_callback: ProgressCallback | None) -> ProgressCallback | None:
+    """Wrap the job's progress sink so engine events never show an unscored value.
 
-    A mean with one floored case is the floor divided by the case count
-    (Best-of-N over 3 cases gives about -3.3e8), so the cut-off is the
-    floor over 1000: it catches such a mean over up to 1000 cases. A real
-    score at or below -1e6 also shows as no score in progress events;
-    records and results keep it.
-
-    Args:
-        value: A progress payload or a part of one.
-
-    Returns:
-        A copy with those numbers set to ``None``.
-    """
-    if isinstance(value, dict):
-        return {key: _scrub_search_floor(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return type(value)(_scrub_search_floor(item) for item in value)
-    if isinstance(value, int | float) and not isinstance(value, bool) and value <= SEARCH_FLOOR / 1000:
-        return None
-    return value
-
-
-def _without_search_floor(progress_callback: ProgressCallback | None) -> ProgressCallback | None:
-    """Wrap the job's progress sink so engine events never show the search floor.
-
-    SKY-367: engines still get :data:`SEARCH_FLOOR` for a metric error case
-    and report it, or means it pulled down, as scores (the native runtime's
-    candidate events too); users must see no score instead.
+    SKY-367: the pinned upstream engines get ``-inf`` for a metric error case
+    and report it, or a mean it made ``-inf``, as a score (the GEPA state
+    watcher and the native runtime's candidate events too); users must see
+    no score instead.
 
     Args:
         progress_callback: The job's progress sink, if any.
 
     Returns:
-        A sink that nulls every floored number in the payload, or ``None``
+        A sink that nulls every non-finite number in the payload, or ``None``
         without a sink.
     """
     if progress_callback is None:
         return None
 
     def sink(event: str, metrics: dict[str, Any]) -> None:
-        """Forward ``event`` with the floored numbers replaced.
+        """Forward ``event`` with the non-finite numbers replaced.
 
         Args:
             event: The progress event name.
             metrics: Its payload.
         """
-        progress_callback(event, _scrub_search_floor(metrics))
+        progress_callback(event, finite_json(metrics))
 
     return sink
 
@@ -1156,7 +1132,7 @@ def _run_job(
         counts.report_split,
     )
     server = EvalServer(scorer, max_evals=job.budget.max_scorer_runs, on_eval=_progress_listener(progress_callback))
-    engine_progress = _without_search_floor(progress_callback)
+    engine_progress = _without_unscored(progress_callback)
     seed_candidate = job.seed_candidate
 
     lm = build_language_model(job.reflection_model_settings, disable_cache=True)
@@ -1465,7 +1441,7 @@ def _run_job(
         details={
             "optimizer_best_score": optimizer_best_score,
             "selection_scope": selection_scope,
-            **_scrub_search_floor(result.metadata),
+            **finite_json(result.metadata),
         },
         split_counts=counts,
         baseline_val_score=baseline_val.score if baseline_val else None,

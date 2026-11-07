@@ -15,6 +15,7 @@ from core.service_gateway.optimization.blackbox.protocol import (
     BudgetExhaustedError,
     EngineContext,
     EvalServer,
+    ScorerAbortError,
     Task,
 )
 from core.service_gateway.optimization.blackbox.registry import ENGINES, available_engine_ids
@@ -24,6 +25,7 @@ from core.service_gateway.optimization.unified.dspy_engine import (
     EXPECTED_KEY,
     BudgetedMetric,
     DspyEngine,
+    NoScore,
     RunProgram,
     apply_candidate,
     case_example,
@@ -361,6 +363,77 @@ def test_metric_with_the_wrong_return_shape_is_rejected() -> None:
     gold = case_example(_cases(1)[0], ["question"])
     with pytest.raises(ServiceError, match="side_info"):
         BudgetedMetric(score, server, feedback=False)(gold, dspy.Prediction(answer="a"))
+
+
+def _raising_score(input: Any, output: Any, expected: Any = None) -> Any:
+    """Crash like a broken user metric.
+
+    Raises:
+        ValueError: Always.
+    """
+    raise ValueError("metric blew up")
+
+
+@pytest.mark.parametrize("feedback", [False, True])
+def test_a_raising_metric_gives_no_score_and_is_charged_as_a_metric_error(feedback: bool) -> None:
+    """SKY-367: a metric crash is charged with no score, and DSPy gets a falsy negative infinity, never 0."""
+    scores: list[float | None] = []
+    server = EvalServer(_never_scored, max_evals=5, on_eval=lambda _server, score: scores.append(score))
+    gold = case_example(_cases(1)[0], ["question"])
+
+    out = BudgetedMetric(_raising_score, server, feedback=feedback)(gold, dspy.Prediction(answer="a"))
+
+    score = out.score if feedback else out
+    assert isinstance(score, NoScore)
+    assert score == float("-inf")
+    assert not score
+    assert not score >= 0.0
+    if feedback:
+        assert out.feedback == "ValueError: metric blew up"
+    assert server.used == 1
+    assert scores == [None]
+
+
+@pytest.mark.parametrize("error", [ScorerAbortError("stop"), BudgetExhaustedError("spent")])
+def test_a_metric_stop_still_stops_the_run(error: Exception) -> None:
+    """A deliberate stop from inside the metric is not turned into a metric error."""
+    server = EvalServer(_never_scored, max_evals=5)
+
+    def score(input: Any, output: Any, expected: Any = None) -> Any:
+        """Raise the stop."""
+        raise error
+
+    gold = case_example(_cases(1)[0], ["question"])
+    with pytest.raises(type(error)):
+        BudgetedMetric(score, server, feedback=False)(gold, dspy.Prediction(answer="a"))
+    assert server.used == 0
+
+
+CRASH_ON_Q0_METRIC = """
+def score(input, output, expected=None):
+    if input["question"] == "q0":
+        raise ValueError("metric blew up")
+    ok = output.answer == expected["answer"]
+    return float(ok), {"feedback": "right" if ok else "wrong"}
+"""
+
+
+def test_bootstrap_survives_a_raising_metric_and_never_keeps_its_case_as_a_demo(tmp_path: Any) -> None:
+    """The run completes, and the case the metric crashed on never becomes a few-shot demo.
+
+    Args:
+        tmp_path: Run directory.
+    """
+    server = EvalServer(_never_scored, max_evals=100)
+    task = _task(_cases(3), _cases(2, offset=3), metric_code=CRASH_ON_Q0_METRIC)
+
+    result = DspyEngine("dspy_bootstrap_fewshot").run(task, server, _ctx(tmp_path))
+
+    program = load_run_program(RUN_CODE).program
+    apply_candidate(program, result.best_candidate)
+    assert program.demos
+    assert all(demo["question"] != "q0" for demo in program.demos)
+    assert result.metadata["metric_calls"] > 0
 
 
 def test_engine_compiles_on_train_and_never_sees_other_cases(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:

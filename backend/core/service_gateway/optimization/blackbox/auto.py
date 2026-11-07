@@ -23,7 +23,17 @@ from ....exceptions import ServiceError
 from ....models.blackbox import BlackboxStrategy
 from ..budget_stop import BudgetReached
 from ..cost_ceiling import CostCeilingExceededError
-from .protocol import BudgetExhaustedError, EngineContext, EvalServer, Result, ScorerAbortError, Task
+from .protocol import (
+    BudgetExhaustedError,
+    Candidate,
+    EngineContext,
+    EvalServer,
+    Result,
+    ScorerAbortError,
+    SideInfo,
+    Task,
+    engine_score,
+)
 from .registry import NO_CAPABILITIES, EngineCapabilities, get_engine
 from .upstream import AUTO_ENGINES, GEPA_SOURCE, local_result
 
@@ -362,9 +372,22 @@ def run_strategy(
             output_dir=str(Path(ctx.run_dir) / f"{phase}-{name}-evals"),
         )
 
+    def evaluate(candidate: Candidate, example: Any = None) -> tuple[float, SideInfo]:
+        """Score one case for the upstream composition, which needs a number for every case.
+
+        Args:
+            candidate: The version to score.
+            example: The case, or ``None`` when there are no cases.
+
+        Returns:
+            The score, :data:`UNSCORED` after a metric error, and the side information.
+        """
+        score, side_info = server.evaluate(candidate, example)
+        return engine_score(score), side_info
+
     kwargs = {
         "seed_candidate": task.seed_candidate,
-        "evaluator": server.evaluate,
+        "evaluator": evaluate,
         # Upstream's dataset is the train split; the validation split rides
         # along as its valset so each lane can select on it.
         "dataset": task.cases or None,
