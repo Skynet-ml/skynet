@@ -455,10 +455,10 @@ def test_gepa_engine_live_event_shows_no_score_for_a_partly_crashed_version(tmp_
     assert (events["1"]["score"], events["1"]["per_example"]) == (None, [])
 
 
-def test_auto_lane_hands_off_its_best_scored_version_when_the_engine_returns_a_crashed_one(
+def test_auto_lane_hands_off_the_seed_at_minus_inf_when_the_engine_returns_a_crashed_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An Auto lane never hands upstream a version that crashed on a case (SKY-367).
+    """An Auto lane never hands upstream a crashed version or a minibatch-only mean (SKY-367).
 
     Args:
         tmp_path: Artifact directory.
@@ -469,7 +469,7 @@ def test_auto_lane_hands_off_its_best_scored_version_when_the_engine_returns_a_c
         """Score two versions and return the crashed one, as an engine ranking by filled means would."""
 
         def run(self, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
-            """Score "axyz" fully, crash "aeiou" on case 1, and return "aeiou".
+            """Score "axyz" fully, "eeee" on case 0 only, crash "aeiou" on case 1, and return "aeiou".
 
             Args:
                 task: The lane task.
@@ -479,6 +479,7 @@ def test_auto_lane_hands_off_its_best_scored_version_when_the_engine_returns_a_c
             Returns:
                 The crashed version at its filled mean.
             """
+            server.evaluate("eeee", task.cases[0])
             for candidate in ("axyz", "aeiou"):
                 for case in task.cases:
                     server.evaluate(candidate, case)
@@ -508,10 +509,11 @@ def test_auto_lane_hands_off_its_best_scored_version_when_the_engine_returns_a_c
     )
     upstream = SimpleNamespace(evaluate=scorer, budget=SimpleNamespace(remaining=10))
 
-    result = lane_engine.run(UpstreamTask("seed", train_set=[{"i": 0}, {"i": 1}]), upstream)  # type: ignore[arg-type]
+    task = UpstreamTask("lane", seed_candidate="seed", train_set=[{"i": 0}, {"i": 1}])
+    result = lane_engine.run(task, upstream)  # type: ignore[arg-type]
 
-    assert (result.best_candidate, result.best_score) == ("axyz", 0.25)
-    assert (lanes[0].best_candidate, lanes[0].best_score) == ("axyz", 0.25)
+    assert (result.best_candidate, result.best_score) == ("seed", -math.inf)
+    assert (lanes[0].best_candidate, lanes[0].best_score) == ("seed", -math.inf)
 
 
 def test_auto_evaluator_gives_upstream_unscored_and_keeps_the_metric_error(

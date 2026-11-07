@@ -1068,7 +1068,9 @@ class AutoResearchEngine:
                 feedback = {str(k): _feedback_text(v) for k, v in (info.get("infos") or {}).items()}
                 for eid, error in (info.get("errors") or {}).items():
                     feedback[str(eid)] = _feedback_text(f"error: {error}")
-                full = set(scores) == visible
+                # A crashed case gets the version's mean as a filled score (SKY-367). That mean must not
+                # rank or stop the run, so the observation does not count as a full-split score.
+                full = set(scores) == visible and not info.get(UNSCORED_CASES_KEY)
                 mean = _mean(scores)
                 named, named_feedback = named_score_columns(list((info.get("infos") or {}).values()))
                 scores.update(named)
@@ -1713,7 +1715,7 @@ class MetaHarnessEngine:
             self._benchmark(server, "seed", seed_as_text(task.seed_candidate))
             self._write_frontier()
             for iteration in range(1, self.max_iterations + 1):
-                best = self._best()
+                best = self._best(scored=True)
                 if _reached(self.stop_at_score, None if best is None else best[1]):
                     stop_reason = "stop_at_score"
                     break
@@ -2192,7 +2194,12 @@ class MetaHarnessEngine:
                 for column, value in named.items()
             },
         }
-        self.results[name] = {"avg_val": avg, "scores": {**record["scores"], **named}, "candidate": candidate}
+        self.results[name] = {
+            "avg_val": avg,
+            "scores": {**record["scores"], **named},
+            "candidate": candidate,
+            "crashed": bool(info.get(UNSCORED_CASES_KEY)),
+        }
         target = self.logs_dir / "results" / name
         target.mkdir(parents=True, exist_ok=True)
         (target / "val.json").write_text(json.dumps(record, indent=2, default=str), encoding="utf-8")
@@ -2217,15 +2224,20 @@ class MetaHarnessEngine:
                 frontier[eid] = {"system": leader[0], "val_accuracy": leader[1]}
         (self.logs_dir / "frontier_val.json").write_text(json.dumps(frontier, indent=2), encoding="utf-8")
 
-    def _best(self) -> tuple[str, float] | None:
+    def _best(self, scored: bool = False) -> tuple[str, float] | None:
         """Return the frontier leader's candidate text and average score.
+
+        Args:
+            scored: Skip versions with a crashed case. Their average holds filled scores (SKY-367),
+                so it must not stop the run.
 
         Returns:
             ``(candidate, score)`` or ``None`` when nothing has been benchmarked.
         """
-        if not self.results:
+        names = [key for key, entry in self.results.items() if not (scored and entry.get("crashed"))]
+        if not names:
             return None
-        name = max(self.results, key=lambda key: self.results[key]["avg_val"])
+        name = max(names, key=lambda key: self.results[key]["avg_val"])
         return self.results[name]["candidate"], float(self.results[name]["avg_val"])
 
     def _result(self, server: EvalServer, iterations: int, stop_reason: str) -> Result:

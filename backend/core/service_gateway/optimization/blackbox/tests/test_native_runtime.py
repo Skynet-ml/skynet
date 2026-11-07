@@ -1775,6 +1775,52 @@ def test_best_of_n_repo_marks_a_partly_crashed_sample_and_ranks_the_rest(tmp_pat
     assert (result.best_candidate, result.best_score) == ("axyz", 0.25)
 
 
+def test_meta_harness_stop_ignores_a_filled_mean(tmp_path: Path) -> None:
+    """A Meta-Harness version with a crashed case cannot reach ``stop_at_score`` (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's logs.
+    """
+    server = _child_server(_null_on({"aeio": {"b"}}), tmp_path)
+    engine = native_engines.MetaHarnessEngine.__new__(native_engines.MetaHarnessEngine)
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.logs_dir = tmp_path / "logs"
+    engine.results = {}
+
+    engine._benchmark(server, "crashed", "aeio")
+    engine._benchmark(server, "ok", "axyz")
+
+    assert engine._best() == ("aeio", 1.0)
+    assert engine._best(scored=True) == ("axyz", 0.25)
+    assert not native_engines._reached(0.9, engine._best(scored=True)[1])
+
+
+def test_autoresearch_leader_ignores_a_filled_mean(tmp_path: Path) -> None:
+    """An AutoResearch version with a crashed case does not rank or stop the run (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's lab folder.
+    """
+    server = _child_server(_null_on({"aeio": {"b"}}), tmp_path)
+    engine = native_engines.AutoResearchEngine.__new__(native_engines.AutoResearchEngine)
+    engine.repo = None
+    engine.suffix = ".txt"
+    engine.work_dir = tmp_path / "lab"
+    (engine.work_dir / "archive").mkdir(parents=True)
+    engine.round = 0
+    engine.observations = []
+    engine._ids = {}
+    engine._lock = threading.Lock()
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine._record(server)
+
+    server.evaluate_examples("aeio")
+    server.evaluate_examples("axyz")
+
+    assert engine._ranking() == {"axyz": 0.25}
+    assert not native_engines._reached(0.9, engine._leader_score())
+
+
 def test_scored_threshold_stopper_ignores_a_crashed_version() -> None:
     """Only a version with no crashed case can reach ``stop_at_score`` (SKY-367)."""
     state = SimpleNamespace(

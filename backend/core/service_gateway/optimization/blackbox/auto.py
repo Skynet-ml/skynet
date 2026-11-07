@@ -226,10 +226,10 @@ class _LaneEngine:
             if server.metric_error(best_candidate) is not None:
                 # An upstream engine ranks by filled means, so it can return a
                 # version that crashed on a case. Final selection excludes such
-                # versions (SKY-350), so the lane hands off its best scored one.
-                best_candidate, best_score = server.best_candidate, server.best_score
-                if best_candidate is None:
-                    best_candidate, best_score = task.seed_candidate, -math.inf
+                # versions (SKY-350). The server's best running mean mixes
+                # minibatch and full-split scores, so the lane hands off the
+                # seed at -inf and another lane wins (SKY-367).
+                best_candidate, best_score = task.seed_candidate, -math.inf
             lane.best_candidate, lane.best_score = best_candidate, best_score
             lane.metadata = result.metadata
             return UpstreamResult(
