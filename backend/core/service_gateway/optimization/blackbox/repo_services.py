@@ -48,6 +48,10 @@ class ServiceSecretError(ValueError):
     """A service names a secret that has no value; the message names the service and the secret."""
 
 
+class UnknownConnectorError(ValueError):
+    """A ``[services.<name>]`` table names no catalog connector; the message lists the known names."""
+
+
 def plan_role(role: RoleEnvironment) -> RolePlan:
     """Work out one role's box from its parsed environment.
 
@@ -63,11 +67,11 @@ def plan_role(role: RoleEnvironment) -> RolePlan:
 def plan_roles(constraints: RepoConstraints) -> dict[str, object]:
     """Describe every role's plan as JSON for the run's environment record.
 
-    Args:
-        constraints: The repository's parsed ``optimize.toml``.
-
     A target's box is offline except for the relay, whatever its ``network``
     says, so its plan records no allowed host, the same as :func:`stage_spec`.
+
+    Args:
+        constraints: The repository's parsed ``optimize.toml``.
 
     Returns:
         ``{"proposer": plan, "targets": {name: plan}}``.
@@ -143,11 +147,11 @@ def service_environment(name: str, spec: ServiceSpec, secrets: Mapping[str, str]
         The named secrets, and nothing else.
 
     Raises:
-        ServiceSecretError: When the name is not a connector, or a named
-            secret has no value.
+        UnknownConnectorError: When the name is not a connector.
+        ServiceSecretError: When a named secret has no value.
     """
     if name not in CONNECTORS:
-        raise ServiceSecretError(f"Service {name} is not a connector; known: {', '.join(CONNECTORS)}.")
+        raise UnknownConnectorError(f"Service {name} is not a connector; known: {', '.join(CONNECTORS)}.")
     missing = [secret for secret in spec.secrets if not secrets.get(secret)]
     if missing:
         raise ServiceSecretError(f"Service {name} needs the secret {missing[0]}, which has no value.")
@@ -204,19 +208,24 @@ def unhealthy_services(services: Collection[str], probe: Callable[[str], bool]) 
 
 
 def stage_spec(
-    name: str, stage: TargetStage, *, candidate_id: str, lifetime_seconds: float, tags: Mapping[str, str]
+    name: str, stage: TargetStage, *, evaluation_id: str, lifetime_seconds: float, tags: Mapping[str, str]
 ) -> SandboxSpec:
     """Build the spec of one stage box for one candidate evaluation.
 
     A target is offline except for the relay, which the parent's mailbox
     serves, so the box gets no host and no secret, and its ``network`` is not
-    used (E27). The box has no fixed name, so two candidates never share one,
-    and its hold is keyed to the candidate and the stage (E29, E31).
+    used (E27). The box has no fixed name, so two evaluations never share one,
+    and its hold is keyed to the evaluation and the stage (E29, E31). A reused
+    key returns the earlier reservation, so the id must be new for every
+    evaluation, also when one candidate is evaluated again. The
+    stage's ``timeout`` is not used here: it limits each ``skynet.call`` on
+    the relay, not the box's lifetime (E30).
 
     Args:
         name: The ``[target.<name>]`` table name.
         stage: Its parsed settings.
-        candidate_id: The candidate this box evaluates.
+        evaluation_id: Unique for each candidate evaluation, for example the
+            candidate id plus an evaluation counter or a uuid.
         lifetime_seconds: The candidate evaluation's limit, which is also the
             box's hold (E31).
         tags: The job's labels, so the sweep finds the box.
@@ -224,12 +233,14 @@ def stage_spec(
     Returns:
         The stage box's spec.
     """
+    # ``stage.timeout`` limits each ``skynet.call`` (repo_constraints.py), not
+    # the box, so the box lives for the whole candidate evaluation instead.
     return SandboxSpec(
         lifetime_seconds=lifetime_seconds,
         tags=dict(tags),
         vcpus=stage.vcpus,
         network_disabled=True,
-        operation_key=f"stage:{candidate_id}:{name}",
+        operation_key=f"stage:{evaluation_id}:{name}",
     )
 
 
@@ -247,8 +258,12 @@ def open_stage_boxes(runtime: SandboxRuntime, specs: Mapping[str, SandboxSpec]) 
         Each stage's open box, by stage name.
 
     Raises:
-        Exception: Whatever ``runtime.open`` raises, after the boxes that
+        BudgetReached: When the budget refuses a box, after the boxes that
             opened close.
+        BudgetInsufficientError: When the hold does not fit the budget, after
+            the boxes that opened close.
+        Exception: Any other error from ``runtime.open`` is re-raised the
+            same way, after the boxes that opened close.
     """
     opened: dict[str, SandboxSession] = {}
     try:

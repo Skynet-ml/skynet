@@ -395,7 +395,7 @@ export const I18N_MESSAGES = {
   "quota.reached": "הגעת למגבלת {quota} {term.optimizationPlural} לכל משתמש. מחק/י {term.optimizationPlural} ישנות כדי ליצור חדשות.",
   "rate_limit.exceeded": "יותר מדי בקשות. המתן/המתיני {retry_after} שניות ונסה/י שוב.",
   "repo_gate.missing_secret": "השירות {service} בקובץ optimize.toml צריך את הסוד {secret}, אבל בהרצה הזו אין סוד בשם הזה. הוסיפו את הסוד להרצה או הסירו את השם מהקובץ.",
-  "repo_gate.proposer_hosts_unsupported": "הקובץ optimize.toml מגדיר את [proposer] network לערך {hosts}. עדיין אין תמיכה בשרתים מותרים עבור ה-proposer. הסירו את הרשימה כדי להריץ.",
+  "repo_gate.proposer_hosts_unsupported": "הקובץ optimize.toml מגדיר את [proposer] network לערך {hosts}. עדיין אין תמיכה בשרתים מותרים עבור המציע. הסירו את הרשימה כדי להריץ.",
   "repo_gate.unenforced_cloud": "הקובץ optimize.toml מגדיר את {key}. ארגז החול בענן עדיין לא יכול לאכוף את ההגדרה הזו. הסירו אותה כדי להריץ.",
   "repo_gate.unenforced_local": "הקובץ optimize.toml מגדיר את {key}. ארגז החול המקומי ב-Docker עדיין לא יכול לאכוף את ההגדרה הזו. הסירו אותה כדי להריץ.",
   "repo_gate.unknown_connector": "השירות {service} בקובץ optimize.toml אינו מחבר. השתמשו באחד מהשמות האלה: {known}.",

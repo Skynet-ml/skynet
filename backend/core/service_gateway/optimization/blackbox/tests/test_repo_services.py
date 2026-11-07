@@ -6,8 +6,8 @@ from collections.abc import Mapping
 
 import pytest
 
+from core.billing.signals import BudgetReached
 from core.service_gateway.optimization.blackbox import repo_services
-from core.service_gateway.optimization.blackbox.protocol import BudgetExhaustedError
 from core.service_gateway.optimization.blackbox.repo_constraints import ServiceSpec, parse_constraints
 from core.service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
 
@@ -58,13 +58,15 @@ class _Runtime:
 
     injects_headers = False
 
-    def __init__(self, refuse_at: int | None = None) -> None:
-        """Set which open the budget refuses.
+    def __init__(self, refuse_at: int | None = None, error: BaseException | None = None) -> None:
+        """Set which open fails, and how.
 
         Args:
-            refuse_at: Zero-based index of the refused open, or ``None``.
+            refuse_at: Zero-based index of the failed open, or ``None``.
+            error: What the failed open raises; a budget stop by default.
         """
         self.refuse_at = refuse_at
+        self.error = error or BudgetReached("budget reached")
         self.sessions: list[_Session] = []
 
     def open(self, spec: SandboxSpec) -> _Session:
@@ -77,10 +79,10 @@ class _Runtime:
             The fake box.
 
         Raises:
-            BudgetExhaustedError: At the refused open.
+            BaseException: The set error, at the failed open.
         """
         if len(self.sessions) == self.refuse_at:
-            raise BudgetExhaustedError("budget reached")
+            raise self.error
         session = _Session(spec)
         self.sessions.append(session)
         return session
@@ -97,7 +99,9 @@ def _specs(names: tuple[str, ...]) -> Mapping[str, SandboxSpec]:
     """
     targets = parse_constraints(_FILE).targets
     return {
-        name: repo_services.stage_spec(name, targets[name], candidate_id="c1", lifetime_seconds=60, tags={"job": "j"})
+        name: repo_services.stage_spec(
+            name, targets[name], evaluation_id="c1-e1", lifetime_seconds=60, tags={"job": "j"}
+        )
         for name in names
     }
 
@@ -163,17 +167,20 @@ def test_no_secret_reaches_a_stage_box() -> None:
     assert _specs(("planner",))["planner"].vcpus == 4
 
 
-def test_each_candidate_gets_its_own_stage_box() -> None:
-    """A stage box has no fixed name, and its hold key names the candidate and the stage (E29)."""
+def test_each_evaluation_gets_its_own_stage_box() -> None:
+    """A stage box has no fixed name, and its hold key names the evaluation and the stage (E29)."""
     stage = parse_constraints(_FILE).targets["planner"]
 
-    first = repo_services.stage_spec("planner", stage, candidate_id="c1", lifetime_seconds=60, tags={})
-    second = repo_services.stage_spec("planner", stage, candidate_id="c2", lifetime_seconds=60, tags={})
+    first = repo_services.stage_spec("planner", stage, evaluation_id="c1-e1", lifetime_seconds=60, tags={})
+    second = repo_services.stage_spec("planner", stage, evaluation_id="c2-e1", lifetime_seconds=60, tags={})
 
     assert first.name is None
     assert second.name is None
-    assert first.operation_key == "stage:c1:planner"
+    again = repo_services.stage_spec("planner", stage, evaluation_id="c1-e2", lifetime_seconds=60, tags={})
+
+    assert first.operation_key == "stage:c1-e1:planner"
     assert first.operation_key != second.operation_key
+    assert again.operation_key != first.operation_key
 
 
 def test_a_target_network_list_gives_its_box_no_host() -> None:
@@ -182,7 +189,9 @@ def test_a_target_network_list_gives_its_box_no_host() -> None:
     constraints = parse_constraints(raw)
 
     plans = repo_services.plan_roles(constraints)
-    spec = repo_services.stage_spec("web", constraints.targets["web"], candidate_id="c1", lifetime_seconds=60, tags={})
+    spec = repo_services.stage_spec(
+        "web", constraints.targets["web"], evaluation_id="c1-e1", lifetime_seconds=60, tags={}
+    )
 
     assert plans["targets"] == {"web": {"allowed_hosts": [], "mcp_servers": [], "services": []}}
     assert spec.allowed_hosts == ()
@@ -209,7 +218,7 @@ def test_a_service_without_its_secret_fails_without_printing_values(secrets: dic
 
 def test_a_service_that_names_no_connector_fails() -> None:
     """A service is a catalog connector, so an unknown name stops before any key is handed out."""
-    with pytest.raises(repo_services.ServiceSecretError, match="Service cache is not a connector"):
+    with pytest.raises(repo_services.UnknownConnectorError, match="Service cache is not a connector"):
         repo_services.service_environment("cache", ServiceSpec(), {})
 
 
@@ -303,7 +312,7 @@ def test_allowed_calls_work_forbidden_calls_fail_and_no_key_is_exposed() -> None
     assert not repo_services.host_allowed("maps.googleapis.com", proposer.allowed_hosts)
     assert "maps" in proposer.mcp_servers
     assert "web_search" not in proposer.mcp_servers
-    spec = repo_services.stage_spec("planner", planner, candidate_id="c1", lifetime_seconds=60, tags={})
+    spec = repo_services.stage_spec("planner", planner, evaluation_id="c1-e1", lifetime_seconds=60, tags={})
     service = repo_services.service_environment("maps", constraints.services["maps"], {"GOOGLE_MAPS_API_KEY": _SECRET})
     assert service == {"GOOGLE_MAPS_API_KEY": _SECRET}
     assert _SECRET not in repr(spec)
@@ -325,9 +334,19 @@ def test_a_refused_second_stage_box_leaves_no_partial_score_and_no_open_box() ->
     runtime = _Runtime(refuse_at=1)
     boxes: dict[str, object] | None = None
 
-    with pytest.raises(BudgetExhaustedError):
+    with pytest.raises(BudgetReached):
         boxes = repo_services.open_stage_boxes(runtime, _specs(("planner", "router")))
 
     assert boxes is None
     assert len(runtime.sessions) == 1
+    assert runtime.sessions[0].closed
+
+
+def test_any_failed_open_closes_the_boxes_that_opened() -> None:
+    """An ordinary error from ``runtime.open`` also closes the open boxes and reaches the caller."""
+    runtime = _Runtime(refuse_at=1, error=ConnectionError("no capacity"))
+
+    with pytest.raises(ConnectionError):
+        repo_services.open_stage_boxes(runtime, _specs(("planner", "router")))
+
     assert runtime.sessions[0].closed

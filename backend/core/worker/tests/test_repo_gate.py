@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from core.billing.env_connectors import CONNECTORS
 from core.i18n import t_locale
 from core.i18n_keys import I18nKey
 from core.service_gateway.optimization.blackbox.repo_constraints import CONSTRAINTS_FILE
@@ -194,7 +195,7 @@ def test_a_service_that_names_no_connector_fails_with_its_own_message(tmp_path: 
     assert codes["[services.cache]"] == I18nKey.REPO_GATE_UNKNOWN_CONNECTOR
     assert codes["[services.maps]"] != I18nKey.REPO_GATE_UNKNOWN_CONNECTOR
     unknown = next(failure for failure in failures if failure.key == "[services.cache]")
-    assert unknown.params == {"service": "cache", "known": "maps, web_search, browser"}
+    assert unknown.params == {"service": "cache", "known": ", ".join(CONNECTORS)}
     assert "is not a connector" in unknown.reason
 
 
