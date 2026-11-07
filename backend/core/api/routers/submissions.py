@@ -200,10 +200,17 @@ def _ensure_api_budget(
         # The limit, not the account balance, stopped the check, so name the
         # limit rather than the optimizer or the columns.
         raise DomainError("budget.below_minimum", status=409)
+    if checked.status == "pending":
+        raise DomainError("budget.pending", status=409)
     if checked.status != "succeeded":
-        raise DomainError(
-            "budget.pending" if checked.status == "pending" else "submission.validation_failed", status=409
-        )
+        # Only catalog-coded failures go out: an uncoded check message can be
+        # raw exception text, and the client words each code in its own locale.
+        failures = [
+            {"key": check.message_code, "params": check.message_params or {}}
+            for check in checked.checks
+            if check.status == "failed" and check.message_code
+        ]
+        raise DomainError("submission.validation_failed", status=409, failures=failures)
     payload.preflight_id = checked.id
     payload.preflight_fingerprint = checked.fingerprint
 
