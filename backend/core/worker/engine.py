@@ -124,6 +124,7 @@ from .constants import (
     EVENT_RESULT,
     EVENT_TERMINAL,
 )
+from .hardening_runner import process_next_hardening_job
 from .log_handler import route_sandbox_logs
 from .memory_guard import memory_usage_fraction
 from .repo_gate import RepoGateError, check_repository, sandbox_place
@@ -669,6 +670,9 @@ class BackgroundWorker:
                 optimization_id = self._get_next_job()
 
                 if optimization_id is None:
+                    if self._run_hardening_job(worker_id):
+                        idle_cycles = 0
+                        continue
                     time.sleep(self._poll_interval)
                     idle_cycles += 1
                     # Heartbeat every ~5 min so observability dashboards
@@ -695,6 +699,33 @@ class BackgroundWorker:
             logger.exception("Worker %d died unexpectedly", worker_id)
 
         logger.info("Worker %d stopped", worker_id)
+
+    def _run_hardening_job(self, worker_id: int) -> bool:
+        """Claim and advance one queued metric-hardening job when no run waits (SKY-369).
+
+        Args:
+            worker_id: Index of the worker thread, for logging.
+
+        Returns:
+            Whether a hardening job was claimed.
+        """
+        engine = getattr(self._job_store, "engine", None)
+        if engine is None:
+            return False
+        try:
+            ran = process_next_hardening_job(
+                engine,
+                pod=self._pod_name,
+                lease_seconds=self._lease_seconds,
+                local_mode=settings.local_mode,
+                settings=settings,
+            )
+        except Exception:  # isolation boundary: a hardening failure must not kill the worker thread
+            logger.exception("Worker %d failed a hardening job pass", worker_id)
+            return False
+        if ran:
+            self._touch_activity(worker_id)
+        return ran
 
     def _process_job(self, optimization_id: str, worker_id: int) -> None:
         """Run one optimization job to completion, handling all error and cancel paths.

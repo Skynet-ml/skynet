@@ -16,7 +16,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from ..constants import HARDENING_DEFAULT_ROUND_CAP_USD, HARDENING_DEFAULT_ROUNDS
 from ..storage.models import JSON_STORE, Base
-from .blackbox import BlackboxTarget
+from .blackbox import BlackboxScorer, BlackboxTarget
 
 HardeningStatus = Literal[
     "preflight",
@@ -100,6 +100,10 @@ class HardeningJob(BaseModel):
     # that shared schema into Input and Output variants in openapi.json.
     target: dict[str, Any] | None = None
     binding_id: str | None = None
+    # The metric the rounds score with, in the run submit's scorer shape
+    # (SKY-369). JSON for the same schema reason as ``target``; the secret is
+    # dropped because GET returns the job. Without it the job fails.
+    scorer: dict[str, Any] | None = None
 
 
 # Body of POST /hardening/jobs. ``target`` has the run submit's repository
@@ -115,6 +119,7 @@ class CreateHardeningJobRequest(BaseModel):
     view: HardeningView = "black_box"
     target: BlackboxTarget | None = None
     binding_id: str | None = Field(default=None, min_length=1, max_length=64)
+    scorer: BlackboxScorer | None = None
 
     @model_validator(mode="after")
     def _ensure_repo_target(self) -> CreateHardeningJobRequest:
@@ -174,3 +179,10 @@ class HardeningJobModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
+    # The worker pod that runs the job now, and when its claim lapses (SKY-369).
+    # Both stay null while the job waits for the user or has ended.
+    claimed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The open ``hardening:<job_id>`` budget hold. A user step can end the job
+    # (clean stop, rejected fix) outside the worker, so the router must find it.
+    budget_operation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

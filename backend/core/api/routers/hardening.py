@@ -37,6 +37,7 @@ from ...service_gateway.optimization.blackbox.hardening import (
     record_verdict,
     retry,
 )
+from ...worker.hardening_runner import finish_hardening_budget
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..model_catalog import require_known_model
@@ -138,6 +139,16 @@ def create_hardening_router(*, job_store) -> APIRouter:
             except HardeningStateError as exc:
                 raise DomainError("hardening.wrong_state", status=409) from exc
             _store(row, job)
+            # A clean stop or a rejected fix ends the job here, not in the
+            # worker, so its budget hold closes here (SKY-369).
+            if (
+                job.status not in ACTIVE_STATUSES
+                and row.budget_operation_id is not None
+                and finish_hardening_budget(
+                    BudgetService(engine=job_store.engine), job, username, row.budget_operation_id
+                )
+            ):
+                row.budget_operation_id = None
             try:
                 session.commit()
             except IntegrityError as exc:
@@ -199,6 +210,9 @@ def create_hardening_router(*, job_store) -> APIRouter:
                 update={
                     "target": None if body.target is None else body.target.model_dump(mode="json"),
                     "binding_id": body.binding_id,
+                    "scorer": None
+                    if body.scorer is None
+                    else body.scorer.model_copy(update={"secret": None}).model_dump(mode="json"),
                 }
             )
             row = HardeningJobModel(id=job.id, username=user.username, draft_id=body.draft_id)

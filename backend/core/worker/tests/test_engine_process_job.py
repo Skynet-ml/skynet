@@ -1118,3 +1118,32 @@ def test_a_payload_without_a_repository_records_no_environment(worker: Backgroun
 
     assert worker._record_repo_environment("opt-plain", {"services": []}) is None
     assert store._jobs["opt-plain"]["payload"] == {"optimizer_name": "GEPA"}
+
+
+def test_a_store_without_an_engine_runs_no_hardening_job(worker: BackgroundWorker) -> None:
+    """Skip the hardening poll when the job store has no SQL engine."""
+    with patch.object(engine_module, "process_next_hardening_job") as process:
+        assert worker._run_hardening_job(0) is False
+    process.assert_not_called()
+
+
+def test_the_idle_worker_runs_a_hardening_job_with_its_pod_lease(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """Pass the store's engine, the pod name and the lease to the hardening pass, and record liveness."""
+    store.engine = MagicMock()  # type: ignore[attr-defined]
+    with (
+        patch.object(engine_module, "process_next_hardening_job", return_value=True) as process,
+        patch.object(worker, "_touch_activity") as touch,
+    ):
+        assert worker._run_hardening_job(0) is True
+    process.assert_called_once()
+    assert process.call_args.args == (store.engine,)  # type: ignore[attr-defined]
+    assert process.call_args.kwargs["pod"] == worker._pod_name
+    assert process.call_args.kwargs["lease_seconds"] == worker._lease_seconds
+    touch.assert_called_once_with(0)
+
+
+def test_a_failing_hardening_pass_does_not_stop_the_worker(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """Report no job when the hardening pass raises, so the loop keeps polling."""
+    store.engine = MagicMock()  # type: ignore[attr-defined]
+    with patch.object(engine_module, "process_next_hardening_job", side_effect=RuntimeError("boom")):
+        assert worker._run_hardening_job(0) is False
