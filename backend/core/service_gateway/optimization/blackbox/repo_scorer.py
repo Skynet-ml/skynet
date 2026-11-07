@@ -79,6 +79,7 @@ CASES_KEY = "cases"
 # The guest names no real endpoint: its requests reach only the parent relay.
 REPO_SCORER_URL = "https://scoped-evaluator.invalid/score"
 RUNNER_PATH = f"{REPO_DIR}/app_runner.py"
+_LINKED_BOX = "The version replaced a folder of the scoring box with a link, so it has no score."
 CALLS_DIR = f"{REPO_DIR}/calls"
 STAGE_DIR = ".app-stage"
 _STAGE_TREE = f"{STAGE_DIR}/tree"
@@ -231,6 +232,7 @@ class RepoScorer:
         self._timeout_seconds = timeout_seconds
         self._rule_judge = rule_judge
         self._root: str | None = None
+        self._root_session: SandboxSession | None = None
         self._calls = 0
         self._lock = threading.Lock()
 
@@ -292,6 +294,18 @@ class RepoScorer:
                         "feedback": _RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(_RUN_FAILED)) :],
                     }
                 document["output"] = ran.get("output")
+                # The version's code could rewrite the runner, swap the calls
+                # folder for a link, or leave files in this call's folder for
+                # the metric run to read (E38). Its processes are stopped now.
+                reset = session.run(
+                    f"if [ -L {CALLS_DIR} ] || [ ! -d {CALLS_DIR} ]; then exit 3; fi;"
+                    f" rm -rf {shlex.quote(call)} {RUNNER_PATH}",
+                    timeout_seconds=30,
+                )
+                if not reset.ok:
+                    self._workspace.close()
+                    raise RepoScoreError(_LINKED_BOX)
+                session.write_files({RUNNER_PATH: RUNNER_SOURCE})
             not_installed = self._workspace.install_metric_files()
             if not_installed:
                 raise RepoScoreError(not_installed)
@@ -638,7 +652,10 @@ class RepoScorer:
         return ModelHTTPResult(200, "application/json", json.dumps(document).encode())
 
     def _box_root(self, session: SandboxSession) -> str:
-        """Return the box's working directory, installing the runner on first use.
+        """Return the box's working directory, and write the runner into the box.
+
+        Each checkout clears the runner with everything else next to the
+        tree, and a failed version can end the box, so it goes in every time.
 
         Args:
             session: The workspace's open box.
@@ -649,13 +666,13 @@ class RepoScorer:
         Raises:
             RepoScoreError: When the box cannot report its directory.
         """
-        if self._root is None:
+        if self._root is None or self._root_session is not session:
             located = session.run("pwd", timeout_seconds=30)
             root = located.stdout.strip()
             if not located.ok or not root.startswith("/"):
                 raise RepoScoreError("The scoring box could not report its working directory.")
-            session.write_files({RUNNER_PATH: RUNNER_SOURCE})
-            self._root = root
+            self._root, self._root_session = root, session
+        session.write_files({RUNNER_PATH: RUNNER_SOURCE})
         return self._root
 
     def close(self) -> None:

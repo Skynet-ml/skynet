@@ -908,7 +908,34 @@ def test_the_supervisor_stops_every_process_the_candidate_left(tmp_path: Path) -
     """A background process in its own session still stops before the metric files go in."""
     ran = _candidate(tmp_path, "cand.py:leaves_a_sleeper", 7)
     assert ran == {"output": 7, "error": None, "stopped": True}
-    assert runner.candidate_processes("tok-test") == set()
+    assert _marked(runner.candidate_processes("tok-test"), "tok-test") == set()
+
+
+def _marked(pids: set[int], token: str) -> set[int]:
+    """Keep the processes that carry the run's marker.
+
+    On Linux ``candidate_processes`` also returns every child of the calling
+    process, which under xdist includes the shared worker's own children.
+
+    Args:
+        pids: Process ids to filter.
+        token: The run's marker.
+
+    Returns:
+        The ids whose environment holds the marker; on macOS, all of them,
+        because there the function finds processes by the marker only.
+    """
+    if not sys.platform.startswith("linux"):
+        return pids
+    marker = f"{runner.CANDIDATE_TOKEN_ENV}={token}".encode()
+    found: set[int] = set()
+    for pid in pids:
+        try:
+            if marker in Path(f"/proc/{pid}/environ").read_bytes():
+                found.add(pid)
+        except OSError:
+            continue
+    return found
 
 
 def test_accepts_output_counts_the_third_argument() -> None:

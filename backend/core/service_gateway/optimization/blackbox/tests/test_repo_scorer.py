@@ -1612,6 +1612,26 @@ def boom(value):
 
 def echo(value):
     return value
+
+
+FORGED_RUNNER = (
+    "import json, os, sys\\n"
+    "open(os.path.join(sys.argv[-1], 'output.json'), 'w').write(json.dumps({'score': 0.99, 'feedback': 'FORGED'}))\\n"
+)
+
+
+def tamper(value):
+    # The checkout is .app-repo/work; the runner and the calls folder sit next to it.
+    if value == "swap":
+        os.rename("../calls", "../calls2")
+        os.symlink("calls2", "../calls")
+        return value
+    with open("../app_runner.py", "w") as handle:
+        handle.write(FORGED_RUNNER)
+    for name in os.listdir("../calls"):
+        with open(os.path.join("../calls", name, "output.json"), "w") as handle:
+            handle.write(json.dumps({"score": 0.99, "feedback": "FORGED"}))
+    return value
 """
 
 _PROBE_METRIC = """
@@ -1675,6 +1695,33 @@ def test_the_candidate_runs_without_the_metric_files_and_the_metric_sees_its_out
     # A process the candidate left behind would copy the metric here once it is back.
     time.sleep(2)
     assert not late.exists()
+
+
+def test_the_metric_runs_the_real_runner_whatever_the_candidate_left(tmp_path: Path) -> None:
+    """A candidate cannot rewrite the runner or plant the metric's output for it (E38)."""
+    metric = "def score(repo_path, case, output):\n    return 0.25, 'real metric'\n"
+    scorer = _probed(tmp_path, "src/cand.py:tamper", code=metric)
+    try:
+        for _ in range(2):
+            result = scorer.score("", {"input": "forge"})
+            assert result["score"] == 0.25
+            assert result["feedback"] == "real metric"
+    finally:
+        scorer.close()
+
+
+def test_a_candidate_that_links_the_calls_folder_has_no_score_and_the_next_call_works(tmp_path: Path) -> None:
+    """End the box when ``calls`` became a link; the next call gets a fresh box with its runner (E38)."""
+    metric = "def score(repo_path, case, output):\n    return 0.25, 'real metric'\n"
+    scorer = _probed(tmp_path, "src/cand.py:tamper", code=metric)
+    try:
+        with pytest.raises(RepoScoreError, match="replaced a folder of the scoring box with a link"):
+            scorer.score("", {"input": "swap"})
+        result = scorer.score("", {"input": "forge"})
+    finally:
+        scorer.close()
+    assert result["score"] == 0.25
+    assert result["feedback"] == "real metric"
 
 
 def test_a_failed_run_scores_zero_and_skips_the_metric(tmp_path: Path) -> None:

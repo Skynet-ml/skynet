@@ -110,6 +110,18 @@ finally:
 """
 # The install script's exit code when the version replaced a folder above a hidden path.
 _NOT_A_FOLDER = 3
+# A version's code can swap a folder of the box layout for a link while it
+# runs. A write through that link lands outside the checkout, where the next
+# version reads it, and the next checkout removes only the link (E38). The
+# check fails with ``_NOT_A_FOLDER`` unless each folder is a real folder.
+_LAYOUT_CHECK = (
+    f'for d in {REPO_DIR} {PREPARED_DIR}; do if [ -L "$d" ] || [ ! -d "$d" ]; then exit {_NOT_A_FOLDER}; fi; done'
+)
+# The checkout too, and it must resolve to its own place in the box.
+_WORK_CHECK = (
+    f"{_LAYOUT_CHECK}; if [ -L {WORK_DIR} ] || [ ! -d {WORK_DIR} ]"
+    f' || [ "$(cd {WORK_DIR} && pwd -P)" != "$(pwd -P)/{WORK_DIR}" ]; then exit {_NOT_A_FOLDER}; fi'
+)
 # Linux caps one environment string at 128 KiB; a larger stage answer goes
 # through a file write and fresh stamps instead.
 _ANSWER_ENV_BYTES = 100_000
@@ -528,9 +540,19 @@ class RepoWorkspace:
             self._stamps_before_run = None
             self._metric_installed = False
             session = self.session()
+            # Everything but the prepared tree goes, so nothing a version left
+            # next to its checkout survives into the next one (E38).
+            clear = (
+                f"{_LAYOUT_CHECK}; find {REPO_DIR} -mindepth 1 -maxdepth 1"
+                f" ! -name {posixpath.basename(PREPARED_DIR)} -exec rm -rf {{}} +"
+            )
+            if not session.run(clear, timeout_seconds=_SETUP_TIMEOUT_SECONDS).ok:
+                # The layout is not the one this box was prepared with; a fresh box is.
+                self._end_box()
+                session = self.session()
             session.write_files({PATCH_FILE: patch})
             applied = session.run(
-                f"set -e; rm -rf {WORK_DIR}; cp -a {PREPARED_DIR} {WORK_DIR}; cd {WORK_DIR};"
+                f"set -e; cp -a {PREPARED_DIR} {WORK_DIR}; cd {WORK_DIR};"
                 f" if [ -s ../version.patch ]; then git apply --binary --whitespace=nowarn ../version.patch; fi",
                 timeout_seconds=_SETUP_TIMEOUT_SECONDS,
             )
@@ -549,6 +571,15 @@ class RepoWorkspace:
                 self._metric_installed = True
                 return None
             session = self.session()
+            # Checked before the archive goes in, so it is never written through a link.
+            try:
+                layout = session.run(_WORK_CHECK, timeout_seconds=_SETUP_TIMEOUT_SECONDS)
+            except BaseException:
+                self._end_box()
+                raise
+            if not layout.ok:
+                self._end_box()
+                return "The version replaced a folder of the scoring box with a link, so it has no score."
             paths = " ".join(shlex.quote(path) for path in self._hidden)
             # A fresh name: the version may have left a file or a link at any name it knew.
             source = f"{REPO_DIR}/hidden-{uuid.uuid4().hex}.b64" if self._metric_files is not None else ""

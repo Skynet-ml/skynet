@@ -702,6 +702,83 @@ def test_a_version_that_links_a_metric_folder_outside_gets_no_metric_written_the
         space.close()
 
 
+_LINKED = "The version replaced a folder of the scoring box with a link, so it has no score."
+
+
+def test_a_version_that_swaps_its_checkout_for_a_link_gets_no_metric_and_leaves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse the install when ``work`` is a link to a folder the next checkout would keep (E38)."""
+    space, runtime = _metric_space(tmp_path)
+    try:
+        box = space.session()
+        seen = _left_at_close(box, monkeypatch)
+        root = Path(box.run("pwd").stdout.strip())
+        assert box.run(f"cd {REPO_DIR} && mv work w2 && ln -s w2 work").ok
+
+        assert space.install_metric_files() == _LINKED
+
+        assert not (root / REPO_DIR / "w2" / "eval" / "metric.py").exists()
+        assert box.closed
+        assert seen
+        assert not [name for name in seen if name.startswith("hidden")]
+        assert space.checkout("").path == WORK_DIR
+        assert len(runtime.boxes) == 2
+    finally:
+        space.close()
+
+
+def test_a_version_that_moves_the_repo_folder_behind_a_link_gets_no_metric_there(tmp_path: Path) -> None:
+    """Refuse the install before the archive goes in when ``.app-repo`` is a link (E38)."""
+    space, _ = _metric_space(tmp_path)
+    outside = tmp_path / "moved"
+    outside.mkdir()
+    try:
+        box = space.session()
+        assert box.run(f"mv {REPO_DIR} {outside}/{REPO_DIR} && ln -s {outside}/{REPO_DIR} {REPO_DIR}").ok
+
+        assert space.install_metric_files() == _LINKED
+
+        moved = outside / REPO_DIR
+        assert not [path.name for path in moved.iterdir() if path.name.startswith("hidden")]
+        assert not (moved / "work" / "eval" / "metric.py").exists()
+        assert box.closed
+    finally:
+        space.close()
+
+
+def test_a_checkout_removes_what_a_version_left_next_to_its_tree(tmp_path: Path) -> None:
+    """Keep only the prepared tree in ``.app-repo``, so no copy of a checkout outlives it (E38)."""
+    space, runtime = _metric_space(tmp_path)
+    try:
+        box = space.session()
+        root = Path(box.run("pwd").stdout.strip())
+        assert box.run(f"cd {REPO_DIR} && cp -a work w2 && touch loose && ln -s w2 link").ok
+
+        assert space.checkout("").path == WORK_DIR
+
+        assert sorted(path.name for path in (root / REPO_DIR).iterdir()) == ["prepared", "version.patch", "work"]
+        assert len(runtime.boxes) == 1
+    finally:
+        space.close()
+
+
+def test_a_checkout_in_a_box_whose_prepared_tree_is_a_link_uses_a_fresh_box(tmp_path: Path) -> None:
+    """Never copy a checkout from a prepared tree a version replaced with a link (E38)."""
+    space, runtime = _metric_space(tmp_path)
+    try:
+        box = space.session()
+        assert box.run(f"cd {REPO_DIR} && mv prepared p2 && ln -s p2 prepared").ok
+
+        assert space.checkout("").path == WORK_DIR
+
+        assert box.closed
+        assert len(runtime.boxes) == 2
+        assert space.install_metric_files() is None
+    finally:
+        space.close()
+
+
 def test_version_code_that_rewrites_the_hidden_metric_while_it_runs_is_caught(tmp_path: Path) -> None:
     """Fingerprint the hidden metric like a protected file, and never name it to the agent (SKY-353)."""
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/metric.py": "def score(): return 0.1\n"})
