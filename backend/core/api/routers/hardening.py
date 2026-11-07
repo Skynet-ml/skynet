@@ -46,6 +46,7 @@ from ._helpers import strip_api_key
 from .execution_budgets import budget_http_error
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
+_ENDPOINT_KEYS = frozenset({"apibase", "baseurl", "endpoint", "url"})
 
 
 def _load(session: Session, username: str, job_id: str, *, lock: bool) -> HardeningJobModel:
@@ -127,8 +128,9 @@ def _stored_scorer(scorer: BlackboxScorer | None) -> dict[str, Any] | None:
         model = strip_api_key(model)
         model["base_url"] = None
         extra = model.get("extra") or {}
-        for field in ("api_base", "base_url", "endpoint", "url"):
-            extra.pop(field, None)
+        # Match by normalized name, so ``apiBase`` and ``baseURL`` go too.
+        for field in [k for k in extra if k.lower().replace("_", "").replace("-", "") in _ENDPOINT_KEYS]:
+            del extra[field]
         stored["model"] = model
     return stored
 

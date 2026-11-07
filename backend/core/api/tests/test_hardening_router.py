@@ -674,6 +674,34 @@ def test_create_drops_every_credential_shape_in_the_scorer_extra() -> None:
         assert "not-a-real" not in str(model)
 
 
+def test_create_drops_camel_case_endpoint_keys_in_the_scorer_extra() -> None:
+    """``apiBase`` and ``baseURL`` in ``extra`` are endpoints too, so their private path never reaches a read."""
+    client, engine, _caller = _harness()
+    endpoint = "https://llm.example/v1/private-path"
+    scorer = {
+        "kind": "python",
+        "metric_code": "def metric(x):\n    return 1.0\n",
+        "model": {
+            "name": "openai/gpt-4o-mini",
+            "token_source": "byok",
+            "extra": {"apiBase": endpoint, "baseURL": endpoint, "temperature": 0},
+        },
+    }
+
+    response = client.post("/hardening/jobs", json={**_BODY, "scorer": scorer})
+
+    assert response.status_code == 201
+    body = response.json()
+    with Session(engine) as session:
+        row = session.get(HardeningJobModel, body["id"])
+        assert row is not None
+        stored = row.job["scorer"]["model"]
+    read = client.get(f"/hardening/jobs/{body['id']}").json()["scorer"]["model"]
+    for model in (stored, body["scorer"]["model"], read):
+        assert model["extra"] == {"temperature": 0}
+        assert "private-path" not in str(model)
+
+
 def test_create_refuses_a_remote_scorer() -> None:
     """A hardening job needs a python metric; a remote scorer gets 422 and no job."""
     client, engine, _caller = _harness()

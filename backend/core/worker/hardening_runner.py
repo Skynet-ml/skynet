@@ -539,7 +539,7 @@ class RepoHardeningRunner(HardeningRunner):
             patch: The solution as a git patch.
 
         Returns:
-            The metric score, or negative infinity when ``fix_diff`` does not apply.
+            The metric score, or NaN when ``fix_diff`` does not apply.
         """
         fixes = tuple(self.fixes) + ((fix_diff,) if fix_diff else ())
         scorer = self._scorers.get(fixes)
@@ -549,10 +549,12 @@ class RepoHardeningRunner(HardeningRunner):
             except RuntimeError:
                 if not fix_diff:
                     raise
-                # A drafted fix that does not apply fails its checks, so the
-                # job waits for the user instead of failing (and paying again).
+                # A drafted fix that does not apply must fail every check, so
+                # the job waits for the user instead of failing (and paying
+                # again). NaN compares false both ways; -inf <= -inf would pass
+                # the suite replay.
                 logger.info("Hardening job %s: the drafted fix does not apply.", self.job.id)
-                return float("-inf")
+                return float("nan")
             scorer = self.open_scorer(archive, fixes)
             self._scorers[fixes] = scorer
         return float(scorer.score(patch)["score"])
@@ -981,9 +983,9 @@ def _start_failure(job: HardeningJob, settings: Settings, *, username: str, vaul
         except ValueError:
             return "hardening.byok_missing"
         except DomainError as error:
-            # A deployment without a vault key holds no saved keys, so to the
-            # user the key is missing, not refused.
-            if error.code == "billing.byok_not_configured":
+            # No vault key, or a saved key the vault cannot decrypt: either
+            # way the user must save the key again, so it is missing.
+            if error.code in {"billing.byok_not_configured", "billing.byok_key_undecryptable"}:
                 return "hardening.byok_missing"
             return "hardening.byok_not_served"
     return None

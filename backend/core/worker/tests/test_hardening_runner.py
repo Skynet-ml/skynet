@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import tarfile
 import threading
 from collections.abc import Iterator
@@ -24,8 +25,8 @@ from core.billing.budgets import BudgetService
 from core.billing.operation_pricing import ChargePolicy, operation_quote
 from core.billing.runtime import PaidResult, generation_operation_key
 from core.config import settings
-from core.models.hardening import HardeningJob, HardeningJobModel
-from core.service_gateway.optimization.blackbox.hardening import new_job
+from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
+from core.service_gateway.optimization.blackbox.hardening import _draft_fix, new_job
 from core.storage.models import Base, BillingCustomerModel
 from core.worker import hardening_runner
 from core.worker.hardening_job import HardeningWorkspace
@@ -693,14 +694,38 @@ def _fixed_tree(tmp_path: Path, applied: tuple[str, ...]) -> RepoHardeningRunner
     )
 
 
-def test_a_drafted_fix_that_does_not_apply_scores_negative_infinity(tmp_path: Path) -> None:
-    """A drafted fix that does not apply scores -inf, so its checks fail and the job waits for the user."""
+def test_a_drafted_fix_that_does_not_apply_fails_every_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A drafted fix that does not apply scores NaN, so all three fix checks fail and the job waits for the user."""
     runner = _fixed_tree(tmp_path, ())
+    bad = _diff("other", "v2")
+    monkeypatch.setattr(runner, "draft_fix", lambda **kwargs: (bad, 0.0))
+    reference = tmp_path / "reference.diff"
+    reference.write_text("")
+    exploit = HardeningExploit(
+        id="e1",
+        kind="case",
+        label="exploit",
+        confidence=0.9,
+        reason="r",
+        unsure=False,
+        patch_diff="",
+        why_md="w",
+        user_verdict="confirmed",
+    )
+    job = new_job(attacker_model="m", judge_model="m", place="local")
+    current = HardeningRound(index=1, status="waiting_review", exploits=[exploit])
     try:
-        assert runner._score(_diff("other", "v2"), "") == float("-inf")
+        assert math.isnan(runner._score(bad, ""))
         assert runner._score(None, "") == 1.0
+        _draft_fix(job, current, runner, tmp_path / "exploits", reference)
     finally:
         runner.close()
+
+    assert job.status == "waiting_fix"
+    assert current.fix is not None
+    assert current.fix.checks.suite_replay == "fail"
+    assert current.fix.checks.base_score_unchanged == "fail"
+    assert current.fix.checks.reference_not_lower == "fail"
 
 
 def test_an_approved_fix_that_does_not_apply_still_raises(tmp_path: Path) -> None:
@@ -1059,6 +1084,7 @@ def test_a_job_that_cannot_start_ends_with_a_stable_key(
     [
         (None, "hardening.byok_missing"),
         (DomainError("billing.byok_not_configured", status=503), "hardening.byok_missing"),
+        (DomainError("billing.byok_key_undecryptable", status=409), "hardening.byok_missing"),
         (DomainError("billing.byok_model_not_served", status=400), "hardening.byok_not_served"),
     ],
 )
