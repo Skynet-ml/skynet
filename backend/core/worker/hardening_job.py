@@ -12,19 +12,22 @@ the user holds no sandbox.
 
 from __future__ import annotations
 
+import logging
 import tarfile
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from ..models.hardening import HardeningJob
 from ..service_gateway.optimization.blackbox.hardening import HardeningRunner, run_until_wait
 from ..service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, MetricSpec, read_constraints
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
-from .repo_gate import RepoGateError, check_repository, sandbox_place
+from .repo_gate import GateFailure, Place, RepoGateError, check_repository, sandbox_place
 from .repo_staging import StagedRepository, stage_repository
+
+logger = logging.getLogger(__name__)
 
 _ACTIVE_STATUSES = frozenset({"preflight", "running"})
 
@@ -53,8 +56,41 @@ class HardeningWorkspace:
 
 RunnerFactory = Callable[[HardeningWorkspace, HardeningJob], AbstractContextManager[HardeningRunner]]
 Reserve = Callable[[HardeningJob, float], None]
-Stage = Callable[..., tuple[dict[str, Any], StagedRepository]]
-Gate = Callable[..., list[Any]]
+
+
+class Stage(Protocol):
+    """Fetches and strips a repository tree, as :func:`stage_repository` does."""
+
+    def __call__(
+        self, payload: dict[str, Any], *, username: str, binding_id: str, engine: Any
+    ) -> tuple[dict[str, Any], StagedRepository]:
+        """Stage the payload's repository.
+
+        Args:
+            payload: The run-shaped payload.
+            username: The job's owner.
+            binding_id: The budget the vaulted secrets are bound to.
+            engine: SQLAlchemy engine for the vaults.
+
+        Returns:
+            The staged payload and the staged repository.
+        """
+
+
+class Gate(Protocol):
+    """The preflight gate, as :func:`check_repository` is."""
+
+    def __call__(self, archive: Path, secret_names: Collection[str], *, place: Place) -> list[GateFailure]:
+        """Check a full tree before any sandbox opens.
+
+        Args:
+            archive: The full base-commit tree.
+            secret_names: The run's secret names; never values.
+            place: Where the sandboxes run.
+
+        Returns:
+            One failure for each failed check.
+        """
 
 
 def required_reservation(job: HardeningJob) -> float:
@@ -105,6 +141,8 @@ def run_hardening_job(
     """
     if job.status not in _ACTIVE_STATUSES:
         return job
+    # A close error of an earlier pass is a note, not a state; this pass starts clean.
+    job = job.model_copy(update={"error": None})
     hold = required_reservation(job)
     if hold:
         try:
@@ -120,11 +158,11 @@ def run_hardening_job(
     except Exception as exc:
         return _end(job, "failed", error=str(exc) or type(exc).__name__)
     try:
-        failures = gate(staged.snapshot.archive, staged.secrets, place=sandbox_place(local_mode))
-        if failures:
-            return _preflight_failed(job, [failure.reason for failure in failures])
         result: HardeningJob | None = None
         try:
+            failures = gate(staged.snapshot.archive, frozenset(staged.secrets), place=sandbox_place(local_mode))
+            if failures:
+                return _preflight_failed(job, [failure.reason for failure in failures])
             workspace = _workspace(staged, staged_payload, job)
             with runner_factory(workspace, job) as runner:
                 result = run_until_wait(
@@ -132,9 +170,15 @@ def run_hardening_job(
                 )
             return result
         except Exception as exc:
-            # A sandbox that fails to close after the pass must not drop the
-            # pass's spend and rounds.
-            return _end(result or job, "failed", error=str(exc) or type(exc).__name__)
+            if result is None:
+                return _end(job, "failed", error=str(exc) or type(exc).__name__)
+            # The pass already reached its state. Failing it now would make a
+            # retry pay for a new attack round and leave this round unreviewable.
+            # Only the type is kept: the message may quote sandbox output.
+            logger.warning("Hardening job %s: a sandbox failed to close (%s).", job.id, type(exc).__name__)
+            if result.status != "failed":
+                result.error = f"A sandbox failed to close ({type(exc).__name__})."
+            return result
     finally:
         staged.close_scorers()
         staged.cleanup()

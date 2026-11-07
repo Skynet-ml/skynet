@@ -122,6 +122,7 @@ class Recorder:
         self.stage_kwargs: dict[str, Any] = {}
         self.held: list[float] = []
         self.agent_names: set[str] = set()
+        self.gate_secrets: Any = None
 
     def reserve(self, job: HardeningJob, usd: float) -> None:
         """Record a budget hold.
@@ -171,6 +172,7 @@ class Recorder:
             The configured failures.
         """
         self.events.append(f"gate:{place}")
+        self.gate_secrets = secrets
         return self.failures
 
     @contextmanager
@@ -526,44 +528,134 @@ def test_a_link_that_leaves_the_tree_fails_the_job(tmp_path: Path) -> None:
     assert not recorder.staged.workdir.exists()
 
 
-def test_a_sandbox_that_fails_to_close_keeps_the_pass_spend(tmp_path: Path) -> None:
-    """A close error after the pass fails the job but keeps the rounds and dollars the pass used."""
-    recorder = Recorder(tmp_path)
+@contextmanager
+def _leaky(recorder: Recorder, workspace: HardeningWorkspace, job: HardeningJob) -> Iterator[FakeRunner]:
+    """Open a fake sandbox that fails on close.
 
-    @contextmanager
-    def leaky(workspace: HardeningWorkspace, job: HardeningJob) -> Iterator[FakeRunner]:
-        """Open a sandbox that fails on close.
+    Args:
+        recorder: The recorder.
+        workspace: The pass's trees.
+        job: The job.
 
-        Args:
-            workspace: The pass's trees.
-            job: The job.
+    Yields:
+        A runner.
 
-        Yields:
-            A runner.
+    Raises:
+        RuntimeError: On exit, with a message that must not reach the job.
+    """
+    with recorder.runner_factory(workspace, job) as runner:
+        yield runner
+    raise RuntimeError("Sandbox stop failed: token=sk-secret")
 
-        Raises:
-            RuntimeError: On exit.
-        """
-        yield FakeRunner(recorder)
-        raise RuntimeError("Sandbox stop failed.")
 
-    job = run_hardening_job(
-        _cloud_job(),
+def _run_leaky(recorder: Recorder, job: HardeningJob) -> HardeningJob:
+    """Run a cloud pass whose sandbox fails to close.
+
+    Args:
+        recorder: The recorder.
+        job: The job.
+
+    Returns:
+        The job after the pass.
+    """
+    return run_hardening_job(
+        job,
         payload=_PAYLOAD,
         binding_id="budget-1",
         username="alice",
         engine=None,
         local_mode=False,
-        runner_factory=leaky,
+        runner_factory=lambda workspace, job: _leaky(recorder, workspace, job),
         reserve=recorder.reserve,
         stage=recorder.stage,
         gate=recorder.gate,
     )
 
-    assert (job.status, job.error) == ("failed", "Sandbox stop failed.")
+
+def test_a_close_error_at_review_keeps_the_round_reviewable(tmp_path: Path) -> None:
+    """A close error after the pass keeps waiting_review, so the user reviews round 1 and no new attack runs."""
+    (tmp_path / "first").mkdir()
+    first = Recorder(tmp_path / "first")
+
+    job = _run_leaky(first, _cloud_job())
+
+    assert job.status == "waiting_review"
+    assert job.error == "A sandbox failed to close (RuntimeError)."
+    assert "sk-secret" not in job.model_dump_json()
     assert job.spent_usd == pytest.approx(0.6)
-    assert job.reserved_usd == job.spent_usd
+    assert job.reserved_usd == pytest.approx(6.0)
     assert len(job.rounds_detail) == 1
+
+    job = record_verdict(job, job.rounds_detail[0].exploits[0].id, confirmed=True)
+    (tmp_path / "second").mkdir()
+    second = Recorder(tmp_path / "second")
+    after = _run(second, job, local_mode=False)
+
+    assert "attack" not in second.events
+    assert (after.status, after.error, after.round) == ("waiting_fix", None, 1)
+    assert len(after.rounds_detail) == 1
+
+
+def test_a_close_error_at_done_keeps_done(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A close error after a pass that ended the job does not turn done into failed."""
+    recorder = Recorder(tmp_path)
+
+    def finish(job: HardeningJob, **kwargs: Any) -> HardeningJob:
+        """End the job as done.
+
+        Args:
+            job: The job.
+            **kwargs: The runner and suite paths.
+
+        Returns:
+            A done copy of the job.
+        """
+        return job.model_copy(update={"status": "done", "spent_usd": 1.5, "reserved_usd": 1.5})
+
+    monkeypatch.setattr("core.worker.hardening_job.run_until_wait", finish)
+
+    job = _run_leaky(recorder, _cloud_job())
+
+    assert (job.status, job.spent_usd) == ("done", 1.5)
+    assert job.error == "A sandbox failed to close (RuntimeError)."
+    assert recorder.open_sandboxes == 0
+    assert not recorder.staged.workdir.exists()
+
+
+def test_a_gate_that_raises_fails_the_job(tmp_path: Path) -> None:
+    """A gate error ends the job as failed, frees the hold, opens no sandbox and removes the workdir."""
+    recorder = Recorder(tmp_path)
+
+    def broken(archive: Path, secret_names: Any, *, place: str) -> list[GateFailure]:
+        """Fail inside the gate.
+
+        Args:
+            archive: The full tree.
+            secret_names: The run's secret names.
+            place: local or cloud.
+
+        Raises:
+            OSError: Always.
+        """
+        raise OSError("Tree unreadable.")
+
+    recorder.gate = broken  # type: ignore[method-assign]
+
+    job = _run(recorder, _cloud_job(), local_mode=False)
+
+    assert (job.status, job.error) == ("failed", "Tree unreadable.")
+    assert job.reserved_usd == job.spent_usd == 0
+    assert "sandbox" not in recorder.events
+    assert not recorder.staged.workdir.exists()
+
+
+def test_the_gate_gets_secret_names_only(tmp_path: Path) -> None:
+    """The preflight gate sees the secret names, never their values."""
+    recorder = Recorder(tmp_path)
+
+    _run(recorder, _cloud_job(), local_mode=False)
+
+    assert recorder.gate_secrets == frozenset({"API_KEY"})
 
 
 @pytest.mark.parametrize(
