@@ -524,3 +524,90 @@ def test_a_watch_note_reaches_the_agent_in_its_next_scoring_reply(tmp_path: Path
         assert [event["kind"] for event in events] == [EVENT_VERDICT, EVENT_NOTE]
     finally:
         scorer.close()
+
+
+def _leaky(tmp_path: Path, code: str) -> RepoScorer:
+    """Open a scorer whose metric names its own files and internals.
+
+    Args:
+        tmp_path: Scratch folder.
+        code: Scorer source.
+
+    Returns:
+        The scorer.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/metric.py": "WEIGHT = 0.3\n"})
+    return RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=60, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+            hidden_paths=["eval"],
+        ),
+        code,
+        timeout_seconds=60,
+    )
+
+
+def test_the_proposer_gets_only_the_score_and_the_feedback(tmp_path: Path) -> None:
+    """Extra keys, the box's paths and each case's extras never reach the agent (SKY-353)."""
+    scorer = _leaky(
+        tmp_path,
+        "import os\ndef score(repo_path):\n"
+        "    return {'score': 0.5, 'feedback': 'read ' + os.path.join(repo_path, 'eval/metric.py'),"
+        " 'weights': {'accuracy': 0.3}, 'metric_source': open(os.path.join(repo_path, 'eval/metric.py')).read(),"
+        " 'cases': {'a': {'score': 1, 'feedback': 'ok', 'formula': 'w * x'}}}\n",
+    )
+    try:
+        reply = scorer.dispatch({"candidate": ""})
+        assert reply.status == 200
+        document = json.loads(reply.body)
+        assert document == {
+            "score": pytest.approx(0.5),
+            "feedback": "read eval/metric.py",
+            "scores": {"a": {"score": pytest.approx(1.0), "feedback": "ok"}},
+        }
+    finally:
+        scorer.close()
+
+
+def test_a_crashing_metric_sends_no_traceback_or_box_path(tmp_path: Path) -> None:
+    """A scorer crash tells the agent the error, not the metric's file paths or lines (SKY-353)."""
+    scorer = _leaky(
+        tmp_path,
+        "import os\ndef score(repo_path):\n    open(os.path.join(repo_path, 'eval/missing.csv'))\n",
+    )
+    try:
+        reply = scorer.dispatch({"candidate": ""})
+        assert reply.status == 422
+        text = reply.body.decode()
+        assert "eval/missing.csv" in text
+        assert "Traceback" not in text
+        assert 'File "' not in text
+        assert ".app-repo" not in text
+        assert str(tmp_path) not in text
+    finally:
+        scorer.close()
+
+
+def test_a_version_that_rewrites_the_metric_gets_the_base_score(tmp_path: Path) -> None:
+    """The scorer box keeps the base commit's metric, so editing it changes nothing (SKY-353)."""
+    scorer = _leaky(
+        tmp_path,
+        "import os, runpy\ndef score(repo_path):\n"
+        "    weight = runpy.run_path(os.path.join(repo_path, 'eval/metric.py'))['WEIGHT']\n"
+        "    return {'score': weight, 'feedback': 'ok'}\n",
+    )
+    try:
+        archive = tmp_path / "tree.tgz"
+        baseline = json.loads(scorer.dispatch({"candidate": ""}).body)["score"]
+        cheat = _patch(tmp_path / "cheat", archive, {"src/app.py": "x = 2\n", "eval/metric.py": "WEIGHT = 99\n"})
+        reply = scorer.dispatch({"candidate": cheat})
+        assert reply.status == 200
+        assert json.loads(reply.body)["score"] == pytest.approx(baseline) == pytest.approx(0.3)
+    finally:
+        scorer.close()

@@ -34,13 +34,20 @@ from ..models.common import ModelConfig
 from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     ConstraintsError,
+    MetricSpec,
     effective_environment,
     instructions_brief,
     read_constraints,
 )
 from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
 from ..service_gateway.optimization.blackbox.repo_setup import infer_setup_command
-from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY, patch_paths, patch_violations
+from ..service_gateway.optimization.blackbox.repo_tree import (
+    REPO_SNAPSHOT_KEY,
+    drop_paths,
+    patch_paths,
+    patch_violations,
+    strip_archive,
+)
 from ..service_gateway.optimization.blackbox.repo_workspace import RepoWorkspace
 from ..service_gateway.optimization.blackbox.rule_judge import (
     JUDGE_ANSWER_TOKENS,
@@ -51,6 +58,7 @@ from ..service_gateway.optimization.blackbox.rule_judge import (
 )
 from ..service_gateway.optimization.blackbox.sandbox import SandboxSpec
 from ..service_gateway.optimization.blackbox.sandbox_scorer import ScorerGateway, scorer_gateway
+from .repo_gate import RepoGateError, check_hidden, sandbox_place
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +91,7 @@ class StagedRepository:
     constrained: bool = False
     rules: tuple[str, ...] = ()
     intent: str | None = None
+    hidden_paths: tuple[str, ...] = ()
 
     def close_scorers(self) -> None:
         """Close the parent's scoring boxes; the gateway still stops any that fail to close."""
@@ -133,6 +142,7 @@ def stage_repository(
         ConstraintsError: When the repository's ``optimize.toml`` is invalid,
             asks for more than the run approved, or a resumed run's rules
             changed since they were first recorded.
+        RepoGateError: When the agent's tree still shows a metric file.
     """
     result = copy.deepcopy(payload)
     repo = result["target"]["repo"]
@@ -160,6 +170,15 @@ def stage_repository(
             secret_names=secrets,
         )
         _ensure_unchanged(repo.get(ENVIRONMENT_KEY), record)
+        # The guest's workspace (Vercel or local Docker) unpacks this copy; the
+        # parent's scorer box keeps the full tree, so it scores with the base
+        # commit's metric (SKY-353).
+        metric = environment.constraints.metric if environment.constraints is not None else MetricSpec()
+        hidden = (*metric.files, metric.exploits)
+        agent_archive = strip_archive(snapshot.archive, hidden, workdir / "agent-tree.tgz")
+        leaks = check_hidden(snapshot.archive, agent_archive, hidden, place=sandbox_place(settings.local_mode))
+        if leaks:
+            raise RepoGateError(leaks)
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
@@ -173,7 +192,7 @@ def stage_repository(
         )
     repo["secrets"] = []
     result[REPO_SNAPSHOT_KEY] = {
-        "archive": str(snapshot.archive),
+        "archive": str(agent_archive),
         "commit": commit,
         "readonly_paths": list(snapshot.readonly_paths),
         "secret_names": sorted(secrets),
@@ -187,6 +206,7 @@ def stage_repository(
         constrained=environment.constraints is not None,
         rules=environment.rules,
         intent=environment.constraints.intent if environment.constraints is not None else None,
+        hidden_paths=hidden,
     )
 
 
@@ -486,6 +506,7 @@ def bind_repo_scorer(
             setup_command=target.get("setup_command"),
             secrets=staged.secrets,
             protected_paths=staged.protected_paths,
+            hidden_paths=staged.hidden_paths,
         ),
         str(scorer_spec["metric_code"]),
         timeout_seconds=float(scorer_spec["timeout_seconds"]),
@@ -672,6 +693,9 @@ def publish_improvement(
     patch = improved_patch(result)
     if patch is None:
         return None
+    # The scorer laid the version out without its metric-file edits, so the
+    # scored change, not the raw one, is what reaches the repository.
+    patch = drop_paths(patch, staged.hidden_paths)
     repo = payload["target"]["repo"]
     outcome: dict[str, Any]
     # The patch came back from the guest, so the editing rules are checked
@@ -739,7 +763,10 @@ def _candidate_versions(
         # The patches came back from the guest, so the editing rules are
         # checked again before any of them reaches the repository.
         if _version_metric_error(result, patch) or patch_violations(
-            patch, repo["editable_paths"], staged.snapshot.readonly_paths, staged.protected_paths
+            drop_paths(patch, staged.hidden_paths),
+            repo["editable_paths"],
+            staged.snapshot.readonly_paths,
+            staged.protected_paths,
         ):
             skipped += 1
             continue
@@ -796,7 +823,9 @@ def publish_candidates(
         versions.append((best_id, ""))
     outcome: dict[str, Any]
     try:
-        pushed = push_candidates(repo["repository"], repo["commit"], versions, best_id, github_token(engine, username))
+        # Ids and rankings key on the raw patches; the scored change is what is pushed.
+        scored = [(version_id, drop_paths(patch, staged.hidden_paths)) for version_id, patch in versions]
+        pushed = push_candidates(repo["repository"], repo["commit"], scored, best_id, github_token(engine, username))
         outcome = {
             "repository": repo["repository"],
             "best_branch": BEST_BRANCH,

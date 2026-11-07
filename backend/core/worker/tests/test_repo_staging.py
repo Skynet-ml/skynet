@@ -1336,3 +1336,66 @@ def test_a_cut_off_judge_reply_reads_as_no_answer(
     ask = repo_staging._route_asker(gateway, {"token": "opt-token", "model": "vendor/strong"})
 
     assert (ask("judge this") == reply) is expected
+
+
+def _names(archive: Path) -> set[str]:
+    """List an archive's member names without a leading ``./``.
+
+    Args:
+        archive: Packed tree.
+
+    Returns:
+        The names.
+    """
+    with tarfile.open(archive) as packed:
+        return {name.removeprefix("./") for name in packed.getnames()}
+
+
+_METRIC_TREE = {
+    "optimize.toml": '[paths]\neditable = ["src"]\n\n[metric]\nfiles = ["eval/scorer.py"]\n',
+    "src/app.py": "x = 1\n",
+    "eval/scorer.py": "def score(): ...\n",
+    "eval/data.csv": "1\n",
+    ".optimize/exploits/cheat.py": "cheat\n",
+}
+
+
+def test_the_agent_tree_has_no_metric_file_and_no_exploit_folder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guest gets a stripped tree; the parent's scorer keeps the full one (SKY-353)."""
+    staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch)
+    try:
+        agent = Path(staged_payload["_repo_snapshot"]["archive"])
+        assert agent != staged.snapshot.archive
+        assert _names(agent) == {"optimize.toml", "src/app.py", "eval/data.csv"}
+        assert {"eval/scorer.py", ".optimize/exploits/cheat.py"} <= _names(staged.snapshot.archive)
+        assert staged.hidden_paths == ("eval/scorer.py", ".optimize/exploits")
+    finally:
+        staged.cleanup()
+
+
+def test_the_exploit_folder_is_hidden_without_a_constraints_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default exploit folder holds attacks on the metric, so the agent never sees it (SKY-353)."""
+    staged_payload, staged = _stage_with({"src/app.py": "x\n", ".optimize/exploits/a.py": "a\n"}, monkeypatch)
+    try:
+        assert _names(Path(staged_payload["_repo_snapshot"]["archive"])) == {"src/app.py"}
+    finally:
+        staged.cleanup()
+
+
+def test_staging_stops_when_a_metric_file_stays_visible(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the strip misses a metric file, the gate names it and staging leaves nothing on disk."""
+    workdirs: list[Path] = []
+    real_mkdtemp = repo_staging.tempfile.mkdtemp
+
+    def track(**options: Any) -> str:
+        """Remember the scratch folder staging makes."""
+        workdirs.append(Path(real_mkdtemp(**options)))
+        return str(workdirs[-1])
+
+    monkeypatch.setattr(repo_staging.tempfile, "mkdtemp", track)
+    monkeypatch.setattr(repo_staging, "strip_archive", lambda archive, hidden, destination: archive)
+
+    with pytest.raises(repo_staging.RepoGateError, match=r"eval/scorer\.py"):
+        _stage_with(_METRIC_TREE, monkeypatch)
+
+    assert not workdirs[0].exists()

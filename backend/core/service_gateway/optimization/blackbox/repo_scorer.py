@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shlex
 import threading
 from collections.abc import Mapping
@@ -24,7 +25,8 @@ from typing import Any
 from ....billing.model_dispatch import ModelHTTPResult
 from . import runner, sandbox_log
 from .harness import ENV_API_KEY, ENV_MODEL
-from .repo_workspace import REPO_DIR, RepoWorkspace, redact
+from .protocol import STATUS_KEY
+from .repo_workspace import REPO_DIR, WORK_DIR, RepoWorkspace, redact
 from .rule_judge import RuleJudge
 from .sandbox import SandboxSession
 from .sandbox_scorer import RUNNER_SOURCE, ScorerGateway, _raise_control
@@ -38,6 +40,11 @@ CALLS_DIR = f"{REPO_DIR}/calls"
 # prepared tree with its installed dependencies can take a while, so its relay
 # gets an allowance on top of the scorer's own timeout.
 SETUP_ALLOWANCE_SECONDS = 1_800.0
+# The proposer gets only these keys, so the scorer's other side information
+# (weights, formulas, metric source) never reveals the metric (SKY-353).
+_PROPOSER_KEYS = ("score", "feedback", STATUS_KEY, "scores")
+# A traceback names the metric's files and quotes its source lines.
+_TRACEBACK = re.compile(r"^Traceback \(most recent call last\):\n|^  File \".*\n(?:    .*\n)?", re.MULTILINE)
 
 
 class RepoScoreError(Exception):
@@ -183,7 +190,7 @@ class RepoScorer:
                 raise RepoScoreError(judge.blocked([reason]) if judge is not None else reason)
             text = session.read_file(f"{CALLS_DIR}/{self._calls:06d}/{runner.OUTPUT_FILE}")
         if text is None:
-            output = redact((result.stderr or result.stdout)[-2_000:], secrets)
+            output = redact(_scrub(result.stderr or result.stdout, root)[-2_000:], secrets)
             raise RepoScoreError(f"The scorer did not finish (exit {result.exit_code}): {output}")
         output = json.loads(redact(text, secrets))
         _raise_control(output)
@@ -237,7 +244,8 @@ class RepoScorer:
             document = self.score(candidate, body.get("case"))
         except RepoScoreError as error:
             # Plain text: the guest's relay client quotes the body in its error.
-            return ModelHTTPResult(422, "text/plain; charset=utf-8", str(error).encode())
+            return ModelHTTPResult(422, "text/plain; charset=utf-8", _scrub(str(error), self._root).encode())
+        document = _for_proposer(document, self._root)
         notes = self._rule_judge.take_notes() if self._rule_judge is not None else []
         if notes:
             feedback = document.get("feedback")
@@ -268,3 +276,42 @@ class RepoScorer:
     def close(self) -> None:
         """Destroy the workspace box."""
         self._workspace.close()
+
+
+def _scrub(text: str, root: str | None) -> str:
+    """Remove traceback frames and the scorer box's absolute paths from text the proposer reads.
+
+    Args:
+        text: An error or a feedback string from the scorer box.
+        root: The box's working directory; ``None`` before it is known.
+
+    Returns:
+        The text with repository-relative paths and without traceback frames.
+    """
+    text = _TRACEBACK.sub("", text if text.endswith("\n") else f"{text}\n").rstrip("\n")
+    if root:
+        text = text.replace(f"{root}/{WORK_DIR}/", "").replace(f"{root}/", "").replace(root, "")
+    return text
+
+
+def _for_proposer(document: Mapping[str, Any], root: str | None) -> dict[str, Any]:
+    """Keep only the score, the feedback and the named scores of a scoring result.
+
+    Args:
+        document: What :meth:`RepoScorer.score` returned.
+        root: The box's working directory, scrubbed from the feedback.
+
+    Returns:
+        The reply the guest receives.
+    """
+    reply = {key: document[key] for key in _PROPOSER_KEYS if key in document}
+    if isinstance(reply.get("feedback"), str):
+        reply["feedback"] = _scrub(reply["feedback"], root)
+    if isinstance(reply.get("scores"), Mapping):
+        reply["scores"] = {
+            name: {key: entry[key] for key in ("score", "feedback") if key in entry}
+            if isinstance(entry, Mapping)
+            else entry
+            for name, entry in reply["scores"].items()
+        }
+    return reply

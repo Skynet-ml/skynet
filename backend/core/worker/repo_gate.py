@@ -10,6 +10,8 @@ the same failures the run would stop on.
 
 from __future__ import annotations
 
+import posixpath
+import tarfile
 import tomllib
 from collections.abc import Collection
 from dataclasses import dataclass, field
@@ -23,10 +25,12 @@ from ..service_gateway.optimization.blackbox.repo_constraints import parse_const
 
 Place = Literal["local", "cloud"]
 
-# The settings each place's sandbox runtime enforces. Both are empty: no
-# runtime wires these keys into the proposer or target boxes yet. The issue
-# that enforces a setting adds its kind here, and the gate stops refusing it.
-ENFORCED: dict[Place, frozenset[str]] = {"local": frozenset(), "cloud": frozenset()}
+# The settings each place's sandbox runtime enforces. Staging strips the
+# metric files and the exploit folder from the agent's tree in both places,
+# and ``check_hidden`` proves it (SKY-353). The issue that enforces another
+# setting adds its kind here, and the gate stops refusing it.
+_METRIC_HIDING = frozenset({"metric.files", "metric.exploits"})
+ENFORCED: dict[Place, frozenset[str]] = {"local": _METRIC_HIDING, "cloud": _METRIC_HIDING}
 
 _UNENFORCED_CODE: dict[Place, I18nKey] = {
     "local": I18nKey.REPO_GATE_UNENFORCED_LOCAL,
@@ -100,6 +104,54 @@ def check_repository(archive: Path, secret_names: Collection[str], *, place: Pla
             if name not in secret_names
         ]
     return failures
+
+
+def check_hidden(
+    original_archive: Path, agent_archive: Path, hidden_paths: Collection[str], *, place: Place
+) -> list[GateFailure]:
+    """List every metric file the agent's tree still shows.
+
+    A file fails when the agent's tree holds it under a hidden path, or when
+    the full tree has a symbolic link under a hidden path whose target the
+    agent can still read.
+
+    Args:
+        original_archive: The full tree that ``stage_repository`` fetched.
+        agent_archive: The stripped tree the proposer's workspace receives.
+        hidden_paths: The ``[metric] files`` entries and the exploit folder.
+        place: Where the run's sandbox runs.
+
+    Returns:
+        One failure per visible path; an empty list means the metric is hidden.
+    """
+    hidden = [posixpath.normpath(path) for path in hidden_paths]
+    with tarfile.open(agent_archive) as packed:
+        visible = [posixpath.normpath(name) for name in packed.getnames()]
+    with tarfile.open(original_archive) as packed:
+        targets = [
+            posixpath.normpath(posixpath.join(posixpath.dirname(posixpath.normpath(member.name)), member.linkname))
+            for member in packed
+            if member.issym() and _covered(posixpath.normpath(member.name), hidden)
+        ]
+    leaked = [path for path in visible if _covered(path, hidden)]
+    leaked += [path for path in targets if any(_covered(name, [path]) for name in visible)]
+    return [
+        _failure("[metric] files", place, _UNENFORCED_CODE[place], key=f"[metric] files: {path}")
+        for path in dict.fromkeys(leaked)
+    ]
+
+
+def _covered(path: str, roots: Collection[str]) -> bool:
+    """Report whether ``path`` is one of ``roots`` or lies below one.
+
+    Args:
+        path: Normalized repository-relative path.
+        roots: Normalized repository-relative files or folders.
+
+    Returns:
+        Whether a root covers the path.
+    """
+    return any(root == "." or path == root or path.startswith(root + "/") for root in roots)
 
 
 def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -> list[tuple[str, str]]:

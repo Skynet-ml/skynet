@@ -8,6 +8,7 @@ the agent's workspace and the trusted scorer apply the same rules.
 from __future__ import annotations
 
 import base64
+import posixpath
 import re
 import subprocess
 import tarfile
@@ -217,6 +218,66 @@ def patch_violations(
         elif not _inside(path, editable):
             problems.append(f"'{path}' is outside the editable paths.")
     return problems
+
+
+def _member_path(name: str) -> str:
+    """Normalize an archive member name to a repository-relative path.
+
+    Args:
+        name: Member name, which may start with ``./``.
+
+    Returns:
+        The path without a leading ``./`` or trailing ``/``.
+    """
+    return posixpath.normpath(name).lstrip("/") if name not in ("", ".", "./") else "."
+
+
+def strip_archive(archive: Path, hidden_paths: Iterable[str], destination: Path) -> Path:
+    """Pack a copy of a tree without the files the agent must never see.
+
+    The metric files and the exploit folder stay in the trusted scorer's tree
+    only, so the proposer cannot read the metric or the attacks on it (SKY-353).
+    A hard link to a hidden file is dropped too, because it carries the file's
+    bytes under another name.
+
+    Args:
+        archive: Packed full tree.
+        hidden_paths: Repository-relative files and folders to leave out.
+        destination: Where to write the stripped archive.
+
+    Returns:
+        ``destination``.
+    """
+    hidden = [_member_path(path) for path in hidden_paths]
+    with tarfile.open(archive) as source, tarfile.open(destination, "w:gz") as target:
+        for member in source:
+            if _inside(_member_path(member.name), hidden):
+                continue
+            if member.islnk() and _inside(_member_path(member.linkname), hidden):
+                continue
+            target.addfile(member, source.extractfile(member) if member.isreg() else None)
+    return destination
+
+
+def drop_paths(patch: str, hidden_paths: Iterable[str]) -> str:
+    """Remove the file sections of a patch that touch a hidden path.
+
+    The scorer box always scores with the base commit's metric, so a version
+    that writes a metric file or the exploit folder keeps the rest of its
+    change and loses only that part (SKY-353).
+
+    Args:
+        patch: ``git diff`` output for one version.
+        hidden_paths: Repository-relative files and folders the version may not change.
+
+    Returns:
+        The patch without those sections; unchanged when nothing is hidden.
+    """
+    hidden = list(hidden_paths)
+    if not hidden or not patch:
+        return patch
+    sections = re.split(r"(?m)^(?=diff --git )", patch)
+    return "".join(section for section in sections if not any(_inside(path, hidden) for path in patch_paths(section)))
 
 
 def archive_chunks(archive: Path) -> Iterator[str]:

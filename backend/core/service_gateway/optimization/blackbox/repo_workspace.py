@@ -21,7 +21,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .repo_tree import MAX_PATCH_BYTES, archive_chunks, patch_violations
+from .repo_tree import MAX_PATCH_BYTES, archive_chunks, drop_paths, patch_violations
 from .sandbox import CommandResult, OutputSink, SandboxRuntime, SandboxSession, SandboxSpec
 
 logger = logging.getLogger(__name__)
@@ -174,6 +174,7 @@ class RepoWorkspace:
         setup_command: str | None,
         secrets: Mapping[str, str],
         protected_paths: Iterable[str] = (),
+        hidden_paths: Iterable[str] = (),
     ) -> None:
         """Bind a snapshot to a runtime without opening anything yet.
 
@@ -188,6 +189,9 @@ class RepoWorkspace:
             secrets: Environment the scorer receives; setup never does.
             protected_paths: Files and folders no version may change, even
                 inside an editable path.
+            hidden_paths: The metric files and exploit folder the agent never
+                sees. A version's edits to them are dropped, so every version
+                is scored with the base commit's metric.
         """
         self._runtime = runtime
         self._spec = spec
@@ -195,6 +199,7 @@ class RepoWorkspace:
         self._editable = tuple(editable_paths)
         self._readonly = tuple(readonly_paths)
         self._protected = tuple(protected_paths)
+        self._hidden = tuple(hidden_paths)
         self._setup = (setup_command or "").strip() or None
         self._secrets = dict(secrets)
         self._session: SandboxSession | None = None
@@ -361,13 +366,17 @@ class RepoWorkspace:
     def violations(self, patch: str) -> list[str]:
         """Explain how a version breaks the run's path rules, without touching the box.
 
+        Edits to hidden paths are not checked: :meth:`checkout` drops them.
+
         Args:
             patch: The version as a git patch against the snapshot.
 
         Returns:
             One reason per broken rule; empty when the version is allowed.
         """
-        return patch_violations(patch, self._editable, self._readonly, self._protected)
+        # The size limit applies to what the guest sent, not to what is left.
+        kept = patch if len(patch.encode("utf-8")) > MAX_PATCH_BYTES else drop_paths(patch, self._hidden)
+        return patch_violations(kept, self._editable, self._readonly, self._protected)
 
     def checkout(self, patch: str) -> Checkout:
         """Lay out one version on a copy of the prepared tree.
@@ -377,11 +386,13 @@ class RepoWorkspace:
 
         Returns:
             The checkout's path, relative to the box, or why the version is
-            not allowed or does not apply.
+            not allowed or does not apply. The base commit's metric files stay
+            in place whatever the version wrote to them.
         """
         problems = self.violations(patch)
         if problems:
             return Checkout(path=None, problems=tuple(problems), blocked=len(patch.encode("utf-8")) <= MAX_PATCH_BYTES)
+        patch = drop_paths(patch, self._hidden)
         with self._lock:
             self._stamps_before_run = None
             session = self.session()

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import io
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -11,9 +13,11 @@ import pytest
 from ..repo_tree import (
     apply_patch,
     archive_chunks,
+    drop_paths,
     patch_paths,
     patch_violations,
     reset_tree,
+    strip_archive,
     unpack_tree,
     version_patch,
 )
@@ -174,3 +178,56 @@ def test_protected_paths_are_refused_even_under_the_whole_tree(tmp_path: Path) -
     problems = patch_violations(version_patch(checkout), ["."], [], ["eval"])
 
     assert problems == ["'eval/labels.json' is protected by the repository's optimize.toml ([paths] protected)."]
+
+
+def test_strip_archive_leaves_out_every_hidden_path(tmp_path: Path) -> None:
+    """The agent's copy has no metric file and no exploit folder; every other file stays (SKY-353)."""
+    archive = _tree(
+        tmp_path,
+        {
+            "src/app.py": "x = 1\n",
+            "eval/scorer.py": "def score(): ...\n",
+            "eval/data.csv": "1\n",
+            "evaluation/keep.py": "kept\n",
+            ".optimize/exploits/cheat.py": "cheat\n",
+        },
+    )
+
+    stripped = strip_archive(archive, ["eval/scorer.py", ".optimize/exploits"], tmp_path / "agent.tgz")
+
+    with tarfile.open(stripped) as packed:
+        names = {name.removeprefix("./") for name in packed.getnames()}
+    assert {"src/app.py", "eval/data.csv", "evaluation/keep.py"} <= names
+    assert not {name for name in names if name.startswith(("eval/scorer.py", ".optimize/exploits"))}
+    with tarfile.open(archive) as full:
+        assert "eval/scorer.py" in {name.removeprefix("./") for name in full.getnames()}
+
+
+def test_strip_archive_drops_a_link_to_a_hidden_file(tmp_path: Path) -> None:
+    """A hard link to a metric file would carry its bytes, so it goes too."""
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        data = tarfile.TarInfo("eval/scorer.py")
+        data.size = 1
+        packed.addfile(data, io.BytesIO(b"x"))
+        link = tarfile.TarInfo("src/copy.py")
+        link.type, link.linkname = tarfile.LNKTYPE, "eval/scorer.py"
+        packed.addfile(link)
+
+    with tarfile.open(strip_archive(archive, ["eval"], tmp_path / "agent.tgz")) as packed:
+        assert packed.getnames() == []
+
+
+def test_drop_paths_removes_the_sections_that_touch_a_hidden_path() -> None:
+    """A version's edit to a metric file is ignored; its other edits stay."""
+    patch = (
+        "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+        "diff --git a/eval/scorer.py b/eval/scorer.py\n--- a/eval/scorer.py\n+++ b/eval/scorer.py\n"
+        "@@ -1 +1 @@\n-a\n+b\n"
+    )
+
+    kept = drop_paths(patch, ["eval/scorer.py"])
+
+    assert patch_paths(kept) == ["src/app.py"]
+    assert drop_paths(patch, []) == patch
+    assert drop_paths("", ["eval"]) == ""
