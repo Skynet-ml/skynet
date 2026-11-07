@@ -277,6 +277,7 @@ class SandboxBroker:
         self._sessions: dict[str, _OwnedSession] = {}
         # Kept apart from ``_sessions`` so no guest handle can ever address them.
         self._parent_sessions: list[ParentSandboxSession] = []
+        self._guest_hosts: frozenset[str] = frozenset()
         self._opened: dict[str, tuple[dict[str, Any], str]] = {}
         self._opening: set[str] = set()
         self._lock = threading.Lock()
@@ -299,7 +300,10 @@ class SandboxBroker:
         return owned
 
     def _open(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Create an offline sandbox using the parent's fixed image and resource profile.
+        """Create a sandbox using the parent's fixed image and resource profile.
+
+        The box is offline unless the spec asks for hosts that
+        :meth:`allow_guest_hosts` granted.
 
         Args:
             payload: Stable request_id and a requested guest spec.
@@ -318,9 +322,15 @@ class SandboxBroker:
             raise ServiceError("The child cannot override the trusted sandbox image or resource profile.")
         if spec.get("inject_headers"):
             raise ServiceError("Protected sandbox model calls use the parent mailbox.")
-        if spec.get("allowed_hosts"):
+        hosts = spec.get("allowed_hosts") or []
+        if not isinstance(hosts, list) or not all(isinstance(host, str) for host in hosts):
             raise ServiceError("This run cannot open network access from its sandbox.")
-        requested = {"lifetime_seconds": lifetime, "env": _environment(spec.get("env"))}
+        hosts = sorted(set(hosts))
+        with self._lock:
+            allowed = self._guest_hosts
+        if not set(hosts) <= allowed:
+            raise ServiceError("This run cannot open network access from its sandbox.")
+        requested = {"lifetime_seconds": lifetime, "env": _environment(spec.get("env")), "allowed_hosts": hosts}
         with self._lock:
             if self._closed:
                 raise ServiceError("The sandbox broker is closed.")
@@ -342,7 +352,8 @@ class SandboxBroker:
                     image=self._image,
                     vcpus=self._vcpus,
                     tags=self._tags,
-                    network_disabled=True,
+                    network_disabled=not hosts,
+                    allowed_hosts=tuple(hosts),
                     operation_key=f"sandbox:{request_id}",
                 )
             )
@@ -360,11 +371,26 @@ class SandboxBroker:
             with self._lock:
                 self._opening.discard(request_id)
 
+    def allow_guest_hosts(self, allowed_hosts: tuple[str, ...]) -> None:
+        """Set the most a guest-opened box may reach, such as a proposer's registries.
+
+        Args:
+            allowed_hosts: Hosts the parent funds for guest boxes; empty keeps
+                every guest box offline.
+
+        Raises:
+            ServiceError: When a host is a wildcard or empty.
+        """
+        if any(not host or "*" in host for host in allowed_hosts):
+            raise ServiceError("A guest box may reach only named hosts.")
+        with self._lock:
+            self._guest_hosts = frozenset(allowed_hosts)
+
     def parent_runtime(self, allowed_hosts: tuple[str, ...]) -> _ParentSandboxRuntime:
         """Return a runtime only the trusted parent holds, for its own scoring box.
 
         Nothing reaches it through :meth:`handle`, so the guest's boxes stay
-        limited to Anthropic however it asks.
+        limited to the hosts :meth:`allow_guest_hosts` granted however it asks.
 
         Args:
             allowed_hosts: Package registries the box may reach until the
