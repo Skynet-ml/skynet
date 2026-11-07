@@ -40,6 +40,13 @@ _HIDDEN_FROM_GENERALIST = {
     "move_runs_to_folder",
     "delete_folder",
     "get_usage_optimizations",
+    # Metric hardening is a new feature; the generalist gets hardening tools in a later change.
+    "create_hardening_job",
+    "get_hardening_job",
+    "get_latest_hardening_job",
+    "set_hardening_exploit_verdict",
+    "decide_hardening_fix",
+    "retry_hardening_job",
 }
 
 _FOLDER_WRITES = ("create_folder", "update_folder", "move_folder", "move_runs_to_folder", "delete_folder")

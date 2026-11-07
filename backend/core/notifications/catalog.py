@@ -87,3 +87,9 @@ DEFAULT_HOLD_MINUTES: Final = 10
 MIN_HOLD_MINUTES: Final = 0
 MAX_HOLD_MINUTES: Final = 1440
 DEFAULT_HELD_CHANNELS: Final[tuple[str, ...]] = (EMAIL,)
+
+# Hardening events reuse existing grid rows: a new row would change the
+# preferences API and the settings page, which ship later. "Review needed"
+# routes like needs_input and "Hardening done" routes like finished.
+HARDENING_REVIEW_EVENT: Final = NEEDS_INPUT
+HARDENING_DONE_EVENT: Final = FINISHED
