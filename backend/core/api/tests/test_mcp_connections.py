@@ -112,7 +112,8 @@ def _app_fragment(answer: Any) -> dict[str, str]:
     """
     assert _app_query(answer) == {"settings": "connectors"}
     fragment = parse_qs(urlsplit(answer.headers["location"]).fragment)
-    return {"state": fragment["mcp_state"][0], "code": fragment["mcp_code"][0]}
+    assert fragment["oauth_flow"] == ["mcp"]
+    return {"state": fragment["oauth_state"][0], "code": fragment["oauth_code"][0]}
 
 
 def test_presets_list_the_picker(api: TestClient) -> None:
