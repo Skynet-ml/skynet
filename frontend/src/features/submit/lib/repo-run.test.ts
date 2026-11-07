@@ -227,10 +227,10 @@ test("the run submit takes the hardening job id only from a finished job", async
     return { id: "job-1", status } as never;
   };
   for (const status of ["clean_stop", "budget_stop", "done"]) {
-    assert.equal(await finishedHardeningJobId("draft-1", jobOf(status)), "job-1", status);
+    assert.equal(await finishedHardeningJobId("local", "draft-1", jobOf(status)), "job-1", status);
   }
   for (const status of ["preflight", "preflight_failed", "running", "waiting_review", "waiting_fix", "rejected", "failed", "stale"]) {
-    assert.equal(await finishedHardeningJobId("draft-1", jobOf(status)), null, status);
+    assert.equal(await finishedHardeningJobId("local", "draft-1", jobOf(status)), null, status);
   }
   assert.ok(reads.every((id) => id === "draft-1"));
 });
@@ -241,9 +241,9 @@ test("a setup without a hardening job submits as before", async () => {
     reads += 1;
     return null;
   };
-  assert.equal(await finishedHardeningJobId(null, read), null);
+  assert.equal(await finishedHardeningJobId("local", null, read), null);
   assert.equal(reads, 0);
-  assert.equal(await finishedHardeningJobId("draft-1", read), null);
+  assert.equal(await finishedHardeningJobId("local", "draft-1", read), null);
   assert.equal(reads, 1);
 });
 
@@ -251,5 +251,15 @@ test("a failed hardening read never blocks the run submit", async () => {
   const read = async () => {
     throw new Error("offline");
   };
-  assert.equal(await finishedHardeningJobId("draft-1", read), null);
+  assert.equal(await finishedHardeningJobId("local", "draft-1", read), null);
+});
+
+test("a hosted run sends no hardening job id", async () => {
+  let reads = 0;
+  const read = async () => {
+    reads += 1;
+    return { id: "job-1", status: "done" } as never;
+  };
+  assert.equal(await finishedHardeningJobId("hosted", "draft-1", read), null);
+  assert.equal(reads, 0);
 });

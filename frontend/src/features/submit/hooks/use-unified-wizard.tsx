@@ -770,6 +770,7 @@ export function WizardV2Provider({
     }
     try {
       const hardeningJobId = await finishedHardeningJobId(
+        runOn,
         readSessionValue(WIZARD_HARDENING_KEY),
         getLatestHardeningJob,
       );
