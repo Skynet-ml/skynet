@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,6 +45,8 @@ from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     ConstraintsError,
     MetricSpec,
+    ServiceSpec,
+    TargetStage,
     effective_environment,
     instructions_brief,
     read_constraints,
@@ -109,6 +111,12 @@ class StagedRepository:
     rules: tuple[str, ...] = ()
     intent: str | None = None
     hidden_paths: tuple[str, ...] = ()
+    targets: Mapping[str, TargetStage] = field(default_factory=dict)
+    services: Mapping[str, ServiceSpec] = field(default_factory=dict)
+    # The services each role lists, by role name. Only [metric] is staged: the relay answers
+    # every caller as the metric until it can tell a [run] caller apart (E37, SKY-375).
+    service_roles: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    agent_archive: Path | None = None
     exploits_path: str = EXPLOITS_DIR
 
     def close_scorers(self) -> None:
@@ -233,6 +241,14 @@ def stage_repository(
         rules=environment.rules,
         intent=environment.constraints.intent if environment.constraints is not None else None,
         hidden_paths=hidden,
+        targets=environment.constraints.targets if environment.constraints is not None else {},
+        services=environment.constraints.services if environment.constraints is not None else {},
+        service_roles={
+            "metric": environment.constraints.metric_role.services,
+        }
+        if environment.constraints is not None
+        else {},
+        agent_archive=agent_archive,
         exploits_path=metric.exploits,
     )
 
@@ -539,6 +555,13 @@ def bind_repo_scorer(
         timeout_seconds=float(scorer_spec["timeout_seconds"]),
         rule_judge=rule_judge,
         gateway=model_gateway,
+        stages=staged.targets,
+        stage_runtime=gateway.parent_sandbox_runtime() if staged.targets else None,
+        stage_archive=staged.agent_archive,
+        hidden_paths=staged.hidden_paths,
+        max_concurrency=int(payload.get("max_concurrency") or 1),
+        services=staged.services,
+        service_roles=staged.service_roles,
     )
     environment = target["repo"].get(ENVIRONMENT_KEY)
     if isinstance(environment, dict):

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import http.server
 import json
 import logging
+import threading
+import time
 import traceback
 from collections.abc import Iterator, Mapping
 from pathlib import Path
@@ -11,11 +14,22 @@ from typing import Any
 
 import pytest
 
+from core.billing.signals import BudgetReached
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
 
-from ..repo_scorer import RepoScoreError, RepoScorer, _scrub, fold_case_scores
+from .. import repo_scorer
+from ..repo_constraints import ServiceSpec, TargetStage
+from ..repo_scorer import (
+    _STAGE_LAYOUT_SECONDS,
+    SETUP_ALLOWANCE_SECONDS,
+    RepoScoreError,
+    RepoScorer,
+    _scrub,
+    _StageRelay,
+    fold_case_scores,
+)
 from ..repo_workspace import RepoWorkspace
 from ..rule_judge import (
     EVENT_BLOCK,
@@ -25,7 +39,8 @@ from ..rule_judge import (
     WATCH_EVERY_ACTIONS,
     RuleJudge,
 )
-from ..sandbox import LocalSubprocessRuntime, SandboxSpec
+from ..sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
+from ..sandbox_contract import SandboxSession
 from ..service import run_blackbox_optimization
 from .test_repo_workspace import _archive, _patch
 
@@ -724,3 +739,742 @@ def test_an_exception_group_traceback_sends_no_frame_or_source_line() -> None:
     assert "Traceback" not in scrubbed
     assert "ExceptionGroup: checks failed (2 sub-exceptions)" in scrubbed
     assert "ValueError: bad" in scrubbed
+
+
+STAGE_TREE = {
+    "src/app.py": "x = 1\n",
+    "src/stages.py": (
+        "import time\n"
+        "FACTOR = 2\n"
+        "def double(value):\n"
+        "    return {'v': value['v'] * FACTOR}\n"
+        "def broken(value):\n"
+        "    raise RuntimeError('stage broke')\n"
+        "def slow(value):\n"
+        "    time.sleep(value)\n"
+        "    return value\n"
+    ),
+}
+STAGES = {
+    "double": TargetStage(entry="src/stages.py:double", timeout=30),
+    "shout": TargetStage(
+        entry=("python3", "-c", "import json, sys; print(json.dumps(json.load(sys.stdin).upper()))"), timeout=30
+    ),
+    "broken": TargetStage(entry="src/stages.py:broken", timeout=30),
+    "slow": TargetStage(entry="src/stages.py:slow", timeout=1),
+}
+
+
+class RecordingRuntime:
+    """Open local boxes and remember each spec and each close."""
+
+    injects_headers = False
+
+    def __init__(self, fail_on: str | None = None, error: Exception | None = None) -> None:
+        """Set which stage box refuses to open.
+
+        Args:
+            fail_on: The stage name whose box raises ``error`` on open.
+            error: What the refused open raises.
+        """
+        self.specs: list[SandboxSpec] = []
+        self.sessions: list[SandboxSession] = []
+        self.closed = 0
+        self._fail_on = fail_on
+        self._error = error or RuntimeError("no capacity")
+
+    def open(self, spec: SandboxSpec) -> SandboxSession:
+        """Open one local box, or refuse the configured stage.
+
+        Args:
+            spec: The stage box's spec.
+
+        Returns:
+            The local session, which counts its close.
+
+        Raises:
+            Exception: The configured error for the refused stage.
+        """
+        if self._fail_on and spec.operation_key.endswith(f":{self._fail_on}"):
+            raise self._error
+        self.specs.append(spec)
+        session = LocalSubprocessRuntime().open(spec)
+        close = session.close
+
+        def counted_close() -> None:
+            """Count the close, then remove the box."""
+            self.closed += 1
+            close()
+
+        session.close = counted_close  # type: ignore[method-assign]
+        self.sessions.append(session)
+        return session
+
+
+def _stage_scorer(
+    tmp_path: Path,
+    code: str,
+    runtime: Any,
+    stages: Mapping[str, TargetStage] = STAGES,
+    *,
+    scorer_runtime: Any = None,
+    protected_paths: tuple[str, ...] = (),
+    **kwargs: Any,
+) -> tuple[RepoScorer, Path]:
+    """Open a scorer whose run has target stages.
+
+    Args:
+        tmp_path: Scratch folder.
+        code: The scorer code.
+        runtime: Opens the stage boxes.
+        stages: The run's stages.
+        scorer_runtime: Opens the scorer's box; a plain local box when unset.
+        protected_paths: Paths the version's code must not change while it runs.
+        **kwargs: More ``RepoScorer`` options.
+
+    Returns:
+        The scorer and the tree's archive.
+    """
+    archive = _archive(tmp_path, {**STAGE_TREE, "eval/metric.py": "hidden\n", "judge/labels.csv": "1\n"})
+    stage_archive = _archive(tmp_path / "stage", STAGE_TREE)
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=scorer_runtime or LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+            protected_paths=list(protected_paths),
+        ),
+        code,
+        timeout_seconds=60,
+        stages=stages,
+        stage_runtime=runtime,
+        stage_archive=stage_archive,
+        hidden_paths=("eval/metric.py",),
+        **kwargs,
+    )
+    return scorer, archive
+
+
+def test_one_and_two_stages_answer_and_see_the_version(tmp_path: Path) -> None:
+    """The scorer calls two stages; each stage box runs the scored version, and every box closes."""
+    code = (
+        "from skynet import call\n"
+        "def score(repo_path, case=None):\n"
+        "    doubled = call('double', {'v': 3})\n"
+        "    return {'score': doubled['v'] / 10, 'feedback': call('shout', 'hi')}\n"
+    )
+    runtime = RecordingRuntime()
+    stages = {name: STAGES[name] for name in ("double", "shout")}
+    scorer, archive = _stage_scorer(tmp_path, code, runtime, stages)
+    try:
+        assert scorer.score("") == {"score": pytest.approx(0.6), "feedback": "HI"}
+        version = _patch(tmp_path / "v1", archive, {"src/stages.py": STAGE_TREE["src/stages.py"].replace("2", "3")})
+        assert scorer.score(version)["score"] == pytest.approx(0.9)
+    finally:
+        scorer.close()
+    assert len(runtime.specs) == 4
+    assert runtime.closed == 4
+    keys = [spec.operation_key for spec in runtime.specs]
+    assert len(set(keys)) == 4
+    assert all(key.startswith("stage:") for key in keys)
+    assert all(spec.network_disabled for spec in runtime.specs)
+
+
+def test_the_guest_waits_as_long_as_a_stage_box_may_live(tmp_path: Path) -> None:
+    """The guest's wait covers the stage layout and the scorer, so it never stops before the parent answers."""
+    code = "from skynet import call\ndef score(repo_path, case=None):\n    return call('double', {'v': 1})['v'] / 10, 'ok'\n"
+    runtime = RecordingRuntime()
+    scorer, _ = _stage_scorer(tmp_path, code, runtime, {"double": STAGES["double"]})
+    try:
+        scorer.score("")
+    finally:
+        scorer.close()
+    assert runtime.specs[0].lifetime_seconds == 60 + _STAGE_LAYOUT_SECONDS
+    assert runtime.specs[0].lifetime_seconds + 1_800 <= 60 + SETUP_ALLOWANCE_SECONDS
+
+
+def test_one_stage_is_enough(tmp_path: Path) -> None:
+    """A run with one stage opens one box for each evaluation."""
+    code = "from skynet import call\ndef score(repo_path, case=None):\n    return call('double', {'v': 1})['v'] / 10, 'ok'\n"
+    runtime = RecordingRuntime()
+    scorer, _ = _stage_scorer(tmp_path, code, runtime, {"double": STAGES["double"]})
+    try:
+        assert scorer.score("")["score"] == pytest.approx(0.2)
+    finally:
+        scorer.close()
+    assert runtime.closed == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("broken", "RuntimeError: stage broke"),
+        ("slow", "passed its 1s timeout"),
+        ("nope", "Unknown stage 'nope'"),
+    ],
+)
+def test_stage_failures_reach_the_scorer_as_stage_errors(tmp_path: Path, name: str, expected: str) -> None:
+    """A failed stage, a stage past its timeout and an unknown name each raise ``StageError``."""
+    code = (
+        "from skynet import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        f"        call({name!r}, 3)\n"
+        "    except StageError as error:\n"
+        "        return 0.0, str(error)\n"
+        "    return 1.0, 'no error'\n"
+    )
+    runtime = RecordingRuntime()
+    scorer, _ = _stage_scorer(tmp_path, code, runtime)
+    try:
+        assert expected in scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+    assert runtime.closed == len(STAGES)
+
+
+def test_a_box_that_fails_to_open_leaves_none_open(tmp_path: Path) -> None:
+    """When one stage box cannot open, the open ones close and the version gets no score."""
+    runtime = RecordingRuntime(fail_on="shout")
+    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    try:
+        with pytest.raises(RepoScoreError, match="stage boxes could not open"):
+            scorer.score("")
+    finally:
+        scorer.close()
+    assert runtime.specs
+    assert runtime.closed == len(runtime.specs)
+
+
+def test_a_budget_refusal_stops_the_run(tmp_path: Path) -> None:
+    """A stage box the budget refuses stops the run as budget reached, with no box left open."""
+    runtime = RecordingRuntime(fail_on="shout", error=BudgetReached("spent"))
+    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    try:
+        with pytest.raises(BudgetReached):
+            scorer.score("")
+    finally:
+        scorer.close()
+    assert runtime.closed == len(runtime.specs)
+
+
+def test_a_partial_line_before_a_call_does_not_hide_the_frame(tmp_path: Path) -> None:
+    """A scorer that prints without a newline before ``call`` still gets the stage's answer."""
+    code = (
+        "from skynet import call\n"
+        "def score(repo_path, case=None):\n"
+        "    print('x', end='', flush=True)\n"
+        "    return call('double', {'v': 2})['v'] / 10, 'ok'\n"
+    )
+    runtime = RecordingRuntime()
+    scorer, _ = _stage_scorer(tmp_path, code, runtime, {"double": STAGES["double"]})
+    try:
+        started = time.monotonic()
+        assert scorer.score("")["score"] == pytest.approx(0.4)
+        assert time.monotonic() - started < 30
+    finally:
+        scorer.close()
+
+
+def test_calls_reach_their_stage_while_another_thread_prints(tmp_path: Path) -> None:
+    """A thread that keeps printing partial lines never makes a call wait for the scorer timeout."""
+    code = (
+        "import threading\n"
+        "from skynet import call\n"
+        "def score(repo_path, case=None):\n"
+        "    stop = threading.Event()\n"
+        "    def chatter():\n"
+        "        while not stop.is_set():\n"
+        "            print('noise', end='', flush=True)\n"
+        "    thread = threading.Thread(target=chatter)\n"
+        "    thread.start()\n"
+        "    try:\n"
+        "        total = sum(call('double', {'v': value})['v'] for value in range(5))\n"
+        "    finally:\n"
+        "        stop.set()\n"
+        "        thread.join()\n"
+        "    return total / 100, 'ok'\n"
+    )
+    runtime = RecordingRuntime()
+    scorer, _ = _stage_scorer(tmp_path, code, runtime, {"double": STAGES["double"]})
+    try:
+        started = time.monotonic()
+        assert scorer.score("")["score"] == pytest.approx(0.2)
+        assert time.monotonic() - started < 30
+    finally:
+        scorer.close()
+
+
+def test_concurrent_calls_to_one_stage_run_in_parallel(tmp_path: Path) -> None:
+    """Four calls to one stage overlap, each in its own process, up to ``max_concurrency``."""
+    code = (
+        "from concurrent.futures import ThreadPoolExecutor\n"
+        "from skynet import call\n"
+        "def score(repo_path, case=None):\n"
+        "    with ThreadPoolExecutor(4) as pool:\n"
+        "        values = list(pool.map(lambda value: call('slow', value), [0.6] * 4))\n"
+        "    return sum(values), 'ok'\n"
+    )
+    stages = {"slow": TargetStage(entry="src/stages.py:slow", timeout=30)}
+    runtime = RecordingRuntime()
+    scorer, _ = _stage_scorer(tmp_path, code, runtime, stages, max_concurrency=4)
+    try:
+        started = time.monotonic()
+        assert scorer.score("")["score"] == pytest.approx(2.4)
+        assert time.monotonic() - started < 2.0
+    finally:
+        scorer.close()
+
+
+def test_stage_answers_keep_a_clean_version_scored_when_writes_touch_every_file(tmp_path: Path) -> None:
+    """Each answer write moves every file's change time, yet a clean version keeps its score."""
+    code = "from skynet import call\ndef score(repo_path, case=None):\n    return call('double', {'v': 3})['v'] / 10, 'ok'\n"
+    scorer, _ = _stage_scorer(
+        tmp_path,
+        code,
+        RecordingRuntime(),
+        {"double": STAGES["double"]},
+        scorer_runtime=_WriteTouchingRuntime(),
+        protected_paths=("judge",),
+    )
+    try:
+        assert scorer.score("")["score"] == pytest.approx(0.6)
+    finally:
+        scorer.close()
+
+
+def test_a_protected_change_before_a_stage_call_still_blocks_the_version(tmp_path: Path) -> None:
+    """A version that changes a protected file and then calls a stage gets no score, with the reason named once."""
+    code = (
+        "import os\n"
+        "from skynet import call\n"
+        "def score(repo_path, case=None):\n"
+        "    with open(os.path.join(repo_path, 'judge/labels.csv'), 'w') as handle:\n"
+        "        handle.write('9\\n')\n"
+        "    total = sum(call('double', {'v': v})['v'] for v in (1, 2, 3))\n"
+        "    return total / 100, 'ok'\n"
+    )
+    scorer, _ = _stage_scorer(
+        tmp_path,
+        code,
+        RecordingRuntime(),
+        {"double": STAGES["double"]},
+        scorer_runtime=_WriteTouchingRuntime(),
+        protected_paths=("judge",),
+    )
+    try:
+        with pytest.raises(RepoScoreError, match=r"'judge/labels\.csv' is protected") as caught:
+            scorer.score("")
+    finally:
+        scorer.close()
+    assert str(caught.value).count("'judge/labels.csv' is protected") == 1
+
+
+class _AnswerCheckFailingSession(_WriteTouchingSession):
+    """Local box whose joined answer check fails, as when the box stops answering."""
+
+    def run(self, command: str, **options: Any) -> Any:
+        """Fail the answer check and run every other command.
+
+        Args:
+            command: Shell command line.
+            **options: Run options.
+
+        Returns:
+            A failed result for the answer check, else the local result.
+        """
+        if command.startswith("export APP_ANSWER_PATH"):
+            return CommandResult(exit_code=1)
+        return self._session.run(command, **options)
+
+
+class _AnswerCheckFailingRuntime(LocalSubprocessRuntime):
+    """Local runtime whose boxes fail the answer check."""
+
+    def open(self, spec: SandboxSpec) -> Any:
+        """Open a local box wrapped so the answer check fails.
+
+        Args:
+            spec: The box's spec.
+
+        Returns:
+            The wrapped box.
+        """
+        return _AnswerCheckFailingSession(super().open(spec))
+
+
+def test_a_failed_answer_check_gets_no_score_without_a_protected_path_block(tmp_path: Path) -> None:
+    """A check that fails during a stage answer is a plain scoring failure, not a protected-file change."""
+    code = "from skynet import call\ndef score(repo_path, case=None):\n    return call('double', {'v': 3})['v'] / 10, 'ok'\n"
+    scorer, _ = _stage_scorer(
+        tmp_path,
+        code,
+        RecordingRuntime(),
+        {"double": STAGES["double"]},
+        scorer_runtime=_AnswerCheckFailingRuntime(),
+        protected_paths=("judge",),
+    )
+    try:
+        started = time.monotonic()
+        with pytest.raises(RepoScoreError, match="could not be checked or delivered") as caught:
+            scorer.score("")
+        assert time.monotonic() - started < 30
+    finally:
+        scorer.close()
+    assert "is protected" not in str(caught.value)
+
+
+class _LayoutFailingRuntime(RecordingRuntime):
+    """Open stage boxes whose file writes fail, as when the archive upload breaks."""
+
+    def open(self, spec: SandboxSpec) -> SandboxSession:
+        """Open one local box whose writes raise.
+
+        Args:
+            spec: The stage box's spec.
+
+        Returns:
+            The local session, whose ``write_files`` raises ``ServiceError``.
+        """
+        session = super().open(spec)
+
+        def refuse(files: Mapping[str, str]) -> None:
+            """Fail every write.
+
+            Args:
+                files: The files the layout tried to write.
+
+            Raises:
+                ServiceError: Always.
+            """
+            raise ServiceError("upload failed")
+
+        session.write_files = refuse  # type: ignore[method-assign]
+        return session
+
+
+def test_a_layout_failure_gets_no_score_and_closes_every_box(tmp_path: Path) -> None:
+    """A stage box that cannot take the tree fails the version with a fixed message, not a server error."""
+    runtime = _LayoutFailingRuntime()
+    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    try:
+        with pytest.raises(RepoScoreError, match="could not lay out the version"):
+            scorer.score("")
+    finally:
+        scorer.close()
+    assert runtime.closed == len(runtime.specs)
+
+
+class _Workspace:
+    """Record each stage answer, or fail its check."""
+
+    def __init__(self, *, checks: bool = True) -> None:
+        """Start with no answers.
+
+        Args:
+            checks: Whether the protected files can be checked.
+        """
+        self.writes: list[tuple[str, str]] = []
+        self._checks = checks
+
+    def answer(self, path: str, text: str) -> tuple[str, ...] | None:
+        """Record one answer.
+
+        Args:
+            path: Where the answer goes.
+            text: The answer.
+
+        Returns:
+            No change, or ``None`` when the check fails.
+        """
+        if not self._checks:
+            return None
+        self.writes.append((path, text))
+        return ()
+
+
+def _relay(workspace: _Workspace) -> _StageRelay:
+    """Build a relay with no stage boxes around a fake workspace.
+
+    Args:
+        workspace: Records the answers.
+
+    Returns:
+        The relay.
+    """
+    return _StageRelay(
+        {},
+        {},
+        response_dir="calls/000001/stages",
+        max_concurrency=1,
+        env={},
+        workspace=workspace,  # type: ignore[arg-type]
+    )
+
+
+def test_an_answer_after_the_relay_closes_never_reaches_the_scorer_box() -> None:
+    """A stage call that ends after its evaluation writes nothing into the next one's box."""
+    workspace = _Workspace()
+    relay = _relay(workspace)
+    relay._answer("a" * 32, {"output": 1})
+    relay.close()
+    relay._answer("b" * 32, {"output": 2})
+    assert workspace.writes == [(f"calls/000001/stages/{'a' * 32}.json", '{"output": 1}')]
+
+
+def test_an_answer_whose_check_fails_is_not_counted_as_a_protected_change() -> None:
+    """A failed check marks the relay unchecked and adds no reason for the rule judge."""
+    relay = _relay(_Workspace(checks=False))
+    relay._answer("a" * 32, {"output": 1})
+    relay.close()
+    assert relay.unchecked
+    assert relay.changes == []
+
+
+def test_the_relay_finds_a_frame_that_does_not_start_its_line() -> None:
+    """Text before the frame on one line is kept as log output, and the frame still gets its answer."""
+    workspace = _Workspace()
+    relay = _relay(workspace)
+    identity = "c" * 32
+    relay.output("stdout", "partial" + relay._prefix + json.dumps({"id": identity, "stage": "nope", "input": 1}) + "\n")
+    deadline = time.monotonic() + 5
+    while not workspace.writes and time.monotonic() < deadline:
+        time.sleep(0.01)
+    relay.close()
+    assert [path for path, _ in workspace.writes] == [f"calls/000001/stages/{identity}.json"]
+    assert "Unknown stage 'nope'" in workspace.writes[0][1]
+
+
+class _Upstream:
+    """Serve a stand-in for a user's own API on loopback and record what it receives."""
+
+    def __init__(self) -> None:
+        """Start the server on a free port."""
+        self.requests: list[dict[str, Any]] = []
+        upstream = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            """Echo each request's path and body as JSON."""
+
+            def do_POST(self) -> None:
+                """Record the request and answer it."""
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                upstream.requests.append({"path": self.path, "headers": dict(self.headers.items()), "body": body})
+                payload = json.dumps({"grade": 7, "path": self.path, "body": body.decode()}).encode()
+                self.send_response(201)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("X-Upstream", "yes")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                """Keep the test output quiet."""
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_address[1]
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        """Stop the server."""
+        self._server.shutdown()
+        self._server.server_close()
+
+
+@pytest.fixture
+def upstream() -> Iterator[_Upstream]:
+    """Run a stand-in service for one test.
+
+    Yields:
+        The running service.
+    """
+    server = _Upstream()
+    yield server
+    server.close()
+
+
+SERVICE_SCORER = """
+import json
+import os
+import urllib.request
+
+def score(repo_path, case=None):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(
+        os.environ["SKYNET_SERVICE_JUDGE_API_URL"] + "grade?mode=strict",
+        data=b'{"text": "hi"}',
+        headers={"Content-Type": "application/json", "Authorization": "Bearer guessed"},
+        method="POST",
+    )
+    with opener.open(request) as response:
+        answer = json.loads(response.read())
+        upstream = response.headers.get("X-Upstream")
+        status = response.status
+    seen = {
+        "status": status,
+        "upstream": upstream,
+        "path": answer["path"],
+        "body": answer["body"],
+        "key_in_env": any(value == "judge-secret-value" for value in os.environ.values()),
+        "key_name_in_env": "JUDGE_KEY" in os.environ,
+        "other_secret": os.environ.get("OTHER_KEY") == "other-value",
+    }
+    return answer["grade"] / 10, json.dumps(seen, sort_keys=True)
+"""
+
+
+def _service_scorer(tmp_path: Path, port: int, roles: Mapping[str, tuple[str, ...]]) -> RepoScorer:
+    """Open a scorer whose run declares one url service with a key.
+
+    Args:
+        tmp_path: Scratch folder.
+        port: The stand-in service's port.
+        roles: The services each role lists.
+
+    Returns:
+        The scorer.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    return RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={"JUDGE_KEY": "judge-secret-value", "OTHER_KEY": "other-value"},
+        ),
+        SERVICE_SCORER,
+        timeout_seconds=60,
+        services={"judge-api": ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://judge.example.test:{port}/v1/")},
+        service_roles=roles,
+    )
+
+
+def test_the_metric_reaches_its_listed_service_without_holding_the_key(
+    tmp_path: Path, upstream: _Upstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The parent adds the key and calls the url; the scorer box gets the response but never the key."""
+    resolved: list[str] = []
+
+    def pinned(url: str, allow_private: bool, *, label: str) -> str:
+        """Resolve the stand-in host to loopback, as public DNS would to a public address."""
+        assert allow_private is False
+        resolved.append(url)
+        return "127.0.0.1"
+
+    monkeypatch.setattr(repo_scorer, "_pinned_address", pinned)
+    scorer = _service_scorer(tmp_path, upstream.port, {"run": (), "metric": ("judge-api",)})
+    try:
+        result = scorer.score("")
+    finally:
+        scorer.close()
+    assert result["score"] == pytest.approx(0.7)
+    assert json.loads(result["feedback"]) == {
+        "body": '{"text": "hi"}',
+        "key_in_env": False,
+        "key_name_in_env": False,
+        "other_secret": True,
+        "path": "/v1/grade?mode=strict",
+        "status": 201,
+        "upstream": "yes",
+    }
+    assert resolved == [f"http://judge.example.test:{upstream.port}/v1/"]
+    [request] = upstream.requests
+    assert request["headers"]["Authorization"] == "Bearer judge-secret-value"
+    assert request["headers"]["Host"] == f"judge.example.test:{upstream.port}"
+
+
+def _service_relay(
+    workspace: _Workspace, *, role: str, allowed: tuple[str, ...], services: Mapping[str, ServiceSpec]
+) -> _StageRelay:
+    """Build a relay with no stage boxes that forwards to the given services.
+
+    Args:
+        workspace: Records the answers.
+        role: The calling role.
+        allowed: The services that role lists.
+        services: The run's services.
+
+    Returns:
+        The relay.
+    """
+    return _StageRelay(
+        {},
+        {},
+        response_dir="calls/000001/stages",
+        max_concurrency=2,
+        env={},
+        workspace=workspace,  # type: ignore[arg-type]
+        services=services,
+        role=role,
+        allowed=allowed,
+        secrets={"JUDGE_KEY": "judge-secret-value"},
+    )
+
+
+def _service_answer(relay: _StageRelay, workspace: _Workspace, name: str) -> dict[str, Any]:
+    """Send one service frame through the relay and wait for its answer.
+
+    Args:
+        relay: The relay.
+        workspace: Records the answers.
+        name: The service the frame names.
+
+    Returns:
+        The answer the scorer box gets.
+    """
+    frame = {"id": "d" * 32, "service": name, "path": "grade", "method": "POST", "headers": [], "body": ""}
+    relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    deadline = time.monotonic() + 10
+    while not workspace.writes and time.monotonic() < deadline:
+        time.sleep(0.01)
+    relay.close()
+    [(_, text)] = workspace.writes
+    return json.loads(text)
+
+
+def test_a_role_that_does_not_list_the_service_is_refused(upstream: _Upstream) -> None:
+    """The caller's role is checked in the relay; the refusal names the service and the role."""
+    workspace = _Workspace()
+    spec = ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://judge.example.test:{upstream.port}/")
+    relay = _service_relay(workspace, role="run", allowed=(), services={"judge": spec})
+    assert relay.config("/work")["services"] == []
+    answer = _service_answer(relay, workspace, "judge")
+    assert answer["status"] == 403
+    assert answer["error"] == "Service 'judge' is not listed for the [run] role."
+    assert upstream.requests == []
+
+
+@pytest.mark.parametrize(
+    ("name", "status", "message"),
+    [
+        ("nope", 404, "Unknown service 'nope'."),
+        ("github", 403, "only services with a url go through the relay"),
+    ],
+)
+def test_unknown_services_and_catalog_connectors_are_refused(name: str, status: int, message: str) -> None:
+    """Only a declared service with a url goes out; a catalog connector stays with its own broker."""
+    workspace = _Workspace()
+    services = {"github": ServiceSpec(secrets=("GITHUB_TOKEN",))}
+    relay = _service_relay(workspace, role="metric", allowed=("github",), services=services)
+    assert relay.config("/work")["services"] == []
+    answer = _service_answer(relay, workspace, name)
+    assert answer["status"] == status
+    assert message in answer["error"]
+
+
+def test_a_service_whose_host_resolves_to_a_private_address_is_refused(upstream: _Upstream) -> None:
+    """The relay resolves the host and refuses loopback, so a url cannot reach the parent's own network."""
+    workspace = _Workspace()
+    spec = ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://127.0.0.1:{upstream.port}/")
+    relay = _service_relay(workspace, role="metric", allowed=("judge",), services={"judge": spec})
+    assert relay.config("/work")["services"] == ["judge"]
+    answer = _service_answer(relay, workspace, "judge")
+    assert answer == {"status": 502, "error": "Service 'judge' could not be reached."}
+    assert upstream.requests == []

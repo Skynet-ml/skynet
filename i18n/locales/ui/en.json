@@ -3863,6 +3863,7 @@
   "submit.v2.harden.view.white_box": "White-box",
   "submit.v2.harden.start": "Start",
   "submit.v2.harden.skip": "Skip",
+  "submit.v2.harden.no_scorer": "Write metric.py first. Hardening scores each attack with the run's metric.",
   "submit.v2.harden.continue": "Continue",
   "submit.v2.harden.retry": "Retry round",
   "submit.v2.harden.running": "The attacker is at work. You can leave. We notify you when your review is needed.",

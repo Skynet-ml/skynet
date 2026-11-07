@@ -251,6 +251,7 @@
   "submit.v2.harden.view.white_box": "Біла скринька",
   "submit.v2.harden.start": "Почати",
   "submit.v2.harden.skip": "Пропустити",
+  "submit.v2.harden.no_scorer": "Спершу напишіть metric.py. Зміцнення оцінює кожну атаку метрикою запуску.",
   "submit.v2.harden.continue": "Продовжити",
   "submit.v2.harden.retry": "Повторити раунд",
   "submit.v2.harden.running": "Атакувальник працює. Можна піти зі сторінки. Ми повідомимо вас, коли знадобиться ваша перевірка.",

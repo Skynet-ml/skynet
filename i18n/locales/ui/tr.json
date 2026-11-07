@@ -251,6 +251,7 @@
   "submit.v2.harden.view.white_box": "Beyaz kutu",
   "submit.v2.harden.start": "Başlat",
   "submit.v2.harden.skip": "Atla",
+  "submit.v2.harden.no_scorer": "Önce metric.py dosyasını yazın. Sağlamlaştırma her saldırıyı çalıştırmanın metriğiyle puanlar.",
   "submit.v2.harden.continue": "Devam",
   "submit.v2.harden.retry": "Turu yeniden dene",
   "submit.v2.harden.running": "Saldırgan çalışıyor. Sayfadan ayrılabilirsiniz. İncelemeniz gerektiğinde size bildirim göndeririz.",

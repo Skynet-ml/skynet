@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import subprocess
 from collections.abc import Iterator
@@ -463,6 +464,70 @@ def test_a_protected_file_rewritten_and_restored_while_the_version_runs_is_caugh
         space.checkout(version)
         space.stamp_before_run()
         space.session().run(f"cd {WORK_DIR} && cat eval/labels.csv eval/judge.py > /dev/null")
+        assert space.protected_changes() == ()
+    finally:
+        space.close()
+
+
+def test_a_stage_answer_checks_the_protected_files_and_is_written_in_one_run(tmp_path: Path) -> None:
+    """Write each answer in the check's own run, so the stamps before the run stay valid and a change still shows."""
+    space, archive = _guarded(tmp_path)
+    try:
+        version = _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"})
+        space.checkout(version)
+        space.stamp_before_run()
+        box = space.session()
+        runs = len(box.commands)
+        assert space.answer("calls/000001/stages/a.json", '{"output": 1}') == ()
+        assert len(box.commands) == runs + 1
+        assert box.read_file("calls/000001/stages/a.json") == '{"output": 1}'
+        assert space.protected_changes() == ()
+
+        space.session().run(f"cd {WORK_DIR} && printf 'a,0\\n' > eval/labels.csv")
+        changes = space.answer("calls/000001/stages/b.json", '{"output": 2}')
+        assert [problem.split("'")[1] for problem in changes or ()] == ["eval/labels.csv"]
+        assert box.read_file("calls/000001/stages/b.json") == '{"output": 2}'
+    finally:
+        space.close()
+
+
+def test_a_failed_answer_check_is_told_apart_from_a_protected_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Return ``None`` when the check fails, yet still write the answer so the scorer stops waiting."""
+    space, archive = _guarded(tmp_path)
+    try:
+        space.checkout(_patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        space.stamp_before_run()
+        box = space.session()
+        run = box.run
+        monkeypatch.setattr(
+            box,
+            "run",
+            lambda command, **options: (
+                CommandResult(exit_code=1) if command.startswith("export APP_ANSWER_PATH") else run(command, **options)
+            ),
+        )
+        assert space.answer("calls/000001/stages/a.json", '{"output": 1}') is None
+        assert box.read_file("calls/000001/stages/a.json") == '{"output": 1}'
+        assert space.protected_changes() == ()
+    finally:
+        space.close()
+
+
+def test_a_large_stage_answer_is_written_by_file_and_stamped_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Send an answer too large for the environment through a file write, then stamp the files again."""
+    monkeypatch.setattr(repo_workspace, "_ANSWER_ENV_BYTES", 10)
+    space, archive = _guarded(tmp_path)
+    try:
+        space.checkout(_patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"}))
+        space.stamp_before_run()
+        text = json.dumps({"output": "x" * 50})
+        assert space.answer("calls/000001/stages/a.json", text) == ()
+        assert space.session().read_file("calls/000001/stages/a.json") == text
+        assert all(not command.startswith("export APP_ANSWER_PATH") for command, _, _ in space.session().commands)
         assert space.protected_changes() == ()
     finally:
         space.close()

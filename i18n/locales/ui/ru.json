@@ -251,6 +251,7 @@
   "submit.v2.harden.view.white_box": "Белый ящик",
   "submit.v2.harden.start": "Начать",
   "submit.v2.harden.skip": "Пропустить",
+  "submit.v2.harden.no_scorer": "Сначала напишите metric.py. Укрепление оценивает каждую атаку метрикой запуска.",
   "submit.v2.harden.continue": "Продолжить",
   "submit.v2.harden.retry": "Повторить раунд",
   "submit.v2.harden.running": "Атакующий работает. Можно уйти со страницы. Мы уведомим вас, когда понадобится ваша проверка.",
