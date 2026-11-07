@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 
 import pytest
 
 from core.billing.signals import BudgetReached
 from core.service_gateway.optimization.blackbox import repo_services
-from core.service_gateway.optimization.blackbox.repo_constraints import ServiceSpec, parse_constraints
+from core.service_gateway.optimization.blackbox.repo_constraints import (
+    McpServer,
+    ServiceSpec,
+    parse_constraints,
+)
 from core.service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
 
 _FILE = b"""
@@ -30,7 +35,8 @@ vcpus = 4
 entry = ["node", "router.js"]
 
 [services.maps]
-secrets = ["GOOGLE_MAPS_API_KEY"]
+url = "https://mapstools.googleapis.com/mcp"
+headers = { Authorization = "Bearer ${GOOGLE_MAPS_API_KEY}" }
 """
 
 _SECRET = "maps-secret-value"
@@ -111,19 +117,24 @@ def test_each_role_gets_only_its_listed_hosts_servers_and_services() -> None:
     plans = repo_services.plan_roles(parse_constraints(_FILE))
 
     assert plans == {
-        "proposer": {"allowed_hosts": ["pypi.org"], "mcp_servers": ["maps"], "services": ["maps"]},
+        "proposer": {"allowed_hosts": ["pypi.org"], "mcp_servers": [], "services": ["maps"]},
         "targets": {
-            "planner": {"allowed_hosts": [], "mcp_servers": ["web_search"], "services": ["maps"]},
+            "planner": {"allowed_hosts": [], "mcp_servers": [], "services": ["maps"]},
             "router": {"allowed_hosts": [], "mcp_servers": [], "services": []},
         },
     }
 
 
-def test_an_unlisted_mcp_server_is_absent() -> None:
-    """Only catalog servers that the role lists reach its harness; built-ins and unknown names do not."""
-    assert repo_services.mcp_servers(["bash", "web_search"]) == ("web_search",)
-    assert "maps" not in repo_services.mcp_servers(["bash", "web_search"])
-    assert repo_services.mcp_servers(["unknown-mcp"]) == ()
+def test_a_role_gets_only_the_servers_of_its_own_mcp_file() -> None:
+    """Catalog names in ``tools`` no longer add servers; a role's plan lists only its own MCP file (E49, E50)."""
+    constraints = parse_constraints(_FILE)
+    run = replace(
+        constraints.run_role,
+        mcp_servers=(McpServer(name="grader", url="https://mcp.example.com/mcp", headers={}),),
+    )
+
+    assert repo_services.plan_role(constraints.proposer).mcp_servers == ()
+    assert repo_services.plan_role(run).mcp_servers == ("grader",)
 
 
 @pytest.mark.parametrize(
@@ -216,12 +227,6 @@ def test_a_service_without_its_secret_fails_without_printing_values(secrets: dic
     assert _SECRET not in str(raised.value)
 
 
-def test_a_service_that_names_no_connector_fails() -> None:
-    """A service is a catalog connector, so an unknown name stops before any key is handed out."""
-    with pytest.raises(repo_services.UnknownConnectorError, match="Service cache is not a connector"):
-        repo_services.service_environment("cache", ServiceSpec(), {})
-
-
 def test_the_connector_probe_uses_the_parent_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     """The probe reaches the connector with the parent-held headers and reports what the sender says."""
     sent: list[tuple[str, Mapping[str, str]]] = []
@@ -240,12 +245,12 @@ def test_the_connector_probe_uses_the_parent_endpoint(monkeypatch: pytest.Monkey
         sent.append((url, headers))
         return True
 
-    assert repo_services.probe_connector("maps", send)
+    assert repo_services.probe_connector("mapstools.googleapis.com", send)
     assert sent == [("https://mapstools.googleapis.com/mcp", {"X-Key": _SECRET})]
 
 
 def test_a_connector_without_a_key_or_an_answer_is_unhealthy(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unknown name, a missing parent key, a no, or a raising sender all fail the health check."""
+    """A name that is not a catalog host, a missing parent key, a no, or a raising sender all fail the health check."""
 
     def no_key(connector: object) -> tuple[str, dict[str, str]]:
         """Fail like a connector with no key in config.
@@ -270,12 +275,12 @@ def test_a_connector_without_a_key_or_an_answer_is_unhealthy(monkeypatch: pytest
         """
         raise ConnectionError("no route")
 
-    assert not repo_services.probe_connector("cache", lambda url, headers: True)
-    monkeypatch.setattr(repo_services, "connector_endpoint", lambda connector: (connector.url, {}))
-    assert not repo_services.probe_connector("maps", lambda url, headers: False)
-    assert not repo_services.probe_connector("maps", unreachable)
-    monkeypatch.setattr(repo_services, "connector_endpoint", no_key)
     assert not repo_services.probe_connector("maps", lambda url, headers: True)
+    monkeypatch.setattr(repo_services, "connector_endpoint", lambda connector: (connector.url, {}))
+    assert not repo_services.probe_connector("mapstools.googleapis.com", lambda url, headers: False)
+    assert not repo_services.probe_connector("mapstools.googleapis.com", unreachable)
+    monkeypatch.setattr(repo_services, "connector_endpoint", no_key)
+    assert not repo_services.probe_connector("mapstools.googleapis.com", lambda url, headers: True)
 
 
 def test_an_unhealthy_service_fails_the_check() -> None:
@@ -310,8 +315,7 @@ def test_allowed_calls_work_forbidden_calls_fail_and_no_key_is_exposed() -> None
     assert proposer.allowed_hosts is not None
     assert repo_services.host_allowed("pypi.org", proposer.allowed_hosts)
     assert not repo_services.host_allowed("maps.googleapis.com", proposer.allowed_hosts)
-    assert "maps" in proposer.mcp_servers
-    assert "web_search" not in proposer.mcp_servers
+    assert proposer.mcp_servers == ()
     spec = repo_services.stage_spec("planner", planner, evaluation_id="c1-e1", lifetime_seconds=60, tags={})
     service = repo_services.service_environment("maps", constraints.services["maps"], {"GOOGLE_MAPS_API_KEY": _SECRET})
     assert service == {"GOOGLE_MAPS_API_KEY": _SECRET}

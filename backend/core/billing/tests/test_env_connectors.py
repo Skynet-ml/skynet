@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import socket
+import threading
+import urllib.request
 from collections.abc import Callable, Iterator
 from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -20,6 +24,7 @@ from core.billing.env_connectors import (
     CONNECTORS,
     connector_endpoint,
     offered_connectors,
+    relay_request,
     require_connectors,
     tool_meter,
 )
@@ -32,6 +37,9 @@ from core.storage.models import Base, BillingCustomerModel, ExecutionOperationMo
 MAPS_KEY = "maps-parent-only-key"
 FIRECRAWL_KEY = "fc-parent-only-key"
 BROWSERBASE_KEY = "bb-parent-only-key"
+MAPS = "mapstools.googleapis.com"
+FIRECRAWL = "mcp.firecrawl.dev"
+BROWSERBASE = "mcp.browserbase.com"
 
 
 @pytest.fixture(autouse=True)
@@ -111,29 +119,33 @@ def tight_runtime(tmp_path: Path) -> Iterator[BudgetRuntime]:
 
 def test_catalog_lists_three_hosted_connectors_with_prices() -> None:
     """Give each connector an HTTPS MCP URL, a real settings field, allowed tools and prices."""
-    assert set(CONNECTORS) == {"maps", "web_search", "browser"}
-    for connector in CONNECTORS.values():
+    assert set(CONNECTORS) == {MAPS, FIRECRAWL, BROWSERBASE}
+    for host, connector in CONNECTORS.items():
+        assert connector.host == host
         assert urlsplit(connector.url).scheme == "https"
         assert connector.key_setting in type(settings).model_fields
         assert connector.tools
         assert all(isinstance(price, Decimal) and price >= 0 for price in connector.tools.values())
         assert connector.price_source.startswith("https://")
-    assert CONNECTORS["maps"].url == "https://mapstools.googleapis.com/mcp"
-    assert CONNECTORS["web_search"].key_setting == "firecrawl_api_key"
+    assert CONNECTORS[MAPS].url == "https://mapstools.googleapis.com/mcp"
+    assert CONNECTORS[FIRECRAWL].key_setting == "firecrawl_api_key"
 
 
 def test_connector_without_key_is_not_offered_and_setup_names_it(monkeypatch: pytest.MonkeyPatch) -> None:
     """Hide a keyless connector and name it, with its env setting, in the setup error."""
-    assert offered_connectors() == ("maps", "web_search", "browser")
+    assert offered_connectors() == (MAPS, FIRECRAWL, BROWSERBASE)
     monkeypatch.setattr(settings, "google_maps_api_key", None)
     monkeypatch.setattr(settings, "browserbase_api_key", SecretStr("  "))
-    assert offered_connectors() == ("web_search",)
-    with pytest.raises(ValueError, match=r"maps \(GOOGLE_MAPS_API_KEY\), browser \(BROWSERBASE_API_KEY\)"):
-        require_connectors(["maps", "web_search", "browser"])
-    assert [connector.name for connector in require_connectors(["web_search", "web_search"])] == ["web_search"]
+    assert offered_connectors() == (FIRECRAWL,)
+    with pytest.raises(
+        ValueError,
+        match=r"mapstools.googleapis.com \(GOOGLE_MAPS_API_KEY\), mcp.browserbase.com \(BROWSERBASE_API_KEY\)",
+    ):
+        require_connectors([MAPS, FIRECRAWL, BROWSERBASE])
+    assert [connector.host for connector in require_connectors([FIRECRAWL, FIRECRAWL])] == [FIRECRAWL]
 
 
-@pytest.mark.parametrize("names", [["unknown"], "maps", [3]])
+@pytest.mark.parametrize("names", [["unknown"], ["maps"], MAPS, [3]])
 def test_unknown_or_malformed_connector_list_is_refused(names: object) -> None:
     """Refuse names outside the catalog and lists that are not plain names."""
     with pytest.raises(ValueError, match="connector"):
@@ -142,15 +154,15 @@ def test_unknown_or_malformed_connector_list_is_refused(names: object) -> None:
 
 def test_endpoint_places_each_key_where_its_provider_reads_it() -> None:
     """Send Maps and Firecrawl keys as headers and the Browserbase key in the query."""
-    assert connector_endpoint(CONNECTORS["maps"]) == (
+    assert connector_endpoint(CONNECTORS[MAPS]) == (
         "https://mapstools.googleapis.com/mcp",
         {"X-Goog-Api-Key": MAPS_KEY},
     )
-    assert connector_endpoint(CONNECTORS["web_search"]) == (
+    assert connector_endpoint(CONNECTORS[FIRECRAWL]) == (
         "https://mcp.firecrawl.dev/v2/mcp",
         {"Authorization": f"Bearer {FIRECRAWL_KEY}"},
     )
-    url, headers = connector_endpoint(CONNECTORS["browser"])
+    url, headers = connector_endpoint(CONNECTORS[BROWSERBASE])
     assert headers == {}
     assert parse_qs(urlsplit(url).query) == {
         "browserbaseApiKey": [BROWSERBASE_KEY],
@@ -160,7 +172,7 @@ def test_endpoint_places_each_key_where_its_provider_reads_it() -> None:
 
 def test_each_call_reserves_and_settles_its_catalog_price(runtime: BudgetRuntime) -> None:
     """Settle the catalog price as a tool cost in the run budget, once per call."""
-    meter = tool_meter(runtime, CONNECTORS["maps"])
+    meter = tool_meter(runtime, CONNECTORS[MAPS])
     calls = []
 
     def call() -> dict:
@@ -182,7 +194,7 @@ def test_each_call_reserves_and_settles_its_catalog_price(runtime: BudgetRuntime
 
 def test_call_outside_budget_is_refused_before_provider(tight_runtime: BudgetRuntime) -> None:
     """Refuse a call whose price does not fit, without reaching the provider."""
-    meter = tool_meter(tight_runtime, CONNECTORS["maps"])
+    meter = tool_meter(tight_runtime, CONNECTORS[MAPS])
     called = []
     with pytest.raises(BudgetInsufficientError):
         meter("search_places", {"textQuery": "cafe"}, _sent(lambda: called.append(1) or {}))
@@ -191,7 +203,7 @@ def test_call_outside_budget_is_refused_before_provider(tight_runtime: BudgetRun
 
 def test_tool_outside_catalog_is_refused_without_charge(runtime: BudgetRuntime) -> None:
     """Refuse an unlisted tool name before any reservation."""
-    meter = tool_meter(runtime, CONNECTORS["maps"])
+    meter = tool_meter(runtime, CONNECTORS[MAPS])
     with pytest.raises(ValueError, match="outside the selected roster"):
         meter("delete_everything", {}, _sent(lambda: pytest.fail("The provider must not be called.")))
     assert runtime.service.get(runtime.budget_id, "alice").setup_spent_cents == 0
@@ -199,7 +211,7 @@ def test_tool_outside_catalog_is_refused_without_charge(runtime: BudgetRuntime) 
 
 def test_failed_call_after_send_settles_its_price_and_raises(runtime: BudgetRuntime) -> None:
     """Charge the catalog price for a call that fails after the request may have gone out."""
-    meter = tool_meter(runtime, CONNECTORS["web_search"])
+    meter = tool_meter(runtime, CONNECTORS[FIRECRAWL])
 
     def fail() -> dict:
         """Simulate a provider read timeout after the request was sent."""
@@ -226,7 +238,7 @@ def test_failed_call_after_send_settles_its_price_and_raises(runtime: BudgetRunt
 )
 def test_admission_stop_before_send_releases_its_hold(runtime: BudgetRuntime, error: BaseException) -> None:
     """Release the reservation when admission stops the call before the provider request."""
-    meter = tool_meter(runtime, CONNECTORS["web_search"])
+    meter = tool_meter(runtime, CONNECTORS[FIRECRAWL])
 
     def stop() -> dict:
         """Simulate the broker's check_admission refusing before it sends the request."""
@@ -249,7 +261,7 @@ def test_connection_failure_before_send_releases_its_hold(runtime: BudgetRuntime
         check_admission=runtime.check_admission,
         allow_private=True,
         timeout_seconds=3,
-        meter=tool_meter(runtime, CONNECTORS["web_search"]),
+        meter=tool_meter(runtime, CONNECTORS[FIRECRAWL]),
     )
     broker._tool_names = {"firecrawl_search"}
     request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "firecrawl_search"}}
@@ -267,7 +279,7 @@ def test_interrupt_settles_after_send_and_releases_before(
     runtime: BudgetRuntime, wrap: Callable[[Callable[[], dict]], ToolCall], spent: Decimal
 ) -> None:
     """Settle an interrupted call that went out and release one that did not; never leave it pending."""
-    meter = tool_meter(runtime, CONNECTORS["web_search"])
+    meter = tool_meter(runtime, CONNECTORS[FIRECRAWL])
 
     def interrupt() -> dict:
         """Simulate an operator interrupt during the call."""
@@ -295,7 +307,7 @@ def test_keys_stay_out_of_quotes_errors_and_logs(
         tool_meter(runtime, connector)(tool, {"q": "x"}, _sent(lambda: {"content": []}))
     monkeypatch.setattr(settings, "google_maps_api_key", None)
     with pytest.raises(ValueError) as refused:
-        connector_endpoint(CONNECTORS["maps"])
+        connector_endpoint(CONNECTORS[MAPS])
     with Session(runtime.service._engine) as session:
         rows = [
             *session.scalars(select(ExecutionOperationModel)).all(),
@@ -306,3 +318,158 @@ def test_keys_stay_out_of_quotes_errors_and_logs(
     surfaces = record + str(refused.value) + caplog.text + repr(env_connectors.CONNECTORS)
     for secret in (MAPS_KEY, FIRECRAWL_KEY, BROWSERBASE_KEY):
         assert secret not in surfaces
+
+
+class _EchoHandler(BaseHTTPRequestHandler):
+    """Answer every POST with the headers and body it received, like a hostile echo server."""
+
+    def do_POST(self) -> None:
+        """Echo the request back as JSON."""
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        answer = json.dumps({"headers": dict(self.headers), "body": body.decode()}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(answer)))
+        self.end_headers()
+        self.wfile.write(answer)
+
+    def log_message(self, *_args: object) -> None:
+        """Keep the test output quiet."""
+
+
+@pytest.fixture
+def echo() -> Iterator[Callable[[str, dict[str, str], bytes], bytes]]:
+    """Run a local echo server and give a sender that delivers every relay request to it."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _EchoHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def send(_url: str, headers: dict[str, str], body: bytes) -> bytes:
+        """Post the filled request to the echo server instead of the real host."""
+        request = urllib.request.Request(f"http://127.0.0.1:{server.server_port}/", data=body, headers=headers)
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.read()
+
+    yield send
+    server.shutdown()
+    server.server_close()
+
+
+def _operations(runtime: BudgetRuntime) -> list[ExecutionOperationModel]:
+    """Return the metered operations in the run budget.
+
+    Args:
+        runtime: The run budget.
+
+    Returns:
+        Every recorded operation.
+    """
+    with Session(runtime.service._engine) as session:
+        return list(session.scalars(select(ExecutionOperationModel)).all())
+
+
+def test_relay_fills_user_secret_and_removes_it_from_the_echo(
+    runtime: BudgetRuntime, echo: Callable[[str, dict[str, str], bytes], bytes]
+) -> None:
+    """Send the user's key to its one host, remove it from the answer, and charge no Skynet fee."""
+    secret = "user-judge-key-123"
+    body = json.dumps({"method": "tools/call", "params": {"name": "search", "arguments": {}}}).encode()
+    answer = relay_request(
+        url="https://api.judge.example/v1",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}", "X-Plain": "fixed"},
+        body=body,
+        user_secrets={"JUDGE_KEY": secret},
+        bindings={},
+        secret_hosts={"JUDGE_KEY": "api.judge.example"},
+        send=echo,
+        runtime=runtime,
+    )
+    echoed = json.loads(answer)
+    assert secret not in answer.decode()
+    assert echoed["headers"]["Authorization"] == "[REDACTED]"
+    assert echoed["headers"]["X-Plain"] == "fixed"
+    assert _operations(runtime) == []
+
+
+def test_relay_fills_managed_key_meters_the_call_and_removes_the_key(
+    runtime: BudgetRuntime, echo: Callable[[str, dict[str, str], bytes], bytes]
+) -> None:
+    """Use Skynet's Maps key for a managed binding, meter the tool call, and hide the key (CFCA)."""
+    body = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "search_places", "arguments": {}}}
+    ).encode()
+    answer = relay_request(
+        url="https://mapstools.googleapis.com/mcp",
+        headers={"Authorization": "Bearer ${GOOGLE_MAPS_KEY}"},
+        body=body,
+        user_secrets={},
+        bindings={"GOOGLE_MAPS_KEY": "managed"},
+        secret_hosts={"GOOGLE_MAPS_KEY": MAPS},
+        send=echo,
+        runtime=runtime,
+    )
+    assert MAPS_KEY not in answer.decode()
+    assert json.loads(answer)["headers"]["Authorization"] == "[REDACTED]"
+    assert [(operation.cost_kind, operation.role) for operation in _operations(runtime)] == [("tool", "maps")]
+    assert runtime.service.get(runtime.budget_id, "alice").setup_spent_cents == Decimal("1.4")
+
+
+def test_relay_does_not_meter_a_managed_tools_list(
+    runtime: BudgetRuntime, echo: Callable[[str, dict[str, str], bytes], bytes]
+) -> None:
+    """Charge only for tool calls, not for the session's list and setup requests."""
+    relay_request(
+        url="https://mapstools.googleapis.com/mcp",
+        headers={"X-Goog-Api-Key": "${GOOGLE_MAPS_KEY}"},
+        body=b'{"method": "tools/list"}',
+        user_secrets={},
+        bindings={"GOOGLE_MAPS_KEY": "managed"},
+        secret_hosts={"GOOGLE_MAPS_KEY": MAPS},
+        send=echo,
+        runtime=runtime,
+    )
+    assert _operations(runtime) == []
+
+
+@pytest.mark.parametrize(
+    ("url", "user_secrets", "bindings", "secret_hosts", "message"),
+    [
+        ("https://api.judge.example/v1", {}, {}, {"KEY": "api.judge.example"}, r"\$\{KEY\} has no value"),
+        ("https://api.judge.example/v1", {}, {"KEY": "managed"}, {"KEY": "api.judge.example"}, "not in the connector"),
+        ("https://evil.example/v1", {"KEY": "v"}, {}, {"KEY": "api.judge.example"}, "may not go to evil.example"),
+        (f"https://{MAPS}/mcp", {}, {"KEY": "managed"}, {"KEY": MAPS}, "Skynet has no key"),
+    ],
+)
+def test_relay_refuses_before_sending(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+    user_secrets: dict[str, str],
+    bindings: dict[str, str],
+    secret_hosts: dict[str, str],
+    message: str,
+) -> None:
+    """Refuse a missing value, a managed key for a host outside the catalog or with no key, and a wrong host."""
+    monkeypatch.setattr(settings, "google_maps_api_key", None)
+    with pytest.raises(ValueError, match=message):
+        relay_request(
+            url=url,
+            headers={"Authorization": "Bearer ${KEY}"},
+            body=b"{}",
+            user_secrets=user_secrets,
+            bindings=bindings,
+            secret_hosts=secret_hosts,
+            send=lambda *_args: pytest.fail("The relay must not send."),
+        )
+
+
+def test_relay_needs_a_budget_for_a_managed_tool_call() -> None:
+    """Refuse a managed tool call that no run budget pays for."""
+    with pytest.raises(ValueError, match="run budget"):
+        relay_request(
+            url=f"https://{MAPS}/mcp",
+            headers={"X-Goog-Api-Key": "${GOOGLE_MAPS_KEY}"},
+            body=b'{"method": "tools/call", "params": {"name": "search_places"}}',
+            user_secrets={},
+            bindings={"GOOGLE_MAPS_KEY": "managed"},
+            secret_hosts={"GOOGLE_MAPS_KEY": MAPS},
+            send=lambda *_args: pytest.fail("The relay must not send."),
+        )

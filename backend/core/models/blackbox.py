@@ -13,6 +13,7 @@ above each class, not in class bodies.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -180,6 +181,11 @@ class BlackboxRepoSource(BaseModel):
     commit: str | None = Field(default=None, pattern=REPO_COMMIT_PATTERN)
     editable_paths: list[str] = Field(min_length=1, max_length=200)
     secrets: list[BlackboxRepoSecret] = Field(default_factory=list, max_length=100)
+    # How each ``${NAME}`` in optimize.toml and the role MCP files is filled
+    # (SKY-381 E50): ``user`` from the run's secrets (BYOK, no Skynet fee), or
+    # ``managed`` with Skynet's key for a catalog host, metered per call. A
+    # name this map does not hold binds to ``user``.
+    secret_bindings: dict[str, Literal["user", "managed"]] = Field(default_factory=dict, max_length=100)
     created_by_skynet: bool = False
 
     @model_validator(mode="after")
@@ -191,7 +197,7 @@ class BlackboxRepoSource(BaseModel):
 
         Raises:
             ValueError: When a path is absolute, empty, or walks out with ``..``,
-                or when two secrets share a name.
+                when two secrets share a name, or when a binding name is invalid.
         """
         cleaned: list[str] = []
         for raw in self.editable_paths:
@@ -211,6 +217,9 @@ class BlackboxRepoSource(BaseModel):
         names = [secret.name for secret in self.secrets]
         if len(names) != len(set(names)):
             raise ValueError("Each secret name can only be used once.")
+        for name in self.secret_bindings:
+            if not re.fullmatch(REPO_SECRET_NAME_PATTERN, name):
+                raise ValueError(f"The secret binding name '{name[:100]}' must use only letters, digits and '_'.")
         return self
 
 

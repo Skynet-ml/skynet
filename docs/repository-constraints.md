@@ -2,7 +2,8 @@
 
 A repository run reads an `optimize.toml` file at the root of the repository,
 at the pinned commit. The file can only narrow the settings that the run's
-owner approved. It cannot widen them, and it cannot grant services.
+owner approved. It cannot widen them. Each secret that a service needs comes
+from the run, never from the file.
 
 ```toml
 version = 1
@@ -53,8 +54,10 @@ into a file.
 
 ## What fails the setup check
 
-- A `[services]` section. Repository runs cannot reach outside services yet,
-  and a repository file can never grant them.
+- A `[services]` section, a `services` list, or an `mcp` file in `[run]` or
+  `[metric]`. The file format below is checked, but runs cannot use these
+  settings yet (SKY-385).
+- A service or MCP server that breaks the secret rules below.
 - An unknown section or setting, a `version` other than `1`, or invalid TOML.
 - A path that leaves the repository, names `.git`, or protects the whole tree.
 - A path with `*`, `?` or `[`. Paths are literal; patterns are not supported,
@@ -80,8 +83,52 @@ into a file.
 The setup check response includes `environment`. The run saves the same
 record under `target.repo.environment`. It holds the commit, the editable,
 protected and read-only paths, the secret names (never values), the setup
-command, the network for setup and for versions, and the services (none).
+command, the network for setup and for versions, and each role's services
+and MCP servers.
 A resumed run that arrives at different rules fails instead of continuing.
+
+## Services, MCP files and secrets
+
+A service is an outside API that a role calls. Write it with a `url` and
+`headers`, and write each secret only as a `${NAME}` placeholder:
+
+```toml
+[services.judge]
+url = "https://api.example.com/v1"
+headers = { Authorization = "Bearer ${JUDGE_KEY}" }
+
+[metric]
+services = ["judge"]
+mcp = "eval/.mcp.json"
+```
+
+- There are no default services. A role gets only the services that its own
+  `services` list names.
+- `[run]` and `[metric]` can each name a standard `.mcp.json` file. A role
+  sees only the servers of its own file, so the proposer gets none of the
+  metric's servers. Skynet reads the files from the same commit as
+  `optimize.toml`, and protects them like rule files.
+- An http server (`url`) goes through Skynet's relay. A stdio server
+  (`command`, `args`, `env`) runs in the box.
+- Each `url` must be `https` on a public host. The check refuses local,
+  private and link-local addresses.
+- Secrets appear only as `${NAME}` in `headers` and in a stdio server's
+  `env`. A value that looks like a real key fails with a message that says
+  to use a placeholder. The old `secrets = [...]` key fails with a message
+  that says to move each name into `headers`.
+- Each secret goes to one host only: the host of the `url` that uses it. A
+  file that sends the same `${NAME}` to two hosts fails.
+- Each `${NAME}` binds to `user` (the user's own secret, with no Skynet fee)
+  or `managed` (Skynet's key, metered for each call). The run sets this in
+  `target.repo.secret_bindings`; a name it does not list is `user`. Managed
+  works only for a host in Skynet's connector catalog, for example
+  `https://mapstools.googleapis.com/mcp`, and only when Skynet holds a key
+  for that host. A stdio secret cannot be managed.
+- The setup check fails before any sandbox starts when a user-bound secret
+  is missing from the run, or when a managed secret has no Skynet key.
+- The relay removes each filled secret value from the answers it returns.
+- Saved user secrets are encrypted at rest (Fernet) and are decrypted only
+  in the trusted parent at run start.
 
 ## Plain-language rules
 

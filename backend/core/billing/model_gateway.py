@@ -871,13 +871,14 @@ class ModelGateway:
     ) -> dict[str, dict[str, str]]:
         """Open one parent-keyed broker for each requested connector.
 
-        A catalog connector gets a metered broker with Skynet's key. Any other
-        name must be the owner's OAuth MCP server connection; its broker adds
+        A catalog connector, named by its host, gets a metered broker with
+        Skynet's key. Any other name must be the owner's OAuth MCP server
+        connection; its broker adds
         the owner's token on the parent and has no meter, because the owner's
         account pays the service, as for BYOK.
 
         Args:
-            names: Connector names from the run's tool list.
+            names: Catalog hosts and OAuth connection names from the run's tool list.
             authorize_tool: Optional blocking approval gate for protected chat tools.
             on_tool_event: Optional lifecycle event receiver for protected chat tools.
             allow_private: Deployment opt-in for private MCP destinations.
@@ -915,7 +916,7 @@ class ModelGateway:
                 self._connector_tokens[name] = token
             routes[name] = {"url": self.url, "token": token}
         for connector in catalog:
-            token = self._connector_tokens.get(connector.name)
+            token = self._connector_tokens.get(connector.host)
             if token is None:
                 url, headers = connector_endpoint(connector)
                 token = secrets.token_urlsafe(32)
@@ -928,8 +929,8 @@ class ModelGateway:
                     on_tool_event=on_tool_event,
                     meter=tool_meter(self.runtime, connector),
                 )
-                self._connector_tokens[connector.name] = token
-            routes[connector.name] = {"url": self.url, "token": token}
+                self._connector_tokens[connector.host] = token
+            routes[connector.host] = {"url": self.url, "token": token}
         return routes
 
     def _budget_state(self) -> dict[str, Any]:

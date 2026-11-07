@@ -1488,7 +1488,8 @@ def test_staging_keeps_the_services_each_role_lists(monkeypatch: pytest.MonkeyPa
     files = {
         **_FILES,
         "optimize.toml": _CONSTRAINTS
-        + '\n[services.judge]\nsecrets = ["JUDGE_KEY"]\nurl = "https://judge.example.com/v1"\n',
+        + '\n[services.judge]\nurl = "https://judge.example.com/v1"\nheaders = { X-Key = "${JUDGE_KEY}" }\n'
+        + '\n[metric]\nservices = ["judge"]\n',
     }
     _, staged = _stage_with(files, monkeypatch)
     try:

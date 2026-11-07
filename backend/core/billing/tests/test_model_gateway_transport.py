@@ -1135,21 +1135,25 @@ def test_catalog_connectors_share_one_gateway_with_a_live_roster(
     payload = {
         "model_config": {"name": "fixture/text"},
         "tool_source": {"kind": "live_mcp", "mcp_url": "https://selected.example/mcp", "tool_filter": ["lookup"]},
-        "env_connectors": ["maps", "web_search"],
+        "env_connectors": ["mapstools.googleapis.com", "mcp.firecrawl.dev"],
     }
 
     protected = gateway.protect_payload(payload, managed_key="upstream-secret")
-    again = gateway.protect_payload({"env_connectors": ["maps"]}, managed_key="upstream-secret")
+    again = gateway.protect_payload({"env_connectors": ["mapstools.googleapis.com"]}, managed_key="upstream-secret")
 
     assert set(brokers) == {"selected.example", "mapstools.googleapis.com", "mcp.firecrawl.dev"}
     assert brokers["mapstools.googleapis.com"]["headers"] == {"X-Goog-Api-Key": "maps-parent-secret"}
     assert brokers["mcp.firecrawl.dev"]["tool_filter"] == ["firecrawl_search", "firecrawl_scrape"]
     assert "meter" not in brokers["selected.example"]
-    for secret in ("maps-parent-secret", "firecrawl-parent-secret", "upstream-secret", "googleapis", "firecrawl.dev"):
+    for secret in ("maps-parent-secret", "firecrawl-parent-secret", "upstream-secret", "selected.example"):
         assert secret not in json.dumps(protected)
     routes = protected["_skynet_connector_routes"]
-    assert again["_skynet_connector_routes"]["maps"] == routes["maps"]
-    tokens = {protected["_skynet_tools_route"]["token"], routes["maps"]["token"], routes["web_search"]["token"]}
+    assert again["_skynet_connector_routes"]["mapstools.googleapis.com"] == routes["mapstools.googleapis.com"]
+    tokens = {
+        protected["_skynet_tools_route"]["token"],
+        routes["mapstools.googleapis.com"]["token"],
+        routes["mcp.firecrawl.dev"]["token"],
+    }
     assert len(tokens) == 3
     answered = {}
     for name, route in {"live": protected["_skynet_tools_route"], **routes}.items():
@@ -1168,13 +1172,18 @@ def test_catalog_connectors_share_one_gateway_with_a_live_roster(
         assert httpx.get(f"{gateway.url}/_budget/state", headers=headers, trust_env=False).status_code == 200
     assert answered == {
         "live": "selected.example",
-        "maps": "mapstools.googleapis.com",
-        "web_search": "mcp.firecrawl.dev",
+        "mapstools.googleapis.com": "mapstools.googleapis.com",
+        "mcp.firecrawl.dev": "mcp.firecrawl.dev",
     }
     snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, "alice")
     assert snapshot.setup_spent_cents == Decimal("2.4")
     assert snapshot.reserved_cents == 0
-    assert gateway.dispatch_guest(routes["maps"]["token"], "/v1/_mcp", {"method": "tools/call"}, {}).status == 200
+    assert (
+        gateway.dispatch_guest(
+            routes["mapstools.googleapis.com"]["token"], "/v1/_mcp", {"method": "tools/call"}, {}
+        ).status
+        == 200
+    )
 
 
 def test_connector_without_key_fails_setup_with_its_name(
@@ -1182,8 +1191,8 @@ def test_connector_without_key_fails_setup_with_its_name(
 ) -> None:
     """Refuse a run that asks for a connector whose key is missing, and name it."""
     monkeypatch.setattr(settings, "google_maps_api_key", None)
-    with pytest.raises(ValueError, match=r"maps \(GOOGLE_MAPS_API_KEY\)"):
-        gateway.protect_payload({"env_connectors": ["maps"]}, managed_key="upstream-secret")
+    with pytest.raises(ValueError, match=r"mapstools.googleapis.com \(GOOGLE_MAPS_API_KEY\)"):
+        gateway.protect_payload({"env_connectors": ["mapstools.googleapis.com"]}, managed_key="upstream-secret")
     assert gateway._connectors == {}
 
 

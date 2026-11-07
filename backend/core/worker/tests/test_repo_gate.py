@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from core.billing.env_connectors import CONNECTORS
+from core.billing import env_connectors
 from core.i18n import t_locale
 from core.i18n_keys import I18nKey
 from core.service_gateway.optimization.blackbox.repo_constraints import CONSTRAINTS_FILE
@@ -26,6 +26,14 @@ protected = ["bot/eval"]
 [proposer]
 illegal = "docs/rules.md"
 """
+
+# The files the parametrized keys name, so the setup check can read them.
+_NAMED_FILES = {
+    ".mcp.json": b'{"mcpServers": {}}',
+    "eval/.mcp.json": b'{"mcpServers": {}}',
+    "rules/run.md": b"- r\n",
+    "rules/metric.md": b"- m\n",
+}
 
 
 def _archive(tmp_path: Path, files: dict[str, bytes]) -> Path:
@@ -49,7 +57,7 @@ def _archive(tmp_path: Path, files: dict[str, bytes]) -> Path:
 
 def test_a_clean_file_passes(tmp_path: Path) -> None:
     """Paths, proposer rules and instructions are enforced or advisory, so they pass in both places."""
-    archive = _archive(tmp_path, {CONSTRAINTS_FILE: _CLEAN})
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: _CLEAN, "docs/intent.md": b"Be fast.\n", "docs/rules.md": b"- r\n"})
 
     assert check_repository(archive, (), place="local") == []
     assert check_repository(archive, (), place="cloud") == []
@@ -93,7 +101,10 @@ def test_the_cloud_names_its_own_sandbox(tmp_path: Path) -> None:
 
 def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
     """A service that needs a secret the run does not have fails with the service and the secret name."""
-    raw = b'[services.maps]\nsecrets = ["GOOGLE_MAPS_API_KEY", "MAPS_REGION"]\n'
+    raw = (
+        b'[services.maps]\nurl = "https://maps.example.com"\n'
+        b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_API_KEY}", X-Region = "${MAPS_REGION}" }\n'
+    )
     archive = _archive(tmp_path, {CONSTRAINTS_FILE: raw})
 
     failures = check_repository(archive, {"MAPS_REGION": "us"}, place="cloud")
@@ -119,9 +130,9 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
         (b'[proposer]\ntools = ["bash"]\n', "[proposer] tools"),
         (b"[proposer]\nnetwork = []\n", "[proposer] network"),
         (b'[proposer]\nnetwork = ["pypi.org"]\n', "[proposer] network"),
-        (b'[services.maps]\n[proposer]\nservices = ["maps"]\n', "[proposer] services"),
+        (b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nservices = ["maps"]\n', "[proposer] services"),
         (b'[target.planner]\nentry = "agents/planner.py:plan"\n', "[target.planner]"),
-        (b"[services.cache]\n", "[services.cache]"),
+        (b'[services.cache]\nurl = "https://api.example.com"\n', "[services.cache]"),
         (b"[proposer]\ntools = []\n", "[proposer] tools"),
         (b"[proposer]\nservices = []\n", "[proposer] services"),
         (b'[metric]\nreference = "eval/reference.json"\n', "[metric] reference"),
@@ -129,11 +140,14 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
         (b'[run]\nentry = ["pytest", "-q"]\n', "[run] entry"),
         (b'[run]\nentry = "a.py:f"\ntimeout = 30\n', "[run] timeout"),
         (b'[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n', "[run] mcp"),
-        (b'[services.maps]\n[run]\nentry = "a.py:f"\nservices = ["maps"]\n', "[run] services"),
+        (
+            b'[services.maps]\nurl = "https://api.example.com"\n[run]\nentry = "a.py:f"\nservices = ["maps"]\n',
+            "[run] services",
+        ),
         (b'[run]\nentry = "a.py:f"\nservices = []\n', "[run] services"),
         (b'[run]\nentry = "a.py:f"\nillegal = "rules/run.md"\n', "[run] illegal"),
         (b'[metric]\nmcp = "eval/.mcp.json"\n', "[metric] mcp"),
-        (b'[services.grader]\n[metric]\nservices = ["grader"]\n', "[metric] services"),
+        (b'[services.grader]\nurl = "https://api.example.com"\n[metric]\nservices = ["grader"]\n', "[metric] services"),
         (b"[metric]\nservices = []\n", "[metric] services"),
         (b'[metric]\nillegal = "rules/metric.md"\n', "[metric] illegal"),
     ],
@@ -141,14 +155,14 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
 @pytest.mark.parametrize("place", ["local", "cloud"])
 def test_every_unenforced_key_fails_in_every_place(tmp_path: Path, raw: bytes, key: str, place: str) -> None:
     """A written key fails even when its value is empty or the default, because no runtime enforces it yet."""
-    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place)  # type: ignore[arg-type]
+    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw, **_NAMED_FILES}), (), place=place)  # type: ignore[arg-type]
 
     assert key in [failure.key for failure in failures]
 
 
 def test_every_failure_has_a_hebrew_message(tmp_path: Path) -> None:
     """Each failure renders in Hebrew with its own parameters, so the setup check shows it in the user's language."""
-    raw = b'[proposer]\ntools = ["bash"]\n[services.maps]\nsecrets = ["GOOGLE_MAPS_API_KEY"]\n'
+    raw = b'[proposer]\ntools = ["bash"]\n[services.maps]\nurl = "https://api.example.com"\nheaders = { Authorization = "${GOOGLE_MAPS_API_KEY}" }\n'
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place="local")
 
     assert {failure.code for failure in failures} == {
@@ -191,34 +205,112 @@ def test_proposer_allowed_hosts_fail_with_their_own_message(tmp_path: Path, plac
     assert "pypi.org, files.pythonhosted.org" in failures[0].reason
 
 
-@pytest.mark.parametrize("place", ["local", "cloud"])
-def test_a_service_that_names_no_connector_fails_with_its_own_message(tmp_path: Path, place: str) -> None:
-    """A service is a catalog connector, so an unknown name gets its own code and the known names (SKY-354)."""
-    raw = b"[services.cache]\n[services.maps]\n"
-    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place)  # type: ignore[arg-type]
+def _mcp_archive(tmp_path: Path, server: str) -> Path:
+    """Pack a ``[metric] mcp`` file with one server.
 
-    codes = {failure.key: failure.code for failure in failures}
-    assert codes["[services.cache]"] == I18nKey.REPO_GATE_UNKNOWN_CONNECTOR
-    assert codes["[services.maps]"] != I18nKey.REPO_GATE_UNKNOWN_CONNECTOR
-    unknown = next(failure for failure in failures if failure.key == "[services.cache]")
-    assert unknown.params == {"service": "cache", "known": ", ".join(CONNECTORS)}
-    assert "is not a connector" in unknown.reason
+    Args:
+        tmp_path: Scratch folder.
+        server: The server's JSON object.
+
+    Returns:
+        The archive.
+    """
+    raw = b'[metric]\nmcp = "eval/.mcp.json"\n'
+    mcp = b'{"mcpServers": {"grader": ' + server.encode() + b"}}"
+    return _archive(tmp_path, {CONSTRAINTS_FILE: raw, "eval/.mcp.json": mcp})
+
+
+def test_a_missing_mcp_server_secret_fails(tmp_path: Path) -> None:
+    """A user-bound ``${NAME}`` in a role's MCP file needs a run secret, like a service header (E49)."""
+    archive = _mcp_archive(tmp_path, '{"url": "https://grader.example.com/mcp", "headers": {"X-Key": "${GRADER_KEY}"}}')
+
+    missing = [f for f in check_repository(archive, (), place="cloud") if f.code == I18nKey.REPO_GATE_MISSING_SECRET]
+
+    assert [(f.key, f.params) for f in missing] == [
+        ("[metric] mcp secrets", {"service": "grader", "secret": "GRADER_KEY"})
+    ]
+    assert not [
+        f
+        for f in check_repository(archive, {"GRADER_KEY"}, place="cloud")
+        if f.code == I18nKey.REPO_GATE_MISSING_SECRET
+    ]
+
+
+_MAPS = (
+    b'[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
+    b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_KEY}" }\n'
+)
+
+
+def _managed_failures(archive: Path) -> list[GateFailure]:
+    """Run the gate with ``GOOGLE_MAPS_KEY`` bound to Skynet's key and keep the managed-key failures.
+
+    Args:
+        archive: The packed tree.
+
+    Returns:
+        The failures with the connector code.
+    """
+    failures = check_repository(archive, (), place="cloud", bindings={"GOOGLE_MAPS_KEY": "managed"})
+    return [failure for failure in failures if failure.code == I18nKey.REPO_GATE_UNKNOWN_CONNECTOR]
+
+
+def test_a_managed_binding_with_a_skynet_key_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A managed name on a catalog host with a Skynet key needs no run secret (E50)."""
+    monkeypatch.setattr(env_connectors, "managed_key_host", lambda host: host == "mapstools.googleapis.com")
+    monkeypatch.setattr(repo_gate, "managed_key_host", env_connectors.managed_key_host)
+
+    failures = check_repository(
+        _archive(tmp_path, {CONSTRAINTS_FILE: _MAPS}), (), place="cloud", bindings={"GOOGLE_MAPS_KEY": "managed"}
+    )
+
+    assert [
+        f for f in failures if f.code in (I18nKey.REPO_GATE_MISSING_SECRET, I18nKey.REPO_GATE_UNKNOWN_CONNECTOR)
+    ] == []
+
+
+def test_a_managed_binding_on_a_host_with_no_skynet_key_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The setup check stops a managed name when this deployment holds no key for its host (E50)."""
+    monkeypatch.setattr(repo_gate, "managed_key_host", lambda host: False)
+
+    [failure] = _managed_failures(_archive(tmp_path, {CONSTRAINTS_FILE: _MAPS}))
+
+    assert failure.key == "[services.maps] secrets"
+    assert failure.params == {"service": "mapstools.googleapis.com", "known": "-"}
+
+
+def test_a_managed_binding_on_a_host_outside_the_catalog_fails(tmp_path: Path) -> None:
+    """Managed is allowed only for a catalog host, so another host fails even with keys configured (E50)."""
+    raw = _MAPS.replace(b"mapstools.googleapis.com", b"maps.example.com")
+
+    [failure] = _managed_failures(_archive(tmp_path, {CONSTRAINTS_FILE: raw}))
+
+    assert failure.params["service"] == "maps.example.com"
+
+
+def test_a_managed_stdio_secret_fails(tmp_path: Path) -> None:
+    """A stdio server runs in the box and a Skynet key never enters a box, so its secret cannot be managed."""
+    archive = _mcp_archive(tmp_path, '{"command": "npx", "args": ["maps"], "env": {"KEY": "${GOOGLE_MAPS_KEY}"}}')
+
+    [failure] = _managed_failures(archive)
+
+    assert failure.key == "[metric] mcp secrets"
+    assert failure.params["service"] == "grader"
 
 
 @pytest.mark.parametrize("place", ["local", "cloud"])
 def test_the_specific_checks_do_not_depend_on_enforced(
     tmp_path: Path, place: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When a later issue enforces these keys, proposer hosts and unknown connectors still stop the run."""
+    """When a later issue enforces these keys, proposer hosts still stop the run."""
     enforced = {name: kinds | {"services", "proposer.network"} for name, kinds in repo_gate.ENFORCED.items()}
     monkeypatch.setattr(repo_gate, "ENFORCED", enforced)
-    raw = b'[proposer]\nnetwork = ["api.example.com"]\n[services.nosuch]\n[services.maps]\n'
+    raw = b'[proposer]\nnetwork = ["api.example.com"]\n[services.maps]\nurl = "https://api.example.com"\n'
 
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place)  # type: ignore[arg-type]
 
     assert [(failure.key, failure.code) for failure in failures] == [
         ("[proposer] network", I18nKey.REPO_GATE_PROPOSER_HOSTS_UNSUPPORTED),
-        ("[services.nosuch]", I18nKey.REPO_GATE_UNKNOWN_CONNECTOR),
     ]
 
 

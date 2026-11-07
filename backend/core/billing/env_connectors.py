@@ -1,31 +1,43 @@
 """Catalog the Skynet-keyed hosted MCP connectors and meter each of their tool calls.
 
-Each connector is a hosted MCP server. The parent gateway holds Skynet's provider
-key and reaches the server through ``McpToolsBroker``; the box gets only a scoped
-route token. Every tool call reserves and settles a fixed per-call price in the
-run budget before and after the provider sees it.
+Each connector is a hosted MCP server, keyed by its host. The parent gateway holds
+Skynet's provider key and reaches the server through ``McpToolsBroker``; the box
+gets only a scoped route token. Every tool call reserves and settles a fixed
+per-call price in the run budget before and after the provider sees it.
+
+:func:`relay_request` is the one parent path for a repository's ``[services]`` and
+role ``.mcp.json`` http calls: it fills each ``${NAME}`` placeholder with the
+user's secret or, for a managed binding, Skynet's key for that host, and removes
+every filled value from the answer.
 """
 
 from __future__ import annotations
 
+import json
+import re
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from ..config import settings
+from .credential_safety import credential_fragments, redact_secret_bytes
 from .mcp_broker import ToolCall
 from .operation_pricing import ChargePolicy, operation_quote
 from .runtime import BudgetRuntime, PaidResult
 
 CONNECTOR_PRICE_VERSION = "env-connectors-2026-11-06"
 CONNECTOR_COST_KIND = "tool"
-# Payload key listing the catalog connectors a run asks for.
+# Payload key listing the catalog connectors, by host, a run asks for.
 CONNECTORS_KEY = "env_connectors"
 # Payload key carrying each connector's scoped route; only the parent gateway writes it.
 CONNECTOR_ROUTES_KEY = "_skynet_connector_routes"
+# A secret binding: the user's own value (BYOK), or Skynet's key for the host.
+USER_BINDING = "user"
+MANAGED_BINDING = "managed"
+_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 @dataclass(frozen=True)
@@ -45,9 +57,14 @@ class Connector:
     # Optional non-secret settings sent as query parameters: settings field -> parameter name.
     extra_query: Mapping[str, str] = field(default_factory=dict)
 
+    @property
+    def host(self) -> str:
+        """Return the connector's host, the catalog key."""
+        return urlsplit(self.url).hostname or ""
+
 
 CONNECTORS: Mapping[str, Connector] = {
-    connector.name: connector
+    connector.host: connector
     for connector in (
         Connector(
             name="maps",
@@ -115,32 +132,32 @@ def _connector_key(connector: Connector) -> str | None:
 
 
 def offered_connectors() -> tuple[str, ...]:
-    """Return the catalog connectors whose provider key is configured."""
-    return tuple(name for name, connector in CONNECTORS.items() if _connector_key(connector))
+    """Return the hosts of the catalog connectors whose provider key is configured."""
+    return tuple(host for host, connector in CONNECTORS.items() if _connector_key(connector))
 
 
-def require_connectors(names: Any) -> tuple[Connector, ...]:
+def require_connectors(hosts: Any) -> tuple[Connector, ...]:
     """Check a requested connector list against the catalog and the configured keys.
 
     Args:
-        names: Connector names from the run's tool list.
+        hosts: Connector hosts from the run's tool list.
 
     Returns:
         The distinct requested catalog entries, in request order.
 
     Raises:
-        ValueError: When the list is malformed, names an unknown connector, or a
-            connector has no key in config. The message names the connector.
+        ValueError: When the list is malformed, names a host outside the catalog,
+            or a connector has no key in config. The message names the host.
     """
-    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
-        raise ValueError("The connector list must be a list of connector names.")
-    unknown = sorted({name for name in names if name not in CONNECTORS})
+    if not isinstance(hosts, list) or not all(isinstance(host, str) for host in hosts):
+        raise ValueError("The connector list must be a list of connector hosts.")
+    unknown = sorted({host for host in hosts if host not in CONNECTORS})
     if unknown:
         raise ValueError(f"Unknown connector: {', '.join(unknown)}.")
-    selected = tuple(CONNECTORS[name] for name in dict.fromkeys(names))
+    selected = tuple(CONNECTORS[host] for host in dict.fromkeys(hosts))
     missing = [connector for connector in selected if _connector_key(connector) is None]
     if missing:
-        details = ", ".join(f"{connector.name} ({connector.key_env})" for connector in missing)
+        details = ", ".join(f"{connector.host} ({connector.key_env})" for connector in missing)
         raise ValueError(f"These connectors have no key in config: {details}.")
     return selected
 
@@ -159,7 +176,7 @@ def connector_endpoint(connector: Connector) -> tuple[str, dict[str, str]]:
     """
     key = _connector_key(connector)
     if key is None:
-        raise ValueError(f"The {connector.name} connector has no key in config ({connector.key_env}).")
+        raise ValueError(f"The {connector.host} connector has no key in config ({connector.key_env}).")
     headers = {connector.key_header: connector.key_prefix + key} if connector.key_header else {}
     query = {connector.key_query: key} if connector.key_query else {}
     for setting, parameter in connector.extra_query.items():
@@ -244,3 +261,170 @@ def tool_meter(
         return result
 
     return meter
+
+
+def managed_key_host(host: str) -> bool:
+    """Tell whether Skynet holds a configured key for a host (E50).
+
+    Args:
+        host: A url host, any case, with or without a trailing dot.
+
+    Returns:
+        True when the host is in the catalog and config holds its key.
+    """
+    connector = CONNECTORS.get(host.rstrip(".").lower())
+    return connector is not None and _connector_key(connector) is not None
+
+
+def resolve_secrets(
+    names: tuple[str, ...] | list[str],
+    host: str,
+    user_secrets: Mapping[str, str],
+    bindings: Mapping[str, str],
+) -> dict[str, str]:
+    """Pick the value for each secret one request to ``host`` uses (E50).
+
+    A missing binding means ``user``. A managed binding takes Skynet's key for
+    the host, and only a catalog host has one.
+
+    Args:
+        names: The secret names the request's headers use.
+        host: The request's host.
+        user_secrets: The run's own secret values, by name.
+        bindings: ``user`` or ``managed`` for each secret name.
+
+    Returns:
+        The value for each name.
+
+    Raises:
+        ValueError: When a user secret has no value, or a managed secret's host
+            is not in the catalog or has no key in config. The message names the
+            secret, never a value.
+    """
+    connector = CONNECTORS.get(host.rstrip(".").lower())
+    values: dict[str, str] = {}
+    for name in names:
+        if bindings.get(name, USER_BINDING) == MANAGED_BINDING:
+            if connector is None:
+                raise ValueError(
+                    f"${{{name}}} uses a Skynet key, but {host} is not in the connector catalog."
+                    " Bind it to your own key instead."
+                )
+            key = _connector_key(connector)
+            if key is None:
+                raise ValueError(f"${{{name}}} uses a Skynet key, but Skynet has no key for {host}.")
+            values[name] = key
+        elif user_secrets.get(name):
+            values[name] = user_secrets[name]
+        else:
+            raise ValueError(f"${{{name}}} has no value. Add the secret {name} to the run.")
+    return values
+
+
+def _fill(text: str, values: Mapping[str, str]) -> str:
+    """Replace each ``${NAME}`` in a header value with its resolved value.
+
+    Args:
+        text: A header value from the repository.
+        values: The resolved value for each name.
+
+    Returns:
+        The filled value.
+    """
+    return _PLACEHOLDER.sub(lambda match: values[match.group(1)], text)
+
+
+def _tool_call(body: bytes) -> tuple[str, dict[str, Any]] | None:
+    """Return the tool name and arguments when a JSON-RPC body is one ``tools/call``.
+
+    Args:
+        body: The request body the box sent.
+
+    Returns:
+        The tool and its arguments, or None for any other request.
+    """
+    try:
+        message = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(message, dict) or message.get("method") != "tools/call":
+        return None
+    params = message.get("params")
+    if not isinstance(params, dict) or not isinstance(params.get("name"), str):
+        return None
+    arguments = params.get("arguments")
+    return params["name"], arguments if isinstance(arguments, dict) else {}
+
+
+def relay_request(
+    *,
+    url: str,
+    headers: Mapping[str, str],
+    body: bytes,
+    user_secrets: Mapping[str, str],
+    bindings: Mapping[str, str],
+    secret_hosts: Mapping[str, str],
+    send: Callable[[str, dict[str, str], bytes], bytes],
+    runtime: BudgetRuntime | None = None,
+) -> bytes:
+    """Send one ``[services]`` or MCP http request with its secrets filled in (E49-E53).
+
+    The box holds only ``${NAME}`` placeholders. This parent-side step fills
+    them, refuses a secret outside the one host it may go to, meters a managed
+    ``tools/call`` with :func:`tool_meter` (a BYOK call has no Skynet fee), and
+    removes every filled value from the answer, so a server that echoes its
+    headers cannot hand a key back to the box.
+
+    Args:
+        url: The declared https url.
+        headers: The declared headers, with ``${NAME}`` placeholders.
+        body: The request body from the box.
+        user_secrets: The run's own secret values, by name.
+        bindings: ``user`` or ``managed`` for each secret name.
+        secret_hosts: The one host each secret may go to, from
+            :attr:`RepoConstraints.secret_hosts`.
+        send: Sends the filled request and returns the answer body.
+        runtime: The run budget; required when a managed secret is used.
+
+    Returns:
+        The answer body without any filled secret value.
+
+    Raises:
+        ValueError: When a secret has no value, goes to a host it is not bound
+            to, or a managed call has no budget, or the metered tool has no price.
+    """
+    host = (urlsplit(url).hostname or "").rstrip(".").lower()
+    names = tuple(dict.fromkeys(name for value in headers.values() for name in _PLACEHOLDER.findall(value)))
+    for name in names:
+        if secret_hosts.get(name) != host:
+            raise ValueError(f"${{{name}}} may not go to {host}.")
+    values = resolve_secrets(names, host, user_secrets, bindings)
+    filled = {key: _fill(value, values) for key, value in headers.items()}
+    fragments = {fragment for value in values.values() for fragment in credential_fragments(value)}
+    fragments |= {
+        fragment for key, value in filled.items() if value != headers[key] for fragment in credential_fragments(value)
+    }
+    ordered = sorted(fragments, key=len, reverse=True)
+    managed = any(bindings.get(name) == MANAGED_BINDING for name in names)
+    call = _tool_call(body) if managed else None
+    if call is None:
+        answer = send(url, filled, body)
+    else:
+        if runtime is None:
+            raise ValueError("A call with a Skynet key needs the run budget.")
+
+        def run(progress: ToolCall) -> dict[str, Any]:
+            """Mark the call sent, then send it.
+
+            Args:
+                progress: The metered call's progress record.
+
+            Returns:
+                The raw answer, wrapped for the meter.
+            """
+            progress.sent = True
+            return {"body": send(url, filled, body)}
+
+        tool, arguments = call
+        answer = tool_meter(runtime, CONNECTORS[host])(tool, arguments, ToolCall(run))["body"]
+    return redact_secret_bytes(answer, ordered)
