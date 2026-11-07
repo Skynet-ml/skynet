@@ -37,6 +37,13 @@ def upgrade() -> None:
         "CREATE INDEX IF NOT EXISTS ix_hardening_jobs_owner_draft_created "
         "ON hardening_jobs (username, draft_id, created_at)"
     )
+    # One unfinished job per draft: the router's SELECT check alone races
+    # when two creates arrive at the same time.
+    op.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_hardening_jobs_active_draft "
+        "ON hardening_jobs (username, draft_id) "
+        "WHERE status IN ('preflight', 'running', 'waiting_review', 'waiting_fix')"
+    )
 
 
 def downgrade() -> None:

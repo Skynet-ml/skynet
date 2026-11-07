@@ -14,9 +14,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ...config import settings
+from ...local.cli_catalog import CLI_MODELS, parse_subscription_model_id
 from ...models.hardening import (
     ACTIVE_STATUSES,
     CreateHardeningJobRequest,
@@ -36,6 +38,7 @@ from ...service_gateway.optimization.blackbox.hardening import (
 )
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
+from ..model_catalog import require_known_model
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 
@@ -62,6 +65,26 @@ def _load(session: Session, username: str, job_id: str, *, lock: bool) -> Harden
     if row is None:
         raise DomainError("hardening.job_not_found", status=404)
     return row
+
+
+def _require_model(model: str, *, role: str | None = None) -> None:
+    """Reject a model that the job cannot run. Never swap it for another one.
+
+    Args:
+        model: The model id from the request.
+        role: The role the model fills; ``judge`` also accepts the classifier-only models.
+
+    Raises:
+        DomainError: 422 when the id is not a catalog model, or names a
+            subscription model its CLI cannot run.
+    """
+    subscription = parse_subscription_model_id(model) if settings.local_mode else None
+    if subscription is not None:
+        cli, slug = subscription
+        if slug not in CLI_MODELS[cli]:
+            raise DomainError("billing.subscription_unmapped_model", status=422, provider=cli)
+        return
+    require_known_model(model, role=role)
 
 
 def _store(row: HardeningJobModel, job: HardeningJob) -> None:
@@ -135,8 +158,11 @@ def create_hardening_router(*, job_store) -> APIRouter:
             The new job.
 
         Raises:
-            DomainError: 409 when the draft already has an unfinished job.
+            DomainError: 422 for an unknown model, 409 when the draft already
+                has an unfinished job.
         """
+        _require_model(body.attacker_model)
+        _require_model(body.judge_model, role="judge")
         with Session(job_store.engine) as session:
             active = session.scalars(
                 select(HardeningJobModel.id)
@@ -161,7 +187,12 @@ def create_hardening_router(*, job_store) -> APIRouter:
             _store(row, job)
             row.created_at = row.updated_at
             session.add(row)
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError as exc:
+                # Two creates for one draft can both pass the SELECT above; the
+                # partial unique index keeps only one of them.
+                raise DomainError("hardening.job_active", status=409) from exc
             return job
 
     @router.get(

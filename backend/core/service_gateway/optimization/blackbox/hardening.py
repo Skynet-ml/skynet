@@ -256,7 +256,7 @@ def advance(
     job = job.model_copy(deep=True)
     try:
         if job.status == "preflight":
-            _preflight(job, runner)
+            _preflight(job, runner, exploits_path)
         else:
             _step(job, runner, exploits_path, reference)
     except Exception as exc:
@@ -409,13 +409,15 @@ def notification_event(job: HardeningJob) -> str | None:
     return None
 
 
-def _preflight(job: HardeningJob, runner: HardeningRunner) -> None:
+def _preflight(job: HardeningJob, runner: HardeningRunner, exploits_path: Path) -> None:
     """Run the preflight and move the job to running or preflight_failed.
 
     Args:
         job: The job, changed in place.
         runner: The run/sandbox runner.
+        exploits_path: The suite folder, which earlier jobs may have filled.
     """
+    job.suite_count = len(_saved_exploits(exploits_path))
     failures = list(runner.preflight(view=job.view))
     job.preflight_failures = failures
     if failures:
@@ -437,6 +439,11 @@ def _step(job: HardeningJob, runner: HardeningRunner, exploits_path: Path, refer
     current = job.rounds_detail[-1] if job.rounds_detail else None
     if current is not None and current.status == "approved":
         _apply_fix(job, current, runner, exploits_path)
+    elif current is not None and current.status == "running" and not _confirmed(current):
+        # A judge error leaves a round "running" with no user verdict. Drafting
+        # a fix for it would pay for an empty fix, so the round runs again.
+        job.rounds_detail.pop()
+        job.round = current.index - 1
     elif current is not None and current.status == "running":
         _draft_fix(job, current, runner, exploits_path, reference)
     elif job.round >= job.rounds:
@@ -528,8 +535,10 @@ def _draft_fix(
     _spend(job, cost)
     base_before = runner.score(fix_diff=None, exploit=None)
     base_after = runner.score(fix_diff=diff, exploit=None)
-    suite = [e for r in job.rounds_detail if r.status == "fixed" for e in _confirmed(r)] + confirmed
-    suite_holds = all(exploit_passes(runner.score(fix_diff=diff, exploit=e), base_after) for e in suite)
+    suite = {e.id: e for e in _saved_exploits(exploits_path)}
+    for exploit in [e for r in job.rounds_detail if r.status == "fixed" for e in _confirmed(r)] + confirmed:
+        suite[exploit.id] = exploit
+    suite_holds = all(exploit_passes(runner.score(fix_diff=diff, exploit=e), base_after) for e in suite.values())
     checks = HardeningFixChecks(
         suite_replay=_result(suite_holds),
         base_score_unchanged=_result(math.isclose(base_before, base_after, rel_tol=1e-9, abs_tol=1e-9)),
@@ -555,19 +564,52 @@ def _apply_fix(job: HardeningJob, current: HardeningRound, runner: HardeningRunn
         exploits_path: The suite folder.
     """
     assert current.fix is not None
-    runner.apply_fix(fix_diff=current.fix.diff)
     confirmed = _confirmed(current)
+    # The suite writes come first and overwrite in place, so a retry after
+    # any failure repeats them safely. Nothing can fail after apply_fix, so a
+    # retry never applies the fix twice.
     for exploit in confirmed:
         folder = exploits_path / exploit.id
         folder.mkdir(parents=True, exist_ok=True)
         (folder / "patch.diff").write_text(exploit.patch_diff, encoding="utf-8")
         (folder / "why.md").write_text(exploit.why_md, encoding="utf-8")
+    runner.apply_fix(fix_diff=current.fix.diff)
     current.status = "fixed"
-    job.suite_count += len(confirmed)
+    job.suite_count = len(_saved_exploits(exploits_path))
     job.fixed_count += len(confirmed)
     if job.round >= job.rounds:
         job.status = "done"
         _release(job)
+
+
+def _saved_exploits(exploits_path: Path) -> list[HardeningExploit]:
+    """Load the exploits that the suite folder already keeps, from this or earlier jobs.
+
+    Args:
+        exploits_path: The suite folder.
+
+    Returns:
+        One confirmed exploit for each ``<id>/patch.diff``, sorted by id.
+    """
+    if not exploits_path.is_dir():
+        return []
+    saved = []
+    for patch in sorted(exploits_path.glob("*/patch.diff")):
+        why = patch.with_name("why.md")
+        saved.append(
+            HardeningExploit(
+                id=patch.parent.name,
+                kind="case",
+                label="exploit",
+                confidence=1.0,
+                reason="",
+                unsure=False,
+                patch_diff=patch.read_text(encoding="utf-8"),
+                why_md=why.read_text(encoding="utf-8") if why.is_file() else "",
+                user_verdict="confirmed",
+            )
+        )
+    return saved
 
 
 def _needs_review(exploit: HardeningExploit) -> bool:

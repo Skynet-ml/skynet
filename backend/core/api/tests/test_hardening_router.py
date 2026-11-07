@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -25,7 +26,9 @@ from ...models.hardening import (
     HardeningRound,
 )
 from ...storage.models import Base
+from .. import model_catalog
 from ..auth import AuthenticatedUser, get_authenticated_user
+from ..model_catalog import CatalogModel, ModelCatalogResponse
 from ..routers.hardening import create_hardening_router
 
 _JOB_FIELDS = {
@@ -48,6 +51,20 @@ _JOB_FIELDS = {
 }
 _EXPLOIT_FIELDS = {"id", "kind", "label", "confidence", "reason", "unsure", "patch_diff", "why_md", "user_verdict"}
 _BODY = {"draft_id": "draft-1", "attacker_model": "openai/attacker", "judge_model": "openai/judge"}
+
+
+@pytest.fixture(autouse=True)
+def _catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve a catalog that lists the test attacker and judge models.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    models = [
+        CatalogModel(value=value, label=value, provider="openai", available=True)
+        for value in (_BODY["attacker_model"], _BODY["judge_model"])
+    ]
+    monkeypatch.setattr(model_catalog, "get_catalog_cached", lambda: ModelCatalogResponse(providers=[], models=models))
 
 
 def _harness() -> tuple[TestClient, Engine, dict[str, str]]:
@@ -199,6 +216,86 @@ def test_create_refuses_bad_input(patch: dict[str, Any]) -> None:
     """Out-of-contract input fails validation."""
     client, _engine, _caller = _harness()
     assert client.post("/hardening/jobs", json={**_BODY, **patch}).status_code == 422
+
+
+@pytest.mark.parametrize("field", ["attacker_model", "judge_model"])
+def test_create_refuses_an_unknown_model(field: str) -> None:
+    """A model outside the catalog gets a 422 and no job; the router never swaps it."""
+    client, engine, _caller = _harness()
+    response = client.post("/hardening/jobs", json={**_BODY, field: "openai/not-a-model"})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "models.unknown_model"
+    with Session(engine) as session:
+        assert session.query(HardeningJobModel).count() == 0
+
+
+def test_judge_may_use_a_classifier_only_model() -> None:
+    """The judge role also takes the classifier-only models; the attacker role does not."""
+    client, _engine, _caller = _harness()
+    classifier = next(iter(model_catalog.CLASSIFIER_ONLY_MODELS))
+
+    judged = client.post("/hardening/jobs", json={**_BODY, "judge_model": classifier})
+    attacked = client.post("/hardening/jobs", json={**_BODY, "draft_id": "draft-2", "attacker_model": classifier})
+
+    assert judged.status_code == 201
+    assert judged.json()["judge_model"] == classifier
+    assert attacked.status_code == 422
+
+
+def test_local_mode_takes_a_mapped_subscription_model_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On the Mac app a subscription model passes when its CLI can run it, and gets a 422 otherwise."""
+    monkeypatch.setattr(settings, "local_mode", True)
+    client, _engine, _caller = _harness()
+    mapped = "subscription/codex/openai/gpt-6.1-sol"
+
+    accepted = client.post("/hardening/jobs", json={**_BODY, "attacker_model": mapped})
+    refused = client.post(
+        "/hardening/jobs", json={**_BODY, "draft_id": "draft-2", "attacker_model": "subscription/codex/openai/nope"}
+    )
+
+    assert accepted.status_code == 201
+    assert accepted.json()["attacker_model"] == mapped
+    assert refused.status_code == 422
+
+
+def test_the_database_keeps_one_unfinished_job_per_draft() -> None:
+    """The partial unique index refuses a second unfinished job even past the router's SELECT."""
+    _client, engine, _caller = _harness()
+    _seed(engine, _job("first", "running"))
+    _seed(engine, _job("ended", "clean_stop"))
+    with pytest.raises(IntegrityError):
+        _seed(engine, _job("second", "waiting_review"))
+
+
+def test_create_maps_a_lost_race_to_409(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When a parallel create wins the race, the loser gets the job_active 409, not a 500."""
+    client, engine, _caller = _harness()
+    original = Session.scalars
+
+    def _no_active(self: Session, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        """Seed the winner, then hide it from the router's active-job SELECT.
+
+        Args:
+            self: The session.
+            statement: The query.
+            *args: Other positional arguments.
+            **kwargs: Other keyword arguments.
+
+        Returns:
+            The query result, empty for the active-job check.
+        """
+        if "hardening_jobs.status IN" in str(statement):
+            monkeypatch.setattr(Session, "scalars", original)
+            _seed(engine, _job("winner", "preflight"))
+            return original(self, statement.where(HardeningJobModel.id == "none"), *args, **kwargs)
+        return original(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "scalars", _no_active)
+    response = client.post("/hardening/jobs", json=_BODY)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == ENGLISH_MESSAGES["hardening.job_active"]
 
 
 def test_one_unfinished_job_per_draft() -> None:

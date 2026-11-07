@@ -557,3 +557,124 @@ def test_bad_judge_output_fails_the_job(tmp_path: Path) -> None:
     job = _run(_job(), FakeRunner([[(_CASE, "garbage")]]), tmp_path)
     assert job.status == "failed"
     assert job.error
+
+
+@pytest.mark.parametrize("bad_judge", ["timeout", "parse"])
+def test_retry_after_a_judge_failure_attacks_again_instead_of_drafting(tmp_path: Path, bad_judge: str) -> None:
+    """A round that failed while judging has no verdicts, so a retry runs the round again and drafts no fix."""
+    runner = FakeRunner([[(_CASE, "garbage" if bad_judge == "parse" else _EXPLOIT)]])
+    runner.fail_on = "judge" if bad_judge == "timeout" else None
+    job = _run(_job(), runner, tmp_path)
+    assert job.status == "failed"
+    assert job.rounds_detail[-1].status == "running"
+
+    runner.fail_on = None
+    runner.rounds = [[(_CASE, _EXPLOIT)]]
+    job = _run(retry(job), runner, tmp_path)
+
+    assert "draft_fix" not in runner.names()
+    assert runner.names().count("attack") == 2
+    assert job.status == "waiting_review"
+    assert job.round == 1
+    assert [r.index for r in job.rounds_detail] == [1]
+    assert len(job.rounds_detail[0].exploits) == 1
+
+
+def _seed_suite(path: Path, exploit_id: str) -> None:
+    """Write one exploit of an earlier job into the suite folder.
+
+    Args:
+        path: The suite folder.
+        exploit_id: The exploit's folder name.
+    """
+    folder = path / exploit_id
+    folder.mkdir(parents=True)
+    (folder / "patch.diff").write_text("+old trick\n", encoding="utf-8")
+    (folder / "why.md").write_text("An earlier exploit.", encoding="utf-8")
+
+
+class ReopeningRunner(FakeRunner):
+    """A runner whose fix makes one saved exploit pay again."""
+
+    def score(self, *, fix_diff: str | None, exploit: HardeningExploit | None) -> float:
+        """Score like the fake runner, but the fixed metric still pays the old exploit.
+
+        Args:
+            fix_diff: The fix to apply first, if any.
+            exploit: The exploit to replay, or None for the base solution.
+
+        Returns:
+            The metric score.
+        """
+        if exploit is not None and exploit.id == "old-1":
+            self._call("score", fix_diff=fix_diff, exploit=exploit)
+            return 1.0
+        return super().score(fix_diff=fix_diff, exploit=exploit)
+
+
+def test_suite_replay_includes_exploits_that_earlier_jobs_saved(tmp_path: Path) -> None:
+    """A fix that reopens an exploit from an earlier job fails the suite replay."""
+    _seed_suite(tmp_path / "exploits", "old-1")
+    runner = ReopeningRunner([[(_CASE, _EXPLOIT)]])
+    job = _run(_job(), runner, tmp_path)
+    assert job.suite_count == 1
+
+    job = _run(_confirm_all(job), runner, tmp_path)
+
+    assert job.status == "waiting_fix"
+    replayed = [kw["exploit"].id for name, kw in runner.calls if name == "score" and kw["exploit"] is not None]
+    assert "old-1" in replayed
+    assert job.rounds_detail[-1].fix is not None
+    assert job.rounds_detail[-1].fix.checks.suite_replay == "fail"
+    with pytest.raises(FixChecksFailedError):
+        decide_fix(job, approve=True)
+
+
+def test_saved_exploits_count_in_the_suite_after_a_fix(tmp_path: Path) -> None:
+    """The suite count covers the earlier jobs' exploits and the new ones."""
+    _seed_suite(tmp_path / "exploits", "old-1")
+    runner = FakeRunner([[(_CASE, _EXPLOIT)]])
+    job = _run(_confirm_all(_run(_job(rounds=1), runner, tmp_path)), runner, tmp_path)
+    assert job.rounds_detail[-1].fix is not None
+    assert job.rounds_detail[-1].fix.checks.suite_replay == "pass"
+
+    job = _run(decide_fix(job, approve=True), runner, tmp_path)
+
+    assert job.status == "done"
+    assert job.suite_count == 2
+    assert job.fixed_count == 1
+
+
+def test_retry_after_a_suite_write_failure_applies_the_fix_once(tmp_path: Path) -> None:
+    """The suite writes run before the fix, so a retry never applies the fix twice."""
+    runner = FakeRunner([[(_CASE, _EXPLOIT)]])
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a folder", encoding="utf-8")
+    job = _confirm_all(run_until_wait(_job(rounds=1), runner=runner, exploits_path=blocked, reference=None))
+    job = run_until_wait(job, runner=runner, exploits_path=blocked, reference=None)
+    job = run_until_wait(decide_fix(job, approve=True), runner=runner, exploits_path=blocked, reference=None)
+    assert job.status == "failed"
+    assert "apply_fix" not in runner.names()
+
+    job = _run(retry(job), runner, tmp_path)
+
+    assert job.status == "done"
+    assert runner.names().count("apply_fix") == 1
+    assert job.rounds_detail[-1].status == "fixed"
+
+
+def test_retry_after_a_failed_apply_writes_the_suite_again_safely(tmp_path: Path) -> None:
+    """A failed apply leaves the suite files; the retry rewrites them in place and applies the fix."""
+    runner = FakeRunner([[(_CASE, _EXPLOIT)]])
+    job = _run(_confirm_all(_run(_job(rounds=1), runner, tmp_path)), runner, tmp_path)
+    runner.fail_on = "apply_fix"
+    job = _run(decide_fix(job, approve=True), runner, tmp_path)
+    assert job.status == "failed"
+
+    runner.fail_on = None
+    job = _run(retry(job), runner, tmp_path)
+
+    assert job.status == "done"
+    assert runner.names().count("apply_fix") == 2
+    assert job.suite_count == 1
+    assert len(list((tmp_path / "exploits").glob("*/patch.diff"))) == 1

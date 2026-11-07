@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, Index, String
+from sqlalchemy import DateTime, Index, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..constants import HARDENING_DEFAULT_ROUND_CAP_USD, HARDENING_DEFAULT_ROUNDS
@@ -36,6 +36,7 @@ CheckResult = Literal["pass", "fail", "pending"]
 RoundStatus = Literal["running", "waiting_review", "waiting_fix", "clean", "approved", "fixed", "rejected", "stopped"]
 
 ACTIVE_STATUSES: frozenset[str] = frozenset({"preflight", "running", "waiting_review", "waiting_fix"})
+_ACTIVE_WHERE = text("status IN ('preflight', 'running', 'waiting_review', 'waiting_fix')")
 
 
 # One claim from the attacker, with the judge's label and the user's verdict.
@@ -118,7 +119,17 @@ class HardeningJobModel(Base):
     """One metric-hardening job of one user, for one setup draft."""
 
     __tablename__ = "hardening_jobs"
-    __table_args__ = (Index("ix_hardening_jobs_owner_draft_created", "username", "draft_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_hardening_jobs_owner_draft_created", "username", "draft_id", "created_at"),
+        Index(
+            "uq_hardening_jobs_active_draft",
+            "username",
+            "draft_id",
+            unique=True,
+            postgresql_where=_ACTIVE_WHERE,
+            sqlite_where=_ACTIVE_WHERE,
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     username: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
