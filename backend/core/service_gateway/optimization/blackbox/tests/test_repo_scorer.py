@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import traceback
 from collections.abc import Iterator, Mapping
 from pathlib import Path
@@ -11,10 +12,12 @@ from typing import Any
 
 import pytest
 
+from core.billing.signals import BudgetReached
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
 
+from ..repo_constraints import TargetStage
 from ..repo_scorer import RepoScoreError, RepoScorer, _scrub, fold_case_scores
 from ..repo_workspace import RepoWorkspace
 from ..rule_judge import (
@@ -26,6 +29,7 @@ from ..rule_judge import (
     RuleJudge,
 )
 from ..sandbox import LocalSubprocessRuntime, SandboxSpec
+from ..sandbox_contract import SandboxSession
 from ..service import run_blackbox_optimization
 from .test_repo_workspace import _archive, _patch
 
@@ -724,3 +728,222 @@ def test_an_exception_group_traceback_sends_no_frame_or_source_line() -> None:
     assert "Traceback" not in scrubbed
     assert "ExceptionGroup: checks failed (2 sub-exceptions)" in scrubbed
     assert "ValueError: bad" in scrubbed
+
+
+STAGE_TREE = {
+    "src/app.py": "x = 1\n",
+    "src/stages.py": (
+        "import time\n"
+        "FACTOR = 2\n"
+        "def double(value):\n"
+        "    return {'v': value['v'] * FACTOR}\n"
+        "def broken(value):\n"
+        "    raise RuntimeError('stage broke')\n"
+        "def slow(value):\n"
+        "    time.sleep(value)\n"
+        "    return value\n"
+    ),
+}
+STAGES = {
+    "double": TargetStage(entry="src/stages.py:double", timeout=30),
+    "shout": TargetStage(
+        entry=("python3", "-c", "import json, sys; print(json.dumps(json.load(sys.stdin).upper()))"), timeout=30
+    ),
+    "broken": TargetStage(entry="src/stages.py:broken", timeout=30),
+    "slow": TargetStage(entry="src/stages.py:slow", timeout=1),
+}
+
+
+class RecordingRuntime:
+    """Open local boxes and remember each spec and each close."""
+
+    injects_headers = False
+
+    def __init__(self, fail_on: str | None = None, error: Exception | None = None) -> None:
+        """Set which stage box refuses to open.
+
+        Args:
+            fail_on: The stage name whose box raises ``error`` on open.
+            error: What the refused open raises.
+        """
+        self.specs: list[SandboxSpec] = []
+        self.sessions: list[SandboxSession] = []
+        self.closed = 0
+        self._fail_on = fail_on
+        self._error = error or RuntimeError("no capacity")
+
+    def open(self, spec: SandboxSpec) -> SandboxSession:
+        """Open one local box, or refuse the configured stage.
+
+        Args:
+            spec: The stage box's spec.
+
+        Returns:
+            The local session, which counts its close.
+
+        Raises:
+            Exception: The configured error for the refused stage.
+        """
+        if self._fail_on and spec.operation_key.endswith(f":{self._fail_on}"):
+            raise self._error
+        self.specs.append(spec)
+        session = LocalSubprocessRuntime().open(spec)
+        close = session.close
+
+        def counted_close() -> None:
+            """Count the close, then remove the box."""
+            self.closed += 1
+            close()
+
+        session.close = counted_close  # type: ignore[method-assign]
+        self.sessions.append(session)
+        return session
+
+
+def _stage_scorer(
+    tmp_path: Path, code: str, runtime: RecordingRuntime, stages: Mapping[str, TargetStage] = STAGES, **kwargs: Any
+) -> tuple[RepoScorer, Path]:
+    """Open a scorer whose run has target stages.
+
+    Args:
+        tmp_path: Scratch folder.
+        code: The scorer code.
+        runtime: Opens the stage boxes.
+        stages: The run's stages.
+        **kwargs: More ``RepoScorer`` options.
+
+    Returns:
+        The scorer and the tree's archive.
+    """
+    archive = _archive(tmp_path, {**STAGE_TREE, "eval/metric.py": "hidden\n"})
+    stage_archive = _archive(tmp_path / "stage", STAGE_TREE)
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+        ),
+        code,
+        timeout_seconds=60,
+        stages=stages,
+        stage_runtime=runtime,
+        stage_archive=stage_archive,
+        hidden_paths=("eval/metric.py",),
+        **kwargs,
+    )
+    return scorer, archive
+
+
+def test_one_and_two_stages_answer_and_see_the_version(tmp_path: Path) -> None:
+    """The scorer calls two stages; each stage box runs the scored version, and every box closes."""
+    code = (
+        "from skynet import call\n"
+        "def score(repo_path, case=None):\n"
+        "    doubled = call('double', {'v': 3})\n"
+        "    return {'score': doubled['v'] / 10, 'feedback': call('shout', 'hi')}\n"
+    )
+    runtime = RecordingRuntime()
+    stages = {name: STAGES[name] for name in ("double", "shout")}
+    scorer, archive = _stage_scorer(tmp_path, code, runtime, stages)
+    try:
+        assert scorer.score("") == {"score": pytest.approx(0.6), "feedback": "HI"}
+        version = _patch(tmp_path / "v1", archive, {"src/stages.py": STAGE_TREE["src/stages.py"].replace("2", "3")})
+        assert scorer.score(version)["score"] == pytest.approx(0.9)
+    finally:
+        scorer.close()
+    assert len(runtime.specs) == 4
+    assert runtime.closed == 4
+    keys = [spec.operation_key for spec in runtime.specs]
+    assert len(set(keys)) == 4
+    assert all(key.startswith("stage:") for key in keys)
+    assert all(spec.network_disabled for spec in runtime.specs)
+
+
+def test_one_stage_is_enough(tmp_path: Path) -> None:
+    """A run with one stage opens one box for each evaluation."""
+    code = "from skynet import call\ndef score(repo_path, case=None):\n    return call('double', {'v': 1})['v'] / 10, 'ok'\n"
+    runtime = RecordingRuntime()
+    scorer, _ = _stage_scorer(tmp_path, code, runtime, {"double": STAGES["double"]})
+    try:
+        assert scorer.score("")["score"] == pytest.approx(0.2)
+    finally:
+        scorer.close()
+    assert runtime.closed == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("broken", "RuntimeError: stage broke"),
+        ("slow", "passed its 1s timeout"),
+        ("nope", "Unknown stage 'nope'"),
+    ],
+)
+def test_stage_failures_reach_the_scorer_as_stage_errors(tmp_path: Path, name: str, expected: str) -> None:
+    """A failed stage, a stage past its timeout and an unknown name each raise ``StageError``."""
+    code = (
+        "from skynet import call, StageError\n"
+        "def score(repo_path, case=None):\n"
+        "    try:\n"
+        f"        call({name!r}, 3)\n"
+        "    except StageError as error:\n"
+        "        return 0.0, str(error)\n"
+        "    return 1.0, 'no error'\n"
+    )
+    runtime = RecordingRuntime()
+    scorer, _ = _stage_scorer(tmp_path, code, runtime)
+    try:
+        assert expected in scorer.score("")["feedback"]
+    finally:
+        scorer.close()
+    assert runtime.closed == len(STAGES)
+
+
+def test_a_box_that_fails_to_open_leaves_none_open(tmp_path: Path) -> None:
+    """When one stage box cannot open, the open ones close and the version gets no score."""
+    runtime = RecordingRuntime(fail_on="shout")
+    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    try:
+        with pytest.raises(RepoScoreError, match="stage boxes could not open"):
+            scorer.score("")
+    finally:
+        scorer.close()
+    assert runtime.specs
+    assert runtime.closed == len(runtime.specs)
+
+
+def test_a_budget_refusal_stops_the_run(tmp_path: Path) -> None:
+    """A stage box the budget refuses stops the run as budget reached, with no box left open."""
+    runtime = RecordingRuntime(fail_on="shout", error=BudgetReached("spent"))
+    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    try:
+        with pytest.raises(BudgetReached):
+            scorer.score("")
+    finally:
+        scorer.close()
+    assert runtime.closed == len(runtime.specs)
+
+
+def test_concurrent_calls_to_one_stage_run_in_parallel(tmp_path: Path) -> None:
+    """Four calls to one stage overlap, each in its own process, up to ``max_concurrency``."""
+    code = (
+        "from concurrent.futures import ThreadPoolExecutor\n"
+        "from skynet import call\n"
+        "def score(repo_path, case=None):\n"
+        "    with ThreadPoolExecutor(4) as pool:\n"
+        "        values = list(pool.map(lambda value: call('slow', value), [0.6] * 4))\n"
+        "    return sum(values), 'ok'\n"
+    )
+    stages = {"slow": TargetStage(entry="src/stages.py:slow", timeout=30)}
+    runtime = RecordingRuntime()
+    scorer, _ = _stage_scorer(tmp_path, code, runtime, stages, max_concurrency=4)
+    try:
+        started = time.monotonic()
+        assert scorer.score("")["score"] == pytest.approx(2.4)
+        assert time.monotonic() - started < 2.0
+    finally:
+        scorer.close()

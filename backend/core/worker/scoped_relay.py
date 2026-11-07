@@ -11,6 +11,8 @@ from ..billing.env_connectors import CONNECTOR_ROUTES_KEY
 from ..billing.host_agent import HOST_AGENT_PATH, HOST_AGENT_TOKEN_KEY
 from ..billing.model_dispatch import ModelHTTPResult
 from ..config import settings
+from ..models.blackbox import BLACKBOX_TARGET_REPO
+from ..service_gateway.optimization.blackbox.repo_scorer import SETUP_ALLOWANCE_SECONDS
 
 
 def model_forwarder(payload: dict[str, Any]) -> Any:
@@ -80,6 +82,12 @@ def model_forwarder(payload: dict[str, Any]) -> Any:
             register(route, frozenset({"/v1/_mcp", "/v1/_budget/state"}))
     register(payload.get("_skynet_packages_route"), frozenset({"/v1/_packages"}))
     register(payload.get("_skynet_evaluator_route"), frozenset({"/v1/_evaluator", "/v1/_budget/state"}))
+    target = payload.get("target")
+    evaluator_timeout = 630.0
+    if isinstance(target, dict) and target.get("kind") == BLACKBOX_TARGET_REPO:
+        # A repository score also prepares the version and opens its stage boxes, so the
+        # guest waits up to its setup allowance longer; the parent must not cut it off first.
+        evaluator_timeout += SETUP_ALLOWANCE_SECONDS
 
     def dispatch(token: str, path: str, body: dict[str, Any], headers: dict[str, str]) -> ModelHTTPResult:
         """Forward one request through its exact scoped capability.
@@ -98,7 +106,7 @@ def model_forwarder(payload: dict[str, Any]) -> Any:
         """
         if token not in routes or path not in routes[token][1]:
             raise ValueError("The guest requested an unknown metered model capability.")
-        timeout = 630 if path == "/v1/_evaluator" else 600
+        timeout = evaluator_timeout if path == "/v1/_evaluator" else 600
         if path == HOST_AGENT_PATH:
             # One host CLI turn may run for its whole configured limit.
             timeout = settings.host_agent_timeout_seconds + 30

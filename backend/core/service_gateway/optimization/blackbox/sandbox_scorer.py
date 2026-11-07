@@ -306,9 +306,10 @@ def _raise_control(result: Mapping[str, Any]) -> None:
 class SandboxPythonScorer:
     """A python scorer that runs inside a sandbox: one box per job, one runner call per evaluation.
 
-    Calls are serialized; the engines' concurrency applies to agent targets,
-    which open their own boxes. ``usage`` is the ledger the run bills, or
-    ``None`` when the scorer has no model.
+    Calls share the box and run in parallel, each in its own call folder, so
+    the engines' ``max_concurrency`` bounds them. Only opening the box and
+    installing packages are serialized. ``usage`` is the ledger the run
+    bills, or ``None`` when the scorer has no model.
     """
 
     def __init__(
@@ -373,9 +374,9 @@ class SandboxPythonScorer:
         )
         self._session: SandboxSession | None = None
         self._calls = 0
+        # ``_lock`` guards the box and the dependency lock only; the calls
+        # themselves run outside it, and the counter only needs uniqueness.
         self._lock = threading.Lock()
-        # ``_lock`` serializes whole calls for the engines; the counter only
-        # needs uniqueness, so concurrent contract-check invokes use their own.
         self._calls_lock = threading.Lock()
         self.usage: ScorerUsage | None = ScorerUsage(gateway.billing_model) if gateway is not None else None
 
@@ -421,17 +422,21 @@ class SandboxPythonScorer:
             blocked = self._extend(candidate)
             if blocked is not None:
                 return ScorerProbeResult(score=None, side_info={}, error=blocked)
-            try:
-                result = self._invoke(payload)
-            except (ServiceError, BudgetError, UsagePendingError):
+            session = self._open()
+        try:
+            result = self._invoke(payload)
+        except (ServiceError, BudgetError, UsagePendingError):
+            raise
+        except Exception:
+            if self._protected:
                 raise
-            except Exception:
-                if self._protected:
-                    raise
-                # The box died under us (lifetime reached, host recycled): one fresh box, one more try.
-                logger.warning("scorer sandbox failed; reopening", exc_info=True)
-                self._discard()
-                result = self._invoke(payload)
+            # The box died under us (lifetime reached, host recycled): one fresh box, one more try.
+            logger.warning("scorer sandbox failed; reopening", exc_info=True)
+            with self._lock:
+                # A parallel call may have reopened it already; that new box stays.
+                if self._session is session:
+                    self._discard()
+            result = self._invoke(payload)
         _raise_control(result)
         entries = list(result.get("usage") or [])
         if self.usage is not None:
@@ -462,8 +467,7 @@ class SandboxPythonScorer:
             "mode": "readiness",
             "gateway": self._gateway.runner_payload() if self._gateway is not None else None,
         }
-        with self._lock:
-            result = self._invoke(payload)
+        result = self._invoke(payload)
         _raise_control(result)
         readiness = result.get("readiness")
         if result.get("error") or not isinstance(readiness, dict) or not readiness.get("ready"):
@@ -487,10 +491,12 @@ class SandboxPythonScorer:
         Raises:
             ServiceError: When the runner produced no output.
         """
-        session = self._open()
+        with self._lock:
+            session = self._open()
         with self._calls_lock:
             self._calls += 1
-            call_dir = f"{CALLS_DIR}/{self._calls:06d}"
+            number = self._calls
+        call_dir = f"{CALLS_DIR}/{number:06d}"
         started = time.perf_counter()
         session.write_files(
             {f"{call_dir}/{runner.INPUT_FILE}": json.dumps(payload, default=runner.side_info_json_default)}
@@ -511,7 +517,7 @@ class SandboxPythonScorer:
                 on_output=sandbox_log.ignore_output,
             )
         logger.debug(
-            "scorer call %d finished in %.1fs (exit %s)", self._calls, time.perf_counter() - started, result.exit_code
+            "scorer call %d finished in %.1fs (exit %s)", number, time.perf_counter() - started, result.exit_code
         )
         if result.timed_out:
             return {

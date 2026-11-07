@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any
 
@@ -263,6 +265,37 @@ def test_sandbox_scorer_installs_the_runner_once_and_runs_one_call_per_directory
     assert usage_by_model_from_history(scorer.usage) == {"fake/judge": (6, 2)}
     assert lm_call_count(scorer.usage) == 2
     assert total_tokens_from_history(scorer.usage) == 8
+
+
+def test_sandbox_scorer_runs_concurrent_calls_in_parallel_with_their_own_results() -> None:
+    """Parallel metric calls share one box, each in its own call folder, with its own score and usage."""
+    started = threading.Barrier(3, timeout=5)
+
+    def respond(payload: dict[str, Any]) -> dict[str, Any]:
+        """Wait until all three calls are inside the box, then score by candidate length.
+
+        Args:
+            payload: The call's input.
+
+        Returns:
+            The call's output, with usage equal to its length.
+        """
+        started.wait()
+        size = len(payload["candidate"])
+        return {**_OK, "score": size, "usage": _usage((size, 1))}
+
+    runtime = _runtime(respond)
+    scorer = SandboxPythonScorer("def score(c): return 1", runtime=runtime, gateway=_GATEWAY, timeout_seconds=5)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        probes = list(pool.map(scorer.run, ["a", "bb", "ccc"]))
+    scorer.close()
+
+    assert [probe.score for probe in probes] == [1.0, 2.0, 3.0]
+    assert [probe.usage_by_model for probe in probes] == [{"fake/judge": (n, 1)} for n in (1, 2, 3)]
+    [box] = runtime.sessions
+    assert sorted(box.commands) == [f"python3 {RUNNER_FILE} {CALLS_DIR}/00000{n}" for n in (1, 2, 3)]
+    assert usage_by_model_from_history(scorer.usage) == {"fake/judge": (6, 3)}
 
 
 def test_sandbox_scorer_without_a_model_sends_no_gateway_and_bills_nothing() -> None:

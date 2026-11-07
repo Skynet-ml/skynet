@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import tarfile
@@ -26,7 +27,7 @@ from core.connectors.github_publish import PublishedChange, RepoPublishError
 from core.connectors.github_repo import RepoSnapshot
 from core.exceptions import ServiceError
 from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR
-from core.service_gateway.optimization.blackbox.repo_constraints import ConstraintsError
+from core.service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, TargetStage
 from core.service_gateway.optimization.blackbox.repo_workspace import _PROBE_OK, NetworkCutoffError
 from core.service_gateway.optimization.blackbox.rule_judge import (
     JUDGE_ANSWER_TOKENS,
@@ -1433,3 +1434,50 @@ def test_the_stored_result_keeps_only_the_scored_change(monkeypatch: pytest.Monk
     assert result["versions"][0]["candidate"] == _EDIT
     assert result["lanes"][0]["candidate"] == {"a": _EDIT}
     assert pushed[0][2] == _EDIT
+
+
+def test_staging_keeps_the_target_stages_and_the_stripped_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The run's ``[target.<name>]`` stages and the tree without the metric reach the parent's scorer."""
+    files = {"optimize.toml": _CONSTRAINTS + '\n[target.locate]\nentry = "src/geocode/locate.py:run"\ntimeout = 5\n'}
+    _, staged = _stage_with(files, monkeypatch)
+    try:
+        assert list(staged.targets) == ["locate"]
+        assert staged.targets["locate"].entry == "src/geocode/locate.py:run"
+        assert staged.agent_archive is not None
+        assert staged.agent_archive.is_file()
+    finally:
+        staged.cleanup()
+
+
+def test_binding_hands_the_stages_to_the_scorer(tmp_path: Path) -> None:
+    """With stages the scorer gets the parent runtime, the stripped tree and the run's concurrency."""
+    payload, staged = _binding(tmp_path, None)
+    staged = dataclasses.replace(
+        staged,
+        targets={"locate": TargetStage(entry="a.py:f")},
+        agent_archive=tmp_path / "agent-tree.tgz",
+    )
+    payload["max_concurrency"] = 3
+    gateway = _Gateway()
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    scorer = gateway.evaluator
+    assert list(scorer._stages) == ["locate"]
+    assert scorer._stage_runtime is not None
+    assert scorer._stage_archive == tmp_path / "agent-tree.tgz"
+    assert scorer._hidden == staged.hidden_paths
+    assert scorer._max_concurrency == 3
+    staged.close_scorers()
+
+
+def test_binding_without_stages_keeps_the_scorer_as_it_was(tmp_path: Path) -> None:
+    """A run with no targets opens no stage boxes and needs no stage runtime."""
+    payload, staged = _binding(tmp_path, None)
+    gateway = _Gateway()
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    assert gateway.evaluator._stages == {}
+    assert gateway.evaluator._stage_runtime is None
+    staged.close_scorers()

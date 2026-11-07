@@ -26,17 +26,25 @@ itself broken (unreadable input, unwritable output). ``gateway`` names the
 OpenAI-compatible endpoint the scorer's ``llm()`` helper talks to; its
 ``api_key`` may be absent when the sandbox injects the credential at the
 network edge instead.
+
+An input's optional ``stages`` (``{"prefix", "response_dir", "names"}``)
+lets the scorer reach the run's ``[target.<name>]`` stages through the
+parent's relay with ``call(name, input)``. In a stage box,
+``python3 app_runner.py --stage <call_dir> <path/file.py:function>`` runs
+one stage call and writes ``{"output": ...}`` or ``{"error": ...}``.
 """
 
 from __future__ import annotations
 
 import base64
+import importlib.util
 import inspect
 import io
 import json
 import os
 import ssl
 import sys
+import threading
 import time
 import types
 import urllib.error
@@ -61,6 +69,12 @@ ENV_BUDGET_RELAY_URL = "APP_BUDGET_RELAY_URL"
 _LEGACY_ENV_PREFIX = "SKYNET_"
 IMAGE_HELPER_NAME = "Image"
 LOG_HELPER_NAME = "log"
+# ``from skynet import call, StageError`` reaches the run's ``[target.<name>]`` stages.
+STAGE_HELPER_NAME = "call"
+STAGE_ERROR_NAME = "StageError"
+# ``app_runner.py --stage <call_dir> <path/file.py:function>`` runs one stage call.
+STAGE_FLAG = "--stage"
+_STAGE_POLL_SECONDS = 0.05
 # Frames one ``log()`` event on stderr; the host turns each into a run-log line.
 EVENT_PREFIX = "APP_SCORER_EVENT "
 _EVENT_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
@@ -119,6 +133,81 @@ class GatewayControl(BaseException):
         """
         super().__init__(message)
         self.code = code
+
+
+class StageError(Exception):
+    """A stage failed, returned no valid output, passed its timeout, or is not in this run."""
+
+
+class StageClient:
+    """Send ``call(name, input)`` to the parent's stage relay and wait for the stage's output.
+
+    The box is offline: each request is one framed stdout line the parent
+    reads, and the answer is a file the parent writes back into the box. The
+    scorer's own timeout bounds the wait, and each stage's ``timeout`` bounds
+    its call on the parent side.
+    """
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        """Bind the relay's frame prefix, response folder and stage names.
+
+        Args:
+            config: ``{"prefix", "response_dir", "names"}`` from the call's input.
+        """
+        self._prefix = str(config["prefix"])
+        self._responses = Path(str(config["response_dir"]))
+        self._names = tuple(str(name) for name in config.get("names") or ())
+        self._lock = threading.Lock()
+
+    def __call__(self, name: str, input: Any = None) -> Any:
+        """Run one stage on ``input`` and return its JSON output.
+
+        Args:
+            name: The ``[target.<name>]`` stage to call.
+            input: Any JSON value; the stage receives it as its only argument.
+
+        Returns:
+            The stage's output.
+
+        Raises:
+            StageError: When the name is not a stage of this run, the stage
+                failed, returned no valid output, or passed its timeout.
+            GatewayControl: When the run's budget stopped the call.
+        """
+        if name not in self._names:
+            known = ", ".join(self._names) or "none"
+            raise StageError(f"Unknown stage {name!r}; the stages of this run are: {known}.")
+        identity = os.urandom(16).hex()
+        frame = self._prefix + json.dumps({"id": identity, "stage": name, "input": input})
+        # The real stdout: a scorer that redirects sys.stdout must still reach the relay.
+        stream = sys.__stdout__ or sys.stdout
+        with self._lock:
+            stream.write(frame + "\n")
+            stream.flush()
+        path = self._responses / f"{identity}.json"
+        while True:
+            try:
+                response = json.loads(path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, ValueError):
+                # ValueError: the parent's write is still in progress.
+                time.sleep(_STAGE_POLL_SECONDS)
+                continue
+            break
+        path.unlink()
+        if isinstance(response.get("control"), dict):
+            raise GatewayControl(str(response["control"].get("code")), str(response["control"].get("message")))
+        if "output" in response:
+            return response["output"]
+        raise StageError(str(response.get("error") or f"Stage {name!r} returned no output."))
+
+
+def missing_stage(name: Any = None, input: Any = None) -> Any:
+    """Refuse a stage call in a run that has no ``[target.<name>]`` stages.
+
+    Raises:
+        StageError: Always.
+    """
+    raise StageError("This run has no target stages, so call() has nothing to call.")
 
 
 @dataclass
@@ -462,7 +551,8 @@ def helper_module(helpers: dict[str, Any]) -> types.ModuleType:
     """
     module = types.ModuleType(
         HELPER_MODULE_NAME,
-        "Helpers for scorer code: llm(prompt, input=None, images=None), Image(...) and log(event, **fields).",
+        "Helpers for scorer code: llm(prompt, input=None, images=None), Image(...), log(event, **fields)"
+        " and call(stage, input) with StageError.",
     )
     module.__dict__.update(helpers)
     return module
@@ -771,6 +861,7 @@ def run_call(payload: dict[str, Any]) -> dict[str, Any]:
         The ``output.json`` contents: score, side info, error and ``llm()`` usage.
     """
     gateway = payload.get("gateway")
+    stages = payload.get("stages")
     llm: GatewayClient | None = None
     if isinstance(gateway, dict):
         llm = GatewayClient(
@@ -790,6 +881,8 @@ def run_call(payload: dict[str, Any]) -> dict[str, Any]:
         LLM_HELPER_NAME: llm if llm is not None else missing_llm,
         IMAGE_HELPER_NAME: Image,
         LOG_HELPER_NAME: log,
+        STAGE_HELPER_NAME: StageClient(stages) if isinstance(stages, dict) else missing_stage,
+        STAGE_ERROR_NAME: StageError,
     }
     result: dict[str, Any] = {"score": None, "side_info": {}, "error": None, "usage": []}
     try:
@@ -832,6 +925,8 @@ def main(argv: list[str] | None = None) -> int:
         The process exit code: 0 whenever the output was written.
     """
     args = list(sys.argv[1:] if argv is None else argv)
+    if len(args) == 3 and args[0] == STAGE_FLAG:
+        return run_stage(Path(args[1]), args[2])
     if len(args) != 1:
         sys.stderr.write("usage: app_runner.py <call_dir>\n")
         return 2
@@ -843,6 +938,39 @@ def main(argv: list[str] | None = None) -> int:
     result = run_call(payload)
     partial = call_dir / (OUTPUT_FILE + ".part")
     partial.write_text(json.dumps(result), encoding="utf-8")
+    partial.replace(call_dir / OUTPUT_FILE)
+    return 0
+
+
+def run_stage(call_dir: Path, entry: str) -> int:
+    """Run one Python stage call: ``<call_dir>/input.json`` → ``function(input)`` → ``output.json``.
+
+    The working directory is the candidate's tree, so ``entry`` and the
+    stage's own imports resolve against it.
+
+    Args:
+        call_dir: The call's folder in the stage box.
+        entry: ``path/file.py:function``, relative to the tree.
+
+    Returns:
+        The process exit code: 0 whenever the output was written.
+    """
+    try:
+        payload = json.loads((call_dir / INPUT_FILE).read_text(encoding="utf-8"))
+        path, _, function = entry.rpartition(":")
+        source = Path(path).resolve()
+        sys.path[:0] = [str(source.parent), str(Path.cwd())]
+        spec = importlib.util.spec_from_file_location("app_stage_entry", source)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        text = json.dumps({"output": getattr(module, function)(payload)}, allow_nan=False)
+    except BaseException as exc:  # user code is arbitrary: any failure is reported, not raised
+        text = json.dumps({"error": f"{type(exc).__name__}: {exc}"})
+    partial = call_dir / (OUTPUT_FILE + ".part")
+    partial.write_text(text, encoding="utf-8")
     partial.replace(call_dir / OUTPUT_FILE)
     return 0
 
