@@ -546,11 +546,11 @@ def test_version_code_that_rewrites_the_hidden_metric_while_it_runs_is_caught(tm
         space.checkout(version)
         space.stamp_before_run()
         space.session().run(f"cd {WORK_DIR} && printf 'def score(): return 1.0\\n' > eval/metric.py")
-        assert space.protected_changes() == ("The version's code changed the repository's metric files while it ran.",)
+        assert space.protected_changes() == ("The metric files changed while the version ran.",)
 
         space.checkout(version)
         space.stamp_before_run()
         space.session().run(f"cd {WORK_DIR} && mkdir -p .optimize/exploits && touch .optimize/exploits/a")
-        assert space.protected_changes() == ("The version's code changed the repository's metric files while it ran.",)
+        assert space.protected_changes() == ("The metric files changed while the version ran.",)
     finally:
         space.close()

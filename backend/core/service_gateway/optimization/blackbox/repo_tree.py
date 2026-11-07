@@ -147,7 +147,7 @@ def patch_paths(patch: str) -> list[str]:
     # Hunk bodies can hold lines that look like headers ("--- a/x" is a
     # removed "-- a/x"), so only the lines before a file's first hunk count.
     in_header = False
-    for line in patch.splitlines():
+    for line in patch.split("\n"):
         if line.startswith("diff --git "):
             in_header = True
             found.extend(_header_paths(line[len("diff --git ") :]))
@@ -186,7 +186,7 @@ def _unreadable(patch: str) -> bool:
             renamed = re.search(r"(?m)^(?:rename|copy) (?:from|to) ", section)
             if not _header_paths(header) and not (header.startswith(("a/", '"a/')) and renamed):
                 return True
-    for line in patch.splitlines():
+    for line in patch.split("\n"):
         if state == "hunk" and (old > 0 or new > 0):
             tag = line[:1] or " "
             if tag not in " -+\\":
@@ -242,7 +242,7 @@ def patch_violations(
     editable, readonly, protected = list(editable_paths), list(readonly_paths), list(protected_paths)
     problems: list[str] = []
     in_header = False
-    for line in patch.splitlines():
+    for line in patch.split("\n"):
         if line.startswith("diff --git "):
             in_header = True
         elif line.startswith(("@@", "GIT binary patch")):

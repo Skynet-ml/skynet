@@ -279,3 +279,15 @@ def test_header_like_lines_inside_a_hunk_are_allowed() -> None:
     )
 
     assert patch_violations(patch, ["src"]) == []
+
+
+@pytest.mark.parametrize("breaker", ["\f", "\u2028", "\r"], ids=["form-feed", "line-separator", "lone-cr"])
+def test_a_line_break_python_knows_but_git_does_not_stays_inside_its_hunk_line(breaker: str) -> None:
+    """``git apply`` splits only on ``\\n``, so other line breaks must not shift the hunk count (SKY-353)."""
+    patch = (
+        "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n"
+        f"@@ -1,3 +1,3 @@\n-x = 1\n+x = 'A{breaker}B'\n y = 2\n-z = 3\n+++ b/eval/scorer.py\n"
+    )
+
+    assert patch_paths(patch) == ["src/a.py"]
+    assert patch_violations(patch, ["src"]) == []

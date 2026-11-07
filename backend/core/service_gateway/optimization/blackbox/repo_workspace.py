@@ -464,7 +464,7 @@ class RepoWorkspace:
         changed = sorted(path for path in changed if not any(other.startswith(f"{path}/") for other in changed))
         hidden = [path for path in changed if any(path == top or path.startswith(f"{top}/") for top in self._hidden)]
         # The agent never sees the hidden files, so the reason does not name them.
-        reasons = ["The version's code changed the repository's metric files while it ran."] if hidden else []
+        reasons = ["The metric files changed while the version ran."] if hidden else []
         return (
             *reasons,
             *(

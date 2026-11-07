@@ -15,6 +15,7 @@ Pareto front.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import shlex
@@ -30,6 +31,8 @@ from .repo_workspace import REPO_DIR, WORK_DIR, RepoWorkspace, redact
 from .rule_judge import RuleJudge
 from .sandbox import SandboxSession
 from .sandbox_scorer import RUNNER_SOURCE, ScorerGateway, _raise_control
+
+logger = logging.getLogger(__name__)
 
 CASES_KEY = "cases"
 # The guest names no real endpoint: its requests reach only the parent relay.
@@ -195,13 +198,23 @@ class RepoScorer:
                 reason = redact(" ".join(tampered), secrets)
                 raise RepoScoreError(judge.blocked([reason]) if judge is not None else reason)
             text = session.read_file(f"{CALLS_DIR}/{self._calls:06d}/{runner.OUTPUT_FILE}")
+        # The version's code runs next to the hidden metric and can print or
+        # raise its contents, so the guest gets only a fixed message; the
+        # details stay in the server log (SKY-353).
         if text is None:
-            output = redact(_scrub(result.stderr or result.stdout, root)[-2_000:], secrets)
-            raise RepoScoreError(f"The scorer did not finish (exit {result.exit_code}): {output}")
+            logger.warning(
+                "Repository scorer did not finish (exit %s): %s",
+                result.exit_code,
+                redact((result.stderr or result.stdout)[-2_000:], secrets),
+            )
+            raise RepoScoreError(f"The scorer did not finish (exit {result.exit_code}).")
         output = json.loads(redact(text, secrets))
         _raise_control(output)
-        if output.get("error") or output.get("score") is None:
-            raise RepoScoreError(str(output.get("error") or "The scorer returned no score."))
+        if output.get("error"):
+            logger.warning("Repository scorer raised: %s", output["error"])
+            raise RepoScoreError("The scorer raised an error, so the version has no score.")
+        if output.get("score") is None:
+            raise RepoScoreError("The scorer returned no score.")
         side_info = fold_case_scores(output.get("side_info") or {})
         return {**side_info, "score": float(output["score"])}
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import traceback
 from collections.abc import Iterator, Mapping
 from pathlib import Path
@@ -105,8 +106,8 @@ def test_versions_outside_the_editable_paths_are_refused(scored: tuple[RepoScore
         scorer.score(_patch(root / "bad", archive, {"README": "changed\n"}))
 
 
-def test_a_failing_scorer_is_reported(tmp_path: Path) -> None:
-    """A scorer that raises surfaces its error as an unscorable version."""
+def test_a_failing_scorer_is_reported(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A scorer that raises gives an unscorable version and logs its error on the server."""
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
     scorer = RepoScorer(
         RepoWorkspace(
@@ -122,8 +123,9 @@ def test_a_failing_scorer_is_reported(tmp_path: Path) -> None:
         timeout_seconds=60,
     )
     try:
-        with pytest.raises(RepoScoreError, match="tests failed"):
+        with caplog.at_level(logging.WARNING), pytest.raises(RepoScoreError, match="raised an error"):
             scorer.score("")
+        assert "tests failed" in caplog.text
     finally:
         scorer.close()
 
@@ -577,7 +579,7 @@ def test_the_proposer_gets_only_the_score_and_the_feedback(tmp_path: Path) -> No
 
 
 def test_a_crashing_metric_sends_no_traceback_or_box_path(tmp_path: Path) -> None:
-    """A scorer crash tells the agent the error, not the metric's file paths or lines (SKY-353)."""
+    """A scorer crash tells the agent only that the scorer failed, not its paths or lines (SKY-353)."""
     scorer = _leaky(
         tmp_path,
         "import os\ndef score(repo_path):\n    open(os.path.join(repo_path, 'eval/missing.csv'))\n",
@@ -586,7 +588,7 @@ def test_a_crashing_metric_sends_no_traceback_or_box_path(tmp_path: Path) -> Non
         reply = scorer.dispatch({"candidate": ""})
         assert reply.status == 422
         text = reply.body.decode()
-        assert "eval/missing.csv" in text
+        assert "eval/missing.csv" not in text
         assert "Traceback" not in text
         assert 'File "' not in text
         assert "os.path.join" not in text
@@ -611,6 +613,39 @@ def test_a_version_that_rewrites_the_metric_gets_the_base_score(tmp_path: Path) 
         reply = scorer.dispatch({"candidate": cheat})
         assert reply.status == 200
         assert json.loads(reply.body)["score"] == pytest.approx(baseline) == pytest.approx(0.3)
+    finally:
+        scorer.close()
+
+
+@pytest.mark.parametrize(
+    "leak",
+    [
+        "import sys\nsys.stderr.write(SOURCE)\nsys.stderr.flush()\nos._exit(3)\n",
+        "raise RuntimeError(SOURCE)\n",
+    ],
+    ids=["stderr-and-exit", "exception-text"],
+)
+def test_a_version_that_reads_the_hidden_metric_gets_a_422_without_it(
+    tmp_path: Path, leak: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Version code that prints or raises a hidden file's content sends none of it to the guest (SKY-353)."""
+    scorer = _leaky(
+        tmp_path,
+        "import os, runpy\ndef score(repo_path):\n"
+        "    runpy.run_path(os.path.join(repo_path, 'src/app.py'))\n"
+        "    return {'score': 1.0, 'feedback': 'ok'}\n",
+    )
+    try:
+        cheat = _patch(
+            tmp_path / "cheat",
+            tmp_path / "tree.tgz",
+            {"src/app.py": f"import os\nSOURCE = open('eval/metric.py').read()\n{leak}"},
+        )
+        with caplog.at_level(logging.WARNING):
+            reply = scorer.dispatch({"candidate": cheat})
+        assert reply.status == 422
+        assert "WEIGHT" not in reply.body.decode()
+        assert "WEIGHT = 0.3" in caplog.text
     finally:
         scorer.close()
 
