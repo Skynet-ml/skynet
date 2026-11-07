@@ -50,7 +50,7 @@ import {
   clearSetupDraft,
 } from "@/shared/lib/setup-draft";
 import { formatMsg, msg, type MessageKey } from "@/shared/lib/messages";
-import { userErrorMessage } from "@/shared/lib/user-error";
+import { knownErrorCodeMessage, userErrorMessage } from "@/shared/lib/user-error";
 import type { ContinuousEnableRequest } from "@/shared/types/continuous";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { getActiveMessages } from "@/shared/lib/runtime-messages";
@@ -94,6 +94,7 @@ import {
   preflightMayAdvance,
   preflightPendingMessageKey,
 } from "../lib/preflight-outcome";
+import { gateReasons } from "../lib/gate-reasons";
 import { repoRunRequest } from "../lib/repo-run";
 import {
   currentRunFailure,
@@ -726,7 +727,12 @@ export function WizardV2Provider({
   const submitFailed = (err: unknown) => {
     // The storage 409 and the balance 402 each open their own shared modal.
     if (!isStorageQuotaError(err) && !isInsufficientFundsError(err)) {
-      toast.error(userErrorMessage(err, msg("submit.submit_failed")));
+      // A refused setup check names what to change, such as an unknown connector.
+      const reasons = gateReasons(err, knownErrorCodeMessage);
+      if (reasons.length > 0) console.error(err);
+      toast.error(
+        reasons.length > 0 ? reasons.join(" ") : userErrorMessage(err, msg("submit.submit_failed")),
+      );
     }
     submittingRef.current = false;
     setSubmitPhase("idle");
