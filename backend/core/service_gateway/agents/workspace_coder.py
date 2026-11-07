@@ -90,8 +90,9 @@ you return.
   ``mcp = "<path>"`` in ``[run]``, for example ``mcp = ".mcp.json"``; give the
   file's contents in ``summary`` too. In that file, use placeholders such as
   ``${{MAPS_KEY}}`` in ``headers`` and ``env`` too. Never write a secret value
-  into any file. Name every secret the run needs in ``summary``, so the user
-  can add it before the run. Give the
+  into any file, even when the user pastes one; write the placeholder and tell
+  the user to add the secret to the run. Name every secret the run needs in
+  ``summary``, so the user can add it before the run. Give the
   whole ``[run]`` section in ``summary``, so the setup assistant shows it to
   the user. With no ``[run]``, nothing runs and the metric judges only the
   checkout.

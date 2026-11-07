@@ -221,19 +221,33 @@ def _mcp_archive(tmp_path: Path, server: str) -> Path:
 
 
 def test_a_missing_mcp_server_secret_fails(tmp_path: Path) -> None:
-    """A user-bound ``${NAME}`` in a role's MCP file needs a run secret, like a service header (E49)."""
+    """A user-bound ``${NAME}`` in a role's MCP file needs a run secret, and the message names the file (E49)."""
     archive = _mcp_archive(tmp_path, '{"url": "https://grader.example.com/mcp", "headers": {"X-Key": "${GRADER_KEY}"}}')
+    secret_codes = (I18nKey.REPO_GATE_MISSING_SECRET, I18nKey.REPO_GATE_MISSING_MCP_SECRET)
 
-    missing = [f for f in check_repository(archive, (), place="cloud") if f.code == I18nKey.REPO_GATE_MISSING_SECRET]
+    missing = [f for f in check_repository(archive, (), place="cloud") if f.code in secret_codes]
 
-    assert [(f.key, f.params) for f in missing] == [
-        ("[metric] mcp secrets", {"service": "grader", "secret": "GRADER_KEY"})
+    assert [(f.key, f.code, f.params) for f in missing] == [
+        (
+            "[metric] mcp secrets",
+            I18nKey.REPO_GATE_MISSING_MCP_SECRET,
+            {"server": "grader", "path": "eval/.mcp.json", "secret": "GRADER_KEY"},
+        )
     ]
-    assert not [
-        f
-        for f in check_repository(archive, {"GRADER_KEY"}, place="cloud")
-        if f.code == I18nKey.REPO_GATE_MISSING_SECRET
-    ]
+    assert not [f for f in check_repository(archive, {"GRADER_KEY"}, place="cloud") if f.code in secret_codes]
+
+
+def test_the_missing_mcp_secret_message_names_the_server_the_file_and_the_fix() -> None:
+    """The MCP message names the server, the secret and the file, and says to add the secret to the run."""
+    params = {"server": "grader", "path": "eval/.mcp.json", "secret": "GRADER_KEY"}
+
+    english = t_locale("en", I18nKey.REPO_GATE_MISSING_MCP_SECRET, **params)
+    hebrew = t_locale("he", I18nKey.REPO_GATE_MISSING_MCP_SECRET, **params)
+
+    for text in (english, hebrew):
+        assert all(value in text for value in params.values())
+    assert "Add the secret to the run" in english
+    assert "service" not in english
 
 
 _MAPS = (
@@ -249,10 +263,10 @@ def _managed_failures(archive: Path) -> list[GateFailure]:
         archive: The packed tree.
 
     Returns:
-        The failures with the connector code.
+        The failures with the managed-key code.
     """
     failures = check_repository(archive, (), place="cloud", bindings={"GOOGLE_MAPS_KEY": "managed"})
-    return [failure for failure in failures if failure.code == I18nKey.REPO_GATE_UNKNOWN_CONNECTOR]
+    return [failure for failure in failures if failure.code == I18nKey.REPO_GATE_MANAGED_SECRET_UNAVAILABLE]
 
 
 def test_a_managed_binding_with_a_skynet_key_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -265,7 +279,9 @@ def test_a_managed_binding_with_a_skynet_key_passes(tmp_path: Path, monkeypatch:
     )
 
     assert [
-        f for f in failures if f.code in (I18nKey.REPO_GATE_MISSING_SECRET, I18nKey.REPO_GATE_UNKNOWN_CONNECTOR)
+        f
+        for f in failures
+        if f.code in (I18nKey.REPO_GATE_MISSING_SECRET, I18nKey.REPO_GATE_MANAGED_SECRET_UNAVAILABLE)
     ] == []
 
 
@@ -276,7 +292,7 @@ def test_a_managed_binding_on_a_host_with_no_skynet_key_fails(tmp_path: Path, mo
     [failure] = _managed_failures(_archive(tmp_path, {CONSTRAINTS_FILE: _MAPS}))
 
     assert failure.key == "[services.maps] secrets"
-    assert failure.params == {"service": "mapstools.googleapis.com", "known": "-"}
+    assert failure.params == {"secret": "GOOGLE_MAPS_KEY", "host": "mapstools.googleapis.com", "known": "-"}
 
 
 def test_a_managed_binding_on_a_host_outside_the_catalog_fails(tmp_path: Path) -> None:
@@ -285,7 +301,8 @@ def test_a_managed_binding_on_a_host_outside_the_catalog_fails(tmp_path: Path) -
 
     [failure] = _managed_failures(_archive(tmp_path, {CONSTRAINTS_FILE: raw}))
 
-    assert failure.params["service"] == "maps.example.com"
+    assert failure.params["secret"] == "GOOGLE_MAPS_KEY"
+    assert failure.params["host"] == "maps.example.com"
 
 
 def test_a_managed_stdio_secret_fails(tmp_path: Path) -> None:
@@ -295,7 +312,8 @@ def test_a_managed_stdio_secret_fails(tmp_path: Path) -> None:
     [failure] = _managed_failures(archive)
 
     assert failure.key == "[metric] mcp secrets"
-    assert failure.params["service"] == "grader"
+    assert failure.params["secret"] == "GOOGLE_MAPS_KEY"
+    assert failure.params["host"] == "grader"
 
 
 @pytest.mark.parametrize("place", ["local", "cloud"])
@@ -317,11 +335,34 @@ def test_the_specific_checks_do_not_depend_on_enforced(
 def test_the_new_messages_exist_in_hebrew() -> None:
     """Each new code renders in the Hebrew base catalog with its placeholders filled."""
     hosts = t_locale("he", I18nKey.REPO_GATE_PROPOSER_HOSTS_UNSUPPORTED, hosts="pypi.org")
-    connector = t_locale("he", I18nKey.REPO_GATE_UNKNOWN_CONNECTOR, service="cache", known="maps")
+    mcp = t_locale(
+        "he", I18nKey.REPO_GATE_MISSING_MCP_SECRET, server="grader", path="eval/.mcp.json", secret="GRADER_KEY"
+    )
+    managed = t_locale(
+        "he", I18nKey.REPO_GATE_MANAGED_SECRET_UNAVAILABLE, secret="MAPS_KEY", host="maps.example.com", known="maps"
+    )
 
     assert "pypi.org" in hosts
-    assert "cache" in connector
-    assert "maps" in connector
+    assert all(value in mcp for value in ("grader", "eval/.mcp.json", "GRADER_KEY"))
+    assert all(value in managed for value in ("MAPS_KEY", "maps.example.com", "maps"))
+    assert "{" not in mcp + managed
+
+
+def test_the_managed_secret_message_names_both_fixes_and_the_hosts() -> None:
+    """The managed message names the secret and host, offers ``user`` or a keyed host, and lists those hosts."""
+    english = t_locale(
+        "en",
+        I18nKey.REPO_GATE_MANAGED_SECRET_UNAVAILABLE,
+        secret="MAPS_KEY",
+        host="maps.example.com",
+        known="mapstools.googleapis.com",
+    )
+
+    assert "MAPS_KEY" in english
+    assert "maps.example.com" in english
+    assert "Bind the secret to user" in english
+    assert "mapstools.googleapis.com" in english
+    assert "not a connector" not in english
 
 
 def test_local_mode_is_the_local_place() -> None:

@@ -358,6 +358,8 @@ class I18nKey(StrEnum):
     QUOTA_CONCURRENT_REACHED = 'quota.concurrent_reached'
     QUOTA_REACHED = 'quota.reached'
     RATE_LIMIT_EXCEEDED = 'rate_limit.exceeded'
+    REPO_GATE_MANAGED_SECRET_UNAVAILABLE = 'repo_gate.managed_secret_unavailable'
+    REPO_GATE_MISSING_MCP_SECRET = 'repo_gate.missing_mcp_secret'
     REPO_GATE_MISSING_SECRET = 'repo_gate.missing_secret'
     REPO_GATE_PROPOSER_HOSTS_UNSUPPORTED = 'repo_gate.proposer_hosts_unsupported'
     REPO_GATE_UNENFORCED_CLOUD = 'repo_gate.unenforced_cloud'

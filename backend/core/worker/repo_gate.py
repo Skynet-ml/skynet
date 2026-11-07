@@ -137,13 +137,13 @@ def _secret_failures(
     Returns:
         One failure per name that cannot be filled, in file order.
     """
-    uses = [
-        (name, f"[services.{service}]", service)
+    uses: list[tuple[str, str, str, str | None]] = [
+        (name, f"[services.{service}]", service, None)
         for service, spec in constraints.services.items()
         for name in spec.secrets
     ]
     uses += [
-        (name, f"{label} mcp", server.name)
+        (name, f"{label} mcp", server.name, role.mcp or "-")
         for label, role in constraints.mcp_roles.items()
         for server in role.mcp_servers
         for name in server.secrets
@@ -151,27 +151,38 @@ def _secret_failures(
     hosts = constraints.secret_hosts
     failures: list[GateFailure] = []
     seen: set[str] = set()
-    for name, setting, owner in uses:
+    for name, setting, owner, mcp_path in uses:
         if name in seen:
             continue
         seen.add(name)
         if bindings.get(name) != MANAGED_BINDING:
-            if name not in secret_names:
-                failures.append(
-                    _failure(f"{setting} secrets", place, I18nKey.REPO_GATE_MISSING_SECRET, service=owner, secret=name)
+            if name in secret_names:
+                continue
+            if mcp_path is None:
+                failure = _failure(
+                    f"{setting} secrets", place, I18nKey.REPO_GATE_MISSING_SECRET, service=owner, secret=name
                 )
+            else:
+                failure = _failure(
+                    f"{setting} secrets",
+                    place,
+                    I18nKey.REPO_GATE_MISSING_MCP_SECRET,
+                    server=owner,
+                    path=mcp_path,
+                    secret=name,
+                )
+            failures.append(failure)
             continue
         host = hosts.get(name, "")
         if not managed_key_host(host):
-            # The catalog message is reused so this needs no new catalog key;
-            # it lists the hosts a Skynet key can serve on this deployment.
             known = ", ".join(key for key in CONNECTORS if managed_key_host(key))
             failures.append(
                 _failure(
                     f"{setting} secrets",
                     place,
-                    I18nKey.REPO_GATE_UNKNOWN_CONNECTOR,
-                    service=host or owner,
+                    I18nKey.REPO_GATE_MANAGED_SECRET_UNAVAILABLE,
+                    secret=name,
+                    host=host or owner,
                     known=known or "-",
                 )
             )
