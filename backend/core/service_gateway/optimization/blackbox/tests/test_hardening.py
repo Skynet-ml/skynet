@@ -11,6 +11,7 @@ import pytest
 from core.constants import HARDENING_DEFAULT_ROUND_CAP_USD, HARDENING_DEFAULT_ROUNDS
 from core.models.hardening import HardeningExploit, HardeningJob
 from core.notifications.catalog import HARDENING_DONE_EVENT, HARDENING_REVIEW_EVENT
+from core.service_gateway.optimization.blackbox.classification import ClassificationError
 from core.service_gateway.optimization.blackbox.hardening import (
     Candidate,
     ExploitNotFoundError,
@@ -547,7 +548,7 @@ def test_parse_verdict_reads_a_mapping_or_json_text() -> None:
 )
 def test_parse_verdict_refuses_bad_output(raw: Any) -> None:
     """Judge output outside the schema is refused, so the job fails instead of guessing."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ClassificationError):
         parse_verdict(raw)
 
 

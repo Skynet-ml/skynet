@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import math
 import uuid
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -32,6 +31,7 @@ from ....models.hardening import (
     HardeningView,
 )
 from ....notifications.catalog import HARDENING_DONE_EVENT, HARDENING_REVIEW_EVENT
+from .classification import JudgeClassification, parse_judge_reply
 
 RETRYABLE_STATUSES: frozenset[str] = frozenset({"failed", "preflight_failed", "stale", "rejected"})
 TERMINAL_STATUSES: frozenset[str] = frozenset(
@@ -58,15 +58,6 @@ class Candidate:
     kind: Literal["case", "method"]
     patch_diff: str
     why_md: str
-
-
-@dataclass(frozen=True)
-class Verdict:
-    """The judge's label for one candidate."""
-
-    label: Literal["exploit", "valid"]
-    confidence: float
-    reason: str
 
 
 class HardeningRunner(Protocol):
@@ -166,35 +157,21 @@ class HardeningRunner(Protocol):
         """
 
 
-def parse_verdict(raw: Any) -> Verdict:
-    """Read the judge output as a verdict.
-
-    SKY-348 ships the shared classification schema. When it lands, this
-    function becomes a thin call to its parse function; the loop only calls this.
+def parse_verdict(raw: Any) -> JudgeClassification:
+    """Read the judge output with the shared classification schema (SKY-348).
 
     Args:
-        raw: A mapping, or JSON text of one, with ``label``, ``confidence`` and ``reason``.
+        raw: The judge reply as text, or a mapping that the runner already decoded.
 
     Returns:
-        The verdict.
+        The judge's label, confidence and reason.
 
     Raises:
-        ValueError: When the output does not match the schema.
+        ClassificationError: When the output does not match the schema.
     """
-    data = json.loads(raw) if isinstance(raw, str | bytes) else raw
-    if not isinstance(data, Mapping):
-        # One error type for every schema mismatch, so the loop handles them the same way.
-        raise ValueError("judge output is not an object")  # noqa: TRY004
-    label = data.get("label")
-    if label not in ("exploit", "valid"):
-        raise ValueError(f"judge label {label!r} is not exploit or valid")
-    confidence = data.get("confidence")
-    if isinstance(confidence, bool) or not isinstance(confidence, int | float) or not 0.0 <= confidence <= 1.0:
-        raise ValueError(f"judge confidence {confidence!r} is not a number from 0 to 1")
-    reason = data.get("reason")
-    if not isinstance(reason, str) or not reason.strip():
-        raise ValueError("judge reason is missing")
-    return Verdict(label=label, confidence=float(confidence), reason=reason.strip())
+    if isinstance(raw, bytes):
+        raw = raw.decode()
+    return parse_judge_reply(raw if isinstance(raw, str) else json.dumps(raw))
 
 
 def exploit_passes(exploit_score: float, base_score: float) -> bool:
