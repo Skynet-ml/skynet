@@ -68,9 +68,35 @@ export function hardeningScorer(state: Pick<WizardV2State, "workspace" | "optimi
     return scorer;
   }
   // runModels builds the metric model as the server does: the reflection model
-  // when no call names one, else the role with that name or a new config.
-  const metric = runModels(state.optimizer, true, code).at(-1);
-  return metric ? { ...scorer, model: prepareModelConfig(metric) } : scorer;
+  // when no call names one, else the role with that name or a new config. The
+  // repository run sends no task model, so its name is not a role here.
+  const optimizer = { ...state.optimizer, taskModel: null };
+  const metric = runModels(optimizer, true, code).at(-1);
+  if (!metric) return scorer;
+  const isRole = [reflection, ...optimizer.extraReflectionModels].some((role) => role?.name === metric.name);
+  return { ...scorer, model: prepareModelConfig(isRole ? metric : withByokProvider(metric, reflection)) };
+}
+
+/**
+ * Give a new BYOK metric config the reflection model's connection, as the
+ * server's `resolve_metric_model` does for a run. Without it the runner cannot
+ * route a bare model name.
+ *
+ * Args:
+ *   metric: The new metric config, with the reflection model's token source.
+ *   reflection: The run's reflection model.
+ *
+ * Returns:
+ *   The config with `byok_provider` when the connection can route the name,
+ *   else the config unchanged.
+ */
+function withByokProvider(metric: ModelConfig, reflection: ModelConfig): ModelConfig {
+  const provider = reflection.byok_provider;
+  if (metric.token_source !== "byok" || reflection.token_source !== "byok" || !provider) return metric;
+  const name = metric.name.trim().replace(/^\/+|\/+$/g, "");
+  // A bare name carries no provider that could contradict the connection.
+  const prefix = name.includes("/") ? name.split("/", 1)[0] : null;
+  return prefix === null || prefix === provider ? { ...metric, byok_provider: provider } : metric;
 }
 
 /** The repository run request, or null while the wizard cannot run it yet. */

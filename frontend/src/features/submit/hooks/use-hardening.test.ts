@@ -403,16 +403,29 @@ if (!process.env.JITI_ALIAS) {
       assert.deepEqual(createdScorer(sent).model, { name: "anthropic/judge", token_source: "managed" });
     });
 
-    void it("gives a model= name that matches the task model that role's config", async () => {
+    void it("bills a model= name that matches the task model like the reflection model, as the run does", async () => {
+      // The repository run sends no task model, so the server never matches its name.
       const { sent } = await startWith(repo, llmMetric("llm('judge this', model='openai/task')"), {
         ...optimizer,
         taskModel: { name: "openai/task", token_source: "byok", byok_provider: "openai" },
       });
-      assert.deepEqual(createdScorer(sent).model, {
-        name: "openai/task",
-        token_source: "byok",
-        byok_provider: "openai",
+      assert.deepEqual(createdScorer(sent).model, { name: "openai/task", token_source: "managed" });
+    });
+
+    void it("gives a bare or same-provider BYOK model= name the reflection model's connection", async () => {
+      const reflectionModel = { name: "openai/reflect", token_source: "byok", byok_provider: "openai" };
+      for (const name of ["gpt-4o-mini", "openai/gpt-4o-mini"]) {
+        const { sent } = await startWith(repo, llmMetric(`llm('judge this', model='${name}')`), {
+          ...optimizer,
+          reflectionModel,
+        });
+        assert.deepEqual(createdScorer(sent).model, { name, token_source: "byok", byok_provider: "openai" });
+      }
+      const { sent } = await startWith(repo, llmMetric("llm('judge this', model='anthropic/judge')"), {
+        ...optimizer,
+        reflectionModel,
       });
+      assert.deepEqual(createdScorer(sent).model, { name: "anthropic/judge", token_source: "byok" });
     });
 
     void it("adds no model for a metric without llm() or with two model names", async () => {
