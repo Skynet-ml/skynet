@@ -112,8 +112,8 @@ def test_a_blocked_version_gets_the_fixed_message_and_an_event_with_the_reason()
     message = judge.blocked(["'data/labels.csv' is protected by the repository's optimize.toml ([paths] protected)."])
 
     assert message == (
-        "Illegal action. Read the constraints file. You cannot do this action. Do not repeat it,"
-        " because it wastes time."
+        "Illegal action. Read optimize.toml and the rule files it names. You cannot do this action."
+        " Do not repeat it, because it wastes time."
     )
     assert message == ILLEGAL_ACTION_MESSAGE
     assert events == [
@@ -151,7 +151,7 @@ def test_a_sure_flag_warns_the_agent_once_and_logs_the_verdict() -> None:
     _act(judge, WATCH_EVERY_ACTIONS)
 
     assert judge.take_notes() == [
-        "Check the constraints file. You are probably about to break one of its rules:"
+        "Check the rule file that optimize.toml names. You are probably about to break one of its rules:"
         " The agent reads the docs of a hosted geocoding API."
     ]
     assert judge.take_notes() == []
@@ -174,7 +174,7 @@ def test_an_off_intent_flag_names_the_intent() -> None:
     _act(judge, WATCH_EVERY_ACTIONS)
 
     (note,) = judge.take_notes()
-    assert note.startswith("Check the run's intent in the constraints file.")
+    assert note.startswith("Check the run's intent in the instructions file that optimize.toml names.")
     assert note.endswith("It tunes only for the test sentences.")
 
 

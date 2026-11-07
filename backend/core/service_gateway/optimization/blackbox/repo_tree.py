@@ -28,7 +28,8 @@ _GIT_IDENTITY = ["-c", "user.name=app", "-c", "user.email=app@localhost", "-c", 
 # text, both in the sandbox and in the parent, and logs the reason as a
 # ``rule.block`` run event instead. ``rule_judge`` and its tests use these.
 ILLEGAL_ACTION_MESSAGE = (
-    "Illegal action. Read the constraints file. You cannot do this action. Do not repeat it, because it wastes time."
+    "Illegal action. Read optimize.toml and the rule files it names. You cannot do this action. Do not repeat it,"
+    " because it wastes time."
 )
 RULE_BLOCK_EVENT = "rule.block"
 PATH_RULE = "optimize.toml [paths]"
