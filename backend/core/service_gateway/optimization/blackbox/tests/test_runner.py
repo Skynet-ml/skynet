@@ -628,12 +628,14 @@ def _answer_stage_calls(responses: Path, answers: dict[str, dict[str, Any]], sen
             """Record a frame and write its answer.
 
             Args:
-                text: One frame line.
+                text: One frame, on its own line.
 
             Returns:
                 The number of characters taken.
             """
-            frame = json.loads(text.removeprefix("PFX:"))
+            assert text.startswith("\nPFX:")
+            assert text.endswith("\n")
+            frame = json.loads(text.strip().removeprefix("PFX:"))
             sent.append(frame)
             (responses / f"{frame['id']}.json").write_text(json.dumps(answers[frame["stage"]]))
             return len(text)
