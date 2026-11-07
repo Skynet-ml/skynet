@@ -122,6 +122,7 @@ _TRACEBACK = re.compile(
     r"|^(?P<margin>[ |]*?)  File \".*\n(?:(?P=margin)    .*\n)*",
     re.MULTILINE,
 )
+_FRAME_FILE = re.compile(r'File "([^"]*)"')
 
 
 class RepoScoreError(Exception):
@@ -284,7 +285,8 @@ class RepoScorer:
             if self._run_entry is not None:
                 ran = self._run_candidate(session, root, checkout.path, call, case, env, secrets)
                 if ran.get("error"):
-                    error = redact(f"{ran['error']}", secrets)
+                    error = _scrub(_RUN_FAILED + redact(f"{ran['error']}", secrets), root, self._hidden)
+                    error = error[len(_RUN_FAILED) :]
                     return {
                         "score": 0.0,
                         "feedback": _RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(_RUN_FAILED)) :],
@@ -628,7 +630,7 @@ class RepoScorer:
         except RepoScoreError as error:
             # Plain text: the guest's relay client quotes the body in its error.
             return ModelHTTPResult(422, "text/plain; charset=utf-8", _scrub(str(error), self._root).encode())
-        document = _for_proposer(document, self._root)
+        document = _for_proposer(document, self._root, self._hidden)
         notes = self._rule_judge.take_notes() if self._rule_judge is not None else []
         if notes:
             feedback = document.get("feedback")
@@ -1010,17 +1012,26 @@ class _StageRelay:
                 box.close()
 
 
-def _scrub(text: str, root: str | None) -> str:
+def _scrub(text: str, root: str | None, hidden: tuple[str, ...] | list[str] = ()) -> str:
     """Remove traceback frames and the scorer box's absolute paths from text the proposer reads.
+
+    "Run failed" feedback keeps the frames in the version's own files, so the
+    proposer can find the line that broke (E41); every other frame goes.
 
     Args:
         text: An error or a feedback string from the scorer box.
         root: The box's working directory; ``None`` before it is known.
+        hidden: The metric files and exploit folder; their frames always go.
 
     Returns:
-        The text with repository-relative paths and without traceback frames.
+        The text with repository-relative paths and without the metric's frames.
     """
-    text = _TRACEBACK.sub("", text if text.endswith("\n") else f"{text}\n").rstrip("\n")
+    text = text if text.endswith("\n") else f"{text}\n"
+    if text.startswith(_RUN_FAILED):
+        text = _TRACEBACK.sub(lambda match: _repo_frame(match.group(0), root, hidden), text)
+    else:
+        text = _TRACEBACK.sub("", text)
+    text = text.rstrip("\n")
     if root:
         text = (
             text.replace(f"{root}/{WORK_DIR}/", "")
@@ -1031,38 +1042,72 @@ def _scrub(text: str, root: str | None) -> str:
     return text
 
 
-def _for_proposer(document: Mapping[str, Any], root: str | None) -> dict[str, Any]:
+def _repo_frame(block: str, root: str | None, hidden: tuple[str, ...] | list[str]) -> str:
+    """Return one traceback frame if it is in a version file, else nothing.
+
+    Args:
+        block: A ``_TRACEBACK`` match: the header line, or one frame with its source lines.
+        root: The box's working directory; ``None`` before it is known.
+        hidden: The metric files and exploit folder.
+
+    Returns:
+        The block unchanged when it is the header or a frame in a visible
+        repository file, else ``""``.
+    """
+    found = _FRAME_FILE.search(block)
+    if found is None:
+        return block
+    path = found.group(1)
+    work = f"{root}/{WORK_DIR}/" if root else None
+    if work and path.startswith(work):
+        path = path[len(work) :]
+    # Frames in the runner, the standard library or packages say nothing
+    # about the version and name box paths; "<frozen ...>" frames are noise.
+    elif path.startswith(("/", "<")):
+        return ""
+    if any(path == entry.rstrip("/") or path.startswith(f"{entry.rstrip('/')}/") for entry in hidden):
+        return ""
+    return block
+
+
+def _for_proposer(
+    document: Mapping[str, Any], root: str | None, hidden: tuple[str, ...] | list[str] = ()
+) -> dict[str, Any]:
     """Keep only the score, the feedback and the named scores of a scoring result.
 
     Args:
         document: What :meth:`RepoScorer.score` returned.
         root: The box's working directory, scrubbed from the feedback.
+        hidden: The metric files and exploit folder, whose frames never reach the proposer.
 
     Returns:
         The reply the guest receives.
     """
     reply = {key: document[key] for key in _PROPOSER_KEYS if key in document}
     if isinstance(reply.get("feedback"), str):
-        reply["feedback"] = _scrub(reply["feedback"], root)
+        reply["feedback"] = _scrub(reply["feedback"], root, hidden)
     if isinstance(reply.get("scores"), Mapping):
         reply["scores"] = {
-            name: _named_score(entry, root) if isinstance(entry, Mapping) else entry
+            name: _named_score(entry, root, hidden) if isinstance(entry, Mapping) else entry
             for name, entry in reply["scores"].items()
         }
     return reply
 
 
-def _named_score(entry: Mapping[str, Any], root: str | None) -> dict[str, Any]:
+def _named_score(
+    entry: Mapping[str, Any], root: str | None, hidden: tuple[str, ...] | list[str] = ()
+) -> dict[str, Any]:
     """Keep only the score and the scrubbed feedback of one named score.
 
     Args:
         entry: One value of the result's ``scores`` mapping.
         root: The box's working directory, scrubbed from the feedback.
+        hidden: The metric files and exploit folder.
 
     Returns:
         The named score the guest receives.
     """
     kept = {key: entry[key] for key in ("score", "feedback") if key in entry}
     if isinstance(kept.get("feedback"), str):
-        kept["feedback"] = _scrub(kept["feedback"], root)
+        kept["feedback"] = _scrub(kept["feedback"], root, hidden)
     return kept

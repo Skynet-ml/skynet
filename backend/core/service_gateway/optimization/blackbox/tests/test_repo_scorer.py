@@ -1693,6 +1693,56 @@ def test_a_failed_run_scores_zero_and_skips_the_metric(tmp_path: Path) -> None:
     assert not marker.exists()
 
 
+def test_run_failed_feedback_keeps_the_version_frames_with_repo_paths(tmp_path: Path) -> None:
+    """The proposer sees the version's own frames, but no box path and no metric file (E41, D43, E61)."""
+    scorer = _probed(tmp_path, "src/cand.py:boom")
+    try:
+        scorer.prepare()
+        reply = json.loads(scorer.dispatch({"candidate": "", "case": {"input": 1}}).body)
+        root = scorer._root
+    finally:
+        scorer.close()
+    feedback = reply["feedback"]
+    assert reply["score"] == 0.0
+    assert feedback.startswith("Run failed: Traceback (most recent call last):")
+    assert 'File "src/cand.py"' in feedback
+    assert 'raise RuntimeError("candidate broke")' in feedback
+    assert feedback.endswith("RuntimeError: candidate broke")
+    assert root
+    assert root not in feedback
+    assert str(tmp_path) not in feedback
+    assert "app_runner" not in feedback
+    assert "eval/" not in feedback
+    assert len(feedback) <= 2_000
+
+
+def test_run_failed_scrub_drops_metric_runner_and_library_frames() -> None:
+    """Only frames in visible version files stay; metric, runner and library frames go (D43, E61)."""
+    root = "/box/root"
+    work = f"{root}/.app-repo/work"
+    text = (
+        "Run failed: Traceback (most recent call last):\n"
+        f'  File "{root}/.app-repo/app_runner.py", line 1447, in run_stage\n'
+        "    secret_runner_line()\n"
+        f'  File "{work}/src/cand.py", line 3, in boom\n'
+        "    helper()\n"
+        f'  File "{work}/eval/metric.py", line 2, in helper\n'
+        "    WEIGHT = 0.3\n"
+        '  File "/usr/lib/python3.12/json/__init__.py", line 9, in dumps\n'
+        "    return x\n"
+        "RuntimeError: broke\n"
+    )
+    scrubbed = _scrub(text, root, ("eval",))
+    assert scrubbed == (
+        "Run failed: Traceback (most recent call last):\n"
+        '  File "src/cand.py", line 3, in boom\n'
+        "    helper()\n"
+        "RuntimeError: broke"
+    )
+    assert _scrub(scrubbed, root, ("eval",)) == scrubbed
+    assert _scrub(text.removeprefix("Run failed: "), root, ("eval",)) == "RuntimeError: broke"
+
+
 def test_a_command_entry_with_a_nonzero_exit_still_reaches_the_metric(tmp_path: Path) -> None:
     """A command's exit code and stdout reach the metric; a nonzero exit is not a run failure (E38)."""
     metric = "import json\ndef score(repo_path, case, output):\n    return 0.5, json.dumps(output, sort_keys=True)\n"
