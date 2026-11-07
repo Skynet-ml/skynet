@@ -29,8 +29,30 @@ logger = logging.getLogger(__name__)
 
 Candidate = str | dict[str, str]
 SideInfo = dict[str, Any]
-ScorerFn = Callable[[Candidate, Any], tuple[float, SideInfo]]
-EvalListener = Callable[["EvalServer", float], None]
+ScorerFn = Callable[[Candidate, Any], tuple[float | None, SideInfo]]
+EvalListener = Callable[["EvalServer", float | None], None]
+
+# Side info ``status`` of a case the metric or scorer crashed on. That case has
+# no score (``None``), never 0: a crash is not a measurement (SKY-350).
+METRIC_ERROR = "metric_error"
+STATUS_KEY = "status"
+# SKY-367: the engines still need a number for every case, so evaluate() hands
+# them this value for a metric_error case. It is far below any real score, so a
+# crashed version always loses the search. It exists only in that return value:
+# records, best picks, logs, results and publishing see ``None``.
+SEARCH_FLOOR = -1e9
+
+
+def is_metric_error(side_info: SideInfo) -> bool:
+    """Return True when the side info marks a case the metric or scorer crashed on.
+
+    Args:
+        side_info: What the scorer returned for one case.
+
+    Returns:
+        Whether its ``status`` is :data:`METRIC_ERROR`.
+    """
+    return side_info.get(STATUS_KEY) == METRIC_ERROR
 
 
 class BudgetExhaustedError(RuntimeError):
@@ -40,9 +62,9 @@ class BudgetExhaustedError(RuntimeError):
 class ScorerAbortError(RuntimeError):
     """Raised by a scorer to stop the whole run.
 
-    :class:`EvalServer` floors every other scorer failure to keep one bad
-    version from killing a run; this one passes through untouched because the
-    scorer has established that no version can be scored.
+    :class:`EvalServer` records every other scorer failure as a metric error
+    to keep one bad version from killing a run; this one passes through
+    untouched because the scorer has established that no version can be scored.
     """
 
 
@@ -109,7 +131,7 @@ class Result:
 
 @dataclass
 class CandidateRecord:
-    """One distinct version an eval server scored: its running mean, latest side info and crash flag."""
+    """One distinct version an eval server scored: its running mean, latest side info and crash flags."""
 
     candidate: Candidate
     total: float
@@ -121,10 +143,15 @@ class CandidateRecord:
     # Kept apart from ``side_info``, which holds only the latest case, so a
     # crash on an earlier case still marks the version.
     crashed: bool = False
+    # Set once the metric or scorer crashed on any case: the version then has
+    # no score at all, so it can never be the best or be published.
+    metric_error: str | None = None
 
     @property
-    def mean_score(self) -> float:
-        """Return the mean score across every case this version was scored on."""
+    def mean_score(self) -> float | None:
+        """Return the mean score across every case this version was scored on, or ``None`` after a metric error."""
+        if self.metric_error is not None:
+            return None
         return self.total / self.count
 
 
@@ -245,7 +272,8 @@ class EvalServer:
             example: The case to score it on, or ``None`` when there are no cases.
 
         Returns:
-            The score and the scorer's side information.
+            The score and the scorer's side information. A metric error case
+            returns :data:`SEARCH_FLOOR` with ``status: metric_error``.
 
         Raises:
             BudgetExhaustedError: When no scorer calls remain.
@@ -258,11 +286,14 @@ class EvalServer:
         # verbose view — the black-box counterpart of the DSPy per-example eval
         # heartbeat, so every run type gets the same normal=aggregates /
         # verbose=per-call split. Counted against the run-wide budget.
-        logger.debug("scorer eval %d/%d score=%.3f", root.used, root.max_evals, score)
+        if score is None:
+            logger.debug("scorer eval %d/%d %s: %s", root.used, root.max_evals, METRIC_ERROR, side_info.get("error"))
+        else:
+            logger.debug("scorer eval %d/%d score=%.3f", root.used, root.max_evals, score)
         self._account(candidate, score, side_info)
-        return score, side_info
+        return (SEARCH_FLOOR if score is None else score), side_info
 
-    def charge(self, candidate: Candidate | None, score: float, side_info: SideInfo | None = None) -> None:
+    def charge(self, candidate: Candidate | None, score: float | None, side_info: SideInfo | None = None) -> None:
         """Count one evaluation scored outside the scorer against every budget in the chain.
 
         In-process adapters (the DSPy engine) run the metric themselves; this
@@ -273,7 +304,7 @@ class EvalServer:
             candidate: The version that was scored, or ``None`` when the
                 caller cannot name it; an unnamed evaluation is counted but
                 not recorded in the version history.
-            score: The score it got.
+            score: The score it got, or ``None`` when the metric crashed.
             side_info: What the metric said about it.
 
         Raises:
@@ -282,12 +313,12 @@ class EvalServer:
         self._reserve()
         self._account(candidate, score, side_info or {})
 
-    def _account(self, candidate: Candidate | None, score: float, side_info: SideInfo) -> None:
+    def _account(self, candidate: Candidate | None, score: float | None, side_info: SideInfo) -> None:
         """Record a reserved evaluation in every server of the chain and notify the listener.
 
         Args:
             candidate: The scored version, or ``None`` to count it without recording.
-            score: Its score.
+            score: Its score, or ``None`` after a metric error.
             side_info: What the scorer said about it.
         """
         root = self._root
@@ -314,8 +345,8 @@ class EvalServer:
                 self._parent._reserve()
             self.used += 1
 
-    def _score(self, candidate: Candidate, example: Any) -> tuple[float, SideInfo]:
-        """Call the scorer, turning a crash into a floor score with feedback.
+    def _score(self, candidate: Candidate, example: Any) -> tuple[float | None, SideInfo]:
+        """Call the scorer, turning a crash into a metric error with no score.
 
         A scorer that raises on one version marks that version as bad — it
         must not kill the run (GEPA's ``raise_on_exception=False`` semantics,
@@ -326,13 +357,13 @@ class EvalServer:
             example: The case to score it on.
 
         Returns:
-            The score and side information, or ``(0.0, {"error": ...})``.
+            The score and side information, or ``(None, {"error": ..., "status": "metric_error"})``.
 
         Raises:
             ScorerAbortError: When the scorer asks to stop the run, or returns no feedback.
         """
         try:
-            return self._scorer(candidate, example)
+            score, side_info = self._scorer(candidate, example)
         except (ScorerAbortError, BudgetExhaustedError, BudgetExhausted, CostCeilingExceededError):
             raise
         except Exception as exc:
@@ -340,27 +371,38 @@ class EvalServer:
             # would spend the whole budget teaching the proposer nothing.
             if FEEDBACK_REQUIRED in str(exc):
                 raise ScorerAbortError(str(exc)) from exc
-            logger.warning("scorer raised on a candidate: %s", exc)
-            return 0.0, {"error": f"{type(exc).__name__}: {exc}"}
+            error = f"{type(exc).__name__}: {exc}"
+            logger.warning("scorer raised on a candidate (%s): %s", METRIC_ERROR, error)
+            return None, {"error": error, STATUS_KEY: METRIC_ERROR}
+        # A nested server (an Auto lane) scores through an outer evaluate(),
+        # which hands back the search floor; the status marks it as no score.
+        if score is None or is_metric_error(side_info):
+            return None, {**side_info, STATUS_KEY: METRIC_ERROR}
+        return score, side_info
 
-    def _record(self, candidate: Candidate, score: float, side_info: SideInfo) -> None:
+    def _record(self, candidate: Candidate, score: float | None, side_info: SideInfo) -> None:
         """Fold ``score`` into the candidate's running mean and keep its latest side info.
 
         Args:
             candidate: The scored version.
-            score: Its score on the case just evaluated.
+            score: Its score on the case just evaluated, or ``None`` after a metric error.
             side_info: What the scorer said about it on that case.
         """
         key = candidate_key(candidate)
         record = self._records.get(key)
-        crashed = "error" in side_info
+        failed = score is None or is_metric_error(side_info)
+        error = str(side_info.get("error") or METRIC_ERROR) if failed else None
+        crashed = failed or "error" in side_info
+        # A failed case adds nothing to the total: the version's mean is None.
+        value = 0.0 if failed or score is None else float(score)
         if record is None:
-            self._records[key] = CandidateRecord(candidate, score, 1, self._root.used, side_info, crashed)
+            self._records[key] = CandidateRecord(candidate, value, 1, self._root.used, side_info, crashed, error)
             return
-        record.total += score
+        record.total += value
         record.count += 1
         record.side_info = side_info
         record.crashed = record.crashed or crashed
+        record.metric_error = record.metric_error or error
 
     @property
     def history(self) -> list[CandidateRecord]:
@@ -374,17 +416,32 @@ class EvalServer:
             candidate: The version to look up.
 
         Returns:
-            Its mean score across the cases scored so far, or ``None``.
+            Its mean score across the cases scored so far, or ``None`` when it
+            was not scored or hit a metric error.
         """
         record = self._records.get(candidate_key(candidate))
         return None if record is None else record.mean_score
 
+    def metric_error(self, candidate: Candidate) -> str | None:
+        """Return the error text of the metric error ``candidate`` hit, if any.
+
+        Args:
+            candidate: The version to look up.
+
+        Returns:
+            The first metric error's text, or ``None`` when the version was
+            not scored or never hit one.
+        """
+        record = self._records.get(candidate_key(candidate))
+        return None if record is None else record.metric_error
+
     @property
     def best_candidate(self) -> Candidate | None:
-        """Return the candidate with the highest mean score, if any was scored."""
-        if not self._records:
+        """Return the candidate with the highest mean score, if any was scored without a metric error."""
+        scored = [record for record in self._records.values() if record.mean_score is not None]
+        if not scored:
             return None
-        return max(self._records.values(), key=lambda record: record.mean_score).candidate
+        return max(scored, key=lambda record: record.mean_score).candidate
 
     @property
     def best_score(self) -> float | None:

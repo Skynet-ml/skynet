@@ -25,6 +25,7 @@ from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from core.connectors.github_publish import PublishedChange, RepoPublishError
 from core.connectors.github_repo import RepoSnapshot
 from core.exceptions import ServiceError
+from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR
 from core.service_gateway.optimization.blackbox.repo_constraints import ConstraintsError
 from core.service_gateway.optimization.blackbox.repo_workspace import _PROBE_OK, NetworkCutoffError
 from core.service_gateway.optimization.blackbox.rule_judge import JUDGE_ANSWER_TOKENS, JUDGE_REASONING_TOKENS
@@ -886,6 +887,39 @@ _ILLEGAL_EDIT = {"candidate": _EDIT, "score": 0.0, "side_info": {"illegal_approa
 def test_a_version_the_judge_rejected_is_never_published(result: dict[str, Any]) -> None:
     """The fixed illegal score can beat negative legal scores, but the illegal version still never ships."""
     assert repo_staging.improved_patch(result) is None
+
+
+_CRASHED_EDIT = {
+    "candidate": _EDIT,
+    "score": None,
+    "side_info": {"error": "KeyError: 'answer'", "status": METRIC_ERROR},
+}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _result(None, None, versions=[{"candidate": "", "score": -3.2}, _CRASHED_EDIT]),
+        _result(None, None, versions=[{"candidate": "", "score": -3.2}, {**_CRASHED_EDIT, "score": 0.0}]),
+        _result(-3.2, 0.0, versions=[{"candidate": "", "score": -3.2}, _CRASHED_EDIT]),
+    ],
+)
+def test_a_version_the_metric_crashed_on_is_never_published(result: dict[str, Any]) -> None:
+    """A metric error has no score (SKY-350), so even a stray number never makes it publishable."""
+    assert repo_staging.improved_patch(result) is None
+
+
+def test_a_version_the_metric_crashed_on_never_gets_a_candidate_branch(tmp_path: Path) -> None:
+    """Candidate branches leave out a crashed version and count it as skipped."""
+    other = _EDIT.replace("+x = 2", "+x = 3")
+    result = _result(None, None, versions=[{**_CRASHED_EDIT, "score": 0.0}, {"candidate": other, "score": 0.4}])
+    repo = {"editable_paths": ["src/"]}
+
+    versions, skipped = repo_staging._candidate_versions(result, repo, _staged(tmp_path), "run")
+
+    assert versions == [("run-2", other)]
+    assert skipped == 1
+    assert repo_staging._version_score(result, _EDIT) is None
 
 
 def _staged(tmp_path: Path, readonly: tuple[str, ...] = ()) -> repo_staging.StagedRepository:

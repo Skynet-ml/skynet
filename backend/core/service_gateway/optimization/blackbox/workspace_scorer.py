@@ -17,8 +17,8 @@ the time the call waited for the box (``queue_ms``) and the whole boxed call
 (``evaluation_ms``); see :mod:`.workspace_harness`.
 
 What reaches the optimizer is a score and side info. A user-code failure
-becomes ``(0.0, {"error": "<Type>: <message>"})`` with no source or
-traceback; a metric that does not return ``(score, side_info)`` stops the
+becomes ``(None, {"error": "<Type>: <message>", "status": "metric_error"})``
+with no source or traceback; a metric that does not return ``(score, side_info)`` stops the
 run with :class:`ScorerAbortError`, since no candidate could ever be scored.
 """
 
@@ -44,7 +44,7 @@ from ....models.unified import UnifiedCase, UnifiedRunRequest
 from . import check_terminal, sandbox_log, workspace_harness
 from .harness import GatewayConfig
 from .native_runtime import sanitize_side_info
-from .protocol import Candidate, ScorerAbortError, SideInfo
+from .protocol import METRIC_ERROR, STATUS_KEY, Candidate, ScorerAbortError, SideInfo
 from .sandbox import SandboxRuntime, SandboxSession, scorer_runtime_from_settings
 from .sandbox_scorer import (
     DEPENDENCIES_DIR,
@@ -249,7 +249,7 @@ class WorkspaceScorer(SandboxPythonScorer):
                 found.append(ledger)
         return tuple(found)
 
-    def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float, SideInfo]:
+    def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float | None, SideInfo]:
         """Score ``candidate`` on ``case`` for the engines.
 
         Args:
@@ -257,8 +257,8 @@ class WorkspaceScorer(SandboxPythonScorer):
             case: The case, a :class:`UnifiedCase` or its mapping.
 
         Returns:
-            The score and side info, or ``(0.0, {"error": "<Type>: <message>"})``
-            when the user's code failed.
+            The score and side info, or ``(None, {"error": "<Type>: <message>",
+            "status": "metric_error"})`` when the user's code failed.
 
         Raises:
             ScorerAbortError: When ``score`` did not return ``(score, side_info)``.
@@ -266,7 +266,9 @@ class WorkspaceScorer(SandboxPythonScorer):
         score, side_info, _ = self.score_observed(candidate, case)
         return score, side_info
 
-    def score_observed(self, candidate: Candidate, case: Any = None) -> tuple[float, SideInfo, dict[str, Any] | None]:
+    def score_observed(
+        self, candidate: Candidate, case: Any = None
+    ) -> tuple[float | None, SideInfo, dict[str, Any] | None]:
         """Score ``candidate`` on ``case`` and keep the evaluation's trusted observation.
 
         The final runs use this to keep each case's time and cost for the
@@ -289,7 +291,7 @@ class WorkspaceScorer(SandboxPythonScorer):
             # In-process engines (GEPA, best-of-n, Auto) hand this straight to a
             # reflection LM, so it gets the same one-line cut native engines get.
             error = sanitize_side_info({"error": probe.error or "ValueError: the metric returned no score"})
-            return 0.0, error, probe.observation
+            return None, {**error, STATUS_KEY: METRIC_ERROR}, probe.observation
         return probe.score, revive_images(probe.side_info), probe.observation
 
     def warm(self) -> None:

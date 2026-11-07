@@ -31,6 +31,7 @@ from ..connectors.github_repo import RepoFetchError, RepoSnapshot, fetch_snapsho
 from ..connectors.saved_secrets import SavedSecretStore
 from ..exceptions import ServiceError
 from ..models.common import ModelConfig
+from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     ConstraintsError,
     effective_environment,
@@ -500,10 +501,14 @@ def _version_score(result: dict[str, Any], candidate: str) -> float | None:
         candidate: The version's patch.
 
     Returns:
-        Its recorded score, or ``None`` when the run never scored it.
+        Its recorded score, or ``None`` when the run never scored it or the
+        metric crashed on it.
     """
     for version in result.get("versions") or []:
         if isinstance(version, dict) and version.get("candidate") == candidate:
+            # SKY-350: a crash has no score, even if an older result stored a number.
+            if is_metric_error(version.get("side_info") or {}):
+                return None
             score = version.get("score")
             return float(score) if isinstance(score, int | float) else None
     return None
@@ -541,6 +546,24 @@ def _version_illegal(result: dict[str, Any], candidate: str) -> bool:
     )
 
 
+def _version_metric_error(result: dict[str, Any], candidate: str) -> bool:
+    """Return whether the metric or scorer crashed on one version during the run.
+
+    Args:
+        result: Finished black-box result.
+        candidate: The version's patch.
+
+    Returns:
+        ``True`` when the version's recorded side info has the metric-error status.
+    """
+    return any(
+        isinstance(version, dict)
+        and version.get("candidate") == candidate
+        and is_metric_error(version.get("side_info") or {})
+        for version in result.get("versions") or []
+    )
+
+
 def improved_patch(result: dict[str, Any]) -> str | None:
     """Return the best version when it beat the starting code, else ``None``.
 
@@ -551,13 +574,13 @@ def improved_patch(result: dict[str, Any]) -> str | None:
         result: Finished black-box result.
 
     Returns:
-        The best version's patch, or ``None`` when it is empty, no better, or
-        an approach the rule judge rejected.
+        The best version's patch, or ``None`` when it is empty, no better,
+        an approach the rule judge rejected, or a version the metric crashed on.
     """
     best = result.get("best_candidate")
     if not isinstance(best, str) or not best.strip() or result.get("regression_guard_applied"):
         return None
-    if _version_illegal(result, best):
+    if _version_illegal(result, best) or _version_metric_error(result, best):
         return None
     baseline, optimized = result.get("baseline_score"), result.get("best_score")
     if baseline is None or optimized is None:
@@ -699,8 +722,10 @@ def _candidate_versions(
         seen.add(patch)
         # The patches came back from the guest, so the editing rules are
         # checked again before any of them reaches the repository.
-        if _version_illegal(result, patch) or patch_violations(
-            patch, repo["editable_paths"], staged.snapshot.readonly_paths, staged.protected_paths
+        if (
+            _version_illegal(result, patch)
+            or _version_metric_error(result, patch)
+            or patch_violations(patch, repo["editable_paths"], staged.snapshot.readonly_paths, staged.protected_paths)
         ):
             skipped += 1
             continue
