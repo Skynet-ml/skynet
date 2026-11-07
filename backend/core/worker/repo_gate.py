@@ -132,9 +132,8 @@ def _secret_failures(
 
     A user-bound name needs a secret in the run, and the host that receives
     it must be on that secret's ``allowed_hosts``. A managed name needs a host
-    in the connector catalog for which Skynet holds a key. A secret that only
-    a stdio server uses has no host, and a Skynet key never enters a box, so
-    such a name cannot be managed.
+    in the connector catalog for which Skynet holds a key. Every MCP server
+    is http now (E64), so every name has a host.
 
     Args:
         constraints: The file with each role's MCP servers filled.
@@ -194,7 +193,7 @@ def _secret_failures(
                     place,
                     I18nKey.REPO_GATE_MANAGED_SECRET_UNAVAILABLE,
                     secret=name,
-                    host=host or owner,
+                    host=host,
                     known=known or "-",
                 )
             )
@@ -206,16 +205,15 @@ def _host_failure(name: str, host: str, allowed: Collection[str], setting: str, 
 
     Args:
         name: The secret's name.
-        host: The one host that receives the secret; empty when only a stdio
-            server uses it, so the secret never leaves the box over the relay.
+        host: The one host that receives the secret.
         allowed: The secret's allowed hosts.
         setting: The ``optimize.toml`` setting that uses the secret.
         place: Where the run's sandbox runs.
 
     Returns:
-        The failure, or ``None`` when the host is allowed or there is none.
+        The failure, or ``None`` when the host is allowed.
     """
-    if not host or host_allowed(host, allowed):
+    if host_allowed(host, allowed):
         return None
     if not allowed:
         return _failure(f"{setting} secrets", place, I18nKey.REPO_GATE_SECRET_HOST_UNLISTED, secret=name, host=host)

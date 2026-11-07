@@ -97,10 +97,10 @@ _MAX_HEADER_CHARS = 1_000
 # Wildcard DNS names such as 169.254.169.254.nip.io resolve to the address they hold.
 _DOTTED_IPV4 = re.compile(r"(^|\.)[0-9]{1,3}(\.[0-9]{1,3}){3}(\.|$)")
 _HOST = re.compile(r"(\*\.)?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*(:[0-9]{1,5})?")
-_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 _MCP_HTTP_TYPES = frozenset({"http", "streamable-http", "sse"})
 _MCP_HTTP_KEYS = frozenset({"type", "url", "headers"})
-_MCP_STDIO_KEYS = frozenset({"type", "command", "args", "env"})
+# Only http servers are supported now (E64): a stdio server would run code and hold secrets in the box.
+_MCP_STDIO_KEYS = frozenset({"command", "args", "env"})
 # Known key formats: OpenAI/Stripe, GitHub, Slack, Google, AWS, GitLab, Hugging Face, and JWTs.
 _SECRET_PREFIX = re.compile(r"(sk|pk|rk)[-_]|gh[pousr]_|github_pat_|xox[abposr]-|AIza|AKIA|ASIA|glpat-|hf_|eyJ")
 _SECRET_TOKEN = re.compile(r"[A-Za-z0-9_\-+/.~]{24,}")
@@ -114,37 +114,33 @@ class ConstraintsError(ValueError):
 
 @dataclass(frozen=True)
 class McpServer:
-    """One server in a role's ``.mcp.json`` file: an http address or a command the box runs (E49).
+    """One http server in a role's ``.mcp.json`` file (E49, E64).
 
-    Header and ``env`` values hold secrets only as ``${NAME}`` placeholders,
-    which the trusted parent resolves; the file never holds a value.
+    Header values hold secrets only as ``${NAME}`` placeholders, which the
+    trusted parent resolves; the file never holds a value.
     """
 
     name: str
-    url: str | None = None
+    url: str
     headers: Mapping[str, str] = field(default_factory=dict)
-    command: tuple[str, ...] = ()
-    env: Mapping[str, str] = field(default_factory=dict)
 
     @property
-    def host(self) -> str | None:
-        """Return the lowercase host an http server's calls go to, or ``None`` for a stdio server."""
-        return _host_of(self.url) if self.url is not None else None
+    def host(self) -> str:
+        """Return the lowercase host the server's calls go to."""
+        return _host_of(self.url)
 
     @property
     def secrets(self) -> tuple[str, ...]:
-        """Return the secret names the server's headers and ``env`` use, in file order."""
-        return _placeholders(*self.headers.values(), *self.env.values())
+        """Return the secret names the server's headers use, in file order."""
+        return _placeholders(*self.headers.values())
 
     def record(self) -> dict[str, Any]:
         """Describe the server for the run's disclosure, without secret values.
 
         Returns:
-            The name, the type, the host or the command, and the secret names.
+            The name, the type, the host and the secret names.
         """
-        if self.url is not None:
-            return {"name": self.name, "type": "http", "host": self.host, "secrets": list(self.secrets)}
-        return {"name": self.name, "type": "stdio", "command": " ".join(self.command), "secrets": list(self.secrets)}
+        return {"name": self.name, "type": "http", "host": self.host, "secrets": list(self.secrets)}
 
 
 @dataclass(frozen=True)
@@ -271,13 +267,12 @@ class RepoConstraints:
         """Return the one host each secret may go to, by secret name (E52).
 
         Returns:
-            Each secret that a ``[services]`` header or an http MCP server's
-            header uses, mapped to the host of that url. A secret that only a
-            stdio server's ``env`` uses has no host and is not listed.
+            Each secret that a ``[services]`` header or an MCP server's
+            header uses, mapped to the host of that url.
         """
         hosts = {name: spec.host for spec in self.services.values() for name in spec.secrets if spec.host}
         for role in self.mcp_roles.values():
-            hosts |= {name: server.host for server in role.mcp_servers if server.host for name in server.secrets}
+            hosts |= {name: server.host for server in role.mcp_servers for name in server.secrets}
         return hosts
 
     @property
@@ -1325,10 +1320,10 @@ def _load_mcp_files(constraints: RepoConstraints, archive: Path) -> RepoConstrai
 def _mcp_servers(text: str, setting: str, path: str) -> tuple[McpServer, ...]:
     """Read a standard ``.mcp.json`` file: ``{"mcpServers": {<name>: <server>}}`` (E49).
 
-    An http server (``type`` http, streamable-http or sse, or a ``url`` with no
-    type) has a url and headers; the relay calls it. A stdio server has a
-    command, args and env; it runs in the box. Secrets appear only as
-    ``${NAME}`` in header and ``env`` values.
+    Each server is an http server (``type`` http, streamable-http or sse, or a
+    ``url`` with no type) with a url and headers; the relay calls it. A stdio
+    server (``command``, ``args``, ``env``) fails: only http servers are
+    supported now (E64). Secrets appear only as ``${NAME}`` in header values.
 
     Args:
         text: The file's text.
@@ -1377,56 +1372,25 @@ def _mcp_server(name: str, entry: Any, prefix: str) -> McpServer:
     label = f"server '{name}'"
     if not isinstance(entry, dict):
         raise ConstraintsError(f"{prefix}: {label} must be an object.")
-    kind = entry.get("type", "http" if "url" in entry else "stdio")
-    if not isinstance(kind, str):
-        raise ConstraintsError(f"{prefix}: {label} type must be http, streamable-http, sse or stdio.")
-    if kind in _MCP_HTTP_TYPES:
-        allowed = _MCP_HTTP_KEYS
-    elif kind == "stdio":
-        allowed = _MCP_STDIO_KEYS
-    else:
-        raise ConstraintsError(f"{prefix}: {label} type must be http, streamable-http, sse or stdio.")
-    unknown = sorted(set(entry) - allowed)
-    if unknown:
-        raise ConstraintsError(f"{prefix}: {label} {unknown[0][:100]} is not a supported setting for a {kind} server.")
-    if kind in _MCP_HTTP_TYPES:
-        if "url" not in entry:
-            raise ConstraintsError(f"{prefix}: {label} needs a url.")
-        headers = _service_headers(entry["headers"], label, prefix) if "headers" in entry else {}
-        return McpServer(name=name, url=_service_url(entry["url"], label, prefix), headers=headers)
-    command = entry.get("command")
-    args = entry.get("args", [])
-    if not isinstance(command, str) or not command.strip() or len(command) > _MAX_COMMAND_CHARS:
-        raise ConstraintsError(f"{prefix}: {label} needs a command of 1 to {_MAX_COMMAND_CHARS} characters.")
-    if (
-        not isinstance(args, list)
-        or len(args) >= _MAX_COMMAND_PARTS
-        or not all(isinstance(arg, str) and len(arg) <= _MAX_COMMAND_CHARS for arg in args)
-    ):
-        raise ConstraintsError(f"{prefix}: {label} args must be a list of at most {_MAX_COMMAND_PARTS - 1} texts.")
-    # The box reads the command line, so a secret there would reach the box's process list.
-    if any("${" in part for part in (command, *args)):
-        raise ConstraintsError(f"{prefix}: {label} command and args must not hold ${{NAME}}; put the secret in env.")
-    if any(_looks_secret(part) for part in (command, *args)):
+    if entry.get("type") == "stdio" or _MCP_STDIO_KEYS & set(entry):
         raise ConstraintsError(
-            f"{prefix}: {label} command or args hold what looks like a secret value. Put it in env as ${{NAME}}."
+            f"{prefix}: {label} is a stdio server (command, args, env). Only http servers are supported now;"
+            ' give it a "url" and put each secret in "headers" as ${NAME}.'
         )
-    env = entry.get("env", {})
-    if not isinstance(env, dict) or len(env) > _MAX_NAMES:
-        raise ConstraintsError(f"{prefix}: {label} env must be an object of at most {_MAX_NAMES} names to text.")
-    for key, value in env.items():
-        if not _ENV_NAME.fullmatch(key):
-            raise ConstraintsError(f"{prefix}: {label} env name {key[:100]!r} must use only letters, digits and '_'.")
-        if not isinstance(value, str) or len(value) > _MAX_HEADER_CHARS or "\n" in value or "\r" in value:
-            raise ConstraintsError(
-                f"{prefix}: {label} env {key} must be one line of at most {_MAX_HEADER_CHARS} characters."
-            )
-        _check_value(value, f"{label} env {key}", prefix)
-    return McpServer(name=name, command=(command, *args), env=dict(env))
+    kind = entry.get("type", "http")
+    if not isinstance(kind, str) or kind not in _MCP_HTTP_TYPES:
+        raise ConstraintsError(f"{prefix}: {label} type must be http, streamable-http or sse.")
+    unknown = sorted(set(entry) - _MCP_HTTP_KEYS)
+    if unknown:
+        raise ConstraintsError(f"{prefix}: {label} {unknown[0][:100]} is not a supported setting for an http server.")
+    if "url" not in entry:
+        raise ConstraintsError(f"{prefix}: {label} needs a url.")
+    headers = _service_headers(entry["headers"], label, prefix) if "headers" in entry else {}
+    return McpServer(name=name, url=_service_url(entry["url"], label, prefix), headers=headers)
 
 
 def _check_secret_receivers(services: Mapping[str, ServiceSpec], roles: Mapping[str, RoleEnvironment]) -> None:
-    """Check that each secret goes to one place only: one host, or one stdio server (E52).
+    """Check that each secret goes to one host only (E52, E53 rule 3).
 
     The relay sends a secret only to the host it is bound to, so a file that
     sends ``${GOOGLE_MAPS_KEY}`` to a second host could leak the key there.
@@ -1436,7 +1400,7 @@ def _check_secret_receivers(services: Mapping[str, ServiceSpec], roles: Mapping[
         roles: ``[run]`` and ``[metric]`` with their MCP servers, by label.
 
     Raises:
-        ConstraintsError: When one secret name goes to two different places.
+        ConstraintsError: When one secret name goes to two different hosts.
     """
     places: dict[str, str] = {}
     uses = [
@@ -1444,8 +1408,7 @@ def _check_secret_receivers(services: Mapping[str, ServiceSpec], roles: Mapping[
     ]
     for label, role in roles.items():
         for server in role.mcp_servers:
-            where = server.host or f"the stdio server '{server.name}' of {label} mcp"
-            uses += [(name, where, f"{label} mcp server '{server.name}'") for name in server.secrets]
+            uses += [(name, server.host, f"{label} mcp server '{server.name}'") for name in server.secrets]
     for name, where, setting in uses:
         first = places.setdefault(name, where)
         if first != where:

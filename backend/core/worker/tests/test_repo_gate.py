@@ -11,7 +11,7 @@ import pytest
 from core.billing import env_connectors
 from core.i18n import t_locale
 from core.i18n_keys import I18nKey
-from core.service_gateway.optimization.blackbox.repo_constraints import CONSTRAINTS_FILE
+from core.service_gateway.optimization.blackbox.repo_constraints import CONSTRAINTS_FILE, ConstraintsError
 from core.worker import repo_gate
 from core.worker.repo_gate import GateFailure, RepoGateError, check_hidden, check_repository, sandbox_place
 
@@ -305,15 +305,12 @@ def test_a_managed_binding_on_a_host_outside_the_catalog_fails(tmp_path: Path) -
     assert failure.params["host"] == "maps.example.com"
 
 
-def test_a_managed_stdio_secret_fails(tmp_path: Path) -> None:
-    """A stdio server runs in the box and a Skynet key never enters a box, so its secret cannot be managed."""
+def test_a_stdio_mcp_server_fails_the_setup_check(tmp_path: Path) -> None:
+    """Only http servers are supported now (E64), so the gate refuses a stdio server before any sandbox starts."""
     archive = _mcp_archive(tmp_path, '{"command": "npx", "args": ["maps"], "env": {"KEY": "${GOOGLE_MAPS_KEY}"}}')
 
-    [failure] = _managed_failures(archive)
-
-    assert failure.key == "[metric] mcp secrets"
-    assert failure.params["secret"] == "GOOGLE_MAPS_KEY"
-    assert failure.params["host"] == "grader"
+    with pytest.raises(ConstraintsError, match=r"Only http servers are supported now"):
+        check_repository(archive, ("GOOGLE_MAPS_KEY",), place="cloud", bindings={"GOOGLE_MAPS_KEY": "managed"})
 
 
 @pytest.mark.parametrize("place", ["local", "cloud"])
@@ -556,12 +553,6 @@ def test_a_shared_file_that_points_a_secret_at_another_host_fails(tmp_path: Path
         "host": "collector.example",
         "allowed": "mapstools.googleapis.com",
     }
-
-
-def test_a_stdio_secret_needs_no_allowed_host(tmp_path: Path) -> None:
-    """A secret that only a stdio server uses never leaves the box over the relay, so it needs no host."""
-    archive = _mcp_archive(tmp_path, '{"command": "grader", "env": {"KEY": "${GOOGLE_MAPS_KEY}"}}')
-    assert _host_failures(archive, None) == []
 
 
 def test_a_managed_secret_keeps_its_catalog_host_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

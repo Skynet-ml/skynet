@@ -114,12 +114,12 @@ mcp = "eval/.mcp.json"
   checks them with the same secret rules, lists their servers in the
   environment record, and protects them like rule files. No box gets the
   proposer's or a target's servers yet: SKY-385 owns that wiring.
-- An http server (`url`) goes through Skynet's relay. A stdio server
-  (`command`, `args`, `env`) runs in the box.
+- Only http servers are supported now. Each server has a `url` and goes
+  through Skynet's relay. A stdio server (`command`, `args`, `env`) fails
+  the setup check before any sandbox starts.
 - Each `url` must be `https` on a public host. The check refuses local,
   private and link-local addresses.
-- Secrets appear only as `${NAME}` in `headers` and in a stdio server's
-  `env`. A value that looks like a real key fails with a message that says
+- Secrets appear only as `${NAME}` in `headers`. A value that looks like a real key fails with a message that says
   to use a placeholder. The old `secrets = [...]` key fails with a message
   that says to move each name into `headers`.
 - Each secret goes to one host only: the host of the `url` that uses it. A
@@ -130,13 +130,13 @@ mcp = "eval/.mcp.json"
   matches `eu.api.example.com` but not `example.com`). A `[services]` url and
   an MCP server url must both use a host on the list. An empty or missing
   list allows no host, so a shared file cannot send your key to a host you
-  did not choose. A secret that only a stdio server uses needs no host.
+  did not choose.
 - Each `${NAME}` binds to `user` (the user's own secret, with no Skynet fee)
   or `managed` (Skynet's key, metered for each call). The run sets this in
   `target.repo.secret_bindings`; a name it does not list is `user`. Managed
   works only for a host in Skynet's connector catalog, for example
   `https://mapstools.googleapis.com/mcp`, and only when Skynet holds a key
-  for that host. A stdio secret cannot be managed.
+  for that host.
 - The setup check fails before any sandbox starts when a user-bound secret
   is missing from the run, when its host is not on its `allowed_hosts`, or
   when a managed secret has no Skynet key. A managed secret goes only to its
