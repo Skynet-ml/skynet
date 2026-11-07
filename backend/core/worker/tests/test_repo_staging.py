@@ -1646,19 +1646,20 @@ def test_a_finished_hardening_job_ships_its_suite_and_counts(monkeypatch: pytest
 @pytest.mark.parametrize(
     ("owner", "status", "target", "job_id"),
     [
-        ("ada", "done", None, None),
-        ("bob", "done", None, "job-1"),
-        ("ada", "waiting_review", None, "job-1"),
-        ("ada", "failed", None, "job-1"),
-        ("ada", "done", None, "job-2"),
+        ("ada", "done", "acme/app", None),
+        ("bob", "done", "acme/app", "job-1"),
+        ("ada", "waiting_review", "acme/app", "job-1"),
+        ("ada", "failed", "acme/app", "job-1"),
+        ("ada", "done", "acme/app", "job-2"),
         ("ada", "done", "acme/other", "job-1"),
+        ("ada", "done", None, "job-1"),
     ],
-    ids=["no-id", "other-user", "unfinished", "failed", "missing", "other-repository"],
+    ids=["no-id", "other-user", "unfinished", "failed", "missing", "other-repository", "no-target"],
 )
 def test_a_run_without_its_own_finished_job_publishes_as_before(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, owner: str, status: str, target: str | None, job_id: str | None
 ) -> None:
-    """No id, another user's job, an unfinished or failed job, a missing job and another repository add nothing."""
+    """No id, another user's, unfinished, failed or missing job, or a job naming no or another repository add nothing."""
     pushed, opened = _publish_hardened(monkeypatch, tmp_path, _jobs_engine(owner, status, target), job_id)
 
     assert pushed[0][2] == _EDIT

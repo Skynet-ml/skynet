@@ -861,7 +861,7 @@ def _finished_hardening_job(engine: Any, username: str, job_id: str, repository:
 
     Returns:
         The job, or ``None`` (with the reason logged) when it is missing, of
-        another user, not finished, or for another repository.
+        another user, not finished, names no repository, or names another one.
     """
     with Session(engine) as session:
         row = session.scalars(
@@ -878,7 +878,12 @@ def _finished_hardening_job(engine: Any, username: str, job_id: str, repository:
         target = row.job.get("target")
         source = target.get("repo") if isinstance(target, dict) else None
         named = source.get("repository") if isinstance(source, dict) else None
-        if isinstance(named, str) and named.casefold() != repository.casefold():
+        # Fail closed: a job that names no repository could come from another
+        # repository, and its exploits must never ship in this repository's PR.
+        if not isinstance(named, str):
+            logger.info("Hardening job %s names no repository; no suite ships.", job_id)
+            return None
+        if named.casefold() != repository.casefold():
             logger.info("Hardening job %s hardened another repository; no suite ships.", job_id)
             return None
         return HardeningJob.model_validate(row.job)
