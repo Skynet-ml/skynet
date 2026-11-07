@@ -123,15 +123,20 @@ class CreateHardeningJobRequest(BaseModel):
 
     @model_validator(mode="after")
     def _ensure_repo_target(self) -> CreateHardeningJobRequest:
-        """Accept only a repository target whose secrets name saved secrets.
+        """Accept only a repository target whose secrets name saved secrets, and a python scorer.
 
         Returns:
             The validated request.
 
         Raises:
-            ValueError: When the target is not a repository target, or a
-                secret carries a value or a vault reference.
+            ValueError: When the target is not a repository target, a
+                secret carries a value or a vault reference, or the scorer
+                is not a python metric.
         """
+        if self.scorer is not None and self.scorer.kind != "python":
+            # The rounds score each fix inside the job's own sandbox, so only
+            # a python metric can run there.
+            raise ValueError("A hardening job takes only a python scorer.")
         if self.target is None:
             return self
         if self.target.repo is None:

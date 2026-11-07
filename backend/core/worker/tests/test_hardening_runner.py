@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tarfile
+import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -10,15 +11,17 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from threading import Barrier
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
 
 from core.billing.budgets import BudgetService
 from core.billing.operation_pricing import ChargePolicy, operation_quote
-from core.billing.runtime import PaidResult
+from core.billing.runtime import PaidResult, generation_operation_key
 from core.config import settings
 from core.models.hardening import HardeningJob, HardeningJobModel
 from core.service_gateway.optimization.blackbox.hardening import new_job
@@ -28,11 +31,16 @@ from core.worker.hardening_job import HardeningWorkspace
 from core.worker.hardening_runner import (
     OPEN_STATES,
     HardeningBudget,
+    HardeningClaimLostError,
     HardeningMeter,
     RepoHardeningRunner,
+    _renew_until,
     claim_hardening_job,
+    close_ended_hardening_holds,
+    open_hardening_runner,
     operation_key,
     process_next_hardening_job,
+    renew_hardening_lease,
     store_hardening_result,
 )
 
@@ -42,6 +50,8 @@ _TARGET = {
     "repo": {"repository": "octo/bot", "branch": "main", "editable_paths": ["bot"], "secrets": []},
 }
 _SCORER = {"metric_code": "def score(): return 1\n"}
+# A placeholder managed key, so a pass gets past the start checks.
+_KEYED = settings.model_copy(update={"openrouter_api_key": SecretStr("test-managed-key")})
 _END_STATUSES = ["done", "clean_stop", "budget_stop", "failed", "preflight_failed", "rejected", "stale"]
 
 
@@ -206,7 +216,7 @@ def _process(engine: Engine, run: Any, *, pod: str = "pod-a", local_mode: bool =
         Whether a job was claimed.
     """
     return process_next_hardening_job(
-        engine, pod=pod, lease_seconds=60, local_mode=local_mode, settings=settings, run=run
+        engine, pod=pod, lease_seconds=60, local_mode=local_mode, settings=_KEYED, run=run
     )
 
 
@@ -222,23 +232,25 @@ def test_only_one_pod_wins_a_claim_race(engine: Engine) -> None:
             index: The pod number.
 
         Returns:
-            The pod name when it won.
+            The claim token when it won.
         """
         barrier.wait()
         won = claim_hardening_job(engine, pod=f"pod-{index}", lease_seconds=60, place="cloud")
-        return f"pod-{index}" if won else None
+        return won[4] if won else None
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         winners = [pod for pod in pool.map(claim, range(8)) if pod]
 
     assert len(winners) == 1
+    assert winners[0].startswith("pod-")
     assert _row(engine, job.id).claimed_by == winners[0]
 
 
 def test_a_held_lease_blocks_and_an_expired_lease_frees_the_job(engine: Engine) -> None:
     """A second pod waits while the lease holds and takes the job after it lapses; the first pod's result is dropped."""
     job = _seed(engine, binding_id=None)
-    assert claim_hardening_job(engine, pod="pod-a", lease_seconds=60, place="cloud") is not None
+    first = claim_hardening_job(engine, pod="pod-a", lease_seconds=60, place="cloud")
+    assert first is not None
     assert claim_hardening_job(engine, pod="pod-b", lease_seconds=60, place="cloud") is None
 
     with Session(engine) as session:
@@ -247,10 +259,12 @@ def test_a_held_lease_blocks_and_an_expired_lease_frees_the_job(engine: Engine) 
         row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
         session.commit()
 
-    assert claim_hardening_job(engine, pod="pod-b", lease_seconds=60, place="cloud") is not None
-    assert _row(engine, job.id).claimed_by == "pod-b"
-    assert not store_hardening_result(engine, job.id, job, pod="pod-a", operation_id=None)
-    assert _row(engine, job.id).claimed_by == "pod-b"
+    second = claim_hardening_job(engine, pod="pod-b", lease_seconds=60, place="cloud")
+    assert second is not None
+    assert second[4].startswith("pod-b:")
+    assert _row(engine, job.id).claimed_by == second[4]
+    assert not store_hardening_result(engine, job.id, job, claim=first[4], operation_id=None)
+    assert _row(engine, job.id).claimed_by == second[4]
 
 
 def test_claim_skips_other_places_and_waiting_jobs(engine: Engine) -> None:
@@ -353,7 +367,8 @@ def test_a_waiting_job_keeps_its_hold_but_no_lease(engine: Engine, holds: list[s
     assert _process(engine, run)
 
     row = _row(engine, job.id)
-    assert claims == ["pod-a"]
+    assert len(claims) == 1
+    assert (claims[0] or "").startswith("pod-a:")
     assert row.status == "waiting_review"
     assert row.claimed_by is None
     assert row.lease_expires_at is None
@@ -598,11 +613,12 @@ def test_the_runner_scores_with_the_approved_fixes_applied(tmp_path: Path) -> No
     class FakeScorer:
         """Reads the metric text the scorer's tree holds."""
 
-        def __init__(self, archive: Path) -> None:
+        def __init__(self, archive: Path, fixes: tuple[str, ...]) -> None:
             """Read the packed metric.
 
             Args:
                 archive: The packed tree.
+                fixes: The metric fixes packed into the tree.
             """
             with tarfile.open(archive) as tree:
                 handle = tree.extractfile("eval/metric.py")
@@ -641,3 +657,419 @@ def test_the_runner_scores_with_the_approved_fixes_applied(tmp_path: Path) -> No
         runner.close()
 
     assert seen == ["v2\n", "v3\n"]
+
+
+def _meter(
+    service: BudgetService, budget_id: str, operation_id: str, lost: threading.Event | None = None
+) -> HardeningMeter:
+    """Create a meter on the job's hold.
+
+    Args:
+        service: The budget service.
+        budget_id: The job's budget.
+        operation_id: The job's hold.
+        lost: The claim-lost signal, if any.
+
+    Returns:
+        The meter.
+    """
+    return HardeningMeter(
+        service,
+        operation_id=operation_id,
+        lost=lost,
+        username=_USER,
+        budget_id=budget_id,
+        generation=service.get(budget_id, _USER).generation,
+        phase="setup",
+    )
+
+
+def _quote(key: str) -> tuple[Any, ChargePolicy]:
+    """Quote one managed model call with a 5 cent maximum.
+
+    Args:
+        key: Makes the quote's request distinct.
+
+    Returns:
+        The quote and its policy.
+    """
+    policy = ChargePolicy("managed_model")
+    return operation_quote({"call": key}, Decimal("0.05"), policy, {"fixture": True}), policy
+
+
+def test_a_failed_dispatch_keeps_the_call_maximum_in_the_hold(engine: Engine) -> None:
+    """A transport error after dispatch charges the call's maximum as unconfirmed, re-raises, and the close keeps it."""
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id)
+    service = BudgetService(engine=engine)
+    budget = HardeningBudget(service, username=_USER, budget_id=budget_id)
+    held = budget.reserve(job, 2.0)
+    quote, policy = _quote("timeout")
+
+    def dispatch() -> PaidResult[str]:
+        """Fail as a timed-out transport does.
+
+        Raises:
+            TimeoutError: Always.
+        """
+        raise TimeoutError
+
+    with pytest.raises(TimeoutError):
+        _meter(service, budget_id, held).execute(quote, policy, dispatch, operation_key="call", cost_kind="model")
+
+    assert service.get_operation(held, _USER).actual_cents == quote.maximum.total
+    budget.finish(held)
+    final = service.get_operation(held, _USER)
+    assert final.state not in OPEN_STATES
+    assert final.actual_cents == quote.maximum.total
+
+
+def test_parallel_calls_on_one_meter_add_both_costs(engine: Engine) -> None:
+    """Two gateway threads that settle at the same time both land in the hold."""
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id)
+    service = BudgetService(engine=engine)
+    held = HardeningBudget(service, username=_USER, budget_id=budget_id).reserve(job, 2.0)
+    meter = _meter(service, budget_id, held)
+    barrier = Barrier(2)
+
+    def call(usd: str) -> str:
+        """Run one call that waits for the other before it returns.
+
+        Args:
+            usd: The call's provider cost.
+
+        Returns:
+            The call's value.
+        """
+        quote, policy = _quote(usd)
+
+        def dispatch() -> PaidResult[str]:
+            """Return after both calls are in flight.
+
+            Returns:
+                The paid result.
+            """
+            barrier.wait()
+            return PaidResult(value="ok", provider_usd=Decimal(usd), evidence={"usd": usd})
+
+        return meter.execute(quote, policy, dispatch, operation_key=usd, cost_kind="model")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert list(pool.map(call, ["0.01", "0.02"])) == ["ok", "ok"]
+
+    policy = ChargePolicy("managed_model")
+    expected = policy.convert(Decimal("0.01")).total + policy.convert(Decimal("0.02")).total
+    assert service.get_operation(held, _USER).actual_cents == expected
+
+
+def test_a_lost_claim_stops_the_meter(engine: Engine) -> None:
+    """After another pod takes the job, the meter refuses every call before dispatch."""
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id)
+    service = BudgetService(engine=engine)
+    held = HardeningBudget(service, username=_USER, budget_id=budget_id).reserve(job, 2.0)
+    lost = threading.Event()
+    lost.set()
+    quote, policy = _quote("lost")
+    calls: list[str] = []
+
+    with pytest.raises(HardeningClaimLostError):
+        _meter(service, budget_id, held, lost).execute(
+            quote, policy, lambda: calls.append("x"), operation_key="call", cost_kind="model"
+        )
+
+    assert calls == []
+    assert service.get_operation(held, _USER).actual_cents == 0
+
+
+def test_a_renewal_with_a_stale_claim_sets_lost(engine: Engine) -> None:
+    """The renewer of a stale claim stops and sets lost; a live claim renews and calls on_renew."""
+    job = _seed(engine, binding_id=None)
+    live = claim_hardening_job(engine, pod="pod-a", lease_seconds=60, place="cloud")
+    assert live is not None
+    assert not renew_hardening_lease(engine, job.id, claim="pod-a:stale", lease_seconds=60)
+
+    stop, lost = threading.Event(), threading.Event()
+    _renew_until(engine, job.id, "pod-a:stale", 0.03, stop, lost, lambda: None)
+    assert lost.is_set()
+
+    renewals: list[int] = []
+    stop, lost = threading.Event(), threading.Event()
+
+    def on_renew() -> None:
+        """Count a renewal and stop after two."""
+        renewals.append(1)
+        if len(renewals) == 2:
+            stop.set()
+
+    _renew_until(engine, job.id, live[4], 0.03, stop, lost, on_renew)
+    assert len(renewals) == 2
+    assert not lost.is_set()
+
+
+def test_a_same_pod_reclaim_fences_the_older_claim(engine: Engine) -> None:
+    """When a lease lapses and the same pod claims again, the older pass of that pod cannot store."""
+    job = _seed(engine, binding_id=None)
+    first = claim_hardening_job(engine, pod="pod-a", lease_seconds=60, place="cloud")
+    assert first is not None
+    with Session(engine) as session:
+        row = session.get(HardeningJobModel, job.id)
+        assert row is not None
+        row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        session.commit()
+    second = claim_hardening_job(engine, pod="pod-a", lease_seconds=60, place="cloud")
+    assert second is not None
+    assert second[4] != first[4]
+
+    assert not store_hardening_result(engine, job.id, job, claim=first[4], operation_id=None)
+    assert not renew_hardening_lease(engine, job.id, claim=first[4], lease_seconds=60)
+    assert store_hardening_result(engine, job.id, job, claim=second[4], operation_id=None)
+
+
+def test_reserve_uses_the_generation_key_after_a_fence(engine: Engine) -> None:
+    """After the budget's generation moves, a new hold takes the generation-scoped key and opens."""
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id)
+    service = BudgetService(engine=engine)
+    budget = HardeningBudget(service, username=_USER, budget_id=budget_id)
+    first = budget.reserve(job, 2.0)
+    budget.finish(first)
+    fenced = service.fence_generation(budget_id, _USER, expected_generation=service.get(budget_id, _USER).generation)
+
+    second = budget.reserve(job, 2.0, current=first)
+
+    snapshot = service.get_operation(second, _USER)
+    assert snapshot.state in OPEN_STATES
+    assert snapshot.generation == fenced.generation
+    assert snapshot.operation_key == generation_operation_key(operation_key(job.id), fenced.generation)
+
+
+def test_the_sweep_closes_a_hold_that_an_earlier_close_left_open(
+    engine: Engine, holds: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ended job whose close failed keeps its hold id; the sweep closes the hold and clears the id."""
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id)
+    service = BudgetService(engine=engine)
+    held = holds
+
+    def run(job: HardeningJob, **kwargs: Any) -> HardeningJob:
+        """Hold, spend, and end.
+
+        Args:
+            job: The job.
+            **kwargs: The driver arguments.
+
+        Returns:
+            The ended job.
+        """
+        kwargs["reserve"](job, 2.0)
+        _spend(service, budget_id, held[-1], "0.02")
+        ended = job.model_copy(deep=True)
+        ended.status = "done"
+        return ended
+
+    def broken_finish(self: HardeningBudget, operation_id: str) -> None:
+        """Fail as a database error does.
+
+        Args:
+            self: The budget handle.
+            operation_id: The hold.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("database away")
+
+    real_finish = HardeningBudget.finish
+    monkeypatch.setattr(HardeningBudget, "finish", broken_finish)
+    assert _process(engine, run)
+    row = _row(engine, job.id)
+    assert row.status == "done"
+    assert row.budget_operation_id == held[-1]
+    assert service.get(budget_id, _USER).reserved_cents > 0
+
+    monkeypatch.setattr(HardeningBudget, "finish", real_finish)
+    assert close_ended_hardening_holds(engine) == 1
+
+    assert _row(engine, job.id).budget_operation_id is None
+    assert service.get_operation(held[-1], _USER).state not in OPEN_STATES
+    assert service.get(budget_id, _USER).reserved_cents == 0
+    assert close_ended_hardening_holds(engine) == 0
+
+
+@pytest.mark.parametrize(
+    ("scorer", "keyed", "error"),
+    [
+        ({"kind": "remote", "url": "https://score.example", "metric_code": "x"}, True, "hardening.no_python_metric"),
+        ({"kind": "python"}, True, "hardening.no_python_metric"),
+        (None, False, "hardening.no_managed_models"),
+    ],
+)
+def test_a_job_that_cannot_start_ends_with_a_stable_key(
+    engine: Engine, scorer: dict[str, Any] | None, keyed: bool, error: str
+) -> None:
+    """A remote or metric-less scorer, or a deployment without managed models, ends the job before any hold."""
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id, scorer=scorer)
+    calls: list[str] = []
+
+    assert process_next_hardening_job(
+        engine,
+        pod="pod-a",
+        lease_seconds=60,
+        local_mode=False,
+        settings=_KEYED if keyed else settings.model_copy(update={"openrouter_api_key": None}),
+        run=lambda job, **kwargs: calls.append(job.id),
+    )
+
+    row = _row(engine, job.id)
+    assert calls == []
+    assert row.status == "failed"
+    assert row.job["error"] == error
+    assert BudgetService(engine=engine).get(budget_id, _USER).reserved_cents == 0
+
+
+def test_the_runner_resolves_a_byok_key_and_keys_each_scorer_box(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A BYOK scorer model gets its saved key at run time, and each scorer box of a pass has its own key."""
+    budget_id = _budget(engine)
+    job = _seed(
+        engine,
+        binding_id=budget_id,
+        scorer={**_SCORER, "model": {"name": "openai/gpt-4o-mini", "token_source": "byok", "extra": {}}},
+    )
+    protected: list[dict[str, Any]] = []
+    keys: list[str] = []
+
+    class FakeGateway:
+        """Records the payload the runner protects."""
+
+        def __init__(self, meter: HardeningMeter) -> None:
+            """Keep the meter.
+
+            Args:
+                meter: The job's meter.
+            """
+            self.meter = meter
+
+        def protect_payload(self, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            """Record and return the payload.
+
+            Args:
+                payload: The scorer payload.
+                **kwargs: The protect arguments.
+
+            Returns:
+                The payload.
+            """
+            protected.append(payload)
+            return payload
+
+        def parent_sandbox_runtime(self) -> None:
+            """Return no runtime."""
+
+        def close(self) -> None:
+            """Close nothing."""
+
+    class FakeWorkspace:
+        """Records the box's operation key."""
+
+        def __init__(self, *, spec: Any, **kwargs: Any) -> None:
+            """Record the key.
+
+            Args:
+                spec: The sandbox spec.
+                **kwargs: The workspace arguments.
+            """
+            keys.append(spec.operation_key)
+
+    class FakeScorer:
+        """A scorer that prepares nothing."""
+
+        def __init__(self, workspace: FakeWorkspace, *args: Any, **kwargs: Any) -> None:
+            """Keep nothing.
+
+            Args:
+                workspace: The box.
+                *args: The scorer arguments.
+                **kwargs: The scorer options.
+            """
+
+        def prepare(self) -> None:
+            """Prepare nothing."""
+
+        def close(self) -> None:
+            """Close nothing."""
+
+    class FakeVault:
+        """Returns one saved OpenAI connection."""
+
+        def resolve_connection(self, username: str, provider: str) -> SimpleNamespace | None:
+            """Return the saved connection.
+
+            Args:
+                username: The owner.
+                provider: The provider slug.
+
+            Returns:
+                The connection for OpenAI, else None.
+            """
+            if provider != "openai":
+                return None
+            return SimpleNamespace(secret="saved-user-key", api_base=None, params={})
+
+    monkeypatch.setattr(hardening_runner, "ModelGateway", FakeGateway)
+    monkeypatch.setattr(
+        hardening_runner, "bind_protected_sandbox", lambda *a, **k: {"lifetime_seconds": 60, "image": "i"}
+    )
+    monkeypatch.setattr(hardening_runner, "_repo_model_gateway", lambda model: None)
+    monkeypatch.setattr(hardening_runner, "RepoWorkspace", FakeWorkspace)
+    monkeypatch.setattr(hardening_runner, "RepoScorer", FakeScorer)
+    workspace = HardeningWorkspace(
+        agent_archive=tmp_path / "a.tgz",
+        trusted_root=tmp_path,
+        exploits_path=tmp_path / "e",
+        reference=None,
+        commit="c0ffee",
+        applied_fixes=(),
+        secrets={},
+    )
+
+    with open_hardening_runner(
+        workspace,
+        job,
+        service=BudgetService(engine=engine),
+        username=_USER,
+        budget_id=budget_id,
+        operation_id=None,
+        settings=_KEYED,
+        claim="pod-a:one",
+        vault=FakeVault(),  # type: ignore[arg-type]
+    ) as runner:
+        runner.open_scorer(tmp_path / "a.tgz", ())
+        runner.open_scorer(tmp_path / "a.tgz", ("fix",))
+
+    assert protected[0]["scorer"]["model"]["extra"]["api_key"] == "saved-user-key"
+    assert job.scorer is not None
+    assert "api_key" not in job.scorer["model"]["extra"]
+    assert len(keys) == 2
+    assert keys[0] != keys[1]
+    assert all(key.startswith(f"repo-scorer:{operation_key(job.id)}:") for key in keys)
+
+    with (
+        pytest.raises(ValueError, match="vault"),
+        open_hardening_runner(
+            workspace,
+            job,
+            service=BudgetService(engine=engine),
+            username=_USER,
+            budget_id=budget_id,
+            operation_id=None,
+            settings=_KEYED,
+            claim="pod-a:one",
+        ),
+    ):
+        pass

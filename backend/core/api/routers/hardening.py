@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from ...billing.budgets import BudgetError, BudgetService
 from ...config import settings
 from ...local.cli_catalog import CLI_MODELS, parse_subscription_model_id
+from ...models.blackbox import BlackboxScorer
 from ...models.hardening import (
     ACTIVE_STATUSES,
     CreateHardeningJobRequest,
@@ -100,6 +101,31 @@ def _store(row: HardeningJobModel, job: HardeningJob) -> None:
     row.job = job.model_dump(mode="json")
     row.status = job.status
     row.updated_at = datetime.now(UTC)
+
+
+def _stored_scorer(scorer: BlackboxScorer | None) -> dict[str, Any] | None:
+    """Return the scorer as the job row keeps it, without any key or endpoint.
+
+    The row and GET return the scorer as stored, so a key or a custom endpoint
+    must never reach them. The worker resolves a BYOK key from the vault at
+    run time, as the run submit does.
+
+    Args:
+        scorer: The scorer the create request sent.
+
+    Returns:
+        The scorer to store, or None.
+    """
+    if scorer is None:
+        return None
+    stored = scorer.model_copy(update={"secret": None}).model_dump(mode="json")
+    model = stored.get("model")
+    if isinstance(model, dict):
+        model["base_url"] = None
+        extra = model.get("extra") or {}
+        for field in ("api_key", "api_base", "base_url"):
+            extra.pop(field, None)
+    return stored
 
 
 def create_hardening_router(*, job_store) -> APIRouter:
@@ -210,9 +236,7 @@ def create_hardening_router(*, job_store) -> APIRouter:
                 update={
                     "target": None if body.target is None else body.target.model_dump(mode="json"),
                     "binding_id": body.binding_id,
-                    "scorer": None
-                    if body.scorer is None
-                    else body.scorer.model_copy(update={"secret": None}).model_dump(mode="json"),
+                    "scorer": _stored_scorer(body.scorer),
                 }
             )
             row = HardeningJobModel(id=job.id, username=user.username, draft_id=body.draft_id)

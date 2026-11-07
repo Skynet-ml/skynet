@@ -719,6 +719,7 @@ class BackgroundWorker:
                 lease_seconds=self._lease_seconds,
                 local_mode=settings.local_mode,
                 settings=settings,
+                on_renew=lambda: self._touch_activity(worker_id),
             )
         except Exception:  # isolation boundary: a hardening failure must not kill the worker thread
             logger.exception("Worker %d failed a hardening job pass", worker_id)

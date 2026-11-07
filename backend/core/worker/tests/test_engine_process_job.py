@@ -1195,18 +1195,21 @@ def test_a_store_without_an_engine_runs_no_hardening_job(worker: BackgroundWorke
 
 
 def test_the_idle_worker_runs_a_hardening_job_with_its_pod_lease(worker: BackgroundWorker, store: FakeJobStore) -> None:
-    """Pass the store's engine, the pod name and the lease to the hardening pass, and record liveness."""
+    """Pass the engine, pod name and lease to the hardening pass, and record liveness at start and on each renewal."""
     store.engine = MagicMock()  # type: ignore[attr-defined]
     with (
         patch.object(engine_module, "process_next_hardening_job", return_value=True) as process,
         patch.object(worker, "_touch_activity") as touch,
     ):
         assert worker._run_hardening_job(0) is True
+        touch.assert_called_once_with(0)
+        process.call_args.kwargs["on_renew"]()
+        assert touch.call_count == 2
+        touch.assert_called_with(0)
     process.assert_called_once()
     assert process.call_args.args == (store.engine,)  # type: ignore[attr-defined]
     assert process.call_args.kwargs["pod"] == worker._pod_name
     assert process.call_args.kwargs["lease_seconds"] == worker._lease_seconds
-    touch.assert_called_once_with(0)
 
 
 def test_a_failing_hardening_pass_does_not_stop_the_worker(worker: BackgroundWorker, store: FakeJobStore) -> None:
