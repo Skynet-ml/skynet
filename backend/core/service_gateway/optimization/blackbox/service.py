@@ -22,7 +22,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import dspy
 
@@ -759,7 +759,8 @@ def _best_legal_candidate(server: EvalServer, rejected: Candidate) -> Candidate 
         and ILLEGAL_APPROACH_KEY not in record.side_info
         and not record.crashed
     ]
-    return max(legal, key=lambda record: record.mean_score or 0.0).candidate if legal else None
+    # A metric error marks the record crashed, so every legal mean is a number.
+    return max(legal, key=lambda record: cast(float, record.mean_score)).candidate if legal else None
 
 
 def _progress_listener(progress_callback: ProgressCallback | None) -> Callable[[EvalServer, float | None], None]:
@@ -797,36 +798,55 @@ def _progress_listener(progress_callback: ProgressCallback | None) -> Callable[[
     return on_eval
 
 
+def _scrub_search_floor(value: Any) -> Any:
+    """Replace every number the search floor reached with ``None``, at any depth.
+
+    A mean with one floored case is the floor divided by the case count
+    (Best-of-N over 3 cases gives about -3.3e8), so the cut-off is the
+    floor over 1000: it catches such a mean over up to 1000 cases. A real
+    score at or below -1e6 also shows as no score in progress events;
+    records and results keep it.
+
+    Args:
+        value: A progress payload or a part of one.
+
+    Returns:
+        A copy with those numbers set to ``None``.
+    """
+    if isinstance(value, dict):
+        return {key: _scrub_search_floor(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return type(value)(_scrub_search_floor(item) for item in value)
+    if isinstance(value, int | float) and not isinstance(value, bool) and value <= SEARCH_FLOOR / 1000:
+        return None
+    return value
+
+
 def _without_search_floor(progress_callback: ProgressCallback | None) -> ProgressCallback | None:
     """Wrap the job's progress sink so engine events never show the search floor.
 
     SKY-367: engines still get :data:`SEARCH_FLOOR` for a metric error case
-    and can report it as a score; users must see no score instead.
+    and report it, or means it pulled down, as scores (the native runtime's
+    candidate events too); users must see no score instead.
 
     Args:
         progress_callback: The job's progress sink, if any.
 
     Returns:
-        A sink that turns each top-level :data:`SEARCH_FLOOR` value into
-        ``None``, or ``None`` without a sink.
+        A sink that nulls every floored number in the payload, or ``None``
+        without a sink.
     """
     if progress_callback is None:
         return None
 
     def sink(event: str, metrics: dict[str, Any]) -> None:
-        """Forward ``event`` with the floor values replaced.
+        """Forward ``event`` with the floored numbers replaced.
 
         Args:
             event: The progress event name.
             metrics: Its payload.
         """
-        progress_callback(
-            event,
-            {
-                key: None if isinstance(value, float) and value == SEARCH_FLOOR else value
-                for key, value in metrics.items()
-            },
-        )
+        progress_callback(event, _scrub_search_floor(metrics))
 
     return sink
 
@@ -1333,7 +1353,7 @@ def _run_job(
             if baseline_val is not None and best_val.illegal and not baseline_val.illegal:
                 logger.info("the rule judge rejected the optimized version; keeping the starting point")
                 best_candidate, best_val, regression_guard_applied = seed_candidate, baseline_val, True
-            elif baseline_val is not None and best_val.score is None and baseline_val.score is not None:
+            elif baseline_val is not None and best_val.score is None:
                 logger.info("the optimized version has no score (%s); keeping the starting point", METRIC_ERROR)
                 best_candidate, best_val, regression_guard_applied = seed_candidate, baseline_val, True
             elif (

@@ -16,6 +16,7 @@ from core.constants import (
     DETAIL_BASELINE,
     DETAIL_OPTIMIZED,
     PROGRESS_BASELINE,
+    PROGRESS_CANDIDATE,
     PROGRESS_EVALUATION_STARTED,
     PROGRESS_LANE_COMPLETED,
     PROGRESS_LANE_HANDOFF,
@@ -1732,10 +1733,19 @@ def test_a_crashed_version_is_never_chosen_even_when_every_valid_score_is_below_
     assert SEARCH_FLOOR not in [value for _, metrics in events for value in metrics.values()]
 
 
+@pytest.mark.parametrize("crashing", [{"winner"}, {"winner", "hello world"}])
 def test_a_metric_error_in_the_final_run_has_no_score_and_keeps_the_seed(
-    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    crashing: set[str],
 ) -> None:
-    """A winner the metric crashes on in the final run gets no score, never 0, and the seed stays."""
+    """A winner the metric crashes on in the final run gets no score, never 0, and the seed stays.
+
+    The seed stays even when the metric crashes on it too, so the crashed
+    winner never becomes the next run's starting point.
+    """
     real_build_scorer = service_mod.build_scorer
 
     def build_scorer(*args: Any, **kwargs: Any) -> Any:
@@ -1757,7 +1767,7 @@ def test_a_metric_error_in_the_final_run_has_no_score_and_keeps_the_seed(
                 Returns:
                     The score and side info.
                 """
-                if candidate == "winner":
+                if candidate in crashing:
                     return None, {"error": "KeyError: 'answer'", "status": METRIC_ERROR}
                 return inner(candidate, case)
 
@@ -1788,7 +1798,7 @@ def test_a_metric_error_in_the_final_run_has_no_score_and_keeps_the_seed(
     assert response.regression_guard_applied is True
     assert response.best_candidate == "hello world"
     assert response.best_score == response.baseline_score
-    assert response.best_score is not None
+    assert (response.best_score is None) == ("hello world" in crashing)
 
 
 def test_final_run_has_no_score_when_the_metric_crashes_on_a_case(caplog: pytest.LogCaptureFixture) -> None:
@@ -1809,3 +1819,35 @@ def test_final_run_has_no_score_when_the_metric_crashes_on_a_case(caplog: pytest
     messages = [record.getMessage() for record in caplog.records]
     assert "optimized version final run 1/2 metric_error: ValueError: bad input" in messages
     assert any("optimized version has no score: metric_error" in message for message in messages)
+
+
+def test_progress_events_never_show_a_score_the_search_floor_dragged_down() -> None:
+    """A Best-of-N style mean over one floored case, and the floored case itself, reach users as no score."""
+    events: list[tuple[str, dict[str, Any]]] = []
+    sink = service_mod._without_search_floor(lambda event, metrics: events.append((event, metrics)))
+    assert sink is not None
+    floored_mean = (0.5 + 0.25 + SEARCH_FLOOR) / 3
+
+    sink(
+        PROGRESS_CANDIDATE,
+        {
+            "candidate_id": "1",
+            "score": floored_mean,
+            "per_example": [{"id": "a", "score": 0.5}, {"id": "b", "score": 0.25}, {"id": "c", "score": SEARCH_FLOOR}],
+            "discovered_at_evals": 3,
+        },
+    )
+    sink(PROGRESS_OPTIMIZER, {"last_score": -0.5, "best_score": 0.5, "n": 3})
+
+    assert events == [
+        (
+            PROGRESS_CANDIDATE,
+            {
+                "candidate_id": "1",
+                "score": None,
+                "per_example": [{"id": "a", "score": 0.5}, {"id": "b", "score": 0.25}, {"id": "c", "score": None}],
+                "discovered_at_evals": 3,
+            },
+        ),
+        (PROGRESS_OPTIMIZER, {"last_score": -0.5, "best_score": 0.5, "n": 3}),
+    ]

@@ -38,8 +38,10 @@ METRIC_ERROR = "metric_error"
 STATUS_KEY = "status"
 # SKY-367: the engines still need a number for every case, so evaluate() hands
 # them this value for a metric_error case. It is far below any real score, so a
-# crashed version always loses the search. It exists only in that return value:
-# records, best picks, logs, results and publishing see ``None``.
+# crashed version always loses the search. Records, best picks, results and
+# publishing see ``None``. Progress events reach users only after the service
+# nulls this value and means it pulled down; an engine's own log line (the
+# native runtime's "Candidate scored") can still show such a mean.
 SEARCH_FLOOR = -1e9
 
 
