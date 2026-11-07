@@ -51,6 +51,7 @@ import {
 } from "@/shared/lib/account-missing";
 import type { ExecutionBudget } from "@/shared/types/execution-budget";
 import type { RunUsage } from "@/shared/types/run-usage";
+import type { CreateHardeningJobRequest, HardeningJob } from "@/shared/types/hardening";
 import type {
   ContinuousEnableRequest,
   ContinuousPlan,
@@ -1820,6 +1821,45 @@ export function getProviderKeys() {
 /** The web account's managed model catalog, read through the Mac's hosted proxy (SKY-340). */
 export function getHostedModels() {
   return request<ModelCatalogResponse>("/models", undefined, "hosted");
+}
+
+/** Start a metric-hardening job for one setup draft (SKY-355). */
+export function createHardeningJob(body: CreateHardeningJobRequest) {
+  return request<HardeningJob>("/hardening/jobs", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** Read one metric-hardening job. */
+export function getHardeningJob(jobId: string, signal?: AbortSignal) {
+  return request<HardeningJob>(`/hardening/jobs/${encodeURIComponent(jobId)}`, { signal });
+}
+
+/** The draft's newest metric-hardening job, or null when it has none. */
+export function getLatestHardeningJob(draftId: string, signal?: AbortSignal) {
+  const query = new URLSearchParams({ draft_id: draftId });
+  return request<HardeningJob | null>(`/hardening/jobs?${query}`, { signal });
+}
+
+/** Confirm or reject one exploit of the current round. */
+export function setHardeningExploitVerdict(jobId: string, exploitId: string, confirmed: boolean) {
+  return request<HardeningJob>(
+    `/hardening/jobs/${encodeURIComponent(jobId)}/exploits/${encodeURIComponent(exploitId)}/verdict`,
+    { method: "POST", body: JSON.stringify({ confirmed }) },
+  );
+}
+
+/** Approve or reject the drafted metric fix; a rejected fix stops the loop. */
+export function decideHardeningFix(jobId: string, approve: boolean) {
+  return request<HardeningJob>(`/hardening/jobs/${encodeURIComponent(jobId)}/fix`, {
+    method: "POST",
+    body: JSON.stringify({ approve }),
+  });
+}
+
+/** Put a failed, stale or rejected job back to work. */
+export function retryHardeningJob(jobId: string) {
+  return request<HardeningJob>(`/hardening/jobs/${encodeURIComponent(jobId)}/retry`, {
+    method: "POST",
+  });
 }
 
 export function getByokModels() {

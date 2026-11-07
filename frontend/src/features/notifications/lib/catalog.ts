@@ -205,6 +205,13 @@ export function itemLine(item: NotificationItem, fmt: FactFormatters): ItemLine 
   const spent = num(facts.spent);
   const limit = num(facts.limit);
   const duration = num(facts.duration);
+  // A hardening job reuses the run events (SKY-360): it pauses for the user's
+  // review as needs_input and ends as finished, with `kind: "hardening"`.
+  // The facts type does not list that kind yet, so compare it as a string.
+  if ((facts.kind as string | null | undefined) === "hardening") {
+    if (item.event_type === "needs_input") return { key: "notifications.item.hardening_review", params: {} };
+    if (item.event_type === "finished") return { key: "notifications.item.hardening_done", params: {} };
+  }
   switch (item.event_type) {
     case "finished":
     case "new_best": {

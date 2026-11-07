@@ -83,10 +83,10 @@ function readyState(level: Level, check: ContractCheckResponse | null) {
   };
 }
 
-test("the Metric step is the code screen, the sandbox check, the schedule, then the overview that holds Run", () => {
+test("the Metric step is the code screen, hardening, the sandbox check, the schedule, then the overview that holds Run", () => {
   for (const level of ["guided", "standard", "expert"] as const) {
     const pages = stepPages("metric", readyState(level, null));
-    assert.deepEqual(pages, ["metric", "check", "schedule", "overview"]);
+    assert.deepEqual(pages, ["metric", "harden", "check", "schedule", "overview"]);
     // The schedule comes right after the check and right before the overview and Run.
     assert.equal(pages.indexOf("schedule"), pages.indexOf("check") + 1);
     assert.equal(pages.indexOf("schedule"), pages.indexOf("overview") - 1);

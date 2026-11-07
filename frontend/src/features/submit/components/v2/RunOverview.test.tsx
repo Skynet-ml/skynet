@@ -13,6 +13,7 @@ import { setClientLocale } from "@/shared/lib/runtime-locale";
 import { TooltipProvider } from "@/shared/ui/primitives/tooltip";
 import type { ContractCheckState } from "../../hooks/use-contract-check";
 import type { BlackboxRunRequest } from "@/shared/types/api";
+import type { HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { initialWizardV2State, type WizardV2State } from "../../lib/wizard-v2";
 
 // The model picker this screen reuses imports a stylesheet, which Node cannot load.
@@ -40,11 +41,11 @@ const cc: ContractCheckState = {
   check: async () => null,
 };
 
-function render(state: WizardV2State): string {
+function render(state: WizardV2State, hardening: HardeningJob | null = null): string {
   setClientLocale("en");
   return renderToStaticMarkup(
     <TooltipProvider>
-      <RunOverview state={state} cc={cc} guided={false} />
+      <RunOverview state={state} cc={cc} guided={false} hardening={hardening} />
     </TooltipProvider>,
   );
 }
@@ -191,5 +192,52 @@ void describe("hostedRunBlock", () => {
       block({ request: request({ staged_dataset_id: "staged-1" }) }),
       "submit.v2.run_on.blocked.staged_data",
     );
+  });
+});
+
+function hardeningJob(status: HardeningStatus): HardeningJob {
+  const exploit = {
+    kind: "case" as const,
+    label: "valid" as const,
+    confidence: 0.9,
+    reason: "",
+    unsure: false,
+    patch_diff: "",
+    why_md: "",
+    user_verdict: null,
+  };
+  return {
+    id: "job-1",
+    status,
+    round: 2,
+    rounds: 5,
+    round_cap_usd: 2,
+    reserved_usd: 10,
+    spent_usd: 1.2,
+    place: "cloud",
+    attacker_model: "a",
+    judge_model: "j",
+    view: "black_box",
+    preflight_failures: [],
+    rounds_detail: [
+      { index: 1, status: "fixed", exploits: [{ ...exploit, id: "e1" }, { ...exploit, id: "e2" }], fix: null },
+      { index: 2, status: "clean", exploits: [{ ...exploit, id: "e3" }], fix: null },
+    ],
+    suite_count: 1,
+    fixed_count: 1,
+    error: null,
+  };
+}
+
+void describe("RunOverview hardening line", () => {
+  void it("names the hardening only when the job ended well", () => {
+    const state = initialWizardV2State("expert");
+    assert.doesNotMatch(render(state), /hardening_survived/);
+    for (const status of ["clean_stop", "budget_stop", "done"] as const) {
+      assert.match(render(state, hardeningJob(status)), /submit\.v2\.overview\.hardening_survived/);
+    }
+    for (const status of ["running", "waiting_review", "failed", "rejected"] as const) {
+      assert.doesNotMatch(render(state, hardeningJob(status)), /hardening_survived/);
+    }
   });
 });

@@ -1,0 +1,142 @@
+"use client";
+
+import * as React from "react";
+import { toast } from "react-toastify";
+import {
+  createHardeningJob,
+  decideHardeningFix,
+  getHardeningJob,
+  getLatestHardeningJob,
+  retryHardeningJob,
+  setHardeningExploitVerdict,
+} from "@/shared/lib/api";
+import type { CreateHardeningJobRequest, HardeningJob, HardeningStatus } from "@/shared/types/hardening";
+import { WIZARD_HARDENING_KEY, keepSessionValue, readSessionValue } from "../lib/session-state";
+
+const POLL_MS = 4000;
+// Only the worker moves a job out of these; every other status waits on the user or is final.
+const POLLED: ReadonlySet<HardeningStatus> = new Set(["preflight", "running"]);
+
+export type HardeningSettings = Omit<CreateHardeningJobRequest, "draft_id">;
+
+export interface HardeningState {
+  job: HardeningJob | null;
+  /** The first read of the draft's newest job is still out. */
+  loading: boolean;
+  /** A user action is out; its buttons hold still. */
+  busy: boolean;
+  start: (settings: HardeningSettings) => Promise<void>;
+  verdict: (exploitId: string, confirmed: boolean) => Promise<void>;
+  decideFix: (approve: boolean) => Promise<void>;
+  retry: () => Promise<void>;
+}
+
+// The setup has no server-side draft id yet, so it keeps one beside its
+// answers. A reload finds its job again; a new setup starts a new draft.
+function draftId(): string {
+  const kept = readSessionValue(WIZARD_HARDENING_KEY);
+  if (kept) return kept;
+  const id = crypto.randomUUID();
+  keepSessionValue(WIZARD_HARDENING_KEY, id);
+  return id;
+}
+
+/**
+ * The setup draft's metric-hardening job: read once, polled while the
+ * worker owns it, and changed by the user's verdicts and fix decisions.
+ *
+ * Args:
+ *   active: The hardening screen is on view; polling runs only then.
+ *
+ * Returns:
+ *   The job and its actions.
+ */
+export function useHardening(active: boolean): HardeningState {
+  const [job, setJob] = React.useState<HardeningJob | null>(null);
+  const [loaded, setLoaded] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const draft = React.useRef<string | null>(null);
+
+  React.useEffect(() => {
+    if (!active || loaded) return;
+    const ctrl = new AbortController();
+    draft.current ??= draftId();
+    getLatestHardeningJob(draft.current, ctrl.signal)
+      .then((latest) => setJob(latest))
+      .catch(() => {})
+      .finally(() => {
+        if (!ctrl.signal.aborted) setLoaded(true);
+      });
+    return () => ctrl.abort();
+  }, [active, loaded]);
+
+  const jobId = job?.id ?? null;
+  const polled = job !== null && POLLED.has(job.status);
+  React.useEffect(() => {
+    if (!active || !jobId || !polled) return;
+    const ctrl = new AbortController();
+    // The next read waits for the last one, so a slow answer never lands after a newer one.
+    let timer = 0;
+    const poll = () => {
+      timer = window.setTimeout(() => {
+        getHardeningJob(jobId, ctrl.signal)
+          .then((next) => {
+            if (!ctrl.signal.aborted) setJob(next);
+          })
+          .catch(() => {})
+          .finally(() => {
+            if (!ctrl.signal.aborted) poll();
+          });
+      }, POLL_MS);
+    };
+    poll();
+    return () => {
+      window.clearTimeout(timer);
+      ctrl.abort();
+    };
+  }, [active, jobId, polled]);
+
+  const act = React.useCallback(async (call: () => Promise<HardeningJob>) => {
+    setBusy(true);
+    try {
+      setJob(await call());
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const start = React.useCallback(
+    (settings: HardeningSettings) => {
+      draft.current ??= draftId();
+      const id = draft.current;
+      return act(async () => {
+        try {
+          return await createHardeningJob({ ...settings, draft_id: id });
+        } catch (err) {
+          // The draft may already hold a job that the first read missed; show it.
+          const latest = await getLatestHardeningJob(id).catch(() => null);
+          if (latest) setJob(latest);
+          throw err;
+        }
+      });
+    },
+    [act],
+  );
+  const verdict = React.useCallback(
+    (exploitId: string, confirmed: boolean) =>
+      jobId ? act(() => setHardeningExploitVerdict(jobId, exploitId, confirmed)) : Promise.resolve(),
+    [act, jobId],
+  );
+  const decideFix = React.useCallback(
+    (approve: boolean) => (jobId ? act(() => decideHardeningFix(jobId, approve)) : Promise.resolve()),
+    [act, jobId],
+  );
+  const retry = React.useCallback(
+    () => (jobId ? act(() => retryHardeningJob(jobId)) : Promise.resolve()),
+    [act, jobId],
+  );
+
+  return { job, loading: active && !loaded, busy, start, verdict, decideFix, retry };
+}

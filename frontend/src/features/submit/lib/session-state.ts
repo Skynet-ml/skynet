@@ -16,7 +16,10 @@ export const WIZARD_SESSION_KEY = "skynet.wizard.session.v1";
  */
 export const WIZARD_SCREEN_KEY = "skynet.wizard.screen.v1";
 export const WIZARD_SCHEDULE_KEY = "skynet.wizard.schedule.v1";
-export const WIZARD_VIEW_KEYS = [WIZARD_SCREEN_KEY, WIZARD_SCHEDULE_KEY] as const;
+// The setup's hardening job is found by this id. It goes with the setup, so a
+// submit or Start new drops it and the next setup never shows the old job.
+export const WIZARD_HARDENING_KEY = "skynet.wizard.hardening-draft.v1";
+export const WIZARD_VIEW_KEYS = [WIZARD_SCREEN_KEY, WIZARD_SCHEDULE_KEY, WIZARD_HARDENING_KEY] as const;
 
 const SLICES = ["task", "inputs", "optimizer", "workspace", "meta"] as const;
 

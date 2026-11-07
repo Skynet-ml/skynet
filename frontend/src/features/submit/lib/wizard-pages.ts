@@ -14,6 +14,7 @@ export type WizardPageId =
   | "models"
   | "budget"
   | "metric"
+  | "harden"
   | "check"
   | "schedule"
   | "overview";
@@ -41,11 +42,12 @@ export function stepPages(step: WizardStepId, state: WizardV2State): readonly Wi
     case "optimizer":
       return optimizerPages(state);
     case "metric":
+      // Hardening attacks the metric right after the code, before anything runs it.
       // A repository's setup check runs on the server at submit, so it has no check screen.
-      if (state.task.repo) return ["metric", "overview"];
+      if (state.task.repo) return ["metric", "harden", "overview"];
       // The sandbox check closes the setup on a screen of its own, and Run
       // sits on the overview after it, away from the code editors. Between them
       // the user may set the run to repeat on a schedule.
-      return ["metric", "check", "schedule", "overview"];
+      return ["metric", "harden", "check", "schedule", "overview"];
   }
 }
