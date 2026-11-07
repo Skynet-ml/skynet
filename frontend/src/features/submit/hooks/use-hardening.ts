@@ -15,7 +15,7 @@ import { msg, type MessageKey } from "@/shared/lib/messages";
 import type { BlackboxScorer, BlackboxTarget, CatalogModel, ModelConfig } from "@/shared/types/api";
 import type { CreateHardeningJobRequest, HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { WIZARD_HARDENING_KEY, keepSessionValue, readSessionValue } from "../lib/session-state";
-import { repoRunScorer } from "../lib/repo-run";
+import { hardeningScorer } from "../lib/repo-run";
 import { repoIssue, type RepoDraft } from "../lib/wizard-v2";
 import { useWizardV2 } from "./use-unified-wizard";
 
@@ -127,7 +127,7 @@ export function hardeningErrorText(err: unknown): string | null {
  *   settings: The rounds, cap, models and view the user picked.
  *   draftId: The setup draft the job belongs to.
  *   repo: The wizard's repository draft, or none.
- *   scorer: The run submit's scorer (`repoRunScorer`), or null while the setup has none.
+ *   scorer: The run's scorer with its metric model (`hardeningScorer`), or null while the setup has none.
  *   ensureBudget: Opens or reuses the wizard's execution budget.
  *   create: Sends the create request.
  *
@@ -180,7 +180,8 @@ export function useHardening(active: boolean): HardeningState {
   const draft = React.useRef<string | null>(null);
   const { state, ensureBudget } = useWizardV2();
   const repo = state.task.repo;
-  const scorer = React.useMemo(() => repoRunScorer(state.workspace), [state.workspace]);
+  const { workspace, optimizer } = state;
+  const scorer = React.useMemo(() => hardeningScorer({ workspace, optimizer }), [workspace, optimizer]);
 
   React.useEffect(() => {
     if (!active || loaded) return;

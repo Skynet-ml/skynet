@@ -10,7 +10,7 @@ import type { ApiSource } from "@/shared/lib/api-route";
 import type { BlackboxEngineId, BlackboxRunRequest, BlackboxScorer, ModelConfig } from "@/shared/types/api";
 import type { HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { prepareModelConfig } from "./model-config";
-import { storedMetricModel } from "./run-floor";
+import { runModels, scanMetricDeclarations, scanMetricModel, storedMetricModel } from "./run-floor";
 import type { WizardV2State } from "./wizard-v2";
 
 export interface RepoRunOptions {
@@ -41,6 +41,36 @@ export function repoRunScorer(workspace: WizardV2State["workspace"]): BlackboxSc
     ...(hasModel(metricModel) && { model: prepareModelConfig(metricModel) }),
     timeout_seconds: workspace.metricTimeoutSeconds,
   };
+}
+
+/**
+ * The hardening job's scorer: the run's scorer, with the metric model that
+ * the run submit gets from the server's `resolve_metric_model`. The hardening
+ * create fills no model, so without this an `llm()` metric fails every round.
+ *
+ * Args:
+ *   state: The wizard state, with `metric.py` and the run's models.
+ *
+ * Returns:
+ *   The scorer, or null while `metric.py` is empty.
+ */
+export function hardeningScorer(state: Pick<WizardV2State, "workspace" | "optimizer">): BlackboxScorer | null {
+  const scorer = repoRunScorer(state.workspace);
+  const reflection = state.optimizer.reflectionModel;
+  if (!scorer || scorer.model || !hasModel(reflection)) return scorer;
+  const code = state.workspace.metricCode;
+  const scan = scanMetricModel(code);
+  // An unreadable metric gets no guessed model; the runner reports its error.
+  if (!scan.uses || scan.unknown) return scorer;
+  const { names, omitted, unsafe } = scanMetricDeclarations(code);
+  // The server refuses these declarations, so no model can be right for them.
+  if (unsafe || names.length > 1 || (omitted && names.length === 1 && names[0] !== reflection.name)) {
+    return scorer;
+  }
+  // runModels builds the metric model as the server does: the reflection model
+  // when no call names one, else the role with that name or a new config.
+  const metric = runModels(state.optimizer, true, code).at(-1);
+  return metric ? { ...scorer, model: prepareModelConfig(metric) } : scorer;
 }
 
 /** The repository run request, or null while the wizard cannot run it yet. */

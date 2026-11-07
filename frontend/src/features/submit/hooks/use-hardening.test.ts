@@ -252,16 +252,23 @@ if (!process.env.JITI_ALIAS) {
     type Sent = { url: string; method?: string; body: Record<string, unknown> };
 
     const workspace = { metricCode: "def score(repo_path, case=None):\n    return 1.0", metricModel: null, metricTimeoutSeconds: 60 };
+    const optimizer = {
+      choice: "gepa",
+      taskModel: null,
+      reflectionModel: { name: "anthropic/reflect", token_source: "managed" },
+      extraReflectionModels: [],
+    };
 
     async function startWith(
       repo: unknown,
       ws: unknown = workspace,
+      opt: unknown = optimizer,
     ): Promise<{ sent: Sent[]; budgets: number; order: string[]; hasScorer: boolean }> {
       const sent: Sent[] = [];
       const order: string[] = [];
       let budgets = 0;
       (globalThis as { __hardeningWizard?: unknown }).__hardeningWizard = {
-        state: { task: { repo }, workspace: ws },
+        state: { task: { repo }, workspace: ws, optimizer: opt },
         ensureBudget: async () => {
           budgets += 1;
           order.push("budget");
@@ -349,6 +356,69 @@ if (!process.env.JITI_ALIAS) {
       for (const leak of ["sk-test-not-real", "top.example", "base.example", "extra.example"]) {
         assert.equal(raw.includes(leak), false, leak);
       }
+    });
+
+    const createdScorer = (sent: Sent[]) => {
+      const create = sent.filter((r) => r.method === "POST");
+      assert.equal(create.length, 1);
+      return create[0]!.body.scorer as Record<string, unknown>;
+    };
+    const repo = { ...emptyRepoDraft(), repository: "acme/widgets" };
+    const llmMetric = (call: string) => ({
+      metricCode: `from skynet import llm\n\ndef score(repo_path, case=None):\n    return float(${call})`,
+      metricModel: null,
+      metricTimeoutSeconds: 60,
+    });
+
+    void it("gives an llm() metric without model= the reflection model, without its key", async () => {
+      const { sent } = await startWith(repo, llmMetric("llm('judge this')"), {
+        ...optimizer,
+        reflectionModel: {
+          name: "openai/reflect",
+          token_source: "byok",
+          byok_provider: "openai",
+          extra: { api_key: "sk-test-not-real", temperature: 0.2 },
+        },
+      });
+      const scorer = createdScorer(sent);
+      assert.deepEqual(scorer.model, {
+        name: "openai/reflect",
+        token_source: "byok",
+        byok_provider: "openai",
+        extra: { temperature: 0.2 },
+      });
+      assert.equal(JSON.stringify(sent).includes("sk-test-not-real"), false);
+    });
+
+    void it("gives an llm() metric with one model= name that model, billed like the reflection model", async () => {
+      const { sent } = await startWith(repo, llmMetric("llm('judge this', model='anthropic/judge')"));
+      assert.deepEqual(createdScorer(sent).model, { name: "anthropic/judge", token_source: "managed" });
+    });
+
+    void it("bills a named metric model as managed when the reflection model is a subscription", async () => {
+      const { sent } = await startWith(repo, llmMetric("llm('judge this', model='anthropic/judge')"), {
+        ...optimizer,
+        reflectionModel: { name: "subscription/claude/opus", token_source: "subscription", cli_provider: "claude" },
+      });
+      assert.deepEqual(createdScorer(sent).model, { name: "anthropic/judge", token_source: "managed" });
+    });
+
+    void it("gives a model= name that matches the task model that role's config", async () => {
+      const { sent } = await startWith(repo, llmMetric("llm('judge this', model='openai/task')"), {
+        ...optimizer,
+        taskModel: { name: "openai/task", token_source: "byok", byok_provider: "openai" },
+      });
+      assert.deepEqual(createdScorer(sent).model, {
+        name: "openai/task",
+        token_source: "byok",
+        byok_provider: "openai",
+      });
+    });
+
+    void it("adds no model for a metric without llm() or with two model names", async () => {
+      assert.equal("model" in createdScorer((await startWith(repo)).sent), false);
+      const two = llmMetric("llm('a', model='x/one') + llm('b', model='x/two')");
+      assert.equal("model" in createdScorer((await startWith(repo, two)).sent), false);
     });
 
     void it("sends no job and reports no scorer while metric.py is empty", async () => {
