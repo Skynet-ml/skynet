@@ -341,6 +341,7 @@ function SettingsForm({
   reflectionModel,
   local,
   busy,
+  hasScorer,
   onStart,
   onSkip,
   t,
@@ -349,6 +350,7 @@ function SettingsForm({
   reflectionModel: ModelConfig | null;
   local: boolean;
   busy: boolean;
+  hasScorer: boolean;
   onStart: (s: { rounds: number; cap: number; attacker: string; judge: string; view: HardeningView }) => void;
   onSkip: () => void;
   t: T;
@@ -460,9 +462,10 @@ function SettingsForm({
           </div>
         </div>
       )}
+      {!hasScorer && <p className="text-sm text-destructive">{t("submit.v2.harden.no_scorer")}</p>}
       <div className="flex flex-wrap gap-2">
         <Button
-          disabled={busy || !valid || !pickedAttacker || !pickedJudge}
+          disabled={busy || !hasScorer || !valid || !pickedAttacker || !pickedJudge}
           onClick={() =>
             onStart({ rounds, cap, attacker: pickedAttacker, judge: pickedJudge, view })
           }
@@ -554,6 +557,7 @@ export function HardenMetricScreen({
         reflectionModel={reflectionModel}
         local={isLocalMode()}
         busy={h.busy}
+        hasScorer={h.hasScorer}
         t={t}
         usd={usd}
         onSkip={next}

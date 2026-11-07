@@ -7,7 +7,7 @@
  * the run needs data.
  */
 import type { ApiSource } from "@/shared/lib/api-route";
-import type { BlackboxEngineId, BlackboxRunRequest, ModelConfig } from "@/shared/types/api";
+import type { BlackboxEngineId, BlackboxRunRequest, BlackboxScorer, ModelConfig } from "@/shared/types/api";
 import type { HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { prepareModelConfig } from "./model-config";
 import { storedMetricModel } from "./run-floor";
@@ -22,6 +22,27 @@ export interface RepoRunOptions {
 const hasModel = (config: ModelConfig | null): config is ModelConfig =>
   Boolean(config?.name.trim());
 
+/**
+ * The repository run's scorer. The hardening job sends the same scorer, so its
+ * runner scores with the run's metric (SKY-378).
+ *
+ * Args:
+ *   workspace: The wizard's workspace, with `metric.py` and its model.
+ *
+ * Returns:
+ *   The scorer, or null while `metric.py` is empty.
+ */
+export function repoRunScorer(workspace: WizardV2State["workspace"]): BlackboxScorer | null {
+  if (!workspace.metricCode.trim()) return null;
+  const metricModel = storedMetricModel(workspace.metricModel, workspace.metricCode);
+  return {
+    kind: "python",
+    metric_code: workspace.metricCode,
+    ...(hasModel(metricModel) && { model: prepareModelConfig(metricModel) }),
+    timeout_seconds: workspace.metricTimeoutSeconds,
+  };
+}
+
 /** The repository run request, or null while the wizard cannot run it yet. */
 export function repoRunRequest(
   state: WizardV2State,
@@ -30,12 +51,12 @@ export function repoRunRequest(
   const { task, inputs, optimizer, workspace, meta } = state;
   const repo = task.repo;
   if (!repo || !hasModel(optimizer.reflectionModel)) return null;
-  if (!workspace.metricCode.trim()) return null;
+  const scorer = repoRunScorer(workspace);
+  if (!scorer) return null;
   const auto = optimizer.choice === "auto";
   const engine = optimizer.choice as BlackboxEngineId;
   const shinka = !auto && engine === "shinka_evolve";
   const editablePaths = repo.editablePaths.map((path) => path.trim()).filter(Boolean);
-  const metricModel = storedMetricModel(workspace.metricModel, workspace.metricCode);
   return {
     name: meta.name.trim() || undefined,
     description: meta.description.trim() || undefined,
@@ -43,12 +64,7 @@ export function repoRunRequest(
     objective: task.objective.trim(),
     background: task.background.trim() || null,
     recipe: "repo",
-    scorer: {
-      kind: "python",
-      metric_code: workspace.metricCode,
-      ...(hasModel(metricModel) && { model: prepareModelConfig(metricModel) }),
-      timeout_seconds: workspace.metricTimeoutSeconds,
-    },
+    scorer,
     // The scorer gets each case as `score(repo_path, case)`.
     ...(task.needsData && inputs.cases.length > 0
       ? { cases: inputs.cases as unknown as Array<Record<string, unknown>> }

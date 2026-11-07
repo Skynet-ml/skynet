@@ -3863,6 +3863,7 @@
   "submit.v2.harden.view.white_box": "קופסה לבנה",
   "submit.v2.harden.start": "התחלה",
   "submit.v2.harden.skip": "דילוג",
+  "submit.v2.harden.no_scorer": "כתבו קודם את metric.py. ההקשחה מנקדת כל מתקפה עם המדד של הריצה.",
   "submit.v2.harden.continue": "המשך",
   "submit.v2.harden.retry": "ניסיון חוזר לסבב",
   "submit.v2.harden.running": "התוקף עובד. אפשר לצאת. נודיע לכם כשנדרשת הבדיקה שלכם.",

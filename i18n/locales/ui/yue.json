@@ -251,6 +251,7 @@
   "submit.v2.harden.view.white_box": "白盒",
   "submit.v2.harden.start": "開始",
   "submit.v2.harden.skip": "略過",
+  "submit.v2.harden.no_scorer": "請先寫 metric.py。加固會用今次運行嘅指標為每次攻擊評分。",
   "submit.v2.harden.continue": "繼續",
   "submit.v2.harden.retry": "重試呢一輪",
   "submit.v2.harden.running": "攻擊模型做緊嘢。你可以走開。需要你審核嘅時候我哋會通知你。",

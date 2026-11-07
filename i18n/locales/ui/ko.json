@@ -251,6 +251,7 @@
   "submit.v2.harden.view.white_box": "화이트박스",
   "submit.v2.harden.start": "시작",
   "submit.v2.harden.skip": "건너뛰기",
+  "submit.v2.harden.no_scorer": "먼저 metric.py를 작성하세요. 하드닝은 실행의 메트릭으로 각 공격을 채점합니다.",
   "submit.v2.harden.continue": "계속",
   "submit.v2.harden.retry": "라운드 재시도",
   "submit.v2.harden.running": "공격 모델이 작업 중입니다. 페이지를 나가도 됩니다. 검토가 필요하면 알려 드립니다.",

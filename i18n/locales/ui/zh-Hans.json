@@ -251,6 +251,7 @@
   "submit.v2.harden.view.white_box": "白盒",
   "submit.v2.harden.start": "开始",
   "submit.v2.harden.skip": "跳过",
+  "submit.v2.harden.no_scorer": "请先编写 metric.py。加固会用本次运行的指标为每次攻击评分。",
   "submit.v2.harden.continue": "继续",
   "submit.v2.harden.retry": "重试本轮",
   "submit.v2.harden.running": "攻击模型正在工作。你可以离开此页面。需要你审核时我们会通知你。",

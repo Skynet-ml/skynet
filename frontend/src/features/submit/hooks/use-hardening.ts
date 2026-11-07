@@ -12,9 +12,10 @@ import {
 } from "@/shared/lib/api";
 import { subscriptionAgentModel, type LocalStatus } from "@/features/local-runtime";
 import { msg, type MessageKey } from "@/shared/lib/messages";
-import type { BlackboxTarget, CatalogModel, ModelConfig } from "@/shared/types/api";
+import type { BlackboxScorer, BlackboxTarget, CatalogModel, ModelConfig } from "@/shared/types/api";
 import type { CreateHardeningJobRequest, HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { WIZARD_HARDENING_KEY, keepSessionValue, readSessionValue } from "../lib/session-state";
+import { repoRunScorer } from "../lib/repo-run";
 import { repoIssue, type RepoDraft } from "../lib/wizard-v2";
 import { useWizardV2 } from "./use-unified-wizard";
 
@@ -44,7 +45,13 @@ export function hardeningDefaultModel(
   return models.find((m) => m.is_default)?.value ?? models[0]?.value ?? "";
 }
 
-export type HardeningSettings = Omit<CreateHardeningJobRequest, "draft_id" | "target" | "binding_id">;
+export type HardeningSettings = Omit<
+  CreateHardeningJobRequest,
+  "draft_id" | "target" | "binding_id" | "scorer"
+>;
+
+/** The error key a start throws when the setup has no scorer yet. */
+export const HARDENING_NO_SCORER = "submit.v2.harden.no_scorer";
 
 /**
  * The run submit's repository target (see repo-run.ts), without secrets: the
@@ -84,6 +91,8 @@ export interface HardeningState {
   loading: boolean;
   /** A user action is out; its buttons hold still. */
   busy: boolean;
+  /** The setup has a scorer, so a job can start; without one the runner cannot score. */
+  hasScorer: boolean;
   start: (settings: HardeningSettings) => Promise<void>;
   verdict: (exploitId: string, confirmed: boolean) => Promise<void>;
   decideFix: (approve: boolean) => Promise<void>;
@@ -104,18 +113,21 @@ export function hardeningErrorText(err: unknown): string | null {
   if (err instanceof Error && err.name === "AbortError") return null;
   if (!(err instanceof Error) || !err.message) return msg("errors.generic");
   const { message } = err;
-  return message.startsWith("budget.") || message.startsWith("submit.v2.repo.issue.")
+  return message.startsWith("budget.") ||
+    message.startsWith("submit.v2.repo.issue.") ||
+    message === HARDENING_NO_SCORER
     ? msg(message as MessageKey)
     : message;
 }
 
 /**
- * Create the draft's hardening job for the wizard's repository and budget.
+ * Create the draft's hardening job for the wizard's repository, scorer and budget.
  *
  * Args:
  *   settings: The rounds, cap, models and view the user picked.
  *   draftId: The setup draft the job belongs to.
  *   repo: The wizard's repository draft, or none.
+ *   scorer: The run submit's scorer (`repoRunScorer`), or null while the setup has none.
  *   ensureBudget: Opens or reuses the wizard's execution budget.
  *   create: Sends the create request.
  *
@@ -123,19 +135,22 @@ export function hardeningErrorText(err: unknown): string | null {
  *   The new job.
  *
  * Throws:
- *   Error: The repository issue key before any budget or job exists, or the
- *   budget or request error.
+ *   Error: The no-scorer key or the repository issue key before any budget or
+ *   job exists, or the budget or request error.
  */
 export async function requestHardeningJob(
   settings: HardeningSettings,
   draftId: string,
   repo: RepoDraft | null | undefined,
+  scorer: BlackboxScorer | null,
   ensureBudget: () => Promise<{ id: string }>,
   create: (body: CreateHardeningJobRequest) => Promise<HardeningJob> = createHardeningJob,
 ): Promise<HardeningJob> {
+  // A job without a scorer fails on the worker with `hardening.no_scorer`.
+  if (!scorer) throw new Error(HARDENING_NO_SCORER);
   const target = hardeningTarget(repo);
   const budget = await ensureBudget();
-  return create({ ...settings, draft_id: draftId, target, binding_id: budget.id });
+  return create({ ...settings, draft_id: draftId, target, binding_id: budget.id, scorer });
 }
 
 // The setup has no server-side draft id yet, so it keeps one beside its
@@ -165,6 +180,7 @@ export function useHardening(active: boolean): HardeningState {
   const draft = React.useRef<string | null>(null);
   const { state, ensureBudget } = useWizardV2();
   const repo = state.task.repo;
+  const scorer = React.useMemo(() => repoRunScorer(state.workspace), [state.workspace]);
 
   React.useEffect(() => {
     if (!active || loaded) return;
@@ -222,7 +238,7 @@ export function useHardening(active: boolean): HardeningState {
       draft.current ??= draftId();
       const id = draft.current;
       return act(() =>
-        requestHardeningJob(settings, id, repo, ensureBudget, async (body) => {
+        requestHardeningJob(settings, id, repo, scorer, ensureBudget, async (body) => {
           try {
             return await createHardeningJob(body);
           } catch (err) {
@@ -234,7 +250,7 @@ export function useHardening(active: boolean): HardeningState {
         }),
       );
     },
-    [act, ensureBudget, repo],
+    [act, ensureBudget, repo, scorer],
   );
   const verdict = React.useCallback(
     (exploitId: string, confirmed: boolean) =>
@@ -250,5 +266,5 @@ export function useHardening(active: boolean): HardeningState {
     [act, jobId],
   );
 
-  return { job, loading: active && !loaded, busy, start, verdict, decideFix, retry };
+  return { job, loading: active && !loaded, busy, hasScorer: scorer !== null, start, verdict, decideFix, retry };
 }

@@ -115,6 +115,7 @@ if (!process.env.JITI_ALIAS) {
     judge_model: "judge",
     view: "black_box" as const,
   };
+  const scorer = { kind: "python" as const, metric_code: "def score(x):\n    return 1.0", timeout_seconds: 60 };
 
   void describe("requestHardeningJob", () => {
     void it("sends the repository target and the wizard budget id with the settings", async () => {
@@ -124,6 +125,7 @@ if (!process.env.JITI_ALIAS) {
         settings,
         "draft-1",
         { ...emptyRepoDraft(), repository: "acme/widgets" },
+        scorer,
         async () => ({ id: "budget-1" }),
         async (body) => {
           sent.push(body);
@@ -147,13 +149,14 @@ if (!process.env.JITI_ALIAS) {
             setup_command: null,
           },
           binding_id: "budget-1",
+          scorer,
         },
       ]);
     });
 
     void it("sends a null target without a repository", async () => {
       let body: { target?: unknown; binding_id?: unknown } | null = null;
-      await requestHardeningJob(settings, "draft-1", null, async () => ({ id: "budget-2" }), async (b) => {
+      await requestHardeningJob(settings, "draft-1", null, scorer, async () => ({ id: "budget-2" }), async (b) => {
         body = b;
         return {} as never;
       });
@@ -169,6 +172,7 @@ if (!process.env.JITI_ALIAS) {
           settings,
           "draft-1",
           { ...emptyRepoDraft(), repository: "not a repo" },
+          scorer,
           async () => {
             budgets += 1;
             return { id: "budget-1" };
@@ -179,6 +183,30 @@ if (!process.env.JITI_ALIAS) {
           },
         ),
         { message: "submit.v2.repo.issue.repository" },
+      );
+      assert.equal(budgets, 0);
+      assert.equal(creates, 0);
+    });
+
+    void it("opens no budget and sends no request without a scorer", async () => {
+      let budgets = 0;
+      let creates = 0;
+      await assert.rejects(
+        requestHardeningJob(
+          settings,
+          "draft-1",
+          { ...emptyRepoDraft(), repository: "acme/widgets" },
+          null,
+          async () => {
+            budgets += 1;
+            return { id: "budget-1" };
+          },
+          async () => {
+            creates += 1;
+            return {} as never;
+          },
+        ),
+        { message: "submit.v2.harden.no_scorer" },
       );
       assert.equal(budgets, 0);
       assert.equal(creates, 0);
@@ -197,6 +225,8 @@ if (!process.env.JITI_ALIAS) {
     });
 
     void it("keeps a server message as it is", () => {
+      assert.equal(hardeningErrorText(new Error("submit.v2.harden.no_scorer")), msg("submit.v2.harden.no_scorer"));
+      assert.notEqual(msg("submit.v2.harden.no_scorer"), "submit.v2.harden.no_scorer");
       assert.equal(hardeningErrorText(new Error("A hardening job is already running.")), "A hardening job is already running.");
     });
 
@@ -221,12 +251,17 @@ if (!process.env.JITI_ALIAS) {
   void describe("useHardening start", () => {
     type Sent = { url: string; method?: string; body: Record<string, unknown> };
 
-    async function startWith(repo: unknown): Promise<{ sent: Sent[]; budgets: number; order: string[] }> {
+    const workspace = { metricCode: "def score(repo_path, case=None):\n    return 1.0", metricModel: null, metricTimeoutSeconds: 60 };
+
+    async function startWith(
+      repo: unknown,
+      ws: unknown = workspace,
+    ): Promise<{ sent: Sent[]; budgets: number; order: string[]; hasScorer: boolean }> {
       const sent: Sent[] = [];
       const order: string[] = [];
       let budgets = 0;
       (globalThis as { __hardeningWizard?: unknown }).__hardeningWizard = {
-        state: { task: { repo } },
+        state: { task: { repo }, workspace: ws },
         ensureBudget: async () => {
           budgets += 1;
           order.push("budget");
@@ -244,16 +279,19 @@ if (!process.env.JITI_ALIAS) {
       }) as typeof fetch;
       try {
         let start: ((s: typeof settings) => Promise<void>) | null = null;
+        let hasScorer = false;
         const Probe = () => {
-          start = useHardening(false).start;
+          const h = useHardening(false);
+          start = h.start;
+          hasScorer = h.hasScorer;
           return null;
         };
         renderToStaticMarkup(React.createElement(Probe));
         await start!(settings);
+        return { sent, budgets, order, hasScorer };
       } finally {
         globalThis.fetch = realFetch;
       }
-      return { sent, budgets, order };
     }
 
     void it("opens the budget, then sends the wizard's repository target and budget id", async () => {
@@ -270,6 +308,21 @@ if (!process.env.JITI_ALIAS) {
         setup_command: null,
       });
       assert.equal(create[0]!.body.rounds, settings.rounds);
+      assert.deepEqual(create[0]!.body.scorer, {
+        kind: "python",
+        metric_code: workspace.metricCode,
+        timeout_seconds: 60,
+      });
+    });
+
+    void it("sends no job and reports no scorer while metric.py is empty", async () => {
+      const { sent, budgets, hasScorer } = await startWith(
+        { ...emptyRepoDraft(), repository: "acme/widgets" },
+        { ...workspace, metricCode: "  " },
+      );
+      assert.equal(hasScorer, false);
+      assert.equal(budgets, 0);
+      assert.equal(sent.filter((r) => r.method === "POST").length, 0);
     });
 
     void it("opens no budget and sends no job for a broken repository", async () => {

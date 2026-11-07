@@ -251,6 +251,7 @@
   "submit.v2.harden.view.white_box": "جعبه‌سفید",
   "submit.v2.harden.start": "شروع",
   "submit.v2.harden.skip": "رد کردن",
+  "submit.v2.harden.no_scorer": "ابتدا metric.py را بنویسید. مقاوم‌سازی هر حمله را با معیار اجرا امتیاز می‌دهد.",
   "submit.v2.harden.continue": "ادامه",
   "submit.v2.harden.retry": "تکرار دور",
   "submit.v2.harden.running": "مهاجم در حال کار است. می‌توانید صفحه را ترک کنید. وقتی بازبینی شما لازم باشد به شما اطلاع می‌دهیم.",

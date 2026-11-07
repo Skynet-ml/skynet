@@ -251,6 +251,7 @@
   "submit.v2.harden.view.white_box": "White-Box",
   "submit.v2.harden.start": "Starten",
   "submit.v2.harden.skip": "Überspringen",
+  "submit.v2.harden.no_scorer": "Schreiben Sie zuerst metric.py. Die Härtung bewertet jeden Angriff mit der Metrik des Laufs.",
   "submit.v2.harden.continue": "Weiter",
   "submit.v2.harden.retry": "Runde wiederholen",
   "submit.v2.harden.running": "Der Angreifer arbeitet. Sie können die Seite verlassen. Wir benachrichtigen Sie, wenn Ihre Prüfung nötig ist.",
