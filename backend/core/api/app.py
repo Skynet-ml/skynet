@@ -121,6 +121,7 @@ from .routers.execution_runtimes import create_execution_runtimes_router
 from .routers.experience import create_experience_router
 from .routers.folders import create_folders_router
 from .routers.generalist_agent import create_generalist_agent_router
+from .routers.hardening import create_hardening_router
 from .routers.local_cli_usage import create_local_cli_usage_router
 from .routers.local_hosted_link import create_local_hosted_link_router
 from .routers.local_hosted_proxy import create_local_hosted_proxy_router
@@ -1401,6 +1402,7 @@ def create_app(
     app.include_router(create_telemetry_router(job_store=job_store), tags=["Telemetry"])
     app.include_router(create_wizard_router(), tags=["Wizard"])
     app.include_router(create_setup_draft_router(job_store=job_store), tags=["Wizard"])
+    app.include_router(create_hardening_router(job_store=job_store), tags=["Hardening"])
     app.include_router(create_workflows_router(job_store=job_store), tags=["Workflows"])
     app.include_router(
         create_submissions_router(service=service, job_store=job_store),
