@@ -5,6 +5,9 @@ from __future__ import annotations
 import http.server
 import json
 import logging
+import os
+import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -30,7 +33,7 @@ from ..repo_scorer import (
     _StageRelay,
     fold_case_scores,
 )
-from ..repo_workspace import RepoWorkspace
+from ..repo_workspace import PREPARED_DIR, RepoWorkspace
 from ..rule_judge import (
     EVENT_BLOCK,
     EVENT_NOTE,
@@ -1562,6 +1565,7 @@ def test_a_service_whose_host_resolves_to_a_private_address_is_refused(upstream:
 _PROBE_CANDIDATE = """
 import json
 import os
+import site
 import subprocess
 import sys
 
@@ -1571,7 +1575,7 @@ CASE_MARK = "ANSWER" + "-42"
 
 
 def _git(*args):
-    done = subprocess.run(["git", *args], capture_output=True, text=True)
+    done = subprocess.run(["git", *args], capture_output=True, text=True, check=False)
     return done.stdout + done.stderr
 
 
@@ -1606,6 +1610,14 @@ def probe(value):
     return {"found": found, "input": value}
 
 
+def plant(value):
+    subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(1); open('../prepared/late.py', 'w').write('x')"],
+        start_new_session=True,
+    )
+    return value
+
+
 def boom(value):
     raise RuntimeError("candidate broke")
 
@@ -1632,6 +1644,45 @@ def tamper(value):
         with open(os.path.join("../calls", name, "output.json"), "w") as handle:
             handle.write(json.dumps({"score": 0.99, "feedback": "FORGED"}))
     return value
+
+
+FORGE = (
+    "import atexit, json, os, sys\\n"
+    "def _forge():\\n"
+    "    try:\\n"
+    "        hidden = open('eval/metric.py').read()\\n"
+    "    except OSError:\\n"
+    "        hidden = 'unread'\\n"
+    "    with open(os.path.join(sys.argv[-1], 'output.json'), 'w') as handle:\\n"
+    "        handle.write(json.dumps({'score': 0.99, 'side_info': {'feedback': 'FORGED ' + hidden}, 'stopped': True}))\\n"
+    "atexit.register(_forge)\\n"
+)
+
+# The planted json.py drops its own folder from the path and loads the real json before it forges.
+JSON_PLANT = (
+    "import os, sys\\n"
+    "_here = os.path.dirname(os.path.abspath(__file__))\\n"
+    "sys.path[:] = [p for p in sys.path if os.path.abspath(p or '.') != _here]\\n"
+    "del sys.modules['json']\\n"
+    "import json as _real\\n"
+    "sys.modules['json'] = _real\\n"
+) + FORGE
+
+
+def plant_module(value):
+    with open("../json.py", "w") as handle:
+        handle.write(JSON_PLANT)
+    return value
+
+
+def plant_pth(value):
+    folder = site.getusersitepackages()
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "skynet_forge.py"), "w") as handle:
+        handle.write(FORGE)
+    with open(os.path.join(folder, "skynet_forge.pth"), "w") as handle:
+        handle.write("import skynet_forge\\n")
+    return folder
 """
 
 _PROBE_METRIC = """
@@ -1645,13 +1696,16 @@ def score(repo_path, case, output):
 """
 
 
-def _probed(tmp_path: Path, run_entry: str | None, code: str = _PROBE_METRIC) -> RepoScorer:
+def _probed(
+    tmp_path: Path, run_entry: str | None, code: str = _PROBE_METRIC, env: dict[str, str] | None = None
+) -> RepoScorer:
     """Open a scorer with a hidden metric, a run secret and a ``[run]`` entry.
 
     Args:
         tmp_path: Scratch folder.
         run_entry: The ``[run]`` entry, if any.
         code: The metric's source.
+        env: Extra box environment.
 
     Returns:
         The scorer.
@@ -1663,7 +1717,7 @@ def _probed(tmp_path: Path, run_entry: str | None, code: str = _PROBE_METRIC) ->
     return RepoScorer(
         RepoWorkspace(
             runtime=LocalSubprocessRuntime(),
-            spec=SandboxSpec(lifetime_seconds=60, network_disabled=True),
+            spec=SandboxSpec(lifetime_seconds=60, network_disabled=True, env=env or {}),
             archive=archive,
             editable_paths=["src"],
             readonly_paths=[],
@@ -1697,10 +1751,82 @@ def test_the_candidate_runs_without_the_metric_files_and_the_metric_sees_its_out
     assert not late.exists()
 
 
+def test_no_process_of_a_version_outlives_its_call_to_write_the_prepared_tree(tmp_path: Path) -> None:
+    """Stop a version's detached process before the next checkout, so the box and its prepared tree stay clean (E38)."""
+    scorer = _probed(tmp_path, "src/cand.py:plant")
+    try:
+        scorer.score("", {"input": 1})
+        box = scorer._workspace.session()
+        time.sleep(2)
+        assert box.run(f"test ! -e {PREPARED_DIR}/late.py").ok
+        scorer.score("", {"input": 2})
+        assert scorer._workspace.session() is box
+    finally:
+        scorer.close()
+
+
+def test_without_a_run_entry_no_process_of_the_metric_call_outlives_it(tmp_path: Path) -> None:
+    """Stop what the metric call started when no ``[run]`` supervisor runs the version (E38)."""
+    metric = (
+        "import subprocess, sys\n"
+        "def score(repo_path, case, output):\n"
+        "    subprocess.Popen([sys.executable, '-c', \"import time; time.sleep(1);"
+        " open('../prepared/late.py', 'w').write('x')\"], start_new_session=True)\n"
+        "    return 1.0, 'ok'\n"
+    )
+    scorer = _probed(tmp_path, None, code=metric)
+    try:
+        assert scorer.score("", {"input": 1})["score"] == 1.0
+        box = scorer._workspace.session()
+        time.sleep(2)
+        assert box.run(f"test ! -e {PREPARED_DIR}/late.py").ok
+        scorer.score("", {"input": 2})
+        assert scorer._workspace.session() is box
+    finally:
+        scorer.close()
+
+
 def test_the_metric_runs_the_real_runner_whatever_the_candidate_left(tmp_path: Path) -> None:
     """A candidate cannot rewrite the runner or plant the metric's output for it (E38)."""
     metric = "def score(repo_path, case, output):\n    return 0.25, 'real metric'\n"
     scorer = _probed(tmp_path, "src/cand.py:tamper", code=metric)
+    try:
+        for _ in range(2):
+            result = scorer.score("", {"input": "forge"})
+            assert result["score"] == 0.25
+            assert result["feedback"] == "real metric"
+    finally:
+        scorer.close()
+
+
+def _base_python(tmp_path: Path) -> dict[str, str]:
+    """Put the interpreter without the test venv first on the box PATH, so user site-packages are on.
+
+    Args:
+        tmp_path: Scratch folder.
+
+    Returns:
+        The box environment with that PATH.
+    """
+    base = getattr(sys, "_base_executable", sys.executable)
+    probe = subprocess.run(
+        [base, "-c", "import site; print(site.ENABLE_USER_SITE)"], capture_output=True, text=True, check=False
+    )
+    if probe.stdout.strip() != "True":
+        pytest.skip("no interpreter with user site-packages on this host")
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "python3").symlink_to(base)
+    return {"PATH": os.pathsep.join([str(shim), "/usr/bin", "/bin"])}
+
+
+@pytest.mark.parametrize("entry", ["plant_module", "plant_pth"])
+def test_a_module_the_candidate_plants_for_the_metric_runner_never_runs(tmp_path: Path, entry: str) -> None:
+    """A json.py next to the runner or a user-site .pth cannot forge the score or read the metric (E38, E40)."""
+    metric = "def score(repo_path, case, output):\n    return 0.25, 'real metric'\n"
+    # The test venv turns user site-packages off; a box python3 has them on.
+    env = _base_python(tmp_path) if entry == "plant_pth" else None
+    scorer = _probed(tmp_path, f"src/cand.py:{entry}", code=metric, env=env)
     try:
         for _ in range(2):
             result = scorer.score("", {"input": "forge"})

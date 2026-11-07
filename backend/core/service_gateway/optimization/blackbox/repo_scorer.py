@@ -81,6 +81,11 @@ REPO_SCORER_URL = "https://scoped-evaluator.invalid/score"
 RUNNER_PATH = f"{REPO_DIR}/app_runner.py"
 _LINKED_BOX = "The version replaced a folder of the scoring box with a link, so it has no score."
 CALLS_DIR = f"{REPO_DIR}/calls"
+# The version's code can write next to the runner and into $HOME, so the
+# runner starts without its own folder, user site-packages or PYTHON* env on
+# its path: a planted json.py or .pth would run before any check (E38, E40).
+# -I drops PYTHONDONTWRITEBYTECODE and PYTHONUNBUFFERED, so -B and -u keep them.
+_ISOLATED = "-I -B -u"
 STAGE_DIR = ".app-stage"
 _STAGE_TREE = f"{STAGE_DIR}/tree"
 # Unpacking the tree and applying the version in a stage box; the box's hold
@@ -295,11 +300,13 @@ class RepoScorer:
                     }
                 document["output"] = ran.get("output")
                 # The version's code could rewrite the runner, swap the calls
-                # folder for a link, or leave files in this call's folder for
-                # the metric run to read (E38). Its processes are stopped now.
+                # folder for a link, leave files in this call's folder for the
+                # metric run to read, or plant a module next to the runner
+                # (E38, E40). Its processes are stopped now.
                 reset = session.run(
                     f"if [ -L {CALLS_DIR} ] || [ ! -d {CALLS_DIR} ]; then exit 3; fi;"
-                    f" rm -rf {shlex.quote(call)} {RUNNER_PATH}",
+                    f" find {REPO_DIR} -mindepth 1 -maxdepth 1 ! -name work ! -name prepared ! -name calls"
+                    f" -exec rm -rf {{}} +; rm -rf {shlex.quote(call)}",
                     timeout_seconds=30,
                 )
                 if not reset.ok:
@@ -319,13 +326,15 @@ class RepoScorer:
                 # A sink makes the session stream stderr live, which is where log() events travel.
                 with sandbox_log.event_scope(source="scorer"):
                     result = session.run(
-                        f"cd {shlex.quote(checkout.path)} && python3 {shlex.quote(f'{root}/{RUNNER_PATH}')}"
+                        f"cd {shlex.quote(checkout.path)} && python3 {_ISOLATED} {shlex.quote(f'{root}/{RUNNER_PATH}')}"
                         f" {shlex.quote(call_dir)}",
                         env=env,
                         timeout_seconds=self._timeout_seconds,
                         on_output=relay.output if relay is not None else sandbox_log.ignore_output,
                     )
             if result.timed_out:
+                # The runner never stopped the metric's processes; only a new box does.
+                self._workspace.close()
                 raise RepoScoreError(f"The scorer exceeded its {self._timeout_seconds:g}s timeout.")
             self._check_changes(relay, secrets)
             text = session.read_file(f"{call}/{runner.OUTPUT_FILE}")
@@ -338,8 +347,14 @@ class RepoScorer:
                 result.exit_code,
                 redact((result.stderr or result.stdout)[-2_000:], secrets),
             )
+            self._workspace.close()
             raise RepoScoreError(f"The scorer did not finish (exit {result.exit_code}).")
         output = json.loads(redact(text, secrets))
+        stopped = output.get("stopped") is True
+        if not stopped:
+            # A process of the metric call could write into the prepared tree
+            # or the next checkout; a new box is the only sure stop (E38).
+            self._workspace.close()
         _raise_control(output)
         if output.get("error"):
             logger.warning("Repository scorer raised: %s", output["error"])
@@ -351,6 +366,8 @@ class RepoScorer:
         except (TypeError, ValueError):
             # The error text would echo the value, which the version's code controls.
             raise RepoScoreError("The scorer returned a score that is not a number.") from None
+        if not stopped:
+            raise RepoScoreError("The version's code left processes that could not be stopped, so it has no score.")
         side_info = fold_case_scores(output.get("side_info") or {})
         return {**side_info, "score": score}
 
@@ -406,7 +423,7 @@ class RepoScorer:
             with sandbox_log.event_scope(source="run"):
                 result = session.run(
                     f"find {calls} -mindepth 1 -maxdepth 1 ! -name {shlex.quote(call.rsplit('/', 1)[1])}"
-                    f" -exec rm -rf {{}} +; cd {shlex.quote(path)} && python3 {shlex.quote(f'{root}/{RUNNER_PATH}')}"
+                    f" -exec rm -rf {{}} +; cd {shlex.quote(path)} && python3 {_ISOLATED} {shlex.quote(f'{root}/{RUNNER_PATH}')}"
                     f" {runner.CANDIDATE_FLAG} {shlex.quote(f'{root}/{supervisor}')}",
                     env=env,
                     timeout_seconds=self._run_timeout + _RUN_STOP_SECONDS,

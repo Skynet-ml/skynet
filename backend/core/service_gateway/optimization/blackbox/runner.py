@@ -60,6 +60,7 @@ import io
 import json
 import os
 import signal
+import site
 import ssl
 import subprocess
 import sys
@@ -116,6 +117,8 @@ RERUN_REFUSED = (
 _PROCESS_EVENTS = frozenset(
     {"subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork", "os.forkpty"}
 )
+# The macOS sweep starts ps after the metric call; only that thread may pass the refusal hook.
+_SWEEP = threading.local()
 _STAGE_POLL_SECONDS = 0.05
 # Frames one ``log()`` event on stderr; the host turns each into a run-log line.
 EVENT_PREFIX = "APP_SCORER_EVENT "
@@ -1102,6 +1105,18 @@ def run_call(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _keep_user_site() -> None:
+    """Put user site-packages back at the end of ``sys.path`` under ``python3 -I``, without its ``.pth`` files."""
+    # Repo setup may pip install into user site-packages when the system folder is read-only.
+    # -I hides that folder from the metric; appended last, the stdlib and system packages
+    # still win, and no .pth file the version planted there runs (E38, E40).
+    if not sys.flags.isolated or sys.prefix != sys.base_prefix:
+        return
+    folder = site.getusersitepackages()
+    if Path(folder).is_dir() and folder not in sys.path:
+        sys.path.append(folder)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run one scorer call from ``<call_dir>/input.json`` into ``<call_dir>/output.json``.
 
@@ -1113,6 +1128,7 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         The process exit code: 0 whenever the output was written.
     """
+    _keep_user_site()
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) == 3 and args[0] in (STAGE_FLAG, RUN_FLAG):
         return run_stage(Path(args[1]), args[2], trace=args[0] == RUN_FLAG)
@@ -1130,10 +1146,17 @@ def main(argv: list[str] | None = None) -> int:
         code_path = Path(__file__).resolve().with_name(CODE_FILE)
         payload["code"] = code_path.read_text(encoding="utf-8") if code_path.is_file() else ""
     refused = refuse_processes() if "output" in payload else None
+    # The metric call runs the version's code without a [run] entry, and a
+    # ctypes fork passes the audit hook. So no process it starts may outlive
+    # it to write into the prepared tree or a later checkout (E38).
+    token = os.urandom(16).hex()
+    os.environ[CANDIDATE_TOKEN_ENV] = token
+    _become_subreaper()
     result = run_call(payload)
     if refused:
         # The metric may have caught the refusal; its score still does not count.
         result.update(score=None, side_info={}, error=RERUN_REFUSED)
+    result["stopped"] = stop_candidates(token)
     _write_output(call_dir, json.dumps(result))
     return 0
 
@@ -1172,7 +1195,7 @@ def refuse_processes() -> list[bool]:
         Raises:
             ScorerError: When the event starts a process.
         """
-        if event in _PROCESS_EVENTS:
+        if event in _PROCESS_EVENTS and not getattr(_SWEEP, "active", False):
             refused.append(True)
             raise ScorerError(RERUN_REFUSED)
 
@@ -1399,9 +1422,15 @@ def candidate_processes(token: str) -> set[int]:
                 continue
     else:
         # macOS: no /proc, and orphans go to launchd, so only the marker finds them.
-        listing = subprocess.run(
-            ["ps", "-axwwE", "-o", "pid=,state=,command="], capture_output=True, check=False
-        ).stdout
+        # The metric call puts the marker in os.environ, and ps must not find itself.
+        env = {key: value for key, value in os.environ.items() if key != CANDIDATE_TOKEN_ENV}
+        _SWEEP.active = True
+        try:
+            listing = subprocess.run(
+                ["ps", "-axwwE", "-o", "pid=,state=,command="], capture_output=True, check=False, env=env
+            ).stdout
+        finally:
+            _SWEEP.active = False
         for line in listing.splitlines():
             parts = line.split(None, 2)
             if len(parts) == 3 and not parts[1].startswith(b"Z") and marker in parts[2]:

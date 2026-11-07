@@ -334,10 +334,12 @@ class _Box:
         return None
 
     def run(self, command: str, **options: Any) -> CommandResult:
-        """Record the command, answering the reachability check as the box would."""
+        """Record the command, answering the reachability check and the prepared-tree digest as the box would."""
         self.commands.append((command, self.online))
         if "/dev/tcp/" in command:
             return CommandResult(exit_code=1) if self.online else CommandResult(exit_code=0, stdout=_PROBE_OK)
+        if "hashlib.sha256" in command:
+            return CommandResult(exit_code=0, stdout="0" * 64)
         return CommandResult(exit_code=0)
 
     def disable_network(self) -> None:

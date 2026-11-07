@@ -535,17 +535,20 @@ def test_a_large_stage_answer_is_written_by_file_and_stamped_again(
 
 
 def test_tampering_with_the_prepared_tree_is_caught_on_the_next_version(tmp_path: Path) -> None:
-    """Compare against fingerprints the parent holds, so rewriting the prepared copy in the box does not hide a change."""
+    """Compare against a digest the parent holds, so the next version gets a fresh box with the clean files (E38)."""
     space, archive = _guarded(tmp_path)
     try:
         version = _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"})
         space.checkout(version)
-        space.session().run(f"printf 'a,0\\n' > {PREPARED_DIR}/eval/labels.csv")
+        box = space.session()
+        box.run(f"printf 'a,0\\n' > {PREPARED_DIR}/eval/labels.csv")
 
         space.checkout(version)
         space.stamp_before_run()
 
-        assert [problem.split("'")[1] for problem in space.protected_changes()] == ["eval/labels.csv"]
+        assert box.closed
+        assert space.session().read_file(f"{WORK_DIR}/eval/labels.csv") == "a,1\n"
+        assert space.protected_changes() == ()
     finally:
         space.close()
 
@@ -559,7 +562,7 @@ def test_a_workspace_without_protected_paths_skips_the_check(
     space.checkout("")
 
     assert space.protected_changes() == ()
-    assert all("hashlib" not in command for command, _, _ in runtime.boxes[0].commands)
+    assert all("def digest(path)" not in command for command, _, _ in runtime.boxes[0].commands)
 
 
 def test_a_version_that_edits_a_metric_file_is_laid_out_with_the_base_metric(tmp_path: Path) -> None:
@@ -775,6 +778,51 @@ def test_a_checkout_in_a_box_whose_prepared_tree_is_a_link_uses_a_fresh_box(tmp_
         assert box.closed
         assert len(runtime.boxes) == 2
         assert space.install_metric_files() is None
+    finally:
+        space.close()
+
+
+def test_a_version_that_writes_into_the_prepared_tree_gets_a_fresh_box(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Never copy a later checkout from a prepared tree a version wrote into, ``.git`` included (E38)."""
+    space, runtime = _metric_space(tmp_path)
+    try:
+        box = space.session()
+        assert box.run(
+            f"cd {WORK_DIR} && echo planted > ../prepared/planted.py"
+            " && git -C ../prepared config core.fsmonitor 'echo pwn'"
+        ).ok
+
+        with caplog.at_level(logging.WARNING, logger=repo_workspace.__name__):
+            assert space.checkout("").path == WORK_DIR
+
+        assert box.closed
+        assert len(runtime.boxes) == 2
+        fresh = space.session()
+        assert fresh.run(f"test ! -e {WORK_DIR}/planted.py").ok
+        assert not fresh.run(f"git -C {WORK_DIR} config core.fsmonitor").ok
+        assert "planted" not in caplog.text
+        assert "pwn" not in caplog.text
+        assert "prepared repository changed" in caplog.text
+        assert space.install_metric_files() is None
+    finally:
+        space.close()
+
+
+def test_a_version_that_only_writes_its_own_checkout_keeps_the_box(tmp_path: Path) -> None:
+    """Find no change in the prepared tree when versions write only in their checkout (E38)."""
+    space, runtime = _metric_space(tmp_path)
+    try:
+        box = space.session()
+        assert box.run(f"cd {WORK_DIR} && echo out > result.txt && git config core.fsmonitor 'echo pwn'").ok
+
+        assert space.checkout("").path == WORK_DIR
+        assert space.checkout("").path == WORK_DIR
+
+        assert not box.closed
+        assert len(runtime.boxes) == 1
+        assert box.run(f"test ! -e {WORK_DIR}/result.txt").ok
     finally:
         space.close()
 

@@ -174,6 +174,29 @@ if answer:
     os.replace(answer + ".tmp", answer)
 print(json.dumps({"files": found, "stamps": stamps}, sort_keys=True))
 """
+# Hashes the whole prepared tree, ``.git`` included: each path's type, mode,
+# link target and content. A version's code runs as the box's only user, so
+# it can write into the prepared tree that every later checkout copies (E38).
+# Only the digest leaves the box; the parent holds the expected value.
+_HASH_PREPARED = r"""
+import hashlib, os, stat
+
+sha = hashlib.sha256()
+for folder, folders, files in os.walk(".", followlinks=False):
+    folders.sort()
+    for name in sorted(folders + files):
+        path = os.path.join(folder, name)
+        info = os.lstat(path)
+        sha.update(f"{path}\0{stat.S_IFMT(info.st_mode)}\0{stat.S_IMODE(info.st_mode)}\0".encode("utf-8", "surrogateescape"))
+        if stat.S_ISLNK(info.st_mode):
+            sha.update(os.fsencode(os.readlink(path)))
+        elif stat.S_ISREG(info.st_mode):
+            with open(path, "rb") as handle:
+                for block in iter(lambda: handle.read(1 << 20), b""):
+                    sha.update(block)
+        sha.update(b"\0")
+print(sha.hexdigest())
+"""
 
 
 class RepoSetupError(RuntimeError):
@@ -306,6 +329,9 @@ class RepoWorkspace:
         # copy of the tree inside the box, the prepared one included.
         self._protected_baseline: dict[str, str] = {}
         self._stamps_before_run: dict[str, str] | None = None
+        # Held in the parent for the same reason: the prepared tree's digest
+        # once setup is done, which every checkout checks before it copies.
+        self._prepared_digest: str | None = None
         # The hidden files, packed, held here while no checkout has them (E38).
         self._metric_files: str | None = None
         self._metric_installed = False
@@ -413,6 +439,26 @@ class RepoWorkspace:
             self._protected_baseline = baseline[0]
         if self._hidden:
             self._take_hidden(session)
+        self._prepared_digest = self._digest_prepared(session)
+        if self._prepared_digest is None:
+            raise RepoSetupError("The prepared repository could not be fingerprinted.")
+
+    def _digest_prepared(self, session: SandboxSession) -> str | None:
+        """Hash the whole prepared tree in the box.
+
+        Args:
+            session: The box holding the prepared tree.
+
+        Returns:
+            The tree's SHA-256 digest, or ``None`` when the hashing command
+            failed or printed something that is not a digest.
+        """
+        result = session.run(
+            f"cd {PREPARED_DIR} && python3 -I -c {shlex.quote(_HASH_PREPARED)}", timeout_seconds=_HASH_TIMEOUT_SECONDS
+        )
+        lines = result.stdout.strip().splitlines() if result.ok else []
+        digest = lines[-1] if lines else ""
+        return digest if len(digest) == 64 and all(char in "0123456789abcdef" for char in digest) else None
 
     def _take_hidden(self, session: SandboxSession) -> None:
         """Move the hidden files out of the prepared tree and its git history into the parent.
@@ -540,8 +586,10 @@ class RepoWorkspace:
             self._stamps_before_run = None
             self._metric_installed = False
             session = self.session()
-            # Everything but the prepared tree goes, so nothing a version left
-            # next to its checkout survives into the next one (E38).
+            # Everything in .app-repo but the prepared tree goes. The prepared
+            # tree must still match the digest taken after setup, or the box
+            # is replaced. So nothing an earlier version wrote in .app-repo
+            # reaches this checkout (E38).
             clear = (
                 f"{_LAYOUT_CHECK}; find {REPO_DIR} -mindepth 1 -maxdepth 1"
                 f" ! -name {posixpath.basename(PREPARED_DIR)} -exec rm -rf {{}} +"
@@ -551,6 +599,12 @@ class RepoWorkspace:
                 self._end_box()
                 session = self.session()
             session.write_files({PATCH_FILE: patch})
+            if self._digest_prepared(session) != self._prepared_digest:
+                # Only the reason is logged: the tree is the user's code.
+                logger.warning("The prepared repository changed after a version ran; a fresh box is prepared.")
+                self._end_box()
+                session = self.session()
+                session.write_files({PATCH_FILE: patch})
             applied = session.run(
                 f"set -e; cp -a {PREPARED_DIR} {WORK_DIR}; cd {WORK_DIR};"
                 f" if [ -s ../version.patch ]; then git apply --binary --whitespace=nowarn ../version.patch; fi",

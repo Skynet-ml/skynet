@@ -557,8 +557,45 @@ def test_main_runs_the_file_contract_end_to_end(tmp_path: Path, interpreter: str
         "side_info": {"feedback": "f", "render": "data:image/png;base64,aGk="},
         "error": None,
         "usage": [],
+        "stopped": True,
     }
     assert not (call_dir / (runner.OUTPUT_FILE + ".part")).exists()
+
+
+def test_an_isolated_runner_imports_user_site_packages_without_their_pth_files(tmp_path: Path) -> None:
+    """Under ``python3 -I`` a metric still imports a user-site dependency, and no ``.pth`` file there runs (E38, E40)."""
+    base = getattr(sys, "_base_executable", sys.executable)
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    folder = subprocess.run(
+        [base, "-c", "import site; print(site.getusersitepackages())"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    ).stdout.strip()
+    user_site = Path(folder)
+    user_site.mkdir(parents=True)
+    (user_site / "userdep.py").write_text("VALUE = 0.5\n", encoding="utf-8")
+    marker = tmp_path / "pth-ran"
+    (user_site / "plant.pth").write_text(f"import pathlib; pathlib.Path({str(marker)!r}).write_text('x')\n")
+    call_dir = tmp_path / "calls" / "000001"
+    call_dir.mkdir(parents=True)
+    payload = {"code": "import userdep\ndef score(candidate, case=None):\n    return userdep.VALUE, 'ok'\n"}
+    (call_dir / runner.INPUT_FILE).write_text(json.dumps({**payload, "candidate": "x", "case": None}), encoding="utf-8")
+
+    completed = subprocess.run(
+        [base, "-I", "-B", runner.__file__, str(call_dir)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=tmp_path,
+        env=env,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((call_dir / runner.OUTPUT_FILE).read_text(encoding="utf-8"))["score"] == 0.5
+    assert not marker.exists()
 
 
 def test_main_wants_exactly_one_argument(capsys: pytest.CaptureFixture[str]) -> None:
