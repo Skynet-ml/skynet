@@ -251,6 +251,7 @@
   "submit.v2.harden.view.white_box": "Boîte blanche",
   "submit.v2.harden.start": "Démarrer",
   "submit.v2.harden.skip": "Ignorer",
+  "submit.v2.harden.no_scorer": "Écrivez d'abord metric.py. Le renforcement note chaque attaque avec la métrique de l'exécution.",
   "submit.v2.harden.continue": "Continuer",
   "submit.v2.harden.retry": "Relancer le tour",
   "submit.v2.harden.running": "L'attaquant travaille. Vous pouvez quitter la page. Nous vous prévenons quand votre revue est requise.",

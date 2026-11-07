@@ -251,6 +251,7 @@
   "submit.v2.harden.view.white_box": "ホワイトボックス",
   "submit.v2.harden.start": "開始",
   "submit.v2.harden.skip": "スキップ",
+  "submit.v2.harden.no_scorer": "先に metric.py を書いてください。ハードニングでは、各攻撃を実行のメトリックで採点します。",
   "submit.v2.harden.continue": "続行",
   "submit.v2.harden.retry": "ラウンドを再試行",
   "submit.v2.harden.running": "攻撃モデルが作業中です。このページを離れても構いません。レビューが必要になったらお知らせします。",

@@ -115,6 +115,7 @@ if (!process.env.JITI_ALIAS) {
     judge_model: "judge",
     view: "black_box" as const,
   };
+  const scorer = { kind: "python" as const, metric_code: "def score(x):\n    return 1.0", timeout_seconds: 60 };
 
   void describe("requestHardeningJob", () => {
     void it("sends the repository target and the wizard budget id with the settings", async () => {
@@ -124,6 +125,7 @@ if (!process.env.JITI_ALIAS) {
         settings,
         "draft-1",
         { ...emptyRepoDraft(), repository: "acme/widgets" },
+        scorer,
         async () => ({ id: "budget-1" }),
         async (body) => {
           sent.push(body);
@@ -147,13 +149,14 @@ if (!process.env.JITI_ALIAS) {
             setup_command: null,
           },
           binding_id: "budget-1",
+          scorer,
         },
       ]);
     });
 
     void it("sends a null target without a repository", async () => {
       let body: { target?: unknown; binding_id?: unknown } | null = null;
-      await requestHardeningJob(settings, "draft-1", null, async () => ({ id: "budget-2" }), async (b) => {
+      await requestHardeningJob(settings, "draft-1", null, scorer, async () => ({ id: "budget-2" }), async (b) => {
         body = b;
         return {} as never;
       });
@@ -169,6 +172,7 @@ if (!process.env.JITI_ALIAS) {
           settings,
           "draft-1",
           { ...emptyRepoDraft(), repository: "not a repo" },
+          scorer,
           async () => {
             budgets += 1;
             return { id: "budget-1" };
@@ -179,6 +183,30 @@ if (!process.env.JITI_ALIAS) {
           },
         ),
         { message: "submit.v2.repo.issue.repository" },
+      );
+      assert.equal(budgets, 0);
+      assert.equal(creates, 0);
+    });
+
+    void it("opens no budget and sends no request without a scorer", async () => {
+      let budgets = 0;
+      let creates = 0;
+      await assert.rejects(
+        requestHardeningJob(
+          settings,
+          "draft-1",
+          { ...emptyRepoDraft(), repository: "acme/widgets" },
+          null,
+          async () => {
+            budgets += 1;
+            return { id: "budget-1" };
+          },
+          async () => {
+            creates += 1;
+            return {} as never;
+          },
+        ),
+        { message: "submit.v2.harden.no_scorer" },
       );
       assert.equal(budgets, 0);
       assert.equal(creates, 0);
@@ -197,6 +225,8 @@ if (!process.env.JITI_ALIAS) {
     });
 
     void it("keeps a server message as it is", () => {
+      assert.equal(hardeningErrorText(new Error("submit.v2.harden.no_scorer")), msg("submit.v2.harden.no_scorer"));
+      assert.notEqual(msg("submit.v2.harden.no_scorer"), "submit.v2.harden.no_scorer");
       assert.equal(hardeningErrorText(new Error("A hardening job is already running.")), "A hardening job is already running.");
     });
 
@@ -221,12 +251,24 @@ if (!process.env.JITI_ALIAS) {
   void describe("useHardening start", () => {
     type Sent = { url: string; method?: string; body: Record<string, unknown> };
 
-    async function startWith(repo: unknown): Promise<{ sent: Sent[]; budgets: number; order: string[] }> {
+    const workspace = { metricCode: "def score(repo_path, case=None):\n    return 1.0", metricModel: null, metricTimeoutSeconds: 60 };
+    const optimizer = {
+      choice: "gepa",
+      taskModel: null,
+      reflectionModel: { name: "anthropic/reflect", token_source: "managed" },
+      extraReflectionModels: [],
+    };
+
+    async function startWith(
+      repo: unknown,
+      ws: unknown = workspace,
+      opt: unknown = optimizer,
+    ): Promise<{ sent: Sent[]; budgets: number; order: string[]; hasScorer: boolean }> {
       const sent: Sent[] = [];
       const order: string[] = [];
       let budgets = 0;
       (globalThis as { __hardeningWizard?: unknown }).__hardeningWizard = {
-        state: { task: { repo } },
+        state: { task: { repo }, workspace: ws, optimizer: opt },
         ensureBudget: async () => {
           budgets += 1;
           order.push("budget");
@@ -244,16 +286,19 @@ if (!process.env.JITI_ALIAS) {
       }) as typeof fetch;
       try {
         let start: ((s: typeof settings) => Promise<void>) | null = null;
+        let hasScorer = false;
         const Probe = () => {
-          start = useHardening(false).start;
+          const h = useHardening(false);
+          start = h.start;
+          hasScorer = h.hasScorer;
           return null;
         };
         renderToStaticMarkup(React.createElement(Probe));
         await start!(settings);
+        return { sent, budgets, order, hasScorer };
       } finally {
         globalThis.fetch = realFetch;
       }
-      return { sent, budgets, order };
     }
 
     void it("opens the budget, then sends the wizard's repository target and budget id", async () => {
@@ -270,6 +315,186 @@ if (!process.env.JITI_ALIAS) {
         setup_command: null,
       });
       assert.equal(create[0]!.body.rounds, settings.rounds);
+      assert.deepEqual(create[0]!.body.scorer, {
+        kind: "python",
+        metric_code: workspace.metricCode,
+        timeout_seconds: 60,
+      });
+    });
+
+    void it("sends the scorer model without a provider key, endpoint or secret", async () => {
+      const { sent } = await startWith(
+        { ...emptyRepoDraft(), repository: "acme/widgets" },
+        {
+          metricCode: "llm('x', model='anthropic/judge')",
+          metricModel: {
+            name: "anthropic/judge",
+            token_source: "byok",
+            byok_provider: "acme",
+            base_url: "https://top.example",
+            extra: {
+              api_key: "sk-test-not-real",
+              api_base: "https://base.example",
+              base_url: "https://extra.example",
+              top_p: 0.5,
+            },
+          },
+          metricTimeoutSeconds: 60,
+        },
+      );
+      const create = sent.filter((r) => r.method === "POST");
+      assert.equal(create.length, 1);
+      const scorer = create[0]!.body.scorer as Record<string, unknown>;
+      assert.deepEqual(scorer.model, {
+        name: "anthropic/judge",
+        token_source: "byok",
+        byok_provider: "acme",
+        extra: { top_p: 0.5 },
+      });
+      assert.equal("secret" in scorer, false);
+      const raw = JSON.stringify(create[0]!.body);
+      for (const leak of ["sk-test-not-real", "top.example", "base.example", "extra.example"]) {
+        assert.equal(raw.includes(leak), false, leak);
+      }
+    });
+
+    const createdScorer = (sent: Sent[]) => {
+      const create = sent.filter((r) => r.method === "POST");
+      assert.equal(create.length, 1);
+      return create[0]!.body.scorer as Record<string, unknown>;
+    };
+    const repo = { ...emptyRepoDraft(), repository: "acme/widgets" };
+    const llmMetric = (call: string) => ({
+      metricCode: `from skynet import llm\n\ndef score(repo_path, case=None):\n    return float(${call})`,
+      metricModel: null,
+      metricTimeoutSeconds: 60,
+    });
+
+    void it("gives an llm() metric without model= the reflection model, without its key", async () => {
+      const { sent } = await startWith(repo, llmMetric("llm('judge this')"), {
+        ...optimizer,
+        reflectionModel: {
+          name: "openai/reflect",
+          token_source: "byok",
+          byok_provider: "openai",
+          extra: { api_key: "sk-test-not-real", temperature: 0.2 },
+        },
+      });
+      const scorer = createdScorer(sent);
+      assert.deepEqual(scorer.model, {
+        name: "openai/reflect",
+        token_source: "byok",
+        byok_provider: "openai",
+        extra: { temperature: 0.2 },
+      });
+      assert.equal(JSON.stringify(sent).includes("sk-test-not-real"), false);
+    });
+
+    void it("gives an llm() metric with one model= name that model, billed like the reflection model", async () => {
+      const { sent } = await startWith(repo, llmMetric("llm('judge this', model='anthropic/judge')"));
+      assert.deepEqual(createdScorer(sent).model, { name: "anthropic/judge", token_source: "managed" });
+    });
+
+    void it("bills a named metric model as managed when the reflection model is a subscription", async () => {
+      const { sent } = await startWith(repo, llmMetric("llm('judge this', model='anthropic/judge')"), {
+        ...optimizer,
+        reflectionModel: { name: "subscription/claude/opus", token_source: "subscription", cli_provider: "claude" },
+      });
+      assert.deepEqual(createdScorer(sent).model, { name: "anthropic/judge", token_source: "managed" });
+    });
+
+    void it("bills a model= name that matches the task model like the reflection model, as the run does", async () => {
+      // The repository run sends no task model, so the server never matches its name.
+      const { sent } = await startWith(repo, llmMetric("llm('judge this', model='openai/task')"), {
+        ...optimizer,
+        taskModel: { name: "openai/task", token_source: "byok", byok_provider: "openai" },
+      });
+      assert.deepEqual(createdScorer(sent).model, { name: "openai/task", token_source: "managed" });
+    });
+
+    void it("gives a bare or same-provider BYOK model= name the reflection model's connection", async () => {
+      const reflectionModel = { name: "openai/reflect", token_source: "byok", byok_provider: "openai" };
+      for (const name of ["gpt-4o-mini", "openai/gpt-4o-mini"]) {
+        const { sent } = await startWith(repo, llmMetric(`llm('judge this', model='${name}')`), {
+          ...optimizer,
+          reflectionModel,
+        });
+        assert.deepEqual(createdScorer(sent).model, { name, token_source: "byok", byok_provider: "openai" });
+      }
+      const { sent } = await startWith(repo, llmMetric("llm('judge this', model='anthropic/judge')"), {
+        ...optimizer,
+        reflectionModel,
+      });
+      assert.deepEqual(createdScorer(sent).model, { name: "anthropic/judge", token_source: "byok" });
+    });
+
+    void it("takes the connection from the reflection name when the BYOK reflection model has no byok_provider", async () => {
+      for (const [reflectionName, provider] of [
+        ["openai/gpt-4o", "openai"],
+        ["gemini/gemini-2.5-pro", "google"],
+      ]) {
+        const { sent } = await startWith(repo, llmMetric("llm('judge this', model='gpt-4o-mini')"), {
+          ...optimizer,
+          reflectionModel: { name: reflectionName, token_source: "byok" },
+        });
+        assert.deepEqual(createdScorer(sent).model, {
+          name: "gpt-4o-mini",
+          token_source: "byok",
+          byok_provider: provider,
+        });
+      }
+    });
+
+    void it("treats an extra reflection model name as a new config when the engine is not ShinkaEvolve", async () => {
+      const { sent } = await startWith(repo, llmMetric("llm('judge this', model='gpt-4o-mini')"), {
+        ...optimizer,
+        reflectionModel: { name: "openai/reflect", token_source: "byok", byok_provider: "openai" },
+        // Left over from an earlier ShinkaEvolve choice; GEPA does not use it.
+        extraReflectionModels: [{ name: "gpt-4o-mini", token_source: "byok" }],
+      });
+      assert.deepEqual(createdScorer(sent).model, {
+        name: "gpt-4o-mini",
+        token_source: "byok",
+        byok_provider: "openai",
+      });
+    });
+
+    void it("gives a ShinkaEvolve extra reflection model name that role's config, with no byok_provider added", async () => {
+      const { sent } = await startWith(repo, llmMetric("llm('judge this', model='gpt-4o-mini')"), {
+        ...optimizer,
+        choice: "shinka_evolve",
+        reflectionModel: { name: "openai/reflect", token_source: "byok", byok_provider: "openai" },
+        extraReflectionModels: [{ name: "gpt-4o-mini", token_source: "byok" }],
+      });
+      assert.deepEqual(createdScorer(sent).model, { name: "gpt-4o-mini", token_source: "byok" });
+    });
+
+    void it("gives an openai/ name on a custom-endpoint connection that connection", async () => {
+      const { sent } = await startWith(repo, llmMetric("llm('judge this', model='openai/y')"), {
+        ...optimizer,
+        reflectionModel: { name: "openai/x", token_source: "byok", byok_provider: "together" },
+      });
+      assert.deepEqual(createdScorer(sent).model, {
+        name: "openai/y",
+        token_source: "byok",
+        byok_provider: "together",
+      });
+    });
+
+    void it("adds no model for a metric without llm() or with two model names", async () => {
+      assert.equal("model" in createdScorer((await startWith(repo)).sent), false);
+      const two = llmMetric("llm('a', model='x/one') + llm('b', model='x/two')");
+      assert.equal("model" in createdScorer((await startWith(repo, two)).sent), false);
+    });
+
+    void it("sends no job and reports no scorer while metric.py is empty", async () => {
+      const { sent, budgets, hasScorer } = await startWith(
+        { ...emptyRepoDraft(), repository: "acme/widgets" },
+        { ...workspace, metricCode: "  " },
+      );
+      assert.equal(hasScorer, false);
+      assert.equal(budgets, 0);
+      assert.equal(sent.filter((r) => r.method === "POST").length, 0);
     });
 
     void it("opens no budget and sends no job for a broken repository", async () => {

@@ -251,6 +251,7 @@
   "submit.v2.harden.view.white_box": "व्हाइट-बॉक्स",
   "submit.v2.harden.start": "शुरू करें",
   "submit.v2.harden.skip": "छोड़ें",
+  "submit.v2.harden.no_scorer": "पहले metric.py लिखें। हार्डनिंग हर हमले को रन के मेट्रिक से स्कोर करती है।",
   "submit.v2.harden.continue": "जारी रखें",
   "submit.v2.harden.retry": "राउंड फिर से चलाएँ",
   "submit.v2.harden.running": "हमलावर काम कर रहा है। आप यह पेज छोड़ सकते हैं। आपकी समीक्षा की ज़रूरत होने पर हम आपको सूचित करेंगे।",

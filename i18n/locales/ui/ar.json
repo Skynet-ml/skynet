@@ -251,6 +251,7 @@
   "submit.v2.harden.view.white_box": "الصندوق الأبيض",
   "submit.v2.harden.start": "بدء",
   "submit.v2.harden.skip": "تخطٍّ",
+  "submit.v2.harden.no_scorer": "اكتب metric.py أولًا. تقوية المقياس تقيّم كل هجوم بمقياس التشغيل.",
   "submit.v2.harden.continue": "متابعة",
   "submit.v2.harden.retry": "إعادة الجولة",
   "submit.v2.harden.running": "المهاجم يعمل الآن. يمكنك المغادرة. سنُعلمك عندما تكون مراجعتك مطلوبة.",

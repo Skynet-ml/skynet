@@ -3,7 +3,7 @@
  * `backend/core/models/hardening.py`; keep the two in step.
  */
 
-import type { BlackboxTarget } from "./api";
+import type { BlackboxScorer, BlackboxTarget } from "./api";
 
 export type HardeningStatus =
   | "preflight"
@@ -98,6 +98,8 @@ export interface CreateHardeningJobRequest {
   /** A repository target only; its secrets may only name saved secrets. */
   target?: BlackboxTarget | null;
   binding_id?: string | null;
+  /** The run submit's scorer; the runner scores each round with it. */
+  scorer?: BlackboxScorer | null;
 }
 
 /** The statuses that end a job well; the overview reports the attacks it survived. */

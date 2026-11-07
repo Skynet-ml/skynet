@@ -7,10 +7,10 @@
  * the run needs data.
  */
 import type { ApiSource } from "@/shared/lib/api-route";
-import type { BlackboxEngineId, BlackboxRunRequest, ModelConfig } from "@/shared/types/api";
+import type { BlackboxEngineId, BlackboxRunRequest, BlackboxScorer, ModelConfig } from "@/shared/types/api";
 import type { HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { prepareModelConfig } from "./model-config";
-import { storedMetricModel } from "./run-floor";
+import { runModels, scanMetricDeclarations, scanMetricModel, storedMetricModel } from "./run-floor";
 import type { WizardV2State } from "./wizard-v2";
 
 export interface RepoRunOptions {
@@ -22,6 +22,114 @@ export interface RepoRunOptions {
 const hasModel = (config: ModelConfig | null): config is ModelConfig =>
   Boolean(config?.name.trim());
 
+/**
+ * The repository run's scorer. The hardening job sends the same scorer, so its
+ * runner scores with the run's metric (SKY-378).
+ *
+ * Args:
+ *   workspace: The wizard's workspace, with `metric.py` and its model.
+ *
+ * Returns:
+ *   The scorer, or null while `metric.py` is empty.
+ */
+export function repoRunScorer(workspace: WizardV2State["workspace"]): BlackboxScorer | null {
+  if (!workspace.metricCode.trim()) return null;
+  const metricModel = storedMetricModel(workspace.metricModel, workspace.metricCode);
+  return {
+    kind: "python",
+    metric_code: workspace.metricCode,
+    ...(hasModel(metricModel) && { model: prepareModelConfig(metricModel) }),
+    timeout_seconds: workspace.metricTimeoutSeconds,
+  };
+}
+
+/**
+ * The hardening job's scorer: the run's scorer, with the metric model that
+ * the run submit gets from the server's `resolve_metric_model`. The hardening
+ * create fills no model, so without this an `llm()` metric fails every round.
+ *
+ * Args:
+ *   state: The wizard state, with `metric.py` and the run's models.
+ *
+ * Returns:
+ *   The scorer, or null while `metric.py` is empty.
+ */
+export function hardeningScorer(state: Pick<WizardV2State, "workspace" | "optimizer">): BlackboxScorer | null {
+  const scorer = repoRunScorer(state.workspace);
+  const reflection = state.optimizer.reflectionModel;
+  if (!scorer || scorer.model || !hasModel(reflection)) return scorer;
+  const code = state.workspace.metricCode;
+  const scan = scanMetricModel(code);
+  // An unreadable metric gets no guessed model; the runner reports its error.
+  if (!scan.uses || scan.unknown) return scorer;
+  const { names, omitted, unsafe } = scanMetricDeclarations(code);
+  // The server refuses these declarations, so no model can be right for them.
+  if (unsafe || names.length > 1 || (omitted && names.length === 1 && names[0] !== reflection.name)) {
+    return scorer;
+  }
+  // runModels builds the metric model as the server does: the reflection model
+  // when no call names one, else the role with that name or a new config. The
+  // repository run sends no task model, so its name is not a role here.
+  const optimizer = { ...state.optimizer, taskModel: null };
+  const metric = runModels(optimizer, true, code).at(-1);
+  if (!metric) return scorer;
+  // runModels returns a role's own object; only a new config needs a connection.
+  const isRole = [reflection, ...optimizer.extraReflectionModels].includes(metric);
+  return { ...scorer, model: prepareModelConfig(isRole ? metric : withByokProvider(metric, reflection)) };
+}
+
+/** The leading `provider/` segment of a model name, or null for a bare name. */
+function modelPrefix(name: string): string | null {
+  const stripped = name.trim().replace(/^\/+|\/+$/g, "");
+  return stripped.includes("/") ? stripped.split("/", 1)[0] || null : null;
+}
+
+// The server's LITELLM_TO_BYOK_PROVIDER (backend/core/provider_registry.py), the
+// reverse of BYOK_TO_LITELLM_PROVIDER in features/billing/lib/byok.ts. A copy,
+// because the repo-run test loader cannot import a feature's index.
+const LITELLM_TO_BYOK_PROVIDER: Readonly<Record<string, string>> = {
+  gemini: "google",
+  together_ai: "together",
+  cohere_chat: "cohere",
+  fireworks_ai: "fireworks",
+  meta_llama: "meta",
+};
+
+/** The BYOK vault slug for a LiteLLM provider prefix (`gemini` → `google`). */
+function byokProviderForLitellm(prefix: string): string {
+  return LITELLM_TO_BYOK_PROVIDER[prefix] ?? prefix;
+}
+
+/**
+ * Give a new BYOK metric config the reflection model's connection, as the
+ * server's `resolve_metric_model` does for a run. Without it the runner cannot
+ * route a bare model name.
+ *
+ * Args:
+ *   metric: The new metric config, with the reflection model's token source.
+ *   reflection: The run's reflection model.
+ *
+ * Returns:
+ *   The config with `byok_provider` when the connection can route the name,
+ *   else the config unchanged.
+ */
+function withByokProvider(metric: ModelConfig, reflection: ModelConfig): ModelConfig {
+  if (metric.token_source !== "byok" || reflection.token_source !== "byok") return metric;
+  const reflectionPrefix = modelPrefix(reflection.name);
+  // A reflection model typed in by hand has no byok_provider; the server then
+  // takes the provider from its name.
+  const provider = reflection.byok_provider || (reflectionPrefix && byokProviderForLitellm(reflectionPrefix));
+  if (!provider) return metric;
+  // An openai/ reflection name on another provider's connection means a custom
+  // endpoint, which also serves openai/ names.
+  const customBase = reflectionPrefix === "openai" && byokProviderForLitellm("openai") !== provider;
+  const prefix = modelPrefix(metric.name);
+  // A bare name carries no provider that could contradict the connection.
+  const routable =
+    prefix === null || byokProviderForLitellm(prefix) === provider || (customBase && prefix === "openai");
+  return routable ? { ...metric, byok_provider: provider } : metric;
+}
+
 /** The repository run request, or null while the wizard cannot run it yet. */
 export function repoRunRequest(
   state: WizardV2State,
@@ -30,12 +138,12 @@ export function repoRunRequest(
   const { task, inputs, optimizer, workspace, meta } = state;
   const repo = task.repo;
   if (!repo || !hasModel(optimizer.reflectionModel)) return null;
-  if (!workspace.metricCode.trim()) return null;
+  const scorer = repoRunScorer(workspace);
+  if (!scorer) return null;
   const auto = optimizer.choice === "auto";
   const engine = optimizer.choice as BlackboxEngineId;
   const shinka = !auto && engine === "shinka_evolve";
   const editablePaths = repo.editablePaths.map((path) => path.trim()).filter(Boolean);
-  const metricModel = storedMetricModel(workspace.metricModel, workspace.metricCode);
   return {
     name: meta.name.trim() || undefined,
     description: meta.description.trim() || undefined,
@@ -43,12 +151,7 @@ export function repoRunRequest(
     objective: task.objective.trim(),
     background: task.background.trim() || null,
     recipe: "repo",
-    scorer: {
-      kind: "python",
-      metric_code: workspace.metricCode,
-      ...(hasModel(metricModel) && { model: prepareModelConfig(metricModel) }),
-      timeout_seconds: workspace.metricTimeoutSeconds,
-    },
+    scorer,
     // The scorer gets each case as `score(repo_path, case)`.
     ...(task.needsData && inputs.cases.length > 0
       ? { cases: inputs.cases as unknown as Array<Record<string, unknown>> }
