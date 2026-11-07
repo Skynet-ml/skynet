@@ -412,3 +412,52 @@ def test_a_secret_value_in_the_file_is_refused(raw: bytes) -> None:
 def test_a_service_without_secrets_parses() -> None:
     """A service that needs no secret is a valid declaration."""
     assert parse_constraints(b"[services.cache]\n").services == {"cache": ServiceSpec()}
+
+
+@pytest.mark.parametrize(
+    ("raw", "key"),
+    [
+        (b'[proposer]\ntools = ["bash"]\n', "[proposer] tools"),
+        (b"[proposer]\nnetwork = []\n", "[proposer] network"),
+        (b'[proposer]\nnetwork = ["pypi.org"]\n', "[proposer] network"),
+        (b'[services.maps]\n[proposer]\nservices = ["maps"]\n', "[proposer] services"),
+        (b'[target.planner]\nentry = "agents/planner.py:plan"\n', "[target.planner]"),
+        (b"[services.cache]\n", "[services.cache]"),
+        (b'[metric]\nfiles = ["eval/scorer.py"]\n', "[metric] files"),
+        (b'[metric]\nexploits = "eval/exploits"\n', "[metric] exploits"),
+        (b'[metric]\nreference = "eval/reference.json"\n', "[metric] reference"),
+    ],
+)
+def test_a_run_refuses_environment_keys_it_cannot_enforce_yet(tmp_path: Path, raw: bytes, key: str) -> None:
+    """Until SKY-352, a repository run fails on these keys instead of silently ignoring them."""
+    parse_constraints(raw)
+
+    with pytest.raises(ConstraintsError, match="cannot enforce") as error:
+        read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw}))
+
+    assert key in str(error.value)
+    assert "SKY-352" in str(error.value)
+
+
+def test_a_run_names_every_unenforced_key(tmp_path: Path) -> None:
+    """One message lists all the keys, so the user can fix the file in one pass."""
+    with pytest.raises(ConstraintsError) as error:
+        read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: _ENVIRONMENT}))
+
+    message = str(error.value)
+    for key in ("[proposer] network", "[target.planner]", "[target.router]", "[services.maps]", "[metric] files"):
+        assert key in message
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        _CFCA + _RULES,
+        b'[proposer]\nillegal = ["Do not edit tests."]\n',
+        b'[metric]\nexploits = ".optimize/exploits"\n',
+        b"[proposer]\n[metric]\n",
+    ],
+)
+def test_a_run_accepts_old_files_and_proposer_illegal(tmp_path: Path, raw: bytes) -> None:
+    """Old files and keys the run already enforces still stage."""
+    assert read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw})) == parse_constraints(raw)

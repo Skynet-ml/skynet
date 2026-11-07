@@ -12,10 +12,12 @@ illegal`` with its alias ``[proposer] illegal``, plain-language rules that
 judge models check during the run and on every version before it is scored.
 Not enforced: ``[instructions]``, which the agent reads as guidance only.
 
-Parsed and validated here, enforced by the sandbox runtime: ``[proposer]``
-and ``[target.<name>]`` (tools, network, services, and for a target its
-entry, vcpus and timeout), ``[services.<name>]`` (the secret names a service
-needs) and ``[metric]`` (the files and exploit folder hidden from the agent).
+Parsed and validated here, but not enforced yet: ``[proposer]`` and
+``[target.<name>]`` (tools, network, services, and for a target its entry,
+vcpus and timeout), ``[services.<name>]`` (the secret names a service needs)
+and ``[metric]`` (the files and exploit folder hidden from the agent). A
+repository run that sets any of them fails the setup check until the
+sandbox runtime enforces them (SKY-352).
 """
 
 from __future__ import annotations
@@ -649,7 +651,52 @@ def read_constraints(archive: Path) -> RepoConstraints | None:
         if member.size > _MAX_FILE_BYTES:
             raise ConstraintsError(f"{CONSTRAINTS_FILE} is larger than {_MAX_FILE_BYTES // 1024} KiB.")
         handle = packed.extractfile(member)
-        return parse_constraints(handle.read() if handle is not None else b"")
+        constraints = parse_constraints(handle.read() if handle is not None else b"")
+    unenforced = _unenforced_keys(constraints)
+    if unenforced:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE} sets {', '.join(unenforced)}. Repository runs cannot enforce "
+            "these settings yet (SKY-352). Remove them to run."
+        )
+    return constraints
+
+
+def _unenforced_keys(constraints: RepoConstraints) -> list[str]:
+    """List the environment settings a repository run cannot enforce yet.
+
+    A setting the run ignores would look like protection the user does not get,
+    for example an offline proposer that still has open egress, so the run path
+    refuses it instead. SKY-352 removes this check when the sandbox runtime
+    enforces these keys. ``[proposer] illegal`` is not listed: the judges enforce it.
+
+    Args:
+        constraints: The parsed file.
+
+    Returns:
+        The settings the file sets, as ``[section] key`` labels, in file order.
+    """
+    proposer, metric = constraints.proposer, constraints.metric
+    keys = [
+        label
+        for label, is_set in (
+            ("[proposer] tools", bool(proposer.tools)),
+            ("[proposer] network", proposer.network is not None),
+            ("[proposer] services", bool(proposer.services)),
+        )
+        if is_set
+    ]
+    keys += [f"[target.{name}]" for name in constraints.targets]
+    keys += [f"[services.{name}]" for name in constraints.services]
+    keys += [
+        label
+        for label, is_set in (
+            ("[metric] files", bool(metric.files)),
+            ("[metric] exploits", metric.exploits != _DEFAULT_EXPLOITS),
+            ("[metric] reference", metric.reference is not None),
+        )
+        if is_set
+    ]
+    return keys
 
 
 def _inside(path: str, roots: Iterable[str]) -> bool:
