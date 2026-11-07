@@ -21,6 +21,7 @@ from ..repo_tree import unpack_tree, version_patch
 from ..repo_workspace import (
     _PROBE_OK,
     PREPARED_DIR,
+    REPO_DIR,
     WORK_DIR,
     NetworkCutoffError,
     RepoSetupError,
@@ -586,6 +587,117 @@ def test_a_version_that_edits_a_metric_file_is_laid_out_with_the_base_metric(tmp
         assert space.install_metric_files() is None
         assert box.read_file(f"{WORK_DIR}/src/metric.py") == "def score(): return 0.1\n"
         assert box.read_file(f"{WORK_DIR}/.optimize/exploits/a") is None
+    finally:
+        space.close()
+
+
+def _metric_space(tmp_path: Path) -> tuple[RepoWorkspace, _Runtime]:
+    """Build a workspace that hides ``eval/metric.py``, laid out with the base version.
+
+    Args:
+        tmp_path: Where the archive goes.
+
+    Returns:
+        The workspace and its runtime.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/metric.py": "SECRET = 0.3\n"})
+    runtime = _Runtime()
+    space = RepoWorkspace(
+        runtime=runtime,
+        spec=_ONLINE,
+        archive=archive,
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command=None,
+        secrets={},
+        hidden_paths=["eval/metric.py"],
+    )
+    assert space.checkout("").path == WORK_DIR
+    return space, runtime
+
+
+def _left_at_close(box: Any, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record the names in the box's repo folder just before the box closes.
+
+    Args:
+        box: The recording box.
+        monkeypatch: Swaps its ``close``.
+
+    Returns:
+        A list that fills with the names when the box closes.
+    """
+    seen: list[str] = []
+    close = box.close
+
+    def recording_close() -> None:
+        """List the repo folder, then close."""
+        seen.extend(box.run(f"ls -a {REPO_DIR}").stdout.split())
+        close()
+
+    monkeypatch.setattr(box, "close", recording_close)
+    return seen
+
+
+def test_a_failed_metric_install_removes_the_archive_and_ends_the_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No later version reads the metric archive after an install fails (SKY-375, E38)."""
+    space, runtime = _metric_space(tmp_path)
+    try:
+        box = space.session()
+        seen = _left_at_close(box, monkeypatch)
+        monkeypatch.setattr(space, "_metric_files", "not an archive")
+
+        assert space.install_metric_files() == "The metric files could not be installed after the version ran."
+
+        assert box.closed
+        assert seen
+        assert not [name for name in seen if name.startswith("hidden")]
+        assert space.session() is not box
+        assert len(runtime.boxes) == 2
+    finally:
+        space.close()
+
+
+def test_a_version_that_turns_a_metric_folder_into_a_file_has_no_score(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse the install, remove the archive and end the box when ``eval`` became a file (E38)."""
+    space, _ = _metric_space(tmp_path)
+    try:
+        box = space.session()
+        seen = _left_at_close(box, monkeypatch)
+        assert box.run(f"cd {WORK_DIR} && rm -rf eval && touch eval").ok
+
+        problem = space.install_metric_files()
+
+        assert problem == "The version replaced a folder of the metric files with a file or a link, so it has no score."
+        assert box.closed
+        assert seen
+        assert not [name for name in seen if name.startswith("hidden")]
+    finally:
+        space.close()
+
+
+def test_a_version_that_links_a_metric_folder_outside_gets_no_metric_written_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never write the metric through a link the version put in place of ``eval`` (E38)."""
+    space, _ = _metric_space(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        box = space.session()
+        seen = _left_at_close(box, monkeypatch)
+        assert box.run(f"cd {WORK_DIR} && rm -rf eval && ln -s {outside} eval").ok
+
+        problem = space.install_metric_files()
+
+        assert problem == "The version replaced a folder of the metric files with a file or a link, so it has no score."
+        assert list(outside.iterdir()) == []
+        assert box.closed
+        assert seen
+        assert not [name for name in seen if name.startswith("hidden")]
     finally:
         space.close()
 

@@ -22,6 +22,7 @@ import logging
 import posixpath
 import shlex
 import threading
+import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,6 +65,51 @@ with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
 with open(sys.argv[1], "w", encoding="ascii") as handle:
     handle.write(base64.b64encode(buffer.getvalue()).decode("ascii"))
 """
+# Puts the hidden files back into the checkout once the version's code
+# stopped. ``-I``: the checkout is the version's. It removes the archive in
+# every case, so no later version reads it. It refuses a folder above a hidden
+# path that the version turned into a file or a link, so nothing is written
+# through a link, and it removes what the version left at a hidden path
+# without following links. Extraction then only makes files and folders
+# below real folders (and links that stay inside the checkout, where the
+# ``data`` filter exists).
+_INSTALL_HIDDEN = r"""
+import base64, io, os, shutil, sys, tarfile
+
+source, paths = sys.argv[1], sys.argv[2:]
+try:
+    for path in paths:
+        parts = path.split("/")
+        for depth in range(1, len(parts)):
+            parent = "/".join(parts[:depth])
+            if os.path.islink(parent) or (os.path.lexists(parent) and not os.path.isdir(parent)):
+                sys.exit(3)
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        elif os.path.lexists(path):
+            os.unlink(path)
+    if source:
+        with open(source, "rb") as handle:
+            data = base64.b64decode(handle.read(), validate=True)
+        data_filter = getattr(tarfile, "data_filter", None)
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+            members = archive.getmembers()
+            if data_filter is None and not all(member.isfile() or member.isdir() for member in members):
+                sys.exit(4)
+            for member in members:
+                name = os.path.normpath(member.name)
+                if os.path.isabs(name) or name == ".." or name.startswith("../"):
+                    sys.exit(4)
+            if data_filter is None:
+                archive.extractall(".")
+            else:
+                archive.extractall(".", filter=data_filter)
+finally:
+    if source and os.path.lexists(source):
+        os.unlink(source)
+"""
+# The install script's exit code when the version replaced a folder above a hidden path.
+_NOT_A_FOLDER = 3
 # Linux caps one environment string at 128 KiB; a larger stage answer goes
 # through a file write and fresh stamps instead.
 _ANSWER_ENV_BYTES = 100_000
@@ -504,20 +550,26 @@ class RepoWorkspace:
                 return None
             session = self.session()
             paths = " ".join(shlex.quote(path) for path in self._hidden)
-            if self._metric_files is not None:
-                session.write_files({HIDDEN_FILE: self._metric_files})
-            name = posixpath.basename(HIDDEN_FILE)
-            # No pipe: ``sh`` has no pipefail, so a failed decode would pass unseen.
-            unpack = (
-                f" base64 -d < ../{name} > ../{name}.tgz; tar -xzf ../{name}.tgz; rm -f ../{name} ../{name}.tgz;"
-                if self._metric_files is not None
-                else ""
-            )
-            # Whatever the version left at a hidden path goes first.
-            result = session.run(
-                f"set -e; cd {WORK_DIR}; rm -rf -- {paths};{unpack}", timeout_seconds=_SETUP_TIMEOUT_SECONDS
-            )
+            # A fresh name: the version may have left a file or a link at any name it knew.
+            source = f"{REPO_DIR}/hidden-{uuid.uuid4().hex}.b64" if self._metric_files is not None else ""
+            try:
+                if self._metric_files is not None:
+                    session.write_files({source: self._metric_files})
+                argument = f"../{posixpath.basename(source)}" if source else "''"
+                result = session.run(
+                    f"cd {WORK_DIR} && python3 -I -c {shlex.quote(_INSTALL_HIDDEN)} {argument} {paths}",
+                    timeout_seconds=_SETUP_TIMEOUT_SECONDS,
+                )
+            except BaseException:
+                self._end_box()
+                raise
             if not result.ok:
+                # The archive may still be in the box; no later version runs in it (E38).
+                self._end_box()
+                if result.exit_code == _NOT_A_FOLDER:
+                    return (
+                        "The version replaced a folder of the metric files with a file or a link, so it has no score."
+                    )
                 return "The metric files could not be installed after the version ran."
             self._metric_installed = True
             return None
@@ -676,6 +728,10 @@ class RepoWorkspace:
     def close(self) -> None:
         """Destroy the box."""
         with self._lock:
-            if self._session is not None:
-                session, self._session = self._session, None
-                session.close()
+            self._end_box()
+
+    def _end_box(self) -> None:
+        """Destroy the box; the caller holds the lock."""
+        if self._session is not None:
+            session, self._session = self._session, None
+            session.close()
