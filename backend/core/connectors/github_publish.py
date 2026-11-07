@@ -51,6 +51,19 @@ class HardeningSummary:
     attacks: int
     exploits_fixed: int
 
+    def __post_init__(self) -> None:
+        """Refuse counts that are not whole numbers of zero or more, or more fixes than attacks.
+
+        Raises:
+            ValueError: A count is a bool, not an int, or negative, or
+                ``exploits_fixed`` is larger than ``attacks``.
+        """
+        for count in (self.attacks, self.exploits_fixed):
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise ValueError(f"Hardening counts must be whole numbers of zero or more, not {count!r}.")
+        if self.exploits_fixed > self.attacks:
+            raise ValueError("A hardening job cannot fix more exploits than it ran attacks.")
+
 
 def hardening_line(summary: HardeningSummary) -> str:
     """Write the pull request body line that reports a finished hardening job.

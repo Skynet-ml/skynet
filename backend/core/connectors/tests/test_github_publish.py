@@ -172,3 +172,23 @@ def test_pull_request_without_hardening_keeps_the_body(monkeypatch: pytest.Monke
     open_pull_request("tok", "acme/app", head="skynet/x", base_branch="main", title="T", body="B\n", hardening=None)
 
     assert sent[0]["body"] == "B\n"
+
+
+@pytest.mark.parametrize(("attacks", "fixed"), [(-1, 0), (0, -1), (True, 0), (0, False), (1.0, 0), ("3", 0)])
+def test_hardening_summary_refuses_bad_counts(attacks: Any, fixed: Any) -> None:
+    """Refuse negative, bool and non-int counts, so the body never reports a wrong number."""
+    with pytest.raises(ValueError, match="whole numbers of zero or more"):
+        HardeningSummary(attacks=attacks, exploits_fixed=fixed)
+
+
+def test_hardening_summary_refuses_more_fixes_than_attacks() -> None:
+    """Refuse a summary that fixed more exploits than it ran attacks."""
+    with pytest.raises(ValueError, match="more exploits than"):
+        HardeningSummary(attacks=2, exploits_fixed=3)
+
+
+def test_hardening_summary_takes_zero_counts() -> None:
+    """Accept a job that ran no attacks and fixed nothing."""
+    assert github_publish.hardening_line(HardeningSummary(attacks=0, exploits_fixed=0)) == (
+        "Metric survived 0 attacks, 0 exploits fixed"
+    )
