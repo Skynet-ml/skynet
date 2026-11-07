@@ -368,7 +368,9 @@ def test_coder_prompt_writes_secrets_only_as_placeholders() -> None:
 
     assert "Write each API that a role calls as ``[services.<name>]``" in prompt
     assert 'headers = { Authorization = "Bearer ${JUDGE_KEY}" }' in prompt
-    assert "use placeholders such as ``${MAPS_KEY}`` in ``headers`` and ``env`` too" in prompt
+    assert "Only http servers with a ``url`` are supported now" in prompt
+    assert "Put placeholders such as ``${MAPS_KEY}`` only in ``headers``." in prompt
+    assert "``env``" not in prompt
     assert "Never write a secret value into any file, even when the user pastes one" in prompt
     assert "tell the user to add the secret to the run" in prompt
     assert "Name every secret the run needs in ``summary``" in prompt

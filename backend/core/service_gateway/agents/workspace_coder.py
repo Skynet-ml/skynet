@@ -88,8 +88,9 @@ you return.
   ``services = ["judge"]`` in ``[metric]``. When the candidate calls MCP
   servers, describe them in a standard ``.mcp.json`` file and set
   ``mcp = "<path>"`` in ``[run]``, for example ``mcp = ".mcp.json"``; give the
-  file's contents in ``summary`` too. In that file, use placeholders such as
-  ``${{MAPS_KEY}}`` in ``headers`` and ``env`` too. Never write a secret value
+  file's contents in ``summary`` too. Only http servers with a ``url`` are
+  supported now, for example ``"maps": {{"url": "https://mapstools.googleapis.com/mcp"}}``.
+  Put placeholders such as ``${{MAPS_KEY}}`` only in ``headers``. Never write a secret value
   into any file, even when the user pastes one; write the placeholder and tell
   the user to add the secret to the run. Name every secret the run needs in
   ``summary``, so the user can add it before the run. Give the

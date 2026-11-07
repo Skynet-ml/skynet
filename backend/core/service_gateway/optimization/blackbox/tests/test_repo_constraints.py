@@ -1198,8 +1198,9 @@ _STDIO_ROLES = {
         b'{"command": "npx", "args": ["files-mcp", "--token", "' + _RAW_KEY.encode() + b'"]}',
         b'{"type": "stdio", "command": "notes-mcp", "env": {"TOKEN": "${NOTES_TOKEN}"}}',
         b'{"url": "https://a.example.com/mcp", "env": {"TOKEN": "${NOTES_TOKEN}"}}',
+        b'{"type": "STDIO", "url": "https://a.example.com/mcp"}',
     ],
-    ids=["command", "type-stdio", "url-with-env"],
+    ids=["command", "type-stdio", "url-with-env", "type-stdio-upper"],
 )
 def test_a_stdio_mcp_server_in_any_role_is_refused(tmp_path: Path, role: str, server: bytes) -> None:
     """Only http servers are supported now, so a stdio server in any role's file fails the setup check (E64)."""
@@ -1212,6 +1213,19 @@ def test_a_stdio_mcp_server_in_any_role_is_refused(tmp_path: Path, role: str, se
         read_constraints(_archive(tmp_path, files))
 
     assert _RAW_KEY not in str(error.value)
+
+
+@pytest.mark.parametrize("kind", ["HTTP", "Streamable-HTTP", "SSE"])
+def test_an_http_type_in_any_case_is_accepted(tmp_path: Path, kind: str) -> None:
+    """The MCP type is matched without case, so ``HTTP`` is an http server (E64)."""
+    raw = b'[run]\nentry = "a.py:f"\nmcp = "roles/.mcp.json"\n'
+    server = b'{"type": "' + kind.encode() + b'", "url": "https://a.example.com/mcp"}'
+    files = {CONSTRAINTS_FILE: raw, "roles/.mcp.json": b'{"mcpServers": {"m": ' + server + b"}}"}
+
+    constraints = read_constraints(_archive(tmp_path, files))
+
+    assert constraints is not None
+    assert constraints.run_role.mcp_servers == (McpServer(name="m", url="https://a.example.com/mcp", headers={}),)
 
 
 def test_a_uuid_key_in_a_service_header_is_refused() -> None:

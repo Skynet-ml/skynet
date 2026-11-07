@@ -856,7 +856,7 @@ def _service_headers(value: Any, label: str, prefix: str = CONSTRAINTS_FILE) -> 
 
 
 def _check_value(text: str, where: str, prefix: str) -> None:
-    """Check that a header or ``env`` value names secrets only as ``${NAME}`` placeholders (E49).
+    """Check that a header value names secrets only as ``${NAME}`` placeholders (E49).
 
     Args:
         text: The value as written.
@@ -915,7 +915,7 @@ def _placeholders(*texts: str) -> tuple[str, ...]:
     """Return the secret names the texts use as ``${NAME}``, in order and without repeats.
 
     Args:
-        *texts: Header or ``env`` values.
+        *texts: Header values.
 
     Returns:
         The names.
@@ -1372,12 +1372,15 @@ def _mcp_server(name: str, entry: Any, prefix: str) -> McpServer:
     label = f"server '{name}'"
     if not isinstance(entry, dict):
         raise ConstraintsError(f"{prefix}: {label} must be an object.")
-    if entry.get("type") == "stdio" or _MCP_STDIO_KEYS & set(entry):
+    # The type is matched without case, so "STDIO" gets the E64 message and "HTTP" passes.
+    kind = entry.get("type", "http")
+    if isinstance(kind, str):
+        kind = kind.lower()
+    if kind == "stdio" or _MCP_STDIO_KEYS & set(entry):
         raise ConstraintsError(
             f"{prefix}: {label} is a stdio server (command, args, env). Only http servers are supported now;"
             ' give it a "url" and put each secret in "headers" as ${NAME}.'
         )
-    kind = entry.get("type", "http")
     if not isinstance(kind, str) or kind not in _MCP_HTTP_TYPES:
         raise ConstraintsError(f"{prefix}: {label} type must be http, streamable-http or sse.")
     unknown = sorted(set(entry) - _MCP_HTTP_KEYS)
@@ -1397,7 +1400,8 @@ def _check_secret_receivers(services: Mapping[str, ServiceSpec], roles: Mapping[
 
     Args:
         services: The file's ``[services]`` declarations.
-        roles: ``[run]`` and ``[metric]`` with their MCP servers, by label.
+        roles: Every role with its MCP servers, by label: ``[proposer]``,
+            ``[run]``, ``[metric]`` and each ``[target.<name>]``.
 
     Raises:
         ConstraintsError: When one secret name goes to two different hosts.
