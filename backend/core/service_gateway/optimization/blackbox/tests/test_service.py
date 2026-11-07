@@ -1851,3 +1851,26 @@ def test_progress_events_never_show_a_score_the_search_floor_dragged_down() -> N
         ),
         (PROGRESS_OPTIMIZER, {"last_score": -0.5, "best_score": 0.5, "n": 3}),
     ]
+
+
+def test_result_details_never_show_a_score_the_search_floor_dragged_down(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An engine's metadata (AutoResearch's Pareto front) reaches the details with floored scores as null."""
+    monkeypatch.setattr(
+        service_mod,
+        "run_strategy",
+        lambda strategy, task, server, ctx, cb=None, *, caps=None: (
+            Result(
+                best_candidate="hello world",
+                best_score=0.6,
+                total_evals=0,
+                metadata={"frontier": [{"id": "c001", "score": SEARCH_FLOOR / 3}, {"id": "c002", "score": 0.6}]},
+            ),
+            [],
+        ),
+    )
+
+    response = run_blackbox_optimization(_payload(), artifact_id="job-frontier", gepa_log_dir_path=str(tmp_path))
+
+    assert response.details["frontier"] == [{"id": "c001", "score": None}, {"id": "c002", "score": 0.6}]

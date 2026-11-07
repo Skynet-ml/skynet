@@ -1462,7 +1462,11 @@ def _run_job(
             "proposer_runtime": job.proposer_runtime,
             "upstream_revision": GEPA_REVISION,
         },
-        details={"optimizer_best_score": optimizer_best_score, "selection_scope": selection_scope, **result.metadata},
+        details={
+            "optimizer_best_score": optimizer_best_score,
+            "selection_scope": selection_scope,
+            **_scrub_search_floor(result.metadata),
+        },
         split_counts=counts,
         baseline_val_score=baseline_val.score if baseline_val else None,
         best_val_score=best_val.score if best_val else None,
