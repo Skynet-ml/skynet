@@ -44,6 +44,41 @@ class PublishedChange:
     draft: bool
 
 
+@dataclass(frozen=True)
+class HardeningSummary:
+    """What a finished metric-hardening job did to the run's metric."""
+
+    attacks: int
+    exploits_fixed: int
+
+    def __post_init__(self) -> None:
+        """Refuse counts that are not whole numbers of zero or more, or more fixes than attacks.
+
+        Raises:
+            ValueError: A count is a bool, not an int, or negative, or
+                ``exploits_fixed`` is larger than ``attacks``.
+        """
+        for count in (self.attacks, self.exploits_fixed):
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise ValueError(f"Hardening counts must be whole numbers of zero or more, not {count!r}.")
+        if self.exploits_fixed > self.attacks:
+            raise ValueError("A hardening job cannot fix more exploits than it ran attacks.")
+
+
+def hardening_line(summary: HardeningSummary) -> str:
+    """Write the pull request body line that reports a finished hardening job.
+
+    Args:
+        summary: The finished job's attack and fix counts.
+
+    Returns:
+        For example ``Metric survived 12 attacks, 3 exploits fixed``.
+    """
+    attacks = "attack" if summary.attacks == 1 else "attacks"
+    exploits = "exploit" if summary.exploits_fixed == 1 else "exploits"
+    return f"Metric survived {summary.attacks} {attacks}, {summary.exploits_fixed} {exploits} fixed"
+
+
 def _base_branch(token: str, repository: str, branch: str | None) -> str:
     """Return the branch the pull request targets.
 
@@ -219,7 +254,14 @@ def _apply(workdir: Path, patch: str, version_id: str) -> None:
 
 
 def open_pull_request(
-    token: str, repository: str, *, head: str, base_branch: str | None, title: str, body: str
+    token: str,
+    repository: str,
+    *,
+    head: str,
+    base_branch: str | None,
+    title: str,
+    body: str,
+    hardening: HardeningSummary | None = None,
 ) -> PublishedChange:
     """Open a draft pull request, or a regular one where the plan has no drafts.
 
@@ -230,6 +272,7 @@ def open_pull_request(
         base_branch: Branch to merge into; ``None`` picks the default branch.
         title: Pull request title.
         body: Pull request description.
+        hardening: The run's finished hardening job; ``None`` keeps the body as given.
 
     Returns:
         The opened pull request.
@@ -238,6 +281,8 @@ def open_pull_request(
         RepoPublishError: When GitHub refuses the request.
     """
     url = f"{API_URL}/repos/{repository}/pulls"
+    if hardening is not None:
+        body = f"{body}\n\n{hardening_line(hardening)}" if body else hardening_line(hardening)
     try:
         fields = {"title": title, "head": head, "base": _base_branch(token, repository, base_branch), "body": body}
         response = request("POST", url, provider=PROVIDER, headers=_headers(token), json={**fields, "draft": True})
