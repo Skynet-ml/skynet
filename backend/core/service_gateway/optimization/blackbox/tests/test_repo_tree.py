@@ -152,6 +152,29 @@ def test_submodule_changes_are_refused() -> None:
     assert any("Submodules are read-only" in problem for problem in patch_violations(patch, ["."]))
 
 
+@pytest.mark.parametrize("path", [".optimize/exploits/a/patch.diff", ".optimize/exploits"])
+def test_writes_to_the_exploit_suite_are_refused(path: str) -> None:
+    """Refuse a version that writes the exploit suite, even with the whole tree editable."""
+    patch = f"diff --git a/{path} b/{path}\nnew file mode 100644\n"
+
+    assert patch_violations(patch, ["."]) == [f"'{path}' is in the exploit suite, which a version may not change."]
+
+
+def test_writes_to_a_configured_exploit_folder_are_refused() -> None:
+    """Guard the ``[metric] exploits`` folder the same way as the default one."""
+    patch = "diff --git a/eval/attacks/x.diff b/eval/attacks/x.diff\nnew file mode 100644\n"
+
+    assert patch_violations(patch, ["."]) == []
+    assert "exploit suite" in patch_violations(patch, ["."], exploit_paths=["eval/attacks"])[0]
+
+
+def test_paths_next_to_the_exploit_suite_stay_editable() -> None:
+    """Match the suite as a folder, not as a name prefix."""
+    patch = "diff --git a/.optimize/exploits2.md b/.optimize/exploits2.md\nnew file mode 100644\n"
+
+    assert patch_violations(patch, ["."]) == []
+
+
 def test_oversized_patches_are_refused() -> None:
     """Stop a version larger than one sandbox upload before it is parsed."""
     assert "larger than" in patch_violations("+" * (9 * 1024 * 1024), ["."])[0]

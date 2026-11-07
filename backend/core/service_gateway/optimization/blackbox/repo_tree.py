@@ -56,6 +56,10 @@ def rule_block_record(reason: str) -> dict[str, Any]:
 # The shipped tree's commit. Versions diff against this ref rather than HEAD,
 # so an agent that commits in its checkout cannot hide those edits.
 BASE_REF = "refs/app/base"
+# The exploit suite ships in the improvement PR, so no version may rewrite it
+# (SKY-356). Same value as ``core.constants.HARDENING_EXPLOITS_DIR``; this
+# module is stdlib-only, so it cannot import that.
+EXPLOITS_DIR = ".optimize/exploits"
 # A version travels as one sandbox file, and uploads cap each file at 16 MiB.
 MAX_PATCH_BYTES = 8 * 1024 * 1024
 
@@ -224,8 +228,12 @@ def patch_violations(
     editable_paths: Iterable[str],
     readonly_paths: Iterable[str] = (),
     protected_paths: Iterable[str] = (),
+    exploit_paths: Iterable[str] = (),
 ) -> list[str]:
     """Explain every way a patch breaks the run's editing rules.
+
+    A write under ``.optimize/exploits`` is always a violation, even when the
+    editable paths cover it.
 
     Args:
         patch: ``git diff`` output for one version.
@@ -233,6 +241,8 @@ def patch_violations(
         readonly_paths: Submodules and Git LFS files, which stay as fetched.
         protected_paths: Files and folders the repository's constraints file
             protects; they win over the editable paths.
+        exploit_paths: The configured ``[metric] exploits`` folder, when it
+            differs from ``.optimize/exploits``; guarded the same way.
 
     Returns:
         One readable reason per broken rule; empty when the patch is allowed.
@@ -240,6 +250,7 @@ def patch_violations(
     if len(patch.encode("utf-8")) > MAX_PATCH_BYTES:
         return [f"The change is larger than the {MAX_PATCH_BYTES // (1024 * 1024)} MiB limit."]
     editable, readonly, protected = list(editable_paths), list(readonly_paths), list(protected_paths)
+    exploits = [EXPLOITS_DIR, *exploit_paths]
     problems: list[str] = []
     in_header = False
     for line in patch.split("\n"):
@@ -257,6 +268,8 @@ def patch_violations(
         parts = path.split("/")
         if path.startswith("/") or any(part in ("", ".", "..") for part in parts) or ".git" in parts:
             problems.append(f"'{path}' is not a path inside the repository.")
+        elif inside(path, exploits):
+            problems.append(f"'{path}' is in the exploit suite, which a version may not change.")
         elif inside(path, protected):
             problems.append(f"'{path}' is protected by the repository's optimize.toml ([paths] protected).")
         elif inside(path, readonly):
