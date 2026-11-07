@@ -35,7 +35,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -417,7 +417,7 @@ def fill_unscored(keys: list[str], scores: list[float]) -> list[float]:
     return filled
 
 
-def best_aggregate_candidate(server: EvalServer) -> tuple[str, float] | None:
+def best_aggregate_candidate(server: EvalServer, only: Collection[str] | None = None) -> tuple[str, float] | None:
     """Return the best candidate among the server's logged aggregate checkpoints.
 
     Dataset ``EvalServer.best_score`` is the best per-example score, not a
@@ -426,6 +426,7 @@ def best_aggregate_candidate(server: EvalServer) -> tuple[str, float] | None:
 
     Args:
         server: Evaluation server whose ``progress_log`` holds the checkpoints.
+        only: Consider only these candidates, or every candidate when ``None``.
 
     Returns:
         ``(candidate, score)`` for the highest logged aggregate, or ``None``.
@@ -436,6 +437,8 @@ def best_aggregate_candidate(server: EvalServer) -> tuple[str, float] | None:
         candidate = by_id.get(entry.get("candidate_id"))
         score = entry.get("val_score")
         if candidate is None or not isinstance(score, int | float) or not math.isfinite(score):
+            continue
+        if only is not None and candidate not in only:
             continue
         if best is None or score > best[1]:
             best = (candidate, float(score))
@@ -955,6 +958,7 @@ class AutoResearchEngine:
         # Set by ``_layout`` when a repository run starts from a non-empty
         # starting patch rather than from the fetched commit itself.
         self.repo_seed = False
+        self.seed = ""
 
     def run(self, task: Task, server: EvalServer) -> Result:
         """Run research rounds until the budget, the target score or the evidence says stop.
@@ -971,6 +975,7 @@ class AutoResearchEngine:
             ProposerFailedError: When a round's CLI session failed on its own.
         """
         self.example_ids = visible_example_ids(server)
+        self.seed = seed_as_text(task.seed_candidate) if task.seed_candidate is not None else ""
         self._layout(task, server)
         restore = self._record(server)
         try:
@@ -1009,7 +1014,13 @@ class AutoResearchEngine:
             ``(candidate, score)`` or ``None`` before any evaluation.
         """
         if server.task.has_dataset:
-            return best_aggregate_candidate(server)
+            # A version with a crashed case logs a filled mean (SKY-367), so the
+            # fully scored versions rank first, then the seed, then the rest.
+            return (
+                best_aggregate_candidate(server, only=self._ranking())
+                or best_aggregate_candidate(server, only={self.seed})
+                or best_aggregate_candidate(server)
+            )
         if server.best_candidate is None or server.best_score is None:
             return None
         return str(server.best_candidate), float(server.best_score)
@@ -1742,7 +1753,7 @@ class MetaHarnessEngine:
             ``(candidate, score)`` or ``None`` before the baseline finished.
         """
         del server
-        return self._best()
+        return self._leader()
 
     def process_result(self, result: Result, output_dir: str | Path) -> None:
         """Write the final candidate and run metadata beside the evaluator artifacts.
@@ -2010,7 +2021,7 @@ class MetaHarnessEngine:
         Raises:
             ProposerFailedError: When the iteration's CLI session failed on its own.
         """
-        best = self._best()
+        best = self._leader()
         log_event(
             "iteration.start",
             f"Iteration {iteration} started, frontier {best[1]:.4f}"
@@ -2082,7 +2093,7 @@ class MetaHarnessEngine:
             for row in rows:
                 handle.write(json.dumps(row) + "\n")
         self._write_frontier()
-        new_best = self._best()
+        new_best = self._leader()
         improved = bool(new_best and (previous_best is None or new_best[1] > previous_best))
         log_event(
             "iteration.end",
@@ -2206,8 +2217,15 @@ class MetaHarnessEngine:
         return avg
 
     def _write_frontier(self) -> None:
-        """Write ``frontier_val.json``: per-example leaders plus the ``_pareto`` ranking."""
-        ranked = sorted(self.results.items(), key=lambda item: -item[1]["avg_val"])
+        """Write ``frontier_val.json``: per-example leaders plus the ``_pareto`` ranking.
+
+        A version with a crashed case holds filled scores (SKY-367), so it neither
+        ranks nor leads a case. Its own ``val.json`` still records it.
+        """
+        ranked = sorted(
+            ((name, entry) for name, entry in self.results.items() if not entry.get("crashed")),
+            key=lambda item: -item[1]["avg_val"],
+        )
         frontier: dict[str, Any] = {
             "_pareto": [{"system": name, "val_accuracy": entry["avg_val"]} for name, entry in ranked]
         }
@@ -2240,6 +2258,21 @@ class MetaHarnessEngine:
         name = max(names, key=lambda key: self.results[key]["avg_val"])
         return self.results[name]["candidate"], float(self.results[name]["avg_val"])
 
+    def _leader(self) -> tuple[str, float] | None:
+        """Return the best fully scored version, else the seed, else the best filled average.
+
+        A version with a crashed case has a filled average (SKY-367), so it leads
+        only when no fully scored version and no seed exist.
+
+        Returns:
+            ``(candidate, score)`` or ``None`` when nothing has been benchmarked.
+        """
+        if (best := self._best(scored=True)) is not None:
+            return best
+        if "seed" in self.results:
+            return self.results["seed"]["candidate"], float(self.results["seed"]["avg_val"])
+        return self._best()
+
     def _result(self, server: EvalServer, iterations: int, stop_reason: str) -> Result:
         """Build the result from the frontier.
 
@@ -2254,7 +2287,7 @@ class MetaHarnessEngine:
         Raises:
             RuntimeError: When even the baseline could not be scored.
         """
-        best = self._best()
+        best = self._leader()
         if best is None:
             raise RuntimeError("Meta-Harness could not benchmark the seed candidate.")
         candidate, score = best

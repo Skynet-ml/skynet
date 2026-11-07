@@ -29,6 +29,7 @@ from core.models.blackbox import (
     BLACKBOX_ENGINE_GEPA,
     BLACKBOX_ENGINE_META_HARNESS,
     BLACKBOX_ENGINE_SHINKA_EVOLVE,
+    BlackboxLaneResult,
     BlackboxStrategy,
 )
 from core.service_gateway.optimization.cost_ceiling import CostCeilingExceededError
@@ -513,7 +514,12 @@ def test_auto_lane_hands_off_the_seed_at_minus_inf_when_the_engine_returns_a_cra
     result = lane_engine.run(task, upstream)  # type: ignore[arg-type]
 
     assert (result.best_candidate, result.best_score) == ("seed", -math.inf)
-    assert (lanes[0].best_candidate, lanes[0].best_score) == ("seed", -math.inf)
+    # PostgreSQL JSONB rejects -Infinity, so the stored lane keeps no score.
+    assert (lanes[0].best_candidate, lanes[0].best_score) == ("seed", None)
+    stored = BlackboxLaneResult(
+        engine=lanes[0].engine, phase=lanes[0].phase, status=lanes[0].status, best_score=lanes[0].best_score
+    )
+    json.dumps(stored.model_dump(mode="json"), allow_nan=False)
 
 
 def test_auto_evaluator_gives_upstream_unscored_and_keeps_the_metric_error(

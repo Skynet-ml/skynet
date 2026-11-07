@@ -1793,6 +1793,30 @@ def test_meta_harness_stop_ignores_a_filled_mean(tmp_path: Path) -> None:
     assert engine._best() == ("aeio", 1.0)
     assert engine._best(scored=True) == ("axyz", 0.25)
     assert not native_engines._reached(0.9, engine._best(scored=True)[1])
+    assert engine.incumbent(server) == ("axyz", 0.25)
+
+    engine._write_frontier()
+    frontier = json.loads((engine.logs_dir / "frontier_val.json").read_text(encoding="utf-8"))
+    assert frontier["_pareto"] == [{"system": "ok", "val_accuracy": 0.25}]
+    assert {frontier[eid]["system"] for eid in engine.example_ids} == {"ok"}
+
+
+def test_meta_harness_falls_back_to_the_seed_when_every_version_crashed(tmp_path: Path) -> None:
+    """With no fully scored version, Meta-Harness returns the seed, not the best filled average (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's logs.
+    """
+    server = _child_server(_null_on({"aeio": {"b"}, "eexx": {"b"}}), tmp_path)
+    engine = native_engines.MetaHarnessEngine.__new__(native_engines.MetaHarnessEngine)
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.logs_dir = tmp_path / "logs"
+    engine.results = {}
+
+    engine._benchmark(server, "seed", "eexx")
+    engine._benchmark(server, "crashed", "aeio")
+
+    assert engine.incumbent(server) == ("eexx", 0.5)
 
 
 def test_autoresearch_leader_ignores_a_filled_mean(tmp_path: Path) -> None:
@@ -1814,11 +1838,41 @@ def test_autoresearch_leader_ignores_a_filled_mean(tmp_path: Path) -> None:
     engine.example_ids = native_engines.visible_example_ids(server)
     engine._record(server)
 
-    server.evaluate_examples("aeio")
-    server.evaluate_examples("axyz")
+    for candidate in ("aeio", "axyz"):
+        score, _ = server.evaluate_examples(candidate)
+        server.log_progress(score, candidate=candidate)
 
     assert engine._ranking() == {"axyz": 0.25}
     assert not native_engines._reached(0.9, engine._leader_score())
+    engine.seed = "eexx"
+    assert engine.incumbent(server) == ("axyz", 0.25)
+
+
+def test_autoresearch_falls_back_to_the_seed_when_every_version_crashed(tmp_path: Path) -> None:
+    """With no fully scored version, AutoResearch returns the seed, not the best filled mean (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's lab folder.
+    """
+    server = _child_server(_null_on({"aeio": {"b"}, "eexx": {"b"}}), tmp_path)
+    engine = native_engines.AutoResearchEngine.__new__(native_engines.AutoResearchEngine)
+    engine.repo = None
+    engine.suffix = ".txt"
+    engine.work_dir = tmp_path / "lab"
+    (engine.work_dir / "archive").mkdir(parents=True)
+    engine.round = 0
+    engine.observations = []
+    engine._ids = {}
+    engine._lock = threading.Lock()
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.seed = "eexx"
+    engine._record(server)
+
+    for candidate in ("eexx", "aeio"):
+        score, _ = server.evaluate_examples(candidate)
+        server.log_progress(score, candidate=candidate)
+
+    assert engine.incumbent(server) == ("eexx", 0.5)
 
 
 def test_scored_threshold_stopper_ignores_a_crashed_version() -> None:

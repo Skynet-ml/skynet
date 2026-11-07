@@ -52,6 +52,21 @@ class LaneOutcome:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def _stored_score(score: float | None) -> float | None:
+    """Return a lane score that a JSONB column can store.
+
+    Upstream best-of needs ``-inf`` to make a lane lose, but PostgreSQL JSONB
+    rejects ``-Infinity``, so the stored lane record keeps ``None`` (SKY-367).
+
+    Args:
+        score: The lane's score, possibly non-finite.
+
+    Returns:
+        The score when finite, else ``None``.
+    """
+    return score if score is not None and math.isfinite(score) else None
+
+
 def lane_tag(phase: str, engine: str) -> str:
     """Name the Auto lane a billed call belongs to.
 
@@ -230,7 +245,7 @@ class _LaneEngine:
                 # minibatch and full-split scores, so the lane hands off the
                 # seed at -inf and another lane wins (SKY-367).
                 best_candidate, best_score = task.seed_candidate, -math.inf
-            lane.best_candidate, lane.best_score = best_candidate, best_score
+            lane.best_candidate, lane.best_score = best_candidate, _stored_score(best_score)
             lane.metadata = result.metadata
             return UpstreamResult(
                 best_candidate=best_candidate,
@@ -241,7 +256,7 @@ class _LaneEngine:
         except BudgetReached as exc:
             lane.status, lane.error = "stopped", str(exc)
             if isinstance(exc.result, Result):
-                lane.best_candidate, lane.best_score = exc.result.best_candidate, exc.result.best_score
+                lane.best_candidate, lane.best_score = exc.result.best_candidate, _stored_score(exc.result.best_score)
                 lane.metadata = dict(exc.result.metadata)
             raise
         except (ScorerAbortError, CostCeilingExceededError, BudgetExhausted, BudgetExhaustedError) as exc:
@@ -326,7 +341,7 @@ def run_strategy(
                 engine.name,
                 "single",
                 "completed",
-                result.best_score,
+                _stored_score(result.best_score),
                 server.used,
                 best_candidate=result.best_candidate,
                 metadata=dict(result.metadata),
@@ -483,7 +498,7 @@ def run_strategy(
             "gepa",
             "continue",
             "completed",
-            continued.best_score,
+            _stored_score(continued.best_score),
             continuation_server.used,
             best_candidate=continued.best_candidate,
             metadata=dict(continued.metadata),
