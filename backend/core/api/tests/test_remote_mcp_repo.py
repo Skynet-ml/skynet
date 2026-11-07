@@ -36,6 +36,7 @@ from .test_remote_mcp import (
     _call,
     _error_text,
     _payload,
+    _rpc,
     _seed_token,
     _Store,
 )
@@ -140,7 +141,13 @@ def test_each_step_gives_feedback_and_the_next_tool(harness: Any) -> None:
     assert body["issues"] == []
     assert body["top_level_paths"] == ["src"]
     assert body["next_tool"] == "repo_draft_set_scorer"
-    body = _step(client, "repo_draft_set_data", draft_id=draft_id, cases=[{"q": 1}, {"q": 2}])
+    body = _step(
+        client,
+        "repo_draft_set_data",
+        draft_id=draft_id,
+        cases=[{"input": {"q": 1}, "expected": 2}, {"input": {"q": 2}}],
+    )
+    assert body["issues"] == []
     assert body["notes"] == ["The run has 2 inline cases."]
     body = _step(client, "repo_draft_set_scorer", draft_id=draft_id, metric_code=SCORER)
     assert body["issues"] == []
@@ -157,6 +164,45 @@ def test_each_step_gives_feedback_and_the_next_tool(harness: Any) -> None:
     assert body["issues"] == []
     assert body["notes"] == []
     assert body["next_tool"] == "repo_draft_set_models"
+
+
+@pytest.mark.parametrize(
+    ("cases", "first"),
+    [
+        ([{"q": 1}], "Case 1 has q"),
+        ([{"input": 1}, {"expected": 2}], "Case 2 has expected"),
+        ([{"input": 1, "expected": 2, "note": "x"}], "Case 1 has expected, input, note"),
+        ([{"input": 1}, {}], "Case 2 has no keys"),
+    ],
+)
+def test_inline_case_with_another_shape_is_an_issue(harness: Any, cases: list[dict[str, Any]], first: str) -> None:
+    """Refuse inline cases that are not {"input", "expected"}, like staged cases (E42)."""
+    client, _engine, _calls = harness
+    draft_id = _step(client, "repo_draft_start", objective="x")["draft_id"]
+    body = _step(client, "repo_draft_set_data", draft_id=draft_id, cases=cases)
+    assert len(body["issues"]) == 1
+    assert body["issues"][0].startswith('Each inline case must be {"input": ..., "expected": ...}')
+    assert first in body["issues"][0]
+    assert body["next_tool"] == "repo_draft_set_data"
+
+
+def test_inline_case_issue_counts_the_bad_cases() -> None:
+    """Name the first bad case and count all of them, not one issue for each case."""
+    cases = [{"input": 1}, {"q": 1}, {"q": 2}]
+    assert remote_mcp_repo.case_shape_issues(cases) == [
+        'Each inline case must be {"input": ..., "expected": ...}; "expected" is optional. '
+        "Case 2 has q, and 2 of 3 cases have another shape."
+    ]
+
+
+def test_data_tool_says_the_candidate_gets_only_input(harness: Any) -> None:
+    """Tell the agent in the tool description that the candidate gets only the case input (E42)."""
+    client, _engine, _calls = harness
+    resp = _rpc(client, "tools/list", {}, WRITE_TOKEN, None)
+    assert resp.status_code == 200, resp.text
+    tools = resp.json()["result"]["tools"]
+    schema = next(tool for tool in tools if tool["name"] == "repo_draft_set_data")["inputSchema"]
+    assert "The candidate gets only input" in json.dumps(schema)
 
 
 def test_step_issues_point_back_at_the_step(harness: Any) -> None:
@@ -443,7 +489,7 @@ def test_bare_number_on_an_error_path_is_an_issue() -> None:
     [
         ("async def score(p, case):\n  return 1.0, 'ok'\n", "is async"),
         ("def score(p, case):\n  yield 1.0, 'ok'\n", "uses yield"),
-        ("def score(p, case, extra):\n  return 1.0, 'ok'\n", "needs more arguments"),
+        ("def score(p, case, output, extra):\n  return 1.0, 'ok'\n", "needs more arguments"),
         ("def score(p, *, mode):\n  return 1.0, 'ok'\n", "needs more arguments"),
         ("def score(p):\n  return " + "-" * 200_000 + "1\n", "cannot parse"),
     ],
@@ -458,3 +504,34 @@ def test_optional_extra_arguments_are_fine() -> None:
     """Accept extra arguments with defaults and a nested generator."""
     code = "def score(p, case=None, extra=1, *, mode='a'):\n  def gen():\n    yield 1\n  return 1.0, 'ok'\n"
     assert remote_mcp_repo.scorer_issues(code, has_cases=True) == ([], [])
+
+
+@pytest.mark.parametrize(
+    "signature", ["score(repo_path)", "score(repo_path, case)", "score(repo_path, case, output=None)"]
+)
+def test_each_scorer_signature_is_accepted(signature: str) -> None:
+    """Accept the scorer with the checkout, the case, and the [run] entry's output for the case (E39)."""
+    code = f"def {signature}:\n  return 1.0, 'ok'\n"
+    issues, _notes = remote_mcp_repo.scorer_issues(code, has_cases=True)
+    assert issues == []
+
+
+def test_missing_scorer_issue_names_all_three_signatures() -> None:
+    """Name every signature the runner accepts when the code defines no scorer."""
+    issues, _notes = remote_mcp_repo.scorer_issues("x = 1\n", has_cases=True)
+    assert all(
+        name in issues[0]
+        for name in ("score(repo_path)", "score(repo_path, case)", "score(repo_path, case, output=None)")
+    )
+
+
+def test_a_required_output_is_an_issue_that_names_the_default() -> None:
+    """Refuse output without a default: the runner calls the scorer with (repo_path, case) when nothing ran."""
+    issues, _notes = remote_mcp_repo.scorer_issues("def score(p, case, output):\n  return 1.0, 'ok'\n", True)
+    assert "score(repo_path, case, output=None)" in issues[0]
+
+
+def test_scorer_with_four_required_arguments_names_the_output() -> None:
+    """Refuse a fourth required argument and name the three the runner passes."""
+    issues, _notes = remote_mcp_repo.scorer_issues("def score(p, c, o, x):\n  return 1.0, 'ok'\n", True)
+    assert "(repo_path, case, output)" in issues[0]

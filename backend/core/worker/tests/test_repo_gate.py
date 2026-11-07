@@ -130,6 +130,17 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
         (b"[proposer]\ntools = []\n", "[proposer] tools"),
         (b"[proposer]\nservices = []\n", "[proposer] services"),
         (b'[metric]\nreference = "eval/reference.json"\n', "[metric] reference"),
+        (b'[run]\nentry = "geocode.py:geocode"\n', "[run] entry"),
+        (b'[run]\nentry = ["pytest", "-q"]\n', "[run] entry"),
+        (b'[run]\nentry = "a.py:f"\ntimeout = 30\n', "[run] timeout"),
+        (b'[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n', "[run] mcp"),
+        (b'[services.maps]\n[run]\nentry = "a.py:f"\nservices = ["maps"]\n', "[run] services"),
+        (b'[run]\nentry = "a.py:f"\nservices = []\n', "[run] services"),
+        (b'[run]\nentry = "a.py:f"\nillegal = ["No hard-coded answers."]\n', "[run] illegal"),
+        (b'[metric]\nmcp = "eval/.mcp.json"\n', "[metric] mcp"),
+        (b'[services.grader]\n[metric]\nservices = ["grader"]\n', "[metric] services"),
+        (b"[metric]\nservices = []\n", "[metric] services"),
+        (b'[metric]\nillegal = ["Never read the answers."]\n', "[metric] illegal"),
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])

@@ -66,6 +66,7 @@ from .submission_idempotency import resolve_submission_replay_keys
 STEPS = ("repository", "data", "scorer", "models", "engine", "budget")
 _REQUIRED_STEPS = ("repository", "scorer", "models", "engine")
 _STEP_TOOLS = {step: f"repo_draft_set_{step}" for step in STEPS}
+_CASE_KEYS = frozenset({"input", "expected"})
 # A draft is a scratch setup, not a saved object; old ones go so a client
 # that never submits cannot grow the table without limit.
 _MAX_DRAFTS_PER_ACCOUNT = 20
@@ -248,6 +249,25 @@ def repository_issues(job_store: Any, username: str, repo: dict[str, Any]) -> tu
     return issues, notes, top_level
 
 
+def case_shape_issues(cases: list[dict[str, Any]]) -> list[str]:
+    """Check that each inline case has the shape staged cases get from ``rows_to_cases`` (E42).
+
+    Args:
+        cases: The inline cases of the data step.
+
+    Returns:
+        One issue that names the first bad case and the count, or no issue.
+    """
+    bad = [number for number, case in enumerate(cases, start=1) if "input" not in case or set(case) - _CASE_KEYS]
+    if not bad:
+        return []
+    keys = ", ".join(sorted(cases[bad[0] - 1])) or "no keys"
+    return [
+        f'Each inline case must be {{"input": ..., "expected": ...}}; "expected" is optional. '
+        f"Case {bad[0]} has {keys}, and {len(bad)} of {len(cases)} cases have another shape."
+    ]
+
+
 def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[str]]:
     """Check scorer code statically: it parses and defines the scorer function.
 
@@ -276,20 +296,30 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
         return [], ["Skynet cannot check an imported, assigned or decorated scorer before the run's setup check."]
     scorer = named or (functions[0] if len(functions) == 1 else None)
     if scorer is None:
-        return ["The scorer must define score(repo_path) or score(repo_path, case)."], []
+        return [
+            "The scorer must define score(repo_path), score(repo_path, case) or score(repo_path, case, output=None)."
+        ], []
     args = scorer.args
     positional = len(args.posonlyargs) + len(args.args)
     if args.vararg is None and positional < 1:
         return [f"The scorer function {scorer.name} takes no arguments. Use score(repo_path)."], []
-    # The runner calls the scorer with at most (repo_path, case) and without
-    # await, so a coroutine or a generator result stops the run.
+    # The runner calls the scorer with at most (repo_path, case, output) and
+    # without await, so a coroutine or a generator result stops the run. The
+    # output is what the [run] entry returned for the case (E39). The runner
+    # calls fn(repo_path, case) today and passes no output when the file has no
+    # [run] entry, so output must default to None.
     if isinstance(scorer, ast.AsyncFunctionDef):
         return [f"The scorer function {scorer.name} is async. Use a plain def."], []
     if any(isinstance(node, ast.Yield | ast.YieldFrom) for node in _own_nodes(scorer)):
         return [f"The scorer function {scorer.name} uses yield. Return the score instead."], []
     required = positional - len(args.defaults)
-    if required > 2 or any(default is None for default in args.kw_defaults):
-        return [f"The scorer function {scorer.name} needs more arguments than (repo_path, case)."], []
+    if required > 3 or any(default is None for default in args.kw_defaults):
+        return [f"The scorer function {scorer.name} needs more arguments than (repo_path, case, output)."], []
+    if required == 3:
+        return [
+            f"The scorer function {scorer.name} needs output. Write score(repo_path, case, output=None), because"
+            " a run with no [run] entry passes no output."
+        ], []
     issues: list[str] = []
     notes: list[str] = []
     if _returns_bare_number(scorer):
@@ -578,6 +608,7 @@ def review_draft(
     repo_problems, notes, _top = repository_issues(job_store, user.username, spec["repository"])
     issues = list(repo_problems)
     data = spec.get("data") or {}
+    issues += case_shape_issues(data.get("cases") or [])
     if data.get("staged_dataset_id"):
         try:
             rows = staged_repo_cases(
@@ -824,7 +855,11 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         draft_id: Annotated[str, Field(max_length=64)],
         cases: Annotated[
             list[dict[str, Any]] | None,
-            Field(max_length=2000, description="Small inline cases; each one reaches the scorer."),
+            Field(
+                max_length=2000,
+                description='Small inline cases, each {"input": ..., "expected": ...}; "expected" is optional.'
+                " The candidate gets only input; the scorer gets the whole case.",
+            ),
         ] = None,
         staged_dataset_id: Annotated[
             str | None, Field(max_length=64, description="A dataset staged before, for more cases.")
@@ -855,7 +890,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
             if not data:
                 return [], ["The run has no cases. The scorer runs once on the whole repository."], {}
             if data.get("cases"):
-                return [], [f"The run has {len(data['cases'])} inline cases."], {}
+                return case_shape_issues(data["cases"]), [f"The run has {len(data['cases'])} inline cases."], {}
             try:
                 rows = staged_repo_cases(
                     data["staged_dataset_id"],
@@ -878,7 +913,9 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
             Field(
                 min_length=1,
                 max_length=200_000,
-                description="Python that defines score(repo_path) or score(repo_path, case). It returns a "
+                description="Python that defines score(repo_path), score(repo_path, case) or "
+                "score(repo_path, case, output=None), where output is what the optimize.toml [run] entry "
+                "returned for the case and None when nothing ran. It returns a "
                 "(score, feedback) pair or a {'score': float, 'feedback': str} dict. A bare number fails the run.",
             ),
         ],

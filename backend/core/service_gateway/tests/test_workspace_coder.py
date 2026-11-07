@@ -321,3 +321,42 @@ async def test_setup_agent_resumes_from_the_coding_agents_result(monkeypatch: py
     assert "Runs the tests and scores their time." in resumed
     assert "tests/test_app.py" in resumed
     assert "Which test counts as the main one?" in resumed
+
+
+def test_coder_prompt_has_the_run_entry_write_the_metric_reads_output() -> None:
+    """The coding agent writes [run] entry when the metric needs the output, and the metric never runs the candidate."""
+    prompt = " ".join(workspace_coder.CODER_PROMPT.split())
+
+    assert "[run]" in prompt
+    assert 'entry = "geocode.py:geocode"' in prompt
+    assert "score(repo_path, case, output=None)" in prompt
+    assert "and ``None`` when nothing ran, so always give it the ``None`` default" in prompt
+    assert "never imports or calls the candidate's code" in prompt
+
+
+def test_coder_prompt_puts_the_test_command_in_the_run_entry() -> None:
+    """A repository scored by its own tests runs them from [run] entry; the metric only reads the report (E40)."""
+    prompt = " ".join(workspace_coder.CODER_PROMPT.split())
+
+    assert 'entry = ["pytest", "-q", "--junitxml=out.xml"]' in prompt
+    assert "only reads the saved report" in prompt
+    assert "the metric never runs the tests itself" in prompt
+
+
+def test_coder_prompt_treats_a_nonzero_exit_code_as_output() -> None:
+    """A command entry's nonzero exit code is output that the metric judges, like pytest's 1 on failed tests (E43)."""
+    prompt = " ".join(workspace_coder.CODER_PROMPT.split())
+
+    assert "a nonzero exit code is normal output" in prompt
+    assert "the metric gets ``exit_code`` and decides what it means" in prompt
+    assert "pytest exits 1 when some tests fail" in prompt
+    assert "partial credit" in prompt
+
+
+def test_coder_prompt_places_metric_secrets_and_candidate_mcp_servers() -> None:
+    """Metric-only services go in [metric] services (E44); the candidate's MCP servers go in an mcp file (E46)."""
+    prompt = " ".join(workspace_coder.CODER_PROMPT.split())
+
+    assert "List in ``[metric] services`` the services only the metric calls" in prompt
+    assert 'standard ``.mcp.json`` file and set ``mcp = "<path>"`` in ``[run]``' in prompt
+    assert "[run] tools" not in prompt
