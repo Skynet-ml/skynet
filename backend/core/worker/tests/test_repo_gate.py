@@ -170,6 +170,28 @@ def test_the_error_carries_every_failure_and_the_first_code(tmp_path: Path) -> N
     assert "[metric] reference" in str(error)
 
 
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_proposer_allowed_hosts_fail_with_a_clear_reason(tmp_path: Path, place: str) -> None:
+    """The proposer gets no allowed hosts yet, so the message says so and names the hosts (SKY-354)."""
+    raw = b'[proposer]\nnetwork = ["pypi.org"]\n'
+    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place)  # type: ignore[arg-type]
+
+    assert [failure.key for failure in failures] == ["[proposer] network"]
+    assert "allowed hosts are not supported yet" in failures[0].reason
+    assert "pypi.org" in failures[0].reason
+
+
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_a_service_that_names_no_connector_fails_with_a_clear_reason(tmp_path: Path, place: str) -> None:
+    """A service is a catalog connector, so an unknown name says which names exist (SKY-354)."""
+    raw = b"[services.cache]\n[services.maps]\n"
+    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place)  # type: ignore[arg-type]
+
+    reasons = {failure.key: failure.reason for failure in failures}
+    assert "names no connector (known: maps, web_search, browser)" in reasons["[services.cache]"]
+    assert "names no connector" not in reasons["[services.maps]"]
+
+
 def test_local_mode_is_the_local_place() -> None:
     """Local mode runs on Docker on this computer; every other deployment uses the cloud sandbox."""
     assert sandbox_place(True) == "local"

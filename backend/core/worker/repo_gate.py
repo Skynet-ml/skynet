@@ -18,10 +18,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from ..billing.env_connectors import CONNECTORS
 from ..exceptions import ServiceError
 from ..i18n_en import t_en
 from ..i18n_keys import I18nKey
-from ..service_gateway.optimization.blackbox.repo_constraints import parse_constraints, read_constraints_file
+from ..service_gateway.optimization.blackbox.repo_constraints import (
+    RepoConstraints,
+    parse_constraints,
+    read_constraints_file,
+)
 from ..service_gateway.optimization.blackbox.repo_tree import inside
 
 Place = Literal["local", "cloud"]
@@ -92,7 +97,7 @@ def check_repository(archive: Path, secret_names: Collection[str], *, place: Pla
         return []
     constraints = parse_constraints(raw)
     failures = [
-        _failure(key, place, _UNENFORCED_CODE[place], key=key)
+        _failure(key, place, _UNENFORCED_CODE[place], key=_detail(key, constraints))
         for kind, key in _set_keys(raw, constraints.targets, constraints.services)
         if kind not in ENFORCED[place]
     ]
@@ -191,6 +196,28 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     keys += [("services", f"[services.{name}]") for name in services]
     keys += [(f"metric.{key}", f"[metric] {key}") for key in ("files", "exploits", "reference") if key in metric]
     return keys
+
+
+def _detail(label: str, constraints: RepoConstraints) -> str:
+    """Add the specific reason to a refused setting's label, so the message says what to change.
+
+    A ``[services.<name>]`` name must be a connector in the catalog (SKY-354),
+    and the proposer gets no allowed hosts until the protected broker can give
+    a guest box an allowlist.
+
+    Args:
+        label: The setting's label, for example ``"[proposer] network"``.
+        constraints: The parsed file.
+
+    Returns:
+        The label, with the reason when one applies.
+    """
+    if label == "[proposer] network" and constraints.proposer.network:
+        return f"{label} = {list(constraints.proposer.network)}, but allowed hosts are not supported yet"
+    service = label.removeprefix("[services.").removesuffix("]")
+    if label.startswith("[services.") and service not in CONNECTORS:
+        return f"{label}, which names no connector (known: {', '.join(CONNECTORS)})"
+    return label
 
 
 def _failure(setting: str, place: Place, code: I18nKey, **params: str) -> GateFailure:
