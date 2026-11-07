@@ -440,6 +440,9 @@ class BlackboxRunRequest(BaseModel):
             "user's own OpenRouter key run normally."
         ),
     )
+    # The setup's metric-hardening job (SKY-356). A finished job of the same
+    # owner ships its exploit suite and counts in the repository run's PR.
+    hardening_job_id: str | None = Field(default=None, min_length=1, max_length=36)
     preflight_id: str | None = Field(default=None, min_length=1, max_length=64)
     preflight_fingerprint: str | None = Field(default=None, min_length=1, max_length=128)
     execution_budget_id: str | None = Field(default=None, min_length=1, max_length=64)

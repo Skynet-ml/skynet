@@ -22,6 +22,7 @@ REQUEST_SHAPES: dict[int, dict[str, str]] = {
     5: {"unified": "cbafddbba3b3a5ca", "blackbox": "bf4f97fca0d2c4be"},
     6: {"unified": "e5e53442de1fbb18", "blackbox": "818f7a80756c22a5"},
     7: {"unified": "e5e53442de1fbb18", "blackbox": "1f83ea232646c16c"},
+    8: {"unified": "e5e53442de1fbb18", "blackbox": "a14c37c4d43ab71b"},
 }
 
 

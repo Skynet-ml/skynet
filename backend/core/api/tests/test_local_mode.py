@@ -33,7 +33,7 @@ from ..app import create_app
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..model_billing import enforce_local_mode_sources, enforce_raw_local_mode_sources
-from ..preflight_execution import WizardPreflightRequest, _canonical_execution_payload
+from ..preflight_execution import WizardPreflightCheck, WizardPreflightRequest, _canonical_execution_payload
 from ..routers import submissions as _sub_mod
 from ..routers import wizard_preflight
 from ..routers.accounts import create_accounts_router
@@ -328,6 +328,50 @@ def test_local_subscription_run_creates_an_uncapped_budget(monkeypatch: pytest.M
     payload = store._jobs[resp.json()["optimization_id"]]["payload"]
     assert payload["token_source"] == "subscription"
     assert payload["execution_budget_id"] == budget.id
+
+
+def test_failed_setup_gate_returns_its_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run the repository gate refuses gets a 409 that lists each coded failure (SKY-372).
+
+    Args:
+        monkeypatch: Pytest fixture used to set local mode and the failed setup check.
+    """
+    client, store = _local_submit_client(monkeypatch, local_mode=True)
+    checks = [
+        WizardPreflightCheck(
+            key="setup",
+            status="failed",
+            message="The service jira in optimize.toml is not a connector.",
+            message_code="repo_gate.unknown_connector",
+            message_params={"service": "jira", "known": "github, linear"},
+        ),
+        WizardPreflightCheck(
+            key="setup",
+            status="failed",
+            message="optimize.toml sets proposer.network.",
+            message_code="repo_gate.unenforced_local",
+            message_params={"key": "proposer.network"},
+        ),
+        WizardPreflightCheck(key="setup", status="failed", message="Traceback: raw internal text"),
+        WizardPreflightCheck(key="usage", status="succeeded"),
+    ]
+    monkeypatch.setattr(
+        _sub_mod,
+        "run_preflight",
+        lambda *args, **kwargs: SimpleNamespace(pending_reason=None, status="failed", checks=checks),
+    )
+
+    resp = client.post("/blackbox/run", json=_run_payload(**_SUBSCRIPTION_RUN))
+
+    assert resp.status_code == 409, resp.text
+    body = resp.json()
+    assert body["code"] == "submission.validation_failed"
+    assert body["params"]["failures"] == [
+        {"key": "repo_gate.unknown_connector", "params": {"service": "jira", "known": "github, linear"}},
+        {"key": "repo_gate.unenforced_local", "params": {"key": "proposer.network"}},
+    ]
+    assert "Traceback" not in resp.text
+    assert store.created_ids() == []
 
 
 def test_local_subscription_run_naming_droid_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
