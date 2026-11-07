@@ -228,7 +228,7 @@ def create_mcp_connections_router() -> APIRouter:
         """
         if error or not code or not state:
             return _app_redirect(mcp_error="mcp_connection.declined")
-        return _app_redirect({"mcp_state": state, "mcp_code": code})
+        return _app_redirect({"oauth_flow": "mcp", "oauth_state": state, "oauth_code": code})
 
     @router.post(
         "/mcp/connections/finish",
