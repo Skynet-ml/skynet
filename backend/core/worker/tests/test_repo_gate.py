@@ -223,3 +223,21 @@ def test_a_link_that_points_into_a_hidden_folder_fails(tmp_path: Path) -> None:
     [failure] = check_hidden(archive, agent, ["eval"], place="local")
 
     assert "src/weights.json" in failure.reason
+
+
+def test_a_metric_file_below_a_linked_folder_fails(tmp_path: Path) -> None:
+    """A hidden path under a linked folder lives at the link's target, so the gate stops the run."""
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        data = tarfile.TarInfo("scoring/metric.py")
+        data.size = 1
+        packed.addfile(data, io.BytesIO(b"m"))
+        link = tarfile.TarInfo("eval")
+        link.type, link.linkname = tarfile.SYMTYPE, "scoring"
+        packed.addfile(link)
+    (tmp_path / "agent").mkdir()
+    agent = _archive(tmp_path / "agent", {"scoring/metric.py": b"m"})
+
+    [failure] = check_hidden(archive, agent, ["eval/metric.py"], place="cloud")
+
+    assert "eval/metric.py" in failure.reason

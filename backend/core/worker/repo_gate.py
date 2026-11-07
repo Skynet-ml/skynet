@@ -111,9 +111,9 @@ def check_hidden(
 ) -> list[GateFailure]:
     """List every metric file the agent's tree still shows.
 
-    A file fails when the agent's tree holds it under a hidden path, or when
-    the full tree has a symbolic link under a hidden path whose target the
-    agent can still read.
+    A file fails when the agent's tree holds it under a hidden path, when the
+    full tree has a symbolic link under a hidden path whose target the agent
+    can still read, or when a hidden path lies below a symbolic link.
 
     Args:
         original_archive: The full tree that ``stage_repository`` fetched.
@@ -128,12 +128,16 @@ def check_hidden(
     with tarfile.open(agent_archive) as packed:
         visible = [posixpath.normpath(name) for name in packed.getnames()]
     with tarfile.open(original_archive) as packed:
-        targets = [
-            posixpath.normpath(posixpath.join(posixpath.dirname(posixpath.normpath(member.name)), member.linkname))
-            for member in packed
-            if member.issym() and _covered(posixpath.normpath(member.name), hidden)
-        ]
-    leaked = [path for path in visible if _covered(path, hidden)]
+        links = [member for member in packed if member.issym()]
+    targets = [
+        posixpath.normpath(posixpath.join(posixpath.dirname(posixpath.normpath(member.name)), member.linkname))
+        for member in links
+        if _covered(posixpath.normpath(member.name), hidden)
+    ]
+    # A hidden path below a linked folder lives at the link's target, which the
+    # strip cannot see by name, so the run stops instead of guessing.
+    leaked = [path for path in hidden if any(_covered(path, [posixpath.normpath(link.name)]) for link in links)]
+    leaked += [path for path in visible if _covered(path, hidden)]
     leaked += [path for path in targets if any(_covered(name, [path]) for name in visible)]
     return [
         _failure("[metric] files", place, _UNENFORCED_CODE[place], key=f"[metric] files: {path}")

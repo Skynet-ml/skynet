@@ -291,7 +291,12 @@ def _scrub(text: str, root: str | None) -> str:
     """
     text = _TRACEBACK.sub("", text if text.endswith("\n") else f"{text}\n").rstrip("\n")
     if root:
-        text = text.replace(f"{root}/{WORK_DIR}/", "").replace(f"{root}/", "").replace(root, "")
+        text = (
+            text.replace(f"{root}/{WORK_DIR}/", "")
+            .replace(f"{root}/{WORK_DIR}", ".")
+            .replace(f"{root}/", "")
+            .replace(root, "")
+        )
     return text
 
 
@@ -310,9 +315,23 @@ def _for_proposer(document: Mapping[str, Any], root: str | None) -> dict[str, An
         reply["feedback"] = _scrub(reply["feedback"], root)
     if isinstance(reply.get("scores"), Mapping):
         reply["scores"] = {
-            name: {key: entry[key] for key in ("score", "feedback") if key in entry}
-            if isinstance(entry, Mapping)
-            else entry
+            name: _named_score(entry, root) if isinstance(entry, Mapping) else entry
             for name, entry in reply["scores"].items()
         }
     return reply
+
+
+def _named_score(entry: Mapping[str, Any], root: str | None) -> dict[str, Any]:
+    """Keep only the score and the scrubbed feedback of one named score.
+
+    Args:
+        entry: One value of the result's ``scores`` mapping.
+        root: The box's working directory, scrubbed from the feedback.
+
+    Returns:
+        The named score the guest receives.
+    """
+    kept = {key: entry[key] for key in ("score", "feedback") if key in entry}
+    if isinstance(kept.get("feedback"), str):
+        kept["feedback"] = _scrub(kept["feedback"], root)
+    return kept

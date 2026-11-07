@@ -560,7 +560,7 @@ def test_the_proposer_gets_only_the_score_and_the_feedback(tmp_path: Path) -> No
         "import os\ndef score(repo_path):\n"
         "    return {'score': 0.5, 'feedback': 'read ' + os.path.join(repo_path, 'eval/metric.py'),"
         " 'weights': {'accuracy': 0.3}, 'metric_source': open(os.path.join(repo_path, 'eval/metric.py')).read(),"
-        " 'cases': {'a': {'score': 1, 'feedback': 'ok', 'formula': 'w * x'}}}\n",
+        " 'cases': {'a': {'score': 1, 'feedback': 'at ' + repo_path, 'formula': 'w * x'}}}\n",
     )
     try:
         reply = scorer.dispatch({"candidate": ""})
@@ -569,7 +569,7 @@ def test_the_proposer_gets_only_the_score_and_the_feedback(tmp_path: Path) -> No
         assert document == {
             "score": pytest.approx(0.5),
             "feedback": "read eval/metric.py",
-            "scores": {"a": {"score": pytest.approx(1.0), "feedback": "ok"}},
+            "scores": {"a": {"score": pytest.approx(1.0), "feedback": "at ."}},
         }
     finally:
         scorer.close()
