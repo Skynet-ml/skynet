@@ -12,6 +12,8 @@ Internal (frontend-only, hidden from public docs):
 - ``GET /optimizations/{id}/test-results``
 - ``GET /optimizations/{id}/pair/{idx}/test-results``
 - ``GET /optimizations/{id}/agent-runs/{run_id}`` — one sandboxed agent run's answer and transcript.
+- ``GET /optimizations/{id}/candidates`` — the run's candidates with state, call count and cost (owner only).
+- ``GET /optimizations/{id}/candidates/{candidate_id}/calls`` — one candidate's relay calls after a cursor (owner only).
 """
 
 from __future__ import annotations
@@ -58,6 +60,7 @@ from ....models import (
     RunResponse,
     SplitFractions,
 )
+from ....models.run_calls import RunCallPage, RunCandidateList
 from ....registry import ResolverError, resolve_module_factory
 from ....service_gateway.language_models import build_language_model
 from ....service_gateway.optimization.data import load_metric_from_code, load_signature_from_code
@@ -100,6 +103,47 @@ AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_us
 # can't serve a pre-change body that's missing the new fields. Last bump:
 # added progress_offset / logs_offset for delta (tail) stream fetches.
 _RESPONSE_SCHEMA_VERSION = "v6"
+
+
+def _load_job_for_owner(job_store, optimization_id: str, user: AuthenticatedUser) -> dict:
+    """Load a job row only for its owner (or an admin); everyone else gets 404.
+
+    The run record holds request and response bodies, so a shared viewer or
+    editor must not read it, and must not learn that it exists.
+
+    Args:
+        job_store: Job-store the row is read from.
+        optimization_id: Optimization id to load.
+        user: Authenticated caller.
+
+    Returns:
+        The job row, without its payload.
+
+    Raises:
+        DomainError: 404 when the id is unknown or the caller is not the owner.
+    """
+    job_data, role = load_job_with_role(job_store, optimization_id, user, include_payload=False)
+    if role != ShareRole.owner:
+        raise DomainError("optimization.not_found", status=404, optimization_id=optimization_id)
+    return job_data
+
+
+def _effective_candidate_state(state: str, job_status: OptimizationStatus) -> str:
+    """Return a candidate's state, closed out when its run already ended.
+
+    A candidate still marked ``running`` in a finished run never got its end
+    mark (for example, the worker died), so it takes the run's outcome.
+
+    Args:
+        state: The stored candidate state.
+        job_status: The run's status.
+
+    Returns:
+        ``running``, ``done`` or ``failed``.
+    """
+    if state != "running" or job_status not in TERMINAL_STATUSES:
+        return state
+    return "failed" if job_status in {OptimizationStatus.failed, OptimizationStatus.cancelled} else "done"
 
 
 def _delta_offset(raw: str | None, count: int, cap: int | None) -> int:
@@ -743,6 +787,91 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
                 "transcript": transcript[offset:],
                 "transcript_offset": offset,
                 "transcript_length": len(transcript),
+            }
+        )
+
+    @router.get(
+        "/optimizations/{optimization_id}/candidates",
+        response_model=RunCandidateList,
+        summary="The candidates of a run with state, call count and cost so far",
+        tags=["agent"],
+    )
+    def list_run_candidates(optimization_id: str, current_user: AuthenticatedUserDep) -> RunCandidateList:
+        """Return each candidate of a run with its role, state, call count and cost.
+
+        Args:
+            optimization_id: The run.
+            current_user: Authenticated caller resolved from the bearer token.
+
+        Returns:
+            The run's candidates, in start order.
+
+        Raises:
+            DomainError: 404 when the run is unknown or the caller is not its owner.
+        """
+        job_data = _load_job_for_owner(job_store, optimization_id, current_user)
+        job_status = status_to_job_status(job_data.get("status", "pending"))
+        list_candidates = getattr(job_store, "list_run_candidates", None)
+        candidates = [] if list_candidates is None else list_candidates(optimization_id)
+        return RunCandidateList.model_validate(
+            {
+                "optimization_id": optimization_id,
+                "candidates": [{**c, "state": _effective_candidate_state(c["state"], job_status)} for c in candidates],
+            }
+        )
+
+    @router.get(
+        "/optimizations/{optimization_id}/candidates/{candidate_id}/calls",
+        response_model=RunCallPage,
+        summary="One candidate's relay calls in time order, after a cursor",
+        tags=["agent"],
+    )
+    def list_run_calls(
+        optimization_id: str,
+        candidate_id: str,
+        current_user: AuthenticatedUserDep,
+        since: int = Query(0, ge=0),
+        limit: int = Query(100, ge=1, le=500),
+    ) -> RunCallPage:
+        """Return a candidate's relay calls after the ``since`` cursor.
+
+        A live monitor polls this with the last ``next_since`` it got, so only
+        the new calls travel, the same as the agent-run transcript route.
+
+        Args:
+            optimization_id: The run.
+            candidate_id: The candidate within the run.
+            current_user: Authenticated caller resolved from the bearer token.
+            since: The last call id the caller holds; ``0`` for the start.
+            limit: The most calls to return in this page.
+
+        Returns:
+            One page of calls, the next cursor, and whether the candidate still runs.
+
+        Raises:
+            DomainError: 404 when the run is unknown or the caller is not its owner.
+        """
+        job_data = _load_job_for_owner(job_store, optimization_id, current_user)
+        job_status = status_to_job_status(job_data.get("status", "pending"))
+        list_calls = getattr(job_store, "list_run_calls", None)
+        get_candidate = getattr(job_store, "get_run_candidate", None)
+        calls = [] if list_calls is None else list_calls(optimization_id, candidate_id, since=since, limit=limit + 1)
+        candidate = None if get_candidate is None else get_candidate(optimization_id, candidate_id)
+        # A candidate with no call yet may still start: it counts as running
+        # until the run itself ends, so a monitor does not stop polling early.
+        if candidate is None:
+            running = job_status not in TERMINAL_STATUSES
+        else:
+            running = _effective_candidate_state(candidate["state"], job_status) == "running"
+        page = calls[:limit]
+        return RunCallPage.model_validate(
+            {
+                "optimization_id": optimization_id,
+                "candidate_id": candidate_id,
+                "running": running,
+                "calls": page,
+                "next_since": page[-1]["id"] if page else since,
+                "has_more": len(calls) > limit,
             }
         )
 

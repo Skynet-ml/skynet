@@ -1459,6 +1459,65 @@ class BlackboxAgentRunModel(Base):
     )
 
 
+class RunCallModel(Base):
+    """One relay call made by a candidate of a run (SKY-364).
+
+    The relay writes one row for each call out of a box: a model call, an MCP
+    tool call, a ``skynet.call`` to a stage, an evaluator call or an
+    allowed-host request. ``id`` grows with each write, so it is both the
+    time order and the ``since`` cursor of the live read route. Bodies over
+    the store's cap are cut; ``request_bytes``/``response_bytes`` keep the
+    full size. Rows go with their job via the cascading foreign key.
+    """
+
+    __tablename__ = "run_calls"
+    __table_args__ = (Index("ix_run_calls_job_candidate_id", "optimization_id", "candidate_id", "id"),)
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    optimization_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("jobs.optimization_id", ondelete="CASCADE"), nullable=False
+    )
+    candidate_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    role: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    target: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    request: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    request_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    request_truncated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    response: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    response_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    response_truncated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class RunCandidateModel(Base):
+    """The role and lifecycle state of one candidate of a run (SKY-364).
+
+    The relay marks a candidate ``running`` on its first call and the worker
+    marks it ``done`` or ``failed`` when it ends. Call count and cost come
+    from ``run_calls``.
+    """
+
+    __tablename__ = "run_candidates"
+
+    optimization_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("jobs.optimization_id", ondelete="CASCADE"), primary_key=True
+    )
+    candidate_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    role: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
 class UserQuotaOverrideModel(Base):
     """SQLAlchemy model for live per-user quota overrides."""
 

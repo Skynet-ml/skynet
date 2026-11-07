@@ -31,12 +31,14 @@ from ...models.blackbox import BlackboxLaneResult, BlackboxRunResponse
 from ...models.common import SplitCounts
 from ...models.results import GridSearchResponse, PairResult, RunResponse
 from ...storage.models import Base
+from ..auth import AuthenticatedUser
 from ..errors import DomainError
 from ..routers import _helpers as helpers_module
 from ..routers.optimizations import create_optimizations_router
 from ..routers.optimizations import detail as detail_module
 from ..routers.optimizations._local import clone_payload
 from ..routers.optimizations_meta import _sanitize_payload
+from ..sharing_access import ShareRole
 from .conftest import bypass_auth
 from .mocks import _BaseFakeJobStore, real_grid_response_dict
 
@@ -380,6 +382,192 @@ def test_get_agent_run_rejects_a_negative_offset(opt_client: TestClient, store: 
     resp = opt_client.get("/optimizations/r4/agent-runs/1?since_transcript=-1")
 
     assert resp.status_code == 422
+
+
+def _run_call(**overrides: Any) -> dict[str, Any]:
+    """Build one relay call as the relay sends it.
+
+    Args:
+        **overrides: Field overrides.
+
+    Returns:
+        The call.
+    """
+    call: dict[str, Any] = {
+        "candidate_id": "cand-1",
+        "role": "solver",
+        "kind": "model",
+        "target": "openai/gpt-5",
+        "started_at": "2026-11-01T10:00:00+00:00",
+        "duration_ms": 50,
+        "status": "ok",
+        "cost_usd": 0.1,
+        "request": "req",
+        "response": "resp",
+    }
+    call.update(overrides)
+    return call
+
+
+def _seed_owned_run(store: _ExtendedFakeJobStore, optimization_id: str, *, status: str = "running") -> None:
+    """Seed a run that ``alice`` owns.
+
+    Args:
+        store: The fake job store.
+        optimization_id: The run id.
+        status: The run's status.
+    """
+    store.seed_job(optimization_id, status=status, payload_overview={"username": "alice"})
+
+
+def _client_as(store: _ExtendedFakeJobStore, user: AuthenticatedUser) -> TestClient:
+    """Build a client over the optimizations router signed in as ``user``.
+
+    Args:
+        store: The fake job store.
+        user: The caller.
+
+    Returns:
+        The test client.
+    """
+    app = FastAPI()
+    app.include_router(create_optimizations_router(job_store=store, get_worker_ref=lambda: None))
+    bypass_auth(app, user=user)
+    return TestClient(app, raise_server_exceptions=False)
+
+
+_ALICE = AuthenticatedUser(username="alice", role="user", groups=())
+_BOB = AuthenticatedUser(username="bob", role="user", groups=())
+
+
+def test_run_calls_serve_the_owner_a_page_with_a_cursor(store: _ExtendedFakeJobStore) -> None:
+    """The owner gets calls in write order; ``next_since`` and ``has_more`` drive the next poll."""
+    _seed_owned_run(store, "rc1")
+    ids = [store.record_run_call("rc1", _run_call(target=f"t{i}"), []) for i in range(3)]
+    client = _client_as(store, _ALICE)
+
+    first = client.get("/optimizations/rc1/candidates/cand-1/calls?limit=2").json()
+    second = client.get(f"/optimizations/rc1/candidates/cand-1/calls?since={first['next_since']}&limit=2").json()
+    empty = client.get(f"/optimizations/rc1/candidates/cand-1/calls?since={ids[-1]}").json()
+
+    assert [c["target"] for c in first["calls"]] == ["t0", "t1"]
+    assert first["has_more"] is True
+    assert first["next_since"] == ids[1]
+    assert first["running"] is True
+    assert [c["id"] for c in second["calls"]] == [ids[2]]
+    assert second["has_more"] is False
+    assert empty["calls"] == []
+    assert empty["next_since"] == ids[-1]
+
+
+def test_run_calls_strip_secrets_before_they_are_served(store: _ExtendedFakeJobStore) -> None:
+    """A secret given at write time never appears in the served record."""
+    _seed_owned_run(store, "rc2")
+    store.record_run_call("rc2", _run_call(request="token=tok-123", response="echo tok-123"), ["tok-123"])
+
+    [call] = _client_as(store, _ALICE).get("/optimizations/rc2/candidates/cand-1/calls").json()["calls"]
+
+    assert "tok-123" not in call["request"]
+    assert "tok-123" not in call["response"]
+
+
+def test_run_calls_report_running_from_candidate_and_run_state(store: _ExtendedFakeJobStore) -> None:
+    """A done candidate stops running; an open candidate of a failed run reads as not running."""
+    _seed_owned_run(store, "rc3")
+    store.record_run_call("rc3", _run_call(), [])
+    store.record_run_call("rc3", _run_call(candidate_id="cand-2"), [])
+    store.set_run_candidate_state("rc3", "cand-1", "solver", "done")
+    client = _client_as(store, _ALICE)
+
+    assert client.get("/optimizations/rc3/candidates/cand-1/calls").json()["running"] is False
+    assert client.get("/optimizations/rc3/candidates/cand-2/calls").json()["running"] is True
+    store.update_job("rc3", status="failed")
+    assert client.get("/optimizations/rc3/candidates/cand-2/calls").json()["running"] is False
+
+
+def test_run_calls_for_an_unknown_candidate_are_empty(store: _ExtendedFakeJobStore) -> None:
+    """A candidate with no record yet gives an empty page that runs while the run runs."""
+    _seed_owned_run(store, "rc4")
+    client = _client_as(store, _ALICE)
+
+    body = client.get("/optimizations/rc4/candidates/nobody/calls?since=7").json()
+
+    assert body["calls"] == []
+    assert body["next_since"] == 7
+    assert body["running"] is True
+    store.update_job("rc4", status="success")
+    assert client.get("/optimizations/rc4/candidates/nobody/calls").json()["running"] is False
+
+
+def test_run_candidates_list_role_state_count_and_cost(store: _ExtendedFakeJobStore) -> None:
+    """The candidate list shows each candidate's totals; open candidates of a finished run read as done."""
+    _seed_owned_run(store, "rc5")
+    store.record_run_call("rc5", _run_call(cost_usd=0.1), [])
+    store.record_run_call("rc5", _run_call(cost_usd=0.2), [])
+    store.record_run_call("rc5", _run_call(candidate_id="cand-2", role="judge", kind="evaluator", cost_usd=None), [])
+    store.set_run_candidate_state("rc5", "cand-2", "judge", "failed")
+    client = _client_as(store, _ALICE)
+
+    live = {c["candidate_id"]: c for c in client.get("/optimizations/rc5/candidates").json()["candidates"]}
+    store.update_job("rc5", status="success")
+    ended = {c["candidate_id"]: c for c in client.get("/optimizations/rc5/candidates").json()["candidates"]}
+
+    assert live["cand-1"]["state"] == "running"
+    assert live["cand-1"]["call_count"] == 2
+    assert live["cand-1"]["cost_usd"] == pytest.approx(0.3)
+    assert live["cand-2"]["role"] == "judge"
+    assert live["cand-2"]["state"] == "failed"
+    assert ended["cand-1"]["state"] == "done"
+    assert ended["cand-2"]["state"] == "failed"
+
+
+def test_run_candidates_are_empty_before_any_call(store: _ExtendedFakeJobStore) -> None:
+    """A run with no record yet lists no candidates."""
+    _seed_owned_run(store, "rc6")
+
+    body = _client_as(store, _ALICE).get("/optimizations/rc6/candidates").json()
+
+    assert body == {"optimization_id": "rc6", "candidates": []}
+
+
+@pytest.mark.parametrize("path", ["/optimizations/rc7/candidates", "/optimizations/rc7/candidates/cand-1/calls"])
+def test_run_record_returns_404_to_another_user(store: _ExtendedFakeJobStore, path: str) -> None:
+    """A user with no access to the run cannot learn that its record exists."""
+    _seed_owned_run(store, "rc7")
+    store.record_run_call("rc7", _run_call(), [])
+
+    resp = _client_as(store, _BOB).get(path)
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.parametrize("path", ["/optimizations/rc8/candidates", "/optimizations/rc8/candidates/cand-1/calls"])
+def test_run_record_is_owner_only_for_shared_members(
+    store: _ExtendedFakeJobStore, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """A shared member who may read the run still gets 404 on its call bodies."""
+    _seed_owned_run(store, "rc8")
+    store.record_run_call("rc8", _run_call(), [])
+    monkeypatch.setattr(helpers_module, "_grant_role", lambda job_store, optimization_id, username: ShareRole.editor)
+    client = _client_as(store, _BOB)
+
+    assert client.get("/optimizations/rc8/summary").status_code == 200
+    assert client.get(path).status_code == 404
+
+
+def test_run_calls_reject_a_negative_cursor_and_a_large_limit(store: _ExtendedFakeJobStore) -> None:
+    """The cursor must not be negative, and a page holds at most 500 calls."""
+    _seed_owned_run(store, "rc9")
+    client = _client_as(store, _ALICE)
+
+    assert client.get("/optimizations/rc9/candidates/cand-1/calls?since=-1").status_code == 422
+    assert client.get("/optimizations/rc9/candidates/cand-1/calls?limit=501").status_code == 422
+
+
+def test_run_record_returns_404_for_an_unknown_run(opt_client: TestClient) -> None:
+    """Both routes return 404 for a run that does not exist."""
+    assert opt_client.get("/optimizations/ghost/candidates").status_code == 404
+    assert opt_client.get("/optimizations/ghost/candidates/cand-1/calls").status_code == 404
 
 
 def test_cancel_job_returns_404_for_unknown_id(opt_client: TestClient) -> None:
