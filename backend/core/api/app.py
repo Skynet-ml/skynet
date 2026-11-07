@@ -54,6 +54,7 @@ from ..billing import (
     warn_if_local_key_uncapped,
 )
 from ..billing.data_policy import configure_data_policy
+from ..billing.mcp_oauth_client import configure_mcp_connections
 from ..brand import APP_NAME
 from ..config import LOCAL_MODE_LOOPBACK_HOSTS, settings
 from ..connectors.registry import oauth_config_problems
@@ -92,6 +93,8 @@ from .observability import (
 )
 from .rate_limit import build_login_throttle
 from .remote_mcp import mount_remote_mcp
+from .remote_mcp_repo import register_repo_tools
+from .remote_mcp_routes import register_route_tools
 from .routers.account_data import create_account_data_router
 from .routers.account_security import create_account_security_router
 from .routers.accounts import create_accounts_router
@@ -119,9 +122,13 @@ from .routers.execution_runtimes import create_execution_runtimes_router
 from .routers.experience import create_experience_router
 from .routers.folders import create_folders_router
 from .routers.generalist_agent import create_generalist_agent_router
+from .routers.hardening import create_hardening_router
+from .routers.local_cli_usage import create_local_cli_usage_router
 from .routers.local_hosted_link import create_local_hosted_link_router
+from .routers.local_hosted_proxy import create_local_hosted_proxy_router
 from .routers.local_notifications import create_local_notifications_router
 from .routers.local_runtime import create_local_runtime_router
+from .routers.mcp_connections import create_mcp_connections_router
 from .routers.mcp_oauth import create_mcp_oauth_router
 from .routers.mcp_probe import create_mcp_probe_router
 from .routers.model_privacy import create_model_privacy_router
@@ -135,7 +142,9 @@ from .routers.registry import create_registry_router
 from .routers.saved_secrets import create_saved_secrets_router
 from .routers.scorer_dependencies import create_scorer_dependencies_router
 from .routers.serve import create_serve_router
+from .routers.setup_draft import create_setup_draft_router
 from .routers.share import create_share_router
+from .routers.shared_with_me import create_shared_with_me_router
 from .routers.submissions import create_submissions_router
 from .routers.tagger_assist import create_tagger_assist_router
 from .routers.tagging_session_share import create_tagging_session_share_router
@@ -735,6 +744,7 @@ def create_app(
     job_store = get_job_store()
     configure_notification_preferences(job_store.engine)
     configure_data_policy(job_store.engine)
+    configure_mcp_connections(job_store.engine)
 
     worker: BackgroundWorker | None = None
     queue_metrics_refresher = None
@@ -1363,7 +1373,9 @@ def create_app(
     )
     app.include_router(create_account_security_router(job_store=job_store), tags=["Auth"])
     app.include_router(create_local_runtime_router(), tags=["Auth"])
+    app.include_router(create_local_cli_usage_router(job_store=job_store), tags=["Auth"])
     app.include_router(create_local_hosted_link_router(job_store=job_store), tags=["Auth"])
+    app.include_router(create_local_hosted_proxy_router(job_store=job_store), tags=["Auth"])
     app.include_router(create_account_data_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_notification_preferences_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_local_notifications_router(job_store=job_store), tags=["Settings"])
@@ -1377,8 +1389,10 @@ def create_app(
     app.include_router(create_dataset_library_router(job_store=job_store), tags=["Datasets"])
     app.include_router(create_dataset_share_router(job_store=job_store), tags=["Datasets"])
     app.include_router(create_folders_router(job_store=job_store), tags=["Folders"])
+    app.include_router(create_shared_with_me_router(job_store=job_store), tags=["Folders"])
     app.include_router(create_continuous_router(job_store=job_store), tags=["Optimizations"])
     app.include_router(create_connectors_router(job_store=job_store), tags=["Connectors"])
+    app.include_router(create_mcp_connections_router(), tags=["Connectors"])
     app.include_router(create_saved_secrets_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_tagging_session_router(job_store=job_store), tags=["Optimizations"])
     app.include_router(create_tagging_session_share_router(job_store=job_store), tags=["Optimizations"])
@@ -1391,6 +1405,8 @@ def create_app(
     app.include_router(create_agent_settings_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_telemetry_router(job_store=job_store), tags=["Telemetry"])
     app.include_router(create_wizard_router(), tags=["Wizard"])
+    app.include_router(create_setup_draft_router(job_store=job_store), tags=["Wizard"])
+    app.include_router(create_hardening_router(job_store=job_store), tags=["Hardening"])
     app.include_router(create_workflows_router(job_store=job_store), tags=["Workflows"])
     app.include_router(
         create_submissions_router(service=service, job_store=job_store),
@@ -1421,6 +1437,15 @@ def create_app(
         mount_mcp_on_app(app)
     except ImportError as exc:
         logger.warning("FastMCP not available, skipping /mcp mount: %s", exc)
-    mount_remote_mcp(app, service=service, job_store=job_store, get_worker=lambda: worker)
+    mount_remote_mcp(
+        app,
+        service=service,
+        job_store=job_store,
+        get_worker=lambda: worker,
+        extensions=[
+            partial(register_repo_tools, service=service, job_store=job_store),
+            register_route_tools(app),
+        ],
+    )
 
     return app

@@ -221,7 +221,7 @@ def emit_scorer_feedback(
     progress_callback: Callable[[str, dict[str, Any]], None] | None,
     *,
     example_id: str,
-    score: float,
+    score: float | None,
     side_info: SideInfo,
     iteration: int | None = None,
     candidate_id: str | None = None,
@@ -236,7 +236,7 @@ def emit_scorer_feedback(
     Args:
         progress_callback: The lane's progress sink, if any.
         example_id: Display id of the case the scorer graded (``"?"`` when none).
-        score: The score the scorer returned.
+        score: The score the scorer returned, ``None`` after a metric error.
         side_info: What the scorer returned next to the score.
         iteration: The version the call scores. Engines that score from
             worker threads pass it explicitly; unset, it is read from the
@@ -321,7 +321,7 @@ def emit_candidate(
     candidate_id: str,
     parent_id: str | None,
     generation: int,
-    score: float,
+    score: float | None,
     per_example: list[tuple[str, float]],
     candidate: Candidate,
     discovered_at_evals: int,
@@ -336,7 +336,7 @@ def emit_candidate(
         candidate_id: The version's id within the lane.
         parent_id: The version it was proposed from; ``None`` for the first.
         generation: Depth in the tree — the parent's plus one, 0 for the first.
-        score: Its mean score.
+        score: Its mean score, or ``None`` for a version with a crashed case.
         per_example: ``(case id, score)`` per case scored.
         candidate: The version's text or parts.
         discovered_at_evals: Scorer runs the lane had spent when it was scored.

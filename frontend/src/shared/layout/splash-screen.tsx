@@ -65,7 +65,10 @@ export function SplashScreen() {
 
   useEffect(() => {
     if (skip) {
+      // The Mac app's local sign-in can move /login to the consent page before
+      // the morph lands, and this cleanup then drops the landing timer.
       endSplash("gone");
+      setPhase("done");
       return;
     }
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;

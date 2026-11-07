@@ -1,35 +1,27 @@
-Eine Engine ist das Suchverfahren, das neue Versionen Ihres Artefakts vorschlägt. Skynet hat sechs native Engines für Prompt-, Code- und Text-Artefakte, drei DSPy-Optimierer für DSPy-Programme und **Auto**. Diese Seite erklärt, was jede davon tut, wann Sie sie wählen und welche Einstellungen sie hat.
+Eine Engine ist die Suchmethode, die neue Versionen Ihres Repositorys vorschlägt. Skynet hat sechs native Engines und **Auto**. Jede Engine arbeitet mit Repositorys. Diese Seite erklärt, was jede tut, wann Sie sie wählen und welche Einstellungen sie hat.
 
-Lesen Sie zuerst [So funktioniert die Optimierung](/docs/concepts/optimization), wenn Sie nicht wissen, welche Engines zu Ihrem Artefakt passen.
+Lesen Sie zuerst [So funktioniert die Optimierung](/docs/concepts/optimization), wenn Sie nicht wissen, welche Engine zu Ihrer Aufgabe passt.
 
 ## Schnellvergleich
 
-| Engine                | Artefaktarten      | Einstellungen für den Coding-Agenten | Einstellung „Max. Iterationen“ |
-| --------------------- | ------------------ | ------------------------------------ | ------------------------------ |
-| Auto                  | Alle               | Ja, bei Prompt, Code und Text        | Nein                           |
-| GEPA                  | Prompt, Code, Text | Nein                                 | Nein                           |
-| Best-of-N             | Prompt, Code, Text | Nein                                 | Nein                           |
-| AutoResearch          | Prompt, Code, Text | Ja                                   | Nein                           |
-| Meta-Harness          | Prompt, Code, Text | Ja                                   | Ja                             |
-| AutoSaddler           | Prompt, Code, Text | Ja                                   | Ja                             |
-| ShinkaEvolve          | Prompt, Code, Text | Nein. Es hat eine eigene Editor-Einstellung. | Ja                     |
-| DSPy GEPA             | DSPy-Programm      | Nein                                 | Nein                           |
-| DSPy MIPROv2          | DSPy-Programm      | Nein                                 | Nein                           |
-| DSPy BootstrapFewShot | DSPy-Programm      | Nein                                 | Nein                           |
+| Engine       | Einstellungen für den Coding-Agenten         | Einstellung „Max. Iterationen“ |
+| ------------ | -------------------------------------------- | ------------------------------ |
+| Auto         | Nein                                         | Nein                           |
+| GEPA         | Nein                                         | Nein                           |
+| Best-of-N    | Nein                                         | Nein                           |
+| AutoResearch | Ja                                           | Nein                           |
+| Meta-Harness | Ja                                           | Ja                             |
+| AutoSaddler  | Ja                                           | Ja                             |
+| ShinkaEvolve | Nein. Es hat eine eigene Editor-Einstellung. | Ja                             |
 
-Der Assistent kennzeichnet GEPA, DSPy GEPA und Auto als Optimierer, die den Feedback-Text Ihrer Metrik verwenden.
+Der Assistent kennzeichnet GEPA und Auto als Optimierer, die den Feedback-Text Ihres Scorers verwenden.
 
 ## Auto
 
-Auto ist die Standardwahl. Was es ausführt, hängt vom Artefakttyp ab:
+Auto ist die Standardwahl für jeden Durchlauf. Es arbeitet in zwei Phasen:
 
-- **DSPy-Programm**: Auto führt DSPy GEPA aus.
-- **Prompt, Code oder Text**: Auto erkundet gleichzeitig mit fünf Engines: GEPA, AutoResearch, Meta-Harness, AutoSaddler und ShinkaEvolve. Jede Engine erhält einen gleichen Anteil der Bewertungsläufe: das Budget geteilt durch 6. Danach macht GEPA ab der besten Version mit dem Rest des Budgets weiter.
-
-Auto verwendet Best-of-N nicht.
-
-> [!WARNING]
-> Bei einem Prompt-, Code- oder Text-Artefakt benötigt Auto mindestens 6 Bewertungsläufe: 5 Erkundungsspuren und eine Fortsetzung. Alle fünf Engines müssen verfügbar sein. Ist eine davon nicht verfügbar, wählen Sie eine einzelne Engine.
+1. Es erkundet mit GEPA, AutoResearch, Meta-Harness, AutoSaddler und ShinkaEvolve.
+2. Es setzt GEPA ab der besten Version fort, die die Erkundung gefunden hat.
 
 **Wählen Sie sie, wenn** Sie nicht wissen, welche Engine passt. Hier fangen Sie am besten an.
 
@@ -37,7 +29,7 @@ Auto verwendet Best-of-N nicht.
 
 „Reflektierende Evolution mit einer Pareto-Front von Versionen.“ Das Reflexionsmodell liest Score und Feedback jedes Falls und schreibt eine bessere Version. GEPA behält eine Front von Versionen, von denen jede bei einigen Fällen die beste ist.
 
-**Wählen Sie sie, wenn** Ihre Metrik konkretes Feedback gibt und Sie eine starke einzelne Engine möchten.
+**Wählen Sie sie, wenn** Ihr Scorer konkretes Feedback gibt und Sie eine starke einzelne Engine möchten.
 
 ## Best-of-N
 
@@ -49,7 +41,7 @@ Auto verwendet Best-of-N nicht.
 
 Ein Coding-Agent führt Forschungsrunden aus. Er bearbeitet, bewertet und behält, was hilft, bis das Budget aufgebraucht ist.
 
-**Wählen Sie sie, wenn** eine gute Änderung mehrere Untersuchungsschritte erfordert, zum Beispiel bei einem Code-Artefakt.
+**Wählen Sie sie, wenn** eine gute Änderung mehrere Untersuchungsschritte erfordert.
 
 ## Meta-Harness
 
@@ -59,9 +51,9 @@ Ein Coding-Agent schlägt in jeder Iteration eine Reihe von Kandidaten vor. Er n
 
 ## AutoSaddler
 
-Ein Coding-Agent liest das Feedback Ihrer Metrik und patcht die Version. Skynet behält nur Patches, die ein neuer Bewertungslauf bestätigt.
+Ein Coding-Agent liest das Feedback Ihres Scorers und patcht die Version. Skynet behält nur Patches, die ein neuer Bewertungslauf bestätigt.
 
-**Wählen Sie sie, wenn** das Feedback Ihrer Metrik auf klare, lokale Fehler zeigt.
+**Wählen Sie sie, wenn** das Feedback Ihres Scorers auf klare, lokale Fehler zeigt.
 
 ## ShinkaEvolve
 
@@ -69,36 +61,26 @@ Ein Coding-Agent liest das Feedback Ihrer Metrik und patcht die Version. Skynet 
 
 **Wählen Sie sie, wenn** Sie breit erkunden möchten und ein größeres Budget haben.
 
-## DSPy-Optimierer
-
-| Optimierer            | Was er tut                                                                                                                         |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| DSPy GEPA             | Liest das Feedback der Metrik und entwickelt die Anweisungen jedes Predictors weiter.                                              |
-| DSPy MIPROv2          | Schlägt Anweisungen und Few-Shot-Demos gemeinsam vor und durchsucht ihre Kombinationen mit Bayes'scher Optimierung.                |
-| DSPy BootstrapFewShot | Sammelt durchgearbeitete Beispiele, die das Programm richtig löst, und fügt sie als Few-Shot-Demos hinzu. Er verwendet kein Reflexionsmodell. |
-
-DSPy MIPROv2 und DSPy BootstrapFewShot benötigen Paare (Fälle mit erwarteten Ausgaben).
-
 ## Einstellungen
 
 ### Budget
 
 | Einstellung             | Standard | Bereich                                                        |
 | ----------------------- | -------- | -------------------------------------------------------------- |
-| Max. Bewertungsläufe    | 200      | 1 bis 100000 (Auto: mindestens 6)                              |
+| Max. Bewertungsläufe    | 200      | 1 bis 100000                              |
 | Stoppen bei Bewertung   | Aus      | 0 oder mehr                                                    |
 | Max. Iterationen        | Aus      | 1 bis 1000. Nur Meta-Harness, AutoSaddler und ShinkaEvolve.    |
 
-Ein Bewertungslauf ist ein Aufruf Ihrer Metrik auf einem Fall. Die abschließende Neubewertung der Ausgangsversion und des Gewinners zählt nicht gegen **Max. Bewertungsläufe**.
+Ein Bewertungslauf ist ein Aufruf Ihres Scorers auf einem Fall. Die abschließende Neubewertung der Ausgangsversion und des Gewinners zählt nicht gegen **Max. Bewertungsläufe**.
 
 ### Einstellungen für den Coding-Agenten
 
-Diese Einstellungen gelten für Auto, AutoResearch, Meta-Harness und AutoSaddler.
+Diese Einstellungen gelten für AutoResearch, Meta-Harness und AutoSaddler.
 
 | Einstellung                     | Standard | Bereich                                            |
 | ------------------------------- | -------- | -------------------------------------------------- |
 | Coding-Agent                    | Codex    | Pi, Codex, OpenCode, Prime Agent, Eigener Befehl   |
-| Kandidaten pro Iteration        | 3        | 1 bis 8. Wird für Auto und Meta-Harness angezeigt. |
+| Kandidaten pro Iteration        | 3        | 1 bis 8. |
 | Max. Tool-Aufrufe pro Kandidat  | 100      | 1 bis 1000                                         |
 
 ### Einstellungen für ShinkaEvolve
@@ -113,8 +95,6 @@ Diese Einstellungen gelten für Auto, AutoResearch, Meta-Harness und AutoSaddler
 | Archivgröße                                         | 40                                                               |
 | Parallele Auswertungen                              | 2                                                                |
 | Parallele Vorschläge                                | 2                                                                |
-
-Wenn Auto ShinkaEvolve ausführt, zeigt der Assistent diese Einstellungen als „ShinkaEvolve-Einstellungen (wenn Auto es ausführt)“.
 
 ## Verwandte Seiten
 

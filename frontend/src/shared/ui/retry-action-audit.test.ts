@@ -11,7 +11,6 @@ const RECOVERY_LABEL_KEYS = new Set([
   "optimizations.react.chat_retry",
   "settings.notifications.retry",
   "shared.agent.regenerate",
-  "submit.code.interview.retry",
   "submit.react.mcp_retry",
   "tagger.assist.retry",
   "tagger.session.retry",

@@ -70,8 +70,10 @@ import {
   type RunView,
 } from "../lib/run-view";
 import { ROW_MOTION, rowTransition } from "../lib/row-motion";
+import { runKey } from "../lib/merge-runs";
 import { FolderShareDialog } from "./FolderShareDialog";
 import { ConfirmDialog } from "@/shared/ui/confirm-dialog";
+import { SharedItemMenuItems, useSharedItemActions } from "@/shared/ui/shared-item-menu";
 
 /** A folder action the sidebar opens a dialog for. */
 export type FolderDialogState =
@@ -302,10 +304,13 @@ interface TreeProps {
 export function FolderTree({
   folders,
   depth = 0,
+  inheritedFrom = null,
   ...props
 }: TreeProps & {
   folders: RunFolder[];
   depth?: number;
+  /** Top folder whose share reaches these folders; null at the top level. */
+  inheritedFrom?: string | null;
 }) {
   return (
     <>
@@ -316,14 +321,19 @@ export function FolderTree({
           initial={false}
           transition={rowTransition(idx)}
         >
-          <FolderNode folder={folder} depth={depth} {...props} />
+          <FolderNode folder={folder} depth={depth} inheritedFrom={inheritedFrom} {...props} />
         </motion.div>
       ))}
     </>
   );
 }
 
-function FolderNode({ folder, depth, ...props }: TreeProps & { folder: RunFolder; depth: number }) {
+function FolderNode({
+  folder,
+  depth,
+  inheritedFrom,
+  ...props
+}: TreeProps & { folder: RunFolder; depth: number; inheritedFrom: string | null }) {
   const { expanded, onToggle, view, version, renderRun, onAction, childMap } = props;
   const isOpen = expanded.has(folder.id);
   const [runs, setRuns] = React.useState<SidebarJobItem[] | null>(null);
@@ -333,6 +343,10 @@ function FolderNode({ folder, depth, ...props }: TreeProps & { folder: RunFolder
   const editable = canEditFolder(folder);
   const isOwner = folder.role === "owner";
   const router = useRouter();
+  const shared = useSharedItemActions(
+    { kind: "folders", id: folder.id, name: folder.name, role: folder.role },
+    { onChanged: () => window.dispatchEvent(new Event("optimizations-changed")) },
+  );
 
   // Runs load lazily the first time a folder opens, and refresh with the rest
   // of the sidebar while it stays open.
@@ -467,6 +481,12 @@ function FolderNode({ folder, depth, ...props }: TreeProps & { folder: RunFolder
                   {menuItem(Trash, msg("folders.delete"), { kind: "delete", folder }, true)}
                 </>
               )}
+              {!isOwner && (
+                <>
+                  <div role="separator" className="mx-3.5 my-1 border-t border-border/40" />
+                  <SharedItemMenuItems actions={shared} inheritedFrom={inheritedFrom} />
+                </>
+              )}
             </PopoverPrimitive.Content>
           </PopoverPrimitive.Portal>
         </PopoverPrimitive.Root>
@@ -483,7 +503,12 @@ function FolderNode({ folder, depth, ...props }: TreeProps & { folder: RunFolder
           >
             <div className="ms-3 border-s border-sidebar-border/50 ps-1.5">
               {subfolders.length > 0 && (
-                <FolderTree folders={subfolders} depth={depth + 1} {...props} />
+                <FolderTree
+                  folders={subfolders}
+                  depth={depth + 1}
+                  inheritedFrom={inheritedFrom ?? folder.name}
+                  {...props}
+                />
               )}
               {visibleRuns === null ? (
                 <div className="flex items-center gap-2 px-2 py-1.5 text-[0.625rem] text-muted-foreground/60">
@@ -494,7 +519,7 @@ function FolderNode({ folder, depth, ...props }: TreeProps & { folder: RunFolder
                 <AnimatePresence initial={false}>
                   {visibleRuns.map((job, idx) => (
                     <motion.div
-                      key={job.optimization_id}
+                      key={runKey(job)}
                       layout="position"
                       initial={ROW_MOTION.initial}
                       animate={ROW_MOTION.animate}
@@ -515,6 +540,7 @@ function FolderNode({ folder, depth, ...props }: TreeProps & { folder: RunFolder
           </motion.div>
         )}
       </AnimatePresence>
+      {!isOwner && shared.dialog}
     </div>
   );
 }

@@ -23,7 +23,17 @@ from ....exceptions import ServiceError
 from ....models.blackbox import BlackboxStrategy
 from ..budget_stop import BudgetReached
 from ..cost_ceiling import CostCeilingExceededError
-from .protocol import BudgetExhaustedError, EngineContext, EvalServer, Result, ScorerAbortError, Task
+from .protocol import (
+    BudgetExhaustedError,
+    Candidate,
+    EngineContext,
+    EvalServer,
+    Result,
+    ScorerAbortError,
+    SideInfo,
+    Task,
+    engine_score,
+)
 from .registry import NO_CAPABILITIES, EngineCapabilities, get_engine
 from .upstream import AUTO_ENGINES, GEPA_SOURCE, local_result
 
@@ -40,6 +50,21 @@ class LaneOutcome:
     error: str | None = None
     best_candidate: Any = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def _stored_score(score: float | None) -> float | None:
+    """Return a lane score that a JSONB column can store.
+
+    Upstream best-of needs ``-inf`` to make a lane lose, but PostgreSQL JSONB
+    rejects ``-Infinity``, so the stored lane record keeps ``None`` (SKY-367).
+
+    Args:
+        score: The lane's score, possibly non-finite.
+
+    Returns:
+        The score when finite, else ``None``.
+    """
+    return score if score is not None and math.isfinite(score) else None
 
 
 def lane_tag(phase: str, engine: str) -> str:
@@ -212,18 +237,26 @@ class _LaneEngine:
         try:
             with dspy.context(**self.model_context), usage_scope(lane=lane_tag(self.phase, self.name)):
                 result = get_engine(self.name, self.caps).run(local_task, server, _admit_context(context))
-            lane.best_candidate, lane.best_score = result.best_candidate, result.best_score
+            best_candidate, best_score = result.best_candidate, result.best_score
+            if server.metric_error(best_candidate) is not None:
+                # An upstream engine ranks by filled means, so it can return a
+                # version that crashed on a case. Final selection excludes such
+                # versions (SKY-350). The server's best running mean mixes
+                # minibatch and full-split scores, so the lane hands off the
+                # seed at -inf and another lane wins (SKY-367).
+                best_candidate, best_score = task.seed_candidate, -math.inf
+            lane.best_candidate, lane.best_score = best_candidate, _stored_score(best_score)
             lane.metadata = result.metadata
             return UpstreamResult(
-                best_candidate=result.best_candidate,
-                best_score=result.best_score if result.best_score is not None else -math.inf,
+                best_candidate=best_candidate,
+                best_score=best_score if best_score is not None else -math.inf,
                 total_evals=server.used,
                 metadata={**result.metadata, "engine": self.name, "phase": self.phase},
             )
         except BudgetReached as exc:
             lane.status, lane.error = "stopped", str(exc)
             if isinstance(exc.result, Result):
-                lane.best_candidate, lane.best_score = exc.result.best_candidate, exc.result.best_score
+                lane.best_candidate, lane.best_score = exc.result.best_candidate, _stored_score(exc.result.best_score)
                 lane.metadata = dict(exc.result.metadata)
             raise
         except (ScorerAbortError, CostCeilingExceededError, BudgetExhausted, BudgetExhaustedError) as exc:
@@ -308,7 +341,7 @@ def run_strategy(
                 engine.name,
                 "single",
                 "completed",
-                result.best_score,
+                _stored_score(result.best_score),
                 server.used,
                 best_candidate=result.best_candidate,
                 metadata=dict(result.metadata),
@@ -362,9 +395,22 @@ def run_strategy(
             output_dir=str(Path(ctx.run_dir) / f"{phase}-{name}-evals"),
         )
 
+    def evaluate(candidate: Candidate, example: Any = None) -> tuple[float, SideInfo]:
+        """Score one case for the upstream composition, which needs a number for every case.
+
+        Args:
+            candidate: The version to score.
+            example: The case, or ``None`` when there are no cases.
+
+        Returns:
+            The score, :data:`UNSCORED` after a metric error, and the side information.
+        """
+        score, side_info = server.evaluate(candidate, example)
+        return engine_score(score), side_info
+
     kwargs = {
         "seed_candidate": task.seed_candidate,
-        "evaluator": server.evaluate,
+        "evaluator": evaluate,
         # Upstream's dataset is the train split; the validation split rides
         # along as its valset so each lane can select on it.
         "dataset": task.cases or None,
@@ -452,7 +498,7 @@ def run_strategy(
             "gepa",
             "continue",
             "completed",
-            continued.best_score,
+            _stored_score(continued.best_score),
             continuation_server.used,
             best_candidate=continued.best_candidate,
             metadata=dict(continued.metadata),

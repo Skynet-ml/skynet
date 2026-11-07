@@ -45,7 +45,6 @@ Authorization: Bearer skyd_...
 | `GET /models`                                   | 사용할 수 있는 모델을 나열합니다.                            |
 | `GET /optimizers`                               | 설정에 맞는 옵티마이저를 나열합니다.                         |
 | `GET /blackbox/engines`                         | 네이티브 엔진과 각 엔진의 사용 가능 여부를 나열합니다.       |
-| `POST /optimize`                                | 프롬프트, 코드, 텍스트 또는 DSPy 프로그램의 실행을 시작합니다. |
 | `POST /blackbox/run`                            | GitHub 리포지토리에서 실행을 시작합니다.                     |
 | `GET /optimizations`                            | 내 실행을 나열합니다.                                        |
 | `GET /optimizations/{optimization_id}`          | 실행 하나의 상태, 진행 상황, 로그, 결과를 반환합니다.        |
@@ -56,10 +55,10 @@ Authorization: Bearer skyd_...
 
 ## 실행 시작하기
 
-`POST /optimize`는 제출 마법사와 같은 설정을 받습니다. 이 예제는 지원 메시지를 라벨로 분류하는 프롬프트를 개선합니다.
+Skynet은 Optimize Anything입니다. 모든 실행은 리포지토리를 최적화합니다. `POST /blackbox/run`은 제출 마법사와 같은 설정을 받습니다. 예제는 지원 메시지를 라벨로 분류하는 리포지토리를 개선합니다.
 
 ```bash tab="curl"
-curl https://api.skynetml.com/optimize \
+curl https://api.skynetml.com/blackbox/run \
   -H "Authorization: Bearer $SKYNET_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: support-labels-001" \
@@ -69,56 +68,62 @@ curl https://api.skynetml.com/optimize \
 ```json tab="run.json"
 {
   "name": "Support labels",
-  "task": {
-    "objective": "Sort each support message into billing, bug or other.",
-    "artifact": {
-      "kind": "prompt",
-      "starting_version": "Label this support message as billing, bug or other."
+  "objective": "Sort each support message into billing, bug or other.",
+  "recipe": "repo",
+  "target": {
+    "kind": "repo",
+    "repo": {
+      "provider": "github",
+      "repository": "your-org/support-labels",
+      "branch": "main",
+      "editable_paths": ["serve.py", "prompts/"]
     }
   },
-  "data": {
-    "mode": "pairs",
-    "cases": [
-      { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
-      { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
-      {
-        "input": { "message": "Do you have a Hebrew interface?" },
-        "expected": { "label": "other" }
-      }
-    ]
+  "cases": [
+    { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
+    { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
+    {
+      "input": { "message": "Do you have a Hebrew interface?" },
+      "expected": { "label": "other" }
+    }
+  ],
+  "input_fields": ["message"],
+  "expected_field": "label",
+  "scorer": {
+    "kind": "python",
+    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "model": { "name": "<model from GET /models>" }
   },
-  "optimizer": { "choice": "auto", "budget": { "max_scorer_runs": 200 } },
-  "models": {
-    "task_model": { "name": "<model from GET /models>" },
-    "reflection_model": { "name": "<model from GET /models>" }
-  },
-  "workspace": {
-    "run_code": "from skynet import llm\n\ndef run(artifact, input):\n    return llm(artifact, input=input[\"message\"])\n",
-    "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
-  },
+  "strategy": { "mode": "auto" },
+  "budget": { "max_scorer_runs": 200 },
+  "reflection_model_config": { "name": "<model from GET /models>" },
   "max_cost_cents": 500
 }
 ```
 
 중요한 필드:
 
-- `task.artifact.kind`는 `prompt`, `code`, `text` 또는 `dspy_program`입니다.
-- `data.mode`는 `pairs`(기대 출력이 있는 입력) 또는 `single`(정확히 하나의 케이스)입니다.
-- `optimizer.choice`는 `auto` 또는 `GET /optimizers`가 반환한 옵티마이저 이름 하나입니다.
+- `target.repo.repository`는 `owner/name` 형식의 GitHub 리포지토리입니다. 먼저 **설정 → 커넥터**에서 GitHub를 연결하세요.
+- `target.repo.editable_paths`는 옵티마이저가 변경할 수 있는 파일과 폴더의 목록입니다. `"."`는 리포지토리 전체를 뜻합니다.
+- `target.repo.commit`은 선택 사항입니다. 40자 SHA입니다. 없으면 Skynet은 브랜치의 최신 커밋을 사용합니다.
+- `target.repo.secrets`는 선택 사항입니다. 각 시크릿에는 `name`과 `value`가 있습니다. 시크릿은 환경 변수로 코드와 채점기에 전달됩니다.
+- `scorer.metric_code`는 `score(repo_path, case)`를 정의합니다. `scorer.model`은 코드와 채점기가 모델 게이트웨이를 통해 호출할 수 있는 모델입니다.
+- `strategy.mode`는 `auto`(기본값) 또는 `single`입니다. `single`이면 `strategy.engine`을 `GET /blackbox/engines`가 반환한 엔진 이름 하나로 설정합니다.
 - `max_cost_cents`는 이 실행의 지출 한도이며 단위는 미국 센트입니다.
 - `is_private`의 기본값은 `false`입니다. 실행을 비공개로 유지하려면 `true`로 설정합니다.
 
-`run_code`와 `metric_code`의 규칙은 [지표와 채점기](/docs/concepts/scorers)를 읽어 보세요.
+`metric_code`의 규칙은 [지표와 채점기](/docs/concepts/scorers)를 읽어 보세요.
 
 ### 응답
 
 | 상태  | 의미                                                                                                                                  |
 | ----- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `201` | Skynet이 실행을 대기열에 넣었습니다. 본문에 `optimization_id`와 `status`가 있습니다.                                                  |
+| `400` | 대상이 리포지토리가 아니거나 채점기를 불러올 수 없습니다. |
 | `202` | 설정 검사가 아직 진행 중입니다. `Retry-After` 헤더에 있는 초만큼 기다린 다음, 같은 본문을 같은 `Idempotency-Key`로 다시 보냅니다.     |
 | `402` | 잔액이 너무 적습니다.                                                                                                                 |
 | `409` | 할당량에 도달했거나 설정 검사가 최신 상태가 아닙니다.                                                                                 |
-| `422` | 요청이나 작업 공간 코드가 옵티마이저와 맞지 않습니다.                                                                                 |
+| `422` | 요청이 옵티마이저와 맞지 않습니다. |
 
 > [!NOTE]
 > 항상 `Idempotency-Key` 헤더를 보내세요. 같은 키로 같은 요청을 다시 보내면 Skynet은 첫 번째 실행을 반환합니다. 두 번째 실행을 시작하지 않습니다.
@@ -154,7 +159,7 @@ curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 
-새 입력에서 최고 버전을 실행하려면 `POST /serve/{optimization_id}`를 보냅니다. 각 점수의 의미는 [결과 읽기](/docs/guides/results)를 읽어 보세요.
+새 입력에서 최고 버전을 실행하려면 `Idempotency-Key` 헤더와 함께 `POST /serve/{optimization_id}`를 보냅니다. 리포지토리에는 `def serve(input)`이 있는 `serve.py` 파일이 있어야 합니다. 요청, 응답, 각 점수의 의미는 [결과 읽기](/docs/guides/results)를 읽어 보세요.
 
 ## 제한
 

@@ -1,5 +1,5 @@
 import type { WorkflowSpec } from "@/shared/types/api";
-import type { ArtifactKind, DataMode, OptimizerChoice } from "@/shared/types/unified-run";
+import type { DataMode, OptimizerChoice, OptimizerTarget } from "@/shared/types/unified-run";
 
 /** Trust mode — how much the agent must ask before acting. */
 export type TrustMode = "ask" | "auto_safe" | "yolo";
@@ -26,8 +26,15 @@ export interface WizardState {
   is_private?: boolean;
   task_objective?: string;
   task_background?: string;
-  artifact_kind?: ArtifactKind;
+  /** `"repo"` when the run optimizes a GitHub repository. */
+  artifact_kind?: OptimizerTarget;
   starting_version?: string | Record<string, string>;
+  /** The repository a repository run optimizes, as `owner/name`. */
+  repository?: string;
+  /** The agent created `repository` on GitHub, so the run request marks it `created_by_skynet`. */
+  repo_created_by_skynet?: boolean;
+  /** Whether the user linked a GitHub account; unset until the wizard knows. */
+  github_connected?: boolean;
   data_mode?: DataMode;
   dataset_ready?: boolean;
   columns_configured?: boolean;
@@ -62,6 +69,10 @@ export interface WizardState {
   screen_notes?: ScreenNote[];
   /** What the Continue button refuses on the screen on view. */
   screen_issue?: string;
+  /** The later screen a go-back left from; Continue returns there. */
+  return_screen?: string;
+  /** The setup is a copy of an earlier run, so the agent waits for the user. */
+  cloned_run?: boolean;
 }
 
 /** A note one wizard screen's agent left for the screens after it. */

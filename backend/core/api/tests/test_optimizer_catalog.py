@@ -37,48 +37,32 @@ def _catalog(monkeypatch: pytest.MonkeyPatch, artifact_kind: str, data_mode: str
 
 
 @pytest.mark.usefixtures("runtimes_up")
-def test_dspy_program_with_pairs_offers_every_dspy_optimizer(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A DSPy program with pairs gets Auto and the three DSPy optimizers, all available."""
-    body = _catalog(monkeypatch, "dspy_program", "pairs")
+@pytest.mark.parametrize("data_mode", ["pairs", "single"])
+def test_dspy_program_offers_no_optimizer_to_a_new_run(monkeypatch: pytest.MonkeyPatch, data_mode: str) -> None:
+    """A new run cannot pick a DSPy optimizer, so a DSPy program gets no options and no Auto.
 
-    by_id = {option["id"]: option for option in body["options"]}
-    assert list(by_id) == ["auto", "dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"]
-    assert body["default"] == "auto"
-    assert body["auto_resolves_to"] == ["dspy_gepa"]
-    assert all(option["available"] for option in body["options"])
-    assert by_id["dspy_gepa"]["family"] == "dspy"
-    assert by_id["dspy_gepa"]["uses_feedback"] is True
-    assert by_id["dspy_miprov2"]["uses_feedback"] is False
-    assert by_id["dspy_bootstrap_fewshot"]["needs_reflection_model"] is False
-    assert by_id["auto"]["family"] == "auto"
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        data_mode: Single input or pairs.
+    """
+    body = _catalog(monkeypatch, "dspy_program", data_mode)
+
+    assert body["options"] == []
+    assert body["auto_resolves_to"] == []
     assert body["run_entry"] == "def run(artifact, input)"
-    assert body["metric_signature"] == "def score(input, output, expected=None)"
-    assert all("metric_shape" not in option for option in body["options"])
 
 
 @pytest.mark.usefixtures("runtimes_up")
-def test_dspy_program_with_one_input_offers_only_gepa(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without pairs, only the feedback-driven DSPy optimizer fits."""
-    body = _catalog(monkeypatch, "dspy_program", "single")
-
-    assert [option["id"] for option in body["options"]] == ["auto", "dspy_gepa"]
-
-
-@pytest.mark.usefixtures("runtimes_up")
-def test_prompt_offers_auto_and_the_blackbox_engines(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A prompt gets Auto plus every black-box engine, under the same contract as a DSPy program."""
-    body = _catalog(monkeypatch, "prompt", "pairs")
+def test_repo_offers_auto_first_then_the_blackbox_engines(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A repository run gets Auto as the default, then every black-box engine, under the same contract."""
+    body = _catalog(monkeypatch, "repo", "pairs")
 
     by_id = {option["id"]: option for option in body["options"]}
-    assert list(by_id) == [
-        "auto",
-        "gepa",
-        "best_of_n",
-        "autoresearch",
-        "meta_harness",
-        "autosaddler",
-        "shinka_evolve",
-    ]
+    assert list(by_id) == ["auto", "gepa", "best_of_n", "autoresearch", "meta_harness", "autosaddler", "shinka_evolve"]
+    assert body["default"] == "auto"
+    assert body["auto_resolves_to"] == ["auto"]
+    assert by_id["auto"]["family"] == "auto"
+    assert by_id["auto"]["uses_feedback"] is True
     assert body["run_entry"] == "def run(artifact, input)"
     assert body["metric_signature"] == "def score(input, output, expected=None)"
     assert by_id["gepa"]["family"] == "blackbox"
@@ -86,13 +70,13 @@ def test_prompt_offers_auto_and_the_blackbox_engines(monkeypatch: pytest.MonkeyP
     assert by_id["best_of_n"]["uses_feedback"] is False
     assert by_id["autoresearch"]["native_proposer"] is True
     assert by_id["gepa"]["native_proposer"] is False
-    assert body["auto_resolves_to"] == ["gepa", "autoresearch", "meta_harness", "autosaddler", "shinka_evolve"]
     assert body["sandbox_available"] is True
     assert all(option["available"] for option in body["options"])
+    assert all(option["family"] != "dspy" for option in body["options"])
 
 
 def test_blackbox_availability_follows_the_engine_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Engines and Auto that need the managed sandbox are unavailable with its reason; DSPy stays available."""
+    """Engines that need the managed sandbox are unavailable with its reason, and so is Auto."""
     monkeypatch.setattr(_bb_service, "agent_target_unavailable_reason", lambda _settings: None)
     monkeypatch.setattr(
         _bb_service,
@@ -100,17 +84,15 @@ def test_blackbox_availability_follows_the_engine_catalog(monkeypatch: pytest.Mo
         lambda runtime, _settings: "Managed sandbox is missing" if runtime == "vercel" else None,
     )
 
-    text = _catalog(monkeypatch, "code", "pairs")
-    dspy = _catalog(monkeypatch, "dspy_program", "pairs")
+    repo = _catalog(monkeypatch, "repo", "pairs")
 
-    by_id = {option["id"]: option for option in text["options"]}
+    by_id = {option["id"]: option for option in repo["options"]}
     assert by_id["gepa"]["available"] is True
     assert by_id["gepa"]["unavailable_reason"] is None
     assert by_id["autoresearch"]["available"] is False
     assert "Managed sandbox is missing" in by_id["autoresearch"]["unavailable_reason"]
     assert by_id["auto"]["available"] is False
-    assert "Managed sandbox is missing" in by_id["auto"]["unavailable_reason"]
-    assert all(option["available"] for option in dspy["options"])
+    assert by_id["auto"]["unavailable_reason"]
 
 
 def test_missing_sandbox_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -118,7 +100,7 @@ def test_missing_sandbox_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_bb_service, "agent_target_unavailable_reason", lambda _settings: "no sandbox here")
     monkeypatch.setattr(_bb_service, "native_runtime_unavailable_reason", lambda _runtime, _settings: None)
 
-    body = _catalog(monkeypatch, "text", "single")
+    body = _catalog(monkeypatch, "dspy_program", "single")
 
     assert body["sandbox_available"] is False
     assert body["sandbox_reason"] == "no sandbox here"
@@ -127,9 +109,9 @@ def test_missing_sandbox_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(
     "params",
     [
-        {"artifact_kind": "repo", "data_mode": "pairs"},
-        {"artifact_kind": "prompt", "data_mode": "many"},
-        {"artifact_kind": "prompt"},
+        {"artifact_kind": "prompt", "data_mode": "pairs"},
+        {"artifact_kind": "dspy_program", "data_mode": "many"},
+        {"artifact_kind": "dspy_program"},
     ],
 )
 def test_unknown_setup_is_422(monkeypatch: pytest.MonkeyPatch, params: dict) -> None:

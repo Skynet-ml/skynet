@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import base64
+import io
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
 
+from .....constants import HARDENING_EXPLOITS_DIR
+from ..repo_constraints import _DEFAULT_EXPLOITS
 from ..repo_tree import (
+    EXPLOITS_DIR,
     apply_patch,
     archive_chunks,
+    drop_paths,
     patch_paths,
     patch_violations,
     reset_tree,
+    strip_archive,
     unpack_tree,
     version_patch,
 )
@@ -148,6 +155,100 @@ def test_submodule_changes_are_refused() -> None:
     assert any("Submodules are read-only" in problem for problem in patch_violations(patch, ["."]))
 
 
+def _reserved(path: str) -> str:
+    """Write the reason the guard gives for a write to the exploit suite.
+
+    Args:
+        path: The refused repository path.
+
+    Returns:
+        The exact reason text.
+    """
+    return f"'{path}' may not be changed."
+
+
+def test_the_exploit_folder_constants_agree() -> None:
+    """Keep the stdlib copy of the suite folder equal to the backend's two copies."""
+    assert EXPLOITS_DIR == HARDENING_EXPLOITS_DIR == _DEFAULT_EXPLOITS
+
+
+@pytest.mark.parametrize(
+    "path", [".optimize/exploits/a/patch.diff", ".optimize/exploits", ".optimize/Exploits/a.diff", ".OPTIMIZE/EXPLOITS"]
+)
+def test_writes_to_the_exploit_suite_are_refused(path: str) -> None:
+    """Refuse a version that writes the exploit suite, in any case, even with the whole tree editable."""
+    patch = f"diff --git a/{path} b/{path}\nnew file mode 100644\n"
+
+    assert patch_violations(patch, ["."]) == [_reserved(path)]
+
+
+@pytest.mark.parametrize("mode", ["100644", "120000"])
+def test_a_file_at_a_parent_of_the_suite_is_refused(mode: str) -> None:
+    """Refuse a ``.optimize`` file or a ``.optimize -> src`` symlink, which would block the suite's patch."""
+    patch = (
+        f"diff --git a/.optimize b/.optimize\nnew file mode {mode}\nindex 0000000..abc1234\n"
+        "--- /dev/null\n+++ b/.optimize\n@@ -0,0 +1 @@\n+src\n\\ No newline at end of file\n"
+    )
+
+    assert patch_violations(patch, ["."]) == [_reserved(".optimize")]
+
+
+@pytest.mark.parametrize(
+    ("patch", "path"),
+    [
+        (
+            "diff --git a/.optimize/exploits/a.diff b/notes/a.diff\nsimilarity index 100%\n"
+            "rename from .optimize/exploits/a.diff\nrename to notes/a.diff\n",
+            ".optimize/exploits/a.diff",
+        ),
+        (
+            "diff --git a/notes/a.diff b/.optimize/exploits/a.diff\nsimilarity index 100%\n"
+            "rename from notes/a.diff\nrename to .optimize/exploits/a.diff\n",
+            ".optimize/exploits/a.diff",
+        ),
+        (
+            "diff --git a/.optimize/exploits/a.diff b/.optimize/exploits/a.diff\ndeleted file mode 100644\n"
+            "index abc1234..0000000\n--- a/.optimize/exploits/a.diff\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n",
+            ".optimize/exploits/a.diff",
+        ),
+        (
+            "diff --git a/.optimize/exploits/run.sh b/.optimize/exploits/run.sh\nold mode 100644\nnew mode 100755\n",
+            ".optimize/exploits/run.sh",
+        ),
+        (
+            "diff --git a/.optimize/exploits/blob.bin b/.optimize/exploits/blob.bin\nnew file mode 100644\n"
+            "index 0000000..abc1234\nGIT binary patch\nliteral 3\nKcmZ?wbNK)P\n\nliteral 0\nHcmV?d00001\n\n",
+            ".optimize/exploits/blob.bin",
+        ),
+        (
+            'diff --git "a/.optimize/exploits/caf\\303\\251.diff" "b/.optimize/exploits/caf\\303\\251.diff"\n'
+            "new file mode 100644\n",
+            ".optimize/exploits/caf\u00e9.diff",
+        ),
+    ],
+    ids=["rename-out", "rename-in", "delete", "mode-change", "binary", "quoted"],
+)
+def test_every_kind_of_suite_change_is_refused(patch: str, path: str) -> None:
+    """Refuse renames, deletes, mode changes, binary files and quoted paths in the suite."""
+    assert patch_violations(patch, ["."]) == [_reserved(path)]
+
+
+@pytest.mark.parametrize("folder", ["eval/attacks", "Eval/Attacks"])
+def test_writes_to_a_configured_exploit_folder_are_refused(folder: str) -> None:
+    """Guard the ``[metric] exploits`` folder the same way as the default one, in any case."""
+    patch = "diff --git a/eval/attacks/x.diff b/eval/attacks/x.diff\nnew file mode 100644\n"
+
+    assert patch_violations(patch, ["."]) == []
+    assert patch_violations(patch, ["."], exploit_paths=[folder]) == [_reserved("eval/attacks/x.diff")]
+
+
+def test_paths_next_to_the_exploit_suite_stay_editable() -> None:
+    """Match the suite as a folder, not as a name prefix."""
+    patch = "diff --git a/.optimize/exploits2.md b/.optimize/exploits2.md\nnew file mode 100644\n"
+
+    assert patch_violations(patch, ["."]) == []
+
+
 def test_oversized_patches_are_refused() -> None:
     """Stop a version larger than one sandbox upload before it is parsed."""
     assert "larger than" in patch_violations("+" * (9 * 1024 * 1024), ["."])[0]
@@ -174,3 +275,116 @@ def test_protected_paths_are_refused_even_under_the_whole_tree(tmp_path: Path) -
     problems = patch_violations(version_patch(checkout), ["."], [], ["eval"])
 
     assert problems == ["'eval/labels.json' is protected by the repository's optimize.toml ([paths] protected)."]
+
+
+def test_strip_archive_leaves_out_every_hidden_path(tmp_path: Path) -> None:
+    """The agent's copy has no metric file and no exploit folder; every other file stays (SKY-353)."""
+    archive = _tree(
+        tmp_path,
+        {
+            "src/app.py": "x = 1\n",
+            "eval/scorer.py": "def score(): ...\n",
+            "eval/data.csv": "1\n",
+            "evaluation/keep.py": "kept\n",
+            ".optimize/exploits/cheat.py": "cheat\n",
+        },
+    )
+
+    stripped = strip_archive(archive, ["eval/scorer.py", ".optimize/exploits"], tmp_path / "agent.tgz")
+
+    with tarfile.open(stripped) as packed:
+        names = {name.removeprefix("./") for name in packed.getnames()}
+    assert {"src/app.py", "eval/data.csv", "evaluation/keep.py"} <= names
+    assert not {name for name in names if name.startswith(("eval/scorer.py", ".optimize/exploits"))}
+    with tarfile.open(archive) as full:
+        assert "eval/scorer.py" in {name.removeprefix("./") for name in full.getnames()}
+
+
+def test_strip_archive_drops_a_link_to_a_hidden_file(tmp_path: Path) -> None:
+    """A hard link to a metric file would carry its bytes, so it goes too."""
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        data = tarfile.TarInfo("eval/scorer.py")
+        data.size = 1
+        packed.addfile(data, io.BytesIO(b"x"))
+        link = tarfile.TarInfo("src/copy.py")
+        link.type, link.linkname = tarfile.LNKTYPE, "eval/scorer.py"
+        packed.addfile(link)
+
+    with tarfile.open(strip_archive(archive, ["eval"], tmp_path / "agent.tgz")) as packed:
+        assert packed.getnames() == []
+
+
+def test_drop_paths_removes_the_sections_that_touch_a_hidden_path() -> None:
+    """A version's edit to a metric file is ignored; its other edits stay."""
+    patch = (
+        "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+        "diff --git a/eval/scorer.py b/eval/scorer.py\n--- a/eval/scorer.py\n+++ b/eval/scorer.py\n"
+        "@@ -1 +1 @@\n-a\n+b\n"
+    )
+
+    kept = drop_paths(patch, ["eval/scorer.py"])
+
+    assert patch_paths(kept) == ["src/app.py"]
+    assert drop_paths(patch, []) == patch
+    assert drop_paths("", ["eval"]) == ""
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [("diff.mnemonicPrefix", "true"), ("diff.noprefix", "true"), ("diff.srcPrefix", "z/")],
+)
+def test_git_config_in_the_checkout_cannot_change_the_patch_headers(tmp_path: Path, setting: str, value: str) -> None:
+    """The agent controls its checkout's git config, so a version always keeps ``a/``/``b/`` headers (SKY-353)."""
+    checkout = _unpacked(tmp_path, {"src/a.py": "x = 1\n", "eval/scorer.py": "a\n"})
+    subprocess.run(["git", "config", setting, value], cwd=checkout, check=True)
+    (checkout / "eval/scorer.py").write_text("b\n")
+
+    patch = version_patch(checkout)
+
+    assert patch.startswith("diff --git a/eval/scorer.py b/eval/scorer.py\n")
+    assert drop_paths(patch, ["eval/scorer.py"]) == ""
+
+
+_HUNK = "@@ -1 +1 @@\n-a\n+b\n"
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        "diff --git c/eval/scorer.py i/eval/scorer.py\n--- c/eval/scorer.py\n+++ i/eval/scorer.py\n" + _HUNK,
+        "diff --git a/src/a.py b/src/a.py\n--- c/eval/scorer.py\n+++ i/eval/scorer.py\n" + _HUNK,
+        "--- a/eval/scorer.py\n+++ b/eval/scorer.py\n" + _HUNK,
+        "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+        "--- a/eval/scorer.py\n+++ b/eval/scorer.py\n" + _HUNK,
+        "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1,2 +1,2 @@\n-x = 1\n?junk\n",
+    ],
+    ids=["other-prefixes", "other-file-lines", "no-git-header", "after-a-hunk", "corrupt-hunk"],
+)
+def test_a_header_that_cannot_be_read_is_refused(patch: str) -> None:
+    """``git apply`` would apply these, so a file header Skynet cannot read stops the version."""
+    kept = drop_paths(patch, ["eval/scorer.py"])
+
+    assert any("cannot read" in problem for problem in patch_violations(kept, ["."]))
+
+
+def test_header_like_lines_inside_a_hunk_are_allowed() -> None:
+    """A removed ``-- a/x`` line and an added ``++ b/x`` line look like headers but belong to the hunk."""
+    patch = (
+        "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n"
+        "@@ -1,2 +1,2 @@\n--- a/x\n+++ b/x\n \n\\ No newline at end of file\n"
+    )
+
+    assert patch_violations(patch, ["src"]) == []
+
+
+@pytest.mark.parametrize("breaker", ["\f", "\u2028", "\r"], ids=["form-feed", "line-separator", "lone-cr"])
+def test_a_line_break_python_knows_but_git_does_not_stays_inside_its_hunk_line(breaker: str) -> None:
+    """``git apply`` splits only on ``\\n``, so other line breaks must not shift the hunk count (SKY-353)."""
+    patch = (
+        "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n"
+        f"@@ -1,3 +1,3 @@\n-x = 1\n+x = 'A{breaker}B'\n y = 2\n-z = 3\n+++ b/eval/scorer.py\n"
+    )
+
+    assert patch_paths(patch) == ["src/a.py"]
+    assert patch_violations(patch, ["src"]) == []

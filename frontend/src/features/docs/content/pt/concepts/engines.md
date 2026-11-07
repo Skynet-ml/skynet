@@ -1,35 +1,27 @@
-Um motor é o método de busca que propõe novas versões do seu artefato. O Skynet tem seis motores nativos para artefatos de Prompt, Código e Texto, três otimizadores DSPy para programas DSPy e o **Auto**. Esta página explica o que cada um faz, quando escolhê-lo e quais configurações ele tem.
+Um motor é o método de busca que propõe novas versões do seu repositório. O Skynet tem seis motores nativos e o **Auto**. Todos os motores funcionam com repositórios. Esta página explica o que cada um faz, quando escolhê-lo e quais configurações ele tem.
 
-Leia primeiro [Como a otimização funciona](/docs/concepts/optimization) se você não souber quais motores servem para o seu artefato.
+Leia primeiro [Como a otimização funciona](/docs/concepts/optimization) se você não souber qual motor serve para a sua tarefa.
 
 ## Comparação rápida
 
-| Motor                 | Tipos de artefato     | Configurações do agente de programação | Configuração de máx. de iterações |
-| --------------------- | --------------------- | -------------------------------------- | --------------------------------- |
-| Auto                  | Todos                 | Sim, em Prompt, Código e Texto         | Não                               |
-| GEPA                  | Prompt, Código, Texto | Não                                    | Não                               |
-| Best-of-N             | Prompt, Código, Texto | Não                                    | Não                               |
-| AutoResearch          | Prompt, Código, Texto | Sim                                    | Não                               |
-| Meta-Harness          | Prompt, Código, Texto | Sim                                    | Sim                               |
-| AutoSaddler           | Prompt, Código, Texto | Sim                                    | Sim                               |
-| ShinkaEvolve          | Prompt, Código, Texto | Não. Tem a sua própria configuração de editor. | Sim                       |
-| DSPy GEPA             | Programa DSPy         | Não                                    | Não                               |
-| DSPy MIPROv2          | Programa DSPy         | Não                                    | Não                               |
-| DSPy BootstrapFewShot | Programa DSPy         | Não                                    | Não                               |
+| Motor        | Configurações do agente de programação          | Configuração de máx. de iterações |
+| ------------ | ---------------------------------------------- | --------------------------------- |
+| Auto         | Não                                            | Não                               |
+| GEPA         | Não                                            | Não                               |
+| Best-of-N    | Não                                            | Não                               |
+| AutoResearch | Sim                                            | Não                               |
+| Meta-Harness | Sim                                            | Sim                               |
+| AutoSaddler  | Sim                                            | Sim                               |
+| ShinkaEvolve | Não. Tem a sua própria configuração de editor. | Sim                               |
 
-O assistente marca o GEPA, o DSPy GEPA e o Auto como otimizadores que usam o texto de feedback da sua métrica.
+O assistente marca o GEPA e o Auto como otimizadores que usam o texto de feedback do seu avaliador.
 
 ## Auto
 
-O Auto é o padrão. O que ele executa depende do tipo de artefato:
+O Auto é o padrão para todas as execuções. Ele funciona em duas fases:
 
-- **Programa DSPy**: o Auto executa o DSPy GEPA.
-- **Prompt, Código ou Texto**: o Auto explora com cinco motores ao mesmo tempo: GEPA, AutoResearch, Meta-Harness, AutoSaddler e ShinkaEvolve. Cada motor recebe uma parte igual das execuções do avaliador: o orçamento dividido por 6. Depois o GEPA continua a partir da melhor versão com o resto do orçamento.
-
-O Auto não usa o Best-of-N.
-
-> [!WARNING]
-> Em um artefato de Prompt, Código ou Texto, o Auto precisa de pelo menos 6 execuções do avaliador: 5 linhas de exploração e uma continuação. Os cinco motores precisam estar disponíveis. Se um deles não estiver disponível, selecione um único motor.
+1. Ele explora com GEPA, AutoResearch, Meta-Harness, AutoSaddler e ShinkaEvolve.
+2. Ele continua o GEPA a partir da melhor versão que a exploração encontrou.
 
 **Escolha-o quando** você não sabe qual motor serve. Este é o melhor ponto de partida.
 
@@ -37,7 +29,7 @@ O Auto não usa o Best-of-N.
 
 "Evolução reflexiva com uma fronteira de Pareto de versões." O modelo de reflexão lê a pontuação e o feedback de cada caso e escreve uma versão melhor. O GEPA mantém uma fronteira de versões em que cada uma é a melhor em alguns casos.
 
-**Escolha-o quando** a sua métrica dá um feedback específico e você quer um único motor forte.
+**Escolha-o quando** o seu avaliador dá um feedback específico e você quer um único motor forte.
 
 ## Best-of-N
 
@@ -49,7 +41,7 @@ O Auto não usa o Best-of-N.
 
 Um agente de programação faz rodadas de pesquisa. Ele edita, pontua e mantém o que ajuda até o orçamento acabar.
 
-**Escolha-o quando** uma boa mudança exige várias etapas de investigação, por exemplo em um artefato de Código.
+**Escolha-o quando** uma boa mudança exige várias etapas de investigação.
 
 ## Meta-Harness
 
@@ -59,9 +51,9 @@ Um agente de programação propõe um lote de candidatos a cada iteração. Ele 
 
 ## AutoSaddler
 
-Um agente de programação lê o feedback da sua métrica e corrige a versão. O Skynet mantém apenas as correções que uma nova execução do avaliador confirma.
+Um agente de programação lê o feedback do seu avaliador e corrige a versão. O Skynet mantém apenas as correções que uma nova execução do avaliador confirma.
 
-**Escolha-o quando** o feedback da sua métrica aponta para defeitos claros e localizados.
+**Escolha-o quando** o feedback do seu avaliador aponta para defeitos claros e localizados.
 
 ## ShinkaEvolve
 
@@ -69,36 +61,26 @@ Um agente de programação lê o feedback da sua métrica e corrige a versão. O
 
 **Escolha-o quando** você quer uma exploração ampla e tem um orçamento maior.
 
-## Otimizadores DSPy
-
-| Otimizador            | O que faz                                                                                                                         |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| DSPy GEPA             | Lê o feedback da métrica e evolui as instruções de cada preditor.                                                                 |
-| DSPy MIPROv2          | Propõe instruções e demonstrações few-shot em conjunto e busca as combinações delas com otimização bayesiana.                     |
-| DSPy BootstrapFewShot | Coleta exemplos resolvidos que o programa acerta e os adiciona como demonstrações few-shot. Não usa um modelo de reflexão.         |
-
-O DSPy MIPROv2 e o DSPy BootstrapFewShot precisam de pares (casos com saídas esperadas).
-
 ## Configurações
 
 ### Orçamento
 
 | Configuração                   | Padrão     | Intervalo                                                    |
 | ------------------------------ | ---------- | ------------------------------------------------------------ |
-| Máx. de execuções do avaliador | 200        | 1 a 100000 (Auto: pelo menos 6)                              |
+| Máx. de execuções do avaliador | 200        | 1 a 100000                              |
 | Parar na pontuação             | Desativada | 0 ou mais                                                    |
 | Máx. de iterações              | Desativada | 1 a 1000. Apenas Meta-Harness, AutoSaddler e ShinkaEvolve.   |
 
-Uma execução do avaliador é uma chamada da sua métrica em um caso. A nova pontuação final da versão inicial e do vencedor não conta para **Máx. de execuções do avaliador**.
+Uma execução do avaliador é uma chamada do seu avaliador em um caso. A nova pontuação final da versão inicial e do vencedor não conta para **Máx. de execuções do avaliador**.
 
 ### Configurações do agente de programação
 
-Estas configurações valem para Auto, AutoResearch, Meta-Harness e AutoSaddler.
+Estas configurações valem para AutoResearch, Meta-Harness e AutoSaddler.
 
 | Configuração                                   | Padrão | Intervalo                                                |
 | ---------------------------------------------- | ------ | -------------------------------------------------------- |
 | Agente de programação                          | Codex  | Pi, Codex, OpenCode, Prime Agent, Comando personalizado  |
-| Candidatos por iteração                        | 3      | 1 a 8. Aparece para Auto e Meta-Harness.                 |
+| Candidatos por iteração                        | 3      | 1 a 8. |
 | Máx. de chamadas de ferramentas por candidato  | 100    | 1 a 1000                                                 |
 
 ### Configurações do ShinkaEvolve
@@ -113,8 +95,6 @@ Estas configurações valem para Auto, AutoResearch, Meta-Harness e AutoSaddler.
 | Tamanho do arquivo                                 | 40                                                                  |
 | Avaliações paralelas                               | 2                                                                   |
 | Propostas paralelas                                | 2                                                                   |
-
-Quando o Auto executa o ShinkaEvolve, o assistente mostra estas configurações como "Definições do ShinkaEvolve (quando o Auto o executa)".
 
 ## Páginas relacionadas
 

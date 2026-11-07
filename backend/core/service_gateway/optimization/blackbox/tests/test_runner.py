@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import io
 import json
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -607,3 +611,197 @@ def test_env_value_prefers_the_new_name_and_falls_back_to_the_legacy_one(monkeyp
     assert runner.env_value("APP_API_KEY") == "old"
     monkeypatch.setenv("APP_API_KEY", "new")
     assert runner.env_value("APP_API_KEY") == "new"
+
+
+def _answer_stage_calls(responses: Path, answers: dict[str, dict[str, Any]], sent: list[dict[str, Any]]) -> Any:
+    """Build a fake stdout that answers each stage frame the way the parent relay does.
+
+    Args:
+        responses: The folder the client polls for answers.
+        answers: The stage name to the answer the parent writes.
+        sent: Collects every frame the client sends.
+
+    Returns:
+        A writable stream to put in place of ``sys.__stdout__``.
+    """
+
+    class Relay(io.StringIO):
+        """Answer each complete frame line at once."""
+
+        def write(self, text: str) -> int:
+            """Record a frame and write its answer.
+
+            Args:
+                text: One frame, on its own line.
+
+            Returns:
+                The number of characters taken.
+            """
+            assert text.startswith("\nPFX:")
+            assert text.endswith("\n")
+            frame = json.loads(text.strip().removeprefix("PFX:"))
+            sent.append(frame)
+            (responses / f"{frame['id']}.json").write_text(json.dumps(answers[frame["stage"]]))
+            return len(text)
+
+    return Relay()
+
+
+def test_stage_call_returns_the_output_and_raises_stage_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``call`` sends one frame, returns the stage output, and turns a stage failure into ``StageError``."""
+    sent: list[dict[str, Any]] = []
+    answers = {"good": {"output": {"doubled": 4}}, "bad": {"error": "Stage 'bad' passed its 5s timeout."}}
+    monkeypatch.setattr(sys, "__stdout__", _answer_stage_calls(tmp_path, answers, sent))
+    client = runner.StageClient({"prefix": "PFX:", "response_dir": str(tmp_path), "names": ["good", "bad"]})
+    assert client("good", {"x": 2}) == {"doubled": 4}
+    assert sent[0]["stage"] == "good"
+    assert sent[0]["input"] == {"x": 2}
+    assert len(sent[0]["id"]) == 32
+    with pytest.raises(runner.StageError, match="timeout"):
+        client("bad", None)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_stage_call_with_an_unknown_name_sends_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unknown stage name fails at once with the run's stage names, and no frame leaves the box."""
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(sys, "__stdout__", _answer_stage_calls(tmp_path, {}, sent))
+    client = runner.StageClient({"prefix": "PFX:", "response_dir": str(tmp_path), "names": ["good"]})
+    with pytest.raises(runner.StageError, match=r"Unknown stage 'nope'.*good"):
+        client("nope", 1)
+    assert sent == []
+
+
+def test_stage_call_raises_the_budget_control(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A budget stop on the parent reaches the scorer as the gateway's control signal."""
+    answers = {"good": {"control": {"code": "budget_reached", "message": "spent"}}}
+    monkeypatch.setattr(sys, "__stdout__", _answer_stage_calls(tmp_path, answers, []))
+    client = runner.StageClient({"prefix": "PFX:", "response_dir": str(tmp_path), "names": ["good"]})
+    with pytest.raises(runner.GatewayControl):
+        client("good", 1)
+
+
+def test_a_run_without_stages_has_a_call_that_explains_itself() -> None:
+    """Scorer code that imports ``call`` still loads; calling it says the run has no stages."""
+    fn = load_scorer_from_code(
+        "from skynet import call, StageError\n"
+        "def score(c, case=None):\n"
+        "    try:\n"
+        "        call('x', 1)\n"
+        "    except StageError as error:\n"
+        "        return 0.0, str(error)\n",
+        helpers={runner.STAGE_HELPER_NAME: runner.missing_stage, runner.STAGE_ERROR_NAME: runner.StageError},
+    )
+    assert "no target stages" in fn("c")[1]
+
+
+@pytest.mark.parametrize(
+    ("source", "answer"),
+    [
+        ("def run(value):\n    return {'twice': value * 2}\n", {"output": {"twice": 6}}),
+        ("def run(value):\n    raise ValueError('bad input')\n", {"error": "ValueError: bad input"}),
+    ],
+)
+def test_stage_mode_runs_the_entry_function(tmp_path: Path, source: str, answer: dict[str, Any]) -> None:
+    """``--stage`` loads ``path:function`` from the tree and writes its output or its error."""
+    tree = tmp_path / "tree"
+    (tree / "pkg").mkdir(parents=True)
+    (tree / "pkg" / "stage.py").write_text(source)
+    call_dir = tmp_path / "calls" / "one"
+    call_dir.mkdir(parents=True)
+    (call_dir / runner.INPUT_FILE).write_text("3")
+    completed = subprocess.run(
+        [sys.executable, str(Path(runner.__file__)), runner.STAGE_FLAG, str(call_dir), "pkg/stage.py:run"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((call_dir / runner.OUTPUT_FILE).read_text()) == answer
+
+
+def test_service_proxy_relays_each_request_through_the_parent() -> None:
+    """A request to the loopback url becomes one relay message, and the parent's answer comes back unchanged."""
+
+    class Client:
+        """Answer each message the way the parent relay does."""
+
+        def __init__(self) -> None:
+            """Start with no messages."""
+            self.sent: list[dict[str, Any]] = []
+
+        def exchange(self, message: dict[str, Any]) -> dict[str, Any]:
+            """Record the message and answer it.
+
+            Args:
+                message: The request the proxy sends.
+
+            Returns:
+                A service response, or a refusal for the second service.
+            """
+            self.sent.append(message)
+            if message["service"] == "blocked one":
+                return {"status": 403, "error": "Service 'blocked one' is not listed for the [run] role."}
+            return {"status": 201, "headers": [["X-Upstream", "yes"]], "body": base64.b64encode(b"graded").decode()}
+
+    client = Client()
+    urls = runner.start_service_proxy(client, ["judge-api", "blocked one"])  # type: ignore[arg-type]
+    assert set(urls) == {"SKYNET_SERVICE_JUDGE_API_URL", "SKYNET_SERVICE_BLOCKED_ONE_URL"}
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(urls["SKYNET_SERVICE_JUDGE_API_URL"] + "v1/grade?x=1", data=b"hi", method="POST")
+    with opener.open(request) as response:
+        assert response.status == 201
+        assert response.headers["X-Upstream"] == "yes"
+        assert response.read() == b"graded"
+    [message] = client.sent
+    assert message["service"] == "judge-api"
+    assert message["path"] == "v1/grade?x=1"
+    assert message["method"] == "POST"
+    assert base64.b64decode(message["body"]) == b"hi"
+    with pytest.raises(urllib.error.HTTPError) as refused:
+        opener.open(urls["SKYNET_SERVICE_BLOCKED_ONE_URL"] + "x")
+    assert refused.value.code == 403
+    assert b"not listed for the [run] role" in refused.value.read()
+
+
+def test_service_proxy_decodes_a_chunked_body_and_sends_each_header_once() -> None:
+    """A chunked request body reaches the parent decoded, and the service's Date and Server come back once."""
+
+    class Client:
+        """Answer each message with the service's own Date and Server."""
+
+        def __init__(self) -> None:
+            """Start with no messages."""
+            self.sent: list[dict[str, Any]] = []
+
+        def exchange(self, message: dict[str, Any]) -> dict[str, Any]:
+            """Record the message and answer it.
+
+            Args:
+                message: The request the proxy sends.
+
+            Returns:
+                A service response with its own Date and Server headers.
+            """
+            self.sent.append(message)
+            headers = [["Date", "Mon, 02 Nov 2026 10:00:00 GMT"], ["Server", "judge"]]
+            return {"status": 200, "headers": headers, "body": base64.b64encode(b"ok").decode()}
+
+    client = Client()
+    url = urllib.parse.urlsplit(runner.start_service_proxy(client, ["judge"])["SKYNET_SERVICE_JUDGE_URL"])  # type: ignore[arg-type]
+    connection = http.client.HTTPConnection(url.hostname, url.port, timeout=10)
+    connection.putrequest("POST", url.path + "v1/grade")
+    connection.putheader("Transfer-Encoding", "chunked")
+    connection.endheaders()
+    for chunk in (b"hello ", b"chunked world"):
+        connection.send(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+    connection.send(b"0\r\nX-Trailer: 1\r\n\r\n")
+    response = connection.getresponse()
+    assert response.status == 200
+    assert response.read() == b"ok"
+    assert response.headers.get_all("Date") == ["Mon, 02 Nov 2026 10:00:00 GMT"]
+    assert response.headers.get_all("Server") == ["judge"]
+    connection.close()
+    [message] = client.sent
+    assert base64.b64decode(message["body"]) == b"hello chunked world"

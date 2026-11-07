@@ -57,9 +57,10 @@ test("run-page tabs: Guided drops Logs, Data, Code and Config but keeps the rest
 
 test("jobs columns: Guided keeps name, status, created and score", () => {
   const guided = jobsColumnGate("guided");
-  for (const key of ["name", "status", "created_at", "optimized_test_metric"]) assert.equal(guided(key), true, key);
-  for (const key of ["optimization_id", "optimization_type", "module_name", "dataset_rows", "elapsed_seconds"]) {
+  for (const key of ["name", "status", "created_at", "optimized_test_metric"])
+    assert.equal(guided(key), true, key);
+  for (const key of ["optimization_id", "elapsed_seconds"]) {
     assert.equal(guided(key), false, key);
   }
-  assert.equal(jobsColumnGate("standard")("module_name"), true);
+  assert.equal(jobsColumnGate("standard")("elapsed_seconds"), true);
 });

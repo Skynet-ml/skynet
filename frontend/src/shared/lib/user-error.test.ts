@@ -10,21 +10,24 @@ const stubs: Record<string, string> = {
   export const tI18n = (code, params) => known[code] ? known[code].replace("{n}", String(params?.n)) : code;`,
   "@/shared/lib/messages":
     "export const msg = (key, params) => `msg:${key}${params ? ' ' + JSON.stringify(params) : ''}`; export const formatMsg = (key) => `msg:${key}`;",
-  "@/shared/lib/agent-kickoff": "export const kickoffOpening = () => {};",
-  "@/shared/ui/agent/turn-stats": "export const parseTurnStats = () => null;",
   "@/shared/lib/report-error": "export const reportHandledError = () => {};",
   "@/shared/lib/account-missing": `export const ACCOUNT_MISSING_CODE = "auth.account_missing";
   export const announceAccountMissing = () => {}; export const isAccountMissingResponse = () => false;`,
-  "@/shared/lib/runtime-env": `export const getRuntimeEnv = () => ({ apiUrl: "http://api.test" });`,
+  "@/shared/lib/runtime-env": `export const getRuntimeEnv = () => ({ apiUrl: "http://api.test" });
+  export const isLocalMode = () => false;`,
+  "@/shared/hooks/use-linked-account": "export const wasLinked = () => false;",
   "@/shared/lib/runtime-locale": `export const getActiveLocale = () => "en";`,
   "@/shared/lib/sse": "export const readServerSentEvents = async () => {};",
-  "@/shared/lib/resumable-turn": "export const streamResumableTurn = async () => {};",
+  "@/shared/lib/oauth-return": "export const forgetOAuthReturn = () => {};",
 };
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier === "@/shared/lib/api") {
       return { shortCircuit: true, url: new URL("./api.ts", import.meta.url).href };
+    }
+    if (specifier === "@/shared/lib/api-route") {
+      return { shortCircuit: true, url: new URL("./api-route.ts", import.meta.url).href };
     }
     const source = stubs[specifier];
     if (source !== undefined) {

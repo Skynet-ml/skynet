@@ -45,7 +45,6 @@ Authorization: Bearer skyd_...
 | `GET /models`                                   | مدل‌هایی را که می‌توانید استفاده کنید فهرست می‌کند.          |
 | `GET /optimizers`                               | بهینه‌سازهایی را که با یک تنظیمات سازگارند فهرست می‌کند.     |
 | `GET /blackbox/engines`                         | موتورهای بومی و در دسترس بودن هر کدام را فهرست می‌کند.      |
-| `POST /optimize`                                | یک اجرا برای پرامپت، کد، متن یا برنامهٔ DSPy شروع می‌کند.   |
 | `POST /blackbox/run`                            | یک اجرا روی یک مخزن GitHub شروع می‌کند.                     |
 | `GET /optimizations`                            | اجراهای شما را فهرست می‌کند.                                |
 | `GET /optimizations/{optimization_id}`          | یک اجرا را برمی‌گرداند: وضعیت، پیشرفت، لاگ‌ها و نتیجه.      |
@@ -56,10 +55,10 @@ Authorization: Bearer skyd_...
 
 ## شروع یک اجرا
 
-`POST /optimize` همان تنظیماتی را می‌گیرد که ویزارد ارسال می‌گیرد. این مثال پرامپتی را بهتر می‌کند که پیام‌های پشتیبانی را در برچسب‌ها دسته‌بندی می‌کند.
+Skynet همان Optimize Anything است: هر اجرا یک مخزن را بهینه می‌کند. `POST /blackbox/run` همان تنظیماتی را می‌گیرد که ویزارد ارسال می‌گیرد. مثال این صفحه مخزنی را بهتر می‌کند که پیام‌های پشتیبانی را در برچسب‌ها دسته‌بندی می‌کند.
 
 ```bash tab="curl"
-curl https://api.skynetml.com/optimize \
+curl https://api.skynetml.com/blackbox/run \
   -H "Authorization: Bearer $SKYNET_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: support-labels-001" \
@@ -69,56 +68,62 @@ curl https://api.skynetml.com/optimize \
 ```json tab="run.json"
 {
   "name": "Support labels",
-  "task": {
-    "objective": "Sort each support message into billing, bug or other.",
-    "artifact": {
-      "kind": "prompt",
-      "starting_version": "Label this support message as billing, bug or other."
+  "objective": "Sort each support message into billing, bug or other.",
+  "recipe": "repo",
+  "target": {
+    "kind": "repo",
+    "repo": {
+      "provider": "github",
+      "repository": "your-org/support-labels",
+      "branch": "main",
+      "editable_paths": ["serve.py", "prompts/"]
     }
   },
-  "data": {
-    "mode": "pairs",
-    "cases": [
-      { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
-      { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
-      {
-        "input": { "message": "Do you have a Hebrew interface?" },
-        "expected": { "label": "other" }
-      }
-    ]
+  "cases": [
+    { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
+    { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
+    {
+      "input": { "message": "Do you have a Hebrew interface?" },
+      "expected": { "label": "other" }
+    }
+  ],
+  "input_fields": ["message"],
+  "expected_field": "label",
+  "scorer": {
+    "kind": "python",
+    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "model": { "name": "<model from GET /models>" }
   },
-  "optimizer": { "choice": "auto", "budget": { "max_scorer_runs": 200 } },
-  "models": {
-    "task_model": { "name": "<model from GET /models>" },
-    "reflection_model": { "name": "<model from GET /models>" }
-  },
-  "workspace": {
-    "run_code": "from skynet import llm\n\ndef run(artifact, input):\n    return llm(artifact, input=input[\"message\"])\n",
-    "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
-  },
+  "strategy": { "mode": "auto" },
+  "budget": { "max_scorer_runs": 200 },
+  "reflection_model_config": { "name": "<model from GET /models>" },
   "max_cost_cents": 500
 }
 ```
 
 فیلدهای مهم:
 
-- `task.artifact.kind` یکی از `prompt`، `code`، `text` یا `dspy_program` است.
-- `data.mode` یا `pairs` است (ورودی‌ها همراه با خروجی‌های مورد انتظار) یا `single` (دقیقاً یک مورد).
-- `optimizer.choice` یا `auto` است یا نام یکی از بهینه‌سازهای `GET /optimizers`.
+- `target.repo.repository` مخزن GitHub به شکل `owner/name` است. ابتدا GitHub را در **تنظیمات → اتصال‌دهنده‌ها** متصل کنید.
+- `target.repo.editable_paths` فایل‌ها و پوشه‌هایی را فهرست می‌کند که بهینه‌ساز اجازهٔ تغییرشان را دارد. `"."` یعنی کل مخزن.
+- `target.repo.commit` اختیاری است. یک SHA با ۴۰ نویسه است. بدون آن، Skynet از آخرین کامیت شاخه استفاده می‌کند.
+- `target.repo.secrets` اختیاری است. هر راز یک `name` و یک `value` دارد. این راز به‌صورت یک متغیر محیطی به کد و امتیازدهندهٔ شما می‌رسد.
+- `scorer.metric_code` تابع `score(repo_path, case)` را تعریف می‌کند. `scorer.model` مدلی است که کد و امتیازدهندهٔ شما می‌توانند از طریق دروازهٔ مدل فراخوانی کنند.
+- `strategy.mode` یا `auto` است (پیش‌فرض) یا `single`. با `single`، مقدار `strategy.engine` را روی نام یکی از موتورهای `GET /blackbox/engines` بگذارید.
 - `max_cost_cents` سقف هزینهٔ این اجرا به سنت آمریکاست.
 - `is_private` به‌طور پیش‌فرض `false` است. برای خصوصی نگه داشتن اجرا، آن را `true` کنید.
 
-برای قاعده‌های `run_code` و `metric_code`، [معیارها و امتیازدهنده‌ها](/docs/concepts/scorers) را بخوانید.
+برای قاعده‌های `metric_code`، [معیارها و امتیازدهنده‌ها](/docs/concepts/scorers) را بخوانید.
 
 ### پاسخ‌ها
 
 | وضعیت | معنی                                                                                                                                  |
 | ----- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `201` | Skynet اجرا را در صف قرار داد. بدنهٔ پاسخ شامل `optimization_id` و `status` است.                                                      |
+| `400` | هدف یک مخزن نیست، یا امتیازدهنده بارگذاری نمی‌شود.                                                                                      |
 | `202` | بررسی تنظیمات هنوز در حال اجراست. به تعداد ثانیه‌های سرآیند `Retry-After` صبر کنید. سپس همان بدنه را با همان `Idempotency-Key` بفرستید. |
 | `402` | موجودی شما کافی نیست.                                                                                                                 |
 | `409` | به یک سهمیه رسیده‌اید، یا بررسی تنظیمات قدیمی شده است.                                                                                 |
-| `422` | درخواست یا کد فضای کار با بهینه‌ساز سازگار نیست.                                                                                       |
+| `422` | درخواست با بهینه‌ساز سازگار نیست.                                                                                                     |
 
 > [!NOTE]
 > همیشه سرآیند `Idempotency-Key` را بفرستید. اگر همان درخواست را دوباره با همان کلید بفرستید، Skynet اجرای اول را برمی‌گرداند. اجرای دومی شروع نمی‌کند.
@@ -154,7 +159,7 @@ curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 
-برای اجرای بهترین نسخه روی یک ورودی جدید، `POST /serve/{optimization_id}` را بفرستید. برای معنی هر امتیاز، [نتیجه‌ها](/docs/guides/results) را بخوانید.
+برای اجرای بهترین نسخه روی یک ورودی جدید، `POST /serve/{optimization_id}` را همراه با سرآیند `Idempotency-Key` بفرستید. مخزن باید یک فایل `serve.py` با `def serve(input)` داشته باشد. برای درخواست، پاسخ و معنی هر امتیاز، [نتیجه‌ها](/docs/guides/results) را بخوانید.
 
 ## محدودیت‌ها
 

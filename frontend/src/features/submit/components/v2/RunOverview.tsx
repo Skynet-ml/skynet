@@ -39,7 +39,9 @@ import { tip } from "@/shared/lib/tooltips";
 import { cn } from "@/shared/lib/utils";
 import { readRewardSpec } from "@/shared/lib/reward";
 import type { ModelConfig } from "@/shared/types/api";
+import { HARDENING_SURVIVED, hardeningSurvived, type HardeningJob } from "@/shared/types/hardening";
 import type { ContractCheckState } from "../../hooks/use-contract-check";
+import { useWizardV2ShellOptional } from "../../hooks/use-unified-wizard";
 import { economyEligible } from "../../lib/model-config";
 import { aggregateTokenSource, runModels, storedMetricModel } from "../../lib/run-floor";
 import { metricUsesModel } from "../../lib/scorer-dependencies";
@@ -187,10 +189,13 @@ export function RunOverview({
   state,
   cc,
   guided,
+  hardening = null,
 }: {
   state: WizardV2State;
   cc: ContractCheckState;
   guided: boolean;
+  /** The setup's hardening job; a job that ended well adds its line under the check. */
+  hardening?: HardeningJob | null;
 }) {
   const t = (key: string, params?: Record<string, string | number>) => v2Msg(key, guided, params);
   const locale = getActiveIntlLocale();
@@ -297,6 +302,16 @@ export function RunOverview({
             <CheckStatus cc={cc} guided={guided} />
           )}
         </div>
+        {hardening && HARDENING_SURVIVED.has(hardening.status) && (
+          <p className="text-sm text-muted-foreground">
+            {hardeningSurvived(hardening) > 0
+              ? t("submit.v2.overview.hardening_survived", { n: fmt(hardeningSurvived(hardening)) })
+              : hardening.status === "budget_stop"
+                ? t("submit.v2.harden.budget", { k: hardening.round, m: hardening.fixed_count })
+                : t("submit.v2.harden.clean", { k: hardening.round })}
+          </p>
+        )}
+        <RunOnChoice />
       </header>
       <div
         role="tablist"
@@ -622,6 +637,72 @@ export function RunOverview({
           </AnimatePresence>
         </div>
       </motion.div>
+    </div>
+  );
+}
+
+/** Mac or Web for a linked Mac app's run; nothing anywhere else. */
+function RunOnChoice() {
+  const shell = useWizardV2ShellOptional();
+  // A Web choice stays visible after the link drops, so the user can see why and pick the Mac.
+  if (!shell || !(shell.hostedChoice || shell.runOn === "hosted")) return null;
+  const { runOn, setRunOn, hostedBlock, submitting, retryHostedCatalog } = shell;
+  const options = [
+    { source: "local", label: "submit.v2.run_on.mac", icon: Desktop },
+    { source: "hosted", label: "submit.v2.run_on.web", icon: Globe },
+  ] as const;
+  return (
+    <div className="space-y-1.5">
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <span id="run-on-label" className="text-xs font-medium text-muted-foreground">
+          {msg("submit.v2.run_on.label")}
+        </span>
+        <div
+          role="radiogroup"
+          aria-labelledby="run-on-label"
+          className="inline-flex gap-0.5 rounded-lg bg-secondary/50 p-0.5"
+        >
+          {options.map(({ source, label, icon: Icon }) => (
+            <button
+              key={source}
+              type="button"
+              role="radio"
+              aria-checked={runOn === source}
+              disabled={submitting}
+              onClick={() => setRunOn(source)}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-60",
+                runOn === source
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" aria-hidden />
+              {msg(label)}
+            </button>
+          ))}
+        </div>
+      </div>
+      {runOn === "hosted" &&
+        (hostedBlock && hostedBlock !== "submit.v2.run_on.blocked.catalog_loading" ? (
+          <p role="alert" className="flex flex-wrap items-start gap-1.5 text-xs text-destructive">
+            <Warning className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+            {msg(hostedBlock)}
+            {hostedBlock === "submit.v2.run_on.blocked.catalog_failed" && (
+              <button
+                type="button"
+                onClick={retryHostedCatalog}
+                className="font-medium underline underline-offset-2 hover:text-foreground"
+              >
+                {msg("submit.v2.run_on.retry")}
+              </button>
+            )}
+          </p>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            {msg(hostedBlock ?? "submit.v2.run_on.web_hint")}
+          </p>
+        ))}
     </div>
   );
 }

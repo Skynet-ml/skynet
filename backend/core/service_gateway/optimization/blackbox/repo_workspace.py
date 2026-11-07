@@ -15,16 +15,21 @@ from __future__ import annotations
 
 import json
 import logging
+import posixpath
 import shlex
 import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .repo_tree import MAX_PATCH_BYTES, archive_chunks, patch_violations
+from .repo_tree import MAX_PATCH_BYTES, archive_chunks, drop_paths, patch_violations
 from .sandbox import CommandResult, OutputSink, SandboxRuntime, SandboxSession, SandboxSpec
 
 logger = logging.getLogger(__name__)
+
+# The agent never sees the hidden files, so this reason does not name them,
+# and the scorer keeps it out of the rule judge's protected-path message.
+HIDDEN_CHANGED = "The metric files changed while the version ran."
 
 REPO_DIR = ".app-repo"
 BASE_DIR = f"{REPO_DIR}/base"
@@ -41,12 +46,18 @@ _PROBE_TIMEOUT_SECONDS = 120.0
 _PROBE_ATTEMPTS = 5
 _PROBE_OK = "app-network-closed"
 _HASH_TIMEOUT_SECONDS = 300.0
+# Linux caps one environment string at 128 KiB; a larger stage answer goes
+# through a file write and fresh stamps instead.
+_ANSWER_ENV_BYTES = 100_000
 # Fingerprints every file under the protected paths. It runs with ``-I`` so a
 # module the version drops into the checkout cannot shadow ``hashlib``; links
 # and special files are recorded rather than followed or opened. Besides the
 # contents it records each file's and folder's inode and change times: any
 # write, rename or link moves the change time, and only root can set it back,
 # so a file rewritten and then restored while the scorer runs still shows.
+# Given APP_ANSWER_PATH, it then writes APP_ANSWER there from inside the box:
+# unlike a Vercel file write, that moves no protected file's change time, so
+# a stage answer needs no fresh stamps after it.
 _HASH_PROTECTED = r"""
 import hashlib, json, os, sys
 
@@ -79,6 +90,12 @@ for top in sys.argv[1:]:
     elif os.path.lexists(top):
         found[os.path.normpath(top)] = digest(top)
         stamps[os.path.normpath(top)] = stamp(top)
+answer = os.environ.get("APP_ANSWER_PATH")
+if answer:
+    os.makedirs(os.path.dirname(answer), exist_ok=True)
+    with open(answer + ".tmp", "w", encoding="utf-8") as handle:
+        handle.write(os.environ["APP_ANSWER"])
+    os.replace(answer + ".tmp", answer)
 print(json.dumps({"files": found, "stamps": stamps}, sort_keys=True))
 """
 
@@ -174,6 +191,7 @@ class RepoWorkspace:
         setup_command: str | None,
         secrets: Mapping[str, str],
         protected_paths: Iterable[str] = (),
+        hidden_paths: Iterable[str] = (),
     ) -> None:
         """Bind a snapshot to a runtime without opening anything yet.
 
@@ -188,6 +206,10 @@ class RepoWorkspace:
             secrets: Environment the scorer receives; setup never does.
             protected_paths: Files and folders no version may change, even
                 inside an editable path.
+            hidden_paths: The metric files and exploit folder the agent never
+                sees. A version's edits to them are dropped, so every version
+                is scored with the base commit's metric, and they are
+                fingerprinted like the protected paths.
         """
         self._runtime = runtime
         self._spec = spec
@@ -195,6 +217,10 @@ class RepoWorkspace:
         self._editable = tuple(editable_paths)
         self._readonly = tuple(readonly_paths)
         self._protected = tuple(protected_paths)
+        self._hidden = tuple(posixpath.normpath(path) for path in hidden_paths)
+        # The version's code runs next to the metric, so it could rewrite the
+        # metric while it runs; the patch check alone never sees that (SKY-353).
+        self._watched = tuple(dict.fromkeys((*self._protected, *self._hidden)))
         self._setup = (setup_command or "").strip() or None
         self._secrets = dict(secrets)
         self._session: SandboxSession | None = None
@@ -301,27 +327,33 @@ class RepoWorkspace:
         moved = session.run(f"mv {WORK_DIR} {PREPARED_DIR}", timeout_seconds=_SETUP_TIMEOUT_SECONDS)
         if not moved.ok:
             raise RepoSetupError(f"The prepared repository could not be kept: {_tail(moved)}")
-        if self._protected:
+        if self._watched:
             baseline = self._fingerprint(session, PREPARED_DIR)
             if baseline is None:
                 raise RepoSetupError("The repository's protected files could not be fingerprinted.")
             self._protected_baseline = baseline[0]
 
-    def _fingerprint(self, session: SandboxSession, directory: str) -> tuple[dict[str, str], dict[str, str]] | None:
-        """Hash every file under the protected paths of one tree in the box.
+    def _fingerprint(
+        self, session: SandboxSession, directory: str, answer: tuple[str, str] | None = None
+    ) -> tuple[dict[str, str], dict[str, str]] | None:
+        """Hash every file under the protected and hidden paths of one tree in the box.
 
         Args:
             session: The box holding the tree.
             directory: The tree's folder, relative to the box.
+            answer: A path relative to the box and the text to write there
+                once the hashing is done, in the same command.
 
         Returns:
             Repository-relative path to digest, and path to inode and change
             times for every file and folder, or ``None`` when the hashing
             command failed or printed something unreadable.
         """
-        paths = " ".join(shlex.quote(path) for path in self._protected)
+        paths = " ".join(shlex.quote(path) for path in self._watched)
+        target = f'export APP_ANSWER_PATH="$PWD"/{shlex.quote(answer[0])} && ' if answer is not None else ""
         result = session.run(
-            f"cd {shlex.quote(directory)} && python3 -I -c {shlex.quote(_HASH_PROTECTED)} {paths}",
+            f"{target}cd {shlex.quote(directory)} && python3 -I -c {shlex.quote(_HASH_PROTECTED)} {paths}",
+            env={"APP_ANSWER": answer[1]} if answer is not None else None,
             timeout_seconds=_HASH_TIMEOUT_SECONDS,
         )
         if not result.ok:
@@ -361,13 +393,17 @@ class RepoWorkspace:
     def violations(self, patch: str) -> list[str]:
         """Explain how a version breaks the run's path rules, without touching the box.
 
+        Edits to hidden paths are not checked: :meth:`checkout` drops them.
+
         Args:
             patch: The version as a git patch against the snapshot.
 
         Returns:
             One reason per broken rule; empty when the version is allowed.
         """
-        return patch_violations(patch, self._editable, self._readonly, self._protected)
+        # The size limit applies to what the guest sent, not to what is left.
+        kept = patch if len(patch.encode("utf-8")) > MAX_PATCH_BYTES else drop_paths(patch, self._hidden)
+        return patch_violations(kept, self._editable, self._readonly, self._protected)
 
     def checkout(self, patch: str) -> Checkout:
         """Lay out one version on a copy of the prepared tree.
@@ -377,11 +413,13 @@ class RepoWorkspace:
 
         Returns:
             The checkout's path, relative to the box, or why the version is
-            not allowed or does not apply.
+            not allowed or does not apply. The base commit's metric files stay
+            in place whatever the version wrote to them.
         """
         problems = self.violations(patch)
         if problems:
             return Checkout(path=None, problems=tuple(problems), blocked=len(patch.encode("utf-8")) <= MAX_PATCH_BYTES)
+        patch = drop_paths(patch, self._hidden)
         with self._lock:
             self._stamps_before_run = None
             session = self.session()
@@ -406,7 +444,7 @@ class RepoWorkspace:
         Returns:
             Why the files could not be stamped, or ``None`` once they are.
         """
-        if not self._protected:
+        if not self._watched:
             return None
         with self._lock:
             before = self._fingerprint(self.session(), WORK_DIR)
@@ -420,22 +458,98 @@ class RepoWorkspace:
 
         The patch check only sees the files a version names; its code can
         still write to the judge's files while it runs. Contents are compared
-        with the prepared tree, and inodes and change times with the checkout
-        just before the run, so a write the code undoes before it exits still
-        counts. Call this after the scorer finishes and before its score is
+        with the prepared tree, and inodes and change times with the last
+        stamp, so a write the code undoes before it exits usually still
+        counts. One gap stays: a stage answer too large for the joined run
+        goes in by a file write and is stamped again, so a write the code
+        makes and undoes between that answer's check and its new stamp is
+        not seen. Call this after the scorer finishes and before its score is
         accepted.
 
         Returns:
             One reason per protected file added, changed or removed since
-            setup, or why they could not be checked; empty when untouched.
+            setup, one reason for any such hidden file, or why they could not
+            be checked; empty when untouched.
         """
-        if not self._protected:
+        if not self._watched:
             return ()
         with self._lock:
             current = self._fingerprint(self.session(), WORK_DIR)
             before = self._stamps_before_run
         if current is None or before is None:
             return ("The protected files could not be checked after the version ran.",)
+        return self._changes(current, before)
+
+    def answer(self, path: str, text: str) -> tuple[str, ...] | None:
+        """Check the protected files while the version runs, then write one stage answer into the box.
+
+        The check and the write share one box command, so the stamps taken
+        before the run stay valid; an answer too large for that is written
+        with a file write and the files are stamped again after it.
+
+        Args:
+            path: Where the scorer's ``call`` waits for the answer, relative to the box.
+            text: The answer.
+
+        Returns:
+            Like :meth:`protected_changes`, or ``None`` when the files could
+            not be checked or the answer could not be written.
+        """
+        with self._lock:
+            session = self.session()
+            before = self._stamps_before_run
+            if not self._watched:
+                return () if self._deliver(session, path, text) else None
+            if before is not None and len(text.encode("utf-8")) <= _ANSWER_ENV_BYTES:
+                current = self._fingerprint(session, WORK_DIR, answer=(path, text))
+                if current is not None:
+                    return self._changes(current, before)
+                # The version gets no score either way; the write only stops
+                # the scorer from waiting for its timeout.
+                self._deliver(session, path, text)
+                return None
+            current = self._fingerprint(session, WORK_DIR) if before is not None else None
+            if not self._deliver(session, path, text) or current is None or before is None:
+                return None
+            # The write moved every change time; only a write the version
+            # undoes before this point goes unseen, a lasting one still
+            # differs from the prepared tree.
+            after = self._fingerprint(session, WORK_DIR)
+            if after is None:
+                return None
+            self._stamps_before_run = after[1]
+            return self._changes(current, before)
+
+    @staticmethod
+    def _deliver(session: SandboxSession, path: str, text: str) -> bool:
+        """Write one stage answer with a file write.
+
+        Args:
+            session: The scorer's box.
+            path: Where the answer goes, relative to the box.
+            text: The answer.
+
+        Returns:
+            Whether the write succeeded.
+        """
+        try:
+            session.write_files({path: text})
+        except Exception as error:
+            logger.warning("A stage answer could not reach the scorer box: %s", error)
+            return False
+        return True
+
+    def _changes(self, current: tuple[dict[str, str], dict[str, str]], before: Mapping[str, str]) -> tuple[str, ...]:
+        """Compare one fingerprint with the prepared tree and the stamps taken before the run.
+
+        Args:
+            current: Digests and stamps from :meth:`_fingerprint`.
+            before: Stamps taken just before the version ran.
+
+        Returns:
+            One reason per protected file added, changed or removed, one
+            reason for any such hidden file; empty when untouched.
+        """
         files, stamps = current
         changed = {
             path
@@ -445,10 +559,16 @@ class RepoWorkspace:
         # A folder's times move whenever an entry in it is added or removed;
         # name the folder only when no file in it explains the change.
         changed = sorted(path for path in changed if not any(other.startswith(f"{path}/") for other in changed))
-        return tuple(
-            f"'{path}' is protected by the repository's optimize.toml ([paths] protected),"
-            " and the version's code changed it while it ran."
-            for path in changed
+        hidden = [path for path in changed if any(path == top or path.startswith(f"{top}/") for top in self._hidden)]
+        reasons = [HIDDEN_CHANGED] if hidden else []
+        return (
+            *reasons,
+            *(
+                f"'{path}' is protected by the repository's optimize.toml ([paths] protected),"
+                " and the version's code changed it while it ran."
+                for path in changed
+                if path not in hidden
+            ),
         )
 
     def close(self) -> None:

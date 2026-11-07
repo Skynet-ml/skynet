@@ -1,8 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import type { ReactNode } from "react";
+import { motion } from "framer-motion";
+import { type Brand, Curl, DSPy, Go, JavaScript, Python } from "@/shared/ui/brand-marks";
 import { Brain, CaretDown, Check } from "@/shared/ui/icons";
+import { Button } from "@/shared/ui/primitives/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/primitives/dropdown-menu";
 import { formatMsg } from "@/shared/lib/messages";
 import { effortLabel } from "@/shared/lib/model-efforts";
 
@@ -41,6 +49,14 @@ export function InfoCard({
   );
 }
 
+const LANG_MARKS: Partial<Record<string, Brand>> = {
+  curl: Curl,
+  python: Python,
+  javascript: JavaScript,
+  go: Go,
+  dspy: DSPy,
+};
+
 export function LangPicker<T extends string>({
   value,
   onChange,
@@ -50,72 +66,41 @@ export function LangPicker<T extends string>({
   onChange: (v: T) => void;
   labels: Record<T, string>;
 }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onClick = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("mousedown", onClick);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onClick);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
   const keys = Object.keys(labels) as T[];
+  const Mark = LANG_MARKS[value]?.Mark;
   return (
-    <div ref={ref} className="relative">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="-mx-1.5 -my-0.5 flex min-h-[44px] items-center gap-1 rounded-md px-1.5 py-0.5 font-semibold tracking-wide rtl:tracking-normal text-[var(--text-2)] transition-colors hover:bg-black/5 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 sm:min-h-0 [@media(hover:none)_and_(pointer:coarse)]:min-h-[44px]"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-      >
-        <span>{labels[value]}</span>
-        <CaretDown
-          className={`size-3 text-muted-foreground transition-transform duration-150 ${open ? "rotate-180" : ""}`}
-        />
-      </button>
-      <AnimatePresence>
-        {open && (
-          <motion.ul
-            role="listbox"
-            initial={{ opacity: 0, y: 4, scale: 0.96 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 4, scale: 0.96 }}
-            transition={{ duration: 0.12, ease: [0.16, 1, 0.3, 1] }}
-            className="absolute bottom-full mb-1.5 start-0 z-20 min-w-[120px] max-w-[min(220px,92vw)] rounded-lg border border-border-subtle bg-[#FAF6F0] dark:bg-[#40382d] shadow-[var(--shadow-float)] overflow-hidden py-1"
-          >
-            {keys.map((k) => (
-              <li key={k}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    onChange(k);
-                    setOpen(false);
-                  }}
-                  className={`flex min-h-[44px] w-full items-center justify-between px-3 py-1.5 text-start text-[0.6875rem] font-semibold tracking-wide rtl:tracking-normal transition-colors cursor-pointer ${k === value ? "bg-primary-fill/8 text-primary" : "text-[var(--text-2)] hover:bg-black/5"}`}
-                  role="option"
-                  aria-selected={k === value}
-                >
-                  <span>{labels[k]}</span>
-                  {k === value && <Check className="size-3" />}
-                </button>
-              </li>
-            ))}
-          </motion.ul>
-        )}
-      </AnimatePresence>
-    </div>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="xs"
+          className="group -ms-1.5 gap-1.5 px-1.5 text-xs font-medium tracking-normal text-foreground data-[state=open]:bg-accent [&_svg:not([class*='size-'])]:size-3.5"
+        >
+          {Mark && <Mark size={14} />}
+          {labels[value]}
+          <CaretDown
+            className="size-3 text-muted-foreground transition-transform duration-150 group-data-[state=open]:rotate-180"
+            aria-hidden="true"
+          />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-44">
+        {keys.map((k) => {
+          const ItemMark = LANG_MARKS[k]?.Mark;
+          return (
+            <DropdownMenuItem key={k} onSelect={() => onChange(k)} className="gap-2.5">
+              <span className="flex size-5 shrink-0 items-center justify-center">
+                {ItemMark && <ItemMark size={16} />}
+              </span>
+              <span className="flex-1">{labels[k]}</span>
+              {k === value && <Check className="size-4 text-primary" aria-hidden="true" />}
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
-
 function reasoningEffortLabel(value: string | null | undefined): string | null {
   if (!value) return null;
   return effortLabel(value.toLowerCase());

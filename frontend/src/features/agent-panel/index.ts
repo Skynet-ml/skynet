@@ -5,7 +5,7 @@ export { MinimizedPill } from "./components/MinimizedPill";
 export { ApprovalCard } from "./components/ApprovalCard";
 export { ToolCallRow } from "./components/ToolCallRow";
 export { SharedChatView } from "./components/SharedChatView";
-export { CodingCallRows } from "./components/CodeAuthoringActivity";
+export { shareLinkTypeLabel } from "./components/ShareChatDialog";
 export { ToolsCarousel } from "./components/ToolsCarousel";
 export { Carousel, CarouselNav } from "./components/Carousel";
 export { ToolHeader } from "./components/ToolHeader";
@@ -19,16 +19,25 @@ export { useTrustMode } from "./hooks/use-trust-mode";
 export {
   WizardStateProvider,
   extractWizardPatch,
+  useAgentFieldLock,
   useWizardStateOptional,
 } from "./hooks/use-wizard-state";
 export { isGeneralistAgentEnabled } from "./lib/feature-flag";
+export { lockedCodeFiles } from "./lib/wizard-write";
+export { SETUP_CHAT_KEY, flushSetupChat, legacySetupChatId } from "./lib/screen-agent";
 export {
   deleteConversation,
   getSharedConversation,
   listSharedConversations,
+  openSharedConversation,
   revokeConversationShare,
 } from "./lib/conversation-api";
-export type { SharedConversation, SharedConversationSummary } from "./lib/conversation-api";
+export type {
+  ShareLinkType,
+  SharedConversation,
+  SharedConversationSummary,
+  SharedItemOption,
+} from "./lib/conversation-api";
 export type {
   ApprovalResolvedPayload,
   ChatTurn,

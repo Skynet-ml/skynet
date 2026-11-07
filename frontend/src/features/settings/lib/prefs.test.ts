@@ -1,12 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  DEFAULT_PREFS,
-  PREF_KEYS,
-  agentSubscriptionFor,
-  parseAgentPreferencePatch,
-  readPref,
-} from "./prefs.ts";
+import { registerHooks } from "node:module";
+
+const unifiedRunUrl = new URL("../../../shared/types/unified-run.ts", import.meta.url).href;
+
+// prefs.ts imports unified-run through the "@/" alias, which node cannot resolve alone.
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier === "@/shared/types/unified-run") return { shortCircuit: true, url: unifiedRunUrl };
+    return nextResolve(specifier, context);
+  },
+});
+
+const { DEFAULT_PREFS, PREF_KEYS, parseAgentPreferencePatch, readPref } = await import("./prefs.ts");
 
 test("parseAgentPreferencePatch accepts the validated agent response envelope", () => {
   assert.deepEqual(
@@ -57,17 +63,25 @@ test("new optimizations default to Auto, the catalog's models and the wizard's o
   assert.equal(readPref("optimizerMaxRuns"), null);
 });
 
-test("a saved agent CLI pref that names Droid reads as no CLI", () => {
-  const store = new Map<string, string>([
-    [PREF_KEYS.agentSubscription, JSON.stringify({ generalist: "droid", code: "codex" })],
-  ]);
+test("a saved DSPy default engine reads as Auto; a repository engine stays", () => {
+  const store = new Map<string, string>();
   const g = globalThis as { window?: unknown };
-  const realWindow = g.window;
-  g.window = { localStorage: { getItem: (key: string) => store.get(key) ?? null } };
+  g.window = {
+    localStorage: {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => store.set(k, v),
+    },
+  };
   try {
-    assert.equal(agentSubscriptionFor("generalist"), null);
-    assert.equal(agentSubscriptionFor("code"), "codex");
+    for (const legacy of ["dspy_gepa", "dspy_miprov2", "dspy_bootstrap_fewshot"]) {
+      store.set(PREF_KEYS.optimizerEngine, JSON.stringify(legacy));
+      assert.equal(readPref("optimizerEngine"), "auto");
+    }
+    store.set(PREF_KEYS.optimizerEngine, JSON.stringify("shinka_evolve"));
+    assert.equal(readPref("optimizerEngine"), "shinka_evolve");
+    store.set(PREF_KEYS.optimizerEngine, JSON.stringify("unknown_engine"));
+    assert.equal(readPref("optimizerEngine"), "auto");
   } finally {
-    g.window = realWindow;
+    delete g.window;
   }
 });

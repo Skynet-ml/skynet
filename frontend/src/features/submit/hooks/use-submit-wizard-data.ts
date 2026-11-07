@@ -2,7 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getModelCallHolds } from "@/shared/lib/api";
-import { getModelCatalog, cachedCatalog } from "@/shared/lib/model-catalog";
+import type { ApiSource } from "@/shared/lib/api-route";
+import {
+  cachedCatalog,
+  cachedHostedCatalog,
+  getHostedModelCatalog,
+  getModelCatalog,
+} from "@/shared/lib/model-catalog";
 import type { ModelCatalogResponse, ModelConfig } from "@/shared/types/api";
 import { MAX_RECENT, RECENT_KEY } from "../constants";
 import { callHoldKey } from "../lib/run-floor";
@@ -76,27 +82,45 @@ export function useRecentModelConfigs() {
   return { recentConfigs, saveToRecent, clearRecentConfigs, removeRecentConfig };
 }
 
-export function useModelCatalog() {
-  const [catalog, setCatalog] = useState<ModelCatalogResponse | null>(cachedCatalog);
+/** The model catalog of the server the run goes to: the web's for a Remote run, else this server's. */
+export function useModelCatalog(source: ApiSource = "local") {
+  const pick = source === "hosted" ? cachedHostedCatalog : cachedCatalog;
+  const [loaded, setLoaded] = useState<{ source: ApiSource; catalog: ModelCatalogResponse } | null>(
+    () => {
+      const cached = pick();
+      return cached ? { source, catalog: cached } : null;
+    },
+  );
+  const catalog = loaded?.source === source ? loaded.catalog : pick();
+  // A failed catalog fetch tries again a few times; each source choice starts a new count.
+  const [retry, setRetry] = useState<{ source: ApiSource; n: number }>({ source, n: 0 });
+  const retries = retry.source === source ? retry.n : 0;
 
   useEffect(() => {
     if (catalog) return;
     let cancelled = false;
-    getModelCatalog()
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    (source === "hosted" ? getHostedModelCatalog() : getModelCatalog())
       .then((c) => {
-        if (!cancelled) setCatalog(c);
+        if (!cancelled) setLoaded({ source, catalog: c });
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled && retries < 3) timer = setTimeout(() => setRetry({ source, n: retries + 1 }), 2000);
+      });
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
-  }, [catalog]);
+  }, [catalog, source, retries]);
 
   return catalog;
 }
 
-const callHoldCache = new Map<string, number | null>();
-let boxHoldCache: number | null = null;
+// Hosted and local servers price calls on their own, so each source keeps its own cache.
+const holdCaches: Record<ApiSource, { calls: Map<string, number | null>; box: number | null }> = {
+  local: { calls: new Map(), box: null },
+  hosted: { calls: new Map(), box: null },
+};
 
 export interface ModelCallHolds {
   /** One call's hold per model, keyed by `callHoldKey`. */
@@ -114,6 +138,7 @@ export interface ModelCallHolds {
  */
 export function useModelCallHolds(
   models: ReadonlyArray<{ name: string; token_source?: "managed" | "byok" }>,
+  source: ApiSource = "local",
 ): ModelCallHolds {
   const wanted = [
     ...new Set(
@@ -127,9 +152,10 @@ export function useModelCallHolds(
   const [failed, setFailed] = useState<string | null>(null);
 
   useEffect(() => {
-    const missing = signature ? signature.split("\n").filter((key) => !callHoldCache.has(key)) : [];
+    const cache = holdCaches[source];
+    const missing = signature ? signature.split("\n").filter((key) => !cache.calls.has(key)) : [];
     // The box hold is the floor's base, so it loads even before any model is named.
-    if (missing.length === 0 && boxHoldCache !== null) return;
+    if (missing.length === 0 && cache.box !== null) return;
     const controller = new AbortController();
     const request = missing.map((key) => {
       const [source, ...name] = key.split(":");
@@ -138,30 +164,31 @@ export function useModelCallHolds(
         token_source: source === "byok" ? "byok" : "managed",
       } as const;
     });
-    getModelCallHolds(request, controller.signal)
+    getModelCallHolds(request, controller.signal, source)
       .then(({ holds, box_hold_cents }) => {
         for (const hold of holds)
-          callHoldCache.set(callHoldKey(hold.name, hold.token_source), hold.cents);
-        if (typeof box_hold_cents === "number") boxHoldCache = box_hold_cents;
+          cache.calls.set(callHoldKey(hold.name, hold.token_source), hold.cents);
+        if (typeof box_hold_cents === "number") cache.box = box_hold_cents;
         setLoaded((count) => count + 1);
       })
       .catch(() => {
-        if (!controller.signal.aborted) setFailed(signature);
+        if (!controller.signal.aborted) setFailed(`${source}\n${signature}`);
       });
     return () => controller.abort();
-  }, [signature]);
+  }, [signature, source]);
 
   return useMemo(() => {
+    const cache = holdCaches[source];
     const holds = new Map<string, number>();
     const keys = signature ? signature.split("\n") : [];
     for (const key of keys) {
-      const cents = callHoldCache.get(key);
+      const cents = cache.calls.get(key);
       if (typeof cents === "number") holds.set(key, cents);
     }
     const settled =
-      failed === signature ||
-      (boxHoldCache !== null && keys.every((key) => callHoldCache.has(key)));
-    return { holds, boxHoldCents: boxHoldCache, settled };
+      failed === `${source}\n${signature}` ||
+      (cache.box !== null && keys.every((key) => cache.calls.has(key)));
+    return { holds, boxHoldCents: cache.box, settled };
     // `loaded` re-reads the module cache once a fetch lands.
-  }, [signature, loaded, failed]);
+  }, [signature, source, loaded, failed]);
 }

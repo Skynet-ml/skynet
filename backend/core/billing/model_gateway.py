@@ -35,7 +35,16 @@ from .cli_dispatch import CliDispatcher
 from .credential_safety import scrub_model_config
 from .data_policy import data_policy_for
 from .dependency_lock import verify_dependency_lock
+from .env_connectors import (
+    CONNECTOR_ROUTES_KEY,
+    CONNECTORS,
+    CONNECTORS_KEY,
+    connector_endpoint,
+    require_connectors,
+    tool_meter,
+)
 from .mcp_broker import McpToolsBroker, _pinned_address, _PinnedTransport
+from .mcp_oauth_client import McpOAuthError, access_token, connected_server_url
 from .model_batch import BatchCollector
 from .model_dispatch import MODEL_ATTEMPT_HEADER, ModelHTTPResult, OpenRouterDispatcher
 from .openrouter_quotes import resolve_model_slug
@@ -236,6 +245,9 @@ class ModelGateway:
         self._parent_only: set[str] = set()
         self._sandbox: SandboxControl | None = None
         self._tools: McpToolsBroker | None = None
+        # Catalog connectors: each holds its own broker behind its own scoped token.
+        self._connectors: dict[str, McpToolsBroker] = {}
+        self._connector_tokens: dict[str, str] = {}
         self._evaluator: EvaluatorEndpoint | None = None
         self._packages: PackageBroker | None = None
         self._package_token = secrets.token_urlsafe(32)
@@ -304,7 +316,7 @@ class ModelGateway:
                 """Return state only to a token already bound to this spending authority."""
                 token = self.headers.get("Authorization", "").removeprefix("Bearer ")
                 if self._route() is None and not (
-                    (gateway._tools is not None and secrets.compare_digest(token, gateway._tool_token))
+                    gateway._tool_broker(token) is not None
                     or (gateway._evaluator is not None and secrets.compare_digest(token, gateway._evaluator_token))
                 ):
                     self._error(401, "unauthorized", "Unknown scoped model route.")
@@ -328,11 +340,8 @@ class ModelGateway:
                     self._capability_request(gateway._capability_refusal(self.path, token))
                     return
                 token = self.headers.get("Authorization", "").removeprefix("Bearer ")
-                is_tools = (
-                    self.path == "/v1/_mcp"
-                    and gateway._tools is not None
-                    and secrets.compare_digest(token, gateway._tool_token)
-                )
+                tools = gateway._tool_broker(token) if self.path == "/v1/_mcp" else None
+                is_tools = tools is not None
                 is_evaluator = (
                     self.path == "/v1/_evaluator"
                     and gateway._evaluator is not None
@@ -362,8 +371,8 @@ class ModelGateway:
                         if is_packages
                         else gateway._evaluator.dispatch(body)
                         if is_evaluator
-                        else gateway._tools.dispatch(body)
-                        if is_tools
+                        else tools.dispatch(body)
+                        if tools is not None
                         else route.dispatch(
                             self.path.removeprefix("/v1"),
                             body,
@@ -746,7 +755,8 @@ class ModelGateway:
                 return refusal
             body_bytes = json.dumps(dict(body)).encode()
             return self._capabilities[path](body_bytes, {name.lower(): value for name, value in headers.items()})
-        is_tools = self._tools is not None and secrets.compare_digest(token, self._tool_token)
+        tools = self._tool_broker(token)
+        is_tools = tools is not None
         is_evaluator = self._evaluator is not None and secrets.compare_digest(token, self._evaluator_token)
         is_packages = self._packages is not None and secrets.compare_digest(token, self._package_token)
         if route is None and not is_tools and not is_evaluator and not is_packages:
@@ -768,7 +778,7 @@ class ModelGateway:
         if is_tools:
             if path != "/v1/_mcp":
                 raise ValueError("The tool capability cannot dispatch models or sandbox commands.")
-            return self._tools.dispatch(body)
+            return tools.dispatch(body)
         try:
             response = route.dispatch(
                 path.removeprefix("/v1"),
@@ -781,6 +791,32 @@ class ModelGateway:
             raise
         self._observe(route, body, response)
         return response
+
+    def dispatch_route(
+        self, token: str, path: str, body: Mapping[str, Any], headers: Mapping[str, str]
+    ) -> ModelHTTPResult:
+        """Serve a model request from a parent box, which may reach only its model routes.
+
+        The parent's own boxes run untrusted repository code, so they get no
+        evaluator, package, tool, control or other capability, even when that
+        code learns one of their tokens. Refusing here, before the evaluator,
+        also keeps a version from calling back into the scorer that runs it.
+
+        Args:
+            token: Scoped model route credential registered by this parent.
+            path: Model protocol path.
+            body: Exact model request emitted by the box's SDK.
+            headers: Permitted protocol headers.
+
+        Returns:
+            Model response after authoritative admission and settlement.
+
+        Raises:
+            ValueError: When the token is not a model route or the path is a capability.
+        """
+        if token not in self._routes or path.startswith("/v1/_") or path in self._capabilities:
+            raise ValueError("A parent box reaches only its scoped model route.")
+        return self.dispatch_guest(token, path, body, headers)
 
     def observe_role(self, role: str, observer: Callable[[Mapping[str, Any]], None]) -> None:
         """Show every answered model call of one role to a parent-side observer.
@@ -808,6 +844,93 @@ class ModelGateway:
                 observer(body)
             except Exception:  # isolation boundary: an observer must never fail the model call it watched
                 logger.warning("A model-call observer failed.", exc_info=True)
+
+    def _tool_broker(self, token: str) -> McpToolsBroker | None:
+        """Find the tool roster a scoped token opens.
+
+        Args:
+            token: Bearer token from the guest request.
+
+        Returns:
+            The live MCP or connector broker for that token, or None.
+        """
+        if self._tools is not None and secrets.compare_digest(token, self._tool_token):
+            return self._tools
+        for connector_token, broker in list(self._connectors.items()):
+            if secrets.compare_digest(token, connector_token):
+                return broker
+        return None
+
+    def _connector_routes(
+        self,
+        names: Any,
+        *,
+        authorize_tool: Callable[[str, str, dict[str, Any]], bool] | None,
+        on_tool_event: Callable[[dict[str, Any]], None] | None,
+        allow_private: bool = False,
+    ) -> dict[str, dict[str, str]]:
+        """Open one parent-keyed broker for each requested connector.
+
+        A catalog connector gets a metered broker with Skynet's key. Any other
+        name must be the owner's OAuth MCP server connection; its broker adds
+        the owner's token on the parent and has no meter, because the owner's
+        account pays the service, as for BYOK.
+
+        Args:
+            names: Connector names from the run's tool list.
+            authorize_tool: Optional blocking approval gate for protected chat tools.
+            on_tool_event: Optional lifecycle event receiver for protected chat tools.
+            allow_private: Deployment opt-in for private MCP destinations.
+
+        Returns:
+            Each connector's scoped route: this gateway's URL and its own token.
+
+        Raises:
+            ValueError: When a connector is unknown, has no key in config, or its
+                OAuth connection needs a new sign-in.
+        """
+        if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+            raise ValueError("The connector list must be a list of connector names.")
+        catalog = require_connectors([name for name in names if name in CONNECTORS])
+        oauth_names = [name for name in dict.fromkeys(names) if name not in CONNECTORS]
+        oauth_urls: dict[str, str] = {}
+        for name in oauth_names:
+            url = connected_server_url(self.runtime.username, name)
+            if url is None:
+                raise McpOAuthError("mcp_connection.unknown_connector", 404, name=name)
+            oauth_urls[name] = url
+        routes: dict[str, dict[str, str]] = {}
+        for name, url in oauth_urls.items():
+            token = self._connector_tokens.get(name)
+            if token is None:
+                token = secrets.token_urlsafe(32)
+                self._connectors[token] = McpToolsBroker(
+                    url,
+                    token_source=lambda name=name: access_token(self.runtime.username, name),
+                    allow_private=allow_private,
+                    check_admission=self.runtime.check_admission,
+                    authorize_tool=authorize_tool,
+                    on_tool_event=on_tool_event,
+                )
+                self._connector_tokens[name] = token
+            routes[name] = {"url": self.url, "token": token}
+        for connector in catalog:
+            token = self._connector_tokens.get(connector.name)
+            if token is None:
+                url, headers = connector_endpoint(connector)
+                token = secrets.token_urlsafe(32)
+                self._connectors[token] = McpToolsBroker(
+                    url,
+                    headers=headers,
+                    tool_filter=list(connector.tools),
+                    check_admission=self.runtime.check_admission,
+                    authorize_tool=authorize_tool,
+                    on_tool_event=on_tool_event,
+                    meter=tool_meter(self.runtime, connector),
+                )
+                self._connector_tokens[connector.name] = token
+            routes[connector.name] = {"url": self.url, "token": token}
+        return routes
 
     def _budget_state(self) -> dict[str, Any]:
         """Expose only the owning run's state and mark replaced capabilities as fenced."""
@@ -860,6 +983,7 @@ class ModelGateway:
         for key in (
             "_skynet_target_route",
             "_skynet_tools_route",
+            CONNECTOR_ROUTES_KEY,
             "_skynet_evaluator_route",
             "_skynet_packages_route",
             "_budget_gateway_descriptor",
@@ -890,6 +1014,13 @@ class ModelGateway:
             )
             source["mcp_url"] = "https://scoped-tools.invalid/mcp"
             result["_skynet_tools_route"] = {"url": self.url, "token": self._tool_token}
+        if result.get(CONNECTORS_KEY):
+            result[CONNECTOR_ROUTES_KEY] = self._connector_routes(
+                result[CONNECTORS_KEY],
+                authorize_tool=authorize_tool,
+                on_tool_event=on_tool_event,
+                allow_private=allow_private_tools,
+            )
         if self._descriptor is not None:
             result["_budget_gateway_descriptor"] = {
                 key: value for key, value in self._descriptor.items() if key != PARENT_HOSTS_KEY
@@ -1094,5 +1225,7 @@ class ModelGateway:
             self._routes.clear()
             self._capabilities.clear()
             self._tools = None
+            self._connectors.clear()
+            self._connector_tokens.clear()
             self._evaluator = None
             self._packages = None

@@ -131,6 +131,27 @@ class _PinnedTransport(httpx.AsyncBaseTransport, httpx.BaseTransport):
         self.close()
 
 
+class ToolCall:
+    """Run one metered tool request and record whether it reached the provider."""
+
+    def __init__(self, run: Callable[[ToolCall], dict[str, Any]]) -> None:
+        """Bind the physical request that receives this call's progress record.
+
+        Args:
+            run: The broker request; it sets ``sent`` just before the remote tool call.
+        """
+        self.run = run
+        self.sent = False
+
+    def __call__(self) -> dict[str, Any]:
+        """Run the request once.
+
+        Returns:
+            The provider's tool result.
+        """
+        return self.run(self)
+
+
 class McpToolsBroker:
     """Expose only one parent-authorized MCP roster through a scoped guest capability."""
 
@@ -145,6 +166,9 @@ class McpToolsBroker:
         timeout_seconds: float = 30,
         authorize_tool: Callable[[str, str, dict[str, Any]], bool] | None = None,
         on_tool_event: Callable[[dict[str, Any]], None] | None = None,
+        headers: Mapping[str, str] | None = None,
+        meter: Callable[[str, Mapping[str, Any], ToolCall], dict[str, Any]] | None = None,
+        token_source: Callable[[], str] | None = None,
     ) -> None:
         """Retain endpoint credentials and resolve a permitted destination outside the guest.
 
@@ -157,11 +181,24 @@ class McpToolsBroker:
             timeout_seconds: Per-request timeout without tool-call retries.
             authorize_tool: Optional blocking approval gate for a live chat call.
             on_tool_event: Optional sink for tool lifecycle events.
+            headers: Optional parent-held credential headers, such as a provider API key header.
+            meter: Optional hook that pays for one tool call; it gets the tool name, the
+                arguments and the physical call, and returns the call's result. The call's
+                ``sent`` flag tells the hook whether the provider could have run the tool.
+            token_source: Optional parent-side source of a current OAuth access token. The
+                broker asks it before each request, so a refreshed token takes effect at
+                once, and adds it as a bearer header that the guest never sees.
         """
         self.url = url
         self.address = _pinned_address(url, allow_private)
-        self.headers = {"Authorization": auth_header} if auth_header else None
-        self._redactions = credential_fragments(auth_header, endpoint=url)
+        merged = {**({"Authorization": auth_header} if auth_header else {}), **dict(headers or {})}
+        self.headers = merged or None
+        fragments = set(credential_fragments(auth_header, endpoint=url))
+        for value in (headers or {}).values():
+            fragments.update(credential_fragments(value))
+        self._redactions = tuple(sorted(fragments, key=len, reverse=True))
+        self.meter = meter
+        self.token_source = token_source
         self.tool_filter = tuple(tool_filter) if tool_filter else None
         self.check_admission = check_admission
         self.timeout_seconds = timeout_seconds
@@ -186,13 +223,43 @@ class McpToolsBroker:
             transport=_PinnedTransport(self.url, self.address),
         )
 
-    async def _request(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
-        """Execute an original MCP operation over the same fresh-session semantics as ReAct."""
+    def _credentials(self) -> tuple[dict[str, str] | None, tuple[str, ...]]:
+        """Return the headers and redactions for one request, with a current OAuth token.
+
+        Returns:
+            The request headers and the secret fragments to redact from its result.
+        """
+        if self.token_source is None:
+            return self.headers, self._redactions
+        token = self.token_source()
+        headers = {**(self.headers or {}), "Authorization": f"Bearer {token}"}
+        fragments = set(self._redactions) | set(credential_fragments(token))
+        return headers, tuple(sorted(fragments, key=len, reverse=True))
+
+    async def _request(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+        call: ToolCall | None = None,
+        credentials: tuple[dict[str, str] | None, tuple[str, ...]] | None = None,
+    ) -> dict[str, Any]:
+        """Execute an original MCP operation over the same fresh-session semantics as ReAct.
+
+        Args:
+            method: Selected remote MCP operation.
+            params: Original call arguments with its already authorized tool name.
+            call: Optional metered call whose ``sent`` flag marks the remote tool request.
+            credentials: Request headers and redactions; defaults to the fixed ones.
+
+        Returns:
+            The redacted protocol result.
+        """
+        headers, redactions = credentials or (self.headers, self._redactions)
         self.check_admission()
         async with (
             streamablehttp_client(
                 self.url,
-                headers=self.headers,
+                headers=headers,
                 timeout=self.timeout_seconds,
                 sse_read_timeout=self.timeout_seconds,
                 httpx_client_factory=self._client_factory,
@@ -204,10 +271,12 @@ class McpToolsBroker:
             if method == "tools/list":
                 result = await session.list_tools()
             else:
+                if call is not None:
+                    call.sent = True
                 result = await session.call_tool(params["name"], arguments=dict(params.get("arguments") or {}))
             return redact_secret_value(
                 result.model_dump(mode="json", by_alias=True, exclude_none=True),
-                self._redactions,
+                redactions,
             )
 
     def _list(self) -> dict[str, Any]:
@@ -224,18 +293,22 @@ class McpToolsBroker:
             result.pop("nextCursor", None)
             return result
 
-    def _run_request(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
+    def _run_request(self, method: str, params: Mapping[str, Any], call: ToolCall | None = None) -> dict[str, Any]:
         """Preserve typed admission stops through the MCP SDK's task-group cleanup.
 
         Args:
             method: Selected remote MCP operation.
             params: Original call arguments with its already authorized tool name.
+            call: Optional metered call whose ``sent`` flag marks the remote tool request.
 
         Returns:
             The actual protocol result from the selected endpoint.
         """
+        # The token lookup runs before the event loop so a refresh or reauth
+        # error keeps its own safe message instead of the generic one below.
+        credentials = self._credentials()
         try:
-            return asyncio.run(self._request(method, params))
+            return asyncio.run(self._request(method, params, call, credentials))
         except BaseExceptionGroup as error:
             pending: list[BaseException] = [error]
             leaves = []
@@ -293,7 +366,12 @@ class McpToolsBroker:
             approved = self.authorize_tool is None or self.authorize_tool(call_id, tool_name, arguments)
             if approved:
                 try:
-                    result = self._run_request(method, params)
+                    if self.meter is None:
+                        result = self._run_request(method, params)
+                    else:
+                        result = self.meter(
+                            tool_name, arguments, ToolCall(lambda call: self._run_request(method, params, call))
+                        )
                 except Exception as error:
                     if self.on_tool_event is not None:
                         self.on_tool_event(

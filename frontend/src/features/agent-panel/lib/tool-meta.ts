@@ -4,7 +4,6 @@ import {
   ChartBar,
   Check,
   CheckCircle,
-  Code,
   Copy,
   Database,
   FadersHorizontal,
@@ -115,16 +114,6 @@ export const TOOL_META: Record<string, ToolMetaDef> = {
     confirmLabel: () => msg("auto.features.agent.panel.lib.tool.meta.literal.12"),
     severity: "info",
     icon: PushPin,
-  },
-  edit_code_optimizations_edit_code_post: {
-    title: () => msg("auto.features.agent.panel.lib.tool.meta.literal.18"),
-    description: () => formatMsg("auto.features.agent.panel.lib.tool.meta.template.14", {
-      p1: TERMS.signature,
-      p2: TERMS.metric,
-    }),
-    confirmLabel: () => msg("auto.features.agent.panel.lib.tool.meta.literal.19"),
-    severity: "info",
-    icon: Code,
   },
   validate_code_validate_code_post: {
     title: () => msg("auto.features.agent.panel.lib.tool.meta.literal.20"),
@@ -264,6 +253,13 @@ export const TOOL_META: Record<string, ToolMetaDef> = {
     severity: "info",
     icon: Database,
   },
+  create_github_repository_connectors_github_repos_post: {
+    title: () => msg("agent.tool.github_create_repo.title"),
+    description: () => msg("agent.tool.github_create_repo.description"),
+    confirmLabel: () => msg("agent.tool.github_create_repo.confirm"),
+    severity: "warning",
+    icon: Sparkle,
+  },
   pause_job_optimizations: {
     title: () => formatMsg("agent.tool.pause_job.title", { p1: TERMS.optimization }),
     description: () => msg("agent.tool.pause_job.description"),
@@ -367,8 +363,13 @@ const TOOL_TITLES: Record<string, LocaleString> = {
   web_search: () => msg("agent.tool.web_search.title"),
   search_docs: () => msg("agent.tool.search_docs.title"),
   fetch_url: () => msg("agent.tool.fetch_url.title"),
+  hand_off_to_coding_agent: () => msg("agent.tool.coding_agent.title"),
+  read_repo_file: () => msg("agent.tool.read_repo_file.title"),
+  list_repo_folder: () => msg("agent.tool.list_repo_folder.title"),
   crawl_site: () => msg("agent.tool.crawl_site.title"),
   blackbox_engines_blackbox_engines_get: () => msg("agent.tool.blackbox_engines.title"),
+  optimizer_catalog_optimizers_get: () => msg("agent.tool.optimizers.title"),
+  list_github_repositories_connectors_github_repos_get: () => msg("agent.tool.github_repos.title"),
   serve_info_serve: () => msg("auto.features.agent.panel.lib.tool.meta.literal.74"),
   serve_pair_info_serve: () => msg("auto.features.agent.panel.lib.tool.meta.literal.75"),
   request_user_dataset_datasets_request_upload_post: () => msg(
@@ -380,6 +381,10 @@ const TOOL_TITLES: Record<string, LocaleString> = {
   list_settings: () => msg("agent.tool.list_settings.title"),
   get_setting: () => msg("agent.tool.get_setting.title"),
   open_page: () => msg("agent.tool.open_page.title"),
+  remember_for_later: () => msg("agent.note.title"),
+  continue_to_next_screen: () => msg("agent.screen_nav.continued"),
+  go_back_to_screen: () => msg("agent.screen_nav.back_running"),
+  turn_check: () => msg("agent.turn_check.title"),
 };
 
 function prettifyToolName(tool: string): string {

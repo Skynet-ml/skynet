@@ -45,7 +45,6 @@ The reference reads the OpenAPI document at `https://api.skynetml.com/openapi.pu
 | `GET /models`                                   | Lists the models you can use.                          |
 | `GET /optimizers`                               | Lists the optimizers that fit a setup.                 |
 | `GET /blackbox/engines`                         | Lists the native engines and if each one is available. |
-| `POST /optimize`                                | Starts a run for a prompt, code, text or DSPy program. |
 | `POST /blackbox/run`                            | Starts a run on a GitHub repository.                   |
 | `GET /optimizations`                            | Lists your runs.                                       |
 | `GET /optimizations/{optimization_id}`          | Returns one run: status, progress, logs and result.    |
@@ -56,10 +55,10 @@ The reference reads the OpenAPI document at `https://api.skynetml.com/openapi.pu
 
 ## Start a run
 
-`POST /optimize` takes the same setup as the submit wizard. This example improves a prompt that sorts support messages into labels.
+Skynet is Optimize Anything: every run optimizes a repository. `POST /blackbox/run` takes the same setup as the submit wizard. The example improves a repository that sorts support messages into labels.
 
 ```bash tab="curl"
-curl https://api.skynetml.com/optimize \
+curl https://api.skynetml.com/blackbox/run \
   -H "Authorization: Bearer $SKYNET_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: support-labels-001" \
@@ -69,56 +68,62 @@ curl https://api.skynetml.com/optimize \
 ```json tab="run.json"
 {
   "name": "Support labels",
-  "task": {
-    "objective": "Sort each support message into billing, bug or other.",
-    "artifact": {
-      "kind": "prompt",
-      "starting_version": "Label this support message as billing, bug or other."
+  "objective": "Sort each support message into billing, bug or other.",
+  "recipe": "repo",
+  "target": {
+    "kind": "repo",
+    "repo": {
+      "provider": "github",
+      "repository": "your-org/support-labels",
+      "branch": "main",
+      "editable_paths": ["serve.py", "prompts/"]
     }
   },
-  "data": {
-    "mode": "pairs",
-    "cases": [
-      { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
-      { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
-      {
-        "input": { "message": "Do you have a Hebrew interface?" },
-        "expected": { "label": "other" }
-      }
-    ]
+  "cases": [
+    { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
+    { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
+    {
+      "input": { "message": "Do you have a Hebrew interface?" },
+      "expected": { "label": "other" }
+    }
+  ],
+  "input_fields": ["message"],
+  "expected_field": "label",
+  "scorer": {
+    "kind": "python",
+    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "model": { "name": "<model from GET /models>" }
   },
-  "optimizer": { "choice": "auto", "budget": { "max_scorer_runs": 200 } },
-  "models": {
-    "task_model": { "name": "<model from GET /models>" },
-    "reflection_model": { "name": "<model from GET /models>" }
-  },
-  "workspace": {
-    "run_code": "from skynet import llm\n\ndef run(artifact, input):\n    return llm(artifact, input=input[\"message\"])\n",
-    "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
-  },
+  "strategy": { "mode": "auto" },
+  "budget": { "max_scorer_runs": 200 },
+  "reflection_model_config": { "name": "<model from GET /models>" },
   "max_cost_cents": 500
 }
 ```
 
 Important fields:
 
-- `task.artifact.kind` is `prompt`, `code`, `text` or `dspy_program`.
-- `data.mode` is `pairs` (inputs with expected outputs) or `single` (exactly one case).
-- `optimizer.choice` is `auto` or one optimizer name from `GET /optimizers`.
+- `target.repo.repository` is the GitHub repository as `owner/name`. Connect GitHub in **Settings → Connectors** first.
+- `target.repo.editable_paths` lists the files and folders that the optimizer may change. `"."` means the whole repository.
+- `target.repo.commit` is optional. It is a 40-character SHA. Without it, Skynet uses the latest commit on the branch.
+- `target.repo.secrets` is optional. Each secret has a `name` and a `value`. It reaches your code and your scorer as an environment variable.
+- `scorer.metric_code` defines `score(repo_path, case)`. `scorer.model` is the model that your code and your scorer can call through the model gateway.
+- `strategy.mode` is `auto` (the default) or `single`. With `single`, set `strategy.engine` to one engine name from `GET /blackbox/engines`.
 - `max_cost_cents` is the spending limit for this run, in US cents.
 - `is_private` is `false` by default. Set it to `true` to keep the run private.
 
-Read [Metrics and scorers](/docs/concepts/scorers) for the rules of `run_code` and `metric_code`.
+Read [Metrics and scorers](/docs/concepts/scorers) for the rules of `metric_code`.
 
 ### Responses
 
 | Status | Meaning                                                                                                                                      |
 | ------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `201`  | Skynet queued the run. The body has `optimization_id` and `status`.                                                                          |
+| `400`  | The target is not a repository, or the scorer does not load.                                                                                |
 | `202`  | The setup check is still running. Wait for the seconds in the `Retry-After` header. Then send the same body with the same `Idempotency-Key`. |
 | `402`  | Your balance is too low.                                                                                                                     |
 | `409`  | You reached a quota, or the setup check is out of date.                                                                                      |
-| `422`  | The request or the workspace code does not fit the optimizer.                                                                                |
+| `422`  | The request does not fit the optimizer.                                                                                                      |
 
 > [!NOTE]
 > Always send an `Idempotency-Key` header. If you send the same request again with the same key, Skynet returns the first run. It does not start a second run.
@@ -154,7 +159,7 @@ curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 
-To run the best version on a new input, send `POST /serve/{optimization_id}`. Read [Results](/docs/guides/results) for what each score means.
+To run the best version on a new input, send `POST /serve/{optimization_id}` with an `Idempotency-Key` header. The repository must have a `serve.py` file with `def serve(input)`. Read [Results](/docs/guides/results) for the request, the response and what each score means.
 
 ## Limits
 

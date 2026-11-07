@@ -13,6 +13,7 @@ import { inputsIssue } from "./inputs-mode";
 import {
   WIZARD_V2_STEPS,
   contractSnapshot,
+  optimizerTarget,
   taskIssue,
   type WizardStepId,
   type WizardV2State,
@@ -25,7 +26,7 @@ export const hasModel = (config: ModelConfig | null | undefined): config is Mode
 function catalogOption(state: WizardV2State, catalog: OptimizerCatalogResponse | null) {
   if (
     !catalog ||
-    catalog.artifact_kind !== state.task.artifactKind ||
+    catalog.artifact_kind !== optimizerTarget(state.task) ||
     catalog.data_mode !== state.inputs.mode
   )
     return undefined;
@@ -43,8 +44,8 @@ export function computeStepIssue(
     case "task":
       return taskIssue(task);
     case "inputs": {
-      // A repository run is scored on its checkout and takes no inputs.
-      if (task.repo) return null;
+      // A repository run takes inputs only when the interview found it needs them.
+      if (task.repo && !task.needsData) return null;
       const caseCount =
         inputs.cases.length > 0 ? inputs.cases.length : inputs.stagedDatasetId ? inputs.rowCount : 0;
       return inputsIssue({
@@ -56,16 +57,14 @@ export function computeStepIssue(
       });
     }
     case "optimizer": {
-      const kind = task.artifactKind;
+      const kind = optimizerTarget(task);
       if (!kind || !inputs.mode) return "submit.v2.optimizer.needs_setup";
-      // Auto has no repository strategy; every named engine edits a checkout.
-      if (task.repo && optimizer.choice === "auto") return "submit.v2.optimizer.issue.choice";
       if (!optimizersFor(kind, inputs.mode).includes(optimizer.choice))
         return "submit.v2.optimizer.issue.choice";
       const option = catalogOption(state, catalog);
       if (option === null) return "submit.v2.optimizer.issue.choice";
       if (option && !option.available) return "submit.v2.optimizer.issue.unavailable";
-      if (kind === "dspy_program" && !hasModel(optimizer.taskModel))
+      if (!task.repo && !hasModel(optimizer.taskModel))
         return "submit.v2.optimizer.models.task.required";
       if (!hasModel(optimizer.reflectionModel))
         return "submit.v2.optimizer.models.reflection.required";

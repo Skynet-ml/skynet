@@ -560,6 +560,21 @@ class Settings(BaseSettings):
         alias="FIRECRAWL_API_KEY",
         description="Firecrawl API key. When set, the wizard agent gets web_search, fetch_url and crawl_site tools so it can search the web and read links the user gives it. Unset leaves the agent without web access.",
     )
+    google_maps_api_key: SecretStr | None = Field(
+        default=None,
+        alias="GOOGLE_MAPS_API_KEY",
+        description="Google Maps Platform key with the Maps Grounding Lite API enabled. When set, runs can use the `maps` connector; the parent gateway holds the key and meters each call. Unset leaves the connector unavailable.",
+    )
+    browserbase_api_key: SecretStr | None = Field(
+        default=None,
+        alias="BROWSERBASE_API_KEY",
+        description="Browserbase API key. When set, runs can use the `browser` connector; the parent gateway holds the key and meters each call. Unset leaves the connector unavailable.",
+    )
+    browserbase_project_id: str | None = Field(
+        default=None,
+        alias="BROWSERBASE_PROJECT_ID",
+        description="Optional Browserbase project ID sent with the `browser` connector's requests.",
+    )
     # Every *_CENTS variable still reads its pre-rename *_CREDITS name so existing deployments keep their values.
     openrouter_balance_floor_cents: int = Field(
         default=1000,
@@ -1110,17 +1125,24 @@ class Settings(BaseSettings):
     rule_watch_model: str = Field(
         default="",
         description=(
-            "Model id of the fast judge that watches a repository run's recent "
-            "actions against its plain-language rules. Empty follows the model "
-            "catalog's best-value default."
+            "Model id of the watch hook that reads a repository run's recent "
+            "steps against its intent and plain-language rules. Empty follows "
+            "the model catalog's best-value default. A run may name its own."
         ),
     )
-    rule_judge_model: str = Field(
-        default="",
+
+    # The watch hook defaults (SKY-349); a run's own setting overrides them.
+    rule_watch_enabled: bool = Field(
+        default=False,
+        description="Whether a repository run's watch hook is on when the run does not say.",
+    )
+    rule_watch_threshold: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
         description=(
-            "Model id of the judge that reads each repository version's full diff "
-            "against its plain-language rules before it is scored. Empty follows "
-            "the model catalog's strongest model."
+            "Lowest confidence at which a watch hook verdict other than ok "
+            "warns the agent, when the run does not set its own."
         ),
     )
 
@@ -1614,6 +1636,21 @@ class Settings(BaseSettings):
         """
         if self.local_mode and self.byok_vault_key is None and self.local_state_dir:
             self.byok_vault_key = SecretStr(load_or_create_vault_key(self.local_state_dir))
+        return self
+
+    @model_validator(mode="after")
+    def _local_mcp_url(self) -> Settings:
+        """Serve the remote MCP server on the Mac app's own loopback port.
+
+        The internal agent already uses ``/mcp`` on this host, so the local
+        server takes ``/remote-mcp``. An explicit ``MCP_RESOURCE_URL`` wins.
+
+        Returns:
+            The settings instance, with ``mcp_resource_url`` set in local mode
+            when a state directory is configured.
+        """
+        if self.local_mode and not self.mcp_resource_url.strip() and self.local_state_dir:
+            self.mcp_resource_url = f"http://{self.api_host}:{self.port}/remote-mcp"
         return self
 
     @property

@@ -15,7 +15,7 @@ registerHooks({
 });
 
 const { OPTIMIZER_SOURCES, optimizerSources } = await import("./optimizer-sources.ts");
-const { BLACKBOX_OPTIMIZERS, DSPY_OPTIMIZERS } = await import("@/shared/types/unified-run");
+const { BLACKBOX_OPTIMIZERS } = await import("@/shared/types/unified-run");
 
 const ARXIV_ABS = /^https:\/\/arxiv\.org\/abs\/\d{4}\.\d{4,5}$/;
 const GITHUB_REPO = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/;
@@ -31,16 +31,13 @@ void test("every paper is an arXiv abstract page and every repo a GitHub repo ro
 });
 
 void test("only real optimizer choices carry sources", () => {
-  const known = new Set<string>([...DSPY_OPTIMIZERS, ...BLACKBOX_OPTIMIZERS]);
+  const known = new Set<string>(BLACKBOX_OPTIMIZERS);
   for (const id of Object.keys(OPTIMIZER_SOURCES)) assert.ok(known.has(id), `unknown optimizer ${id}`);
 });
 
 void test("each optimizer links its verified primary source", () => {
   const urls = (id: Parameters<typeof optimizerSources>[0]) => optimizerSources(id).map((s) => s.url);
   assert.deepEqual(urls("gepa"), ["https://arxiv.org/abs/2507.19457"]);
-  assert.deepEqual(urls("dspy_gepa"), ["https://arxiv.org/abs/2507.19457"]);
-  assert.deepEqual(urls("dspy_miprov2"), ["https://arxiv.org/abs/2406.11695"]);
-  assert.deepEqual(urls("dspy_bootstrap_fewshot"), ["https://arxiv.org/abs/2310.03714"]);
   assert.deepEqual(urls("meta_harness"), ["https://arxiv.org/abs/2603.28052"]);
   assert.deepEqual(urls("autosaddler"), ["https://arxiv.org/abs/2608.23041"]);
   assert.deepEqual(urls("shinka_evolve"), ["https://arxiv.org/abs/2509.19349"]);

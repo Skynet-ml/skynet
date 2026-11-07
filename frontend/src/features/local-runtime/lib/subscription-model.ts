@@ -158,6 +158,9 @@ export function catalogValueMatchesSlug(value: string, slug: string): boolean {
 /**
  * The picker list for a CLI: its slugs, enriched with catalog metadata where
  * the catalog knows the model. The saved name is always the CLI's own slug.
+ * Each model takes the levels the CLI takes for it (`cli.efforts`, from the
+ * backend's one table), not the catalog's, so no picker offers a level the CLI
+ * cannot run. A model with no levels takes no effort.
  */
 export function subscriptionCatalogModels(
   cli: CliStatus | undefined,
@@ -166,14 +169,21 @@ export function subscriptionCatalogModels(
   if (!cli) return [];
   return cli.models.map((slug) => {
     const hit = catalog?.find((model) => catalogValueMatchesSlug(model.value, slug));
-    if (hit) return { ...hit, value: slug, available: true };
+    const efforts = [...(cli.efforts?.[slug] ?? [])];
     return {
+      ...(hit ?? {
+        label: slug.split("/").pop() || slug,
+        provider: slug.includes("/") ? slug.slice(0, slug.indexOf("/")) : cli.id,
+        supports_vision: false,
+      }),
       value: slug,
-      label: slug.split("/").pop() || slug,
-      provider: slug.includes("/") ? slug.slice(0, slug.indexOf("/")) : cli.id,
-      supports_thinking: false,
-      supports_vision: false,
       available: true,
+      supports_thinking: efforts.length > 0,
+      reasoning_efforts: efforts,
+      // An unpicked call sends no effort, so the CLI's own default runs and
+      // "Default" names no level.
+      reasoning_default_enabled: true,
+      default_reasoning_effort: null,
     };
   });
 }
@@ -181,9 +191,9 @@ export function subscriptionCatalogModels(
 /**
  * The composer menu's list for an agent role that runs on `cli`: the CLI's
  * models as subscription ids, so the pick is the id the request sends. Each
- * row takes the levels the CLI takes for that model (`cli.efforts`, from the
- * backend's one table), not the catalog's. A model with no levels gets a
- * disabled Effort row, and the backend drops any level it does not take.
+ * row takes the CLI's levels from `subscriptionCatalogModels`. A model with
+ * no levels gets a disabled Effort row, and the backend drops any level it
+ * does not take.
  */
 export function subscriptionMenuModels(
   cli: CliStatus | undefined,
@@ -195,13 +205,7 @@ export function subscriptionMenuModels(
     value: subscriptionModelId(cli.id, model.value),
     // A catalog hit may name a BYOK provider; this row runs on the CLI.
     byok_provider: null,
-    supports_thinking: (cli.efforts?.[model.value] ?? []).length > 0,
-    reasoning_efforts: [...(cli.efforts?.[model.value] ?? [])],
     supports_fast: (cli.fast ?? []).includes(model.value),
-    // An unpicked turn sends no effort, so the CLI's own default runs and
-    // "Default" names no level.
-    reasoning_default_enabled: true,
-    default_reasoning_effort: null,
   }));
 }
 

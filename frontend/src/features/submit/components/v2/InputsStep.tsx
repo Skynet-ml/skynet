@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { useSearchParams } from "next/navigation";
 
 import { DatasetPickerDialog } from "@/features/datasets";
 import { ImportFromMenu } from "@/features/connectors";
@@ -13,10 +12,9 @@ import { DATASET_UPLOAD_ACCEPT } from "@/shared/lib/parse-dataset";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
 
-import { useWizardAutoAdvance } from "../../hooks/use-auto-advance";
-import { useInputsInference } from "../../hooks/use-inputs-inference";
+import { useInputsData } from "../../hooks/use-inputs-data";
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
-import { inputsAdvanceFrom } from "../../lib/auto-advance";
+import { AgentFieldLock } from "./AgentFieldLock";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { GeneralistAgentShell } from "./GeneralistAgentShell";
 import { InputsColumnsCard } from "./InputsColumnsCard";
@@ -24,10 +22,20 @@ import { WizardScreen } from "./WizardScreen";
 
 type MessageParams = Record<string, string | number>;
 
+// The wizard fields the setup agent writes on the roles and split card.
+const INPUTS_FIELDS = [
+  "data_mode",
+  "split_fractions",
+  "shuffle",
+  "seed",
+  "input_fields",
+  "expected_field",
+] as const;
+
 /**
  * Step 2, Inputs: bring a table (upload, library or connector import). Once
- * it is loaded, each column gets an Input / Output / Ignore role (preselected
- * from the backend's inference) and the split sits right below. The step is
+ * it is loaded, each column gets an Input / Output / Ignore role (the last
+ * column preselected as the Output) and the split sits right below. The step is
  * done once the roles are valid. A single-answer task skips the step: its one
  * input is the question itself. Auto hosts the app's generalist agent, which
  * has the inputs tools, beside it.
@@ -36,7 +44,7 @@ export function InputsStep() {
   const ctx = useWizardV2();
   const { state, patchInputs, guided, stepIssue } = ctx;
   const inputs = state.inputs;
-  const inference = useInputsInference(ctx);
+  const data = useInputsData(ctx);
   const t = (key: string, params?: MessageParams) => v2Msg(key, guided, params);
   const fmt = (n: number) => new Intl.NumberFormat(getActiveIntlLocale()).format(n);
 
@@ -45,13 +53,8 @@ export function InputsStep() {
 
   return (
     <GeneralistAgentShell active={state.step === "inputs"}>
-      {(assist) => (
+      {() => (
         <div className="flex min-h-0 flex-1 flex-col gap-5 px-4 py-5 sm:px-6 sm:py-6">
-          <InputsAutoAdvance
-            auto={assist === "auto"}
-            hasData={hasData}
-            inferring={inference.loading || inference.inferring}
-          />
           <header className="flex shrink-0 flex-col gap-1">
             <h3 className="text-base font-semibold text-foreground">
               {t("submit.v2.inputs.title")}
@@ -73,7 +76,7 @@ export function InputsStep() {
                     type="button"
                     variant="ghost"
                     size="sm"
-                    onClick={inference.clear}
+                    onClick={data.clear}
                     className="min-h-11 gap-1.5 lg:min-h-8"
                   >
                     <Trash className="size-3.5" aria-hidden="true" />
@@ -88,7 +91,7 @@ export function InputsStep() {
                   fromTable ? "p-4" : "p-6 hover:border-primary-fill/50 hover:bg-muted/30 sm:p-8",
                 )}
               >
-                {inference.loading ? (
+                {data.loading ? (
                   <PingDot size="sm" tone="agent" className="mx-auto mb-3" />
                 ) : (
                   <UploadSimple
@@ -114,7 +117,7 @@ export function InputsStep() {
                   type="file"
                   accept={DATASET_UPLOAD_ACCEPT}
                   className="sr-only"
-                  onChange={inference.handleFileUpload}
+                  onChange={data.handleFileUpload}
                 />
               </label>
 
@@ -122,65 +125,39 @@ export function InputsStep() {
                 <Button
                   type="button"
                   variant="outline"
-                  onClick={() => inference.setLibraryOpen(true)}
+                  onClick={() => data.setLibraryOpen(true)}
                   className="min-h-11 flex-1 justify-center gap-2 lg:min-h-9"
                 >
                   <Books className="size-4" aria-hidden="true" />
                   {t("submit.v2.inputs.source.library")}
                 </Button>
                 <ImportFromMenu
-                  onImported={(dataset) => void inference.handlePickDataset(dataset)}
+                  onImported={(dataset) => void data.handlePickDataset(dataset)}
                   className="min-h-11 flex-1 justify-center gap-2 lg:min-h-9"
                 />
               </div>
             </section>
 
             {hasData && (
-              <InputsColumnsCard
-                inputs={inputs}
-                inference={inference}
-                patchInputs={patchInputs}
-                issue={stepIssue("inputs")}
-                guided={guided}
-              />
+              <AgentFieldLock fields={INPUTS_FIELDS}>
+                <InputsColumnsCard
+                  inputs={inputs}
+                  data={data}
+                  patchInputs={patchInputs}
+                  issue={stepIssue("inputs")}
+                  guided={guided}
+                />
+              </AgentFieldLock>
             )}
           </WizardScreen>
 
           <DatasetPickerDialog
-            open={inference.libraryOpen}
-            onOpenChange={inference.setLibraryOpen}
-            onPick={(dataset) => void inference.handlePickDataset(dataset)}
+            open={data.libraryOpen}
+            onOpenChange={data.setLibraryOpen}
+            onPick={(dataset) => void data.handlePickDataset(dataset)}
           />
         </div>
       )}
     </GeneralistAgentShell>
   );
-}
-
-/** Moves on from Inputs once data the user brought by hand is ready, as the agent would. */
-function InputsAutoAdvance({
-  auto,
-  hasData,
-  inferring,
-}: {
-  auto: boolean;
-  hasData: boolean;
-  inferring: boolean;
-}) {
-  const { state, stepIssue } = useWizardV2();
-  const cloned = useSearchParams().has("clone");
-  const { advanceFrom } = useWizardAutoAdvance();
-  const advancePast = inputsAdvanceFrom({
-    auto,
-    firstPass: state.furthestStep === "inputs",
-    onStep: state.step === "inputs",
-    cloned,
-    hasData,
-    inferring,
-    valid: stepIssue("inputs") === null,
-  });
-  React.useEffect(() => {
-    if (advancePast) advanceFrom(advancePast);
-  }, [advancePast, advanceFrom]);
-  return null;
 }

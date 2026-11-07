@@ -2,21 +2,20 @@
 
 ## Çalıştırma sayfasındaki sekmeler
 
-Çalıştırma sayfası yalnızca çalıştırmaya uyan sekmeleri gösterir. Bazı sekmeler yola, duruma ve deneyim düzeyinize bağlıdır.
+Çalıştırma sayfası yalnızca çalıştırmaya uyan sekmeleri gösterir. Bazı sekmeler duruma ve deneyim düzeyinize bağlıdır.
 
-| Sekme                         | Ne zaman görünür                                                       | Ne içerir                                                                               |
-| ----------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| **Genel bakış**               | Her zaman                                                              | İlerleme, puanlar ve puan geçmişi                                                       |
-| **Kullanım**                  | Skynet'in sunabileceği bir programa sahip başarılı bir çalıştırma      | Optimize edilmiş programı çalıştırmak için bir form ve entegrasyon kodu                 |
-| **Yapay nesne**               | Sonucu olan bir İstem, Kod veya Metin çalıştırması                     | Yapıtınızın sürümleri ve en iyi sürüm                                                   |
-| **Veri**                      | Bitmiş bir DSPy programı çalıştırması                                  | Eğitim, doğrulama ve test kümelerine bölünmüş veri ve test kümesi değerlendirmesi       |
-| **Kod**                       | Çalıştırmanın gösterilecek kodu olduğunda                              | Çalıştırma kodu ve metrik                                                               |
-| **Ödül**                      | Metriği ödül bileşenleri bildiren bir İstem, Kod veya Metin çalıştırması | Ödül bileşenleri ve ağırlıkları                                                       |
-| **Yapay nesne**               | Optimize edilmiş bir istemi veya dosyaları olan bir çalıştırma         | Optimize edilmiş çıktı ve **Sonuçları dışa aktar**                                      |
-| **Günlükler**                 | Çoğu çalıştırma                                                        | Çalıştırma günlüğü                                                                      |
-| **Kullanım ve maliyet**       | Oturum açtığınızda                                                     | Çalıştırmanın harcadığı tutar                                                           |
-| **Zamanlanmış çalıştırma**    | Başarılı bir İstem, Kod veya Metin çalıştırması                        | Optimizasyonu yeniden çalıştırmak için bir zamanlama                                    |
-| **Yapılandırma**              | Her zaman                                                              | Çalıştırma yapılandırması                                                               |
+| Sekme                      | Ne zaman görünür                                              | Ne içerir                                                                  |
+| -------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| **Genel bakış**            | Her zaman                                                     | İlerleme, puanlar ve puan geçmişi                                          |
+| **Kullanım**               | Deposunda `serve.py` dosyası olan başarılı bir çalıştırma     | En iyi sürümü çağırmak için bir form ve entegrasyon kodu                   |
+| **Yapay nesne**            | Sonucu olan bir çalıştırma                                    | Deponuzun sürümleri ve en iyi sürüm                                        |
+| **Veri**                   | Vakaları olan bitmiş bir çalıştırma                           | Eğitim, doğrulama ve test kümelerine bölünmüş veri                         |
+| **Kod**                    | Çalıştırmanın gösterilecek kodu olduğunda                     | Puanlayıcı                                                                 |
+| **Ödül**                   | Puanlayıcısı ödül parçaları bildiren bir çalıştırma           | Ödül bileşenleri ve ağırlıkları                                            |
+| **Günlükler**              | Çoğu çalıştırma                                               | Çalıştırma günlüğü                                                         |
+| **Kullanım ve maliyet**    | Oturum açtığınızda                                            | Çalıştırmanın harcadığı tutar                                              |
+| **Zamanlanmış çalıştırma** | Başarılı bir çalıştırma                                       | Optimizasyonu en iyi sürümden yeniden çalıştırmak için bir zamanlama       |
+| **Yapılandırma**           | Her zaman                                                     | Çalıştırma yapılandırması                                                  |
 
 > [!NOTE]
 > **Rehberli** düzeyde çalıştırma sayfası **Veri**, **Kod**, **Günlükler** ve **Yapılandırma** sekmelerini gizler. Bu sekmelerden birine doğrudan bir bağlantı yine de sekmeyi açar. Düzeyi **Ayarlar → Hesap** içinde değiştirin.
@@ -29,13 +28,11 @@ Skynet sürümleri doğrulama vakaları üzerinde seçer. Nihai puanı test vaka
 
 - **İyileşme**: başlangıç sürümünden en iyi sürüme olan değişim.
 - **Puan ilerlemesi**: çalıştırma boyunca puan.
-- **Puan dökümü**: **Temel Değer**, **Optimize Edilmiş** ve **Değişim** sütunlarıyla her metrik.
+- **Puan dökümü**: **Temel Değer**, **Optimize Edilmiş** ve **Değişim** sütunlarıyla her puan.
 
 Çalıştırma etkinken genel bakış **Geçen süre**, **Kalan** ve **Hız** değerlerini de gösterir.
 
-Bir İstem, Kod veya Metin çalıştırmasında, metriğiniz adlandırılmış puanlar bildirdiğinde genel bakış **Adlandırılmış puanlar** bölümünü de gösterir.
-
-Bir DSPy programı çalıştırmasında **Veri** sekmesinde bir **Test kümesi değerlendirmesi** bulunur. Her test vakası için temel puanı ve optimize edilmiş puanı gösterir.
+Puanlayıcınız adlandırılmış puanlar bildirdiğinde genel bakış **Adlandırılmış puanlar** bölümünü de gösterir.
 
 ### En iyi sürüm başlangıç sürümü olduğunda
 
@@ -45,38 +42,37 @@ Bazen hiçbir aday başlangıç sürümünü geçemez. Bu durumda Skynet başlan
 
 ## En iyi sürümü dışa aktarın
 
-### İstem, Kod ve Metin çalıştırmaları
-
-**Yapay nesne** sekmesi yapıtınızın **Sürümler** listesini gösterir. Her sürüm için şunları yapabilirsiniz:
+**Yapay nesne** sekmesi deponuzun **Sürümler** listesini gösterir. Her sürüm için şunları yapabilirsiniz:
 
 - Sürümü kopyalayın.
 - Sürümü bir dosya olarak indirin.
-- Bir depo çalıştırmasında sürümü tüm deponun zip'i olarak indirin.
+- Sürümü tüm deponun zip'i olarak indirin.
 
 Bir sürümü başka bir sürümle karşılaştırabilirsiniz. Sekme bir sürümün **Puanlayıcı geri bildirimi** bölümünü de gösterir.
 
-### DSPy programı çalıştırmaları
+### Yeni bir depodaki dallar
 
-**Yapay nesne** sekmesinde bir **Sonuçları dışa aktar** paneli vardır. **İndir** menüsünü açın. Menü, çalıştırmada bulunan biçimleri gösterir:
-
-| Seçenek                    | Biçim                                                   |
-| -------------------------- | ------------------------------------------------------- |
-| DSPy programı              | `.zip`, çalıştırabileceğiniz bağımsız bir dışa aktarım  |
-| Optimize edilmiş program   | `.pkl`                                                  |
-| İstem                      | `.json`                                                 |
-| Optimize edilmiş kod       | `.py`                                                   |
-| Günlükler                  | `.csv`                                                  |
+Skynet depoyu çalıştırma için oluşturduysa her adayı kendi dalına, `skynet/candidate-<version id>` dalına gönderir. `skynet/best` dalı her zaman en iyi sürümü gösterir. Daha iyi bir sürüm çıktığında bu dal yer değiştirir.
 
 ## En iyi sürümü sunun
 
-Optimize edilmiş bir DSPy programını kendi kodunuzdan çağırabilirsiniz. **Kullanım** sekmesinin iki bölümü vardır:
+En iyi sürümü kendi kodunuzdan çağırabilirsiniz. Deponun kökünde `serve(input)` tanımlayan bir `serve.py` dosyası olmalıdır:
 
-- Bir form. Girdi alanlarını doldurun ve bir tahmin almak için **Çalıştır** seçeneğini seçin.
-- cURL, Python, JavaScript, Go ve DSPy ile **Entegrasyon kodu**.
+```python tab="serve.py"
+def serve(input):
+    return {"label": classify(input["message"])}
+```
 
-Program her zaman optimize edildiği model ayarlarıyla çalışır. Tüm girdi alanlarını vermelisiniz. Skynet fazladan alanları yok sayar.
+- `input`, istekteki girdi alanlarının dict'idir.
+- Dönüş değeri JSON'a serileştirilebilir olmalıdır. Bir dict `outputs` olur. Başka herhangi bir değer `{"output": value}` olur.
+- `serve.py`, `skynet` yardımcı modülündeki `llm` ile bir model çağırabilir. Çalıştırmanın gizli değerlerini almaz.
 
-Programı çağırmak için **Ayarlar → API** içinde bir API token'ı oluşturun. Ardından bir istek gönderin:
+Skynet en iyi sürümü, çalıştırmayla aynı korumalı sandbox içinde çalıştırır. **Kullanım** sekmesinin iki bölümü vardır:
+
+- Bir form. Girdi alanlarını doldurun ve bir sonuç almak için **Çalıştır** seçeneğini seçin.
+- cURL, Python, JavaScript ve Go ile **Entegrasyon kodu**.
+
+En iyi sürümü çağırmak için **Ayarlar → API** içinde bir API token'ı oluşturun. Ardından bir istek gönderin. `Idempotency-Key` başlığı zorunludur:
 
 ```bash tab="cURL"
 export APP_API_TOKEN=skyd_...
@@ -84,7 +80,7 @@ curl -X POST "$API_URL/serve/<optimization_id>" \
   -H "Authorization: Bearer $APP_API_TOKEN" \
   -H "Idempotency-Key: $(uuidgen)" \
   -H "Content-Type: application/json" \
-  -d '{"inputs": {"question": "What is DSPy?"}}'
+  -d '{"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5}'
 ```
 
 ```python tab="Python"
@@ -98,19 +94,17 @@ response = requests.post(
         "Authorization": f"Bearer {os.environ['APP_API_TOKEN']}",
         "Idempotency-Key": str(uuid.uuid4()),
     },
-    json={"inputs": {"question": "What is DSPy?"}},
+    json={"inputs": {"message": "I was charged twice."}, "max_cost_cents": 5},
 )
 print(response.json()["outputs"])
 ```
 
-`question` yerine programınızın girdi alanlarını yazın. **Kullanım** sekmesindeki **Entegrasyon kodu**, gerçek URL'yi ve alan adlarını sizin için doldurur.
+`message` yerine çalıştırmanızın girdi alanlarını yazın. **Kullanım** sekmesindeki **Entegrasyon kodu**, gerçek URL'yi ve alan adlarını sizin için doldurur.
 
-Yanıt `outputs`, `input_fields`, `output_fields` ve `model_used` değerlerini içerir.
+Yanıt `outputs`, `input_fields`, `output_fields`, `model_used`, `cents_charged` ve `budget` değerlerini içerir.
 
 > [!TIP]
-> İstek gövdesi `max_cost_cents` değerini de kabul eder. Bu değer, bu tek çağrının sent cinsinden en fazla ne kadar tutabileceğini belirler. Bazı çalıştırmalar bunu zorunlu tutar.
-
-Kısmi çıktıları geldikçe almak için aynı isteği `/serve/<optimization_id>/stream` adresine gönderin. Yanıt bir server-sent events akışıdır.
+> Her çağrı ayrı olarak, çağıranın bakiyesinden faturalandırılır. `max_cost_cents`, bu tek çağrının sent cinsinden en fazla ne kadar tutabileceğini belirler. Aynı `Idempotency-Key` değerini yeniden gönderirseniz Skynet çağrıyı yeniden ücretlendirmez.
 
 Kimlik doğrulama ve diğer uç noktalar için [API](/docs/api) sayfasını okuyun.
 

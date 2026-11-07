@@ -506,6 +506,13 @@ def is_removed_model(name: str) -> bool:
     return bool(_REMOVED_MODEL_RE.search(name))
 
 
+# D50: TypeSafe Jev is a router, so the removed-model rule hides it, but its
+# typed labels suit the classification roles (the watch hook and the exploit
+# judge). Only those roles may pick it; every other role keeps it hidden.
+CLASSIFIER_ROLES: frozenset[str] = frozenset({"hook", "judge"})
+CLASSIFIER_ONLY_MODELS: frozenset[str] = frozenset({"openrouter/typesafe/jev-router"})
+
+
 # Featured-model selection over the OpenRouter listing: the agent panels'
 # shortlist. Each model line contributes its newest release, which must reach
 # a share of the best benchmark and not be beaten on both score and price by
@@ -2015,7 +2022,28 @@ def is_hidden_model(name: str) -> bool:
     return name in _hidden_model_values
 
 
-def require_known_model(model: str | None) -> None:
+def models_for_role(role: str | None = None) -> list[CatalogModel]:
+    """Return the catalog models one model role may pick.
+
+    Args:
+        role: The role the model fills, e.g. ``"hook"`` or ``"judge"``;
+            ``None`` for a role with no extra models.
+
+    Returns:
+        The catalog models, plus the classifier-only models for the
+        classifier roles.
+    """
+    models = list(get_catalog_cached().models)
+    if role in CLASSIFIER_ROLES:
+        listed = {m.value for m in models}
+        models += [
+            CatalogModel(value=value, label=_make_label(value), provider="openrouter", available=True)
+            for value in sorted(CLASSIFIER_ONLY_MODELS - listed)
+        ]
+    return models
+
+
+def require_known_model(model: str | None, *, role: str | None = None) -> None:
     """Reject a model id that is not in the curated catalog.
 
     Guards every endpoint that lets the client pick the LM for a
@@ -2023,10 +2051,14 @@ def require_known_model(model: str | None) -> None:
 
     Args:
         model: LiteLLM model id; empty/None passes (the server default runs).
+        role: The role the model fills; the classifier roles also accept the
+            classifier-only models.
 
     Raises:
         DomainError: 422 when the id is not a catalog model.
     """
     name = str(model or "").strip()
+    if role in CLASSIFIER_ROLES and name in CLASSIFIER_ONLY_MODELS:
+        return
     if name and not is_hidden_model(name) and all(entry.value != name for entry in get_catalog_cached().models):
         raise DomainError("models.unknown_model", status=422)

@@ -4,16 +4,15 @@
 
 ### 什么是 Skynet？
 
-Skynet 是一个平台，它基于你自己的数据和指标来优化提示词、程序、智能体和工作流。你上传数据集、描述任务，然后开始运行。运行会尝试新版本，并在留出的数据上为它们打分。要开始使用，请阅读[快速入门](/docs/quickstart)。
+Skynet 是一个根据你自己的数据和评分器优化仓库的平台。你上传数据集、描述任务，然后开始运行。运行会尝试新版本，并在留出的数据上为它们打分。要开始使用，请阅读[快速入门](/docs/quickstart)。
 
 ### Skynet 能优化什么？
 
-Skynet 就是 Optimize Anything。它在一个产品中优化提示词、代码、文本和 DSPy 程序。产物类型决定了哪些引擎可以处理它：
+Skynet 就是 Optimize Anything：每次运行都优化一个仓库。你可以使用已有的 GitHub 仓库，也可以让 Skynet 根据你的任务和数据创建一个新仓库。代码可以使用任何库，例如 DSPy。
 
-- 提示词、代码和文本产物使用原生引擎：GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler 和 ShinkaEvolve。
-- DSPy 程序使用 DSPy 优化器：DSPy GEPA、DSPy MIPROv2 和 DSPy BootstrapFewShot。
+每个引擎都处理仓库：GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler 和 ShinkaEvolve。
 
-**Auto** 会组合适合你任务的引擎。请参阅[优化的工作原理](/docs/concepts/optimization)和[引擎](/docs/concepts/engines)。
+**Auto** 是默认选项。它先用多个引擎探索，然后从最好的版本继续运行 GEPA。请阅读 [优化的工作原理](/docs/concepts/optimization) 和 [引擎](/docs/concepts/engines)。
 
 ### 界面支持哪些语言？
 

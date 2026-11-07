@@ -16,11 +16,12 @@ storage quota apply exactly as they do to an upload.
 
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -28,6 +29,7 @@ from ...config import settings
 from ...connectors import github, registry
 from ...connectors import huggingface as hf
 from ...connectors import oauth as generic_oauth
+from ...connectors.github_create_repo import RepoCreateError, create_repository_with_files
 from ...connectors.pruning import browse_importable
 from ...connectors.transport import label
 from ...connectors.vault import ConnectorSecret, ConnectorVault
@@ -39,6 +41,14 @@ from .dataset_library import SaveDatasetResponse, _summary, save_rows_gated
 
 SEARCH_LIMIT_MAX = 100
 GITHUB_FILE_MAX_BYTES = 1024 * 1024
+# GitHub's own rule for a repository name: letters, digits, ``.``, ``-`` and ``_``, at most 100.
+# GitHub itself refuses ``.`` and ``..``; the route maps that refusal to 422.
+GITHUB_REPO_NAME_PATTERN = r"^[A-Za-z0-9._-]{1,100}$"
+GITHUB_OBJECTIVE_MAX_CHARS = 20000
+GITHUB_SCORER_MAX_CHARS = 200_000
+GITHUB_CASES_MAX_ITEMS = 10_000
+# The cases file goes into one git commit from memory; this keeps the push small.
+GITHUB_CASES_MAX_BYTES = 5 * 1024 * 1024
 
 # Some providers resolve a folder's web link with its own API call (OneDrive),
 # so it runs beside the listing instead of after it.
@@ -84,6 +94,13 @@ class OAuthStartResponse(BaseModel):
     """Where to send the browser to start the OAuth flow."""
 
     authorize_url: str
+
+
+# Body for the signed-in finish step. The state is the encrypted payload from
+# the start step; Fernet tokens are several hundred characters long.
+class OAuthFinishRequest(BaseModel):
+    state: str = Field(min_length=1, max_length=4096)
+    code: str = Field(min_length=1, max_length=2048)
 
 
 class HubDataset(BaseModel):
@@ -225,6 +242,23 @@ class GithubFileResponse(BaseModel):
     missing: bool = Field(default=False, description="No regular file exists at this path and ref.")
 
 
+# Body for ``POST /connectors/github/repos``: a new repository seeded with the task, scorer and cases.
+class GithubCreateRepositoryRequest(BaseModel):
+    name: str = Field(pattern=GITHUB_REPO_NAME_PATTERN)
+    private: bool = True
+    description: str | None = Field(default=None, max_length=350)
+    objective: str = Field(min_length=1, max_length=GITHUB_OBJECTIVE_MAX_CHARS)
+    scorer_code: str | None = Field(default=None, max_length=GITHUB_SCORER_MAX_CHARS)
+    cases: list[dict[str, Any]] | None = Field(default=None, max_length=GITHUB_CASES_MAX_ITEMS)
+
+
+# The new repository and the commit that seeds it.
+class GithubCreatedRepository(BaseModel):
+    full_name: str
+    default_branch: str
+    commit: str
+
+
 def connector_secret(vault: ConnectorVault, username: str, provider: str) -> ConnectorSecret:
     """Load an account's credential for a generic provider, refreshing OAuth tokens.
 
@@ -323,6 +357,25 @@ def create_connectors_router(*, job_store) -> APIRouter:
             params["connector_error"] = error
         return RedirectResponse(f"{settings.app_public_url.rstrip('/')}/?{urlencode(params)}", status_code=303)
 
+    def _finish_redirect(provider: str, state: str, code: str) -> RedirectResponse:
+        """Pass the state and code to the web app, which finishes the sign-in.
+
+        Args:
+            provider: Provider slug the sign-in is for.
+            state: The encrypted state minted at start.
+            code: Authorization code from the provider.
+
+        Returns:
+            A 303 redirect to the Connectors tab with the values in the URL
+            fragment, which the browser does not send to any server or put in
+            a ``Referer`` header.
+        """
+        fragment = urlencode({"oauth_flow": f"connector:{provider}", "oauth_state": state, "oauth_code": code})
+        return RedirectResponse(
+            f"{settings.app_public_url.rstrip('/')}/?{urlencode({'settings': 'connectors'})}#{fragment}",
+            status_code=303,
+        )
+
     @router.get("/connectors", response_model=ConnectorListResponse, summary="List the caller's linked accounts")
     def list_connectors(
         user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
@@ -417,11 +470,11 @@ def create_connectors_router(*, job_store) -> APIRouter:
         state: str | None = None,
         error: str | None = None,
     ) -> RedirectResponse:
-        """Finish the OAuth flow and bounce the browser back to Settings.
+        """Pass the state and code to the web app, which finishes the sign-in.
 
-        This is the one unauthenticated route here: the browser arrives from
-        huggingface.co without the app's bearer token, so the encrypted
-        ``state`` is what ties the code to the user who started the flow.
+        This route has no session, because auth is a bearer header. So it
+        trades no code itself: the signed-in finish route checks that the
+        caller started the sign-in, which blocks an account-link hijack.
 
         Args:
             request: Incoming request.
@@ -430,18 +483,42 @@ def create_connectors_router(*, job_store) -> APIRouter:
             error: Hugging Face's error code when the user declined.
 
         Returns:
-            A redirect to the Connectors tab, carrying an error code on failure.
+            A redirect with an error code, or with the state and code in the fragment.
         """
         if error or not code or not state:
             return _settings_redirect("connectors.hf_oauth_failed")
-        try:
-            payload = hf.parse_state(state)
-            tokens = hf.exchange_code(code, payload["v"], payload["r"])
-        except DomainError as exc:
-            return _settings_redirect(str(exc.code))
+        return _finish_redirect(hf.PROVIDER, state, code)
+
+    @router.post(
+        "/connectors/huggingface/oauth/finish",
+        response_model=ConnectorListResponse,
+        summary="Finish the Hugging Face OAuth flow",
+    )
+    def finish_huggingface_oauth(
+        body: OAuthFinishRequest,
+        user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
+    ) -> ConnectorListResponse:
+        """Trade the code for tokens when the caller started this sign-in.
+
+        Args:
+            body: The state and code from the callback.
+            user: Authenticated caller.
+
+        Returns:
+            The updated connector list.
+
+        Raises:
+            DomainError: 400 for a forged or expired state, or a refused code;
+                403 when another user started the sign-in; 503 when the OAuth
+                app or the vault is not configured.
+        """
+        payload = hf.parse_state(body.state)
+        if payload["u"] != user.username:
+            raise DomainError("connectors.hf_oauth_state_invalid", status=403)
+        tokens = hf.exchange_code(body.code, payload["v"], payload["r"])
         label = hf.fetch_userinfo(tokens.access_token)
         vault.save(
-            payload["u"],
+            user.username,
             hf.PROVIDER,
             access_token=tokens.access_token,
             auth_method="oauth",
@@ -450,7 +527,7 @@ def create_connectors_router(*, job_store) -> APIRouter:
             expires_at=tokens.expires_at,
             scopes=tokens.scope,
         )
-        return _settings_redirect()
+        return _status(user.username)
 
     @router.get(
         "/connectors/huggingface/datasets",
@@ -596,6 +673,7 @@ def create_connectors_router(*, job_store) -> APIRouter:
         "/connectors/github/repos",
         response_model=GithubRepositoriesResponse,
         summary="List the caller's GitHub repositories for the repository picker",
+        tags=["agent"],
     )
     def list_github_repositories(
         user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
@@ -614,6 +692,70 @@ def create_connectors_router(*, job_store) -> APIRouter:
         """
         repos = github.list_repositories(_secret(user.username, github.PROVIDER), search)
         return GithubRepositoriesResponse(repositories=[GithubRepository(**r) for r in repos])
+
+    @router.post(
+        "/connectors/github/repos",
+        response_model=GithubCreatedRepository,
+        status_code=201,
+        summary="Create a GitHub repository seeded with the run's objective, scorer and cases",
+        tags=["agent"],
+    )
+    def create_github_repository(
+        body: GithubCreateRepositoryRequest,
+        user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
+    ) -> GithubCreatedRepository:
+        """Create a repository in the linked account, seeded with the run's task, scorer and data.
+
+        The first commit holds ``README.md`` with the objective, plus
+        ``scorer.py`` when a scorer is given and ``data/cases.jsonl`` (one JSON
+        object per line) when cases are given.
+
+        Args:
+            body: Name, visibility, optional description, the objective text,
+                and the optional scorer code and cases.
+            user: Authenticated caller.
+
+        Returns:
+            The new repository, its default branch and the first commit.
+
+        Raises:
+            DomainError: 409 ``connectors.not_connected`` when GitHub is not linked.
+            HTTPException: 409 for a taken name, 413 for oversized cases,
+                422 for a name GitHub refuses, 502 when GitHub refuses the request or the first push fails.
+        """
+        files = {"README.md": f"# {body.name}\n\n{body.objective.strip()}\n"}
+        if body.scorer_code and body.scorer_code.strip():
+            files["scorer.py"] = body.scorer_code if body.scorer_code.endswith("\n") else body.scorer_code + "\n"
+        if body.cases:
+            cases = "".join(json.dumps(case, ensure_ascii=False) + "\n" for case in body.cases)
+            if len(cases.encode("utf-8")) > GITHUB_CASES_MAX_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"The cases are larger than {GITHUB_CASES_MAX_BYTES // (1024 * 1024)} MiB. Use fewer cases.",
+                )
+            files["data/cases.jsonl"] = cases
+        token = _secret(user.username, github.PROVIDER).access_token
+        try:
+            created = create_repository_with_files(
+                token,
+                body.name,
+                files,
+                private=body.private,
+                description=body.description or None,
+            )
+        except RepoCreateError as error:
+            message = str(error)
+            # The library words its errors for the user but has no error kind, so the wording picks the status.
+            if "already has a repository" in message:
+                status = 409
+            elif "does not accept" in message:
+                status = 422
+            else:
+                status = 502
+            raise HTTPException(status_code=status, detail=message) from error
+        return GithubCreatedRepository(
+            full_name=created.full_name, default_branch=created.default_branch, commit=created.commit
+        )
 
     @router.get(
         "/connectors/github/branches",
@@ -792,10 +934,10 @@ def create_connectors_router(*, job_store) -> APIRouter:
         state: str | None = None,
         error: str | None = None,
     ) -> RedirectResponse:
-        """Finish a provider's OAuth flow and bounce the browser back to Settings.
+        """Pass the state and code to the web app, which finishes the sign-in.
 
-        Unauthenticated like the Hugging Face callback: the encrypted ``state``
-        ties the code to the user who started the flow.
+        Unauthenticated like the Hugging Face callback, so it trades no code
+        itself: the signed-in finish route checks the caller.
 
         Args:
             provider: Provider slug.
@@ -805,21 +947,50 @@ def create_connectors_router(*, job_store) -> APIRouter:
             error: The provider's error code when the user declined.
 
         Returns:
-            A redirect to the Connectors tab, carrying an error code on failure.
+            A redirect with an error code, or with the state and code in the fragment.
         """
         if provider not in registry.OAUTH_PROVIDERS:
             return _settings_redirect("connectors.unknown_provider")
         if error or not code or not state:
             return _settings_redirect("connectors.oauth_failed")
+        return _finish_redirect(provider, state, code)
+
+    @router.post(
+        "/connectors/{provider}/oauth/finish",
+        response_model=ConnectorListResponse,
+        summary="Finish a provider's OAuth flow",
+    )
+    def finish_connector_oauth(
+        provider: str,
+        body: OAuthFinishRequest,
+        user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
+    ) -> ConnectorListResponse:
+        """Trade the code for tokens when the caller started this sign-in.
+
+        Args:
+            provider: Provider slug; one of the OAuth-capable providers.
+            body: The state and code from the callback.
+            user: Authenticated caller.
+
+        Returns:
+            The updated connector list.
+
+        Raises:
+            DomainError: 400 for a forged, expired or other-provider state, or
+                a refused code; 403 when another user started the sign-in;
+                404 when the provider has no OAuth flow; 503 when its OAuth
+                app or the vault is not configured.
+        """
         module = registry.get_provider(provider)
+        if provider not in registry.OAUTH_PROVIDERS:
+            raise DomainError("connectors.unknown_provider", status=404, provider=provider)
         app = module.oauth_app()
-        try:
-            payload = generic_oauth.parse_state(app, state)
-            tokens = generic_oauth.exchange_code(app, code, payload["v"], payload["r"])
-        except DomainError as exc:
-            return _settings_redirect(str(exc.code))
+        payload = generic_oauth.parse_state(app, body.state)
+        if payload["u"] != user.username:
+            raise DomainError("connectors.oauth_state_invalid", status=403)
+        tokens = generic_oauth.exchange_code(app, body.code, payload["v"], payload["r"])
         vault.save(
-            payload["u"],
+            user.username,
             provider,
             access_token=tokens.access_token,
             auth_method="oauth",
@@ -828,7 +999,7 @@ def create_connectors_router(*, job_store) -> APIRouter:
             expires_at=tokens.expires_at,
             scopes=tokens.scope,
         )
-        return _settings_redirect()
+        return _status(user.username)
 
     @router.get(
         "/connectors/{provider}/browse",

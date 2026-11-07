@@ -1,7 +1,6 @@
 # AGENTS.md — Skynet working rules
 
-Skynet optimizes any user-supplied artifact: prompts, programs, agents and
-more. Stack: FastAPI (`backend/`), Next.js (`frontend/`), PostgreSQL.
+Skynet is Optimize Anything: every run optimizes a repository. Stack: FastAPI (`backend/`), Next.js (`frontend/`), PostgreSQL.
 
 Every coding agent (Devin, Claude Code, Codex and others) reads this file
 first. Its rules always apply; nested `AGENTS.md` files only add rules. Read
@@ -9,7 +8,7 @@ the matching file below when the task needs it:
 
 | When you | Read |
 | --- | --- |
-| Open, update, describe, review, record videos for, or merge a PR | `.agents/skills/skynet-pr-workflow/SKILL.md` |
+| Open, update, describe, review, capture UI evidence for, or merge a PR | `.agents/skills/skynet-pr-workflow/SKILL.md` |
 | Sign in to staging or a PR preview, or run acceptance checks there | `.agents/skills/skynet-test-accounts/SKILL.md` |
 | Work on or debug a PR preview environment | `docs/agents/pr-previews.md` |
 | Need the stack, layout, local URLs, persistence, auth or i18n facts | `docs/agents/architecture.md` |
@@ -46,7 +45,7 @@ just check-i18n
 - Lint, typecheck and build are not behavior tests. Say which is which.
 - Local frontend work: do not drive a browser unless the task asks for it.
   Tell the user what to check at `localhost:3000`. PR acceptance checks and
-  videos still follow the `skynet-pr-workflow` skill.
+  UI evidence still follow the `skynet-pr-workflow` skill.
 
 Local dev servers: backend `:8000` (`cd backend && .venv/bin/python main.py`
 or `just backend`), frontend `:3000` (`cd frontend && npm run dev` or `just
@@ -89,12 +88,14 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   (`.github/workflows/pr-files-scope.yml` checks this).
 - Never bypass branch protection or hooks. Never force-push.
 - The repository is **public**. Never commit secrets, passwords, tokens,
-  emails, account data or videos. Secret names are fine.
+  emails, account data, or evidence images or videos. Secret names are fine.
 
 ## Merge policy (MANDATORY)
 
 - Each PR gets a preview (staging copy, empty database) at
-  `https://pr-<n>.staging.skynetml.com`. Run acceptance checks and videos there.
+  `https://pr-<n>.staging.skynetml.com`. Run acceptance checks and capture UI
+  evidence there. A visual-only UI change may use simulated local renders
+  (`skynet-pr-workflow` section 5).
 - **Fix bugs locally, deploy once.** Each push rebuilds the preview and
   starts a new review. Test and review the full diff locally, then push once.
 - **Only the orchestrator merges**, in the daily window (03:00
@@ -115,6 +116,12 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   the exact setup failure and record the coverage gap. Do not ask Gilad to
   create one. Never sign up for a normal check. Never borrow a personal
   session. Never print or commit passwords, tokens, cookies or email codes.
+- The staging test accounts `pool-1` to `pool-4` live in AWS Secrets
+  Manager: secret `skynet/staging/test-accounts`, account 669242775630,
+  region `us-east-2`, profile `skynet`. The secret is a JSON object keyed by
+  slot, with `email`, `password`, `app`, `api` and `status`. Read it only
+  inside your own script, and use only the slot that the orchestrator gave
+  you. Never print the value.
 - Never add funds, grant credits, change balances or change live billing
   configuration. Never deploy production.
 - Sign-in, sign-up exceptions, served-commit check: `skynet-test-accounts`.
@@ -179,12 +186,12 @@ Applies to every `backend/` file you touch (not `.venv/`, `__pycache__/` or
 
 ## Product and runtime model
 
-- **Skynet is Optimize Anything.** It is one product that optimizes any
-  user-supplied artifact: prompts, programs, agents, workflows, datasets and
-  more. Do not describe DSPy and Optimize Anything as two separate paths or
-  products, in code comments, docs, UI copy or marketing text.
-- **DSPy programs** are one artifact type inside Optimize Anything. Skynet
-  optimizes them with the DSPy optimizers.
+- **Skynet is Optimize Anything: every run optimizes a repository.** It is
+  one product. A run uses a GitHub repository that the user connects, or a
+  new repository that Skynet creates. Never describe two paths or products,
+  in code comments, docs, UI copy or marketing text.
+- **DSPy is not an artifact type.** It is only a library that a user's
+  repository (or Skynet's own agents) can use.
 - **Engines.** The native engines come from the pinned upstream GEPA
   implementation and include GEPA, Best-of-N and Meta-Harness, plus Skynet's
   own AutoResearch and the pinned AutoSaddler and ShinkaEvolve packages.

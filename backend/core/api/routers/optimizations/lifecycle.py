@@ -27,9 +27,11 @@ from ....constants import (
     OPTIMIZATION_TYPE_RUN,
     PAYLOAD_OVERVIEW_NAME,
     PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE,
+    PAYLOAD_OVERVIEW_PAYLOAD_KIND,
 )
 from ....i18n import CANCELLATION_REASON, CLONE_NAME_PREFIX, PAUSE_REASON, RETRY_NAME_PREFIX
 from ....models import (
+    UNIFIED_PAYLOAD_KIND,
     BulkCancelRequest,
     BulkCancelResponse,
     BulkCancelSkipped,
@@ -122,20 +124,29 @@ def _require_new_budget_configuration(job: dict[str, Any]) -> None:
         )
 
 
-def _require_executable_type(optimization_type: str) -> None:
-    """Refuse to queue new work for a stored grid search.
+def _require_executable_type(overview: dict[str, Any]) -> None:
+    """Refuse to queue new work for a stored grid search or DSPy program run.
 
-    Stored grid runs stay readable, but the worker no longer executes grid
-    searches, so a clone, retry, resume or restart of one could only fail.
+    Stored grid and DSPy runs stay readable, but Skynet now optimizes only
+    repositories (SKY-316), so a clone, retry, resume or restart of one must
+    not start.
 
     Args:
-        optimization_type: The stored run's overview optimization type.
+        overview: The stored run's payload overview.
 
     Raises:
-        DomainError: 409 ``optimization.grid_search_retired`` for a grid search.
+        DomainError: 409 ``optimization.grid_search_retired`` for a grid
+            search; 410 ``optimization.dspy_run_retired`` for a legacy DSPy
+            run or a unified DSPy program run.
     """
+    optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
     if optimization_type == OPTIMIZATION_TYPE_GRID_SEARCH:
         raise DomainError("optimization.grid_search_retired", status=409)
+    if (
+        optimization_type == OPTIMIZATION_TYPE_RUN
+        or overview.get(PAYLOAD_OVERVIEW_PAYLOAD_KIND) == UNIFIED_PAYLOAD_KIND
+    ):
+        raise DomainError("optimization.dspy_run_retired", status=410)
 
 
 def cancel_optimization(
@@ -420,7 +431,7 @@ def register_lifecycle_routes(
 
         overview = parse_overview(job_data)
         optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
-        _require_executable_type(optimization_type)
+        _require_executable_type(overview)
         prefix = (req.name_prefix or CLONE_NAME_PREFIX).strip()
         source_name = overview.get(PAYLOAD_OVERVIEW_NAME) or optimization_id[:8]
         cloned_payload_seed: dict[str, Any] = {**source_payload, "username": current_user.username}
@@ -490,7 +501,7 @@ def register_lifecycle_routes(
 
         overview = parse_overview(job_data)
         optimization_type = overview.get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
-        _require_executable_type(optimization_type)
+        _require_executable_type(overview)
         source_name = overview.get(PAYLOAD_OVERVIEW_NAME) or optimization_id[:8]
         retry_name = f"{RETRY_NAME_PREFIX} {source_name}".strip()
         retry_payload_seed: dict[str, Any] = {**source_payload, "username": current_user.username}
@@ -554,9 +565,7 @@ def register_lifecycle_routes(
                 params={"status": status.value},
             )
 
-        _require_executable_type(
-            parse_overview(job_data).get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
-        )
+        _require_executable_type(parse_overview(job_data))
         has_checkpoint = getattr(job_store, "has_gepa_checkpoint", None)
         interrupted = is_interrupted_stop(job_data)
         # An interrupted top-level run with no checkpoint starts again from the
@@ -651,9 +660,7 @@ def register_lifecycle_routes(
         """
         job_data, _role = require_role_at_least(job_store, optimization_id, current_user, ShareRole.editor)
         _require_new_budget_configuration(job_data)
-        _require_executable_type(
-            parse_overview(job_data).get(PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE, OPTIMIZATION_TYPE_RUN)
-        )
+        _require_executable_type(parse_overview(job_data))
 
         status = status_to_job_status(job_data.get("status", "pending"))
         if status not in {OptimizationStatus.failed, OptimizationStatus.cancelled}:

@@ -19,7 +19,7 @@ registerHooks({
 const { initialWizardV2State, emptyRepoDraft } = await import("./wizard-v2.ts");
 const { stepPages } = await import("./wizard-pages.ts");
 const { computeStepIssue } = await import("./step-issue.ts");
-const { repoRunRequest } = await import("./repo-run.ts");
+const { finishedHardeningJobId, repoRunRequest } = await import("./repo-run.ts");
 const { prepareModelConfig } = await import("./model-config.ts");
 
 const model = { name: "openai/gpt-default", token_source: "managed" as const };
@@ -27,7 +27,6 @@ const model = { name: "openai/gpt-default", token_source: "managed" as const };
 function repoState() {
   const state = initialWizardV2State();
   state.task.objective = "Make the build faster.";
-  state.task.artifactKind = "code";
   state.task.repo = {
     ...emptyRepoDraft(),
     repository: "example/site",
@@ -65,11 +64,33 @@ test("a repository run submits its repo, commit, paths and setup command", () =>
   assert.equal(request.task_model_config, null);
 });
 
-test("Auto cannot optimize a repository", () => {
+test("a repository Skynet created is flagged in the run request", () => {
+  const state = repoState();
+  state.task.repo = { ...state.task.repo!, createdBySkynet: true };
+  const request = repoRunRequest(state, options);
+  assert.ok(request);
+  assert.equal(request.target.repo?.created_by_skynet, true);
+  assert.equal(repoRunRequest(repoState(), options)?.target.repo?.created_by_skynet, undefined);
+});
+
+test("Auto on a repository sends the auto strategy", () => {
   const state = repoState();
   state.optimizer.choice = "auto";
-  assert.equal(repoRunRequest(state, options), null);
-  assert.equal(computeStepIssue(state, "optimizer", null), "submit.v2.optimizer.issue.choice");
+  const request = repoRunRequest(state, options);
+  assert.ok(request);
+  assert.deepEqual(request.strategy, { mode: "auto" });
+  assert.equal(request.shinka, null);
+  assert.deepEqual(request.extra_reflection_model_configs, []);
+  assert.equal(computeStepIssue(state, "optimizer", null), null);
+});
+
+test("a repository run waits for a reflection model and a scorer", () => {
+  const noModel = repoState();
+  noModel.optimizer.reflectionModel = null;
+  assert.equal(repoRunRequest(noModel, options), null);
+  const noScorer = repoState();
+  noScorer.workspace.metricCode = "  ";
+  assert.equal(repoRunRequest(noScorer, options), null);
 });
 
 test("a repository clone drops a stored scorer model the code does not name", () => {
@@ -117,7 +138,7 @@ test("a repository run skips inputs and needs only the scorer", () => {
   assert.equal(computeStepIssue(state, "metric", null), null);
   state.workspace.metricCode = " ";
   assert.equal(computeStepIssue(state, "metric", null), "submit.v2.metric.issue.metric_code");
-  assert.deepEqual(stepPages("metric", state), ["metric", "overview"]);
+  assert.deepEqual(stepPages("metric", state), ["metric", "harden", "overview"]);
 });
 
 test("the task step names what a repository still lacks", () => {
@@ -165,4 +186,80 @@ test("a repository run sends economy on the models that chose it, not for the ru
   assert.equal(request.reflection_model_config?.extra?.economy_mode, true);
   assert.equal(request.extra_reflection_model_configs?.[0]?.extra, undefined);
   assert.equal("economy_mode" in request, false);
+});
+
+test("a repository run sends its cases only when it needs data", () => {
+  const state = repoState();
+  state.inputs.cases = [{ input: { url: "/" } }];
+  state.inputs.inputFields = ["url"];
+  assert.equal(repoRunRequest(state, options)?.cases, undefined);
+  state.task.needsData = true;
+  assert.deepEqual(repoRunRequest(state, options)?.cases, [{ input: { url: "/" } }]);
+  assert.equal(computeStepIssue(state, "inputs", null), null);
+  state.inputs.cases = [];
+  state.inputs.mode = null;
+  assert.equal(repoRunRequest(state, options)?.cases, undefined);
+  assert.notEqual(computeStepIssue(state, "inputs", null), null);
+});
+
+test("a repository run sends a staged dataset by reference", () => {
+  const state = repoState();
+  state.task.needsData = true;
+  state.inputs.stagedDatasetId = "ds-1";
+  state.inputs.inputFields = ["url"];
+  state.inputs.expectedField = null;
+  const request = repoRunRequest(state, options);
+  assert.equal(request?.cases, undefined);
+  assert.equal(request?.staged_dataset_id, "ds-1");
+  assert.deepEqual(request?.input_fields, ["url"]);
+  state.task.needsData = false;
+  assert.equal(repoRunRequest(state, options)?.staged_dataset_id, undefined);
+});
+
+test("a repository run carries no hardening job of its own", () => {
+  assert.equal("hardening_job_id" in (repoRunRequest(repoState(), options) ?? {}), false);
+});
+
+test("the run submit takes the hardening job id only from a finished job", async () => {
+  const reads: string[] = [];
+  const jobOf = (status: string) => async (draftId: string) => {
+    reads.push(draftId);
+    return { id: "job-1", status } as never;
+  };
+  for (const status of ["clean_stop", "budget_stop", "done"]) {
+    assert.equal(await finishedHardeningJobId("local", "draft-1", jobOf(status)), "job-1", status);
+  }
+  for (const status of ["preflight", "preflight_failed", "running", "waiting_review", "waiting_fix", "rejected", "failed", "stale"]) {
+    assert.equal(await finishedHardeningJobId("local", "draft-1", jobOf(status)), null, status);
+  }
+  assert.ok(reads.every((id) => id === "draft-1"));
+});
+
+test("a setup without a hardening job submits as before", async () => {
+  let reads = 0;
+  const read = async () => {
+    reads += 1;
+    return null;
+  };
+  assert.equal(await finishedHardeningJobId("local", null, read), null);
+  assert.equal(reads, 0);
+  assert.equal(await finishedHardeningJobId("local", "draft-1", read), null);
+  assert.equal(reads, 1);
+});
+
+test("a failed hardening read never blocks the run submit", async () => {
+  const read = async () => {
+    throw new Error("offline");
+  };
+  assert.equal(await finishedHardeningJobId("local", "draft-1", read), null);
+});
+
+test("a hosted run sends no hardening job id", async () => {
+  let reads = 0;
+  const read = async () => {
+    reads += 1;
+    return { id: "job-1", status: "done" } as never;
+  };
+  assert.equal(await finishedHardeningJobId("hosted", "draft-1", read), null);
+  assert.equal(reads, 0);
 });

@@ -61,7 +61,7 @@ agent 第一次呼叫 Skynet 嗰陣，你嘅瀏覽器會打開一個 Skynet 頁�
 4. agent 會一直呼叫 `get_run`，直到運行完結。最終狀態係 `success`、`failed`、`cancelled` 同 `stopped`。
 
 > [!TIP]
-> 喺你嘅提示詞入面話畀 agent 知你嘅花費上限，例如「最佳化呢個提示詞，最多使 $10。」agent 就會喺 `start_run` 用嗰個上限。
+> 喺你嘅提示詞入面話畀 agent 知你嘅花費上限，例如「最佳化呢個倉庫，最多使 $10。」agent 就會喺 `start_run` 用嗰個上限。
 
 運行去到花費上限就會停止。想知 Skynet 點樣為一次運行收費，請睇 [預算同收費](/docs/concepts/billing)。
 

@@ -26,10 +26,12 @@ import { Separator } from "@/shared/ui/primitives/separator";
 import { ModelPicker, modelSupportsThinking } from "./ModelPicker";
 import { ProviderLogo } from "@/shared/ui/provider-logo";
 import { modelDisplayName, modelProviderSlug } from "@/shared/lib/model-provider";
-import { effortLabel, effortsFor, unpickedEffort } from "@/shared/lib/model-efforts";
+import { effortsFor, unpickedEffort } from "@/shared/lib/model-efforts";
 import { NumberInput } from "@/shared/ui/number-input";
 import { Segmented } from "@/shared/ui/segmented";
 import { Disclosure } from "./Disclosure";
+import { ReasoningEffortControl } from "./ReasoningEffortControl";
+import { runnableEffort, usesEffortSlider } from "../lib/model-config";
 import { cn } from "@/shared/lib/utils";
 import type { ModelConfig, CatalogModel } from "@/shared/types/api";
 import { HelpTip } from "@/shared/ui/help-tip";
@@ -63,6 +65,12 @@ interface ModelConfigModalProps {
    * refuses managed models locally and cannot run subscription ones.
    */
   byokOnlyLocally?: boolean;
+  /**
+   * The run starts on the web from a linked Mac (SKY-340). Hosted runs only
+   * managed models there: the Mac cannot read the web account's own keys,
+   * and a CLI plan exists only on this Mac.
+   */
+  remote?: boolean;
 }
 
 const TOKEN_SOURCE_SEGMENTS: Array<{
@@ -85,12 +93,29 @@ const LOCAL_BYOK_ONLY_SEGMENTS: typeof TOKEN_SOURCE_SEGMENTS = [
   { mode: "byok", icon: Key, labelKey: "billing.mode.byok" },
 ];
 
+const REMOTE_SEGMENTS: typeof TOKEN_SOURCE_SEGMENTS = [
+  { mode: "managed", icon: Coins, labelKey: "billing.mode.managed" },
+];
+
 /**
  * The draft a config opens as: in the local build a managed model opens on the
  * subscription source, or on the user's own key where only that source runs.
  */
-function initialDraft(config: ModelConfig, local: boolean, byokOnly = false): ModelConfig {
+function initialDraft(
+  config: ModelConfig,
+  local: boolean,
+  byokOnly = false,
+  remote = false,
+): ModelConfig {
   const draft = withoutInlineConnection(config);
+  if (remote && draft.token_source !== "managed") {
+    return withoutInlineConnection({
+      ...draft,
+      name: "",
+      token_source: "managed",
+      byok_provider: undefined,
+    });
+  }
   if (local && byokOnly && draft.token_source !== "byok") {
     return withoutInlineConnection({
       ...draft,
@@ -137,6 +162,7 @@ export function ModelConfigModal({
   nameOnly = false,
   modelDefaultsOnly = false,
   byokOnlyLocally = false,
+  remote = false,
 }: ModelConfigModalProps) {
   const { keys } = useByokKeys();
   const { openTo } = useSettingsModal();
@@ -151,10 +177,10 @@ export function ModelConfigModal({
   const hasParams = (c: ModelConfig) =>
     c.temperature != null || c.max_tokens != null || !!c.extra?.reasoning_effort;
   const showParameters = isVisible("wizard.model_params", level) || hasParams(config);
-  const localMode = isLocalMode();
+  const localMode = isLocalMode() && !remote;
   const byokOnly = localMode && byokOnlyLocally;
   const [draft, setDraft] = React.useState<ModelConfig>(() =>
-    initialDraft(config, localMode, byokOnly),
+    initialDraft(config, localMode, byokOnly, remote),
   );
   const mode = nameOnly ? "managed" : (draft.token_source ?? "managed");
   const local = useLocalStatus(localMode && open && mode === "subscription");
@@ -224,10 +250,10 @@ export function ModelConfigModal({
   // Sync draft when config changes externally (e.g. opening with different model)
   React.useEffect(() => {
     if (open) {
-      setDraft(initialDraft(config, localMode, byokOnly));
+      setDraft(initialDraft(config, localMode, byokOnly, remote));
       setParametersOpen(paramsFirstOpen || hasParams(config));
     }
-  }, [open, config, localMode, byokOnly]);
+  }, [open, config, localMode, byokOnly, remote]);
 
   // The effort ladder is model-specific (providers reject levels outside
   // their documented set). "none" is expressed by the switch itself. An
@@ -263,7 +289,12 @@ export function ModelConfigModal({
   };
   const { mandatory: thinkingMandatory, defaultOn: thinkingDefaultOn } = thinkingInfo(draft.name);
   const canThink = modelSupportsThinking(draft.name, detectionModels);
-  const storedEffort = draft.extra?.reasoning_effort as string | undefined;
+  const savedEffort = draft.extra?.reasoning_effort as string | undefined;
+  const cliLevels =
+    mode === "subscription"
+      ? subscriptionModels?.find((m) => m.value === draft.name)?.reasoning_efforts
+      : undefined;
+  const storedEffort = runnableEffort(savedEffort, cliLevels ?? undefined);
   const thinkingEnabled =
     thinkingMandatory || (storedEffort ? storedEffort !== "none" : thinkingDefaultOn);
   const reasoningEffort =
@@ -292,8 +323,8 @@ export function ModelConfigModal({
     });
   };
 
-  const setEffort = (level: string) => {
-    setDraft((p) => ({ ...p, extra: { ...p.extra, reasoning_effort: level } }));
+  const setEffort = (level: string | null) => {
+    setDraft((p) => ({ ...p, extra: withEffort(p.extra, level) }));
   };
 
   const handleSave = () => {
@@ -305,9 +336,16 @@ export function ModelConfigModal({
         token_source: draft.token_source ?? "managed",
         byok_provider: draft.token_source === "byok" ? draft.byok_provider : undefined,
         ...(draft.token_source === "subscription" ? { cli_provider: draft.cli_provider } : {}),
+        extra: withEffort(undefined, storedEffort ?? null),
       });
     } else {
-      onSave(withoutInlineConnection(draft));
+      onSave(
+        withoutInlineConnection(
+          storedEffort === savedEffort
+            ? draft
+            : { ...draft, extra: withEffort(draft.extra, storedEffort ?? null) },
+        ),
+      );
     }
     onOpenChange(false);
   };
@@ -396,7 +434,9 @@ export function ModelConfigModal({
                         }),
                       )
                     }
-                    options={(byokOnly
+                    options={(remote
+                      ? REMOTE_SEGMENTS
+                      : byokOnly
                       ? LOCAL_BYOK_ONLY_SEGMENTS
                       : localMode
                         ? LOCAL_TOKEN_SOURCE_SEGMENTS
@@ -494,12 +534,13 @@ export function ModelConfigModal({
               }
               byokMode={mode === "byok"}
               byokProviders={byokProviders}
-              modelsOverride={subscriptionModels}
+              // Remote runs on the web account, so it lists the hosted catalog (SKY-340).
+              modelsOverride={remote ? (catalogModels ?? []) : subscriptionModels}
               placeholder={msg("auto.features.submit.components.modelconfigmodal.literal.3")}
             />
           </div>
 
-          {!nameOnly && !modelDefaultsOnly && (
+          {!nameOnly && (!modelDefaultsOnly || canThink) && (
             <>
               <Separator />
 
@@ -510,55 +551,65 @@ export function ModelConfigModal({
                 onOpenChange={setParametersOpen}
               >
                 <div className="space-y-4">
-                  <div className="space-y-2">
-                    <Label htmlFor={`${parametersId}-temperature`}>
-                      <HelpTip text={tip("model_config.temperature")}>
-                        {msg("auto.features.submit.components.modelconfigmodal.5")}
-                      </HelpTip>
-                    </Label>
-                    <NumberInput
-                      id={`${parametersId}-temperature`}
-                      min={0}
-                      max={2}
-                      step={0.1}
-                      value={draft.temperature ?? ""}
-                      onChange={(value) =>
-                        setDraft((current) => ({ ...current, temperature: value }))
-                      }
-                      onClear={() =>
-                        setDraft((current) => ({ ...current, temperature: undefined }))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor={`${parametersId}-max-tokens`}>
-                      <HelpTip text={tip("model_config.max_tokens")}>
-                        {msg("auto.features.submit.components.modelconfigmodal.7")}
-                      </HelpTip>
-                    </Label>
-                    <NumberInput
-                      id={`${parametersId}-max-tokens`}
-                      min={1}
-                      step={256}
-                      value={draft.max_tokens ?? ""}
-                      onChange={(value) =>
-                        setDraft((current) => ({ ...current, max_tokens: value }))
-                      }
-                      onClear={() => setDraft((current) => ({ ...current, max_tokens: undefined }))}
-                    />
-                  </div>
+                  {!modelDefaultsOnly && (
+                    <>
+                      <div className="space-y-2">
+                        <Label htmlFor={`${parametersId}-temperature`}>
+                          <HelpTip text={tip("model_config.temperature")}>
+                            {msg("auto.features.submit.components.modelconfigmodal.5")}
+                          </HelpTip>
+                        </Label>
+                        <NumberInput
+                          id={`${parametersId}-temperature`}
+                          min={0}
+                          max={2}
+                          step={0.1}
+                          value={draft.temperature ?? ""}
+                          onChange={(value) =>
+                            setDraft((current) => ({ ...current, temperature: value }))
+                          }
+                          onClear={() =>
+                            setDraft((current) => ({ ...current, temperature: undefined }))
+                          }
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor={`${parametersId}-max-tokens`}>
+                          <HelpTip text={tip("model_config.max_tokens")}>
+                            {msg("auto.features.submit.components.modelconfigmodal.7")}
+                          </HelpTip>
+                        </Label>
+                        <NumberInput
+                          id={`${parametersId}-max-tokens`}
+                          min={1}
+                          step={256}
+                          value={draft.max_tokens ?? ""}
+                          onChange={(value) =>
+                            setDraft((current) => ({ ...current, max_tokens: value }))
+                          }
+                          onClear={() =>
+                            setDraft((current) => ({ ...current, max_tokens: undefined }))
+                          }
+                        />
+                      </div>
+                    </>
+                  )}
 
                   {canThink && (
                     <>
-                      <Separator />
+                      {!modelDefaultsOnly && <Separator />}
                       <div className="space-y-3">
                         <div className="flex items-center justify-between">
                           <Label>{msg("auto.features.submit.components.modelconfigmodal.8")}</Label>
-                          <Switch
-                            checked={thinkingEnabled}
-                            onCheckedChange={setThinking}
-                            disabled={thinkingMandatory}
-                          />
+                          {/* A CLI has no off level: the backend drops "none" and the
+                              CLI runs its default, so a CLI model gets no switch. */}
+                          {mode !== "subscription" && (
+                            <Switch
+                              checked={thinkingEnabled}
+                              onCheckedChange={setThinking}
+                              disabled={thinkingMandatory}
+                            />
+                          )}
                         </div>
                         {thinkingMandatory && (
                           <p className="text-xs text-muted-foreground">
@@ -566,20 +617,13 @@ export function ModelConfigModal({
                           </p>
                         )}
                         {thinkingEnabled && effortLadder.length > 0 && (
-                          <div className="space-y-2 p-3 border rounded-lg bg-muted/30">
-                            <Label>
-                              {msg("auto.features.submit.components.modelconfigmodal.9")}
-                            </Label>
-                            <Segmented
-                              label={msg("auto.features.submit.components.modelconfigmodal.9")}
-                              value={reasoningEffort}
-                              onChange={setEffort}
-                              options={effortLadder.map((val) => ({
-                                value: val,
-                                label: effortLabel(val),
-                              }))}
-                            />
-                          </div>
+                          <ReasoningEffortControl
+                            cli={usesEffortSlider(mode, thinkingDefaultOn)}
+                            efforts={effortLadder}
+                            stored={storedEffort ?? null}
+                            fallback={reasoningEffort}
+                            onChange={setEffort}
+                          />
                         )}
                       </div>
                     </>

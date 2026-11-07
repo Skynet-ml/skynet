@@ -20,7 +20,7 @@ from gepa.oa.task import Task as UpstreamTask
 
 from ..budget_stop import BudgetReached
 from .native_engines import AUTORESEARCH_VERSION, META_HARNESS_REVISION
-from .protocol import BudgetExhaustedError, EngineContext, EvalServer, Result, Task
+from .protocol import BudgetExhaustedError, EngineContext, EvalServer, Result, Task, engine_score
 
 GEPA_REVISION = "0632cdb5dcc052e690eab439e1b4a7e3e9cfe407"
 GEPA_SOURCE = f"git+https://github.com/gepa-ai/gepa@{GEPA_REVISION}"
@@ -58,7 +58,7 @@ def upstream_task(task: Task, name: str) -> UpstreamTask:
 
 
 def upstream_server(
-    task: Task, server: EvalServer, ctx: EngineContext, on_eval: Callable[[Any, Any, float], None] | None = None
+    task: Task, server: EvalServer, ctx: EngineContext, on_eval: Callable[[Any, Any, float | None], None] | None = None
 ) -> UpstreamEvalServer:
     """Keep upstream evaluations inside Skynet's run-wide scoring allowance.
 
@@ -66,7 +66,7 @@ def upstream_server(
         task: Optimization inputs.
         server: Skynet's accounting and scorer boundary.
         ctx: Workspace and concurrency settings.
-        on_eval: Called with the candidate, case and score after each scorer run, if given.
+        on_eval: Called with the candidate, case and score (``None`` after a metric error) after each scorer run, if given.
 
     Returns:
         An unstarted upstream server for an in-process engine.
@@ -82,7 +82,7 @@ def upstream_server(
             example: Optional dataset example.
 
         Returns:
-            The score and feedback.
+            The score, :data:`UNSCORED` after a metric error, and feedback.
         """
         try:
             score, info = server.evaluate(candidate, example)
@@ -93,7 +93,7 @@ def upstream_server(
             raise BudgetExhausted(str(exc)) from exc
         if on_eval is not None:
             on_eval(candidate, example, score)
-        return score, info
+        return engine_score(score), info
 
     upstream = UpstreamEvalServer(
         upstream_task(task, Path(ctx.run_dir).name),
@@ -116,7 +116,7 @@ def local_result(result: UpstreamResult, server: EvalServer) -> Result:
     Returns:
         A JSON-safe platform result without re-ranking candidates.
     """
-    metadata = _finite_metadata(
+    metadata = finite_json(
         {key: value for key, value in result.metadata.items() if key not in {"all_results", "stage_results"}}
     )
     metadata["upstream_source"] = GEPA_SOURCE
@@ -129,11 +129,11 @@ def local_result(result: UpstreamResult, server: EvalServer) -> Result:
     )
 
 
-def _finite_metadata(value: Any) -> Any:
-    """Keep unscored upstream sentinels valid in persisted JSON.
+def finite_json(value: Any) -> Any:
+    """Keep unscored upstream sentinels valid in persisted JSON and progress events.
 
     Args:
-        value: Upstream metadata after recursive result references are removed.
+        value: Upstream metadata or a progress payload.
 
     Returns:
         JSON-shaped values with non-finite scores represented as missing.
@@ -141,9 +141,9 @@ def _finite_metadata(value: Any) -> Any:
     if isinstance(value, float) and not math.isfinite(value):
         return None
     if isinstance(value, dict):
-        return {key: _finite_metadata(item) for key, item in value.items()}
+        return {key: finite_json(item) for key, item in value.items()}
     if isinstance(value, tuple | list):
-        return [_finite_metadata(item) for item in value]
+        return [finite_json(item) for item in value]
     return value
 
 

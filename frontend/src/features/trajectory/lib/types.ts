@@ -103,7 +103,6 @@ export interface RejectedNode extends RejectedMetrics {
 // Run configuration a black-box ("Optimize Anything") run hands the drawer, so
 // it can name what a candidate is and decide which sections apply.
 export interface BlackboxTrajectoryContext {
-  recipe: "prompt" | "code" | "anything" | null;
   // Whether candidates were scored against cases (per-case scores and notes
   // exist) or in single-task mode, where each version has one score.
   hasCases: boolean;

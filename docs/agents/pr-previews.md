@@ -8,7 +8,9 @@ Feature PRs target `staging`, never `main`. Each PR from this repository gets
 a PR environment (preview), a full copy of staging with an empty database, at
 `https://pr-<n>.staging.skynetml.com` (API `https://api-pr-<n>.staging.skynetml.com`).
 The preview helper scripts require Bash 5.1 or newer.
-Run the acceptance checks and record the videos there, before the merge.
+Run the acceptance checks and capture the Before and After evidence there,
+before the merge. A visual-only UI change may use simulated local renders
+instead (`skynet-pr-workflow` section 5).
 `.github/workflows/preview.yml` builds it on every push and deletes it when the
 PR closes. At most 4 previews run at once; a preview with no push for 48 hours
 is deleted. PRs from forks or Dependabot, and PRs whose files cannot change

@@ -2,19 +2,7 @@
 
 import type { ComponentType } from "react";
 
-import {
-  ArrowsClockwise,
-  Crosshair,
-  Cube,
-  DiceFive,
-  GitBranch,
-  MagicWand,
-  PushPin,
-  Robot,
-  SquaresFour,
-  TreeStructure,
-  Wrench,
-} from "@/shared/ui/icons";
+import { OptimizerLogo } from "@/shared/ui/optimizer-logo";
 import { Badge } from "@/shared/ui/primitives/badge";
 import { msg } from "@/shared/lib/messages";
 
@@ -60,7 +48,7 @@ export function EngineCard({
   // such as source links that cannot live inside the card's button.
   footerSlot?: boolean;
 }) {
-  const { Banner, icon: Icon } = ENGINE_VISUALS[engine.id] ?? GENERIC_VISUAL;
+  const Banner = ENGINE_BANNERS[engine.id] ?? GenericBanner;
   return (
     <>
       {/* The banner frame sizes itself for a full-width slide; a grid card
@@ -70,9 +58,7 @@ export function EngineCard({
       </div>
       <div className="flex flex-1 flex-col gap-1.5 p-3 text-start">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-accent text-muted-foreground [&_svg]:size-3.5">
-            <Icon className="size-3.5" />
-          </span>
+          <OptimizerLogo id={engine.id} size={28} className="[&_svg]:size-3.5" />
           <span dir="ltr" className="text-sm font-semibold tracking-tight text-foreground">
             {engine.label}
           </span>
@@ -99,11 +85,6 @@ export function EngineCard({
       </div>
     </>
   );
-}
-
-interface EngineVisual {
-  Banner: ComponentType;
-  icon: ComponentType<{ className?: string }>;
 }
 
 // Each banner is the engine's search loop in the wizard's schematic grammar:
@@ -183,144 +164,6 @@ function GepaBanner() {
           />
         )),
       )}
-    </BannerFrame>
-  );
-}
-
-// DSPy GEPA runs the same reflect-and-mutate loop per predictor: one node of
-// the program graph is rewritten, and each child is the whole program with
-// that one predictor changed.
-function DspyGepaBanner() {
-  return (
-    <BannerFrame>
-      <GWire d="M24 44 C30 44 30 22 38 22" />
-      <GWire d="M24 44 C30 44 30 66 38 66" />
-      <GWire d="M54 22 C60 22 60 44 64 44" />
-      <GWire d="M54 66 C60 66 60 44 64 44" />
-      <GDot cx={18} cy={44} r={5} />
-      <GBox x={38} y={15} w={16} h={14} accent />
-      <GDot cx={46} cy={66} r={5} />
-      <GDot cx={69} cy={44} r={5} />
-      <GWire d="M46 15 V8 H80" dashed />
-      <GNote x={80} y={2} w={24} h={14} />
-      <GBar x={84} y={7} w={14} />
-      <GWire d="M92 16 V28" dashed />
-      <GWire d="M74 44 H86" />
-      <GArrow x={90} y={44} dir="right" />
-      <GBox x={90} y={30} w={28} h={28} accent />
-      <GBar x={96} y={38} w={16} />
-      <GBar x={96} y={44} w={11} />
-      <GBar x={96} y={50} w={14} />
-      <GWire d="M118 44 H124 C130 44 130 18 136 18" />
-      <GWire d="M118 44 H136" />
-      <GWire d="M118 44 H124 C130 44 130 70 136 70" />
-      {[18, 44, 70].map((cy) => (
-        <g key={cy}>
-          <GBox x={136} y={cy - 9} w={34} h={18} />
-          <GDot cx={143} cy={cy} r={2.5} />
-          <GDot cx={153} cy={cy} r={2.5} accent />
-          <GDot cx={163} cy={cy} r={2.5} />
-        </g>
-      ))}
-      <GFrame x={178} y={8} w={52} h={72} />
-      {[0, 1, 2].map((row) =>
-        [0, 1, 2, 3].map((col) => (
-          <GDot
-            key={`${row}-${col}`}
-            cx={188 + col * 11}
-            cy={18 + row * 26}
-            r={3}
-            accent={[2, 0, 1, 0][col] === row}
-          />
-        )),
-      )}
-    </BannerFrame>
-  );
-}
-
-// MIPROv2 proposes instruction candidates and example sets, then a Bayesian
-// search samples combinations of the two and keeps the best-scoring pair.
-function DspyMiproBanner() {
-  return (
-    <BannerFrame>
-      {[12, 36, 60].map((y) => (
-        <g key={y}>
-          <GBox x={10} y={y} w={30} h={16} />
-          <GBar x={15} y={y + 5} w={20} />
-          <GBar x={15} y={y + 10} w={13} />
-        </g>
-      ))}
-      {[12, 36, 60].map((y) => (
-        <g key={y}>
-          <GBox x={48} y={y} w={30} h={16} />
-          <GDot cx={56} cy={y + 8} r={2.5} />
-          <GDot cx={63} cy={y + 8} r={2.5} />
-          <GDot cx={70} cy={y + 8} r={2.5} />
-        </g>
-      ))}
-      <GWire d="M78 44 H90" />
-      <GArrow x={94} y={44} dir="right" />
-      <GFrame x={96} y={8} w={72} h={72} />
-      {[0, 1, 2].map((row) =>
-        [0, 1, 2].map((col) => (
-          <GDot
-            key={`${row}-${col}`}
-            cx={110 + col * 22}
-            cy={20 + row * 24}
-            r={4}
-            accent={row === 0 && col === 2}
-            dim={!((row === 2 && col === 0) || (row === 1 && col === 1) || (row === 0 && col === 2))}
-          />
-        )),
-      )}
-      <GWire d="M114 64 L128 48 M136 40 L150 24" dashed />
-      <GWire d="M168 20 H178 C186 20 186 44 192 44" />
-      <GArrow x={196} y={44} dir="right" />
-      <GBox x={196} y={28} w={32} h={32} accent />
-      <GBar x={202} y={36} w={20} />
-      <GBar x={202} y={42} w={14} />
-      <GDot cx={205} cy={51} r={2.5} />
-      <GDot cx={212} cy={51} r={2.5} />
-      <GDot cx={219} cy={51} r={2.5} />
-    </BannerFrame>
-  );
-}
-
-// Bootstrap few-shot runs the program on training cases, keeps the traces the
-// metric passes, and pins those into the prompt as worked examples.
-function DspyBootstrapBanner() {
-  const traces = [
-    { y: 8, ok: true },
-    { y: 28, ok: false },
-    { y: 48, ok: true },
-    { y: 68, ok: false },
-  ];
-  return (
-    <BannerFrame>
-      <GBox x={10} y={31} w={30} h={26} />
-      <GPlay x={25} y={44} />
-      <GWire d="M40 44 H46 C52 44 52 14 58 14" />
-      <GWire d="M40 44 H46 C52 44 52 34 58 34" />
-      <GWire d="M40 44 H46 C52 44 52 54 58 54" />
-      <GWire d="M40 44 H46 C52 44 52 74 58 74" />
-      {traces.map(({ y, ok }) => (
-        <g key={y}>
-          <GBox x={58} y={y} w={46} h={12} />
-          <GBar x={63} y={y + 5} w={ok ? 30 : 24} />
-          <GMark x={112} y={y + 6} ok={ok} />
-        </g>
-      ))}
-      <GWire d="M118 14 H134 C142 14 142 38 150 38" />
-      <GWire d="M118 54 H134 C142 54 142 60 150 60" />
-      <GArrow x={154} y={38} dir="right" />
-      <GArrow x={154} y={60} dir="right" />
-      <GBox x={154} y={12} w={72} h={64} />
-      <GBar x={161} y={20} w={40} />
-      <GBar x={161} y={26} w={28} />
-      <GBox x={160} y={32} w={60} h={13} accent />
-      <GBar x={165} y={37} w={30} />
-      <GBox x={160} y={54} w={60} h={13} accent />
-      <GBar x={165} y={59} w={30} />
     </BannerFrame>
   );
 }
@@ -556,17 +399,12 @@ function GenericBanner() {
   );
 }
 
-const GENERIC_VISUAL: EngineVisual = { Banner: GenericBanner, icon: Cube };
-
-const ENGINE_VISUALS: Record<string, EngineVisual> = {
-  auto: { Banner: AutoBanner, icon: MagicWand },
-  dspy_gepa: { Banner: DspyGepaBanner, icon: TreeStructure },
-  dspy_miprov2: { Banner: DspyMiproBanner, icon: Crosshair },
-  dspy_bootstrap_fewshot: { Banner: DspyBootstrapBanner, icon: PushPin },
-  gepa: { Banner: GepaBanner, icon: GitBranch },
-  best_of_n: { Banner: BestOfNBanner, icon: DiceFive },
-  autoresearch: { Banner: AutoResearchBanner, icon: Robot },
-  meta_harness: { Banner: MetaHarnessBanner, icon: Wrench },
-  autosaddler: { Banner: AutoSaddlerBanner, icon: ArrowsClockwise },
-  shinka_evolve: { Banner: ShinkaEvolveBanner, icon: SquaresFour },
+const ENGINE_BANNERS: Record<string, ComponentType> = {
+  auto: AutoBanner,
+  gepa: GepaBanner,
+  best_of_n: BestOfNBanner,
+  autoresearch: AutoResearchBanner,
+  meta_harness: MetaHarnessBanner,
+  autosaddler: AutoSaddlerBanner,
+  shinka_evolve: ShinkaEvolveBanner,
 };

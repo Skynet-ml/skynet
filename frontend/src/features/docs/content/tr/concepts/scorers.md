@@ -1,47 +1,50 @@
-Metrik, Skynet'e bir çıktının ne kadar iyi olduğunu söyler. `metric.py` içinde bir Python fonksiyonudur. Her motor aynı fonksiyonu çağırır. Bu sayfa sözleşmeyi, dönüş değerini ve örnekleri verir.
+Puanlayıcı, Skynet'e deponuzun bir sürümünün ne kadar iyi olduğunu söyler. `scorer.py` içinde bir Python fonksiyonudur. Her motor aynı fonksiyonu çağırır. Bu sayfa sözleşmeyi, dönüş değerini ve örnekleri verir.
 
 ## Sözleşme
 
 ```python
-def score(input, output, expected=None):
+def score(repo_path, case):
     ...
     return score_value, {"feedback": "..."}
 ```
 
-| Argüman    | İçeriği                                                              |
-| ---------- | -------------------------------------------------------------------- |
-| `input`    | Vakanın girdi alanlarını içeren bir dict                             |
-| `output`   | `run(artifact, input)` fonksiyonunuzun bu vaka için döndürdüğü değer |
-| `expected` | Vakanın beklenen değeri; vakada yoksa `None`                         |
+| Argüman     | İçeriği                                                                      |
+| ----------- | ---------------------------------------------------------------------------- |
+| `repo_path` | Kurulum komutu çalıştıktan sonra deponun bir sürümünün klasörü               |
+| `case`      | Bir dict. `case["input"]` girdi alanlarını tutar. `case["expected"]` beklenen değeri veya `None` tutar |
 
-Fonksiyonunuz yalnızca iki argüman alıyorsa Skynet `score(input, output)` çağrısını yapar.
+Fonksiyonunuz yalnızca bir argüman alıyorsa Skynet `score(repo_path)` çağırır. Puanlayıcı kendi testlerini çalıştırıyorsa ve vakalara ihtiyacı yoksa bu biçimi kullanın.
 
-Bir DSPy programı için Skynet, DSPy metrik çağrısını bu aynı fonksiyona uyarlar. Her yapıt türü için tek bir metrik yazarsınız. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) sayfasını okuyun.
+Puanlayıcı sandbox içinde, sürümün klasöründe çalışır. Depodan kod içe aktarabilir, bir komut çalıştırabilir veya `serve.py` içindeki `serve()` fonksiyonunu çağırabilir. [Optimizasyon nasıl çalışır](/docs/concepts/optimization) sayfasını okuyun.
 
 ## Dönüş değeri
 
-`score` bir çift döndürmelidir (iki öğeli bir tuple veya liste):
+`score`, geri bildirimli bir puan döndürmelidir. Şu biçimler geçerlidir:
 
-1. **Puan.** Bir sayı. Optimize edici bu sayıyı yükseltmeye çalışır.
-2. **Yan bilgi.** Bir dict. Değeri string olan bir `"feedback"` anahtarı olmalıdır.
+1. Bir çift: bir sayı ve bir geri bildirim string'i ya da `"feedback"` anahtarı olan bir dict.
+2. `"score"` altında bir sayı ve `"feedback"` altında bir string olan bir dict.
 
-Yan bilgide bir `"scores"` anahtarı da olabilir. Bu anahtar adları sayılara eşler, örneğin `{"format": 1.0, "accuracy": 0.5}`.
+Geri bildirim boş olmayan bir string olmalıdır.
 
-Dönüş değerinin biçimi farklıysa sözleşme kontrolü **Metriğin dönüş değeri** adımında başarısız olur.
+Yan bilgide bir `"scores"` anahtarı da olabilir. Bu anahtar adları adlandırılmış puanlara eşler. Her adlandırılmış puanın kendi puanı ve geri bildirimi vardır, örneğin `{"format": {"score": 1.0, "feedback": "Valid JSON."}}`.
 
-| Dönüş değeri                                           | Geçerli mi                            |
-| ------------------------------------------------------ | ------------------------------------- |
-| `(0.8, {"feedback": "Close. Missing the date."})`      | Evet                                  |
-| `[1.0, {"feedback": "OK", "scores": {"format": 1.0}}]` | Evet                                  |
-| `0.8`                                                  | Hayır. Yan bilgi yok.                 |
-| `(0.8, "Close.")`                                      | Hayır. Yan bilgi bir dict değil.      |
-| `(0.8, {})`                                            | Hayır. Geri bildirim string'i yok.    |
-| `("0.8", {"feedback": "OK"})`                          | Hayır. Puan bir string.               |
-| `(0.8, {"feedback": "OK", "scores": {"a": "high"}})`   | Hayır. Adlandırılmış bir puan sayı değil. |
+Yan bilgide aynı biçimde bir `"cases"` anahtarı da olabilir. Her girdi bir vakanın sonucudur. Her motor her vakayı ayrı bir hedef olarak kullanır.
+
+Dönüş değerinin biçimi farklıysa kontrol başarısız olur ve nedenini gösterir.
+
+| Dönüş değeri                                                                    | Geçerli mi                                |
+| ------------------------------------------------------------------------------- | ----------------------------------------- |
+| `(0.8, {"feedback": "Close. Missing the date."})`                               | Evet                                      |
+| `(0.8, "Close. Missing the date.")`                                             | Evet                                      |
+| `{"score": 1.0, "feedback": "OK", "scores": {"format": {"score": 1.0, "feedback": "OK"}}}` | Evet                           |
+| `0.8`                                                                           | Hayır. Geri bildirim yok.                 |
+| `(0.8, {})`                                                                     | Hayır. Geri bildirim string'i yok.        |
+| `("0.8", {"feedback": "OK"})`                                                   | Hayır. Puan bir string.                   |
+| `(0.8, {"feedback": "OK", "scores": {"a": {"score": "high", "feedback": "OK"}}})` | Hayır. Adlandırılmış bir puan sayı değil. |
 
 ## Faydalı geri bildirim yazın
 
-GEPA, DSPy GEPA ve Auto, bir sonraki sürümü yazmak için geri bildirim metnini okur. Neyin yanlış olduğunu ve doğru bir çıktının neye benzediğini söyleyin.
+GEPA ve Auto, bir sonraki sürümü yazmak için geri bildirim metnini okur. Neyin yanlış olduğunu ve doğru bir çıktının neye benzediğini söyleyin.
 
 | Zayıf geri bildirim | Faydalı geri bildirim                                                                 |
 | ------------------- | ------------------------------------------------------------------------------------- |
@@ -49,98 +52,80 @@ GEPA, DSPy GEPA ve Auto, bir sonraki sürümü yazmak için geri bildirim metnin
 | "Kötü biçim."       | "Çıktı geçerli bir JSON değil. Son alandan sonra fazladan bir virgül var."            |
 
 > [!NOTE]
-> Optimize edici metriğinizin kaynak kodunu hiçbir zaman görmez. Bir DSPy optimize edicisiyle yansıtma modeli yalnızca geri bildirim metnini görür. Beklenen değerleriniz metrikte kalır.
+> Kodlama ajanı puanlayıcınızın kaynak kodunu, beklenen değerleri veya çalıştırma gizli anahtarlarını hiçbir zaman görmez. Yalnızca puanları ve geri bildirim metnini görür.
 
 ## Örnekler
 
 ### Tam eşleşme
 
-```python tab="metric.py"
-def score(input, output, expected=None):
-    want = expected["label"]
-    if output == want:
+```python tab="scorer.py"
+import importlib.util
+
+
+def score(repo_path, case):
+    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    got = module.serve(case["input"])
+    want = case["expected"]["label"]
+    if got == want:
         return 1.0, {"feedback": "Correct."}
-    return 0.0, {"feedback": f"Expected {want!r}, got {output!r}."}
+    return 0.0, {"feedback": f"Expected {want!r}, got {got!r}."}
 ```
 
-`expected`, anahtarı Çıktı sütununuzun adı olan bir dict'tir. [Veri kümeleri ve bölmeler](/docs/concepts/datasets) sayfasını okuyun.
+`case["expected"]`, Çıktı sütununuzun adıyla anahtarlanmış bir dict'tir. [Veri kümeleri ve bölmeler](/docs/concepts/datasets) sayfasını okuyun.
 
-### Birden çok kontrol
+### Deponun testlerini çalıştırın
 
-```python tab="metric.py"
-import json
+```python tab="scorer.py"
+import subprocess
 
 
-def score(input, output, expected=None):
-    try:
-        data = json.loads(output)
-    except ValueError as exc:
-        return 0.0, {"feedback": f"Output is not valid JSON: {exc}", "scores": {"format": 0.0, "fields": 0.0}}
-    want = expected["fields"]
-    found = [key for key in want if key in data]
-    fields = len(found) / len(want) if want else 1.0
-    missing = [key for key in want if key not in data]
-    feedback = "All fields present." if not missing else f"Missing fields: {', '.join(missing)}."
-    return 0.5 + 0.5 * fields, {"feedback": feedback, "scores": {"format": 1.0, "fields": fields}}
+def score(repo_path):
+    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=repo_path, capture_output=True, text=True)
+    if result.returncode == 0:
+        return 1.0, {"feedback": "All tests pass."}
+    return 0.0, {"feedback": result.stdout[-2000:]}
 ```
 
 ### Hakem olarak model
 
-Metrik bir model çağırabilir. `skynet` yardımcı modülünden `llm` içe aktarın. Metrikten yapılan bir çağrı metrik modeline gider.
+Puanlayıcı bir model çağırabilir. `skynet` yardımcı modülünden `llm` içe aktarın. Çağrı, Skynet'in model ağ geçidi üzerinden çalıştırmanın puanlayıcı modeline gider.
 
-```python tab="metric.py"
+```python tab="scorer.py"
+import importlib.util
+
 from skynet import llm
 
 
-def score(input, output, expected=None):
+def score(repo_path, case):
+    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    answer = module.serve(case["input"])
     verdict = llm(
         "Answer PASS or FAIL, then give one sentence of reasons.",
-        input=f"Question: {input['question']}\nAnswer: {output}",
-        model="openai/gpt-4.1-mini",
+        input=f"Question: {case['input']['question']}\nAnswer: {answer}",
         temperature=0,
         max_tokens=512,
-        reasoning_effort="low",
     )
     passed = str(verdict).strip().upper().startswith("PASS")
     return (1.0 if passed else 0.0), {"feedback": str(verdict)}
 ```
 
-Metrik, modelini kendi `llm()` çağrısında belirler. Gösterilen dört argümanın tümü isteğe bağlıdır. `model=` olmadan metrik yansıtma modelini kullanır.
+Puanlayıcı, `OPENAI_BASE_URL`, `APP_API_KEY` ve `APP_MODEL` ortam değişkenleriyle herhangi bir OpenAI uyumlu istemciyi de kullanabilir. Ağ geçidi yalnızca çalıştırmanın puanlayıcı modelini kabul eder.
 
-## Doğruluk, hız ve maliyet
+## Model çağrıları ve gizli anahtarlar
 
-Bir metrik, doğruluğu ölçülen çalışma süresi ve model maliyetiyle harmanlayabilir. Modül düzeyinde `REWARD_SPEC` tanımlayın ve `reward` değerini döndürün.
-
-```python tab="metric.py"
-from skynet import reward
-
-REWARD_SPEC = {
-    "weights": {"accuracy": 0.7, "speed": 0.2, "cost": 0.1},
-    "accuracy": {},
-    "speed": {"reference": 2000},
-    "cost": {"reference": 0.01},
-}
-
-
-def score(input, output, expected=None):
-    ok = output == expected["label"]
-    return reward(REWARD_SPEC, 1.0 if ok else 0.0, "Correct." if ok else "Wrong label.")
-```
-
-- `weights` içinde `accuracy`, `speed` ve `cost` bulunmalıdır. Her ağırlık 0 veya daha büyüktür ve hepsi 0 olamaz. Skynet ağırlıkları toplamları 1 olacak şekilde ölçekler.
-- `speed.reference` milisaniye cinsindendir. `cost.reference` ABD doları cinsindendir. İkisi de pozitif olmalıdır.
-- `accuracy.reference` olmadan doğruluk, 0 ile 1 arasında bir puandır. Bu değerle doğruluk bir hatadır ve düşük olan daha iyidir.
-
-Süreyi ve maliyeti Skynet kendisi ölçer. Çalıştırma kodu bunları değiştiremez. Skynet süreyi veya maliyeti ölçemezse o bölüm 0 puan alır ve geri bildirim bunu belirtir.
-
-Metrik, ölçümleri `skynet` modülündeki `observation()` ve `service_cost()` ile doğrudan da okuyabilir.
+- Skynet'in anahtarlarıyla yapılan çağrılar çalıştırma bütçesine göre ölçülür. Kendi anahtarınızla (BYOK) çağrı sağlayıcı anahtarınıza gider ve Skynet model ücreti alınmaz. [Faturalandırma](/docs/concepts/billing) sayfasını okuyun.
+- Çalıştırma gizli anahtarları puanlayıcıya ortam değişkenleri olarak ulaşır. Değişken adı, gizli anahtarın adıdır, örneğin `os.environ["SEARCH_API_KEY"]`.
+- Skynet gizli değerleri puanlayıcı çıktısında ve günlüklerde gizler.
 
 ## Limitler
 
 | Öğe                         | Değer                                     |
 | --------------------------- | ----------------------------------------- |
-| Metrik zaman aşımı          | Varsayılan olarak 60 saniye, en fazla 600 |
-| Sözleşme kontrolü örnekleri | 3 vaka                                    |
+| Puanlayıcı zaman aşımı      | Varsayılan olarak 60 saniye, en fazla 600 |
 
 ## İlgili sayfalar
 

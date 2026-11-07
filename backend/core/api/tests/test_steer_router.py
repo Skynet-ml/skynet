@@ -9,13 +9,11 @@ from pydantic import ValidationError
 
 from ...service_gateway.agents.steering import SteerStore
 from ..routers import generalist_agent as agent_mod
-from ..routers.code_agent import CodeAgentRequest
 from ..routers.generalist_agent import GeneralistAgentRequest, SteerWithdrawResponse
-from ..routers.serve import ServeChatRequest
 from .conftest import bypass_auth
 
 
-@pytest.mark.parametrize("model", [GeneralistAgentRequest, CodeAgentRequest, ServeChatRequest])
+@pytest.mark.parametrize("model", [GeneralistAgentRequest])
 def test_turn_steer_key_rejects_empty(model: type) -> None:
     """Reject an explicitly empty key without making omitted keys mandatory.
 
@@ -71,7 +69,9 @@ def test_over_cap_post_is_rejected_without_losing_pending_messages(monkeypatch: 
     bypass_auth(app)
     client = TestClient(app)
     for index in range(10):
-        assert client.post("/optimizations/agent-steer", json={"steer_key": "turn", "text": str(index)}).status_code == 200
+        assert (
+            client.post("/optimizations/agent-steer", json={"steer_key": "turn", "text": str(index)}).status_code == 200
+        )
     response = client.post("/optimizations/agent-steer", json={"steer_key": "turn", "text": "queue me"})
     assert response.status_code == 429
     assert len(store.take("alice", "turn")) == 10

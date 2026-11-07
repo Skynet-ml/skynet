@@ -259,14 +259,15 @@ def test_import_makes_no_wallet_or_budget_rows(hosted_store: _SQLiteJobStore, bu
 
 
 def test_imported_run_cannot_be_requeued(hosted_store: _SQLiteJobStore, bundle: dict[str, Any]) -> None:
-    """Restart of an imported failed run is refused, and the failed copy keeps no result."""
+    """Restart of an imported failed DSPy run is refused, and the failed copy keeps no result."""
     bundle["job"]["status"] = "failed"
     resp = _import(hosted_store, bundle)
     assert resp.status_code == 201, resp.text
     new_id = resp.json()["optimization_id"]
     restart = _client(hosted_store, HOSTED_USER).post(f"/optimizations/{new_id}/restart")
-    assert restart.status_code == 409
-    assert restart.json()["detail"] == t_en("optimization.retry_no_payload")
+    # The bundle is a DSPy run, and Skynet no longer starts DSPy runs (SKY-316).
+    assert restart.status_code == 410
+    assert restart.json()["detail"] == t_en("optimization.dspy_run_retired")
     job = hosted_store.get_job(new_id)
     assert job["status"] == "failed"
     assert job["result"] is None

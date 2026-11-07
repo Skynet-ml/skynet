@@ -45,8 +45,7 @@ Authorization: Bearer skyd_...
 | `GET /models`                                   | 列出你可以用嘅模型。                                   |
 | `GET /optimizers`                               | 列出適合某個設定嘅優化器。                             |
 | `GET /blackbox/engines`                         | 列出原生引擎，同埋每個引擎係咪可用。                   |
-| `POST /optimize`                                | 為提示詞、程式碼、文字或者 DSPy 程式開始一次運行。     |
-| `POST /blackbox/run`                            | 喺一個 GitHub 儲存庫上開始一次運行。                   |
+| `POST /blackbox/run`                            | 喺一個 GitHub 倉庫上開始一次運行。                   |
 | `GET /optimizations`                            | 列出你嘅運行。                                         |
 | `GET /optimizations/{optimization_id}`          | 回傳一次運行：狀態、進度、日誌同結果。                 |
 | `GET /optimizations/{optimization_id}/artifact` | 回傳運行搵到嘅最佳版本。                               |
@@ -56,10 +55,10 @@ Authorization: Bearer skyd_...
 
 ## 開始一次運行
 
-`POST /optimize` 接受同提交精靈一樣嘅設定。呢個例子會改良一個將客服訊息分類做唔同標籤嘅提示詞。
+Skynet 就係 Optimize Anything：每次運行都係最佳化一個倉庫。`POST /blackbox/run` 接受同提交精靈一樣嘅設定。例子會改良一個將客服訊息分類做唔同標籤嘅倉庫。
 
 ```bash tab="curl"
-curl https://api.skynetml.com/optimize \
+curl https://api.skynetml.com/blackbox/run \
   -H "Authorization: Bearer $SKYNET_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: support-labels-001" \
@@ -69,56 +68,62 @@ curl https://api.skynetml.com/optimize \
 ```json tab="run.json"
 {
   "name": "Support labels",
-  "task": {
-    "objective": "Sort each support message into billing, bug or other.",
-    "artifact": {
-      "kind": "prompt",
-      "starting_version": "Label this support message as billing, bug or other."
+  "objective": "Sort each support message into billing, bug or other.",
+  "recipe": "repo",
+  "target": {
+    "kind": "repo",
+    "repo": {
+      "provider": "github",
+      "repository": "your-org/support-labels",
+      "branch": "main",
+      "editable_paths": ["serve.py", "prompts/"]
     }
   },
-  "data": {
-    "mode": "pairs",
-    "cases": [
-      { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
-      { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
-      {
-        "input": { "message": "Do you have a Hebrew interface?" },
-        "expected": { "label": "other" }
-      }
-    ]
+  "cases": [
+    { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
+    { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
+    {
+      "input": { "message": "Do you have a Hebrew interface?" },
+      "expected": { "label": "other" }
+    }
+  ],
+  "input_fields": ["message"],
+  "expected_field": "label",
+  "scorer": {
+    "kind": "python",
+    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "model": { "name": "<model from GET /models>" }
   },
-  "optimizer": { "choice": "auto", "budget": { "max_scorer_runs": 200 } },
-  "models": {
-    "task_model": { "name": "<model from GET /models>" },
-    "reflection_model": { "name": "<model from GET /models>" }
-  },
-  "workspace": {
-    "run_code": "from skynet import llm\n\ndef run(artifact, input):\n    return llm(artifact, input=input[\"message\"])\n",
-    "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
-  },
+  "strategy": { "mode": "auto" },
+  "budget": { "max_scorer_runs": 200 },
+  "reflection_model_config": { "name": "<model from GET /models>" },
   "max_cost_cents": 500
 }
 ```
 
 重要欄位：
 
-- `task.artifact.kind` 係 `prompt`、`code`、`text` 或者 `dspy_program`。
-- `data.mode` 係 `pairs`（輸入連埋預期輸出）或者 `single`（啱啱好一個案例）。
-- `optimizer.choice` 係 `auto`，或者 `GET /optimizers` 入面其中一個優化器名稱。
+- `target.repo.repository` 係 GitHub 倉庫，格式係 `owner/name`。請先喺 **設定 → 連接器** 連接 GitHub。
+- `target.repo.editable_paths` 列出優化器可以改嘅檔案同資料夾。`"."` 即係成個倉庫。
+- `target.repo.commit` 係可選嘅。佢係一個 40 個字元嘅 SHA。如果冇設定，Skynet 會用個分支上面最新嘅 commit。
+- `target.repo.secrets` 係可選嘅。每個密鑰都有 `name` 同 `value`。佢會以環境變數嘅形式去到你嘅程式碼同評分器。
+- `scorer.metric_code` 定義 `score(repo_path, case)`。`scorer.model` 係你嘅程式碼同評分器可以經模型閘道呼叫嘅模型。
+- `strategy.mode` 係 `auto`（預設）或者 `single`。用 `single` 嘅話，將 `strategy.engine` 設做 `GET /blackbox/engines` 入面其中一個引擎名稱。
 - `max_cost_cents` 係呢次運行嘅花費上限，單位係美仙。
 - `is_private` 預設係 `false`。設做 `true` 就可以將運行保持私人。
 
-`run_code` 同 `metric_code` 嘅規則，請睇 [指標同評分器](/docs/concepts/scorers)。
+`metric_code` 嘅規則，請睇 [指標同評分器](/docs/concepts/scorers)。
 
 ### 回應
 
 | 狀態  | 意思                                                                                                         |
 | ----- | ------------------------------------------------------------------------------------------------------------ |
 | `201` | Skynet 已經將運行排入佇列。回應內容有 `optimization_id` 同 `status`。                                        |
+| `400` | 目標唔係一個倉庫，或者評分器載入唔到。                                                                       |
 | `202` | 設定檢查仲做緊。等 `Retry-After` 標頭指定嘅秒數，然後用同一個 `Idempotency-Key` 再傳送同一個內容。          |
 | `402` | 你嘅結餘唔夠。                                                                                               |
 | `409` | 你去到配額上限，或者設定檢查已經過時。                                                                       |
-| `422` | 請求或者工作區程式碼唔符合優化器嘅要求。                                                                     |
+| `422` | 請求唔符合優化器嘅要求。                                                                                     |
 
 > [!NOTE]
 > 一定要傳送 `Idempotency-Key` 標頭。如果你用同一個 key 再傳送同一個請求，Skynet 會回傳第一次嘅運行，唔會開始第二次運行。
@@ -154,7 +159,7 @@ curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 
-想用最佳版本處理一個新輸入，就傳送 `POST /serve/{optimization_id}`。每個分數嘅意思，請睇 [睇結果](/docs/guides/results)。
+想用最佳版本處理一個新輸入，就傳送 `POST /serve/{optimization_id}`，再加埋 `Idempotency-Key` 標頭。倉庫一定要有一個 `serve.py` 檔案，入面有 `def serve(input)`。請求、回應同每個分數嘅意思，請睇 [睇結果](/docs/guides/results)。
 
 ## 限制
 

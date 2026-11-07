@@ -2,7 +2,9 @@
  * Light / dark color theme: the stored choice, its resolution against the
  * OS preference, and the pre-paint script that applies it.
  *
- * The choice lives per browser in localStorage. `system` (the default) follows
+ * The choice lives per browser in a cookie, with a localStorage copy. A cookie
+ * is scoped by host, not port, so the Mac app keeps the choice when its web
+ * port changes between launches (SKY-358). `system` (the default) follows
  * `prefers-color-scheme` live. The resolved theme is a `.dark` class plus the
  * matching `color-scheme` on `<html>`; every color token switches off that class.
  */
@@ -12,6 +14,8 @@ export type ColorTheme = (typeof COLOR_THEMES)[number];
 export type ResolvedColorTheme = Exclude<ColorTheme, "system">;
 
 export const COLOR_THEME_STORAGE_KEY = "app.prefs.color-theme";
+export const COLOR_THEME_COOKIE = "app_color_theme";
+const COLOR_THEME_COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
 const DARK_QUERY = "(prefers-color-scheme: dark)";
 // The former Gray theme became Dark; a choice saved under the old name keeps it.
 const LEGACY_DARK = "gray";
@@ -20,18 +24,51 @@ export function isColorTheme(value: unknown): value is ColorTheme {
   return typeof value === "string" && (COLOR_THEMES as readonly string[]).includes(value);
 }
 
-/** Read the stored choice; storage can be absent or throw (private mode). */
+function parseColorTheme(raw: string | null | undefined): ColorTheme | null {
+  if (raw === LEGACY_DARK) return "dark";
+  return isColorTheme(raw) ? raw : null;
+}
+
+function readCookie(): string | null {
+  const prefix = `${COLOR_THEME_COOKIE}=`;
+  const entry = document.cookie.split("; ").find((part) => part.startsWith(prefix));
+  return entry ? entry.slice(prefix.length) : null;
+}
+
+/**
+ * Read the stored choice. The cookie wins, because `system` is written there
+ * and must override an older choice left in this port's localStorage. A
+ * choice saved before the cookie existed is still read from localStorage.
+ * Storage can be absent or throw (private mode).
+ */
 export function readColorTheme(): ColorTheme {
   try {
-    const raw = window.localStorage.getItem(COLOR_THEME_STORAGE_KEY);
-    if (raw === LEGACY_DARK) return "dark";
-    return isColorTheme(raw) ? raw : "system";
+    const fromCookie = parseColorTheme(readCookie());
+    if (fromCookie) return fromCookie;
+  } catch {
+    /* no document.cookie: fall through to localStorage */
+  }
+  let saved: ColorTheme | null = null;
+  try {
+    saved = parseColorTheme(window.localStorage.getItem(COLOR_THEME_STORAGE_KEY));
   } catch {
     return "system";
+  }
+  // Copy a pre-cookie choice into the cookie, so the next port finds it too.
+  if (saved) writeCookie(saved);
+  return saved ?? "system";
+}
+
+function writeCookie(theme: ColorTheme): void {
+  try {
+    document.cookie = `${COLOR_THEME_COOKIE}=${theme};path=/;max-age=${COLOR_THEME_COOKIE_MAX_AGE};samesite=lax`;
+  } catch {
+    /* cookies unavailable: localStorage still keeps it for this port */
   }
 }
 
 export function writeColorTheme(theme: ColorTheme): void {
+  writeCookie(theme);
   try {
     if (theme === "system") window.localStorage.removeItem(COLOR_THEME_STORAGE_KEY);
     else window.localStorage.setItem(COLOR_THEME_STORAGE_KEY, theme);
@@ -72,9 +109,11 @@ export function watchSystemColorScheme(onChange: () => void): () => void {
  * dark-mode visitor never sees a light flash. Mirrors readColorTheme +
  * resolveColorTheme + applyResolvedColorTheme with no imports.
  */
-export const COLOR_THEME_INIT_SCRIPT = `(function(){try{var t=null;try{t=localStorage.getItem(${JSON.stringify(
+export const COLOR_THEME_INIT_SCRIPT = `(function(){try{var t=null;try{var m=document.cookie.match(/(?:^|; )${COLOR_THEME_COOKIE}=([^;]*)/);if(m)t=m[1]}catch(e){}if(t!=="system"&&t!=="light"&&t!=="dark"&&t!==${JSON.stringify(
+  LEGACY_DARK,
+)}){t=null;try{t=localStorage.getItem(${JSON.stringify(
   COLOR_THEME_STORAGE_KEY,
-)})}catch(e){}var d=t==="dark"||t===${JSON.stringify(
+)})}catch(e){}}var d=t==="dark"||t===${JSON.stringify(
   LEGACY_DARK,
 )}||(t!=="light"&&window.matchMedia(${JSON.stringify(
   DARK_QUERY,

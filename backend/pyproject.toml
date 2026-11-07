@@ -228,7 +228,7 @@ exclude = ["usage_guide/", ".venv/"]
 #   pytest tests/test_llm_integration.py -v  # nightly paid tier
 #   pytest tests/ -m "not slow" -v           # skip long-running LLM tests
 #
-testpaths = ["core", "tests"]
+testpaths = ["core", "tests", "scripts"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 addopts = ["--strict-markers"]

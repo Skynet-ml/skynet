@@ -32,13 +32,13 @@ def test_missing_scorer_model_message_has_localized_code() -> None:
 def _spec() -> dict[str, Any]:
     """Build a unified spec as the wizard sends it."""
     return {
-        "task": {"objective": "o", "artifact": {"kind": "prompt", "starting_version": "p"}},
+        "task": {"objective": "o", "artifact": {"kind": "dspy_program", "starting_version": "p"}},
         "data": {
             "mode": "pairs",
             "cases": [{"input": {"q": str(i)}, "expected": "p"} for i in range(3)],
             "input_fields": ["q"],
         },
-        "optimizer": {"choice": "best_of_n"},
+        "optimizer": {"choice": "dspy_gepa"},
         "models": {"reflection_model": {"name": "openrouter/task"}},
         "workspace": {"run_code": RUN_CODE, "metric_code": METRIC_CODE},
     }

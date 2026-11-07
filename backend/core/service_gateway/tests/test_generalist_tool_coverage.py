@@ -14,17 +14,19 @@ from core.service_gateway.agents.generalist import (
     _DESTRUCTIVE_TOOLS,
     _POST_SUBMIT_TOOLS,
     _SAFE_MUTATIONS,
-    _SUBMIT_TOOLS,
     _needs_approval,
 )
 
 # Agent-tagged routes the generalist deliberately does not see. Each one has a
 # reason; a new agent route must be added to a generalist list or here.
 _HIDDEN_FROM_GENERALIST = {
+    # Every run optimizes a repository, and the wizard's own Run button submits it (SKY-316).
+    "submit_unified_run_optimize_post",
+    # Grid-search pairs are DSPy programs, and these routes refuse every call with 410 (SKY-316).
+    "serve_pair_info_serve",
+    "request_user_pair_inference",
     # The chat's inference card runs this itself; the agent cannot know the user's inputs.
     "serve_program_serve",
-    # Only the Metric screen's coding agent writes run and metric code.
-    "edit_code_optimizations_edit_code_post",
     # Needs a black-box run ordinal the agent has no listing for, and returns a full transcript.
     "get_agent_run_optimizations",
     # Folder organizing and the per-run cost breakdown are their own feature;
@@ -38,6 +40,13 @@ _HIDDEN_FROM_GENERALIST = {
     "move_runs_to_folder",
     "delete_folder",
     "get_usage_optimizations",
+    # Metric hardening is a new feature; the generalist gets hardening tools in a later change.
+    "create_hardening_job",
+    "get_hardening_job",
+    "get_latest_hardening_job",
+    "set_hardening_exploit_verdict",
+    "decide_hardening_fix",
+    "retry_hardening_job",
 }
 
 _FOLDER_WRITES = ("create_folder", "update_folder", "move_folder", "move_runs_to_folder", "delete_folder")
@@ -68,7 +77,7 @@ def agent_tool_names() -> set[str]:
 
 def test_every_generalist_tool_name_matches_an_agent_route(agent_tool_names: set[str]) -> None:
     """A tool name with no agent route would silently drop out of the agent's tool list."""
-    listed = _ALWAYS_TOOLS | _DATASET_READY_TOOLS | _SUBMIT_TOOLS | _POST_SUBMIT_TOOLS
+    listed = _ALWAYS_TOOLS | _DATASET_READY_TOOLS | _POST_SUBMIT_TOOLS
     assert sorted(listed - agent_tool_names) == []
 
 
@@ -79,7 +88,7 @@ def test_every_gated_tool_name_matches_an_agent_route(agent_tool_names: set[str]
 
 def test_every_agent_route_is_exposed_or_deliberately_hidden(agent_tool_names: set[str]) -> None:
     """A new agent route must be given to the generalist or listed with a reason it is hidden."""
-    listed = _ALWAYS_TOOLS | _DATASET_READY_TOOLS | _SUBMIT_TOOLS | _POST_SUBMIT_TOOLS
+    listed = _ALWAYS_TOOLS | _DATASET_READY_TOOLS | _POST_SUBMIT_TOOLS
     assert sorted(agent_tool_names - listed - _HIDDEN_FROM_GENERALIST) == []
     assert sorted(_HIDDEN_FROM_GENERALIST - agent_tool_names) == []
 

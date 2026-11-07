@@ -8,10 +8,11 @@ import {
   localModelRefusalMessage,
   useLocalStatus,
 } from "@/features/local-runtime";
-import { agentSubscriptionFor, readPref } from "@/features/settings";
+import { readPref } from "@/features/settings";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { I18N_KEY } from "@/shared/lib/i18n";
 import { getActiveLocale } from "@/shared/lib/runtime-locale";
+import { parseSourceKey } from "@/shared/lib/api-route";
 import { liveEffort, sentFastMode } from "@/shared/lib/effort-slider";
 import {
   appendReasoning,
@@ -29,7 +30,12 @@ import { midTurnOf, SteerQueue, type MidTurnQueue } from "@/shared/ui/agent/stee
 import { agentSteerChannel, newSteerKey } from "@/shared/ui/agent/use-steer-queue";
 
 import { confirmGeneralistApproval, streamGeneralistAgent } from "../lib/stream";
-import { dropPendingToolCalls, pendingToolCall, placeToolCall } from "../lib/pending-tool-calls";
+import {
+  dropPendingToolCalls,
+  pendingToolCall,
+  placeToolCall,
+  stopToolCalls,
+} from "../lib/pending-tool-calls";
 import { editMode, retryMode } from "../lib/edit-turn";
 import type {
   ChatTurn,
@@ -87,8 +93,11 @@ export interface GeneralistAgentState {
    * conversation has no in-memory session and must be loaded from the server.
    */
   activateConversation: (id: string) => boolean;
-  /** Open a server-loaded conversation as the displayed session. */
-  openConversation: (id: string, messages: AgentMessage[]) => void;
+  /**
+   * Open a conversation as the displayed session. An `unsaved` one lives
+   * only in the browser: its turns go out with `persist: false`.
+   */
+  openConversation: (id: string, messages: AgentMessage[], options?: { unsaved?: boolean }) => void;
   /** Drop a conversation's session (aborting its stream) after deletion. */
   discardConversation: (id: string) => void;
   /** Conversation ids with a stream running or waiting in the queue. */
@@ -169,6 +178,8 @@ interface SessionView {
   /** Machine code of the error, e.g. the balance gate's, so the panel can offer its way out. */
   errorCode: string | null;
   pendingApproval: PendingApprovalPayload | null;
+  /** The server keeps no copy: its id is the browser's own and its turns are not saved. */
+  unsaved?: boolean;
 }
 
 /** A turn captured at send time, replayed verbatim when a slot frees up. */
@@ -305,9 +316,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
 
   // Effect ordering guarantees this snapshot is current at send time: this
   // child hook's effects run before the parent panel's, so any same-commit
-  // programmatic send (e.g. the code-authoring handoff) sees the latest props.
-  // Same-tick sends that must carry not-yet-committed values pass them via the
-  // ``wizardStateOverride`` argument instead (see the dataset/code handoffs).
+  // programmatic send sees the latest props.
   const snapshotRef = React.useRef({ wizardState, trustMode });
   React.useEffect(() => {
     snapshotRef.current = { wizardState, trustMode };
@@ -511,6 +520,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         if (streamingKeysRef.current.delete(key)) requestPump();
       };
 
+      const unsaved = sessionsRef.current.get(key)?.unsaved === true;
       const steerKey = newSteerKey();
       const steerQueue = steerQueueFor(key);
       const applySteer = ({ ids, text }: { ids: string[]; text: string }) => {
@@ -550,14 +560,15 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       // Every stream callback short-circuits on ``controller.signal.aborted``
       // so a slow stream replaced by a fresh ``send`` (or by the unmount-time
       // abort) cannot leak state writes or window events into the live view.
-      void localAgentModel(modelRef.current, agentSubscriptionFor("generalist")).then((sentModel) =>
+      void localAgentModel(modelRef.current).then((sentModel) =>
         streamGeneralistAgent(
           {
             user_message: run.message,
             chat_history: run.chatHistory,
             wizard_state: run.wizardState,
             trust_mode: run.trustMode,
-            conversation_id: sessionsRef.current.get(key)?.conversationId ?? null,
+            conversation_id: unsaved ? null : (sessionsRef.current.get(key)?.conversationId ?? null),
+            persist: unsaved ? false : undefined,
             regenerate: run.regenerate,
             edit_user_text: run.editUserTurn?.text,
             edit_user_occurrence: run.editUserTurn?.occurrence,
@@ -872,6 +883,12 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       hidden = false,
       editUserTurn: { text: string; occurrence: number } | null = null,
     ) => {
+      // A web chat is read-only on the Mac: refuse before any turn shows.
+      const conversationId = sessionsRef.current.get(key)?.conversationId;
+      if (conversationId && parseSourceKey(conversationId).source === "hosted") {
+        patchSession(key, { error: msg("agent.web_chat.read_only"), errorCode: null });
+        return;
+      }
       // A resend within the same session replaces its own in-flight or queued
       // turn — other sessions' streams are untouched.
       abortSession(key);
@@ -1033,6 +1050,15 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     abortSession(key);
     patchSession(key, { status: "idle", statusLabel: "" });
     patchThinking(key, (segments) => closeThinking(segments, Date.now()));
+    patchMessages(key, (prev) => {
+      const last = prev[prev.length - 1];
+      if (!last || last.role !== "assistant" || !last.toolCalls?.some((t) => t.status === "running")) {
+        return prev;
+      }
+      const next = prev.slice();
+      next[next.length - 1] = { ...last, toolCalls: stopToolCalls(last.toolCalls, Date.now()) };
+      return next;
+    });
     if (wasQueued) {
       // Nothing streamed yet — drop the empty assistant placeholder so the
       // transcript doesn't keep a hollow bubble for a turn that never ran.
@@ -1058,7 +1084,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
       for (const [key, session] of draft) {
         if (key === keepKey) continue;
         if (isBusy(session) || session.status === "error") continue;
-        if (session.conversationId === null && session.messages.length > 0) continue;
+        if ((session.conversationId === null || session.unsaved) && session.messages.length > 0) continue;
         if (steerQueues.get(key)?.hasPending()) continue;
         draft.delete(key);
         runtimesRef.current.delete(key);
@@ -1100,10 +1126,15 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
   );
 
   const openConversation = React.useCallback(
-    (id: string, loaded: AgentMessage[]) => {
+    (id: string, loaded: AgentMessage[], options?: { unsaved?: boolean }) => {
       const key = nextKey();
       commit((draft) => {
-        draft.set(key, { ...blankSession(key), conversationId: id, messages: loaded });
+        draft.set(key, {
+          ...blankSession(key),
+          conversationId: id,
+          messages: loaded,
+          ...(options?.unsaved ? { unsaved: true } : {}),
+        });
         pruneInactive(draft, key);
       });
       setActive(key);

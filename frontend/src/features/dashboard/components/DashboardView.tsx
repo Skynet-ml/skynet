@@ -24,8 +24,9 @@ import { sessionIdentity } from "@/shared/lib/session-identity";
 import { TERMS } from "@/shared/lib/terms";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { useColumnFilters, useColumnResize } from "@/shared/ui/excel-filter";
-import { ACTIVE_STATUSES, getJobTypeLabel, getStatusLabel } from "@/shared/constants/job-status";
+import { ACTIVE_STATUSES, getStatusLabel } from "@/shared/constants/job-status";
 import type { OptimizationSummaryResponse } from "@/shared/types/api";
+import { runHref } from "@/shared/lib/api-route";
 import { bulkCancelJobs, bulkPinOptimizations, pauseJob, resumeJob } from "@/shared/lib/api";
 import { transformChartData } from "../lib/transform-chart-data";
 import { useQueueStatus } from "../hooks/use-queue-status";
@@ -120,8 +121,6 @@ export function DashboardView() {
     dateTo: analyticsFilters.dateTo,
     owner: analyticsFilters.owner,
     access: analyticsFilters.access,
-    jobType: analyticsFilters.jobType,
-    module: analyticsFilters.module,
     improvement: analyticsFilters.improvement,
     runtime: analyticsFilters.runtime,
     dataset: analyticsFilters.dataset,
@@ -164,9 +163,13 @@ export function DashboardView() {
     return data.items.filter((job) => selectedIds.has(job.optimization_id));
   }, [data, selectedIds]);
   const hasCompleteSelection = selectedIds.size > 0 && selectedJobs.length === selectedIds.size;
-  const selectedJob = hasCompleteSelection && selectedJobs.length === 1 ? selectedJobs[0] : null;
+  // Bulk actions call local routes only, so a selection with a hosted run gets none.
+  const selectionIsLocal = selectedJobs.every((job) => job.source !== "hosted");
+  const selectedJob =
+    hasCompleteSelection && selectionIsLocal && selectedJobs.length === 1 ? selectedJobs[0] : null;
   const canEditSelection =
     hasCompleteSelection &&
+    selectionIsLocal &&
     (isAdmin ||
       selectedJobs.every(
         (job) => job.role == null || job.role === "owner" || job.role === "editor",
@@ -320,11 +323,12 @@ export function DashboardView() {
   // which skips non-owned ids — gating here avoids a misleading "deleted" toast
   // when the server actually skipped them.
   const canBulkDelete = useMemo(() => {
+    if (!selectionIsLocal) return false;
     if (isAdmin) return true;
     if (!data || !Array.isArray(data.items) || selectedIds.size === 0) return false;
     if (!hasCompleteSelection) return false;
     return selectedJobs.every((job) => job.role == null || job.role === "owner");
-  }, [isAdmin, data, selectedIds.size, hasCompleteSelection, selectedJobs]);
+  }, [isAdmin, data, selectedIds.size, hasCompleteSelection, selectedJobs, selectionIsLocal]);
 
   const filteredItems = useMemo(() => {
     if (!data || !Array.isArray(data.items)) return [];
@@ -398,8 +402,6 @@ export function DashboardView() {
       ),
       role,
       status: unique("status", getStatusLabel),
-      optimization_type: unique("optimization_type", getJobTypeLabel),
-      module_name: unique("module_name"),
       optimizer_name: unique("optimizer_name"),
     };
   }, [data, sessionUser]);
@@ -505,7 +507,7 @@ export function DashboardView() {
                   togglePageSelection={togglePageSelection}
                   pageOffset={pageOffset}
                   setPageOffset={setPageOffset}
-                  onOpenJob={(id) => router.push(`/optimizations/${id}`)}
+                  onOpenJob={(id, source) => router.push(runHref(id, source))}
                 />
               </TabsContent>
 

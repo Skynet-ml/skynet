@@ -57,7 +57,7 @@ Kayıtları içe aktaran bağlayıcılar arasında veritabanı tabloları, LLM i
 | Klasör derinliği                   | 3 klasör                                                                |
 | Dosya türleri                      | `.py`, `.txt`, `.md`, `.json`, `.yaml`, `.csv`, `.toml`, `.ini`, `.cfg` |
 
-`run.py` ve `metric.py` bir çalıştırmanın giriş dosyalarıdır. Bunları silemez, yeniden adlandıramaz veya taşıyamazsınız.
+`scorer.py` puanlayıcınızı içerir. Skynet her vaka için onun `score(repo_path, case)` fonksiyonunu çağırır.
 
 ## İstek hızları
 

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
+import subprocess
 import tarfile
 import threading
 from pathlib import Path
@@ -12,22 +14,35 @@ from typing import Any
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.model_catalog import CatalogModel, ModelCatalogResponse
 from core.api.routers import wizard_preflight
 from core.billing.model_dispatch import ModelHTTPResult
+from core.billing.model_gateway import ROUTE_KEY
 from core.billing.openrouter_quotes import resolve_model_slug
 from core.billing.operation_pricing import ChargePolicy
 from core.billing.protected_credentials import has_exposed_execution_credentials
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
-from core.connectors.github_publish import PublishedChange, RepoPublishError
+from core.connectors.github_publish import HardeningSummary, PublishedChange, RepoPublishError
 from core.connectors.github_repo import RepoSnapshot
 from core.exceptions import ServiceError
-from core.service_gateway.optimization.blackbox.repo_constraints import ConstraintsError
+from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
+from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR
+from core.service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, ServiceSpec, TargetStage
 from core.service_gateway.optimization.blackbox.repo_workspace import _PROBE_OK, NetworkCutoffError
-from core.service_gateway.optimization.blackbox.rule_judge import JUDGE_ANSWER_TOKENS, JUDGE_REASONING_TOKENS
+from core.service_gateway.optimization.blackbox.rule_judge import (
+    JUDGE_ANSWER_TOKENS,
+    JUDGE_REASONING_TOKENS,
+    WATCH_EVERY_ACTIONS,
+    WITHHELD_STEP,
+)
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult, SandboxSpec
+from core.storage.models import Base
 from core.worker import repo_staging
 
 
@@ -115,12 +130,17 @@ def test_staging_applies_the_repository_constraints_and_records_the_environment(
     repo = staged_payload["target"]["repo"]
     assert repo["editable_paths"] == ["src/geocode"]
     assert staged.protected_paths == ("optimize.toml", "src/geocode/eval")
+    assert staged.intent == "Pick the place the sender means."
     environment = repo["environment"]
     assert environment["commit"] == "c" * 40
     assert environment["editable_paths"] == ["src/geocode"]
     assert environment["protected_paths"] == ["optimize.toml", "src/geocode/eval"]
     assert environment["secret_names"] == ["API_KEY"]
     assert environment["services"] == []
+    assert environment["roles"] == {
+        "proposer": {"allowed_hosts": None, "mcp_servers": [], "services": []},
+        "targets": {},
+    }
     assert environment["constraints_file"]["path"] == "optimize.toml"
     assert "secret-value" not in repr(staged_payload)
     assert "Pick the place the sender means." in staged_payload["background"]
@@ -398,7 +418,7 @@ class _Gateway:
         self.observers.setdefault(role, []).append(observer)
 
     def dispatch_guest(self, token: str, path: str, body: dict[str, Any], headers: dict[str, str]) -> Any:
-        """Answer a judge call with a legal verdict.
+        """Answer a watch hook call with an ``ok`` verdict.
 
         Args:
             token: Route token.
@@ -411,9 +431,9 @@ class _Gateway:
         """
         self.judged.append((self.routes[token]["model"], body["messages"][0]["content"]))
         self.bodies[self.routes[token]["model"]] = body
-        if "recent actions" in body["messages"][0]["content"].lower():
+        if "<steps>" in body["messages"][0]["content"]:
             self.watched.set()
-        verdict = json.dumps({"violation": False, "rule": None, "reason": "fine"})
+        verdict = json.dumps({"label": "ok", "confidence": 0.9, "reason": "fine"})
         reply = {"choices": [{"message": {"content": verdict}}]}
         return ModelHTTPResult(200, "application/json", json.dumps(reply).encode())
 
@@ -497,52 +517,223 @@ def test_binding_hands_the_guest_a_route_and_closes_the_box(tmp_path: Path) -> N
     assert box.closed
 
 
-def _ruled_binding(tmp_path: Path, rules: tuple[str, ...]) -> tuple[dict[str, Any], repo_staging.StagedRepository]:
+def test_binding_gives_the_box_only_the_scorer_models_scoped_route(tmp_path: Path) -> None:
+    """The scorer's model reaches the box as its scoped route; the box stays offline."""
+    payload, staged = _binding(tmp_path, None)
+    route = {"url": "http://127.0.0.1:1/v1", "token": "route-token", "model": "vendor/judge", "role": "judge"}
+    payload["scorer"]["model"] = {"name": "vendor/judge", "token_source": "byok", "extra": {ROUTE_KEY: route}}
+    gateway = _Gateway()
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    bound = gateway.evaluator._gateway
+    assert (bound.url, bound.model, bound.api_key, bound.protected) == (
+        route["url"],
+        "vendor/judge",
+        "route-token",
+        True,
+    )
+    assert gateway.evaluator._model_env() == {"APP_API_KEY": "route-token", "APP_MODEL": "vendor/judge"}
+    box = gateway.boxes[0]
+    assert box.spec.network_disabled is True
+    assert box.spec.allowed_hosts == ()
+    assert payload["target"]["repo"]["environment"]["network"] == {"setup": [], "versions": []}
+    staged.close_scorers()
+
+
+def test_binding_refuses_a_scorer_model_without_a_scoped_route(tmp_path: Path) -> None:
+    """A model the parent did not scope would carry a provider key, so no box opens."""
+    payload, staged = _binding(tmp_path, None)
+    payload["scorer"]["model"] = {"name": "vendor/judge", "token_source": "byok", "extra": {"api_key": "user-key"}}
+    gateway = _Gateway()
+
+    with pytest.raises(ServiceError, match="scoped route"):
+        repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+    assert gateway.boxes == []
+
+
+def _ruled_binding(
+    tmp_path: Path, rules: tuple[str, ...], *, intent: str | None = None, watch: bool = False
+) -> tuple[dict[str, Any], repo_staging.StagedRepository]:
     """Build a staged repository whose optimize.toml has the given plain-language rules.
 
     Args:
         tmp_path: Scratch folder.
         rules: The file's rules.
+        intent: The file's stated intent.
+        watch: Whether the run turns the watch hook on.
 
     Returns:
         The payload and the staged tree.
     """
     payload, staged = _binding(tmp_path, None)
+    if watch:
+        payload[repo_staging.RULE_WATCH_KEY] = {"enabled": True}
     return payload, repo_staging.StagedRepository(
         snapshot=staged.snapshot,
         secrets=staged.secrets,
         workdir=staged.workdir,
         constrained=True,
         rules=rules,
+        intent=intent,
     )
 
 
-def test_rules_bind_two_managed_judges_billed_to_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The watch and final judges run on the managed key under the run's budget, never on a guest route."""
+def _agent_call(command: str, result: str = "ok") -> dict[str, Any]:
+    """Build an agent model call that ends with one shell tool call and its result.
+
+    Args:
+        command: The shell command.
+        result: The tool result text.
+
+    Returns:
+        The request body.
+    """
+    return {
+        "messages": [
+            {"role": "user", "content": "This is round 2 (explore)."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"function": {"name": "shell", "arguments": json.dumps({"command": command})}}],
+            },
+            {"role": "tool", "content": result},
+        ]
+    }
+
+
+def _trigger_watch(gateway: Any) -> None:
+    """Send enough agent model calls to start one watch, and wait for it.
+
+    Args:
+        gateway: The recording gateway.
+    """
+    (observer,) = gateway.observers["optimization"]
+    for index in range(WATCH_EVERY_ACTIONS):
+        observer(_agent_call(f"edit {index}"))
+    assert gateway.watched.wait(5)
+
+
+def test_a_run_that_turns_the_watch_on_binds_one_managed_hook_billed_to_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The watch hook runs on the managed key under the run's budget, never on a guest route, and never sees the metric."""
     monkeypatch.setattr(repo_staging, "agent_model_id", lambda configured="": "vendor/fast")
-    monkeypatch.setattr(repo_staging, "strongest_model_id", lambda configured="": "vendor/strong")
-    payload, staged = _ruled_binding(tmp_path, ("Do not hardcode answers.",))
+    payload, staged = _ruled_binding(tmp_path, ("Do not hardcode answers.",), intent="Find places.", watch=True)
     gateway = _Gateway()
 
     repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1", managed_key="managed-key")
 
-    assert sorted(tuple(route.values()) for route in gateway.routes.values()) == [
+    assert [tuple(route.values()) for route in gateway.routes.values()] == [
         ("vendor/fast", "managed-key", "judge", "managed_model", True),
-        ("vendor/strong", "managed-key", "judge", "managed_model", True),
     ]
     assert "managed-key" not in repr(payload)
     judge = gateway.evaluator._rule_judge
     assert judge.rules == ("Do not hardcode answers.",)
-    assert not judge.judge_version("diff --git a/x b/x\n+x = 1\n").violated
-    assert gateway.judged[0][0] == "vendor/strong"
-    assert "Rule 1: Do not hardcode answers." in gateway.judged[0][1]
+    assert judge.watching
+    assert gateway.judged == []
 
-    (observer,) = gateway.observers["optimization"]
-    for index in range(15):
-        observer({"messages": [{"role": "user", "content": f"edit {index}"}]})
-    assert gateway.watched.wait(5)
-    assert gateway.judged[-1][0] == "vendor/fast"
+    _trigger_watch(gateway)
+
+    (model, prompt) = gateway.judged[0]
+    assert model == "vendor/fast"
+    assert "Rule 1: Do not hardcode answers." in prompt
+    assert "Find places." in prompt
+    assert "edit 14" in prompt
+    assert payload["scorer"]["metric_code"] not in prompt
     staged.close_scorers()
+
+
+def test_the_watch_never_reads_a_score_or_the_scorers_feedback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Engine files and tool results carry the scores and feedback, so the hook reads only safe tool inputs."""
+    monkeypatch.setattr(repo_staging, "agent_model_id", lambda configured="": "vendor/fast")
+    payload, staged = _ruled_binding(tmp_path, ("Do not hardcode answers.",), intent="Find places.", watch=True)
+    gateway = _Gateway()
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1", managed_key="managed-key")
+    (observer,) = gateway.observers["optimization"]
+    reply = json.dumps({"score": 0.4217, "info": {"feedback": "FEEDBACK-SECRET: case 3 names the wrong city"}})
+    state = "## Leaderboard\n\n| c001 | 0.4217 |\n\n## Failure dossier\n\n- `ex7`: FEEDBACK-SECRET wrong city\n"
+
+    for index in range(WATCH_EVERY_ACTIONS - 3):
+        observer(_agent_call(f"edit {index}"))
+    observer(_agent_call("cat STATE.md", state))
+    observer(_agent_call("./eval.sh case-3", reply))
+    observer(_agent_call("jq -r .info.feedback last.json", "FEEDBACK-SECRET: case 3 names the wrong city"))
+    assert gateway.watched.wait(5)
+
+    (_model, prompt) = gateway.judged[0]
+    assert "edit 11" in prompt
+    assert WITHHELD_STEP in prompt
+    assert "jq -r .info.feedback last.json" in prompt
+    assert "0.4217" not in prompt
+    assert "FEEDBACK-SECRET" not in prompt
+    assert "eval.sh" not in prompt
+    staged.close_scorers()
+
+
+def test_the_watch_is_off_by_default_and_costs_nothing(tmp_path: Path) -> None:
+    """Rules alone register no model and observe no agent call unless the run turns the watch on."""
+    payload, staged = _ruled_binding(tmp_path, ("Do not hardcode answers.",), intent="Find places.")
+    gateway = _Gateway()
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1", managed_key="managed-key")
+
+    assert gateway.routes == {}
+    assert gateway.observers == {}
+    judge = gateway.evaluator._rule_judge
+    assert judge.rules == ("Do not hardcode answers.",)
+    assert not judge.watching
+    staged.close_scorers()
+
+
+def test_the_watch_runs_on_an_intent_without_rules(tmp_path: Path) -> None:
+    """A stated intent is enough for the watch hook to have something to check."""
+    payload, staged = _ruled_binding(tmp_path, (), intent="Find places.", watch=True)
+    gateway = _Gateway()
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1", managed_key="managed-key")
+
+    assert len(gateway.routes) == 1
+    assert gateway.evaluator._rule_judge.watching
+    staged.close_scorers()
+
+
+def test_the_watch_setting_falls_back_to_the_server_defaults() -> None:
+    """A run without the setting gets the hook off, the configured model and the 0.7 threshold."""
+    assert repo_staging._rule_watch_setting({}) == (False, repo_staging.settings.rule_watch_model, 0.7)
+    assert repo_staging._rule_watch_setting({repo_staging.RULE_WATCH_KEY: None})[0] is False
+
+
+def test_the_watch_setting_takes_the_runs_values() -> None:
+    """A run can turn the hook on and choose its model and threshold."""
+    setting = {"enabled": True, "model": "vendor/watch", "threshold": 0.9}
+
+    assert repo_staging._rule_watch_setting({repo_staging.RULE_WATCH_KEY: setting}) == (True, "vendor/watch", 0.9)
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        True,
+        "on",
+        False,
+        0,
+        [],
+        "",
+        {"enabled": "yes"},
+        {"enabled": True, "model": ""},
+        {"enabled": True, "model": 0},
+        {"enabled": True, "model": 3},
+        {"enabled": True, "threshold": 1.5},
+        {"enabled": True, "threshold": -0.1},
+        {"enabled": True, "threshold": True},
+        {"enabled": True, "threshold": "high"},
+    ],
+)
+def test_a_bad_watch_setting_fails_setup(setting: Any) -> None:
+    """A malformed setting stops the run instead of silently turning the hook off."""
+    with pytest.raises(ConstraintsError, match="rule_watch"):
+        repo_staging._rule_watch_setting({repo_staging.RULE_WATCH_KEY: setting})
 
 
 def _catalog(*models: CatalogModel) -> ModelCatalogResponse:
@@ -570,96 +761,93 @@ def _row(value: str, **reasoning: Any) -> CatalogModel:
     return CatalogModel(value=value, label=value, provider="openrouter", **reasoning)
 
 
-def _judge_bodies(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, catalog: Any, *, prefix: str = ""
-) -> dict[str, dict[str, Any]]:
-    """Bind a ruled run, ask both judges once, and return each judge's request body.
+def _judge_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, catalog: Any, *, prefix: str = "") -> dict[str, Any]:
+    """Bind a run with the watch on, start one watch, and return the hook's request body.
 
     Args:
         tmp_path: Scratch folder.
         monkeypatch: Pytest monkeypatch.
-        catalog: The catalog snapshot the judges are built from.
-        prefix: Provider prefix on the configured judge ids.
+        catalog: The catalog snapshot the hook's limits are built from.
+        prefix: Provider prefix on the configured hook model id.
 
     Returns:
-        The request body per judge model slug.
+        The watch hook's request body.
     """
     monkeypatch.setattr(repo_staging, "agent_model_id", lambda configured="": f"{prefix}vendor/fast")
-    monkeypatch.setattr(repo_staging, "strongest_model_id", lambda configured="": f"{prefix}vendor/strong")
     monkeypatch.setattr(repo_staging, "catalog_snapshot", lambda: catalog)
-    payload, staged = _ruled_binding(tmp_path, ("Do not hardcode answers.",))
+    payload, staged = _ruled_binding(tmp_path, ("Do not hardcode answers.",), watch=True)
     gateway = _Gateway()
     repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1", managed_key="managed-key")
-    gateway.evaluator._rule_judge.judge_version("diff --git a/x b/x\n+x = 1\n")
-    (observer,) = gateway.observers["optimization"]
-    for index in range(15):
-        observer({"messages": [{"role": "user", "content": f"edit {index}"}]})
-    assert gateway.watched.wait(5)
+    _trigger_watch(gateway)
     staged.close_scorers()
-    return gateway.bodies
+    return gateway.bodies["vendor/fast"]
 
 
 @pytest.mark.parametrize("prefix", ["", "openrouter/"])
-def test_a_reasoning_judge_gets_low_effort_and_room_to_answer(
+def test_a_reasoning_hook_gets_low_effort_and_room_to_answer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefix: str
 ) -> None:
-    """A judge that thinks by default must not spend its whole answer budget on reasoning (OpenRouter shares it).
+    """A hook model that thinks by default must not spend its whole answer budget on reasoning (OpenRouter shares it).
 
     Catalog ids keep the ``openrouter/`` prefix that the gateway strips from route models.
     """
     catalog = _catalog(
         _row(
-            f"{prefix}vendor/strong",
+            f"{prefix}vendor/fast",
             reasoning_mandatory=True,
             reasoning_default_enabled=True,
             reasoning_efforts=["minimal", "low", "medium", "high"],
             default_reasoning_effort="high",
         ),
-        _row(f"{prefix}vendor/fast", reasoning_efforts=[], reasoning_default_enabled=False, reasoning_mandatory=False),
     )
 
-    bodies = _judge_bodies(tmp_path, monkeypatch, catalog, prefix=prefix)
+    body = _judge_body(tmp_path, monkeypatch, catalog, prefix=prefix)
 
-    strong = bodies["vendor/strong"]
-    assert strong["reasoning"] == {"effort": "low"}
-    assert strong["max_tokens"] == JUDGE_ANSWER_TOKENS + JUDGE_REASONING_TOKENS
+    assert body["reasoning"] == {"effort": "low"}
+    assert body["max_tokens"] == JUDGE_ANSWER_TOKENS + JUDGE_REASONING_TOKENS
     assert JUDGE_REASONING_TOKENS >= 4 * JUDGE_ANSWER_TOKENS
-    fast = bodies["vendor/fast"]
-    assert "reasoning" not in fast
-    assert fast["max_tokens"] == JUDGE_ANSWER_TOKENS
 
 
-def test_a_judge_missing_from_the_catalog_still_has_room_to_reason(
+def test_a_hook_that_never_reasons_gets_only_the_answer_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model the catalog marks as non-reasoning gets no reasoning field and the short limit."""
+    catalog = _catalog(
+        _row("vendor/fast", reasoning_efforts=[], reasoning_default_enabled=False, reasoning_mandatory=False)
+    )
+
+    body = _judge_body(tmp_path, monkeypatch, catalog)
+
+    assert "reasoning" not in body
+    assert body["max_tokens"] == JUDGE_ANSWER_TOKENS
+
+
+def test_a_hook_missing_from_the_catalog_still_has_room_to_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Before the catalog loads nobody knows whether a judge reasons, so both get the larger budget."""
-    bodies = _judge_bodies(tmp_path, monkeypatch, None)
+    """Before the catalog loads nobody knows whether the hook reasons, so it gets the larger budget."""
+    body = _judge_body(tmp_path, monkeypatch, None)
 
-    for body in bodies.values():
-        assert "reasoning" not in body
-        assert body["max_tokens"] == JUDGE_ANSWER_TOKENS + JUDGE_REASONING_TOKENS
+    assert "reasoning" not in body
+    assert body["max_tokens"] == JUDGE_ANSWER_TOKENS + JUDGE_REASONING_TOKENS
 
 
-def test_a_judge_with_unknown_reasoning_data_still_has_room_to_reason(
+def test_a_hook_with_unknown_reasoning_data_still_has_room_to_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A catalog row whose provider did not say whether it reasons is unknown, not a model that never reasons."""
     unknown = {"reasoning_efforts": None, "reasoning_default_enabled": None, "reasoning_mandatory": None}
-    catalog = _catalog(_row("vendor/strong", **unknown), _row("vendor/fast", **unknown))
 
-    bodies = _judge_bodies(tmp_path, monkeypatch, catalog)
+    body = _judge_body(tmp_path, monkeypatch, _catalog(_row("vendor/fast", **unknown)))
 
-    for body in bodies.values():
-        assert "reasoning" not in body
-        assert body["max_tokens"] == JUDGE_ANSWER_TOKENS + JUDGE_REASONING_TOKENS
+    assert "reasoning" not in body
+    assert body["max_tokens"] == JUDGE_ANSWER_TOKENS + JUDGE_REASONING_TOKENS
 
 
-def test_rules_without_the_managed_key_fail_setup(tmp_path: Path) -> None:
-    """Rules nobody can check stop the run before the guest starts, instead of going unenforced."""
-    payload, staged = _ruled_binding(tmp_path, ("Do not hardcode answers.",))
+def test_a_watch_without_the_managed_key_fails_setup(tmp_path: Path) -> None:
+    """A watch the run asked for but nobody can run stops the run before the guest starts."""
+    payload, staged = _ruled_binding(tmp_path, ("Do not hardcode answers.",), watch=True)
     gateway = _Gateway()
 
-    with pytest.raises(ConstraintsError, match="judge"):
+    with pytest.raises(ConstraintsError, match="rule watch"):
         repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1", managed_key="")
 
     assert gateway.boxes == []
@@ -667,8 +855,8 @@ def test_rules_without_the_managed_key_fail_setup(tmp_path: Path) -> None:
 
 
 def test_a_constraints_file_without_rules_blocks_without_judge_models(tmp_path: Path) -> None:
-    """Path rules alone still get the fixed block message, and no judge model is registered or paid for."""
-    payload, staged = _ruled_binding(tmp_path, ())
+    """Path rules alone still get the fixed block message, and no hook model is registered or paid for."""
+    payload, staged = _ruled_binding(tmp_path, (), watch=True)
     gateway = _Gateway()
 
     repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
@@ -837,19 +1025,51 @@ def test_only_a_version_that_beat_the_start_is_published(result: dict[str, Any],
     assert repo_staging.improved_patch(result) == expected
 
 
-_ILLEGAL_EDIT = {"candidate": _EDIT, "score": 0.0, "side_info": {"illegal_approach": {"rule": "r1", "reason": "x"}}}
+_STALE_ILLEGAL_EDIT = {
+    "candidate": _EDIT,
+    "score": 0.4,
+    "side_info": {"illegal_approach": {"rule": "r1", "reason": "x"}},
+}
+
+
+def test_an_old_judge_rejection_no_longer_blocks_publishing() -> None:
+    """The final judge is gone (SKY-349): a stale rejection key in side info is ignored like any other."""
+    result = _result(None, None, versions=[{"candidate": "", "score": 0.2}, _STALE_ILLEGAL_EDIT])
+
+    assert repo_staging.improved_patch(result) == _EDIT
+
+
+_CRASHED_EDIT = {
+    "candidate": _EDIT,
+    "score": None,
+    "side_info": {"error": "KeyError: 'answer'", "status": METRIC_ERROR},
+}
 
 
 @pytest.mark.parametrize(
     "result",
     [
-        _result(-3.2, 0.0, versions=[{"candidate": "", "score": -3.2}, _ILLEGAL_EDIT]),
-        _result(None, None, versions=[{"candidate": "", "score": -3.2}, _ILLEGAL_EDIT]),
+        _result(None, None, versions=[{"candidate": "", "score": -3.2}, _CRASHED_EDIT]),
+        _result(None, None, versions=[{"candidate": "", "score": -3.2}, {**_CRASHED_EDIT, "score": 0.0}]),
+        _result(-3.2, 0.0, versions=[{"candidate": "", "score": -3.2}, _CRASHED_EDIT]),
     ],
 )
-def test_a_version_the_judge_rejected_is_never_published(result: dict[str, Any]) -> None:
-    """The fixed illegal score can beat negative legal scores, but the illegal version still never ships."""
+def test_a_version_the_metric_crashed_on_is_never_published(result: dict[str, Any]) -> None:
+    """A metric error has no score (SKY-350), so even a stray number never makes it publishable."""
     assert repo_staging.improved_patch(result) is None
+
+
+def test_a_version_the_metric_crashed_on_never_gets_a_candidate_branch(tmp_path: Path) -> None:
+    """Candidate branches leave out a crashed version and count it as skipped."""
+    other = _EDIT.replace("+x = 2", "+x = 3")
+    result = _result(None, None, versions=[{**_CRASHED_EDIT, "score": 0.0}, {"candidate": other, "score": 0.4}])
+    repo = {"editable_paths": ["src/"]}
+
+    versions, skipped = repo_staging._candidate_versions(result, repo, _staged(tmp_path), "run")
+
+    assert versions == [("run-2", other)]
+    assert skipped == 1
+    assert repo_staging._version_score(result, _EDIT) is None
 
 
 def _staged(tmp_path: Path, readonly: tuple[str, ...] = ()) -> repo_staging.StagedRepository:
@@ -897,6 +1117,16 @@ def test_publishing_pushes_the_version_and_records_the_pull_request(
     monkeypatch.setattr(repo_staging, "push_version", lambda *args: pushed.append(args))
 
     def fake_open(token: str, repository: str, **fields: Any) -> PublishedChange:
+        """Record the pull request instead of opening it.
+
+        Args:
+            token: The GitHub token.
+            repository: The target repository.
+            fields: The pull request fields.
+
+        Returns:
+            A fixed draft pull request.
+        """
         opened.append({"token": token, "repository": repository, **fields})
         return PublishedChange(branch=fields["head"], url="https://github.com/acme/app/pull/7", number=7, draft=True)
 
@@ -950,6 +1180,14 @@ def test_publishing_failure_is_recorded_not_raised(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "tok")
 
     def refuse(*_args: Any) -> None:
+        """Fail the push the way GitHub does.
+
+        Args:
+            _args: The push arguments, ignored.
+
+        Raises:
+            RepoPublishError: Always.
+        """
         raise RepoPublishError("Could not push the branch: git push failed: denied")
 
     monkeypatch.setattr(repo_staging, "push_version", refuse)
@@ -1110,3 +1348,424 @@ def test_a_cut_off_judge_reply_reads_as_no_answer(
     ask = repo_staging._route_asker(gateway, {"token": "opt-token", "model": "vendor/strong"})
 
     assert (ask("judge this") == reply) is expected
+
+
+def _names(archive: Path) -> set[str]:
+    """List an archive's member names without a leading ``./``.
+
+    Args:
+        archive: Packed tree.
+
+    Returns:
+        The names.
+    """
+    with tarfile.open(archive) as packed:
+        return {name.removeprefix("./") for name in packed.getnames()}
+
+
+_METRIC_TREE = {
+    "optimize.toml": '[paths]\neditable = ["src"]\n\n[metric]\nfiles = ["eval/scorer.py"]\n',
+    "src/app.py": "x = 1\n",
+    "eval/scorer.py": "def score(): ...\n",
+    "eval/data.csv": "1\n",
+    ".optimize/exploits/cheat.py": "cheat\n",
+}
+
+
+def test_the_agent_tree_has_no_metric_file_and_no_exploit_folder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guest gets a stripped tree; the parent's scorer keeps the full one (SKY-353)."""
+    staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch)
+    try:
+        agent = Path(staged_payload["_repo_snapshot"]["archive"])
+        assert agent != staged.snapshot.archive
+        assert _names(agent) == {"optimize.toml", "src/app.py", "eval/data.csv"}
+        assert {"eval/scorer.py", ".optimize/exploits/cheat.py"} <= _names(staged.snapshot.archive)
+        assert staged.hidden_paths == ("eval/scorer.py", ".optimize/exploits")
+    finally:
+        staged.cleanup()
+
+
+def test_the_exploit_folder_is_hidden_without_a_constraints_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default exploit folder holds attacks on the metric, so the agent never sees it (SKY-353)."""
+    staged_payload, staged = _stage_with({"src/app.py": "x\n", ".optimize/exploits/a.py": "a\n"}, monkeypatch)
+    try:
+        assert _names(Path(staged_payload["_repo_snapshot"]["archive"])) == {"src/app.py"}
+    finally:
+        staged.cleanup()
+
+
+def test_staging_stops_when_a_metric_file_stays_visible(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the strip misses a metric file, the gate names it and staging leaves nothing on disk."""
+    workdirs: list[Path] = []
+    real_mkdtemp = repo_staging.tempfile.mkdtemp
+
+    def track(**options: Any) -> str:
+        """Remember the scratch folder staging makes."""
+        workdirs.append(Path(real_mkdtemp(**options)))
+        return str(workdirs[-1])
+
+    monkeypatch.setattr(repo_staging.tempfile, "mkdtemp", track)
+    monkeypatch.setattr(repo_staging, "strip_archive", lambda archive, hidden, destination: archive)
+
+    with pytest.raises(repo_staging.RepoGateError, match=r"eval/scorer\.py"):
+        _stage_with(_METRIC_TREE, monkeypatch)
+
+    assert not workdirs[0].exists()
+
+
+_METRIC_EDIT = (
+    "diff --git a/eval/scorer.py b/eval/scorer.py\n--- a/eval/scorer.py\n+++ b/eval/scorer.py\n"
+    "@@ -1 +1 @@\n-def score(): ...\n+def score(): return 1.0\n"
+)
+
+
+def test_the_stored_result_keeps_only_the_scored_change(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Serving and download read the stored versions, so a metric edit never stays in them (SKY-353)."""
+    pushed: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "tok")
+    monkeypatch.setattr(repo_staging, "push_version", lambda *args: pushed.append(args))
+    monkeypatch.setattr(
+        repo_staging,
+        "open_pull_request",
+        lambda token, repository, **fields: PublishedChange(branch=fields["head"], url="u", number=1, draft=True),
+    )
+    staged = repo_staging.StagedRepository(
+        snapshot=_staged(tmp_path).snapshot, secrets={}, workdir=tmp_path, hidden_paths=("eval/scorer.py",)
+    )
+    raw = _EDIT + _METRIC_EDIT
+    result = _result(0.5, 0.8, best=raw, versions=[{"candidate": raw, "score": 0.8}], lanes=[{"candidate": {"a": raw}}])
+
+    _publish(result, staged)
+
+    assert repo_staging.improved_patch(result) == _EDIT
+    assert result["versions"][0]["candidate"] == _EDIT
+    assert result["lanes"][0]["candidate"] == {"a": _EDIT}
+    assert pushed[0][2] == _EDIT
+
+
+def test_staging_keeps_the_target_stages_and_the_stripped_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The run's ``[target.<name>]`` stages and the tree without the metric reach the parent's scorer."""
+    files = {"optimize.toml": _CONSTRAINTS + '\n[target.locate]\nentry = "src/geocode/locate.py:run"\ntimeout = 5\n'}
+    _, staged = _stage_with(files, monkeypatch)
+    try:
+        assert list(staged.targets) == ["locate"]
+        assert staged.targets["locate"].entry == "src/geocode/locate.py:run"
+        assert staged.agent_archive is not None
+        assert staged.agent_archive.is_file()
+    finally:
+        staged.cleanup()
+
+
+def test_binding_hands_the_stages_to_the_scorer(tmp_path: Path) -> None:
+    """With stages the scorer gets the parent runtime, the stripped tree and the run's concurrency."""
+    payload, staged = _binding(tmp_path, None)
+    staged = dataclasses.replace(
+        staged,
+        targets={"locate": TargetStage(entry="a.py:f")},
+        agent_archive=tmp_path / "agent-tree.tgz",
+    )
+    payload["max_concurrency"] = 3
+    gateway = _Gateway()
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    scorer = gateway.evaluator
+    assert list(scorer._stages) == ["locate"]
+    assert scorer._stage_runtime is not None
+    assert scorer._stage_archive == tmp_path / "agent-tree.tgz"
+    assert scorer._hidden == staged.hidden_paths
+    assert scorer._max_concurrency == 3
+    staged.close_scorers()
+
+
+def test_staging_keeps_the_services_each_role_lists(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The run's services and each role's list reach the parent, so the relay can check the caller."""
+    files = {
+        "optimize.toml": _CONSTRAINTS
+        + '\n[services.judge]\nsecrets = ["JUDGE_KEY"]\nurl = "https://judge.example.com/v1"\n'
+    }
+    _, staged = _stage_with(files, monkeypatch)
+    try:
+        assert staged.services["judge"].url == "https://judge.example.com/v1"
+        assert staged.service_roles == {"metric": ("judge",)}
+    finally:
+        staged.cleanup()
+
+
+def test_binding_hands_the_services_to_the_scorer(tmp_path: Path) -> None:
+    """The scorer gets the url services and the metric's list; their keys leave the scorer box's env."""
+    payload, staged = _binding(tmp_path, None)
+    staged = dataclasses.replace(
+        staged,
+        secrets={**staged.secrets, "JUDGE_KEY": "judge-secret-value"},
+        services={"judge": ServiceSpec(secrets=("JUDGE_KEY",), url="https://judge.example.com/v1")},
+        service_roles={"metric": ("judge",)},
+    )
+    gateway = _Gateway()
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    scorer = gateway.evaluator
+    assert list(scorer._services) == ["judge"]
+    assert scorer._service_roles["metric"] == ("judge",)
+    assert "JUDGE_KEY" not in scorer._box_secrets
+    staged.close_scorers()
+
+
+def test_binding_without_stages_keeps_the_scorer_as_it_was(tmp_path: Path) -> None:
+    """A run with no targets opens no stage boxes and needs no stage runtime."""
+    payload, staged = _binding(tmp_path, None)
+    gateway = _Gateway()
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    assert gateway.evaluator._stages == {}
+    assert gateway.evaluator._stage_runtime is None
+    staged.close_scorers()
+
+
+_CASE_ID, _METHOD_ID, _OLD_ID = "a" * 32, "b" * 32, "c" * 32
+_CASE_DIFF = "diff --git a/inputs/q.json b/inputs/q.json\nnew file mode 100644\n--- /dev/null\n+++ b/inputs/q.json\n@@ -0,0 +1 @@\n+{}\n"
+_METHOD_DIFF = (
+    "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-x = 1\n+x = 99\n"
+)
+
+
+def _exploit(exploit_id: str, kind: str, verdict: str | None, label: str = "exploit") -> HardeningExploit:
+    """Build one attacker claim.
+
+    Args:
+        exploit_id: The exploit's folder name.
+        kind: ``case`` or ``method``.
+        verdict: The user's verdict.
+        label: The judge's label.
+
+    Returns:
+        The exploit.
+    """
+    diff = _CASE_DIFF if kind == "case" else _METHOD_DIFF
+    return HardeningExploit(
+        id=exploit_id,
+        kind=kind,  # type: ignore[arg-type]
+        label=label,  # type: ignore[arg-type]
+        confidence=0.9,
+        reason="r",
+        unsure=False,
+        patch_diff=diff,
+        why_md=f"# Why {kind}\n\nThe metric scored it high.\n",
+        user_verdict=verdict,  # type: ignore[arg-type]
+    )
+
+
+def _hardening_job(status: str = "done", target: str | None = None) -> dict[str, Any]:
+    """Build a stored job: one fixed round with a case and a method, and one round whose fix was rejected.
+
+    Args:
+        status: The job status.
+        target: The hardened repository, as the job row keeps it after SKY-368.
+
+    Returns:
+        The job document.
+    """
+    fixed = HardeningRound(
+        index=1,
+        status="fixed",
+        exploits=[
+            _exploit(_CASE_ID, "case", "confirmed"),
+            _exploit(_METHOD_ID, "method", "confirmed"),
+            _exploit("d" * 32, "case", "rejected"),
+            _exploit("e" * 32, "case", None, label="valid"),
+        ],
+    )
+    refused = HardeningRound(index=2, status="rejected", exploits=[_exploit("f" * 32, "case", "confirmed")])
+    job = HardeningJob(
+        id="job-1",
+        status=status,  # type: ignore[arg-type]
+        round=2,
+        rounds=2,
+        round_cap_usd=1.0,
+        reserved_usd=0.0,
+        spent_usd=0.0,
+        place="cloud",
+        attacker_model="m",
+        judge_model="m",
+        view="black_box",
+        rounds_detail=[fixed, refused],
+        fixed_count=2,
+    ).model_dump(mode="json")
+    if target is not None:
+        job["target"] = {"kind": "repo", "repo": {"repository": target}}
+    return job
+
+
+def _jobs_engine(owner: str = "ada", status: str = "done", target: str | None = None) -> Engine:
+    """Store one hardening job in a fresh database.
+
+    Args:
+        owner: The job's owner.
+        status: The job status.
+        target: The hardened repository, if the row names one.
+
+    Returns:
+        The database engine.
+    """
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine, tables=[HardeningJobModel.__table__])  # type: ignore[list-item]
+    with Session(engine) as session:
+        job = _hardening_job(status, target)
+        session.add(HardeningJobModel(id="job-1", username=owner, draft_id="d", status=status, job=job))
+        session.commit()
+    return engine
+
+
+_BASE_FILES = {
+    "./src/app.py": "x = 1\n",
+    f".optimize/exploits/{_OLD_ID}/why.md": "an older exploit\n",
+    f"./.optimize/exploits/{_CASE_ID}/why.md": "# Why case\n\nThe metric scored it high.\n",
+}
+
+
+def _publish_hardened(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: Engine | None, job_id: str | None
+) -> tuple[list[tuple[Any, ...]], list[dict[str, Any]]]:
+    """Publish an improved run whose payload names a hardening job.
+
+    Args:
+        monkeypatch: Pytest fixture.
+        tmp_path: Pytest temp dir; the base tree goes here.
+        engine: The database holding the jobs.
+        job_id: The payload's ``hardening_job_id``.
+
+    Returns:
+        The pushes and the opened pull requests.
+    """
+    pushed: list[tuple[Any, ...]] = []
+    opened: list[dict[str, Any]] = []
+    monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "tok")
+    monkeypatch.setattr(repo_staging, "push_version", lambda *args: pushed.append(args))
+
+    def fake_open(token: str, repository: str, **fields: Any) -> PublishedChange:
+        """Record the pull request instead of opening it.
+
+        Args:
+            token: The GitHub token.
+            repository: The target repository.
+            fields: The pull request fields.
+
+        Returns:
+            A fixed draft pull request.
+        """
+        opened.append(fields)
+        return PublishedChange(branch=fields["head"], url="https://github.com/acme/app/pull/7", number=7, draft=True)
+
+    monkeypatch.setattr(repo_staging, "open_pull_request", fake_open)
+    _tree(tmp_path, _BASE_FILES)
+    payload = _payload("c" * 40)
+    if job_id is not None:
+        payload["hardening_job_id"] = job_id
+    repo_staging.publish_improvement(
+        _result(0.5, 0.8),
+        payload,
+        _staged(tmp_path),
+        username="ada",
+        engine=engine,
+        optimization_id="0123456789abcdef",
+        app_url="https://skynetml.com/",
+    )
+    return pushed, opened
+
+
+def _applied(tmp_path: Path, patch: str) -> dict[str, str]:
+    """Apply a pushed patch to the base tree with real git, as ``push_version`` does.
+
+    Args:
+        tmp_path: Pytest temp dir.
+        patch: The pushed patch.
+
+    Returns:
+        Repository path to text after the patch.
+    """
+    root = tmp_path / "checkout"
+    for name, text in _BASE_FILES.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text)
+    subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+    subprocess.run(["git", "add", "--all"], cwd=root, check=True)
+    subprocess.run(["git", "apply", "--index", "--binary", "-"], cwd=root, check=True, input=patch, text=True)
+    return {
+        str(path.relative_to(root)): path.read_text()
+        for path in root.rglob("*")
+        if path.is_file() and ".git" not in path.parts
+    }
+
+
+def test_a_finished_hardening_job_ships_its_suite_and_counts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The pushed patch adds the fixed rounds' cases and methods unchanged, and the body gets the counts."""
+    engine = _jobs_engine(target="ACME/app")
+
+    pushed, opened = _publish_hardened(monkeypatch, tmp_path, engine, "job-1")
+
+    patch = pushed[0][2]
+    assert patch.startswith(_EDIT)
+    files = _applied(tmp_path, patch)
+    suite = ".optimize/exploits"
+    assert files["src/app.py"] == "x = 2\n"
+    assert files[f"{suite}/{_CASE_ID}/patch.diff"] == _CASE_DIFF
+    assert files[f"{suite}/{_CASE_ID}/why.md"] == "# Why case\n\nThe metric scored it high.\n"
+    assert files[f"{suite}/{_METHOD_ID}/patch.diff"] == _METHOD_DIFF
+    assert files[f"{suite}/{_METHOD_ID}/why.md"] == "# Why method\n\nThe metric scored it high.\n"
+    assert files[f"{suite}/{_OLD_ID}/why.md"] == "an older exploit\n"
+    assert sorted(path for path in files if path.startswith(suite)) == sorted(
+        [
+            f"{suite}/{_OLD_ID}/why.md",
+            *(f"{suite}/{i}/{n}" for i in (_CASE_ID, _METHOD_ID) for n in ("patch.diff", "why.md")),
+        ]
+    )
+    assert f"b/{suite}/{_CASE_ID}/why.md" not in patch
+    assert opened[0]["hardening"] == HardeningSummary(attacks=4, exploits_fixed=2)
+
+
+@pytest.mark.parametrize(
+    ("owner", "status", "target", "job_id"),
+    [
+        ("ada", "done", "acme/app", None),
+        ("bob", "done", "acme/app", "job-1"),
+        ("ada", "waiting_review", "acme/app", "job-1"),
+        ("ada", "failed", "acme/app", "job-1"),
+        ("ada", "done", "acme/app", "job-2"),
+        ("ada", "done", "acme/other", "job-1"),
+        ("ada", "done", None, "job-1"),
+    ],
+    ids=["no-id", "other-user", "unfinished", "failed", "missing", "other-repository", "no-target"],
+)
+def test_a_run_without_its_own_finished_job_publishes_as_before(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, owner: str, status: str, target: str | None, job_id: str | None
+) -> None:
+    """No id, another user's, unfinished, failed or missing job, or a job naming no or another repository add nothing."""
+    pushed, opened = _publish_hardened(monkeypatch, tmp_path, _jobs_engine(owner, status, target), job_id)
+
+    assert pushed[0][2] == _EDIT
+    assert opened[0]["hardening"] is None
+
+
+def test_a_broken_job_store_publishes_as_before(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A job that cannot be read never stops the improvement from publishing."""
+    pushed, opened = _publish_hardened(monkeypatch, tmp_path, None, "job-1")
+
+    assert pushed[0][2] == _EDIT
+    assert opened[0]["hardening"] is None
+
+
+def test_publishing_refuses_a_version_that_changes_the_configured_suite(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A best version writing into a configured ``[metric] exploits`` folder is never pushed."""
+    monkeypatch.setattr(repo_staging, "push_version", lambda *args: pytest.fail("pushed a suite change"))
+    staged = repo_staging.StagedRepository(
+        snapshot=_staged(tmp_path).snapshot, secrets={}, workdir=tmp_path, exploits_path="src/attacks"
+    )
+    edit = _EDIT.replace("src/app.py", "src/attacks/x.py")
+
+    outcome = _publish(_result(0.5, 0.8, best=edit), staged)
+
+    assert outcome == {"error": "The best version breaks the editing rules: 'src/attacks/x.py' may not be changed."}

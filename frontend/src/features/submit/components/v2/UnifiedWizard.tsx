@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { toast } from "react-toastify";
 
@@ -11,10 +11,14 @@ import { msg } from "@/shared/lib/messages";
 import { getActiveDir } from "@/shared/lib/runtime-locale";
 
 import { slideVariants } from "../../constants";
-import { WizardAutoAdvanceContext, useAutoAdvanceDriver } from "../../hooks/use-auto-advance";
 import { ExecutionBudgetProvider } from "../../hooks/use-execution-budget";
 import { WizardV2Provider, useWizardV2Shell, v2Text } from "../../hooks/use-unified-wizard";
-import { budgetContinueBlock, budgetShortfall, type BudgetShortfall } from "../../lib/budget-limit";
+import {
+  budgetContinueBlock,
+  budgetShortfall,
+  runBalance,
+  type BudgetShortfall,
+} from "../../lib/budget-limit";
 import type { RunFailureCause } from "../../lib/run-failure";
 import {
   WIZARD_SCREEN_KEY,
@@ -116,10 +120,15 @@ function UnifiedWizardFrame() {
   const { goNext, goPrev, advancing, submitting } = w;
   const visibleScreen = stepPages(current, w.state)[page] ?? "";
   useEffect(() => keepSessionValue(WIZARD_SCREEN_KEY, visibleScreen), [visibleScreen]);
-  const { totalCents, available: balanceKnown } = useBalance();
+  const { totalCents, available: balanceKnown, shown } = useBalance();
   const { runFloor, budgetUncapped, maxCostCents } = w;
   const floorCents = runFloor?.floorCents ?? null;
-  const balance = balanceKnown ? totalCents : null;
+  // A Web run spends the linked account's balance, not the Mac's wallet.
+  const balance = runBalance(
+    w.runOn,
+    { available: balanceKnown, totalCents },
+    { available: shown.available, totalCents: shown.totalCents },
+  );
   // A run its limit or balance can't open would only fail at its first model
   // call, so Continue holds (the agent's too) on the screen that sets the
   // limit and on the last one before the metric step's editor and checks.
@@ -154,7 +163,6 @@ function UnifiedWizardFrame() {
   const pricing =
     !w.costSettled &&
     (beforeMetric || (LIMIT_SCREENS as readonly string[]).includes(visibleScreen));
-  const forwardOpen = inputsOpen && shortfall === null && !pricing;
   const [waitingOn, setWaitingOn] = useState<string | null>(null);
   if (waitingOn !== null && waitingOn !== visibleScreen) setWaitingOn(null);
   // Continue stays clickable under a shortfall so the press can say why it holds.
@@ -195,12 +203,6 @@ function UnifiedWizardFrame() {
   }, [waitingOn, pricing, forward]);
   const [reopenedScreen, setReopenedScreen] = useState(() => (w.restored ? visibleScreen : null));
   if (reopenedScreen !== null && reopenedScreen !== visibleScreen) setReopenedScreen(null);
-  const autoAdvance = useAutoAdvanceDriver(
-    visibleScreen,
-    forwardOpen && !advancing && !submitting,
-    forward,
-    reopenedScreen,
-  );
 
   const back = useCallback(() => {
     if (page > 0) {
@@ -215,7 +217,7 @@ function UnifiedWizardFrame() {
 
   // Back to one named screen: the agent's go-back lands where the user's
   // own Back presses would, without walking every screen between.
-  const { goTo } = w;
+  const { goTo, canEnter, stepIssue } = w;
   const goToScreen = useCallback(
     (screen: string) => {
       const step = steps.find((s) => (stepPages(s, w.state) as readonly string[]).includes(screen));
@@ -226,6 +228,33 @@ function UnifiedWizardFrame() {
       if (step !== current) goTo(step);
     },
     [steps, position, current, page, goTo, w.state],
+  );
+
+  // Forward to one named screen, after the agent's go-back edit returns the
+  // user where they were. Anything the jump cannot pass falls back to a
+  // plain Continue, which shows why it holds.
+  const goForwardTo = useCallback(
+    (screen: string) => {
+      const step = steps.find((s) => (stepPages(s, w.state) as readonly string[]).includes(screen));
+      const target = step ? (stepPages(step, w.state) as readonly string[]).indexOf(screen) : -1;
+      const later = step !== undefined && (steps.indexOf(step) > position || (step === current && target > page));
+      const open = inputsOpen && !pricing && shortfall === null;
+      // The stepper's own hold: no jump into the metric step while costs are unsettled.
+      const held = step !== undefined && (runShort || !w.costSettled) && WIZARD_STAGE[step] >= WIZARD_STAGE.metric;
+      // A step on the way with a problem (an optimizer that no longer fits
+      // the data, a stale check) holds the jump, so Continue shows it.
+      const blocked =
+        step !== undefined &&
+        (steps.slice(position, steps.indexOf(step)).some((s) => stepIssue(s) !== null) ||
+          (target > 0 && stepIssue(step) !== null));
+      if (!step || !later || !open || held || blocked || (step !== current && !canEnter(step))) {
+        forward();
+        return;
+      }
+      setPages((p) => ({ ...p, [step]: target }));
+      if (step !== current) goTo(step);
+    },
+    [steps, position, current, page, inputsOpen, pricing, shortfall, runShort, w.costSettled, forward, goTo, canEnter, stepIssue, w.state],
   );
 
   // Guided's flow skips the screen that sets the limit, so its notice has no button.
@@ -266,16 +295,30 @@ function UnifiedWizardFrame() {
   useEffect(() => {
     shareRestoredSetup?.(w.restored);
   }, [shareRestoredSetup, w.restored]);
+  // The agent's create-repository write lands as a plain repository pick,
+  // which clears the mark; set it again once the wizard holds that repository.
+  const agentCreatedRepo = wizardCtx?.state.repo_created_by_skynet ? wizardCtx.state.repository : undefined;
+  const taskRepo = w.state.task.repo;
+  const patchTask = w.patchTask;
   useEffect(() => {
+    if (!agentCreatedRepo || !taskRepo || taskRepo.createdBySkynet) return;
+    if (taskRepo.repository !== agentCreatedRepo) return;
+    patchTask({ repo: { ...taskRepo, createdBySkynet: true } });
+  }, [agentCreatedRepo, taskRepo, patchTask]);
+  // Layout effects: the agent's go-back can arrive right after a Continue,
+  // and it must not see the screen before it.
+  useLayoutEffect(() => {
     setWizardScreen?.(visibleScreen);
   }, [visibleScreen, setWizardScreen]);
   useEffect(() => {
     setScreenIssue?.(blockedText);
   }, [blockedText, setScreenIssue]);
-  useEffect(() => {
-    setScreenNavigator?.({ screen: visibleScreen, forward, goToScreen });
-  }, [visibleScreen, forward, goToScreen, setScreenNavigator]);
-  useEffect(
+  useLayoutEffect(() => {
+    setScreenNavigator?.({ screen: visibleScreen, forward, goToScreen, goForwardTo });
+  }, [visibleScreen, forward, goToScreen, goForwardTo, setScreenNavigator]);
+  // A layout cleanup: a new frame (an account switch remounts it) registers in
+  // layout effects, and this old frame's nulls must land before them.
+  useLayoutEffect(
     () => () => {
       setWizardScreen?.(null);
       setScreenIssue?.(null);
@@ -332,26 +375,24 @@ function UnifiedWizardFrame() {
         className="relative min-h-0 flex-1 overflow-hidden pt-[10px]"
         data-tutorial="submit-wizard"
       >
-        <WizardAutoAdvanceContext.Provider value={autoAdvance}>
-          {WIZARD_V2_STEPS.filter(mounted).map((step) => {
-            const active = step === current;
-            return (
-              <motion.div
-                key={step}
-                hidden={!active}
-                className="h-full"
-                data-tutorial={active ? `wizard-stage-${step}` : undefined}
-                custom={direction}
-                variants={slideVariants}
-                initial="enter"
-                animate={active ? "center" : "enter"}
-                transition={{ duration: active ? 0.1 : 0 }}
-              >
-                {STEP_VIEWS[step](Math.min(pages[step], stepPages(step, w.state).length - 1), back)}
-              </motion.div>
-            );
-          })}
-        </WizardAutoAdvanceContext.Provider>
+        {WIZARD_V2_STEPS.filter(mounted).map((step) => {
+          const active = step === current;
+          return (
+            <motion.div
+              key={step}
+              hidden={!active}
+              className="h-full"
+              data-tutorial={active ? `wizard-stage-${step}` : undefined}
+              custom={direction}
+              variants={slideVariants}
+              initial="enter"
+              animate={active ? "center" : "enter"}
+              transition={{ duration: active ? 0.1 : 0 }}
+            >
+              {STEP_VIEWS[step](Math.min(pages[step], stepPages(step, w.state).length - 1), back)}
+            </motion.div>
+          );
+        })}
       </div>
 
       <div className="shrink-0">

@@ -45,7 +45,6 @@ La référence lit le document OpenAPI à l'adresse `https://api.skynetml.com/op
 | `GET /models`                                   | Liste les modèles que vous pouvez utiliser.                       |
 | `GET /optimizers`                               | Liste les optimiseurs adaptés à une configuration.                |
 | `GET /blackbox/engines`                         | Liste les moteurs natifs et indique si chacun est disponible.     |
-| `POST /optimize`                                | Lance une exécution pour un prompt, du code, du texte ou un programme DSPy. |
 | `POST /blackbox/run`                            | Lance une exécution sur un dépôt GitHub.                          |
 | `GET /optimizations`                            | Liste vos exécutions.                                             |
 | `GET /optimizations/{optimization_id}`          | Renvoie une exécution : statut, progression, journaux et résultat. |
@@ -56,10 +55,10 @@ La référence lit le document OpenAPI à l'adresse `https://api.skynetml.com/op
 
 ## Lancer une exécution
 
-`POST /optimize` accepte la même configuration que l'assistant de soumission. Cet exemple améliore un prompt qui classe des messages de support selon des étiquettes.
+Skynet, c'est Optimize Anything : chaque exécution optimise un dépôt. `POST /blackbox/run` accepte la même configuration que l'assistant de soumission. L'exemple améliore un dépôt qui classe des messages de support selon des étiquettes.
 
 ```bash tab="curl"
-curl https://api.skynetml.com/optimize \
+curl https://api.skynetml.com/blackbox/run \
   -H "Authorization: Bearer $SKYNET_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: support-labels-001" \
@@ -69,56 +68,62 @@ curl https://api.skynetml.com/optimize \
 ```json tab="run.json"
 {
   "name": "Support labels",
-  "task": {
-    "objective": "Sort each support message into billing, bug or other.",
-    "artifact": {
-      "kind": "prompt",
-      "starting_version": "Label this support message as billing, bug or other."
+  "objective": "Sort each support message into billing, bug or other.",
+  "recipe": "repo",
+  "target": {
+    "kind": "repo",
+    "repo": {
+      "provider": "github",
+      "repository": "your-org/support-labels",
+      "branch": "main",
+      "editable_paths": ["serve.py", "prompts/"]
     }
   },
-  "data": {
-    "mode": "pairs",
-    "cases": [
-      { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
-      { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
-      {
-        "input": { "message": "Do you have a Hebrew interface?" },
-        "expected": { "label": "other" }
-      }
-    ]
+  "cases": [
+    { "input": { "message": "I was charged twice." }, "expected": { "label": "billing" } },
+    { "input": { "message": "The export button does nothing." }, "expected": { "label": "bug" } },
+    {
+      "input": { "message": "Do you have a Hebrew interface?" },
+      "expected": { "label": "other" }
+    }
+  ],
+  "input_fields": ["message"],
+  "expected_field": "label",
+  "scorer": {
+    "kind": "python",
+    "metric_code": "import importlib.util\n\n\ndef score(repo_path, case):\n    spec = importlib.util.spec_from_file_location(\"serve\", f\"{repo_path}/serve.py\")\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    ok = str(module.serve(case[\"input\"])).strip().lower() == case[\"expected\"][\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n",
+    "model": { "name": "<model from GET /models>" }
   },
-  "optimizer": { "choice": "auto", "budget": { "max_scorer_runs": 200 } },
-  "models": {
-    "task_model": { "name": "<model from GET /models>" },
-    "reflection_model": { "name": "<model from GET /models>" }
-  },
-  "workspace": {
-    "run_code": "from skynet import llm\n\ndef run(artifact, input):\n    return llm(artifact, input=input[\"message\"])\n",
-    "metric_code": "def score(input, output, expected=None):\n    ok = str(output).strip().lower() == expected[\"label\"]\n    return (1.0 if ok else 0.0), {\"feedback\": \"Correct.\" if ok else \"Wrong label.\"}\n"
-  },
+  "strategy": { "mode": "auto" },
+  "budget": { "max_scorer_runs": 200 },
+  "reflection_model_config": { "name": "<model from GET /models>" },
   "max_cost_cents": 500
 }
 ```
 
 Champs importants :
 
-- `task.artifact.kind` vaut `prompt`, `code`, `text` ou `dspy_program`.
-- `data.mode` vaut `pairs` (des entrées avec des sorties attendues) ou `single` (exactement un cas).
-- `optimizer.choice` vaut `auto` ou le nom d'un optimiseur renvoyé par `GET /optimizers`.
+- `target.repo.repository` est le dépôt GitHub sous la forme `owner/name`. Connectez d'abord GitHub dans **Paramètres → Connecteurs**.
+- `target.repo.editable_paths` liste les fichiers et dossiers que l'optimiseur peut modifier. `"."` désigne le dépôt entier.
+- `target.repo.commit` est facultatif. C'est un SHA de 40 caractères. Sans lui, Skynet utilise le dernier commit de la branche.
+- `target.repo.secrets` est facultatif. Chaque secret a un `name` et une `value`. Il arrive à votre code et à votre évaluateur sous forme de variable d'environnement.
+- `scorer.metric_code` définit `score(repo_path, case)`. `scorer.model` est le modèle que votre code et votre évaluateur peuvent appeler via la passerelle de modèles.
+- `strategy.mode` vaut `auto` (par défaut) ou `single`. Avec `single`, définissez `strategy.engine` sur le nom d'un moteur renvoyé par `GET /blackbox/engines`.
 - `max_cost_cents` est le plafond de dépenses de cette exécution, en cents de dollar américain.
 - `is_private` vaut `false` par défaut. Passez-le à `true` pour garder l'exécution privée.
 
-Lisez [Métriques et évaluateurs](/docs/concepts/scorers) pour les règles de `run_code` et `metric_code`.
+Lisez [Métriques et évaluateurs](/docs/concepts/scorers) pour les règles de `metric_code`.
 
 ### Réponses
 
 | Statut | Signification                                                                                                                                         |
 | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `201`  | Skynet a mis l'exécution en file d'attente. Le corps contient `optimization_id` et `status`.                                                          |
+| `400`  | La cible n'est pas un dépôt, ou l'évaluateur ne se charge pas.                                                                                       |
 | `202`  | La vérification de la configuration est toujours en cours. Attendez le nombre de secondes indiqué dans l'en-tête `Retry-After`. Renvoyez ensuite le même corps avec la même `Idempotency-Key`. |
 | `402`  | Votre solde est insuffisant.                                                                                                                          |
 | `409`  | Vous avez atteint un quota, ou la vérification de la configuration n'est plus à jour.                                                                 |
-| `422`  | La requête ou le code de l'espace de travail ne convient pas à l'optimiseur.                                                                          |
+| `422`  | La requête ne convient pas à l'optimiseur.                                                                                                            |
 
 > [!NOTE]
 > Envoyez toujours un en-tête `Idempotency-Key`. Si vous renvoyez la même requête avec la même clé, Skynet renvoie la première exécution. Il ne lance pas de seconde exécution.
@@ -154,7 +159,7 @@ curl https://api.skynetml.com/optimizations/$RUN_ID/artifact \
   -H "Authorization: Bearer $SKYNET_TOKEN"
 ```
 
-Pour exécuter la meilleure version sur une nouvelle entrée, envoyez `POST /serve/{optimization_id}`. Lisez [Résultats](/docs/guides/results) pour la signification de chaque score.
+Pour exécuter la meilleure version sur une nouvelle entrée, envoyez `POST /serve/{optimization_id}` avec un en-tête `Idempotency-Key`. Le dépôt doit contenir un fichier `serve.py` avec `def serve(input)`. Lisez [Résultats](/docs/guides/results) pour la requête, la réponse et la signification de chaque score.
 
 ## Limites
 

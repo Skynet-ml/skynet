@@ -1,9 +1,10 @@
 import type { ModelConfig, SplitFractions } from "@/shared/types/api";
-import type {
-  ArtifactKind,
-  DataMode,
-  OptimizerChoice,
-  UnifiedCase,
+import {
+  storedOptimizerChoice,
+  type ArtifactKind,
+  type DataMode,
+  type OptimizerChoice,
+  type UnifiedCase,
 } from "@/shared/types/unified-run";
 import type {
   InputsSlice,
@@ -34,7 +35,7 @@ export interface CloneSlices {
   meta: Partial<MetaSlice>;
 }
 
-const ARTIFACT_KINDS: readonly ArtifactKind[] = ["prompt", "code", "dspy_program", "text"];
+const ARTIFACT_KINDS: readonly ArtifactKind[] = ["dspy_program"];
 const DATA_MODES: readonly DataMode[] = ["single", "pairs"];
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -123,9 +124,6 @@ function cloneMeta(payload: ClonePayload, jobName?: string | null): Partial<Meta
 
 const OPTIMIZER_CHOICES: readonly OptimizerChoice[] = [
   "auto",
-  "dspy_gepa",
-  "dspy_miprov2",
-  "dspy_bootstrap_fewshot",
   "gepa",
   "best_of_n",
   "autoresearch",
@@ -204,8 +202,8 @@ function cloneUnified(payload: ClonePayload): Omit<CloneSlices, "meta"> {
     extraReflectionModels: modelConfigs(models.extra_reflection_models),
     ...engineKnobs(optimizer),
   };
-  if (typeof optimizer.choice === "string")
-    optimizerSlice.choice = optimizer.choice as OptimizerChoice;
+  const choice = storedOptimizerChoice(optimizer.choice);
+  if (choice) optimizerSlice.choice = choice;
 
   const metricCode = typeof workspace.metric_code === "string" ? workspace.metric_code : "";
   const reflection = modelConfig(models.reflection_model);
@@ -262,28 +260,14 @@ function legacyRepo(target: unknown): RepoDraft | null {
   };
 }
 
+/** A `/blackbox/run` payload is a repository run, scored one case at a time. */
 function cloneLegacyBlackbox(payload: ClonePayload): Omit<CloneSlices, "meta"> {
-  const seed = startingVersion(payload.seed_candidate);
   const task: Partial<TaskSlice> = {
     objective: text(payload.objective) ?? "",
     background: text(payload.background) ?? "",
   };
-  if (seed !== undefined) task.startingVersion = seed;
   const repo = legacyRepo(payload.target);
-  if (repo) {
-    // The wizard keys its engine catalog on a kind and mode, so a repository
-    // run stands in as one piece of code scored once per round.
-    task.repo = repo;
-    task.artifactKind = "code";
-  }
-  // Legacy cases are flat rows the scorer read whole; an `expected` key, when
-  // present, was the answer the scorer compared against.
-  const cases = Array.isArray(payload.cases)
-    ? payload.cases.filter(isRecord).map((row): UnifiedCase => {
-        const { expected, ...input } = row;
-        return { input, expected: expected ?? null };
-      })
-    : [];
+  if (repo) task.repo = repo;
   const scorer = isRecord(payload.scorer) ? payload.scorer : {};
   const reflection = modelConfig(payload.reflection_model_config ?? payload.reflection_model_settings);
   const metricModel = modelConfig(scorer.model);
@@ -299,7 +283,7 @@ function cloneLegacyBlackbox(payload: ClonePayload): Omit<CloneSlices, "meta"> {
     workspace.metricTimeoutSeconds = scorer.timeout_seconds;
   return {
     task,
-    inputs: repo ? { mode: "single" } : inputsFromCases(cases, []),
+    inputs: { mode: "single" },
     // Stored payloads may be dumped by alias or by field name.
     optimizer: {
       taskModel: modelConfig(payload.task_model_config ?? payload.task_model_settings),

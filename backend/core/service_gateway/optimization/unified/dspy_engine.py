@@ -38,6 +38,7 @@ from contextlib import contextmanager
 from typing import Any
 
 import dspy
+from gepa.oa.budget import BudgetExhausted
 
 from ....billing.cli_dispatch import CLI_EFFORT_KEY
 from ....exceptions import ServiceError
@@ -48,7 +49,18 @@ from ...language_models import build_language_model
 from ..artifacts import persist_program
 from ..blackbox import runner as helper_runtime
 from ..blackbox import workspace_harness
-from ..blackbox.protocol import BudgetExhaustedError, Candidate, EngineContext, EvalServer, Result, Task
+from ..blackbox.protocol import (
+    METRIC_ERROR,
+    STATUS_KEY,
+    BudgetExhaustedError,
+    Candidate,
+    EngineContext,
+    EvalServer,
+    Result,
+    ScorerAbortError,
+    Task,
+)
+from ..cost_ceiling import CostCeilingExceededError
 from ..data import DatasetSplits
 from ..optimizers import compile_program, instantiate_optimizer
 
@@ -416,6 +428,42 @@ def load_score(metric_code: str) -> Callable[..., Any]:
     return score
 
 
+class NoScore(float):
+    """The score DSPy gets for a case the metric crashed on (SKY-367).
+
+    DSPy needs a number for every case. Negative infinity keeps every mean
+    that takes it in at negative infinity, so the version ranks below every
+    scored one. It is falsy, so bootstrapping never keeps the case as a demo.
+    """
+
+    def __new__(cls) -> NoScore:
+        """Make the negative infinity value.
+
+        Returns:
+            A new ``NoScore``.
+        """
+        return super().__new__(cls, float("-inf"))
+
+    def __bool__(self) -> bool:
+        """Read as a failed case wherever DSPy tests the score for truth.
+
+        Returns:
+            Always ``False``.
+        """
+        return False
+
+    def __reduce__(self) -> tuple[type[NoScore], tuple[()]]:
+        """Rebuild through the no-argument constructor on copy and pickle.
+
+        The default float reduction passes the value to ``__new__``, which
+        takes no value, so copies and pickles would fail without this.
+
+        Returns:
+            The class and its empty constructor arguments.
+        """
+        return (NoScore, ())
+
+
 def run_output(pred: Any) -> Any:
     """Return what ``run`` returned for a prediction :class:`RunProgram` made.
 
@@ -467,7 +515,8 @@ class BudgetedMetric:
             pred_trace: That predictor's trace, if any.
 
         Returns:
-            ``dspy.Prediction(score, feedback)`` for DSPy GEPA, otherwise the score.
+            ``dspy.Prediction(score, feedback)`` for DSPy GEPA, otherwise the
+            score. A case the metric crashed on gets :class:`NoScore`.
 
         Raises:
             BudgetExhaustedError: When the scorer-run budget is spent.
@@ -478,14 +527,35 @@ class BudgetedMetric:
             raise BudgetExhaustedError("scorer-run budget exhausted")
         inputs = gold.inputs().toDict()
         output = run_output(pred)
-        if self._takes_expected:
-            raw = self._metric(inputs, output, gold.get(EXPECTED_KEY))
-        else:
-            raw = self._metric(inputs, output)
+        try:
+            if self._takes_expected:
+                raw = self._metric(inputs, output, gold.get(EXPECTED_KEY))
+            else:
+                raw = self._metric(inputs, output)
+        except (ScorerAbortError, BudgetExhaustedError, BudgetExhausted, CostCeilingExceededError):
+            raise
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            logger.warning("metric raised on a case (%s): %s", METRIC_ERROR, error)
+            self._charge(None, {"error": error, STATUS_KEY: METRIC_ERROR})
+            return dspy.Prediction(score=NoScore(), feedback=error) if self._feedback else NoScore()
         try:
             score, side_info = workspace_harness.normalize_metric(raw)
         except workspace_harness.ShapeError as exc:
             raise ServiceError(f"{METRIC_SIGNATURE} must return (score, side_info): {exc}") from exc
+        self._charge(score, side_info)
+        return dspy.Prediction(score=score, feedback=side_info["feedback"]) if self._feedback else score
+
+    def _charge(self, score: float | None, side_info: dict[str, Any]) -> None:
+        """Count one metric call against the run's budget.
+
+        Args:
+            score: The case's score, or ``None`` after a metric error.
+            side_info: What the metric said about the case.
+
+        Raises:
+            BudgetExhaustedError: When the scorer-run budget is spent.
+        """
         try:
             self._server.charge(None, score, side_info)
         except BudgetExhaustedError:
@@ -493,7 +563,6 @@ class BudgetedMetric:
             raise
         with self._lock:
             self.calls += 1
-        return dspy.Prediction(score=score, feedback=side_info["feedback"]) if self._feedback else score
 
 
 def _model_config(raw: Any) -> ModelConfig | None:

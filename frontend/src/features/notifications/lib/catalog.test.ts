@@ -96,6 +96,22 @@ test("a share line names who shared and the kind of share", () => {
   );
 });
 
+test("a hardening job asks for review and reports when it is done", () => {
+  const hardening = { kind: "hardening", spent: 4, limit: 5, score: 0.8 };
+  assert.deepEqual(itemLine(item({ event_type: "needs_input", facts: hardening }), fmt), {
+    key: "notifications.item.hardening_review",
+    params: {},
+  });
+  assert.deepEqual(itemLine(item({ event_type: "finished", facts: hardening }), fmt), {
+    key: "notifications.item.hardening_done",
+    params: {},
+  });
+  assert.deepEqual(itemLine(item({ event_type: "budget_near", facts: hardening }), fmt), {
+    key: "notifications.item.budget_near",
+    params: { spent: "$4", limit: "$5" },
+  });
+});
+
 test("news uses its headline as written", () => {
   assert.deepEqual(itemLine(item({ event_type: "product_news", title: "Inbox" }), fmt), {
     text: "Inbox",

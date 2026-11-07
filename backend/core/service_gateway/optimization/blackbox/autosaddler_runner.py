@@ -646,6 +646,10 @@ class AppEvaluator:
         """
         if score is None or not math.isfinite(score):
             return
+        # A version with a crashed case has a filled mean (SKY-367). Final
+        # selection drops it, so it must not become best or stop the run.
+        if any(observation.score is None for observation in observations):
+            return
         if self.best_development is None or score > self.best_development["best_score"]:
             self.best_development = {"best_candidate": value, "best_score": score, "candidate_id": candidate_id}
         per_case: dict[str, list[float]] = {}

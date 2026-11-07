@@ -39,6 +39,7 @@ from core.billing.host_agent import (
     host_agent_failure,
     host_cli_argv,
     host_proposer,
+    host_reasoning_effort,
     run_host_agent,
 )
 from core.billing.model_gateway import ModelGateway
@@ -264,6 +265,100 @@ def test_unknown_permission_is_refused(tmp_path: Path) -> None:
     """A permission outside the table never reaches a CLI."""
     with pytest.raises(host_agent.HostAgentRequestError):
         host_cli_argv("claude", "root", "bin", tmp_path, None)
+
+
+_HIGH_EFFORT_FLAGS = [("codex", ["-c", 'model_reasoning_effort="high"']), ("claude", ["--effort", "high"])]
+
+
+@pytest.mark.parametrize(("cli", "flags"), _HIGH_EFFORT_FLAGS)
+def test_argv_passes_the_effort_the_way_each_cli_reads_it(cli: str, flags: list[str], tmp_path: Path) -> None:
+    """Codex exec takes the effort as a config override, Claude Code as its --effort flag.
+
+    Args:
+        cli: The host CLI.
+        flags: The arguments that carry the effort.
+        tmp_path: Workspace parent.
+    """
+    plain = host_cli_argv(cli, "full_access", "bin", tmp_path, "m")  # type: ignore[arg-type]
+    chosen = host_cli_argv(cli, "full_access", "bin", tmp_path, "m", effort="high")  # type: ignore[arg-type]
+
+    assert chosen == [*plain, *flags]
+
+
+@pytest.mark.parametrize(
+    ("cli", "model", "effort", "expected"),
+    [
+        ("codex", "subscription/codex/openai/gpt-6.1-sol", "xhigh", "xhigh"),
+        ("claude", "subscription/claude/anthropic/claude-opus-5.5", "max", "max"),
+        # Opus 4.5 tops out at high, so Max runs there.
+        ("claude", "anthropic/claude-opus-4.5", "max", "high"),
+        ("claude", "anthropic/claude-opus-4.5", "xhigh", None),
+        # Sonnet 4.5 takes no effort at all.
+        ("claude", "anthropic/claude-sonnet-4.5", "high", None),
+        ("codex", "subscription/codex/openai/gpt-6.1-sol", "minimal", None),
+        # The CLI's own default model has no known levels.
+        ("codex", "", "high", None),
+        ("codex", "subscription/codex/openai/gpt-6.1-sol", None, None),
+    ],
+)
+def test_effort_keeps_only_levels_the_cli_takes_for_the_model(
+    cli: str, model: str, effort: str | None, expected: str | None
+) -> None:
+    """The run's effort reaches the CLI only as a level that CLI lists for the model.
+
+    Args:
+        cli: The host CLI.
+        model: The proposer model id the guest sends.
+        effort: The run's stored effort.
+        expected: The level the CLI receives, or None.
+    """
+    assert host_agent._effort_arg(cli, model, effort) == expected  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(("cli", "flags"), _HIGH_EFFORT_FLAGS)
+def test_capability_runs_the_cli_at_the_stored_effort(
+    cli: str,
+    flags: list[str],
+    gateway: ModelGateway,
+    local: Settings,
+    guest: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The effort from the run settings reaches the CLI; a guest-sent effort does not.
+
+    Args:
+        cli: The host CLI.
+        flags: The arguments that carry the effort.
+        gateway: The parent gateway.
+        local: Local-mode settings.
+        guest: Guest workspace.
+        tmp_path: Where the fake CLI records its argv.
+        monkeypatch: Pytest fixture for the fake CLI's name.
+    """
+    monkeypatch.setenv("FAKE_CLI_NAME", cli)
+    model = {"codex": "subscription/codex/openai/gpt-6.1-sol", "claude": "anthropic/claude-opus-5.5"}[cli]
+    body = {"model": model, "reasoning_effort": "low", "prompt": "x", "workspace_tar_b64": _workspace_tar(guest)}
+
+    token = bind_host_agent(gateway, local, cli=cli, permission="workspace_only", reasoning_effort="high")
+    assert _post(gateway, token, body).status_code == 200
+    argv = json.loads((tmp_path / "record.json").read_text())["argv"]
+    assert argv[-len(flags) :] == flags
+    assert "low" not in argv
+
+
+def test_capability_keeps_the_cli_default_effort_without_a_choice(
+    gateway: ModelGateway, local: Settings, guest: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run with no stored effort starts the CLI with no effort argument."""
+    monkeypatch.setenv("FAKE_CLI_NAME", "claude")
+    body = {"model": "anthropic/claude-opus-5.5", "prompt": "x", "workspace_tar_b64": _workspace_tar(guest)}
+
+    token = bind_host_agent(gateway, local, cli="claude", permission="workspace_only")
+    assert _post(gateway, token, body).status_code == 200
+    argv = json.loads((tmp_path / "record.json").read_text())["argv"]
+    assert "--effort" not in argv
+    assert not any("model_reasoning_effort" in arg for arg in argv)
 
 
 @pytest.mark.parametrize("cli", ["codex", "claude"])
@@ -759,6 +854,51 @@ def test_capped_turn_fails_the_run_with_its_reset_time(
     assert "claude" in message
 
 
+def test_turn_that_no_cli_started_is_marked_for_the_usage_panel(
+    gateway: ModelGateway, local: Settings, guest: Path, database: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn that a saved cap stops before the CLI starts records ``dispatched: false``; the guest never sees the marker."""
+    monkeypatch.setenv("FAKE_CLI_NAME", "claude")
+    monkeypatch.setenv("FAKE_CLI_MODE", "limit")
+    token = bind_host_agent(gateway, local, cli="claude", permission="workspace_only")
+    body = {"model": "", "prompt": "x", "workspace_tar_b64": _workspace_tar(guest)}
+
+    ran = _post(gateway, token, body)
+    skipped = _post(gateway, token, body)
+
+    assert ran.status_code == skipped.status_code == 429
+    assert host_agent.NOT_STARTED_KEY not in skipped.json()
+    records = run_usage.load_records(database, str(gateway.runtime.budget_id))
+    assert sorted(record.evidence.get("dispatched", True) for record in records) == [False, True]
+
+
+def test_only_a_cli_that_could_not_start_is_marked_not_started(
+    local: Settings, guest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed start is not local use; a cleanup error after the CLI ran still is."""
+    monkeypatch.setenv("FAKE_CLI_NAME", "claude")
+    body = {"model": "", "prompt": "x", "workspace_tar_b64": _workspace_tar(guest)}
+
+    def broken_cleanup(*args: object, **kwargs: object) -> None:
+        """Fail like a ``ps`` fork error after the CLI ran."""
+        raise OSError("fork failed")
+
+    monkeypatch.setattr(host_agent, "_stop_turn", broken_cleanup)
+    ran = run_host_agent(body, local, cli="claude", permission="workspace_only")
+    monkeypatch.setattr(host_agent.subprocess, "Popen", broken_cleanup)
+    refused = run_host_agent(body, local, cli="claude", permission="workspace_only")
+
+    assert (ran["status"], host_agent.NOT_STARTED_KEY in ran) == ("error", False)
+    assert (refused["status"], refused.get(host_agent.NOT_STARTED_KEY)) == ("error", True)
+
+
+def test_failed_start_keeps_the_missing_binary_in_the_message(tmp_path: Path) -> None:
+    """The start error names the binary, so the user can see which CLI is missing."""
+    missing = str(tmp_path / "no-such-cli")
+    with pytest.raises(host_agent.CliStartError, match="no-such-cli"):
+        host_agent.run_group([missing], cwd=tmp_path, env=dict(os.environ), stdin="", timeout=1)
+
+
 def test_oversized_workspace_is_refused(gateway: ModelGateway, local: Settings, tmp_path: Path) -> None:
     """A request above 32 MB is refused with 413 before any CLI runs."""
     token = bind_host_agent(gateway, local, cli="claude", permission="workspace_only")
@@ -845,6 +985,11 @@ def test_proposer_settings_decide_the_host_cli() -> None:
     assert host_proposer({"optimizer": {}}) is None
     attach_host_agent_token(unified, "host")
     assert route[HOST_AGENT_TOKEN_KEY] == "host"
+    assert host_reasoning_effort(unified) is None
+    unified["models"]["reflection_model"]["extra"]["reasoning_effort"] = "high"  # type: ignore[index]
+    assert host_reasoning_effort(unified) == "high"
+    assert host_reasoning_effort({"reflection_model_config": {"extra": {"reasoning_effort": "low"}}}) == "low"
+    assert host_reasoning_effort({"reflection_model_config": {"extra": {"reasoning_effort": ""}}}) is None
     with pytest.raises(ValueError, match="route"):
         attach_host_agent_token({"proposer": {"host_cli": "claude"}}, "host")
 

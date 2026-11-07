@@ -35,7 +35,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,7 +46,6 @@ from gepa.oa.config import OptimizeAnythingConfig
 from gepa.oa.engine import Result
 from gepa.oa.eval_server import EvalServer
 from gepa.oa.task import Task, seed_as_text
-from gepa.utils.stop_condition import ScoreThresholdStopper
 
 try:
     from . import repo_tree
@@ -384,7 +383,58 @@ def visible_example_ids(server: EvalServer) -> list[str]:
     return [eid for split in ("train", "val") for eid, _ in server.iter_split(split)]
 
 
-def best_aggregate_candidate(server: EvalServer) -> tuple[str, float] | None:
+# Sweep details list the case ids that ``native_runner`` filled, so an engine
+# that must not rank a partly crashed version can tell it apart (SKY-367).
+UNSCORED_CASES_KEY = "unscored_cases"
+TEXT_CANDIDATE_KEY = "current_candidate"
+
+
+def fill_unscored(keys: list[str], scores: list[float]) -> list[float]:
+    """Give each null case its version's mean over the scored cases in the same batch.
+
+    In the sandbox a null score arrives as negative infinity. Upstream engines
+    average a version's cases, so one case that always crashes would make every
+    version negative infinity and hide which one is better (SKY-367).
+
+    Args:
+        keys: The version scored on each case, as a stable key.
+        scores: Each case's score, negative infinity for a null case.
+
+    Returns:
+        A number for every case: the score, or the same version's scored mean
+        for a null case, or negative infinity when the version has no scored case.
+    """
+    scored: dict[str, list[float]] = {}
+    for key, score in zip(keys, scores, strict=True):
+        if math.isfinite(score):
+            scored.setdefault(key, []).append(score)
+    filled: list[float] = []
+    for key, score in zip(keys, scores, strict=True):
+        values = scored.get(key)
+        if not math.isfinite(score):
+            score = sum(values) / len(values) if values else float("-inf")
+        filled.append(score)
+    return filled
+
+
+def _logged(server: EvalServer, candidate: str, score: float) -> bool:
+    """Check that the server logged this aggregate score for this candidate.
+
+    Args:
+        server: Evaluation server whose ``progress_log`` holds the checkpoints.
+        candidate: Candidate text.
+        score: Aggregate score to find.
+
+    Returns:
+        Whether a progress entry has the candidate's id and this ``val_score``.
+    """
+    candidate_id = server._candidate_registry.get(candidate)
+    return candidate_id is not None and any(
+        entry.get("candidate_id") == candidate_id and entry.get("val_score") == score for entry in server.progress_log
+    )
+
+
+def best_aggregate_candidate(server: EvalServer, only: Collection[str] | None = None) -> tuple[str, float] | None:
     """Return the best candidate among the server's logged aggregate checkpoints.
 
     Dataset ``EvalServer.best_score`` is the best per-example score, not a
@@ -393,6 +443,7 @@ def best_aggregate_candidate(server: EvalServer) -> tuple[str, float] | None:
 
     Args:
         server: Evaluation server whose ``progress_log`` holds the checkpoints.
+        only: Consider only these candidates, or every candidate when ``None``.
 
     Returns:
         ``(candidate, score)`` for the highest logged aggregate, or ``None``.
@@ -402,7 +453,9 @@ def best_aggregate_candidate(server: EvalServer) -> tuple[str, float] | None:
     for entry in server.progress_log:
         candidate = by_id.get(entry.get("candidate_id"))
         score = entry.get("val_score")
-        if candidate is None or not isinstance(score, int | float):
+        if candidate is None or not isinstance(score, int | float) or not math.isfinite(score):
+            continue
+        if only is not None and candidate not in only:
             continue
         if best is None or score > best[1]:
             best = (candidate, float(score))
@@ -642,6 +695,51 @@ def _reached(stop_at_score: float | None, score: float | None) -> bool:
     return stop_at_score is not None and score is not None and score >= stop_at_score
 
 
+class ScoredThresholdStopper:
+    """GEPA stopper that ignores versions with a crashed case.
+
+    GEPA ranks a version by the mean with each null case filled (SKY-367).
+    Final selection drops such a version, so its filled mean must not stop
+    the run either.
+    """
+
+    def __init__(self, threshold: float, crashed: Callable[[Any], bool]) -> None:
+        """Bind the threshold and the crash check.
+
+        Args:
+            threshold: The run's ``stop_at_score``.
+            crashed: Tells whether a GEPA program candidate hit a metric error.
+        """
+        self.threshold = threshold
+        self.crashed = crashed
+
+    def __call__(self, gepa_state: Any) -> bool:
+        """Tell whether a version with no crashed case reached the threshold.
+
+        Args:
+            gepa_state: GEPA's run state.
+
+        Returns:
+            ``True`` once such a version's validation mean meets the threshold.
+        """
+        pairs = zip(gepa_state.program_candidates, gepa_state.program_full_scores_val_set, strict=False)
+        return any(score >= self.threshold for candidate, score in pairs if not self.crashed(candidate))
+
+
+def unwrap_text_candidate(candidate: Any) -> Any:
+    """Return the text of a GEPA text-mode program candidate.
+
+    Args:
+        candidate: A GEPA program candidate.
+
+    Returns:
+        The text inside a one-key ``current_candidate`` mapping, else ``candidate``.
+    """
+    if isinstance(candidate, dict) and list(candidate) == [TEXT_CANDIDATE_KEY]:
+        return candidate[TEXT_CANDIDATE_KEY]
+    return candidate
+
+
 def task_brief(task: Task, example_ids: list[str]) -> str:
     """Describe the task the way the upstream repositories' READMEs describe theirs.
 
@@ -874,6 +972,10 @@ class AutoResearchEngine:
         self.example_ids: list[str] = []
         self._ids: dict[str, str] = {}
         self._lock = threading.Lock()
+        # Set by ``_layout`` when a repository run starts from a non-empty
+        # starting patch rather than from the fetched commit itself.
+        self.repo_seed = False
+        self.seed = ""
 
     def run(self, task: Task, server: EvalServer) -> Result:
         """Run research rounds until the budget, the target score or the evidence says stop.
@@ -890,6 +992,7 @@ class AutoResearchEngine:
             ProposerFailedError: When a round's CLI session failed on its own.
         """
         self.example_ids = visible_example_ids(server)
+        self.seed = seed_as_text(task.seed_candidate) if task.seed_candidate is not None else ""
         self._layout(task, server)
         restore = self._record(server)
         try:
@@ -928,7 +1031,15 @@ class AutoResearchEngine:
             ``(candidate, score)`` or ``None`` before any evaluation.
         """
         if server.task.has_dataset:
-            return best_aggregate_candidate(server)
+            # A version with a crashed case logs a filled mean (SKY-367), so the
+            # fully scored sweeps rank first, then the seed, then the rest. A
+            # crashed re-sweep of a ranked version can log a higher filled mean,
+            # so the ranked score itself must be the logged one.
+            ranking = sorted(self._ranking().items(), key=lambda item: -item[1])
+            for candidate, score in ranking:
+                if math.isfinite(score) and _logged(server, candidate, score):
+                    return candidate, score
+            return best_aggregate_candidate(server, only={self.seed}) or best_aggregate_candidate(server)
         if server.best_candidate is None or server.best_score is None:
             return None
         return str(server.best_candidate), float(server.best_score)
@@ -987,7 +1098,9 @@ class AutoResearchEngine:
                 feedback = {str(k): _feedback_text(v) for k, v in (info.get("infos") or {}).items()}
                 for eid, error in (info.get("errors") or {}).items():
                     feedback[str(eid)] = _feedback_text(f"error: {error}")
-                full = set(scores) == visible
+                # A crashed case gets the version's mean as a filled score (SKY-367). That mean must not
+                # rank or stop the run, so the observation does not count as a full-split score.
+                full = set(scores) == visible and not info.get(UNSCORED_CASES_KEY)
                 mean = _mean(scores)
                 named, named_feedback = named_score_columns(list((info.get("infos") or {}).values()))
                 scores.update(named)
@@ -1162,6 +1275,13 @@ class AutoResearchEngine:
             checkout_script = self.work_dir / "checkout.sh"
             checkout_script.write_text(CHECKOUT_SCRIPT.format(base=self.repo["base"]), encoding="utf-8")
             checkout_script.chmod(0o755)
+            seed = seed_as_text(task.seed_candidate) if task.seed_candidate is not None else ""
+            self.repo_seed = bool(seed.strip())
+            if self.repo_seed:
+                # The seed stays a patch against the fetched commit, so every
+                # version the agent saves still diffs against that commit.
+                (self.work_dir / "archive" / f"seed{self.suffix}").write_text(seed, encoding="utf-8")
+                subprocess.run(["./checkout.sh", "seed"], cwd=self.work_dir, check=True, capture_output=True)
         else:
             (self.work_dir / "work" / "seed.txt").write_text(seed_as_text(task.seed_candidate), encoding="utf-8")
             script = EVAL_SCRIPT.format(
@@ -1196,6 +1316,12 @@ class AutoResearchEngine:
             if self.example_ids
             else "one unit, since the evaluator scores the repository as a whole"
         )
+        seed = (
+            "- The run starts from a starting version, `archive/seed.patch`, not from the bare starting commit. "
+            "`repo/` holds it when the run begins, and `./checkout.sh seed` restores it.\n"
+            if self.repo_seed
+            else ""
+        )
         return (
             "# Research brief\n\n"
             "You are running one round of a multi-round research effort to improve a code repository against a "
@@ -1214,6 +1340,7 @@ class AutoResearchEngine:
             "`archive/index.tsv`.\n"
             "- `./checkout.sh <id>` resets `repo/` to that version, and `./checkout.sh base` to the starting "
             "commit. It throws away unsaved work in `repo/`.\n"
+            f"{seed}"
             "- `notebook.md` is yours and is the only memory that survives between rounds. Later rounds, "
             "possibly a different session of you, depend on it.\n\n"
             "## Evaluating\n\n"
@@ -1375,6 +1502,12 @@ class AutoResearchEngine:
             Markdown for the directive section.
         """
         leader = self._ids[front[0]] if front else ("the starting commit" if self.repo else "the seed")
+        if directive == "survey" and self.repo_seed:
+            return (
+                "**Survey.** First give the starting version a full evaluation (`./checkout.sh seed`, then "
+                "`./eval.sh`) to anchor the baseline. Then map the failure modes across examples and test your most "
+                "promising hypotheses."
+            )
         if directive == "survey" and self.repo:
             return (
                 "**Survey.** First give the untouched checkout a full evaluation (`./checkout.sh base`, then "
@@ -1612,7 +1745,7 @@ class MetaHarnessEngine:
             self._benchmark(server, "seed", seed_as_text(task.seed_candidate))
             self._write_frontier()
             for iteration in range(1, self.max_iterations + 1):
-                best = self._best()
+                best = self._best(scored=True)
                 if _reached(self.stop_at_score, None if best is None else best[1]):
                     stop_reason = "stop_at_score"
                     break
@@ -1639,7 +1772,7 @@ class MetaHarnessEngine:
             ``(candidate, score)`` or ``None`` before the baseline finished.
         """
         del server
-        return self._best()
+        return self._leader()
 
     def process_result(self, result: Result, output_dir: str | Path) -> None:
         """Write the final candidate and run metadata beside the evaluator artifacts.
@@ -1907,7 +2040,7 @@ class MetaHarnessEngine:
         Raises:
             ProposerFailedError: When the iteration's CLI session failed on its own.
         """
-        best = self._best()
+        best = self._leader()
         log_event(
             "iteration.start",
             f"Iteration {iteration} started, frontier {best[1]:.4f}"
@@ -1979,7 +2112,7 @@ class MetaHarnessEngine:
             for row in rows:
                 handle.write(json.dumps(row) + "\n")
         self._write_frontier()
-        new_best = self._best()
+        new_best = self._leader()
         improved = bool(new_best and (previous_best is None or new_best[1] > previous_best))
         log_event(
             "iteration.end",
@@ -2091,15 +2224,27 @@ class MetaHarnessEngine:
                 for column, value in named.items()
             },
         }
-        self.results[name] = {"avg_val": avg, "scores": {**record["scores"], **named}, "candidate": candidate}
+        self.results[name] = {
+            "avg_val": avg,
+            "scores": {**record["scores"], **named},
+            "candidate": candidate,
+            "crashed": bool(info.get(UNSCORED_CASES_KEY)),
+        }
         target = self.logs_dir / "results" / name
         target.mkdir(parents=True, exist_ok=True)
         (target / "val.json").write_text(json.dumps(record, indent=2, default=str), encoding="utf-8")
         return avg
 
     def _write_frontier(self) -> None:
-        """Write ``frontier_val.json``: per-example leaders plus the ``_pareto`` ranking."""
-        ranked = sorted(self.results.items(), key=lambda item: -item[1]["avg_val"])
+        """Write ``frontier_val.json``: per-example leaders plus the ``_pareto`` ranking.
+
+        A version with a crashed case holds filled scores (SKY-367), so it neither
+        ranks nor leads a case. Its own ``val.json`` still records it.
+        """
+        ranked = sorted(
+            ((name, entry) for name, entry in self.results.items() if not entry.get("crashed")),
+            key=lambda item: -item[1]["avg_val"],
+        )
         frontier: dict[str, Any] = {
             "_pareto": [{"system": name, "val_accuracy": entry["avg_val"]} for name, entry in ranked]
         }
@@ -2116,16 +2261,36 @@ class MetaHarnessEngine:
                 frontier[eid] = {"system": leader[0], "val_accuracy": leader[1]}
         (self.logs_dir / "frontier_val.json").write_text(json.dumps(frontier, indent=2), encoding="utf-8")
 
-    def _best(self) -> tuple[str, float] | None:
+    def _best(self, scored: bool = False) -> tuple[str, float] | None:
         """Return the frontier leader's candidate text and average score.
+
+        Args:
+            scored: Skip versions with a crashed case. Their average holds filled scores (SKY-367),
+                so it must not stop the run.
 
         Returns:
             ``(candidate, score)`` or ``None`` when nothing has been benchmarked.
         """
-        if not self.results:
+        names = [key for key, entry in self.results.items() if not (scored and entry.get("crashed"))]
+        if not names:
             return None
-        name = max(self.results, key=lambda key: self.results[key]["avg_val"])
+        name = max(names, key=lambda key: self.results[key]["avg_val"])
         return self.results[name]["candidate"], float(self.results[name]["avg_val"])
+
+    def _leader(self) -> tuple[str, float] | None:
+        """Return the best fully scored version, else the seed, else the best filled average.
+
+        A version with a crashed case has a filled average (SKY-367), so it leads
+        only when no fully scored version and no seed exist.
+
+        Returns:
+            ``(candidate, score)`` or ``None`` when nothing has been benchmarked.
+        """
+        if (best := self._best(scored=True)) is not None:
+            return best
+        if "seed" in self.results:
+            return self.results["seed"]["candidate"], float(self.results["seed"]["avg_val"])
+        return self._best()
 
     def _result(self, server: EvalServer, iterations: int, stop_reason: str) -> Result:
         """Build the result from the frontier.
@@ -2141,7 +2306,7 @@ class MetaHarnessEngine:
         Raises:
             RuntimeError: When even the baseline could not be scored.
         """
-        best = self._best()
+        best = self._leader()
         if best is None:
             raise RuntimeError("Meta-Harness could not benchmark the seed candidate.")
         candidate, score = best
@@ -2184,6 +2349,9 @@ class BestValsetVersion:
         if event["num_examples_evaluated"] < event["total_valset_size"]:
             return
         score = float(event["average_score"])
+        # SKY-367: a version with no scored case averages to negative infinity; it is never best.
+        if not math.isfinite(score):
+            return
         if self.best is None or score > self.best[1]:
             self.best = (next(iter(event["candidate"].values()), ""), score)
 
@@ -2244,6 +2412,19 @@ class GepaRepoEngine:
         gepa_dir = self.run_dir / "gepa"
         gepa_dir.mkdir(parents=True, exist_ok=True)
         tracker = BestValsetVersion()
+        crashed: set[str] = set()
+
+        def _key(candidate: Any) -> str:
+            """Key a version the same way for the batch and the stopper.
+
+            Args:
+                candidate: The text GEPA scores, or its program candidate mapping.
+
+            Returns:
+                The version's sorted JSON form.
+            """
+            return json.dumps(unwrap_text_candidate(candidate), sort_keys=True, default=str)
+
         config = GEPAConfig(
             engine=EngineConfig(
                 run_dir=str(gepa_dir),
@@ -2256,7 +2437,11 @@ class GepaRepoEngine:
             reflection=ReflectionConfig(reflection_lm=None, custom_candidate_proposer=self.proposer),
             stop_callbacks=[
                 lambda _state: self.proposer.failure is not None,
-                *([ScoreThresholdStopper(self.stop_at_score)] if self.stop_at_score is not None else []),
+                *(
+                    [ScoredThresholdStopper(self.stop_at_score, lambda candidate: _key(candidate) in crashed)]
+                    if self.stop_at_score is not None
+                    else []
+                ),
             ],
             callbacks=[tracker],
         )
@@ -2266,9 +2451,25 @@ class GepaRepoEngine:
             score, info = server.evaluate(candidate, example)
             return score, gepa_named_scores(info)
 
+        def batch_evaluate(pairs: list[tuple[Any, Any]]) -> list[tuple[float, Any]]:
+            """Score one GEPA batch in order and fill each null case with its version's scored mean.
+
+            Args:
+                pairs: The ``(candidate, case)`` pairs of one GEPA batch.
+
+            Returns:
+                One ``(score, side_info)`` per pair, in order.
+            """
+            results = [evaluate(candidate, example) for candidate, example in pairs]
+            keys = [_key(candidate) for candidate, _ in pairs]
+            crashed.update(key for key, (score, _) in zip(keys, results, strict=True) if not math.isfinite(score))
+            filled = fill_unscored(keys, [score for score, _ in results])
+            return [(score, info) for score, (_, info) in zip(filled, results, strict=True)]
+
         kwargs: dict[str, Any] = {
             "seed_candidate": seed_as_text(task.seed_candidate) if task.seed_candidate is not None else "",
             "evaluator": evaluate,
+            "batch_evaluator": batch_evaluate,
             "config": config,
         }
         # Every case both drives reflection and ranks versions.
@@ -2515,14 +2716,19 @@ class BestOfNRepoEngine:
             self.samples.append(sample)
             try:
                 if split is None:
-                    score, _ = server.evaluate(patch["candidate"])
+                    score, info = server.evaluate(patch["candidate"])
                 else:
-                    score, _ = server.evaluate_examples(patch["candidate"], split=split)
+                    score, info = server.evaluate_examples(patch["candidate"], split=split)
             except BudgetExhausted:
                 # Upstream discards a sample the budget cut short and keeps the best complete one.
                 sample["outcome"] = "budget_exhausted"
                 break
             score = float(score)
+            if not math.isfinite(score) or info.get(UNSCORED_CASES_KEY):
+                # SKY-367: a sample with a crashed case has no score, so it is
+                # never best and cannot reach stop_at_score on its filled mean.
+                sample["outcome"] = "metric_error"
+                continue
             server.log_progress(score, candidate=patch["candidate"])
             sample["score"] = score
             if self.best is None or score > self.best[1]:

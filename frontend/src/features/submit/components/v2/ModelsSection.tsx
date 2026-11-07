@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import type { BlackboxHarness, ModelConfig } from "@/shared/types/api";
-import type { ArtifactKind, OptimizerChoice } from "@/shared/types/unified-run";
+import type { OptimizerTarget, OptimizerChoice } from "@/shared/types/unified-run";
 import { resolveOptimizer } from "@/shared/types/unified-run";
 import { HarnessLogo } from "@/shared/ui/harness-logo";
 import { HelpTip } from "@/shared/ui/help-tip";
@@ -32,7 +32,7 @@ import { isLocalMode } from "@/shared/lib/runtime-env";
 import { msg } from "@/shared/lib/messages";
 
 import { emptyModelConfig } from "../../constants";
-import { useWizardV2 } from "../../hooks/use-unified-wizard";
+import { useWizardV2Shell } from "../../hooks/use-unified-wizard";
 import { useModelCatalog, useRecentModelConfigs } from "../../hooks/use-submit-wizard-data";
 import { DEFAULT_PROPOSER, proposerKnobs, usesNativeProposer } from "../../lib/engine-contract";
 import { keepEconomy } from "../../lib/model-config";
@@ -66,11 +66,11 @@ type Editing = {
  * and the proposer settings of the engines that drive a coding agent. The
  * metric model lives with the metric in step 4.
  */
-export function ModelsSection({ kind, choice }: { kind: ArtifactKind; choice: OptimizerChoice }) {
-  const { state, patchOptimizer, guided } = useWizardV2();
+export function ModelsSection({ kind, choice }: { kind: OptimizerTarget; choice: OptimizerChoice }) {
+  const { state, patchOptimizer, guided, runSource } = useWizardV2Shell();
   const t = (key: string) => v2Msg(key, guided);
   const level = useExperienceLevel();
-  const catalog = useModelCatalog();
+  const catalog = useModelCatalog(runSource);
   const { recentConfigs, saveToRecent, removeRecentConfig } = useRecentModelConfigs();
   const [editing, setEditing] = React.useState<Editing | null>(null);
   const [proposerOpen, setProposerOpen] = React.useState(() =>
@@ -378,6 +378,7 @@ export function ModelsSection({ kind, choice }: { kind: ArtifactKind; choice: Op
           recentConfigs={recentConfigs}
           onRemoveRecent={removeRecentConfig}
           modelDefaultsOnly={editing.modelDefaultsOnly}
+          remote={runSource === "hosted"}
         />
       )}
     </StepCard>

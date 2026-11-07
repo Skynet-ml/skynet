@@ -11,7 +11,9 @@ import { parseMessageTime } from "@/shared/ui/agent/message-time";
 import { parseTurnStats } from "@/shared/ui/agent/turn-stats";
 import { parseThinkingRows } from "@/shared/lib/thinking-segments";
 import { getRuntimeEnv } from "@/shared/lib/runtime-env";
-import { fetchWithAuthRetry } from "@/shared/lib/api";
+import { apiUrl, fetchWithAuthRetry, hostedRunsAvailable } from "@/shared/lib/api";
+import { parseSourceKey, sourceKey } from "@/shared/lib/api-route";
+import type { ApiSource } from "@/shared/lib/api-route";
 
 // Resolve lazily — a module-load const races the injected window.__APP_ENV__
 // and freezes the build-time localhost fallback. See shared/lib/api.ts.
@@ -25,6 +27,8 @@ export interface ConversationSummary {
   createdAt: string;
   updatedAt: string;
   preview: string | null;
+  /** "hosted" for a web chat a linked Mac shows read-only; its id is a hosted key. */
+  source?: ApiSource;
 }
 
 export interface ConversationDetail extends ConversationSummary {
@@ -57,9 +61,10 @@ interface RawDetail extends RawSummary {
   messages: RawMessage[];
 }
 
-function toSummary(raw: RawSummary): ConversationSummary {
+function toSummary(raw: RawSummary, source: ApiSource = "local"): ConversationSummary {
   return {
-    id: raw.id,
+    id: sourceKey(source, raw.id),
+    ...(source === "hosted" ? { source } : {}),
     title: raw.title,
     pinned: Boolean(raw.pinned),
     archivedAt: raw.archived_at,
@@ -127,32 +132,65 @@ export async function listConversations(
   if (params?.limit) q.set("limit", String(params.limit));
   if (params?.offset) q.set("offset", String(params.offset));
   const qs = q.toString();
+  const path = `/agent/conversations${qs ? `?${qs}` : ""}`;
+  // Chats made on the Mac stay local; a linked Mac only adds the web chats
+  // beside them. A failed hosted read keeps the local list.
+  const [local, hosted] = await Promise.all([
+    readSummaries(`${apiBase()}${path}`, "local", signal),
+    hostedRunsAvailable() ? readSummaries(apiUrl(path, "hosted"), "hosted", signal) : null,
+  ]);
+  if (local === null || hosted === null) return local;
+  return [...local, ...hosted].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+/**
+ * Read one conversation list from `url`, keyed for `source`.
+ *
+ * Args:
+ *   url: The full list URL.
+ *   source: Where the list comes from; hosted rows get hosted keys.
+ *   signal: Aborts the read.
+ *
+ * Returns:
+ *   The rows, or null on any failure.
+ */
+async function readSummaries(
+  url: string,
+  source: ApiSource,
+  signal?: AbortSignal,
+): Promise<ConversationSummary[] | null> {
   try {
-    const res = await fetchWithAuthRetry(`${apiBase()}/agent/conversations${qs ? `?${qs}` : ""}`, {
-      method: "GET",
-      signal,
-    });
+    const res = await fetchWithAuthRetry(url, { method: "GET", signal });
     if (!res.ok) return null;
     const rows = (await res.json()) as RawSummary[];
-    return rows.map(toSummary);
+    return rows.map((row) => toSummary(row, source));
   } catch {
     return null;
   }
+}
+
+/** Whether `conversationId` is a web chat's hosted key: the Mac never writes to one. */
+export function isHostedConversation(conversationId: string): boolean {
+  return parseSourceKey(conversationId).source === "hosted";
 }
 
 export async function getConversation(
   conversationId: string,
   signal?: AbortSignal,
 ): Promise<ConversationDetail | null> {
+  const { source, id } = parseSourceKey(conversationId);
+  // An unlinked Mac would send a web id to the local backend.
+  if (source === "hosted" && !hostedRunsAvailable()) return null;
+  const path = `/agent/conversations/${encodeURIComponent(id)}`;
   try {
     const res = await fetchWithAuthRetry(
-      `${apiBase()}/agent/conversations/${encodeURIComponent(conversationId)}`,
+      source === "hosted" ? apiUrl(path, "hosted") : `${apiBase()}${path}`,
       { method: "GET", signal },
     );
     if (!res.ok) return null;
     const raw = (await res.json()) as RawDetail;
     return {
-      ...toSummary(raw),
+      ...toSummary(raw, source),
       messages: raw.messages.map(toMessage),
     };
   } catch {
@@ -169,6 +207,7 @@ export async function patchConversation(
   conversationId: string,
   patch: ConversationPatch,
 ): Promise<ConversationSummary | null> {
+  if (isHostedConversation(conversationId)) return null;
   try {
     const res = await fetchWithAuthRetry(
       `${apiBase()}/agent/conversations/${encodeURIComponent(conversationId)}`,
@@ -187,6 +226,7 @@ export async function patchConversation(
 }
 
 export async function deleteConversation(conversationId: string): Promise<boolean> {
+  if (isHostedConversation(conversationId)) return false;
   try {
     const res = await fetchWithAuthRetry(
       `${apiBase()}/agent/conversations/${encodeURIComponent(conversationId)}`,
@@ -198,16 +238,76 @@ export async function deleteConversation(conversationId: string): Promise<boolea
   }
 }
 
-/** Create (or reuse) the conversation's public read-only link token; null on failure. */
-export async function createConversationShare(conversationId: string): Promise<string | null> {
+/** The three kinds of chat share link (SKY-294). */
+export type ShareLinkType = "view" | "continue" | "continue_data";
+
+/** A run, dataset or file that a share link can grant read access to. */
+export interface SharedItemOption {
+  kind: "run" | "dataset" | "file";
+  id: string;
+  label: string;
+  /** False when the item no longer exists. */
+  available: boolean;
+}
+
+/** The owner's view of a chat's share link: the live link and the items it can tick. */
+export interface ChatShareState {
+  token: string | null;
+  linkType: ShareLinkType | null;
+  items: SharedItemOption[];
+  candidates: SharedItemOption[];
+}
+
+interface RawShareState {
+  token: string | null;
+  link_type: ShareLinkType | null;
+  items: SharedItemOption[];
+  candidates: SharedItemOption[];
+}
+
+function toShareState(raw: RawShareState): ChatShareState {
+  return { token: raw.token, linkType: raw.link_type, items: raw.items, candidates: raw.candidates };
+}
+
+/** Read the chat's share link and the private items it can grant; null on failure. */
+export async function getChatShareState(conversationId: string): Promise<ChatShareState | null> {
+  if (isHostedConversation(conversationId)) return null;
   try {
     const res = await fetchWithAuthRetry(
       `${apiBase()}/agent/conversations/${encodeURIComponent(conversationId)}/share`,
-      { method: "POST" },
+      { method: "GET" },
     );
     if (!res.ok) return null;
-    const raw = (await res.json()) as { token?: unknown };
-    return typeof raw.token === "string" && raw.token ? raw.token : null;
+    return toShareState((await res.json()) as RawShareState);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Create the chat's share link, or change its type and ticked items. The token
+ * stays the same. Returns null on failure.
+ */
+export async function saveChatShare(
+  conversationId: string,
+  linkType: ShareLinkType,
+  items: ReadonlyArray<Pick<SharedItemOption, "kind" | "id">>,
+): Promise<ChatShareState | null> {
+  if (isHostedConversation(conversationId)) return null;
+  try {
+    const res = await fetchWithAuthRetry(
+      `${apiBase()}/agent/conversations/${encodeURIComponent(conversationId)}/share`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          link_type: linkType,
+          items: linkType === "continue_data" ? items.map(({ kind, id }) => ({ kind, id })) : [],
+        }),
+      },
+    );
+    if (!res.ok) return null;
+    return toShareState((await res.json()) as RawShareState);
   } catch {
     return null;
   }
@@ -219,22 +319,38 @@ export interface SharedConversationSummary {
   title: string;
   sharedAt: string | null;
   token: string;
+  linkType: ShareLinkType;
+  items: SharedItemOption[];
 }
 
 /**
- * List the user's chats that have a live public link, newest share first. In
- * the Mac app the local backend reads the list from the linked hosted account.
+ * List the user's chats that have a live share link, newest share first.
  * Throws on a failed request so the caller can show an error.
  */
 export async function listSharedConversations(): Promise<SharedConversationSummary[]> {
   const res = await fetchWithAuthRetry(`${apiBase()}/agent/shared-conversations`, { method: "GET" });
   if (!res.ok) throw new Error(`shared chats list failed (${res.status})`);
-  const raw = (await res.json()) as Array<{ id: string; title: string; shared_at: string | null; token: string }>;
-  return raw.map((r) => ({ id: r.id, title: r.title, sharedAt: r.shared_at, token: r.token }));
+  const raw = (await res.json()) as Array<{
+    id: string;
+    title: string;
+    shared_at: string | null;
+    token: string;
+    link_type: ShareLinkType;
+    items?: SharedItemOption[];
+  }>;
+  return raw.map((r) => ({
+    id: r.id,
+    title: r.title,
+    sharedAt: r.shared_at,
+    token: r.token,
+    linkType: r.link_type,
+    items: r.items ?? [],
+  }));
 }
 
 /** Stop sharing a chat: its public link then answers "not found". Returns false on failure. */
 export async function revokeConversationShare(conversationId: string): Promise<boolean> {
+  if (isHostedConversation(conversationId)) return false;
   try {
     const res = await fetchWithAuthRetry(
       `${apiBase()}/agent/conversations/${encodeURIComponent(conversationId)}/share`,
@@ -249,6 +365,8 @@ export async function revokeConversationShare(conversationId: string): Promise<b
 export interface SharedConversation {
   title: string;
   messages: AgentMessage[];
+  /** A continue link carries no messages: the reader must sign in first. */
+  linkType: ShareLinkType;
 }
 
 /**
@@ -266,8 +384,38 @@ export async function getSharedConversation(
       { method: "GET", signal, credentials: "omit" },
     );
     if (!res.ok) return null;
-    const raw = (await res.json()) as { title: string; messages: RawMessage[] };
-    return { title: raw.title, messages: raw.messages.map(toMessage) };
+    const raw = (await res.json()) as {
+      title: string;
+      messages: RawMessage[];
+      link_type?: ShareLinkType;
+    };
+    return { title: raw.title, messages: raw.messages.map(toMessage), linkType: raw.link_type ?? "view" };
+  } catch {
+    return null;
+  }
+}
+
+/** What a signed-in user opens from a share link. */
+export interface SharedChatOpen {
+  /** owner: the chat itself; fork: the caller's own copy; view: read-only. */
+  mode: "owner" | "fork" | "view";
+  conversationId: string | null;
+}
+
+/**
+ * Open a share link as the signed-in user. For a continue link the first open
+ * makes the user's own copy of the chat. Returns null for an unknown or
+ * revoked link and on any failure.
+ */
+export async function openSharedConversation(token: string): Promise<SharedChatOpen | null> {
+  try {
+    const res = await fetchWithAuthRetry(
+      `${apiBase()}/agent/shared-conversations/${encodeURIComponent(token)}/open`,
+      { method: "POST" },
+    );
+    if (!res.ok) return null;
+    const raw = (await res.json()) as { mode: SharedChatOpen["mode"]; conversation_id: string | null };
+    return { mode: raw.mode, conversationId: raw.conversation_id };
   } catch {
     return null;
   }

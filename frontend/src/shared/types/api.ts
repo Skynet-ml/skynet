@@ -1,4 +1,5 @@
 import type { ExecutionBudget, JobExecutionBudget } from "./execution-budget";
+import type { ApiSource } from "@/shared/lib/api-route";
 
 export type JobStatus =
   | "pending"
@@ -243,6 +244,8 @@ interface BudgetProjection {
 
 export interface OptimizationSummaryResponse {
   optimization_id: string;
+  /** Client-side tag: which backend listed the run (the Mac app merges local and hosted). */
+  source?: ApiSource;
   optimization_type: OptimizationType;
   status: JobStatus;
   stop_reason?: string | null;
@@ -569,6 +572,8 @@ export interface BlackboxRepoSource {
   commit?: string | null;
   editable_paths: string[];
   secrets?: BlackboxRepoSecret[];
+  /** True when Skynet created the repository for this run. */
+  created_by_skynet?: boolean;
 }
 
 export interface BlackboxTarget {
@@ -646,6 +651,8 @@ export interface BlackboxRunRequest {
   execution_budget_revision?: number;
   preflight_id?: string;
   preflight_fingerprint?: string;
+  // The setup's finished hardening job; the run's PR ships its exploit suite.
+  hardening_job_id?: string | null;
 
   name?: string;
   description?: string;
@@ -653,10 +660,13 @@ export interface BlackboxRunRequest {
   objective?: string | null;
   background?: string | null;
   // Wizard recipe that authored the run; cloning preselects the picker with it.
-  recipe?: "prompt" | "code" | "anything" | "repo" | null;
+  recipe?: "repo" | null;
   seed_candidate?: BlackboxCandidate | null;
   scorer: BlackboxScorer;
   cases?: Array<Record<string, unknown>> | null;
+  staged_dataset_id?: string | null;
+  input_fields?: string[];
+  expected_field?: string | null;
   seed?: number | null;
   budget: BlackboxBudget;
   strategy: BlackboxStrategy;
@@ -983,6 +993,8 @@ export interface ServeInfoResponse {
   demo_count: number;
   /** Example input values (from a demo or the dataset) to prefill usage snippets. */
   sample_inputs?: Record<string, string>;
+  /** Whether the run's owner turned serving on; serve calls refuse while it is off. */
+  serving_enabled?: boolean;
 }
 
 export interface ServeResponse {

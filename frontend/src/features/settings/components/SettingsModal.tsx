@@ -51,6 +51,7 @@ import { CopyButton } from "@/shared/ui/copy-button";
 import { ExpandToggleButton } from "@/shared/ui/expand-toggle-button";
 import { WalletTab, UsageTab, ByokKeysSection } from "@/features/billing";
 import { ConnectorsTab } from "@/features/connectors";
+import { LocalCliUsagePanel } from "@/features/local-usage";
 import { AdminDashboard } from "@/features/dashboard";
 import { ExperienceLevelControl } from "@/features/experience";
 import { Input } from "@/shared/ui/primitives/input";
@@ -125,9 +126,7 @@ import { linkedUsername, useLinkedAccount } from "@/shared/hooks/use-linked-acco
 import { useHostedFeaturesAvailable } from "@/shared/hooks/use-hosted-features";
 import { hostedFeaturesAvailable } from "@/shared/lib/hosted-features";
 import { AgentEngineSetting } from "./AgentEngineSetting";
-import { AgentLocalRunSetting } from "./AgentLocalRunSetting";
 import { useLocalAgentMenuModels } from "@/features/local-runtime";
-import { agentSubscriptionFor } from "../lib/prefs";
 
 function WizardTab() {
   const { prefs, setPref } = useUserPrefs();
@@ -251,10 +250,7 @@ function TaggingTab() {
 
 function AgentTab() {
   const { prefs, setPref } = useUserPrefs();
-  const localMenu = useLocalAgentMenuModels(
-    agentSubscriptionFor("generalist"),
-    prefs.composerModel,
-  );
+  const localMenu = useLocalAgentMenuModels(prefs.composerModel);
 
   return (
     <div className="space-y-1">
@@ -297,8 +293,6 @@ function AgentTab() {
           </SelectContent>
         </Select>
       </SettingsRow>
-
-      {isLocalMode() && <AgentLocalRunSetting />}
     </div>
   );
 }
@@ -1525,7 +1519,7 @@ export function SettingsModal() {
                 <WalletTab />
               </TabsContent>
               <TabsContent value="usage">
-                <UsageTab />
+                <UsageTab localPanel={<LocalCliUsagePanel />} />
               </TabsContent>
               <TabsContent value="providers">
                 <ByokKeysSection />

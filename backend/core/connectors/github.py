@@ -226,6 +226,21 @@ def _repo_summary(repo: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _matches(repo: dict[str, Any], words: list[str]) -> bool:
+    """Say whether every search word is in the repository's name or description.
+
+    Args:
+        repo: One repository from GitHub's list.
+        words: The lowercased search words; empty matches every repository.
+
+    Returns:
+        True when each word is a substring of ``owner/name`` plus the description.
+    """
+    description = repo.get("description") if isinstance(repo.get("description"), str) else ""
+    haystack = f"{repo['full_name']} {description}".lower()
+    return all(word in haystack for word in words)
+
+
 def list_repositories(secret: ConnectorSecret, search: str) -> list[dict[str, Any]]:
     """List the account's repositories with the details the picker shows, most recently pushed first.
 
@@ -235,7 +250,10 @@ def list_repositories(secret: ConnectorSecret, search: str) -> list[dict[str, An
 
     Args:
         secret: The stored connector.
-        search: Case-insensitive substring filter on ``owner/name``.
+        search: Case-insensitive words; a repository matches when each word
+            is in its ``owner/name`` or its description. Spaces, hyphens
+            and other separators only split words, so ``personal website``
+            finds ``personal-website``.
 
     Returns:
         Repository summaries, see :func:`_repo_summary`.
@@ -248,10 +266,14 @@ def list_repositories(secret: ConnectorSecret, search: str) -> list[dict[str, An
         params={"per_page": REPO_LIMIT, "sort": "pushed", "affiliation": "owner,collaborator,organization_member"},
     )
     needle = search.strip().lower()
+    words = [word for word in re.split(r"[\W_]+", needle) if word]
+    # A search of only punctuation has no words; it must match nothing, not everything.
+    if needle and not words:
+        words = [needle]
     repos = [
         _repo_summary(repo)
         for repo in body or []
-        if isinstance(repo, dict) and isinstance(repo.get("full_name"), str) and needle in repo["full_name"].lower()
+        if isinstance(repo, dict) and isinstance(repo.get("full_name"), str) and _matches(repo, words)
     ]
     if REPO_NAME.match(needle) and not any(r["full_name"].lower() == needle for r in repos):
         owner, name = search.strip().split("/")

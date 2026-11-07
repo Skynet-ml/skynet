@@ -1,35 +1,27 @@
-An engine is the search method that proposes new versions of your artifact. Skynet has six native engines for Prompt, Code and Text artifacts, three DSPy optimizers for DSPy programs, and **Auto**. This page says what each one does, when to pick it, and which settings it has.
+An engine is the search method that proposes new versions of your repository. Skynet has six native engines and **Auto**. Every engine works on repositories. This page says what each one does, when to pick it, and which settings it has.
 
-Read [How optimization works](/docs/concepts/optimization) first if you do not know which engines fit your artifact.
+Read [How optimization works](/docs/concepts/optimization) first if you do not know which engine fits your task.
 
 ## Quick comparison
 
-| Engine                | Artifact kinds     | Coding agent settings              | Max iterations setting |
-| --------------------- | ------------------ | ---------------------------------- | ---------------------- |
-| Auto                  | All                | Yes, on Prompt, Code and Text      | No                     |
-| GEPA                  | Prompt, Code, Text | No                                 | No                     |
-| Best-of-N             | Prompt, Code, Text | No                                 | No                     |
-| AutoResearch          | Prompt, Code, Text | Yes                                | No                     |
-| Meta-Harness          | Prompt, Code, Text | Yes                                | Yes                    |
-| AutoSaddler           | Prompt, Code, Text | Yes                                | Yes                    |
-| ShinkaEvolve          | Prompt, Code, Text | No. It has its own editor setting. | Yes                    |
-| DSPy GEPA             | DSPy program       | No                                 | No                     |
-| DSPy MIPROv2          | DSPy program       | No                                 | No                     |
-| DSPy BootstrapFewShot | DSPy program       | No                                 | No                     |
+| Engine       | Coding agent settings              | Max iterations setting |
+| ------------ | ---------------------------------- | ---------------------- |
+| Auto         | No                                 | No                     |
+| GEPA         | No                                 | No                     |
+| Best-of-N    | No                                 | No                     |
+| AutoResearch | Yes                                | No                     |
+| Meta-Harness | Yes                                | Yes                    |
+| AutoSaddler  | Yes                                | Yes                    |
+| ShinkaEvolve | No. It has its own editor setting. | Yes                    |
 
-The wizard marks GEPA, DSPy GEPA and Auto as optimizers that use the feedback text from your metric.
+The wizard marks GEPA and Auto as optimizers that use the feedback text from your scorer.
 
 ## Auto
 
-Auto is the default. What it runs depends on the artifact type:
+Auto is the default for every run. It works in two phases:
 
-- **DSPy program**: Auto runs DSPy GEPA.
-- **Prompt, Code or Text**: Auto explores with five engines at the same time: GEPA, AutoResearch, Meta-Harness, AutoSaddler and ShinkaEvolve. Each engine gets an equal share of the scorer runs: the budget divided by 6. Then GEPA continues from the best version with the rest of the budget.
-
-Auto does not use Best-of-N.
-
-> [!WARNING]
-> On a Prompt, Code or Text artifact, Auto needs at least 6 scorer runs: 5 exploration lanes and one continuation. All five engines must be available. If one is not available, select a single engine.
+1. It explores with GEPA, AutoResearch, Meta-Harness, AutoSaddler and ShinkaEvolve.
+2. It continues GEPA from the best version that the exploration found.
 
 **Pick it when** you do not know which engine fits. This is the best place to start.
 
@@ -37,7 +29,7 @@ Auto does not use Best-of-N.
 
 "Reflective evolution with a Pareto front of versions." The reflection model reads the score and the feedback of each case and writes a better version. GEPA keeps a front of versions that are each best on some cases.
 
-**Pick it when** your metric gives specific feedback, and you want a strong single engine.
+**Pick it when** your scorer gives specific feedback, and you want a strong single engine.
 
 ## Best-of-N
 
@@ -49,7 +41,7 @@ Auto does not use Best-of-N.
 
 A coding agent runs research rounds. It edits, scores and keeps what helps until the budget runs out.
 
-**Pick it when** a good change needs several steps of investigation, for example on a Code artifact.
+**Pick it when** a good change needs several steps of investigation.
 
 ## Meta-Harness
 
@@ -59,9 +51,9 @@ A coding agent proposes a batch of candidates each iteration. It uses the full h
 
 ## AutoSaddler
 
-A coding agent reads the feedback from your metric and patches the version. Skynet keeps only patches that a new scorer run confirms.
+A coding agent reads the feedback from your scorer and patches the version. Skynet keeps only patches that a new scorer run confirms.
 
-**Pick it when** your metric feedback points to clear, local defects.
+**Pick it when** your scorer feedback points to clear, local defects.
 
 ## ShinkaEvolve
 
@@ -69,36 +61,26 @@ A coding agent reads the feedback from your metric and patches the version. Skyn
 
 **Pick it when** you want broad exploration and you have a larger budget.
 
-## DSPy optimizers
-
-| Optimizer             | What it does                                                                                                              |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| DSPy GEPA             | Reads the metric feedback and evolves the instructions of each predictor.                                                 |
-| DSPy MIPROv2          | Proposes instructions and few-shot demos together, and searches their combinations with Bayesian optimization.            |
-| DSPy BootstrapFewShot | Collects worked examples that the program gets right and adds them as few-shot demos. It does not use a reflection model. |
-
-DSPy MIPROv2 and DSPy BootstrapFewShot need pairs (cases with expected outputs).
-
 ## Settings
 
 ### Budget
 
 | Setting         | Default | Range                                                       |
 | --------------- | ------- | ----------------------------------------------------------- |
-| Max scorer runs | 200     | 1 to 100000 (Auto: at least 6)                              |
+| Max scorer runs | 200     | 1 to 100000                              |
 | Stop at score   | Off     | 0 or more                                                   |
 | Max iterations  | Off     | 1 to 1000. Only Meta-Harness, AutoSaddler and ShinkaEvolve. |
 
-One scorer run is one call of your metric on one case. The final re-score of the starting version and the winner does not count against **Max scorer runs**.
+One scorer run is one call of your scorer on one case. The final re-score of the starting version and the winner does not count against **Max scorer runs**.
 
 ### Coding agent settings
 
-These settings apply to Auto, AutoResearch, Meta-Harness and AutoSaddler.
+These settings apply to AutoResearch, Meta-Harness and AutoSaddler.
 
 | Setting                      | Default | Range                                            |
 | ---------------------------- | ------- | ------------------------------------------------ |
 | Coding agent                 | Codex   | Pi, Codex, OpenCode, Prime Agent, Custom command |
-| Candidates per iteration     | 3       | 1 to 8. Shown for Auto and Meta-Harness.         |
+| Candidates per iteration     | 3       | 1 to 8. |
 | Max tool calls per candidate | 100     | 1 to 1000                                        |
 
 ### ShinkaEvolve settings
@@ -113,8 +95,6 @@ These settings apply to Auto, AutoResearch, Meta-Harness and AutoSaddler.
 | Archive size                            | 40                                                          |
 | Parallel evaluations                    | 2                                                           |
 | Parallel proposals                      | 2                                                           |
-
-When Auto runs ShinkaEvolve, the wizard shows these settings as "ShinkaEvolve settings (when Auto runs it)".
 
 ## Related pages
 

@@ -3,15 +3,14 @@
 import * as React from "react";
 
 import {
-  BLACKBOX_OPTIMIZERS,
-  DSPY_OPTIMIZERS,
-  type ArtifactKind,
+  storedOptimizerChoice,
   type DataMode,
-  type OptimizerChoice,
+  type OptimizerTarget,
 } from "@/shared/types/unified-run";
 
 import type { ScreenNav, ScreenNavigator } from "../lib/screen-agent";
-import { runScreenNav } from "../lib/screen-agent";
+import { nextReturnScreen, reachedReturnScreen, runScreenNav } from "../lib/screen-agent";
+import { rolesFields } from "../lib/wizard-write";
 import type { ScreenNote, WizardState } from "../lib/types";
 
 type WizardKey = keyof WizardState;
@@ -65,6 +64,35 @@ interface WizardStateContextValue {
   setRestoredSetup: (restored: boolean) => void;
   /** Move the wizard as a screen agent asked, through the frame's handlers. */
   navigateScreen: (nav: ScreenNav) => void;
+  /**
+   * The screen the agent's go-back left, until the wizard reaches it again.
+   * The agent's next Continue jumps there, so the user does not walk every
+   * finished screen between.
+   */
+  returnScreen: string | null;
+  /** The wizard's agent is running or waiting on a turn. */
+  agentBusy: boolean;
+  setAgentBusy: (busy: boolean) => void;
+  /** Fields a running agent write is changing; the form locks them until it lands. */
+  agentWritingFields: readonly string[];
+  setAgentWritingFields: (fields: readonly string[]) => void;
+  /** The newest message the wizard sends the agent by itself, such as a failed setup check. */
+  autoFeedback: AutoFeedback | null;
+  /** Queue a message for the agent; returns its id. */
+  sendAutoFeedback: (text: string) => number;
+  /** The id of the newest automatic message whose turn the agent finished. */
+  finishedAutoFeedback: number;
+  setFinishedAutoFeedback: (id: number) => void;
+  /** What each wizard write's fields held on the form when it landed, by tool call id. */
+  writeBefore: Readonly<Record<string, Record<string, unknown>>>;
+  noteWriteBefore: (callId: string, before: Record<string, unknown>) => void;
+}
+
+/** A message the wizard sends its agent without the user typing it. */
+export interface AutoFeedback {
+  /** Grows with each message, so the same text sent twice still counts twice. */
+  id: number;
+  text: string;
 }
 
 const Ctx = React.createContext<WizardStateContextValue | null>(null);
@@ -84,13 +112,53 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
   const [screenIssue, setScreenIssue] = React.useState<string | null>(null);
   const [reopenedScreen, setReopenedScreen] = React.useState<string | null>(null);
   const [restoredSetup, setRestoredSetup] = React.useState(false);
+  const [agentBusy, setAgentBusy] = React.useState(false);
+  const [agentWritingFields, setAgentWritingFieldsState] = React.useState<readonly string[]>([]);
+  const setAgentWritingFields = React.useCallback((fields: readonly string[]) => {
+    setAgentWritingFieldsState((prev) =>
+      prev.length === fields.length && prev.every((f, i) => f === fields[i]) ? prev : fields,
+    );
+  }, []);
+  const [autoFeedback, setAutoFeedback] = React.useState<AutoFeedback | null>(null);
+  const feedbackIdRef = React.useRef(0);
+  const sendAutoFeedback = React.useCallback((text: string) => {
+    feedbackIdRef.current += 1;
+    const id = feedbackIdRef.current;
+    setAutoFeedback({ id, text });
+    return id;
+  }, []);
+  const [finishedAutoFeedback, setFinishedAutoFeedback] = React.useState(0);
+  const [writeBefore, setWriteBefore] = React.useState<Record<string, Record<string, unknown>>>({});
+  const noteWriteBefore = React.useCallback((callId: string, before: Record<string, unknown>) => {
+    setWriteBefore((prev) => ({ ...prev, [callId]: before }));
+  }, []);
   // A ref, not state: the frame re-registers on every render that changes its
   // handlers, and the agent reads it only when a move arrives.
   const navigatorRef = React.useRef<ScreenNavigator | null>(null);
+  const [returnScreen, setReturnScreen] = React.useState<string | null>(null);
   const setScreenNavigator = React.useCallback((navigator: ScreenNavigator | null) => {
     navigatorRef.current = navigator;
+    // Null means the wizard unmounted. The provider outlives it, so the next
+    // setup must not inherit this one's return screen. The screen alone cannot
+    // say so: on an account switch the new frame's screen lands in the same
+    // render as the old frame's null.
+    if (navigator === null) setReturnScreen(null);
   }, []);
+  // Clear it when the wizard moves to it or past it, not while the wizard
+  // still shows the screen the go-back left: that screen is the return screen.
+  const [seenScreen, setSeenScreen] = React.useState<string | null>(wizardScreen);
+  if (seenScreen !== wizardScreen) {
+    setSeenScreen(wizardScreen);
+    if (returnScreen !== null && reachedReturnScreen(returnScreen, wizardScreen)) {
+      setReturnScreen(null);
+    }
+  }
   const navigateScreen = React.useCallback((nav: ScreenNav) => {
+    // The navigator, not wizardScreen: the frame registers it in the same
+    // commit as the screen change, so a move that arrives right after a
+    // Continue still sees the screen the user is on.
+    const shown = navigatorRef.current?.screen ?? null;
+    setReturnScreen((prev) => nextReturnScreen(prev, nav, shown));
     runScreenNav(nav, navigatorRef.current);
   }, []);
   const setField = React.useCallback<WizardStateContextValue["setField"]>(
@@ -177,6 +245,9 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
     // afterwards early-returns from its incoming-sync effect instead of
     // replaying the last agent write onto an otherwise-empty form.
     setPulseKeys([]);
+    setAutoFeedback(null);
+    setWriteBefore({});
+    setReturnScreen(null);
   }, []);
 
   const overriddenFields = React.useMemo(() => Array.from(overridden).sort(), [overridden]);
@@ -197,10 +268,21 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       setScreenIssue,
       setScreenNavigator,
       navigateScreen,
+      returnScreen,
       reopenedScreen,
       setReopenedScreen,
       restoredSetup,
       setRestoredSetup,
+      agentBusy,
+      setAgentBusy,
+      agentWritingFields,
+      setAgentWritingFields,
+      autoFeedback,
+      sendAutoFeedback,
+      finishedAutoFeedback,
+      setFinishedAutoFeedback,
+      writeBefore,
+      noteWriteBefore,
     }),
     [
       state,
@@ -215,8 +297,17 @@ export function WizardStateProvider({ children }: { children: React.ReactNode })
       screenIssue,
       setScreenNavigator,
       navigateScreen,
+      returnScreen,
       reopenedScreen,
       restoredSetup,
+      agentBusy,
+      agentWritingFields,
+      setAgentWritingFields,
+      autoFeedback,
+      sendAutoFeedback,
+      finishedAutoFeedback,
+      writeBefore,
+      noteWriteBefore,
     ],
   );
 
@@ -228,9 +319,16 @@ export function useWizardStateOptional(): WizardStateContextValue | null {
   return React.useContext(Ctx);
 }
 
-const ARTIFACT_KINDS: readonly ArtifactKind[] = ["prompt", "code", "dspy_program", "text"];
+/** Whether a running agent write is changing this wizard field (or any of these), so the form holds it. */
+export function useAgentFieldLock(field: keyof WizardState | ReadonlyArray<keyof WizardState>): boolean {
+  const writing = React.useContext(Ctx)?.agentWritingFields ?? [];
+  const fields: readonly string[] = typeof field === "string" ? [field] : field;
+  return fields.some((f) => writing.includes(f));
+}
+
+// Skynet is repo-only (SKY-316): an agent that still names a DSPy program gets no artifact write.
+const ARTIFACT_KINDS: readonly OptimizerTarget[] = ["repo"];
 const DATA_MODES: readonly DataMode[] = ["single", "pairs"];
-const OPTIMIZER_CHOICES: readonly string[] = ["auto", ...DSPY_OPTIMIZERS, ...BLACKBOX_OPTIMIZERS];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -274,6 +372,7 @@ export function extractWizardPatch(result: unknown): Partial<WizardState> {
     "model_configured",
     "shuffle",
     "is_private",
+    "repo_created_by_skynet",
   ] as const) {
     if (typeof wrap[key] === "boolean") patch[key] = wrap[key] as boolean;
   }
@@ -288,13 +387,15 @@ export function extractWizardPatch(result: unknown): Partial<WizardState> {
   ] as const) {
     if (typeof wrap[key] === "string") patch[key] = wrap[key] as string;
   }
-  for (const key of ["staged_dataset_id", "source_dataset_id", "expected_field"] as const) {
+  for (const key of ["staged_dataset_id", "source_dataset_id", "expected_field", "repository"] as const) {
     if (typeof wrap[key] === "string" && wrap[key]) patch[key] = wrap[key] as string;
   }
   if (isStringList(wrap.dataset_columns)) patch.dataset_columns = wrap.dataset_columns;
   const notes = parseScreenNotes(wrap.screen_notes);
   if (notes) patch.screen_notes = notes;
   if (isStringList(wrap.input_fields)) patch.input_fields = wrap.input_fields;
+  const roles = rolesFields(wrap.column_roles);
+  if (roles && !patch.input_fields && !patch.expected_field) Object.assign(patch, roles);
 
   const kind = ARTIFACT_KINDS.find((k) => k === wrap.artifact_kind);
   if (kind) patch.artifact_kind = kind;
@@ -302,11 +403,9 @@ export function extractWizardPatch(result: unknown): Partial<WizardState> {
   if (startingVersion !== null) patch.starting_version = startingVersion;
   const mode = DATA_MODES.find((m) => m === wrap.data_mode);
   if (mode) patch.data_mode = mode;
-  if (
-    typeof wrap.optimizer_choice === "string" &&
-    OPTIMIZER_CHOICES.includes(wrap.optimizer_choice)
-  )
-    patch.optimizer_choice = wrap.optimizer_choice as OptimizerChoice;
+  // A DSPy optimizer id from the agent maps to Auto, since only repository engines run.
+  const choice = storedOptimizerChoice(wrap.optimizer_choice);
+  if (choice) patch.optimizer_choice = choice;
 
   if (isRecord(wrap.workflow) && Array.isArray(wrap.workflow.nodes)) {
     patch.workflow = wrap.workflow as unknown as WizardState["workflow"];

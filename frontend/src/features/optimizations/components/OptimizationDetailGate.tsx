@@ -9,10 +9,13 @@ import {
   ApiError,
   getJob,
   getPublicOptimization,
+  hostedRunsAvailable,
   setApiAuthToken,
   type SharedOptimizationData,
 } from "@/shared/lib/api";
+import { sourceFromParam } from "@/shared/lib/api-route";
 import { formatMsg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { TERMS } from "@/shared/lib/terms";
 import { OptimizationDetailView } from "./OptimizationDetailView";
 import { OptimizationDetailSkeleton } from "./OptimizationDetailSkeleton";
@@ -23,7 +26,7 @@ type GateState =
   | { mode: "loading" }
   | { mode: "owned" }
   | { mode: "public"; data: SharedOptimizationData }
-  | { mode: "notfound" };
+  | { mode: "notfound"; message?: string };
 
 /**
  * Decides which detail view to render for ``/optimizations/[id]``: the full
@@ -40,7 +43,13 @@ export function OptimizationDetailGate() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   // A grid pair deep link renders the pair strip above the tabs.
-  const isPairLink = useSearchParams().get("pair") != null;
+  const searchParams = useSearchParams();
+  const isPairLink = searchParams.get("pair") != null;
+  // `?source=hosted` counts only where hosted can be read (a linked Mac); the
+  // web app and an unlinked Mac keep the local probe and its public fallback.
+  const source = hostedRunsAvailable() ? sourceFromParam(searchParams.get("source")) : "local";
+  // Local and hosted IDs can repeat, so the latch keys on both.
+  const runRef = `${source}:${id}`;
   const { data: session, status } = useSession();
   const [state, setState] = useState<GateState>({ mode: "loading" });
   // The id whose probe already resolved to a stable view. The session token
@@ -58,7 +67,7 @@ export function OptimizationDetailGate() {
     // root ApiAuthTokenBridge may not have synced it yet; without this the
     // owner's getJob could 401 and wrongly fall through to the public view.
     if (session?.backendAccessToken) setApiAuthToken(session.backendAccessToken);
-    if (resolvedIdRef.current === id) return;
+    if (resolvedIdRef.current === runRef) return;
     let cancelled = false;
     setState({ mode: "loading" });
     const probe = async () => {
@@ -72,17 +81,25 @@ export function OptimizationDetailGate() {
         // gets misrendered as "wasn't found" while it is happily training.
         for (let attempt = 0; ; attempt++) {
           try {
-            const probed = await getJob(id);
+            const probed = await getJob(id, undefined, source);
             rememberProbedRun(
               id,
               probed.optimization_type,
               planPipelineStages(probed, null).map((s) => ({ detail: !!s.detail, foot: "time" })),
             );
             if (cancelled) return;
-            resolvedIdRef.current = id;
+            resolvedIdRef.current = runRef;
             setState({ mode: "owned" });
             return;
           } catch (err) {
+            // A hosted run has no public fallback here: show the proxy's error
+            // (not linked, revoked, refused, unreachable) instead.
+            if (source === "hosted" && (attempt >= 2 || err instanceof ApiError)) {
+              if (!cancelled) {
+                setState({ mode: "notfound", message: userErrorMessage(err) });
+              }
+              return;
+            }
             const notFound = err instanceof ApiError && err.status === 404;
             if (notFound || attempt >= 2) break;
             await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
@@ -93,7 +110,7 @@ export function OptimizationDetailGate() {
       try {
         const data = await getPublicOptimization(id);
         if (cancelled) return;
-        resolvedIdRef.current = id;
+        resolvedIdRef.current = runRef;
         setState({ mode: "public", data });
       } catch {
         if (cancelled) return;
@@ -111,7 +128,7 @@ export function OptimizationDetailGate() {
     return () => {
       cancelled = true;
     };
-  }, [id, status, session?.backendAccessToken, router]);
+  }, [id, source, runRef, status, session?.backendAccessToken, router]);
 
   if (state.mode === "loading") {
     return <OptimizationDetailSkeleton pair={isPairLink} grid={kindHint === "grid_search"} />;
@@ -122,10 +139,11 @@ export function OptimizationDetailGate() {
       <div className="flex flex-col items-center justify-center min-h-[60dvh] gap-4">
         <XCircle className="size-12 text-destructive" />
         <p className="text-lg text-muted-foreground">
-          {formatMsg("auto.app.optimizations.id.page.template.2", { p1: TERMS.optimization })}
+          {state.message ??
+            formatMsg("auto.app.optimizations.id.page.template.2", { p1: TERMS.optimization })}
         </p>
       </div>
     );
   }
-  return <OptimizationDetailView />;
+  return <OptimizationDetailView source={source} />;
 }

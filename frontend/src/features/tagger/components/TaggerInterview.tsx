@@ -47,7 +47,6 @@ import { ModelConfigModal, useRecentModelConfigs } from "@/features/submit";
 import { ModelChip } from "@/shared/ui/model-chip";
 import { formatCentsUsd } from "@/features/billing";
 import { useLocalAgentMenuModels } from "@/features/local-runtime";
-import { agentSubscriptionFor } from "@/features/settings";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
@@ -144,10 +143,7 @@ export function TaggerInterview({
   onConfirmRubric,
 }: Props) {
   useCompletionNotification(busy, () => msg("notify.interview.turn"));
-  const localMenu = useLocalAgentMenuModels(
-    agentSubscriptionFor("tagger"),
-    interviewComposerModel(assist),
-  );
+  const localMenu = useLocalAgentMenuModels(interviewComposerModel(assist));
   const [draft, setDraft] = useState("");
   const done = assist.interview.done;
   // A synthetic session has no rows until the interview has specified them.
@@ -233,6 +229,7 @@ export function TaggerInterview({
           </div>
 
           <AgentThread
+            streaming={busy}
             scrollDeps={[messages.length, streamText, thinking?.reasoning]}
             isEmpty={messages.length === 0}
             emptyState={

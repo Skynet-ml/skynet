@@ -37,6 +37,7 @@ from .. import (
     best_of_n,
     gepa_engine,
     harness_bridge,
+    native_engines,
     native_runner,
     native_runtime,
     repo_tree,
@@ -625,6 +626,29 @@ def test_supervisor_stop_is_not_reported_as_a_reply_timeout(
     assert mailbox.error is None
 
 
+@pytest.mark.parametrize(("sent", "expected"), [(None, float("-inf")), (0.5, 0.5)])
+def test_box_mailbox_turns_a_null_parent_score_into_no_score(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sent: float | None, expected: float
+) -> None:
+    """A metric error reaches the box as null and the upstream engine sees its own no-score value (SKY-367)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "rpc").mkdir()
+    mailbox = native_runner.EvaluatorMailbox("nonce", 5.0)
+
+    def reply(prefix: str, payload: dict[str, Any]) -> None:
+        """Answer the request at once, as the parent does.
+
+        Args:
+            prefix: Event family, ignored.
+            payload: The evaluation request.
+        """
+        (tmp_path / "rpc" / f"{payload['id']}.json").write_text(json.dumps({"score": sent, "info": {"x": 1}}))
+
+    monkeypatch.setattr(mailbox, "emit", reply)
+
+    assert mailbox.evaluate("candidate") == (expected, {"x": 1})
+
+
 def test_native_usage_ledger_survives_lane_replacement() -> None:
     """Auto lanes share cumulative proposer usage when their cost caps differ."""
     options = NativeOptions("vercel", "claude-test", GatewayConfig("https://gateway.example", "key"), 1.0)
@@ -1033,6 +1057,37 @@ def test_shinka_agent_editor_ships_a_tagged_pi_launch_per_model(
     assert "node -e" in session.calls[0][0]
 
 
+def test_shinka_agent_editor_applies_the_effort_only_to_the_reflection_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reflection model's Pi editor runs at the chosen effort; the extra models keep the default.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for replacing the pinned source archive.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    session.candidate = "better"
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(
+        ctx.native_options,
+        proposer=BlackboxProposer(harness="pi"),
+        shinka={"editor": "agent"},
+        shinka_models=(
+            {"model": "claude-test", "url": "https://gateway.example/v1", "token": "route-a"},
+            {"model": "gpt-test", "url": "https://gateway.example/v1", "token": "route-b"},
+        ),
+        reasoning_effort="high",
+    )
+    run_native_engine("shinka_evolve", Task("seed"), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+
+    main, extra = json.loads(session.files["native_input.json"])["shinka_editor"]["launches"]
+    assert '--model "$APP_MODEL:high"' in main["run_command"]
+    assert '--model "$APP_MODEL"' in extra["run_command"]
+    assert "thinkingLevelMap" not in json.loads(extra["files"][".app/pi/models.json"])["providers"]["app"]["models"][0]
+
+
 def test_shinka_bootstrap_prepares_pi_only_for_the_agent_editor() -> None:
     """Install Pi and check Node for the agent editor, and skip both for single-call ShinkaEvolve."""
     plain = _bootstrap_command("vercel", engine_id="shinka_evolve", harness="pi", install_command="npm i -g pi@1")
@@ -1352,6 +1407,21 @@ def test_run_native_engine_serializes_the_proposer_without_the_gateway_key(
     assert "codex --version" in session.calls[0][0]
 
 
+def test_run_native_engine_hands_the_reasoning_effort_to_the_proposer_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The optimization model's effort reaches the config the proposer CLI reads in the sandbox."""
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(
+        ctx.native_options, proposer=BlackboxProposer(harness="codex"), reasoning_effort="high"
+    )
+    run_native_engine("autoresearch", Task("seed"), EvalServer(lambda c, e: (0.5, {}), max_evals=3), ctx)
+    payload = json.loads(session.files["native_input.json"])
+    assert 'model_reasoning_effort = "high"' in payload["proposer"]["files"][".app/codex/config.toml"]
+
+
 class _RecordingMailbox:
     """Child-side mailbox stand-in that scores by vowel density and records progress lines."""
 
@@ -1438,6 +1508,45 @@ def test_mailbox_relays_case_scores_and_per_case_versions() -> None:
     assert candidate["parent_id"] is None
     assert candidate["score"] == 0.75
     assert candidate["per_example"] == [{"id": "0", "score": 1.0}, {"id": "1", "score": 0.5}]
+
+
+def test_mailbox_shows_no_score_for_a_version_with_a_crashed_case() -> None:
+    """The child's filled mean for a version with a crashed case never reaches the candidate tree (SKY-367)."""
+
+    def crash_on_case_two(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
+        """Raise on case 2, else score 1.0.
+
+        Args:
+            candidate: Candidate text.
+            case: The case.
+
+        Returns:
+            A full score and no side information.
+
+        Raises:
+            RuntimeError: On case 2.
+        """
+        if case == {"id": "2"}:
+            raise RuntimeError("scorer bug")
+        return 1.0, {}
+
+    sink: list[tuple[str, dict[str, Any]]] = []
+    server = EvalServer(crash_on_case_two, max_evals=3)
+    server.evaluate("seed", {"id": "2"})
+    mailbox = native_runtime._EvaluatorMailbox(
+        FakeSession(), server, "nonce", progress_callback=lambda event, metrics: sink.append((event, metrics))
+    )
+
+    mailbox.on_output(
+        "stdout",
+        'APP_NATIVE_PROGRESS nonce {"candidate_id": 0, "candidate": "seed", "score": 0.75, "total_evals": 2, '
+        '"per_example": [["0", 1.0], ["1", 0.5], ["2", 0.75]]}\n',
+    )
+
+    assert mailbox.error is None
+    [(event, candidate)] = sink
+    assert event == PROGRESS_CANDIDATE
+    assert (candidate["score"], candidate["per_example"]) == (None, [])
 
 
 def test_mailbox_relays_the_lineage_an_engine_reports() -> None:
@@ -1531,6 +1640,352 @@ def test_the_child_names_the_candidate_and_case_of_each_request(tmp_path: Path) 
     server.evaluate("seed", list(server._examples.values())[1])
     server.evaluate("unregistered", None)
     assert labels == [(0, "1"), (None, None)]
+
+
+def test_a_sweep_fills_a_null_case_with_the_scored_mean(tmp_path: Path) -> None:
+    """A case that always crashes leaves a sweep at the scored cases' mean, so versions still rank (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts.
+    """
+    mailbox = _RecordingMailbox()
+
+    def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+        """Score by vowel density, and give the parent's null on case ``c``."""
+        if example == {"id": "c"}:
+            return float("-inf"), {}
+        return sum(ch in "aeiou" for ch in candidate) / len(candidate), {}
+
+    mailbox.evaluate = evaluate  # type: ignore[method-assign]
+    task = UpstreamTask("seed", train_set=[{"id": "a"}, {"id": "b"}, {"id": "c"}])
+    server = native_runner.ProgressEvalServer(
+        task, mailbox, OptimizeAnythingConfig(max_evals=20, max_concurrency=1), tmp_path
+    )
+
+    good, good_info = server.evaluate_examples("aeiou", split="train")
+    poor, poor_info = server.evaluate_examples("axyz", split="train")
+    only_null, only_null_info = server.evaluate_examples("aeiou", example_ids=["c"])
+
+    assert good == 1.0
+    assert good_info["scores"] == {"a": 1.0, "b": 1.0, "c": 1.0}
+    assert poor == 0.25
+    assert poor_info["scores"]["c"] == 0.25
+    assert good_info[native_engines.UNSCORED_CASES_KEY] == ["c"]
+    assert good > poor
+    assert only_null == float("-inf")
+    assert only_null_info["scores"] == {"c": float("-inf")}
+
+
+def _null_on(nulls: dict[str, set[str]]) -> _RecordingMailbox:
+    """Build a mailbox that gives the parent's null on chosen cases of chosen versions.
+
+    Args:
+        nulls: Case ids that get a null score, keyed by version text.
+
+    Returns:
+        A recording mailbox that scores every other case by vowel density.
+    """
+    mailbox = _RecordingMailbox()
+
+    def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+        """Give negative infinity, as the mailbox does for a parent null, on the chosen cases."""
+        if example is not None and example["id"] in nulls.get(candidate, set()):
+            return float("-inf"), {}
+        return sum(ch in "aeiou" for ch in candidate) / max(1, len(candidate)), {}
+
+    mailbox.evaluate = evaluate  # type: ignore[method-assign]
+    return mailbox
+
+
+def _child_server(mailbox: _RecordingMailbox, tmp_path: Path, max_evals: int = 20) -> Any:
+    """Build the child-side evaluation server over cases ``a`` and ``b``.
+
+    Args:
+        mailbox: Mailbox the server scores through.
+        tmp_path: Upstream evaluation artifacts.
+        max_evals: Evaluation budget.
+
+    Returns:
+        The child's progress evaluation server.
+    """
+    task = UpstreamTask("seed", train_set=[{"id": "a"}, {"id": "b"}])
+    config = OptimizeAnythingConfig(max_evals=max_evals, max_concurrency=1)
+    return native_runner.ProgressEvalServer(task, mailbox, config, tmp_path)
+
+
+def test_native_fill_unscored_fills_per_version() -> None:
+    """A null case takes its own version's scored mean; a version with no scored case stays negative infinity."""
+    inf = float("-inf")
+
+    assert native_engines.fill_unscored(["x", "x", "y", "y"], [0.2, inf, inf, inf]) == [0.2, 0.2, inf, inf]
+
+
+def test_best_logged_version_skips_a_version_with_no_scored_case(tmp_path: Path) -> None:
+    """The logged-aggregate fallback never picks a crashed version and ranks the rest by scored cases (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts.
+    """
+    server = _child_server(_null_on({"zzzz": {"a", "b"}, "aeio": {"b"}}), tmp_path)
+    for candidate in ("zzzz", "aeio", "axyz"):
+        score, _ = server.evaluate_examples(candidate, split="train")
+        server.log_progress(score, candidate=candidate)
+
+    assert native_engines.best_aggregate_candidate(server) == ("aeio", 1.0)
+
+
+def test_best_valset_version_skips_a_version_with_no_scored_case() -> None:
+    """GEPA's budget-stop fallback keeps only finite full-valset averages (SKY-367)."""
+    tracker = native_engines.BestValsetVersion()
+
+    for text, score in (("crashed", float("-inf")), ("ok", 0.25), ("partial", 0.9)):
+        tracker.on_valset_evaluated(
+            {
+                "candidate": {"candidate": text},
+                "average_score": score,
+                "num_examples_evaluated": 1 if text == "partial" else 2,
+                "total_valset_size": 2,
+            }
+        )
+
+    assert tracker.best == ("ok", 0.25)
+
+
+def test_best_of_n_repo_marks_a_partly_crashed_sample_and_ranks_the_rest(tmp_path: Path) -> None:
+    """A sample with any null case is a metric_error sample, so its filled mean cannot stop the run (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts.
+    """
+    server = _child_server(_null_on({"zzzz": {"a", "b"}, "aeio": {"b"}}), tmp_path, max_evals=6)
+    patches = iter(["zzzz", "aeio", "axyz"])
+    engine = native_engines.BestOfNRepoEngine.__new__(native_engines.BestOfNRepoEngine)
+    engine.proposer = lambda *_: {"candidate": next(patches)}  # type: ignore[assignment]
+    engine.proposer.total_cost = 0.0  # type: ignore[attr-defined]
+    engine.proposer.session_ids = []  # type: ignore[attr-defined]
+    engine.max_token_cost = None
+    engine.stop_at_score = 0.9
+    engine.samples = []
+    engine.best = None
+
+    result = engine.run(server.task, server)
+
+    assert [sample.get("outcome") for sample in result.metadata["samples"]] == ["metric_error", "metric_error", None]
+    assert [sample.get("score") for sample in result.metadata["samples"]] == [None, None, 0.25]
+    assert (result.best_candidate, result.best_score) == ("axyz", 0.25)
+
+
+def test_meta_harness_stop_ignores_a_filled_mean(tmp_path: Path) -> None:
+    """A Meta-Harness version with a crashed case cannot reach ``stop_at_score`` (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's logs.
+    """
+    server = _child_server(_null_on({"aeio": {"b"}}), tmp_path)
+    engine = native_engines.MetaHarnessEngine.__new__(native_engines.MetaHarnessEngine)
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.logs_dir = tmp_path / "logs"
+    engine.results = {}
+
+    engine._benchmark(server, "crashed", "aeio")
+    engine._benchmark(server, "ok", "axyz")
+
+    assert engine._best() == ("aeio", 1.0)
+    assert engine._best(scored=True) == ("axyz", 0.25)
+    assert not native_engines._reached(0.9, engine._best(scored=True)[1])
+    assert engine.incumbent(server) == ("axyz", 0.25)
+
+    engine._write_frontier()
+    frontier = json.loads((engine.logs_dir / "frontier_val.json").read_text(encoding="utf-8"))
+    assert frontier["_pareto"] == [{"system": "ok", "val_accuracy": 0.25}]
+    assert {frontier[eid]["system"] for eid in engine.example_ids} == {"ok"}
+
+
+def test_meta_harness_falls_back_to_the_seed_when_every_version_crashed(tmp_path: Path) -> None:
+    """With no fully scored version, Meta-Harness returns the seed, not the best filled average (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's logs.
+    """
+    server = _child_server(_null_on({"aeio": {"b"}, "eexx": {"b"}}), tmp_path)
+    engine = native_engines.MetaHarnessEngine.__new__(native_engines.MetaHarnessEngine)
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.logs_dir = tmp_path / "logs"
+    engine.results = {}
+
+    engine._benchmark(server, "seed", "eexx")
+    engine._benchmark(server, "crashed", "aeio")
+
+    assert engine.incumbent(server) == ("eexx", 0.5)
+
+
+def test_meta_harness_prefers_a_partly_crashed_seed_over_a_fully_crashed_version(tmp_path: Path) -> None:
+    """A version with no scored case counts as crashed, so the seed leads and the frontier leaves it out (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's logs.
+    """
+    server = _child_server(_null_on({"eexx": {"b"}, "zzzz": {"a", "b"}}), tmp_path)
+    engine = native_engines.MetaHarnessEngine.__new__(native_engines.MetaHarnessEngine)
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.logs_dir = tmp_path / "logs"
+    engine.results = {}
+    engine.session_ids = []
+    engine.cost_usd = 0.0
+    engine.work_dir = tmp_path / "work"
+
+    engine._benchmark(server, "seed", "eexx")
+    engine._benchmark(server, "broken", "zzzz")
+
+    assert engine.results["broken"]["crashed"]
+    assert engine._best(scored=True) is None
+    assert engine.incumbent(server) == ("eexx", 0.5)
+    result = engine._result(server, 1, "budget")
+    assert (result.best_candidate, result.best_score) == ("eexx", 0.5)
+
+    engine._write_frontier()
+    frontier = json.loads((engine.logs_dir / "frontier_val.json").read_text(encoding="utf-8"))
+    assert "broken" not in {row["system"] for row in frontier["_pareto"]}
+    assert "broken" not in {frontier[eid]["system"] for eid in engine.example_ids if eid in frontier}
+
+
+def _autoresearch(server: Any, tmp_path: Path, seed: str) -> Any:
+    """Build an AutoResearch engine that records the server's sweeps.
+
+    Args:
+        server: Child evaluation server.
+        tmp_path: Folder for the engine's lab.
+        seed: The run's seed text.
+
+    Returns:
+        The engine, already recording.
+    """
+    engine = native_engines.AutoResearchEngine.__new__(native_engines.AutoResearchEngine)
+    engine.repo = None
+    engine.suffix = ".txt"
+    engine.work_dir = tmp_path / "lab"
+    (engine.work_dir / "archive").mkdir(parents=True)
+    engine.round = 0
+    engine.observations = []
+    engine._ids = {}
+    engine._lock = threading.Lock()
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.seed = seed
+    engine._record(server)
+    return engine
+
+
+def test_autoresearch_does_not_count_a_fully_crashed_sweep_as_full(tmp_path: Path) -> None:
+    """A sweep with no scored case does not rank, so the incumbent falls back to the seed (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's lab folder.
+    """
+    server = _child_server(_null_on({"eexx": {"b"}, "zzzz": {"a", "b"}}), tmp_path)
+    engine = _autoresearch(server, tmp_path, "eexx")
+
+    for candidate in ("eexx", "zzzz"):
+        score, _ = server.evaluate_examples(candidate)
+        server.log_progress(score, candidate=candidate)
+
+    assert engine._ranking() == {}
+    assert engine.incumbent(server) == ("eexx", 0.5)
+
+
+def test_autoresearch_incumbent_ignores_a_crashed_resweep_of_a_ranked_version(tmp_path: Path) -> None:
+    """A ranked version's crashed re-sweep logs a higher filled mean, but the incumbent keeps the full score (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's lab folder.
+    """
+    mailbox = _RecordingMailbox()
+    sweeps: dict[str, int] = {}
+
+    def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+        """Score case ``a`` 0.2 and ``b`` 0.8, with a null on ``a`` in the version's second sweep."""
+        if example["id"] == "a":
+            sweeps[candidate] = sweeps.get(candidate, 0) + 1
+            return (float("-inf"), {}) if sweeps[candidate] == 2 else (0.2, {})
+        return 0.8, {}
+
+    mailbox.evaluate = evaluate  # type: ignore[method-assign]
+    server = _child_server(mailbox, tmp_path)
+    engine = _autoresearch(server, tmp_path, "seed")
+
+    for _ in range(2):
+        score, _ = server.evaluate_examples("ab")
+        server.log_progress(score, candidate="ab")
+
+    assert native_engines.best_aggregate_candidate(server, only={"ab"}) == ("ab", 0.8)
+    assert engine.incumbent(server) == ("ab", 0.5)
+
+
+def test_autoresearch_leader_ignores_a_filled_mean(tmp_path: Path) -> None:
+    """An AutoResearch version with a crashed case does not rank or stop the run (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's lab folder.
+    """
+    server = _child_server(_null_on({"aeio": {"b"}}), tmp_path)
+    engine = native_engines.AutoResearchEngine.__new__(native_engines.AutoResearchEngine)
+    engine.repo = None
+    engine.suffix = ".txt"
+    engine.work_dir = tmp_path / "lab"
+    (engine.work_dir / "archive").mkdir(parents=True)
+    engine.round = 0
+    engine.observations = []
+    engine._ids = {}
+    engine._lock = threading.Lock()
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine._record(server)
+
+    for candidate in ("aeio", "axyz"):
+        score, _ = server.evaluate_examples(candidate)
+        server.log_progress(score, candidate=candidate)
+
+    assert engine._ranking() == {"axyz": 0.25}
+    assert not native_engines._reached(0.9, engine._leader_score())
+    engine.seed = "eexx"
+    assert engine.incumbent(server) == ("axyz", 0.25)
+
+
+def test_autoresearch_falls_back_to_the_seed_when_every_version_crashed(tmp_path: Path) -> None:
+    """With no fully scored version, AutoResearch returns the seed, not the best filled mean (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's lab folder.
+    """
+    server = _child_server(_null_on({"aeio": {"b"}, "eexx": {"b"}}), tmp_path)
+    engine = native_engines.AutoResearchEngine.__new__(native_engines.AutoResearchEngine)
+    engine.repo = None
+    engine.suffix = ".txt"
+    engine.work_dir = tmp_path / "lab"
+    (engine.work_dir / "archive").mkdir(parents=True)
+    engine.round = 0
+    engine.observations = []
+    engine._ids = {}
+    engine._lock = threading.Lock()
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.seed = "eexx"
+    engine._record(server)
+
+    for candidate in ("eexx", "aeio"):
+        score, _ = server.evaluate_examples(candidate)
+        server.log_progress(score, candidate=candidate)
+
+    assert engine.incumbent(server) == ("eexx", 0.5)
+
+
+def test_scored_threshold_stopper_ignores_a_crashed_version() -> None:
+    """Only a version with no crashed case can reach ``stop_at_score`` (SKY-367)."""
+    state = SimpleNamespace(
+        program_candidates=[{"current_candidate": "crashed"}, {"current_candidate": "ok"}],
+        program_full_scores_val_set=[1.0, 0.5],
+    )
+    crashed = lambda candidate: native_engines.unwrap_text_candidate(candidate) == "crashed"  # noqa: E731
+
+    assert not native_engines.ScoredThresholdStopper(0.9, crashed)(state)
+    assert native_engines.ScoredThresholdStopper(0.5, crashed)(state)
 
 
 def test_unsupported_runtime_reason_names_the_cloud_sandbox_not_its_vendor() -> None:

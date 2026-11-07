@@ -89,8 +89,6 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "budget.not_found": "This budget is unavailable for your account. Start a new setup budget.",
     "budget.pending": "Usage is still being settled. Wait for work in progress to finish before continuing.",
     "budget.idempotency_required": "Send a unique Idempotency-Key for this request.",
-    "code_agent.seed_lane_timeout": "The model thought for too long without writing the code, so the draft was stopped. Try again, or pick a faster model or a lower reasoning effort.",
-    "code_agent.upstream_failed": "Code agent failed: {error}",
     "dataset.column_roles_invalid": "Invalid role values (must be 'input', 'output', or 'ignore'): {bad}",
     "dataset.column_roles_need_input": "At least one column must have role 'input'.",
     "dataset.column_roles_need_output": "At least one column must have role 'output'.",
@@ -133,6 +131,26 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "connectors.hf_dataset_unsupported": "Hugging Face can't serve {repo_id} yet (no viewer data or parquet conversion).",
     "connectors.hf_expired": "Your Hugging Face session expired. Connect again from Settings.",
     "connectors.hf_oauth_failed": "Hugging Face sign-in didn't complete. Try again.",
+    "mcp_connection.invalid_name": "Use 1 to 40 lowercase letters, digits, '-' or '_', starting with a letter.",
+    "mcp_connection.name_reserved": f"The name {{name}} belongs to a {APP_NAME} connector. Use a different name.",
+    "mcp_connection.invalid_url": "The MCP server URL must be an HTTPS URL without a query.",
+    "mcp_connection.blocked_address": "This MCP server address is not allowed.",
+    "mcp_connection.discovery_failed": "The OAuth setup of this MCP server could not be read.",
+    "mcp_connection.oauth_unsupported": "This MCP server does not ask for an OAuth sign-in.",
+    "mcp_connection.issuer_mismatch": "The OAuth server metadata names a different issuer.",
+    "mcp_connection.pkce_unsupported": "This MCP server does not support PKCE with S256.",
+    "mcp_connection.registration_required": f"This server needs {APP_NAME} to register first. Its owner must allow dynamic client registration.",
+    "mcp_connection.exchange_failed": "The MCP server did not complete the sign-in. Try again.",
+    "mcp_connection.state_invalid": "The sign-in link is not valid. Start again.",
+    "mcp_connection.state_expired": "The sign-in link is too old. Start again.",
+    "mcp_connection.wrong_account": "Another account started this sign-in. Start it again from your own account.",
+    "mcp_connection.declined": "The sign-in did not complete.",
+    "mcp_connection.reauth_required": "Sign in to the MCP server {name} again.",
+    "mcp_connection.vault_key_changed": "The saved sign-in can no longer be read. Sign in to this MCP server again.",
+    "mcp_connection.not_connected": "There is no MCP server connection named {name}.",
+    "mcp_connection.unknown_connector": "Unknown connector: {name}. Connect it as an MCP server first.",
+    "mcp_connection.invalid_preset": "This MCP server is not in the list.",
+    "mcp_connection.invalid_request": "Give a preset, or a name and an MCP server URL.",
     "connectors.hf_oauth_state_invalid": "The Hugging Face sign-in link is invalid or expired. Start again.",
     "notifications.slack_not_configured": "Slack isn't set up on this server yet.",
     "notifications.slack_not_connected": f"Slack isn't connected. Add {APP_NAME} to Slack first.",
@@ -150,6 +168,9 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "dataset.share.not_found": "Shared dataset not found or the link was revoked.",
     "folder.not_found": "Project not found.",
     "folder.forbidden": "You do not have permission to do that in this project.",
+    "sharing.access_inherited": "Your access comes from the shared folder {folder}. Change it on that folder.",
+    "sharing.grant_not_found": "You do not have your own access to this item.",
+    "sharing.role_raise_forbidden": "You can only lower your own permission. Ask the owner for more access.",
     "folder.invalid_name": "Project names cannot be blank.",
     "folder.invalid_move": "A project cannot be moved into itself or one of its sub-projects.",
     "folder.share.forbidden": "Only the owner can change who has access to this project.",
@@ -184,6 +205,11 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "grid_search.pair_position_missing": "No pair at position {pair_index} in the grid-search result.",
     "grid_search.pair_submission_grid_only": "Pair-scoped submission is only available for grid-search optimizations.",
     "grid_search.pair_test_results_grid_only": "Pair-scoped test results are only available for grid-search optimizations.",
+    "hardening.job_not_found": "Hardening job not found.",
+    "hardening.exploit_not_found": "That exploit is not in this hardening job.",
+    "hardening.wrong_state": "The hardening job cannot do this now. Refresh it and try again.",
+    "hardening.job_active": "This setup already has a hardening job that is not finished.",
+    "hardening.fix_checks_failed": "The fix did not pass every automatic check. Reject it or retry the round.",
     "health.workers_dead": "Worker threads are not running.",
     "health.workers_stuck": "Worker threads have been stuck for {seconds} seconds.",
     "hosted_link.not_configured": f"This Mac app build has no hosted {APP_NAME} address, so it cannot link an account.",
@@ -227,6 +253,12 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "optimization.not_success_status_for_test_results": "Optimization is in state '{status}' — only successfully completed optimizations have test results.",
     "serve.caller_tool_connection_required": "This optimization uses an owner-bound tool connection. Connect the tool to your account before invoking it.",
     "serve.protected_interaction_failed": "The sandboxed request failed: {error}",
+    "serve.not_enabled": "Serving is off for this run. Turn it on in the run's Serve tab first.",
+    "repo_gate.unenforced_local": "optimize.toml sets {key}. The local Docker sandbox cannot enforce this setting yet. Remove it to run.",
+    "repo_gate.unenforced_cloud": "optimize.toml sets {key}. The cloud sandbox cannot enforce this setting yet. Remove it to run.",
+    "repo_gate.missing_secret": "The service {service} in optimize.toml needs the secret {secret}, but this run has no secret with that name. Add the secret to the run or remove the name from the file.",
+    "repo_gate.unknown_connector": "The service {service} in optimize.toml is not a connector. Use one of these names: {known}.",
+    "repo_gate.proposer_hosts_unsupported": "optimize.toml sets [proposer] network to {hosts}. Allowed hosts for the proposer are not supported yet. Remove the list to run.",
     "serve.subscription_model_hosted": (
         f"This run used a local subscription model. Serve it in the {APP_NAME} Mac app, "
         "or start a new optimization with a managed model or your own provider key."
@@ -286,6 +318,7 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "transcription.unconfigured": "No transcription provider configured. Set TRANSCRIPTION_API_KEY.",
     "user.storage.quota_exceeded": "Storage quota exceeded ({used_mb}MB of {quota_mb}MB used). Free up space and try again.",
     "wizard.column_roles_not_object": "column_roles must be an object.",
+    "wizard.setup_draft.too_large": "The setup draft is too large to save, even without its chat.",
     "wizard.field_must_be_list": "{field} must be a list.",
     "wizard.field_non_empty_string": "{field} must be a non-empty string.",
     "wizard.invalid_role_values": "Invalid role values (must be one of {allowed}): {bad}",
@@ -304,10 +337,6 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "webauthn.challenge_expired": "The passkey request expired — try again.",
     "webauthn.invalid_credential": "This passkey couldn't be verified.",
     "webauthn.not_found": "Passkey not found.",
-    "wizard.code_via_authoring_only": (
-        "{field} cannot be set through update_wizard_state. Run and metric "
-        "code are written only by the coding agent in the wizard's Metric step."
-    ),
     "wizard.optimizer_unknown": (
         "'{name}' is not a recognized optimizer. Call get_registry_snapshot for "
         "registered names, or use the alias 'gepa' or a fully qualified dotted "
@@ -323,6 +352,10 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "wizard.split_fractions_not_object": "split_fractions must be an object with train/val/test keys.",
     "wizard.split_fractions_sum": "split_fractions must sum to 1.0, got {total}",
     "workflow.validation_failed": "Workflow validation failed: {error}",
+    "optimization.dspy_run_retired": (
+        "Skynet now optimizes repositories only. DSPy program runs can no longer be started, resumed, cloned, "
+        "served or scheduled. This run stays readable; start a new repository optimization instead."
+    ),
 }
 
 

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any
 
@@ -265,6 +267,37 @@ def test_sandbox_scorer_installs_the_runner_once_and_runs_one_call_per_directory
     assert total_tokens_from_history(scorer.usage) == 8
 
 
+def test_sandbox_scorer_runs_concurrent_calls_in_parallel_with_their_own_results() -> None:
+    """Parallel metric calls share one box, each in its own call folder, with its own score and usage."""
+    started = threading.Barrier(3, timeout=5)
+
+    def respond(payload: dict[str, Any]) -> dict[str, Any]:
+        """Wait until all three calls are inside the box, then score by candidate length.
+
+        Args:
+            payload: The call's input.
+
+        Returns:
+            The call's output, with usage equal to its length.
+        """
+        started.wait()
+        size = len(payload["candidate"])
+        return {**_OK, "score": size, "usage": _usage((size, 1))}
+
+    runtime = _runtime(respond)
+    scorer = SandboxPythonScorer("def score(c): return 1", runtime=runtime, gateway=_GATEWAY, timeout_seconds=5)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        probes = list(pool.map(scorer.run, ["a", "bb", "ccc"]))
+    scorer.close()
+
+    assert [probe.score for probe in probes] == [1.0, 2.0, 3.0]
+    assert [probe.usage_by_model for probe in probes] == [{"fake/judge": (n, 1)} for n in (1, 2, 3)]
+    [box] = runtime.sessions
+    assert sorted(box.commands) == [f"python3 {RUNNER_FILE} {CALLS_DIR}/00000{n}" for n in (1, 2, 3)]
+    assert usage_by_model_from_history(scorer.usage) == {"fake/judge": (6, 3)}
+
+
 def test_sandbox_scorer_without_a_model_sends_no_gateway_and_bills_nothing() -> None:
     """No model chosen: the payload has no gateway, the env carries no key, and there is no usage ledger."""
     runtime = _runtime(lambda payload: _OK)
@@ -359,6 +392,48 @@ def test_sandbox_scorer_reopens_the_box_once_when_it_dies() -> None:
     assert second.closed is False
     assert second.commands == [f"python3 {RUNNER_FILE} {CALLS_DIR}/000002", f"python3 {RUNNER_FILE} {CALLS_DIR}/000003"]
     assert RUNNER_FILE in second.files
+
+
+def test_sandbox_scorer_retries_a_sibling_call_when_another_call_closes_the_box() -> None:
+    """A call whose box a parallel call closed is retried once in the new box, not reported as a timeout."""
+    sibling_inside = threading.Event()
+    attempts: dict[str, int] = {}
+    runtime: FakeSandboxRuntime
+
+    def respond(payload: dict[str, Any]) -> dict[str, Any] | CommandResult:
+        """Kill the first box from call ``a`` while call ``b`` still runs in it.
+
+        Args:
+            payload: The call's input.
+
+        Returns:
+            On the first box, a dead-box error for ``a`` and a killed process for ``b``; then a normal answer.
+        """
+        candidate = payload["candidate"]
+        attempts[candidate] = attempts.get(candidate, 0) + 1
+        if attempts[candidate] > 1:
+            return {**_OK, "score": len(candidate)}
+        if candidate == "a":
+            assert sibling_inside.wait(5)
+            raise OSError("box went away")
+        sibling_inside.set()
+        deadline = time.monotonic() + 5
+        while not runtime.sessions[0].closed and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return CommandResult(exit_code=137, timed_out=True)
+
+    runtime = _runtime(respond)
+    scorer = SandboxPythonScorer("def score(c): return 1", runtime=runtime, gateway=None, timeout_seconds=5)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        probes = list(pool.map(scorer.run, ["a", "bb"]))
+    scorer.close()
+
+    assert [(probe.score, probe.error) for probe in probes] == [(1.0, None), (2.0, None)]
+    assert attempts == {"a": 2, "bb": 2}
+    first, second = runtime.sessions
+    assert first.closed is True
+    assert len(second.commands) == 2
 
 
 def test_sandbox_scorer_gives_up_after_one_reopen() -> None:

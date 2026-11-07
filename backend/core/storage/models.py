@@ -1216,6 +1216,10 @@ class OptimizationShareGrantModel(Base):
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
 
+    # Set when the grantee removes the item from their own "Shared with me"
+    # view. Access is unchanged; listings skip the row until it is cleared.
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # The composite PK leads with optimization_id, so "list everything shared
     # with this user" (filtering on grantee_username alone) could not use it.
     __table_args__ = (Index("ix_optimization_share_grants_grantee", "grantee_username"),)
@@ -1566,10 +1570,10 @@ class AgentConversationModel(Base):
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # Unguessable public read-only link token; NULL when the chat is not shared.
-    share_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # When the current share link was made; NULL while the chat is not shared.
-    shared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The share link this chat was continued from, when another user's link
+    # made it. Not a foreign key: a revoke deletes the link row and clears this
+    # column, and every shared-item read checks the live link row.
+    source_share_token: Mapped[str | None] = mapped_column(String(48), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
@@ -1580,7 +1584,38 @@ class AgentConversationModel(Base):
     __table_args__ = (
         Index("ix_agent_conversations_user_updated", "username", "updated_at"),
         Index("ix_agent_conversations_user_pinned", "username", "pinned"),
-        Index("ix_agent_conversations_share_token", "share_token", unique=True),
+        # One continued copy per user and link, so a second open finds the first.
+        Index("ix_agent_conversations_source_share", "source_share_token", "username", unique=True),
+    )
+
+
+class AgentChatShareModel(Base):
+    """The one live share link of an agent conversation.
+
+    ``link_type`` is ``view`` (anyone can read the chat), ``continue`` (a
+    signed-in user continues it as their own chat) or ``continue_data``
+    (as ``continue``, and the user can read the ticked ``items`` live,
+    read-only). ``items`` holds ``{"kind", "id"}`` entries. A revoke deletes
+    the row, so the token and every grant stop at once.
+    """
+
+    __tablename__ = "agent_chat_shares"
+
+    token: Mapped[str] = mapped_column(String(48), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("agent_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    username: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    link_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    items: Mapped[list[dict[str, Any]]] = mapped_column(JSON_STORE, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
 
 
@@ -1668,6 +1703,55 @@ class AgentStagedDatasetModel(Base):
     )
 
     __table_args__ = (Index("ix_agent_staged_datasets_user_created", "username", "created_at"),)
+
+
+# One left run-wizard setup per account, offered back on any device until the
+# user submits or starts new. ``staged_dataset_id`` names the upload the setup
+# uses, so the staged-dataset sweep keeps that upload while the draft exists.
+class SetupDraftModel(Base):
+    """Server copy of the run-wizard setup an account left."""
+
+    __tablename__ = "setup_drafts"
+
+    username: Mapped[str] = mapped_column(String(255), primary_key=True)
+    left_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    draft_values: Mapped[dict[str, str]] = mapped_column(JSON_STORE, nullable=False)
+    chat: Mapped[dict[str, Any] | None] = mapped_column(JSON_STORE, nullable=True)
+    staged_dataset_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # Raised on each save and delete; a call that names an older one changes nothing.
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    # A delete keeps the row with no setup and a new revision, so a save sent
+    # before the delete that arrives after it is refused.
+    deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    # The latest save from each recent browser page, as [writer, seq, revision]
+    # entries, oldest first. A load drops a browser copy whose save already landed.
+    saves: Mapped[list[list[Any]]] = mapped_column(JSON_STORE, nullable=False, default=list, server_default="[]")
+    # The highest revision a page that left ``saves`` made; a copy from an
+    # unknown page that builds on an older revision may have landed.
+    evicted_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    # The revision of the last delete. A later save clears ``deleted`` but keeps
+    # this, so a copy older than a submit cannot bring the submitted setup back.
+    deleted_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
+# A repository run an MCP client builds one step at a time (SKY-320). Each
+# step tool saves its part of ``spec`` and the submit tool turns the whole
+# spec into a repository run request. The rows are agent scratch state, so
+# the store caps how many each account keeps and drops old ones.
+class McpRunDraftModel(Base):
+    """Repository run setup that an MCP client builds step by step."""
+
+    __tablename__ = "mcp_run_drafts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    username: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSON_STORE, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
 
 
 class TaggingSessionModel(Base):
@@ -1836,6 +1920,10 @@ class DatasetShareGrantModel(Base):
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
 
+    # Set when the grantee removes the item from their own "Shared with me"
+    # view. Access is unchanged; listings skip the row until it is cleared.
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # The composite PK leads with dataset_id, so "list everything shared with
     # this user" (filtering on grantee_username alone) could not use it.
     __table_args__ = (Index("ix_dataset_share_grants_grantee", "grantee_username"),)
@@ -1898,6 +1986,10 @@ class TaggingSessionShareGrantModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
+
+    # Set when the grantee removes the item from their own "Shared with me"
+    # view. Access is unchanged; listings skip the row until it is cleared.
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # The composite PK leads with session_id, so "list everything shared with
     # this user" (filtering on grantee_username alone) could not use it.
@@ -1967,6 +2059,10 @@ class RunFolderShareGrantModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
+
+    # Set when the grantee removes the item from their own "Shared with me"
+    # view. Access is unchanged; listings skip the row until it is cleared.
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # The composite PK leads with folder_id, so "list everything shared with
     # this user" (filtering on grantee_username alone) could not use it.
@@ -2066,3 +2162,35 @@ class ContinuousCycleModel(Base):
     )
 
     __table_args__ = (UniqueConstraint("plan_id", "slot", name="uq_continuous_cycles_plan_slot"),)
+
+
+class McpServerConnectionModel(Base):
+    """One user's OAuth sign-in to a remote MCP server, named as a connector.
+
+    ``name`` is the connector name that a run payload lists in ``env_connectors``.
+    ``credentials_encrypted`` is a Fernet blob under ``BYOK_VAULT_KEY`` with the
+    client registration, the token endpoint and the tokens; the plaintext never
+    reaches the database or the box. A ``pending`` row waits for the OAuth
+    callback: the database keeps only the sha256 of its single-use ``state``.
+    """
+
+    __tablename__ = "mcp_server_connections"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    username: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(40), nullable=False)
+    server_url: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    credentials_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    pending_state_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    pending_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pending_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+    __table_args__ = (UniqueConstraint("username", "name", name="uq_mcp_server_connections_owner_name"),)

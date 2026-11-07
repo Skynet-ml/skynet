@@ -1,4 +1,4 @@
-"""Tests for the submission router: ``/optimize`` billing gates, engine catalog and spend ceiling.
+"""Tests for the submission router: the retired ``/optimize``, engine catalog and spend ceiling.
 
 The unified-run specifics (staged datasets, seeding, overview keys) live in
 ``test_unified_submit.py``; the optimizer catalog in ``test_optimizer_catalog.py``.
@@ -383,14 +383,14 @@ def unified_payload(**overrides: Any) -> dict:
         "task": {
             "objective": "Answer the question in one word.",
             "background": "",
-            "artifact": {"kind": "prompt", "starting_version": "Answer briefly: "},
+            "artifact": {"kind": "dspy_program", "starting_version": "Answer briefly: "},
         },
         "data": {
             "mode": "pairs",
             "cases": [{"input": {"question": f"Q{i}?"}, "expected": f"A{i}"} for i in range(6)],
             "input_fields": ["question"],
         },
-        "optimizer": {"choice": "gepa"},
+        "optimizer": {"choice": "dspy_gepa"},
         "models": {"reflection_model": {"name": "openai/gpt-4o-mini"}},
         "workspace": {"run_code": _RUN_CODE, "metric_code": _METRIC_CODE},
     }
@@ -427,7 +427,6 @@ def make_client(store: _FakeJobStore, *, monkeypatch: pytest.MonkeyPatch, balanc
     monkeypatch.setattr(_sub_mod, "get_worker", lambda *a, **kw: worker)
     monkeypatch.setattr(_sub_mod, "_ensure_api_budget", lambda *args, **kwargs: None)
     monkeypatch.setattr(_sub_mod, "_protected_submission", lambda *args, **kwargs: None)
-    monkeypatch.setattr(_sub_mod, "validate_unified_payload", lambda payload: None)
 
     app = FastAPI()
     app.include_router(create_submissions_router(service=object(), job_store=store))
@@ -446,153 +445,21 @@ def make_client(store: _FakeJobStore, *, monkeypatch: pytest.MonkeyPatch, balanc
     return TestClient(app, raise_server_exceptions=False)
 
 
-def _funded_store(**customer: Any) -> _FakeJobStore:
-    """Build a fake store whose billing DB holds one ``alice`` customer row.
-
-    Args:
-        **customer: Column overrides for the customer row.
-
-    Returns:
-        The store with its ``engine`` set.
-    """
-    engine = _billing_engine()
-    with Session(engine) as session:
-        session.add(
-            BillingCustomerModel(username="alice", stripe_customer_id="cus_alice", **{"balance_cents": 0, **customer})
-        )
-        session.commit()
-    store = _FakeJobStore()
-    store.engine = engine
-    return store
-
-
-def test_optimize_returns_201_and_enqueues_one_job(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A valid unified run is accepted as a pending black-box job and persisted."""
+def test_optimize_returns_410_and_stores_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new DSPy program run is refused: Skynet optimizes repositories only (SKY-316)."""
     store = _FakeJobStore()
     client = make_client(store, monkeypatch=monkeypatch)
 
     resp = client.post("/optimize", json=unified_payload())
 
-    assert resp.status_code == 201, resp.text
-    body = resp.json()
-    assert body["status"] == "pending"
-    assert body["optimization_type"] == "blackbox"
-    assert body["optimizer_name"] == "gepa"
-    assert store.created_ids() == [body["optimization_id"]]
-    assert store._jobs[body["optimization_id"]]["payload"]["payload_kind"] == "unified_v1"
-
-
-def test_optimize_overrides_posted_username(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The stored owner is the authenticated caller, not the posted username."""
-    store = _FakeJobStore()
-    client = make_client(store, monkeypatch=monkeypatch)
-
-    resp = client.post("/optimize", json=unified_payload(username="mallory"))
-
-    assert resp.status_code == 201, resp.text
-    assert resp.json()["username"] == "alice"
-    assert store._jobs[store.created_ids()[0]]["username"] == "alice"
-
-
-def test_optimize_returns_402_when_balance_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A managed run is blocked at submit when the account has no spendable balance."""
-    store = _funded_store(balance_cents=0, grant_remaining=0)
-    client = make_client(store, monkeypatch=monkeypatch)
-
-    resp = client.post("/optimize", json=unified_payload())
-
-    assert resp.status_code == 402
-    assert resp.json()["code"] == "billing.insufficient_funds"
+    assert resp.status_code == 410, resp.text
+    assert resp.json()["code"] == "optimization.dspy_run_retired"
     assert store.created_ids() == []
-
-
-def test_optimize_caps_managed_ceiling_to_balance(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A managed run's ``max_cost_cents`` is clamped to the spendable balance."""
-    store = _funded_store(balance_cents=0, grant_remaining=200)
-    client = make_client(store, monkeypatch=monkeypatch)
-
-    resp = client.post("/optimize", json=unified_payload(max_cost_cents=10_000))
-
-    assert resp.status_code == 201, resp.text
-    assert store._jobs[store.created_ids()[0]]["payload"]["max_cost_cents"] == 200
-
-
-def test_optimize_byok_without_connection_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A BYOK run is refused at submit when the account saved no key for the provider."""
-    store = _funded_store(balance_cents=500)
-    client = make_client(store, monkeypatch=monkeypatch)
-    body = unified_payload(
-        token_source="byok",
-        models={"reflection_model": {"name": "openrouter/openai/gpt-4o"}},
-    )
-
-    resp = client.post("/optimize", json=body)
-
-    assert resp.status_code == 400
-    assert resp.json()["code"] == "billing.byok_missing_connection"
-    assert store.created_ids() == []
-
-
-def test_optimize_byok_with_verified_connection_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A BYOK run with a verified provider key is accepted and stamps the per-model source."""
-    store = _funded_store(balance_cents=500)
-    with Session(store.engine) as session:
-        session.add(_verified_byok_row(monkeypatch))
-        session.commit()
-    client = make_client(store, monkeypatch=monkeypatch)
-    body = unified_payload(
-        token_source="byok",
-        models={"reflection_model": {"name": "openrouter/openai/gpt-4o"}},
-    )
-
-    resp = client.post("/optimize", json=body)
-
-    assert resp.status_code == 201, resp.text
-    overview = store._jobs[store.created_ids()[0]]["overview"]
-    assert overview["token_source"] == "byok"
-    assert set(overview["token_sources_by_model"].values()) == {"byok"}
-
-
-def test_optimize_returns_409_when_over_job_quota(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The per-user job quota refuses a new run before anything is stored."""
-    store = _FakeJobStore(job_count=10_000)
-    client = make_client(store, monkeypatch=monkeypatch)
-
-    resp = client.post("/optimize", json=unified_payload())
-
-    assert resp.status_code == 409
-    assert store.created_ids() == []
-
-
-def test_optimize_returns_409_when_over_storage_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A run whose payload would exceed the storage quota is refused."""
-    store = _FakeJobStore(storage_used=100, storage_quota=100)
-    client = make_client(store, monkeypatch=monkeypatch)
-
-    resp = client.post("/optimize", json=unified_payload())
-
-    assert resp.status_code == 409
-    assert store.created_ids() == []
-
-
-def test_optimize_idempotent_retry_returns_same_optimization_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reusing an ``Idempotency-Key`` returns the original job without enqueuing another."""
-    store = _FakeJobStore()
-    client = make_client(store, monkeypatch=monkeypatch)
-    headers = {"Idempotency-Key": "retry-1"}
-
-    first = client.post("/optimize", json=unified_payload(), headers=headers)
-    second = client.post("/optimize", json=unified_payload(), headers=headers)
-
-    assert first.status_code == 201, first.text
-    assert second.status_code == 201, second.text
-    assert first.json()["optimization_id"] == second.json()["optimization_id"]
-    assert len(store.created_ids()) == 1
 
 
 @pytest.mark.parametrize("path", ["/run", "/grid-search", "/blackbox/scorer/dry-run"])
 def test_retired_submit_endpoints_are_gone(monkeypatch: pytest.MonkeyPatch, path: str) -> None:
-    """The per-family submit routes were replaced by ``/optimize``.
+    """The per-family submit routes are gone.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.

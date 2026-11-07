@@ -26,13 +26,13 @@ METRIC_CODE = "def score(input, output, expected=None):\n    return 1.0, {'feedb
 def _spec(*, run_code: str = RUN_CODE, budget: bool = True) -> dict[str, Any]:
     """Build a unified spec as the wizard sends it."""
     spec: dict[str, Any] = {
-        "task": {"objective": "o", "artifact": {"kind": "prompt", "starting_version": "p"}},
+        "task": {"objective": "o", "artifact": {"kind": "dspy_program", "starting_version": "p"}},
         "data": {
             "mode": "pairs",
             "cases": [{"input": {"q": str(i)}, "expected": "p"} for i in range(3)],
             "input_fields": ["q"],
         },
-        "optimizer": {"choice": "best_of_n"},
+        "optimizer": {"choice": "dspy_gepa"},
         "models": {"reflection_model": {"name": "openrouter/task"}},
         "workspace": {"run_code": run_code, "metric_code": METRIC_CODE},
     }

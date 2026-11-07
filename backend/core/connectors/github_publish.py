@@ -7,9 +7,11 @@ top of the code the run started from.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +24,10 @@ from .transport import get_json, request
 COMMIT_AUTHOR = ["-c", f"user.name={APP_NAME}", "-c", "user.email=noreply@skynetml.com", "-c", "commit.gpgsign=false"]
 # The branch holds a reviewed diff, never LFS objects, so LFS filters stay off.
 _NO_LFS = ["-c", "filter.lfs.process=", "-c", "filter.lfs.clean=cat", "-c", "filter.lfs.smudge=cat"]
+CANDIDATE_PREFIX = "skynet/candidate-"
+BEST_BRANCH = "skynet/best"
+# Stricter than git's ref rules, so an id never needs escaping in a refspec.
+_REF_SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}")
 
 
 class RepoPublishError(RuntimeError):
@@ -36,6 +42,41 @@ class PublishedChange:
     url: str
     number: int
     draft: bool
+
+
+@dataclass(frozen=True)
+class HardeningSummary:
+    """What a finished metric-hardening job did to the run's metric."""
+
+    attacks: int
+    exploits_fixed: int
+
+    def __post_init__(self) -> None:
+        """Refuse counts that are not whole numbers of zero or more, or more fixes than attacks.
+
+        Raises:
+            ValueError: A count is a bool, not an int, or negative, or
+                ``exploits_fixed`` is larger than ``attacks``.
+        """
+        for count in (self.attacks, self.exploits_fixed):
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise ValueError(f"Hardening counts must be whole numbers of zero or more, not {count!r}.")
+        if self.exploits_fixed > self.attacks:
+            raise ValueError("A hardening job cannot fix more exploits than it ran attacks.")
+
+
+def hardening_line(summary: HardeningSummary) -> str:
+    """Write the pull request body line that reports a finished hardening job.
+
+    Args:
+        summary: The finished job's attack and fix counts.
+
+    Returns:
+        For example ``Metric survived 12 attacks, 3 exploits fixed``.
+    """
+    attacks = "attack" if summary.attacks == 1 else "attacks"
+    exploits = "exploit" if summary.exploits_fixed == 1 else "exploits"
+    return f"Metric survived {summary.attacks} {attacks}, {summary.exploits_fixed} {exploits} fixed"
 
 
 def _base_branch(token: str, repository: str, branch: str | None) -> str:
@@ -104,8 +145,123 @@ def push_version(
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def candidate_branch(version_id: str) -> str:
+    """Return the branch that holds one candidate version.
+
+    Args:
+        version_id: The version's id.
+
+    Returns:
+        ``skynet/candidate-<id>``.
+
+    Raises:
+        RepoPublishError: When the id cannot be part of a branch name.
+    """
+    if not _REF_SAFE.fullmatch(version_id):
+        raise RepoPublishError(f"'{version_id}' cannot be used in a branch name.")
+    return f"{CANDIDATE_PREFIX}{version_id}"
+
+
+def push_candidates(
+    repository: str,
+    commit: str,
+    versions: Sequence[tuple[str, str]],
+    best_id: str,
+    token: str | None,
+    *,
+    remote: str | None = None,
+) -> dict[str, str]:
+    """Push each version to its own branch and move the best branch to one of them.
+
+    Every candidate commit takes its dates from ``commit``, so the same
+    version always makes the same commit id. A retry then pushes nothing new,
+    and only ``skynet/best`` is ever rewritten.
+
+    Args:
+        repository: ``owner/name``.
+        commit: The pinned commit every version was made against.
+        versions: ``(version id, git diff --binary against commit)`` pairs.
+            An empty patch puts the branch on ``commit`` itself.
+        best_id: Id of the version ``skynet/best`` points at.
+        token: GitHub token; ``None`` for a local remote.
+        remote: Push URL override, used by tests with a local repository.
+
+    Returns:
+        Each pushed branch, ``skynet/best`` included, mapped to its commit id.
+
+    Raises:
+        RepoPublishError: When an id is invalid or repeated, ``best_id`` is
+            not a version, a patch does not apply, or the push fails.
+    """
+    branches = [candidate_branch(version_id) for version_id, _ in versions]
+    if len(set(branches)) != len(branches):
+        raise RepoPublishError("Two candidate versions have the same id.")
+    if best_id not in {version_id for version_id, _ in versions}:
+        raise RepoPublishError(f"The best version '{best_id}' is not one of the candidates.")
+    environment = git_auth_env(token)
+    workdir = Path(tempfile.mkdtemp(prefix="app-candidates-"))
+    try:
+        _git(["init", "--quiet"], workdir, environment)
+        _git(["remote", "add", "origin", remote or f"{GITHUB_HOST}/{repository}.git"], workdir, environment)
+        _git(["fetch", "--quiet", "--depth", "1", "origin", commit], workdir, environment)
+        date = _git(["log", "-1", "--format=%cI", "FETCH_HEAD"], workdir, environment).strip()
+        dated = {**environment, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
+        pushed: dict[str, str] = {}
+        for (version_id, patch), branch in zip(versions, branches, strict=True):
+            _git(
+                [*_NO_LFS, "-c", "advice.detachedHead=false", "checkout", "--quiet", "--force", commit], workdir, dated
+            )
+            if patch.strip():
+                _apply(workdir, patch, version_id)
+                message = f"{APP_NAME} candidate {version_id}"
+                _git([*COMMIT_AUTHOR, *_NO_LFS, "commit", "--quiet", "--no-verify", "-m", message], workdir, dated)
+            pushed[branch] = _git(["rev-parse", "HEAD"], workdir, dated).strip()
+        pushed[BEST_BRANCH] = pushed[candidate_branch(best_id)]
+        refspecs = [f"{sha}:refs/heads/{branch}" for branch, sha in pushed.items() if branch != BEST_BRANCH]
+        _git(
+            ["push", "--quiet", "--atomic", "origin", *refspecs, f"+{pushed[BEST_BRANCH]}:refs/heads/{BEST_BRANCH}"],
+            workdir,
+            dated,
+        )
+        return pushed
+    except RepoFetchError as error:
+        raise RepoPublishError(f"Could not push the candidate branches: {error}") from error
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _apply(workdir: Path, patch: str, version_id: str) -> None:
+    """Apply one version's patch to the index and working tree.
+
+    Args:
+        workdir: Checkout of the pinned commit.
+        patch: ``git diff --binary`` output.
+        version_id: Version id, for the error message.
+
+    Raises:
+        RepoPublishError: When the patch does not apply.
+    """
+    applied = subprocess.run(
+        ["git", "apply", "--index", "--binary", "--whitespace=nowarn", "-"],
+        cwd=workdir,
+        input=patch if patch.endswith("\n") else patch + "\n",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if applied.returncode != 0:
+        raise RepoPublishError(f"Version {version_id} does not apply to the commit the run started from.")
+
+
 def open_pull_request(
-    token: str, repository: str, *, head: str, base_branch: str | None, title: str, body: str
+    token: str,
+    repository: str,
+    *,
+    head: str,
+    base_branch: str | None,
+    title: str,
+    body: str,
+    hardening: HardeningSummary | None = None,
 ) -> PublishedChange:
     """Open a draft pull request, or a regular one where the plan has no drafts.
 
@@ -116,6 +272,7 @@ def open_pull_request(
         base_branch: Branch to merge into; ``None`` picks the default branch.
         title: Pull request title.
         body: Pull request description.
+        hardening: The run's finished hardening job; ``None`` keeps the body as given.
 
     Returns:
         The opened pull request.
@@ -124,6 +281,8 @@ def open_pull_request(
         RepoPublishError: When GitHub refuses the request.
     """
     url = f"{API_URL}/repos/{repository}/pulls"
+    if hardening is not None:
+        body = f"{body}\n\n{hardening_line(hardening)}" if body else hardening_line(hardening)
     try:
         fields = {"title": title, "head": head, "base": _base_branch(token, repository, base_branch), "body": body}
         response = request("POST", url, provider=PROVIDER, headers=_headers(token), json={**fields, "draft": True})

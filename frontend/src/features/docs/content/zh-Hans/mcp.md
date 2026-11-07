@@ -61,7 +61,7 @@ https://mcp.skynetml.com/mcp
 4. 智能体反复调用 `get_run`，直到运行结束。最终状态为 `success`、`failed`、`cancelled` 和 `stopped`。
 
 > [!TIP]
-> 在提示词中告诉智能体你的支出上限，例如“优化这个提示词，最多花 $10。”智能体就会在 `start_run` 中使用这个上限。
+> 在提示词中告诉智能体你的支出上限，例如“优化这个仓库，最多花 $10。”智能体就会在 `start_run` 中使用这个上限。
 
 运行达到支出上限时会停止。关于 Skynet 如何为运行收费，请阅读[计费](/docs/concepts/billing)。
 

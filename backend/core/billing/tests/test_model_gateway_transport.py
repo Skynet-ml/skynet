@@ -24,7 +24,7 @@ from core.api.preflight_execution import _verify_model_routes
 from core.billing import model_gateway as gateway_module
 from core.billing.budgets import BudgetInsufficientError, BudgetService
 from core.billing.byok_upstreams import UPSTREAMS
-from core.billing.model_dispatch import ModelHTTPResult
+from core.billing.model_dispatch import ModelHTTPResult, response_complete
 from core.billing.model_gateway import (
     EMBEDDING_ROUTE_KEY,
     PARENT_HOSTS_KEY,
@@ -735,6 +735,79 @@ def test_byok_only_supplies_default_output_limit_for_anthropic_messages(
     assert sent[0].get("max_tokens") == expected
 
 
+def test_anthropic_byok_messages_moves_completion_limit_to_max_tokens(gateway: ModelGateway) -> None:
+    """Forward the caller's max_completion_tokens to Anthropic as max_tokens only."""
+    sent: list[dict] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        """Capture the exact forwarded request."""
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "generation", "usage": {}})
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(provider))
+    route = gateway.register(
+        model="fixture/text",
+        api_key="private",
+        role="task",
+        policy=ChargePolicy("byok_model"),
+        upstream=UPSTREAMS["anthropic"],
+    )
+    gateway._routes[route["token"]].dispatch("/messages", {"model": route["model"], "max_completion_tokens": 50})
+    assert sent[0] == {"model": route["model"], "max_tokens": 50}
+
+
+@pytest.mark.parametrize("limit", [0, -1, "50", True, 1.5])
+def test_anthropic_byok_messages_rejects_invalid_completion_limit(gateway: ModelGateway, limit: object) -> None:
+    """Refuse an invalid max_completion_tokens on /messages before any provider call."""
+    sent: list[httpx.Request] = []
+    gateway._client.close()
+    gateway._client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: sent.append(request) or httpx.Response(200, json={}))
+    )
+    route = gateway.register(
+        model="fixture/text",
+        api_key="private",
+        role="task",
+        policy=ChargePolicy("byok_model"),
+        upstream=UPSTREAMS["anthropic"],
+    )
+    with pytest.raises(UnpricedOperationError, match="positive output token limit"):
+        gateway._routes[route["token"]].dispatch("/messages", {"model": route["model"], "max_completion_tokens": limit})
+    assert sent == []
+
+
+_STREAM_WITHOUT_DONE = (
+    b'data: {"id":"gen-1","choices":[{"delta":{"content":"hi"},"finish_reason":null}]}\n\n'
+    b'data: {"id":"gen-1","choices":[{"delta":{},"finish_reason":"stop"}],'
+    b'"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\n'
+)
+
+
+def test_byok_stream_without_done_line_ends_at_finish_reason(gateway: ModelGateway) -> None:
+    """Pass a BYOK stream that closes with a finish_reason chunk and no [DONE] line."""
+    gateway._client.close()
+    gateway._client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, content=_STREAM_WITHOUT_DONE
+            )
+        )
+    )
+    route = gateway.register(
+        model="fixture/text",
+        api_key="private",
+        role="task",
+        policy=ChargePolicy("byok_model"),
+        upstream=UPSTREAMS["openai"],
+    )
+    result = gateway._routes[route["token"]].dispatch(
+        "/chat/completions", {"model": route["model"], "stream": True, "max_tokens": 5}
+    )
+    assert result.status == 200
+    assert response_complete(_STREAM_WITHOUT_DONE, "text/event-stream") is False
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -1031,6 +1104,87 @@ def test_selected_tools_keep_credentials_outside_guest_and_cannot_call_models(
     gateway.runtime.service.fence_generation(gateway.runtime.budget_id, "alice", expected_generation=0)
     state = httpx.get(f"{gateway.url}/_budget/state", headers=headers, trust_env=False)
     assert state.json()["blocked_reason"] == "generation_fenced"
+
+
+def test_catalog_connectors_share_one_gateway_with_a_live_roster(
+    gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Open one metered, parent-keyed roster per connector beside the live MCP roster."""
+    brokers: dict[str, dict[str, Any]] = {}
+
+    class RecordingBroker:
+        """Record each roster's parent-only endpoint and answer with its own name."""
+
+        def __init__(self, url, **kwargs):
+            """Keep the connection the parent chose for this roster."""
+            self.name = url.split("/")[2]
+            brokers[self.name] = {"url": url, **kwargs}
+
+        def dispatch(self, body):
+            """Run a metered call when a meter exists, then name the answering roster."""
+            meter = brokers[self.name].get("meter")
+            if meter is not None:
+                tool = brokers[self.name]["tool_filter"][0]
+                meter(tool, {"q": "x"}, lambda: {"content": []})
+            payload = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"roster": self.name}})
+            return ModelHTTPResult(200, "application/json", payload.encode())
+
+    monkeypatch.setattr(gateway_module, "McpToolsBroker", RecordingBroker)
+    monkeypatch.setattr(settings, "google_maps_api_key", SecretStr("maps-parent-secret"))
+    monkeypatch.setattr(settings, "firecrawl_api_key", SecretStr("firecrawl-parent-secret"))
+    payload = {
+        "model_config": {"name": "fixture/text"},
+        "tool_source": {"kind": "live_mcp", "mcp_url": "https://selected.example/mcp", "tool_filter": ["lookup"]},
+        "env_connectors": ["maps", "web_search"],
+    }
+
+    protected = gateway.protect_payload(payload, managed_key="upstream-secret")
+    again = gateway.protect_payload({"env_connectors": ["maps"]}, managed_key="upstream-secret")
+
+    assert set(brokers) == {"selected.example", "mapstools.googleapis.com", "mcp.firecrawl.dev"}
+    assert brokers["mapstools.googleapis.com"]["headers"] == {"X-Goog-Api-Key": "maps-parent-secret"}
+    assert brokers["mcp.firecrawl.dev"]["tool_filter"] == ["firecrawl_search", "firecrawl_scrape"]
+    assert "meter" not in brokers["selected.example"]
+    for secret in ("maps-parent-secret", "firecrawl-parent-secret", "upstream-secret", "googleapis", "firecrawl.dev"):
+        assert secret not in json.dumps(protected)
+    routes = protected["_skynet_connector_routes"]
+    assert again["_skynet_connector_routes"]["maps"] == routes["maps"]
+    tokens = {protected["_skynet_tools_route"]["token"], routes["maps"]["token"], routes["web_search"]["token"]}
+    assert len(tokens) == 3
+    answered = {}
+    for name, route in {"live": protected["_skynet_tools_route"], **routes}.items():
+        headers = {"Authorization": f"Bearer {route['token']}"}
+        response = httpx.post(
+            f"{gateway.url}/_mcp",
+            headers=headers,
+            json={"jsonrpc": "2.0", "method": "tools/call", "id": 1},
+            trust_env=False,
+        )
+        assert response.status_code == 200
+        answered[name] = response.json()["result"]["roster"]
+        assert (
+            httpx.post(f"{gateway.url}/chat/completions", headers=headers, json={}, trust_env=False).status_code == 401
+        )
+        assert httpx.get(f"{gateway.url}/_budget/state", headers=headers, trust_env=False).status_code == 200
+    assert answered == {
+        "live": "selected.example",
+        "maps": "mapstools.googleapis.com",
+        "web_search": "mcp.firecrawl.dev",
+    }
+    snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, "alice")
+    assert snapshot.setup_spent_cents == Decimal("2.4")
+    assert snapshot.reserved_cents == 0
+    assert gateway.dispatch_guest(routes["maps"]["token"], "/v1/_mcp", {"method": "tools/call"}, {}).status == 200
+
+
+def test_connector_without_key_fails_setup_with_its_name(
+    gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse a run that asks for a connector whose key is missing, and name it."""
+    monkeypatch.setattr(settings, "google_maps_api_key", None)
+    with pytest.raises(ValueError, match=r"maps \(GOOGLE_MAPS_API_KEY\)"):
+        gateway.protect_payload({"env_connectors": ["maps"]}, managed_key="upstream-secret")
+    assert gateway._connectors == {}
 
 
 def test_remote_runtime_streams_and_metered_mailbox_scrubs_protocol(gateway: ModelGateway) -> None:

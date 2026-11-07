@@ -1,108 +1,97 @@
-Skynet 就是 Optimize Anything：一个基于你的数据和指标改进任意产物的产品。每次运行都使用同一个运行契约和同一个指标契约。产物类型决定了哪些引擎可以处理它。
+Skynet 就是 Optimize Anything：每次运行都优化一个仓库。引擎提出仓库的新版本，你的评分器为每个版本打分，Skynet 保留最好的版本。
 
 ## 共享契约
 
-每次运行都有两个文件。`run.py` 在一个用例上运行产物。`metric.py` 为输出打分。
+每次运行都有一个仓库和一个评分器。评分器是一个 Python 函数，它接收仓库某个版本的路径和一个用例。
 
-```python tab="run.py"
-from skynet import llm
+```python tab="scorer.py"
+import importlib.util
 
 
-def run(artifact, input):
-    return llm(artifact, input=input)
-```
-
-```python tab="metric.py"
-def score(input, output, expected=None):
-    ok = output == expected
+def score(repo_path, case):
+    spec = importlib.util.spec_from_file_location("serve", f"{repo_path}/serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    output = module.serve(case["input"])
+    ok = output == case["expected"]
     return (1.0 if ok else 0.0), {"feedback": "Match." if ok else "No match."}
 ```
 
-- `artifact` 是优化器提出的当前版本。
-- `input` 是一个 dict，包含一个用例的输入字段。
-- `expected` 是该用例的期望值；如果用例没有期望值，则为 `None`。
+- `repo_path` 是仓库某个版本的文件夹，安装命令已经在其中运行过。
+- `case` 是一个 dict。`case["input"]` 包含一个用例的输入字段。`case["expected"]` 包含期望值；如果该用例没有期望值，则为 `None`。
 - `score` 返回一对值：一个数字，以及一个包含 `"feedback"` 字符串的 dict。
 
-`skynet` 辅助模块提供 `llm`、`Image` 和 `log`。在运行代码中调用 `llm` 会使用任务模型。在指标中调用 `llm` 会使用指标模型。
+仓库根目录中有一个 `serve.py` 文件，其中定义了 `def serve(input)`。评分器可以调用它，运行结束后 Skynet 也用它来部署最好的版本。
 
 > [!NOTE]
-> 运行代码在沙箱中自己的进程里运行。它看不到指标源代码、期望值或指标密钥。
+> 编写版本的编码智能体看不到评分器的源代码、期望值或运行密钥。
 
-完整的指标契约请阅读[指标与评分器](/docs/concepts/scorers)。
+完整的评分器契约，请阅读[指标与评分器](/docs/concepts/scorers)。
 
-## 产物类型与引擎
+## 你的代码发起的模型调用
 
-| 产物类型  | 引擎                                                                         |
-| --------- | ---------------------------------------------------------------------------- |
-| 提示词    | Auto、GEPA、Best-of-N、AutoResearch、Meta-Harness、AutoSaddler、ShinkaEvolve |
-| 代码      | 与提示词相同                                                                 |
-| 文本      | 与提示词相同                                                                 |
-| DSPy 程序 | Auto、DSPy GEPA、DSPy MIPROv2、DSPy BootstrapFewShot                         |
+你的仓库代码和评分器可以通过 Skynet 的模型网关调用模型。沙箱通过环境变量提供一个兼容 OpenAI 的端点：
 
-引擎分为两个系列：
+| 变量                 | 内容                                                  |
+| -------------------- | ----------------------------------------------------- |
+| `OPENAI_BASE_URL`    | 网关 URL。`APP_GATEWAY_URL` 包含相同的值。            |
+| `APP_API_KEY`        | 仅用于本次运行的令牌。它不是提供商密钥。              |
+| `APP_MODEL`          | 要发送的模型名称。它是本次运行的评分器模型。          |
+| `ANTHROPIC_BASE_URL` | 供 Anthropic SDK 使用的网关 URL。                     |
 
-- **原生引擎** 把产物当作黑盒。它们处理提示词、代码和文本产物。
-- **DSPy 优化器** 在 DSPy 程序内部工作。它们只处理 DSPy 程序产物。
+```python tab="pipeline.py"
+import os
 
-DSPy MIPROv2 和 DSPy BootstrapFewShot 需要成对数据（带期望输出的用例）。如果只有单个输入，DSPy 程序只能使用 Auto 和 DSPy GEPA。
+from openai import OpenAI
 
-## 提示词、代码和文本产物
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["APP_API_KEY"])
 
-原生引擎把产物当作黑盒。引擎提出一个新版本，在用例上运行 `run(artifact, input)`，然后读取分数和反馈。
 
-六个原生引擎使用不同的搜索方法：
+def label(message):
+    response = client.chat.completions.create(
+        model=os.environ["APP_MODEL"],
+        messages=[{"role": "user", "content": f"Label as billing, bug or other: {message}"}],
+    )
+    return response.choices[0].message.content
+```
 
-- **GEPA** 通过反思来演化版本，并维护一个 Pareto 前沿。
+- 使用 Skynet 密钥的调用会计入运行预算。
+- 使用你自己的密钥（BYOK）时，调用计到你的提供商密钥上。Skynet 不收取模型费用。
+- 网关会拒绝对其他任何模型的请求。
+- 运行密钥以环境变量的形式传给你的代码和评分器。变量名就是密钥名。Skynet 会在输出中隐藏密钥的值。
+
+沙箱没有其他网络访问权限。
+
+## 引擎
+
+每个引擎都处理仓库：
+
+- **Auto** 是默认选项。它尝试多个引擎，然后从最好的版本继续运行 GEPA。
+- **GEPA** 通过反思演化版本，并维护一个 Pareto 前沿。
 - **Best-of-N** 让反思模型给出相互独立的提议，并保留最好的一个。
 - **AutoResearch**、**Meta-Harness**、**AutoSaddler** 和 **ShinkaEvolve** 使用编程智能体来提出版本。
 
-每个引擎及其设置请阅读[引擎](/docs/concepts/engines)。
-
-## DSPy 程序产物
-
-DSPy 程序是一种产物类型。你的 `run.py` 在模块级构建一个 `dspy.Module`，并在 `run` 中调用它。如果文件中有多个模块，请把要优化的那个命名为 `program`。
-
-DSPy 优化器运行时会发生以下过程：
-
-1. Skynet 找到你的模块，并用你的 `run` 函数包装它。每个用例都会经过你自己的 `run`。
-2. DSPy 优化器在训练用例上编译程序。
-3. 它在验证用例上进行选择。
-4. 胜出者是每个预测器的指令文本，加上模块完整的编译状态。该状态包含 few-shot 示例。
-
-最终分数衡量的正是 Skynet 保存的那个程序。
-
-| 优化器                | 是否读取反馈文本 |
-| --------------------- | ---------------- |
-| DSPy GEPA             | 是               |
-| DSPy MIPROv2          | 否，只读分数     |
-| DSPy BootstrapFewShot | 否，只读分数     |
-
-DSPy BootstrapFewShot 不使用反思模型。
-
-> [!TIP]
-> DSPy 反思模型只能看到你的指标返回的反馈文本。它永远看不到指标源代码。
+引擎只修改你允许的路径中的文件。关于每个引擎及其设置，请阅读[引擎](/docs/concepts/engines)。
 
 ## Auto
 
-**Auto** 是向导中的默认选项。
+**Auto** 是向导中每次运行的默认选项。
 
-- 对于提示词、代码或文本产物，Auto 先用五个原生引擎进行探索，然后从最佳版本出发用 GEPA 继续优化。
-- 对于 DSPy 程序，Auto 运行 DSPy GEPA。
+1. Auto 用五个引擎进行探索：GEPA、AutoResearch、Meta-Harness、AutoSaddler 和 ShinkaEvolve。
+2. 它选出这些引擎找到的最好版本。
+3. 它从该版本继续运行 GEPA，直到预算用完。
 
-两种形式的 Auto 都会读取你的指标给出的反馈文本。
+Auto 会读取你的评分器给出的反馈文本。
 
-## 该选哪个引擎
+## 起始版本从哪里来
 
-| 你的情况                                     | 使用                                                        |
-| -------------------------------------------- | ----------------------------------------------------------- |
-| 你有一个由模型运行的提示词                   | 提示词产物。从 Auto 开始。                                  |
-| 你有想要更快、更便宜或更正确的代码           | 代码产物。从 Auto 开始。                                    |
-| 你有一份文档或一份配置                       | 文本产物。从 Auto 开始。                                    |
-| 你有一个 DSPy 程序                           | DSPy 程序产物。从 Auto 开始。                               |
-| 你希望从数据中挑选 few-shot 示例             | 使用 DSPy BootstrapFewShot 或 DSPy MIPROv2 的 DSPy 程序产物 |
+| 你的情况                     | 使用                                                         |
+| ---------------------------- | ------------------------------------------------------------ |
+| 你的代码在 GitHub 仓库中     | **使用现有仓库**。你选择的分支或提交中的代码就是起点。           |
+| 你只有任务和数据             | **创建新仓库**。Skynet 编写第一个解决方案，它就是起点。      |
 
 > [!WARNING]
-> GEPA、DSPy GEPA 和 Auto 会从反馈文本中学习。如果你的反馈总是同一个字符串，这些优化器能利用的信息就更少。
+> GEPA 和 Auto 会从反馈文本中学习。如果你的反馈总是同一个字符串，这些优化器能利用的信息就更少。
 
 ## 相关页面
 

@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const { effortFill, liveEffort, retiredLevel, sentFastMode, sliderStops, stepEffort } =
-  await import("./effort-slider.ts");
+const {
+  cliEffort,
+  effortCharge,
+  effortFill,
+  fillMotion,
+  liveEffort,
+  sentFastMode,
+  sliderStops,
+  stepEffort,
+} = await import("./effort-slider.ts");
 
 const claude = ["low", "medium", "high", "xhigh", "max"];
 
@@ -57,11 +65,20 @@ test("a saved retired level reads as max", () => {
   assert.equal(liveEffort(null), null);
 });
 
-test("the picker greys out the CLI's retired level and never offers it as a stop", () => {
-  assert.equal(retiredLevel("subscription/codex/openai/gpt-6.1-sol"), "ultra");
-  assert.equal(retiredLevel("subscription/claude/anthropic/claude-opus-5-5"), "ultracode");
-  assert.equal(retiredLevel("anthropic/claude-opus-5-5"), null);
-  assert.equal(retiredLevel(null), null);
+test("a CLI model runs Max and a retired level at its top level, as the backend does", () => {
+  const opus45 = ["low", "medium", "high"];
+  assert.equal(cliEffort("max", opus45), "high");
+  assert.equal(cliEffort("ultracode", opus45), "high");
+  assert.equal(cliEffort("ultra", claude), "max");
+  assert.equal(cliEffort("max", claude), "max");
+  assert.equal(cliEffort("medium", opus45), "medium");
+  assert.equal(cliEffort("xhigh", opus45), null);
+  assert.equal(cliEffort("none", opus45), null);
+  assert.equal(cliEffort("max", []), null);
+  assert.equal(cliEffort(null, opus45), null);
+});
+
+test("the picker never offers the CLI's retired level as a stop", () => {
   for (const level of ["ultra", "ultracode"]) {
     assert.ok(!sliderStops(claude).includes(level));
     for (const key of ["ArrowRight", "ArrowUp", "End", "PageUp"]) {
@@ -69,5 +86,51 @@ test("the picker greys out the CLI's retired level and never offers it as a stop
     }
     // A saved retired level sits on the Max stop, the level that runs.
     assert.equal(stepEffort(claude, liveEffort(level), "ArrowRight", false), "max");
+  }
+});
+
+test("the fill sweeps faster and brighter as the level rises", () => {
+  assert.equal(fillMotion(0), null);
+  assert.deepEqual(fillMotion(1), { seconds: 1.4, strength: 0.38 });
+  const low = fillMotion(effortFill(claude, "low"))!;
+  const high = fillMotion(effortFill(claude, "high"))!;
+  assert.ok(low.seconds > high.seconds);
+  assert.ok(low.strength < high.strength);
+  assert.deepEqual(fillMotion(2), fillMotion(1));
+});
+
+test("the charge ramps from calm to super charged", () => {
+  const heat = sliderStops(claude).map((l) => effortCharge(claude, l, false).heat);
+  assert.deepEqual(heat, [0, 0, 0.25, 0.5, 0.75, 1]);
+  // Levels a model does not take sit calm on the default stop.
+  assert.equal(effortCharge(["low", "medium", "high"], "max", false).heat, 0);
+  assert.equal(effortCharge(["low"], "low", false).heat, 0);
+  assert.equal(effortCharge(["low", "high"], "high", false).heat, 1);
+});
+
+test("only the top two levels spark, the top one most", () => {
+  const sparks = sliderStops(claude).map((l) => effortCharge(claude, l, false).sparks);
+  assert.deepEqual(sparks, [0, 0, 0, 0, 2, 6]);
+  const codex = ["low", "medium", "high"];
+  assert.deepEqual(
+    sliderStops(codex).map((l) => effortCharge(codex, l, false).sparks),
+    [0, 0, 2, 6],
+  );
+  // With two levels the lowest stays calm.
+  assert.equal(effortCharge(["low", "high"], "low", false).sparks, 0);
+  assert.equal(effortCharge(claude, "max", false).pulse, true);
+  assert.equal(effortCharge(claude, "high", false).pulse, false);
+});
+
+test("a step up sprays more sparks the higher it lands, and none at the calm levels", () => {
+  const spray = sliderStops(claude).map((l) => effortCharge(claude, l, false).spray);
+  assert.deepEqual(spray, [0, 0, 3, 4, 5, 6]);
+});
+
+test("reduced motion keeps the color ramp and drops every effect", () => {
+  for (const level of sliderStops(claude)) {
+    const still = effortCharge(claude, level, true);
+    assert.equal(still.heat, effortCharge(claude, level, false).heat);
+    assert.deepEqual([still.sparks, still.pulse, still.spray], [0, false, 0]);
   }
 });

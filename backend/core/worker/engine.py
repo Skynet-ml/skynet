@@ -48,6 +48,7 @@ from ..billing.host_agent import (
     failure_message,
     host_agent_failure,
     host_proposer,
+    host_reasoning_effort,
 )
 from ..billing.metering import debit_at_fallback_price
 from ..billing.model_gateway import ModelGateway
@@ -123,8 +124,10 @@ from .constants import (
     EVENT_RESULT,
     EVENT_TERMINAL,
 )
+from .hardening_runner import process_next_hardening_job
 from .log_handler import route_sandbox_logs
 from .memory_guard import memory_usage_fraction
+from .repo_gate import RepoGateError, check_repository, sandbox_place
 from .repo_staging import (
     ENVIRONMENT_KEY,
     StagedRepository,
@@ -667,6 +670,9 @@ class BackgroundWorker:
                 optimization_id = self._get_next_job()
 
                 if optimization_id is None:
+                    if self._run_hardening_job(worker_id):
+                        idle_cycles = 0
+                        continue
                     time.sleep(self._poll_interval)
                     idle_cycles += 1
                     # Heartbeat every ~5 min so observability dashboards
@@ -693,6 +699,34 @@ class BackgroundWorker:
             logger.exception("Worker %d died unexpectedly", worker_id)
 
         logger.info("Worker %d stopped", worker_id)
+
+    def _run_hardening_job(self, worker_id: int) -> bool:
+        """Claim and advance one queued metric-hardening job when no run waits (SKY-369).
+
+        Args:
+            worker_id: Index of the worker thread, for logging.
+
+        Returns:
+            Whether a hardening job was claimed.
+        """
+        engine = getattr(self._job_store, "engine", None)
+        if engine is None:
+            return False
+        try:
+            ran = process_next_hardening_job(
+                engine,
+                pod=self._pod_name,
+                lease_seconds=self._lease_seconds,
+                local_mode=settings.local_mode,
+                settings=settings,
+                on_renew=lambda: self._touch_activity(worker_id),
+            )
+        except Exception:  # isolation boundary: a hardening failure must not kill the worker thread
+            logger.exception("Worker %d failed a hardening job pass", worker_id)
+            return False
+        if ran:
+            self._touch_activity(worker_id)
+        return ran
 
     def _process_job(self, optimization_id: str, worker_id: int) -> None:
         """Run one optimization job to completion, handling all error and cancel paths.
@@ -995,9 +1029,14 @@ class BackgroundWorker:
                     if host is not None:
                         # The CLI and permission come from the stored run settings,
                         # never from the guest, and only this run's proposer gets the token.
-                        attach_host_agent_token(
-                            payload_dict, bind_host_agent(budget_gateway, settings, cli=host[0], permission=host[1])
+                        host_token = bind_host_agent(
+                            budget_gateway,
+                            settings,
+                            cli=host[0],
+                            permission=host[1],
+                            reasoning_effort=host_reasoning_effort(payload_dict),
                         )
+                        attach_host_agent_token(payload_dict, host_token)
                     # The wizard leaves the ceiling unset for a budget without a
                     # limit, while the guest's proposer still plans its spend
                     # against one, so the parent hands it the ledger's allowance.
@@ -1012,6 +1051,14 @@ class BackgroundWorker:
                                 engine=byok_engine,
                             )
                             self._record_repo_commit(optimization_id, payload_dict["target"]["repo"]["commit"])
+                            # Before the setup model and the scorer box, so a refused run costs nothing.
+                            gate_failures = check_repository(
+                                staged_repository.snapshot.archive,
+                                staged_repository.secrets,
+                                place=sandbox_place(settings.local_mode),
+                            )
+                            if gate_failures:
+                                raise RepoGateError(gate_failures)
                             inferred_setup = infer_repo_setup(payload_dict, staged_repository, budget_gateway)
                             if inferred_setup is not None:
                                 self._record_setup_command(optimization_id, inferred_setup)
