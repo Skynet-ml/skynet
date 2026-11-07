@@ -45,6 +45,7 @@ from ..service_gateway.optimization.blackbox import check_terminal
 from ..service_gateway.optimization.blackbox.native_runtime import NATIVE_ENGINES
 from ..service_gateway.optimization.blackbox.preflight import preflight_lifetime_seconds, verify_unified_in_sandbox
 from ..storage.preflights import PreflightStore
+from ..worker.repo_gate import RepoGateError, check_repository, sandbox_place
 from ..worker.repo_staging import (
     StagedRepository,
     bind_repo_scorer,
@@ -709,6 +710,11 @@ def _perform_preflight(
                 binding_id=request.execution_budget_id,
                 engine=engine,
             )
+            gate_failures = check_repository(
+                staged.snapshot.archive, staged.secrets, place=sandbox_place(settings.local_mode)
+            )
+            if gate_failures:
+                raise RepoGateError(gate_failures)
             infer_repo_setup(protected, staged, gateway)
             bind_repo_scorer(
                 protected,
@@ -743,6 +749,17 @@ def _perform_preflight(
     except BudgetInsufficientError as error:
         field = BALANCE_FIELD if isinstance(error, AccountFundsError) else None
         result = {"checks": [_check(BUDGET_CHECK_KEY, "failed", str(error), field)]}
+    except RepoGateError as error:
+        result = {
+            "checks": [
+                {
+                    **_check("setup", "failed", failure.reason),
+                    "message_code": failure.code,
+                    "message_params": failure.params,
+                }
+                for failure in error.failures
+            ]
+        }
     except DomainError as error:
         result = {
             "checks": [

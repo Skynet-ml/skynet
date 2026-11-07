@@ -234,6 +234,9 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "serve.caller_tool_connection_required": "This optimization uses an owner-bound tool connection. Connect the tool to your account before invoking it.",
     "serve.protected_interaction_failed": "The sandboxed request failed: {error}",
     "serve.not_enabled": "Serving is off for this run. Turn it on in the run's Serve tab first.",
+    "repo_gate.unenforced_local": "optimize.toml sets {key}. The local Docker sandbox cannot enforce this setting yet. Remove it to run.",
+    "repo_gate.unenforced_cloud": "optimize.toml sets {key}. The cloud sandbox cannot enforce this setting yet. Remove it to run.",
+    "repo_gate.missing_secret": "The service {service} in optimize.toml needs the secret {secret}, but this run has no secret with that name. Add the secret to the run or remove the name from the file.",
     "serve.subscription_model_hosted": (
         f"This run used a local subscription model. Serve it in the {APP_NAME} Mac app, "
         "or start a new optimization with a managed model or your own provider key."

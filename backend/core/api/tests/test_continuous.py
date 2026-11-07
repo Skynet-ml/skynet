@@ -198,7 +198,7 @@ REPO_BEST_PATCH = "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-x = 1\n+x =
 REPO_COMMIT = "a" * 40
 
 
-def _stage_without_sandbox(payload: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], None]:
+def _stage_without_sandbox(payload: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], SimpleNamespace]:
     """Record an empty setup environment, as staging does after it clones the repository.
 
     Args:
@@ -206,10 +206,12 @@ def _stage_without_sandbox(payload: dict[str, Any], **kwargs: Any) -> tuple[dict
         **kwargs: Staging options, unused here.
 
     Returns:
-        The request and no staged checkout.
+        The request and a stand-in checkout with no files or secrets.
     """
     payload["target"]["repo"]["environment"] = {}
-    return payload, None
+    return payload, SimpleNamespace(
+        snapshot=SimpleNamespace(archive=None), secrets={}, close_scorers=lambda: None, cleanup=lambda: None
+    )
 
 
 def _incumbent_payload() -> dict[str, Any]:
@@ -316,6 +318,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Env]:
     monkeypatch.setattr(preflight_execution, "_verify_anything", verify)
     # Staging clones the repository in a sandbox; the fixture preflight stands in for that sandbox.
     monkeypatch.setattr(preflight_execution, "stage_repository", _stage_without_sandbox)
+    monkeypatch.setattr(preflight_execution, "check_repository", lambda *args, **kwargs: [])
     monkeypatch.setattr(preflight_execution, "infer_repo_setup", lambda *args, **kwargs: None)
     monkeypatch.setattr(preflight_execution, "bind_repo_scorer", lambda *args, **kwargs: None)
     monkeypatch.setattr(submissions, "validate_blackbox_payload", lambda payload: None)
