@@ -18,7 +18,7 @@ from ..repo_workspace import RepoWorkspace
 from ..rule_judge import (
     EVENT_BLOCK,
     EVENT_NOTE,
-    EVENT_REJECTION,
+    EVENT_VERDICT,
     ILLEGAL_ACTION_MESSAGE,
     WATCH_EVERY_ACTIONS,
     RuleJudge,
@@ -388,13 +388,13 @@ def test_a_repository_run_needs_its_tree(engine: str) -> None:
 
 
 class _StubJudge:
-    """Answer rule-judge prompts with one fixed reply and count the questions."""
+    """Answer watch hook prompts with one fixed reply and count the questions."""
 
     def __init__(self, reply: str | None) -> None:
         """Keep the reply.
 
         Args:
-            reply: What the judge model answers, or ``None`` for a failed call.
+            reply: What the hook model answers, or ``None`` for a failed call.
         """
         self.reply = reply
         self.prompts: list[str] = []
@@ -403,7 +403,7 @@ class _StubJudge:
         """Return the fixed reply.
 
         Args:
-            prompt: The judge prompt.
+            prompt: The watch prompt.
 
         Returns:
             The reply.
@@ -412,19 +412,16 @@ class _StubJudge:
         return self.reply
 
 
-_LEGAL = json.dumps({"violation": False, "rule": None, "reason": "General change."})
-_HARDCODED = json.dumps({"violation": True, "rule": 1, "reason": "It returns the expected value for one case."})
+_LEGAL = json.dumps({"label": "ok", "confidence": 0.9, "reason": "General change."})
+_HARDCODED = json.dumps({"label": "breaks_rule", "confidence": 0.9, "reason": "It reads expected answers."})
 
 
-def _ruled(
-    tmp_path: Path, strong: _StubJudge, fast: _StubJudge | None = None
-) -> tuple[RepoScorer, Path, list[dict[str, Any]], RuleJudge]:
+def _ruled(tmp_path: Path, hook: _StubJudge | None = None) -> tuple[RepoScorer, Path, list[dict[str, Any]], RuleJudge]:
     """Open a scorer for a repository with one plain-language rule and a protected folder.
 
     Args:
         tmp_path: Scratch folder.
-        strong: The final judge stub.
-        fast: The watch judge stub.
+        hook: The watch hook stub.
 
     Returns:
         The scorer, the archive, the recorded rule events and the judge.
@@ -433,8 +430,8 @@ def _ruled(
     events: list[dict[str, Any]] = []
     judge = RuleJudge(
         ("Do not hardcode answers for dataset cases.",),
-        ask_fast=fast or _StubJudge(_LEGAL),
-        ask_strong=strong,
+        intent="Raise the value in a general way.",
+        ask=hook or _StubJudge(_LEGAL),
         emit=events.append,
         run_watch=lambda watch: watch(),
     )
@@ -460,7 +457,7 @@ def _ruled(
 
 def test_a_blocked_version_gets_only_the_fixed_message(tmp_path: Path) -> None:
     """A path-rule refusal tells the agent the fixed text; the reason goes to the run's events."""
-    scorer, archive, events, _ = _ruled(tmp_path, _StubJudge(_LEGAL))
+    scorer, archive, events, _ = _ruled(tmp_path)
     try:
         reply = scorer.dispatch({"candidate": _patch(tmp_path / "bad", archive, {"eval/labels.csv": "9\n"})})
         assert reply.status == 422
@@ -478,7 +475,7 @@ def test_a_blocked_version_gets_only_the_fixed_message(tmp_path: Path) -> None:
 
 def test_a_version_that_rewrites_a_protected_file_while_it_runs_is_blocked(tmp_path: Path) -> None:
     """The runtime protected-file check is the same gate: fixed message, reason in the events."""
-    scorer, archive, events, _ = _ruled(tmp_path, _StubJudge(_LEGAL))
+    scorer, archive, events, _ = _ruled(tmp_path)
     try:
         cheat = _patch(
             tmp_path / "cheat",
@@ -495,51 +492,16 @@ def test_a_version_that_rewrites_a_protected_file_while_it_runs_is_blocked(tmp_p
         scorer.close()
 
 
-def test_an_illegal_approach_scores_zero_without_running_the_scorer(tmp_path: Path) -> None:
-    """The final judge's rejection is a scored 0 with its reason, so every optimizer keeps it in history."""
-    strong = _StubJudge(_HARDCODED)
-    scorer, archive, events, _ = _ruled(tmp_path, strong)
-    try:
-        version = _patch(tmp_path / "v1", archive, {"src/app.py": "x = 9\n"})
-        first = scorer.dispatch({"candidate": version})
-        second = scorer.score(version)
-        assert first.status == 200
-        assert json.loads(first.body) == {
-            "score": 0.0,
-            "feedback": "Illegal approach (Rule 1): It returns the expected value for one case.",
-            "illegal_approach": {"rule": "Rule 1", "reason": "It returns the expected value for one case."},
-        }
-        assert second["score"] == 0.0
-        assert len(strong.prompts) == 1
-        assert "x = 9" in strong.prompts[0]
-        assert scorer._calls == 0
-        assert [event["kind"] for event in events] == [EVENT_REJECTION]
-    finally:
-        scorer.close()
-
-
-def test_a_legal_version_is_scored_and_the_baseline_is_not_judged(tmp_path: Path) -> None:
-    """The starting commit needs no verdict; a legal change is scored normally."""
-    strong = _StubJudge(_LEGAL)
-    scorer, archive, events, _ = _ruled(tmp_path, strong)
+def test_a_version_the_rules_name_is_scored_like_any_other(tmp_path: Path) -> None:
+    """With the final judge gone, scoring never asks the hook and never scores a version 0 for a rule."""
+    hook = _StubJudge(_HARDCODED)
+    scorer, archive, events, _ = _ruled(tmp_path, hook)
     try:
         assert scorer.score("")["score"] == pytest.approx(0.1)
-        assert strong.prompts == []
-        assert scorer.score(_patch(tmp_path / "v1", archive, {"src/app.py": "x = 4\n"}))["score"] == pytest.approx(0.4)
-        assert len(strong.prompts) == 1
-        assert events == []
-    finally:
-        scorer.close()
-
-
-def test_a_version_the_judge_cannot_check_stays_unscored(tmp_path: Path) -> None:
-    """A failed judge never turns into a false 0 or a free pass."""
-    scorer, archive, events, _ = _ruled(tmp_path, _StubJudge(None))
-    try:
-        reply = scorer.dispatch({"candidate": _patch(tmp_path / "v1", archive, {"src/app.py": "x = 4\n"})})
-        assert reply.status == 422
-        assert "rule judge could not check this version" in reply.body.decode()
-        assert scorer._calls == 0
+        reply = scorer.dispatch({"candidate": _patch(tmp_path / "v1", archive, {"src/app.py": "x = 9\n"})})
+        assert reply.status == 200
+        assert json.loads(reply.body) == {"score": pytest.approx(0.9), "feedback": "value read"}
+        assert hook.prompts == []
         assert events == []
     finally:
         scorer.close()
@@ -547,18 +509,18 @@ def test_a_version_the_judge_cannot_check_stays_unscored(tmp_path: Path) -> None
 
 def test_a_watch_note_reaches_the_agent_in_its_next_scoring_reply(tmp_path: Path) -> None:
     """The watch judge's warning is put in front of the next feedback the agent reads, once."""
-    fast = _StubJudge(json.dumps({"violation": True, "rule": 1, "reason": "It reads expected answers."}))
-    scorer, archive, events, judge = _ruled(tmp_path, _StubJudge(_LEGAL), fast)
+    scorer, archive, events, judge = _ruled(tmp_path, _StubJudge(_HARDCODED))
     try:
         for index in range(WATCH_EVERY_ACTIONS):
             judge.record_action(f"action {index}")
         version = _patch(tmp_path / "v1", archive, {"src/app.py": "x = 4\n"})
         warned = json.loads(scorer.dispatch({"candidate": version}).body)
         assert warned["feedback"] == (
-            "Check the constraints file. You are probably about to violate rule 1.\n\nvalue read"
+            "Check the constraints file. You are probably about to break one of its rules:"
+            " It reads expected answers.\n\nvalue read"
         )
         assert warned["score"] == pytest.approx(0.4)
         assert json.loads(scorer.dispatch({"candidate": version}).body)["feedback"] == "value read"
-        assert [event["kind"] for event in events] == [EVENT_NOTE]
+        assert [event["kind"] for event in events] == [EVENT_VERDICT, EVENT_NOTE]
     finally:
         scorer.close()

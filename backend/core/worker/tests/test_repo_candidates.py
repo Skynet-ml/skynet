@@ -10,7 +10,6 @@ import pytest
 from core.connectors.github_publish import BEST_BRANCH, RepoPublishError
 from core.connectors.github_repo import RepoSnapshot
 from core.models.blackbox import BlackboxRepoSource
-from core.service_gateway.optimization.blackbox.rule_judge import ILLEGAL_APPROACH_KEY
 from core.worker import repo_staging
 
 _COMMIT = "c" * 40
@@ -159,22 +158,18 @@ def test_created_repository_points_best_at_the_start_without_an_improvement(
     assert outcome["best_version"] == "0123456789ab-start"
 
 
-def test_created_repository_never_pushes_a_version_that_breaks_the_rules(
+def test_created_repository_never_pushes_a_version_that_breaks_the_path_rules(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Read-only edits and judge-rejected approaches stay out of the repository."""
-    versions = [
-        {"candidate": ""},
-        {"candidate": _OUTSIDE},
-        {"candidate": _EDIT, "side_info": {ILLEGAL_APPROACH_KEY: "hard-coded answers"}},
-    ]
-    result = _result(_EDIT, 0.9, versions)
+    """Read-only edits stay out of the repository; the watch hook never removes a version (SKY-349)."""
+    versions = [{"candidate": ""}, {"candidate": _OUTSIDE}]
+    result = _result("", 0.9, versions)
 
     outcome, calls = _publish(monkeypatch, tmp_path, result)
 
     assert calls[0][2:4] == ([("0123456789ab-1", "")], "0123456789ab-1")
     assert outcome is not None
-    assert outcome["skipped"] == 2
+    assert outcome["skipped"] == 1
 
 
 def test_second_run_on_a_created_repository_uses_new_branch_names(
