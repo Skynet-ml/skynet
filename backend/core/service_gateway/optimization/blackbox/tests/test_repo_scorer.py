@@ -534,7 +534,7 @@ def test_a_watch_note_reaches_the_agent_in_its_next_scoring_reply(tmp_path: Path
         version = _patch(tmp_path / "v1", archive, {"src/app.py": "x = 4\n"})
         warned = json.loads(scorer.dispatch({"candidate": version}).body)
         assert warned["feedback"] == (
-            "Check the constraints file. You are probably about to break one of its rules:"
+            "Check the rule file that optimize.toml names. You are probably about to break one of its rules:"
             " It reads expected answers.\n\nvalue read"
         )
         assert warned["score"] == pytest.approx(0.4)

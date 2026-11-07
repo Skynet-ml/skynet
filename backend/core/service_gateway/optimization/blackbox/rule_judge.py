@@ -1,9 +1,10 @@
 """Watch a repository run against its intent and plain-language rules.
 
-A repository's ``optimize.toml`` may state the run's intent under
-``[instructions] intent`` and list illegal approaches under ``[rules]
-illegal``. Path rules cannot catch either, so an optional watch hook reads the
-agent's recent steps against them during the run:
+A repository's ``optimize.toml`` may name an instructions file that states
+the run's intent (``instructions``) and a rule file that lists illegal
+approaches (``[proposer] illegal``), one top-level bullet per rule. Path rules
+cannot catch either, so an optional watch hook reads the agent's recent steps
+against them during the run:
 
 - It is off by default and turned on per run.
 - Every :data:`WATCH_EVERY_ACTIONS` agent actions, it reads the last
@@ -69,8 +70,14 @@ _EVENT_TITLES = {
     EVENT_VERDICT: "Watch hook verdict",
 }
 _NOTES = {
-    "off_intent": "Check the run's intent in the constraints file. Your recent work seems to move away from it: {reason}",
-    "breaks_rule": "Check the constraints file. You are probably about to break one of its rules: {reason}",
+    "off_intent": (
+        f"Check the run's intent in the instructions file that {CONSTRAINTS_FILE} names. Your recent work seems"
+        " to move away from it: {reason}"
+    ),
+    "breaks_rule": (
+        f"Check the rule file that {CONSTRAINTS_FILE} names. You are probably about to break one of its rules:"
+        " {reason}"
+    ),
 }
 
 Ask = Callable[[str], "str | None"]
@@ -95,8 +102,8 @@ def watch_prompt(intent: str | None, rules: Sequence[str], steps: Sequence[str])
     intent_text = (intent or "").strip()[:_MAX_INTENT_CHARS] or "(no intent given)"
     recent = "\n".join(f"- {step}" for step in steps)[-_MAX_STEPS_CHARS:]
     return (
-        "You watch a code optimization agent. The repository's"
-        f" {CONSTRAINTS_FILE} gives the run's intent and its rules.\n\n"
+        "You watch a code optimization agent. The intent comes from the repository's instructions file,"
+        f" and the rules come from the rule file. {CONSTRAINTS_FILE} names both files.\n\n"
         f"<intent>\n{intent_text}\n</intent>\n\n<rules>\n{rules_text}\n</rules>\n\n"
         'Read the agent\'s recent steps. Use "breaks_rule" when the work goes toward a rule violation,'
         ' "off_intent" when it moves away from the intent, and "ok" otherwise. Flag only clear signs,'

@@ -360,3 +360,15 @@ def test_coder_prompt_places_metric_secrets_and_candidate_mcp_servers() -> None:
     assert "List in ``[metric] services`` the services only the metric calls" in prompt
     assert 'standard ``.mcp.json`` file and set ``mcp = "<path>"`` in ``[run]``' in prompt
     assert "[run] tools" not in prompt
+
+
+def test_coder_prompt_writes_the_rules_into_files_and_their_paths_into_the_toml() -> None:
+    """The coding agent writes the intent and rules into markdown files and names them in optimize.toml (E48)."""
+    prompt = " ".join(workspace_coder.CODER_PROMPT.split())
+
+    assert "Never put rule text in optimize.toml" in prompt
+    assert 'set ``instructions = "docs/intent.md"`` at the top of optimize.toml, before any section' in prompt
+    assert "one top-level ``- `` bullet for each rule" in prompt
+    assert 'set ``illegal = "docs/rules.md"`` in ``[proposer]``' in prompt
+    assert "[instructions]" not in prompt
+    assert "[rules]" not in prompt

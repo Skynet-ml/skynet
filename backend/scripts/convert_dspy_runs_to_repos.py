@@ -74,6 +74,8 @@ DSPY_REQUIREMENT = "dspy==3.3.1"
 UNSUPPORTED_METRIC_HELPERS = frozenset({"observation", "service_cost", "reward"})
 RESERVED_PROGRAM_FILES = frozenset({"__init__.py", "pipeline.py", "prompts.json"})
 MAX_INTENT_CHARS = 4_000
+INTENT_FILE = "docs/intent.md"
+INTENT_INVARIANT = "Invariant: program/__init__.py keeps defining run(input)."
 MAX_SETUP_COMMAND_CHARS = 300
 PLACEHOLDER_REPOSITORY = "pending-owner/pending-repo"
 NEW_RUN_PLACEHOLDER = "<new run id for {job_id}>"
@@ -343,18 +345,18 @@ def _starting_prompts(payload: dict[str, Any], result: dict[str, Any]) -> tuple[
     return (candidate if isinstance(candidate, str) else ""), False
 
 
-def _optimize_toml(objective: str, setup_command: str | None) -> str:
+def _optimize_toml(setup_command: str | None) -> str:
     """Write the repository's ``optimize.toml``.
 
     Args:
-        objective: The run's objective, already cut to the intent limit.
         setup_command: The old install command, when it fits.
 
     Returns:
-        The file text.
+        The file text. It names :data:`INTENT_FILE` as its instructions file.
     """
     lines = [
         "version = 1",
+        f"instructions = {_toml_string(INTENT_FILE)}",
         "",
         "[paths]",
         f'editable = ["{PROGRAM_DIR}"]',
@@ -363,11 +365,21 @@ def _optimize_toml(objective: str, setup_command: str | None) -> str:
     ]
     if setup_command:
         lines += ["[setup]", f"command = {_toml_string(setup_command)}", ""]
-    lines += ["[instructions]"]
-    if objective:
-        lines.append(f"intent = {_toml_string(objective)}")
-    lines.append(f"invariants = [{_toml_string('program/__init__.py keeps defining run(input).')}]")
     return "\n".join(lines) + "\n"
+
+
+def _intent_md(objective: str) -> str:
+    """Write the instructions file that ``optimize.toml`` names.
+
+    Args:
+        objective: The run's objective, already cut so the file fits the intent limit.
+
+    Returns:
+        The file text: the objective, then the invariant the program must keep.
+    """
+    parts = [objective.strip()] if objective.strip() else []
+    parts.append(INTENT_INVARIANT)
+    return "\n\n".join(parts) + "\n"
 
 
 def _readme(name: str, objective: str, background: str, job_id: str, demos_dropped: bool) -> str:
@@ -485,17 +497,20 @@ def convert_job(job: dict[str, Any]) -> dict[str, Any]:
     prompts, demos_dropped = _starting_prompts(payload, result)
     if demos_dropped:
         warnings.append("Few-shot demos (__dspy_state__) were dropped; only instructions carried over.")
-    intent = objective
-    if len(intent) > MAX_INTENT_CHARS:
-        intent = intent[:MAX_INTENT_CHARS]
-        warnings.append("The objective was cut to 4,000 characters in optimize.toml; the request keeps all of it.")
+    # The invariant and its separator share the instructions file's 4,000-character limit.
+    intent_room = MAX_INTENT_CHARS - len(INTENT_INVARIANT) - 2
+    intent = objective.strip()
+    if len(intent) > intent_room:
+        intent = intent[:intent_room]
+        warnings.append(f"The objective was cut to fit {INTENT_FILE}; the request keeps all of it.")
     setup_command = (workspace.get("install_command") or "").strip() or None
     if setup_command and len(setup_command) > MAX_SETUP_COMMAND_CHARS:
         warnings.append("The install command is too long for optimize.toml; the run infers a setup command.")
         setup_command = None
 
     files: dict[str, str] = {
-        "optimize.toml": _optimize_toml(intent, setup_command),
+        "optimize.toml": _optimize_toml(setup_command),
+        INTENT_FILE: _intent_md(intent),
         "README.md": _readme(name, objective, background, job_id, demos_dropped),
         "requirements.txt": DSPY_REQUIREMENT + "\n",
         f"{PROGRAM_DIR}/__init__.py": PROGRAM_INIT_TEMPLATE.replace("__ARTIFACT_KIND__", repr(artifact_kind)),
