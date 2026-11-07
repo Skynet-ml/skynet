@@ -71,8 +71,8 @@ into a file.
 - A rule file with no bullets, more than 50 rules, a rule longer than 500
   characters, or text outside a top-level bullet. A line that starts with
   `- `, `* ` or `+ ` at the start of the line opens a rule. Indented lines
-  and lines right after it continue that rule. Headings (`#` to `######`
-  and a space) and blank lines separate rules. Any other line that starts
+  and lines right after it continue that rule. Headings (`#` to `######`,
+  then a space, a tab or the line end) and blank lines separate rules. Any other line that starts
   with `#` is rule text.
 
 ## Where the effective environment is recorded

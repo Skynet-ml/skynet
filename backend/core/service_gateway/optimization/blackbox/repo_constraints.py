@@ -76,7 +76,6 @@ _RUN_ROLE_SECTIONS = ("run", "metric")
 # The candidate and the metric share one box today (E37), so neither can size
 # or wall off its own box; these keys fail with that reason, not as unknown.
 _SHARED_BOX_KEYS = frozenset({"network", "vcpus"})
-# A bullet that starts a rule: "- ", "* " or "+ " at the start of the line.
 _BULLET = re.compile(r"[-*+](?:[ \t]+(.*))?")
 # Only an ATX heading counts; "#1 Do not ..." or "#tag" is text and must not be dropped as a heading.
 _HEADING = re.compile(r"#{1,6}(?:[ \t]|$)")
