@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import tarfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -511,7 +512,7 @@ def test_a_sandbox_that_fails_to_open_fails_the_job(tmp_path: Path) -> None:
         gate=recorder.gate,
     )
 
-    assert (job.status, job.error, job.reserved_usd) == ("failed", "Sandbox quota reached.", 0.0)
+    assert (job.status, job.error, job.reserved_usd) == ("failed", "RuntimeError", 0.0)
     assert not recorder.staged.workdir.exists()
 
 
@@ -572,16 +573,17 @@ def _run_leaky(recorder: Recorder, job: HardeningJob) -> HardeningJob:
     )
 
 
-def test_a_close_error_at_review_keeps_the_round_reviewable(tmp_path: Path) -> None:
+def test_a_close_error_at_review_keeps_the_round_reviewable(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """A close error after the pass keeps waiting_review, so the user reviews round 1 and no new attack runs."""
     (tmp_path / "first").mkdir()
     first = Recorder(tmp_path / "first")
 
-    job = _run_leaky(first, _cloud_job())
+    with caplog.at_level(logging.WARNING, logger="core.worker.hardening_job"):
+        job = _run_leaky(first, _cloud_job())
 
-    assert job.status == "waiting_review"
-    assert job.error == "A sandbox failed to close (RuntimeError)."
-    assert "sk-secret" not in job.model_dump_json()
+    assert (job.status, job.error) == ("waiting_review", None)
+    assert "RuntimeError" in caplog.text
+    assert "sk-secret" not in caplog.text
     assert job.spent_usd == pytest.approx(0.6)
     assert job.reserved_usd == pytest.approx(6.0)
     assert len(job.rounds_detail) == 1
@@ -616,8 +618,7 @@ def test_a_close_error_at_done_keeps_done(tmp_path: Path, monkeypatch: pytest.Mo
 
     job = _run_leaky(recorder, _cloud_job())
 
-    assert (job.status, job.spent_usd) == ("done", 1.5)
-    assert job.error == "A sandbox failed to close (RuntimeError)."
+    assert (job.status, job.spent_usd, job.error) == ("done", 1.5, None)
     assert recorder.open_sandboxes == 0
     assert not recorder.staged.workdir.exists()
 
@@ -637,14 +638,41 @@ def test_a_gate_that_raises_fails_the_job(tmp_path: Path) -> None:
         Raises:
             OSError: Always.
         """
-        raise OSError("Tree unreadable.")
+        raise OSError("Tree unreadable: token=sk-secret")
 
     recorder.gate = broken  # type: ignore[method-assign]
 
     job = _run(recorder, _cloud_job(), local_mode=False)
 
-    assert (job.status, job.error) == ("failed", "Tree unreadable.")
+    assert (job.status, job.error) == ("failed", "OSError")
     assert job.reserved_usd == job.spent_usd == 0
+    assert "sandbox" not in recorder.events
+    assert not recorder.staged.workdir.exists()
+
+
+def test_a_gate_constraints_error_ends_as_preflight_failed(tmp_path: Path) -> None:
+    """A bad optimize.toml found by the gate is a preflight failure with its reason, not a failed job."""
+    recorder = Recorder(tmp_path)
+
+    def refuse(archive: Path, secret_names: Any, *, place: str) -> list[GateFailure]:
+        """Refuse the constraints file.
+
+        Args:
+            archive: The full tree.
+            secret_names: The run's secret names.
+            place: local or cloud.
+
+        Raises:
+            ConstraintsError: Always.
+        """
+        raise ConstraintsError("optimize.toml is not valid TOML.")
+
+    recorder.gate = refuse  # type: ignore[method-assign]
+
+    job = _run(recorder, _cloud_job(), local_mode=False)
+
+    assert (job.status, job.preflight_failures) == ("preflight_failed", ["optimize.toml is not valid TOML."])
+    assert job.reserved_usd == 0
     assert "sandbox" not in recorder.events
     assert not recorder.staged.workdir.exists()
 

@@ -131,7 +131,8 @@ def run_hardening_job(
         runner_factory: Opens the attacker, judge and scorer sandboxes for one
             pass and closes them on exit.
         reserve: Holds the given dollars on the job's budget before paid work.
-            Each pass calls it again, so it must hold once per job.
+            Every pass calls it, so it must be idempotent for each job: the
+            budget holds once per job, however many passes run.
         stage: Fetches and strips the tree; :func:`stage_repository` by default.
         gate: The preflight gate; :func:`check_repository` by default.
 
@@ -141,8 +142,6 @@ def run_hardening_job(
     """
     if job.status not in _ACTIVE_STATUSES:
         return job
-    # A close error of an earlier pass is a note, not a state; this pass starts clean.
-    job = job.model_copy(update={"error": None})
     hold = required_reservation(job)
     if hold:
         try:
@@ -169,15 +168,16 @@ def run_hardening_job(
                     job, runner=runner, exploits_path=workspace.exploits_path, reference=workspace.reference
                 )
             return result
+        except ConstraintsError as exc:
+            return _preflight_failed(job, [str(exc)])
         except Exception as exc:
+            # After staging, a message can quote sandbox output or a secret, so
+            # the job and the log keep only the type.
+            logger.warning("Hardening job %s: the pass raised %s.", job.id, type(exc).__name__)
             if result is None:
-                return _end(job, "failed", error=str(exc) or type(exc).__name__)
+                return _end(job, "failed", error=type(exc).__name__)
             # The pass already reached its state. Failing it now would make a
             # retry pay for a new attack round and leave this round unreviewable.
-            # Only the type is kept: the message may quote sandbox output.
-            logger.warning("Hardening job %s: a sandbox failed to close (%s).", job.id, type(exc).__name__)
-            if result.status != "failed":
-                result.error = f"A sandbox failed to close ({type(exc).__name__})."
             return result
     finally:
         staged.close_scorers()
