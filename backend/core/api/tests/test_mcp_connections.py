@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from core.billing.mcp_server_presets import PRESETS
@@ -15,10 +16,40 @@ from core.billing.tests.test_mcp_oauth_client import OAuthServerState, connectio
 from core.config import settings
 
 from ..auth import AuthenticatedUser
+from ..errors import DomainError
 from ..routers.mcp_connections import create_mcp_connections_router
 from .conftest import bypass_auth
 
 APP_URL = "https://app.example"
+
+
+def _app(user: AuthenticatedUser | None = None) -> FastAPI:
+    """Mount the routes for one user with the app's coded error envelope.
+
+    Args:
+        user: The caller, or ``None`` for the default test user.
+
+    Returns:
+        The app.
+    """
+    app = FastAPI()
+    app.include_router(create_mcp_connections_router())
+    bypass_auth(app, user=user)
+
+    @app.exception_handler(DomainError)
+    async def _domain_error(_request: Any, exc: DomainError) -> JSONResponse:
+        """Answer with ``code`` at the top level, as the app envelope does.
+
+        Args:
+            _request: The request.
+            exc: The coded error.
+
+        Returns:
+            The error answer.
+        """
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail, "code": exc.code})
+
+    return app
 
 
 @pytest.fixture
@@ -29,10 +60,7 @@ def api(connections: Any, monkeypatch: pytest.MonkeyPatch) -> TestClient:  # noq
         A client that does not follow redirects.
     """
     monkeypatch.setattr(settings, "app_public_url", APP_URL)
-    app = FastAPI()
-    app.include_router(create_mcp_connections_router())
-    bypass_auth(app)
-    return TestClient(app, follow_redirects=False)
+    return TestClient(_app(), follow_redirects=False)
 
 
 @pytest.fixture
@@ -42,10 +70,7 @@ def bob(api: TestClient) -> TestClient:
     Returns:
         A client for bob, who started no sign-in.
     """
-    app = FastAPI()
-    app.include_router(create_mcp_connections_router())
-    bypass_auth(app, user=AuthenticatedUser(username="bob", role="user", groups=()))
-    return TestClient(app, follow_redirects=False)
+    return TestClient(_app(AuthenticatedUser(username="bob", role="user", groups=())), follow_redirects=False)
 
 
 def _approve(authorize_url: str) -> dict[str, str]:
@@ -118,7 +143,7 @@ def test_connect_list_and_disconnect(api: TestClient, oauth_server: OAuthServerS
     assert api.delete("/mcp/connections/tracker").status_code == 204
     assert api.get("/mcp/connections").json() == {"connections": []}
     gone = api.delete("/mcp/connections/tracker")
-    assert (gone.status_code, gone.json()["detail"]["code"]) == (404, "mcp_connection.not_connected")
+    assert (gone.status_code, gone.json()["code"]) == (404, "mcp_connection.not_connected")
 
 
 def test_callback_reports_a_decline_and_finish_refuses_a_reused_state(
@@ -133,7 +158,7 @@ def test_callback_reports_a_decline_and_finish_refuses_a_reused_state(
     body = _app_fragment(api.get("/mcp/connections/callback", params=_approve(start.json()["authorize_url"])))
     assert api.post("/mcp/connections/finish", json=body).status_code == 200
     reused = api.post("/mcp/connections/finish", json=body)
-    assert (reused.status_code, reused.json()["detail"]["code"]) == (400, "mcp_connection.state_invalid")
+    assert (reused.status_code, reused.json()["code"]) == (400, "mcp_connection.state_invalid")
 
 
 def test_finish_refuses_a_sign_in_that_another_user_started(
@@ -147,7 +172,7 @@ def test_finish_refuses_a_sign_in_that_another_user_started(
 
     hijack = bob.post("/mcp/connections/finish", json=body)
 
-    assert (hijack.status_code, hijack.json()["detail"]["code"]) == (403, "mcp_connection.wrong_account")
+    assert (hijack.status_code, hijack.json()["code"]) == (403, "mcp_connection.wrong_account")
     assert oauth_server.token_forms == []
     assert api.get("/mcp/connections").json() == {"connections": []}
     assert bob.get("/mcp/connections").json() == {"connections": []}
@@ -171,19 +196,19 @@ def test_callback_sends_only_codes_to_the_fixed_app_url(api: TestClient) -> None
     assert _app_fragment(passed) == {"state": "s", "code": "c"}
     assert "evil" not in passed.headers["location"]
     unknown = api.post("/mcp/connections/finish", json={"state": "never-issued", "code": "c"})
-    assert (unknown.status_code, unknown.json()["detail"]["code"]) == (400, "mcp_connection.state_invalid")
+    assert (unknown.status_code, unknown.json()["code"]) == (400, "mcp_connection.state_invalid")
 
 
 def test_start_errors_carry_a_code(api: TestClient, oauth_server: OAuthServerState) -> None:  # noqa: F811
     """Answer 422 for a bad request and 409 for a server that needs pre-registration."""
     unknown = api.post("/mcp/connections/start", json={"preset": "nowhere"})
-    assert (unknown.status_code, unknown.json()["detail"]["code"]) == (422, "mcp_connection.invalid_preset")
+    assert (unknown.status_code, unknown.json()["code"]) == (422, "mcp_connection.invalid_preset")
     missing = api.post("/mcp/connections/start", json={"name": "tracker"})
-    assert (missing.status_code, missing.json()["detail"]["code"]) == (422, "mcp_connection.invalid_request")
+    assert (missing.status_code, missing.json()["code"]) == (422, "mcp_connection.invalid_request")
 
     oauth_server.registration = False
     refused = api.post("/mcp/connections/start", json={"name": "tracker", "url": f"{oauth_server.base}/mcp"})
 
     assert refused.status_code == 409
-    assert refused.json()["detail"]["code"] == "mcp_connection.registration_required"
-    assert "register first" in refused.json()["detail"]["message"]
+    assert refused.json()["code"] == "mcp_connection.registration_required"
+    assert "register first" in refused.json()["detail"]

@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Annotated
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -30,6 +30,7 @@ from ...billing.mcp_oauth_client import (
 from ...billing.mcp_server_presets import PRESETS
 from ...config import settings
 from ..auth import AuthenticatedUser, get_authenticated_user
+from ..errors import DomainError
 
 
 # One remote MCP server the picker offers.
@@ -80,18 +81,19 @@ class McpConnectionFinishResponse(BaseModel):
     name: str
 
 
-def _http_error(error: McpOAuthError) -> HTTPException:
+def _http_error(error: McpOAuthError) -> DomainError:
     """Turn a sign-in failure into its HTTP answer.
 
+    A ``DomainError`` puts ``code`` and ``params`` at the top of the error
+    envelope, where the web app reads them to show the localized message.
+
     Args:
-        error: The failure with its safe message.
+        error: The failure with its i18n key and params.
 
     Returns:
         The exception to raise.
     """
-    return HTTPException(
-        status_code=error.status, detail={"code": error.code, "params": error.params, "message": error.message}
-    )
+    return DomainError(error.code, status=error.status, params=error.params)
 
 
 def _app_redirect(fragment: dict[str, str] | None = None, **params: str) -> RedirectResponse:
@@ -184,7 +186,7 @@ def create_mcp_connections_router() -> APIRouter:
             The authorization URL.
 
         Raises:
-            HTTPException: 422 for an unknown preset or a bad name or URL; 409
+            DomainError: 422 for an unknown preset or a bad name or URL; 409
                 when the server needs a pre-registered client; 502 when
                 discovery fails.
         """
@@ -247,7 +249,7 @@ def create_mcp_connections_router() -> APIRouter:
             The connector name.
 
         Raises:
-            HTTPException: 400 for an unknown, used or old state; 403 when
+            DomainError: 400 for an unknown, used or old state; 403 when
                 another user started the sign-in; 502 when the exchange fails;
                 503 when the vault is not configured.
         """
@@ -276,7 +278,7 @@ def create_mcp_connections_router() -> APIRouter:
             An empty 204 answer.
 
         Raises:
-            HTTPException: 404 when the caller has no such connection.
+            DomainError: 404 when the caller has no such connection.
         """
         if not disconnect(user.username, name):
             raise _http_error(McpOAuthError("mcp_connection.not_connected", 404, name=name))
