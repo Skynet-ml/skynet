@@ -16,6 +16,8 @@ from ..protocol import (
     Task,
     candidate_key,
     engine_score,
+    fill_unscored,
+    score_batch,
 )
 from ..runner import normalize_score
 from .mocks import vowel_scorer
@@ -342,3 +344,34 @@ def test_evaluate_logs_a_debug_heartbeat_per_scorer_call(caplog: pytest.LogCaptu
         "scorer eval 1/5 score=0.500",
         "scorer eval 2/5 score=0.750",
     ]
+
+
+def test_fill_unscored_gives_a_null_case_its_versions_scored_mean() -> None:
+    """A null case takes the same version's scored mean; a version with no scored case stays UNSCORED."""
+    candidates = ["a", "a", "a", "b", "b"]
+
+    assert fill_unscored(candidates, [0.2, None, 0.6, None, None]) == pytest.approx([0.2, 0.4, 0.6, UNSCORED, UNSCORED])
+
+
+def test_score_batch_keeps_order_and_metric_error_status() -> None:
+    """A batch scores each pair once, keeps the order, and still marks the filled case as a metric error."""
+    server = EvalServer(lambda c, e: _crashing("boom" if e == 2 else c, e), max_evals=10)
+
+    def score_one(candidate: Any, example: Any) -> tuple[float | None, dict[str, Any]]:
+        """Score one pair through the server.
+
+        Args:
+            candidate: The version.
+            example: The case.
+
+        Returns:
+            The server's score, ``None`` after a metric error, and side info.
+        """
+        return server.evaluate(candidate, example)
+
+    for workers in (1, 4):
+        results = score_batch(score_one, [("ab", 1), ("ab", 2), ("abcd", 3)], workers)
+
+        assert [score for score, _ in results] == [-2.0, -2.0, -4.0]
+        assert results[1][1]["status"] == METRIC_ERROR
+    assert server.used == 6

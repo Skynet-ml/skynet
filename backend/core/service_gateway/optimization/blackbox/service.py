@@ -1275,7 +1275,8 @@ def _run_job(
     best_candidate = result.best_candidate
     engine_pick_error = server.metric_error(best_candidate)
     if engine_pick_error is not None:
-        # SKY-367: the engine ranked a crashed version by the search floor.
+        # SKY-367: an engine can still return a version with a crashed case,
+        # because it ranks by the filled scores; final selection never keeps it.
         logger.warning(
             "the engine picked a version with a %s (%s); using the best scored version", METRIC_ERROR, engine_pick_error
         )

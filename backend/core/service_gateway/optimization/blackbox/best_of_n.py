@@ -25,7 +25,8 @@ class _SampleStream:
 
     Upstream scores the samples one after another, one scorer run per case,
     so consecutive runs group into samples by count alone; a sample cut short
-    by the budget never completes its group and stays out of the tree.
+    by the budget never completes its group and stays out of the tree, and a
+    sample with a metric error on any case stays out too.
     """
 
     def __init__(self, task: Task, server: EvalServer, ctx: EngineContext) -> None:
@@ -44,6 +45,7 @@ class _SampleStream:
         self._samples = 0
         self._seen = 0
         self._scores: list[tuple[str, float]] = []
+        self._metric_error = False
 
     def __call__(self, candidate: Any, example: Any, score: float | None) -> None:
         """Record one scored case, announcing the sample once its last case is in.
@@ -54,13 +56,19 @@ class _SampleStream:
             score: The case's score, ``None`` after a metric error.
         """
         self._seen += 1
-        if isinstance(score, float | int) and math.isfinite(score):
+        if score is None:
+            self._metric_error = True
+        else:
             self._scores.append((self._case_ids.get(id(example), "?"), float(score)))
         if self._seen < self._per_sample:
             return
         scores, self._scores, self._seen = self._scores, [], 0
+        metric_error, self._metric_error = self._metric_error, False
         sample, self._samples = self._samples, self._samples + 1
-        if not scores:
+        # A sample with a metric error on any case has no score (SKY-350), the
+        # same as the run's final selection treats it, and the candidate event
+        # carries a number, so the sample stays out of the tree.
+        if metric_error:
             return
         emit_candidate(
             self._sink,
@@ -102,7 +110,7 @@ class BestOfNEngine:
             return run_native_engine("best_of_n_repo", task, server, ctx)
         finalists = _validation_finalists(task, server)
         sampling = server.lane(server.remaining - finalists * len(task.valset))
-        upstream = upstream_server(task, sampling, ctx, on_eval=_SampleStream(task, sampling, ctx))
+        upstream = upstream_server(task, sampling, ctx, on_eval=_SampleStream(task, sampling, ctx), prefetch_cases=True)
         result = None
         budget_stop = None
         try:
@@ -126,7 +134,8 @@ class BestOfNEngine:
             raise ServiceError("Best-of-N did not produce a result.")
         engine.process_result(result, upstream.output_dir)
         adapted = local_result(result, server)
-        evaluated = any("score" in row for row in result.metadata.get("bon_cost_log", []))
+        # Upstream logs a sample with no scored case at -inf; it is not evaluated.
+        evaluated = any(math.isfinite(row.get("score", -math.inf)) for row in result.metadata.get("bon_cost_log", []))
         if budget_stop is not None:
             if evaluated:
                 budget_stop.result = adapted

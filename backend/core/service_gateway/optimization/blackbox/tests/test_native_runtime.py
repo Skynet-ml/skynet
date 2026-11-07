@@ -37,6 +37,7 @@ from .. import (
     best_of_n,
     gepa_engine,
     harness_bridge,
+    native_engines,
     native_runner,
     native_runtime,
     repo_tree,
@@ -1600,6 +1601,138 @@ def test_the_child_names_the_candidate_and_case_of_each_request(tmp_path: Path) 
     server.evaluate("seed", list(server._examples.values())[1])
     server.evaluate("unregistered", None)
     assert labels == [(0, "1"), (None, None)]
+
+
+def test_a_sweep_fills_a_null_case_with_the_scored_mean(tmp_path: Path) -> None:
+    """A case that always crashes leaves a sweep at the scored cases' mean, so versions still rank (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts.
+    """
+    mailbox = _RecordingMailbox()
+
+    def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+        """Score by vowel density, and give the parent's null on case ``c``."""
+        if example == {"id": "c"}:
+            return float("-inf"), {}
+        return sum(ch in "aeiou" for ch in candidate) / len(candidate), {}
+
+    mailbox.evaluate = evaluate  # type: ignore[method-assign]
+    task = UpstreamTask("seed", train_set=[{"id": "a"}, {"id": "b"}, {"id": "c"}])
+    server = native_runner.ProgressEvalServer(
+        task, mailbox, OptimizeAnythingConfig(max_evals=20, max_concurrency=1), tmp_path
+    )
+
+    good, good_info = server.evaluate_examples("aeiou", split="train")
+    poor, poor_info = server.evaluate_examples("axyz", split="train")
+    only_null, only_null_info = server.evaluate_examples("aeiou", example_ids=["c"])
+
+    assert good == 1.0
+    assert good_info["scores"] == {"a": 1.0, "b": 1.0, "c": 1.0}
+    assert poor == 0.25
+    assert poor_info["scores"]["c"] == 0.25
+    assert good > poor
+    assert only_null == float("-inf")
+    assert only_null_info["scores"] == {"c": float("-inf")}
+
+
+def _null_on(nulls: dict[str, set[str]]) -> _RecordingMailbox:
+    """Build a mailbox that gives the parent's null on chosen cases of chosen versions.
+
+    Args:
+        nulls: Case ids that get a null score, keyed by version text.
+
+    Returns:
+        A recording mailbox that scores every other case by vowel density.
+    """
+    mailbox = _RecordingMailbox()
+
+    def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+        """Give negative infinity, as the mailbox does for a parent null, on the chosen cases."""
+        if example is not None and example["id"] in nulls.get(candidate, set()):
+            return float("-inf"), {}
+        return sum(ch in "aeiou" for ch in candidate) / max(1, len(candidate)), {}
+
+    mailbox.evaluate = evaluate  # type: ignore[method-assign]
+    return mailbox
+
+
+def _child_server(mailbox: _RecordingMailbox, tmp_path: Path, max_evals: int = 20) -> Any:
+    """Build the child-side evaluation server over cases ``a`` and ``b``.
+
+    Args:
+        mailbox: Mailbox the server scores through.
+        tmp_path: Upstream evaluation artifacts.
+        max_evals: Evaluation budget.
+
+    Returns:
+        The child's progress evaluation server.
+    """
+    task = UpstreamTask("seed", train_set=[{"id": "a"}, {"id": "b"}])
+    config = OptimizeAnythingConfig(max_evals=max_evals, max_concurrency=1)
+    return native_runner.ProgressEvalServer(task, mailbox, config, tmp_path)
+
+
+def test_native_fill_unscored_fills_per_version() -> None:
+    """A null case takes its own version's scored mean; a version with no scored case stays negative infinity."""
+    inf = float("-inf")
+
+    assert native_engines.fill_unscored(["x", "x", "y", "y"], [0.2, inf, inf, inf]) == [0.2, 0.2, inf, inf]
+
+
+def test_best_logged_version_skips_a_version_with_no_scored_case(tmp_path: Path) -> None:
+    """The logged-aggregate fallback never picks a crashed version and ranks the rest by scored cases (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts.
+    """
+    server = _child_server(_null_on({"zzzz": {"a", "b"}, "aeio": {"b"}}), tmp_path)
+    for candidate in ("zzzz", "aeio", "axyz"):
+        score, _ = server.evaluate_examples(candidate, split="train")
+        server.log_progress(score, candidate=candidate)
+
+    assert native_engines.best_aggregate_candidate(server) == ("aeio", 1.0)
+
+
+def test_best_valset_version_skips_a_version_with_no_scored_case() -> None:
+    """GEPA's budget-stop fallback keeps only finite full-valset averages (SKY-367)."""
+    tracker = native_engines.BestValsetVersion()
+
+    for text, score in (("crashed", float("-inf")), ("ok", 0.25), ("partial", 0.9)):
+        tracker.on_valset_evaluated(
+            {
+                "candidate": {"candidate": text},
+                "average_score": score,
+                "num_examples_evaluated": 1 if text == "partial" else 2,
+                "total_valset_size": 2,
+            }
+        )
+
+    assert tracker.best == ("ok", 0.25)
+
+
+def test_best_of_n_repo_marks_a_crashed_sample_and_ranks_the_rest(tmp_path: Path) -> None:
+    """A sample with no scored case is a metric_error sample; one null case still ranks by the other (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts.
+    """
+    server = _child_server(_null_on({"zzzz": {"a", "b"}, "aeio": {"b"}}), tmp_path, max_evals=6)
+    patches = iter(["zzzz", "aeio", "axyz"])
+    engine = native_engines.BestOfNRepoEngine.__new__(native_engines.BestOfNRepoEngine)
+    engine.proposer = lambda *_: {"candidate": next(patches)}  # type: ignore[assignment]
+    engine.proposer.total_cost = 0.0  # type: ignore[attr-defined]
+    engine.proposer.session_ids = []  # type: ignore[attr-defined]
+    engine.max_token_cost = None
+    engine.stop_at_score = None
+    engine.samples = []
+    engine.best = None
+
+    result = engine.run(server.task, server)
+
+    assert [sample.get("outcome") for sample in result.metadata["samples"]] == ["metric_error", None, None]
+    assert [sample.get("score") for sample in result.metadata["samples"]] == [None, 1.0, 0.25]
+    assert (result.best_candidate, result.best_score) == ("aeio", 1.0)
 
 
 def test_unsupported_runtime_reason_names_the_cloud_sandbox_not_its_vendor() -> None:

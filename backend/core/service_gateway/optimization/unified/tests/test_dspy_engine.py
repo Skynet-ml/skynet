@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import pickle
 from typing import Any
 
 import dspy
@@ -392,6 +394,20 @@ def test_a_raising_metric_gives_no_score_and_is_charged_as_a_metric_error(feedba
         assert out.feedback == "ValueError: metric blew up"
     assert server.used == 1
     assert scores == [None]
+
+
+@pytest.mark.parametrize("clone", [copy.copy, copy.deepcopy, lambda score: pickle.loads(pickle.dumps(score))])
+def test_no_score_survives_copy_and_pickle(clone: Any) -> None:
+    """DSPy copies and pickles scores; a NoScore stays a falsy negative infinity NoScore.
+
+    Args:
+        clone: The copy, deepcopy or pickle round trip.
+    """
+    score = clone(NoScore())
+
+    assert isinstance(score, NoScore)
+    assert score == float("-inf")
+    assert not score
 
 
 @pytest.mark.parametrize("error", [ScorerAbortError("stop"), BudgetExhaustedError("spent")])

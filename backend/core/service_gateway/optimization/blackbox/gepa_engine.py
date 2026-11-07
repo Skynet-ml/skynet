@@ -23,7 +23,16 @@ from ..budget_stop import BudgetReached
 from ..trajectory import capture_proposal_prompts, trajectory_watch
 from .feedback import STR_CANDIDATE_KEY, emit_scorer_feedback, gepa_side_info
 from .native_runtime import run_native_engine
-from .protocol import BudgetExhaustedError, Candidate, EngineContext, EvalServer, Result, Task, engine_score
+from .protocol import (
+    BudgetExhaustedError,
+    Candidate,
+    EngineContext,
+    EvalServer,
+    Result,
+    Task,
+    engine_score,
+    score_batch,
+)
 from .upstream import GEPA_SOURCE
 
 logger = logging.getLogger(__name__)
@@ -93,7 +102,7 @@ class GepaEngine:
         # so the tree drawer can pair the scorer's notes with a case's score cell.
         example_ids = {id(example): str(index) for index, example in enumerate([*task.cases, *task.valset])}
 
-        def evaluator(candidate: Candidate, example: Any = None) -> tuple[float, dict[str, Any]]:
+        def score_one(candidate: Candidate, example: Any = None) -> tuple[float | None, dict[str, Any]]:
             """Route one GEPA evaluation through the budgeted server and report its feedback.
 
             Args:
@@ -101,10 +110,9 @@ class GepaEngine:
                 example: The case, or ``None`` in single-task mode.
 
             Returns:
-                The score (:data:`UNSCORED` after a metric error, so GEPA never
-                accepts or picks that version) and side information, named
-                scores as plain numbers for GEPA's objective frontier and their
-                feedback beside them.
+                The score (``None`` after a metric error) and side information,
+                named scores as plain numbers for GEPA's objective frontier and
+                their feedback beside them.
             """
             if ctx.check_budget is not None:
                 ctx.check_budget()
@@ -117,9 +125,43 @@ class GepaEngine:
                 score=score,
                 side_info=side_info,
             )
-            return engine_score(score), gepa_side_info(side_info)
+            return score, gepa_side_info(side_info)
 
-        kwargs: dict[str, Any] = {"seed_candidate": task.seed_candidate, "evaluator": evaluator, "config": config}
+        def evaluator(candidate: Candidate, example: Any = None) -> tuple[float, dict[str, Any]]:
+            """Score one case alone, as GEPA's single-pair calls do.
+
+            Args:
+                candidate: The version GEPA wants scored.
+                example: The case, or ``None`` in single-task mode.
+
+            Returns:
+                The score, :data:`UNSCORED` after a metric error, and side information.
+            """
+            score, side_info = score_one(candidate, example)
+            return engine_score(score), side_info
+
+        def batch_evaluator(pairs: list[tuple[Candidate, Any]]) -> list[tuple[float, dict[str, Any]]]:
+            """Score one GEPA batch and fill each null case with its version's scored mean.
+
+            GEPA averages a version's batch itself. A filled case leaves that
+            mean at the scored cases' mean, so a case that always crashes does
+            not hide which version is better (SKY-367).
+
+            Args:
+                pairs: The ``(candidate, case)`` pairs of one GEPA batch.
+
+            Returns:
+                One ``(score, side_info)`` per pair, in order.
+            """
+            # Serial, like ``parallel=False`` above: the budget checks stay exact.
+            return score_batch(score_one, pairs, 1)
+
+        kwargs: dict[str, Any] = {
+            "seed_candidate": task.seed_candidate,
+            "evaluator": evaluator,
+            "batch_evaluator": batch_evaluator,
+            "config": config,
+        }
         # Train cases drive reflection and the validation cases rank versions.
         # Without a validation split GEPA ranks on the train cases; the test
         # split never reaches GEPA, the service's final run scores it.

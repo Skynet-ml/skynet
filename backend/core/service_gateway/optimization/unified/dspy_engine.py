@@ -452,6 +452,17 @@ class NoScore(float):
         """
         return False
 
+    def __reduce__(self) -> tuple[type[NoScore], tuple[()]]:
+        """Rebuild through the no-argument constructor on copy and pickle.
+
+        The default float reduction passes the value to ``__new__``, which
+        takes no value, so copies and pickles would fail without this.
+
+        Returns:
+            The class and its empty constructor arguments.
+        """
+        return (NoScore, ())
+
 
 def run_output(pred: Any) -> Any:
     """Return what ``run`` returned for a prediction :class:`RunProgram` made.

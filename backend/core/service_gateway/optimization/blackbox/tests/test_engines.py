@@ -27,17 +27,19 @@ from core.models.blackbox import (
     BLACKBOX_ENGINE_GEPA,
     BLACKBOX_ENGINE_META_HARNESS,
     BLACKBOX_ENGINE_SHINKA_EVOLVE,
+    BlackboxStrategy,
 )
 from core.service_gateway.optimization.cost_ceiling import CostCeilingExceededError
 
+from .. import auto
 from .. import gepa_engine as gepa_mod
 from ..autoresearch import AutoResearchEngine
 from ..best_of_n import BestOfNEngine
 from ..gepa_engine import GepaEngine
 from ..meta_harness import MetaHarnessEngine
-from ..protocol import BudgetExhaustedError, EngineContext, EvalServer, Task
+from ..protocol import UNSCORED, BudgetExhaustedError, EngineContext, EvalServer, Task
 from ..registry import ENGINES, EngineCapabilities, available_engine_ids, get_engine
-from ..upstream import GEPA_SOURCE
+from ..upstream import AUTO_ENGINES, GEPA_SOURCE
 from .mocks import FakeGateway, make_ctx, vowel_scorer
 
 _NATIVE_CAPS = EngineCapabilities(proposer_available=True)
@@ -301,7 +303,92 @@ def test_best_of_n_skips_a_sample_whose_metric_raises(tmp_path: Path) -> None:
     assert [entry["score"] for entry in log] == [None, 1.0, 0.0]
     assert [entry["best_score"] for entry in log] == [None, 1.0, 1.0]
     events = [metrics for event, metrics in sink if event == PROGRESS_CANDIDATE]
-    assert all(row.get("score") is None or math.isfinite(row["score"]) for row in events)
+    assert [row["candidate_id"] for row in events] == ["1", "2"]
+    assert [row["prompt"]["current_candidate"] for row in events] == ["aeiou", "xyz"]
+    assert [row["score"] for row in events] == [1.0, 0.0]
+
+
+def test_best_of_n_ranks_a_sample_with_one_raising_case_by_its_scored_cases(tmp_path: Path) -> None:
+    """Fill one null case with the sample's scored mean, so valid samples keep their rank (SKY-367)."""
+    model = _SequenceModel(["abab", "aeiou", "xyz"])
+    sink: list[tuple[str, dict[str, Any]]] = []
+    task = Task(seed_candidate="seed", cases=[{"id": "a"}, {"id": "b"}])
+
+    def score(candidate: Any, example: Any = None) -> tuple[float, dict[str, Any]]:
+        """Raise on the second case of the first sample only.
+
+        Args:
+            candidate: Proposal.
+            example: Dataset example.
+
+        Returns:
+            Vowel density and side info.
+
+        Raises:
+            RuntimeError: For the first sample's second case.
+        """
+        if candidate == "abab" and example is task.cases[1]:
+            raise RuntimeError("scorer bug")
+        return vowel_scorer(candidate, example)
+
+    server = EvalServer(score, max_evals=6)
+    ctx = EngineContext(
+        reflection_lm=model,
+        run_dir=str(tmp_path),
+        progress_callback=lambda event, metrics: sink.append((event, metrics)),
+    )
+
+    result = BestOfNEngine().run(task, server, ctx)
+
+    assert result.best_candidate == "aeiou"
+    assert [entry["score"] for entry in result.metadata["bon_cost_log"]] == [0.5, 1.0, 0.0]
+    assert server.metric_error("abab") is not None
+    assert server.used == 6
+    events = [metrics for event, metrics in sink if event == PROGRESS_CANDIDATE]
+    assert [row["prompt"]["current_candidate"] for row in events] == ["aeiou", "xyz"]
+
+
+def test_upstream_best_of_n_scores_every_case_once_in_task_order(tmp_path: Path) -> None:
+    """Guard the Best-of-N prefetch: upstream asks for each train case once, in order (SKY-367).
+
+    The adapter scores every case of a sample on its first single-case call.
+    If upstream changes its case order or skips cases, this test fails first.
+    """
+    model = _SequenceModel(["aeiou", "xyz"])
+    cases = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
+    upstream_task = UpstreamTask(name="order", seed_candidate="seed", objective="", background="", train_set=cases)
+    asked: list[tuple[Any, Any]] = []
+
+    def score(candidate: Any, example: Any = None) -> tuple[float, dict[str, Any]]:
+        """Record which case upstream asks for.
+
+        Args:
+            candidate: Proposal.
+            example: Dataset example.
+
+        Returns:
+            Vowel density and side info.
+        """
+        asked.append((candidate, example))
+        return vowel_scorer(candidate, example)
+
+    upstream = UpstreamEvalServer(upstream_task, score, BudgetTracker(max_evals=6))
+    with FakeGateway(reply=lambda body: model(body["messages"])) as gateway:
+        UpstreamBestOfN(
+            OptimizeAnythingConfig(
+                engine="best_of_n",
+                max_evals=6,
+                engine_config={
+                    "model": "openai/order-fixture",
+                    "lm_kwargs": {"api_base": gateway.url, "api_key": "fixture", "num_retries": 0},
+                },
+            )
+        ).run(upstream_task, upstream)
+
+    assert [(candidate, example["id"]) for candidate, example in asked] == [
+        (candidate, case["id"]) for candidate in ("aeiou", "xyz") for case in cases
+    ]
+    assert all(example is cases[index % 3] for index, (_, example) in enumerate(asked))
 
 
 def test_gepa_engine_survives_a_raising_metric_and_never_picks_it(tmp_path: Path) -> None:
@@ -319,6 +406,95 @@ def test_gepa_engine_survives_a_raising_metric_and_never_picks_it(tmp_path: Path
     tree = result.metadata["candidate_tree"]
     assert all(node["candidate"] != "aeiou" for node in tree)
     assert all(node["val_score"] is None or math.isfinite(node["val_score"]) for node in tree)
+
+
+def test_gepa_engine_ranks_by_scored_cases_when_one_case_always_crashes(tmp_path: Path) -> None:
+    """A validation case that crashes for every version leaves GEPA ranking by the scored cases (SKY-367)."""
+
+    def crash_on_case_two(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
+        """Raise on case 2 for every version, else score vowel density.
+
+        Args:
+            candidate: Candidate text.
+            case: The case.
+
+        Returns:
+            Vowel density and side information.
+
+        Raises:
+            RuntimeError: On case 2.
+        """
+        if case == {"i": 2}:
+            raise RuntimeError("scorer bug")
+        return vowel_scorer(candidate, case)
+
+    server = EvalServer(crash_on_case_two, max_evals=16)
+    task = Task(seed_candidate="hello world", objective="more vowels", cases=[{"i": 0}, {"i": 1}, {"i": 2}])
+
+    result = GepaEngine().run(task, server, make_ctx(str(tmp_path)))
+
+    assert server.used <= 16
+    # The fake LM proposes "aeiou" first: GEPA must accept it over the seed.
+    assert result.best_candidate == "aeiou"
+    tree = result.metadata["candidate_tree"]
+    assert [node["candidate"] for node in tree[:2]] == ["hello world", "aeiou"]
+    seed_score, child_score = (node["val_score"] for node in tree[:2])
+    assert math.isfinite(seed_score)
+    assert child_score > seed_score
+    assert server.metric_error("aeiou") is not None
+
+
+def test_auto_evaluator_gives_upstream_unscored_and_keeps_the_metric_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Auto's upstream evaluator turns a raising metric into UNSCORED; Skynet keeps the metric_error (SKY-367).
+
+    Args:
+        tmp_path: Artifact directory.
+        monkeypatch: Replaces the upstream composition to capture its evaluator.
+    """
+
+    class _CapturedError(Exception):
+        """Stop the run once the evaluator is captured."""
+
+    def capture(**kwargs: Any) -> Any:
+        """Capture the evaluator that Auto gives upstream.
+
+        Args:
+            kwargs: The upstream composition arguments.
+
+        Raises:
+            _CapturedError: Always, with the evaluator.
+        """
+        raise _CapturedError(kwargs["evaluator"])
+
+    def crash(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
+        """Raise on the version "broken", else score vowel density.
+
+        Args:
+            candidate: Candidate text.
+            case: The case.
+
+        Returns:
+            Vowel density and side information.
+
+        Raises:
+            RuntimeError: On the version "broken".
+        """
+        if candidate == "broken":
+            raise RuntimeError("scorer bug")
+        return vowel_scorer(candidate, case)
+
+    monkeypatch.setattr(auto, "optimize_best_of", capture)
+    server = EvalServer(crash, max_evals=2 * (len(AUTO_ENGINES) + 1))
+    with pytest.raises(_CapturedError) as captured:
+        auto.run_strategy(BlackboxStrategy(), Task("seed"), server, make_ctx(str(tmp_path)), caps=_NATIVE_CAPS)
+    evaluator = captured.value.args[0]
+
+    assert evaluator("broken")[0] == UNSCORED
+    assert evaluator("aeiou")[0] == 1.0
+    assert server.metric_error("broken") is not None
+    assert server.metric_error("aeiou") is None
 
 
 @pytest.mark.parametrize("seed", ["seed", None])

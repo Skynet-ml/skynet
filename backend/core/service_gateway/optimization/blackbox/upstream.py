@@ -20,7 +20,16 @@ from gepa.oa.task import Task as UpstreamTask
 
 from ..budget_stop import BudgetReached
 from .native_engines import AUTORESEARCH_VERSION, META_HARNESS_REVISION
-from .protocol import BudgetExhaustedError, EngineContext, EvalServer, Result, Task, engine_score
+from .protocol import (
+    BudgetExhaustedError,
+    EngineContext,
+    EvalServer,
+    Result,
+    Task,
+    candidate_key,
+    engine_score,
+    score_batch,
+)
 
 GEPA_REVISION = "0632cdb5dcc052e690eab439e1b4a7e3e9cfe407"
 GEPA_SOURCE = f"git+https://github.com/gepa-ai/gepa@{GEPA_REVISION}"
@@ -58,7 +67,11 @@ def upstream_task(task: Task, name: str) -> UpstreamTask:
 
 
 def upstream_server(
-    task: Task, server: EvalServer, ctx: EngineContext, on_eval: Callable[[Any, Any, float | None], None] | None = None
+    task: Task,
+    server: EvalServer,
+    ctx: EngineContext,
+    on_eval: Callable[[Any, Any, float | None], None] | None = None,
+    prefetch_cases: bool = False,
 ) -> UpstreamEvalServer:
     """Keep upstream evaluations inside Skynet's run-wide scoring allowance.
 
@@ -67,14 +80,19 @@ def upstream_server(
         server: Skynet's accounting and scorer boundary.
         ctx: Workspace and concurrency settings.
         on_eval: Called with the candidate, case and score (``None`` after a metric error) after each scorer run, if given.
+        prefetch_cases: Score every train case of a version on its first
+            single-case call, so each null case gets the version's scored mean.
 
     Returns:
         An unstarted upstream server for an in-process engine.
     """
 
     stops: list[BudgetReached] = []
+    case_ids = {id(case) for case in task.cases}
+    prefetched: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
+    lock = threading.Lock()
 
-    def evaluate(candidate: Any, example: Any = None) -> tuple[float, dict[str, Any]]:
+    def score_one(candidate: Any, example: Any = None) -> tuple[float | None, dict[str, Any]]:
         """Translate the admission stop into the exception upstream engines handle.
 
         Args:
@@ -82,7 +100,7 @@ def upstream_server(
             example: Optional dataset example.
 
         Returns:
-            The score, :data:`UNSCORED` after a metric error, and feedback.
+            The score, ``None`` after a metric error, and feedback.
         """
         try:
             score, info = server.evaluate(candidate, example)
@@ -93,7 +111,36 @@ def upstream_server(
             raise BudgetExhausted(str(exc)) from exc
         if on_eval is not None:
             on_eval(candidate, example, score)
-        return engine_score(score), info
+        return score, info
+
+    def evaluate(candidate: Any, example: Any = None) -> tuple[float, dict[str, Any]]:
+        """Score one case for an upstream engine that has no batch call.
+
+        Args:
+            candidate: Proposed text or components.
+            example: Optional dataset example.
+
+        Returns:
+            The score and feedback. A null case is :data:`UNSCORED`, or with
+            ``prefetch_cases`` the version's mean over its scored cases.
+        """
+        if not prefetch_cases or id(example) not in case_ids:
+            score, info = score_one(candidate, example)
+            return engine_score(score), info
+        key = candidate_key(candidate)
+        with lock:
+            hit = prefetched.pop((key, id(example)), None)
+        if hit is not None:
+            return hit
+        # Upstream Best-of-N scores a sample one case at a time and averages
+        # the numbers itself, with no batch call. Scoring all cases on the
+        # first call lets each null case take the scored mean (SKY-367). The
+        # scorer runs and their order are the same as upstream's own loop.
+        results = score_batch(score_one, [(candidate, case) for case in task.cases], 1)
+        with lock:
+            for case, result in zip(task.cases, results, strict=True):
+                prefetched[(key, id(case))] = result
+            return prefetched.pop((key, id(example)))
 
     upstream = UpstreamEvalServer(
         upstream_task(task, Path(ctx.run_dir).name),

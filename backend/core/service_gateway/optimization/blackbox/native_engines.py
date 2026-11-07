@@ -384,6 +384,34 @@ def visible_example_ids(server: EvalServer) -> list[str]:
     return [eid for split in ("train", "val") for eid, _ in server.iter_split(split)]
 
 
+def fill_unscored(keys: list[str], scores: list[float]) -> list[float]:
+    """Give each null case its version's mean over the scored cases in the same batch.
+
+    In the sandbox a null score arrives as negative infinity. Upstream engines
+    average a version's cases, so one case that always crashes would make every
+    version negative infinity and hide which one is better (SKY-367).
+
+    Args:
+        keys: The version scored on each case, as a stable key.
+        scores: Each case's score, negative infinity for a null case.
+
+    Returns:
+        A number for every case: the score, or the same version's scored mean
+        for a null case, or negative infinity when the version has no scored case.
+    """
+    scored: dict[str, list[float]] = {}
+    for key, score in zip(keys, scores, strict=True):
+        if math.isfinite(score):
+            scored.setdefault(key, []).append(score)
+    filled: list[float] = []
+    for key, score in zip(keys, scores, strict=True):
+        values = scored.get(key)
+        if not math.isfinite(score):
+            score = sum(values) / len(values) if values else float("-inf")
+        filled.append(score)
+    return filled
+
+
 def best_aggregate_candidate(server: EvalServer) -> tuple[str, float] | None:
     """Return the best candidate among the server's logged aggregate checkpoints.
 
@@ -2207,7 +2235,7 @@ class BestValsetVersion:
         if event["num_examples_evaluated"] < event["total_valset_size"]:
             return
         score = float(event["average_score"])
-        # SKY-367: an average with a metric error is negative infinity; it is never best.
+        # SKY-367: a version with no scored case averages to negative infinity; it is never best.
         if not math.isfinite(score):
             return
         if self.best is None or score > self.best[1]:
@@ -2292,9 +2320,24 @@ class GepaRepoEngine:
             score, info = server.evaluate(candidate, example)
             return score, gepa_named_scores(info)
 
+        def batch_evaluate(pairs: list[tuple[Any, Any]]) -> list[tuple[float, Any]]:
+            """Score one GEPA batch in order and fill each null case with its version's scored mean.
+
+            Args:
+                pairs: The ``(candidate, case)`` pairs of one GEPA batch.
+
+            Returns:
+                One ``(score, side_info)`` per pair, in order.
+            """
+            results = [evaluate(candidate, example) for candidate, example in pairs]
+            keys = [json.dumps(candidate, sort_keys=True, default=str) for candidate, _ in pairs]
+            filled = fill_unscored(keys, [score for score, _ in results])
+            return [(score, info) for score, (_, info) in zip(filled, results, strict=True)]
+
         kwargs: dict[str, Any] = {
             "seed_candidate": seed_as_text(task.seed_candidate) if task.seed_candidate is not None else "",
             "evaluator": evaluate,
+            "batch_evaluator": batch_evaluate,
             "config": config,
         }
         # Every case both drives reflection and ranks versions.
@@ -2550,7 +2593,7 @@ class BestOfNRepoEngine:
                 break
             score = float(score)
             if not math.isfinite(score):
-                # SKY-367: a sample with a metric error has no score and is never best.
+                # SKY-367: a sample with no scored case has no score and is never best.
                 sample["outcome"] = "metric_error"
                 continue
             server.log_progress(score, candidate=patch["candidate"])

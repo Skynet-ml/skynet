@@ -12,6 +12,7 @@ import json
 import logging
 import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -37,9 +38,10 @@ EvalListener = Callable[["EvalServer", float | None], None]
 METRIC_ERROR = "metric_error"
 STATUS_KEY = "status"
 # SKY-367: the pinned upstream engines need a number for every case, and they
-# use negative infinity as their own "no score" value. A mean that takes it in
-# is negative infinity too, so a crashed version ranks below every scored one
-# and the order of the scored versions does not change.
+# use negative infinity as their own "no score" value. A single case scored
+# alone gets it; a batch fills each null case with its version's mean over the
+# scored cases (see :func:`fill_unscored`), so the null cases do not change the
+# mean upstream ranks by. Only a version with no scored case is UNSCORED.
 UNSCORED = float("-inf")
 
 
@@ -53,6 +55,60 @@ def engine_score(score: float | None) -> float:
         The score, or :data:`UNSCORED` when there is none.
     """
     return UNSCORED if score is None else score
+
+
+def fill_unscored(candidates: list[Candidate], scores: list[float | None]) -> list[float]:
+    """Give each null case its version's mean over the scored cases in the same batch.
+
+    Args:
+        candidates: The version scored on each case, aligned with ``scores``.
+        scores: Each case's score, ``None`` after a metric error.
+
+    Returns:
+        A number for every case: the score, the mean of the same version's
+        scored cases for a null case, or :data:`UNSCORED` when the version
+        has no scored case in the batch.
+    """
+    scored: dict[str, list[float]] = {}
+    for candidate, score in zip(candidates, scores, strict=True):
+        if score is not None:
+            scored.setdefault(candidate_key(candidate), []).append(score)
+    filled: list[float] = []
+    for candidate, score in zip(candidates, scores, strict=True):
+        if score is None:
+            values = scored.get(candidate_key(candidate))
+            score = sum(values) / len(values) if values else UNSCORED
+        filled.append(score)
+    return filled
+
+
+def score_batch(
+    score_one: Callable[[Candidate, Any], tuple[float | None, SideInfo]],
+    pairs: list[tuple[Candidate, Any]],
+    max_workers: int | None,
+) -> list[tuple[float, SideInfo]]:
+    """Score a batch of pairs at the engine's concurrency and fill the null cases.
+
+    Upstream sends a whole batch in one call and does not fan it out, so the
+    batch keeps the per-pair concurrency the engines had before (SKY-367).
+
+    Args:
+        score_one: Scores one pair; ``None`` after a metric error.
+        pairs: The ``(candidate, case)`` pairs of one upstream batch.
+        max_workers: The engine's scorer concurrency.
+
+    Returns:
+        One ``(score, side_info)`` per pair, in order, with null cases filled
+        by :func:`fill_unscored`; side info still marks each metric error.
+    """
+    workers = max(1, min(max_workers or 1, len(pairs)))
+    if workers == 1:
+        results = [score_one(candidate, example) for candidate, example in pairs]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(lambda pair: score_one(*pair), pairs))
+    filled = fill_unscored([candidate for candidate, _ in pairs], [score for score, _ in results])
+    return [(score, info) for score, (_, info) in zip(filled, results, strict=True)]
 
 
 def is_metric_error(side_info: SideInfo) -> bool:
@@ -387,7 +443,8 @@ class EvalServer:
             logger.warning("scorer raised on a candidate (%s): %s", METRIC_ERROR, error)
             return None, {"error": error, STATUS_KEY: METRIC_ERROR}
         # A nested server (an Auto lane) scores through the upstream server,
-        # which hands back UNSCORED; the status marks it as no score.
+        # which hands back UNSCORED or a batch-filled number; the status marks
+        # it as no score.
         if score is None or is_metric_error(side_info):
             return None, {**side_info, STATUS_KEY: METRIC_ERROR}
         return score, side_info
