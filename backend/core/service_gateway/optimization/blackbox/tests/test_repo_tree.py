@@ -10,7 +10,10 @@ from pathlib import Path
 
 import pytest
 
+from .....constants import HARDENING_EXPLOITS_DIR
+from ..repo_constraints import _DEFAULT_EXPLOITS
 from ..repo_tree import (
+    EXPLOITS_DIR,
     apply_patch,
     archive_chunks,
     drop_paths,
@@ -150,6 +153,100 @@ def test_submodule_changes_are_refused() -> None:
     patch = "diff --git a/vendor/lib b/vendor/lib\nnew file mode 160000\nindex 0000000..abc1234\n"
 
     assert any("Submodules are read-only" in problem for problem in patch_violations(patch, ["."]))
+
+
+def _reserved(path: str) -> str:
+    """Write the reason the guard gives for a write to the exploit suite.
+
+    Args:
+        path: The refused repository path.
+
+    Returns:
+        The exact reason text.
+    """
+    return f"'{path}' may not be changed."
+
+
+def test_the_exploit_folder_constants_agree() -> None:
+    """Keep the stdlib copy of the suite folder equal to the backend's two copies."""
+    assert EXPLOITS_DIR == HARDENING_EXPLOITS_DIR == _DEFAULT_EXPLOITS
+
+
+@pytest.mark.parametrize(
+    "path", [".optimize/exploits/a/patch.diff", ".optimize/exploits", ".optimize/Exploits/a.diff", ".OPTIMIZE/EXPLOITS"]
+)
+def test_writes_to_the_exploit_suite_are_refused(path: str) -> None:
+    """Refuse a version that writes the exploit suite, in any case, even with the whole tree editable."""
+    patch = f"diff --git a/{path} b/{path}\nnew file mode 100644\n"
+
+    assert patch_violations(patch, ["."]) == [_reserved(path)]
+
+
+@pytest.mark.parametrize("mode", ["100644", "120000"])
+def test_a_file_at_a_parent_of_the_suite_is_refused(mode: str) -> None:
+    """Refuse a ``.optimize`` file or a ``.optimize -> src`` symlink, which would block the suite's patch."""
+    patch = (
+        f"diff --git a/.optimize b/.optimize\nnew file mode {mode}\nindex 0000000..abc1234\n"
+        "--- /dev/null\n+++ b/.optimize\n@@ -0,0 +1 @@\n+src\n\\ No newline at end of file\n"
+    )
+
+    assert patch_violations(patch, ["."]) == [_reserved(".optimize")]
+
+
+@pytest.mark.parametrize(
+    ("patch", "path"),
+    [
+        (
+            "diff --git a/.optimize/exploits/a.diff b/notes/a.diff\nsimilarity index 100%\n"
+            "rename from .optimize/exploits/a.diff\nrename to notes/a.diff\n",
+            ".optimize/exploits/a.diff",
+        ),
+        (
+            "diff --git a/notes/a.diff b/.optimize/exploits/a.diff\nsimilarity index 100%\n"
+            "rename from notes/a.diff\nrename to .optimize/exploits/a.diff\n",
+            ".optimize/exploits/a.diff",
+        ),
+        (
+            "diff --git a/.optimize/exploits/a.diff b/.optimize/exploits/a.diff\ndeleted file mode 100644\n"
+            "index abc1234..0000000\n--- a/.optimize/exploits/a.diff\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n",
+            ".optimize/exploits/a.diff",
+        ),
+        (
+            "diff --git a/.optimize/exploits/run.sh b/.optimize/exploits/run.sh\nold mode 100644\nnew mode 100755\n",
+            ".optimize/exploits/run.sh",
+        ),
+        (
+            "diff --git a/.optimize/exploits/blob.bin b/.optimize/exploits/blob.bin\nnew file mode 100644\n"
+            "index 0000000..abc1234\nGIT binary patch\nliteral 3\nKcmZ?wbNK)P\n\nliteral 0\nHcmV?d00001\n\n",
+            ".optimize/exploits/blob.bin",
+        ),
+        (
+            'diff --git "a/.optimize/exploits/caf\\303\\251.diff" "b/.optimize/exploits/caf\\303\\251.diff"\n'
+            "new file mode 100644\n",
+            ".optimize/exploits/caf\u00e9.diff",
+        ),
+    ],
+    ids=["rename-out", "rename-in", "delete", "mode-change", "binary", "quoted"],
+)
+def test_every_kind_of_suite_change_is_refused(patch: str, path: str) -> None:
+    """Refuse renames, deletes, mode changes, binary files and quoted paths in the suite."""
+    assert patch_violations(patch, ["."]) == [_reserved(path)]
+
+
+@pytest.mark.parametrize("folder", ["eval/attacks", "Eval/Attacks"])
+def test_writes_to_a_configured_exploit_folder_are_refused(folder: str) -> None:
+    """Guard the ``[metric] exploits`` folder the same way as the default one, in any case."""
+    patch = "diff --git a/eval/attacks/x.diff b/eval/attacks/x.diff\nnew file mode 100644\n"
+
+    assert patch_violations(patch, ["."]) == []
+    assert patch_violations(patch, ["."], exploit_paths=[folder]) == [_reserved("eval/attacks/x.diff")]
+
+
+def test_paths_next_to_the_exploit_suite_stay_editable() -> None:
+    """Match the suite as a folder, not as a name prefix."""
+    patch = "diff --git a/.optimize/exploits2.md b/.optimize/exploits2.md\nnew file mode 100644\n"
+
+    assert patch_violations(patch, ["."]) == []
 
 
 def test_oversized_patches_are_refused() -> None:

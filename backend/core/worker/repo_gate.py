@@ -18,10 +18,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from ..billing.env_connectors import CONNECTORS
 from ..exceptions import ServiceError
 from ..i18n_en import t_en
 from ..i18n_keys import I18nKey
-from ..service_gateway.optimization.blackbox.repo_constraints import parse_constraints, read_constraints_file
+from ..service_gateway.optimization.blackbox.repo_constraints import (
+    RepoConstraints,
+    parse_constraints,
+    read_constraints_file,
+)
 from ..service_gateway.optimization.blackbox.repo_tree import inside
 
 Place = Literal["local", "cloud"]
@@ -91,10 +96,11 @@ def check_repository(archive: Path, secret_names: Collection[str], *, place: Pla
     if raw is None:
         return []
     constraints = parse_constraints(raw)
+    specific = _specific_failures(constraints, place)
     failures = [
-        _failure(key, place, _UNENFORCED_CODE[place], key=key)
+        specific.get(key) or _failure(key, place, _UNENFORCED_CODE[place], key=key)
         for kind, key in _set_keys(raw, constraints.targets, constraints.services)
-        if kind not in ENFORCED[place]
+        if key in specific or kind not in ENFORCED[place]
     ]
     for service, spec in constraints.services.items():
         failures += [
@@ -191,6 +197,38 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     keys += [("services", f"[services.{name}]") for name in services]
     keys += [(f"metric.{key}", f"[metric] {key}") for key in ("files", "exploits", "reference") if key in metric]
     return keys
+
+
+def _specific_failures(constraints: RepoConstraints, place: Place) -> dict[str, GateFailure]:
+    """Find the settings that fail for a reason of their own, whatever ``ENFORCED`` holds.
+
+    A ``[services.<name>]`` name must be a connector in the catalog (SKY-354).
+    The proposer gets no allowed hosts until the protected broker can give a
+    guest box an allowlist, so a non-empty ``[proposer] network`` fails even
+    when the place enforces the key.
+
+    Args:
+        constraints: The parsed file.
+        place: Where the run's sandbox runs.
+
+    Returns:
+        Each such setting's failure, by its label.
+    """
+    found: dict[str, GateFailure] = {}
+    if constraints.proposer.network:
+        found["[proposer] network"] = _failure(
+            "[proposer] network",
+            place,
+            I18nKey.REPO_GATE_PROPOSER_HOSTS_UNSUPPORTED,
+            hosts=", ".join(constraints.proposer.network),
+        )
+    for name in constraints.services:
+        if name not in CONNECTORS:
+            label = f"[services.{name}]"
+            found[label] = _failure(
+                label, place, I18nKey.REPO_GATE_UNKNOWN_CONNECTOR, service=name, known=", ".join(CONNECTORS)
+            )
+    return found
 
 
 def _failure(setting: str, place: Place, code: I18nKey, **params: str) -> GateFailure:

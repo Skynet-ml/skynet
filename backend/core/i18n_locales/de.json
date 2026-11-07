@@ -318,6 +318,8 @@
     "repo_gate.unenforced_local": "optimize.toml legt {key} fest. Die lokale Docker-Sandbox kann diese Einstellung noch nicht durchsetzen. Entferne sie, um den Lauf zu starten.",
     "repo_gate.unenforced_cloud": "optimize.toml legt {key} fest. Die Cloud-Sandbox kann diese Einstellung noch nicht durchsetzen. Entferne sie, um den Lauf zu starten.",
     "repo_gate.missing_secret": "Der Dienst {service} in optimize.toml benötigt das Secret {secret}, aber dieser Lauf hat kein Secret mit diesem Namen. Füge das Secret zum Lauf hinzu oder entferne den Namen aus der Datei.",
+    "repo_gate.unknown_connector": "Der Dienst {service} in optimize.toml ist kein Connector. Verwende einen dieser Namen: {known}.",
+    "repo_gate.proposer_hosts_unsupported": "optimize.toml setzt [proposer] network auf {hosts}. Erlaubte Hosts für den Proposer werden noch nicht unterstützt. Entferne die Liste, um den Lauf zu starten.",
     "optimization.retry_no_payload": "Die Quelloptimierung hat keine gespeicherte Nutzlast für einen erneuten Versuch.",
     "optimization.retry_wrong_status": "Nur Optimierungen im Zustand 'failed' oder 'cancelled' können erneut versucht werden — diese befindet sich im Zustand '{status}'. Klonen Sie sie stattdessen.",
     "quota.reached": "Sie haben Ihr Limit von {quota, plural, one {1 Optimierung} other {# Optimierungen}} erreicht. Löschen Sie alte Optimierungen, um neue zu erstellen.",

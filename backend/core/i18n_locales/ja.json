@@ -318,6 +318,8 @@
     "repo_gate.unenforced_local": "optimize.toml で {key} が設定されています。ローカルの Docker サンドボックスはまだこの設定を適用できません。実行するには削除してください。",
     "repo_gate.unenforced_cloud": "optimize.toml で {key} が設定されています。クラウドのサンドボックスはまだこの設定を適用できません。実行するには削除してください。",
     "repo_gate.missing_secret": "optimize.toml のサービス {service} にはシークレット {secret} が必要ですが、この実行にはその名前のシークレットがありません。シークレットを実行に追加するか、ファイルから名前を削除してください。",
+    "repo_gate.unknown_connector": "optimize.toml のサービス {service} はコネクタではありません。次のいずれかの名前を使ってください: {known}。",
+    "repo_gate.proposer_hosts_unsupported": "optimize.toml で [proposer] network が {hosts} に設定されています。提案者の許可ホストはまだサポートされていません。実行するにはリストを削除してください。",
     "optimization.retry_no_payload": "再試行元の最適化に、再試行できる保存済みペイロードがありません。",
     "optimization.retry_wrong_status": "'failed' または 'cancelled' 状態の最適化のみ再試行できます。これは '{status}' の状態です。代わりに複製してください。",
     "quota.reached": "最適化が上限（{quota, plural, other {#件}}）に達しました。新しい最適化を作成するには、古い最適化を削除してください。",

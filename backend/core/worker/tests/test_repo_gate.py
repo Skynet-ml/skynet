@@ -8,9 +8,11 @@ from pathlib import Path
 
 import pytest
 
+from core.billing.env_connectors import CONNECTORS
 from core.i18n import t_locale
 from core.i18n_keys import I18nKey
 from core.service_gateway.optimization.blackbox.repo_constraints import CONSTRAINTS_FILE
+from core.worker import repo_gate
 from core.worker.repo_gate import GateFailure, RepoGateError, check_hidden, check_repository, sandbox_place
 
 _CLEAN = b"""
@@ -168,6 +170,60 @@ def test_the_error_carries_every_failure_and_the_first_code(tmp_path: Path) -> N
     assert error.params == {"key": "[proposer] network"}
     assert "[proposer] network" in str(error)
     assert "[metric] reference" in str(error)
+
+
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_proposer_allowed_hosts_fail_with_their_own_message(tmp_path: Path, place: str) -> None:
+    """The proposer gets no allowed hosts yet, so the failure has its own code and names the hosts (SKY-354)."""
+    raw = b'[proposer]\nnetwork = ["pypi.org", "files.pythonhosted.org"]\n'
+    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place)  # type: ignore[arg-type]
+
+    assert [(failure.key, failure.code) for failure in failures] == [
+        ("[proposer] network", I18nKey.REPO_GATE_PROPOSER_HOSTS_UNSUPPORTED)
+    ]
+    assert failures[0].params == {"hosts": "pypi.org, files.pythonhosted.org"}
+    assert "pypi.org, files.pythonhosted.org" in failures[0].reason
+
+
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_a_service_that_names_no_connector_fails_with_its_own_message(tmp_path: Path, place: str) -> None:
+    """A service is a catalog connector, so an unknown name gets its own code and the known names (SKY-354)."""
+    raw = b"[services.cache]\n[services.maps]\n"
+    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place)  # type: ignore[arg-type]
+
+    codes = {failure.key: failure.code for failure in failures}
+    assert codes["[services.cache]"] == I18nKey.REPO_GATE_UNKNOWN_CONNECTOR
+    assert codes["[services.maps]"] != I18nKey.REPO_GATE_UNKNOWN_CONNECTOR
+    unknown = next(failure for failure in failures if failure.key == "[services.cache]")
+    assert unknown.params == {"service": "cache", "known": ", ".join(CONNECTORS)}
+    assert "is not a connector" in unknown.reason
+
+
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_the_specific_checks_do_not_depend_on_enforced(
+    tmp_path: Path, place: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When a later issue enforces these keys, proposer hosts and unknown connectors still stop the run."""
+    enforced = {name: kinds | {"services", "proposer.network"} for name, kinds in repo_gate.ENFORCED.items()}
+    monkeypatch.setattr(repo_gate, "ENFORCED", enforced)
+    raw = b'[proposer]\nnetwork = ["api.example.com"]\n[services.nosuch]\n[services.maps]\n'
+
+    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place)  # type: ignore[arg-type]
+
+    assert [(failure.key, failure.code) for failure in failures] == [
+        ("[proposer] network", I18nKey.REPO_GATE_PROPOSER_HOSTS_UNSUPPORTED),
+        ("[services.nosuch]", I18nKey.REPO_GATE_UNKNOWN_CONNECTOR),
+    ]
+
+
+def test_the_new_messages_exist_in_hebrew() -> None:
+    """Each new code renders in the Hebrew base catalog with its placeholders filled."""
+    hosts = t_locale("he", I18nKey.REPO_GATE_PROPOSER_HOSTS_UNSUPPORTED, hosts="pypi.org")
+    connector = t_locale("he", I18nKey.REPO_GATE_UNKNOWN_CONNECTOR, service="cache", known="maps")
+
+    assert "pypi.org" in hosts
+    assert "cache" in connector
+    assert "maps" in connector
 
 
 def test_local_mode_is_the_local_place() -> None:

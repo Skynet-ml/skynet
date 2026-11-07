@@ -129,6 +129,10 @@ def test_staging_applies_the_repository_constraints_and_records_the_environment(
     assert environment["protected_paths"] == ["optimize.toml", "src/geocode/eval"]
     assert environment["secret_names"] == ["API_KEY"]
     assert environment["services"] == []
+    assert environment["roles"] == {
+        "proposer": {"allowed_hosts": None, "mcp_servers": [], "services": []},
+        "targets": {},
+    }
     assert environment["constraints_file"]["path"] == "optimize.toml"
     assert "secret-value" not in repr(staged_payload)
     assert "Pick the place the sender means." in staged_payload["background"]

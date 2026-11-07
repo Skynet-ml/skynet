@@ -1,6 +1,6 @@
 ---
 name: skynet-test-accounts
-description: Use this skill before any signed-in check on Skynet shared staging or a PR preview (pr-<n>.staging.skynetml.com), for acceptance checks, video evidence or API calls with a user token. It says which target to use, how to confirm the served commit with /api/version and /health, how agents read the pool accounts from AWS Secrets Manager and sign in with login.sh, the DNS-over-HTTPS fallback, and the rules for secrets and test data.
+description: Use this skill before any signed-in check on Skynet shared staging or a PR preview (pr-<n>.staging.skynetml.com), for acceptance checks, UI evidence or API calls with a user token. It says which target to use, how to confirm the served commit with /api/version and /health, how agents read the pool accounts from AWS Secrets Manager and sign in with login.sh, the DNS-over-HTTPS fallback, and the rules for secrets and test data.
 ---
 
 # Skynet test accounts and targets
@@ -16,7 +16,7 @@ skill.
 | The PR's own code (new behavior) | The PR preview: `https://pr-<n>.staging.skynetml.com`, API `https://api-pr-<n>.staging.skynetml.com` |
 | The current product (baseline checks, unrelated flows) | Shared staging: `https://staging.skynetml.com`, API `https://api-staging.skynetml.com` |
 
-- Before and After videos: record both on the PR preview, the Before first.
+- Before and After evidence: capture both on the PR preview, the Before first.
   Use staging for the Before only when the preview cannot show the baseline.
   See section 5 of the `skynet-pr-workflow` skill.
 - Shared staging runs merged code only. It does not hold your PR's change.

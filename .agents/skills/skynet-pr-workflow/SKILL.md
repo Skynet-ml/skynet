@@ -1,6 +1,6 @@
 ---
 name: skynet-pr-workflow
-description: Use this skill whenever you create, update, describe, review, verify, record videos for, or merge a Skynet pull request, or move its Linear issue. It holds the fix-locally-then-push-once order, the merge gates and proof card, the PR description structure and test table, the Opus 5.5 RevEngine review gate, the staging and preview acceptance rules, the costly-workflow rule, the UI before-and-after video specs, the backend-only merge scope, the Linear approval flow and the daily merge window.
+description: Use this skill whenever you create, update, describe, review, verify, capture UI evidence for, or merge a Skynet pull request, or move its Linear issue. It holds the fix-locally-then-push-once order, the merge gates and proof card, the PR description structure and test table, the Opus 5.5 RevEngine review gate, the staging and preview acceptance rules, the costly-workflow rule, the UI before-and-after image and video specs, the backend-only merge scope, the Linear approval flow and the daily merge window.
 ---
 
 # Skynet PR workflow
@@ -38,7 +38,7 @@ bugs before you push. Follow this order for every PR:
    fix it. Repeat until a review finds nothing new.
 3. Push once. Let CI, the preview build and the automated review gate run.
 4. Run the acceptance checks on the PR preview.
-5. Record the After video last, on the final commit.
+5. Capture the After evidence last, on the final commit.
 
 If the review gate or the acceptance checks find a bug, fix all findings
 locally, check them again, and then push them together in one push.
@@ -73,7 +73,8 @@ Use the repository template when there is one. Include, in this order:
 
 1. Problem and resulting behavior (one concrete before-and-after example when
    useful).
-2. Review evidence: the UI videos, or why there is no visible UI change.
+2. Review evidence: the UI Before and After images (or video, with the
+   reason), or why there is no visible UI change.
 3. Test scope and the results table.
 4. Material gaps or follow-up work, only when present.
 5. Automated review verdicts and the decision requested from Gilad.
@@ -129,7 +130,7 @@ for review until the evidence is there.
   API `https://api-staging.skynetml.com`. Railway is deleted (2026-10-29);
   never log in to, call, deploy to or test on it.
 - Use shared staging for baseline checks. Use the PR preview for changed
-  behavior. For the Before and After videos, follow section 5: both go on
+  behavior. For the Before and After evidence, follow section 5: both go on
   the preview, and staging is only the fallback for the Before. Never
   overwrite shared staging with an unmerged branch.
 - Until AWS staging serves a needed flow, use local Docker evidence and state
@@ -169,38 +170,46 @@ for review until the evidence is there.
 - Costly or rare workflows (for example expensive scheduled runs): backend
   algorithmic tests and source review may verify the backend. The frontend
   may use clearly labeled simulated state on the real running UI. Use the
-  same simulated state for Before and After, and label it in the videos and
+  same simulated state for Before and After, and label it in the evidence and
   the PR. State the cost, the simulated boundary, the real coverage and the
   remaining gap. Never claim the expensive run happened.
 - This exception does not cover cheap authentication, data or navigation
   flows. Test those on real staging.
 
-## 5. UI PRs: before-and-after videos
+## 5. UI PRs: before-and-after images
 
-- Every visible UI change needs playable Before and After videos. Screenshots
-  alone are not enough.
-- Upload the videos to the **Linear issue** as private Linear uploads, in a
-  comment. Never put videos in Git or on GitHub (no commits, attachments,
-  comments or releases): the repository is public. In the PR body, say that
-  the videos are on the Linear issue and name it.
-- Record the Before first: open the draft PR before you change code, record
-  the Before on its preview, then implement and record the After on the same
-  preview. Use staging for the Before only when the preview cannot show the
-  baseline.
-- Record the same flow, data, viewport and pace on both versions. Use real
+- Every visible UI change needs Before and After evidence. Images are the
+  default (Gilad, 2026-11-07).
+- Use video only when the change shows motion or continuous behavior that
+  still images cannot show: animation, streaming progress, drag, or a live
+  multi-step flow. Static states (toasts, labels, dialogs, errors, layout)
+  need images only. If you use video, say in the PR body why images are not
+  enough.
+- Upload the images (and any video) to the **Linear issue** as private
+  Linear uploads, in a comment. Never put images or videos in Git or on
+  GitHub (no commits, attachments, comments or releases): the repository is
+  public. In the PR body, say that the evidence is on the Linear issue and
+  name it.
+- Capture the Before first: open the draft PR before you change code,
+  capture the Before on its preview, then implement and capture the After on
+  the same preview. Use staging for the Before only when the preview cannot
+  show the baseline.
+- Capture the same flow, data, viewport and state on both versions. Use real
   running versions; never mockups, staged output or an unrelated preview.
-- Label the videos Before and After. Name their commit or deployment, and
+- Label the evidence Before and After. Name its commit or deployment, and
   say what the reviewer should see.
 - Cover the affected layouts, themes and language directions (light and
   dark, LTR and RTL).
-- Specs: viewport 1440x900 at device scale 2 (2880x1800 captures). H.264, at
-  least 2560 px wide, CRF 16 or lower, yuv420p, at least 30 fps, readable
-  text, under about 60 s, slow enough to follow. Stills: lossless
-  full-resolution PNG, a before/after pair at each key moment plus one
-  side-by-side image.
-- Check that both uploaded videos play and show the expected behavior. State
-  that check in the Linear comment and in the PR body.
-- Record the After video last, on the final commit (section 1a, step 5).
+- Images: viewport 1440x900 at device scale 2 (2880x1800 captures),
+  lossless full-resolution PNG, readable text, a Before and After pair at
+  each key state plus one side-by-side image.
+- Video, only when needed: same viewport, H.264, at least 2560 px wide, CRF
+  16 or lower, yuv420p, at least 30 fps, readable text, under about 60 s,
+  slow enough to follow.
+- Check that the uploaded images open (and any video plays) and show the
+  expected behavior. State that check in the Linear comment and in the PR
+  body.
+- Capture the After evidence last, on the final commit (section 1a, step 5).
 
 ## 6. Defect repairs and conflicts (standing rule, 2026-10-20)
 
@@ -238,7 +247,7 @@ gates pass:
 
 **UI PRs** (anything touching `frontend/`, including mixed PRs) wait for the
 user. Attach a proof card: one line naming the decision and the Linear issue,
-the Before and After videos of the acceptance criteria in the PR environment
+the Before and After evidence of the acceptance criteria in the PR environment
 (on the Linear issue; section 5), the review verdict, and the diff size.
 Merge only after the user approves that specific PR in chat or on GitHub (or
 with `Approved for merge` on the Linear issue), and then only in the daily
@@ -265,9 +274,9 @@ A manual hold on a change or on a promotion still stops it.
 - Exception (2026-10-22): a PR that touches frontend files may use this path
   when the review confirms no meaningful visible change in normal use (for
   example payload or data-cleanup fixes for stale states, internal refactors,
-  tests, i18n-only string moves). It needs no videos. The PR body must say
-  why the change is not visible. If the reviewer is unsure, keep the human
-  approval.
+  tests, i18n-only string moves). It needs no images or videos. The PR body
+  must say why the change is not visible. If the reviewer is unsure, keep
+  the human approval.
 - Just before the merge, check the full changed-file list, the current
   revision, base, evidence and review policy. Use a merge command that
   requires the reviewed head commit. Never bypass branch protection or queue
@@ -280,7 +289,7 @@ A manual hold on a change or on a promotion still stops it.
 
 - An issue in **Ready for Review** is Gilad's review inbox. After the Opus
   5.5 approval, the orchestrator moves the issue there and notifies Gilad
-  only for changes that need human review (PR, UI videos, preview, checks,
+  only for changes that need human review (PR, UI evidence, preview, checks,
   review evidence). Withdraw readiness quietly if commits, checks or evidence
   change. A backend merge needs no notification.
 - Gilad approves with a new comment that contains `Approved for merge`. It
