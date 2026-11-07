@@ -529,12 +529,13 @@ def test_a_watch_note_reaches_the_agent_in_its_next_scoring_reply(tmp_path: Path
         scorer.close()
 
 
-def _leaky(tmp_path: Path, code: str) -> RepoScorer:
+def _leaky(tmp_path: Path, code: str, rule_judge: RuleJudge | None = None) -> RepoScorer:
     """Open a scorer whose metric names its own files and internals.
 
     Args:
         tmp_path: Scratch folder.
         code: Scorer source.
+        rule_judge: The run's rule judge, if any.
 
     Returns:
         The scorer.
@@ -553,6 +554,7 @@ def _leaky(tmp_path: Path, code: str) -> RepoScorer:
         ),
         code,
         timeout_seconds=60,
+        rule_judge=rule_judge,
     )
 
 
@@ -594,6 +596,53 @@ def test_a_crashing_metric_sends_no_traceback_or_box_path(tmp_path: Path) -> Non
         assert "os.path.join" not in text
         assert ".app-repo" not in text
         assert str(tmp_path) not in text
+    finally:
+        scorer.close()
+
+
+def test_a_write_under_the_hidden_metric_skips_the_rule_judge(tmp_path: Path) -> None:
+    """A hidden-file change gets the neutral 422, not the judge's message or a rule.block event (SKY-353)."""
+    events: list[dict[str, Any]] = []
+    judge = RuleJudge(
+        ("Do not hardcode answers for dataset cases.",),
+        intent="Raise the value in a general way.",
+        ask=_StubJudge(_LEGAL),
+        emit=events.append,
+        run_watch=lambda watch: watch(),
+    )
+    scorer = _leaky(
+        tmp_path,
+        "import os\ndef score(repo_path):\n"
+        "    open(os.path.join(repo_path, 'eval/cache.txt'), 'w').write('1')\n"
+        "    return {'score': 1.0}\n",
+        rule_judge=judge,
+    )
+    try:
+        reply = scorer.dispatch({"candidate": ""})
+        assert reply.status == 422
+        assert reply.body.decode() == "The metric files changed while the version ran."
+        assert events == []
+    finally:
+        scorer.close()
+
+
+@pytest.mark.parametrize("score", ["0.5 WEIGHT = 0.3", [0.3], {"w": 0.3}], ids=["text", "list", "object"])
+def test_a_score_that_is_not_a_number_gets_a_fixed_422(tmp_path: Path, score: Any) -> None:
+    """The 422 never echoes a score value that the version's code can set (SKY-353).
+
+    The runner checks the score, so the code rewrites the output file after the runner writes it.
+    """
+    forged = json.dumps({"score": score})
+    scorer = _leaky(
+        tmp_path,
+        "import atexit, os, sys\n"
+        f"atexit.register(lambda: open(os.path.join(sys.argv[1], 'output.json'), 'w').write({forged!r}))\n"
+        "def score(repo_path):\n    return {'score': 1.0, 'feedback': 'ok'}\n",
+    )
+    try:
+        reply = scorer.dispatch({"candidate": ""})
+        assert reply.status == 422
+        assert reply.body.decode() == "The scorer returned a score that is not a number."
     finally:
         scorer.close()
 

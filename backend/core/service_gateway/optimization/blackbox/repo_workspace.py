@@ -27,6 +27,10 @@ from .sandbox import CommandResult, OutputSink, SandboxRuntime, SandboxSession, 
 
 logger = logging.getLogger(__name__)
 
+# The agent never sees the hidden files, so this reason does not name them,
+# and the scorer keeps it out of the rule judge's protected-path message.
+HIDDEN_CHANGED = "The metric files changed while the version ran."
+
 REPO_DIR = ".app-repo"
 BASE_DIR = f"{REPO_DIR}/base"
 WORK_DIR = f"{REPO_DIR}/work"
@@ -463,8 +467,7 @@ class RepoWorkspace:
         # name the folder only when no file in it explains the change.
         changed = sorted(path for path in changed if not any(other.startswith(f"{path}/") for other in changed))
         hidden = [path for path in changed if any(path == top or path.startswith(f"{top}/") for top in self._hidden)]
-        # The agent never sees the hidden files, so the reason does not name them.
-        reasons = ["The metric files changed while the version ran."] if hidden else []
+        reasons = [HIDDEN_CHANGED] if hidden else []
         return (
             *reasons,
             *(

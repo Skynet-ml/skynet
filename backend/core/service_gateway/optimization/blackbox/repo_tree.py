@@ -206,7 +206,7 @@ def _unreadable(patch: str) -> bool:
     return False
 
 
-def _inside(path: str, roots: Iterable[str]) -> bool:
+def inside(path: str, roots: Iterable[str]) -> bool:
     """Report whether ``path`` is one of ``roots`` or lies below one.
 
     Args:
@@ -257,11 +257,11 @@ def patch_violations(
         parts = path.split("/")
         if path.startswith("/") or any(part in ("", ".", "..") for part in parts) or ".git" in parts:
             problems.append(f"'{path}' is not a path inside the repository.")
-        elif _inside(path, protected):
+        elif inside(path, protected):
             problems.append(f"'{path}' is protected by the repository's optimize.toml ([paths] protected).")
-        elif _inside(path, readonly):
+        elif inside(path, readonly):
             problems.append(f"'{path}' is a submodule or Git LFS file, which are read-only.")
-        elif not _inside(path, editable):
+        elif not inside(path, editable):
             problems.append(f"'{path}' is outside the editable paths.")
     return problems
 
@@ -297,9 +297,9 @@ def strip_archive(archive: Path, hidden_paths: Iterable[str], destination: Path)
     hidden = [_member_path(path) for path in hidden_paths]
     with tarfile.open(archive) as source, tarfile.open(destination, "w:gz") as target:
         for member in source:
-            if _inside(_member_path(member.name), hidden):
+            if inside(_member_path(member.name), hidden):
                 continue
-            if member.islnk() and _inside(_member_path(member.linkname), hidden):
+            if member.islnk() and inside(_member_path(member.linkname), hidden):
                 continue
             target.addfile(member, source.extractfile(member) if member.isreg() else None)
     return destination
@@ -323,7 +323,7 @@ def drop_paths(patch: str, hidden_paths: Iterable[str]) -> str:
     if not hidden or not patch:
         return patch
     sections = re.split(r"(?m)^(?=diff --git )", patch)
-    return "".join(section for section in sections if not any(_inside(path, hidden) for path in patch_paths(section)))
+    return "".join(section for section in sections if not any(inside(path, hidden) for path in patch_paths(section)))
 
 
 def archive_chunks(archive: Path) -> Iterator[str]:

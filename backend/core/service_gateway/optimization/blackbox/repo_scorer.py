@@ -27,7 +27,7 @@ from ....billing.model_dispatch import ModelHTTPResult
 from . import runner, sandbox_log
 from .harness import ENV_API_KEY, ENV_MODEL
 from .protocol import STATUS_KEY
-from .repo_workspace import REPO_DIR, WORK_DIR, RepoWorkspace, redact
+from .repo_workspace import HIDDEN_CHANGED, REPO_DIR, WORK_DIR, RepoWorkspace, redact
 from .rule_judge import RuleJudge
 from .sandbox import SandboxSession
 from .sandbox_scorer import RUNNER_SOURCE, ScorerGateway, _raise_control
@@ -192,11 +192,16 @@ class RepoScorer:
                 )
             if result.timed_out:
                 raise RepoScoreError(f"The scorer exceeded its {self._timeout_seconds:g}s timeout.")
-            tampered = self._workspace.protected_changes()
+            changes = self._workspace.protected_changes()
+            # A hidden change is not a [paths] rule the agent knows, so it
+            # skips the rule judge and its "do not repeat it" message.
+            tampered = [change for change in changes if change != HIDDEN_CHANGED]
             if tampered:
                 # The version's code names these files and can read the secrets.
                 reason = redact(" ".join(tampered), secrets)
                 raise RepoScoreError(judge.blocked([reason]) if judge is not None else reason)
+            if changes:
+                raise RepoScoreError(HIDDEN_CHANGED)
             text = session.read_file(f"{CALLS_DIR}/{self._calls:06d}/{runner.OUTPUT_FILE}")
         # The version's code runs next to the hidden metric and can print or
         # raise its contents, so the guest gets only a fixed message; the
@@ -215,8 +220,13 @@ class RepoScorer:
             raise RepoScoreError("The scorer raised an error, so the version has no score.")
         if output.get("score") is None:
             raise RepoScoreError("The scorer returned no score.")
+        try:
+            score = float(output["score"])
+        except (TypeError, ValueError):
+            # The error text would echo the value, which the version's code controls.
+            raise RepoScoreError("The scorer returned a score that is not a number.") from None
         side_info = fold_case_scores(output.get("side_info") or {})
-        return {**side_info, "score": float(output["score"])}
+        return {**side_info, "score": score}
 
     def _model_env(self) -> dict[str, str]:
         """Return the env that points code in the box at the run's model route.

@@ -22,6 +22,7 @@ from ..exceptions import ServiceError
 from ..i18n_en import t_en
 from ..i18n_keys import I18nKey
 from ..service_gateway.optimization.blackbox.repo_constraints import parse_constraints, read_constraints_file
+from ..service_gateway.optimization.blackbox.repo_tree import inside
 
 Place = Literal["local", "cloud"]
 
@@ -143,8 +144,8 @@ def check_hidden(
     targets = [
         target
         for member in links
-        if _covered(posixpath.normpath(member.name), hidden)
-        and not _covered(
+        if inside(posixpath.normpath(member.name), hidden)
+        and not inside(
             target := posixpath.normpath(
                 posixpath.join(posixpath.dirname(posixpath.normpath(member.name)), member.linkname)
             ),
@@ -154,29 +155,16 @@ def check_hidden(
     optional = {posixpath.normpath(path) for path in optional_paths}
     # A misspelled metric path hides nothing, so the agent could read the
     # real metric; the run stops instead of guessing (SKY-353).
-    leaked = [path for path in hidden if path not in optional and not any(_covered(name, [path]) for name in names)]
+    leaked = [path for path in hidden if path not in optional and not any(inside(name, [path]) for name in names)]
     # A hidden path below a linked folder lives at the link's target, which the
     # strip cannot see by name, so the run stops instead of guessing.
     leaked += [path for path in hidden if any(path.startswith(posixpath.normpath(link.name) + "/") for link in links)]
-    leaked += [path for path in visible if _covered(path, hidden)]
-    leaked += [path for path in targets if any(_covered(name, [path]) for name in visible)]
+    leaked += [path for path in visible if inside(path, hidden)]
+    leaked += [path for path in targets if any(inside(name, [path]) for name in visible)]
     return [
         _failure("[metric] files", place, _UNENFORCED_CODE[place], key=f"[metric] files: {path}")
         for path in dict.fromkeys(leaked)
     ]
-
-
-def _covered(path: str, roots: Collection[str]) -> bool:
-    """Report whether ``path`` is one of ``roots`` or lies below one.
-
-    Args:
-        path: Normalized repository-relative path.
-        roots: Normalized repository-relative files or folders.
-
-    Returns:
-        Whether a root covers the path.
-    """
-    return any(root == "." or path == root or path.startswith(root + "/") for root in roots)
 
 
 def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -> list[tuple[str, str]]:
