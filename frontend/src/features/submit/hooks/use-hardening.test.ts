@@ -315,6 +315,42 @@ if (!process.env.JITI_ALIAS) {
       });
     });
 
+    void it("sends the scorer model without a provider key, endpoint or secret", async () => {
+      const { sent } = await startWith(
+        { ...emptyRepoDraft(), repository: "acme/widgets" },
+        {
+          metricCode: "llm('x', model='anthropic/judge')",
+          metricModel: {
+            name: "anthropic/judge",
+            token_source: "byok",
+            byok_provider: "acme",
+            base_url: "https://top.example",
+            extra: {
+              api_key: "sk-test-not-real",
+              api_base: "https://base.example",
+              base_url: "https://extra.example",
+              top_p: 0.5,
+            },
+          },
+          metricTimeoutSeconds: 60,
+        },
+      );
+      const create = sent.filter((r) => r.method === "POST");
+      assert.equal(create.length, 1);
+      const scorer = create[0]!.body.scorer as Record<string, unknown>;
+      assert.deepEqual(scorer.model, {
+        name: "anthropic/judge",
+        token_source: "byok",
+        byok_provider: "acme",
+        extra: { top_p: 0.5 },
+      });
+      assert.equal("secret" in scorer, false);
+      const raw = JSON.stringify(create[0]!.body);
+      for (const leak of ["sk-test-not-real", "top.example", "base.example", "extra.example"]) {
+        assert.equal(raw.includes(leak), false, leak);
+      }
+    });
+
     void it("sends no job and reports no scorer while metric.py is empty", async () => {
       const { sent, budgets, hasScorer } = await startWith(
         { ...emptyRepoDraft(), repository: "acme/widgets" },
