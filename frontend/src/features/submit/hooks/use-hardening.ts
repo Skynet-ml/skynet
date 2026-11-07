@@ -102,8 +102,8 @@ export interface HardeningState {
  */
 export function hardeningErrorText(err: unknown): string | null {
   if (err instanceof Error && err.name === "AbortError") return null;
-  const message = err instanceof Error ? err.message : String(err ?? "");
-  if (!message) return msg("errors.generic");
+  if (!(err instanceof Error) || !err.message) return msg("errors.generic");
+  const { message } = err;
   return message.startsWith("budget.") || message.startsWith("submit.v2.repo.issue.")
     ? msg(message as MessageKey)
     : message;

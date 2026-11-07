@@ -5,6 +5,8 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -14,6 +16,15 @@ const frontend = path.resolve(path.dirname(self), "../../../..");
 
 if (!process.env.JITI_ALIAS) {
   void it("use-hardening tests pass under jiti", () => {
+    // The hook reads the wizard through `./use-unified-wizard`, whose provider
+    // needs a router, a session and a budget. The child aliases that import to
+    // this stub, which serves the context a case puts on globalThis.
+    const stubDir = mkdtempSync(path.join(tmpdir(), "use-hardening-"));
+    const stub = path.join(stubDir, "wizard-stub.ts");
+    writeFileSync(
+      stub,
+      "export const useWizardV2 = () => (globalThis as { __hardeningWizard?: unknown }).__hardeningWizard;\n",
+    );
     // Without NODE_TEST_CONTEXT the child prints its own TAP report, not the
     // parent's binary test stream, so the `# fail 0` check below can read it.
     const { NODE_TEST_CONTEXT: _parent, ...env } = process.env;
@@ -23,9 +34,10 @@ if (!process.env.JITI_ALIAS) {
       env: {
         ...env,
         JITI_JSX: "1",
-        JITI_ALIAS: JSON.stringify({ "@/": `${path.join(frontend, "src")}/` }),
+        JITI_ALIAS: JSON.stringify({ "@/": `${path.join(frontend, "src")}/`, "./use-unified-wizard": stub }),
       },
     });
+    rmSync(stubDir, { recursive: true, force: true });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /# fail 0/);
   });
@@ -39,7 +51,8 @@ if (!process.env.JITI_ALIAS) {
     load: (url, context, next) =>
       url.endsWith(".css") ? { format: "module", source: "", shortCircuit: true } : next(url, context),
   });
-  const { hardeningErrorText, hardeningTarget, requestHardeningJob } = await import("./use-hardening");
+  const { hardeningErrorText, hardeningTarget, requestHardeningJob, useHardening } = await import("./use-hardening");
+  const { renderToStaticMarkup } = await import("react-dom/server");
   const { emptyRepoDraft } = await import("../lib/wizard-v2");
   const { msg } = await import("@/shared/lib/messages");
   const { buildActiveCatalog } = await import("@/shared/lib/messages.server");
@@ -191,6 +204,8 @@ if (!process.env.JITI_ALIAS) {
       assert.equal(hardeningErrorText(new Error("")), msg("errors.generic"));
       assert.notEqual(msg("errors.generic"), "errors.generic");
       assert.equal(hardeningErrorText(undefined), msg("errors.generic"));
+      assert.equal(hardeningErrorText({ detail: "x" }), msg("errors.generic"));
+      assert.equal(hardeningErrorText("budget.invalid"), msg("errors.generic"));
     });
 
     void it("shows no toast for an aborted request", () => {
@@ -198,6 +213,69 @@ if (!process.env.JITI_ALIAS) {
       abort.name = "AbortError";
       assert.equal(hardeningErrorText(abort), null);
       assert.equal(hardeningErrorText(new DOMException("aborted", "AbortError")), null);
+    });
+  });
+
+  // The hook as the wizard uses it: the wizard context's repository and
+  // budget reach the create request that start() sends.
+  void describe("useHardening start", () => {
+    type Sent = { url: string; method?: string; body: Record<string, unknown> };
+
+    async function startWith(repo: unknown): Promise<{ sent: Sent[]; budgets: number; order: string[] }> {
+      const sent: Sent[] = [];
+      const order: string[] = [];
+      let budgets = 0;
+      (globalThis as { __hardeningWizard?: unknown }).__hardeningWizard = {
+        state: { task: { repo } },
+        ensureBudget: async () => {
+          budgets += 1;
+          order.push("budget");
+          return { id: "budget-9" };
+        },
+      };
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: string, init?: RequestInit) => {
+        sent.push({ url: String(url), method: init?.method, body: JSON.parse(String(init?.body ?? "{}")) });
+        if (init?.method === "POST") order.push("create");
+        return new Response(JSON.stringify({ id: "job-9" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as typeof fetch;
+      try {
+        let start: ((s: typeof settings) => Promise<void>) | null = null;
+        const Probe = () => {
+          start = useHardening(false).start;
+          return null;
+        };
+        renderToStaticMarkup(React.createElement(Probe));
+        await start!(settings);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+      return { sent, budgets, order };
+    }
+
+    void it("opens the budget, then sends the wizard's repository target and budget id", async () => {
+      const { sent, budgets, order } = await startWith({ ...emptyRepoDraft(), repository: " acme/widgets " });
+      assert.equal(budgets, 1);
+      assert.deepEqual(order, ["budget", "create"]);
+      const create = sent.filter((r) => r.method === "POST");
+      assert.equal(create.length, 1);
+      assert.match(create[0]!.url, /\/hardening\/jobs$/);
+      assert.equal(create[0]!.body.binding_id, "budget-9");
+      assert.deepEqual(create[0]!.body.target, {
+        kind: "repo",
+        repo: { provider: "github", repository: "acme/widgets", branch: null, commit: null, editable_paths: ["."] },
+        setup_command: null,
+      });
+      assert.equal(create[0]!.body.rounds, settings.rounds);
+    });
+
+    void it("opens no budget and sends no job for a broken repository", async () => {
+      const { sent, budgets } = await startWith({ ...emptyRepoDraft(), repository: "not a repo" });
+      assert.equal(budgets, 0);
+      assert.equal(sent.filter((r) => r.method === "POST").length, 0);
     });
   });
 }
