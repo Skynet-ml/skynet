@@ -318,6 +318,8 @@
     "repo_gate.unenforced_local": "optimize.toml تنظیم {key} را تعیین می‌کند. سندباکس محلی Docker هنوز نمی‌تواند این تنظیم را اعمال کند. برای اجرا آن را حذف کنید.",
     "repo_gate.unenforced_cloud": "optimize.toml تنظیم {key} را تعیین می‌کند. سندباکس ابری هنوز نمی‌تواند این تنظیم را اعمال کند. برای اجرا آن را حذف کنید.",
     "repo_gate.missing_secret": "سرویس {service} در optimize.toml به راز {secret} نیاز دارد، اما این اجرا رازی با این نام ندارد. راز را به اجرا اضافه کنید یا نام را از فایل حذف کنید.",
+    "repo_gate.unknown_connector": "سرویس {service} در optimize.toml یک اتصال‌دهنده نیست. یکی از این نام‌ها را به کار ببرید: {known}.",
+    "repo_gate.proposer_hosts_unsupported": "optimize.toml مقدار [proposer] network را {hosts} تعیین می‌کند. میزبان‌های مجاز برای پیشنهاددهنده هنوز پشتیبانی نمی‌شوند. برای اجرا، فهرست را حذف کنید.",
     "optimization.retry_no_payload": "بهینه‌سازی مبدأ هیچ بار ذخیره‌شده‌ای برای تلاش مجدد ندارد.",
     "optimization.retry_wrong_status": "تنها بهینه‌سازی‌هایی که در وضعیت 'failed' یا 'cancelled' هستند قابل تلاش مجدد هستند — این یکی در وضعیت '{status}' است. به جای آن آن را کلون کنید.",
     "quota.reached": "شما به محدودیت {quota, plural, one {۱ بهینه‌سازی} other {# بهینه‌سازی}} خود رسیده‌اید. برای ایجاد بهینه‌سازی‌های جدید، بهینه‌سازی‌های قدیمی را حذف کنید.",

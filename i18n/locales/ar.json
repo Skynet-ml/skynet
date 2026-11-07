@@ -318,6 +318,8 @@
     "repo_gate.unenforced_local": "يضبط optimize.toml الإعداد {key}. لا تستطيع بيئة Docker المعزولة المحلية فرض هذا الإعداد بعد. أزِله لتشغيل العملية.",
     "repo_gate.unenforced_cloud": "يضبط optimize.toml الإعداد {key}. لا تستطيع البيئة المعزولة السحابية فرض هذا الإعداد بعد. أزِله لتشغيل العملية.",
     "repo_gate.missing_secret": "تحتاج الخدمة {service} في optimize.toml إلى السر {secret}، لكن هذا التشغيل لا يملك سرًا بهذا الاسم. أضِف السر إلى التشغيل أو احذف الاسم من الملف.",
+    "repo_gate.unknown_connector": "الخدمة {service} في optimize.toml ليست موصّلًا. استخدم أحد هذه الأسماء: {known}.",
+    "repo_gate.proposer_hosts_unsupported": "يضبط optimize.toml الإعداد [proposer] network على {hosts}. المضيفون المسموح بهم للمقترح غير مدعومين بعد. أزِل القائمة لتشغيله.",
     "optimization.retry_no_payload": "لا يملك التحسين المصدر أي حمولة محفوظة لإعادة المحاولة.",
     "optimization.retry_wrong_status": "لا يمكن إعادة محاولة سوى عمليات التحسين في حالة 'failed' أو 'cancelled' — هذه في الحالة '{status}'. استنسخها بدلاً من ذلك.",
     "quota.reached": "لقد بلغتَ الحد الأقصى وهو {quota, plural, one {عملية تحسين واحدة} two {عمليتا تحسين} few {# عمليات تحسين} many {# عملية تحسين} other {# عملية تحسين}}. احذف عمليات تحسين قديمة لإنشاء عمليات جديدة.",

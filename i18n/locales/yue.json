@@ -304,6 +304,8 @@
     "repo_gate.unenforced_local": "optimize.toml 設定咗 {key}。本機 Docker 沙盒暫時未能強制執行呢個設定。請刪走佢再運行。",
     "repo_gate.unenforced_cloud": "optimize.toml 設定咗 {key}。雲端沙盒暫時未能強制執行呢個設定。請刪走佢再運行。",
     "repo_gate.missing_secret": "optimize.toml 入面嘅服務 {service} 需要密鑰 {secret}，但係今次運行冇呢個名嘅密鑰。請將密鑰加入運行，或者喺檔案度刪走呢個名。",
+    "repo_gate.unknown_connector": "optimize.toml 入面嘅服務 {service} 唔係連接器。請用以下其中一個名：{known}。",
+    "repo_gate.proposer_hosts_unsupported": "optimize.toml 將 [proposer] network 設定咗做 {hosts}。暫時未支援提案者嘅允許主機。請刪走呢個清單再運行。",
     "optimization.retry_no_payload": "來源優化冇已儲存嘅 payload 可以重試。",
     "optimization.retry_wrong_status": "只有處於「failed」或「cancelled」狀態嘅優化先可以重試——目前處於「{status}」。請改為複製佢。",
     "quota.concurrent_reached": "你已經有 {limit, plural, other {# 個執行}} 進行緊。請等其中一個完成咗先好開始下一個。",

@@ -40,6 +40,7 @@ from ..service_gateway.optimization.blackbox.repo_constraints import (
     read_constraints,
 )
 from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
+from ..service_gateway.optimization.blackbox.repo_services import plan_roles
 from ..service_gateway.optimization.blackbox.repo_setup import infer_setup_command
 from ..service_gateway.optimization.blackbox.repo_tree import (
     REPO_SNAPSHOT_KEY,
@@ -169,6 +170,8 @@ def stage_repository(
             readonly_paths=snapshot.readonly_paths,
             secret_names=secrets,
         )
+        if environment.constraints is not None:
+            record["roles"] = plan_roles(environment.constraints)
         _ensure_unchanged(repo.get(ENVIRONMENT_KEY), record)
         # The guest's workspace (Vercel or local Docker) unpacks this copy; the
         # parent's scorer box keeps the full tree, so it scores with the base
