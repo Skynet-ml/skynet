@@ -90,12 +90,52 @@ export interface HardeningState {
   retry: () => Promise<void>;
 }
 
-// The budget session and the repository draft throw i18n keys, not text.
-function errorText(err: unknown): string {
-  const message = err instanceof Error ? err.message : String(err);
+/**
+ * The toast text for a failed hardening action. The budget session and the
+ * repository draft throw i18n keys, not text.
+ *
+ * Args:
+ *   err: What the action threw.
+ *
+ * Returns:
+ *   The message to show, or null for an aborted request, which shows nothing.
+ */
+export function hardeningErrorText(err: unknown): string | null {
+  if (err instanceof Error && err.name === "AbortError") return null;
+  const message = err instanceof Error ? err.message : String(err ?? "");
+  if (!message) return msg("errors.generic");
   return message.startsWith("budget.") || message.startsWith("submit.v2.repo.issue.")
     ? msg(message as MessageKey)
     : message;
+}
+
+/**
+ * Create the draft's hardening job for the wizard's repository and budget.
+ *
+ * Args:
+ *   settings: The rounds, cap, models and view the user picked.
+ *   draftId: The setup draft the job belongs to.
+ *   repo: The wizard's repository draft, or none.
+ *   ensureBudget: Opens or reuses the wizard's execution budget.
+ *   create: Sends the create request.
+ *
+ * Returns:
+ *   The new job.
+ *
+ * Throws:
+ *   Error: The repository issue key before any budget or job exists, or the
+ *   budget or request error.
+ */
+export async function requestHardeningJob(
+  settings: HardeningSettings,
+  draftId: string,
+  repo: RepoDraft | null | undefined,
+  ensureBudget: () => Promise<{ id: string }>,
+  create: (body: CreateHardeningJobRequest) => Promise<HardeningJob> = createHardeningJob,
+): Promise<HardeningJob> {
+  const target = hardeningTarget(repo);
+  const budget = await ensureBudget();
+  return create({ ...settings, draft_id: draftId, target, binding_id: budget.id });
 }
 
 // The setup has no server-side draft id yet, so it keeps one beside its
@@ -170,7 +210,8 @@ export function useHardening(active: boolean): HardeningState {
     try {
       setJob(await call());
     } catch (err) {
-      if (!(err instanceof Error && err.name === "AbortError")) toast.error(errorText(err));
+      const text = hardeningErrorText(err);
+      if (text !== null) toast.error(text);
     } finally {
       setBusy(false);
     }
@@ -180,23 +221,18 @@ export function useHardening(active: boolean): HardeningState {
     (settings: HardeningSettings) => {
       draft.current ??= draftId();
       const id = draft.current;
-      return act(async () => {
-        const target = hardeningTarget(repo);
-        const budget = await ensureBudget();
-        try {
-          return await createHardeningJob({
-            ...settings,
-            draft_id: id,
-            target,
-            binding_id: budget.id,
-          });
-        } catch (err) {
-          // The draft may already hold a job that the first read missed; show it.
-          const latest = await getLatestHardeningJob(id).catch(() => null);
-          if (latest) setJob(latest);
-          throw err;
-        }
-      });
+      return act(() =>
+        requestHardeningJob(settings, id, repo, ensureBudget, async (body) => {
+          try {
+            return await createHardeningJob(body);
+          } catch (err) {
+            // The draft may already hold a job that the first read missed; show it.
+            const latest = await getLatestHardeningJob(id).catch(() => null);
+            if (latest) setJob(latest);
+            throw err;
+          }
+        }),
+      );
     },
     [act, ensureBudget, repo],
   );
