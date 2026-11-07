@@ -15,15 +15,15 @@ from __future__ import annotations
 import tarfile
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..models.hardening import HardeningJob
 from ..service_gateway.optimization.blackbox.hardening import HardeningRunner, run_until_wait
-from ..service_gateway.optimization.blackbox.repo_constraints import MetricSpec, read_constraints
+from ..service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, MetricSpec, read_constraints
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
-from .repo_gate import check_repository, sandbox_place
+from .repo_gate import RepoGateError, check_repository, sandbox_place
 from .repo_staging import StagedRepository, stage_repository
 
 _ACTIVE_STATUSES = frozenset({"preflight", "running"})
@@ -36,13 +36,19 @@ class HardeningWorkspace:
     ``agent_archive`` is the stripped tree the attacker's sandbox unpacks.
     ``trusted_root`` is the full base-commit tree; only the parent's scorer
     reads it, so a metric fix and the exploit suite score with the real metric.
+    Each pass stages a fresh tree, so the suite already holds the exploits of
+    earlier fixed rounds. ``applied_fixes`` lists those rounds' approved fixes
+    in order; the runner applies them before it scores. ``commit`` is the
+    commit the tree came from; the caller pins later passes to it.
     """
 
     agent_archive: Path
     trusted_root: Path
     exploits_path: Path
     reference: Path | None
-    secrets: dict[str, str]
+    commit: str | None
+    applied_fixes: tuple[str, ...]
+    secrets: dict[str, str] = field(repr=False)
 
 
 RunnerFactory = Callable[[HardeningWorkspace, HardeningJob], AbstractContextManager[HardeningRunner]]
@@ -107,33 +113,40 @@ def run_hardening_job(
             return _end(job, "failed", error=str(exc) or type(exc).__name__)
     try:
         staged_payload, staged = stage(payload, username=username, binding_id=binding_id, engine=engine)
+    except RepoGateError as exc:
+        return _preflight_failed(job, [failure.reason for failure in exc.failures])
+    except ConstraintsError as exc:
+        return _preflight_failed(job, [str(exc)])
     except Exception as exc:
         return _end(job, "failed", error=str(exc) or type(exc).__name__)
     try:
         failures = gate(staged.snapshot.archive, staged.secrets, place=sandbox_place(local_mode))
         if failures:
-            job = _end(job, "preflight_failed")
-            job.preflight_failures = [failure.reason for failure in failures]
-            return job
-        workspace = _workspace(staged, Path(staged_payload[REPO_SNAPSHOT_KEY]["archive"]))
+            return _preflight_failed(job, [failure.reason for failure in failures])
+        result: HardeningJob | None = None
         try:
+            workspace = _workspace(staged, staged_payload, job)
             with runner_factory(workspace, job) as runner:
-                return run_until_wait(
+                result = run_until_wait(
                     job, runner=runner, exploits_path=workspace.exploits_path, reference=workspace.reference
                 )
+            return result
         except Exception as exc:
-            return _end(job, "failed", error=str(exc) or type(exc).__name__)
+            # A sandbox that fails to close after the pass must not drop the
+            # pass's spend and rounds.
+            return _end(result or job, "failed", error=str(exc) or type(exc).__name__)
     finally:
         staged.close_scorers()
         staged.cleanup()
 
 
-def _workspace(staged: StagedRepository, agent_archive: Path) -> HardeningWorkspace:
-    """Unpack the trusted tree and resolve the metric paths inside it.
+def _workspace(staged: StagedRepository, staged_payload: dict[str, Any], job: HardeningJob) -> HardeningWorkspace:
+    """Unpack the trusted tree, resolve the metric paths, and restore earlier rounds' suite.
 
     Args:
         staged: The staged repository.
-        agent_archive: The stripped tree that :func:`stage_repository` packed.
+        staged_payload: The payload :func:`stage_repository` returned.
+        job: The job, whose fixed rounds the suite must hold again.
 
     Returns:
         The workspace for one pass.
@@ -141,21 +154,47 @@ def _workspace(staged: StagedRepository, agent_archive: Path) -> HardeningWorksp
     archive = Path(staged.snapshot.archive)
     trusted_root = staged.workdir / "trusted-tree"
     trusted_root.mkdir(parents=True, exist_ok=True)
+    # The "data" filter refuses absolute paths, ".." parts and links that leave
+    # the tree; the caller ends the job as failed when it refuses.
     with tarfile.open(archive) as tree:
         tree.extractall(trusted_root, filter="data")
     constraints = read_constraints(archive)
     metric = constraints.metric if constraints is not None else MetricSpec()
+    exploits_path = trusted_root / metric.exploits
+    fixed = [r for r in job.rounds_detail if r.status == "fixed"]
+    for exploit in (e for r in fixed for e in r.exploits if e.user_verdict == "confirmed"):
+        folder = exploits_path / exploit.id
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "patch.diff").write_text(exploit.patch_diff, encoding="utf-8")
+        (folder / "why.md").write_text(exploit.why_md, encoding="utf-8")
     return HardeningWorkspace(
-        agent_archive=agent_archive,
+        agent_archive=Path(staged_payload[REPO_SNAPSHOT_KEY]["archive"]),
         trusted_root=trusted_root,
-        exploits_path=trusted_root / metric.exploits,
+        exploits_path=exploits_path,
         reference=trusted_root / metric.reference if metric.reference else None,
+        commit=staged_payload.get("target", {}).get("repo", {}).get("commit"),
+        applied_fixes=tuple(r.fix.diff for r in fixed if r.fix is not None),
         secrets=staged.secrets,
     )
 
 
+def _preflight_failed(job: HardeningJob, failures: list[str]) -> HardeningJob:
+    """End a job whose repository failed the preflight checks.
+
+    Args:
+        job: The job.
+        failures: One message for each failed check.
+
+    Returns:
+        A changed copy of the job.
+    """
+    ended = _end(job, "preflight_failed")
+    ended.preflight_failures = failures
+    return ended
+
+
 def _end(job: HardeningJob, status: str, *, error: str | None = None) -> HardeningJob:
-    """End a job before its loop starts and release what it holds.
+    """End a job outside the core loop and release what it holds.
 
     Args:
         job: The job.

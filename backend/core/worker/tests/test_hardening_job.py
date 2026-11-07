@@ -13,11 +13,15 @@ import pytest
 
 from core.i18n_keys import I18nKey
 from core.models.hardening import HardeningJob
-from core.service_gateway.optimization.blackbox.hardening import Candidate, new_job, record_verdict
-from core.service_gateway.optimization.blackbox.repo_constraints import CONSTRAINTS_FILE, read_constraints
+from core.service_gateway.optimization.blackbox.hardening import Candidate, decide_fix, new_job, record_verdict
+from core.service_gateway.optimization.blackbox.repo_constraints import (
+    CONSTRAINTS_FILE,
+    ConstraintsError,
+    read_constraints,
+)
 from core.service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY, strip_archive
 from core.worker.hardening_job import HardeningWorkspace, required_reservation, run_hardening_job
-from core.worker.repo_gate import GateFailure
+from core.worker.repo_gate import GateFailure, RepoGateError
 from core.worker.repo_staging import StagedRepository
 
 _TOML = b"""
@@ -49,12 +53,13 @@ _FAILURE = GateFailure(
 )
 
 
-def _archive(path: Path, files: dict[str, bytes]) -> Path:
+def _archive(path: Path, files: dict[str, bytes], links: dict[str, str] | None = None) -> Path:
     """Pack files the way the parent ships a fetched tree.
 
     Args:
         path: Where the archive goes.
         files: Root-relative path to bytes.
+        links: Root-relative path to symbolic link target; fetch_snapshot keeps links.
 
     Returns:
         The archive.
@@ -64,6 +69,11 @@ def _archive(path: Path, files: dict[str, bytes]) -> Path:
             info = tarfile.TarInfo(name)
             info.size = len(data)
             packed.addfile(info, io.BytesIO(data))
+        for name, target in (links or {}).items():
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.SYMTYPE
+            info.linkname = target
+            packed.addfile(info)
     return path
 
 
@@ -84,7 +94,12 @@ class Recorder:
     """Keeps the order of the job's side effects and the sandboxes it holds open."""
 
     def __init__(
-        self, tmp_path: Path, *, failures: list[GateFailure] | None = None, files: dict[str, bytes] | None = None
+        self,
+        tmp_path: Path,
+        *,
+        failures: list[GateFailure] | None = None,
+        files: dict[str, bytes] | None = None,
+        links: dict[str, str] | None = None,
     ) -> None:
         """Set up a recorder.
 
@@ -92,9 +107,12 @@ class Recorder:
             tmp_path: Scratch folder for the staged tree.
             failures: What the fake gate reports.
             files: The repository tree; the metric fixture when None.
+            links: Symbolic links to add to the tree.
         """
         self.tmp_path = tmp_path
         self.files = files or _FILES
+        self.links = links
+        self.suite_ids: list[str] = []
         self.failures = failures or []
         self.events: list[str] = []
         self.open_sandboxes = 0
@@ -129,7 +147,7 @@ class Recorder:
         self.stage_kwargs = {"payload": payload, **kwargs}
         workdir = self.tmp_path / "staged"
         workdir.mkdir()
-        full = _archive(workdir / "tree.tgz", self.files)
+        full = _archive(workdir / "tree.tgz", self.files, self.links)
         constraints = read_constraints(full)
         assert constraints is not None
         hidden = (*constraints.metric.files, constraints.metric.exploits)
@@ -138,7 +156,8 @@ class Recorder:
         self.staged = StagedRepository(
             snapshot=snapshot, secrets={"API_KEY": "x"}, workdir=workdir, hidden_paths=hidden
         )
-        return {**payload, REPO_SNAPSHOT_KEY: {"archive": str(agent)}}, self.staged
+        target = {**payload["target"], "repo": {**payload["target"]["repo"], "commit": "c0ffee"}}
+        return {**payload, "target": target, REPO_SNAPSHOT_KEY: {"archive": str(agent)}}, self.staged
 
     def gate(self, archive: Path, secrets: Any, *, place: str) -> list[GateFailure]:
         """Record the preflight gate.
@@ -168,6 +187,7 @@ class Recorder:
         self.events.append("sandbox")
         self.workspace = workspace
         self.agent_names = _names(workspace.agent_archive)
+        self.suite_ids = sorted(path.parent.name for path in workspace.exploits_path.glob("*/patch.diff"))
         self.open_sandboxes += 1
         try:
             yield FakeRunner(self)
@@ -256,6 +276,14 @@ class FakeRunner:
         """
         return 0.5
 
+    def apply_fix(self, *, fix_diff: str) -> None:
+        """Record the approved fix.
+
+        Args:
+            fix_diff: The fix.
+        """
+        self.recorder.events.append("apply_fix")
+
 
 def _run(recorder: Recorder, job: HardeningJob, *, local_mode: bool) -> HardeningJob:
     """Run the job with the recorder's fakes.
@@ -327,6 +355,8 @@ def test_the_attacker_tree_has_no_metric_files_or_exploits(tmp_path: Path) -> No
     assert not any(name.startswith(("eval/metric.py", "eval/exploits")) for name in agent_names)
     assert workspace.exploits_path == workspace.trusted_root / "eval/exploits"
     assert workspace.reference == workspace.trusted_root / "eval/reference.py"
+    assert workspace.commit == "c0ffee"
+    assert "API_KEY" not in repr(workspace)
     assert job.suite_count == 1
 
 
@@ -481,3 +511,120 @@ def test_a_sandbox_that_fails_to_open_fails_the_job(tmp_path: Path) -> None:
 
     assert (job.status, job.error, job.reserved_usd) == ("failed", "Sandbox quota reached.", 0.0)
     assert not recorder.staged.workdir.exists()
+
+
+def test_a_link_that_leaves_the_tree_fails_the_job(tmp_path: Path) -> None:
+    """The trusted tree refuses a link out of the repository; the job fails, opens no sandbox and frees its hold."""
+    recorder = Recorder(tmp_path, links={"bot/python": "/usr/bin/python3"})
+
+    job = _run(recorder, _cloud_job(), local_mode=False)
+
+    assert job.status == "failed"
+    assert job.error
+    assert job.reserved_usd == job.spent_usd == 0.0
+    assert "sandbox" not in recorder.events
+    assert not recorder.staged.workdir.exists()
+
+
+def test_a_sandbox_that_fails_to_close_keeps_the_pass_spend(tmp_path: Path) -> None:
+    """A close error after the pass fails the job but keeps the rounds and dollars the pass used."""
+    recorder = Recorder(tmp_path)
+
+    @contextmanager
+    def leaky(workspace: HardeningWorkspace, job: HardeningJob) -> Iterator[FakeRunner]:
+        """Open a sandbox that fails on close.
+
+        Args:
+            workspace: The pass's trees.
+            job: The job.
+
+        Yields:
+            A runner.
+
+        Raises:
+            RuntimeError: On exit.
+        """
+        yield FakeRunner(recorder)
+        raise RuntimeError("Sandbox stop failed.")
+
+    job = run_hardening_job(
+        _cloud_job(),
+        payload=_PAYLOAD,
+        binding_id="budget-1",
+        username="alice",
+        engine=None,
+        local_mode=False,
+        runner_factory=leaky,
+        reserve=recorder.reserve,
+        stage=recorder.stage,
+        gate=recorder.gate,
+    )
+
+    assert (job.status, job.error) == ("failed", "Sandbox stop failed.")
+    assert job.spent_usd == pytest.approx(0.6)
+    assert job.reserved_usd == job.spent_usd
+    assert len(job.rounds_detail) == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "failures"),
+    [
+        (RepoGateError([_FAILURE]), [_FAILURE.reason]),
+        (ConstraintsError("optimize.toml is not valid TOML."), ["optimize.toml is not valid TOML."]),
+    ],
+)
+def test_a_staging_check_failure_ends_the_job_as_preflight_failed(
+    tmp_path: Path, error: Exception, failures: list[str]
+) -> None:
+    """A hidden-file leak or a bad optimize.toml found while staging is a preflight failure with its reasons."""
+    recorder = Recorder(tmp_path)
+
+    def refuse(payload: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], StagedRepository]:
+        """Fail the staging checks.
+
+        Args:
+            payload: The run-shaped payload.
+            **kwargs: username, binding_id and engine.
+
+        Raises:
+            Exception: The configured error.
+        """
+        raise error
+
+    job = run_hardening_job(
+        _cloud_job(),
+        payload=_PAYLOAD,
+        binding_id="budget-1",
+        username="alice",
+        engine=None,
+        local_mode=False,
+        runner_factory=recorder.runner_factory,
+        reserve=recorder.reserve,
+        stage=refuse,
+        gate=recorder.gate,
+    )
+
+    assert job.status == "preflight_failed"
+    assert job.preflight_failures == failures
+    assert job.reserved_usd == 0.0
+    assert "sandbox" not in recorder.events
+
+
+def test_a_later_pass_restores_the_suite_and_fixes_of_earlier_rounds(tmp_path: Path) -> None:
+    """Each pass stages a fresh tree, so the workspace writes back the fixed rounds' exploits and lists their fixes."""
+    recorder = Recorder(tmp_path)
+    job = _run(recorder, _cloud_job(), local_mode=False)
+    first = job.rounds_detail[0].exploits[0]
+    job = _run(recorder, record_verdict(job, first.id, confirmed=True), local_mode=False)
+    assert job.status == "waiting_fix"
+    job = _run(recorder, decide_fix(job, approve=True), local_mode=False)
+    assert job.rounds_detail[0].status == "fixed"
+    assert job.status == "waiting_review"
+    second = job.rounds_detail[1].exploits[0]
+
+    job = _run(recorder, record_verdict(job, second.id, confirmed=True), local_mode=False)
+
+    assert recorder.suite_ids == sorted(["old", first.id])
+    assert recorder.workspace is not None
+    assert recorder.workspace.applied_fixes == (job.rounds_detail[0].fix.diff,)
+    assert job.status == "waiting_fix"
