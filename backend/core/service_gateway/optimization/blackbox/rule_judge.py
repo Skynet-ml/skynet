@@ -1,69 +1,76 @@
-"""Enforce a repository's plain-language rules with judge models.
+"""Watch a repository run against its intent and plain-language rules.
 
-A repository's ``optimize.toml`` may list illegal approaches in plain
-language under ``[rules] illegal``. Path rules cannot catch them, so two judge
-models read the agent's work against them:
+A repository's ``optimize.toml`` may state the run's intent under
+``[instructions] intent`` and list illegal approaches under ``[rules]
+illegal``. Path rules cannot catch either, so an optional watch hook reads the
+agent's recent steps against them during the run:
 
-- a fast judge that watches the agent's recent actions during the run and
-  warns it when the work goes toward a violation, and
-- a stronger judge that reads each version's full diff before it is scored.
+- It is off by default and turned on per run.
+- Every :data:`WATCH_EVERY_ACTIONS` agent actions, it reads the last
+  :data:`WATCH_EVERY_ACTIONS` steps, the intent and the rules.
+- It answers with a typed label (``ok``, ``off_intent`` or ``breaks_rule``)
+  and a confidence. At or above the run's threshold, a non-``ok`` label
+  queues a warning for the agent's next scoring reply.
+- It never stops the run and never changes a score. Every verdict goes into
+  the run log.
 
-A version the final judge rejects is an illegal approach. It gets a score of
-0 with the judge's reason as feedback and stays in the run history, so every
-optimizer learns from it the same way (Gilad's decision on SKY-141).
-
-The judges read only the rules, the agent's actions and the diff. They never
-receive the scorer's data or its labels.
+The hook never sees the metric, the scorer, its data or its labels, so it
+cannot leak them to the agent or judge by the score. A step is only the
+agent's tool calls: the tool name and its input. Tool results never reach the
+hook, and a call that touches an engine file (``eval.sh``, ``STATE.md`` or
+``archive/``) is withheld, so the hook gets no scorer or engine output. The
+agent's own inputs, such as notebook text, can still quote a score. The final
+judge that scored rejected versions 0 is gone (SKY-349): a hint is enough,
+and a wrong rejection lost real improvements.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any
 
 from .... import run_log
 from . import sandbox_log
+from .classification import HOOK_LABELS, ClassificationError, HookClassification, answer_format, parse_hook_reply
 from .repo_constraints import CONSTRAINTS_FILE, numbered_rules
 from .repo_tree import ILLEGAL_ACTION_MESSAGE, PATH_RULE, RULE_BLOCK_EVENT
 
 logger = logging.getLogger(__name__)
 
-ILLEGAL_APPROACH = "illegal approach"
-ILLEGAL_SCORE = 0.0
-# Side-info key that marks a version the final judge rejected; final selection
-# reads it because ILLEGAL_SCORE can still beat negative legal scores.
-ILLEGAL_APPROACH_KEY = "illegal_approach"
 WATCH_EVERY_ACTIONS = 15
+DEFAULT_WARN_CONFIDENCE = 0.7
 JUDGE_ANSWER_TOKENS = 600
 # OpenRouter counts reasoning tokens inside max_tokens. A judge that reasons
 # gets this much more, or its thinking can use the whole limit and leave an
 # empty verdict that is still billed.
 JUDGE_REASONING_TOKENS = 8_000
-# The final judge must read the whole diff; a larger one is refused rather
-# than judged in part, because the unread part could hold the violation.
-MAX_JUDGED_DIFF_CHARS = 400_000
-_MAX_ACTIONS_CHARS = 60_000
-_MAX_REASON_CHARS = 600
+_MAX_STEPS_CHARS = 60_000
+_MAX_INTENT_CHARS = 4_000
 _MAX_ACTION_CHARS = 2_000
-# The latest turns of a model call show the agent's last tool calls and their
-# results; older turns were already seen by earlier watches.
-_ACTION_TURNS = 3
-_JSON_DECODER = json.JSONDecoder()
-_VERDICT_START = re.compile(r'\{\s*"violation"\s*:')
+# The engine keeps scores and the scorer's feedback in these files (STATE.md's
+# leaderboard and failure dossier, archive/index.tsv) and runs the scorer
+# through eval.sh. A call that names one never reaches the hook.
+_ENGINE_FILES = re.compile(r"eval\.sh|STATE\.md|\barchive\b")
+_CALL_ITEMS = frozenset({"function_call", "custom_tool_call", "local_shell_call"})
+_RESULT_ITEMS = frozenset({"function_call_output", "custom_tool_call_output", "local_shell_call_output"})
+WITHHELD_STEP = "The agent used an engine file. The call is withheld."
+NO_TOOL_CALL_STEP = "The agent made no tool call."
 
 EVENT_BLOCK = RULE_BLOCK_EVENT
 EVENT_NOTE = "rule.note"
-EVENT_REJECTION = "rule.rejection"
+EVENT_VERDICT = "rule.verdict"
 _EVENT_TITLES = {
     EVENT_BLOCK: "Illegal action blocked",
     EVENT_NOTE: "Rule warning sent to the agent",
-    EVENT_REJECTION: "Illegal approach scored 0",
+    EVENT_VERDICT: "Watch hook verdict",
+}
+_NOTES = {
+    "off_intent": "Check the run's intent in the constraints file. Your recent work seems to move away from it: {reason}",
+    "breaks_rule": "Check the constraints file. You are probably about to break one of its rules: {reason}",
 }
 
 Ask = Callable[[str], "str | None"]
@@ -71,177 +78,168 @@ Emit = Callable[[dict[str, Any]], None]
 RunWatch = Callable[[Callable[[], None]], None]
 
 
-class RuleJudgeUnavailableError(Exception):
-    """The judge could not give a verdict; the message is safe to show the agent."""
-
-
-@dataclass(frozen=True)
-class RuleVerdict:
-    """What a judge decided about one piece of work."""
-
-    violated: bool
-    rule: str | None = None
-    reason: str = ""
-
-    @property
-    def feedback(self) -> str:
-        """Return the text a rejected version carries as its feedback."""
-        return f"Illegal approach ({self.rule}): {self.reason}"
-
-    @property
-    def note(self) -> str:
-        """Return the warning the agent reads after a watch finds a likely violation."""
-        return f"Check the constraints file. You are probably about to violate {self.rule.lower()}."
-
-
-def _rules_block(rules: Sequence[str]) -> str:
-    """List the rules the way the agent's brief numbers them.
+def watch_prompt(intent: str | None, rules: Sequence[str], steps: Sequence[str]) -> str:
+    """Write the watch hook's prompt for the agent's recent steps.
 
     Args:
+        intent: The run's stated intent, when the repository gives one.
         rules: The plain-language rules.
+        steps: The agent's recent steps, oldest first.
 
     Returns:
-        One ``Rule N: text`` line per rule.
+        The prompt. It holds no metric, scorer, data or labels. Steps from
+        :func:`describe_model_call` hold no scorer or engine output; the
+        agent's own tool inputs can still quote a score.
     """
-    return "\n".join(f"{label}: {rule}" for label, rule in numbered_rules(rules))
-
-
-_ANSWER_FORMAT = (
-    'Answer with one JSON object only: {"violation": true or false, "rule": <rule number or null>,'
-    ' "reason": "<one or two sentences that quote the code or action>"}.'
-)
-
-
-def final_prompt(rules: Sequence[str], diff: str) -> str:
-    """Write the final judge's prompt for one version.
-
-    Args:
-        rules: The plain-language rules.
-        diff: The version's full git diff against the starting commit.
-
-    Returns:
-        The prompt.
-    """
-    return (
-        "You are the rule judge of a code optimization run. An agent changed a repository to raise a"
-        f" score. The repository's {CONSTRAINTS_FILE} lists illegal approaches:\n\n{_rules_block(rules)}\n\n"
-        "Read the full diff below. Decide whether the change uses an illegal approach. Judge the approach,"
-        " not the code quality. A change that only looks related to a rule but does not break it is legal."
-        " When you are not sure, the change is legal.\n\n"
-        f"{_ANSWER_FORMAT}\n\n<diff>\n{diff}\n</diff>"
-    )
-
-
-def watch_prompt(rules: Sequence[str], actions: Sequence[str], diff: str) -> str:
-    """Write the fast judge's prompt for the agent's recent work.
-
-    Args:
-        rules: The plain-language rules.
-        actions: The agent's recent actions, oldest first.
-        diff: The agent's latest version, possibly empty.
-
-    Returns:
-        The prompt.
-    """
-    recent = "\n".join(f"- {action}" for action in actions)[-_MAX_ACTIONS_CHARS:]
-    latest = diff[-_MAX_ACTIONS_CHARS:]
+    rules_text = "\n".join(f"{label}: {rule}" for label, rule in numbered_rules(rules)) or "(no rules)"
+    intent_text = (intent or "").strip()[:_MAX_INTENT_CHARS] or "(no intent given)"
+    recent = "\n".join(f"- {step}" for step in steps)[-_MAX_STEPS_CHARS:]
     return (
         "You watch a code optimization agent. The repository's"
-        f" {CONSTRAINTS_FILE} lists illegal approaches:\n\n{_rules_block(rules)}\n\n"
-        "Read the agent's recent actions and its latest change. Decide whether the work is going toward"
-        " an illegal approach. Flag only clear signs, not ordinary work.\n\n"
-        f"{_ANSWER_FORMAT}\n\n<actions>\n{recent}\n</actions>\n\n<latest_change>\n{latest}\n</latest_change>"
+        f" {CONSTRAINTS_FILE} gives the run's intent and its rules.\n\n"
+        f"<intent>\n{intent_text}\n</intent>\n\n<rules>\n{rules_text}\n</rules>\n\n"
+        'Read the agent\'s recent steps. Use "breaks_rule" when the work goes toward a rule violation,'
+        ' "off_intent" when it moves away from the intent, and "ok" otherwise. Flag only clear signs,'
+        " not ordinary work.\n\n"
+        f"{answer_format(HOOK_LABELS)}\n\n<steps>\n{recent}\n</steps>"
     )
-
-
-def _verdict_object(text: str | None) -> dict[str, Any] | None:
-    """Find the JSON object with a boolean ``violation`` in a judge's reply.
-
-    Judges quote code, so braces in prose before or after the answer are
-    skipped instead of read as part of it. A quoted verdict-shaped string
-    from the diff can sit beside the real answer, so objects that disagree
-    on ``violation`` make the reply unreadable instead of letting one win,
-    and so does a ``{"violation"`` that does not read as an answer, such as
-    a real answer cut off or written loosely after a quoted one.
-
-    Args:
-        text: The judge model's reply.
-
-    Returns:
-        The first answer object, or ``None`` when the reply holds none, its
-        answer objects disagree, or it has a ``{"violation"`` that is not one.
-    """
-    reply = text or ""
-    answers: list[dict[str, Any]] = []
-    start = reply.find("{")
-    while start != -1:
-        try:
-            answer, _ = _JSON_DECODER.raw_decode(reply, start)
-        except json.JSONDecodeError:
-            answer = None
-        if isinstance(answer, dict) and isinstance(answer.get("violation"), bool):
-            answers.append(answer)
-        elif _VERDICT_START.match(reply, start):
-            return None
-        start = reply.find("{", start + 1)
-    if not answers or len({answer["violation"] for answer in answers}) > 1:
-        return None
-    return answers[0]
-
-
-def parse_verdict(text: str | None, rules: Sequence[str]) -> RuleVerdict | None:
-    """Read a judge's answer.
-
-    Args:
-        text: The judge model's reply.
-        rules: The rules, to check the named rule exists.
-
-    Returns:
-        The verdict, or ``None`` when the reply is not a valid answer.
-    """
-    answer = _verdict_object(text)
-    if answer is None:
-        return None
-    reason = str(answer.get("reason") or "").strip()[:_MAX_REASON_CHARS]
-    if not answer["violation"]:
-        return RuleVerdict(violated=False, reason=reason)
-    number = answer.get("rule")
-    if isinstance(number, str) and number.strip().lower().removeprefix("rule").strip().isdigit():
-        number = int(number.strip().lower().removeprefix("rule").strip())
-    if isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= len(rules):
-        return None
-    return RuleVerdict(violated=True, rule=f"Rule {number}", reason=reason or "The judge gave no reason.")
 
 
 def describe_model_call(body: Mapping[str, Any]) -> str:
-    """Describe one agent model call as an action for the watch judge.
+    """Describe one agent model call as a step for the watch hook.
 
-    Each call the coding agent makes carries its latest tool calls and their
-    results as its last turns, in any of the chat, messages or responses
-    formats. The system prompt and instructions are left out.
+    Each call the coding agent makes ends with its latest tool calls and their
+    results, in any of the chat, messages or responses formats. The step keeps
+    only those tool calls: each tool's name and its input (a command, a file
+    path or edit content). Tool results, the agent's text, the prompt and the
+    system prompt are left out, so the hook gets no scorer or engine output. A
+    call that names an engine file makes the step :data:`WITHHELD_STEP`.
 
     Args:
         body: The model request the agent sent.
 
     Returns:
-        The end of the call's latest turns as JSON text, at most
-        ``_MAX_ACTION_CHARS`` characters.
+        The tool calls as JSON text, at most ``_MAX_ACTION_CHARS`` characters,
+        :data:`WITHHELD_STEP`, or :data:`NO_TOOL_CALL_STEP`.
     """
     turns = body.get("messages") if isinstance(body.get("messages"), list) else body.get("input")
-    if isinstance(turns, str):
-        latest: Any = turns
-    elif isinstance(turns, list):
-        latest = [turn for turn in turns if not (isinstance(turn, dict) and turn.get("role") == "system")]
-        latest = latest[-_ACTION_TURNS:]
-    else:
-        latest = []
-    return json.dumps(latest, ensure_ascii=False, default=str)[-_MAX_ACTION_CHARS:]
+    calls = _latest_tool_calls(turns) if isinstance(turns, list) else []
+    if not calls:
+        return NO_TOOL_CALL_STEP
+    text = json.dumps(calls, ensure_ascii=False, default=str)
+    if _ENGINE_FILES.search(text):
+        return WITHHELD_STEP
+    return text[:_MAX_ACTION_CHARS]
+
+
+def _latest_tool_calls(turns: Sequence[Any]) -> list[dict[str, Any]]:
+    """Return the agent's latest tool calls, skipping the results that follow them.
+
+    Older calls were already seen by earlier model calls, so only the last
+    group of calls counts.
+
+    Args:
+        turns: The call's turns or input items, oldest first.
+
+    Returns:
+        ``{"tool", "input"}`` for each call in the latest group, in order.
+    """
+    calls: list[dict[str, Any]] = []
+    index = len(turns) - 1
+    while index >= 0 and _is_result(turns[index]):
+        index -= 1
+    while index >= 0:
+        turn = turns[index]
+        if isinstance(turn, dict) and turn.get("type") == "reasoning":
+            index -= 1
+            continue
+        found = _turn_calls(turn)
+        if not found:
+            break
+        calls[:0] = found
+        if isinstance(turn, dict) and turn.get("type") not in _CALL_ITEMS:
+            break
+        index -= 1
+    return calls
+
+
+def _is_result(turn: Any) -> bool:
+    """Return whether a turn only carries tool results.
+
+    Args:
+        turn: One turn or input item.
+
+    Returns:
+        ``True`` for a chat ``tool`` turn, a user turn of ``tool_result``
+        blocks, or a responses output item.
+    """
+    if not isinstance(turn, dict):
+        return False
+    if turn.get("role") == "tool" or turn.get("type") in _RESULT_ITEMS:
+        return True
+    content = turn.get("content")
+    return (
+        turn.get("role") == "user"
+        and isinstance(content, list)
+        and bool(content)
+        and all(isinstance(block, dict) and block.get("type") == "tool_result" for block in content)
+    )
+
+
+def _turn_calls(turn: Any) -> list[dict[str, Any]]:
+    """Return the tool calls one turn makes.
+
+    Args:
+        turn: One turn or input item.
+
+    Returns:
+        ``{"tool", "input"}`` for each call; empty when the turn makes none.
+    """
+    if not isinstance(turn, dict):
+        return []
+    kind = turn.get("type")
+    if kind == "local_shell_call":
+        return [{"tool": "shell", "input": turn.get("action")}]
+    if kind in _CALL_ITEMS:
+        return [{"tool": turn.get("name"), "input": _call_input(turn.get("arguments", turn.get("input")))}]
+    if turn.get("role") != "assistant":
+        return []
+    calls = [
+        {"tool": call["function"].get("name"), "input": _call_input(call["function"].get("arguments"))}
+        for call in turn.get("tool_calls") or []
+        if isinstance(call, dict) and isinstance(call.get("function"), dict)
+    ]
+    content = turn.get("content")
+    if isinstance(content, list):
+        calls += [
+            {"tool": block.get("name"), "input": block.get("input")}
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "tool_use"
+        ]
+    return calls
+
+
+def _call_input(arguments: Any) -> Any:
+    """Return a call's input, read as JSON when it is JSON text.
+
+    Args:
+        arguments: The call's arguments or input.
+
+    Returns:
+        The parsed value, or the text itself when it is not JSON.
+    """
+    if not isinstance(arguments, str):
+        return arguments
+    try:
+        return json.loads(arguments)
+    except ValueError:
+        return arguments
 
 
 def run_log_emitter(owner: str) -> Emit:
     """Return an event sink that writes rule events into one run's log.
 
-    The judges run on the parent's gateway threads, which are not the job's,
+    The hook runs on the parent's gateway threads, which are not the job's,
     so the events go through the sandbox log router, which persists a
     record by its owner whatever thread wrote it.
 
@@ -256,22 +254,17 @@ def run_log_emitter(owner: str) -> Emit:
         """Log one rule event.
 
         Args:
-            event: ``{"kind", "rule", "reason"}``.
+            event: ``{"kind", ...fields}``; every key besides ``kind`` becomes a field.
         """
         kind = str(event["kind"])
-        level = logging.INFO if kind == EVENT_NOTE else logging.WARNING
+        fields = {key: value for key, value in event.items() if key != "kind"}
+        level = logging.WARNING if kind == EVENT_BLOCK else logging.INFO
         sandbox_log.stream_logger.log(
             level,
-            "%s: %s. %s",
+            "%s: %s",
             _EVENT_TITLES.get(kind, kind),
-            event.get("rule"),
-            event.get("reason"),
-            extra=run_log.event_extra(
-                source="host",
-                event=kind,
-                fields={"rule": event.get("rule"), "reason": event.get("reason")},
-                sandbox_owner=owner,
-            ),
+            ", ".join(f"{key}={value}" for key, value in fields.items()),
+            extra=run_log.event_extra(source="host", event=kind, fields=fields, sandbox_owner=owner),
         )
 
     return emit
@@ -287,39 +280,48 @@ def _start_thread(watch: Callable[[], None]) -> None:
 
 
 class RuleJudge:
-    """Check a run's work against its plain-language rules."""
+    """Record path-rule blocks and, when on, watch the agent against its intent and rules."""
 
     def __init__(
         self,
         rules: Sequence[str],
         *,
-        ask_fast: Ask,
-        ask_strong: Ask,
+        intent: str | None = None,
+        ask: Ask | None,
         emit: Emit,
+        threshold: float = DEFAULT_WARN_CONFIDENCE,
         run_watch: RunWatch = _start_thread,
     ) -> None:
-        """Bind the rules to the two judge models.
+        """Bind the intent and rules to the watch hook model.
 
         Args:
-            rules: The plain-language rules, in file order; with none, only
-                path-rule blocks are recorded and no model is asked.
-            ask_fast: Sends one prompt to the fast judge; ``None`` when it failed.
-            ask_strong: Sends one prompt to the final judge; ``None`` when it failed.
+            rules: The plain-language rules, in file order.
+            intent: The run's stated intent, when the repository gives one.
+            ask: Sends one prompt to the watch hook model and returns its
+                reply, or ``None`` when the call failed. ``None`` turns the
+                watch off: path-rule blocks are still recorded and no model
+                is asked.
             emit: Records one run event.
+            threshold: The lowest confidence at which a non-``ok`` verdict
+                warns the agent.
             run_watch: Runs one watch; by default on its own thread, so the
                 agent's model call never waits for it.
         """
         self.rules = tuple(rules)
-        self._ask_fast = ask_fast
-        self._ask_strong = ask_strong
+        self.intent = intent
+        self._ask = ask
         self._emit = emit
+        self._threshold = threshold
         self._run_watch = run_watch
-        self._verdicts: dict[str, RuleVerdict] = {}
-        self._actions: list[str] = []
+        self._steps: list[str] = []
         self._since_watch = 0
-        self._latest_diff = ""
         self._notes: list[str] = []
         self._lock = threading.Lock()
+
+    @property
+    def watching(self) -> bool:
+        """Return whether the watch hook asks a model."""
+        return self._ask is not None
 
     def blocked(self, problems: Sequence[str]) -> str:
         """Record a version the path rules refused and return what the agent reads.
@@ -330,93 +332,72 @@ class RuleJudge:
         Returns:
             The fixed illegal-action message.
         """
-        self._emit(
-            {
-                "kind": EVENT_BLOCK,
-                "rule": PATH_RULE,
-                "reason": " ".join(problems),
-            }
-        )
+        self._emit({"kind": EVENT_BLOCK, "rule": PATH_RULE, "reason": " ".join(problems)})
         return ILLEGAL_ACTION_MESSAGE
 
-    def judge_version(self, diff: str) -> RuleVerdict:
-        """Ask the final judge about one version, once per distinct diff.
-
-        Args:
-            diff: The version's full git diff.
-
-        Returns:
-            The verdict; a violation means the version is an illegal approach.
-
-        Raises:
-            RuleJudgeUnavailableError: When the diff is too large to judge whole,
-                or the judge gave no valid answer twice.
-        """
-        if not self.rules:
-            return RuleVerdict(violated=False)
-        key = hashlib.sha256(diff.encode("utf-8")).hexdigest()
-        with self._lock:
-            self._latest_diff = diff
-            cached = self._verdicts.get(key)
-        if cached is not None:
-            return cached
-        if len(diff) > MAX_JUDGED_DIFF_CHARS:
-            raise RuleJudgeUnavailableError(
-                f"The change is larger than the {MAX_JUDGED_DIFF_CHARS:,} characters the rule judge reads."
-                " Make a smaller change."
-            )
-        prompt = final_prompt(self.rules, diff)
-        verdict = parse_verdict(self._ask_strong(prompt), self.rules) or parse_verdict(
-            self._ask_strong(prompt), self.rules
-        )
-        if verdict is None:
-            raise RuleJudgeUnavailableError("The rule judge could not check this version. Send it again.")
-        with self._lock:
-            self._verdicts[key] = verdict
-        if verdict.violated:
-            self._emit({"kind": EVENT_REJECTION, "rule": verdict.rule, "reason": verdict.reason})
-        return verdict
-
-    def record_action(self, action: str, diff: str | None = None) -> None:
-        """Count one agent action and watch the recent work every :data:`WATCH_EVERY_ACTIONS` actions.
+    def record_action(self, action: str) -> None:
+        """Count one agent step and watch the last steps every :data:`WATCH_EVERY_ACTIONS` steps.
 
         Args:
             action: A short description of what the agent did.
-            diff: The agent's latest version; by default the last one sent for scoring.
         """
-        if not self.rules:
+        if self._ask is None:
             return
         with self._lock:
-            self._actions.append(action)
-            del self._actions[: -WATCH_EVERY_ACTIONS * 2]
+            self._steps.append(action)
+            del self._steps[:-WATCH_EVERY_ACTIONS]
             self._since_watch += 1
             if self._since_watch < WATCH_EVERY_ACTIONS:
                 return
             self._since_watch = 0
-            recent = list(self._actions[-WATCH_EVERY_ACTIONS:])
-            latest = self._latest_diff if diff is None else diff
-        self._run_watch(lambda: self._watch(recent, latest))
+            recent = list(self._steps)
+        self._run_watch(lambda: self._watch(recent))
 
-    def _watch(self, actions: Sequence[str], diff: str) -> None:
-        """Ask the fast judge about the recent work and queue a note on a likely violation.
+    def _watch(self, steps: Sequence[str]) -> None:
+        """Ask the watch hook about the recent steps, log its verdict, and queue a warning when it is sure.
 
-        A failed watch is dropped: the agent may continue, and the final judge
-        still checks every version.
+        A failed watch is logged and dropped: the hook never stops the run.
 
         Args:
-            actions: The recent actions, oldest first.
-            diff: The agent's latest version.
+            steps: The recent steps, oldest first.
         """
-        try:
-            verdict = parse_verdict(self._ask_fast(watch_prompt(self.rules, actions, diff)), self.rules)
-        except Exception:  # isolation boundary: a watch must never stop the run
-            logger.warning("The rule watch could not ask its judge.", exc_info=True)
+        ask = self._ask
+        if ask is None:
             return
-        if verdict is None or not verdict.violated:
+        try:
+            verdict = parse_hook_reply(ask(watch_prompt(self.intent, self.rules, steps)))
+        except ClassificationError as error:
+            logger.warning("The rule watch got an answer it could not read: %s", error)
+            return
+        except Exception:  # isolation boundary: a watch must never stop the run
+            logger.warning("The rule watch could not ask its model.", exc_info=True)
+            return
+        warned = self._warns(verdict)
+        self._emit(
+            {
+                "kind": EVENT_VERDICT,
+                "label": verdict.label,
+                "confidence": verdict.confidence,
+                "reason": verdict.reason,
+                "warned": warned,
+            }
+        )
+        if not warned:
             return
         with self._lock:
-            self._notes.append(verdict.note)
-        self._emit({"kind": EVENT_NOTE, "rule": verdict.rule, "reason": verdict.reason})
+            self._notes.append(_NOTES[verdict.label].format(reason=verdict.reason))
+        self._emit({"kind": EVENT_NOTE, "label": verdict.label, "reason": verdict.reason})
+
+    def _warns(self, verdict: HookClassification) -> bool:
+        """Return whether a verdict is sure enough to warn the agent.
+
+        Args:
+            verdict: The watch hook's answer.
+
+        Returns:
+            ``True`` for a non-``ok`` label at or above the threshold.
+        """
+        return verdict.label != "ok" and verdict.confidence >= self._threshold
 
     def take_notes(self) -> list[str]:
         """Return and clear the warnings the agent has not read yet.

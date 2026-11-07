@@ -25,7 +25,7 @@ from ....billing.model_dispatch import ModelHTTPResult
 from . import runner, sandbox_log
 from .harness import ENV_API_KEY, ENV_MODEL
 from .repo_workspace import REPO_DIR, RepoWorkspace, redact
-from .rule_judge import ILLEGAL_APPROACH_KEY, ILLEGAL_SCORE, RuleJudge, RuleJudgeUnavailableError
+from .rule_judge import RuleJudge
 from .sandbox import SandboxSession
 from .sandbox_scorer import RUNNER_SOURCE, ScorerGateway, _raise_control
 
@@ -94,8 +94,8 @@ class RepoScorer:
             timeout_seconds: Longest one scorer call may run, setup excluded.
             rule_judge: The repository's constraints-file enforcement, when it
                 has an ``optimize.toml``: path-rule refusals then get the fixed
-                illegal-action message, and every changed version passes the
-                final rule judge before it is scored.
+                illegal-action message, and the watch hook's warnings open
+                the next scoring feedback. It never changes a score.
             gateway: The run's scoped model route from the trusted parent.
                 The scorer's ``llm()`` and the version's own code reach it
                 with ``APP_API_KEY`` and ``APP_MODEL``; the box itself stays
@@ -118,13 +118,12 @@ class RepoScorer:
             case: The case to score it on, when the run has cases.
 
         Returns:
-            ``{"score": ..., **side_info}``, secrets redacted; an illegal
-            approach gets a score of 0 with the judge's reason, unscored.
+            ``{"score": ..., **side_info}``, secrets redacted.
 
         Raises:
             RepoScoreError: When the version breaks the path rules or does not
-                apply, changes a protected file while it runs, the rule judge
-                cannot check it, or the scorer fails or returns no score.
+                apply, changes a protected file while it runs, or the scorer
+                fails or returns no score.
             BudgetReached: When the run's budget stopped a model call.
             BudgetError: When a model call had insufficient budget coverage.
             UsagePendingError: When a model call needs reconciliation.
@@ -135,19 +134,6 @@ class RepoScorer:
         if gateway is not None and gateway.api_key:
             secrets.append(gateway.api_key)
         judge = self._rule_judge
-        # The judge runs outside the lock: a slow verdict must not hold up the
-        # checkout and scoring of other versions.
-        if judge is not None and patch.strip() and not self._workspace.violations(patch):
-            try:
-                verdict = judge.judge_version(patch)
-            except RuleJudgeUnavailableError as error:
-                raise RepoScoreError(str(error)) from error
-            if verdict.violated:
-                return {
-                    "score": ILLEGAL_SCORE,
-                    "feedback": verdict.feedback,
-                    ILLEGAL_APPROACH_KEY: {"rule": verdict.rule, "reason": verdict.reason},
-                }
         # Checkout and scoring share one lock: the next version's checkout
         # replaces the tree this one is scored on.
         with self._lock:
