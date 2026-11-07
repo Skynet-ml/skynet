@@ -425,6 +425,10 @@ def test_a_service_without_secrets_parses() -> None:
         (b"[services.cache]\n", "[services.cache]"),
         (b'[metric]\nfiles = ["eval/scorer.py"]\n', "[metric] files"),
         (b'[metric]\nexploits = "eval/exploits"\n', "[metric] exploits"),
+        (b'[metric]\nexploits = ".optimize/exploits"\n', "[metric] exploits"),
+        (b"[proposer]\ntools = []\n", "[proposer] tools"),
+        (b"[proposer]\nservices = []\n", "[proposer] services"),
+        (b"[metric]\nfiles = []\n", "[metric] files"),
         (b'[metric]\nreference = "eval/reference.json"\n', "[metric] reference"),
     ],
 )
@@ -454,10 +458,9 @@ def test_a_run_names_every_unenforced_key(tmp_path: Path) -> None:
     [
         _CFCA + _RULES,
         b'[proposer]\nillegal = ["Do not edit tests."]\n',
-        b'[metric]\nexploits = ".optimize/exploits"\n',
         b"[proposer]\n[metric]\n",
     ],
 )
 def test_a_run_accepts_old_files_and_proposer_illegal(tmp_path: Path, raw: bytes) -> None:
-    """Old files and keys the run already enforces still stage."""
+    """Old files, ``[proposer] illegal`` (the judges enforce it) and empty sections still stage."""
     assert read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw})) == parse_constraints(raw)

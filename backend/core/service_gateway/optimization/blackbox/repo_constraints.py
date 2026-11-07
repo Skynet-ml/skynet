@@ -651,8 +651,9 @@ def read_constraints(archive: Path) -> RepoConstraints | None:
         if member.size > _MAX_FILE_BYTES:
             raise ConstraintsError(f"{CONSTRAINTS_FILE} is larger than {_MAX_FILE_BYTES // 1024} KiB.")
         handle = packed.extractfile(member)
-        constraints = parse_constraints(handle.read() if handle is not None else b"")
-    unenforced = _unenforced_keys(constraints)
+        raw = handle.read() if handle is not None else b""
+    constraints = parse_constraints(raw)
+    unenforced = _unenforced_keys(raw, constraints)
     if unenforced:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE} sets {', '.join(unenforced)}. Repository runs cannot enforce "
@@ -661,7 +662,7 @@ def read_constraints(archive: Path) -> RepoConstraints | None:
     return constraints
 
 
-def _unenforced_keys(constraints: RepoConstraints) -> list[str]:
+def _unenforced_keys(raw: bytes, constraints: RepoConstraints) -> list[str]:
     """List the environment settings a repository run cannot enforce yet.
 
     A setting the run ignores would look like protection the user does not get,
@@ -669,33 +670,24 @@ def _unenforced_keys(constraints: RepoConstraints) -> list[str]:
     refuses it instead. SKY-352 removes this check when the sandbox runtime
     enforces these keys. ``[proposer] illegal`` is not listed: the judges enforce it.
 
+    Presence is read from the file, not the parsed values: a written empty list
+    (``tools = []``) means "none", which differs from the default an absent key
+    gives, and a written default (``exploits = ".optimize/exploits"``) still
+    asks for a folder to be hidden.
+
     Args:
+        raw: The file's contents, already accepted by :func:`parse_constraints`.
         constraints: The parsed file.
 
     Returns:
-        The settings the file sets, as ``[section] key`` labels, in file order.
+        The settings the file sets, as ``[section] key`` labels.
     """
-    proposer, metric = constraints.proposer, constraints.metric
-    keys = [
-        label
-        for label, is_set in (
-            ("[proposer] tools", bool(proposer.tools)),
-            ("[proposer] network", proposer.network is not None),
-            ("[proposer] services", bool(proposer.services)),
-        )
-        if is_set
-    ]
+    document = tomllib.loads(raw.decode("utf-8"))
+    proposer, metric = document.get("proposer", {}), document.get("metric", {})
+    keys = [f"[proposer] {key}" for key in ("tools", "network", "services") if key in proposer]
     keys += [f"[target.{name}]" for name in constraints.targets]
     keys += [f"[services.{name}]" for name in constraints.services]
-    keys += [
-        label
-        for label, is_set in (
-            ("[metric] files", bool(metric.files)),
-            ("[metric] exploits", metric.exploits != _DEFAULT_EXPLOITS),
-            ("[metric] reference", metric.reference is not None),
-        )
-        if is_set
-    ]
+    keys += [f"[metric] {key}" for key in ("files", "exploits", "reference") if key in metric]
     return keys
 
 
