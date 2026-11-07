@@ -36,6 +36,7 @@ from typing import Any, TypeVar
 from sqlalchemy import Engine, or_, select, update
 from sqlalchemy.orm import Session
 
+from ..api.errors import DomainError
 from ..api.model_catalog import agent_model_id
 from ..billing.budgets import BudgetService
 from ..billing.byok_bridge import inject_byok_connections, payload_uses_token_source
@@ -114,6 +115,7 @@ class HardeningMeter(BudgetRuntime):
         *,
         operation_id: str | None,
         lost: threading.Event | None = None,
+        exhausted: threading.Event | None = None,
         **kwargs: Any,
     ) -> None:
         """Create the meter.
@@ -122,12 +124,14 @@ class HardeningMeter(BudgetRuntime):
             service: The budget service.
             operation_id: The job's hold, or None for a local job.
             lost: Set when this pod loses its claim on the job.
+            exhausted: Set when the hold cannot cover another model call.
             **kwargs: The :class:`BudgetRuntime` arguments.
         """
         super().__init__(service, **kwargs)
         self.operation_id = operation_id
         self.spent_usd = 0.0
         self._lost = lost if lost is not None else threading.Event()
+        self._exhausted = exhausted if exhausted is not None else threading.Event()
         self._calls = 0
         # Gateway threads share one meter. The lock keeps each cumulative
         # settle on top of the latest one, and ``_inflight`` counts the
@@ -177,6 +181,7 @@ class HardeningMeter(BudgetRuntime):
         with self._lock:
             operation = self.service.get_operation(self.operation_id, self.username)
             if operation.actual_cents + self._inflight + quote.maximum.total > operation.max_cents:
+                self._exhausted.set()
                 raise HardeningBudgetExceededError("The job's hold cannot cover another model call.")
             if operation.state == "reserved":
                 self.service.mark_dispatched(self.operation_id, self.username)
@@ -534,12 +539,21 @@ class RepoHardeningRunner(HardeningRunner):
             patch: The solution as a git patch.
 
         Returns:
-            The metric score.
+            The metric score, or negative infinity when ``fix_diff`` does not apply.
         """
         fixes = tuple(self.fixes) + ((fix_diff,) if fix_diff else ())
         scorer = self._scorers.get(fixes)
         if scorer is None:
-            scorer = self.open_scorer(self._fixed_archive(fixes), fixes)
+            try:
+                archive = self._fixed_archive(fixes)
+            except RuntimeError:
+                if not fix_diff:
+                    raise
+                # A drafted fix that does not apply fails its checks, so the
+                # job waits for the user instead of failing (and paying again).
+                logger.info("Hardening job %s: the drafted fix does not apply.", self.job.id)
+                return float("-inf")
+            scorer = self.open_scorer(archive, fixes)
             self._scorers[fixes] = scorer
         return float(scorer.score(patch)["score"])
 
@@ -577,6 +591,7 @@ def open_hardening_runner(
     claim: str,
     vault: ProviderKeyVault | None = None,
     lost: threading.Event | None = None,
+    exhausted: threading.Event | None = None,
     on_commit: Callable[[str | None], None] = lambda _commit: None,
 ) -> Iterator[RepoHardeningRunner]:
     """Open the gateway, sandbox broker and runner for one pass, and close them on exit.
@@ -592,6 +607,7 @@ def open_hardening_runner(
         claim: This pass's claim token; it keys the scorer boxes of the pass.
         vault: Resolves a BYOK scorer model's saved key; needed only for one.
         lost: Set when this pod loses its claim, so the meter stops paying.
+        exhausted: Set when the hold cannot cover another model call.
         on_commit: Receives the commit the pass staged, so later passes pin it.
 
     Yields:
@@ -621,6 +637,7 @@ def open_hardening_runner(
         service,
         operation_id=operation_id,
         lost=lost,
+        exhausted=exhausted,
         username=username,
         budget_id=budget_id,
         generation=snapshot.generation,
@@ -853,7 +870,8 @@ def process_next_hardening_job(
         return False
     job_id, username, job, operation_id, claim = claimed
     state: dict[str, Any] = {"operation": operation_id, "commit": None}
-    failure = _start_failure(job, settings)
+    vault = ProviderKeyVault(engine=engine)
+    failure = _start_failure(job, settings, username=username, vault=vault)
     if failure is not None:
         result = _ended(job, failure)
     else:
@@ -861,6 +879,7 @@ def process_next_hardening_job(
         budget = HardeningBudget(BudgetService(engine=engine), username=username, budget_id=job.binding_id)
         binding_id = job.binding_id
         lost = threading.Event()
+        exhausted = threading.Event()
 
         def reserve(reserved_job: HardeningJob, hold: float) -> None:
             """Hold the job's dollars, reusing its open hold.
@@ -890,8 +909,9 @@ def process_next_hardening_job(
                 operation_id=state["operation"],
                 settings=settings,
                 claim=claim,
-                vault=ProviderKeyVault(engine=engine),
+                vault=vault,
                 lost=lost,
+                exhausted=exhausted,
                 on_commit=lambda commit: state.__setitem__("commit", commit),
             )
 
@@ -917,16 +937,21 @@ def process_next_hardening_job(
         except Exception as exc:
             # One bad job must not stop the worker loop.
             logger.warning("Hardening job %s: the pass raised %s.", job_id, type(exc).__name__)
-            result = _ended(job, type(exc).__name__)
+            result = _ended(job, "hardening.runner_failed")
         finally:
             stop.set()
             renewer.join()
+        if result.status == "failed" and exhausted.is_set():
+            # The core round budget sees only ``job.spent_usd``, which misses
+            # the metric's own model calls, so a spent hold surfaces as a raised
+            # error. Running out of money is a clean end, not a failure.
+            result = result.model_copy(update={"status": "budget_stop", "error": None})
         result = _pin_commit(result, state["commit"])
     store_hardening_result(engine, job_id, result, claim=claim, operation_id=state["operation"])
     return True
 
 
-def _start_failure(job: HardeningJob, settings: Settings) -> str | None:
+def _start_failure(job: HardeningJob, settings: Settings, *, username: str, vault: ProviderKeyVault) -> str | None:
     """Return the stable error key of a job that cannot start, before any paid work.
 
     The page shows these keys, so a known failure never surfaces as a Python
@@ -935,6 +960,8 @@ def _start_failure(job: HardeningJob, settings: Settings) -> str | None:
     Args:
         job: The claimed job.
         settings: The deployment settings.
+        username: The job's owner, whose saved keys a BYOK scorer uses.
+        vault: The provider-key vault.
 
     Returns:
         The error key, or None when the job can start.
@@ -947,6 +974,18 @@ def _start_failure(job: HardeningJob, settings: Settings) -> str | None:
         return "hardening.no_python_metric"
     if settings.openrouter_api_key is None:
         return "hardening.no_managed_models"
+    scorer = {"scorer": copy.deepcopy(job.scorer)}
+    if payload_uses_token_source(scorer, TOKEN_SOURCE_BYOK, default_token_source=TOKEN_SOURCE_MANAGED):
+        try:
+            inject_byok_connections(scorer, username=username, vault=vault, default_token_source=TOKEN_SOURCE_MANAGED)
+        except ValueError:
+            return "hardening.byok_missing"
+        except DomainError as error:
+            # A deployment without a vault key holds no saved keys, so to the
+            # user the key is missing, not refused.
+            if error.code == "billing.byok_not_configured":
+                return "hardening.byok_missing"
+            return "hardening.byok_not_served"
     return None
 
 

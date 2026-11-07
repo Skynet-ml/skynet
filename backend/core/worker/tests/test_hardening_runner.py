@@ -19,6 +19,7 @@ from pydantic import SecretStr
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
 
+from core.api.errors import DomainError
 from core.billing.budgets import BudgetService
 from core.billing.operation_pricing import ChargePolicy, operation_quote
 from core.billing.runtime import PaidResult, generation_operation_key
@@ -456,7 +457,7 @@ def test_a_job_without_a_scorer_fails_without_a_pass(engine: Engine) -> None:
 
 
 def test_a_raising_pass_fails_the_job_and_closes_its_hold(engine: Engine) -> None:
-    """A driver error ends the job as failed with the type name, and the hold closes."""
+    """A driver error ends the job as failed with a stable key, and the hold closes."""
     budget_id = _budget(engine)
     job = _seed(engine, binding_id=budget_id)
     service = BudgetService(engine=engine)
@@ -478,7 +479,7 @@ def test_a_raising_pass_fails_the_job_and_closes_its_hold(engine: Engine) -> Non
 
     row = _row(engine, job.id)
     assert row.status == "failed"
-    assert row.job["error"] == "KeyError"
+    assert row.job["error"] == "hardening.runner_failed"
     assert row.budget_operation_id is None
     assert service.get(budget_id, _USER).reserved_cents == 0
 
@@ -659,6 +660,59 @@ def test_the_runner_scores_with_the_approved_fixes_applied(tmp_path: Path) -> No
     assert seen == ["v2\n", "v3\n"]
 
 
+def _fixed_tree(tmp_path: Path, applied: tuple[str, ...]) -> RepoHardeningRunner:
+    """Create a runner whose trusted tree holds a one-line metric.
+
+    Args:
+        tmp_path: Pytest temporary folder.
+        applied: The approved fixes of earlier rounds.
+
+    Returns:
+        The runner, with a scorer that always returns 1.
+    """
+    trusted = tmp_path / "trusted"
+    (trusted / "eval").mkdir(parents=True)
+    (trusted / "eval" / "metric.py").write_text("v1\n")
+    workspace = HardeningWorkspace(
+        agent_archive=tmp_path / "agent.tgz",
+        trusted_root=trusted,
+        exploits_path=trusted / "eval" / "exploits",
+        reference=None,
+        commit="c0ffee",
+        applied_fixes=applied,
+        secrets={},
+    )
+    scorer = SimpleNamespace(score=lambda patch: {"score": 1.0}, close=lambda: None)
+    return RepoHardeningRunner(
+        workspace,
+        new_job(attacker_model="m", judge_model="m", place="local"),
+        gateway=None,
+        meter=None,
+        open_scorer=lambda archive, fixes: scorer,
+        managed_key="k",  # type: ignore[arg-type]
+    )
+
+
+def test_a_drafted_fix_that_does_not_apply_scores_negative_infinity(tmp_path: Path) -> None:
+    """A drafted fix that does not apply scores -inf, so its checks fail and the job waits for the user."""
+    runner = _fixed_tree(tmp_path, ())
+    try:
+        assert runner._score(_diff("other", "v2"), "") == float("-inf")
+        assert runner._score(None, "") == 1.0
+    finally:
+        runner.close()
+
+
+def test_an_approved_fix_that_does_not_apply_still_raises(tmp_path: Path) -> None:
+    """When the approved fixes alone do not apply, the base score raises and the pass fails."""
+    runner = _fixed_tree(tmp_path, (_diff("other", "v2"),))
+    try:
+        with pytest.raises(RuntimeError):
+            runner._score(None, "")
+    finally:
+        runner.close()
+
+
 def _meter(
     service: BudgetService, budget_id: str, operation_id: str, lost: threading.Event | None = None
 ) -> HardeningMeter:
@@ -722,6 +776,70 @@ def test_a_failed_dispatch_keeps_the_call_maximum_in_the_hold(engine: Engine) ->
     final = service.get_operation(held, _USER)
     assert final.state not in OPEN_STATES
     assert final.actual_cents == quote.maximum.total
+
+
+def test_a_spent_hold_sets_exhausted_before_it_refuses_a_call(engine: Engine) -> None:
+    """A call whose maximum passes the hold sets exhausted, raises, and never dispatches."""
+    budget_id = _budget(engine)
+    job = _seed(engine, binding_id=budget_id)
+    service = BudgetService(engine=engine)
+    held = HardeningBudget(service, username=_USER, budget_id=budget_id).reserve(job, 0.01)
+    exhausted = threading.Event()
+    meter = HardeningMeter(
+        service,
+        operation_id=held,
+        username=_USER,
+        budget_id=budget_id,
+        generation=service.get(budget_id, _USER).generation,
+        phase="setup",
+        exhausted=exhausted,
+    )
+    quote, policy = _quote("over")
+    calls: list[str] = []
+
+    with pytest.raises(hardening_runner.HardeningBudgetExceededError):
+        meter.execute(quote, policy, lambda: calls.append("x"), operation_key="call", cost_kind="model")
+
+    assert exhausted.is_set()
+    assert calls == []
+
+
+def test_a_pass_that_fails_on_a_spent_hold_ends_as_budget_stop(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the meter ran out of hold, the core's failed result becomes budget_stop with no error."""
+    job = _seed(engine, binding_id=_budget(engine))
+
+    def fake_runner(*args: Any, exhausted: threading.Event, **kwargs: Any) -> None:
+        """Signal a spent hold as the meter does.
+
+        Args:
+            *args: The runner arguments.
+            exhausted: The job's spent-hold signal.
+            **kwargs: The runner options.
+        """
+        exhausted.set()
+
+    def run(job: HardeningJob, **kwargs: Any) -> HardeningJob:
+        """Open the runner, then fail as the core does on a raised call.
+
+        Args:
+            job: The job.
+            **kwargs: The driver arguments.
+
+        Returns:
+            The failed job.
+        """
+        kwargs["runner_factory"](None, job)
+        ended = job.model_copy(deep=True)
+        ended.status = "failed"
+        ended.error = "The job's hold cannot cover another model call."
+        return ended
+
+    monkeypatch.setattr(hardening_runner, "open_hardening_runner", fake_runner)
+    assert _process(engine, run)
+
+    row = _row(engine, job.id)
+    assert row.status == "budget_stop"
+    assert row.job["error"] is None
 
 
 def test_parallel_calls_on_one_meter_add_both_costs(engine: Engine) -> None:
@@ -905,6 +1023,11 @@ def test_the_sweep_closes_a_hold_that_an_earlier_close_left_open(
         ({"kind": "remote", "url": "https://score.example", "metric_code": "x"}, True, "hardening.no_python_metric"),
         ({"kind": "python"}, True, "hardening.no_python_metric"),
         (None, False, "hardening.no_managed_models"),
+        (
+            {**_SCORER, "model": {"name": "openai/gpt-4o-mini", "token_source": "byok", "extra": {}}},
+            True,
+            "hardening.byok_missing",
+        ),
     ],
 )
 def test_a_job_that_cannot_start_ends_with_a_stable_key(
@@ -923,6 +1046,52 @@ def test_a_job_that_cannot_start_ends_with_a_stable_key(
         settings=_KEYED if keyed else settings.model_copy(update={"openrouter_api_key": None}),
         run=lambda job, **kwargs: calls.append(job.id),
     )
+
+    row = _row(engine, job.id)
+    assert calls == []
+    assert row.status == "failed"
+    assert row.job["error"] == error
+    assert BudgetService(engine=engine).get(budget_id, _USER).reserved_cents == 0
+
+
+@pytest.mark.parametrize(
+    ("refusal", "error"),
+    [
+        (None, "hardening.byok_missing"),
+        (DomainError("billing.byok_not_configured", status=503), "hardening.byok_missing"),
+        (DomainError("billing.byok_model_not_served", status=400), "hardening.byok_not_served"),
+    ],
+)
+def test_a_byok_scorer_without_a_usable_key_ends_with_a_stable_key(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, refusal: DomainError | None, error: str
+) -> None:
+    """A BYOK scorer with no saved key, no vault, or a key Skynet cannot route, ends before any hold."""
+    budget_id = _budget(engine)
+    job = _seed(
+        engine,
+        binding_id=budget_id,
+        scorer={**_SCORER, "model": {"name": "openai/gpt-4o-mini", "token_source": "byok", "extra": {}}},
+    )
+    calls: list[str] = []
+
+    def resolve_connection(username: str, provider: str) -> None:
+        """Find no key, or refuse as the vault or the route check does.
+
+        Args:
+            username: The owner.
+            provider: The provider slug.
+
+        Raises:
+            DomainError: The case's refusal, when it has one.
+        """
+        if refusal is not None:
+            raise refusal
+
+    monkeypatch.setattr(
+        hardening_runner, "ProviderKeyVault", lambda **kwargs: SimpleNamespace(resolve_connection=resolve_connection)
+    )
+
+    assert _process(engine, lambda job, **kwargs: calls.append(job.id))
 
     row = _row(engine, job.id)
     assert calls == []

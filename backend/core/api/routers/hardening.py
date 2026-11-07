@@ -42,6 +42,7 @@ from ...worker.hardening_runner import finish_hardening_budget
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..model_catalog import require_known_model
+from ._helpers import strip_api_key
 from .execution_budgets import budget_http_error
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
@@ -121,10 +122,14 @@ def _stored_scorer(scorer: BlackboxScorer | None) -> dict[str, Any] | None:
     stored = scorer.model_copy(update={"secret": None}).model_dump(mode="json")
     model = stored.get("model")
     if isinstance(model, dict):
+        # ``extra`` is a free dict, so only the shared scrubber catches every
+        # credential shape (headers, provider-named keys, tokens).
+        model = strip_api_key(model)
         model["base_url"] = None
         extra = model.get("extra") or {}
-        for field in ("api_key", "api_base", "base_url"):
+        for field in ("api_base", "base_url", "endpoint", "url"):
             extra.pop(field, None)
+        stored["model"] = model
     return stored
 
 
