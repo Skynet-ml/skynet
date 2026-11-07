@@ -64,7 +64,10 @@ class RunCandidateSummary(BaseModel):
 
 
 # One page of a run's candidates in start order. Ask again with
-# ``offset=next_offset`` while ``has_more`` is true.
+# ``offset=next_offset`` while ``has_more`` is true. The order is a start-time
+# snapshot, not commit order: a candidate that commits late can sort before a
+# page already read, so offset pages can repeat or skip one during a live run.
+# A live poller re-reads from offset 0, or removes duplicates by candidate_id.
 class RunCandidateList(BaseModel):
     optimization_id: str
     candidates: list[RunCandidateSummary] = Field(default_factory=list)

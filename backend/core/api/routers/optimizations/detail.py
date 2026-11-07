@@ -804,6 +804,12 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
     ) -> RunCandidateList:
         """Return one page of a run's candidates with role, state, call count and cost.
 
+        The list is a snapshot in start order, not in commit order. A candidate
+        that commits late can sort before a page the client already holds, so
+        an offset page can repeat or skip a candidate during a live run. A
+        live poller re-reads from offset 0, or removes duplicates by
+        ``candidate_id``.
+
         Args:
             optimization_id: The run.
             current_user: Authenticated caller resolved from the bearer token.
