@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from ...billing.budgets import BudgetService
 from ...config import settings
 from ...i18n_en import ENGLISH_MESSAGES
 from ...models.hardening import (
@@ -25,7 +26,7 @@ from ...models.hardening import (
     HardeningJobModel,
     HardeningRound,
 )
-from ...storage.models import Base
+from ...storage.models import Base, BillingCustomerModel
 from .. import model_catalog
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..model_catalog import CatalogModel, ModelCatalogResponse
@@ -48,9 +49,23 @@ _JOB_FIELDS = {
     "suite_count",
     "fixed_count",
     "error",
+    "target",
+    "binding_id",
 }
 _EXPLOIT_FIELDS = {"id", "kind", "label", "confidence", "reason", "unsure", "patch_diff", "why_md", "user_verdict"}
 _BODY = {"draft_id": "draft-1", "attacker_model": "openai/attacker", "judge_model": "openai/judge"}
+_TARGET = {
+    "kind": "repo",
+    "repo": {
+        "provider": "github",
+        "repository": "acme/widgets",
+        "branch": "main",
+        "commit": None,
+        "editable_paths": ["src/"],
+        "secrets": [{"name": "API_KEY", "saved_secret_id": "saved-1"}],
+    },
+    "setup_command": "pip install -e .",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -474,3 +489,102 @@ def test_retry_while_another_job_of_the_draft_is_active_is_409() -> None:
     assert retried.status_code == 409
     assert retried.json()["detail"] == ENGLISH_MESSAGES["hardening.job_active"]
     assert client.get("/hardening/jobs/job-a").json()["status"] == "failed"
+
+
+def _budget(engine: Engine, username: str) -> str:
+    """Create an owned execution budget on a synthetic in-memory wallet.
+
+    Args:
+        engine: The test engine.
+        username: The budget owner.
+
+    Returns:
+        The budget id.
+    """
+    with Session(engine) as session:
+        session.add(BillingCustomerModel(username=username, stripe_customer_id=f"cus_{username}", balance_cents=10_000))
+        session.commit()
+    return BudgetService(engine=engine).create(username, 500, idempotency_key=f"harden-{username}").id
+
+
+def test_create_keeps_the_repository_target_and_budget() -> None:
+    """The job row and the response keep the run-shaped target and the caller's budget id."""
+    client, engine, caller = _harness()
+    budget = _budget(engine, caller["user"])
+
+    response = client.post("/hardening/jobs", json={**_BODY, "target": _TARGET, "binding_id": budget})
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["binding_id"] == budget
+    assert body["target"]["kind"] == "repo"
+    assert body["target"]["setup_command"] == "pip install -e ."
+    assert body["target"]["repo"]["repository"] == "acme/widgets"
+    assert body["target"]["repo"]["editable_paths"] == ["src"]
+    assert body["target"]["repo"]["secrets"] == [
+        {
+            "name": "API_KEY",
+            "value": None,
+            "saved_secret_id": "saved-1",
+            "credential_ref": None,
+            "credential_revision": None,
+        }
+    ]
+    with Session(engine) as session:
+        row = session.get(HardeningJobModel, body["id"])
+        assert row is not None
+        assert row.job["binding_id"] == budget
+        assert row.job["target"]["repo"]["repository"] == "acme/widgets"
+    assert client.get(f"/hardening/jobs/{body['id']}").json() == body
+
+
+def test_create_without_target_keeps_nulls() -> None:
+    """A setup with no repository stores null target and budget fields."""
+    client, _engine, _caller = _harness()
+    body = client.post("/hardening/jobs", json=_BODY).json()
+    assert (body["target"], body["binding_id"]) == (None, None)
+
+
+@pytest.mark.parametrize("binding_id", ["missing-budget", "foreign"])
+def test_create_refuses_a_budget_the_caller_does_not_own(binding_id: str) -> None:
+    """An unknown or another user's budget gets the run submit's 404 and no job."""
+    client, engine, _caller = _harness()
+    if binding_id == "foreign":
+        binding_id = _budget(engine, "mallory")
+
+    response = client.post("/hardening/jobs", json={**_BODY, "target": _TARGET, "binding_id": binding_id})
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == ENGLISH_MESSAGES["budget.not_found"]
+    with Session(engine) as session:
+        assert session.query(HardeningJobModel).count() == 0
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [{"name": "API_KEY", "value": "sk-test-not-real"}, {"name": "API_KEY", "credential_ref": "ref-1"}],
+)
+def test_create_refuses_a_secret_value_or_vault_reference(secret: dict[str, Any]) -> None:
+    """A repository secret must name a saved secret; a value or vault reference never reaches the row."""
+    client, engine, _caller = _harness()
+    target = {**_TARGET, "repo": {**_TARGET["repo"], "secrets": [secret]}}
+
+    response = client.post("/hardening/jobs", json={**_BODY, "target": target})
+
+    assert response.status_code == 422
+    assert "saved secrets only" in response.json()["detail"][0]["msg"]
+    with Session(engine) as session:
+        assert session.query(HardeningJobModel).count() == 0
+
+
+@pytest.mark.parametrize("target", [{"kind": "text"}, {"kind": "repo"}, {"kind": "text", "repo": _TARGET["repo"]}])
+def test_create_refuses_a_target_that_is_not_a_repository(target: dict[str, Any]) -> None:
+    """Only a repository target with a repo passes."""
+    client, _engine, _caller = _harness()
+    assert client.post("/hardening/jobs", json={**_BODY, "target": target}).status_code == 422
+
+
+def test_create_refuses_a_bad_binding_id() -> None:
+    """An empty budget id fails validation."""
+    client, _engine, _caller = _harness()
+    assert client.post("/hardening/jobs", json={**_BODY, "binding_id": ""}).status_code == 422

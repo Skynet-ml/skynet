@@ -3,6 +3,8 @@
  * `backend/core/models/hardening.py`; keep the two in step.
  */
 
+import type { BlackboxTarget } from "./api";
+
 export type HardeningStatus =
   | "preflight"
   | "preflight_failed"
@@ -80,6 +82,10 @@ export interface HardeningJob {
   suite_count: number;
   fixed_count: number;
   error: string | null;
+  /** The repository target the create request named, as JSON. Jobs from before SKY-368 lack it. */
+  target?: BlackboxTarget | null;
+  /** The execution budget the job charges. */
+  binding_id?: string | null;
 }
 
 export interface CreateHardeningJobRequest {
@@ -89,6 +95,9 @@ export interface CreateHardeningJobRequest {
   attacker_model: string;
   judge_model: string;
   view: HardeningView;
+  /** A repository target only; its secrets may only name saved secrets. */
+  target?: BlackboxTarget | null;
+  binding_id?: string | null;
 }
 
 /** The statuses that end a job well; the overview reports the attacks it survived. */
