@@ -16,7 +16,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from ..constants import HARDENING_DEFAULT_ROUND_CAP_USD, HARDENING_DEFAULT_ROUNDS
 from ..storage.models import JSON_STORE, Base
-from .blackbox import BlackboxTarget
+from .blackbox import BlackboxScorer, BlackboxTarget
 
 HardeningStatus = Literal[
     "preflight",
@@ -100,6 +100,10 @@ class HardeningJob(BaseModel):
     # that shared schema into Input and Output variants in openapi.json.
     target: dict[str, Any] | None = None
     binding_id: str | None = None
+    # The metric the rounds score with, in the run submit's scorer shape
+    # (SKY-369). JSON for the same schema reason as ``target``; the secret is
+    # dropped because GET returns the job. Without it the job fails.
+    scorer: dict[str, Any] | None = None
 
 
 # Body of POST /hardening/jobs. ``target`` has the run submit's repository
@@ -115,18 +119,24 @@ class CreateHardeningJobRequest(BaseModel):
     view: HardeningView = "black_box"
     target: BlackboxTarget | None = None
     binding_id: str | None = Field(default=None, min_length=1, max_length=64)
+    scorer: BlackboxScorer | None = None
 
     @model_validator(mode="after")
     def _ensure_repo_target(self) -> CreateHardeningJobRequest:
-        """Accept only a repository target whose secrets name saved secrets.
+        """Accept only a repository target whose secrets name saved secrets, and a python scorer.
 
         Returns:
             The validated request.
 
         Raises:
-            ValueError: When the target is not a repository target, or a
-                secret carries a value or a vault reference.
+            ValueError: When the target is not a repository target, a
+                secret carries a value or a vault reference, or the scorer
+                is not a python metric.
         """
+        if self.scorer is not None and self.scorer.kind != "python":
+            # The rounds score each fix inside the job's own sandbox, so only
+            # a python metric can run there.
+            raise ValueError("A hardening job takes only a python scorer.")
         if self.target is None:
             return self
         if self.target.repo is None:
@@ -174,3 +184,10 @@ class HardeningJobModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
+    # The worker pod that runs the job now, and when its claim lapses (SKY-369).
+    # Both stay null while the job waits for the user or has ended.
+    claimed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The open ``hardening:<job_id>`` budget hold. A user step can end the job
+    # (clean stop, rejected fix) outside the worker, so the router must find it.
+    budget_operation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

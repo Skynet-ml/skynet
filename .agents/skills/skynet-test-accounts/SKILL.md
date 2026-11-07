@@ -18,6 +18,7 @@ skill.
 
 - Before and After evidence: capture both on the PR preview, the Before first.
   Use staging for the Before only when the preview cannot show the baseline.
+  A visual-only change may use simulated local renders and needs no target.
   See section 5 of the `skynet-pr-workflow` skill.
 - Shared staging runs merged code only. It does not hold your PR's change.
 - A preview has its own empty database. Staging accounts do not exist there.

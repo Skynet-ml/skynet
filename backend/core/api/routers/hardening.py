@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from ...billing.budgets import BudgetError, BudgetService
 from ...config import settings
 from ...local.cli_catalog import CLI_MODELS, parse_subscription_model_id
+from ...models.blackbox import BlackboxScorer
 from ...models.hardening import (
     ACTIVE_STATUSES,
     CreateHardeningJobRequest,
@@ -37,12 +38,15 @@ from ...service_gateway.optimization.blackbox.hardening import (
     record_verdict,
     retry,
 )
+from ...worker.hardening_runner import finish_hardening_budget
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..model_catalog import require_known_model
+from ._helpers import strip_api_key
 from .execution_budgets import budget_http_error
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
+_ENDPOINT_KEYS = frozenset({"apibase", "baseurl", "endpoint", "url"})
 
 
 def _load(session: Session, username: str, job_id: str, *, lock: bool) -> HardeningJobModel:
@@ -101,6 +105,36 @@ def _store(row: HardeningJobModel, job: HardeningJob) -> None:
     row.updated_at = datetime.now(UTC)
 
 
+def _stored_scorer(scorer: BlackboxScorer | None) -> dict[str, Any] | None:
+    """Return the scorer as the job row keeps it, without any key or endpoint.
+
+    The row and GET return the scorer as stored, so a key or a custom endpoint
+    must never reach them. The worker resolves a BYOK key from the vault at
+    run time, as the run submit does.
+
+    Args:
+        scorer: The scorer the create request sent.
+
+    Returns:
+        The scorer to store, or None.
+    """
+    if scorer is None:
+        return None
+    stored = scorer.model_copy(update={"secret": None}).model_dump(mode="json")
+    model = stored.get("model")
+    if isinstance(model, dict):
+        # ``extra`` is a free dict, so only the shared scrubber catches every
+        # credential shape (headers, provider-named keys, tokens).
+        model = strip_api_key(model)
+        model["base_url"] = None
+        extra = model.get("extra") or {}
+        # Match by normalized name, so ``apiBase`` and ``baseURL`` go too.
+        for field in [k for k in extra if k.lower().replace("_", "").replace("-", "") in _ENDPOINT_KEYS]:
+            del extra[field]
+        stored["model"] = model
+    return stored
+
+
 def create_hardening_router(*, job_store) -> APIRouter:
     """Build the caller-scoped hardening router.
 
@@ -138,6 +172,16 @@ def create_hardening_router(*, job_store) -> APIRouter:
             except HardeningStateError as exc:
                 raise DomainError("hardening.wrong_state", status=409) from exc
             _store(row, job)
+            # A clean stop or a rejected fix ends the job here, not in the
+            # worker, so its budget hold closes here (SKY-369).
+            if (
+                job.status not in ACTIVE_STATUSES
+                and row.budget_operation_id is not None
+                and finish_hardening_budget(
+                    BudgetService(engine=job_store.engine), job, username, row.budget_operation_id
+                )
+            ):
+                row.budget_operation_id = None
             try:
                 session.commit()
             except IntegrityError as exc:
@@ -199,6 +243,7 @@ def create_hardening_router(*, job_store) -> APIRouter:
                 update={
                     "target": None if body.target is None else body.target.model_dump(mode="json"),
                     "binding_id": body.binding_id,
+                    "scorer": _stored_scorer(body.scorer),
                 }
             )
             row = HardeningJobModel(id=job.id, username=user.username, draft_id=body.draft_id)
