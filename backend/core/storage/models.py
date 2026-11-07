@@ -2162,3 +2162,35 @@ class ContinuousCycleModel(Base):
     )
 
     __table_args__ = (UniqueConstraint("plan_id", "slot", name="uq_continuous_cycles_plan_slot"),)
+
+
+class McpServerConnectionModel(Base):
+    """One user's OAuth sign-in to a remote MCP server, named for optimize.toml.
+
+    ``name`` is the connector name a run lists under ``[services.<name>]``.
+    ``credentials_encrypted`` is a Fernet blob under ``BYOK_VAULT_KEY`` with the
+    client registration, the token endpoint and the tokens; the plaintext never
+    reaches the database or the box. A ``pending`` row waits for the OAuth
+    callback: the database keeps only the sha256 of its single-use ``state``.
+    """
+
+    __tablename__ = "mcp_server_connections"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    username: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(40), nullable=False)
+    server_url: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    credentials_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    pending_state_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    pending_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pending_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+    __table_args__ = (UniqueConstraint("username", "name", name="uq_mcp_server_connections_owner_name"),)
