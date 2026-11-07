@@ -68,22 +68,22 @@ def test_a_repository_without_the_file_passes(tmp_path: Path) -> None:
     assert check_repository(_archive(tmp_path, {"bot/app.py": b"x = 1\n"}), (), place="local") == []
 
 
-def test_an_unenforceable_tools_key_fails_on_local_docker(tmp_path: Path) -> None:
-    """Local Docker cannot limit the proposer's tools yet, so the run stops instead of ignoring the key."""
-    archive = _archive(tmp_path, {CONSTRAINTS_FILE: b'[proposer]\ntools = ["bash"]\n'})
+def test_an_unenforceable_proposer_mcp_key_fails_on_local_docker(tmp_path: Path) -> None:
+    """No box gets the proposer's MCP servers yet (SKY-385), so the run stops instead of ignoring the key."""
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: b'[proposer]\nmcp = ".mcp.json"\n', **_NAMED_FILES})
 
     failures = check_repository(archive, (), place="local")
 
     assert failures == [
         GateFailure(
-            key="[proposer] tools",
+            key="[proposer] mcp",
             place="local",
             reason=(
-                "optimize.toml sets [proposer] tools. The local Docker sandbox cannot enforce "
+                "optimize.toml sets [proposer] mcp. The local Docker sandbox cannot enforce "
                 "this setting yet. Remove it to run."
             ),
             code=I18nKey.REPO_GATE_UNENFORCED_LOCAL,
-            params={"key": "[proposer] tools"},
+            params={"key": "[proposer] mcp"},
         )
     ]
 
@@ -127,13 +127,13 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("raw", "key"),
     [
-        (b'[proposer]\ntools = ["bash"]\n', "[proposer] tools"),
+        (b'[proposer]\nmcp = ".mcp.json"\n', "[proposer] mcp"),
         (b"[proposer]\nnetwork = []\n", "[proposer] network"),
         (b'[proposer]\nnetwork = ["pypi.org"]\n', "[proposer] network"),
         (b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nservices = ["maps"]\n', "[proposer] services"),
         (b'[target.planner]\nentry = "agents/planner.py:plan"\n', "[target.planner]"),
+        (b'[target.planner]\nentry = "agents/planner.py:plan"\nmcp = "eval/.mcp.json"\n', "[target.planner]"),
         (b'[services.cache]\nurl = "https://api.example.com"\n', "[services.cache]"),
-        (b"[proposer]\ntools = []\n", "[proposer] tools"),
         (b"[proposer]\nservices = []\n", "[proposer] services"),
         (b'[metric]\nreference = "eval/reference.json"\n', "[metric] reference"),
         (b'[run]\nentry = "geocode.py:geocode"\n', "[run] entry"),
@@ -162,7 +162,7 @@ def test_every_unenforced_key_fails_in_every_place(tmp_path: Path, raw: bytes, k
 
 def test_every_failure_has_a_hebrew_message(tmp_path: Path) -> None:
     """Each failure renders in Hebrew with its own parameters, so the setup check shows it in the user's language."""
-    raw = b'[proposer]\ntools = ["bash"]\n[services.maps]\nurl = "https://api.example.com"\nheaders = { Authorization = "${GOOGLE_MAPS_API_KEY}" }\n'
+    raw = b'[proposer]\nnetwork = []\n[services.maps]\nurl = "https://api.example.com"\nheaders = { Authorization = "${GOOGLE_MAPS_API_KEY}" }\n'
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place="local")
 
     assert {failure.code for failure in failures} == {
@@ -588,3 +588,17 @@ def test_the_allowed_host_messages_exist_in_hebrew() -> None:
     assert all(value in unlisted for value in ("MAPS_KEY", "maps.example.com"))
     assert all(value in not_allowed for value in ("MAPS_KEY", "evil.example", "maps.example.com"))
     assert "{" not in unlisted + not_allowed
+
+
+def test_a_proposer_mcp_file_gets_the_allowed_host_check(tmp_path: Path) -> None:
+    """The gate checks the hosts of the proposer's MCP servers too, so its user secret needs an allowed host (E52)."""
+    proposer = (
+        b'{"mcpServers": {"maps": {"url": "https://mapstools.googleapis.com/mcp",'
+        b' "headers": {"Authorization": "Bearer ${GOOGLE_MAPS_KEY}"}}}}'
+    )
+    files = {CONSTRAINTS_FILE: b'[proposer]\nmcp = "agent/.mcp.json"\n', "agent/.mcp.json": proposer}
+
+    [failure] = _host_failures(_archive(tmp_path, files), None)
+
+    assert failure.code == I18nKey.REPO_GATE_SECRET_HOST_UNLISTED
+    assert failure.key == "[proposer] mcp secrets"

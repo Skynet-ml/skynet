@@ -293,7 +293,7 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     """List the environment settings the file writes, as ``(kind, label)`` pairs.
 
     Presence is read from the file, not the parsed values: a written empty list
-    (``tools = []``) means "none", which differs from the default an absent key
+    (``services = []``) means "none", which differs from the default an absent key
     gives, and a written default (``exploits = ".optimize/exploits"``) still
     asks for a folder to be hidden. ``[proposer] illegal`` is not listed: the
     judges enforce it in every place. Every ``[run]`` key and the ``[metric]``
@@ -307,11 +307,11 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
         services: Names of the file's ``[services.<name>]`` declarations.
 
     Returns:
-        Each setting's kind, for example ``"proposer.tools"``, and its label, for example ``"[proposer] tools"``.
+        Each setting's kind, for example ``"proposer.mcp"``, and its label, for example ``"[proposer] mcp"``.
     """
     document: dict[str, Any] = tomllib.loads(raw.decode("utf-8"))
     proposer, metric, run = document.get("proposer", {}), document.get("metric", {}), document.get("run", {})
-    keys = [(f"proposer.{key}", f"[proposer] {key}") for key in ("tools", "network", "services") if key in proposer]
+    keys = [(f"proposer.{key}", f"[proposer] {key}") for key in ("mcp", "network", "services") if key in proposer]
     keys += [("target", f"[target.{name}]") for name in targets]
     keys += [("services", f"[services.{name}]") for name in services]
     keys += [(f"run.{key}", f"[run] {key}") for key in ("entry", "timeout", "mcp", "services", "illegal") if key in run]

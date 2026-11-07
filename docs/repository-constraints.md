@@ -54,9 +54,12 @@ into a file.
 
 ## What fails the setup check
 
-- A `[services]` section, a `services` list, or an `mcp` file in `[run]` or
-  `[metric]`. The file format below is checked, but runs cannot use these
-  settings yet (SKY-385).
+- A `[services]` section, a `services` list, or an `mcp` file in any role.
+  The file format below is checked, but runs cannot use these settings yet
+  (SKY-385).
+- A `tools` key in `[proposer]`, `[run]`, `[metric]` or `[target.<name>]`.
+  The message says to list the MCP servers in a `.mcp.json` file and set
+  `mcp = "<path>"` instead.
 - A service or MCP server that breaks the secret rules below.
 - An unknown section or setting, a `version` other than `1`, or invalid TOML.
 - A path that leaves the repository, names `.git`, or protects the whole tree.
@@ -104,10 +107,13 @@ mcp = "eval/.mcp.json"
 
 - There are no default services. A role gets only the services that its own
   `services` list names.
-- `[run]` and `[metric]` can each name a standard `.mcp.json` file. A role
-  sees only the servers of its own file, so the proposer gets none of the
-  metric's servers. Skynet reads the files from the same commit as
-  `optimize.toml`, and protects them like rule files.
+- `[proposer]`, `[run]`, `[metric]` and each `[target.<name>]` can name a
+  standard `.mcp.json` file with `mcp = "<path>"`. A role sees only the
+  servers of its own file, so the proposer gets none of the metric's
+  servers. Skynet reads the files from the same commit as `optimize.toml`,
+  checks them with the same secret rules, lists their servers in the
+  environment record, and protects them like rule files. No box gets the
+  proposer's or a target's servers yet: SKY-385 owns that wiring.
 - An http server (`url`) goes through Skynet's relay. A stdio server
   (`command`, `args`, `env`) runs in the box.
 - Each `url` must be `https` on a public host. The check refuses local,

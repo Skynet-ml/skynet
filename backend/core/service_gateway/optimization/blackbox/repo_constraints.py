@@ -16,16 +16,18 @@ files, not in the toml (E48), and every file they name is protected like
 ``optimize.toml`` itself, so no version can rewrite its own rules.
 
 Parsed and validated here, but not enforced yet: ``[proposer]`` and
-``[target.<name>]`` (tools, network, services, and for a target its entry,
+``[target.<name>]`` (mcp, network, services, and for a target its entry,
 vcpus and timeout), ``[services.<name>]`` (a user's API: an https ``url``
 and ``headers`` that name secrets only as ``${NAME}`` placeholders),
 ``[metric]`` (the files and exploit folder hidden from the agent) and
 ``[run]`` (the entry that starts the candidate for each case, and its
 timeout; with no ``[run]``, nothing runs and the metric judges only the tree
-and the patch). ``[run]`` and ``[metric]`` also take the role keys mcp (the
-path of a standard ``.mcp.json`` file in the repository, read from the same
-snapshot and checked here), services and illegal; they share one box, so
-network and vcpus fail. A role gets only the services it lists and only the
+and the patch). ``[run]`` and ``[metric]`` also take the role keys mcp,
+services and illegal; they share one box, so network and vcpus fail. Every
+role's mcp is the path of a standard ``.mcp.json`` file in the repository,
+read from the same snapshot and checked here; a role's ``tools`` key fails
+and points to mcp (E46). No box gets the proposer's or a target's MCP
+servers yet: SKY-385 owns that wiring. A role gets only the services it lists and only the
 servers in its own mcp file (E49, E55). Every secret goes to one host, and
 the file names it only as ``${NAME}``; a raw secret value fails (E49, E52).
 The worker's preflight gate (``core.worker.repo_gate``) fails a run that
@@ -66,7 +68,7 @@ _MAX_COMMAND_PARTS = 50
 _DEFAULT_VCPUS = 2
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _DEFAULT_EXPLOITS = ".optimize/exploits"
-_ROLE_KEYS = frozenset({"tools", "network", "services", "illegal"})
+_ROLE_KEYS = frozenset({"mcp", "network", "services", "illegal"})
 _TARGET_KEYS = _ROLE_KEYS | {"entry", "vcpus", "timeout"}
 _SECTIONS: dict[str, frozenset[str]] = {
     "paths": frozenset({"editable", "protected"}),
@@ -75,7 +77,8 @@ _SECTIONS: dict[str, frozenset[str]] = {
     "metric": frozenset({"files", "exploits", "reference", "mcp", "services", "illegal"}),
     "run": frozenset({"entry", "timeout", "mcp", "services", "illegal"}),
 }
-# These two roles name their MCP servers in a .mcp.json file, not catalog tool names (E46).
+# Every role names its MCP servers in a .mcp.json file, not catalog tool names (E46).
+_ROLE_SECTIONS = frozenset({"proposer", "run", "metric"})
 _RUN_ROLE_SECTIONS = ("run", "metric")
 # The candidate and the metric share one box today (E37), so neither can size
 # or wall off its own box; these keys fail with that reason, not as unknown.
@@ -153,11 +156,10 @@ class RoleEnvironment:
     target). An empty tuple means offline.
     """
 
-    tools: tuple[str, ...] = ()
     network: tuple[str, ...] | None = None
     services: tuple[str, ...] = ()
     illegal: tuple[str, ...] = ()
-    # Only [run] and [metric] set it: the repository path of their .mcp.json file (E46).
+    # The repository path of the role's .mcp.json file (E46).
     mcp: str | None = None
     # The repository path the file names in illegal; read_constraints fills illegal from it (E48).
     illegal_file: str | None = None
@@ -255,13 +257,14 @@ class RepoConstraints:
 
     @property
     def mcp_files(self) -> tuple[str, ...]:
-        """Return the distinct repository paths of the ``.mcp.json`` files that ``[run]`` and ``[metric]`` name."""
-        return tuple(dict.fromkeys(role.mcp for role in (self.run_role, self.metric_role) if role.mcp is not None))
+        """Return the distinct repository paths of the ``.mcp.json`` files that the roles name."""
+        return tuple(dict.fromkeys(role.mcp for role in self.mcp_roles.values() if role.mcp is not None))
 
     @property
     def mcp_roles(self) -> dict[str, RoleEnvironment]:
-        """Return the roles that may name an MCP file, by the label the file uses for them."""
-        return {"[run]": self.run_role, "[metric]": self.metric_role}
+        """Return every role, which may name an MCP file, by the label the file uses for it."""
+        targets = {f"[target.{name}]": stage for name, stage in self.targets.items()}
+        return {"[proposer]": self.proposer, "[run]": self.run_role, "[metric]": self.metric_role, **targets}
 
     @property
     def secret_hosts(self) -> dict[str, str]:
@@ -510,7 +513,7 @@ def _network(section: Mapping[str, Any], label: str) -> tuple[str, ...] | None:
 
 
 def _role(section: Mapping[str, Any], label: str, services: Mapping[str, ServiceSpec]) -> dict[str, Any]:
-    """Read the settings every role shares: tools, network, services and illegal.
+    """Read the settings every role shares: mcp, network, services and illegal.
 
     Args:
         section: The parsed ``[proposer]`` or ``[target.<name>]`` table.
@@ -530,15 +533,30 @@ def _role(section: Mapping[str, Any], label: str, services: Mapping[str, Service
                 f"{CONSTRAINTS_FILE}: {label} services names '{name}', but the file has no [services.{name}] table."
             )
     return {
-        "tools": _names(section, "tools", label),
+        "mcp": _mcp(section, label),
         "network": _network(section, label),
         "services": named,
         "illegal_file": _illegal_file(section, label),
     }
 
 
+def _tools_moved(label: str) -> ConstraintsError:
+    """Build the error for a role's ``tools`` key, which names catalog tools instead of an MCP file (E46).
+
+    Args:
+        label: The role's table as the file names it.
+
+    Returns:
+        The error, with the fix that points to ``mcp``.
+    """
+    return ConstraintsError(
+        f"{CONSTRAINTS_FILE}: {label} tools is not supported. List the MCP servers in a .mcp.json"
+        f' file in the repository and set mcp = "<path>" in {label} instead.'
+    )
+
+
 def _mcp(section: Mapping[str, Any], label: str) -> str | None:
-    """Read the optional ``mcp`` path of ``[run]`` or ``[metric]``.
+    """Read the optional ``mcp`` path of a role.
 
     Args:
         section: The parsed table.
@@ -614,6 +632,8 @@ def _target(section: Any, name: str, services: Mapping[str, ServiceSpec]) -> Tar
             " and use only letters, digits, '-' and '_' (at most 64)."
         )
     label = f"[target.{name}]"
+    if "tools" in section:
+        raise _tools_moved(label)
     unknown = sorted(set(section) - _TARGET_KEYS)
     if unknown:
         raise ConstraintsError(f"{CONSTRAINTS_FILE}: {label} {unknown[0]} is not a supported setting.")
@@ -1025,11 +1045,8 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         if name in _NAMED_SECTIONS:
             continue
         shared = sorted(set(section) & _SHARED_BOX_KEYS) if name in _RUN_ROLE_SECTIONS else []
-        if name in _RUN_ROLE_SECTIONS and "tools" in section:
-            raise ConstraintsError(
-                f"{CONSTRAINTS_FILE}: [{name}] tools is not supported. List the MCP servers in a .mcp.json"
-                f' file in the repository and set mcp = "<path>" in [{name}] instead.'
-            )
+        if name in _ROLE_SECTIONS and "tools" in section:
+            raise _tools_moved(f"[{name}]")
         if shared:
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: [{name}] {shared[0]} is not supported: the candidate and the metric"
@@ -1055,10 +1072,8 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
     run_entry, run_timeout = _run(document.get("run"))
     run_section = document.get("run", {})
     run_role = _role(run_section, "[run]", services)
-    run_role["mcp"] = _mcp(run_section, "[run]")
     metric_section = document.get("metric", {})
     metric_role = _role(metric_section, "[metric]", services)
-    metric_role["mcp"] = _mcp(metric_section, "[metric]")
     _check_secret_receivers(services, {})
     return RepoConstraints(
         sha256=hashlib.sha256(raw).hexdigest(),
@@ -1269,7 +1284,7 @@ def _split_rules(text: str, setting: str, path: str) -> tuple[str, ...]:
 
 
 def _load_mcp_files(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
-    """Fill ``[run]`` and ``[metric]`` with the servers of the MCP file each names (E49).
+    """Fill each role with the servers of the MCP file it names (E49).
 
     The files come from the same snapshot as the toml, so the servers a run
     gets are the ones the setup check showed.
@@ -1297,8 +1312,13 @@ def _load_mcp_files(constraints: RepoConstraints, archive: Path) -> RepoConstrai
             servers[label] = _mcp_servers(text, f"{label} mcp", path)
     return replace(
         constraints,
+        proposer=replace(constraints.proposer, mcp_servers=servers.get("[proposer]", ())),
         run_role=replace(constraints.run_role, mcp_servers=servers.get("[run]", ())),
         metric_role=replace(constraints.metric_role, mcp_servers=servers.get("[metric]", ())),
+        targets={
+            name: replace(stage, mcp_servers=servers.get(f"[target.{name}]", ()))
+            for name, stage in constraints.targets.items()
+        },
     )
 
 

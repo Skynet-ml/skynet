@@ -432,14 +432,14 @@ _ENVIRONMENT = b"""
 version = 1
 
 [proposer]
-tools = ["bash", "maps-mcp"]
+mcp = "tools/proposer.mcp.json"
 network = ["pypi.org", "files.pythonhosted.org"]
 services = ["maps"]
 illegal = "docs/rules.md"
 
 [target.planner]
 entry = "agents/planner.py:plan"
-tools = ["search"]
+mcp = "agents/planner.mcp.json"
 network = []
 services = ["maps"]
 illegal = "agents/planner_rules.md"
@@ -461,6 +461,8 @@ _ENVIRONMENT_FILES = {
     CONSTRAINTS_FILE: _ENVIRONMENT,
     "docs/rules.md": b"- Do not hardcode answers.\n- Do not read the metric.\n",
     "agents/planner_rules.md": b"- Do not call a paid model.\n",
+    "tools/proposer.mcp.json": b'{"mcpServers": {"files": {"command": "npx", "args": ["files-mcp"]}}}',
+    "agents/planner.mcp.json": b'{"mcpServers": {}}',
 }
 
 
@@ -470,16 +472,17 @@ def test_the_environment_sections_parse_into_typed_fields(tmp_path: Path) -> Non
     assert constraints is not None
 
     assert constraints.proposer == RoleEnvironment(
-        tools=("bash", "maps-mcp"),
         network=("pypi.org", "files.pythonhosted.org"),
         services=("maps",),
         illegal=("Do not hardcode answers.", "Do not read the metric."),
         illegal_file="docs/rules.md",
+        mcp="tools/proposer.mcp.json",
+        mcp_servers=(McpServer(name="files", command=("npx", "files-mcp")),),
     )
     assert constraints.targets == {
         "planner": TargetStage(
             entry="agents/planner.py:plan",
-            tools=("search",),
+            mcp="agents/planner.mcp.json",
             network=(),
             services=("maps",),
             illegal=("Do not call a paid model.",),
@@ -528,7 +531,7 @@ def test_a_file_without_new_sections_gets_empty_defaults(tmp_path: Path) -> None
 def test_an_empty_network_list_means_offline_and_a_missing_one_keeps_the_default() -> None:
     """``network = []`` is offline; no key keeps the role's default (open for the proposer, relay for a target)."""
     offline = parse_constraints(b"[proposer]\nnetwork = []\n")
-    default = parse_constraints(b'[proposer]\ntools = ["bash"]\n')
+    default = parse_constraints(b"[proposer]\nservices = []\n")
 
     assert offline.proposer.network == ()
     assert default.proposer.network is None
@@ -536,7 +539,7 @@ def test_an_empty_network_list_means_offline_and_a_missing_one_keeps_the_default
 
 def test_a_file_with_no_target_parses() -> None:
     """The target section is optional."""
-    assert parse_constraints(b'[proposer]\ntools = ["bash"]\n').targets == {}
+    assert parse_constraints(b"[proposer]\nservices = []\n").targets == {}
 
 
 def test_a_target_stage_gets_the_default_vcpus_and_timeout() -> None:
@@ -577,7 +580,13 @@ def test_supported_vcpu_counts_parse(vcpus: int) -> None:
         (b'[target.solver]\nentry = "s.py:f"\nmemory = 4\n', r"\[target\.solver\] memory is not a supported setting"),
         (b'[target."bad name"]\nentry = "s.py:f"\n', r"stage name 'bad name'"),
         (b'[proposer]\nmodel = "x"\n', r"\[proposer\] model is not a supported setting"),
-        (b'[proposer]\ntools = "bash"\n', r"\[proposer\] tools must be a list"),
+        (b'[proposer]\ntools = ["bash"]\n', r"\[proposer\] tools is not supported\. .* mcp = .* in \[proposer\]"),
+        (
+            b'[target.s]\nentry = "s.py:f"\ntools = ["search"]\n',
+            r"\[target\.s\] tools is not supported\. .* mcp = .* in \[target\.s\]",
+        ),
+        (b"[proposer]\nmcp = 3\n", r"\[proposer\] mcp must be a text path"),
+        (b'[target.s]\nentry = "s.py:f"\nmcp = "../x.json"\n', r"\[target\.s\] mcp must be relative"),
         (b'[proposer]\nnetwork = ["https://pypi.org/simple"]\n', r"\[proposer\] network .* host name"),
         (b'[proposer]\nservices = ["maps"]\n', r"\[proposer\] services names 'maps'.*\[services\.maps\]"),
         (b'[target.s]\nentry = "s.py:f"\nservices = ["db"]\n', r"\[target\.s\] services names 'db'"),
@@ -947,6 +956,70 @@ def test_the_proposer_gets_none_of_the_metric_servers(tmp_path: Path) -> None:
     assert constraints.proposer.mcp_servers == ()
     metric_names = {server.name for server in constraints.metric_role.mcp_servers}
     assert metric_names.isdisjoint(server.name for server in constraints.run_role.mcp_servers)
+
+
+_MCP_AGENT_TOML = (
+    b'[proposer]\nmcp = "agent/.mcp.json"\n[target.planner]\nentry = "p.py:plan"\nmcp = "agent/planner.mcp.json"\n'
+)
+_MCP_PROPOSER = b"""{"mcpServers": {
+  "search": {"url": "https://search.example.com/mcp", "headers": {"x-api-key": "${SEARCH_KEY}"}}
+}}"""
+_MCP_PLANNER = b'{"mcpServers": {"notes": {"command": "notes-mcp", "env": {"NOTES_TOKEN": "${NOTES_TOKEN}"}}}}'
+
+
+def _read_agent_mcp(tmp_path: Path, proposer: bytes = _MCP_PROPOSER, raw: bytes = _MCP_AGENT_TOML) -> RepoConstraints:
+    """Read a file whose [proposer] and [target.planner] name the MCP files given."""
+    files = {CONSTRAINTS_FILE: raw, "agent/.mcp.json": proposer, "agent/planner.mcp.json": _MCP_PLANNER}
+    constraints = read_constraints(_archive(tmp_path, files))
+    assert constraints is not None
+    return constraints
+
+
+def test_the_proposer_and_a_target_read_their_own_mcp_files(tmp_path: Path) -> None:
+    """[proposer] and [target.<name>] name .mcp.json files too; each role gets only its own servers (E46, E49)."""
+    constraints = _read_agent_mcp(tmp_path)
+
+    assert [server.name for server in constraints.proposer.mcp_servers] == ["search"]
+    assert [server.name for server in constraints.targets["planner"].mcp_servers] == ["notes"]
+    assert constraints.run_role.mcp_servers == ()
+    assert constraints.mcp_files == ("agent/.mcp.json", "agent/planner.mcp.json")
+    assert constraints.secret_names == ("SEARCH_KEY", "NOTES_TOKEN")
+    assert constraints.secret_hosts == {"SEARCH_KEY": "search.example.com"}
+
+
+def test_a_missing_proposer_or_target_mcp_file_fails(tmp_path: Path) -> None:
+    """An mcp path of the proposer or a target that names no file fails the setup check (E46)."""
+    files = {CONSTRAINTS_FILE: _MCP_AGENT_TOML, "agent/.mcp.json": _MCP_PROPOSER}
+
+    with pytest.raises(ConstraintsError, match=r"\[target\.planner\] mcp names 'agent/planner\.mcp\.json'"):
+        read_constraints(_archive(tmp_path, files))
+
+
+def test_a_proposer_mcp_file_gets_the_secret_value_and_host_checks(tmp_path: Path) -> None:
+    """The E49 raw-value check and the E52 one-host check cover the proposer's file."""
+    (tmp_path / "value").mkdir()
+    (tmp_path / "host").mkdir()
+    raw_value = b'{"mcpServers": {"m": {"command": "x", "env": {"TOKEN": "ghp_' + b'abcdefghijklmnop1234"}}}}'
+    with pytest.raises(ConstraintsError, match=r"looks like a secret value"):
+        _read_agent_mcp(tmp_path / "value", proposer=raw_value)
+
+    raw = b'[services.s]\nurl = "https://other.example.com"\nheaders = { k = "${SEARCH_KEY}" }\n' + _MCP_AGENT_TOML
+    with pytest.raises(ConstraintsError, match=r"\$\{SEARCH_KEY\} goes to other\.example\.com"):
+        _read_agent_mcp(tmp_path / "host", raw=raw)
+
+
+def test_the_disclosure_and_protection_cover_the_proposer_and_target_files(tmp_path: Path) -> None:
+    """The record lists the proposer's and the target's servers, and both files are protected (E49, E52)."""
+    constraints = _read_agent_mcp(tmp_path)
+    environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
+
+    record = environment.record(repository="o/r", commit="a" * 40, readonly_paths=[], secret_names=[])
+
+    assert record["mcp_servers"] == {
+        "[proposer]": [{"name": "search", "type": "http", "host": "search.example.com", "secrets": ["SEARCH_KEY"]}],
+        "[target.planner]": [{"name": "notes", "type": "stdio", "command": "notes-mcp", "secrets": ["NOTES_TOKEN"]}],
+    }
+    assert {"agent/.mcp.json", "agent/planner.mcp.json"} <= set(environment.protected_paths)
 
 
 @pytest.mark.parametrize(

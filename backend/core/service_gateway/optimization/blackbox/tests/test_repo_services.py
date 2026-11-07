@@ -20,13 +20,11 @@ _FILE = b"""
 version = 1
 
 [proposer]
-tools = ["bash", "maps", "maps", "unknown-mcp"]
 network = ["pypi.org"]
 services = ["maps"]
 
 [target.planner]
 entry = "agents/planner.py:plan"
-tools = ["web_search"]
 network = []
 services = ["maps"]
 vcpus = 4
@@ -126,7 +124,7 @@ def test_each_role_gets_only_its_listed_hosts_servers_and_services() -> None:
 
 
 def test_a_role_gets_only_the_servers_of_its_own_mcp_file() -> None:
-    """Catalog names in ``tools`` no longer add servers; a role's plan lists only its own MCP file (E49, E50)."""
+    """A role's plan lists only the servers of its own MCP file (E49, E50)."""
     constraints = parse_constraints(_FILE)
     run = replace(
         constraints.run_role,
