@@ -106,6 +106,8 @@ holds one case on each line, as a JSON object:
   with `#` is rule text.
 - A `[data]` section without `cases`, or with `split` or any other key. A
   `cases` path that is absolute, leaves the repository, or names no file. A
+  `cases` path that is also the `instructions` file or an `illegal` file,
+  because the agent reads those files in its brief. A
   cases file that is a link or a folder, is larger than 20 MiB, is not UTF-8
   text, holds no case or more than 200,000 cases. A line that is not a JSON
   object with `input` and an optional `expected`; the message names the line.

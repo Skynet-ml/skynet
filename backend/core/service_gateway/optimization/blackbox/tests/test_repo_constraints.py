@@ -904,6 +904,26 @@ def test_a_bad_data_section_fails_with_a_reason(raw: bytes, message: str) -> Non
         parse_constraints(raw)
 
 
+def test_a_cases_file_that_is_also_the_instructions_is_refused() -> None:
+    """The brief quotes the instructions to the agent, so shared cases would show it every expected answer (E61)."""
+    raw = b'instructions = "data/cases.jsonl"\n\n[data]\ncases = "data/cases.jsonl"\n'
+
+    with pytest.raises(
+        ConstraintsError, match=r"\[data\] cases and instructions name the same file 'data/cases\.jsonl'"
+    ):
+        parse_constraints(raw)
+
+
+@pytest.mark.parametrize("section", ["proposer", "run", "metric", "target.lint"])
+def test_a_cases_file_that_is_also_a_rule_file_is_refused(section: str) -> None:
+    """A rule file is read and quoted like the instructions, so it cannot hold the cases either (E61)."""
+    extra = "" if section in ("proposer", "metric") else '\nentry = "src/app.py:main"'
+    raw = f'[{section}]\nillegal = "data/cases.jsonl"{extra}\n\n[data]\ncases = "data/cases.jsonl"\n'.encode()
+
+    with pytest.raises(ConstraintsError, match=rf"\[data\] cases and \[{section}\] illegal name the same file"):
+        parse_constraints(raw)
+
+
 @pytest.mark.parametrize(
     ("text", "message"),
     [
