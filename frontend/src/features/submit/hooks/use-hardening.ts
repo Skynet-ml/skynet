@@ -11,9 +11,11 @@ import {
   setHardeningExploitVerdict,
 } from "@/shared/lib/api";
 import { subscriptionAgentModel, type LocalStatus } from "@/features/local-runtime";
-import type { CatalogModel, ModelConfig } from "@/shared/types/api";
+import type { BlackboxTarget, CatalogModel, ModelConfig } from "@/shared/types/api";
 import type { CreateHardeningJobRequest, HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { WIZARD_HARDENING_KEY, keepSessionValue, readSessionValue } from "../lib/session-state";
+import { repoIssue, type RepoDraft } from "../lib/wizard-v2";
+import { useWizardV2 } from "./use-unified-wizard";
 
 const POLL_MS = 4000;
 // Only the worker moves a job out of these; every other status waits on the user or is final.
@@ -41,7 +43,25 @@ export function hardeningDefaultModel(
   return models.find((m) => m.is_default)?.value ?? models[0]?.value ?? "";
 }
 
-export type HardeningSettings = Omit<CreateHardeningJobRequest, "draft_id">;
+export type HardeningSettings = Omit<CreateHardeningJobRequest, "draft_id" | "target" | "binding_id">;
+
+// The run submit's repository target (see repo-run.ts), without secrets: the
+// job row keeps the target as sent, so it never takes a secret value.
+function hardeningTarget(repo: RepoDraft | null | undefined): BlackboxTarget | null {
+  if (!repo || repoIssue(repo)) return null;
+  return {
+    kind: "repo",
+    repo: {
+      provider: "github",
+      repository: repo.repository.trim(),
+      branch: repo.branch.trim() || null,
+      commit: repo.commit.trim() || null,
+      editable_paths: repo.editablePaths.map((path) => path.trim()).filter(Boolean),
+      ...(repo.createdBySkynet ? { created_by_skynet: true } : {}),
+    },
+    setup_command: repo.setupCommand.trim() || null,
+  };
+}
 
 export interface HardeningState {
   job: HardeningJob | null;
@@ -80,6 +100,8 @@ export function useHardening(active: boolean): HardeningState {
   const [loaded, setLoaded] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const draft = React.useRef<string | null>(null);
+  const { state, ensureBudget } = useWizardV2();
+  const repo = state.task.repo;
 
   React.useEffect(() => {
     if (!active || loaded) return;
@@ -136,8 +158,14 @@ export function useHardening(active: boolean): HardeningState {
       draft.current ??= draftId();
       const id = draft.current;
       return act(async () => {
+        const budget = await ensureBudget();
         try {
-          return await createHardeningJob({ ...settings, draft_id: id });
+          return await createHardeningJob({
+            ...settings,
+            draft_id: id,
+            target: hardeningTarget(repo),
+            binding_id: budget.id,
+          });
         } catch (err) {
           // The draft may already hold a job that the first read missed; show it.
           const latest = await getLatestHardeningJob(id).catch(() => null);
@@ -146,7 +174,7 @@ export function useHardening(active: boolean): HardeningState {
         }
       });
     },
-    [act],
+    [act, ensureBudget, repo],
   );
   const verdict = React.useCallback(
     (exploitId: string, confirmed: boolean) =>

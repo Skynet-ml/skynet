@@ -10,12 +10,13 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import DateTime, Index, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..constants import HARDENING_DEFAULT_ROUND_CAP_USD, HARDENING_DEFAULT_ROUNDS
 from ..storage.models import JSON_STORE, Base
+from .blackbox import BlackboxTarget
 
 HardeningStatus = Literal[
     "preflight",
@@ -93,9 +94,18 @@ class HardeningJob(BaseModel):
     suite_count: int = Field(default=0, ge=0)
     fixed_count: int = Field(default=0, ge=0)
     error: str | None = None
+    # The repository and budget the create request named (SKY-368). The worker
+    # stages ``target`` as a run would and charges ``binding_id``. ``target`` is
+    # the validated ``BlackboxTarget`` as JSON: a typed field here would split
+    # that shared schema into Input and Output variants in openapi.json.
+    target: dict[str, Any] | None = None
+    binding_id: str | None = None
 
 
-# Body of POST /hardening/jobs.
+# Body of POST /hardening/jobs. ``target`` has the run submit's repository
+# target shape and ``binding_id`` names the setup's execution budget. A repo
+# secret may only name a saved secret: the job row keeps the target as sent,
+# so it must never carry a secret value or a vault reference.
 class CreateHardeningJobRequest(BaseModel):
     draft_id: str = Field(min_length=1, max_length=255)
     rounds: int = Field(default=HARDENING_DEFAULT_ROUNDS, ge=1, le=20)
@@ -103,6 +113,28 @@ class CreateHardeningJobRequest(BaseModel):
     attacker_model: str = Field(min_length=1, max_length=255)
     judge_model: str = Field(min_length=1, max_length=255)
     view: HardeningView = "black_box"
+    target: BlackboxTarget | None = None
+    binding_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _ensure_repo_target(self) -> CreateHardeningJobRequest:
+        """Accept only a repository target whose secrets name saved secrets.
+
+        Returns:
+            The validated request.
+
+        Raises:
+            ValueError: When the target is not a repository target, or a
+                secret carries a value or a vault reference.
+        """
+        if self.target is None:
+            return self
+        if self.target.repo is None:
+            raise ValueError("A hardening job takes only a repository target.")
+        for secret in self.target.repo.secrets:
+            if secret.saved_secret_id is None:
+                raise ValueError("A hardening job takes saved secrets only, never a secret value.")
+        return self
 
 
 # Body of POST /hardening/jobs/{job_id}/exploits/{exploit_id}/verdict.

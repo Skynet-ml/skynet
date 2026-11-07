@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ...billing.budgets import BudgetError, BudgetService
 from ...config import settings
 from ...local.cli_catalog import CLI_MODELS, parse_subscription_model_id
 from ...models.hardening import (
@@ -39,6 +40,7 @@ from ...service_gateway.optimization.blackbox.hardening import (
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..errors import DomainError
 from ..model_catalog import require_known_model
+from .execution_budgets import budget_http_error
 
 AuthenticatedUserDep = Annotated[AuthenticatedUser, Depends(get_authenticated_user)]
 
@@ -156,18 +158,24 @@ def create_hardening_router(*, job_store) -> APIRouter:
         """Create a job that waits for its preflight.
 
         Args:
-            body: The draft, rounds, round cap, models and view.
+            body: The draft, rounds, round cap, models, view, repository target and budget.
             user: Authenticated caller.
 
         Returns:
             The new job.
 
         Raises:
-            DomainError: 422 for an unknown model, 409 when the draft already
-                has an unfinished job.
+            DomainError: 422 for an unknown model, 404 when the caller owns no
+                such budget, 409 when the draft already has an unfinished job.
         """
         _require_model(body.attacker_model)
         _require_model(body.judge_model, role="judge")
+        if body.binding_id is not None:
+            # The same owner check a run submit makes on its execution budget.
+            try:
+                BudgetService(engine=job_store.engine).get(body.binding_id, user.username)
+            except BudgetError as error:
+                raise budget_http_error(error) from error
         with Session(job_store.engine) as session:
             active = session.scalars(
                 select(HardeningJobModel.id)
@@ -187,6 +195,11 @@ def create_hardening_router(*, job_store) -> APIRouter:
                 rounds=body.rounds,
                 round_cap_usd=body.round_cap_usd,
                 view=body.view,
+            ).model_copy(
+                update={
+                    "target": None if body.target is None else body.target.model_dump(mode="json"),
+                    "binding_id": body.binding_id,
+                }
             )
             row = HardeningJobModel(id=job.id, username=user.username, draft_id=body.draft_id)
             _store(row, job)
