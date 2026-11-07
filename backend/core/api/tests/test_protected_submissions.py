@@ -141,7 +141,7 @@ class _Harness:
             return session.scalar(select(func.count()).select_from(model))
 
 
-def _stage_without_sandbox(payload: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], None]:
+def _stage_without_sandbox(payload: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], SimpleNamespace]:
     """Return the repository payload as staged, with a fixture environment.
 
     Args:
@@ -149,10 +149,12 @@ def _stage_without_sandbox(payload: dict[str, Any], **kwargs: Any) -> tuple[dict
         **kwargs: Owner and budget binding, unused by the fixture.
 
     Returns:
-        The payload with a repository environment, and no staged checkout.
+        The payload with a repository environment, and a stand-in checkout with no files or secrets.
     """
     payload["target"]["repo"]["environment"] = {"setup_command": "npm ci"}
-    return payload, None
+    return payload, SimpleNamespace(
+        snapshot=SimpleNamespace(archive=None), secrets={}, close_scorers=lambda: None, cleanup=lambda: None
+    )
 
 
 @pytest.fixture
@@ -187,6 +189,7 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Harnes
     # Repository staging clones from GitHub inside a sandbox; the fixture
     # keeps the payload and only records the environment the check reports.
     monkeypatch.setattr(preflight_execution, "stage_repository", _stage_without_sandbox)
+    monkeypatch.setattr(preflight_execution, "check_repository", lambda *args, **kwargs: [])
     monkeypatch.setattr(preflight_execution, "infer_repo_setup", lambda *args, **kwargs: None)
     monkeypatch.setattr(preflight_execution, "bind_repo_scorer", lambda *args, **kwargs: None)
     # The unified sandbox verifier is replaced the same way so no sandbox or
