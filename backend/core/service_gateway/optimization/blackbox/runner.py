@@ -251,12 +251,35 @@ def start_service_proxy(client: StageClient, names: list[str]) -> dict[str, str]
     class Handler(http.server.BaseHTTPRequestHandler):
         """Send each ``/service/<name>/<path>`` request to the parent and return its answer."""
 
+        def read_body(self) -> bytes:
+            """Read the request body, sent with a Content-Length or in chunks.
+
+            Returns:
+                The body bytes, decoded from the chunked coding when the client used it.
+
+            Raises:
+                ValueError: When a chunk size line is not hexadecimal.
+            """
+            if "chunked" not in (self.headers.get("Transfer-Encoding") or "").lower():
+                length = int(self.headers.get("Content-Length") or 0)
+                return self.rfile.read(length) if length > 0 else b""
+            chunks = []
+            while size := int(self.rfile.readline().split(b";")[0], 16):
+                chunks.append(self.rfile.read(size))
+                self.rfile.readline()
+            while self.rfile.readline() not in (b"\r\n", b"\n", b""):
+                pass
+            return b"".join(chunks)
+
         def relay(self) -> None:
             """Relay one request and write the service's response."""
             _, _, rest = self.path.partition("/service/")
             name, _, path = rest.partition("/")
-            length = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                body = self.read_body()
+            except ValueError:
+                self.send_error(400, "Malformed request body")
+                return
             response = client.exchange(
                 {
                     "service": urllib.parse.unquote(name),
@@ -272,7 +295,8 @@ def start_service_proxy(client: StageClient, names: list[str]) -> dict[str, str]
             else:
                 payload = base64.b64decode(str(response.get("body") or ""))
                 headers = [(str(key), str(value)) for key, value in response.get("headers") or ()]
-            self.send_response(int(response.get("status") or 502))
+            # send_response would add this proxy's own Date and Server next to the service's.
+            self.send_response_only(int(response.get("status") or 502))
             for key, value in headers:
                 self.send_header(key, value)
             self.send_header("Content-Length", str(len(payload)))

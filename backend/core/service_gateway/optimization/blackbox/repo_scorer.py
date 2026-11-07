@@ -90,7 +90,8 @@ _HOP_HEADERS = frozenset(
     {"connection", "content-length", "host", "keep-alive", "proxy-authorization", "te", "transfer-encoding", "upgrade"}
 )
 _DECODED_HEADERS = frozenset({"content-encoding", "content-length", "connection", "keep-alive", "transfer-encoding"})
-# The scorer code is the [metric] role; the candidate's [run] entry calls as "run" (SKY-375).
+# Every service frame is answered as [metric]: the version code shares the metric's
+# process, so the relay cannot yet tell a [run] caller apart (E37, SKY-375).
 _METRIC_ROLE = "metric"
 # The proposer gets only these keys, so the scorer's other side information
 # (weights, formulas, metric source) never reveals the metric (SKY-353).
@@ -182,8 +183,8 @@ class RepoScorer:
             max_concurrency: How many calls to one stage run at the same time.
             services: The run's ``[services.<name>]``; those with a url
                 go through the relay, and their secrets stay out of the box.
-            service_roles: The services each role lists, by role name
-                (``run``, ``metric``); the scorer calls as ``metric``.
+            service_roles: The services each role lists, by role name. Only
+                ``metric`` is read: every caller shares its process (E37).
 
         Raises:
             ValueError: When stages are given without a runtime or a tree.
@@ -555,7 +556,8 @@ class _StageRelay:
             workspace: The scorer box's workspace, which checks the
                 protected files and writes each answer into the scorer box.
             services: The run's services with a url, by name.
-            role: The calling role, checked against each service request.
+            role: The role that each service request is checked against;
+                ``metric`` for now, since a [run] caller shares its process (E37).
             allowed: The services that ``role`` lists.
             secrets: The run's secret values, filled into service headers
                 here in the parent.

@@ -303,6 +303,10 @@ def _raise_control(result: Mapping[str, Any]) -> None:
     raise UsagePendingError(message)
 
 
+class _BoxClosedError(ServiceError):
+    """A parallel call closed the box while this call still ran in it."""
+
+
 class SandboxPythonScorer:
     """A python scorer that runs inside a sandbox: one box per job, one runner call per evaluation.
 
@@ -425,6 +429,12 @@ class SandboxPythonScorer:
             session = self._open()
         try:
             result = self._invoke(payload)
+        except _BoxClosedError:
+            if self._protected:
+                raise
+            # A sibling call saw the box die and closed it; this call's result is lost with it.
+            logger.warning("scorer sandbox closed by a parallel call; retrying")
+            result = self._invoke(payload)
         except (ServiceError, BudgetError, UsagePendingError):
             raise
         except Exception:
@@ -489,6 +499,7 @@ class SandboxPythonScorer:
             The runner's ``output.json`` content, or a timeout error in its shape.
 
         Raises:
+            _BoxClosedError: When a parallel call closed the box while this call ran.
             ServiceError: When the runner produced no output.
         """
         with self._lock:
@@ -519,6 +530,14 @@ class SandboxPythonScorer:
         logger.debug(
             "scorer call %d finished in %.1fs (exit %s)", number, time.perf_counter() - started, result.exit_code
         )
+        text = None if result.timed_out else session.read_file(f"{call_dir}/{runner.OUTPUT_FILE}")
+        if text is None:
+            with self._lock:
+                closed = self._session is not session
+            # Closing the box kills this call's process (a false timeout) or loses its output
+            # file. A call that already wrote its output keeps it, so its model calls run once.
+            if closed:
+                raise _BoxClosedError(f"scorer sandbox call {number} lost its box to a parallel call")
         if result.timed_out:
             return {
                 "score": None,
@@ -526,7 +545,6 @@ class SandboxPythonScorer:
                 "error": f"scorer exceeded the {self._timeout_seconds:g}s timeout",
                 "usage": [],
             }
-        text = session.read_file(f"{call_dir}/{runner.OUTPUT_FILE}")
         if text is None:
             raise ServiceError(
                 f"scorer sandbox failed (exit {result.exit_code}): {_tail(result.stderr or result.stdout)}"

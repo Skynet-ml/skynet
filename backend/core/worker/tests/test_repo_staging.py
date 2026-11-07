@@ -1487,7 +1487,7 @@ def test_staging_keeps_the_services_each_role_lists(monkeypatch: pytest.MonkeyPa
     _, staged = _stage_with(files, monkeypatch)
     try:
         assert staged.services["judge"].url == "https://judge.example.com/v1"
-        assert staged.service_roles == {"run": (), "metric": ("judge",)}
+        assert staged.service_roles == {"metric": ("judge",)}
     finally:
         staged.cleanup()
 
@@ -1499,7 +1499,7 @@ def test_binding_hands_the_services_to_the_scorer(tmp_path: Path) -> None:
         staged,
         secrets={**staged.secrets, "JUDGE_KEY": "judge-secret-value"},
         services={"judge": ServiceSpec(secrets=("JUDGE_KEY",), url="https://judge.example.com/v1")},
-        service_roles={"run": (), "metric": ("judge",)},
+        service_roles={"metric": ("judge",)},
     )
     gateway = _Gateway()
 

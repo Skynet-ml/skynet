@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import io
 import json
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -761,3 +763,45 @@ def test_service_proxy_relays_each_request_through_the_parent() -> None:
         opener.open(urls["SKYNET_SERVICE_BLOCKED_ONE_URL"] + "x")
     assert refused.value.code == 403
     assert b"not listed for the [run] role" in refused.value.read()
+
+
+def test_service_proxy_decodes_a_chunked_body_and_sends_each_header_once() -> None:
+    """A chunked request body reaches the parent decoded, and the service's Date and Server come back once."""
+
+    class Client:
+        """Answer each message with the service's own Date and Server."""
+
+        def __init__(self) -> None:
+            """Start with no messages."""
+            self.sent: list[dict[str, Any]] = []
+
+        def exchange(self, message: dict[str, Any]) -> dict[str, Any]:
+            """Record the message and answer it.
+
+            Args:
+                message: The request the proxy sends.
+
+            Returns:
+                A service response with its own Date and Server headers.
+            """
+            self.sent.append(message)
+            headers = [["Date", "Mon, 02 Nov 2026 10:00:00 GMT"], ["Server", "judge"]]
+            return {"status": 200, "headers": headers, "body": base64.b64encode(b"ok").decode()}
+
+    client = Client()
+    url = urllib.parse.urlsplit(runner.start_service_proxy(client, ["judge"])["SKYNET_SERVICE_JUDGE_URL"])  # type: ignore[arg-type]
+    connection = http.client.HTTPConnection(url.hostname, url.port, timeout=10)
+    connection.putrequest("POST", url.path + "v1/grade")
+    connection.putheader("Transfer-Encoding", "chunked")
+    connection.endheaders()
+    for chunk in (b"hello ", b"chunked world"):
+        connection.send(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+    connection.send(b"0\r\nX-Trailer: 1\r\n\r\n")
+    response = connection.getresponse()
+    assert response.status == 200
+    assert response.read() == b"ok"
+    assert response.headers.get_all("Date") == ["Mon, 02 Nov 2026 10:00:00 GMT"]
+    assert response.headers.get_all("Server") == ["judge"]
+    connection.close()
+    [message] = client.sent
+    assert base64.b64decode(message["body"]) == b"hello chunked world"

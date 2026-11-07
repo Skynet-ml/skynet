@@ -113,7 +113,8 @@ class StagedRepository:
     hidden_paths: tuple[str, ...] = ()
     targets: Mapping[str, TargetStage] = field(default_factory=dict)
     services: Mapping[str, ServiceSpec] = field(default_factory=dict)
-    # The services each role lists, by role name; the relay checks the caller against it.
+    # The services each role lists, by role name. Only [metric] is staged: the relay answers
+    # every caller as the metric until it can tell a [run] caller apart (E37, SKY-375).
     service_roles: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     agent_archive: Path | None = None
     exploits_path: str = EXPLOITS_DIR
@@ -243,7 +244,6 @@ def stage_repository(
         targets=environment.constraints.targets if environment.constraints is not None else {},
         services=environment.constraints.services if environment.constraints is not None else {},
         service_roles={
-            "run": environment.constraints.run_role.services,
             "metric": environment.constraints.metric_role.services,
         }
         if environment.constraints is not None

@@ -394,6 +394,48 @@ def test_sandbox_scorer_reopens_the_box_once_when_it_dies() -> None:
     assert RUNNER_FILE in second.files
 
 
+def test_sandbox_scorer_retries_a_sibling_call_when_another_call_closes_the_box() -> None:
+    """A call whose box a parallel call closed is retried once in the new box, not reported as a timeout."""
+    sibling_inside = threading.Event()
+    attempts: dict[str, int] = {}
+    runtime: FakeSandboxRuntime
+
+    def respond(payload: dict[str, Any]) -> dict[str, Any] | CommandResult:
+        """Kill the first box from call ``a`` while call ``b`` still runs in it.
+
+        Args:
+            payload: The call's input.
+
+        Returns:
+            On the first box, a dead-box error for ``a`` and a killed process for ``b``; then a normal answer.
+        """
+        candidate = payload["candidate"]
+        attempts[candidate] = attempts.get(candidate, 0) + 1
+        if attempts[candidate] > 1:
+            return {**_OK, "score": len(candidate)}
+        if candidate == "a":
+            assert sibling_inside.wait(5)
+            raise OSError("box went away")
+        sibling_inside.set()
+        deadline = time.monotonic() + 5
+        while not runtime.sessions[0].closed and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return CommandResult(exit_code=137, timed_out=True)
+
+    runtime = _runtime(respond)
+    scorer = SandboxPythonScorer("def score(c): return 1", runtime=runtime, gateway=None, timeout_seconds=5)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        probes = list(pool.map(scorer.run, ["a", "bb"]))
+    scorer.close()
+
+    assert [(probe.score, probe.error) for probe in probes] == [(1.0, None), (2.0, None)]
+    assert attempts == {"a": 2, "bb": 2}
+    first, second = runtime.sessions
+    assert first.closed is True
+    assert len(second.commands) == 2
+
+
 def test_sandbox_scorer_gives_up_after_one_reopen() -> None:
     """A box that dies twice in a row surfaces the underlying error."""
 
