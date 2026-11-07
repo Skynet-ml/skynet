@@ -34,6 +34,7 @@ import hashlib
 import ipaddress
 import math
 import re
+import socket
 import tarfile
 import tomllib
 from collections.abc import Iterable, Mapping, Sequence
@@ -651,6 +652,14 @@ def _service_url(value: Any, label: str) -> str:
         is_ip = True
     except ValueError:
         is_ip = False
+    if not is_ip:
+        # inet_aton reads the IPv4 forms that ip_address refuses, such as 0x7f.0x1 or
+        # 169.254.169.0xfe, the way an HTTP client resolves them.
+        try:
+            socket.inet_aton(host)
+            is_ip = True
+        except OSError:
+            pass
     # A last label with no letter also catches IP forms that ip_address refuses, such as 0x7f.1.
     last = host.rsplit(".", 1)[-1]
     if (
