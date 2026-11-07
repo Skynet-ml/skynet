@@ -12,7 +12,7 @@ from core.service_gateway.language_models import usage_by_model_from_history
 from core.service_gateway.optimization.unified.metric_model import resolve_metric_model
 
 from ..harness import GatewayConfig
-from ..protocol import ScorerAbortError
+from ..protocol import METRIC_ERROR, ScorerAbortError
 from ..sandbox import LocalSubprocessRuntime, SandboxSession, SandboxSpec
 from ..workspace_scorer import HARNESS_FILE, build_workspace_scorer
 from .mocks import FakeGateway
@@ -146,7 +146,7 @@ def test_run_many_scores_every_case_in_order_in_one_box() -> None:
 
 
 def test_user_error_reaches_the_optimizer_as_type_and_message_only() -> None:
-    """A crash in the run code is ``(0.0, {"error": "Type: msg"})`` with no source or traceback."""
+    """A crash in the run code is a metric error with no score, only ``Type: msg``, no source or traceback."""
     run_code = PROGRAM + "def run(artifact, input):\n    raise ValueError('bad input')\n"
     with FakeGateway(reply="unused") as gw:
         scorer = build_workspace_scorer(
@@ -160,7 +160,30 @@ def test_user_error_reaches_the_optimizer_as_type_and_message_only() -> None:
         finally:
             scorer.close()
 
-    assert result == (0.0, {"error": "ValueError: bad input"})
+    score, side_info = result
+    assert score is None
+    assert side_info == {"error": "ValueError: bad input", "status": METRIC_ERROR}
+
+
+def test_a_metric_crash_has_no_score_in_the_final_run_path() -> None:
+    """``score_observed`` (the final run's path) also returns no score and the metric error status."""
+    metric = "def score(input, output):\n    raise RuntimeError('metric broke')\n"
+    with FakeGateway(reply="unused") as gw:
+        scorer = build_workspace_scorer(
+            _payload(metric_code=metric),
+            GatewayConfig(url=gw.url, api_key="k"),
+            protected=False,
+            runtime=LocalSubprocessRuntime(),
+        )
+        try:
+            score, side_info, _ = scorer.score_observed("p", {"input": {"q": "1"}})
+        finally:
+            scorer.close()
+
+    assert score is None
+    assert side_info["status"] == METRIC_ERROR
+    assert "RuntimeError" in side_info["error"]
+    assert "metric broke" in side_info["error"]
 
 
 def test_shape_mismatch_aborts_the_run() -> None:

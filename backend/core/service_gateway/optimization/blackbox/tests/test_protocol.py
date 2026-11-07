@@ -8,6 +8,8 @@ from typing import Any
 import pytest
 
 from ..protocol import (
+    METRIC_ERROR,
+    SEARCH_FLOOR,
     BudgetExhaustedError,
     EvalServer,
     ScorerAbortError,
@@ -85,30 +87,139 @@ def test_best_tracking_is_shared_with_lanes() -> None:
     assert lane.best_candidate == "aaa"
 
 
-def test_scorer_crash_becomes_floor_score_with_feedback() -> None:
-    """A scorer that raises marks the version bad instead of killing the run."""
+def _crashing(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
+    """Raise for one specific version, and score every other version by its length below zero.
 
-    def crashing(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
-        """Raise for one specific version.
+    Args:
+        candidate: The version.
+        case: Ignored.
+
+    Returns:
+        ``-len(candidate)`` for anything but ``"boom"``, so every valid score is negative.
+
+    Raises:
+        ValueError: For ``"boom"``.
+    """
+    if candidate == "boom":
+        raise ValueError("cannot score this")
+    return -float(len(candidate)), {"feedback": "ok"}
+
+
+def test_scorer_crash_is_a_metric_error_with_no_score() -> None:
+    """A scorer that raises records the version with a null score and the error text, never 0."""
+    server = EvalServer(_crashing, max_evals=5)
+
+    _, side_info = server.evaluate("boom")
+
+    assert side_info == {"error": "ValueError: cannot score this", "status": METRIC_ERROR}
+    assert server.used == 1
+    (record,) = server.history
+    assert record.mean_score is None
+    assert record.crashed
+    assert record.metric_error == "ValueError: cannot score this"
+    assert server.mean_score("boom") is None
+
+
+def test_root_score_hides_the_search_floor() -> None:
+    """The internal scorer path returns None for a crash; only evaluate() hands the engines the floor."""
+    server = EvalServer(_crashing, max_evals=5)
+
+    assert server._score("boom", None) == (None, {"error": "ValueError: cannot score this", "status": METRIC_ERROR})
+    score, _ = server.evaluate("boom")
+    assert score == SEARCH_FLOOR
+
+
+def test_a_crashed_version_is_never_best_even_below_zero() -> None:
+    """With every valid score below 0, the crashed version is still not the best."""
+    server = EvalServer(_crashing, max_evals=5)
+
+    server.evaluate("boom")
+    server.evaluate("abcdef")
+    server.evaluate("abcdefghij")
+
+    assert server.best_candidate == "abcdef"
+    assert server.best_score == -6.0
+
+
+def test_only_crashed_versions_leave_no_best() -> None:
+    """A run where every version crashed has no best version and no best score."""
+    server = EvalServer(_crashing, max_evals=5)
+
+    server.evaluate("boom")
+
+    assert server.best_candidate is None
+    assert server.best_score is None
+
+
+def test_one_crashed_case_nulls_the_whole_version() -> None:
+    """A metric error on any case makes the version's mean null, not an average with a zero."""
+
+    def flaky(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
+        """Score case 1, crash on case 2.
 
         Args:
-            candidate: The version.
-            case: Ignored.
+            candidate: Ignored.
+            case: The case number.
 
         Returns:
-            A perfect score for anything but ``"boom"``.
+            0.9 on case 1.
+
+        Raises:
+            RuntimeError: On case 2.
         """
-        if candidate == "boom":
-            raise ValueError("cannot score this")
-        return 1.0, {}
+        if case == 2:
+            raise RuntimeError("metric blew up")
+        return 0.9, {"feedback": "ok"}
 
-    server = EvalServer(crashing, max_evals=5)
+    server = EvalServer(flaky, max_evals=5)
 
-    score, side_info = server.evaluate("boom")
+    server.evaluate("v", 1)
+    server.evaluate("v", 2)
+    server.evaluate("v", 1)
 
-    assert score == 0.0
-    assert side_info == {"error": "ValueError: cannot score this"}
-    assert server.used == 1
+    (record,) = server.history
+    assert record.count == 3
+    assert record.mean_score is None
+    assert record.metric_error == "RuntimeError: metric blew up"
+    assert server.best_candidate is None
+
+
+def test_a_nested_server_keeps_the_metric_error() -> None:
+    """A server that scores through another server's evaluate() reads the status, not the floor."""
+    outer = EvalServer(_crashing, max_evals=5)
+    inner = EvalServer(outer.evaluate, max_evals=5)
+
+    score, side_info = inner.evaluate("boom")
+    inner.evaluate("abc")
+
+    assert score == SEARCH_FLOOR
+    assert side_info["status"] == METRIC_ERROR
+    assert inner.mean_score("boom") is None
+    assert inner.best_candidate == "abc"
+
+
+def test_a_metric_error_logs_the_error_not_a_score(caplog: pytest.LogCaptureFixture) -> None:
+    """The run log names the metric error and its text, and never prints the floor."""
+    server = EvalServer(_crashing, max_evals=5)
+
+    with caplog.at_level(logging.DEBUG, logger="core.service_gateway.optimization.blackbox.protocol"):
+        server.evaluate("boom")
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "scorer raised on a candidate (metric_error): ValueError: cannot score this" in messages
+    assert "scorer eval 1/5 metric_error: ValueError: cannot score this" in messages
+    assert not any(str(SEARCH_FLOOR) in message or "e+09" in message for message in messages)
+
+
+def test_on_eval_gets_none_for_a_metric_error() -> None:
+    """The progress listener sees a null score for a crashed case, never the floor."""
+    seen: list[float | None] = []
+    server = EvalServer(_crashing, max_evals=5, on_eval=lambda srv, score: seen.append(score))
+
+    server.evaluate("boom")
+    server.evaluate("ab")
+
+    assert seen == [None, -2.0]
 
 
 def test_scorer_abort_is_not_floored() -> None:

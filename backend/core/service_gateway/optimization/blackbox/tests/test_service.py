@@ -16,6 +16,7 @@ from core.constants import (
     DETAIL_BASELINE,
     DETAIL_OPTIMIZED,
     PROGRESS_BASELINE,
+    PROGRESS_CANDIDATE,
     PROGRESS_EVALUATION_STARTED,
     PROGRESS_LANE_COMPLETED,
     PROGRESS_LANE_HANDOFF,
@@ -44,7 +45,16 @@ from ..agent_runs import PHASE_BASELINE, PHASE_FINAL
 from ..auto import LaneOutcome
 from ..harness import GatewayConfig
 from ..native_runtime import NativeOptions
-from ..protocol import Candidate, EngineContext, EvalServer, Result, Task, candidate_key
+from ..protocol import (
+    METRIC_ERROR,
+    SEARCH_FLOOR,
+    Candidate,
+    EngineContext,
+    EvalServer,
+    Result,
+    Task,
+    candidate_key,
+)
 from ..sandbox import LocalSubprocessRuntime
 from ..sandbox_scorer import ScorerGateway, ScorerUsage
 from ..service import run_blackbox_optimization, validate_blackbox_payload
@@ -1170,6 +1180,7 @@ def test_service_hands_the_progress_sink_to_the_engine_context(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The job's progress sink rides into the engine context so trajectory events stream live."""
+    events: list[tuple[str, dict[str, Any]]] = []
     captured: dict[str, Any] = {}
 
     def fake_run_strategy(strategy: Any, task: Any, server: Any, ctx: Any, cb: Any = None, *, caps: Any = None) -> Any:
@@ -1180,11 +1191,13 @@ def test_service_hands_the_progress_sink_to_the_engine_context(
     monkeypatch.setattr(service_mod, "run_strategy", fake_run_strategy)
 
     def sink(event: str, metrics: dict[str, Any]) -> None:
-        """Discard events."""
+        """Record events."""
+        events.append((event, metrics))
 
     run_blackbox_optimization(_payload(), artifact_id="job-cb", progress_callback=sink, gepa_log_dir_path=str(tmp_path))
+    captured["ctx"].progress_callback("trajectory", {"score": 0.5})
 
-    assert captured["ctx"].progress_callback is sink
+    assert events[-1] == ("trajectory", {"score": 0.5})
 
 
 @pytest.mark.parametrize("concurrency", [1, 2])
@@ -1656,3 +1669,208 @@ def test_geocoding_final_runs_keep_raw_observations_for_both_versions() -> None:
     assert best.named["accuracy"].score == pytest.approx(1.0)
     assert best.named["speed"].score > baseline.named["speed"].score
     assert best.score > baseline.score
+
+
+_DEEP_NEGATIVE_CODE = """
+def score(candidate, case=None):
+    if candidate == "broken":
+        raise RuntimeError("syntax error in the version")
+    if candidate == "legal-better":
+        return {"score": -2e9, "feedback": "legal improvement"}
+    return {"score": -3e9, "feedback": "legal"}
+"""
+
+
+def test_a_crashed_version_is_never_chosen_even_when_every_valid_score_is_below_the_floor(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Valid scores below the search floor never let a metric_error version win, show a number or log one."""
+
+    def search(
+        strategy: object, task: object, server: EvalServer, ctx: Any, cb: object = None, *, caps: object = None
+    ) -> tuple[Result, list[LaneOutcome]]:
+        """Score a valid version and a crashing one; return the crashed one, as an engine fooled by the floor would."""
+        server.evaluate("legal-better")
+        _, floor_side_info = server.evaluate("broken")
+        assert floor_side_info["status"] == METRIC_ERROR
+        ctx.progress_callback(PROGRESS_OPTIMIZER, {"score": SEARCH_FLOOR, "candidate": "broken"})
+        lane = LaneOutcome(
+            engine=BLACKBOX_ENGINE_BEST_OF_N,
+            phase="explore",
+            status="completed",
+            best_score=SEARCH_FLOOR,
+            best_candidate="broken",
+        )
+        result = Result(
+            best_candidate="broken",
+            best_score=SEARCH_FLOOR,
+            total_evals=server.used,
+            metadata={"candidate_tree": [{"candidate": "broken", "parents": [], "val_score": SEARCH_FLOOR}]},
+        )
+        return result, [lane]
+
+    monkeypatch.setattr(service_mod, "run_strategy", search)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    response = run_blackbox_optimization(
+        _payload(scorer={"kind": "python", "metric_code": _DEEP_NEGATIVE_CODE}),
+        artifact_id="job-floor",
+        progress_callback=lambda event, metrics: events.append((event, metrics)),
+        gepa_log_dir_path=str(tmp_path),
+    )
+
+    assert response.best_candidate == "legal-better"
+    assert response.best_score == pytest.approx(-2e9)
+    broken = next(version for version in response.versions if version.candidate == "broken")
+    assert broken.score is None
+    assert broken.mean_score is None
+    assert broken.side_info["status"] == METRIC_ERROR
+    assert "RuntimeError: syntax error in the version" in broken.side_info["error"]
+    assert response.lanes[0].best_score is None
+    assert response.candidate_tree[0].val_score is None
+    assert response.details["optimizer_best_score"] is None
+    assert (PROGRESS_OPTIMIZER, {"score": None, "candidate": "broken"}) in events
+    assert SEARCH_FLOOR not in [value for _, metrics in events for value in metrics.values()]
+
+
+@pytest.mark.parametrize("crashing", [{"winner"}, {"winner", "hello world"}])
+def test_a_metric_error_in_the_final_run_has_no_score_and_keeps_the_seed(
+    fake_lm: FakeReflectionLM,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    crashing: set[str],
+) -> None:
+    """A winner the metric crashes on in the final run gets no score, never 0, and the seed stays.
+
+    The seed stays even when the metric crashes on it too, so the crashed
+    winner never becomes the next run's starting point.
+    """
+    real_build_scorer = service_mod.build_scorer
+
+    def build_scorer(*args: Any, **kwargs: Any) -> Any:
+        """Wrap the real scorer so the metric crashes on the winner."""
+        inner = real_build_scorer(*args, **kwargs)
+
+        class Crashing:
+            """Report a metric error on the winner, like the workspace scorer does."""
+
+            usage = inner.usage
+
+            def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float | None, dict[str, Any]]:
+                """Return a metric error for the winner, else the real score.
+
+                Args:
+                    candidate: The version to score.
+                    case: The case, if any.
+
+                Returns:
+                    The score and side info.
+                """
+                if candidate in crashing:
+                    return None, {"error": "KeyError: 'answer'", "status": METRIC_ERROR}
+                return inner(candidate, case)
+
+            def close(self) -> None:
+                """Close the wrapped scorer."""
+                inner.close()
+
+        return Crashing()
+
+    monkeypatch.setattr(service_mod, "build_scorer", build_scorer)
+    monkeypatch.setattr(
+        service_mod,
+        "run_strategy",
+        lambda strategy, task, server, ctx, cb=None, *, caps=None: (
+            Result(best_candidate="winner", best_score=1.0, total_evals=0),
+            [],
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="core.service_gateway.optimization.blackbox.service"):
+        response = run_blackbox_optimization(_payload(), artifact_id="job-final-crash", gepa_log_dir_path=str(tmp_path))
+
+    assert any(
+        "optimized version has no score: metric_error" in record.getMessage()
+        and "KeyError: 'answer'" in record.getMessage()
+        for record in caplog.records
+    )
+    assert response.regression_guard_applied is True
+    assert response.best_candidate == "hello world"
+    assert response.best_score == response.baseline_score
+    assert (response.best_score is None) == ("hello world" in crashing)
+
+
+def test_final_run_has_no_score_when_the_metric_crashes_on_a_case(caplog: pytest.LogCaptureFixture) -> None:
+    """One metric_error case nulls the version's final score and named scores, and the log shows the error."""
+
+    def scorer(candidate: Candidate, case: Any) -> tuple[float | None, dict[str, Any]]:
+        """Crash the metric on the first case; score the second."""
+        if case["n"] == 1:
+            return None, {"error": "ValueError: bad input", "status": METRIC_ERROR}
+        return 0.8, {"feedback": "ok", "scores": {"accuracy": {"score": 0.8, "feedback": "close"}}}
+
+    with caplog.at_level(logging.DEBUG, logger="core.service_gateway.optimization.blackbox.service"):
+        run = service_mod._final_run(scorer, "v", [{"n": 1}, {"n": 2}], label="optimized version", phase=PHASE_FINAL)
+
+    assert run.score is None
+    assert run.named == {}
+    assert run.cases == [(None, "ValueError: bad input"), (0.8, "ok")]
+    messages = [record.getMessage() for record in caplog.records]
+    assert "optimized version final run 1/2 metric_error: ValueError: bad input" in messages
+    assert any("optimized version has no score: metric_error" in message for message in messages)
+
+
+def test_progress_events_never_show_a_score_the_search_floor_dragged_down() -> None:
+    """A Best-of-N style mean over one floored case, and the floored case itself, reach users as no score."""
+    events: list[tuple[str, dict[str, Any]]] = []
+    sink = service_mod._without_search_floor(lambda event, metrics: events.append((event, metrics)))
+    assert sink is not None
+    floored_mean = (0.5 + 0.25 + SEARCH_FLOOR) / 3
+
+    sink(
+        PROGRESS_CANDIDATE,
+        {
+            "candidate_id": "1",
+            "score": floored_mean,
+            "per_example": [{"id": "a", "score": 0.5}, {"id": "b", "score": 0.25}, {"id": "c", "score": SEARCH_FLOOR}],
+            "discovered_at_evals": 3,
+        },
+    )
+    sink(PROGRESS_OPTIMIZER, {"last_score": -0.5, "best_score": 0.5, "n": 3})
+
+    assert events == [
+        (
+            PROGRESS_CANDIDATE,
+            {
+                "candidate_id": "1",
+                "score": None,
+                "per_example": [{"id": "a", "score": 0.5}, {"id": "b", "score": 0.25}, {"id": "c", "score": None}],
+                "discovered_at_evals": 3,
+            },
+        ),
+        (PROGRESS_OPTIMIZER, {"last_score": -0.5, "best_score": 0.5, "n": 3}),
+    ]
+
+
+def test_result_details_never_show_a_score_the_search_floor_dragged_down(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An engine's metadata (AutoResearch's Pareto front) reaches the details with floored scores as null."""
+    monkeypatch.setattr(
+        service_mod,
+        "run_strategy",
+        lambda strategy, task, server, ctx, cb=None, *, caps=None: (
+            Result(
+                best_candidate="hello world",
+                best_score=0.6,
+                total_evals=0,
+                metadata={"frontier": [{"id": "c001", "score": SEARCH_FLOOR / 3}, {"id": "c002", "score": 0.6}]},
+            ),
+            [],
+        ),
+    )
+
+    response = run_blackbox_optimization(_payload(), artifact_id="job-frontier", gepa_log_dir_path=str(tmp_path))
+
+    assert response.details["frontier"] == [{"id": "c001", "score": None}, {"id": "c002", "score": 0.6}]
