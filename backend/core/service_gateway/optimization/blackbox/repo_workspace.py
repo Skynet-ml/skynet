@@ -48,6 +48,15 @@ _GIT_IDENTITY = "-c user.name=app -c user.email=app@localhost -c commit.gpgsign=
 # git 2.47), whose lock files come and go while ``cp -a`` walks ``.git`` and
 # fail the copy with "cannot stat .git/objects/maintenance.lock".
 _GIT_NO_MAINTENANCE = "-c maintenance.auto=false -c gc.auto=0"
+# A version's code can write $HOME and the XDG config folder, outside .app-repo,
+# so the reset and the prepared digest never see them. A filter, hook or
+# fsmonitor command set there would run in a later checkout's git call, outside
+# every candidate stop (E38). Box git reads only the repository's own config.
+GIT = (
+    "env HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null"
+    " GIT_CONFIG_SYSTEM=/dev/null GIT_ATTR_NOSYSTEM=1 git -c core.attributesFile=/dev/null"
+    " -c core.hooksPath=/dev/null -c core.fsmonitor=false"
+)
 _PROBE_TIMEOUT_SECONDS = 120.0
 _PROBE_ATTEMPTS = 5
 _PROBE_OK = "app-network-closed"
@@ -414,7 +423,7 @@ class RepoWorkspace:
         files = " ".join(shlex.quote(part) for part in parts)
         result = session.run(
             f"set -e; mkdir -p {BASE_DIR}; cat {files} | base64 -d | tar -xzf - -C {BASE_DIR}; rm -f {files};"
-            f" cd {BASE_DIR}; git init -q; git add -A -f; git {_GIT_IDENTITY} {_GIT_NO_MAINTENANCE} commit -q --allow-empty -m base;"
+            f" cd {BASE_DIR}; {GIT} init -q; {GIT} add -A -f; {GIT} {_GIT_IDENTITY} {_GIT_NO_MAINTENANCE} commit -q --allow-empty -m base;"
             f" cd - >/dev/null; rm -rf {WORK_DIR} {PREPARED_DIR}; mv {BASE_DIR} {WORK_DIR}",
             timeout_seconds=_SETUP_TIMEOUT_SECONDS,
         )
@@ -481,7 +490,7 @@ class RepoWorkspace:
         text = session.read_file(HIDDEN_FILE) if packed.ok else None
         if text is None:
             raise RepoSetupError(f"The metric files could not be packed: {_tail(packed)}")
-        git = f"git {_GIT_IDENTITY} {_GIT_NO_MAINTENANCE}"
+        git = f"{GIT} {_GIT_IDENTITY} {_GIT_NO_MAINTENANCE}"
         # The base commit and every loose object hold the hidden files too;
         # the amended commit replaces it and the old objects are pruned.
         removed = session.run(
@@ -607,7 +616,7 @@ class RepoWorkspace:
                 session.write_files({PATCH_FILE: patch})
             applied = session.run(
                 f"set -e; cp -a {PREPARED_DIR} {WORK_DIR}; cd {WORK_DIR};"
-                f" if [ -s ../version.patch ]; then git apply --binary --whitespace=nowarn ../version.patch; fi",
+                f" if [ -s ../version.patch ]; then {GIT} apply --binary --whitespace=nowarn ../version.patch; fi",
                 timeout_seconds=_SETUP_TIMEOUT_SECONDS,
             )
             if not applied.ok:

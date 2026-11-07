@@ -1836,6 +1836,58 @@ def test_a_module_the_candidate_plants_for_the_metric_runner_never_runs(tmp_path
         scorer.close()
 
 
+_GIT_PLANT = r"""
+import os
+
+
+def go(value):
+    home = os.environ["HOME"]
+    marker = os.path.join(home, "filter_ran")
+    if value != "plant":
+        return {"filter_ran": os.path.exists(marker)}
+    script = os.path.join(home, "f.sh")
+    with open(script, "w") as handle:
+        handle.write("#!/bin/sh\ntouch " + marker + "\ncat\n")
+    os.chmod(script, 0o755)
+    with open(os.path.join(home, "attrs"), "w") as handle:
+        handle.write("* filter=x\n")
+    for folder in (home, os.path.join(home, ".config", "git")):
+        os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(home, ".config", "git", "attributes"), "w") as handle:
+        handle.write("* filter=x\n")
+    config = "[core]\n\tattributesFile = " + os.path.join(home, "attrs") + "\n[filter \"x\"]\n\tclean = " + script + "\n"
+    for path in (os.path.join(home, ".gitconfig"), os.path.join(home, ".config", "git", "config")):
+        with open(path, "w") as handle:
+            handle.write(config)
+    return {"filter_ran": False}
+"""
+
+
+def test_a_git_config_the_candidate_plants_in_home_never_runs_in_a_later_checkout(tmp_path: Path) -> None:
+    """A filter set in $HOME or the XDG git config does not run in the next checkout's ``git apply`` (E38)."""
+    files = {"src/app.py": "x = 1\n", "src/cand.py": _GIT_PLANT, "eval/metric.py": "WEIGHT = 0.3\n"}
+    archive = _archive(tmp_path, files)
+    patch = _patch(tmp_path / "version", archive, {"src/app.py": "x = 2\n"})
+    workspace = RepoWorkspace(
+        runtime=LocalSubprocessRuntime(),
+        spec=SandboxSpec(lifetime_seconds=90, network_disabled=True),
+        archive=archive,
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command=None,
+        secrets={},
+        hidden_paths=["eval"],
+    )
+    metric = "def score(repo_path, case, output):\n    return 0.25, repr(output)\n"
+    scorer = RepoScorer(workspace, metric, timeout_seconds=90, run_entry="src/cand.py:go", run_timeout=10.0)
+    try:
+        scorer.score("", {"input": "plant"})
+        results = [scorer.score(version, {"input": "check"}) for version in (patch, "")]
+    finally:
+        scorer.close()
+    assert [result["feedback"] for result in results] == ["{'filter_ran': False}"] * 2
+
+
 def test_a_candidate_that_links_the_calls_folder_has_no_score_and_the_next_call_works(tmp_path: Path) -> None:
     """End the box when ``calls`` became a link; the next call gets a fresh box with its runner (E38)."""
     metric = "def score(repo_path, case, output):\n    return 0.25, 'real metric'\n"

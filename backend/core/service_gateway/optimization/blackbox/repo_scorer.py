@@ -67,7 +67,7 @@ from .protocol import STATUS_KEY
 from .repo_constraints import ServiceSpec, TargetStage
 from .repo_services import open_stage_boxes, stage_spec
 from .repo_tree import archive_chunks, drop_paths
-from .repo_workspace import HIDDEN_CHANGED, REPO_DIR, WORK_DIR, RepoWorkspace, redact
+from .repo_workspace import GIT, HIDDEN_CHANGED, REPO_DIR, WORK_DIR, RepoWorkspace, redact
 from .rule_judge import RuleJudge
 from .sandbox import SandboxSession
 from .sandbox_contract import SandboxRuntime
@@ -620,7 +620,7 @@ class RepoScorer:
         files = " ".join(shlex.quote(part) for part in parts)
         result = box.run(
             f"set -e; mkdir -p {_STAGE_TREE}; cat {files} | base64 -d | tar -xzf - -C {_STAGE_TREE}; rm -f {files};"
-            f" cd {_STAGE_TREE}; if [ -s ../version.patch ]; then git apply --binary --whitespace=nowarn ../version.patch; fi",
+            f" cd {_STAGE_TREE}; if [ -s ../version.patch ]; then {GIT} apply --binary --whitespace=nowarn ../version.patch; fi",
             timeout_seconds=_STAGE_LAYOUT_SECONDS,
         )
         if not result.ok:
