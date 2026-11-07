@@ -473,3 +473,54 @@ def test_relay_needs_a_budget_for_a_managed_tool_call() -> None:
             secret_hosts={"GOOGLE_MAPS_KEY": MAPS},
             send=lambda *_args: pytest.fail("The relay must not send."),
         )
+
+
+@pytest.mark.parametrize(
+    ("url", "body", "message"),
+    [
+        (f"https://{MAPS}/mcp", b'[{"method": "tools/call", "params": {"name": "search_places"}}]', "one JSON-RPC"),
+        (f"https://{MAPS}/mcp", b'{"method": "tools/call", "params": {"name": "s\xff"}}', "one JSON-RPC"),
+        (f"https://{MAPS}/mcp", b'{"method": "resources/read", "params": {}}', "one JSON-RPC"),
+        (f"https://{MAPS}/mcp", b'{"method": "tools/call", "params": {}}', "one JSON-RPC"),
+        (f"https://{MAPS}/v1/other", b'{"method": "tools/call", "params": {"name": "search_places"}}', "may go only"),
+        (f"https://{MAPS}/mcp?alt=1", b'{"method": "tools/call", "params": {"name": "search_places"}}', "may go only"),
+    ],
+)
+def test_relay_refuses_a_managed_call_that_the_meter_cannot_read(
+    runtime: BudgetRuntime, url: str, body: bytes, message: str
+) -> None:
+    """Fail closed on a batch, bad UTF-8, an unknown method, no tool name, or another endpoint on the host."""
+    with pytest.raises(ValueError, match=message):
+        relay_request(
+            url=url,
+            headers={"X-Goog-Api-Key": "${GOOGLE_MAPS_KEY}"},
+            body=body,
+            user_secrets={},
+            bindings={"GOOGLE_MAPS_KEY": "managed"},
+            secret_hosts={"GOOGLE_MAPS_KEY": MAPS},
+            send=lambda *_args: pytest.fail("The relay must not send."),
+            runtime=runtime,
+        )
+    assert _operations(runtime) == []
+
+
+def test_relay_removes_a_json_escaped_echo_of_the_secret() -> None:
+    """Hide the secret when the server echoes it with JSON escapes such as \\/ and \\u0026."""
+    secret = "user/key&part<1>"
+    escaped = json.dumps(secret)[1:-1]
+    forms = [
+        escaped,
+        escaped.replace("/", "\\/"),
+        escaped.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e").replace("/", "\\/"),
+    ]
+    answer = relay_request(
+        url="https://api.judge.example/v1",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        body=b"{}",
+        user_secrets={"JUDGE_KEY": secret},
+        bindings={},
+        secret_hosts={"JUDGE_KEY": "api.judge.example"},
+        send=lambda *_args: ('{"echo": ["' + '", "'.join(forms) + '"]}').encode(),
+    ).decode()
+    assert all(form not in answer for form in forms)
+    assert json.loads(answer)["echo"] == ["[REDACTED]"] * 3

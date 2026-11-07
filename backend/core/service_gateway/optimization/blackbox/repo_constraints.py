@@ -101,6 +101,8 @@ _MCP_STDIO_KEYS = frozenset({"type", "command", "args", "env"})
 # Known key formats: OpenAI/Stripe, GitHub, Slack, Google, AWS, GitLab, Hugging Face, and JWTs.
 _SECRET_PREFIX = re.compile(r"(sk|pk|rk)[-_]|gh[pousr]_|github_pat_|xox[abposr]-|AIza|AKIA|ASIA|glpat-|hf_|eyJ")
 _SECRET_TOKEN = re.compile(r"[A-Za-z0-9_\-+/.~]{24,}")
+# Some providers issue UUID keys, which the dashed-slug rule below would let through.
+_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 
 class ConstraintsError(ValueError):
@@ -751,8 +753,8 @@ def _service_url(value: Any, label: str, prefix: str = CONSTRAINTS_FILE) -> str:
         The url as written.
 
     Raises:
-        ConstraintsError: When the value is not https, holds credentials or a
-            placeholder, or names an IP address, ``localhost``, an
+        ConstraintsError: When the value is not https, holds credentials, a
+            placeholder or what looks like a raw secret, or names an IP address, ``localhost``, an
             ``.internal`` or ``.local`` name, a name that holds a dotted IPv4
             address, or a host without a domain.
     """
@@ -766,6 +768,10 @@ def _service_url(value: Any, label: str, prefix: str = CONSTRAINTS_FILE) -> str:
         parts.port  # noqa: B018 - reading it raises ValueError for a bad port
     except ValueError as error:
         raise ConstraintsError(f"{prefix}: {label} url is not a valid address.") from error
+    if _looks_secret(" ".join(re.split(r"[/?&#=]+", f"{parts.path}?{parts.query}"))):
+        raise ConstraintsError(
+            f"{prefix}: {label} url holds what looks like a secret value. Put the secret in headers as ${{NAME}}."
+        )
     if parts.username is not None or parts.password is not None:
         raise ConstraintsError(
             f"{prefix}: {label} url must not hold credentials; write the secret as ${{NAME}} in headers."
@@ -877,7 +883,7 @@ def _looks_secret(text: str) -> bool:
         Whether a part of the text looks like a secret.
     """
     for token in re.split(r"[\s,;=\"']+", text):
-        if len(token) >= 12 and _SECRET_PREFIX.match(token):
+        if (len(token) >= 12 and _SECRET_PREFIX.match(token)) or _UUID.fullmatch(token):
             return True
         if (
             _SECRET_TOKEN.fullmatch(token)
@@ -1319,7 +1325,7 @@ def _mcp_servers(text: str, setting: str, path: str) -> tuple[McpServer, ...]:
     prefix = f"{CONSTRAINTS_FILE}: {setting} file '{path}'"
     try:
         document = json.loads(text)
-    except ValueError as error:
+    except (ValueError, RecursionError) as error:
         raise ConstraintsError(f"{prefix} is not valid JSON.") from error
     if not isinstance(document, dict) or set(document) != {"mcpServers"}:
         raise ConstraintsError(f'{prefix} must be one object with only "mcpServers": {{"<name>": {{...}}}}.')
@@ -1352,6 +1358,8 @@ def _mcp_server(name: str, entry: Any, prefix: str) -> McpServer:
     if not isinstance(entry, dict):
         raise ConstraintsError(f"{prefix}: {label} must be an object.")
     kind = entry.get("type", "http" if "url" in entry else "stdio")
+    if not isinstance(kind, str):
+        raise ConstraintsError(f"{prefix}: {label} type must be http, streamable-http, sse or stdio.")
     if kind in _MCP_HTTP_TYPES:
         allowed = _MCP_HTTP_KEYS
     elif kind == "stdio":
@@ -1379,6 +1387,10 @@ def _mcp_server(name: str, entry: Any, prefix: str) -> McpServer:
     # The box reads the command line, so a secret there would reach the box's process list.
     if any("${" in part for part in (command, *args)):
         raise ConstraintsError(f"{prefix}: {label} command and args must not hold ${{NAME}}; put the secret in env.")
+    if any(_looks_secret(part) for part in (command, *args)):
+        raise ConstraintsError(
+            f"{prefix}: {label} command or args hold what looks like a secret value. Put it in env as ${{NAME}}."
+        )
     env = entry.get("env", {})
     if not isinstance(env, dict) or len(env) > _MAX_NAMES:
         raise ConstraintsError(f"{prefix}: {label} env must be an object of at most {_MAX_NAMES} names to text.")

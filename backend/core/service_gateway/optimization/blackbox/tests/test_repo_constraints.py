@@ -598,6 +598,7 @@ def test_malformed_environment_settings_fail_with_a_reason(raw: bytes, message: 
 
 # A fake key, split so the commit secret scan does not match the test file.
 _RAW_KEY = "AIza" + "SyD4f9Kq2LmN8pR3tUvW6xYz1aBcDeFgHiJ"
+_LIVE_KEY = b"sk-live-" + b"4f9Kq2LmN8pR3t"
 
 
 @pytest.mark.parametrize(
@@ -972,8 +973,9 @@ def test_a_bad_mcp_file_fails_with_a_reason(tmp_path: Path, run: bytes, message:
 @pytest.mark.parametrize(
     "run",
     [
-        b'{"mcpServers": {"m": {"url": "https://a.example.com", "headers": {"Authorization": "Bearer sk-live-'
-        + b'4f9Kq2LmN8pR3t"}}}}',
+        b'{"mcpServers": {"m": {"url": "https://a.example.com", "headers": {"Authorization": "Bearer '
+        + _LIVE_KEY
+        + b'"}}}}',
         b'{"mcpServers": {"m": {"command": "x", "env": {"TOKEN": "ghp_' + b'abcdefghijklmnop1234"}}}}',
     ],
 )
@@ -1057,3 +1059,53 @@ def test_the_disclosure_lists_each_role_servers_and_the_host_of_each_secret(tmp_
         "GOOGLE_MAPS_KEY": "mapstools.googleapis.com",
         "GRADER_KEY": "grader.example.com",
     }
+
+
+@pytest.mark.parametrize(
+    ("run", "message"),
+    [
+        (b'{"mcpServers": {"m": {"type": ["http"], "url": "https://a.example.com"}}}', r"type must be http"),
+        (b'{"mcpServers": {"m": {"type": {"x": 1}, "url": "https://a.example.com"}}}', r"type must be http"),
+        (b"[" * 10_000 + b"]" * 10_000, r"is not valid JSON"),
+    ],
+    ids=["type-list", "type-object", "deep-nesting"],
+)
+def test_a_hostile_mcp_file_fails_with_a_reason_not_a_crash(tmp_path: Path, run: bytes, message: str) -> None:
+    """A type that is not text, or JSON nested too deep to read, is a ConstraintsError, not a crash."""
+    with pytest.raises(ConstraintsError, match=message):
+        _read_mcp(tmp_path, run=run)
+
+
+@pytest.mark.parametrize(
+    ("run", "message"),
+    [
+        (
+            b'{"mcpServers": {"m": {"url": "https://a.example.com/mcp?key=' + _RAW_KEY.encode() + b'"}}}',
+            r"url holds what looks like a secret value\. Put the secret in headers",
+        ),
+        (
+            b'{"mcpServers": {"m": {"url": "https://a.example.com/' + _RAW_KEY.encode() + b'/mcp"}}}',
+            r"url holds what looks like a secret value",
+        ),
+        (
+            b'{"mcpServers": {"m": {"command": "x", "args": ["--token", "' + _RAW_KEY.encode() + b'"]}}}',
+            r"command or args hold what looks like a secret value\. Put it in env",
+        ),
+    ],
+)
+def test_a_secret_value_in_an_mcp_url_or_command_is_refused(tmp_path: Path, run: bytes, message: str) -> None:
+    """A raw key in a url path or query, or in stdio args, fails with the fix and is not echoed (E49)."""
+    with pytest.raises(ConstraintsError, match=message) as error:
+        _read_mcp(tmp_path, run=run)
+
+    assert _RAW_KEY not in str(error.value)
+
+
+def test_a_uuid_key_in_a_service_header_is_refused() -> None:
+    """Many providers issue UUID keys, so a UUID header value counts as a raw secret (E49)."""
+    raw = (
+        b'[services.maps]\nurl = "https://maps.example.com"\n'
+        b'headers = { "X-Api-Key" = "3f2b8c1e-' + b'9a4d-4c7e-b1f0-6d2e8a5c9b13" }\n'
+    )
+    with pytest.raises(ConstraintsError, match=r"looks like a secret value"):
+        parse_constraints(raw)

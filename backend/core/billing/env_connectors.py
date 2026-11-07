@@ -334,26 +334,76 @@ def _fill(text: str, values: Mapping[str, str]) -> str:
     return _PLACEHOLDER.sub(lambda match: values[match.group(1)], text)
 
 
-def _tool_call(body: bytes) -> tuple[str, dict[str, Any]] | None:
-    """Return the tool name and arguments when a JSON-RPC body is one ``tools/call``.
+_FREE_METHODS = frozenset({"initialize", "ping", "tools/list"})
+
+
+def _managed_call(body: bytes) -> tuple[str, dict[str, Any]] | None:
+    """Return the tool and arguments of a managed ``tools/call``, or None for a free request.
+
+    A managed request carries Skynet's key, so it fails closed: anything the
+    meter cannot read (a batch, bad UTF-8, an unknown method) is refused, not
+    sent unmetered.
 
     Args:
         body: The request body the box sent.
 
     Returns:
-        The tool and its arguments, or None for any other request.
+        The tool and its arguments for a ``tools/call``, or None for
+        ``initialize``, ``ping``, ``tools/list`` and notifications.
+
+    Raises:
+        ValueError: When the body is not one JSON-RPC request of those kinds.
     """
+    refusal = "A call with a Skynet key must be one JSON-RPC tools/call, tools/list, initialize, ping or notification."
     try:
         message = json.loads(body)
-    except ValueError:
-        return None
-    if not isinstance(message, dict) or message.get("method") != "tools/call":
+    except (ValueError, RecursionError) as error:
+        raise ValueError(refusal) from error
+    method = message.get("method") if isinstance(message, dict) else None
+    if not isinstance(method, str):
+        # The relay's callers turn ValueError into the refusal the box sees.
+        raise ValueError(refusal)  # noqa: TRY004
+    if method in _FREE_METHODS or method.startswith("notifications/"):
         return None
     params = message.get("params")
-    if not isinstance(params, dict) or not isinstance(params.get("name"), str):
-        return None
+    if method != "tools/call" or not isinstance(params, dict) or not isinstance(params.get("name"), str):
+        raise ValueError(refusal)
     arguments = params.get("arguments")
     return params["name"], arguments if isinstance(arguments, dict) else {}
+
+
+def _same_endpoint(url: str, connector: Connector) -> bool:
+    """Return whether a url is the connector's own endpoint, so a managed key reaches no other path.
+
+    Args:
+        url: The declared url.
+        connector: The catalog entry for the url's host.
+
+    Returns:
+        True when the scheme, host and path match, with no query.
+    """
+    given, own = urlsplit(url), urlsplit(connector.url)
+    return (
+        given.scheme == own.scheme
+        and (given.hostname or "").rstrip(".").lower() == connector.host
+        and given.port in (None, 443)
+        and given.path.rstrip("/") == own.path.rstrip("/")
+        and not given.query
+    )
+
+
+def _escaped_forms(fragment: str) -> set[str]:
+    """Return the JSON-escaped forms in which a server may echo a secret fragment.
+
+    Args:
+        fragment: One secret fragment.
+
+    Returns:
+        The JSON-escaped, ``\\/``-escaped and HTML-safe JSON forms.
+    """
+    escaped = json.dumps(fragment)[1:-1]
+    html_safe = escaped.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+    return {escaped, escaped.replace("/", "\\/"), html_safe, html_safe.replace("/", "\\/")}
 
 
 def relay_request(
@@ -391,7 +441,9 @@ def relay_request(
 
     Raises:
         ValueError: When a secret has no value, goes to a host it is not bound
-            to, or a managed call has no budget, or the metered tool has no price.
+            to, or a managed call is not to the connector's own endpoint, is a
+            request the meter cannot read, has no budget, or names a tool with
+            no price.
     """
     host = (urlsplit(url).hostname or "").rstrip(".").lower()
     names = tuple(dict.fromkeys(name for value in headers.values() for name in _PLACEHOLDER.findall(value)))
@@ -404,9 +456,13 @@ def relay_request(
     fragments |= {
         fragment for key, value in filled.items() if value != headers[key] for fragment in credential_fragments(value)
     }
+    # A server can echo a value JSON-escaped (Go writes & as \u0026, PHP writes / as \/), so hide those forms too.
+    fragments |= {form for fragment in fragments for form in _escaped_forms(fragment)}
     ordered = sorted(fragments, key=len, reverse=True)
     managed = any(bindings.get(name) == MANAGED_BINDING for name in names)
-    call = _tool_call(body) if managed else None
+    if managed and not _same_endpoint(url, CONNECTORS[host]):
+        raise ValueError(f"A Skynet key for {host} may go only to {CONNECTORS[host].url}.")
+    call = _managed_call(body) if managed else None
     if call is None:
         answer = send(url, filled, body)
     else:

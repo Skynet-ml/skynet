@@ -369,6 +369,7 @@ def test_server_without_pkce_s256_is_refused(oauth_server: OAuthServerState, con
     ("name", "url", "code"),
     [
         ("mapstools.googleapis.com", "https://mcp.example/mcp", "mcp_connection.invalid_name"),
+        ("maps", "https://mcp.example/mcp", "mcp_connection.name_reserved"),
         ("Bad Name", "https://mcp.example/mcp", "mcp_connection.invalid_name"),
         ("tracker", "ftp://mcp.example/mcp", "mcp_connection.invalid_url"),
         ("tracker", "https://mcp.example/mcp?token=x", "mcp_connection.invalid_url"),
