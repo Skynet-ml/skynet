@@ -459,6 +459,28 @@ if (!process.env.JITI_ALIAS) {
       });
     });
 
+    void it("gives a ShinkaEvolve extra reflection model name that role's config, with no byok_provider added", async () => {
+      const { sent } = await startWith(repo, llmMetric("llm('judge this', model='gpt-4o-mini')"), {
+        ...optimizer,
+        choice: "shinka_evolve",
+        reflectionModel: { name: "openai/reflect", token_source: "byok", byok_provider: "openai" },
+        extraReflectionModels: [{ name: "gpt-4o-mini", token_source: "byok" }],
+      });
+      assert.deepEqual(createdScorer(sent).model, { name: "gpt-4o-mini", token_source: "byok" });
+    });
+
+    void it("gives an openai/ name on a custom-endpoint connection that connection", async () => {
+      const { sent } = await startWith(repo, llmMetric("llm('judge this', model='openai/y')"), {
+        ...optimizer,
+        reflectionModel: { name: "openai/x", token_source: "byok", byok_provider: "together" },
+      });
+      assert.deepEqual(createdScorer(sent).model, {
+        name: "openai/y",
+        token_source: "byok",
+        byok_provider: "together",
+      });
+    });
+
     void it("adds no model for a metric without llm() or with two model names", async () => {
       assert.equal("model" in createdScorer((await startWith(repo)).sent), false);
       const two = llmMetric("llm('a', model='x/one') + llm('b', model='x/two')");
