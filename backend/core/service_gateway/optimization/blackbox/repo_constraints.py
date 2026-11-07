@@ -15,9 +15,9 @@ Not enforced: ``[instructions]``, which the agent reads as guidance only.
 Parsed and validated here, but not enforced yet: ``[proposer]`` and
 ``[target.<name>]`` (tools, network, services, and for a target its entry,
 vcpus and timeout), ``[services.<name>]`` (the secret names a service needs)
-and ``[metric]`` (the files and exploit folder hidden from the agent). A
-repository run that sets any of them fails the setup check until the
-sandbox runtime enforces them (SKY-352).
+and ``[metric]`` (the files and exploit folder hidden from the agent). The
+worker's preflight gate (``core.worker.repo_gate``) fails a run that sets a
+key its sandbox cannot enforce, before any sandbox time (SKY-352).
 """
 
 from __future__ import annotations
@@ -642,6 +642,22 @@ def read_constraints(archive: Path) -> RepoConstraints | None:
     Raises:
         ConstraintsError: When the file is not a regular file or is invalid.
     """
+    raw = read_constraints_file(archive)
+    return None if raw is None else parse_constraints(raw)
+
+
+def read_constraints_file(archive: Path) -> bytes | None:
+    """Read the raw bytes of the constraints file at the root of a packed snapshot.
+
+    Args:
+        archive: Packed tree from :func:`fetch_snapshot`.
+
+    Returns:
+        The file's contents, not yet validated, or ``None`` when the repository has no such file.
+
+    Raises:
+        ConstraintsError: When the file is not a regular file or is too large.
+    """
     with tarfile.open(archive, "r:gz") as packed:
         member = next((m for m in packed.getmembers() if str(PurePosixPath(m.name)) == CONSTRAINTS_FILE), None)
         if member is None:
@@ -651,44 +667,7 @@ def read_constraints(archive: Path) -> RepoConstraints | None:
         if member.size > _MAX_FILE_BYTES:
             raise ConstraintsError(f"{CONSTRAINTS_FILE} is larger than {_MAX_FILE_BYTES // 1024} KiB.")
         handle = packed.extractfile(member)
-        raw = handle.read() if handle is not None else b""
-    constraints = parse_constraints(raw)
-    unenforced = _unenforced_keys(raw, constraints)
-    if unenforced:
-        raise ConstraintsError(
-            f"{CONSTRAINTS_FILE} sets {', '.join(unenforced)}. Repository runs cannot enforce "
-            "these settings yet (SKY-352). Remove them to run."
-        )
-    return constraints
-
-
-def _unenforced_keys(raw: bytes, constraints: RepoConstraints) -> list[str]:
-    """List the environment settings a repository run cannot enforce yet.
-
-    A setting the run ignores would look like protection the user does not get,
-    for example an offline proposer that still has open egress, so the run path
-    refuses it instead. SKY-352 removes this check when the sandbox runtime
-    enforces these keys. ``[proposer] illegal`` is not listed: the judges enforce it.
-
-    Presence is read from the file, not the parsed values: a written empty list
-    (``tools = []``) means "none", which differs from the default an absent key
-    gives, and a written default (``exploits = ".optimize/exploits"``) still
-    asks for a folder to be hidden.
-
-    Args:
-        raw: The file's contents, already accepted by :func:`parse_constraints`.
-        constraints: The parsed file.
-
-    Returns:
-        The settings the file sets, as ``[section] key`` labels.
-    """
-    document = tomllib.loads(raw.decode("utf-8"))
-    proposer, metric = document.get("proposer", {}), document.get("metric", {})
-    keys = [f"[proposer] {key}" for key in ("tools", "network", "services") if key in proposer]
-    keys += [f"[target.{name}]" for name in constraints.targets]
-    keys += [f"[services.{name}]" for name in constraints.services]
-    keys += [f"[metric] {key}" for key in ("files", "exploits", "reference") if key in metric]
-    return keys
+        return handle.read() if handle is not None else b""
 
 
 def _inside(path: str, roots: Iterable[str]) -> bool:
