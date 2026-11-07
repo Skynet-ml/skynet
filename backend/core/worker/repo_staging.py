@@ -6,12 +6,20 @@ import contextlib
 import copy
 import json
 import logging
+import os
+import posixpath
+import re
 import shutil
+import subprocess
+import tarfile
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from ..api.model_catalog import agent_model_id, catalog_snapshot, lowest_effort_from_low
 from ..billing.model_gateway import ROUTE_KEY
@@ -22,6 +30,7 @@ from ..brand import APP_NAME
 from ..config import settings
 from ..connectors.github_publish import (
     BEST_BRANCH,
+    HardeningSummary,
     RepoPublishError,
     open_pull_request,
     push_candidates,
@@ -31,6 +40,7 @@ from ..connectors.github_repo import RepoFetchError, RepoSnapshot, fetch_snapsho
 from ..connectors.saved_secrets import SavedSecretStore
 from ..exceptions import ServiceError
 from ..models.common import ModelConfig
+from ..models.hardening import HardeningJob, HardeningJobModel
 from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     ConstraintsError,
@@ -43,6 +53,7 @@ from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
 from ..service_gateway.optimization.blackbox.repo_services import plan_roles
 from ..service_gateway.optimization.blackbox.repo_setup import infer_setup_command
 from ..service_gateway.optimization.blackbox.repo_tree import (
+    EXPLOITS_DIR,
     REPO_SNAPSHOT_KEY,
     drop_paths,
     patch_paths,
@@ -78,6 +89,11 @@ _JUDGE_ROLE = "judge"
 # The per-run watch hook setting: ``{"enabled", "model", "threshold"}``, each
 # optional; a missing key takes the server default (SKY-349).
 RULE_WATCH_KEY = "rule_watch"
+# Only a job that ended on its own terms ships its suite; a failed, rejected or
+# stale job may hold rounds the user never finished reviewing (SKY-356).
+_FINISHED_HARDENING = frozenset({"clean_stop", "budget_stop", "done"})
+# Exploit ids are uuid4 hex; anything else could name a path outside the suite.
+_EXPLOIT_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 @dataclass(frozen=True)
@@ -93,6 +109,7 @@ class StagedRepository:
     rules: tuple[str, ...] = ()
     intent: str | None = None
     hidden_paths: tuple[str, ...] = ()
+    exploits_path: str = EXPLOITS_DIR
 
     def close_scorers(self) -> None:
         """Close the parent's scoring boxes; the gateway still stops any that fail to close."""
@@ -216,6 +233,7 @@ def stage_repository(
         rules=environment.rules,
         intent=environment.constraints.intent if environment.constraints is not None else None,
         hidden_paths=hidden,
+        exploits_path=metric.exploits,
     )
 
 
@@ -745,7 +763,13 @@ def publish_improvement(
     outcome: dict[str, Any]
     # The patch came back from the guest, so the editing rules are checked
     # again before anything reaches the user's repository.
-    problems = patch_violations(patch, repo["editable_paths"], staged.snapshot.readonly_paths, staged.protected_paths)
+    problems = patch_violations(
+        patch,
+        repo["editable_paths"],
+        staged.snapshot.readonly_paths,
+        staged.protected_paths,
+        exploit_paths=(staged.exploits_path,),
+    )
     if problems:
         outcome = {"error": f"The best version breaks the editing rules: {problems[0]}"}
     else:
@@ -753,12 +777,13 @@ def publish_improvement(
         # so publishing keeps it rather than starting a second naming scheme.
         branch = f"skynet/optimize-{optimization_id[:12]}"
         run_url = f"{app_url.rstrip('/')}/optimizations/{optimization_id}"
+        suite, hardening = _hardening_suite(staged, engine, username, payload.get("hardening_job_id"), repo)
         try:
             token = github_token(engine, username)
             push_version(
                 repo["repository"],
                 repo["commit"],
-                patch,
+                _joined(patch, suite),
                 branch,
                 f"Apply the best version from {APP_NAME} run {optimization_id[:12]}",
                 token,
@@ -770,6 +795,7 @@ def publish_improvement(
                 base_branch=repo.get("branch"),
                 title=f"{APP_NAME}: optimized version from run {optimization_id[:12]}",
                 body=_description(result, patch, run_url),
+                hardening=hardening,
             )
             outcome = {"url": change.url, "number": change.number, "branch": change.branch, "draft": change.draft}
         except (RepoFetchError, RepoPublishError) as error:
@@ -780,6 +806,175 @@ def publish_improvement(
     details = result.setdefault("details", {})
     details[PULL_REQUEST_DETAIL] = outcome
     return outcome
+
+
+def _hardening_suite(
+    staged: StagedRepository, engine: Any, username: str, job_id: Any, repo: dict[str, Any]
+) -> tuple[str, HardeningSummary | None]:
+    """Build the exploit-suite patch and PR counts of the run's finished hardening job.
+
+    Never raises: a run without a usable job publishes as it did before
+    hardening existed, with no suite and no counts.
+
+    Args:
+        staged: The fetched tree, whose base suite the patch builds on.
+        engine: SQLAlchemy engine holding the hardening jobs.
+        username: Owner of the run; only this user's job counts.
+        job_id: The payload's ``hardening_job_id``, if any.
+        repo: The payload's repository source.
+
+    Returns:
+        The suite patch (empty when nothing is new) and the counts, or
+        ``("", None)`` when the run has no finished job of its own.
+    """
+    if not job_id:
+        return "", None
+    try:
+        job = _finished_hardening_job(engine, username, str(job_id), repo["repository"])
+        if job is None:
+            return "", None
+        fixed = [
+            e for r in job.rounds_detail if r.status == "fixed" for e in r.exploits if e.user_verdict == "confirmed"
+        ]
+        if any(not _EXPLOIT_ID.fullmatch(e.id) for e in fixed):
+            logger.warning("Hardening job %s has an exploit id that is not a safe folder name.", job_id)
+            return "", None
+        files = {
+            f"{staged.exploits_path}/{e.id}/{name}": text
+            for e in fixed
+            for name, text in (("patch.diff", e.patch_diff), ("why.md", e.why_md))
+        }
+        return _suite_patch(Path(staged.snapshot.archive), files, staged.workdir), _hardening_summary(job)
+    except Exception as error:  # isolation boundary: the improvement still publishes without the suite
+        logger.warning("The exploit suite of hardening job %s was left out: %s.", job_id, type(error).__name__)
+        return "", None
+
+
+def _finished_hardening_job(engine: Any, username: str, job_id: str, repository: str) -> HardeningJob | None:
+    """Load the user's finished hardening job, if it may ship with this repository's PR.
+
+    Args:
+        engine: SQLAlchemy engine holding the hardening jobs.
+        username: Owner of the run.
+        job_id: The job to load.
+        repository: The run's ``owner/name`` repository.
+
+    Returns:
+        The job, or ``None`` (with the reason logged) when it is missing, of
+        another user, not finished, or for another repository.
+    """
+    with Session(engine) as session:
+        row = session.scalars(
+            select(HardeningJobModel).where(HardeningJobModel.id == job_id, HardeningJobModel.username == username)
+        ).one_or_none()
+        if row is None:
+            # A job of another user reads as missing, so the log does not
+            # tell which jobs exist.
+            logger.info("Hardening job %s was not found for the run's owner; no suite ships.", job_id)
+            return None
+        if row.status not in _FINISHED_HARDENING:
+            logger.info("Hardening job %s is %s, not finished; no suite ships.", job_id, row.status)
+            return None
+        target = row.job.get("target")
+        source = target.get("repo") if isinstance(target, dict) else None
+        named = source.get("repository") if isinstance(source, dict) else None
+        if isinstance(named, str) and named.casefold() != repository.casefold():
+            logger.info("Hardening job %s hardened another repository; no suite ships.", job_id)
+            return None
+        return HardeningJob.model_validate(row.job)
+
+
+def _hardening_summary(job: HardeningJob) -> HardeningSummary:
+    """Count the attacks the metric survived and the exploits its fixes closed.
+
+    The count matches the setup page's "survived" number: every attack the
+    metric held against, plus each exploit a fixed round closed.
+
+    Args:
+        job: A finished hardening job.
+
+    Returns:
+        The PR body counts.
+    """
+    attacks = fixed = 0
+    for hardening_round in job.rounds_detail:
+        for exploit in hardening_round.exploits:
+            closed = exploit.user_verdict == "confirmed" and hardening_round.status == "fixed"
+            held = exploit.user_verdict == "rejected" or (exploit.label == "valid" and exploit.user_verdict is None)
+            attacks += closed or held
+            fixed += closed
+    return HardeningSummary(attacks=attacks, exploits_fixed=fixed)
+
+
+def _suite_patch(archive: Path, files: dict[str, str], workdir: Path) -> str:
+    """Diff the job's suite files against the base commit's versions of them.
+
+    A base commit may already hold part of the suite (a merged earlier PR), so
+    the patch is taken against those files and stays empty for unchanged ones.
+
+    Args:
+        archive: The full base-commit tree.
+        files: Suite path to its text, as the job wrote it.
+        workdir: The run's scratch folder.
+
+    Returns:
+        A ``git diff --binary`` patch, empty when nothing is new.
+    """
+    if not files:
+        return ""
+    root = Path(tempfile.mkdtemp(prefix="suite-", dir=workdir))
+    try:
+        with tarfile.open(archive) as tree:
+            for member in tree:
+                path = posixpath.normpath(member.name).lstrip("/")
+                if path in files and member.isfile() and (data := tree.extractfile(member)) is not None:
+                    (root / path).parent.mkdir(parents=True, exist_ok=True)
+                    (root / path).write_bytes(data.read())
+        _git(root, "init", "--quiet")
+        _git(root, "add", "--all")
+        base = _git(root, "write-tree").strip()
+        for path, text in files.items():
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_text(text, encoding="utf-8")
+        _git(root, "add", "--all")
+        return _git(root, "diff", "--cached", "--binary", base)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _git(cwd: Path, *arguments: str) -> str:
+    """Run git in a scratch repository with no user or system config.
+
+    Args:
+        cwd: Repository root.
+        *arguments: Arguments after ``git``.
+
+    Returns:
+        Standard output.
+    """
+    return subprocess.run(
+        ["git", "-c", "core.autocrlf=false", *arguments],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(cwd)},
+    ).stdout
+
+
+def _joined(patch: str, suite: str) -> str:
+    """Append the suite patch to the improvement patch.
+
+    Args:
+        patch: The improvement; it never touches the suite (``patch_violations``).
+        suite: The suite patch, possibly empty.
+
+    Returns:
+        One patch that ``git apply`` takes in one pass.
+    """
+    if not suite:
+        return patch
+    return patch + ("" if patch.endswith("\n") else "\n") + suite
 
 
 def _candidate_versions(
@@ -808,7 +1003,11 @@ def _candidate_versions(
         # The patches came back from the guest, so the editing rules are
         # checked again before any of them reaches the repository.
         if _version_metric_error(result, patch) or patch_violations(
-            patch, repo["editable_paths"], staged.snapshot.readonly_paths, staged.protected_paths
+            patch,
+            repo["editable_paths"],
+            staged.snapshot.readonly_paths,
+            staged.protected_paths,
+            exploit_paths=(staged.exploits_path,),
         ):
             skipped += 1
             continue

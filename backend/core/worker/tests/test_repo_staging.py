@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import tarfile
 import threading
 from pathlib import Path
@@ -12,6 +13,10 @@ from typing import Any
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 from core.api.auth import AuthenticatedUser, get_authenticated_user
 from core.api.model_catalog import CatalogModel, ModelCatalogResponse
@@ -22,9 +27,10 @@ from core.billing.openrouter_quotes import resolve_model_slug
 from core.billing.operation_pricing import ChargePolicy
 from core.billing.protected_credentials import has_exposed_execution_credentials
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
-from core.connectors.github_publish import PublishedChange, RepoPublishError
+from core.connectors.github_publish import HardeningSummary, PublishedChange, RepoPublishError
 from core.connectors.github_repo import RepoSnapshot
 from core.exceptions import ServiceError
+from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR
 from core.service_gateway.optimization.blackbox.repo_constraints import ConstraintsError
 from core.service_gateway.optimization.blackbox.repo_workspace import _PROBE_OK, NetworkCutoffError
@@ -35,6 +41,7 @@ from core.service_gateway.optimization.blackbox.rule_judge import (
     WITHHELD_STEP,
 )
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult, SandboxSpec
+from core.storage.models import Base
 from core.worker import repo_staging
 
 
@@ -1433,3 +1440,249 @@ def test_the_stored_result_keeps_only_the_scored_change(monkeypatch: pytest.Monk
     assert result["versions"][0]["candidate"] == _EDIT
     assert result["lanes"][0]["candidate"] == {"a": _EDIT}
     assert pushed[0][2] == _EDIT
+
+
+_CASE_ID, _METHOD_ID, _OLD_ID = "a" * 32, "b" * 32, "c" * 32
+_CASE_DIFF = "diff --git a/inputs/q.json b/inputs/q.json\nnew file mode 100644\n--- /dev/null\n+++ b/inputs/q.json\n@@ -0,0 +1 @@\n+{}\n"
+_METHOD_DIFF = (
+    "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-x = 1\n+x = 99\n"
+)
+
+
+def _exploit(exploit_id: str, kind: str, verdict: str | None, label: str = "exploit") -> HardeningExploit:
+    """Build one attacker claim.
+
+    Args:
+        exploit_id: The exploit's folder name.
+        kind: ``case`` or ``method``.
+        verdict: The user's verdict.
+        label: The judge's label.
+
+    Returns:
+        The exploit.
+    """
+    diff = _CASE_DIFF if kind == "case" else _METHOD_DIFF
+    return HardeningExploit(
+        id=exploit_id,
+        kind=kind,  # type: ignore[arg-type]
+        label=label,  # type: ignore[arg-type]
+        confidence=0.9,
+        reason="r",
+        unsure=False,
+        patch_diff=diff,
+        why_md=f"# Why {kind}\n\nThe metric scored it high.\n",
+        user_verdict=verdict,  # type: ignore[arg-type]
+    )
+
+
+def _hardening_job(status: str = "done", target: str | None = None) -> dict[str, Any]:
+    """Build a stored job: one fixed round with a case and a method, and one round whose fix was rejected.
+
+    Args:
+        status: The job status.
+        target: The hardened repository, as the job row keeps it after SKY-368.
+
+    Returns:
+        The job document.
+    """
+    fixed = HardeningRound(
+        index=1,
+        status="fixed",
+        exploits=[
+            _exploit(_CASE_ID, "case", "confirmed"),
+            _exploit(_METHOD_ID, "method", "confirmed"),
+            _exploit("d" * 32, "case", "rejected"),
+            _exploit("e" * 32, "case", None, label="valid"),
+        ],
+    )
+    refused = HardeningRound(index=2, status="rejected", exploits=[_exploit("f" * 32, "case", "confirmed")])
+    job = HardeningJob(
+        id="job-1",
+        status=status,  # type: ignore[arg-type]
+        round=2,
+        rounds=2,
+        round_cap_usd=1.0,
+        reserved_usd=0.0,
+        spent_usd=0.0,
+        place="cloud",
+        attacker_model="m",
+        judge_model="m",
+        view="black_box",
+        rounds_detail=[fixed, refused],
+        fixed_count=2,
+    ).model_dump(mode="json")
+    if target is not None:
+        job["target"] = {"kind": "repo", "repo": {"repository": target}}
+    return job
+
+
+def _jobs_engine(owner: str = "ada", status: str = "done", target: str | None = None) -> Engine:
+    """Store one hardening job in a fresh database.
+
+    Args:
+        owner: The job's owner.
+        status: The job status.
+        target: The hardened repository, if the row names one.
+
+    Returns:
+        The database engine.
+    """
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine, tables=[HardeningJobModel.__table__])  # type: ignore[list-item]
+    with Session(engine) as session:
+        job = _hardening_job(status, target)
+        session.add(HardeningJobModel(id="job-1", username=owner, draft_id="d", status=status, job=job))
+        session.commit()
+    return engine
+
+
+_BASE_FILES = {
+    "./src/app.py": "x = 1\n",
+    f".optimize/exploits/{_OLD_ID}/why.md": "an older exploit\n",
+    f"./.optimize/exploits/{_CASE_ID}/why.md": "# Why case\n\nThe metric scored it high.\n",
+}
+
+
+def _publish_hardened(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: Engine | None, job_id: str | None
+) -> tuple[list[tuple[Any, ...]], list[dict[str, Any]]]:
+    """Publish an improved run whose payload names a hardening job.
+
+    Args:
+        monkeypatch: Pytest fixture.
+        tmp_path: Pytest temp dir; the base tree goes here.
+        engine: The database holding the jobs.
+        job_id: The payload's ``hardening_job_id``.
+
+    Returns:
+        The pushes and the opened pull requests.
+    """
+    pushed: list[tuple[Any, ...]] = []
+    opened: list[dict[str, Any]] = []
+    monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "tok")
+    monkeypatch.setattr(repo_staging, "push_version", lambda *args: pushed.append(args))
+
+    def fake_open(token: str, repository: str, **fields: Any) -> PublishedChange:
+        """Record the pull request instead of opening it.
+
+        Args:
+            token: The GitHub token.
+            repository: The target repository.
+            fields: The pull request fields.
+
+        Returns:
+            A fixed draft pull request.
+        """
+        opened.append(fields)
+        return PublishedChange(branch=fields["head"], url="https://github.com/acme/app/pull/7", number=7, draft=True)
+
+    monkeypatch.setattr(repo_staging, "open_pull_request", fake_open)
+    _tree(tmp_path, _BASE_FILES)
+    payload = _payload("c" * 40)
+    if job_id is not None:
+        payload["hardening_job_id"] = job_id
+    repo_staging.publish_improvement(
+        _result(0.5, 0.8),
+        payload,
+        _staged(tmp_path),
+        username="ada",
+        engine=engine,
+        optimization_id="0123456789abcdef",
+        app_url="https://skynetml.com/",
+    )
+    return pushed, opened
+
+
+def _applied(tmp_path: Path, patch: str) -> dict[str, str]:
+    """Apply a pushed patch to the base tree with real git, as ``push_version`` does.
+
+    Args:
+        tmp_path: Pytest temp dir.
+        patch: The pushed patch.
+
+    Returns:
+        Repository path to text after the patch.
+    """
+    root = tmp_path / "checkout"
+    for name, text in _BASE_FILES.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text)
+    subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+    subprocess.run(["git", "add", "--all"], cwd=root, check=True)
+    subprocess.run(["git", "apply", "--index", "--binary", "-"], cwd=root, check=True, input=patch, text=True)
+    return {
+        str(path.relative_to(root)): path.read_text()
+        for path in root.rglob("*")
+        if path.is_file() and ".git" not in path.parts
+    }
+
+
+def test_a_finished_hardening_job_ships_its_suite_and_counts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The pushed patch adds the fixed rounds' cases and methods unchanged, and the body gets the counts."""
+    engine = _jobs_engine(target="ACME/app")
+
+    pushed, opened = _publish_hardened(monkeypatch, tmp_path, engine, "job-1")
+
+    patch = pushed[0][2]
+    assert patch.startswith(_EDIT)
+    files = _applied(tmp_path, patch)
+    suite = ".optimize/exploits"
+    assert files["src/app.py"] == "x = 2\n"
+    assert files[f"{suite}/{_CASE_ID}/patch.diff"] == _CASE_DIFF
+    assert files[f"{suite}/{_CASE_ID}/why.md"] == "# Why case\n\nThe metric scored it high.\n"
+    assert files[f"{suite}/{_METHOD_ID}/patch.diff"] == _METHOD_DIFF
+    assert files[f"{suite}/{_METHOD_ID}/why.md"] == "# Why method\n\nThe metric scored it high.\n"
+    assert files[f"{suite}/{_OLD_ID}/why.md"] == "an older exploit\n"
+    assert sorted(path for path in files if path.startswith(suite)) == sorted(
+        [
+            f"{suite}/{_OLD_ID}/why.md",
+            *(f"{suite}/{i}/{n}" for i in (_CASE_ID, _METHOD_ID) for n in ("patch.diff", "why.md")),
+        ]
+    )
+    assert f"b/{suite}/{_CASE_ID}/why.md" not in patch
+    assert opened[0]["hardening"] == HardeningSummary(attacks=4, exploits_fixed=2)
+
+
+@pytest.mark.parametrize(
+    ("owner", "status", "target", "job_id"),
+    [
+        ("ada", "done", None, None),
+        ("bob", "done", None, "job-1"),
+        ("ada", "waiting_review", None, "job-1"),
+        ("ada", "failed", None, "job-1"),
+        ("ada", "done", None, "job-2"),
+        ("ada", "done", "acme/other", "job-1"),
+    ],
+    ids=["no-id", "other-user", "unfinished", "failed", "missing", "other-repository"],
+)
+def test_a_run_without_its_own_finished_job_publishes_as_before(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, owner: str, status: str, target: str | None, job_id: str | None
+) -> None:
+    """No id, another user's job, an unfinished or failed job, a missing job and another repository add nothing."""
+    pushed, opened = _publish_hardened(monkeypatch, tmp_path, _jobs_engine(owner, status, target), job_id)
+
+    assert pushed[0][2] == _EDIT
+    assert opened[0]["hardening"] is None
+
+
+def test_a_broken_job_store_publishes_as_before(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A job that cannot be read never stops the improvement from publishing."""
+    pushed, opened = _publish_hardened(monkeypatch, tmp_path, None, "job-1")
+
+    assert pushed[0][2] == _EDIT
+    assert opened[0]["hardening"] is None
+
+
+def test_publishing_refuses_a_version_that_changes_the_configured_suite(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A best version writing into a configured ``[metric] exploits`` folder is never pushed."""
+    monkeypatch.setattr(repo_staging, "push_version", lambda *args: pytest.fail("pushed a suite change"))
+    staged = repo_staging.StagedRepository(
+        snapshot=_staged(tmp_path).snapshot, secrets={}, workdir=tmp_path, exploits_path="src/attacks"
+    )
+    edit = _EDIT.replace("src/app.py", "src/attacks/x.py")
+
+    outcome = _publish(_result(0.5, 0.8, best=edit), staged)
+
+    assert outcome == {"error": "The best version breaks the editing rules: 'src/attacks/x.py' may not be changed."}
