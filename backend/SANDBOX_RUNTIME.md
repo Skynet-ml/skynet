@@ -70,7 +70,7 @@ External evaluator and MCP service fees are outside Skynet Total. Their relay st
 
 - A run asks for connectors with `env_connectors: ["maps", ...]`. The parent gateway opens one `McpToolsBroker` for each connector, with its own scoped token, beside any user `live_mcp` roster. The guest gets only `_skynet_connector_routes` (gateway URL and token). It never gets the provider URL or the key.
 - A connector with no key in config (`GOOGLE_MAPS_API_KEY`, `FIRECRAWL_API_KEY`, `BROWSERBASE_API_KEY`) is not offered. Setup fails with a message that names each missing connector and its setting.
-- Each `tools/call` reserves the tool's catalog price through `operation_quote` before the provider sees it, and settles that price as a `tool` cost with the connector name as its role. A call that does not fit the budget is refused before dispatch. A call that fails releases its hold. Tool listing is free. A tool name outside the catalog is refused.
+- Each `tools/call` reserves the tool's catalog price through `operation_quote` before the provider sees it, and settles that price as a `tool` cost with the connector name as its role. A call that does not fit the budget is refused before dispatch. A call that fails before the broker sends the tool request (an admission stop, a connection or `initialize` failure) releases its hold. A call that fails or is interrupted after the send settles at the catalog price, because connectors have no usage reconciler. Tool listing is free. A tool name outside the catalog is refused.
 - The broker redacts each key header and query value from tool results. Keys never enter the payload, the run record or an error message.
 - Applying connector lists to boxes and the guest environment wiring belong to SKY-354.
 

@@ -131,6 +131,27 @@ class _PinnedTransport(httpx.AsyncBaseTransport, httpx.BaseTransport):
         self.close()
 
 
+class ToolCall:
+    """Run one metered tool request and record whether it reached the provider."""
+
+    def __init__(self, run: Callable[[ToolCall], dict[str, Any]]) -> None:
+        """Bind the physical request that receives this call's progress record.
+
+        Args:
+            run: The broker request; it sets ``sent`` just before the remote tool call.
+        """
+        self.run = run
+        self.sent = False
+
+    def __call__(self) -> dict[str, Any]:
+        """Run the request once.
+
+        Returns:
+            The provider's tool result.
+        """
+        return self.run(self)
+
+
 class McpToolsBroker:
     """Expose only one parent-authorized MCP roster through a scoped guest capability."""
 
@@ -146,7 +167,7 @@ class McpToolsBroker:
         authorize_tool: Callable[[str, str, dict[str, Any]], bool] | None = None,
         on_tool_event: Callable[[dict[str, Any]], None] | None = None,
         headers: Mapping[str, str] | None = None,
-        meter: Callable[[str, Mapping[str, Any], Callable[[], dict[str, Any]]], dict[str, Any]] | None = None,
+        meter: Callable[[str, Mapping[str, Any], ToolCall], dict[str, Any]] | None = None,
     ) -> None:
         """Retain endpoint credentials and resolve a permitted destination outside the guest.
 
@@ -161,7 +182,8 @@ class McpToolsBroker:
             on_tool_event: Optional sink for tool lifecycle events.
             headers: Optional parent-held credential headers, such as a provider API key header.
             meter: Optional hook that pays for one tool call; it gets the tool name, the
-                arguments and the physical call, and returns the call's result.
+                arguments and the physical call, and returns the call's result. The call's
+                ``sent`` flag tells the hook whether the provider could have run the tool.
         """
         self.url = url
         self.address = _pinned_address(url, allow_private)
@@ -196,8 +218,17 @@ class McpToolsBroker:
             transport=_PinnedTransport(self.url, self.address),
         )
 
-    async def _request(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
-        """Execute an original MCP operation over the same fresh-session semantics as ReAct."""
+    async def _request(self, method: str, params: Mapping[str, Any], call: ToolCall | None = None) -> dict[str, Any]:
+        """Execute an original MCP operation over the same fresh-session semantics as ReAct.
+
+        Args:
+            method: Selected remote MCP operation.
+            params: Original call arguments with its already authorized tool name.
+            call: Optional metered call whose ``sent`` flag marks the remote tool request.
+
+        Returns:
+            The redacted protocol result.
+        """
         self.check_admission()
         async with (
             streamablehttp_client(
@@ -214,6 +245,8 @@ class McpToolsBroker:
             if method == "tools/list":
                 result = await session.list_tools()
             else:
+                if call is not None:
+                    call.sent = True
                 result = await session.call_tool(params["name"], arguments=dict(params.get("arguments") or {}))
             return redact_secret_value(
                 result.model_dump(mode="json", by_alias=True, exclude_none=True),
@@ -234,18 +267,19 @@ class McpToolsBroker:
             result.pop("nextCursor", None)
             return result
 
-    def _run_request(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
+    def _run_request(self, method: str, params: Mapping[str, Any], call: ToolCall | None = None) -> dict[str, Any]:
         """Preserve typed admission stops through the MCP SDK's task-group cleanup.
 
         Args:
             method: Selected remote MCP operation.
             params: Original call arguments with its already authorized tool name.
+            call: Optional metered call whose ``sent`` flag marks the remote tool request.
 
         Returns:
             The actual protocol result from the selected endpoint.
         """
         try:
-            return asyncio.run(self._request(method, params))
+            return asyncio.run(self._request(method, params, call))
         except BaseExceptionGroup as error:
             pending: list[BaseException] = [error]
             leaves = []
@@ -306,7 +340,9 @@ class McpToolsBroker:
                     if self.meter is None:
                         result = self._run_request(method, params)
                     else:
-                        result = self.meter(tool_name, arguments, lambda: self._run_request(method, params))
+                        result = self.meter(
+                            tool_name, arguments, ToolCall(lambda call: self._run_request(method, params, call))
+                        )
                 except Exception as error:
                     if self.on_tool_event is not None:
                         self.on_tool_event(

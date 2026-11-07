@@ -16,10 +16,9 @@ from typing import Any
 from urllib.parse import urlencode
 
 from ..config import settings
-from .budgets import BudgetError
+from .mcp_broker import ToolCall
 from .operation_pricing import ChargePolicy, operation_quote
 from .runtime import BudgetRuntime, PaidResult
-from .signals import BudgetReached
 
 CONNECTOR_PRICE_VERSION = "env-connectors-2026-11-06"
 CONNECTOR_COST_KIND = "tool"
@@ -173,7 +172,7 @@ def connector_endpoint(connector: Connector) -> tuple[str, dict[str, str]]:
 
 def tool_meter(
     runtime: BudgetRuntime, connector: Connector
-) -> Callable[[str, Mapping[str, Any], Callable[[], dict[str, Any]]], dict[str, Any]]:
+) -> Callable[[str, Mapping[str, Any], ToolCall], dict[str, Any]]:
     """Bind per-call budget metering for one connector's broker.
 
     Args:
@@ -184,13 +183,13 @@ def tool_meter(
         A hook that reserves a call's price, runs the call and settles the price.
     """
 
-    def meter(tool: str, arguments: Mapping[str, Any], call: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    def meter(tool: str, arguments: Mapping[str, Any], call: ToolCall) -> dict[str, Any]:
         """Reserve, dispatch and settle one tool call in the run budget.
 
         Args:
             tool: Allowed tool name.
             arguments: The guest's tool arguments, bound into the quote fingerprint.
-            call: The physical provider call.
+            call: The physical provider call; its `sent` flag marks the remote request.
 
         Returns:
             The provider's tool result.
@@ -215,24 +214,22 @@ def tool_meter(
         failures: list[BaseException] = []
 
         def dispatch() -> PaidResult[dict[str, Any] | None]:
-            """Run the call once and settle its price unless admission stopped it first.
+            """Run the call once and settle its price unless it failed before the send.
 
             Returns:
-                The settled price with the tool result or failure, or a refusal when
-                admission stopped the call before the provider request.
+                The settled price with the tool result or failure, or a refusal when the
+                call failed before the broker sent the tool request.
             """
             try:
                 return PaidResult(call(), price, evidence)
-            except (BudgetError, BudgetReached) as error:
-                # Only check_admission raises these, and the broker runs it before it sends
-                # the tool request, so the provider never saw the call.
+            except BaseException as error:
                 failures.append(error)
-                return PaidResult(None, None, {**evidence, "failure": type(error).__name__}, refused=True)
-            except Exception as error:
-                # The request may have reached the provider (for example a read timeout), and
-                # connectors have no usage reconciler, so the catalog ceiling settles.
-                failures.append(error)
-                return PaidResult(None, price, {**evidence, "failure": type(error).__name__})
+                if not call.sent:
+                    return PaidResult(None, None, {**evidence, "failure": type(error).__name__}, refused=True)
+                # The provider may have run the tool (for example a read timeout or an
+                # interrupt), and connectors have no usage reconciler, so the ceiling settles.
+                failure = type(error).__name__ if isinstance(error, Exception) else "interrupted"
+                return PaidResult(None, price, {**evidence, "failure": failure})
 
         result = runtime.execute(
             quote,

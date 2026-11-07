@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+import socket
+from collections.abc import Callable, Iterator
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -22,6 +23,7 @@ from core.billing.env_connectors import (
     require_connectors,
     tool_meter,
 )
+from core.billing.mcp_broker import McpToolsBroker, ToolCall
 from core.billing.runtime import BudgetRuntime
 from core.billing.signals import BudgetReached
 from core.config import settings
@@ -40,6 +42,36 @@ def _keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "firecrawl_api_key", SecretStr(FIRECRAWL_KEY))
     monkeypatch.setattr(settings, "browserbase_api_key", SecretStr(BROWSERBASE_KEY))
     monkeypatch.setattr(settings, "browserbase_project_id", "project-fixture")
+
+
+def _sent(run: Callable[[], dict]) -> ToolCall:
+    """Wrap a fake provider call that fails or returns after the tool request went out.
+
+    Args:
+        run: Fake provider behavior.
+
+    Returns:
+        A metered call whose ``sent`` flag is set before ``run`` starts.
+    """
+
+    def send(call: ToolCall) -> dict:
+        """Mark the request as sent, then run the fake provider."""
+        call.sent = True
+        return run()
+
+    return ToolCall(send)
+
+
+def _unsent(run: Callable[[], dict]) -> ToolCall:
+    """Wrap a fake call that stops before the tool request goes out.
+
+    Args:
+        run: Fake pre-send behavior.
+
+    Returns:
+        A metered call whose ``sent`` flag stays false.
+    """
+    return ToolCall(lambda _call: run())
 
 
 def _runtime(tmp_path: Path, budget_cents: int) -> Iterator[BudgetRuntime]:
@@ -136,8 +168,8 @@ def test_each_call_reserves_and_settles_its_catalog_price(runtime: BudgetRuntime
         calls.append(runtime.service.get(runtime.budget_id, "alice").reserved_cents)
         return {"content": [{"type": "text", "text": "Cafe"}]}
 
-    assert meter("search_places", {"textQuery": "cafe"}, call) == {"content": [{"type": "text", "text": "Cafe"}]}
-    meter("lookup_weather", {"location": "Tel Aviv"}, call)
+    assert meter("search_places", {"textQuery": "cafe"}, _sent(call)) == {"content": [{"type": "text", "text": "Cafe"}]}
+    meter("lookup_weather", {"location": "Tel Aviv"}, _sent(call))
 
     snapshot = runtime.service.get(runtime.budget_id, "alice")
     assert calls[0] > 0
@@ -153,7 +185,7 @@ def test_call_outside_budget_is_refused_before_provider(tight_runtime: BudgetRun
     meter = tool_meter(tight_runtime, CONNECTORS["maps"])
     called = []
     with pytest.raises(BudgetInsufficientError):
-        meter("search_places", {"textQuery": "cafe"}, lambda: called.append(1) or {})
+        meter("search_places", {"textQuery": "cafe"}, _sent(lambda: called.append(1) or {}))
     assert called == []
 
 
@@ -161,7 +193,7 @@ def test_tool_outside_catalog_is_refused_without_charge(runtime: BudgetRuntime) 
     """Refuse an unlisted tool name before any reservation."""
     meter = tool_meter(runtime, CONNECTORS["maps"])
     with pytest.raises(ValueError, match="outside the selected roster"):
-        meter("delete_everything", {}, lambda: pytest.fail("The provider must not be called."))
+        meter("delete_everything", {}, _sent(lambda: pytest.fail("The provider must not be called.")))
     assert runtime.service.get(runtime.budget_id, "alice").setup_spent_cents == 0
 
 
@@ -174,7 +206,7 @@ def test_failed_call_after_send_settles_its_price_and_raises(runtime: BudgetRunt
         raise ValueError("The selected MCP endpoint could not complete the tool request.")
 
     with pytest.raises(ValueError, match="could not complete"):
-        meter("firecrawl_search", {"query": "x"}, fail)
+        meter("firecrawl_search", {"query": "x"}, _sent(fail))
     snapshot = runtime.service.get(runtime.budget_id, "alice")
     assert snapshot.reserved_cents == 0
     assert snapshot.setup_spent_cents == Decimal(1)
@@ -201,10 +233,56 @@ def test_admission_stop_before_send_releases_its_hold(runtime: BudgetRuntime, er
         raise error
 
     with pytest.raises(type(error)):
-        meter("firecrawl_search", {"query": "x"}, stop)
+        meter("firecrawl_search", {"query": "x"}, _unsent(stop))
     snapshot = runtime.service.get(runtime.budget_id, "alice")
     assert snapshot.reserved_cents == 0
     assert snapshot.setup_spent_cents == 0
+
+
+def test_connection_failure_before_send_releases_its_hold(runtime: BudgetRuntime) -> None:
+    """Charge nothing when the real broker cannot reach the provider before the tool call."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    broker = McpToolsBroker(
+        f"http://127.0.0.1:{port}/mcp",
+        check_admission=runtime.check_admission,
+        allow_private=True,
+        timeout_seconds=3,
+        meter=tool_meter(runtime, CONNECTORS["web_search"]),
+    )
+    broker._tool_names = {"firecrawl_search"}
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "firecrawl_search"}}
+    with pytest.raises(ValueError, match="could not complete"):
+        broker.dispatch(request)
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert snapshot.reserved_cents == 0
+    assert snapshot.setup_spent_cents == 0
+    with Session(runtime.service._engine) as session:
+        assert session.scalars(select(ExecutionOperationModel)).one().state != "settled"
+
+
+@pytest.mark.parametrize(("wrap", "spent"), [(_sent, Decimal(1)), (_unsent, Decimal(0))])
+def test_interrupt_settles_after_send_and_releases_before(
+    runtime: BudgetRuntime, wrap: Callable[[Callable[[], dict]], ToolCall], spent: Decimal
+) -> None:
+    """Settle an interrupted call that went out and release one that did not; never leave it pending."""
+    meter = tool_meter(runtime, CONNECTORS["web_search"])
+
+    def interrupt() -> dict:
+        """Simulate an operator interrupt during the call."""
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        meter("firecrawl_search", {"query": "x"}, wrap(interrupt))
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert snapshot.reserved_cents == 0
+    assert snapshot.setup_spent_cents == spent
+    with Session(runtime.service._engine) as session:
+        operation = session.scalars(select(ExecutionOperationModel)).one()
+        evidence = repr([row.__dict__ for row in session.scalars(select(ExecutionUsageEvidenceModel)).all()])
+    assert operation.state != "pending"
+    assert ("interrupted" in evidence) == bool(spent)
 
 
 def test_keys_stay_out_of_quotes_errors_and_logs(
@@ -214,7 +292,7 @@ def test_keys_stay_out_of_quotes_errors_and_logs(
     caplog.set_level(logging.DEBUG)
     for connector in CONNECTORS.values():
         tool = next(iter(connector.tools))
-        tool_meter(runtime, connector)(tool, {"q": "x"}, lambda: {"content": []})
+        tool_meter(runtime, connector)(tool, {"q": "x"}, _sent(lambda: {"content": []}))
     monkeypatch.setattr(settings, "google_maps_api_key", None)
     with pytest.raises(ValueError) as refused:
         connector_endpoint(CONNECTORS["maps"])
