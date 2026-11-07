@@ -18,7 +18,7 @@ from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
 
 from ..repo_constraints import TargetStage
-from ..repo_scorer import RepoScoreError, RepoScorer, _scrub, fold_case_scores
+from ..repo_scorer import RepoScoreError, RepoScorer, _scrub, _StageRelay, fold_case_scores
 from ..repo_workspace import RepoWorkspace
 from ..rule_judge import (
     EVENT_BLOCK,
@@ -801,7 +801,14 @@ class RecordingRuntime:
 
 
 def _stage_scorer(
-    tmp_path: Path, code: str, runtime: RecordingRuntime, stages: Mapping[str, TargetStage] = STAGES, **kwargs: Any
+    tmp_path: Path,
+    code: str,
+    runtime: Any,
+    stages: Mapping[str, TargetStage] = STAGES,
+    *,
+    scorer_runtime: Any = None,
+    protected_paths: tuple[str, ...] = (),
+    **kwargs: Any,
 ) -> tuple[RepoScorer, Path]:
     """Open a scorer whose run has target stages.
 
@@ -810,22 +817,25 @@ def _stage_scorer(
         code: The scorer code.
         runtime: Opens the stage boxes.
         stages: The run's stages.
+        scorer_runtime: Opens the scorer's box; a plain local box when unset.
+        protected_paths: Paths the version's code must not change while it runs.
         **kwargs: More ``RepoScorer`` options.
 
     Returns:
         The scorer and the tree's archive.
     """
-    archive = _archive(tmp_path, {**STAGE_TREE, "eval/metric.py": "hidden\n"})
+    archive = _archive(tmp_path, {**STAGE_TREE, "eval/metric.py": "hidden\n", "judge/labels.csv": "1\n"})
     stage_archive = _archive(tmp_path / "stage", STAGE_TREE)
     scorer = RepoScorer(
         RepoWorkspace(
-            runtime=LocalSubprocessRuntime(),
+            runtime=scorer_runtime or LocalSubprocessRuntime(),
             spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
             archive=archive,
             editable_paths=["src"],
             readonly_paths=[],
             setup_command=None,
             secrets={},
+            protected_paths=list(protected_paths),
         ),
         code,
         timeout_seconds=60,
@@ -947,3 +957,131 @@ def test_concurrent_calls_to_one_stage_run_in_parallel(tmp_path: Path) -> None:
         assert time.monotonic() - started < 2.0
     finally:
         scorer.close()
+
+
+def test_stage_answers_keep_a_clean_version_scored_when_writes_touch_every_file(tmp_path: Path) -> None:
+    """Each answer write moves every file's change time, yet a clean version keeps its score."""
+    code = "from skynet import call\ndef score(repo_path, case=None):\n    return call('double', {'v': 3})['v'] / 10, 'ok'\n"
+    scorer, _ = _stage_scorer(
+        tmp_path,
+        code,
+        RecordingRuntime(),
+        {"double": STAGES["double"]},
+        scorer_runtime=_WriteTouchingRuntime(),
+        protected_paths=("judge",),
+    )
+    try:
+        assert scorer.score("")["score"] == pytest.approx(0.6)
+    finally:
+        scorer.close()
+
+
+def test_a_protected_change_before_a_stage_call_still_blocks_the_version(tmp_path: Path) -> None:
+    """A version that changes a protected file and then calls a stage gets no score."""
+    code = (
+        "import os\n"
+        "from skynet import call\n"
+        "def score(repo_path, case=None):\n"
+        "    with open(os.path.join(repo_path, 'judge/labels.csv'), 'w') as handle:\n"
+        "        handle.write('9\\n')\n"
+        "    return call('double', {'v': 3})['v'] / 10, 'ok'\n"
+    )
+    scorer, _ = _stage_scorer(
+        tmp_path,
+        code,
+        RecordingRuntime(),
+        {"double": STAGES["double"]},
+        scorer_runtime=_WriteTouchingRuntime(),
+        protected_paths=("judge",),
+    )
+    try:
+        with pytest.raises(RepoScoreError, match=r"'judge/labels\.csv' is protected"):
+            scorer.score("")
+    finally:
+        scorer.close()
+
+
+class _LayoutFailingRuntime(RecordingRuntime):
+    """Open stage boxes whose file writes fail, as when the archive upload breaks."""
+
+    def open(self, spec: SandboxSpec) -> SandboxSession:
+        """Open one local box whose writes raise.
+
+        Args:
+            spec: The stage box's spec.
+
+        Returns:
+            The local session, whose ``write_files`` raises ``ServiceError``.
+        """
+        session = super().open(spec)
+
+        def refuse(files: Mapping[str, str]) -> None:
+            """Fail every write.
+
+            Args:
+                files: The files the layout tried to write.
+
+            Raises:
+                ServiceError: Always.
+            """
+            raise ServiceError("upload failed")
+
+        session.write_files = refuse  # type: ignore[method-assign]
+        return session
+
+
+def test_a_layout_failure_gets_no_score_and_closes_every_box(tmp_path: Path) -> None:
+    """A stage box that cannot take the tree fails the version with a fixed message, not a server error."""
+    runtime = _LayoutFailingRuntime()
+    scorer, _ = _stage_scorer(tmp_path, "def score(repo_path, case=None):\n    return 1.0, 'ran'\n", runtime)
+    try:
+        with pytest.raises(RepoScoreError, match="could not lay out the version"):
+            scorer.score("")
+    finally:
+        scorer.close()
+    assert runtime.closed == len(runtime.specs)
+
+
+class _Box:
+    """Record the files written to a scorer box."""
+
+    def __init__(self) -> None:
+        """Start with no writes."""
+        self.writes: list[Mapping[str, str]] = []
+
+    def write_files(self, files: Mapping[str, str]) -> None:
+        """Record one write.
+
+        Args:
+            files: Relative path to content.
+        """
+        self.writes.append(files)
+
+
+class _Workspace:
+    """Report no protected change and stamp without a box."""
+
+    def protected_changes(self) -> tuple[str, ...]:
+        """Report the protected files untouched."""
+        return ()
+
+    def stamp_before_run(self) -> None:
+        """Stamp nothing."""
+
+
+def test_an_answer_after_the_relay_closes_never_reaches_the_scorer_box() -> None:
+    """A stage call that ends after its evaluation writes nothing into the next one's box."""
+    box = _Box()
+    relay = _StageRelay(
+        {},
+        {},
+        scorer_box=box,  # type: ignore[arg-type]
+        response_dir="calls/000001/stages",
+        max_concurrency=1,
+        env={},
+        workspace=_Workspace(),  # type: ignore[arg-type]
+    )
+    relay._answer("a" * 32, {"output": 1})
+    relay.close()
+    relay._answer("b" * 32, {"output": 2})
+    assert box.writes == [{f"calls/000001/stages/{'a' * 32}.json": '{"output": 1}'}]

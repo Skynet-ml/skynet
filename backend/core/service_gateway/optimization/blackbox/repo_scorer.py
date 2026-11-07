@@ -238,7 +238,7 @@ class RepoScorer:
                     )
             if result.timed_out:
                 raise RepoScoreError(f"The scorer exceeded its {self._timeout_seconds:g}s timeout.")
-            changes = self._workspace.protected_changes()
+            changes = (*(relay.changes if relay is not None else ()), *self._workspace.protected_changes())
             # A hidden change is not a [paths] rule the agent knows, so it
             # skips the rule judge and its "do not repeat it" message.
             tampered = [change for change in changes if change != HIDDEN_CHANGED]
@@ -341,11 +341,18 @@ class RepoScorer:
             response_dir=response_dir,
             max_concurrency=self._max_concurrency,
             env=self._model_env(),
+            workspace=self._workspace,
         )
         try:
             kept = drop_paths(patch, self._hidden)
-            with ThreadPoolExecutor(max_workers=len(boxes), thread_name_prefix="stage-layout") as pool:
-                laid_out = list(pool.map(lambda box: self._lay_out(box, kept), boxes.values()))
+            try:
+                with ThreadPoolExecutor(max_workers=len(boxes), thread_name_prefix="stage-layout") as pool:
+                    laid_out = list(pool.map(lambda box: self._lay_out(box, kept), boxes.values()))
+            except (BudgetReached, BudgetError, UsagePendingError, UnpricedOperationError):
+                raise
+            except Exception as error:
+                logger.warning("Stage box layout failed: %s", error)
+                laid_out = [False]
             if not all(laid_out):
                 raise RepoScoreError("A stage box could not lay out the version, so it has no score.")
             yield relay
@@ -466,6 +473,7 @@ class _StageRelay:
         response_dir: str,
         max_concurrency: int,
         env: Mapping[str, str],
+        workspace: RepoWorkspace,
     ) -> None:
         """Bind the open stage boxes to the scorer box that waits for their answers.
 
@@ -477,6 +485,8 @@ class _StageRelay:
             max_concurrency: How many calls to one stage run at the same time.
             env: The run's model route, so stage code reaches models only
                 through the parent's mailbox.
+            workspace: The scorer box's workspace, whose protected files
+                each answer write must not appear to change.
         """
         self._boxes = dict(boxes)
         self._stages = stages
@@ -494,6 +504,10 @@ class _StageRelay:
         self._pending = ""
         self._seen: set[str] = set()
         self._lock = threading.Lock()
+        self._workspace = workspace
+        self._answer_lock = threading.Lock()
+        self._closed = False
+        self.changes: list[str] = []
 
     def config(self, root: str) -> dict[str, Any]:
         """Describe the relay to the runner in the scorer box.
@@ -627,14 +641,27 @@ class _StageRelay:
             identity: The call's id.
             response: ``{"output"}``, ``{"error"}`` or ``{"control"}``.
         """
-        try:
-            self._scorer_box.write_files({f"{self._response_dir}/{identity}.json": json.dumps(response)})
-        except Exception as error:
-            # The scorer then waits until its own timeout, which fails the version.
-            logger.warning("A stage answer could not reach the scorer box: %s", error)
+        with self._answer_lock:
+            if self._closed:
+                return
+            # A file write moves the change time of every file in the box, so the
+            # protected files are checked before each answer and stamped again
+            # after it. Only a write the version undoes before an answer arrives
+            # goes unseen; a lasting change still differs from the prepared tree.
+            self.changes.extend(self._workspace.protected_changes())
+            try:
+                self._scorer_box.write_files({f"{self._response_dir}/{identity}.json": json.dumps(response)})
+            except Exception as error:
+                # The scorer then waits until its own timeout, which fails the version.
+                logger.warning("A stage answer could not reach the scorer box: %s", error)
+            unstamped = self._workspace.stamp_before_run()
+            if unstamped:
+                self.changes.append(unstamped)
 
     def close(self) -> None:
-        """Stop queued calls and close every stage box."""
+        """Stop queued calls, keep late answers out of the scorer box, and close every stage box."""
+        with self._answer_lock:
+            self._closed = True
         for pool in (*self._pools.values(), self._refusals):
             pool.shutdown(wait=False, cancel_futures=True)
         for box in self._boxes.values():
