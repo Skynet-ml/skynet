@@ -1,16 +1,18 @@
-"""Tests for "Continue with OpenRouter": the PKCE start URL, state, and callback.
+"""Tests for "Continue with OpenRouter": the PKCE start URL, state, callback, and finish.
 
 Runs the billing router against an in-memory SQLite engine with OpenRouter's
 key exchange and the vault's verify probe mocked at the :mod:`httpx` boundary,
 so the tests cover the challenge/verifier pair, the encrypted state carried on
-the callback URL, the key landing in the vault exactly like a pasted one, and
-every error path redirecting back to the providers tab with its code.
+the callback URL, the callback handing the code to the app without a save,
+the signed-in finish step that binds the state to its owner, and the key
+landing in the vault exactly like a pasted one.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import time
 from collections.abc import Iterator
 from hashlib import sha256
 from types import SimpleNamespace
@@ -38,6 +40,7 @@ from ..errors import DomainError
 from ..routers.billing import create_billing_router
 
 _ALICE = AuthenticatedUser(username="alice", role="user", groups=())
+_BOB = AuthenticatedUser(username="bob", role="user", groups=())
 _CALLBACK = "http://testserver/billing/byok/openrouter/oauth/callback"
 
 
@@ -192,21 +195,55 @@ def test_parse_state_rejects_forged_and_expired(vault_key: str) -> None:
         openrouter_oauth.parse_state(stale)
 
 
-def test_callback_exchanges_code_and_saves_key(client: TestClient, engine: Any, vault_key: str) -> None:
-    """The minted key goes through the vault's save-and-verify path like a pasted one."""
+def _fragment(response: httpx.Response) -> dict[str, str]:
+    """Assert a clean redirect into the providers tab and return its fragment.
+
+    Args:
+        response: The callback's response.
+
+    Returns:
+        The fragment values, one string per key.
+    """
+    assert "byok_error" not in _location(response)
+    return {key: values[0] for key, values in parse_qs(urlparse(response.headers["location"]).fragment).items()}
+
+
+def _finish(client: TestClient, state: str, code: str = "c0de", **mock_kwargs: Any) -> tuple[Any, Any]:
+    """Call the signed-in finish step with OpenRouter and the verify probe mocked.
+
+    Args:
+        client: Test client with the billing router mounted.
+        state: The state from the callback.
+        code: The code from the callback.
+        **mock_kwargs: ``return_value`` or ``side_effect`` for the key exchange.
+
+    Returns:
+        The finish response and the mock of the key exchange.
+    """
+    mock_kwargs = mock_kwargs or {"return_value": _keys_response(200, {"key": "sk-or-minted-wxyz"})}
+    with (
+        patch("core.billing.openrouter_oauth.httpx.post", **mock_kwargs) as post,
+        patch("core.billing.byok_vault.httpx.get", return_value=SimpleNamespace(status_code=200, is_success=True)),
+    ):
+        response = client.post("/billing/byok/openrouter/oauth/finish", json={"state": state, "code": code})
+    return response, post
+
+
+def test_callback_hands_off_and_finish_saves_key(client: TestClient, engine: Any, vault_key: str) -> None:
+    """The callback stores nothing; the signed-in finish saves the key like a pasted one."""
     _, callback_query = _start(client)
     state = callback_query["state"][0]
     verifier = json.loads(Fernet(vault_key.encode("ascii")).decrypt(state.encode("ascii")))["v"]
-    with (
-        patch(
-            "core.billing.openrouter_oauth.httpx.post", return_value=_keys_response(200, {"key": "sk-or-minted-wxyz"})
-        ) as post,
-        patch("core.billing.byok_vault.httpx.get", return_value=SimpleNamespace(status_code=200, is_success=True)),
-    ):
+    with patch("core.billing.openrouter_oauth.httpx.post") as never:
         response = client.get(
             "/billing/byok/openrouter/oauth/callback", params={"code": "c0de", "state": state}, follow_redirects=False
         )
-    assert "byok_error" not in _location(response)
+    never.assert_not_called()
+    assert _fragment(response) == {"oauth_flow": "openrouter", "oauth_state": state, "oauth_code": "c0de"}
+    assert _stored_keys(engine) == []
+
+    finish, post = _finish(client, state)
+    assert finish.status_code == 204, finish.text
     assert post.call_args.kwargs["json"] == {"code": "c0de", "code_verifier": verifier, "code_challenge_method": "S256"}
     rows = _stored_keys(engine)
     assert [(r.username, r.provider, r.last4, r.status) for r in rows] == [
@@ -215,46 +252,69 @@ def test_callback_exchanges_code_and_saves_key(client: TestClient, engine: Any, 
     assert b"sk-or-minted-wxyz" not in rows[0].secret_ciphertext
 
 
-@pytest.mark.parametrize(
-    ("params", "code"),
-    [
-        ({}, "billing.openrouter_oauth_failed"),
-        ({"code": "c0de"}, "billing.openrouter_oauth_failed"),
-        ({"code": "c0de", "state": "forged"}, "billing.openrouter_oauth_state_invalid"),
-    ],
-)
-def test_callback_rejects_missing_or_bad_state(
-    client: TestClient, engine: Any, vault_key: str, params: dict[str, str], code: str
+@pytest.mark.parametrize("params", [{}, {"code": "c0de"}, {"state": "s"}])
+def test_callback_without_code_or_state_redirects_with_error(
+    client: TestClient, engine: Any, vault_key: str, params: dict[str, str]
 ) -> None:
-    """A missing code/state or a forged state bounces back with its error code."""
-    with patch("core.billing.openrouter_oauth.httpx.post") as post:
-        response = client.get("/billing/byok/openrouter/oauth/callback", params=params, follow_redirects=False)
-    assert _location(response)["byok_error"] == [code]
+    """A missing code or state bounces back with the failure code."""
+    response = client.get("/billing/byok/openrouter/oauth/callback", params=params, follow_redirects=False)
+    assert _location(response)["byok_error"] == ["billing.openrouter_oauth_failed"]
+    assert _stored_keys(engine) == []
+
+
+def test_finish_by_another_user_is_refused(client: TestClient, engine: Any, vault_key: str) -> None:
+    """A state that Alice started cannot save a key for Bob."""
+    _, callback_query = _start(client)
+    client.app.dependency_overrides[get_authenticated_user] = lambda: _BOB
+    finish, post = _finish(client, callback_query["state"][0])
+    assert finish.status_code == 403
+    assert finish.json()["code"] == "billing.openrouter_oauth_state_invalid"
+    post.assert_not_called()
+    assert _stored_keys(engine) == []
+
+
+def test_finish_needs_a_signed_in_caller(client: TestClient, engine: Any, vault_key: str) -> None:
+    """Without a bearer token the finish route answers 401 and trades nothing."""
+    _, callback_query = _start(client)
+    client.app.dependency_overrides.pop(get_authenticated_user)
+    finish, post = _finish(client, callback_query["state"][0])
+    assert finish.status_code == 401
+    post.assert_not_called()
+    assert _stored_keys(engine) == []
+
+
+def test_finish_refuses_forged_or_expired_state(client: TestClient, engine: Any, vault_key: str) -> None:
+    """A forged or expired state never reaches OpenRouter."""
+    _, callback_query = _start(client)
+    forged, post = _finish(client, "forged")
+    assert forged.status_code == 400
+    assert forged.json()["code"] == "billing.openrouter_oauth_state_invalid"
+    post.assert_not_called()
+    with patch("cryptography.fernet.time.time", return_value=time.time() + 3600):
+        expired, post = _finish(client, callback_query["state"][0])
+    assert expired.status_code == 400
+    assert expired.json()["code"] == "billing.openrouter_oauth_state_invalid"
     post.assert_not_called()
     assert _stored_keys(engine) == []
 
 
 @pytest.mark.parametrize(
-    ("outcome", "code"),
+    ("outcome", "status", "code"),
     [
-        (_keys_response(403, {"error": "Invalid code or code_verifier"}), "billing.openrouter_oauth_failed"),
-        (_keys_response(200, {"nope": True}), "billing.openrouter_oauth_failed"),
-        (httpx.ConnectError("down"), "billing.openrouter_unreachable"),
+        (_keys_response(403, {"error": "Invalid code or code_verifier"}), 400, "billing.openrouter_oauth_failed"),
+        (_keys_response(200, {"nope": True}), 400, "billing.openrouter_oauth_failed"),
+        (httpx.ConnectError("down"), 502, "billing.openrouter_unreachable"),
     ],
 )
-def test_callback_surfaces_exchange_failures(
-    client: TestClient, engine: Any, vault_key: str, outcome: Any, code: str
+def test_finish_surfaces_exchange_failures(
+    client: TestClient, engine: Any, vault_key: str, outcome: Any, status: int, code: str
 ) -> None:
-    """A refused, malformed, or unreachable exchange stores nothing and reports why."""
+    """A refused (for example, a used code), malformed, or unreachable exchange stores nothing."""
     _, callback_query = _start(client)
     mock_kwargs = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
-    with patch("core.billing.openrouter_oauth.httpx.post", **mock_kwargs):
-        response = client.get(
-            "/billing/byok/openrouter/oauth/callback",
-            params={"code": "c0de", "state": callback_query["state"][0]},
-            follow_redirects=False,
-        )
-    assert _location(response)["byok_error"] == [code]
+    finish, _ = _finish(client, callback_query["state"][0], **mock_kwargs)
+    assert finish.status_code == status
+    assert finish.json()["code"] == code
     assert _stored_keys(engine) == []
 
 

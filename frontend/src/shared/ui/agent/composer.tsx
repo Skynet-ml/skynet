@@ -16,6 +16,7 @@ import { autoResizeTextarea } from "./auto-resize";
 import { ComposerLoader } from "./composer-loader";
 import { handleComposerEscape } from "./composer-keys";
 import { MAX_ATTACHMENT_MB, readAttachments, splitClaimed } from "./file-attachments";
+import { HISTORY_IDLE, historyKeyDirection, sentHistory, stepHistory } from "./input-history";
 import { PastedTextCard } from "./pasted-text-card";
 import {
   attachedFile,
@@ -151,6 +152,10 @@ export function Composer({
     disabled: Boolean(disabled || dictating),
   });
   const suggestionHintId = React.useId();
+  // Every agent chat passes its transcript for suggestions, so the same
+  // messages feed the Up/Down recall of what the user sent.
+  const history = React.useMemo(() => sentHistory(suggest?.messages), [suggest?.messages]);
+  const historyNav = React.useRef(HISTORY_IDLE);
   // Long pastes live in `value` as tagged blocks; the textarea only edits
   // what was typed, and each block shows as a card above it.
   const draft = splitPastes(value);
@@ -257,11 +262,10 @@ export function Composer({
     const controlledPopup = controlledPopupId
       ? e.currentTarget.ownerDocument.getElementById(controlledPopupId)
       : null;
-    const popupOpen = Boolean(
-      suggestion
-      || e.currentTarget.getAttribute("aria-expanded") === "true"
-      || controlledPopup?.getAttribute("data-state") === "open",
-    );
+    const menuOpen =
+      e.currentTarget.getAttribute("aria-expanded") === "true"
+      || controlledPopup?.getAttribute("data-state") === "open";
+    const popupOpen = Boolean(suggestion || menuOpen);
     if (handleComposerEscape(e, { streaming: Boolean(streaming), popupOpen, composing: Boolean(e.nativeEvent.isComposing || e.keyCode === 229) }, onStop)) return;
     const suggestAction = suggestKeyAction(e, {
       suggestion,
@@ -301,6 +305,17 @@ export function Composer({
         sendMidTurn(action);
         return;
       }
+    }
+    const direction = menuOpen ? null : historyKeyDirection(e, e.currentTarget);
+    if (direction) {
+      const step = stepHistory(history, historyNav.current, value, direction);
+      if (step) {
+        e.preventDefault();
+        historyNav.current = step.nav;
+        onChange(step.value);
+        refocus();
+      }
+      return;
     }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();

@@ -6,6 +6,7 @@ are spawned.  FakeJobStore from conftest is used as the in-memory store.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import inspect
 import itertools
@@ -21,6 +22,7 @@ import pytest
 from core.api.errors import DomainError
 from core.exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, ServiceError
 from core.i18n import CANCELLATION_REASON
+from core.models.blackbox import BlackboxRunRequest
 from core.storage.base import JobStore
 
 from .. import engine as engine_module
@@ -910,6 +912,71 @@ def test_gateway_domain_failure_has_plain_detail(worker: BackgroundWorker, store
     assert store._jobs["gateway-domain"]["message"] == DomainError("submission.byok_novelty_unsupported").detail
 
 
+def test_repository_run_hands_its_hardening_job_id_to_the_publish(
+    worker: BackgroundWorker, store: FakeJobStore
+) -> None:
+    """The setup's hardening job id goes from the stored run request to the PR publish (SKY-356)."""
+    request = BlackboxRunRequest(
+        username="alice",
+        recipe="repo",
+        scorer={"kind": "python", "metric_code": "def score(candidate, case=None): return 1.0"},
+        target={"kind": "repo", "repo": {"repository": "acme/app", "editable_paths": ["src"]}},
+        reflection_model_config={"name": "gpt-4o"},
+        hardening_job_id="hardening-1",
+    )
+    store.engine = MagicMock()
+    store.seed_job(
+        "repo-hardened",
+        payload=request.model_dump(mode="json", by_alias=True),
+        payload_overview=_BLACKBOX_OVERVIEW,
+        execution_budget_id="budget",
+        execution_budget_generation=0,
+    )
+    worker.enqueue_job("repo-hardened")
+    gateway = MagicMock()
+    gateway.protect_payload.side_effect = lambda payload, **kwargs: payload
+    gateway.cost_ceiling_cents.return_value = 100
+    staged = MagicMock()
+
+    def stage(payload: dict, **kwargs: object) -> tuple[dict, MagicMock]:
+        """Stage the repository the way the real step leaves the payload."""
+        payload["target"]["repo"][engine_module.ENVIRONMENT_KEY] = {}
+        return payload, staged
+
+    ctx, _proc = make_mp_context(exitcode=0, result_events=[make_result_event()])
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch("core.worker.engine.notify_job_completed"))
+        stack.enter_context(patch("core.worker.engine.record_server_event"))
+        stack.enter_context(patch.object(worker, "_get_service"))
+        stack.enter_context(patch("core.worker.engine.validate_blackbox_payload"))
+        stack.enter_context(patch("core.worker.engine.payload_uses_token_source", return_value=False))
+        stack.enter_context(patch("core.worker.engine.ModelGateway", return_value=gateway))
+        stack.enter_context(patch("core.worker.engine.BudgetService"))
+        stack.enter_context(patch("core.worker.engine.BudgetRuntime"))
+        stack.enter_context(patch("core.worker.engine.bind_protected_sandbox"))
+        stack.enter_context(patch("core.worker.engine.protected_image", return_value=None))
+        stack.enter_context(
+            patch("core.worker.engine.resolve_execution_credentials", side_effect=lambda payload, **kwargs: payload)
+        )
+        stack.enter_context(patch("core.worker.engine.host_proposer", return_value=None))
+        stack.enter_context(patch("core.worker.engine.stage_repository", side_effect=stage))
+        stack.enter_context(patch("core.worker.engine.check_repository", return_value=[]))
+        stack.enter_context(patch("core.worker.engine.infer_repo_setup", return_value=None))
+        stack.enter_context(patch("core.worker.engine.bind_repo_scorer"))
+        stack.enter_context(patch("core.worker.engine.has_exposed_execution_credentials", return_value=False))
+        stack.enter_context(patch("core.worker.engine.mp.get_context", return_value=ctx))
+        publish = stack.enter_context(patch("core.worker.engine.publish_improvement"))
+        stack.enter_context(patch.object(worker, "_record_repo_commit"))
+        stack.enter_context(patch.object(worker, "_record_repo_environment", return_value=None))
+        stack.enter_context(patch.object(worker, "_close_budget_gateway", return_value=(None, None)))
+        worker._process_job("repo-hardened", 0)
+    publish.assert_called_once()
+    published_payload = publish.call_args.args[1]
+    assert published_payload["hardening_job_id"] == "hardening-1"
+    assert publish.call_args.args[2] is staged
+    assert publish.call_args.kwargs["username"] == "alice"
+
+
 def test_unified_byok_injection_domain_error_before_sandbox(worker: BackgroundWorker, store: FakeJobStore) -> None:
     """Record a plain domain error when the BYOK bridge rejects a model."""
     name = "openrouter/anthropic/claude-sonnet-4"
@@ -1118,3 +1185,35 @@ def test_a_payload_without_a_repository_records_no_environment(worker: Backgroun
 
     assert worker._record_repo_environment("opt-plain", {"services": []}) is None
     assert store._jobs["opt-plain"]["payload"] == {"optimizer_name": "GEPA"}
+
+
+def test_a_store_without_an_engine_runs_no_hardening_job(worker: BackgroundWorker) -> None:
+    """Skip the hardening poll when the job store has no SQL engine."""
+    with patch.object(engine_module, "process_next_hardening_job") as process:
+        assert worker._run_hardening_job(0) is False
+    process.assert_not_called()
+
+
+def test_the_idle_worker_runs_a_hardening_job_with_its_pod_lease(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """Pass the engine, pod name and lease to the hardening pass, and record liveness at start and on each renewal."""
+    store.engine = MagicMock()  # type: ignore[attr-defined]
+    with (
+        patch.object(engine_module, "process_next_hardening_job", return_value=True) as process,
+        patch.object(worker, "_touch_activity") as touch,
+    ):
+        assert worker._run_hardening_job(0) is True
+        touch.assert_called_once_with(0)
+        process.call_args.kwargs["on_renew"]()
+        assert touch.call_count == 2
+        touch.assert_called_with(0)
+    process.assert_called_once()
+    assert process.call_args.args == (store.engine,)  # type: ignore[attr-defined]
+    assert process.call_args.kwargs["pod"] == worker._pod_name
+    assert process.call_args.kwargs["lease_seconds"] == worker._lease_seconds
+
+
+def test_a_failing_hardening_pass_does_not_stop_the_worker(worker: BackgroundWorker, store: FakeJobStore) -> None:
+    """Report no job when the hardening pass raises, so the loop keeps polling."""
+    store.engine = MagicMock()  # type: ignore[attr-defined]
+    with patch.object(engine_module, "process_next_hardening_job", side_effect=RuntimeError("boom")):
+        assert worker._run_hardening_job(0) is False

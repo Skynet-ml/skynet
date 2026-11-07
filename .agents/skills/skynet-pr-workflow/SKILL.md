@@ -24,7 +24,8 @@ full PR, review and merge procedure.
   the same time.
 - Each agent runs at most one headless browser at a time and closes it when
   done. Prefer the cloud preview (AWS). Start a local dev server only when
-  there is no other way.
+  there is no other way. For a visual-only change, render the frontend
+  locally (section 5).
 
 ### 1a. Fix bugs locally, deploy once (MANDATORY)
 
@@ -37,7 +38,8 @@ bugs before you push. Follow this order for every PR:
    example, two subagents). Verify each finding with a failing test, then
    fix it. Repeat until a review finds nothing new.
 3. Push once. Let CI, the preview build and the automated review gate run.
-4. Run the acceptance checks on the PR preview.
+4. Run the acceptance checks on the PR preview. A visual-only change uses
+   section 5 instead.
 5. Capture the After evidence last, on the final commit.
 
 If the review gate or the acceptance checks find a bug, fix all findings
@@ -130,7 +132,8 @@ for review until the evidence is there.
   API `https://api-staging.skynetml.com`. Railway is deleted (2026-10-29);
   never log in to, call, deploy to or test on it.
 - Use shared staging for baseline checks. Use the PR preview for changed
-  behavior. For the Before and After evidence, follow section 5: both go on
+  behavior. For the Before and After evidence, follow section 5: a
+  visual-only change may use simulated local renders; other changes go on
   the preview, and staging is only the fallback for the Before. Never
   overwrite shared staging with an unmerged branch.
 - Until AWS staging serves a needed flow, use local Docker evidence and state
@@ -148,9 +151,14 @@ for review until the evidence is there.
   evidence keeps the PR draft. An infrastructure failure is a blocker, not a
   pass.
 - Documentation-only work with no runtime effect may skip staging acceptance.
-  Explain that exemption in the description. The Opus 5.5 review must approve
-  the staging evidence, the costly-flow alternative or the documentation
-  exemption. A changed review policy cancels earlier approval.
+  Explain that exemption in the description.
+- A visual-only change with no app logic under test (section 5) may skip the
+  preview acceptance checks and the served-commit check. Its simulated
+  renders are the acceptance evidence. Explain that exemption in the
+  description.
+- The Opus 5.5 review must approve the staging evidence, the visual-only
+  simulated-render evidence, the costly-flow alternative or the
+  documentation exemption. A changed review policy cancels earlier approval.
 
 ### Real data and costly workflows
 
@@ -190,12 +198,23 @@ for review until the evidence is there.
   GitHub (no commits, attachments, comments or releases): the repository is
   public. In the PR body, say that the evidence is on the Linear issue and
   name it.
-- Capture the Before first: open the draft PR before you change code,
-  capture the Before on its preview, then implement and capture the After on
-  the same preview. Use staging for the Before only when the preview cannot
-  show the baseline.
+- Visual-only changes may use simulated UI renders (Gilad, 2026-11-07).
+  When the change is layout, styling, copy, labels or static states, and no
+  app logic is under test, render the real frontend code locally with
+  stubbed state. Do not wait for staging or a preview. Use the same stubbed
+  state for Before (`origin/staging`) and After (the branch). Label each
+  image "Simulated UI state, not staging", and name the stubbed boundary in
+  the PR body.
+- Use staging or the PR preview when the evidence must prove app logic
+  (data flow, API calls, auth, saved data). Use video only for motion or
+  behavior over time, as above. Backend behavior still needs its own tests.
+- For preview evidence, capture the Before first: open the draft PR before
+  you change code, capture the Before on its preview, then implement and
+  capture the After on the same preview. Use staging for the Before only
+  when the preview cannot show the baseline.
 - Capture the same flow, data, viewport and state on both versions. Use real
-  running versions; never mockups, staged output or an unrelated preview.
+  running frontend code; never hand-drawn mockups, staged output or an
+  unrelated preview.
 - Label the evidence Before and After. Name its commit or deployment, and
   say what the reviewer should see.
 - Cover the affected layouts, themes and language directions (light and
@@ -247,8 +266,9 @@ gates pass:
 
 **UI PRs** (anything touching `frontend/`, including mixed PRs) wait for the
 user. Attach a proof card: one line naming the decision and the Linear issue,
-the Before and After evidence of the acceptance criteria in the PR environment
-(on the Linear issue; section 5), the review verdict, and the diff size.
+the Before and After evidence of the acceptance criteria in the PR environment,
+or as labeled simulated renders for a visual-only change (on the Linear issue;
+section 5), the review verdict, and the diff size.
 Merge only after the user approves that specific PR in chat or on GitHub (or
 with `Approved for merge` on the Linear issue), and then only in the daily
 window. A frontend PR with no meaningful visible change can use the backend

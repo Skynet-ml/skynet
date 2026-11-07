@@ -651,6 +651,8 @@ export interface BlackboxRunRequest {
   execution_budget_revision?: number;
   preflight_id?: string;
   preflight_fingerprint?: string;
+  // The setup's finished hardening job; the run's PR ships its exploit suite.
+  hardening_job_id?: string | null;
 
   name?: string;
   description?: string;

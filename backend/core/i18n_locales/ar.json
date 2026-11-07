@@ -482,6 +482,26 @@
     "budget.not_found": "هذه الميزانية غير متاحة لحسابك. أنشئ ميزانية إعداد جديدة.",
     "budget.invalid": "أدخل حد إنفاق يغطي الاستخدام المنفق أو المحجوز بالفعل.",
     "budget.below_minimum": "حدّ الإنفاق أقل من الحد الأدنى الذي يحتاجه هذا التشغيل. أدخل حدًا أعلى.",
-    "serve.not_enabled": "التقديم متوقف لهذا التشغيل. فعّله أولًا من تبويب التقديم في التشغيل."
+    "serve.not_enabled": "التقديم متوقف لهذا التشغيل. فعّله أولًا من تبويب التقديم في التشغيل.",
+    "mcp_connection.invalid_name": "استخدم من 1 إلى 40 حرفًا لاتينيًا صغيرًا أو رقمًا أو '-' أو '_'، على أن يبدأ بحرف.",
+    "mcp_connection.name_reserved": "الاسم {name} يخص موصّلًا في {term.appName}. استخدم اسمًا آخر.",
+    "mcp_connection.invalid_url": "يجب أن يكون عنوان خادم MCP عنوان HTTPS بلا استعلام.",
+    "mcp_connection.blocked_address": "عنوان خادم MCP هذا غير مسموح به.",
+    "mcp_connection.discovery_failed": "تعذّرت قراءة إعداد OAuth لخادم MCP هذا.",
+    "mcp_connection.oauth_unsupported": "خادم MCP هذا لا يطلب تسجيل دخول عبر OAuth.",
+    "mcp_connection.issuer_mismatch": "بيانات خادم OAuth تذكر جهة إصدار مختلفة.",
+    "mcp_connection.pkce_unsupported": "خادم MCP هذا لا يدعم PKCE مع S256.",
+    "mcp_connection.registration_required": "يتطلب هذا الخادم أن يسجّل {term.appName} أولًا. يجب أن يسمح مالكه بالتسجيل الديناميكي للعملاء.",
+    "mcp_connection.exchange_failed": "لم يُكمل خادم MCP تسجيل الدخول. حاول مرة أخرى.",
+    "mcp_connection.state_invalid": "رابط تسجيل الدخول غير صالح. ابدأ من جديد.",
+    "mcp_connection.state_expired": "رابط تسجيل الدخول قديم جدًا. ابدأ من جديد.",
+    "mcp_connection.wrong_account": "حساب آخر بدأ تسجيل الدخول هذا. ابدأه من جديد من حسابك.",
+    "mcp_connection.declined": "لم يكتمل تسجيل الدخول.",
+    "mcp_connection.reauth_required": "سجّل الدخول إلى خادم MCP {name} مرة أخرى.",
+    "mcp_connection.vault_key_changed": "تعذّرت قراءة تسجيل الدخول المحفوظ. سجّل الدخول إلى خادم MCP هذا مرة أخرى.",
+    "mcp_connection.not_connected": "لا يوجد اتصال بخادم MCP باسم {name}.",
+    "mcp_connection.unknown_connector": "موصّل غير معروف: {name}. اربطه كخادم MCP أولًا.",
+    "mcp_connection.invalid_preset": "خادم MCP هذا ليس في القائمة.",
+    "mcp_connection.invalid_request": "قدّم إعدادًا مسبقًا، أو اسمًا وعنوان خادم MCP."
   }
 }

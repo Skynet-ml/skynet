@@ -96,6 +96,13 @@ class OAuthStartResponse(BaseModel):
     authorize_url: str
 
 
+# Body for the signed-in finish step. The state is the encrypted payload from
+# the start step; Fernet tokens are several hundred characters long.
+class OAuthFinishRequest(BaseModel):
+    state: str = Field(min_length=1, max_length=4096)
+    code: str = Field(min_length=1, max_length=2048)
+
+
 class HubDataset(BaseModel):
     """One Hub search hit."""
 
@@ -350,6 +357,25 @@ def create_connectors_router(*, job_store) -> APIRouter:
             params["connector_error"] = error
         return RedirectResponse(f"{settings.app_public_url.rstrip('/')}/?{urlencode(params)}", status_code=303)
 
+    def _finish_redirect(provider: str, state: str, code: str) -> RedirectResponse:
+        """Pass the state and code to the web app, which finishes the sign-in.
+
+        Args:
+            provider: Provider slug the sign-in is for.
+            state: The encrypted state minted at start.
+            code: Authorization code from the provider.
+
+        Returns:
+            A 303 redirect to the Connectors tab with the values in the URL
+            fragment, which the browser does not send to any server or put in
+            a ``Referer`` header.
+        """
+        fragment = urlencode({"oauth_flow": f"connector:{provider}", "oauth_state": state, "oauth_code": code})
+        return RedirectResponse(
+            f"{settings.app_public_url.rstrip('/')}/?{urlencode({'settings': 'connectors'})}#{fragment}",
+            status_code=303,
+        )
+
     @router.get("/connectors", response_model=ConnectorListResponse, summary="List the caller's linked accounts")
     def list_connectors(
         user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
@@ -444,11 +470,11 @@ def create_connectors_router(*, job_store) -> APIRouter:
         state: str | None = None,
         error: str | None = None,
     ) -> RedirectResponse:
-        """Finish the OAuth flow and bounce the browser back to Settings.
+        """Pass the state and code to the web app, which finishes the sign-in.
 
-        This is the one unauthenticated route here: the browser arrives from
-        huggingface.co without the app's bearer token, so the encrypted
-        ``state`` is what ties the code to the user who started the flow.
+        This route has no session, because auth is a bearer header. So it
+        trades no code itself: the signed-in finish route checks that the
+        caller started the sign-in, which blocks an account-link hijack.
 
         Args:
             request: Incoming request.
@@ -457,18 +483,42 @@ def create_connectors_router(*, job_store) -> APIRouter:
             error: Hugging Face's error code when the user declined.
 
         Returns:
-            A redirect to the Connectors tab, carrying an error code on failure.
+            A redirect with an error code, or with the state and code in the fragment.
         """
         if error or not code or not state:
             return _settings_redirect("connectors.hf_oauth_failed")
-        try:
-            payload = hf.parse_state(state)
-            tokens = hf.exchange_code(code, payload["v"], payload["r"])
-        except DomainError as exc:
-            return _settings_redirect(str(exc.code))
+        return _finish_redirect(hf.PROVIDER, state, code)
+
+    @router.post(
+        "/connectors/huggingface/oauth/finish",
+        response_model=ConnectorListResponse,
+        summary="Finish the Hugging Face OAuth flow",
+    )
+    def finish_huggingface_oauth(
+        body: OAuthFinishRequest,
+        user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
+    ) -> ConnectorListResponse:
+        """Trade the code for tokens when the caller started this sign-in.
+
+        Args:
+            body: The state and code from the callback.
+            user: Authenticated caller.
+
+        Returns:
+            The updated connector list.
+
+        Raises:
+            DomainError: 400 for a forged or expired state, or a refused code;
+                403 when another user started the sign-in; 503 when the OAuth
+                app or the vault is not configured.
+        """
+        payload = hf.parse_state(body.state)
+        if payload["u"] != user.username:
+            raise DomainError("connectors.hf_oauth_state_invalid", status=403)
+        tokens = hf.exchange_code(body.code, payload["v"], payload["r"])
         label = hf.fetch_userinfo(tokens.access_token)
         vault.save(
-            payload["u"],
+            user.username,
             hf.PROVIDER,
             access_token=tokens.access_token,
             auth_method="oauth",
@@ -477,7 +527,7 @@ def create_connectors_router(*, job_store) -> APIRouter:
             expires_at=tokens.expires_at,
             scopes=tokens.scope,
         )
-        return _settings_redirect()
+        return _status(user.username)
 
     @router.get(
         "/connectors/huggingface/datasets",
@@ -884,10 +934,10 @@ def create_connectors_router(*, job_store) -> APIRouter:
         state: str | None = None,
         error: str | None = None,
     ) -> RedirectResponse:
-        """Finish a provider's OAuth flow and bounce the browser back to Settings.
+        """Pass the state and code to the web app, which finishes the sign-in.
 
-        Unauthenticated like the Hugging Face callback: the encrypted ``state``
-        ties the code to the user who started the flow.
+        Unauthenticated like the Hugging Face callback, so it trades no code
+        itself: the signed-in finish route checks the caller.
 
         Args:
             provider: Provider slug.
@@ -897,21 +947,50 @@ def create_connectors_router(*, job_store) -> APIRouter:
             error: The provider's error code when the user declined.
 
         Returns:
-            A redirect to the Connectors tab, carrying an error code on failure.
+            A redirect with an error code, or with the state and code in the fragment.
         """
         if provider not in registry.OAUTH_PROVIDERS:
             return _settings_redirect("connectors.unknown_provider")
         if error or not code or not state:
             return _settings_redirect("connectors.oauth_failed")
+        return _finish_redirect(provider, state, code)
+
+    @router.post(
+        "/connectors/{provider}/oauth/finish",
+        response_model=ConnectorListResponse,
+        summary="Finish a provider's OAuth flow",
+    )
+    def finish_connector_oauth(
+        provider: str,
+        body: OAuthFinishRequest,
+        user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
+    ) -> ConnectorListResponse:
+        """Trade the code for tokens when the caller started this sign-in.
+
+        Args:
+            provider: Provider slug; one of the OAuth-capable providers.
+            body: The state and code from the callback.
+            user: Authenticated caller.
+
+        Returns:
+            The updated connector list.
+
+        Raises:
+            DomainError: 400 for a forged, expired or other-provider state, or
+                a refused code; 403 when another user started the sign-in;
+                404 when the provider has no OAuth flow; 503 when its OAuth
+                app or the vault is not configured.
+        """
         module = registry.get_provider(provider)
+        if provider not in registry.OAUTH_PROVIDERS:
+            raise DomainError("connectors.unknown_provider", status=404, provider=provider)
         app = module.oauth_app()
-        try:
-            payload = generic_oauth.parse_state(app, state)
-            tokens = generic_oauth.exchange_code(app, code, payload["v"], payload["r"])
-        except DomainError as exc:
-            return _settings_redirect(str(exc.code))
+        payload = generic_oauth.parse_state(app, body.state)
+        if payload["u"] != user.username:
+            raise DomainError("connectors.oauth_state_invalid", status=403)
+        tokens = generic_oauth.exchange_code(app, body.code, payload["v"], payload["r"])
         vault.save(
-            payload["u"],
+            user.username,
             provider,
             access_token=tokens.access_token,
             auth_method="oauth",
@@ -920,7 +999,7 @@ def create_connectors_router(*, job_store) -> APIRouter:
             expires_at=tokens.expires_at,
             scopes=tokens.scope,
         )
-        return _settings_redirect()
+        return _status(user.username)
 
     @router.get(
         "/connectors/{provider}/browse",

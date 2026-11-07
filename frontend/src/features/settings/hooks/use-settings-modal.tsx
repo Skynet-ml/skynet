@@ -2,6 +2,7 @@
 
 import * as React from "react";
 
+import { parseOAuthFinish } from "@/shared/lib/oauth-finish";
 import { takeOAuthReturn } from "@/shared/lib/oauth-return";
 
 interface SettingsModalContextValue {
@@ -39,9 +40,12 @@ export function SettingsModalProvider({ children }: { children: React.ReactNode 
     const url = new URL(window.location.href);
     const requestedTab = url.searchParams.get("settings");
     if (!requestedTab) return;
-    // A failed link stays here, where the Connectors tab explains the error.
-    const back = requestedTab === "connectors" ? takeOAuthReturn() : null;
-    if (back && !url.searchParams.has("connector_error")) {
+    // A failed link stays here. A sign-in that a tab must still finish from the
+    // URL fragment also stays, and that tab returns to the saved path after it.
+    const pending = parseOAuthFinish(url.hash) !== null;
+    const back = requestedTab === "connectors" && !pending ? takeOAuthReturn() : null;
+    const failed = url.searchParams.has("connector_error") || url.searchParams.has("mcp_error");
+    if (back && !failed) {
       window.location.replace(back);
       return;
     }

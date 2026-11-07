@@ -22,7 +22,7 @@ from threading import Lock
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import AliasChoices, BaseModel, Field
 
@@ -499,6 +499,13 @@ class OpenRouterOAuthStartResponse(BaseModel):
     """Where to send the browser to connect an OpenRouter account."""
 
     authorize_url: str = Field(description="OpenRouter sign-in URL carrying the PKCE challenge and callback.")
+
+
+# Body for the signed-in finish step. The state is the encrypted payload from
+# the start step; Fernet tokens are several hundred characters long.
+class OpenRouterOAuthFinishRequest(BaseModel):
+    state: str = Field(min_length=1, max_length=4096)
+    code: str = Field(min_length=1, max_length=2048)
 
 
 # Request to save (or rotate) a provider's BYOK connection. The secret is
@@ -1065,29 +1072,55 @@ def create_billing_router(*, job_store) -> APIRouter:
         include_in_schema=False,
     )
     def openrouter_oauth_callback(code: str | None = None, state: str | None = None) -> RedirectResponse:
-        """Trade the code for a key, save it like a pasted one, and return to Settings.
+        """Pass the state and code to the web app, which finishes the sign-in.
 
-        Unauthenticated: the browser arrives from openrouter.ai without the
-        app's bearer token, so the encrypted ``state`` is what ties the code to
-        the user who started the flow.
+        This route has no session, because auth is a bearer header. So it
+        trades no code itself: the signed-in finish route checks that the
+        caller started the sign-in, which blocks an account-link hijack.
 
         Args:
             code: Authorization code from OpenRouter.
             state: The encrypted state minted at start.
 
         Returns:
-            A redirect to the providers tab, carrying an error code on failure.
+            A redirect with an error code, or with the state and code in the
+            URL fragment, which the browser does not send to any server.
         """
         if not code or not state:
             return _providers_redirect("billing.openrouter_oauth_failed")
-        try:
-            payload = openrouter_oauth.parse_state(state)
-            key = openrouter_oauth.exchange_code(code, payload["v"])
-            vault.save_key(payload["u"], openrouter_oauth.PROVIDER, key)
-        except DomainError as exc:
-            return _providers_redirect(str(exc.code))
-        _invalidate_byok_user_catalog(payload["u"])
-        return _providers_redirect()
+        fragment = urlencode({"oauth_flow": "openrouter", "oauth_state": state, "oauth_code": code})
+        return RedirectResponse(
+            f"{settings.app_public_url.rstrip('/')}/?{urlencode({'settings': 'providers'})}#{fragment}",
+            status_code=303,
+        )
+
+    @router.post(
+        "/billing/byok/openrouter/oauth/finish",
+        status_code=204,
+        summary="Finish 'Continue with OpenRouter' and save the minted key",
+    )
+    def finish_openrouter_oauth(body: OpenRouterOAuthFinishRequest, user: AuthenticatedUserDep) -> Response:
+        """Trade the code for a key when the caller started this sign-in.
+
+        Args:
+            body: The state and code from the callback.
+            user: Authenticated caller.
+
+        Returns:
+            An empty 204 answer.
+
+        Raises:
+            DomainError: 400 for a forged or expired state, or a refused code;
+                403 when another user started the sign-in; 503 when the vault
+                is not configured.
+        """
+        payload = openrouter_oauth.parse_state(body.state)
+        if payload["u"] != user.username:
+            raise DomainError("billing.openrouter_oauth_state_invalid", status=403)
+        key = openrouter_oauth.exchange_code(body.code, payload["v"])
+        vault.save_key(user.username, openrouter_oauth.PROVIDER, key)
+        _invalidate_byok_user_catalog(user.username)
+        return Response(status_code=204)
 
     @router.delete(
         "/billing/byok/keys/{provider}",

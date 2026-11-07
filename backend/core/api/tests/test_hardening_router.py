@@ -27,6 +27,7 @@ from ...models.hardening import (
     HardeningRound,
 )
 from ...storage.models import Base, BillingCustomerModel
+from ...worker.hardening_runner import HardeningBudget
 from .. import model_catalog
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..model_catalog import CatalogModel, ModelCatalogResponse
@@ -51,6 +52,7 @@ _JOB_FIELDS = {
     "error",
     "target",
     "binding_id",
+    "scorer",
 }
 _EXPLOIT_FIELDS = {"id", "kind", "label", "confidence", "reason", "unsure", "patch_diff", "why_md", "user_verdict"}
 _BODY = {"draft_id": "draft-1", "attacker_model": "openai/attacker", "judge_model": "openai/judge"}
@@ -588,3 +590,149 @@ def test_create_refuses_a_bad_binding_id() -> None:
     """An empty budget id fails validation."""
     client, _engine, _caller = _harness()
     assert client.post("/hardening/jobs", json={**_BODY, "binding_id": ""}).status_code == 422
+
+
+def test_create_copies_the_scorer_without_its_secret() -> None:
+    """The job keeps the run submit's scorer for the worker, but never its secret."""
+    client, engine, _caller = _harness()
+    scorer = {"kind": "python", "metric_code": "def metric(x):\n    return 1.0\n", "secret": "not-a-real-secret"}
+
+    response = client.post("/hardening/jobs", json={**_BODY, "scorer": scorer})
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["scorer"]["metric_code"] == scorer["metric_code"]
+    assert body["scorer"]["secret"] is None
+    with Session(engine) as session:
+        row = session.get(HardeningJobModel, body["id"])
+        assert row is not None
+        assert row.job["scorer"]["kind"] == "python"
+        assert row.job["scorer"]["secret"] is None
+    assert client.post("/hardening/jobs", json={**_BODY, "draft_id": "draft-2"}).json()["scorer"] is None
+
+
+def test_create_drops_the_scorer_model_key_and_endpoint() -> None:
+    """A scorer model's key and endpoint never reach the row or a read; the worker resolves a BYOK key at run time."""
+    client, engine, _caller = _harness()
+    scorer = {
+        "kind": "python",
+        "metric_code": "def metric(x):\n    return 1.0\n",
+        "model": {
+            "name": "openai/gpt-4o-mini",
+            "token_source": "byok",
+            "base_url": "https://proxy.example/v1",
+            "extra": {"api_key": "not-a-real-key", "api_base": "https://proxy.example", "temperature": 0},
+        },
+    }
+
+    response = client.post("/hardening/jobs", json={**_BODY, "scorer": scorer})
+
+    assert response.status_code == 201
+    body = response.json()
+    with Session(engine) as session:
+        row = session.get(HardeningJobModel, body["id"])
+        assert row is not None
+        stored = row.job["scorer"]["model"]
+    read = client.get(f"/hardening/jobs/{body['id']}").json()["scorer"]["model"]
+    for model in (stored, body["scorer"]["model"], read):
+        assert model["base_url"] is None
+        assert model["extra"] == {"temperature": 0}
+        assert model["token_source"] == "byok"
+    assert "not-a-real-key" not in str(read)
+
+
+def test_create_drops_every_credential_shape_in_the_scorer_extra() -> None:
+    """Header, provider-named and token credentials in ``extra`` never reach the row or a read."""
+    client, engine, _caller = _harness()
+    scorer = {
+        "kind": "python",
+        "metric_code": "def metric(x):\n    return 1.0\n",
+        "model": {
+            "name": "openai/gpt-4o-mini",
+            "token_source": "byok",
+            "extra": {
+                "extra_headers": {"Authorization": "Bearer not-a-real-header"},
+                "openai_api_key": "not-a-real-openai-key",
+                "apiKey": "not-a-real-camel-key",
+                "token": "not-a-real-token",
+                "temperature": 0,
+            },
+        },
+    }
+
+    response = client.post("/hardening/jobs", json={**_BODY, "scorer": scorer})
+
+    assert response.status_code == 201
+    body = response.json()
+    with Session(engine) as session:
+        row = session.get(HardeningJobModel, body["id"])
+        assert row is not None
+        stored = row.job["scorer"]["model"]
+    read = client.get(f"/hardening/jobs/{body['id']}").json()["scorer"]["model"]
+    for model in (stored, body["scorer"]["model"], read):
+        assert model["extra"] == {"temperature": 0}
+        assert "not-a-real" not in str(model)
+
+
+def test_create_drops_camel_case_endpoint_keys_in_the_scorer_extra() -> None:
+    """``apiBase`` and ``baseURL`` in ``extra`` are endpoints too, so their private path never reaches a read."""
+    client, engine, _caller = _harness()
+    endpoint = "https://llm.example/v1/private-path"
+    scorer = {
+        "kind": "python",
+        "metric_code": "def metric(x):\n    return 1.0\n",
+        "model": {
+            "name": "openai/gpt-4o-mini",
+            "token_source": "byok",
+            "extra": {"apiBase": endpoint, "baseURL": endpoint, "temperature": 0},
+        },
+    }
+
+    response = client.post("/hardening/jobs", json={**_BODY, "scorer": scorer})
+
+    assert response.status_code == 201
+    body = response.json()
+    with Session(engine) as session:
+        row = session.get(HardeningJobModel, body["id"])
+        assert row is not None
+        stored = row.job["scorer"]["model"]
+    read = client.get(f"/hardening/jobs/{body['id']}").json()["scorer"]["model"]
+    for model in (stored, body["scorer"]["model"], read):
+        assert model["extra"] == {"temperature": 0}
+        assert "private-path" not in str(model)
+
+
+def test_create_refuses_a_remote_scorer() -> None:
+    """A hardening job needs a python metric; a remote scorer gets 422 and no job."""
+    client, engine, _caller = _harness()
+    scorer = {"kind": "remote", "url": "https://score.example/score"}
+
+    response = client.post("/hardening/jobs", json={**_BODY, "scorer": scorer})
+
+    assert response.status_code == 422
+    assert "python scorer" in str(response.json()["detail"])
+    with Session(engine) as session:
+        assert session.query(HardeningJobModel).count() == 0
+
+
+def test_a_rejected_fix_closes_the_budget_hold() -> None:
+    """A user step that ends the job releases its unspent hold and forgets the operation."""
+    client, engine, caller = _harness()
+    budget = _budget(engine, caller["user"])
+    service = BudgetService(engine=engine)
+    job = _waiting_fix("j1").model_copy(update={"binding_id": budget})
+    _seed(engine, job)
+    operation_id = HardeningBudget(service, username=caller["user"], budget_id=budget).reserve(job, 1.0)
+    with Session(engine) as session:
+        row = session.get(HardeningJobModel, "j1")
+        assert row is not None
+        row.budget_operation_id = operation_id
+        session.commit()
+
+    assert client.post("/hardening/jobs/j1/fix", json={"approve": False}).json()["status"] == "rejected"
+
+    assert service.get_operation(operation_id, caller["user"]).state == "released"
+    with Session(engine) as session:
+        row = session.get(HardeningJobModel, "j1")
+        assert row is not None
+        assert row.budget_operation_id is None
