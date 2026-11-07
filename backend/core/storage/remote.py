@@ -1467,7 +1467,7 @@ class RemoteDBJobStore:
             secrets: Every secret value the call could carry.
 
         Returns:
-            The new call's id, which is also its cursor.
+            The new call's ``seq``, which is also its cursor.
         """
         return self._run_calls.record_call(optimization_id, call, secrets)
 
@@ -1490,7 +1490,7 @@ class RemoteDBJobStore:
         Args:
             optimization_id: Owning job id.
             candidate_id: The candidate within the run.
-            since: The last call id the caller holds.
+            since: The last call ``seq`` the caller holds.
             limit: The most calls to return.
 
         Returns:
@@ -1510,16 +1510,18 @@ class RemoteDBJobStore:
         """
         return self._run_calls.get_candidate(optimization_id, candidate_id)
 
-    def list_run_candidates(self, optimization_id: str) -> list[dict]:
-        """Return the run's candidates with role, state, call count and cost so far.
+    def list_run_candidates(self, optimization_id: str, *, limit: int = 100, offset: int = 0) -> list[dict]:
+        """Return one page of the run's candidates with role, state, call count and cost so far.
 
         Args:
             optimization_id: Owning job id.
+            limit: The most candidates to return.
+            offset: The number of candidates to skip, in start order.
 
         Returns:
-            One summary for each candidate.
+            One summary for each candidate on the page.
         """
-        return self._run_calls.list_candidates(optimization_id)
+        return self._run_calls.list_candidates(optimization_id, limit=limit, offset=offset)
 
     def save_gepa_checkpoint(
         self,

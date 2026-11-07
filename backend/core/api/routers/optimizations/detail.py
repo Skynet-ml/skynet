@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 import dspy
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import AliasChoices, BaseModel, Field, ValidationError
 
@@ -796,15 +796,22 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
         summary="The candidates of a run with state, call count and cost so far",
         tags=["agent"],
     )
-    def list_run_candidates(optimization_id: str, current_user: AuthenticatedUserDep) -> RunCandidateList:
-        """Return each candidate of a run with its role, state, call count and cost.
+    def list_run_candidates(
+        optimization_id: str,
+        current_user: AuthenticatedUserDep,
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ) -> RunCandidateList:
+        """Return one page of a run's candidates with role, state, call count and cost.
 
         Args:
             optimization_id: The run.
             current_user: Authenticated caller resolved from the bearer token.
+            limit: The most candidates to return in this page.
+            offset: The number of candidates to skip, in start order.
 
         Returns:
-            The run's candidates, in start order.
+            One page of the run's candidates in start order, and the next offset.
 
         Raises:
             DomainError: 404 when the run is unknown or the caller is not its owner.
@@ -812,11 +819,14 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
         job_data = _load_job_for_owner(job_store, optimization_id, current_user)
         job_status = status_to_job_status(job_data.get("status", "pending"))
         list_candidates = getattr(job_store, "list_run_candidates", None)
-        candidates = [] if list_candidates is None else list_candidates(optimization_id)
+        candidates = [] if list_candidates is None else list_candidates(optimization_id, limit=limit + 1, offset=offset)
+        page = candidates[:limit]
         return RunCandidateList.model_validate(
             {
                 "optimization_id": optimization_id,
-                "candidates": [{**c, "state": _effective_candidate_state(c["state"], job_status)} for c in candidates],
+                "candidates": [{**c, "state": _effective_candidate_state(c["state"], job_status)} for c in page],
+                "next_offset": offset + len(page),
+                "has_more": len(candidates) > limit,
             }
         )
 
@@ -828,8 +838,10 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
     )
     def list_run_calls(
         optimization_id: str,
-        candidate_id: str,
         current_user: AuthenticatedUserDep,
+        # The store keeps 64 characters of a candidate id; a longer id could
+        # never match, so it is refused instead of cut.
+        candidate_id: str = Path(max_length=64),
         since: int = Query(0, ge=0),
         limit: int = Query(100, ge=1, le=500),
     ) -> RunCallPage:
@@ -842,7 +854,7 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
             optimization_id: The run.
             candidate_id: The candidate within the run.
             current_user: Authenticated caller resolved from the bearer token.
-            since: The last call id the caller holds; ``0`` for the start.
+            since: The last call ``seq`` the caller holds; ``0`` for the start.
             limit: The most calls to return in this page.
 
         Returns:
@@ -870,7 +882,7 @@ def register_detail_routes(router: APIRouter, *, job_store) -> None:
                 "candidate_id": candidate_id,
                 "running": running,
                 "calls": page,
-                "next_since": page[-1]["id"] if page else since,
+                "next_since": page[-1]["seq"] if page else since,
                 "has_more": len(calls) > limit,
             }
         )

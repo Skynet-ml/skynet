@@ -1464,20 +1464,24 @@ class RunCallModel(Base):
 
     The relay writes one row for each call out of a box: a model call, an MCP
     tool call, a ``skynet.call`` to a stage, an evaluator call or an
-    allowed-host request. ``id`` grows with each write, so it is both the
-    time order and the ``since`` cursor of the live read route. Bodies over
-    the store's cap are cut; ``request_bytes``/``response_bytes`` keep the
-    full size. Rows go with their job via the cascading foreign key.
+    allowed-host request. ``seq`` counts the candidate's calls from 1 and is
+    the ``since`` cursor of the live read route. The store assigns it under a
+    lock on the candidate row, so a call with a lower ``seq`` always commits
+    first and a poll never skips one. ``id`` is only a row key: parallel
+    writers can commit ids out of order. Bodies over the store's cap are cut;
+    ``request_bytes``/``response_bytes`` keep the full size. Rows go with
+    their job via the cascading foreign key.
     """
 
     __tablename__ = "run_calls"
-    __table_args__ = (Index("ix_run_calls_job_candidate_id", "optimization_id", "candidate_id", "id"),)
+    __table_args__ = (Index("ux_run_calls_job_candidate_seq", "optimization_id", "candidate_id", "seq", unique=True),)
 
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     optimization_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("jobs.optimization_id", ondelete="CASCADE"), nullable=False
     )
     candidate_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
     role: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
     target: Mapped[str] = mapped_column(String(512), nullable=False, default="")
@@ -1499,7 +1503,8 @@ class RunCandidateModel(Base):
 
     The relay marks a candidate ``running`` on its first call and the worker
     marks it ``done`` or ``failed`` when it ends. Call count and cost come
-    from ``run_calls``.
+    from ``run_calls``. ``last_seq`` is the ``seq`` of the candidate's last
+    call; the store locks this row to assign the next one.
     """
 
     __tablename__ = "run_candidates"
@@ -1510,6 +1515,7 @@ class RunCandidateModel(Base):
     candidate_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     role: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     state: Mapped[str] = mapped_column(String(16), nullable=False)
+    last_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )

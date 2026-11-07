@@ -349,9 +349,9 @@ class _BaseFakeJobStore:
         """Return one candidate's summary through the real store, or ``None``."""
         return self._run_call_store().get_candidate(optimization_id, candidate_id)
 
-    def list_run_candidates(self, optimization_id: str) -> list[dict]:
-        """Return the run's candidate summaries through the real store."""
-        return self._run_call_store().list_candidates(optimization_id)
+    def list_run_candidates(self, optimization_id: str, *, limit: int = 100, offset: int = 0) -> list[dict]:
+        """Return one page of the run's candidate summaries through the real store."""
+        return self._run_call_store().list_candidates(optimization_id, limit=limit, offset=offset)
 
     def save_agent_run(self, optimization_id: str, run: dict) -> None:
         """Store one agent run record under its ``run_id``.

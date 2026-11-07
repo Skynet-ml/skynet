@@ -1,8 +1,8 @@
 """Response models of the run record read routes (SKY-364).
 
-``GET /optimizations/{id}/candidates`` lists a run's candidates and
-``GET /optimizations/{id}/candidates/{candidate_id}/calls`` pages through one
-candidate's relay calls with a ``since`` cursor. The classes carry no
+``GET /optimizations/{id}/candidates`` pages through a run's candidates with
+an ``offset`` and ``GET /optimizations/{id}/candidates/{candidate_id}/calls``
+pages through one candidate's relay calls with a ``since`` cursor. The classes carry no
 docstrings on purpose: a ``BaseModel`` docstring becomes part of the OpenAPI
 schema.
 """
@@ -17,11 +17,13 @@ RunCallKind = Literal["model", "mcp", "stage", "evaluator", "host"]
 RunCandidateState = Literal["running", "done", "failed"]
 
 
-# One relay call. ``request``/``response`` are cut at the store's cap when
+# One relay call. ``seq`` counts the candidate's calls from 1 and is the
+# ``since`` cursor. ``request``/``response`` are cut at the store's cap when
 # ``*_truncated`` is set; ``*_bytes`` is always the full size. Secret values
 # are already replaced with ``[REDACTED]``.
 class RunCallRecord(BaseModel):
     id: int
+    seq: int
     candidate_id: str
     role: str = ""
     kind: RunCallKind
@@ -61,6 +63,10 @@ class RunCandidateSummary(BaseModel):
     updated_at: str | None = None
 
 
+# One page of a run's candidates in start order. Ask again with
+# ``offset=next_offset`` while ``has_more`` is true.
 class RunCandidateList(BaseModel):
     optimization_id: str
     candidates: list[RunCandidateSummary] = Field(default_factory=list)
+    next_offset: int = 0
+    has_more: bool = False

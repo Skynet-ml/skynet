@@ -4,7 +4,8 @@ The relay calls :meth:`PostgresRunCallStore.record_call` once for each call
 out of a box. The store removes the given secret values from the bodies,
 cuts bodies over :data:`BODY_CAP_BYTES`, and writes one ``run_calls`` row.
 ``run_candidates`` holds each candidate's role and lifecycle state. The live
-read routes page through a candidate's calls with an ``id`` cursor.
+read routes page through a candidate's calls with a per-candidate ``seq``
+cursor.
 """
 
 from __future__ import annotations
@@ -14,8 +15,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .models import RunCallModel, RunCandidateModel
@@ -24,6 +26,7 @@ BODY_CAP_BYTES = 64 * 1024
 SECRET_MASK = "[REDACTED]"
 CALL_KINDS = frozenset({"model", "mcp", "stage", "evaluator", "host"})
 CANDIDATE_STATES = frozenset({"running", "done", "failed"})
+CANDIDATE_ID_MAX = 64
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -115,7 +118,7 @@ class PostgresRunCallStore:
                 resolved values of the user's ``${NAME}`` placeholders.
 
         Returns:
-            The new row's id, which is also its cursor.
+            The new call's ``seq``, which is also its cursor.
 
         Raises:
             ValueError: When ``kind`` is not a known call kind.
@@ -126,7 +129,7 @@ class PostgresRunCallStore:
         request, request_bytes, request_truncated = cut_body(strip_secrets(str(call.get("request") or ""), secrets))
         response, response_bytes, response_truncated = cut_body(strip_secrets(str(call.get("response") or ""), secrets))
         failure_reason = call.get("failure_reason")
-        candidate_id = str(call["candidate_id"])[:64]
+        candidate_id = str(call["candidate_id"])[:CANDIDATE_ID_MAX]
         role = str(call.get("role") or "")[:64]
         fields = {
             "optimization_id": optimization_id,
@@ -147,24 +150,12 @@ class PostgresRunCallStore:
             "response_truncated": response_truncated,
         }
         with Session(self._engine) as session:
-            row = RunCallModel(**fields)
-            session.add(row)
-            if session.get(RunCandidateModel, (optimization_id, candidate_id)) is None:
-                session.add(
-                    RunCandidateModel(
-                        optimization_id=optimization_id, candidate_id=candidate_id, role=role, state="running"
-                    )
-                )
-            try:
-                session.commit()
-            except IntegrityError:
-                # A parallel call of the same new candidate inserted its state
-                # row first; keep that row and write only this call.
-                session.rollback()
-                row = RunCallModel(**fields)
-                session.add(row)
-                session.commit()
-            return int(row.id)
+            candidate = self._lock_candidate(session, optimization_id, candidate_id, role, "running")
+            candidate.last_seq += 1
+            seq = candidate.last_seq
+            session.add(RunCallModel(seq=seq, **fields))
+            session.commit()
+            return seq
 
     def set_candidate_state(self, optimization_id: str, candidate_id: str, role: str, state: str) -> None:
         """Insert or update one candidate's role and lifecycle state.
@@ -180,20 +171,49 @@ class PostgresRunCallStore:
         """
         if state not in CANDIDATE_STATES:
             raise ValueError(f"unknown candidate state: {state!r}")
-        candidate_id = str(candidate_id)[:64]
+        candidate_id = str(candidate_id)[:CANDIDATE_ID_MAX]
         with Session(self._engine) as session:
-            existing = session.get(RunCandidateModel, (optimization_id, candidate_id))
-            if existing is None:
-                session.add(
-                    RunCandidateModel(
-                        optimization_id=optimization_id, candidate_id=candidate_id, role=role[:64], state=state
-                    )
-                )
-            else:
-                existing.role = role[:64] or existing.role
-                existing.state = state
-                existing.updated_at = datetime.now(UTC)
+            candidate = self._lock_candidate(session, optimization_id, candidate_id, role[:64], state)
+            candidate.role = role[:64] or candidate.role
+            candidate.state = state
+            candidate.updated_at = datetime.now(UTC)
             session.commit()
+
+    def _lock_candidate(
+        self, session: Session, optimization_id: str, candidate_id: str, role: str, state: str
+    ) -> RunCandidateModel:
+        """Create the candidate row when it is missing, then lock it until the session commits.
+
+        The lock serializes every write of one candidate, so ``last_seq`` grows
+        in commit order: a reader that holds ``seq`` N can never later see a
+        call with ``seq`` N or lower commit. Parallel candidates do not wait on
+        each other. SQLite ignores ``FOR UPDATE``; it allows only one writer.
+
+        Args:
+            session: The open write session.
+            optimization_id: Owning job id.
+            candidate_id: The candidate within the run, already cut.
+            role: The role to give a new candidate row.
+            state: The state to give a new candidate row.
+
+        Returns:
+            The locked candidate row, read fresh from the database.
+        """
+        insert = postgres_insert if self._engine.dialect.name == "postgresql" else sqlite_insert
+        session.execute(
+            insert(RunCandidateModel)
+            .values(optimization_id=optimization_id, candidate_id=candidate_id, role=role, state=state)
+            .on_conflict_do_nothing(index_elements=["optimization_id", "candidate_id"])
+        )
+        return session.scalars(
+            select(RunCandidateModel)
+            .where(
+                RunCandidateModel.optimization_id == optimization_id,
+                RunCandidateModel.candidate_id == candidate_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).one()
 
     def list_calls(self, optimization_id: str, candidate_id: str, *, since: int = 0, limit: int = 100) -> list[dict]:
         """Return a candidate's calls after the ``since`` cursor, oldest first.
@@ -201,27 +221,27 @@ class PostgresRunCallStore:
         Args:
             optimization_id: Owning job id.
             candidate_id: The candidate within the run.
-            since: The last call id the caller holds; ``0`` for the start.
+            since: The last call ``seq`` the caller holds; ``0`` for the start.
             limit: The most calls to return.
 
         Returns:
-            The call records, in write order.
+            The call records, in ``seq`` order.
         """
         with Session(self._engine) as session:
             rows = session.scalars(
                 select(RunCallModel)
                 .where(
                     RunCallModel.optimization_id == optimization_id,
-                    RunCallModel.candidate_id == candidate_id,
-                    RunCallModel.id > since,
+                    RunCallModel.candidate_id == str(candidate_id)[:CANDIDATE_ID_MAX],
+                    RunCallModel.seq > since,
                 )
-                .order_by(RunCallModel.id)
+                .order_by(RunCallModel.seq)
                 .limit(limit)
             ).all()
             return [self._call_record(row) for row in rows]
 
     def get_candidate(self, optimization_id: str, candidate_id: str) -> dict | None:
-        """Return one candidate's summary, or ``None`` when it has no state and no calls.
+        """Return one candidate's summary, or ``None`` when it has no row.
 
         Args:
             optimization_id: Owning job id.
@@ -230,52 +250,77 @@ class PostgresRunCallStore:
         Returns:
             The candidate summary, or ``None``.
         """
-        return next(
-            (c for c in self.list_candidates(optimization_id) if c["candidate_id"] == candidate_id),
-            None,
-        )
+        with Session(self._engine) as session:
+            candidate = session.get(RunCandidateModel, (optimization_id, str(candidate_id)[:CANDIDATE_ID_MAX]))
+            if candidate is None:
+                return None
+            return self._summaries(session, optimization_id, [candidate])[0]
 
-    def list_candidates(self, optimization_id: str) -> list[dict]:
-        """Return the run's candidates with role, state, call count and cost so far.
+    def list_candidates(self, optimization_id: str, *, limit: int = 100, offset: int = 0) -> list[dict]:
+        """Return one page of the run's candidates with role, state, call count and cost so far.
 
         Args:
             optimization_id: Owning job id.
+            limit: The most candidates to return.
+            offset: The number of candidates to skip, in start order.
 
         Returns:
-            One summary for each candidate, in start order.
+            One summary for each candidate on the page, in start order.
         """
         with Session(self._engine) as session:
             candidates = session.scalars(
                 select(RunCandidateModel)
                 .where(RunCandidateModel.optimization_id == optimization_id)
                 .order_by(RunCandidateModel.started_at, RunCandidateModel.candidate_id)
+                .offset(offset)
+                .limit(limit)
             ).all()
-            totals = {
-                candidate_id: (int(count), float(cost or 0.0))
-                for candidate_id, count, cost in session.execute(
-                    select(RunCallModel.candidate_id, func.count(RunCallModel.id), func.sum(RunCallModel.cost_usd))
-                    .where(RunCallModel.optimization_id == optimization_id)
-                    .group_by(RunCallModel.candidate_id)
-                ).all()
+            return self._summaries(session, optimization_id, list(candidates))
+
+    @staticmethod
+    def _summaries(session: Session, optimization_id: str, candidates: list[RunCandidateModel]) -> list[dict]:
+        """Project candidate rows onto summaries, totalling only their own calls.
+
+        Args:
+            session: The open read session.
+            optimization_id: Owning job id.
+            candidates: The candidate rows to summarize.
+
+        Returns:
+            One summary for each row, in the given order.
+        """
+        if not candidates:
+            return []
+        totals = {
+            candidate_id: (int(count), float(cost or 0.0))
+            for candidate_id, count, cost in session.execute(
+                select(RunCallModel.candidate_id, func.count(RunCallModel.id), func.sum(RunCallModel.cost_usd))
+                .where(
+                    RunCallModel.optimization_id == optimization_id,
+                    RunCallModel.candidate_id.in_([candidate.candidate_id for candidate in candidates]),
+                )
+                .group_by(RunCallModel.candidate_id)
+            ).all()
+        }
+        return [
+            {
+                "candidate_id": candidate.candidate_id,
+                "role": candidate.role,
+                "state": candidate.state,
+                "call_count": totals.get(candidate.candidate_id, (0, 0.0))[0],
+                "cost_usd": totals.get(candidate.candidate_id, (0, 0.0))[1],
+                "started_at": _iso(candidate.started_at),
+                "updated_at": _iso(candidate.updated_at),
             }
-            return [
-                {
-                    "candidate_id": candidate.candidate_id,
-                    "role": candidate.role,
-                    "state": candidate.state,
-                    "call_count": totals.get(candidate.candidate_id, (0, 0.0))[0],
-                    "cost_usd": totals.get(candidate.candidate_id, (0, 0.0))[1],
-                    "started_at": _iso(candidate.started_at),
-                    "updated_at": _iso(candidate.updated_at),
-                }
-                for candidate in candidates
-            ]
+            for candidate in candidates
+        ]
 
     @staticmethod
     def _call_record(row: RunCallModel) -> dict[str, Any]:
         """Project an ORM row onto the record shape the read routes serve."""
         return {
             "id": int(row.id),
+            "seq": int(row.seq),
             "candidate_id": row.candidate_id,
             "role": row.role,
             "kind": row.kind,

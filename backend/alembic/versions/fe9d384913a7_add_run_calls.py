@@ -24,6 +24,7 @@ def upgrade() -> None:
             id BIGSERIAL PRIMARY KEY,
             optimization_id VARCHAR(36) NOT NULL REFERENCES jobs(optimization_id) ON DELETE CASCADE,
             candidate_id VARCHAR(64) NOT NULL,
+            seq INTEGER NOT NULL,
             role VARCHAR(64) NOT NULL DEFAULT '',
             kind VARCHAR(16) NOT NULL,
             target VARCHAR(512) NOT NULL DEFAULT '',
@@ -42,7 +43,8 @@ def upgrade() -> None:
         """
     )
     op.execute(
-        "CREATE INDEX IF NOT EXISTS ix_run_calls_job_candidate_id ON run_calls (optimization_id, candidate_id, id)"
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_run_calls_job_candidate_seq"
+        " ON run_calls (optimization_id, candidate_id, seq)"
     )
     op.execute(
         """
@@ -51,6 +53,7 @@ def upgrade() -> None:
             candidate_id VARCHAR(64) NOT NULL,
             role VARCHAR(64) NOT NULL DEFAULT '',
             state VARCHAR(16) NOT NULL,
+            last_seq INTEGER NOT NULL DEFAULT 0,
             started_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
             updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
             PRIMARY KEY (optimization_id, candidate_id)

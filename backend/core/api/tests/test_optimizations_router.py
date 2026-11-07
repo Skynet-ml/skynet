@@ -443,21 +443,21 @@ _BOB = AuthenticatedUser(username="bob", role="user", groups=())
 def test_run_calls_serve_the_owner_a_page_with_a_cursor(store: _ExtendedFakeJobStore) -> None:
     """The owner gets calls in write order; ``next_since`` and ``has_more`` drive the next poll."""
     _seed_owned_run(store, "rc1")
-    ids = [store.record_run_call("rc1", _run_call(target=f"t{i}"), []) for i in range(3)]
+    seqs = [store.record_run_call("rc1", _run_call(target=f"t{i}"), []) for i in range(3)]
     client = _client_as(store, _ALICE)
 
     first = client.get("/optimizations/rc1/candidates/cand-1/calls?limit=2").json()
     second = client.get(f"/optimizations/rc1/candidates/cand-1/calls?since={first['next_since']}&limit=2").json()
-    empty = client.get(f"/optimizations/rc1/candidates/cand-1/calls?since={ids[-1]}").json()
+    empty = client.get(f"/optimizations/rc1/candidates/cand-1/calls?since={seqs[-1]}").json()
 
     assert [c["target"] for c in first["calls"]] == ["t0", "t1"]
     assert first["has_more"] is True
-    assert first["next_since"] == ids[1]
+    assert first["next_since"] == seqs[1] == 2
     assert first["running"] is True
-    assert [c["id"] for c in second["calls"]] == [ids[2]]
+    assert [c["seq"] for c in second["calls"]] == [seqs[2]]
     assert second["has_more"] is False
     assert empty["calls"] == []
-    assert empty["next_since"] == ids[-1]
+    assert empty["next_since"] == seqs[-1]
 
 
 def test_run_calls_strip_secrets_before_they_are_served(store: _ExtendedFakeJobStore) -> None:
@@ -527,7 +527,34 @@ def test_run_candidates_are_empty_before_any_call(store: _ExtendedFakeJobStore) 
 
     body = _client_as(store, _ALICE).get("/optimizations/rc6/candidates").json()
 
-    assert body == {"optimization_id": "rc6", "candidates": []}
+    assert body == {"optimization_id": "rc6", "candidates": [], "next_offset": 0, "has_more": False}
+
+
+def test_run_candidates_page_with_limit_and_offset(store: _ExtendedFakeJobStore) -> None:
+    """The candidate list pages with ``limit`` and ``next_offset`` and refuses a page over 500."""
+    _seed_owned_run(store, "rc10")
+    for index in range(3):
+        store.record_run_call("rc10", _run_call(candidate_id=f"cand-{index}"), [])
+    client = _client_as(store, _ALICE)
+
+    first = client.get("/optimizations/rc10/candidates?limit=2").json()
+    rest = client.get(f"/optimizations/rc10/candidates?limit=2&offset={first['next_offset']}").json()
+
+    assert [c["candidate_id"] for c in first["candidates"]] == ["cand-0", "cand-1"]
+    assert (first["next_offset"], first["has_more"]) == (2, True)
+    assert [c["candidate_id"] for c in rest["candidates"]] == ["cand-2"]
+    assert (rest["next_offset"], rest["has_more"]) == (3, False)
+    assert client.get("/optimizations/rc10/candidates?limit=501").status_code == 422
+    assert client.get("/optimizations/rc10/candidates?offset=-1").status_code == 422
+
+
+def test_run_calls_refuse_a_candidate_id_over_64_characters(store: _ExtendedFakeJobStore) -> None:
+    """The store keeps 64 characters of a candidate id, so a longer id in the path is refused."""
+    _seed_owned_run(store, "rc11")
+    client = _client_as(store, _ALICE)
+
+    assert client.get(f"/optimizations/rc11/candidates/{'c' * 64}/calls").status_code == 200
+    assert client.get(f"/optimizations/rc11/candidates/{'c' * 65}/calls").status_code == 422
 
 
 @pytest.mark.parametrize("path", ["/optimizations/rc7/candidates", "/optimizations/rc7/candidates/cand-1/calls"])
