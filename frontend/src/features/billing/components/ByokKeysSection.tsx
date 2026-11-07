@@ -66,22 +66,45 @@ function useByokErrorParam() {
  * ``#oauth_flow=openrouter&oauth_state=..&oauth_code=..`` fragment of the
  * callback redirect. The backend saves the key only for the user who started
  * the sign-in. The fragment is cleared first, so the code is sent once.
+ * Returns true until the saved keys show the new key, so the OpenRouter row
+ * shows a spinner and not a stale "no key" row.
  */
-function useOpenRouterFinishFragment() {
-  const { reload } = useByokKeys();
+function useOpenRouterFinishFragment(): boolean {
+  const { reload, loading } = useByokKeys();
+  const [finishing, setFinishing] = React.useState(false);
+  const [finished, setFinished] = React.useState(false);
   React.useEffect(() => {
     const finish = parseOAuthFinish(window.location.hash);
     if (finish?.flow !== "openrouter") return;
     const url = new URL(window.location.href);
     window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}`);
+    setFinishing(true);
     finishOAuth(finish.path, finish)
-      .then(() => reload())
-      .catch((err) => toast.error(userErrorMessage(err, msg("settings.keys.save_failed_toast"))));
+      .then(() => setFinished(true))
+      .catch((err) => {
+        setFinishing(false);
+        toast.error(userErrorMessage(err, msg("settings.keys.save_failed_toast")));
+      });
     // Runs once on mount: the fragment is read and cleared in the same pass.
   }, []);
+  React.useEffect(() => {
+    // The provider's mount fetch can hold the list from before the key was
+    // saved. Reload only after it settles, so it cannot land after the reload.
+    if (!finished || loading) return;
+    setFinished(false);
+    void reload().finally(() => setFinishing(false));
+  }, [finished, loading, reload]);
+  return finishing;
 }
 
-function ProviderKeyRow({ provider }: { provider: ByokProviderInfo }) {
+function ProviderKeyRow({
+  provider,
+  finishingOAuth = false,
+}: {
+  provider: ByokProviderInfo;
+  /** True while a "Continue with OpenRouter" sign-in finishes for this row. */
+  finishingOAuth?: boolean;
+}) {
   const { keyFor, saveKey, verifyKey, removeKey, openrouterOAuthAvailable } = useByokKeys();
   const { locale } = useLocale();
   const saved = keyFor(provider.slug);
@@ -92,7 +115,8 @@ function ProviderKeyRow({ provider }: { provider: ByokProviderInfo }) {
   const [saving, setSaving] = React.useState(false);
   const [verifying, setVerifying] = React.useState(false);
   const [startingOAuth, setStartingOAuth] = React.useState(false);
-  const offerOAuth = provider.slug === "openrouter" && openrouterOAuthAvailable;
+  const offerOAuth = provider.slug === "openrouter" && (openrouterOAuthAvailable || finishingOAuth);
+  const oauthBusy = startingOAuth || finishingOAuth;
 
   const handleOAuth = async () => {
     setStartingOAuth(true);
@@ -195,11 +219,12 @@ function ProviderKeyRow({ provider }: { provider: ByokProviderInfo }) {
                   variant="outline"
                   size="icon-sm"
                   onClick={handleOAuth}
-                  disabled={startingOAuth}
+                  disabled={oauthBusy}
+                  aria-busy={oauthBusy}
                   className="size-[44px] sm:size-8 [@media(hover:none)_and_(pointer:coarse)]:size-[44px]"
                   aria-label={msg("settings.keys.openrouter_oauth")}
                 >
-                  {startingOAuth ? (
+                  {oauthBusy ? (
                     <CircleNotch className="size-3.5 animate-spin" />
                   ) : (
                     <SignIn className="size-3.5" />
@@ -209,7 +234,7 @@ function ProviderKeyRow({ provider }: { provider: ByokProviderInfo }) {
               <TooltipContent>{msg("settings.keys.openrouter_oauth")}</TooltipContent>
             </Tooltip>
           )}
-          {!saved && !editing && (
+          {!saved && !editing && !finishingOAuth && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -340,7 +365,7 @@ function ProviderKeyRow({ provider }: { provider: ByokProviderInfo }) {
  */
 export function ByokKeysSection() {
   useByokErrorParam();
-  useOpenRouterFinishFragment();
+  const finishingOpenRouter = useOpenRouterFinishFragment();
   return (
     <div data-setup="model-keys" className="space-y-3">
       <p className="text-xs text-muted-foreground">
@@ -350,7 +375,11 @@ export function ByokKeysSection() {
 
       <div className="flex flex-col gap-2">
         {BYOK_PROVIDERS.map((p) => (
-          <ProviderKeyRow key={p.slug} provider={p} />
+          <ProviderKeyRow
+            key={p.slug}
+            provider={p}
+            finishingOAuth={p.slug === "openrouter" && finishingOpenRouter}
+          />
         ))}
       </div>
 

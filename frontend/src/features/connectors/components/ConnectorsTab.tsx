@@ -105,7 +105,10 @@ function useConnectorErrorParam() {
  * the flow. Returns true while a connector finish runs, so the tab shows a
  * spinner instead of a stale "not connected" list.
  */
-function useOAuthFinishFragment(setConnectors: (connectors: ConnectorStatus[]) => void) {
+function useOAuthFinishFragment(
+  setConnectors: (connectors: ConnectorStatus[]) => void,
+  refetch: () => void,
+) {
   const [finishing, setFinishing] = React.useState(false);
   React.useEffect(() => {
     const finish = parseOAuthFinish(window.location.hash);
@@ -130,6 +133,9 @@ function useOAuthFinishFragment(setConnectors: (connectors: ConnectorStatus[]) =
           return;
         }
         if (answer?.connectors) setConnectors(answer.connectors);
+        // The mount GET can still be in flight with the list from before the
+        // link. A refetch drops that answer and loads the list again.
+        refetch();
         setFinishing(false);
       })
       .catch((err) => {
@@ -478,7 +484,7 @@ export function ConnectorsTab() {
     if (targetFocus) clearFocus();
   }, [targetFocus, clearFocus]);
   useConnectorErrorParam();
-  const finishing = useOAuthFinishFragment(setConnectors);
+  const finishing = useOAuthFinishFragment(setConnectors, refetch);
 
   return (
     <div data-setup="connectors" className="space-y-4">
