@@ -138,7 +138,7 @@ test("a repository run skips inputs and needs only the scorer", () => {
   assert.equal(computeStepIssue(state, "metric", null), null);
   state.workspace.metricCode = " ";
   assert.equal(computeStepIssue(state, "metric", null), "submit.v2.metric.issue.metric_code");
-  assert.deepEqual(stepPages("metric", state), ["metric", "overview"]);
+  assert.deepEqual(stepPages("metric", state), ["metric", "harden", "overview"]);
 });
 
 test("the task step names what a repository still lacks", () => {

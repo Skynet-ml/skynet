@@ -13,6 +13,7 @@ import { msg } from "@/shared/lib/messages";
 import type { ContractCheckResponse } from "@/shared/types/unified-run";
 import { useWizardV2 } from "../../hooks/use-unified-wizard";
 import { useContractCheck } from "../../hooks/use-contract-check";
+import { useHardening } from "../../hooks/use-hardening";
 import { IdeWorkspace } from "../../ide/IdeWorkspace";
 import { indexRepoTree, repoFolderName, type RepoSource } from "../../ide/repo-files";
 import { activeContractPhase } from "../../lib/contract-validation";
@@ -21,6 +22,7 @@ import { setupCheckFeedback } from "../../lib/setup-check-feedback";
 import { METRIC_FILE, RUN_FILE, repoIssue } from "../../lib/wizard-v2";
 import { ScheduleRunScreen } from "./ScheduleRunScreen";
 import { ContractCheckScreen } from "./ContractCheckScreen";
+import { HardenMetricScreen } from "./HardenMetricScreen";
 import { GeneralistAgentShell } from "./GeneralistAgentShell";
 import { RunOverview } from "./RunOverview";
 import { WizardScreen } from "./WizardScreen";
@@ -107,11 +109,12 @@ function useAutoFixLoop(
 }
 
 /**
- * Step 4, three screens. First the code, in VS Code's workbench: the setup
- * agent docked beside it writes run.py and metric.py, and the user can open
- * and edit each one. Then the sandbox check, which runs the code on a few
- * samples, with the agent docked beside it too. Then the overview, which
- * holds Run, so the run button never covers the editors.
+ * Step 4. First the code, in VS Code's workbench: the setup agent docked
+ * beside it writes run.py and metric.py, and the user can open and edit each
+ * one. Then hardening, where an attacker model tries to game the metric. Then
+ * the sandbox check, which runs the code on a few samples, with the agent
+ * docked beside it too. Then the overview, which holds Run, so the run button
+ * never covers the editors.
  */
 export function MetricStep({ page, onBack }: { page: number; onBack: () => void }) {
   const ctx = useWizardV2();
@@ -165,7 +168,20 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
     onStep && (agent?.agentBusy ?? false),
     agent?.agentWritingFields ?? [],
   );
-  const overviewPage = repo ? 1 : 3;
+  const overviewPage = repo ? 2 : 4;
+  // One job for the hardening screen and the overview's line about it.
+  const hardening = useHardening(onStep && page >= 1);
+  // The check's "Back to setup" means the code, two screens back past hardening.
+  const backTwice = React.useRef(false);
+  React.useEffect(() => {
+    if (!backTwice.current || page !== 1) return;
+    backTwice.current = false;
+    onBack();
+  }, [page, onBack]);
+  const toEditor = React.useCallback(() => {
+    backTwice.current = true;
+    onBack();
+  }, [onBack]);
 
   // The sandbox still injects `llm` for old scorers; making the import
   // explicit as the user leaves the code keeps it honest about what it calls.
@@ -200,24 +216,33 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
           }
         />
       </WizardScreen>
+      <WizardScreen active={page === 1} className="overflow-y-auto px-4 py-5 sm:px-6 sm:py-6">
+        <HardenMetricScreen
+          active={onStep && page === 1}
+          guided={guided}
+          onBack={onBack}
+          hardening={hardening}
+          reflectionModel={state.optimizer.reflectionModel ?? null}
+        />
+      </WizardScreen>
       {!repo && (
-        <WizardScreen active={page === 1} className="flex flex-col">
+        <WizardScreen active={page === 2} className="flex flex-col">
           {/* The check's automatic message and the agent's fix play out in this chat. */}
-          <GeneralistAgentShell active={onStep && page === 1}>
+          <GeneralistAgentShell active={onStep && page === 2}>
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 sm:py-6">
-              <ContractCheckScreen cc={contract} guided={guided} active={page === 1} onBack={onBack} />
+              <ContractCheckScreen cc={contract} guided={guided} active={page === 2} onBack={toEditor} />
             </div>
           </GeneralistAgentShell>
         </WizardScreen>
       )}
       {!repo && (
-        <WizardScreen active={page === 2} className="overflow-y-auto">
+        <WizardScreen active={page === 3} className="overflow-y-auto">
           <ScheduleRunScreen />
         </WizardScreen>
       )}
-      {/* A repository run has no check or schedule screen, so its overview is the second page. */}
+      {/* A repository run has no check or schedule screen, so its overview is the third page. */}
       <WizardScreen active={page === overviewPage} className="flex flex-col overflow-hidden">
-        <RunOverview state={state} cc={contract} guided={guided} />
+        <RunOverview state={state} cc={contract} guided={guided} hardening={hardening.job} />
       </WizardScreen>
     </div>
   );
