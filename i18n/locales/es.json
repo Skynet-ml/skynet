@@ -482,6 +482,26 @@
     "budget.not_found": "Este presupuesto no está disponible para tu cuenta. Crea un nuevo presupuesto de configuración.",
     "budget.invalid": "Introduce un límite de gasto que cubra el consumo ya gastado o reservado.",
     "budget.below_minimum": "El límite de gasto es inferior al mínimo que necesita esta ejecución. Introduce un límite más alto.",
-    "serve.not_enabled": "El servicio está desactivado para esta ejecución. Actívalo primero en la pestaña Servir de la ejecución."
+    "serve.not_enabled": "El servicio está desactivado para esta ejecución. Actívalo primero en la pestaña Servir de la ejecución.",
+    "mcp_connection.invalid_name": "Usa de 1 a 40 letras minúsculas, dígitos, '-' o '_', empezando por una letra.",
+    "mcp_connection.name_reserved": "El nombre {name} pertenece a un conector de {term.appName}. Usa otro nombre.",
+    "mcp_connection.invalid_url": "La URL del servidor MCP debe ser una URL HTTPS sin consulta.",
+    "mcp_connection.blocked_address": "Esta dirección de servidor MCP no está permitida.",
+    "mcp_connection.discovery_failed": "No se pudo leer la configuración OAuth de este servidor MCP.",
+    "mcp_connection.oauth_unsupported": "Este servidor MCP no pide un inicio de sesión OAuth.",
+    "mcp_connection.issuer_mismatch": "Los metadatos del servidor OAuth indican otro emisor.",
+    "mcp_connection.pkce_unsupported": "Este servidor MCP no admite PKCE con S256.",
+    "mcp_connection.registration_required": "Este servidor requiere que {term.appName} se registre primero. Su propietario debe permitir el registro dinámico de clientes.",
+    "mcp_connection.exchange_failed": "El servidor MCP no completó el inicio de sesión. Inténtalo de nuevo.",
+    "mcp_connection.state_invalid": "El enlace de inicio de sesión no es válido. Empieza de nuevo.",
+    "mcp_connection.state_expired": "El enlace de inicio de sesión es demasiado antiguo. Empieza de nuevo.",
+    "mcp_connection.wrong_account": "Otra cuenta inició este inicio de sesión. Vuelve a iniciarlo desde tu propia cuenta.",
+    "mcp_connection.declined": "El inicio de sesión no se completó.",
+    "mcp_connection.reauth_required": "Vuelve a iniciar sesión en el servidor MCP {name}.",
+    "mcp_connection.vault_key_changed": "El inicio de sesión guardado ya no se puede leer. Vuelve a iniciar sesión en este servidor MCP.",
+    "mcp_connection.not_connected": "No hay ninguna conexión de servidor MCP llamada {name}.",
+    "mcp_connection.unknown_connector": "Conector desconocido: {name}. Conéctalo primero como servidor MCP.",
+    "mcp_connection.invalid_preset": "Este servidor MCP no está en la lista.",
+    "mcp_connection.invalid_request": "Indica un preajuste, o un nombre y una URL de servidor MCP."
   }
 }

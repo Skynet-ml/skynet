@@ -482,6 +482,26 @@
     "budget.not_found": "Ce budget n’est pas disponible pour votre compte. Créez un nouveau budget de configuration.",
     "budget.invalid": "Saisissez un plafond de dépenses couvrant les montants déjà dépensés ou réservés.",
     "budget.below_minimum": "La limite de dépenses est inférieure au minimum requis pour cette exécution. Saisissez une limite plus élevée.",
-    "serve.not_enabled": "Le service est désactivé pour cette exécution. Activez-le d’abord dans l’onglet Service de l’exécution."
+    "serve.not_enabled": "Le service est désactivé pour cette exécution. Activez-le d’abord dans l’onglet Service de l’exécution.",
+    "mcp_connection.invalid_name": "Utilisez de 1 à 40 lettres minuscules, chiffres, '-' ou '_', en commençant par une lettre.",
+    "mcp_connection.name_reserved": "Le nom {name} appartient à un connecteur {term.appName}. Choisissez un autre nom.",
+    "mcp_connection.invalid_url": "L'URL du serveur MCP doit être une URL HTTPS sans requête.",
+    "mcp_connection.blocked_address": "Cette adresse de serveur MCP n'est pas autorisée.",
+    "mcp_connection.discovery_failed": "Impossible de lire la configuration OAuth de ce serveur MCP.",
+    "mcp_connection.oauth_unsupported": "Ce serveur MCP ne demande pas de connexion OAuth.",
+    "mcp_connection.issuer_mismatch": "Les métadonnées du serveur OAuth indiquent un autre émetteur.",
+    "mcp_connection.pkce_unsupported": "Ce serveur MCP ne prend pas en charge PKCE avec S256.",
+    "mcp_connection.registration_required": "Ce serveur exige que {term.appName} s'enregistre d'abord. Son propriétaire doit autoriser l'enregistrement dynamique de clients.",
+    "mcp_connection.exchange_failed": "Le serveur MCP n'a pas terminé la connexion. Réessayez.",
+    "mcp_connection.state_invalid": "Le lien de connexion n'est pas valide. Recommencez.",
+    "mcp_connection.state_expired": "Le lien de connexion est trop ancien. Recommencez.",
+    "mcp_connection.wrong_account": "Un autre compte a lancé cette connexion. Relancez-la depuis votre propre compte.",
+    "mcp_connection.declined": "La connexion n'a pas abouti.",
+    "mcp_connection.reauth_required": "Reconnectez-vous au serveur MCP {name}.",
+    "mcp_connection.vault_key_changed": "La connexion enregistrée n'est plus lisible. Reconnectez-vous à ce serveur MCP.",
+    "mcp_connection.not_connected": "Aucune connexion de serveur MCP nommée {name}.",
+    "mcp_connection.unknown_connector": "Connecteur inconnu : {name}. Connectez-le d'abord comme serveur MCP.",
+    "mcp_connection.invalid_preset": "Ce serveur MCP n'est pas dans la liste.",
+    "mcp_connection.invalid_request": "Indiquez un préréglage, ou un nom et une URL de serveur MCP."
   }
 }

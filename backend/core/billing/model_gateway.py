@@ -35,8 +35,16 @@ from .cli_dispatch import CliDispatcher
 from .credential_safety import scrub_model_config
 from .data_policy import data_policy_for
 from .dependency_lock import verify_dependency_lock
-from .env_connectors import CONNECTOR_ROUTES_KEY, CONNECTORS_KEY, connector_endpoint, require_connectors, tool_meter
+from .env_connectors import (
+    CONNECTOR_ROUTES_KEY,
+    CONNECTORS,
+    CONNECTORS_KEY,
+    connector_endpoint,
+    require_connectors,
+    tool_meter,
+)
 from .mcp_broker import McpToolsBroker, _pinned_address, _PinnedTransport
+from .mcp_oauth_client import McpOAuthError, access_token, connected_server_url
 from .model_batch import BatchCollector
 from .model_dispatch import MODEL_ATTEMPT_HEADER, ModelHTTPResult, OpenRouterDispatcher
 from .openrouter_quotes import resolve_model_slug
@@ -859,22 +867,54 @@ class ModelGateway:
         *,
         authorize_tool: Callable[[str, str, dict[str, Any]], bool] | None,
         on_tool_event: Callable[[dict[str, Any]], None] | None,
+        allow_private: bool = False,
     ) -> dict[str, dict[str, str]]:
-        """Open one parent-keyed, metered broker for each requested catalog connector.
+        """Open one parent-keyed broker for each requested connector.
+
+        A catalog connector gets a metered broker with Skynet's key. Any other
+        name must be the owner's OAuth MCP server connection; its broker adds
+        the owner's token on the parent and has no meter, because the owner's
+        account pays the service, as for BYOK.
 
         Args:
             names: Connector names from the run's tool list.
             authorize_tool: Optional blocking approval gate for protected chat tools.
             on_tool_event: Optional lifecycle event receiver for protected chat tools.
+            allow_private: Deployment opt-in for private MCP destinations.
 
         Returns:
             Each connector's scoped route: this gateway's URL and its own token.
 
         Raises:
-            ValueError: When a connector is unknown or has no key in config.
+            ValueError: When a connector is unknown, has no key in config, or its
+                OAuth connection needs a new sign-in.
         """
+        if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+            raise ValueError("The connector list must be a list of connector names.")
+        catalog = require_connectors([name for name in names if name in CONNECTORS])
+        oauth_names = [name for name in dict.fromkeys(names) if name not in CONNECTORS]
+        oauth_urls: dict[str, str] = {}
+        for name in oauth_names:
+            url = connected_server_url(self.runtime.username, name)
+            if url is None:
+                raise McpOAuthError("mcp_connection.unknown_connector", 404, name=name)
+            oauth_urls[name] = url
         routes: dict[str, dict[str, str]] = {}
-        for connector in require_connectors(names):
+        for name, url in oauth_urls.items():
+            token = self._connector_tokens.get(name)
+            if token is None:
+                token = secrets.token_urlsafe(32)
+                self._connectors[token] = McpToolsBroker(
+                    url,
+                    token_source=lambda name=name: access_token(self.runtime.username, name),
+                    allow_private=allow_private,
+                    check_admission=self.runtime.check_admission,
+                    authorize_tool=authorize_tool,
+                    on_tool_event=on_tool_event,
+                )
+                self._connector_tokens[name] = token
+            routes[name] = {"url": self.url, "token": token}
+        for connector in catalog:
             token = self._connector_tokens.get(connector.name)
             if token is None:
                 url, headers = connector_endpoint(connector)
@@ -976,7 +1016,10 @@ class ModelGateway:
             result["_skynet_tools_route"] = {"url": self.url, "token": self._tool_token}
         if result.get(CONNECTORS_KEY):
             result[CONNECTOR_ROUTES_KEY] = self._connector_routes(
-                result[CONNECTORS_KEY], authorize_tool=authorize_tool, on_tool_event=on_tool_event
+                result[CONNECTORS_KEY],
+                authorize_tool=authorize_tool,
+                on_tool_event=on_tool_event,
+                allow_private=allow_private_tools,
             )
         if self._descriptor is not None:
             result["_budget_gateway_descriptor"] = {

@@ -22,7 +22,8 @@ import { Button } from "@/shared/ui/primitives/button";
 import { Input } from "@/shared/ui/primitives/input";
 import { Label } from "@/shared/ui/primitives/label";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
-import type { ConnectorProvider, ConnectorStatus } from "@/shared/lib/api";
+import { finishMcpConnection, type ConnectorProvider, type ConnectorStatus } from "@/shared/lib/api";
+import { parseMcpFinish } from "@/shared/lib/mcp-finish";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { knownErrorCodeMessage, userErrorMessage } from "@/shared/lib/user-error";
 import { cn } from "@/shared/lib/utils";
@@ -74,21 +75,42 @@ function ConnectorStatusDot({ status }: { status: NonNullable<ConnectorStatus["s
 }
 
 /**
- * Consume a ``?connector_error=<code>`` left by the OAuth callback redirect:
- * toast the translated message once and strip the param so a reload stays quiet.
+ * Consume a ``?connector_error=<code>`` or ``?mcp_error=<code>`` left by an
+ * OAuth callback redirect: toast the translated message once and strip the
+ * param so a reload stays quiet.
  */
 function useConnectorErrorParam() {
   React.useEffect(() => {
     const url = new URL(window.location.href);
-    const code = url.searchParams.get("connector_error");
+    const code = url.searchParams.get("connector_error") ?? url.searchParams.get("mcp_error");
     if (!code) return;
     toast.error(knownErrorCodeMessage(code) ?? msg("connectors.toast.failed"), TOAST_OPTIONS);
     url.searchParams.delete("connector_error");
+    url.searchParams.delete("mcp_error");
     window.history.replaceState(
       window.history.state,
       "",
       `${url.pathname}${url.search}${url.hash}`,
     );
+  }, []);
+}
+
+/**
+ * Finish an MCP server sign-in from the ``#mcp_state=..&mcp_code=..`` fragment
+ * of the callback redirect. The backend checks that this signed-in user
+ * started the sign-in. The fragment is cleared first, so the code is sent once.
+ */
+function useMcpFinishFragment() {
+  React.useEffect(() => {
+    const finish = parseMcpFinish(window.location.hash);
+    if (!finish) return;
+    const url = new URL(window.location.href);
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}`);
+    finishMcpConnection(finish)
+      .then(({ name }) =>
+        toast.success(formatMsg("connectors.toast.provider_connected", { provider: name }), TOAST_OPTIONS),
+      )
+      .catch((err) => toast.error(userErrorMessage(err, msg("connectors.toast.failed")), TOAST_OPTIONS));
   }, []);
 }
 
@@ -428,6 +450,7 @@ export function ConnectorsTab() {
     if (targetFocus) clearFocus();
   }, [targetFocus, clearFocus]);
   useConnectorErrorParam();
+  useMcpFinishFragment();
 
   return (
     <div data-setup="connectors" className="space-y-4">
