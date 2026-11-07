@@ -222,11 +222,19 @@ class _LaneEngine:
         try:
             with dspy.context(**self.model_context), usage_scope(lane=lane_tag(self.phase, self.name)):
                 result = get_engine(self.name, self.caps).run(local_task, server, _admit_context(context))
-            lane.best_candidate, lane.best_score = result.best_candidate, result.best_score
+            best_candidate, best_score = result.best_candidate, result.best_score
+            if server.metric_error(best_candidate) is not None:
+                # An upstream engine ranks by filled means, so it can return a
+                # version that crashed on a case. Final selection excludes such
+                # versions (SKY-350), so the lane hands off its best scored one.
+                best_candidate, best_score = server.best_candidate, server.best_score
+                if best_candidate is None:
+                    best_candidate, best_score = task.seed_candidate, -math.inf
+            lane.best_candidate, lane.best_score = best_candidate, best_score
             lane.metadata = result.metadata
             return UpstreamResult(
-                best_candidate=result.best_candidate,
-                best_score=result.best_score if result.best_score is not None else -math.inf,
+                best_candidate=best_candidate,
+                best_score=best_score if best_score is not None else -math.inf,
                 total_evals=server.used,
                 metadata={**result.metadata, "engine": self.name, "phase": self.phase},
             )

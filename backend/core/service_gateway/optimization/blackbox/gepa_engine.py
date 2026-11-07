@@ -9,19 +9,20 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from gepa.core.result import GEPAResult
 from gepa.core.state import GEPAState
 from gepa.gepa_launcher import EngineConfig, GEPAConfig, ReflectionConfig, TrackingConfig, optimize_anything
-from gepa.utils.stop_condition import ScoreThresholdStopper
 
-from ....constants import OPTIMIZER_NAME_GEPA
+from ....constants import OPTIMIZER_NAME_GEPA, PROGRESS_CANDIDATE
 from ....exceptions import ServiceError
 from ..budget_stop import BudgetReached
 from ..trajectory import capture_proposal_prompts, trajectory_watch
 from .feedback import STR_CANDIDATE_KEY, emit_scorer_feedback, gepa_side_info
+from .native_engines import ScoredThresholdStopper
 from .native_runtime import run_native_engine
 from .protocol import (
     BudgetExhaustedError,
@@ -52,6 +53,53 @@ class _JobLogger:
         logger.info("%s", message)
 
 
+def _version(candidate: Any, str_mode: bool) -> Any:
+    """Return the version the server keyed for a GEPA program candidate.
+
+    Args:
+        candidate: A GEPA program candidate.
+        str_mode: Whether the task optimizes one text.
+
+    Returns:
+        The text in text mode, else the components mapping.
+    """
+    return candidate[STR_CANDIDATE_KEY] if str_mode and isinstance(candidate, dict) else candidate
+
+
+def _scored_progress(
+    callback: Callable[[str, dict[str, Any]], None] | None, server: EvalServer, str_mode: bool
+) -> Callable[[str, dict[str, Any]], None] | None:
+    """Wrap a progress callback so a crashed version's live event shows no score.
+
+    GEPA ranks by filled means, so its state holds a filled mean for a
+    version that crashed on a case. Final selection drops that version
+    (SKY-350), so the live tree must not show the filled mean (SKY-367).
+
+    Args:
+        callback: The job's progress callback, or ``None``.
+        server: The server that records each version's metric error.
+        str_mode: Whether the task optimizes one text.
+
+    Returns:
+        The wrapped callback, or ``None`` when there is no callback.
+    """
+    if callback is None:
+        return None
+
+    def forward(event: str, metrics: dict[str, Any]) -> None:
+        """Forward one event, with no score for a candidate that crashed on a case.
+
+        Args:
+            event: The progress event name.
+            metrics: The event payload.
+        """
+        if event == PROGRESS_CANDIDATE and server.metric_error(_version(metrics.get("prompt"), str_mode)) is not None:
+            metrics = {**metrics, "score": None, "per_example": []}
+        callback(event, metrics)
+
+    return forward
+
+
 class GepaEngine:
     """Reflective prompt-evolution engine backed by ``optimize_anything``."""
 
@@ -79,7 +127,12 @@ class GepaEngine:
         Path(run_dir).mkdir(parents=True, exist_ok=True)
         stop_callbacks: list[Any] = []
         if ctx.stop_at_score is not None:
-            stop_callbacks.append(ScoreThresholdStopper(ctx.stop_at_score))
+            stop_callbacks.append(
+                ScoredThresholdStopper(
+                    ctx.stop_at_score,
+                    lambda candidate: server.metric_error(_version(candidate, task.str_mode)) is not None,
+                )
+            )
         config = GEPAConfig(
             engine=EngineConfig(
                 run_dir=run_dir,
@@ -178,7 +231,10 @@ class GepaEngine:
         # stream their trajectory tree through. The proposal capture pins
         # scorer feedback to the iteration that asked for it and snapshots
         # rejected proposals' text, again exactly as the DSPy path does.
-        with capture_proposal_prompts(OPTIMIZER_NAME_GEPA), trajectory_watch(run_dir, ctx.progress_callback):
+        with (
+            capture_proposal_prompts(OPTIMIZER_NAME_GEPA),
+            trajectory_watch(run_dir, _scored_progress(ctx.progress_callback, server, task.str_mode)),
+        ):
             try:
                 gepa_result: GEPAResult[Any, Any] | None = optimize_anything(**kwargs)
             except BudgetReached as exc:

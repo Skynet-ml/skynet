@@ -321,7 +321,7 @@ def emit_candidate(
     candidate_id: str,
     parent_id: str | None,
     generation: int,
-    score: float,
+    score: float | None,
     per_example: list[tuple[str, float]],
     candidate: Candidate,
     discovered_at_evals: int,
@@ -336,7 +336,7 @@ def emit_candidate(
         candidate_id: The version's id within the lane.
         parent_id: The version it was proposed from; ``None`` for the first.
         generation: Depth in the tree — the parent's plus one, 0 for the first.
-        score: Its mean score.
+        score: Its mean score, or ``None`` for a version with a crashed case.
         per_example: ``(case id, score)`` per case scored.
         candidate: The version's text or parts.
         discovered_at_evals: Scorer runs the lane had spent when it was scored.

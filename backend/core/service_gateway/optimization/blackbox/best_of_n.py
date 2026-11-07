@@ -110,7 +110,7 @@ class BestOfNEngine:
             return run_native_engine("best_of_n_repo", task, server, ctx)
         finalists = _validation_finalists(task, server)
         sampling = server.lane(server.remaining - finalists * len(task.valset))
-        upstream = upstream_server(task, sampling, ctx, on_eval=_SampleStream(task, sampling, ctx), prefetch_cases=True)
+        upstream = upstream_server(task, sampling, ctx, on_eval=_SampleStream(task, sampling, ctx))
         result = None
         budget_stop = None
         try:

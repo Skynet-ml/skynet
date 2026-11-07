@@ -732,6 +732,44 @@ def test_a_version_that_crashed_on_an_earlier_case_is_not_the_legal_fallback(
     assert response.best_score == pytest.approx(-2.0)
 
 
+_ALWAYS_CRASHING_CASE_CODE = """
+def score(candidate, case=None):
+    if case and case.get("i") == 1:
+        raise IndexError("edge case")
+    return {"score": 1.0 if candidate == "better" else 0.5, "feedback": "ok"}
+"""
+
+
+def test_a_case_that_crashes_for_every_version_publishes_the_seed(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When one case crashes for every version, each version has a metric_error, so the seed stays (SKY-367).
+
+    This pins a known coverage gap: the search still ranks by the scored
+    cases, but final selection excludes every version with a metric_error.
+    """
+    cases = [{"i": 0}, {"i": 1}]
+
+    def search(
+        strategy: object, task: object, server: EvalServer, ctx: object, cb: object = None, *, caps: object = None
+    ) -> tuple[Result, list[object]]:
+        """Score a better version on every case and return it."""
+        for case in cases:
+            server.evaluate("better", case)
+        return Result(best_candidate="better", best_score=1.0, total_evals=server.used), []
+
+    monkeypatch.setattr(service_mod, "run_strategy", search)
+
+    response = run_blackbox_optimization(
+        _payload(scorer={"kind": "python", "metric_code": _ALWAYS_CRASHING_CASE_CODE}, cases=cases),
+        artifact_id="job-3f",
+        gepa_log_dir_path=str(tmp_path),
+    )
+
+    assert response.best_candidate == "hello world"
+    assert response.best_score == response.baseline_score == 0.5
+
+
 def test_seedless_run_without_cases_scores_the_version_alone(fake_lm: FakeReflectionLM, tmp_path: Path) -> None:
     """Without a starting point or cases there is no baseline and the scorer sees ``case=None``."""
     response = run_blackbox_optimization(

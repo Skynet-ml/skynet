@@ -46,7 +46,6 @@ from gepa.oa.config import OptimizeAnythingConfig
 from gepa.oa.engine import Result
 from gepa.oa.eval_server import EvalServer
 from gepa.oa.task import Task, seed_as_text
-from gepa.utils.stop_condition import ScoreThresholdStopper
 
 try:
     from . import repo_tree
@@ -384,6 +383,12 @@ def visible_example_ids(server: EvalServer) -> list[str]:
     return [eid for split in ("train", "val") for eid, _ in server.iter_split(split)]
 
 
+# Sweep details list the case ids that ``native_runner`` filled, so an engine
+# that must not rank a partly crashed version can tell it apart (SKY-367).
+UNSCORED_CASES_KEY = "unscored_cases"
+TEXT_CANDIDATE_KEY = "current_candidate"
+
+
 def fill_unscored(keys: list[str], scores: list[float]) -> list[float]:
     """Give each null case its version's mean over the scored cases in the same batch.
 
@@ -668,6 +673,51 @@ def _reached(stop_at_score: float | None, score: float | None) -> bool:
         ``True`` only when both are set and the threshold is met.
     """
     return stop_at_score is not None and score is not None and score >= stop_at_score
+
+
+class ScoredThresholdStopper:
+    """GEPA stopper that ignores versions with a crashed case.
+
+    GEPA ranks a version by the mean with each null case filled (SKY-367).
+    Final selection drops such a version, so its filled mean must not stop
+    the run either.
+    """
+
+    def __init__(self, threshold: float, crashed: Callable[[Any], bool]) -> None:
+        """Bind the threshold and the crash check.
+
+        Args:
+            threshold: The run's ``stop_at_score``.
+            crashed: Tells whether a GEPA program candidate hit a metric error.
+        """
+        self.threshold = threshold
+        self.crashed = crashed
+
+    def __call__(self, gepa_state: Any) -> bool:
+        """Tell whether a version with no crashed case reached the threshold.
+
+        Args:
+            gepa_state: GEPA's run state.
+
+        Returns:
+            ``True`` once such a version's validation mean meets the threshold.
+        """
+        pairs = zip(gepa_state.program_candidates, gepa_state.program_full_scores_val_set, strict=False)
+        return any(score >= self.threshold for candidate, score in pairs if not self.crashed(candidate))
+
+
+def unwrap_text_candidate(candidate: Any) -> Any:
+    """Return the text of a GEPA text-mode program candidate.
+
+    Args:
+        candidate: A GEPA program candidate.
+
+    Returns:
+        The text inside a one-key ``current_candidate`` mapping, else ``candidate``.
+    """
+    if isinstance(candidate, dict) and list(candidate) == [TEXT_CANDIDATE_KEY]:
+        return candidate[TEXT_CANDIDATE_KEY]
+    return candidate
 
 
 def task_brief(task: Task, example_ids: list[str]) -> str:
@@ -2298,6 +2348,19 @@ class GepaRepoEngine:
         gepa_dir = self.run_dir / "gepa"
         gepa_dir.mkdir(parents=True, exist_ok=True)
         tracker = BestValsetVersion()
+        crashed: set[str] = set()
+
+        def _key(candidate: Any) -> str:
+            """Key a version the same way for the batch and the stopper.
+
+            Args:
+                candidate: The text GEPA scores, or its program candidate mapping.
+
+            Returns:
+                The version's sorted JSON form.
+            """
+            return json.dumps(unwrap_text_candidate(candidate), sort_keys=True, default=str)
+
         config = GEPAConfig(
             engine=EngineConfig(
                 run_dir=str(gepa_dir),
@@ -2310,7 +2373,11 @@ class GepaRepoEngine:
             reflection=ReflectionConfig(reflection_lm=None, custom_candidate_proposer=self.proposer),
             stop_callbacks=[
                 lambda _state: self.proposer.failure is not None,
-                *([ScoreThresholdStopper(self.stop_at_score)] if self.stop_at_score is not None else []),
+                *(
+                    [ScoredThresholdStopper(self.stop_at_score, lambda candidate: _key(candidate) in crashed)]
+                    if self.stop_at_score is not None
+                    else []
+                ),
             ],
             callbacks=[tracker],
         )
@@ -2330,7 +2397,8 @@ class GepaRepoEngine:
                 One ``(score, side_info)`` per pair, in order.
             """
             results = [evaluate(candidate, example) for candidate, example in pairs]
-            keys = [json.dumps(candidate, sort_keys=True, default=str) for candidate, _ in pairs]
+            keys = [_key(candidate) for candidate, _ in pairs]
+            crashed.update(key for key, (score, _) in zip(keys, results, strict=True) if not math.isfinite(score))
             filled = fill_unscored(keys, [score for score, _ in results])
             return [(score, info) for score, (_, info) in zip(filled, results, strict=True)]
 
@@ -2584,16 +2652,17 @@ class BestOfNRepoEngine:
             self.samples.append(sample)
             try:
                 if split is None:
-                    score, _ = server.evaluate(patch["candidate"])
+                    score, info = server.evaluate(patch["candidate"])
                 else:
-                    score, _ = server.evaluate_examples(patch["candidate"], split=split)
+                    score, info = server.evaluate_examples(patch["candidate"], split=split)
             except BudgetExhausted:
                 # Upstream discards a sample the budget cut short and keeps the best complete one.
                 sample["outcome"] = "budget_exhausted"
                 break
             score = float(score)
-            if not math.isfinite(score):
-                # SKY-367: a sample with no scored case has no score and is never best.
+            if not math.isfinite(score) or info.get(UNSCORED_CASES_KEY):
+                # SKY-367: a sample with a crashed case has no score, so it is
+                # never best and cannot reach stop_at_score on its filled mean.
                 sample["outcome"] = "metric_error"
                 continue
             server.log_progress(score, candidate=patch["candidate"])

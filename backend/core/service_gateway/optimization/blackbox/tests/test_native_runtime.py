@@ -1510,6 +1510,45 @@ def test_mailbox_relays_case_scores_and_per_case_versions() -> None:
     assert candidate["per_example"] == [{"id": "0", "score": 1.0}, {"id": "1", "score": 0.5}]
 
 
+def test_mailbox_shows_no_score_for_a_version_with_a_crashed_case() -> None:
+    """The child's filled mean for a version with a crashed case never reaches the candidate tree (SKY-367)."""
+
+    def crash_on_case_two(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
+        """Raise on case 2, else score 1.0.
+
+        Args:
+            candidate: Candidate text.
+            case: The case.
+
+        Returns:
+            A full score and no side information.
+
+        Raises:
+            RuntimeError: On case 2.
+        """
+        if case == {"id": "2"}:
+            raise RuntimeError("scorer bug")
+        return 1.0, {}
+
+    sink: list[tuple[str, dict[str, Any]]] = []
+    server = EvalServer(crash_on_case_two, max_evals=3)
+    server.evaluate("seed", {"id": "2"})
+    mailbox = native_runtime._EvaluatorMailbox(
+        FakeSession(), server, "nonce", progress_callback=lambda event, metrics: sink.append((event, metrics))
+    )
+
+    mailbox.on_output(
+        "stdout",
+        'APP_NATIVE_PROGRESS nonce {"candidate_id": 0, "candidate": "seed", "score": 0.75, "total_evals": 2, '
+        '"per_example": [["0", 1.0], ["1", 0.5], ["2", 0.75]]}\n',
+    )
+
+    assert mailbox.error is None
+    [(event, candidate)] = sink
+    assert event == PROGRESS_CANDIDATE
+    assert (candidate["score"], candidate["per_example"]) == (None, [])
+
+
 def test_mailbox_relays_the_lineage_an_engine_reports() -> None:
     """A version's parent and generation reach the candidate event; engines that omit them keep the defaults."""
     sink: list[tuple[str, dict[str, Any]]] = []
@@ -1631,6 +1670,7 @@ def test_a_sweep_fills_a_null_case_with_the_scored_mean(tmp_path: Path) -> None:
     assert good_info["scores"] == {"a": 1.0, "b": 1.0, "c": 1.0}
     assert poor == 0.25
     assert poor_info["scores"]["c"] == 0.25
+    assert good_info[native_engines.UNSCORED_CASES_KEY] == ["c"]
     assert good > poor
     assert only_null == float("-inf")
     assert only_null_info["scores"] == {"c": float("-inf")}
@@ -1711,8 +1751,8 @@ def test_best_valset_version_skips_a_version_with_no_scored_case() -> None:
     assert tracker.best == ("ok", 0.25)
 
 
-def test_best_of_n_repo_marks_a_crashed_sample_and_ranks_the_rest(tmp_path: Path) -> None:
-    """A sample with no scored case is a metric_error sample; one null case still ranks by the other (SKY-367).
+def test_best_of_n_repo_marks_a_partly_crashed_sample_and_ranks_the_rest(tmp_path: Path) -> None:
+    """A sample with any null case is a metric_error sample, so its filled mean cannot stop the run (SKY-367).
 
     Args:
         tmp_path: Upstream evaluation artifacts.
@@ -1724,15 +1764,27 @@ def test_best_of_n_repo_marks_a_crashed_sample_and_ranks_the_rest(tmp_path: Path
     engine.proposer.total_cost = 0.0  # type: ignore[attr-defined]
     engine.proposer.session_ids = []  # type: ignore[attr-defined]
     engine.max_token_cost = None
-    engine.stop_at_score = None
+    engine.stop_at_score = 0.9
     engine.samples = []
     engine.best = None
 
     result = engine.run(server.task, server)
 
-    assert [sample.get("outcome") for sample in result.metadata["samples"]] == ["metric_error", None, None]
-    assert [sample.get("score") for sample in result.metadata["samples"]] == [None, 1.0, 0.25]
-    assert (result.best_candidate, result.best_score) == ("aeio", 1.0)
+    assert [sample.get("outcome") for sample in result.metadata["samples"]] == ["metric_error", "metric_error", None]
+    assert [sample.get("score") for sample in result.metadata["samples"]] == [None, None, 0.25]
+    assert (result.best_candidate, result.best_score) == ("axyz", 0.25)
+
+
+def test_scored_threshold_stopper_ignores_a_crashed_version() -> None:
+    """Only a version with no crashed case can reach ``stop_at_score`` (SKY-367)."""
+    state = SimpleNamespace(
+        program_candidates=[{"current_candidate": "crashed"}, {"current_candidate": "ok"}],
+        program_full_scores_val_set=[1.0, 0.5],
+    )
+    crashed = lambda candidate: native_engines.unwrap_text_candidate(candidate) == "crashed"  # noqa: E731
+
+    assert not native_engines.ScoredThresholdStopper(0.9, crashed)(state)
+    assert native_engines.ScoredThresholdStopper(0.5, crashed)(state)
 
 
 def test_unsupported_runtime_reason_names_the_cloud_sandbox_not_its_vendor() -> None:

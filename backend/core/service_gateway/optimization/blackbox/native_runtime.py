@@ -678,7 +678,10 @@ class _EvaluatorMailbox:
         per_example = event.get("per_example")
         parent_id = event.get("parent_id")
         generation = event.get("generation")
-        fields: dict[str, Any] = {"score": float(score), "total_evals": event.get("total_evals")}
+        # The child fills a crashed case with its version's mean (SKY-367).
+        # Final selection drops that version (SKY-350), so it shows no score.
+        shown = None if self.server.metric_error(event.get("candidate")) is not None else float(score)
+        fields: dict[str, Any] = {"score": shown, "total_evals": event.get("total_evals")}
         tool_calls = event.get("tool_calls")
         tool_note = ""
         if isinstance(tool_calls, int) and not isinstance(tool_calls, bool):
@@ -686,9 +689,9 @@ class _EvaluatorMailbox:
             fields.update(tool_calls=tool_calls, tool_cap_reached=cap_reached)
             tool_note = f"; the agent used {tool_calls} tool call(s)" + (", hitting the cap" if cap_reached else "")
         logger.info(
-            "Candidate %s scored %.4f after %s evaluations%s",
+            "Candidate %s scored %s after %s evaluations%s",
             candidate_id,
-            float(score),
+            "no score (a case crashed)" if shown is None else f"{shown:.4f}",
             event.get("total_evals"),
             tool_note,
             extra=run_log.event_extra(
@@ -703,8 +706,10 @@ class _EvaluatorMailbox:
             candidate_id=str(candidate_id),
             parent_id=_label(parent_id),
             generation=generation if isinstance(generation, int) and not isinstance(generation, bool) else 0,
-            score=float(score),
-            per_example=[
+            score=shown,
+            per_example=[]
+            if shown is None
+            else [
                 (str(example_id), float(value))
                 for example_id, value in (per_example if isinstance(per_example, list) else [])
                 if _finite(value)
