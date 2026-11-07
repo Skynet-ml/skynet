@@ -1399,3 +1399,33 @@ def test_staging_stops_when_a_metric_file_stays_visible(monkeypatch: pytest.Monk
         _stage_with(_METRIC_TREE, monkeypatch)
 
     assert not workdirs[0].exists()
+
+
+_METRIC_EDIT = (
+    "diff --git a/eval/scorer.py b/eval/scorer.py\n--- a/eval/scorer.py\n+++ b/eval/scorer.py\n"
+    "@@ -1 +1 @@\n-def score(): ...\n+def score(): return 1.0\n"
+)
+
+
+def test_the_stored_result_keeps_only_the_scored_change(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Serving and download read the stored versions, so a metric edit never stays in them (SKY-353)."""
+    pushed: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "tok")
+    monkeypatch.setattr(repo_staging, "push_version", lambda *args: pushed.append(args))
+    monkeypatch.setattr(
+        repo_staging,
+        "open_pull_request",
+        lambda token, repository, **fields: PublishedChange(branch=fields["head"], url="u", number=1, draft=True),
+    )
+    staged = repo_staging.StagedRepository(
+        snapshot=_staged(tmp_path).snapshot, secrets={}, workdir=tmp_path, hidden_paths=("eval/scorer.py",)
+    )
+    raw = _EDIT + _METRIC_EDIT
+    result = _result(0.5, 0.8, best=raw, versions=[{"candidate": raw, "score": 0.8}], lanes=[{"candidate": {"a": raw}}])
+
+    _publish(result, staged)
+
+    assert repo_staging.improved_patch(result) == _EDIT
+    assert result["versions"][0]["candidate"] == _EDIT
+    assert result["lanes"][0]["candidate"] == {"a": _EDIT}
+    assert pushed[0][2] == _EDIT

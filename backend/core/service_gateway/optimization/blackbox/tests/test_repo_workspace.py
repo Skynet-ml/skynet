@@ -521,3 +521,36 @@ def test_a_version_that_edits_a_metric_file_is_laid_out_with_the_base_metric(tmp
         assert box.read_file(f"{WORK_DIR}/.optimize/exploits/a") is None
     finally:
         space.close()
+
+
+def test_version_code_that_rewrites_the_hidden_metric_while_it_runs_is_caught(tmp_path: Path) -> None:
+    """Fingerprint the hidden metric like a protected file, and never name it to the agent (SKY-353)."""
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/metric.py": "def score(): return 0.1\n"})
+    space = RepoWorkspace(
+        runtime=_Runtime(),
+        spec=_ONLINE,
+        archive=archive,
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command=None,
+        secrets={},
+        hidden_paths=["eval/metric.py", ".optimize/exploits"],
+    )
+    try:
+        version = _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"})
+        space.checkout(version)
+        assert space.stamp_before_run() is None
+        space.session().run(f"cd {WORK_DIR} && cat eval/metric.py > /dev/null")
+        assert space.protected_changes() == ()
+
+        space.checkout(version)
+        space.stamp_before_run()
+        space.session().run(f"cd {WORK_DIR} && printf 'def score(): return 1.0\\n' > eval/metric.py")
+        assert space.protected_changes() == ("The version's code changed the repository's metric files while it ran.",)
+
+        space.checkout(version)
+        space.stamp_before_run()
+        space.session().run(f"cd {WORK_DIR} && mkdir -p .optimize/exploits && touch .optimize/exploits/a")
+        assert space.protected_changes() == ("The version's code changed the repository's metric files while it ran.",)
+    finally:
+        space.close()

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import posixpath
 import shlex
 import threading
 from collections.abc import Iterable, Mapping
@@ -191,7 +192,8 @@ class RepoWorkspace:
                 inside an editable path.
             hidden_paths: The metric files and exploit folder the agent never
                 sees. A version's edits to them are dropped, so every version
-                is scored with the base commit's metric.
+                is scored with the base commit's metric, and they are
+                fingerprinted like the protected paths.
         """
         self._runtime = runtime
         self._spec = spec
@@ -199,7 +201,10 @@ class RepoWorkspace:
         self._editable = tuple(editable_paths)
         self._readonly = tuple(readonly_paths)
         self._protected = tuple(protected_paths)
-        self._hidden = tuple(hidden_paths)
+        self._hidden = tuple(posixpath.normpath(path) for path in hidden_paths)
+        # The version's code runs next to the metric, so it could rewrite the
+        # metric while it runs; the patch check alone never sees that (SKY-353).
+        self._watched = tuple(dict.fromkeys((*self._protected, *self._hidden)))
         self._setup = (setup_command or "").strip() or None
         self._secrets = dict(secrets)
         self._session: SandboxSession | None = None
@@ -306,14 +311,14 @@ class RepoWorkspace:
         moved = session.run(f"mv {WORK_DIR} {PREPARED_DIR}", timeout_seconds=_SETUP_TIMEOUT_SECONDS)
         if not moved.ok:
             raise RepoSetupError(f"The prepared repository could not be kept: {_tail(moved)}")
-        if self._protected:
+        if self._watched:
             baseline = self._fingerprint(session, PREPARED_DIR)
             if baseline is None:
                 raise RepoSetupError("The repository's protected files could not be fingerprinted.")
             self._protected_baseline = baseline[0]
 
     def _fingerprint(self, session: SandboxSession, directory: str) -> tuple[dict[str, str], dict[str, str]] | None:
-        """Hash every file under the protected paths of one tree in the box.
+        """Hash every file under the protected and hidden paths of one tree in the box.
 
         Args:
             session: The box holding the tree.
@@ -324,7 +329,7 @@ class RepoWorkspace:
             times for every file and folder, or ``None`` when the hashing
             command failed or printed something unreadable.
         """
-        paths = " ".join(shlex.quote(path) for path in self._protected)
+        paths = " ".join(shlex.quote(path) for path in self._watched)
         result = session.run(
             f"cd {shlex.quote(directory)} && python3 -I -c {shlex.quote(_HASH_PROTECTED)} {paths}",
             timeout_seconds=_HASH_TIMEOUT_SECONDS,
@@ -417,7 +422,7 @@ class RepoWorkspace:
         Returns:
             Why the files could not be stamped, or ``None`` once they are.
         """
-        if not self._protected:
+        if not self._watched:
             return None
         with self._lock:
             before = self._fingerprint(self.session(), WORK_DIR)
@@ -438,9 +443,10 @@ class RepoWorkspace:
 
         Returns:
             One reason per protected file added, changed or removed since
-            setup, or why they could not be checked; empty when untouched.
+            setup, one reason for any such hidden file, or why they could not
+            be checked; empty when untouched.
         """
-        if not self._protected:
+        if not self._watched:
             return ()
         with self._lock:
             current = self._fingerprint(self.session(), WORK_DIR)
@@ -456,10 +462,17 @@ class RepoWorkspace:
         # A folder's times move whenever an entry in it is added or removed;
         # name the folder only when no file in it explains the change.
         changed = sorted(path for path in changed if not any(other.startswith(f"{path}/") for other in changed))
-        return tuple(
-            f"'{path}' is protected by the repository's optimize.toml ([paths] protected),"
-            " and the version's code changed it while it ran."
-            for path in changed
+        hidden = [path for path in changed if any(path == top or path.startswith(f"{top}/") for top in self._hidden)]
+        # The agent never sees the hidden files, so the reason does not name them.
+        reasons = ["The version's code changed the repository's metric files while it ran."] if hidden else []
+        return (
+            *reasons,
+            *(
+                f"'{path}' is protected by the repository's optimize.toml ([paths] protected),"
+                " and the version's code changed it while it ran."
+                for path in changed
+                if path not in hidden
+            ),
         )
 
     def close(self) -> None:

@@ -44,8 +44,13 @@ SETUP_ALLOWANCE_SECONDS = 1_800.0
 # (weights, formulas, metric source) never reveals the metric (SKY-353).
 _PROPOSER_KEYS = ("score", "feedback", STATUS_KEY, "scores")
 # A traceback names the metric's files and quotes its source lines, and on
-# Python 3.11+ adds caret lines under them; every indented line goes.
-_TRACEBACK = re.compile(r"^Traceback \(most recent call last\):\n|^  File \".*\n(?:    .*\n)*", re.MULTILINE)
+# Python 3.11+ adds caret lines under them; every indented line goes. An
+# exception group draws the same frames behind "| " margins.
+_TRACEBACK = re.compile(
+    r"^[ +|]*(?:Exception Group )?Traceback \(most recent call last\):\n"
+    r"|^(?P<margin>[ |]*?)  File \".*\n(?:(?P=margin)    .*\n)*",
+    re.MULTILINE,
+)
 
 
 class RepoScoreError(Exception):

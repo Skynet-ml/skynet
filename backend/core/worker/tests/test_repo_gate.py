@@ -199,12 +199,19 @@ def test_a_metric_file_the_agent_can_still_see_fails_and_names_the_path(tmp_path
     leaked = _archive(tmp_path / "agent", {"src/app.py": b"x\n", "./eval/scorer.py": b"s\n"})
     clean = _archive(tmp_path, {"src/app.py": b"x\n"})
 
-    [failure] = check_hidden(original, leaked, ["eval", ".optimize/exploits"], place="cloud")
+    [failure] = check_hidden(
+        original, leaked, ["eval", ".optimize/exploits"], place="cloud", optional_paths=[".optimize/exploits"]
+    )
 
     assert failure.key == "[metric] files"
     assert failure.code == I18nKey.REPO_GATE_UNENFORCED_CLOUD
     assert "eval/scorer.py" in failure.reason
-    assert check_hidden(original, clean, ["eval", ".optimize/exploits"], place="cloud") == []
+    assert (
+        check_hidden(
+            original, clean, ["eval", ".optimize/exploits"], place="cloud", optional_paths=[".optimize/exploits"]
+        )
+        == []
+    )
 
 
 def test_a_link_that_points_into_a_hidden_folder_fails(tmp_path: Path) -> None:
@@ -241,3 +248,57 @@ def test_a_metric_file_below_a_linked_folder_fails(tmp_path: Path) -> None:
     [failure] = check_hidden(archive, agent, ["eval/metric.py"], place="cloud")
 
     assert "eval/metric.py" in failure.reason
+
+
+def _linked(tmp_path: Path, files: dict[str, bytes], links: dict[str, str]) -> Path:
+    """Pack files and symbolic links into one archive.
+
+    Args:
+        tmp_path: Scratch folder.
+        files: Root-relative path to bytes.
+        links: Root-relative link path to its target.
+
+    Returns:
+        The archive.
+    """
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            packed.addfile(info, io.BytesIO(data))
+        for name, target in links.items():
+            link = tarfile.TarInfo(name)
+            link.type, link.linkname = tarfile.SYMTYPE, target
+            packed.addfile(link)
+    return archive
+
+
+def test_a_hidden_link_to_another_hidden_file_passes(tmp_path: Path) -> None:
+    """A link whose target stays inside the hidden paths shows the agent nothing (SKY-353)."""
+    original = _linked(
+        tmp_path,
+        {"src/app.py": b"x\n", "eval/impl.py": b"m\n", ".optimize/exploits/a.md": b"a\n"},
+        {"eval/metric.py": "impl.py", ".optimize/exploits/b.md": "a.md"},
+    )
+    (tmp_path / "agent").mkdir()
+    agent = _archive(tmp_path / "agent", {"src/app.py": b"x\n"})
+
+    hidden = ["eval/metric.py", "eval/impl.py", ".optimize/exploits"]
+    assert check_hidden(original, agent, hidden, place="cloud", optional_paths=[".optimize/exploits"]) == []
+
+
+def test_a_metric_path_that_matches_no_file_fails(tmp_path: Path) -> None:
+    """A misspelled ``[metric] files`` entry hides nothing, so the run stops; a missing exploit folder is fine."""
+    original = _archive(tmp_path, {"src/app.py": b"x\n", "eval/metric.py": b"m\n"})
+    (tmp_path / "agent").mkdir()
+    agent = _archive(tmp_path / "agent", {"src/app.py": b"x\n"})
+    exploits = [".optimize/exploits"]
+
+    [failure] = check_hidden(
+        original, agent, ["eval/metrics.py", "eval/metric.py", *exploits], place="local", optional_paths=exploits
+    )
+
+    assert failure.key == "[metric] files"
+    assert "eval/metrics.py" in failure.reason
+    assert check_hidden(original, agent, ["eval/metric.py", *exploits], place="local", optional_paths=exploits) == []

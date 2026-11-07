@@ -231,3 +231,51 @@ def test_drop_paths_removes_the_sections_that_touch_a_hidden_path() -> None:
     assert patch_paths(kept) == ["src/app.py"]
     assert drop_paths(patch, []) == patch
     assert drop_paths("", ["eval"]) == ""
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [("diff.mnemonicPrefix", "true"), ("diff.noprefix", "true"), ("diff.srcPrefix", "z/")],
+)
+def test_git_config_in_the_checkout_cannot_change_the_patch_headers(tmp_path: Path, setting: str, value: str) -> None:
+    """The agent controls its checkout's git config, so a version always keeps ``a/``/``b/`` headers (SKY-353)."""
+    checkout = _unpacked(tmp_path, {"src/a.py": "x = 1\n", "eval/scorer.py": "a\n"})
+    subprocess.run(["git", "config", setting, value], cwd=checkout, check=True)
+    (checkout / "eval/scorer.py").write_text("b\n")
+
+    patch = version_patch(checkout)
+
+    assert patch.startswith("diff --git a/eval/scorer.py b/eval/scorer.py\n")
+    assert drop_paths(patch, ["eval/scorer.py"]) == ""
+
+
+_HUNK = "@@ -1 +1 @@\n-a\n+b\n"
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        "diff --git c/eval/scorer.py i/eval/scorer.py\n--- c/eval/scorer.py\n+++ i/eval/scorer.py\n" + _HUNK,
+        "diff --git a/src/a.py b/src/a.py\n--- c/eval/scorer.py\n+++ i/eval/scorer.py\n" + _HUNK,
+        "--- a/eval/scorer.py\n+++ b/eval/scorer.py\n" + _HUNK,
+        "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+        "--- a/eval/scorer.py\n+++ b/eval/scorer.py\n" + _HUNK,
+        "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1,2 +1,2 @@\n-x = 1\n?junk\n",
+    ],
+    ids=["other-prefixes", "other-file-lines", "no-git-header", "after-a-hunk", "corrupt-hunk"],
+)
+def test_a_header_that_cannot_be_read_is_refused(patch: str) -> None:
+    """``git apply`` would apply these, so a file header Skynet cannot read stops the version."""
+    kept = drop_paths(patch, ["eval/scorer.py"])
+
+    assert any("cannot read" in problem for problem in patch_violations(kept, ["."]))
+
+
+def test_header_like_lines_inside_a_hunk_are_allowed() -> None:
+    """A removed ``-- a/x`` line and an added ``++ b/x`` line look like headers but belong to the hunk."""
+    patch = (
+        "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n"
+        "@@ -1,2 +1,2 @@\n--- a/x\n+++ b/x\n \n\\ No newline at end of file\n"
+    )
+
+    assert patch_violations(patch, ["src"]) == []

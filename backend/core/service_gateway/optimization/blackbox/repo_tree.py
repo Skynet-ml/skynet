@@ -63,6 +63,8 @@ _GITLINK_MODE = "160000"
 _MODE_LINE = re.compile(r"^(?:new file mode|deleted file mode|old mode|new mode) (\d{6})$")
 _INDEX_MODE = re.compile(r"^index [0-9a-f]+\.\.[0-9a-f]+ (\d{6})$")
 _PATH_PREFIXES = ("rename from ", "rename to ", "copy from ", "copy to ")
+_HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+_FILE_LINE = re.compile(r'^(?:--- (?:a/|"a/|/dev/null)|\+\+\+ (?:b/|"b/|/dev/null))')
 
 
 def _unquote(token: str) -> str:
@@ -162,6 +164,48 @@ def patch_paths(patch: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+def _unreadable(patch: str) -> bool:
+    """Report whether a patch holds a file header that :func:`patch_paths` cannot read.
+
+    ``git apply`` strips any first path component and also applies plain
+    ``---``/``+++`` diffs found between hunks, so a header with other prefixes
+    or a header outside a ``diff --git`` section could change a hidden or
+    protected file unseen (SKY-353). Hunk lines are counted, because a hunk
+    body can hold lines that look like headers.
+
+    Args:
+        patch: ``git diff`` output.
+
+    Returns:
+        Whether any header is unreadable or stands outside a ``diff --git`` section.
+    """
+    state, old, new = "outside", 0, 0
+    for section in re.split(r"(?m)^(?=diff --git )", patch):
+        if section.startswith("diff --git "):
+            header = section.split("\n", 1)[0][len("diff --git ") :]
+            renamed = re.search(r"(?m)^(?:rename|copy) (?:from|to) ", section)
+            if not _header_paths(header) and not (header.startswith(("a/", '"a/')) and renamed):
+                return True
+    for line in patch.splitlines():
+        if state == "hunk" and (old > 0 or new > 0):
+            tag = line[:1] or " "
+            if tag not in " -+\\":
+                return True
+            old -= tag in " -"
+            new -= tag in " +"
+            continue
+        if line.startswith("diff --git "):
+            state = "header"
+        elif line.startswith(("--- ", "+++ ")):
+            if state != "header" or not _FILE_LINE.match(line):
+                return True
+        elif line.startswith("GIT binary patch") and state == "header":
+            state = "binary"
+        elif (hunk := _HUNK.match(line)) and state in ("header", "hunk"):
+            state, old, new = "hunk", int(hunk.group(1) or 1), int(hunk.group(2) or 1)
+    return False
+
+
 def _inside(path: str, roots: Iterable[str]) -> bool:
     """Report whether ``path`` is one of ``roots`` or lies below one.
 
@@ -207,6 +251,8 @@ def patch_violations(
         if mode and mode.group(1) == _GITLINK_MODE:
             problems.append("Submodules are read-only; the change adds, moves, or updates one.")
             break
+    if _unreadable(patch):
+        problems.append("The change has a file header Skynet cannot read, so it cannot check the files it touches.")
     for path in patch_paths(patch):
         parts = path.split("/")
         if path.startswith("/") or any(part in ("", ".", "..") for part in parts) or ".git" in parts:
@@ -379,7 +425,23 @@ def version_patch(checkout: Path) -> str:
         ``git diff --binary`` output; empty when nothing changed.
     """
     _git(["add", "--all"], checkout)
-    return _git(["diff", "--cached", "--binary", "--no-color", "--no-ext-diff", BASE_REF], checkout)
+    # The agent can set git config in its checkout; other path prefixes would
+    # hide which files a version touches, so the scorer would refuse it.
+    pinned = ["-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false"]
+    return _git(
+        [
+            *pinned,
+            "diff",
+            "--cached",
+            "--binary",
+            "--no-color",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            BASE_REF,
+        ],
+        checkout,
+    )
 
 
 def reset_tree(checkout: Path) -> None:

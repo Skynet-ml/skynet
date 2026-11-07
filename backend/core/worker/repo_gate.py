@@ -107,19 +107,28 @@ def check_repository(archive: Path, secret_names: Collection[str], *, place: Pla
 
 
 def check_hidden(
-    original_archive: Path, agent_archive: Path, hidden_paths: Collection[str], *, place: Place
+    original_archive: Path,
+    agent_archive: Path,
+    hidden_paths: Collection[str],
+    *,
+    place: Place,
+    optional_paths: Collection[str] = (),
 ) -> list[GateFailure]:
     """List every metric file the agent's tree still shows.
 
     A file fails when the agent's tree holds it under a hidden path, when the
-    full tree has a symbolic link under a hidden path whose target the agent
-    can still read, or when a hidden path lies below a symbolic link.
+    full tree has a symbolic link under a hidden path whose target outside
+    the hidden paths the agent can still read, or when a hidden path lies
+    below a symbolic link. A hidden path that matches no file also fails,
+    unless it is optional.
 
     Args:
         original_archive: The full tree that ``stage_repository`` fetched.
         agent_archive: The stripped tree the proposer's workspace receives.
         hidden_paths: The ``[metric] files`` entries and the exploit folder.
         place: Where the run's sandbox runs.
+        optional_paths: Hidden paths that may match no file, such as the
+            exploit folder.
 
     Returns:
         One failure per visible path; an empty list means the metric is hidden.
@@ -128,15 +137,27 @@ def check_hidden(
     with tarfile.open(agent_archive) as packed:
         visible = [posixpath.normpath(name) for name in packed.getnames()]
     with tarfile.open(original_archive) as packed:
-        links = [member for member in packed if member.issym()]
+        members = packed.getmembers()
+    names = [posixpath.normpath(member.name) for member in members]
+    links = [member for member in members if member.issym()]
     targets = [
-        posixpath.normpath(posixpath.join(posixpath.dirname(posixpath.normpath(member.name)), member.linkname))
+        target
         for member in links
         if _covered(posixpath.normpath(member.name), hidden)
+        and not _covered(
+            target := posixpath.normpath(
+                posixpath.join(posixpath.dirname(posixpath.normpath(member.name)), member.linkname)
+            ),
+            hidden,
+        )
     ]
+    optional = {posixpath.normpath(path) for path in optional_paths}
+    # A misspelled metric path hides nothing, so the agent could read the
+    # real metric; the run stops instead of guessing (SKY-353).
+    leaked = [path for path in hidden if path not in optional and not any(_covered(name, [path]) for name in names)]
     # A hidden path below a linked folder lives at the link's target, which the
     # strip cannot see by name, so the run stops instead of guessing.
-    leaked = [path for path in hidden if any(_covered(path, [posixpath.normpath(link.name)]) for link in links)]
+    leaked += [path for path in hidden if any(path.startswith(posixpath.normpath(link.name) + "/") for link in links)]
     leaked += [path for path in visible if _covered(path, hidden)]
     leaked += [path for path in targets if any(_covered(name, [path]) for name in visible)]
     return [

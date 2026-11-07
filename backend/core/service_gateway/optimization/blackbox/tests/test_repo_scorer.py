@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
 
-from ..repo_scorer import RepoScoreError, RepoScorer, fold_case_scores
+from ..repo_scorer import RepoScoreError, RepoScorer, _scrub, fold_case_scores
 from ..repo_workspace import RepoWorkspace
 from ..rule_judge import (
     EVENT_BLOCK,
@@ -612,3 +613,30 @@ def test_a_version_that_rewrites_the_metric_gets_the_base_score(tmp_path: Path) 
         assert json.loads(reply.body)["score"] == pytest.approx(baseline) == pytest.approx(0.3)
     finally:
         scorer.close()
+
+
+def _grouped_failure() -> None:
+    """Raise an exception group that holds a nested group, as a metric might."""
+    try:
+        {}["missing"]  # METRIC_LINE_ONE
+    except KeyError as error:
+        inner = ExceptionGroup("inner", [ValueError("bad")])
+        raise ExceptionGroup("checks failed", [error, inner]) from None  # METRIC_LINE_TWO
+
+
+def test_an_exception_group_traceback_sends_no_frame_or_source_line() -> None:
+    """Exception group frames sit behind ``|`` margins and must go like plain frames (SKY-353)."""
+    try:
+        _grouped_failure()
+    except ExceptionGroup as group:
+        text = "".join(traceback.format_exception(group))
+
+    scrubbed = _scrub(text, None)
+
+    assert "  |   File " in text
+    assert "METRIC_LINE_TWO" in text
+    assert "METRIC_LINE" not in scrubbed
+    assert 'File "' not in scrubbed
+    assert "Traceback" not in scrubbed
+    assert "ExceptionGroup: checks failed (2 sub-exceptions)" in scrubbed
+    assert "ValueError: bad" in scrubbed

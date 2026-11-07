@@ -176,7 +176,13 @@ def stage_repository(
         metric = environment.constraints.metric if environment.constraints is not None else MetricSpec()
         hidden = (*metric.files, metric.exploits)
         agent_archive = strip_archive(snapshot.archive, hidden, workdir / "agent-tree.tgz")
-        leaks = check_hidden(snapshot.archive, agent_archive, hidden, place=sandbox_place(settings.local_mode))
+        leaks = check_hidden(
+            snapshot.archive,
+            agent_archive,
+            hidden,
+            place=sandbox_place(settings.local_mode),
+            optional_paths=(metric.exploits,),
+        )
         if leaks:
             raise RepoGateError(leaks)
     except BaseException:
@@ -601,6 +607,44 @@ def _version_metric_error(result: dict[str, Any], candidate: str) -> bool:
     )
 
 
+def _scored_candidate(candidate: Any, hidden_paths: tuple[str, ...]) -> Any:
+    """Drop the hidden-path edits from one recorded candidate.
+
+    Args:
+        candidate: A patch, a mapping of patches, or anything else.
+        hidden_paths: Metric files and the exploit folder.
+
+    Returns:
+        The candidate with every patch reduced to the scored change.
+    """
+    if isinstance(candidate, str):
+        return drop_paths(candidate, hidden_paths)
+    if isinstance(candidate, dict):
+        return {key: _scored_candidate(value, hidden_paths) for key, value in candidate.items()}
+    return candidate
+
+
+def drop_hidden_edits(result: dict[str, Any], hidden_paths: tuple[str, ...]) -> None:
+    """Replace every version a finished result records with the change the scorer scored.
+
+    Serving, download and publishing all read these fields, so a version's
+    edits to a metric file or the exploit folder never leave the run (SKY-353).
+
+    Args:
+        result: Finished black-box result, updated in place.
+        hidden_paths: Metric files and the exploit folder.
+    """
+    if not hidden_paths:
+        return
+    for key in ("seed_candidate", "best_candidate"):
+        if key in result:
+            result[key] = _scored_candidate(result[key], hidden_paths)
+    for key in ("versions", "candidate_tree", "lanes"):
+        for entry in result.get(key) or []:
+            if isinstance(entry, dict) and "candidate" in entry:
+                entry["candidate"] = _scored_candidate(entry["candidate"], hidden_paths)
+
+
 def improved_patch(result: dict[str, Any]) -> str | None:
     """Return the best version when it beat the starting code, else ``None``.
 
@@ -686,6 +730,7 @@ def publish_improvement(
         ``details.candidate_branches`` for a created repository), or ``None``
         when the run did not improve an existing repository.
     """
+    drop_hidden_edits(result, staged.hidden_paths)
     if payload["target"]["repo"].get("created_by_skynet"):
         return publish_candidates(
             result, payload, staged, username=username, engine=engine, optimization_id=optimization_id
@@ -693,9 +738,6 @@ def publish_improvement(
     patch = improved_patch(result)
     if patch is None:
         return None
-    # The scorer laid the version out without its metric-file edits, so the
-    # scored change, not the raw one, is what reaches the repository.
-    patch = drop_paths(patch, staged.hidden_paths)
     repo = payload["target"]["repo"]
     outcome: dict[str, Any]
     # The patch came back from the guest, so the editing rules are checked
@@ -763,10 +805,7 @@ def _candidate_versions(
         # The patches came back from the guest, so the editing rules are
         # checked again before any of them reaches the repository.
         if _version_metric_error(result, patch) or patch_violations(
-            drop_paths(patch, staged.hidden_paths),
-            repo["editable_paths"],
-            staged.snapshot.readonly_paths,
-            staged.protected_paths,
+            patch, repo["editable_paths"], staged.snapshot.readonly_paths, staged.protected_paths
         ):
             skipped += 1
             continue
@@ -823,9 +862,7 @@ def publish_candidates(
         versions.append((best_id, ""))
     outcome: dict[str, Any]
     try:
-        # Ids and rankings key on the raw patches; the scored change is what is pushed.
-        scored = [(version_id, drop_paths(patch, staged.hidden_paths)) for version_id, patch in versions]
-        pushed = push_candidates(repo["repository"], repo["commit"], scored, best_id, github_token(engine, username))
+        pushed = push_candidates(repo["repository"], repo["commit"], versions, best_id, github_token(engine, username))
         outcome = {
             "repository": repo["repository"],
             "best_branch": BEST_BRANCH,
