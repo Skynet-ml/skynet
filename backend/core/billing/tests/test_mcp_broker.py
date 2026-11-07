@@ -191,3 +191,81 @@ def test_worker_tool_token_cannot_dispatch_models() -> None:
     dispatch = model_forwarder({"_skynet_tools_route": {"url": "http://127.0.0.1:9000/v1", "token": "tool"}})
     with pytest.raises(ValueError, match="unknown metered model capability"):
         dispatch("tool", "/v1/chat/completions", {}, {})
+
+
+def test_parent_headers_reach_remote_and_are_redacted_from_tool_output(remote: list[httpx.Request]) -> None:
+    """Send a connector's key header to the remote and keep it out of the guest's result."""
+
+    def respond_with_header(tool: str, arguments: dict[str, Any], call: Any) -> dict[str, Any]:
+        """Run the call unchanged; the meter only wraps it."""
+        return call()
+
+    broker = mcp_broker.McpToolsBroker(
+        "https://tools.example/mcp",
+        check_admission=lambda: None,
+        headers={"X-Goog-Api-Key": "maps-parent-secret"},
+        tool_filter=["echo"],
+        meter=respond_with_header,
+    )
+    result = broker.dispatch(_rpc("tools/call", {"name": "echo", "arguments": {"value": "maps-parent-secret"}}))
+
+    assert all(request.headers["x-goog-api-key"] == "maps-parent-secret" for request in remote)
+    assert "maps-parent-secret" not in result.body.decode()
+    assert "[REDACTED]" in result.body.decode()
+
+
+def test_meter_wraps_each_tool_call_but_not_listing(remote: list[httpx.Request]) -> None:
+    """Meter tools/call once per call and leave tools/list free."""
+    metered: list[tuple[str, dict[str, Any]]] = []
+
+    def meter(tool: str, arguments: dict[str, Any], call: Any) -> dict[str, Any]:
+        """Record the metered call, then run it."""
+        metered.append((tool, dict(arguments)))
+        return call()
+
+    broker = mcp_broker.McpToolsBroker(
+        "https://tools.example/mcp", check_admission=lambda: None, tool_filter=["echo"], meter=meter
+    )
+    broker.dispatch(_rpc("tools/list"))
+    result = json.loads(broker.dispatch(_rpc("tools/call", {"name": "echo", "arguments": {"value": "paid"}})).body)
+
+    assert metered == [("echo", {"value": "paid"})]
+    assert result["result"]["content"] == [{"type": "text", "text": "paid"}]
+    with pytest.raises(ValueError, match="outside the selected roster"):
+        broker.dispatch(_rpc("tools/call", {"name": "other", "arguments": {}}))
+    assert len(metered) == 1
+
+
+def test_meter_refusal_keeps_call_away_from_remote(remote: list[httpx.Request]) -> None:
+    """Refuse a call the budget cannot cover before the remote sees tools/call."""
+
+    def refuse(tool: str, arguments: dict[str, Any], call: Any) -> dict[str, Any]:
+        """Refuse like a budget that has no room left."""
+        raise BudgetReached("budget")
+
+    broker = mcp_broker.McpToolsBroker(
+        "https://tools.example/mcp", check_admission=lambda: None, tool_filter=["echo"], meter=refuse
+    )
+    with pytest.raises(BudgetReached):
+        broker.dispatch(_rpc("tools/call", {"name": "echo", "arguments": {"value": "x"}}))
+    calls = [json.loads(request.content) for request in remote if request.method == "POST"]
+    assert all(body["method"] != "tools/call" for body in calls)
+
+
+def test_connector_tokens_reach_only_tool_paths() -> None:
+    """Register each connector route for tools and budget state, never for models."""
+    dispatch = model_forwarder(
+        {
+            "_skynet_connector_routes": {
+                "maps": {"url": "http://127.0.0.1:9000/v1", "token": "maps-token"},
+                "browser": {"url": "http://127.0.0.1:9000/v1", "token": "browser-token"},
+            }
+        }
+    )
+    for token in ("maps-token", "browser-token"):
+        with pytest.raises(ValueError, match="unknown metered model capability"):
+            dispatch(token, "/v1/chat/completions", {}, {})
+    with pytest.raises(ValueError, match="loopback gateway"):
+        model_forwarder(
+            {"_skynet_connector_routes": {"maps": {"url": "https://mapstools.googleapis.com/v1", "token": "t"}}}
+        )

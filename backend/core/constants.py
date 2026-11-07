@@ -191,3 +191,11 @@ OPTIMIZER_NAME_GEPA = "gepa"
 # A worker that shuts down mid-run marks the run with this recovery cause; the
 # orphan sweep then requeues it without counting the restart as a failed attempt.
 WORKER_RESTART_CAUSE = "worker_restart"
+
+# Metric hardening (SKY-355). A cloud job reserves rounds × cap up front (D46);
+# a judge verdict below the confidence bar goes to the user as unsure (D50).
+HARDENING_DEFAULT_ROUNDS = 5
+HARDENING_DEFAULT_ROUND_CAP_USD = 2.0
+HARDENING_UNSURE_CONFIDENCE = 0.7
+# The exploit suite lives in the user's repository, one folder per exploit (D44).
+HARDENING_EXPLOITS_DIR = ".optimize/exploits"

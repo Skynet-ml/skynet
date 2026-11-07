@@ -64,6 +64,16 @@ User-selected remote evaluators keep their original `POST {candidate, case}` pro
 
 External evaluator and MCP service fees are outside Skynet Total. Their relay still checks the owning execution generation and cancellation state; it does not invent zero-cost provider receipts. Every Anything setup and run requires the deployment's managed Vercel profile. The external endpoint call leaves through the trusted parent relay, while optimizer and target execution remain inside the sandbox boundary. A supplied seed is scored on a non-held-out case, and an HTTP failure remains a failed check with the original status. Seedless setup verifies endpoint readiness and clearly defers the actual request until a real candidate exists.
 
+## Skynet-keyed connectors
+
+`core/billing/env_connectors.py` lists the hosted MCP connectors that Skynet pays for: `maps` (Google Maps Grounding Lite), `web_search` (Firecrawl) and `browser` (Browserbase). Each catalog entry gives the hosted MCP URL, the config setting that holds Skynet's key, the allowed tool names and the USD price of one call.
+
+- A run asks for connectors with `env_connectors: ["maps", ...]`. The parent gateway opens one `McpToolsBroker` for each connector, with its own scoped token, beside any user `live_mcp` roster. The guest gets only `_skynet_connector_routes` (gateway URL and token). It never gets the provider URL or the key.
+- A connector with no key in config (`GOOGLE_MAPS_API_KEY`, `FIRECRAWL_API_KEY`, `BROWSERBASE_API_KEY`) is not offered. Setup fails with a message that names each missing connector and its setting.
+- Each `tools/call` reserves the tool's catalog price through `operation_quote` before the provider sees it, and settles that price as a `tool` cost with the connector name as its role. A call that does not fit the budget is refused before dispatch. A call that fails before the broker sends the tool request (an admission stop, a connection or `initialize` failure) releases its hold. A call that fails or is interrupted after the send settles at the catalog price, because connectors have no usage reconciler. Tool listing is free. A tool name outside the catalog is refused.
+- The broker redacts each key header and query value from tool results. Keys never enter the payload, the run record or an error message.
+- Applying connector lists to boxes and the guest environment wiring belong to SKY-354.
+
 ## Recovery contract
 
 An interrupted run is never restarted automatically: a worker shutdown, a lost lease, or a dropped sandbox leaves the run failed with `stop_reason=interrupted`. The owner chooses what happens next: Resume, Retry, or Clone.
