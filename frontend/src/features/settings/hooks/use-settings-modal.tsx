@@ -2,6 +2,7 @@
 
 import * as React from "react";
 
+import { parseMcpFinish } from "@/shared/lib/mcp-finish";
 import { takeOAuthReturn } from "@/shared/lib/oauth-return";
 
 interface SettingsModalContextValue {
@@ -39,9 +40,11 @@ export function SettingsModalProvider({ children }: { children: React.ReactNode 
     const url = new URL(window.location.href);
     const requestedTab = url.searchParams.get("settings");
     if (!requestedTab) return;
-    // A failed link stays here, where the Connectors tab explains the error.
+    // A failed link, and an MCP sign-in that the Connectors tab must still
+    // finish from the URL fragment, stay here.
     const back = requestedTab === "connectors" ? takeOAuthReturn() : null;
-    if (back && !url.searchParams.has("connector_error")) {
+    const failed = url.searchParams.has("connector_error") || url.searchParams.has("mcp_error");
+    if (back && !failed && !parseMcpFinish(url.hash)) {
       window.location.replace(back);
       return;
     }

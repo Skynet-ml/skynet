@@ -59,6 +59,7 @@ _STATE_TTL = timedelta(minutes=10)
 # Refresh a little early so a token does not expire between the check and the tool call.
 _REFRESH_MARGIN = timedelta(seconds=60)
 _TIMEOUT = httpx.Timeout(15.0)
+_REFRESH_REFUSED_ERRORS = frozenset({"invalid_grant", "invalid_client", "unauthorized_client"})
 
 _engine: Engine | None = None
 
@@ -121,7 +122,7 @@ def _db() -> Engine:
 
 
 def validate_name(name: str) -> str:
-    """Check a connector name that optimize.toml lists under ``[services.<name>]``.
+    """Check a connector name that a run payload lists in ``env_connectors``.
 
     Args:
         name: Proposed connector name.
@@ -167,6 +168,23 @@ def _validate_server_url(server_url: str) -> str:
     return server_url
 
 
+def _require_https(url: str) -> None:
+    """Refuse a URL from discovery that is not HTTPS.
+
+    Plain HTTP is allowed only with ``discover_allow_private``, for local
+    test servers, because tokens and codes must not cross the network in clear.
+
+    Args:
+        url: Endpoint URL from discovery or the user.
+
+    Raises:
+        McpOAuthError: ``blocked_address`` for a non-HTTPS URL.
+    """
+    scheme = urlsplit(url).scheme
+    if scheme != "https" and not (scheme == "http" and settings.discover_allow_private):
+        raise McpOAuthError("mcp_connection.blocked_address", 502)
+
+
 def _fetch(method: str, url: str, *, code: str, label: str, **kwargs: Any) -> httpx.Response:
     """Send one OAuth request to a pinned address with redirects off.
 
@@ -183,6 +201,7 @@ def _fetch(method: str, url: str, *, code: str, label: str, **kwargs: Any) -> ht
     Raises:
         McpOAuthError: When the URL breaks the SSRF policy or the request fails.
     """
+    _require_https(url)
     try:
         address = _pinned_address(url, settings.discover_allow_private, label=label)
     except ValueError as error:
@@ -480,7 +499,7 @@ def start_connection(username: str, name: str, server_url: str, redirect_uri: st
 
     Args:
         username: Owner of the connection.
-        name: Connector name for optimize.toml.
+        name: Connector name for ``env_connectors``.
         server_url: Remote MCP endpoint.
         redirect_uri: Skynet's OAuth callback URL.
 
@@ -494,6 +513,7 @@ def start_connection(username: str, name: str, server_url: str, redirect_uri: st
     _validate_server_url(server_url)
     vault_cipher()
     metadata, resource, scope = _discover(server_url)
+    _require_https(str(metadata.authorization_endpoint))
     client = _register(metadata, redirect_uri, scope)
     pkce = PKCEParameters.generate()
     state = secrets.token_urlsafe(32)
@@ -533,20 +553,24 @@ def start_connection(username: str, name: str, server_url: str, redirect_uri: st
     return f"{endpoint}{'&' if urlsplit(endpoint).query else '?'}{urlencode(params)}"
 
 
-def finish_connection(state: str, code: str) -> tuple[str, str]:
+def finish_connection(username: str, state: str, code: str) -> str:
     """Trade the callback code for tokens and store them encrypted.
 
-    Each state works once and only for ten minutes.
+    Each state works once and only for ten minutes. Only the user who started
+    the sign-in can finish it, so a sign-in link that someone else started
+    cannot attach this user's MCP account to theirs.
 
     Args:
-        state: The ``state`` query value from the callback.
+        username: The signed-in caller.
+        state: The ``state`` value from the callback.
         code: The authorization code from the callback.
 
     Returns:
-        The owner and the connector name.
+        The connector name.
 
     Raises:
-        McpOAuthError: ``state_invalid`` for an unknown or used state, ``state_expired`` for an old one;
+        McpOAuthError: ``state_invalid`` for an unknown or used state, ``state_expired`` for an old one,
+            ``wrong_account`` (403) when another user started the sign-in;
             ``exchange_failed`` when the token endpoint refuses the code.
     """
     if not state or not code:
@@ -566,9 +590,11 @@ def finish_connection(state: str, code: str) -> tuple[str, str]:
         row.pending_encrypted = None
         row.pending_expires_at = None
         session.commit()
+        if row.username != username:
+            raise McpOAuthError("mcp_connection.wrong_account", 403)
         if expired:
             raise McpOAuthError("mcp_connection.state_expired", 400)
-        username, name = row.username, row.name
+        name = row.name
     credentials = {key: pending[key] for key in pending if key != "code_verifier"}
     response = _token_request(
         credentials,
@@ -597,7 +623,7 @@ def finish_connection(state: str, code: str) -> tuple[str, str]:
         row.created_at = now
         row.updated_at = now
         session.commit()
-    return username, name
+    return name
 
 
 def connected_server_url(username: str, name: str) -> str | None:
@@ -605,7 +631,7 @@ def connected_server_url(username: str, name: str) -> str | None:
 
     Args:
         username: Owner of the run.
-        name: Connector name from optimize.toml.
+        name: Connector name from ``env_connectors``.
 
     Returns:
         The MCP endpoint, or ``None`` when the user has no such connection.
@@ -624,6 +650,27 @@ def connected_server_url(username: str, name: str) -> str | None:
         if row.status == STATUS_REAUTH:
             raise McpOAuthError("mcp_connection.reauth_required", 409, name=name)
         return row.server_url
+
+
+def _refresh_refused(response: httpx.Response) -> bool:
+    """Tell whether the token endpoint refused the refresh token for good.
+
+    Only these RFC 6749 section 5.2 errors mean the user must sign in again.
+    A 408, a 429 or another 4xx answer can pass, so the row keeps its status.
+
+    Args:
+        response: The token endpoint's answer to the refresh.
+
+    Returns:
+        True when the user must sign in again.
+    """
+    if response.status_code not in (400, 401):
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("error") in _REFRESH_REFUSED_ERRORS
 
 
 def access_token(username: str, name: str) -> str:
@@ -670,7 +717,7 @@ def access_token(username: str, name: str) -> str:
                 "resource": credentials["resource"],
             },
         )
-        if 400 <= response.status_code < 500:
+        if _refresh_refused(response):
             row.status = STATUS_REAUTH
             row.updated_at = datetime.now(UTC)
             session.commit()

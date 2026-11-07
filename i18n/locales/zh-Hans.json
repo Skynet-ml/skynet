@@ -480,6 +480,26 @@
     "budget.not_found": "此预算对您的账户不可用。请创建新的设置预算。",
     "budget.invalid": "请输入能够覆盖已花费或已预留用量的支出上限。",
     "budget.below_minimum": "支出上限低于本次运行所需的最低金额。请输入更高的上限。",
-    "serve.not_enabled": "此运行的服务已关闭。请先在运行的服务标签页中开启。"
+    "serve.not_enabled": "此运行的服务已关闭。请先在运行的服务标签页中开启。",
+    "mcp_connection.invalid_name": "使用 1 到 40 个小写字母、数字、'-' 或 '_'，并以字母开头。",
+    "mcp_connection.name_reserved": "名称 {name} 属于 {term.appName} 连接器。请使用其他名称。",
+    "mcp_connection.invalid_url": "MCP 服务器 URL 必须是不带查询参数的 HTTPS URL。",
+    "mcp_connection.blocked_address": "不允许使用此 MCP 服务器地址。",
+    "mcp_connection.discovery_failed": "无法读取此 MCP 服务器的 OAuth 设置。",
+    "mcp_connection.oauth_unsupported": "此 MCP 服务器不要求 OAuth 登录。",
+    "mcp_connection.issuer_mismatch": "OAuth 服务器元数据中的签发方不一致。",
+    "mcp_connection.pkce_unsupported": "此 MCP 服务器不支持 S256 的 PKCE。",
+    "mcp_connection.registration_required": "此服务器要求 {term.appName} 先注册。其所有者必须允许动态客户端注册。",
+    "mcp_connection.exchange_failed": "MCP 服务器未完成登录。请重试。",
+    "mcp_connection.state_invalid": "登录链接无效。请重新开始。",
+    "mcp_connection.state_expired": "登录链接已过期。请重新开始。",
+    "mcp_connection.wrong_account": "另一个账号发起了此次登录。请从你自己的账号重新开始。",
+    "mcp_connection.declined": "登录未完成。",
+    "mcp_connection.reauth_required": "请重新登录 MCP 服务器 {name}。",
+    "mcp_connection.vault_key_changed": "已保存的登录无法再读取。请重新登录此 MCP 服务器。",
+    "mcp_connection.not_connected": "没有名为 {name} 的 MCP 服务器连接。",
+    "mcp_connection.unknown_connector": "未知连接器：{name}。请先将其作为 MCP 服务器连接。",
+    "mcp_connection.invalid_preset": "此 MCP 服务器不在列表中。",
+    "mcp_connection.invalid_request": "请提供预设，或提供名称和 MCP 服务器 URL。"
   }
 }

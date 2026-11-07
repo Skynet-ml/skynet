@@ -480,6 +480,26 @@
     "budget.not_found": "この予算はお使いのアカウントでは利用できません。新しいセットアップ予算を作成してください。",
     "budget.invalid": "すでに使用または予約された分を賄える支出上限を入力してください。",
     "budget.below_minimum": "支出上限がこの実行に必要な最低額を下回っています。より高い上限を入力してください。",
-    "serve.not_enabled": "この実行のサービングはオフです。先に実行のサービングタブでオンにしてください。"
+    "serve.not_enabled": "この実行のサービングはオフです。先に実行のサービングタブでオンにしてください。",
+    "mcp_connection.invalid_name": "小文字の英字、数字、'-'、'_' を 1〜40 文字で使い、英字で始めてください。",
+    "mcp_connection.name_reserved": "名前 {name} は {term.appName} のコネクタで使われています。別の名前を使ってください。",
+    "mcp_connection.invalid_url": "MCP サーバーの URL はクエリのない HTTPS URL にしてください。",
+    "mcp_connection.blocked_address": "この MCP サーバーのアドレスは許可されていません。",
+    "mcp_connection.discovery_failed": "この MCP サーバーの OAuth 設定を読み取れませんでした。",
+    "mcp_connection.oauth_unsupported": "この MCP サーバーは OAuth サインインを求めていません。",
+    "mcp_connection.issuer_mismatch": "OAuth サーバーのメタデータが別の発行者を示しています。",
+    "mcp_connection.pkce_unsupported": "この MCP サーバーは S256 の PKCE に対応していません。",
+    "mcp_connection.registration_required": "このサーバーでは、先に {term.appName} の登録が必要です。所有者が動的クライアント登録を許可する必要があります。",
+    "mcp_connection.exchange_failed": "MCP サーバーがサインインを完了しませんでした。もう一度お試しください。",
+    "mcp_connection.state_invalid": "サインインのリンクが無効です。最初からやり直してください。",
+    "mcp_connection.state_expired": "サインインのリンクの期限が切れています。最初からやり直してください。",
+    "mcp_connection.wrong_account": "別のアカウントがこのサインインを開始しました。ご自身のアカウントからやり直してください。",
+    "mcp_connection.declined": "サインインは完了しませんでした。",
+    "mcp_connection.reauth_required": "MCP サーバー {name} にもう一度サインインしてください。",
+    "mcp_connection.vault_key_changed": "保存されたサインインを読み取れなくなりました。この MCP サーバーにもう一度サインインしてください。",
+    "mcp_connection.not_connected": "{name} という名前の MCP サーバー接続はありません。",
+    "mcp_connection.unknown_connector": "不明なコネクタ: {name}。先に MCP サーバーとして接続してください。",
+    "mcp_connection.invalid_preset": "この MCP サーバーは一覧にありません。",
+    "mcp_connection.invalid_request": "プリセット、または名前と MCP サーバーの URL を指定してください。"
   }
 }

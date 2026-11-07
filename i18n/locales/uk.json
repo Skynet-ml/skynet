@@ -480,6 +480,26 @@
     "budget.not_found": "Цей бюджет недоступний для вашого облікового запису. Створіть новий бюджет налаштування.",
     "budget.invalid": "Вкажіть ліміт витрат, що покриває вже витрачені або зарезервовані суми.",
     "budget.below_minimum": "Ліміт витрат нижчий за мінімум, потрібний цьому запуску. Вкажіть вищий ліміт.",
-    "serve.not_enabled": "Обслуговування для цього запуску вимкнено. Спочатку увімкніть його на вкладці «Обслуговування» запуску."
+    "serve.not_enabled": "Обслуговування для цього запуску вимкнено. Спочатку увімкніть його на вкладці «Обслуговування» запуску.",
+    "mcp_connection.invalid_name": "Використовуйте від 1 до 40 малих латинських літер, цифр, '-' або '_', починаючи з літери.",
+    "mcp_connection.name_reserved": "Ім'я {name} належить конектору {term.appName}. Виберіть інше ім'я.",
+    "mcp_connection.invalid_url": "URL MCP-сервера має бути HTTPS-адресою без рядка запиту.",
+    "mcp_connection.blocked_address": "Ця адреса MCP-сервера не дозволена.",
+    "mcp_connection.discovery_failed": "Не вдалося прочитати налаштування OAuth цього MCP-сервера.",
+    "mcp_connection.oauth_unsupported": "Цей MCP-сервер не вимагає входу через OAuth.",
+    "mcp_connection.issuer_mismatch": "Метадані OAuth-сервера вказують іншого видавця.",
+    "mcp_connection.pkce_unsupported": "Цей MCP-сервер не підтримує PKCE з S256.",
+    "mcp_connection.registration_required": "Цей сервер вимагає, щоб {term.appName} спочатку зареєструвався. Його власник має дозволити динамічну реєстрацію клієнтів.",
+    "mcp_connection.exchange_failed": "MCP-сервер не завершив вхід. Спробуйте ще раз.",
+    "mcp_connection.state_invalid": "Посилання для входу недійсне. Почніть знову.",
+    "mcp_connection.state_expired": "Посилання для входу застаріло. Почніть знову.",
+    "mcp_connection.wrong_account": "Цей вхід розпочав інший обліковий запис. Почніть його знову зі свого облікового запису.",
+    "mcp_connection.declined": "Вхід не завершено.",
+    "mcp_connection.reauth_required": "Увійдіть у MCP-сервер {name} ще раз.",
+    "mcp_connection.vault_key_changed": "Збережений вхід більше не можна прочитати. Увійдіть у цей MCP-сервер ще раз.",
+    "mcp_connection.not_connected": "Немає підключення до MCP-сервера з ім'ям {name}.",
+    "mcp_connection.unknown_connector": "Невідомий конектор: {name}. Спочатку підключіть його як MCP-сервер.",
+    "mcp_connection.invalid_preset": "Цього MCP-сервера немає у списку.",
+    "mcp_connection.invalid_request": "Вкажіть пресет або ім'я та URL MCP-сервера."
   }
 }

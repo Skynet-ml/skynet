@@ -21,6 +21,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -57,6 +58,7 @@ class OAuthServerState:
     expires_in: int = 3600
     rotate_refresh: bool = True
     refresh_status: int = 200
+    refresh_error: str = "invalid_grant"
     issuer: str | None = None
     clients: dict[str, dict[str, Any]] = field(default_factory=dict)
     codes: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -150,7 +152,7 @@ def _app(state: OAuthServerState) -> Starlette:
                 return JSONResponse({"error": "invalid_grant"}, status_code=400)
             return JSONResponse(issue())
         if state.refresh_status != 200:
-            return JSONResponse({"error": "invalid_grant"}, status_code=state.refresh_status)
+            return JSONResponse({"error": state.refresh_error}, status_code=state.refresh_status)
         if form["refresh_token"] not in state.refresh:
             return JSONResponse({"error": "invalid_grant"}, status_code=400)
         pair = issue()
@@ -271,7 +273,7 @@ def _sign_in(state: OAuthServerState, name: str = "tracker") -> str:
     answer = httpx.get(authorize_url, follow_redirects=False, trust_env=False)
     assert answer.status_code == 302
     callback = parse_qs(urlsplit(answer.headers["location"]).query)
-    assert client.finish_connection(callback["state"][0], callback["code"][0]) == ("alice", name)
+    assert client.finish_connection("alice", callback["state"][0], callback["code"][0]) == name
     return next(iter(state.access))
 
 
@@ -329,9 +331,9 @@ def test_state_works_once_and_expires(oauth_server: OAuthServerState, connection
     authorize_url = client.start_connection("alice", "tracker", f"{oauth_server.base}/mcp", REDIRECT_URI)
     callback = parse_qs(urlsplit(httpx.get(authorize_url, trust_env=False).headers["location"]).query)
     state, code = callback["state"][0], callback["code"][0]
-    client.finish_connection(state, code)
+    client.finish_connection("alice", state, code)
     with pytest.raises(client.McpOAuthError) as reused:
-        client.finish_connection(state, code)
+        client.finish_connection("alice", state, code)
     assert reused.value.code == "mcp_connection.state_invalid"
 
     authorize_url = client.start_connection("alice", "late", f"{oauth_server.base}/mcp", REDIRECT_URI)
@@ -341,7 +343,7 @@ def test_state_works_once_and_expires(oauth_server: OAuthServerState, connection
         row.pending_expires_at = datetime.now(UTC) - timedelta(seconds=1)
         session.commit()
     with pytest.raises(client.McpOAuthError, match="too old"):
-        client.finish_connection(late["state"][0], late["code"][0])
+        client.finish_connection("alice", late["state"][0], late["code"][0])
     assert len(oauth_server.token_forms) == 1
 
 
@@ -411,17 +413,17 @@ def test_authorize_url_carries_resource_and_the_state_stays_hashed(
     assert row.pending_state_hash not in (None, query["state"])
     pending = row.pending_encrypted or ""
     callback = parse_qs(urlsplit(httpx.get(authorize_url, trust_env=False).headers["location"]).query)
-    client.finish_connection(callback["state"][0], callback["code"][0])
+    client.finish_connection("alice", callback["state"][0], callback["code"][0])
     assert oauth_server.token_forms[0]["code_verifier"] not in pending
 
 
 def test_an_unknown_state_is_refused(oauth_server: OAuthServerState, connections: Any) -> None:
     """Refuse a state that no sign-in started, before any token request."""
     with pytest.raises(client.McpOAuthError) as unknown:
-        client.finish_connection("never-issued", "some-code")
+        client.finish_connection("alice", "never-issued", "some-code")
     assert (unknown.value.code, unknown.value.status) == ("mcp_connection.state_invalid", 400)
     with pytest.raises(client.McpOAuthError):
-        client.finish_connection("", "some-code")
+        client.finish_connection("alice", "", "some-code")
     assert oauth_server.token_forms == []
 
 
@@ -498,7 +500,7 @@ def test_a_refreshed_token_is_reused_until_it_nears_expiry(oauth_server: OAuthSe
 
 
 def test_a_refused_refresh_asks_for_a_new_sign_in(oauth_server: OAuthServerState, connections: Any) -> None:
-    """Mark the connection for reauth on a 4xx refresh, and keep it on a 5xx."""
+    """Mark the connection for reauth on an invalid_grant refresh, and keep it on a 5xx."""
     oauth_server.expires_in = 30
     _sign_in(oauth_server)
     oauth_server.refresh_status = 503
@@ -514,6 +516,79 @@ def test_a_refused_refresh_asks_for_a_new_sign_in(oauth_server: OAuthServerState
     assert _row(connections).status == client.STATUS_REAUTH
     with pytest.raises(client.McpOAuthError, match="again"):
         client.connected_server_url("alice", "tracker")
+
+
+@pytest.mark.parametrize(
+    ("status", "error"), [(429, "invalid_grant"), (408, "invalid_grant"), (400, "invalid_request")]
+)
+def test_a_passing_refresh_failure_keeps_the_connection(
+    oauth_server: OAuthServerState, connections: Any, status: int, error: str
+) -> None:
+    """Give exchange_failed and keep the row on a rate limit or another 4xx, so a later refresh works."""
+    oauth_server.expires_in = 30
+    _sign_in(oauth_server)
+    oauth_server.refresh_status, oauth_server.refresh_error = status, error
+
+    with pytest.raises(client.McpOAuthError) as passing:
+        client.access_token("alice", "tracker")
+
+    assert (passing.value.code, passing.value.status) == ("mcp_connection.exchange_failed", 502)
+    assert _row(connections).status == client.STATUS_CONNECTED
+    oauth_server.refresh_status = 200
+    assert client.access_token("alice", "tracker") in oauth_server.access
+    assert _row(connections).status == client.STATUS_CONNECTED
+
+
+def test_another_user_cannot_finish_a_sign_in(oauth_server: OAuthServerState, connections: Any) -> None:
+    """Refuse with 403 when the caller did not start the sign-in, and spend the state."""
+    authorize_url = client.start_connection("alice", "tracker", f"{oauth_server.base}/mcp", REDIRECT_URI)
+    callback = parse_qs(urlsplit(httpx.get(authorize_url, trust_env=False).headers["location"]).query)
+
+    with pytest.raises(client.McpOAuthError) as hijack:
+        client.finish_connection("bob", callback["state"][0], callback["code"][0])
+
+    assert (hijack.value.code, hijack.value.status) == ("mcp_connection.wrong_account", 403)
+    assert oauth_server.token_forms == []
+    row = _row(connections)
+    assert row is not None
+    assert (row.credentials_encrypted, row.pending_state_hash) == (None, None)
+    with pytest.raises(client.McpOAuthError) as reused:
+        client.finish_connection("alice", callback["state"][0], callback["code"][0])
+    assert reused.value.code == "mcp_connection.state_invalid"
+
+
+def test_an_http_token_endpoint_is_refused_without_the_deployment_opt_in(
+    oauth_server: OAuthServerState, connections: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse to send a refresh token to a plain HTTP token endpoint, before any request."""
+    oauth_server.expires_in = 30
+    _sign_in(oauth_server)
+    forms = len(oauth_server.token_forms)
+    monkeypatch.setattr(settings, "discover_allow_private", False)
+    # Let the loopback test server pass the address check, so only the scheme check can refuse it.
+    monkeypatch.setattr(client, "_pinned_address", lambda url, allow_private, label: "127.0.0.1")
+
+    with pytest.raises(client.McpOAuthError) as blocked:
+        client.access_token("alice", "tracker")
+
+    assert blocked.value.code == "mcp_connection.blocked_address"
+    assert len(oauth_server.token_forms) == forms
+    assert _row(connections).status == client.STATUS_CONNECTED
+
+
+def test_an_http_authorization_endpoint_is_refused_without_the_deployment_opt_in(
+    connections: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse to send the browser to a plain HTTP sign-in page, before registration."""
+    monkeypatch.setattr(settings, "discover_allow_private", False)
+    metadata = SimpleNamespace(authorization_endpoint="http://auth.example/authorize")
+    monkeypatch.setattr(client, "_discover", lambda server_url: (metadata, server_url, None))
+    monkeypatch.setattr(client, "_register", lambda *args: pytest.fail("registered with an HTTP server"))
+
+    with pytest.raises(client.McpOAuthError) as blocked:
+        client.start_connection("alice", "tracker", "https://mcp.example/mcp", REDIRECT_URI)
+
+    assert blocked.value.code == "mcp_connection.blocked_address"
 
 
 def test_a_revoked_sign_in_gives_a_clear_run_error_without_the_token(

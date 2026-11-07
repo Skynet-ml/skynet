@@ -2165,9 +2165,9 @@ class ContinuousCycleModel(Base):
 
 
 class McpServerConnectionModel(Base):
-    """One user's OAuth sign-in to a remote MCP server, named for optimize.toml.
+    """One user's OAuth sign-in to a remote MCP server, named as a connector.
 
-    ``name`` is the connector name a run lists under ``[services.<name>]``.
+    ``name`` is the connector name that a run payload lists in ``env_connectors``.
     ``credentials_encrypted`` is a Fernet blob under ``BYOK_VAULT_KEY`` with the
     client registration, the token endpoint and the tokens; the plaintext never
     reaches the database or the box. A ``pending`` row waits for the OAuth

@@ -480,6 +480,26 @@
     "budget.not_found": "Bu bütçe hesabınız için kullanılamıyor. Yeni bir kurulum bütçesi oluşturun.",
     "budget.invalid": "Önceden harcanmış veya ayrılmış kullanımı karşılayan bir harcama limiti girin.",
     "budget.below_minimum": "Harcama limiti bu çalıştırmanın ihtiyaç duyduğu minimumun altında. Daha yüksek bir limit girin.",
-    "serve.not_enabled": "Bu çalıştırmada sunum kapalı. Önce çalıştırmanın Sunum sekmesinden açın."
+    "serve.not_enabled": "Bu çalıştırmada sunum kapalı. Önce çalıştırmanın Sunum sekmesinden açın.",
+    "mcp_connection.invalid_name": "1 ile 40 arasında küçük harf, rakam, '-' veya '_' kullanın ve bir harfle başlayın.",
+    "mcp_connection.name_reserved": "{name} adı bir {term.appName} bağlayıcısına ait. Başka bir ad kullanın.",
+    "mcp_connection.invalid_url": "MCP sunucusu URL'si sorgusuz bir HTTPS URL'si olmalıdır.",
+    "mcp_connection.blocked_address": "Bu MCP sunucusu adresine izin verilmiyor.",
+    "mcp_connection.discovery_failed": "Bu MCP sunucusunun OAuth kurulumu okunamadı.",
+    "mcp_connection.oauth_unsupported": "Bu MCP sunucusu OAuth ile oturum açma istemiyor.",
+    "mcp_connection.issuer_mismatch": "OAuth sunucusu meta verileri farklı bir yayıncı belirtiyor.",
+    "mcp_connection.pkce_unsupported": "Bu MCP sunucusu S256 ile PKCE desteklemiyor.",
+    "mcp_connection.registration_required": "Bu sunucu önce {term.appName} uygulamasının kaydolmasını istiyor. Sahibi dinamik istemci kaydına izin vermelidir.",
+    "mcp_connection.exchange_failed": "MCP sunucusu oturum açmayı tamamlamadı. Tekrar deneyin.",
+    "mcp_connection.state_invalid": "Oturum açma bağlantısı geçerli değil. Yeniden başlayın.",
+    "mcp_connection.state_expired": "Oturum açma bağlantısı çok eski. Yeniden başlayın.",
+    "mcp_connection.wrong_account": "Bu oturum açmayı başka bir hesap başlattı. Kendi hesabınızdan yeniden başlatın.",
+    "mcp_connection.declined": "Oturum açma tamamlanmadı.",
+    "mcp_connection.reauth_required": "{name} MCP sunucusunda yeniden oturum açın.",
+    "mcp_connection.vault_key_changed": "Kayıtlı oturum artık okunamıyor. Bu MCP sunucusunda yeniden oturum açın.",
+    "mcp_connection.not_connected": "{name} adlı bir MCP sunucusu bağlantısı yok.",
+    "mcp_connection.unknown_connector": "Bilinmeyen bağlayıcı: {name}. Önce bunu bir MCP sunucusu olarak bağlayın.",
+    "mcp_connection.invalid_preset": "Bu MCP sunucusu listede yok.",
+    "mcp_connection.invalid_request": "Bir ön ayar ya da bir ad ve MCP sunucusu URL'si verin."
   }
 }

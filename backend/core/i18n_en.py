@@ -143,6 +143,7 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "mcp_connection.exchange_failed": "The MCP server did not complete the sign-in. Try again.",
     "mcp_connection.state_invalid": "The sign-in link is not valid. Start again.",
     "mcp_connection.state_expired": "The sign-in link is too old. Start again.",
+    "mcp_connection.wrong_account": "Another account started this sign-in. Start it again from your own account.",
     "mcp_connection.declined": "The sign-in did not complete.",
     "mcp_connection.reauth_required": "Sign in to the MCP server {name} again.",
     "mcp_connection.vault_key_changed": "The saved sign-in can no longer be read. Sign in to this MCP server again.",

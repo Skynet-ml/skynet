@@ -480,6 +480,26 @@
     "budget.not_found": "你嘅帳戶無法使用呢個預算。請建立新嘅設定預算。",
     "budget.invalid": "請輸入可以涵蓋已花費或者已預留用量嘅支出上限。",
     "budget.below_minimum": "開支上限低過呢次運行需要嘅最低金額。請輸入更高嘅上限。",
-    "serve.not_enabled": "呢次執行嘅服務閂咗。請先喺執行嘅服務分頁開啟。"
+    "serve.not_enabled": "呢次執行嘅服務閂咗。請先喺執行嘅服務分頁開啟。",
+    "mcp_connection.invalid_name": "用 1 至 40 個細楷英文字母、數字、'-' 或 '_'，並以字母開頭。",
+    "mcp_connection.name_reserved": "名稱 {name} 屬於 {term.appName} 嘅連接器。請用第二個名稱。",
+    "mcp_connection.invalid_url": "MCP 伺服器網址必須係唔帶查詢參數嘅 HTTPS 網址。",
+    "mcp_connection.blocked_address": "唔可以用呢個 MCP 伺服器位址。",
+    "mcp_connection.discovery_failed": "讀唔到呢個 MCP 伺服器嘅 OAuth 設定。",
+    "mcp_connection.oauth_unsupported": "呢個 MCP 伺服器唔要求 OAuth 登入。",
+    "mcp_connection.issuer_mismatch": "OAuth 伺服器資料寫咗另一個簽發方。",
+    "mcp_connection.pkce_unsupported": "呢個 MCP 伺服器唔支援 S256 嘅 PKCE。",
+    "mcp_connection.registration_required": "呢個伺服器要 {term.appName} 先註冊。佢嘅擁有人要容許動態用戶端註冊。",
+    "mcp_connection.exchange_failed": "MCP 伺服器冇完成登入。請再試。",
+    "mcp_connection.state_invalid": "登入連結無效。請重新開始。",
+    "mcp_connection.state_expired": "登入連結太舊。請重新開始。",
+    "mcp_connection.wrong_account": "另一個帳戶開始咗呢次登入。請喺你自己嘅帳戶重新開始。",
+    "mcp_connection.declined": "登入未完成。",
+    "mcp_connection.reauth_required": "請重新登入 MCP 伺服器 {name}。",
+    "mcp_connection.vault_key_changed": "已儲存嘅登入讀唔到。請重新登入呢個 MCP 伺服器。",
+    "mcp_connection.not_connected": "冇叫 {name} 嘅 MCP 伺服器連線。",
+    "mcp_connection.unknown_connector": "未知連接器：{name}。請先將佢當 MCP 伺服器連接。",
+    "mcp_connection.invalid_preset": "呢個 MCP 伺服器唔喺清單入面。",
+    "mcp_connection.invalid_request": "請提供預設，或者名稱同 MCP 伺服器網址。"
   }
 }

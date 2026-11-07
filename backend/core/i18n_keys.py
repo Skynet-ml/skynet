@@ -269,6 +269,7 @@ class I18nKey(StrEnum):
     MCP_CONNECTION_STATE_INVALID = 'mcp_connection.state_invalid'
     MCP_CONNECTION_UNKNOWN_CONNECTOR = 'mcp_connection.unknown_connector'
     MCP_CONNECTION_VAULT_KEY_CHANGED = 'mcp_connection.vault_key_changed'
+    MCP_CONNECTION_WRONG_ACCOUNT = 'mcp_connection.wrong_account'
     MODELS_MANAGED_UNAVAILABLE_LOCAL = 'models.managed_unavailable_local'
     MODELS_SUBSCRIPTION_LOCAL_ONLY = 'models.subscription_local_only'
     NOTIFICATIONS_SLACK_FAILED = 'notifications.slack_failed'

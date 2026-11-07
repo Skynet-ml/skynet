@@ -480,6 +480,26 @@
     "budget.not_found": "این بودجه برای حساب شما در دسترس نیست. یک بودجهٔ تنظیم جدید ایجاد کنید.",
     "budget.invalid": "سقف هزینه‌ای وارد کنید که مصرف انجام‌شده یا رزروشده را پوشش دهد.",
     "budget.below_minimum": "سقف هزینه کمتر از حداقلی است که این اجرا نیاز دارد. سقف بالاتری وارد کنید.",
-    "serve.not_enabled": "سرویس‌دهی برای این اجرا خاموش است. ابتدا آن را در زبانه سرویس‌دهی اجرا روشن کنید."
+    "serve.not_enabled": "سرویس‌دهی برای این اجرا خاموش است. ابتدا آن را در زبانه سرویس‌دهی اجرا روشن کنید.",
+    "mcp_connection.invalid_name": "از ۱ تا ۴۰ حرف کوچک لاتین، رقم، '-' یا '_' استفاده کنید که با یک حرف شروع شود.",
+    "mcp_connection.name_reserved": "نام {name} متعلق به یک اتصال‌دهندهٔ {term.appName} است. نام دیگری انتخاب کنید.",
+    "mcp_connection.invalid_url": "نشانی سرور MCP باید یک نشانی HTTPS بدون کوئری باشد.",
+    "mcp_connection.blocked_address": "این نشانی سرور MCP مجاز نیست.",
+    "mcp_connection.discovery_failed": "تنظیمات OAuth این سرور MCP خوانده نشد.",
+    "mcp_connection.oauth_unsupported": "این سرور MCP ورود با OAuth نمی‌خواهد.",
+    "mcp_connection.issuer_mismatch": "فرادادهٔ سرور OAuth صادرکنندهٔ دیگری را نام می‌برد.",
+    "mcp_connection.pkce_unsupported": "این سرور MCP از PKCE با S256 پشتیبانی نمی‌کند.",
+    "mcp_connection.registration_required": "این سرور نیاز دارد {term.appName} ابتدا ثبت شود. مالک آن باید ثبت پویای کلاینت را مجاز کند.",
+    "mcp_connection.exchange_failed": "سرور MCP ورود را کامل نکرد. دوباره تلاش کنید.",
+    "mcp_connection.state_invalid": "پیوند ورود معتبر نیست. دوباره شروع کنید.",
+    "mcp_connection.state_expired": "پیوند ورود خیلی قدیمی است. دوباره شروع کنید.",
+    "mcp_connection.wrong_account": "حساب دیگری این ورود را شروع کرده است. آن را از حساب خودتان دوباره شروع کنید.",
+    "mcp_connection.declined": "ورود کامل نشد.",
+    "mcp_connection.reauth_required": "دوباره به سرور MCP {name} وارد شوید.",
+    "mcp_connection.vault_key_changed": "ورود ذخیره‌شده دیگر خوانده نمی‌شود. دوباره به این سرور MCP وارد شوید.",
+    "mcp_connection.not_connected": "هیچ اتصال سرور MCP با نام {name} وجود ندارد.",
+    "mcp_connection.unknown_connector": "اتصال‌دهندهٔ ناشناخته: {name}. ابتدا آن را به‌عنوان سرور MCP متصل کنید.",
+    "mcp_connection.invalid_preset": "این سرور MCP در فهرست نیست.",
+    "mcp_connection.invalid_request": "یک پیش‌تنظیم، یا یک نام و نشانی سرور MCP بدهید."
   }
 }

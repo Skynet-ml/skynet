@@ -1,10 +1,13 @@
 """Routes that connect a user's account to a remote MCP server with OAuth.
 
 ``POST /mcp/connections/start`` returns the server's sign-in URL. The browser
-comes back to ``GET /mcp/connections/callback``, which stores the tokens
-encrypted and returns to the web app. A run lists the connection's name under
-``[services.<name>]`` in optimize.toml, and the broker on the parent adds the
-token to each tool call, so the token never reaches the box.
+comes back to ``GET /mcp/connections/callback``, which passes the state and
+code to the web app in the URL fragment. The signed-in web app then calls
+``POST /mcp/connections/finish``, which checks that the caller started the
+sign-in and stores the tokens encrypted. A run payload names the connection
+in ``env_connectors``, and the broker on the parent adds the token to each
+tool call, so the token never reaches the box. The ``[services.<name>]``
+wiring in optimize.toml comes with the SKY-354 follow-up.
 """
 
 from __future__ import annotations
@@ -27,7 +30,6 @@ from ...billing.mcp_oauth_client import (
 from ...billing.mcp_server_presets import PRESETS
 from ...config import settings
 from ..auth import AuthenticatedUser, get_authenticated_user
-from ..errors import DomainError
 
 
 # One remote MCP server the picker offers.
@@ -67,6 +69,17 @@ class McpConnectionStartResponse(BaseModel):
     authorize_url: str
 
 
+# The state and code that the callback passed to the web app.
+class McpConnectionFinishRequest(BaseModel):
+    state: str = Field(max_length=200)
+    code: str = Field(max_length=2048)
+
+
+# The connector name of the finished connection.
+class McpConnectionFinishResponse(BaseModel):
+    name: str
+
+
 def _http_error(error: McpOAuthError) -> HTTPException:
     """Turn a sign-in failure into its HTTP answer.
 
@@ -81,17 +94,20 @@ def _http_error(error: McpOAuthError) -> HTTPException:
     )
 
 
-def _app_redirect(**params: str) -> RedirectResponse:
+def _app_redirect(fragment: dict[str, str] | None = None, **params: str) -> RedirectResponse:
     """Send the browser back to the connectors settings of the web app.
 
     Args:
-        **params: Result values for the web app.
+        fragment: Values for the URL fragment, which the browser does not send
+            to any server or put in a ``Referer`` header.
+        **params: Result values for the query.
 
     Returns:
         A 303 redirect into the frontend.
     """
     query = urlencode({"settings": "connectors", **params})
-    return RedirectResponse(f"{settings.app_public_url.rstrip('/')}/?{query}", status_code=303)
+    tail = f"#{urlencode(fragment)}" if fragment else ""
+    return RedirectResponse(f"{settings.app_public_url.rstrip('/')}/?{query}{tail}", status_code=303)
 
 
 def create_mcp_connections_router() -> APIRouter:
@@ -194,10 +210,11 @@ def create_mcp_connections_router() -> APIRouter:
         state: str | None = None,
         error: str | None = None,
     ) -> RedirectResponse:
-        """Finish the sign-in and send the browser back to the web app.
+        """Pass the state and code to the web app, which finishes the sign-in.
 
-        Unauthenticated like the other connector callbacks: the single-use
-        ``state`` ties the code to the user who started the sign-in.
+        This route has no session, because auth is a bearer header. So it
+        trades no code itself: the signed-in finish route checks that the
+        caller started the sign-in, which blocks an account-link hijack.
 
         Args:
             code: Authorization code.
@@ -205,17 +222,40 @@ def create_mcp_connections_router() -> APIRouter:
             error: The server's error code when the user declined.
 
         Returns:
-            A redirect that carries the connector name or an error code.
+            A redirect with an error code, or with the state and code in the fragment.
         """
         if error or not code or not state:
             return _app_redirect(mcp_error="mcp_connection.declined")
+        return _app_redirect({"mcp_state": state, "mcp_code": code})
+
+    @router.post(
+        "/mcp/connections/finish",
+        response_model=McpConnectionFinishResponse,
+        summary="Finish the OAuth sign-in to a remote MCP server",
+    )
+    def finish_mcp_connection(
+        body: McpConnectionFinishRequest,
+        user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
+    ) -> McpConnectionFinishResponse:
+        """Trade the code for tokens when the caller started this sign-in.
+
+        Args:
+            body: The state and code from the callback.
+            user: Authenticated caller.
+
+        Returns:
+            The connector name.
+
+        Raises:
+            HTTPException: 400 for an unknown, used or old state; 403 when
+                another user started the sign-in; 502 when the exchange fails;
+                503 when the vault is not configured.
+        """
         try:
-            _username, name = finish_connection(state, code)
-        except McpOAuthError as failure:
-            return _app_redirect(mcp_error=failure.code)
-        except DomainError:
-            return _app_redirect(mcp_error="connectors.vault_not_configured")
-        return _app_redirect(mcp_connected=name)
+            name = finish_connection(user.username, body.state, body.code)
+        except McpOAuthError as error:
+            raise _http_error(error) from error
+        return McpConnectionFinishResponse(name=name)
 
     @router.delete(
         "/mcp/connections/{name}",

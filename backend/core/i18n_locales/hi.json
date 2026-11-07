@@ -480,6 +480,26 @@
     "budget.not_found": "यह बजट आपके खाते के लिए उपलब्ध नहीं है। नया सेटअप बजट बनाएँ।",
     "budget.invalid": "ऐसी खर्च सीमा डालें जो पहले से खर्च या आरक्षित उपयोग को कवर करे।",
     "budget.below_minimum": "खर्च सीमा इस रन के लिए ज़रूरी न्यूनतम से कम है। ऊँची सीमा दर्ज करें।",
-    "serve.not_enabled": "इस रन के लिए सर्विंग बंद है। पहले रन के सर्विंग टैब में इसे चालू करें।"
+    "serve.not_enabled": "इस रन के लिए सर्विंग बंद है। पहले रन के सर्विंग टैब में इसे चालू करें।",
+    "mcp_connection.invalid_name": "1 से 40 छोटे अंग्रेज़ी अक्षर, अंक, '-' या '_' इस्तेमाल करें, और शुरुआत अक्षर से करें।",
+    "mcp_connection.name_reserved": "नाम {name} एक {term.appName} कनेक्टर का है। कोई दूसरा नाम इस्तेमाल करें।",
+    "mcp_connection.invalid_url": "MCP सर्वर URL बिना क्वेरी वाला HTTPS URL होना चाहिए।",
+    "mcp_connection.blocked_address": "इस MCP सर्वर पते की अनुमति नहीं है।",
+    "mcp_connection.discovery_failed": "इस MCP सर्वर का OAuth सेटअप पढ़ा नहीं जा सका।",
+    "mcp_connection.oauth_unsupported": "यह MCP सर्वर OAuth साइन-इन नहीं मांगता।",
+    "mcp_connection.issuer_mismatch": "OAuth सर्वर मेटाडेटा में कोई दूसरा जारीकर्ता है।",
+    "mcp_connection.pkce_unsupported": "यह MCP सर्वर S256 के साथ PKCE का समर्थन नहीं करता।",
+    "mcp_connection.registration_required": "इस सर्वर के लिए {term.appName} को पहले रजिस्टर करना होगा। इसके मालिक को डायनैमिक क्लाइंट रजिस्ट्रेशन की अनुमति देनी होगी।",
+    "mcp_connection.exchange_failed": "MCP सर्वर ने साइन-इन पूरा नहीं किया। फिर से कोशिश करें।",
+    "mcp_connection.state_invalid": "साइन-इन लिंक मान्य नहीं है। फिर से शुरू करें।",
+    "mcp_connection.state_expired": "साइन-इन लिंक बहुत पुराना है। फिर से शुरू करें।",
+    "mcp_connection.wrong_account": "यह साइन-इन किसी दूसरे खाते ने शुरू किया था। इसे अपने खाते से फिर से शुरू करें।",
+    "mcp_connection.declined": "साइन-इन पूरा नहीं हुआ।",
+    "mcp_connection.reauth_required": "MCP सर्वर {name} में फिर से साइन इन करें।",
+    "mcp_connection.vault_key_changed": "सहेजा गया साइन-इन अब पढ़ा नहीं जा सकता। इस MCP सर्वर में फिर से साइन इन करें।",
+    "mcp_connection.not_connected": "{name} नाम का कोई MCP सर्वर कनेक्शन नहीं है।",
+    "mcp_connection.unknown_connector": "अज्ञात कनेक्टर: {name}। पहले इसे MCP सर्वर के रूप में कनेक्ट करें।",
+    "mcp_connection.invalid_preset": "यह MCP सर्वर सूची में नहीं है।",
+    "mcp_connection.invalid_request": "कोई प्रीसेट दें, या एक नाम और MCP सर्वर URL दें।"
   }
 }

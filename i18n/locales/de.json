@@ -480,6 +480,26 @@
     "budget.not_found": "Dieses Budget ist für dein Konto nicht verfügbar. Erstelle ein neues Einrichtungsbudget.",
     "budget.invalid": "Gib ein Ausgabenlimit ein, das bereits verbrauchte oder reservierte Beträge abdeckt.",
     "budget.below_minimum": "Das Ausgabenlimit liegt unter dem Minimum, das dieser Lauf benötigt. Geben Sie ein höheres Limit ein.",
-    "serve.not_enabled": "Die Bereitstellung ist für diesen Lauf aus. Schalten Sie sie zuerst im Tab „Bereitstellung“ des Laufs ein."
+    "serve.not_enabled": "Die Bereitstellung ist für diesen Lauf aus. Schalten Sie sie zuerst im Tab „Bereitstellung“ des Laufs ein.",
+    "mcp_connection.invalid_name": "Verwende 1 bis 40 Kleinbuchstaben, Ziffern, '-' oder '_', beginnend mit einem Buchstaben.",
+    "mcp_connection.name_reserved": "Der Name {name} gehört zu einem {term.appName}-Connector. Verwende einen anderen Namen.",
+    "mcp_connection.invalid_url": "Die MCP-Server-URL muss eine HTTPS-URL ohne Query sein.",
+    "mcp_connection.blocked_address": "Diese MCP-Serveradresse ist nicht erlaubt.",
+    "mcp_connection.discovery_failed": "Die OAuth-Einrichtung dieses MCP-Servers konnte nicht gelesen werden.",
+    "mcp_connection.oauth_unsupported": "Dieser MCP-Server verlangt keine OAuth-Anmeldung.",
+    "mcp_connection.issuer_mismatch": "Die Metadaten des OAuth-Servers nennen einen anderen Aussteller.",
+    "mcp_connection.pkce_unsupported": "Dieser MCP-Server unterstützt kein PKCE mit S256.",
+    "mcp_connection.registration_required": "Dieser Server verlangt, dass sich {term.appName} zuerst registriert. Sein Betreiber muss die dynamische Client-Registrierung erlauben.",
+    "mcp_connection.exchange_failed": "Der MCP-Server hat die Anmeldung nicht abgeschlossen. Versuche es erneut.",
+    "mcp_connection.state_invalid": "Der Anmeldelink ist ungültig. Beginne von vorn.",
+    "mcp_connection.state_expired": "Der Anmeldelink ist zu alt. Beginne von vorn.",
+    "mcp_connection.wrong_account": "Ein anderes Konto hat diese Anmeldung gestartet. Starte sie erneut in deinem eigenen Konto.",
+    "mcp_connection.declined": "Die Anmeldung wurde nicht abgeschlossen.",
+    "mcp_connection.reauth_required": "Melde dich erneut beim MCP-Server {name} an.",
+    "mcp_connection.vault_key_changed": "Die gespeicherte Anmeldung kann nicht mehr gelesen werden. Melde dich erneut bei diesem MCP-Server an.",
+    "mcp_connection.not_connected": "Es gibt keine MCP-Serververbindung namens {name}.",
+    "mcp_connection.unknown_connector": "Unbekannter Connector: {name}. Verbinde ihn zuerst als MCP-Server.",
+    "mcp_connection.invalid_preset": "Dieser MCP-Server ist nicht in der Liste.",
+    "mcp_connection.invalid_request": "Gib eine Vorlage an, oder einen Namen und eine MCP-Server-URL."
   }
 }
