@@ -24,6 +24,7 @@ from core.api.preflight_execution import _verify_model_routes
 from core.billing import model_gateway as gateway_module
 from core.billing.budgets import BudgetInsufficientError, BudgetService
 from core.billing.byok_upstreams import UPSTREAMS
+from core.billing.env_connectors import CONNECTOR_ROUTES_KEY, CONNECTORS, CONNECTORS_KEY
 from core.billing.mcp_oauth_client import McpOAuthError
 from core.billing.model_dispatch import ModelHTTPResult, response_complete
 from core.billing.model_gateway import (
@@ -1107,13 +1108,21 @@ def test_selected_tools_keep_credentials_outside_guest_and_cannot_call_models(
     assert state.json()["blocked_reason"] == "generation_fenced"
 
 
-def test_catalog_host_gets_no_connector_route(gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give a catalog host no route: a role reaches it only through its .mcp.json and a managed binding."""
-    monkeypatch.setattr(settings, "google_maps_api_key", SecretStr("maps-parent-secret"))
+@pytest.mark.parametrize("entry", sorted({*CONNECTORS, *(c.name for c in CONNECTORS.values())}))
+def test_no_catalog_entry_reaches_connector_routes(
+    gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """Fill the connector routes key only from an OAuth connection, never from a catalog host or name (E49)."""
+    for connector in CONNECTORS.values():
+        monkeypatch.setattr(settings, connector.key_setting, SecretStr(f"{connector.name}-parent-secret"))
+    forged = {entry: {"url": "https://forged.example/mcp", "token": "forged"}}
     with pytest.raises(McpOAuthError) as caught:
-        gateway.protect_payload({"env_connectors": ["mapstools.googleapis.com"]}, managed_key="upstream-secret")
+        gateway.protect_payload({CONNECTORS_KEY: [entry], CONNECTOR_ROUTES_KEY: forged}, managed_key="upstream-secret")
     assert caught.value.code == "mcp_connection.unknown_connector"
     assert gateway._connectors == {}
+    assert gateway._connector_tokens == {}
+    passed = gateway.protect_payload({CONNECTOR_ROUTES_KEY: forged}, managed_key="upstream-secret")
+    assert CONNECTOR_ROUTES_KEY not in passed
 
 
 def test_remote_runtime_streams_and_metered_mailbox_scrubs_protocol(gateway: ModelGateway) -> None:
