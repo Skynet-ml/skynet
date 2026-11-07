@@ -11,6 +11,7 @@ import {
   setHardeningExploitVerdict,
 } from "@/shared/lib/api";
 import { subscriptionAgentModel, type LocalStatus } from "@/features/local-runtime";
+import { msg, type MessageKey } from "@/shared/lib/messages";
 import type { BlackboxTarget, CatalogModel, ModelConfig } from "@/shared/types/api";
 import type { CreateHardeningJobRequest, HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { WIZARD_HARDENING_KEY, keepSessionValue, readSessionValue } from "../lib/session-state";
@@ -45,10 +46,24 @@ export function hardeningDefaultModel(
 
 export type HardeningSettings = Omit<CreateHardeningJobRequest, "draft_id" | "target" | "binding_id">;
 
-// The run submit's repository target (see repo-run.ts), without secrets: the
-// job row keeps the target as sent, so it never takes a secret value.
-function hardeningTarget(repo: RepoDraft | null | undefined): BlackboxTarget | null {
-  if (!repo || repoIssue(repo)) return null;
+/**
+ * The run submit's repository target (see repo-run.ts), without secrets: the
+ * job row keeps the target as sent, so it never takes a secret value.
+ *
+ * Args:
+ *   repo: The wizard's repository draft, or none for a setup without a repository.
+ *
+ * Returns:
+ *   The target, or null when the setup has no repository.
+ *
+ * Throws:
+ *   Error: Its message is the draft's issue key when the repository is not
+ *   valid; a job without its target would harden the wrong metric.
+ */
+export function hardeningTarget(repo: RepoDraft | null | undefined): BlackboxTarget | null {
+  if (!repo) return null;
+  const issue = repoIssue(repo);
+  if (issue) throw new Error(issue);
   return {
     kind: "repo",
     repo: {
@@ -73,6 +88,14 @@ export interface HardeningState {
   verdict: (exploitId: string, confirmed: boolean) => Promise<void>;
   decideFix: (approve: boolean) => Promise<void>;
   retry: () => Promise<void>;
+}
+
+// The budget session and the repository draft throw i18n keys, not text.
+function errorText(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.startsWith("budget.") || message.startsWith("submit.v2.repo.issue.")
+    ? msg(message as MessageKey)
+    : message;
 }
 
 // The setup has no server-side draft id yet, so it keeps one beside its
@@ -147,7 +170,7 @@ export function useHardening(active: boolean): HardeningState {
     try {
       setJob(await call());
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      if (!(err instanceof Error && err.name === "AbortError")) toast.error(errorText(err));
     } finally {
       setBusy(false);
     }
@@ -158,12 +181,13 @@ export function useHardening(active: boolean): HardeningState {
       draft.current ??= draftId();
       const id = draft.current;
       return act(async () => {
+        const target = hardeningTarget(repo);
         const budget = await ensureBudget();
         try {
           return await createHardeningJob({
             ...settings,
             draft_id: id,
-            target: hardeningTarget(repo),
+            target,
             binding_id: budget.id,
           });
         } catch (err) {
