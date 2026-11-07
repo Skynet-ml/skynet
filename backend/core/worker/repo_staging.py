@@ -45,6 +45,7 @@ from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     ConstraintsError,
     MetricSpec,
+    ServiceSpec,
     TargetStage,
     effective_environment,
     instructions_brief,
@@ -111,6 +112,9 @@ class StagedRepository:
     intent: str | None = None
     hidden_paths: tuple[str, ...] = ()
     targets: Mapping[str, TargetStage] = field(default_factory=dict)
+    services: Mapping[str, ServiceSpec] = field(default_factory=dict)
+    # The services each role lists, by role name; the relay checks the caller against it.
+    service_roles: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     agent_archive: Path | None = None
     exploits_path: str = EXPLOITS_DIR
 
@@ -237,6 +241,13 @@ def stage_repository(
         intent=environment.constraints.intent if environment.constraints is not None else None,
         hidden_paths=hidden,
         targets=environment.constraints.targets if environment.constraints is not None else {},
+        services=environment.constraints.services if environment.constraints is not None else {},
+        service_roles={
+            "run": environment.constraints.run_role.services,
+            "metric": environment.constraints.metric_role.services,
+        }
+        if environment.constraints is not None
+        else {},
         agent_archive=agent_archive,
         exploits_path=metric.exploits,
     )
@@ -549,6 +560,8 @@ def bind_repo_scorer(
         stage_archive=staged.agent_archive,
         hidden_paths=staged.hidden_paths,
         max_concurrency=int(payload.get("max_concurrency") or 1),
+        services=staged.services,
+        service_roles=staged.service_roles,
     )
     environment = target["repo"].get(ENVIRONMENT_KEY)
     if isinstance(environment, dict):

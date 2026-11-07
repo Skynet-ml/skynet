@@ -17,10 +17,17 @@ box for each stage for each candidate evaluation, all before the scorer runs
 framed line on the scorer's stdout, the parent runs the stage in its box, and
 writes the answer back into the scorer box. That relay is the stages' only
 way out (E27).
+
+The same relay carries the metric's requests to the run's ``[services.<name>]``
+that have a url (E45). The parent checks that the calling role lists the
+service, adds the service's headers with the secrets filled in, calls the
+url, and returns the response unchanged. The scorer box never holds those
+secrets. Catalog connectors do not go through the relay.
 """
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
 import logging
@@ -34,7 +41,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from ....billing.budgets import BudgetError, BudgetInsufficientError
+from ....billing.mcp_broker import _pinned_address, _PinnedTransport
 from ....billing.model_dispatch import ModelHTTPResult
 from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import UsagePendingError
@@ -42,7 +52,7 @@ from ....billing.signals import BudgetReached
 from . import runner, sandbox_log
 from .harness import ENV_API_KEY, ENV_MODEL
 from .protocol import STATUS_KEY
-from .repo_constraints import TargetStage
+from .repo_constraints import ServiceSpec, TargetStage
 from .repo_services import open_stage_boxes, stage_spec
 from .repo_tree import archive_chunks, drop_paths
 from .repo_workspace import HIDDEN_CHANGED, REPO_DIR, WORK_DIR, RepoWorkspace, redact
@@ -70,6 +80,18 @@ _STAGE_LAYOUT_SECONDS = 600.0
 # repository run gets the layout time too; it only matters when the parent hangs.
 SETUP_ALLOWANCE_SECONDS = 1_800.0 + _STAGE_LAYOUT_SECONDS
 _STAGE_ERROR_CHARS = 500
+_SERVICE_TIMEOUT_SECONDS = 120.0
+# The answer is written into the scorer box, base64-encoded.
+_SERVICE_BODY_BYTES = 4 * 1024 * 1024
+_SERVICE_PLACEHOLDER = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
+_HTTP_METHOD = re.compile(r"[A-Z]{1,16}")
+# Connection framing is the relay's own on each side; httpx decodes the body.
+_HOP_HEADERS = frozenset(
+    {"connection", "content-length", "host", "keep-alive", "proxy-authorization", "te", "transfer-encoding", "upgrade"}
+)
+_DECODED_HEADERS = frozenset({"content-encoding", "content-length", "connection", "keep-alive", "transfer-encoding"})
+# The scorer code is the [metric] role; the candidate's [run] entry calls as "run" (SKY-375).
+_METRIC_ROLE = "metric"
 # The proposer gets only these keys, so the scorer's other side information
 # (weights, formulas, metric source) never reveals the metric (SKY-353).
 _PROPOSER_KEYS = ("score", "feedback", STATUS_KEY, "scores")
@@ -133,6 +155,8 @@ class RepoScorer:
         stage_archive: Path | None = None,
         hidden_paths: tuple[str, ...] = (),
         max_concurrency: int = 1,
+        services: Mapping[str, ServiceSpec] | None = None,
+        service_roles: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         """Bind the user's scorer code to a repository workspace.
 
@@ -156,6 +180,10 @@ class RepoScorer:
             hidden_paths: Metric files and the exploit folder, dropped from
                 each version before a stage box applies it.
             max_concurrency: How many calls to one stage run at the same time.
+            services: The run's ``[services.<name>]``; those with a url
+                go through the relay, and their secrets stay out of the box.
+            service_roles: The services each role lists, by role name
+                (``run``, ``metric``); the scorer calls as ``metric``.
 
         Raises:
             ValueError: When stages are given without a runtime or a tree.
@@ -167,6 +195,11 @@ class RepoScorer:
         self._stage_archive = stage_archive
         self._hidden = hidden_paths
         self._max_concurrency = max(1, max_concurrency)
+        self._services = {name: spec for name, spec in (services or {}).items() if spec.url is not None}
+        self._service_roles = dict(service_roles or {})
+        relayed = {secret for spec in self._services.values() for secret in spec.secrets}
+        # The relay adds these keys in the parent; the version's code runs in the box and must never read them.
+        self._box_secrets = {name: value for name, value in workspace.secrets.items() if name not in relayed}
         self._workspace = workspace
         self._gateway = gateway
         self._code = code
@@ -234,7 +267,7 @@ class RepoScorer:
                         # __pycache__ into it and fail the protected-path check.
                         # Skipping the bytecode beats ignoring __pycache__, where a
                         # version could plant a .pyc that the judge then loads.
-                        env={**self._workspace.secrets, **self._model_env(), "PYTHONDONTWRITEBYTECODE": "1"},
+                        env={**self._box_secrets, **self._model_env(), "PYTHONDONTWRITEBYTECODE": "1"},
                         timeout_seconds=self._timeout_seconds,
                         on_output=relay.output if relay is not None else sandbox_log.ignore_output,
                     )
@@ -321,8 +354,16 @@ class RepoScorer:
             UsagePendingError: When earlier usage still needs reconciliation.
             UnpricedOperationError: When the parent cannot bound a stage box.
         """
-        if not self._stages:
+        relayed = [name for name in self._service_roles.get(_METRIC_ROLE, ()) if name in self._services]
+        if not self._stages and not relayed:
             yield None
+            return
+        if not self._stages:
+            relay = self._relay({}, response_dir)
+            try:
+                yield relay
+            finally:
+                relay.close()
             return
         evaluation_id = uuid.uuid4().hex
         specs = {
@@ -342,14 +383,7 @@ class RepoScorer:
         except Exception as error:
             logger.warning("Stage boxes did not open: %s", error)
             raise RepoScoreError("The stage boxes could not open, so the version has no score.") from None
-        relay = _StageRelay(
-            boxes,
-            self._stages,
-            response_dir=response_dir,
-            max_concurrency=self._max_concurrency,
-            env=self._model_env(),
-            workspace=self._workspace,
-        )
+        relay = self._relay(boxes, response_dir)
         try:
             kept = drop_paths(patch, self._hidden)
             try:
@@ -365,6 +399,29 @@ class RepoScorer:
             yield relay
         finally:
             relay.close()
+
+    def _relay(self, boxes: Mapping[str, SandboxSession], response_dir: str) -> _StageRelay:
+        """Build the relay for one scorer call, calling as the ``[metric]`` role.
+
+        Args:
+            boxes: Each stage's open box, by stage name.
+            response_dir: The call's answer folder, relative to the scorer box.
+
+        Returns:
+            The relay for this call.
+        """
+        return _StageRelay(
+            boxes,
+            self._stages,
+            response_dir=response_dir,
+            max_concurrency=self._max_concurrency,
+            env=self._model_env(),
+            workspace=self._workspace,
+            services=self._services,
+            role=_METRIC_ROLE,
+            allowed=self._service_roles.get(_METRIC_ROLE, ()),
+            secrets=self._workspace.secrets,
+        )
 
     def _lay_out(self, box: SandboxSession, patch: str) -> bool:
         """Unpack the tree without the hidden metric into one stage box and apply the version.
@@ -465,10 +522,11 @@ class RepoScorer:
 
 
 class _StageRelay:
-    """Answer one scorer call's ``call(name, input)`` frames from its open stage boxes.
+    """Answer one scorer call's ``call(name, input)`` and service frames.
 
     Calls to one stage run in parallel, each in its own process and folder,
-    up to ``max_concurrency`` at a time (E34).
+    up to ``max_concurrency`` at a time (E34). Service requests run in their
+    own pool with the same limit.
     """
 
     def __init__(
@@ -480,6 +538,10 @@ class _StageRelay:
         max_concurrency: int,
         env: Mapping[str, str],
         workspace: RepoWorkspace,
+        services: Mapping[str, ServiceSpec] | None = None,
+        role: str = _METRIC_ROLE,
+        allowed: tuple[str, ...] = (),
+        secrets: Mapping[str, str] | None = None,
     ) -> None:
         """Bind the open stage boxes to the scorer box that waits for their answers.
 
@@ -492,6 +554,11 @@ class _StageRelay:
                 through the parent's mailbox.
             workspace: The scorer box's workspace, which checks the
                 protected files and writes each answer into the scorer box.
+            services: The run's services with a url, by name.
+            role: The calling role, checked against each service request.
+            allowed: The services that ``role`` lists.
+            secrets: The run's secret values, filled into service headers
+                here in the parent.
         """
         self._boxes = dict(boxes)
         self._stages = stages
@@ -505,6 +572,12 @@ class _StageRelay:
             for name in self._boxes
         }
         self._refusals = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stage-refusal")
+        self._services = {name: spec for name, spec in (services or {}).items() if spec.url is not None}
+        self._catalog = {name for name, spec in (services or {}).items() if spec.url is None}
+        self._role = role
+        self._allowed = frozenset(allowed)
+        self._secrets = dict(secrets or {})
+        self._service_pool = ThreadPoolExecutor(max_workers=max_concurrency, thread_name_prefix="stage-service")
         self._pending = ""
         self._seen: set[str] = set()
         self._lock = threading.Lock()
@@ -522,9 +595,15 @@ class _StageRelay:
             root: The scorer box's working directory.
 
         Returns:
-            ``{"prefix", "response_dir", "names"}`` for the call's input.
+            ``{"prefix", "response_dir", "names", "services"}`` for the
+            call's input; ``services`` lists what the role may call.
         """
-        return {"prefix": self._prefix, "response_dir": f"{root}/{self._response_dir}", "names": list(self._boxes)}
+        return {
+            "prefix": self._prefix,
+            "response_dir": f"{root}/{self._response_dir}",
+            "names": list(self._boxes),
+            "services": [name for name in self._services if name in self._allowed],
+        }
 
     def output(self, stream: str, data: str) -> None:
         """Take the scorer's output as it streams and hand each call frame to its stage's pool.
@@ -552,7 +631,8 @@ class _StageRelay:
                     sandbox_log.ignore_output(stream, line[:start] + "\n")
                 try:
                     frame = json.loads(line[start + len(self._prefix) :])
-                    identity, name = frame["id"], frame["stage"]
+                    identity = frame["id"]
+                    name = frame["service"] if "service" in frame else frame["stage"]
                 except (ValueError, KeyError, TypeError):
                     continue
                 if (
@@ -563,11 +643,127 @@ class _StageRelay:
                 ):
                     continue
                 self._seen.add(identity)
+                if "service" in frame:
+                    refusal = self._refusal(name)
+                    if refusal is None:
+                        self._service_pool.submit(self._service, name, identity, frame)
+                    else:
+                        self._refusals.submit(self._answer, identity, refusal)
+                    continue
                 pool = self._pools.get(name) if isinstance(name, str) else None
                 if pool is None:
                     self._refusals.submit(self._answer, identity, {"error": f"Unknown stage {name!r}."})
                 else:
                     pool.submit(self._call, name, identity, frame.get("input"))
+
+    def _refusal(self, name: Any) -> dict[str, Any] | None:
+        """Check that the calling role may reach a service through the relay.
+
+        Args:
+            name: The service the frame names.
+
+        Returns:
+            The refusal answer, or ``None`` when the request may go out.
+        """
+        if not isinstance(name, str) or (name not in self._services and name not in self._catalog):
+            return {"status": 404, "error": f"Unknown service {name!r}."}
+        if name not in self._allowed:
+            return {"status": 403, "error": f"Service {name!r} is not listed for the [{self._role}] role."}
+        if name in self._catalog:
+            return {
+                "status": 403,
+                "error": f"Service {name!r} has no url; only services with a url go through the relay.",
+            }
+        return None
+
+    def _service(self, name: str, identity: str, frame: Mapping[str, Any]) -> None:
+        """Send one service request and write the response for the scorer.
+
+        Args:
+            name: The service.
+            identity: The request's id, also its answer name.
+            frame: The guest's ``path``, ``method``, ``headers`` and ``body``.
+        """
+        try:
+            response = self._request(self._services[name], name, frame)
+        except Exception as error:
+            logger.warning("Service %s request failed in the parent: %s", name, error)
+            response = {"status": 502, "error": f"Service {name!r} could not be reached."}
+        self._answer(identity, response)
+
+    def _request(self, spec: ServiceSpec, name: str, frame: Mapping[str, Any]) -> dict[str, Any]:
+        """Call a service's url with its headers and the run's secrets filled in.
+
+        The host must resolve to public addresses only, and the connection
+        stays on that address and origin; redirects come back to the guest
+        unchanged.
+
+        Args:
+            spec: The service's declaration.
+            name: The service.
+            frame: The guest's ``path``, ``method``, ``headers`` and ``body``.
+
+        Returns:
+            ``{"status", "headers", "body"}`` with a base64 body, or
+            ``{"status", "error"}`` when the request cannot go out.
+
+        Raises:
+            ValueError: When the frame is malformed or the host resolves to a
+                private, loopback or link-local address.
+            httpx.HTTPError: When the service cannot be reached.
+        """
+        method, path = frame.get("method"), frame.get("path", "")
+        if not isinstance(method, str) or not _HTTP_METHOD.fullmatch(method) or not isinstance(path, str):
+            return {"status": 400, "error": f"Service {name!r} got a malformed request."}
+        url = str(spec.url).rstrip("/") + "/" + path.lstrip("/")
+        origin, target = httpx.URL(str(spec.url)), httpx.URL(url)
+        if (target.scheme, target.host, target.port) != (origin.scheme, origin.host, origin.port):
+            return {"status": 400, "error": f"Service {name!r} got a path outside its url."}
+        overrides = {key.lower(): value for key, value in spec.request_headers.items()}
+        headers = [
+            (pair[0], pair[1])
+            for pair in frame.get("headers") or ()
+            if isinstance(pair, list | tuple)
+            and len(pair) == 2
+            and all(isinstance(part, str) for part in pair)
+            and pair[0].lower() not in _HOP_HEADERS
+            and pair[0].lower() not in overrides
+        ]
+        for key, template in spec.request_headers.items():
+            missing = [secret for secret in _SERVICE_PLACEHOLDER.findall(template) if secret not in self._secrets]
+            if missing:
+                return {
+                    "status": 502,
+                    "error": f"Service {name!r} needs secret {missing[0]}, which the run does not have.",
+                }
+            headers.append((key, _SERVICE_PLACEHOLDER.sub(lambda match: self._secrets[match.group(1)], template)))
+        body = base64.b64decode(frame.get("body") or "", validate=True)
+        transport = _PinnedTransport(
+            str(spec.url), _pinned_address(str(spec.url), False, label=f"service {name!r} url")
+        )
+        try:
+            with (
+                httpx.Client(
+                    transport=transport, follow_redirects=False, trust_env=False, timeout=_SERVICE_TIMEOUT_SECONDS
+                ) as client,
+                client.stream(method, target, headers=headers, content=body) as response,
+            ):
+                content = bytearray()
+                for chunk in response.iter_bytes():
+                    content.extend(chunk)
+                    if len(content) > _SERVICE_BODY_BYTES:
+                        return {"status": 502, "error": f"Service {name!r} answered with more than 4 MiB."}
+                return {
+                    "status": response.status_code,
+                    "headers": [
+                        [key, value]
+                        for key, value in response.headers.multi_items()
+                        if key.lower() not in _DECODED_HEADERS
+                    ],
+                    "body": base64.b64encode(bytes(content)).decode("ascii"),
+                }
+        finally:
+            transport.close()
 
     def _call(self, name: str, identity: str, value: Any) -> None:
         """Run one stage call in its box and write the answer for the scorer.
@@ -649,7 +845,8 @@ class _StageRelay:
 
         Args:
             identity: The call's id.
-            response: ``{"output"}``, ``{"error"}`` or ``{"control"}``.
+            response: ``{"output"}``, ``{"error"}``, ``{"control"}``, or a
+                service's ``{"status", ...}``.
         """
         with self._answer_lock:
             if self._closed:
@@ -665,7 +862,7 @@ class _StageRelay:
         """Stop queued calls, keep late answers out of the scorer box, and close every stage box."""
         with self._answer_lock:
             self._closed = True
-        for pool in (*self._pools.values(), self._refusals):
+        for pool in (*self._pools.values(), self._refusals, self._service_pool):
             pool.shutdown(wait=False, cancel_futures=True)
         for box in self._boxes.values():
             with contextlib.suppress(Exception):

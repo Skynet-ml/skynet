@@ -33,7 +33,7 @@ from core.connectors.github_repo import RepoSnapshot
 from core.exceptions import ServiceError
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
 from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR
-from core.service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, TargetStage
+from core.service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, ServiceSpec, TargetStage
 from core.service_gateway.optimization.blackbox.repo_workspace import _PROBE_OK, NetworkCutoffError
 from core.service_gateway.optimization.blackbox.rule_judge import (
     JUDGE_ANSWER_TOKENS,
@@ -1475,6 +1475,40 @@ def test_binding_hands_the_stages_to_the_scorer(tmp_path: Path) -> None:
     assert scorer._stage_archive == tmp_path / "agent-tree.tgz"
     assert scorer._hidden == staged.hidden_paths
     assert scorer._max_concurrency == 3
+    staged.close_scorers()
+
+
+def test_staging_keeps_the_services_each_role_lists(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The run's services and each role's list reach the parent, so the relay can check the caller."""
+    files = {
+        "optimize.toml": _CONSTRAINTS
+        + '\n[services.judge]\nsecrets = ["JUDGE_KEY"]\nurl = "https://judge.example.com/v1"\n'
+    }
+    _, staged = _stage_with(files, monkeypatch)
+    try:
+        assert staged.services["judge"].url == "https://judge.example.com/v1"
+        assert staged.service_roles == {"run": (), "metric": ("judge",)}
+    finally:
+        staged.cleanup()
+
+
+def test_binding_hands_the_services_to_the_scorer(tmp_path: Path) -> None:
+    """The scorer gets the url services and the metric's list; their keys leave the scorer box's env."""
+    payload, staged = _binding(tmp_path, None)
+    staged = dataclasses.replace(
+        staged,
+        secrets={**staged.secrets, "JUDGE_KEY": "judge-secret-value"},
+        services={"judge": ServiceSpec(secrets=("JUDGE_KEY",), url="https://judge.example.com/v1")},
+        service_roles={"run": (), "metric": ("judge",)},
+    )
+    gateway = _Gateway()
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    scorer = gateway.evaluator
+    assert list(scorer._services) == ["judge"]
+    assert scorer._service_roles["metric"] == ("judge",)
+    assert "JUDGE_KEY" not in scorer._box_secrets
     staged.close_scorers()
 
 

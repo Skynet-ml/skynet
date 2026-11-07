@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import http.server
 import json
 import logging
+import threading
 import time
 import traceback
 from collections.abc import Iterator, Mapping
@@ -17,7 +19,8 @@ from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
 
-from ..repo_constraints import TargetStage
+from .. import repo_scorer
+from ..repo_constraints import ServiceSpec, TargetStage
 from ..repo_scorer import (
     _STAGE_LAYOUT_SECONDS,
     SETUP_ALLOWANCE_SECONDS,
@@ -1244,3 +1247,234 @@ def test_the_relay_finds_a_frame_that_does_not_start_its_line() -> None:
     relay.close()
     assert [path for path, _ in workspace.writes] == [f"calls/000001/stages/{identity}.json"]
     assert "Unknown stage 'nope'" in workspace.writes[0][1]
+
+
+class _Upstream:
+    """Serve a stand-in for a user's own API on loopback and record what it receives."""
+
+    def __init__(self) -> None:
+        """Start the server on a free port."""
+        self.requests: list[dict[str, Any]] = []
+        upstream = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            """Echo each request's path and body as JSON."""
+
+            def do_POST(self) -> None:
+                """Record the request and answer it."""
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                upstream.requests.append({"path": self.path, "headers": dict(self.headers.items()), "body": body})
+                payload = json.dumps({"grade": 7, "path": self.path, "body": body.decode()}).encode()
+                self.send_response(201)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("X-Upstream", "yes")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                """Keep the test output quiet."""
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_address[1]
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        """Stop the server."""
+        self._server.shutdown()
+        self._server.server_close()
+
+
+@pytest.fixture
+def upstream() -> Iterator[_Upstream]:
+    """Run a stand-in service for one test.
+
+    Yields:
+        The running service.
+    """
+    server = _Upstream()
+    yield server
+    server.close()
+
+
+SERVICE_SCORER = """
+import json
+import os
+import urllib.request
+
+def score(repo_path, case=None):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(
+        os.environ["SKYNET_SERVICE_JUDGE_API_URL"] + "grade?mode=strict",
+        data=b'{"text": "hi"}',
+        headers={"Content-Type": "application/json", "Authorization": "Bearer guessed"},
+        method="POST",
+    )
+    with opener.open(request) as response:
+        answer = json.loads(response.read())
+        upstream = response.headers.get("X-Upstream")
+        status = response.status
+    seen = {
+        "status": status,
+        "upstream": upstream,
+        "path": answer["path"],
+        "body": answer["body"],
+        "key_in_env": any(value == "judge-secret-value" for value in os.environ.values()),
+        "key_name_in_env": "JUDGE_KEY" in os.environ,
+        "other_secret": os.environ.get("OTHER_KEY") == "other-value",
+    }
+    return answer["grade"] / 10, json.dumps(seen, sort_keys=True)
+"""
+
+
+def _service_scorer(tmp_path: Path, port: int, roles: Mapping[str, tuple[str, ...]]) -> RepoScorer:
+    """Open a scorer whose run declares one url service with a key.
+
+    Args:
+        tmp_path: Scratch folder.
+        port: The stand-in service's port.
+        roles: The services each role lists.
+
+    Returns:
+        The scorer.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
+    return RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={"JUDGE_KEY": "judge-secret-value", "OTHER_KEY": "other-value"},
+        ),
+        SERVICE_SCORER,
+        timeout_seconds=60,
+        services={"judge-api": ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://judge.example.test:{port}/v1/")},
+        service_roles=roles,
+    )
+
+
+def test_the_metric_reaches_its_listed_service_without_holding_the_key(
+    tmp_path: Path, upstream: _Upstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The parent adds the key and calls the url; the scorer box gets the response but never the key."""
+    resolved: list[str] = []
+
+    def pinned(url: str, allow_private: bool, *, label: str) -> str:
+        """Resolve the stand-in host to loopback, as public DNS would to a public address."""
+        assert allow_private is False
+        resolved.append(url)
+        return "127.0.0.1"
+
+    monkeypatch.setattr(repo_scorer, "_pinned_address", pinned)
+    scorer = _service_scorer(tmp_path, upstream.port, {"run": (), "metric": ("judge-api",)})
+    try:
+        result = scorer.score("")
+    finally:
+        scorer.close()
+    assert result["score"] == pytest.approx(0.7)
+    assert json.loads(result["feedback"]) == {
+        "body": '{"text": "hi"}',
+        "key_in_env": False,
+        "key_name_in_env": False,
+        "other_secret": True,
+        "path": "/v1/grade?mode=strict",
+        "status": 201,
+        "upstream": "yes",
+    }
+    assert resolved == [f"http://judge.example.test:{upstream.port}/v1/"]
+    [request] = upstream.requests
+    assert request["headers"]["Authorization"] == "Bearer judge-secret-value"
+    assert request["headers"]["Host"] == f"judge.example.test:{upstream.port}"
+
+
+def _service_relay(
+    workspace: _Workspace, *, role: str, allowed: tuple[str, ...], services: Mapping[str, ServiceSpec]
+) -> _StageRelay:
+    """Build a relay with no stage boxes that forwards to the given services.
+
+    Args:
+        workspace: Records the answers.
+        role: The calling role.
+        allowed: The services that role lists.
+        services: The run's services.
+
+    Returns:
+        The relay.
+    """
+    return _StageRelay(
+        {},
+        {},
+        response_dir="calls/000001/stages",
+        max_concurrency=2,
+        env={},
+        workspace=workspace,  # type: ignore[arg-type]
+        services=services,
+        role=role,
+        allowed=allowed,
+        secrets={"JUDGE_KEY": "judge-secret-value"},
+    )
+
+
+def _service_answer(relay: _StageRelay, workspace: _Workspace, name: str) -> dict[str, Any]:
+    """Send one service frame through the relay and wait for its answer.
+
+    Args:
+        relay: The relay.
+        workspace: Records the answers.
+        name: The service the frame names.
+
+    Returns:
+        The answer the scorer box gets.
+    """
+    frame = {"id": "d" * 32, "service": name, "path": "grade", "method": "POST", "headers": [], "body": ""}
+    relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    deadline = time.monotonic() + 10
+    while not workspace.writes and time.monotonic() < deadline:
+        time.sleep(0.01)
+    relay.close()
+    [(_, text)] = workspace.writes
+    return json.loads(text)
+
+
+def test_a_role_that_does_not_list_the_service_is_refused(upstream: _Upstream) -> None:
+    """The caller's role is checked in the relay; the refusal names the service and the role."""
+    workspace = _Workspace()
+    spec = ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://judge.example.test:{upstream.port}/")
+    relay = _service_relay(workspace, role="run", allowed=(), services={"judge": spec})
+    assert relay.config("/work")["services"] == []
+    answer = _service_answer(relay, workspace, "judge")
+    assert answer["status"] == 403
+    assert answer["error"] == "Service 'judge' is not listed for the [run] role."
+    assert upstream.requests == []
+
+
+@pytest.mark.parametrize(
+    ("name", "status", "message"),
+    [
+        ("nope", 404, "Unknown service 'nope'."),
+        ("github", 403, "only services with a url go through the relay"),
+    ],
+)
+def test_unknown_services_and_catalog_connectors_are_refused(name: str, status: int, message: str) -> None:
+    """Only a declared service with a url goes out; a catalog connector stays with its own broker."""
+    workspace = _Workspace()
+    services = {"github": ServiceSpec(secrets=("GITHUB_TOKEN",))}
+    relay = _service_relay(workspace, role="metric", allowed=("github",), services=services)
+    assert relay.config("/work")["services"] == []
+    answer = _service_answer(relay, workspace, name)
+    assert answer["status"] == status
+    assert message in answer["error"]
+
+
+def test_a_service_whose_host_resolves_to_a_private_address_is_refused(upstream: _Upstream) -> None:
+    """The relay resolves the host and refuses loopback, so a url cannot reach the parent's own network."""
+    workspace = _Workspace()
+    spec = ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://127.0.0.1:{upstream.port}/")
+    relay = _service_relay(workspace, role="metric", allowed=("judge",), services={"judge": spec})
+    assert relay.config("/work")["services"] == ["judge"]
+    answer = _service_answer(relay, workspace, "judge")
+    assert answer == {"status": 502, "error": "Service 'judge' could not be reached."}
+    assert upstream.requests == []

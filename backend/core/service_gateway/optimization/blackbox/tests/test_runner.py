@@ -7,6 +7,8 @@ import io
 import json
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -715,3 +717,47 @@ def test_stage_mode_runs_the_entry_function(tmp_path: Path, source: str, answer:
     )
     assert completed.returncode == 0, completed.stderr
     assert json.loads((call_dir / runner.OUTPUT_FILE).read_text()) == answer
+
+
+def test_service_proxy_relays_each_request_through_the_parent() -> None:
+    """A request to the loopback url becomes one relay message, and the parent's answer comes back unchanged."""
+
+    class Client:
+        """Answer each message the way the parent relay does."""
+
+        def __init__(self) -> None:
+            """Start with no messages."""
+            self.sent: list[dict[str, Any]] = []
+
+        def exchange(self, message: dict[str, Any]) -> dict[str, Any]:
+            """Record the message and answer it.
+
+            Args:
+                message: The request the proxy sends.
+
+            Returns:
+                A service response, or a refusal for the second service.
+            """
+            self.sent.append(message)
+            if message["service"] == "blocked one":
+                return {"status": 403, "error": "Service 'blocked one' is not listed for the [run] role."}
+            return {"status": 201, "headers": [["X-Upstream", "yes"]], "body": base64.b64encode(b"graded").decode()}
+
+    client = Client()
+    urls = runner.start_service_proxy(client, ["judge-api", "blocked one"])  # type: ignore[arg-type]
+    assert set(urls) == {"SKYNET_SERVICE_JUDGE_API_URL", "SKYNET_SERVICE_BLOCKED_ONE_URL"}
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(urls["SKYNET_SERVICE_JUDGE_API_URL"] + "v1/grade?x=1", data=b"hi", method="POST")
+    with opener.open(request) as response:
+        assert response.status == 201
+        assert response.headers["X-Upstream"] == "yes"
+        assert response.read() == b"graded"
+    [message] = client.sent
+    assert message["service"] == "judge-api"
+    assert message["path"] == "v1/grade?x=1"
+    assert message["method"] == "POST"
+    assert base64.b64decode(message["body"]) == b"hi"
+    with pytest.raises(urllib.error.HTTPError) as refused:
+        opener.open(urls["SKYNET_SERVICE_BLOCKED_ONE_URL"] + "x")
+    assert refused.value.code == 403
+    assert b"not listed for the [run] role" in refused.value.read()
