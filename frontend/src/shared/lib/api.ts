@@ -3659,10 +3659,10 @@ export interface McpProbeResponse {
  * Finish an OAuth sign-in at ``path`` (from ``oauthFinishPath``) with the state
  * and code that the callback passed in the URL fragment. The backend links the
  * account only for the user who started the sign-in. An MCP finish answers
- * with the server name.
+ * with the server name, and a connector finish with the full connector list.
  */
 export function finishOAuth(path: string, { state, code }: { state: string; code: string }) {
-  return request<{ name?: string } | undefined>(path, {
+  return request<{ name?: string; connectors?: ConnectorStatus[] } | undefined>(path, {
     method: "POST",
     body: JSON.stringify({ state, code }),
   });

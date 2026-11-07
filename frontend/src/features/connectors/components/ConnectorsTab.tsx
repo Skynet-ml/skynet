@@ -101,14 +101,18 @@ function useConnectorErrorParam() {
  * ``#oauth_flow=..&oauth_state=..&oauth_code=..`` fragment of the callback
  * redirect. The backend checks that this signed-in user started the sign-in.
  * The fragment is cleared first, so the code is sent once. A linked connector
- * refreshes the list quietly, then returns to the page that started the flow.
+ * takes the list from the finish answer, then returns to the page that started
+ * the flow. Returns true while a connector finish runs, so the tab shows a
+ * spinner instead of a stale "not connected" list.
  */
-function useOAuthFinishFragment(refetch: () => unknown) {
+function useOAuthFinishFragment(setConnectors: (connectors: ConnectorStatus[]) => void) {
+  const [finishing, setFinishing] = React.useState(false);
   React.useEffect(() => {
     const finish = parseOAuthFinish(window.location.hash);
     if (!finish || (finish.flow !== "mcp" && !finish.flow.startsWith("connector:"))) return;
     const url = new URL(window.location.href);
     window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}`);
+    if (finish.flow !== "mcp") setFinishing(true);
     finishOAuth(finish.path, finish)
       .then((answer) => {
         if (finish.flow === "mcp") {
@@ -120,15 +124,22 @@ function useOAuthFinishFragment(refetch: () => unknown) {
           return;
         }
         const back = takeOAuthReturn();
-        if (back) window.location.replace(back);
-        else void refetch();
+        // Keep the spinner while the page goes back, so the list never shows.
+        if (back) {
+          window.location.replace(back);
+          return;
+        }
+        if (answer?.connectors) setConnectors(answer.connectors);
+        setFinishing(false);
       })
       .catch((err) => {
         forgetOAuthReturn();
+        setFinishing(false);
         toast.error(userErrorMessage(err, msg("connectors.toast.failed")), TOAST_OPTIONS);
       });
     // Runs once on mount: the fragment is read and cleared in the same pass.
   }, []);
+  return finishing;
 }
 
 /** One input of the credentials form; secrets are masked, long pastes get a textarea. */
@@ -467,13 +478,13 @@ export function ConnectorsTab() {
     if (targetFocus) clearFocus();
   }, [targetFocus, clearFocus]);
   useConnectorErrorParam();
-  useOAuthFinishFragment(refetch);
+  const finishing = useOAuthFinishFragment(setConnectors);
 
   return (
     <div data-setup="connectors" className="space-y-4">
       <p className="text-xs text-muted-foreground">{msg("connectors.subtitle")}</p>
 
-      {loading ? (
+      {loading || finishing ? (
         <LoadingState />
       ) : error ? (
         <div className="flex items-center justify-between gap-3 rounded-lg border border-border/50 px-3 py-2.5">

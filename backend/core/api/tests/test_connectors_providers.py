@@ -629,18 +629,56 @@ def _github_state(client: Any) -> str:
     return parse_qs(urlparse(start.json()["authorize_url"]).query)["state"][0]
 
 
-def test_oauth_finish_by_another_user_is_refused(github_oauth_on: None) -> None:
-    """A state that Alice started cannot link a GitHub account to Bob."""
+_OAUTH_APP_SETTINGS = {
+    "google_sheets": "google",
+    "google_drive": "google",
+    "onedrive": "microsoft",
+    "azure_blob": "microsoft",
+    "github": "github",
+    "notion": "notion",
+    "supabase": "supabase",
+}
+_OAUTH_START_FIELDS: dict[str, dict[str, str]] = {"azure_blob": {"account": "acct", "container": "data"}}
+
+
+def test_oauth_provider_table_covers_every_oauth_provider() -> None:
+    """The per-provider finish test below runs for every OAuth provider."""
+    assert set(_OAUTH_APP_SETTINGS) == OAUTH_PROVIDERS
+
+
+@pytest.mark.parametrize("provider", sorted(_OAUTH_APP_SETTINGS))
+def test_oauth_finish_by_another_user_is_refused(
+    provider: str,
+    monkeypatch: pytest.MonkeyPatch,
+    vault_key: str,  # noqa: F811
+    generic_oauth_off: None,
+) -> None:
+    """A state that Alice started cannot link the account to Bob or to a caller with no sign-in.
+
+    Args:
+        provider: OAuth provider slug.
+        monkeypatch: Pytest monkeypatch fixture.
+        vault_key: Vault key fixture.
+        generic_oauth_off: Fixture that clears every OAuth client first.
+    """
+    app = _OAUTH_APP_SETTINGS[provider]
+    monkeypatch.setattr(settings, f"{app}_oauth_client_id", f"{app}-client")
+    monkeypatch.setattr(settings, f"{app}_oauth_client_secret", SecretStr(f"{app}-secret"))
     client, store = _make_client()
-    state = _github_state(client)
-    client.app.dependency_overrides[get_authenticated_user] = lambda: _BOB
-    finish, post = _github_finish(client, "github", state)
-    assert finish.status_code == 403
-    assert finish.json()["code"] == "connectors.oauth_state_invalid"
+    state = _start_oauth(client, provider, _OAUTH_START_FIELDS.get(provider))["state"][0]
+    body = {"state": state, "code": "c-1"}
+    with patch("core.connectors.oauth.httpx.post") as post:
+        client.app.dependency_overrides[get_authenticated_user] = lambda: _BOB
+        refused = client.post(f"/connectors/{provider}/oauth/finish", json=body)
+        client.app.dependency_overrides.pop(get_authenticated_user)
+        unsigned = client.post(f"/connectors/{provider}/oauth/finish", json=body)
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["code"] == "connectors.oauth_state_invalid"
+    assert unsigned.status_code == 401
     post.assert_not_called()
     vault = ConnectorVault(store.engine)
-    assert vault.resolve("bob", "github") is None
-    assert vault.resolve("alice", "github") is None
+    assert vault.resolve("bob", provider) is None
+    assert vault.resolve("alice", provider) is None
 
 
 def test_oauth_finish_needs_a_signed_in_caller(github_oauth_on: None) -> None:
