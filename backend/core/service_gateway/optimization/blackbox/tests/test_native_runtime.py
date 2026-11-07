@@ -1819,6 +1819,107 @@ def test_meta_harness_falls_back_to_the_seed_when_every_version_crashed(tmp_path
     assert engine.incumbent(server) == ("eexx", 0.5)
 
 
+def test_meta_harness_prefers_a_partly_crashed_seed_over_a_fully_crashed_version(tmp_path: Path) -> None:
+    """A version with no scored case counts as crashed, so the seed leads and the frontier leaves it out (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's logs.
+    """
+    server = _child_server(_null_on({"eexx": {"b"}, "zzzz": {"a", "b"}}), tmp_path)
+    engine = native_engines.MetaHarnessEngine.__new__(native_engines.MetaHarnessEngine)
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.logs_dir = tmp_path / "logs"
+    engine.results = {}
+    engine.session_ids = []
+    engine.cost_usd = 0.0
+    engine.work_dir = tmp_path / "work"
+
+    engine._benchmark(server, "seed", "eexx")
+    engine._benchmark(server, "broken", "zzzz")
+
+    assert engine.results["broken"]["crashed"]
+    assert engine._best(scored=True) is None
+    assert engine.incumbent(server) == ("eexx", 0.5)
+    result = engine._result(server, 1, "budget")
+    assert (result.best_candidate, result.best_score) == ("eexx", 0.5)
+
+    engine._write_frontier()
+    frontier = json.loads((engine.logs_dir / "frontier_val.json").read_text(encoding="utf-8"))
+    assert "broken" not in {row["system"] for row in frontier["_pareto"]}
+    assert "broken" not in {frontier[eid]["system"] for eid in engine.example_ids if eid in frontier}
+
+
+def _autoresearch(server: Any, tmp_path: Path, seed: str) -> Any:
+    """Build an AutoResearch engine that records the server's sweeps.
+
+    Args:
+        server: Child evaluation server.
+        tmp_path: Folder for the engine's lab.
+        seed: The run's seed text.
+
+    Returns:
+        The engine, already recording.
+    """
+    engine = native_engines.AutoResearchEngine.__new__(native_engines.AutoResearchEngine)
+    engine.repo = None
+    engine.suffix = ".txt"
+    engine.work_dir = tmp_path / "lab"
+    (engine.work_dir / "archive").mkdir(parents=True)
+    engine.round = 0
+    engine.observations = []
+    engine._ids = {}
+    engine._lock = threading.Lock()
+    engine.example_ids = native_engines.visible_example_ids(server)
+    engine.seed = seed
+    engine._record(server)
+    return engine
+
+
+def test_autoresearch_does_not_count_a_fully_crashed_sweep_as_full(tmp_path: Path) -> None:
+    """A sweep with no scored case does not rank, so the incumbent falls back to the seed (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's lab folder.
+    """
+    server = _child_server(_null_on({"eexx": {"b"}, "zzzz": {"a", "b"}}), tmp_path)
+    engine = _autoresearch(server, tmp_path, "eexx")
+
+    for candidate in ("eexx", "zzzz"):
+        score, _ = server.evaluate_examples(candidate)
+        server.log_progress(score, candidate=candidate)
+
+    assert engine._ranking() == {}
+    assert engine.incumbent(server) == ("eexx", 0.5)
+
+
+def test_autoresearch_incumbent_ignores_a_crashed_resweep_of_a_ranked_version(tmp_path: Path) -> None:
+    """A ranked version's crashed re-sweep logs a higher filled mean, but the incumbent keeps the full score (SKY-367).
+
+    Args:
+        tmp_path: Upstream evaluation artifacts and the engine's lab folder.
+    """
+    mailbox = _RecordingMailbox()
+    sweeps: dict[str, int] = {}
+
+    def evaluate(candidate: str, example: Any = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+        """Score case ``a`` 0.2 and ``b`` 0.8, with a null on ``a`` in the version's second sweep."""
+        if example["id"] == "a":
+            sweeps[candidate] = sweeps.get(candidate, 0) + 1
+            return (float("-inf"), {}) if sweeps[candidate] == 2 else (0.2, {})
+        return 0.8, {}
+
+    mailbox.evaluate = evaluate  # type: ignore[method-assign]
+    server = _child_server(mailbox, tmp_path)
+    engine = _autoresearch(server, tmp_path, "seed")
+
+    for _ in range(2):
+        score, _ = server.evaluate_examples("ab")
+        server.log_progress(score, candidate="ab")
+
+    assert native_engines.best_aggregate_candidate(server, only={"ab"}) == ("ab", 0.8)
+    assert engine.incumbent(server) == ("ab", 0.5)
+
+
 def test_autoresearch_leader_ignores_a_filled_mean(tmp_path: Path) -> None:
     """An AutoResearch version with a crashed case does not rank or stop the run (SKY-367).
 

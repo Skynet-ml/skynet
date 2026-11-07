@@ -353,15 +353,16 @@ def _fill_unscored(average: float, info: dict[str, Any]) -> tuple[float, dict[st
 
     Returns:
         The filled cases' mean and the details with each null case filled
-        and listed under ``UNSCORED_CASES_KEY``, or both unchanged when the
-        sweep scored no case.
+        and listed under ``UNSCORED_CASES_KEY``. A sweep that scored no case
+        keeps its mean and lists every case, so no engine ranks it as fully
+        scored.
     """
     scores = info.get("scores")
     if not isinstance(scores, dict) or not scores:
         return average, info
     filled = native_engines.fill_unscored([""] * len(scores), list(scores.values()))
     if not all(math.isfinite(score) for score in filled):
-        return average, info
+        return average, {**info, native_engines.UNSCORED_CASES_KEY: list(scores)}
     unscored = [case for case, score in scores.items() if not math.isfinite(score)]
     return sum(filled) / len(filled), {
         **info,

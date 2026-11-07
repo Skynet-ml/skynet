@@ -417,6 +417,23 @@ def fill_unscored(keys: list[str], scores: list[float]) -> list[float]:
     return filled
 
 
+def _logged(server: EvalServer, candidate: str, score: float) -> bool:
+    """Check that the server logged this aggregate score for this candidate.
+
+    Args:
+        server: Evaluation server whose ``progress_log`` holds the checkpoints.
+        candidate: Candidate text.
+        score: Aggregate score to find.
+
+    Returns:
+        Whether a progress entry has the candidate's id and this ``val_score``.
+    """
+    candidate_id = server._candidate_registry.get(candidate)
+    return candidate_id is not None and any(
+        entry.get("candidate_id") == candidate_id and entry.get("val_score") == score for entry in server.progress_log
+    )
+
+
 def best_aggregate_candidate(server: EvalServer, only: Collection[str] | None = None) -> tuple[str, float] | None:
     """Return the best candidate among the server's logged aggregate checkpoints.
 
@@ -1015,12 +1032,14 @@ class AutoResearchEngine:
         """
         if server.task.has_dataset:
             # A version with a crashed case logs a filled mean (SKY-367), so the
-            # fully scored versions rank first, then the seed, then the rest.
-            return (
-                best_aggregate_candidate(server, only=self._ranking())
-                or best_aggregate_candidate(server, only={self.seed})
-                or best_aggregate_candidate(server)
-            )
+            # fully scored sweeps rank first, then the seed, then the rest. A
+            # crashed re-sweep of a ranked version can log a higher filled mean,
+            # so the ranked score itself must be the logged one.
+            ranking = sorted(self._ranking().items(), key=lambda item: -item[1])
+            for candidate, score in ranking:
+                if math.isfinite(score) and _logged(server, candidate, score):
+                    return candidate, score
+            return best_aggregate_candidate(server, only={self.seed}) or best_aggregate_candidate(server)
         if server.best_candidate is None or server.best_score is None:
             return None
         return str(server.best_candidate), float(server.best_score)
