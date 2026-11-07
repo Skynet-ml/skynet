@@ -581,8 +581,10 @@ def test_a_version_that_edits_a_metric_file_is_laid_out_with_the_base_metric(tmp
         laid = space.checkout(patch)
         assert laid.path == WORK_DIR
         box = space.session()
-        assert box.read_file(f"{WORK_DIR}/src/metric.py") == "def score(): return 0.1\n"
+        assert box.read_file(f"{WORK_DIR}/src/metric.py") is None
         assert box.read_file(f"{WORK_DIR}/src/app.py") == "x = 2\n"
+        assert space.install_metric_files() is None
+        assert box.read_file(f"{WORK_DIR}/src/metric.py") == "def score(): return 0.1\n"
         assert box.read_file(f"{WORK_DIR}/.optimize/exploits/a") is None
     finally:
         space.close()

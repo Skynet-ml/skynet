@@ -9,6 +9,10 @@ command can install dependencies. Setup runs once, on the starting commit and
 without the run's secrets; the box's network is then switched off and the
 switch checked from inside before any version is laid out. Every version
 starts from a copy of that prepared tree and runs no setup of its own.
+
+The metric files and the exploit folder leave the box once setup is done,
+also from the git history: the parent keeps them and installs them into a
+version's checkout only after the version's own code stopped (E38).
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ BASE_DIR = f"{REPO_DIR}/base"
 WORK_DIR = f"{REPO_DIR}/work"
 PREPARED_DIR = f"{REPO_DIR}/prepared"
 PATCH_FILE = f"{REPO_DIR}/version.patch"
+HIDDEN_FILE = f"{REPO_DIR}/hidden.b64"
 _SETUP_TIMEOUT_SECONDS = 1_800.0
 _GIT_IDENTITY = "-c user.name=app -c user.email=app@localhost -c commit.gpgsign=false"
 # A commit may start ``git maintenance`` in the background (detached since
@@ -46,6 +51,19 @@ _PROBE_TIMEOUT_SECONDS = 120.0
 _PROBE_ATTEMPTS = 5
 _PROBE_OK = "app-network-closed"
 _HASH_TIMEOUT_SECONDS = 300.0
+# Packs the hidden paths that exist in the prepared tree, so the parent can
+# hold them while the version's code runs. ``-I``: the tree is the user's.
+_PACK_HIDDEN = r"""
+import base64, io, os, sys, tarfile
+
+buffer = io.BytesIO()
+with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+    for path in sys.argv[2:]:
+        if os.path.lexists(path):
+            archive.add(path)
+with open(sys.argv[1], "w", encoding="ascii") as handle:
+    handle.write(base64.b64encode(buffer.getvalue()).decode("ascii"))
+"""
 # Linux caps one environment string at 128 KiB; a larger stage answer goes
 # through a file write and fresh stamps instead.
 _ANSWER_ENV_BYTES = 100_000
@@ -230,6 +248,9 @@ class RepoWorkspace:
         # copy of the tree inside the box, the prepared one included.
         self._protected_baseline: dict[str, str] = {}
         self._stamps_before_run: dict[str, str] | None = None
+        # The hidden files, packed, held here while no checkout has them (E38).
+        self._metric_files: str | None = None
+        self._metric_installed = False
         self._lock = threading.Lock()
 
     @property
@@ -310,7 +331,7 @@ class RepoWorkspace:
         result = session.run(
             f"set -e; mkdir -p {BASE_DIR}; cat {files} | base64 -d | tar -xzf - -C {BASE_DIR}; rm -f {files};"
             f" cd {BASE_DIR}; git init -q; git add -A -f; git {_GIT_IDENTITY} {_GIT_NO_MAINTENANCE} commit -q --allow-empty -m base;"
-            f" cd - >/dev/null; rm -rf {WORK_DIR} {PREPARED_DIR}; cp -a {BASE_DIR} {WORK_DIR}",
+            f" cd - >/dev/null; rm -rf {WORK_DIR} {PREPARED_DIR}; mv {BASE_DIR} {WORK_DIR}",
             timeout_seconds=_SETUP_TIMEOUT_SECONDS,
         )
         if not result.ok:
@@ -332,6 +353,43 @@ class RepoWorkspace:
             if baseline is None:
                 raise RepoSetupError("The repository's protected files could not be fingerprinted.")
             self._protected_baseline = baseline[0]
+        if self._hidden:
+            self._take_hidden(session)
+
+    def _take_hidden(self, session: SandboxSession) -> None:
+        """Move the hidden files out of the prepared tree and its git history into the parent.
+
+        The baseline above still covers them, so the metric a checkout gets
+        later must match the starting commit's. Setup output the setup command
+        copied elsewhere in the tree is not found here.
+
+        Args:
+            session: The box holding the prepared tree.
+
+        Raises:
+            RepoSetupError: When the files cannot be packed or removed.
+        """
+        paths = " ".join(shlex.quote(path) for path in self._hidden)
+        packed = session.run(
+            f"cd {PREPARED_DIR} && python3 -I -c {shlex.quote(_PACK_HIDDEN)} ../{posixpath.basename(HIDDEN_FILE)} {paths}",
+            timeout_seconds=_SETUP_TIMEOUT_SECONDS,
+        )
+        text = session.read_file(HIDDEN_FILE) if packed.ok else None
+        if text is None:
+            raise RepoSetupError(f"The metric files could not be packed: {_tail(packed)}")
+        git = f"git {_GIT_IDENTITY} {_GIT_NO_MAINTENANCE}"
+        # The base commit and every loose object hold the hidden files too;
+        # the amended commit replaces it and the old objects are pruned.
+        removed = session.run(
+            f"set -e; rm -f {HIDDEN_FILE}; cd {PREPARED_DIR}; rm -rf -- {paths};"
+            f" if [ -d .git ]; then {git} rm -r -q --cached --ignore-unmatch -- {paths};"
+            f" {git} commit -q --amend --allow-empty -m base; {git} reflog expire --expire=now --all;"
+            f" {git} gc -q --prune=now; fi",
+            timeout_seconds=_SETUP_TIMEOUT_SECONDS,
+        )
+        if not removed.ok:
+            raise RepoSetupError(f"The metric files could not be removed from the tree: {_tail(removed)}")
+        self._metric_files = text
 
     def _fingerprint(
         self, session: SandboxSession, directory: str, answer: tuple[str, str] | None = None
@@ -422,6 +480,7 @@ class RepoWorkspace:
         patch = drop_paths(patch, self._hidden)
         with self._lock:
             self._stamps_before_run = None
+            self._metric_installed = False
             session = self.session()
             session.write_files({PATCH_FILE: patch})
             applied = session.run(
@@ -432,6 +491,36 @@ class RepoWorkspace:
             if not applied.ok:
                 return Checkout(path=None, problems=(f"The change does not apply cleanly: {_tail(applied)}",))
             return Checkout(path=WORK_DIR)
+
+    def install_metric_files(self) -> str | None:
+        """Put the hidden files back into the current checkout, once the version's code stopped.
+
+        Returns:
+            Why the files could not be installed, or ``None`` once they are.
+        """
+        with self._lock:
+            if self._metric_installed or not self._hidden:
+                self._metric_installed = True
+                return None
+            session = self.session()
+            paths = " ".join(shlex.quote(path) for path in self._hidden)
+            if self._metric_files is not None:
+                session.write_files({HIDDEN_FILE: self._metric_files})
+            name = posixpath.basename(HIDDEN_FILE)
+            # No pipe: ``sh`` has no pipefail, so a failed decode would pass unseen.
+            unpack = (
+                f" base64 -d < ../{name} > ../{name}.tgz; tar -xzf ../{name}.tgz; rm -f ../{name} ../{name}.tgz;"
+                if self._metric_files is not None
+                else ""
+            )
+            # Whatever the version left at a hidden path goes first.
+            result = session.run(
+                f"set -e; cd {WORK_DIR}; rm -rf -- {paths};{unpack}", timeout_seconds=_SETUP_TIMEOUT_SECONDS
+            )
+            if not result.ok:
+                return "The metric files could not be installed after the version ran."
+            self._metric_installed = True
+            return None
 
     def stamp_before_run(self) -> str | None:
         """Record the protected files' inodes and change times just before the version runs.
@@ -551,15 +640,17 @@ class RepoWorkspace:
             reason for any such hidden file; empty when untouched.
         """
         files, stamps = current
-        changed = {
-            path
-            for path in set(self._protected_baseline) | set(files)
-            if self._protected_baseline.get(path) != files.get(path)
-        } | {path for path in set(before) | set(stamps) if before.get(path) != stamps.get(path)}
+        baseline = self._protected_baseline
+        if not self._metric_installed:
+            # The hidden files are out of the tree while the version runs; one there is planted.
+            baseline = {path: digest for path, digest in baseline.items() if not self._is_hidden(path)}
+        changed = {path for path in set(baseline) | set(files) if baseline.get(path) != files.get(path)} | {
+            path for path in set(before) | set(stamps) if before.get(path) != stamps.get(path)
+        }
         # A folder's times move whenever an entry in it is added or removed;
         # name the folder only when no file in it explains the change.
         changed = sorted(path for path in changed if not any(other.startswith(f"{path}/") for other in changed))
-        hidden = [path for path in changed if any(path == top or path.startswith(f"{top}/") for top in self._hidden)]
+        hidden = [path for path in changed if self._is_hidden(path)]
         reasons = [HIDDEN_CHANGED] if hidden else []
         return (
             *reasons,
@@ -570,6 +661,17 @@ class RepoWorkspace:
                 if path not in hidden
             ),
         )
+
+    def _is_hidden(self, path: str) -> bool:
+        """Return True when a repository-relative path is a hidden path or lies under one.
+
+        Args:
+            path: Normalized path from a fingerprint.
+
+        Returns:
+            Whether the agent must never see it.
+        """
+        return any(path == top or path.startswith(f"{top}/") for top in self._hidden)
 
     def close(self) -> None:
         """Destroy the box."""
