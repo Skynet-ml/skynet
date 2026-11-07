@@ -430,3 +430,214 @@ def test_reading_the_file_accepts_environment_keys(tmp_path: Path) -> None:
 def test_a_run_accepts_old_files_and_proposer_illegal(tmp_path: Path, raw: bytes) -> None:
     """Old files, ``[proposer] illegal`` (the judges enforce it) and empty sections still stage."""
     assert read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw})) == parse_constraints(raw)
+
+
+def test_a_file_with_no_run_has_no_run_entry() -> None:
+    """With no [run], nothing runs, and existing files stay valid (E39)."""
+    constraints = parse_constraints(_CFCA)
+
+    assert (constraints.run_entry, constraints.run_timeout) == (None, 60.0)
+
+
+@pytest.mark.parametrize(
+    ("raw", "entry"),
+    [
+        (b'[run]\nentry = "geocode.py:geocode"\n', "geocode.py:geocode"),
+        (b'[run]\nentry = "bot/geocode.py:geocode"\n', "bot/geocode.py:geocode"),
+        (b'[run]\nentry = ["pytest", "-q", "--junitxml=out.xml"]\n', ("pytest", "-q", "--junitxml=out.xml")),
+    ],
+)
+def test_a_run_entry_parses_in_both_forms(raw: bytes, entry: str | tuple[str, ...]) -> None:
+    """[run] entry takes a Python function or a command list, with the 60-second default for each case."""
+    constraints = parse_constraints(raw)
+
+    assert (constraints.run_entry, constraints.run_timeout) == (entry, 60.0)
+
+
+def test_a_run_timeout_parses() -> None:
+    """[run] timeout is seconds for each case."""
+    assert parse_constraints(b'[run]\nentry = "a.py:f"\ntimeout = 5\n').run_timeout == 5.0
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        (b"[run]\n", r"\[run\] entry is missing"),
+        (b"[run]\ntimeout = 5\n", r"\[run\] entry is missing"),
+        (b'[run]\nentry = "a.py:f"\ncwd = "x"\n', r"\[run\] cwd is not a supported setting"),
+        (b'[run]\nentry = "geocode.py"\n', r"\[run\] entry must be"),
+        (b'[run]\nentry = "../a.py:f"\n', r"\[run\] entry must be"),
+        (b"[run]\nentry = []\n", r"\[run\] entry must be"),
+        (b'[run]\nentry = ["pytest", ""]\n', r"\[run\] entry must be"),
+        (b"[run]\nentry = 3\n", r"\[run\] entry must be"),
+        (
+            b'[run]\nentry = "a.py:f"\ntimeout = 0\n',
+            r"\[run\] timeout must be a positive number of seconds for each case",
+        ),
+        (b'[run]\nentry = "a.py:f"\ntimeout = -2\n', r"\[run\] timeout must be a positive"),
+        (b'[run]\nentry = "a.py:f"\ntimeout = true\n', r"\[run\] timeout must be a positive"),
+        (b'[run]\nentry = "a.py:f"\ntimeout = "60"\n', r"\[run\] timeout must be a positive"),
+        (b'[run]\nentry = "a.py:f"\ntimeout = inf\n', r"\[run\] timeout must be a positive"),
+        (b'run = "a.py:f"\n', r"run must be a \[run\] table"),
+    ],
+)
+def test_a_malformed_run_section_fails_with_a_reason(raw: bytes, message: str) -> None:
+    """An unknown key, a missing or bad entry, or a bad timeout fails the setup check."""
+    with pytest.raises(ConstraintsError, match=message):
+        parse_constraints(raw)
+
+
+_SERVICES = b'[services.maps]\nsecrets = ["MAPS_API_KEY"]\n[services.grader]\nsecrets = ["GRADER_KEY"]\n'
+
+
+def test_run_and_metric_roles_default_to_no_mcp_and_the_run_services() -> None:
+    """[run] gets no MCP file and no services; [metric] gets the [run] services (E44)."""
+    plain = parse_constraints(b'[run]\nentry = "a.py:f"\n')
+    inherited = parse_constraints(_SERVICES + b'[run]\nentry = "a.py:f"\nservices = ["maps"]\n')
+
+    assert (plain.run_role, plain.metric_role) == (RoleEnvironment(), RoleEnvironment())
+    assert inherited.run_role == RoleEnvironment(services=("maps",))
+    assert inherited.metric_role == RoleEnvironment(services=("maps",))
+
+
+def test_run_and_metric_accept_the_role_keys() -> None:
+    """[run] and [metric] take mcp, services and illegal; [metric] keeps files, exploits and reference."""
+    raw = _SERVICES + (
+        b'[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\nservices = ["maps"]\nillegal = ["No hard-coded answers."]\n'
+        b'[metric]\nfiles = ["metric.py"]\nreference = "ref"\nservices = ["grader"]\nmcp = "eval/.mcp.json"\n'
+        b'illegal = ["Never read the answers."]\n'
+    )
+    constraints = parse_constraints(raw)
+
+    assert constraints.run_role == RoleEnvironment(
+        mcp=".mcp.json", services=("maps",), illegal=("No hard-coded answers.",)
+    )
+    assert constraints.metric_role == RoleEnvironment(
+        mcp="eval/.mcp.json", services=("grader",), illegal=("Never read the answers.",)
+    )
+    assert (constraints.metric.files, constraints.metric.reference) == (("metric.py",), "ref")
+
+
+def test_metric_services_empty_list_gives_the_metric_no_services() -> None:
+    """An explicit empty [metric] services overrides the [run] default."""
+    raw = _SERVICES + b'[run]\nentry = "a.py:f"\nservices = ["maps"]\n[metric]\nservices = []\n'
+
+    assert parse_constraints(raw).metric_role.services == ()
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        (b'[run]\nentry = "a.py:f"\nnetwork = []\n', r"\[run\] network is not supported: .* share one box"),
+        (b'[run]\nentry = "a.py:f"\nvcpus = 2\n', r"\[run\] vcpus is not supported: .* share one box"),
+        (b"[metric]\nnetwork = []\n", r"\[metric\] network is not supported: .* share one box"),
+        (b"[metric]\nvcpus = 4\n", r"\[metric\] vcpus is not supported: .* share one box"),
+        (
+            b'[run]\nentry = "a.py:f"\nservices = ["maps"]\n',
+            r"\[run\] services names 'maps', but .* \[services\.maps\]",
+        ),
+        (b'[metric]\nservices = ["grader"]\n', r"\[metric\] services names 'grader', but .* \[services\.grader\]"),
+        (b'[run]\nentry = "a.py:f"\ntools = ["search"]\n', r"\[run\] tools is not supported\. .* mcp = "),
+        (b'[metric]\ntools = ["lookup"]\n', r"\[metric\] tools is not supported\. .* mcp = "),
+        (b'[run]\nentry = "a.py:f"\nmcp = ["a.json"]\n', r"\[run\] mcp must be a text path"),
+        (b'[run]\nentry = "a.py:f"\nmcp = "../x.json"\n', r"\[run\] mcp must be relative"),
+        (b'[metric]\nmcp = "."\n', r"\[metric\] mcp must name one file"),
+        (b"[metric]\nillegal = []\n", r"\[metric\] illegal must list 1 to"),
+    ],
+)
+def test_bad_run_or_metric_role_keys_fail_with_a_reason(raw: bytes, message: str) -> None:
+    """network and vcpus fail (one shared box, E37); tools points to mcp (E46); services must be declared."""
+    with pytest.raises(ConstraintsError, match=message):
+        parse_constraints(raw)
+
+
+def test_an_mcp_file_in_the_snapshot_passes(tmp_path: Path) -> None:
+    """read_constraints accepts an mcp path the snapshot holds, without reading its servers (E46)."""
+    raw = b'[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n[metric]\nmcp = "eval/.mcp.json"\n'
+    files = {CONSTRAINTS_FILE: raw, ".mcp.json": b"not json", "eval/.mcp.json": b"{}"}
+
+    assert read_constraints(_archive(tmp_path, files)) == parse_constraints(raw)
+
+
+@pytest.mark.parametrize("label", ["run", "metric"])
+def test_a_missing_mcp_file_fails_with_a_reason(tmp_path: Path, label: str) -> None:
+    """An mcp path that names no file in the snapshot fails the setup check (E46)."""
+    entry = b'entry = "a.py:f"\n' if label == "run" else b""
+    raw = b"[" + label.encode() + b"]\n" + entry + b'mcp = "tools/.mcp.json"\n'
+
+    with pytest.raises(ConstraintsError, match=rf"\[{label}\] mcp names 'tools/\.mcp\.json', but .* no such file"):
+        read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw, "tools/other.json": b"{}"}))
+
+
+def test_a_service_with_its_own_url_and_one_secret_gets_the_bearer_header() -> None:
+    """A user's own API takes an https url; with one secret and no headers, it sends Bearer ${SECRET} (E45)."""
+    raw = b'[services.judge]\nurl = "https://llm.example.com/v1"\nsecrets = ["JUDGE_KEY"]\n'
+    service = parse_constraints(raw).services["judge"]
+
+    assert (service.url, service.headers) == ("https://llm.example.com/v1", None)
+    assert service.request_headers == {"Authorization": "Bearer ${JUDGE_KEY}"}
+
+
+def test_a_service_keeps_its_own_headers_with_placeholders() -> None:
+    """headers values may use ${SECRET} placeholders for the service's own secrets, and replace the default."""
+    raw = (
+        b'[services.judge]\nurl = "https://llm.example.com:8443/v1"\nsecrets = ["JUDGE_KEY", "ORG"]\n'
+        b'[services.judge.headers]\nx-api-key = "${JUDGE_KEY}"\nX-Org = "org-${ORG}"\n'
+    )
+    service = parse_constraints(raw).services["judge"]
+
+    assert service.request_headers == {"x-api-key": "${JUDGE_KEY}", "X-Org": "org-${ORG}"}
+
+
+def test_a_service_with_no_or_many_secrets_has_no_default_header() -> None:
+    """The Bearer default needs exactly one secret."""
+    raw = b'[services.a]\nurl = "https://a.example.com"\n[services.b]\nsecrets = ["K1", "K2"]\n'
+    services = parse_constraints(raw).services
+
+    assert (services["a"].request_headers, services["b"].request_headers) == ({}, {})
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://llm.example.com/v1",
+        "ftp://llm.example.com",
+        "llm.example.com",
+        "https://127.0.0.1/v1",
+        "https://10.0.0.5",
+        "https://[::1]/v1",
+        "https://169.254.169.254/latest",
+        "https://localhost:8000",
+        "https://api.localhost",
+        "https://intranet/v1",
+        "https://0x7f.1",
+        "https://2130706433",
+        "https://user:pw@llm.example.com",
+        "https://llm.example.com:99999",
+    ],
+)
+def test_a_bad_service_url_fails_with_a_reason(url: str) -> None:
+    """url must be https on a public host name: no IP, no localhost, no credentials (SSRF guard, E45)."""
+    raw = f'[services.judge]\nurl = "{url}"\n'.encode()
+
+    with pytest.raises(ConstraintsError, match=r"\[services\.judge\] url "):
+        parse_constraints(raw)
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        (
+            b'[services.judge]\nsecrets = ["JUDGE_KEY"]\n[services.judge.headers]\nAuthorization = "Bearer ${OTHER}"\n',
+            r"headers Authorization uses \$\{OTHER\}, but OTHER is not in its secrets",
+        ),
+        (b'[services.judge]\nheaders = "Bearer x"\n', r"\[services\.judge\] headers must be a table"),
+        (b'[services.judge.headers]\n"bad name" = "x"\n', r"header name 'bad name' must use only"),
+        (b"[services.judge.headers]\nX-N = 3\n", r"headers X-N must be one line"),
+        (b'[services.judge.headers]\nX-N = "a\\r\\nb"\n', r"headers X-N must be one line"),
+    ],
+)
+def test_bad_service_headers_fail_with_a_reason(raw: bytes, message: str) -> None:
+    """Each placeholder must name one of the service's secrets, and each header is one line of text."""
+    with pytest.raises(ConstraintsError, match=message):
+        parse_constraints(raw)

@@ -66,6 +66,26 @@ you return.
   ``score(repo_path, case)`` when the run has data, and scores the checkout
   at ``repo_path``. It returns ``(score, feedback)`` or
   ``{{"score": ..., "feedback": ...}}``; a bare number is refused.
+  {APP_NAME} starts the candidate, never the metric. When the metric needs
+  the candidate's output, write a ``[run]`` section for the repository's
+  optimize.toml with ``entry`` set to ``"path/to/file.py:function"`` or a
+  command list, for example ``entry = "geocode.py:geocode"``, and write
+  ``score(repo_path, case, output)``: ``output`` is what the entry returned
+  for the case. That metric reads ``output`` and never imports or calls the
+  candidate's code. When the repository is scored by its own tests, put the
+  test command in ``[run] entry``, for example
+  ``entry = ["pytest", "-q", "--junitxml=out.xml"]``, and write a metric that
+  only reads the saved report; the metric never runs the tests itself. For
+  a command entry, a nonzero exit code is normal output, not a failure: the
+  metric gets ``exit_code`` and decides what it means. For example, pytest
+  exits 1 when some tests fail, so the metric reads the report and gives
+  partial credit. List in ``[metric] services`` the services only the metric
+  calls. When the candidate calls MCP servers, describe them in a standard
+  ``.mcp.json`` file and set ``mcp = "<path>"`` in ``[run]``, for example
+  ``mcp = ".mcp.json"``; give the file's contents in ``summary`` too. Give the
+  whole ``[run]`` section in ``summary``, so the setup assistant shows it to
+  the user. With no ``[run]``, nothing runs and the metric judges only the
+  checkout.
   Read the files that show how the project runs and how it is judged (the
   entry point, its tests, the code the task names) with ``read_repo_file``
   and ``list_repo_folder`` before you write. Use only paths and commands
@@ -87,7 +107,10 @@ class WorkspaceCoderSig(dspy.Signature):
     repo: str = dspy.InputField(desc="The repository's tree and key files, or why it cannot be read.")
     run_code: str = dspy.OutputField(desc="The whole run.py; empty to leave it unchanged or for a repository run.")
     metric_code: str = dspy.OutputField(desc="The whole metric.py; empty to leave it unchanged.")
-    summary: str = dspy.OutputField(desc="One or two sentences on what the code does and why.")
+    summary: str = dspy.OutputField(
+        desc="One or two sentences on what the code does and why, then the optimize.toml [run] section when"
+        " the metric needs one."
+    )
     open_questions: list[str] = dspy.OutputField(desc="Questions only the user can answer; empty when none.")
 
 
