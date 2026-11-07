@@ -150,8 +150,8 @@ for review until the evidence is there.
   pass.
 - Documentation-only work with no runtime effect may skip staging acceptance.
   Explain that exemption in the description. The Opus 5.5 review must approve
-  the staging evidence, the costly-flow alternative or the documentation
-  exemption. A changed review policy cancels earlier approval.
+  the staging evidence, the visual-only simulated-render evidence, the
+  costly-flow alternative or the documentation exemption. A changed review policy cancels earlier approval.
 
 ### Real data and costly workflows
 
@@ -198,10 +198,9 @@ for review until the evidence is there.
   state for Before (`origin/staging`) and After (the branch). Label each
   image "Simulated UI state, not staging", and name the stubbed boundary in
   the PR body.
-- Use staging or the PR preview, and video, only when the change shows
-  motion or behavior over time, or when the evidence must prove app logic
-  (data flow, API calls, auth, saved data). Backend behavior still needs its
-  own tests.
+- Use staging or the PR preview when the evidence must prove app logic
+  (data flow, API calls, auth, saved data). Use video only for motion or
+  behavior over time, as above. Backend behavior still needs its own tests.
 - For preview evidence, capture the Before first: open the draft PR before
   you change code, capture the Before on its preview, then implement and
   capture the After on the same preview. Use staging for the Before only
@@ -260,8 +259,9 @@ gates pass:
 
 **UI PRs** (anything touching `frontend/`, including mixed PRs) wait for the
 user. Attach a proof card: one line naming the decision and the Linear issue,
-the Before and After evidence of the acceptance criteria in the PR environment
-(on the Linear issue; section 5), the review verdict, and the diff size.
+the Before and After evidence of the acceptance criteria in the PR environment,
+or as labeled simulated renders for a visual-only change (on the Linear issue;
+section 5), the review verdict, and the diff size.
 Merge only after the user approves that specific PR in chat or on GitHub (or
 with `Approved for merge` on the Linear issue), and then only in the daily
 window. A frontend PR with no meaningful visible change can use the backend

@@ -94,7 +94,8 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
 
 - Each PR gets a preview (staging copy, empty database) at
   `https://pr-<n>.staging.skynetml.com`. Run acceptance checks and capture UI
-  evidence there.
+  evidence there. A visual-only UI change may use simulated local renders
+  (`skynet-pr-workflow` section 5).
 - **Fix bugs locally, deploy once.** Each push rebuilds the preview and
   starts a new review. Test and review the full diff locally, then push once.
 - **Only the orchestrator merges**, in the daily window (03:00
