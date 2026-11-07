@@ -383,6 +383,10 @@ def retry(job: HardeningJob) -> HardeningJob:
     if job.status == "preflight_failed":
         job.status = "preflight"
         job.preflight_failures = []
+    elif job.round == 0 and not job.rounds_detail:
+        # A preflight that raised also ends in "failed"; it never passed, so
+        # the retry checks again before any paid attack round.
+        job.status = "preflight"
     else:
         job.status = "running"
         if job.rounds_detail and job.rounds_detail[-1].status == "rejected":

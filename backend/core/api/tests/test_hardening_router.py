@@ -460,3 +460,17 @@ def test_retry_refuses_an_active_job_and_reruns_a_failed_preflight() -> None:
         row = session.get(HardeningJobModel, "j2")
         assert row is not None
         assert row.status == "preflight"
+
+
+def test_retry_while_another_job_of_the_draft_is_active_is_409() -> None:
+    """Job A fails, job B starts on the same draft, then the retry of A gets the job_active 409."""
+    client, engine, _caller = _harness()
+    _seed(engine, _job("job-a", "failed", error="attack broke"), age=5)
+    started = client.post("/hardening/jobs", json=_BODY)
+
+    retried = client.post("/hardening/jobs/job-a/retry")
+
+    assert started.status_code == 201
+    assert retried.status_code == 409
+    assert retried.json()["detail"] == ENGLISH_MESSAGES["hardening.job_active"]
+    assert client.get("/hardening/jobs/job-a").json()["status"] == "failed"

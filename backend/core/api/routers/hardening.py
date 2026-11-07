@@ -123,7 +123,7 @@ def create_hardening_router(*, job_store) -> APIRouter:
 
         Raises:
             DomainError: 404 for an unknown job or exploit, 409 when the job
-                cannot take the step now.
+                cannot take the step now or another job of the draft is active.
         """
         with Session(job_store.engine) as session:
             row = _load(session, username, job_id, lock=True)
@@ -136,7 +136,12 @@ def create_hardening_router(*, job_store) -> APIRouter:
             except HardeningStateError as exc:
                 raise DomainError("hardening.wrong_state", status=409) from exc
             _store(row, job)
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError as exc:
+                # A retry makes the job active again; another job may already
+                # be active on the same draft, and the partial unique index refuses it.
+                raise DomainError("hardening.job_active", status=409) from exc
             return job
 
     @router.post(

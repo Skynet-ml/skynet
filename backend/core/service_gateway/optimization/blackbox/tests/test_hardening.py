@@ -678,3 +678,39 @@ def test_retry_after_a_failed_apply_writes_the_suite_again_safely(tmp_path: Path
     assert runner.names().count("apply_fix") == 2
     assert job.suite_count == 1
     assert len(list((tmp_path / "exploits").glob("*/patch.diff"))) == 1
+
+
+class TimeoutPreflightRunner(FakeRunner):
+    """A runner whose first preflight raises a timeout."""
+
+    def preflight(self, **kwargs: Any) -> Any:
+        """Raise a timeout once, then run the scripted preflight.
+
+        Args:
+            **kwargs: The preflight arguments.
+
+        Returns:
+            The scripted preflight failures.
+
+        Raises:
+            TimeoutError: On the first call.
+        """
+        if not any(name == "preflight" for name in self.names()):
+            self.calls.append(("preflight", kwargs))
+            raise TimeoutError("preflight timed out")
+        return super().preflight(**kwargs)
+
+
+def test_retry_after_a_preflight_error_runs_the_preflight_before_any_attack(tmp_path: Path) -> None:
+    """A preflight that raised never passed, so retry checks again before a paid attack."""
+    runner = TimeoutPreflightRunner([[(_CASE, _VALID)]])
+    job = _run(_job(), runner, tmp_path)
+
+    assert (job.status, job.error, runner.names()) == ("failed", "preflight timed out", ["preflight"])
+    job = retry(job)
+    assert job.status == "preflight"
+    job = _run(job, runner, tmp_path)
+    names = runner.names()
+    assert names.count("preflight") == 2
+    assert names.index("attack") > names.index("preflight", 1)
+    assert job.status == "clean_stop"
