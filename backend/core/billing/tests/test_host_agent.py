@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import shlex
 import signal
 import socket
 import subprocess
@@ -1444,3 +1445,87 @@ def test_tool_roots_never_open_the_home_or_a_folder_in_it(tmp_path: Path) -> Non
     for root in roots:
         assert not (real_home + os.sep).startswith(root.rstrip(os.sep) + os.sep)
         assert root != os.path.realpath(home / ".cargo")
+
+
+# The worker's hidden list lands with SKY-386 and SKY-387; these tests use a fixed one.
+_HIDDEN = ["optimize.toml", "metric", ".optimize/exploits", "reference/answers.json", "data/cases.jsonl"]
+
+
+def test_claude_turns_deny_each_hidden_path_by_exact_name(tmp_path: Path) -> None:
+    """Deny Read and Edit on each hidden path and its contents, and Bash only for full access."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    rules = host_agent.claude_hidden_rules(workspace, _HIDDEN, full=False)
+    root = os.path.realpath(workspace)
+    for hidden in _HIDDEN:
+        for tool in ("Read", "Edit"):
+            assert f"{tool}(/{root}/{hidden})" in rules
+            assert f"{tool}(/{root}/{hidden}/**)" in rules
+    assert not any(rule.startswith("Bash(") for rule in rules)
+    assert "Bash(*optimize.toml*)" in host_agent.claude_hidden_rules(workspace, _HIDDEN, full=True)
+    assert not any("**/*" in rule or rule.endswith("(/**)") for rule in rules)
+
+    argv = host_cli_argv("claude", "workspace_only", "bin", workspace, "m", hidden_rules=rules)
+    denied = [argv[index + 1] for index, part in enumerate(argv) if part == "--disallowedTools"]
+    assert denied == rules
+
+
+def test_claude_permission_denials_become_refusals_with_tool_and_kind(tmp_path: Path) -> None:
+    """Map each Claude permission denial on a hidden path to its tool and kind, and skip other denials."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    stdout = json.dumps(
+        {
+            "type": "result",
+            "permission_denials": [
+                {"tool_name": "Read", "tool_input": {"file_path": f"{workspace}/optimize.toml"}},
+                {"tool_name": "Grep", "tool_input": {"pattern": "x", "path": "metric"}},
+                {"tool_name": "WebFetch", "tool_input": {"url": "https://example.com"}},
+            ],
+        }
+    )
+
+    refusals = host_agent.host_refusals("claude", stdout, tmp_path, workspace, _HIDDEN)
+
+    assert refusals == [{"tool": "Read", "kind": "config"}, {"tool": "Grep", "kind": "scoring"}]
+    assert host_agent.host_refusals("claude", stdout, tmp_path, workspace, ()) == []
+
+
+def test_codex_turns_install_a_guard_hook_that_refuses_hidden_paths(tmp_path: Path) -> None:
+    """Write the Codex hooks file, refuse a hidden read through it, and read back only tool and kind."""
+    turn = tmp_path / "turn"
+    workspace = turn / "work"
+    codex_home = turn / "codex"
+    workspace.mkdir(parents=True)
+    codex_home.mkdir()
+
+    roots = host_agent.install_codex_guard(turn, workspace, codex_home, _HIDDEN)
+
+    hook = json.loads((codex_home / "hooks.json").read_text())["hooks"]["PreToolUse"][0]["hooks"][0]
+    assert hook["type"] == "command"
+    argv = shlex.split(hook["command"])
+    if sys.platform == "darwin":
+        argv = host_agent.confine(
+            argv, home=Path.home(), writable=[str(turn)], readable=roots, hidden=(tempfile.gettempdir(),)
+        )
+
+    def call(command: str) -> dict:
+        """Send one Codex tool call to the hook.
+
+        Args:
+            command: The shell command of the call.
+
+        Returns:
+            The hook's answer.
+        """
+        request = json.dumps({"tool_name": "exec_command", "tool_input": {"cmd": command}})
+        completed = subprocess.run(argv, input=request, capture_output=True, text=True, timeout=30, check=True)
+        return json.loads(completed.stdout or "{}")
+
+    denied = call("cat data/cases.jsonl")
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert call("ls src") == {}
+    assert host_agent.host_refusals("codex", "", turn, workspace, _HIDDEN) == [
+        {"tool": "exec_command", "kind": "scoring"}
+    ]
+    assert "cases" not in (turn / "guard" / "refusals.jsonl").read_text()

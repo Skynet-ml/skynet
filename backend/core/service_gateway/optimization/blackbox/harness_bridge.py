@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -347,6 +349,344 @@ def cost_usd(usage: Usage, price: dict[str, float] | None) -> float:
     )
 
 
+GUARD_DIR = "guard"
+GUARD_REFUSAL = (
+    "Refused: this path is hidden from the agent. It belongs to the run's scoring side. Continue the task without it."
+)
+_GUARD_COMMAND_KEYS = frozenset({"command", "cmd", "script"})
+_GUARD_PATH_KEYS = frozenset({"pattern", "glob", "dir", "directory", "include", "target"})
+_GUARD_PATCH_RE = re.compile(r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$", re.MULTILINE)
+_GUARD_WORD_RE = re.compile(r"[\w.~/@+-]+")
+_GUARD_SHELL_DEPTH = 3
+# One check function shared by the Pi extension and the OpenCode plugin. It
+# asks this module for the verdict, so the matching lives in one place.
+_GUARD_JS_CHECK = """import {{ execFileSync }} from "node:child_process";
+
+function appGuardReason(tool, input) {{
+  try {{
+    const reply = execFileSync({python}, [{bridge}, "guard", "check", {policy}], {{
+      input: JSON.stringify({{ tool: String(tool || ""), input: input ?? null }}),
+      timeout: 10000,
+      encoding: "utf8",
+    }});
+    return JSON.parse(reply || "{{}}").reason || null;
+  }} catch {{
+    // Fail open: the hidden files are not in the sandbox, so guard 1 still holds.
+    return null;
+  }}
+}}
+"""
+_GUARD_PI_EXTENSION = """
+export default function (pi) {
+  pi.on("tool_call", async (event) => {
+    const reason = appGuardReason(event.toolName, event.input);
+    return reason ? { block: true, reason } : undefined;
+  });
+}
+"""
+# OpenCode loads every export of a plugin file as a plugin, so only the
+# plugin itself is exported.
+_GUARD_OPENCODE_PLUGIN = """
+export const AppGuard = async () => ({
+  "tool.execute.before": async (input, output) => {
+    const reason = appGuardReason(input.tool, output.args);
+    if (reason) throw new Error(reason);
+  },
+});
+"""
+
+
+def hidden_kind(path: str) -> str:
+    """Name the kind of a hidden path for the run log, without its name.
+
+    Args:
+        path: Repository-relative hidden path.
+
+    Returns:
+        ``"config"`` for an ``optimize.toml`` file, else ``"scoring"``.
+    """
+    return "config" if PurePosixPath(path).name == "optimize.toml" else "scoring"
+
+
+def _path_hash(path: str) -> str:
+    """Hash one normalized repository-relative path.
+
+    Args:
+        path: Relative path with ``/`` separators.
+
+    Returns:
+        The SHA-256 hex digest.
+    """
+    return hashlib.sha256(path.encode("utf-8")).hexdigest()
+
+
+def guard_policy(workspace: Path, hidden_paths: list[str], log: Path) -> dict[str, Any]:
+    """Build the refusal policy of one session.
+
+    The policy holds hashes, not names, because the agent can read the file
+    and must not learn the hidden names from it.
+
+    Args:
+        workspace: Directory the agent works in.
+        hidden_paths: Repository-relative hidden files and directories.
+        log: File each refusal is appended to.
+
+    Returns:
+        The policy: workspace, path hashes mapped to their kind, and log file.
+    """
+    hashes = {}
+    for path in hidden_paths:
+        normalized = os.path.normpath(str(path).strip().strip("/"))
+        if normalized in ("", ".") or normalized.startswith(".."):
+            continue
+        hashes[_path_hash(normalized.replace(os.sep, "/"))] = hidden_kind(normalized)
+    return {"workspace": str(workspace), "hashes": hashes, "log": str(log)}
+
+
+def _hidden_match(text: str, roots: list[str], hashes: dict[str, str]) -> str | None:
+    """Return the kind of the hidden path one candidate names, if any.
+
+    Matching is exact: the candidate, or one of its parent directories, must
+    be a hidden path. A glob such as ``**/*`` names no hidden path.
+
+    Args:
+        text: One path-like string from a tool call.
+        roots: The workspace path and its resolved form.
+        hashes: Policy hashes mapped to their kind.
+
+    Returns:
+        The hidden kind, or ``None``.
+    """
+    candidate = text.strip().strip("'\"`").removeprefix("file://")
+    for variable in ("$PWD/", "${PWD}/"):
+        if candidate.startswith(variable):
+            candidate = roots[0] + "/" + candidate[len(variable) :]
+    if not candidate:
+        return None
+    for root in roots:
+        relative = os.path.relpath(os.path.normpath(Path(root) / candidate), root)
+        if relative == "." or relative.startswith(".."):
+            continue
+        parts = PurePosixPath(Path(relative).as_posix()).parts
+        for end in range(1, len(parts) + 1):
+            kind = hashes.get(_path_hash("/".join(parts[:end])))
+            if kind:
+                return kind
+    return None
+
+
+def _shell_words(command: str, depth: int = 0) -> Iterator[str]:
+    """Yield every word, and every path-like run inside a word, of a shell command.
+
+    Args:
+        command: Shell command text.
+        depth: Nesting level, for quoted scripts such as ``bash -lc '...'``.
+
+    Yields:
+        Candidate path strings.
+    """
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        words = list(lexer)
+    except ValueError:
+        words = command.split()
+    for word in words:
+        yield word
+        yield from _GUARD_WORD_RE.findall(word)
+        if depth < _GUARD_SHELL_DEPTH and any(character.isspace() for character in word):
+            yield from _shell_words(word, depth + 1)
+
+
+def _guard_candidates(tool: str, tool_input: Any) -> Iterator[str]:
+    """Yield the path-like strings of one tool call.
+
+    Args:
+        tool: The harness's tool name.
+        tool_input: The tool's arguments.
+
+    Yields:
+        Candidate path strings.
+    """
+    stack: list[tuple[str, Any]] = [("", tool_input)]
+    while stack:
+        key, value = stack.pop()
+        name = key.lower()
+        if isinstance(value, dict):
+            stack.extend((str(child), item) for child, item in value.items())
+            continue
+        if isinstance(value, list):
+            stack.extend((key, item) for item in value)
+            continue
+        if not isinstance(value, str):
+            continue
+        if "*** Begin Patch" in value:
+            yield from _GUARD_PATCH_RE.findall(value)
+        if name in _GUARD_COMMAND_KEYS:
+            yield from _shell_words(value)
+        elif "path" in name or "file" in name or name in _GUARD_PATH_KEYS:
+            # A grep pattern is a regex over file contents, not a path.
+            if name == "pattern" and "grep" in tool.lower():
+                continue
+            yield value
+
+
+def guard_check(policy: dict[str, Any], tool: str, tool_input: Any) -> str | None:
+    """Tell whether one tool call names a hidden path.
+
+    Args:
+        policy: Policy from :func:`guard_policy`.
+        tool: The harness's tool name.
+        tool_input: The tool's arguments.
+
+    Returns:
+        The hidden kind the call names, or ``None`` to let it run.
+    """
+    hashes = policy.get("hashes") or {}
+    if not hashes:
+        return None
+    workspace = str(policy.get("workspace") or Path.cwd())
+    roots = list(dict.fromkeys([workspace, os.path.realpath(workspace)]))
+    for candidate in _guard_candidates(tool, tool_input):
+        kind = _hidden_match(candidate, roots, hashes)
+        if kind:
+            return kind
+    return None
+
+
+def guard_main(argv: list[str]) -> int:
+    """Answer one tool-call check from a harness hook.
+
+    ``hook`` reads a Codex ``PreToolUse`` event and prints its deny answer.
+    ``check`` reads ``{"tool", "input"}`` and prints ``{"reason"}`` or ``{}``.
+    Each refusal appends only the tool and the path kind to the policy log.
+
+    Args:
+        argv: ``[mode, policy_file]``.
+
+    Returns:
+        The exit code: 0, or 2 for a usage error.
+    """
+    if len(argv) != 2 or argv[0] not in ("hook", "check"):
+        print("usage: harness_bridge.py guard <hook|check> <policy.json>", file=sys.stderr)
+        return 2
+    mode, policy_file = argv
+    policy = json.loads(Path(policy_file).read_text(encoding="utf-8"))
+    request = json.loads(sys.stdin.read() or "{}")
+    if mode == "hook":
+        tool, tool_input = str(request.get("tool_name") or ""), request.get("tool_input")
+    else:
+        tool, tool_input = str(request.get("tool") or ""), request.get("input")
+    kind = guard_check(policy, tool, tool_input)
+    if kind and policy.get("log"):
+        with Path(policy["log"]).open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"tool": tool, "kind": kind}) + "\n")
+    if mode == "check":
+        print(json.dumps({"reason": GUARD_REFUSAL} if kind else {}))
+    elif kind:
+        decision = {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": GUARD_REFUSAL,
+        }
+        print(json.dumps({"hookSpecificOutput": decision}))
+    return 0
+
+
+def guard_command(mode: str, policy_file: Path) -> list[str]:
+    """Build the command line that runs one guard check.
+
+    Args:
+        mode: ``"hook"`` or ``"check"``.
+        policy_file: The session's policy file.
+
+    Returns:
+        The argument list.
+    """
+    return [sys.executable, str(Path(__file__).resolve()), "guard", mode, str(policy_file)]
+
+
+def codex_hooks(policy_file: Path) -> dict[str, Any]:
+    """Build a Codex ``hooks.json`` that sends every tool call through the guard.
+
+    Args:
+        policy_file: The session's policy file.
+
+    Returns:
+        The hooks document.
+    """
+    hook = {"type": "command", "command": shlex.join(guard_command("hook", policy_file)), "timeout": 10}
+    return {"hooks": {"PreToolUse": [{"hooks": [hook]}]}}
+
+
+def install_guard(session_dir: Path, workspace: Path, hidden_paths: list[str]) -> dict[str, str]:
+    """Write the refusal hooks of every harness for one session.
+
+    Args:
+        session_dir: Private directory of the session.
+        workspace: Directory the agent works in.
+        hidden_paths: Repository-relative hidden files and directories.
+
+    Returns:
+        The environment that points each harness at its hook.
+    """
+    guard_dir = session_dir / GUARD_DIR
+    (guard_dir / "plugin").mkdir(parents=True, exist_ok=True)
+    log = guard_dir / "refusals.jsonl"
+    log.write_text("", encoding="utf-8")
+    policy_file = guard_dir / "policy.json"
+    policy_file.write_text(json.dumps(guard_policy(workspace, hidden_paths, log)), encoding="utf-8")
+    python, bridge, _, _, policy = guard_command("check", policy_file)
+    check = _GUARD_JS_CHECK.format(python=json.dumps(python), bridge=json.dumps(bridge), policy=json.dumps(policy))
+    pi_extension = guard_dir / "pi-guard.ts"
+    pi_extension.write_text(check + _GUARD_PI_EXTENSION, encoding="utf-8")
+    (guard_dir / "plugin" / "app-guard.js").write_text(check + _GUARD_OPENCODE_PLUGIN, encoding="utf-8")
+    codex_file = guard_dir / "codex-hooks.json"
+    codex_file.write_text(json.dumps(codex_hooks(policy_file)), encoding="utf-8")
+    return {
+        "APP_GUARD_PI": str(pi_extension),
+        "APP_GUARD_CODEX": str(codex_file),
+        "OPENCODE_CONFIG_DIR": str(guard_dir),
+    }
+
+
+def read_refusals(session_dir: Path) -> list[dict[str, str]]:
+    """Read the refusals one session logged.
+
+    Args:
+        session_dir: Private directory of the session.
+
+    Returns:
+        One ``{"tool", "kind"}`` entry per refusal.
+    """
+    log = session_dir / GUARD_DIR / "refusals.jsonl"
+    if not log.exists():
+        return []
+    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def refusal_record(refusal: dict[str, Any]) -> dict[str, Any]:
+    """Build the run-log record a sandboxed engine sends for one hidden-path refusal.
+
+    Only the tool and the path kind travel, never the path or its content.
+
+    Args:
+        refusal: One ``{"tool", "kind"}`` entry of a session.
+
+    Returns:
+        The record the parent forwards to the run log as a ``proposer.refusal`` event.
+    """
+    tool, kind = str(refusal.get("tool") or ""), str(refusal.get("kind") or "")
+    return {
+        "level": "WARNING",
+        "logger": "app.engine",
+        "message": f"Refused a {tool} call on a hidden {kind} path; the session continues",
+        "source": "proposer",
+        "event": "proposer.refusal",
+        "fields": {"tool": tool, "kind": kind},
+    }
+
+
 @dataclass
 class SessionOutcome:
     """What one harness session produced."""
@@ -362,6 +702,7 @@ class SessionOutcome:
     budget_exceeded: bool = False
     tool_calls: int = 0
     tool_cap_reached: bool = False
+    refusals: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def failed(self) -> bool:
@@ -459,7 +800,9 @@ def run_session(
         proposer: Serialized launch: ``run_command``, ``files``, ``env``,
             ``output_format``, ``instructions_file`` and optional ``price``
             and ``max_tool_calls`` (stop the harness once it starts more
-            tool calls than this; its workspace edits so far stand).
+            tool calls than this; its workspace edits so far stand), and
+            ``hidden_paths`` (repository-relative scoring-side paths every
+            tool call that names one is refused).
         workspace: Directory the agent works in (the upstream work dir).
         prompt: Task prompt for this session.
         model: Model identifier the harness should route to.
@@ -494,6 +837,9 @@ def run_session(
         **{name: _with_key(value, api_key) for name, value in (proposer.get("env") or {}).items()},
         **(extra_env or {}),
     }
+    hidden_paths = list(proposer.get("hidden_paths") or [])
+    if hidden_paths:
+        env.update(install_guard(session_dir, workspace, hidden_paths))
     for name, value in (
         ("MODEL", model),
         ("PROMPT_FILE", str(prompt_file)),
@@ -554,6 +900,7 @@ def run_session(
         budget_exceeded=monitor.budget_exceeded,
         tool_calls=monitor.tool_calls,
         tool_cap_reached=monitor.tool_cap_reached,
+        refusals=read_refusals(session_dir) if hidden_paths else [],
     )
 
 
@@ -694,6 +1041,7 @@ def result_document(session_id: str, model: str, outcome: SessionOutcome) -> dic
                 "costUSD": outcome.cost_usd,
             }
         },
+        "refusals": outcome.refusals,
     }
 
 
@@ -760,6 +1108,8 @@ def main(argv: list[str]) -> int:
     Returns:
         The process exit code: the harness's own code, or 1 for a bridge failure.
     """
+    if argv[:1] == ["guard"]:
+        return guard_main(argv[1:])
     args, unknown = _cli_parser().parse_known_args(argv)
     if args.output_format not in (None, "json"):
         print(f"claude bridge: unsupported --output-format {args.output_format}", file=sys.stderr)

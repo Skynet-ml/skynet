@@ -62,6 +62,11 @@ OutputParser = Callable[[str], tuple[str | None, Usage]]
 _PARSER_NAMES = {parser: name for name, parser in PARSERS.items()}
 
 _PROMPT_ARG = f'"$(cat "${ENV_PROMPT_FILE}")"'
+# The bridge sets these only when the run hides scoring-side paths: Pi and
+# Prime load the refusal extension even with --no-extensions, and Codex reads
+# the refusal hook from its home directory.
+_GUARD_PI_ARG = '${APP_GUARD_PI:+-e "$APP_GUARD_PI"} '
+_GUARD_CODEX_COPY = '[ -z "$APP_GUARD_CODEX" ] || cp "$APP_GUARD_CODEX" .app/codex/hooks.json; '
 
 
 @dataclass(frozen=True)
@@ -307,7 +312,7 @@ def _pi_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | No
         files={".app/pi/models.json": json.dumps(models_json, indent=2)},
         run_command=(
             f'{_PI_PATH}; mkdir -p "$HOME/.pi/agent" && cp .app/pi/models.json "$HOME/.pi/agent/models.json" && '
-            f"pi --mode json --no-session --provider {PROVIDER} --model {model_arg} {_PROMPT_ARG}"
+            f"pi --mode json --no-session --provider {PROVIDER} --model {model_arg} {_GUARD_PI_ARG}{_PROMPT_ARG}"
         ),
         env=_base_env(model, gateway),
         parse_output=parse_pi_output,
@@ -344,6 +349,7 @@ def _codex_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
         install_command=_npm_install("codex", "@openai/codex", CODEX_VERSION),
         files={".app/codex/config.toml": config_toml},
         run_command=(
+            f"{_GUARD_CODEX_COPY}"
             'CODEX_HOME="$PWD/.app/codex" codex exec --skip-git-repo-check '
             f"--dangerously-bypass-approvals-and-sandbox --json {_PROMPT_ARG}"
         ),
@@ -417,7 +423,7 @@ def _prime_agent_launch(model: str, gateway: GatewayConfig, *, reasoning_effort:
         run_command=(
             f'PRIME_AGENT_CODING_AGENT_DIR="$PWD/{_PRIME_AGENT_DIR}" '
             f'PRIME_AGENT_KERNEL_PYTHON="$([ -x {PRIME_AGENT_IMAGE_KERNEL} ] && echo {PRIME_AGENT_IMAGE_KERNEL})" '
-            f"prime-agent --mode json --no-session --provider {PROVIDER} --model {model_arg} {_PROMPT_ARG}"
+            f"prime-agent --mode json --no-session --provider {PROVIDER} --model {model_arg} {_GUARD_PI_ARG}{_PROMPT_ARG}"
         ),
         env=env,
         parse_output=parse_pi_output,
@@ -465,7 +471,7 @@ def pi_editor_launch(
     run_command = (
         f'{_PI_PATH}; PI_CODING_AGENT_DIR="$PWD/{PI_EDITOR_CONFIG_DIR}" pi --mode json --no-session '
         f"--no-extensions --no-skills --no-context-files --tools {','.join(PI_EDITOR_TOOLS)} "
-        f'--provider {PROVIDER} --model {model_arg} @"${ENV_PROMPT_FILE}" "Do the task in the attached file."'
+        f'--provider {PROVIDER} --model {model_arg} {_GUARD_PI_ARG}@"${ENV_PROMPT_FILE}" "Do the task in the attached file."'
     )
     if protected:
         run_command = _with_relay_config(run_command, files, gateway)

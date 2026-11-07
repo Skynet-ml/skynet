@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from .. import harness_bridge
+from .. import harness, harness_bridge
 from ..harness_bridge import (
     SessionOutcome,
     _cli_parser,
@@ -348,3 +349,211 @@ def test_codex_tool_call_counts_once_across_start_and_completion(tmp_path: Path)
     outcome = run_session(proposer, workspace=tmp_path / "w", prompt="x", model="m", session_dir=tmp_path / "s")
     assert outcome.tool_calls == 1
     assert outcome.tool_cap_reached is False
+
+
+# The worker's hidden list lands with SKY-386 and SKY-387; these tests use a fixed one.
+_HIDDEN = [
+    "optimize.toml",
+    "metric",
+    ".optimize/exploits",
+    "reference/answers.json",
+    "data/cases.jsonl",
+    "rules/illegal.md",
+    "tools/mcp_server.py",
+]
+_HIDDEN_FILES = ["optimize.toml", "metric/score.py", ".optimize/exploits/log.md", *_HIDDEN[3:]]
+# One shape per harness tool family: claude, codex, pi, opencode, prime and their shells.
+_TOOL_CALLS = [
+    ("Read", lambda path: {"file_path": path}),
+    ("Grep", lambda path: {"pattern": "def", "path": path}),
+    ("Glob", lambda path: {"pattern": path}),
+    ("LS", lambda path: {"path": path}),
+    ("Bash", lambda path: {"command": f"cat {path}"}),
+    ("exec_command", lambda path: {"cmd": f"bash -lc 'head -n 5 {path}'"}),
+    ("read", lambda path: {"path": path}),
+    ("ls", lambda path: {"path": path}),
+    ("grep", lambda path: {"pattern": "x", "path": path}),
+    ("find", lambda path: {"pattern": "*", "path": path}),
+    ("bash", lambda path: {"command": f"python -c \"print(open('{path}').read())\""}),
+    ("list", lambda path: {"dirPath": path}),
+    ("apply_patch", lambda path: {"input": f"*** Begin Patch\n*** Update File: {path}\n*** End Patch"}),
+]
+
+
+def _policy(tmp_path: Path) -> dict:
+    """Build a guard policy over the fixed hidden list."""
+    workspace = tmp_path / "work"
+    workspace.mkdir(exist_ok=True)
+    return harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "refusals.jsonl")
+
+
+@pytest.mark.parametrize("path", _HIDDEN_FILES)
+@pytest.mark.parametrize(("tool", "shape"), _TOOL_CALLS, ids=[tool for tool, _ in _TOOL_CALLS])
+def test_guard_refuses_every_hidden_path_by_exact_name_in_every_tool(tmp_path: Path, tool, shape, path) -> None:
+    """Refuse a read, grep, glob, list or shell call on each hidden path, with the right kind."""
+    policy = _policy(tmp_path)
+    expected = "config" if path == "optimize.toml" else "scoring"
+    assert harness_bridge.guard_check(policy, tool, shape(path)) == expected
+    absolute = f"{policy['workspace']}/{path}"
+    assert harness_bridge.guard_check(policy, tool, shape(absolute)) == expected
+
+
+@pytest.mark.parametrize(
+    ("tool", "tool_input"),
+    [
+        ("Glob", {"pattern": "**/*"}),
+        ("Bash", {"command": "ls -R ."}),
+        ("Grep", {"pattern": "optimize.toml", "path": "src"}),
+        ("Read", {"file_path": "src/optimize.toml.md"}),
+        ("Read", {"file_path": "metrics/score.py"}),
+        ("Read", {"file_path": "../work-other/optimize.toml"}),
+    ],
+)
+def test_guard_lets_other_paths_and_broad_patterns_run(tmp_path: Path, tool: str, tool_input: dict) -> None:
+    """Match exact hidden names only, so broad globs and look-alike names still work."""
+    assert harness_bridge.guard_check(_policy(tmp_path), tool, tool_input) is None
+
+
+def test_guard_policy_holds_no_hidden_names(tmp_path: Path) -> None:
+    """Keep the hidden names out of the policy file the agent's workspace can read."""
+    text = json.dumps(_policy(tmp_path))
+    for path in _HIDDEN:
+        assert path not in text
+
+
+def _guard(mode: str, policy_file: Path, request: dict) -> dict:
+    """Run the guard CLI once and parse its answer."""
+    completed = subprocess.run(
+        harness_bridge.guard_command(mode, policy_file),
+        input=json.dumps(request),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(completed.stdout or "{}")
+
+
+def test_guard_cli_answers_codex_hooks_and_js_checks_and_logs_only_tool_and_kind(tmp_path: Path) -> None:
+    """Deny in the Codex hook shape, answer the JS check shape, and log no path or content."""
+    session = tmp_path / "session"
+    env = harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
+    policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
+    denied = _guard("hook", policy_file, {"tool_name": "exec_command", "tool_input": {"cmd": "cat optimize.toml"}})
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert denied["hookSpecificOutput"]["permissionDecisionReason"] == harness_bridge.GUARD_REFUSAL
+    assert _guard("hook", policy_file, {"tool_name": "exec_command", "tool_input": {"cmd": "ls src"}}) == {}
+    checked = _guard("check", policy_file, {"tool": "read", "input": {"path": "data/cases.jsonl"}})
+    assert checked == {"reason": harness_bridge.GUARD_REFUSAL}
+    assert _guard("check", policy_file, {"tool": "read", "input": {"path": "src/app.py"}}) == {}
+    assert harness_bridge.read_refusals(session) == [
+        {"tool": "exec_command", "kind": "config"},
+        {"tool": "read", "kind": "scoring"},
+    ]
+    hooks = json.loads(Path(env["APP_GUARD_CODEX"]).read_text())
+    assert "guard hook" in hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert Path(env["APP_GUARD_PI"]).exists()
+    assert (Path(env["OPENCODE_CONFIG_DIR"]) / "plugin" / "app-guard.js").exists()
+
+
+_NODE = shutil.which("node")
+
+
+@pytest.mark.skipif(_NODE is None, reason="node is not installed")
+def test_pi_extension_and_opencode_plugin_refuse_hidden_paths(tmp_path: Path) -> None:
+    """Block a hidden read in the Pi extension and throw in the OpenCode plugin; let others run."""
+    session = tmp_path / "session"
+    env = harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
+    pi_module = tmp_path / "pi-guard.mjs"
+    pi_module.write_text(Path(env["APP_GUARD_PI"]).read_text())
+    plugin = Path(env["OPENCODE_CONFIG_DIR"]) / "plugin" / "app-guard.js"
+    plugin_module = tmp_path / "app-guard.mjs"
+    plugin_module.write_text(plugin.read_text())
+    script = f"""
+const pi = (await import({json.dumps(pi_module.as_uri())})).default;
+let handler;
+pi({{ on: (name, fn) => {{ handler = fn; }} }});
+const blocked = await handler({{ toolName: "read", input: {{ path: "metric/score.py" }} }});
+const allowed = await handler({{ toolName: "read", input: {{ path: "src/app.py" }} }});
+const {{ AppGuard }} = await import({json.dumps(plugin_module.as_uri())});
+const hooks = await AppGuard({{}});
+let thrown = null;
+try {{ await hooks["tool.execute.before"]({{ tool: "read" }}, {{ args: {{ filePath: "optimize.toml" }} }}); }}
+catch (error) {{ thrown = error.message; }}
+await hooks["tool.execute.before"]({{ tool: "read" }}, {{ args: {{ filePath: "src/app.py" }} }});
+console.log(JSON.stringify({{ blocked, allowed: allowed ?? null, thrown }}));
+"""
+    completed = subprocess.run([_NODE, "--input-type=module", "-e", script], capture_output=True, text=True, check=True)
+    result = json.loads(completed.stdout)
+    assert result["blocked"] == {"block": True, "reason": harness_bridge.GUARD_REFUSAL}
+    assert result["allowed"] is None
+    assert result["thrown"] == harness_bridge.GUARD_REFUSAL
+
+
+def test_run_session_reports_refusals_and_keeps_running(tmp_path: Path) -> None:
+    """Install the guard for a session with hidden paths, report each refusal, and finish the session."""
+    command = (
+        'printf \'{"tool":"read","input":{"path":".optimize/exploits"}}\' | '
+        '"$APP_GUARD_PYTHON" "$APP_GUARD_BRIDGE" guard check "$APP_GUARD_POLICY"; echo done'
+    )
+    session = tmp_path / "session"
+    python, bridge, _, _, policy = harness_bridge.guard_command(
+        "check", session / harness_bridge.GUARD_DIR / "policy.json"
+    )
+    proposer = {
+        **_PLAIN,
+        "run_command": command,
+        "env": {"APP_GUARD_PYTHON": python, "APP_GUARD_BRIDGE": bridge, "APP_GUARD_POLICY": policy},
+        "hidden_paths": _HIDDEN,
+    }
+    outcome = run_session(proposer, workspace=tmp_path / "work", prompt="go", model="m1", session_dir=session)
+    assert outcome.returncode == 0
+    assert outcome.text.endswith("done")
+    assert outcome.refusals == [{"tool": "read", "kind": "scoring"}]
+    assert result_document("sid", "m1", outcome)["refusals"] == outcome.refusals
+    record = harness_bridge.refusal_record(outcome.refusals[0])
+    assert record["event"] == "proposer.refusal"
+    assert record["fields"] == {"tool": "read", "kind": "scoring"}
+    assert ".optimize" not in json.dumps(record)
+
+
+def test_run_session_without_hidden_paths_installs_no_guard(tmp_path: Path) -> None:
+    """Leave sessions with no hidden list unchanged."""
+    session = tmp_path / "session"
+    outcome = run_session(_PLAIN, workspace=tmp_path / "work", prompt="go", model="m1", session_dir=session)
+    assert outcome.refusals == []
+    assert not (session / harness_bridge.GUARD_DIR).exists()
+
+
+@pytest.mark.parametrize(
+    "launch",
+    [
+        lambda gateway: harness._pi_launch("m1", gateway),
+        lambda gateway: harness._prime_agent_launch("m1", gateway),
+        lambda gateway: harness.pi_editor_launch("m1", gateway),
+    ],
+    ids=["pi", "prime", "pi-editor"],
+)
+def test_pi_family_launches_load_the_guard_extension_only_when_installed(launch, tmp_path: Path) -> None:
+    """Add ``-e <guard>`` to Pi-family commands when the guard is set, and nothing when it is not."""
+    command = launch(harness.GatewayConfig(url="https://gw.example/v1", api_key="k")).run_command
+    assert harness._GUARD_PI_ARG in command
+    expand = f"printf '%s|' {harness._GUARD_PI_ARG}"
+    with_guard = subprocess.run(
+        ["bash", "-c", expand], env={"APP_GUARD_PI": "/g/pi.ts"}, capture_output=True, text=True, check=True
+    )
+    without = subprocess.run(["bash", "-c", expand], env={}, capture_output=True, text=True, check=True)
+    assert with_guard.stdout == "-e|/g/pi.ts|"
+    assert without.stdout == "|"
+
+
+def test_codex_launch_installs_the_guard_hooks_before_it_starts(tmp_path: Path) -> None:
+    """Copy the guard hooks into the session's Codex home only when the guard is set."""
+    command = harness._codex_launch("m1", harness.GatewayConfig(url="https://gw.example/v1", api_key="k")).run_command
+    assert command.startswith(harness._GUARD_CODEX_COPY)
+    (tmp_path / ".app" / "codex").mkdir(parents=True)
+    (tmp_path / "hooks.json").write_text("{}")
+    subprocess.run(["bash", "-c", harness._GUARD_CODEX_COPY], cwd=tmp_path, env={}, check=True)
+    assert not (tmp_path / ".app" / "codex" / "hooks.json").exists()
+    env = {"APP_GUARD_CODEX": str(tmp_path / "hooks.json")}
+    subprocess.run(["bash", "-c", harness._GUARD_CODEX_COPY], cwd=tmp_path, env=env, check=True)
+    assert (tmp_path / ".app" / "codex" / "hooks.json").read_text() == "{}"

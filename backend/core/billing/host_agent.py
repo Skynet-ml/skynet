@@ -35,6 +35,7 @@ import os
 import platform
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import stat
@@ -47,6 +48,7 @@ import time
 import urllib.parse
 import uuid
 import weakref
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -58,6 +60,7 @@ from ..i18n import t_locale
 from ..local.cli_catalog import CliProvider, cli_efforts, cli_model_arg, parse_subscription_model_id
 from ..local.cli_isolation import CODEX_AUTH_FILE, isolated_cli
 from ..local.cli_probe import cli_binary, codex_subscription_login, read_cli_limits, write_cli_limit
+from ..service_gateway.optimization.blackbox import harness_bridge
 from ..worker.host_agent_shim import INSTRUCTIONS_FILES, excluded_path
 from .cli_runners import limit_error
 from .codex_auth_proxy import CodexAuthProxy, jwt_claims, placeholder_login, real_account
@@ -133,6 +136,7 @@ def host_cli_argv(
     model_arg: str | None,
     isolation_args: tuple[str, ...] = (),
     effort: str | None = None,
+    hidden_rules: Sequence[str] = (),
 ) -> list[str]:
     """Build the CLI command for one turn; the prompt goes on stdin.
 
@@ -145,6 +149,7 @@ def host_cli_argv(
         model_arg: The CLI's own model name, or None for its default.
         isolation_args: Flags that keep the user's own config out.
         effort: An effort level from :func:`_effort_arg`, or None for the CLI's default.
+        hidden_rules: Claude deny rules from :func:`claude_hidden_rules`.
 
     Returns:
         The argv list.
@@ -170,6 +175,8 @@ def host_cli_argv(
             # tool that runs a command (Bash, Monitor, Task agents, Workflow) could read
             # decrypted Keychain items. This allow-list has only file tools.
             argv += ["--tools", ",".join(CLAUDE_WORKSPACE_TOOLS)]
+        for rule in hidden_rules:
+            argv += ["--disallowedTools", rule]
     else:
         raise HostAgentRequestError(f"Unknown host CLI {cli!r}.")
     if model_arg:
@@ -178,6 +185,95 @@ def host_cli_argv(
         # ``codex exec`` has no effort flag; its config key takes the same levels.
         argv += ["-c", f"model_reasoning_effort={json.dumps(effort)}"] if cli == "codex" else ["--effort", effort]
     return argv
+
+
+def claude_hidden_rules(workdir: Path, hidden_paths: Sequence[str], full: bool) -> list[str]:
+    """Build the Claude deny rules that refuse each hidden path by its exact name.
+
+    A ``Read`` rule also covers Grep and Glob, and an ``Edit`` rule covers
+    every file-editing tool. Only ``full_access`` turns have Bash.
+
+    Args:
+        workdir: The copied workspace.
+        hidden_paths: Repository-relative hidden files and folders.
+        full: Whether the turn runs with ``full_access``.
+
+    Returns:
+        The rules, one per tool and path.
+    """
+    roots = list(dict.fromkeys([str(workdir), os.path.realpath(workdir)]))
+    rules: list[str] = []
+    for hidden in (str(path).strip("/") for path in hidden_paths):
+        if not hidden:
+            continue
+        for root in roots:
+            absolute = f"/{root.lstrip('/')}/{hidden}"
+            for tool in ("Read", "Edit"):
+                rules += [f"{tool}(/{absolute})", f"{tool}(/{absolute}/**)"]
+        if full:
+            rules.append(f"Bash(*{hidden}*)")
+    return rules
+
+
+def install_codex_guard(turn: Path, workdir: Path, codex_home: Path, hidden_paths: Sequence[str]) -> list[str]:
+    """Send every codex tool call of one turn through the hidden-path guard.
+
+    Args:
+        turn: The turn's folder.
+        workdir: The copied workspace.
+        codex_home: The turn's ``CODEX_HOME``.
+        hidden_paths: Repository-relative hidden files and folders.
+
+    Returns:
+        The folders the guard's interpreter must read under ``confine``.
+    """
+    guard_dir = turn / harness_bridge.GUARD_DIR
+    guard_dir.mkdir()
+    # confine() hides the user's home, where the backend and its virtualenv live,
+    # so the hook runs a turn copy of the stdlib-only bridge on the base interpreter.
+    bridge = guard_dir / "harness_bridge.py"
+    shutil.copyfile(harness_bridge.__file__, bridge)
+    log = guard_dir / "refusals.jsonl"
+    log.write_text("", encoding="utf-8")
+    policy_file = guard_dir / "policy.json"
+    policy_file.write_text(json.dumps(harness_bridge.guard_policy(workdir, list(hidden_paths), log)), encoding="utf-8")
+    python = os.path.realpath(sys.executable)
+    command = [python, "-I", str(bridge), "guard", "hook", str(policy_file)]
+    hook = {"type": "command", "command": shlex.join(command), "timeout": 10}
+    (codex_home / "hooks.json").write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [hook]}]}}), encoding="utf-8")
+    return list(dict.fromkeys([os.path.realpath(sys.base_prefix), str(Path(python).parent)]))
+
+
+def host_refusals(
+    cli: CliProvider, stdout: str, turn: Path, workdir: Path, hidden_paths: Sequence[str]
+) -> list[dict[str, str]]:
+    """List the hidden-path refusals of one turn, with only the tool and the path kind.
+
+    Args:
+        cli: The CLI of the turn.
+        stdout: The CLI's captured output.
+        turn: The turn's folder.
+        workdir: The copied workspace.
+        hidden_paths: Repository-relative hidden files and folders.
+
+    Returns:
+        One ``{"tool", "kind"}`` entry per refusal.
+    """
+    if not hidden_paths:
+        return []
+    if cli == "codex":
+        return harness_bridge.read_refusals(turn)
+    policy = harness_bridge.guard_policy(workdir, list(hidden_paths), turn / "unused.jsonl")
+    refusals = []
+    for document in _json_documents(stdout):
+        for denial in document.get("permission_denials") or ():
+            if not isinstance(denial, dict):
+                continue
+            tool = str(denial.get("tool_name") or "")
+            kind = harness_bridge.guard_check(policy, tool, denial.get("tool_input"))
+            if kind is not None:
+                refusals.append({"tool": tool, "kind": kind})
+    return refusals
 
 
 def _catalog_slug(cli: CliProvider, model: str) -> str | None:
@@ -1142,6 +1238,7 @@ def run_host_agent(
     permission: HostPermission,
     job: str = "run",
     reasoning_effort: str | None = None,
+    hidden_paths: Sequence[str] = (),
 ) -> dict:
     """Run one host-CLI turn on a copy of the guest workspace.
 
@@ -1153,6 +1250,8 @@ def run_host_agent(
         permission: The permission from the run's stored proposer settings.
         job: Folder name that groups this run's copies.
         reasoning_effort: The reflection model's effort from the run's stored settings, or None.
+        hidden_paths: The run's scoring-side files and folders, which every
+            tool refuses by exact name.
 
     Returns:
         ``{status, result_tar_b64, usage, transcript_tail, error?}``.
@@ -1200,6 +1299,9 @@ def run_host_agent(
                 ca_file.write_bytes(proxy.ca_pem)
                 env["CODEX_CA_CERTIFICATE"] = str(ca_file)
                 secret_values.update(_login_secrets((turn / "codex" / CODEX_AUTH_FILE).read_bytes())[1])
+            guard_roots: list[str] = []
+            if hidden_paths and cli == "codex":
+                guard_roots = install_codex_guard(turn, workdir, Path(env["CODEX_HOME"]), hidden_paths)
             binary = _command(cli_binary(cli, settings), env)
             model = str(body.get("model") or "")
             argv = host_cli_argv(
@@ -1210,13 +1312,14 @@ def run_host_agent(
                 _model_arg(cli, model),
                 isolation_args,
                 _effort_arg(cli, model, reasoning_effort),
+                claude_hidden_rules(workdir, hidden_paths, permission == "full_access") if cli == "claude" else (),
             )
             if permission == "workspace_only":
                 argv = confine(
                     argv,
                     home=Path.home(),
                     writable=[str(turn)],
-                    readable=[*tool_roots(binary), *_login_paths(cli)],
+                    readable=[*tool_roots(binary), *_login_paths(cli), *guard_roots],
                     hidden=(tempfile.gettempdir(), "/private/tmp"),
                 )
             started = time.monotonic()
@@ -1235,6 +1338,9 @@ def run_host_agent(
         # The transcript and the error text go to the guest like the files do.
         stdout, stderr = _redact(completed.stdout, secret_values), _redact(completed.stderr, secret_values)
         text, usage, cli_error = parse_cli_output(cli, stdout)
+        for refusal in host_refusals(cli, stdout, turn, workdir, hidden_paths):
+            # A refusal does not stop the turn; only the tool and the path kind are logged.
+            logger.warning("Host agent: refused a %s call on a hidden %s path", refusal["tool"], refusal["kind"])
         transcript = text or stdout or stderr
         if completed.returncode != 0 and cli_error is None:
             cli_error = (stderr or stdout).strip()[-2000:] or f"exit status {completed.returncode}"
@@ -1382,7 +1488,13 @@ def _reply(status: int, document: dict[str, Any]) -> ModelHTTPResult:
 
 
 def bind_host_agent(
-    gateway: ModelGateway, settings: Settings, *, cli: str, permission: str, reasoning_effort: str | None = None
+    gateway: ModelGateway,
+    settings: Settings,
+    *,
+    cli: str,
+    permission: str,
+    reasoning_effort: str | None = None,
+    hidden_paths: Sequence[str] = (),
 ) -> str:
     """Serve ``/v1/_host_agent`` for one run whose proposer is a host CLI.
 
@@ -1399,6 +1511,7 @@ def bind_host_agent(
         cli: The proposer's host CLI from the run settings.
         permission: The proposer's host permission from the run settings.
         reasoning_effort: The proposer model's effort from the run settings, or None.
+        hidden_paths: The run's scoring-side files and folders, which the CLI must refuse.
 
     Returns:
         The token the host proposer's shim must present.
@@ -1456,6 +1569,7 @@ def bind_host_agent(
                 permission=trusted_permission,
                 job=str(runtime.budget_id),
                 reasoning_effort=reasoning_effort,
+                hidden_paths=tuple(hidden_paths),
             )
             started = not document.pop(NOT_STARTED_KEY, False)
             usage = document["usage"]
