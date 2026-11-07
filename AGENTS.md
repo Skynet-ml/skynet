@@ -8,7 +8,7 @@ the matching file below when the task needs it:
 
 | When you | Read |
 | --- | --- |
-| Open, update, describe, review, record videos for, or merge a PR | `.agents/skills/skynet-pr-workflow/SKILL.md` |
+| Open, update, describe, review, capture UI evidence for, or merge a PR | `.agents/skills/skynet-pr-workflow/SKILL.md` |
 | Sign in to staging or a PR preview, or run acceptance checks there | `.agents/skills/skynet-test-accounts/SKILL.md` |
 | Work on or debug a PR preview environment | `docs/agents/pr-previews.md` |
 | Need the stack, layout, local URLs, persistence, auth or i18n facts | `docs/agents/architecture.md` |
@@ -45,7 +45,7 @@ just check-i18n
 - Lint, typecheck and build are not behavior tests. Say which is which.
 - Local frontend work: do not drive a browser unless the task asks for it.
   Tell the user what to check at `localhost:3000`. PR acceptance checks and
-  videos still follow the `skynet-pr-workflow` skill.
+  UI evidence still follow the `skynet-pr-workflow` skill.
 
 Local dev servers: backend `:8000` (`cd backend && .venv/bin/python main.py`
 or `just backend`), frontend `:3000` (`cd frontend && npm run dev` or `just
@@ -88,12 +88,13 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
   (`.github/workflows/pr-files-scope.yml` checks this).
 - Never bypass branch protection or hooks. Never force-push.
 - The repository is **public**. Never commit secrets, passwords, tokens,
-  emails, account data or videos. Secret names are fine.
+  emails, account data, images or videos. Secret names are fine.
 
 ## Merge policy (MANDATORY)
 
 - Each PR gets a preview (staging copy, empty database) at
-  `https://pr-<n>.staging.skynetml.com`. Run acceptance checks and videos there.
+  `https://pr-<n>.staging.skynetml.com`. Run acceptance checks and capture UI
+  evidence there.
 - **Fix bugs locally, deploy once.** Each push rebuilds the preview and
   starts a new review. Test and review the full diff locally, then push once.
 - **Only the orchestrator merges**, in the daily window (03:00
