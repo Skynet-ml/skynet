@@ -47,7 +47,7 @@ from ..harness import GatewayConfig
 from ..native_runtime import NativeOptions
 from ..protocol import (
     METRIC_ERROR,
-    SEARCH_FLOOR,
+    UNSCORED,
     Candidate,
     EngineContext,
     EvalServer,
@@ -612,6 +612,44 @@ def test_a_judge_key_in_side_info_never_changes_the_winner(
     assert response.best_candidate == "xyz"
     assert response.best_score == pytest.approx(0.0)
     assert response.baseline_score == pytest.approx(-3.2)
+
+
+_ALWAYS_CRASHING_CASE_CODE = """
+def score(candidate, case=None):
+    if case and case.get("i") == 1:
+        raise IndexError("edge case")
+    return {"score": 1.0 if candidate == "better" else 0.5, "feedback": "ok"}
+"""
+
+
+def test_a_case_that_crashes_for_every_version_publishes_the_seed(
+    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When one case crashes for every version, each version has a metric_error, so the seed stays (SKY-367).
+
+    This pins a known coverage gap: the search still ranks by the scored
+    cases, but final selection excludes every version with a metric_error.
+    """
+    cases = [{"i": 0}, {"i": 1}]
+
+    def search(
+        strategy: object, task: object, server: EvalServer, ctx: object, cb: object = None, *, caps: object = None
+    ) -> tuple[Result, list[object]]:
+        """Score a better version on every case and return it."""
+        for case in cases:
+            server.evaluate("better", case)
+        return Result(best_candidate="better", best_score=1.0, total_evals=server.used), []
+
+    monkeypatch.setattr(service_mod, "run_strategy", search)
+
+    response = run_blackbox_optimization(
+        _payload(scorer={"kind": "python", "metric_code": _ALWAYS_CRASHING_CASE_CODE}, cases=cases),
+        artifact_id="job-3f",
+        gepa_log_dir_path=str(tmp_path),
+    )
+
+    assert response.best_candidate == "hello world"
+    assert response.best_score == response.baseline_score == 0.5
 
 
 def test_seedless_run_without_cases_scores_the_version_alone(fake_lm: FakeReflectionLM, tmp_path: Path) -> None:
@@ -1563,31 +1601,32 @@ def score(candidate, case=None):
 """
 
 
-def test_a_crashed_version_is_never_chosen_even_when_every_valid_score_is_below_the_floor(
+def test_a_crashed_version_is_never_chosen_even_when_every_valid_score_is_deeply_negative(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Valid scores below the search floor never let a metric_error version win, show a number or log one."""
+    """Deeply negative valid scores never let a metric_error version win, show a number or log one."""
 
     def search(
         strategy: object, task: object, server: EvalServer, ctx: Any, cb: object = None, *, caps: object = None
     ) -> tuple[Result, list[LaneOutcome]]:
-        """Score a valid version and a crashing one; return the crashed one, as an engine fooled by the floor would."""
+        """Score a valid version and a crashing one; return the crashed one, as a confused engine would."""
         server.evaluate("legal-better")
-        _, floor_side_info = server.evaluate("broken")
-        assert floor_side_info["status"] == METRIC_ERROR
-        ctx.progress_callback(PROGRESS_OPTIMIZER, {"score": SEARCH_FLOOR, "candidate": "broken"})
+        broken_score, broken_side_info = server.evaluate("broken")
+        assert broken_score is None
+        assert broken_side_info["status"] == METRIC_ERROR
+        ctx.progress_callback(PROGRESS_OPTIMIZER, {"score": UNSCORED, "candidate": "broken"})
         lane = LaneOutcome(
             engine=BLACKBOX_ENGINE_BEST_OF_N,
             phase="explore",
             status="completed",
-            best_score=SEARCH_FLOOR,
+            best_score=UNSCORED,
             best_candidate="broken",
         )
         result = Result(
             best_candidate="broken",
-            best_score=SEARCH_FLOOR,
+            best_score=UNSCORED,
             total_evals=server.used,
-            metadata={"candidate_tree": [{"candidate": "broken", "parents": [], "val_score": SEARCH_FLOOR}]},
+            metadata={"candidate_tree": [{"candidate": "broken", "parents": [], "val_score": UNSCORED}]},
         )
         return result, [lane]
 
@@ -1612,7 +1651,7 @@ def test_a_crashed_version_is_never_chosen_even_when_every_valid_score_is_below_
     assert response.candidate_tree[0].val_score is None
     assert response.details["optimizer_best_score"] is None
     assert (PROGRESS_OPTIMIZER, {"score": None, "candidate": "broken"}) in events
-    assert SEARCH_FLOOR not in [value for _, metrics in events for value in metrics.values()]
+    assert UNSCORED not in [value for _, metrics in events for value in metrics.values()]
 
 
 @pytest.mark.parametrize("crashing", [{"winner"}, {"winner", "hello world"}])
@@ -1703,19 +1742,20 @@ def test_final_run_has_no_score_when_the_metric_crashes_on_a_case(caplog: pytest
     assert any("optimized version has no score: metric_error" in message for message in messages)
 
 
-def test_progress_events_never_show_a_score_the_search_floor_dragged_down() -> None:
-    """A Best-of-N style mean over one floored case, and the floored case itself, reach users as no score."""
+def test_progress_events_never_show_an_unscored_value() -> None:
+    """A mean over one unscored case, and the unscored case itself, reach users as no score."""
     events: list[tuple[str, dict[str, Any]]] = []
-    sink = service_mod._without_search_floor(lambda event, metrics: events.append((event, metrics)))
+    sink = service_mod._without_unscored(lambda event, metrics: events.append((event, metrics)))
     assert sink is not None
-    floored_mean = (0.5 + 0.25 + SEARCH_FLOOR) / 3
+    unscored_mean = (0.5 + 0.25 + UNSCORED) / 3
+    assert unscored_mean == UNSCORED
 
     sink(
         PROGRESS_CANDIDATE,
         {
             "candidate_id": "1",
-            "score": floored_mean,
-            "per_example": [{"id": "a", "score": 0.5}, {"id": "b", "score": 0.25}, {"id": "c", "score": SEARCH_FLOOR}],
+            "score": unscored_mean,
+            "per_example": [{"id": "a", "score": 0.5}, {"id": "b", "score": 0.25}, {"id": "c", "score": UNSCORED}],
             "discovered_at_evals": 3,
         },
     )
@@ -1735,10 +1775,10 @@ def test_progress_events_never_show_a_score_the_search_floor_dragged_down() -> N
     ]
 
 
-def test_result_details_never_show_a_score_the_search_floor_dragged_down(
+def test_result_details_never_show_an_unscored_value(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An engine's metadata (AutoResearch's Pareto front) reaches the details with floored scores as null."""
+    """An engine's metadata (AutoResearch's Pareto front) reaches the details with unscored values as null."""
     monkeypatch.setattr(
         service_mod,
         "run_strategy",
@@ -1747,7 +1787,7 @@ def test_result_details_never_show_a_score_the_search_floor_dragged_down(
                 best_candidate="hello world",
                 best_score=0.6,
                 total_evals=0,
-                metadata={"frontier": [{"id": "c001", "score": SEARCH_FLOOR / 3}, {"id": "c002", "score": 0.6}]},
+                metadata={"frontier": [{"id": "c001", "score": UNSCORED}, {"id": "c002", "score": 0.6}]},
             ),
             [],
         ),

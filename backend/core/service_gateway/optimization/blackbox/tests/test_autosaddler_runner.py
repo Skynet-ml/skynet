@@ -495,3 +495,25 @@ def test_an_unconstrained_repository_block_keeps_naming_the_paths(
     assert (accepted, check) == (False, "repository-rules")
     assert "README.md" in reason
     assert "APP_NATIVE_LOG" not in capsys.readouterr().out
+
+
+def test_a_development_aggregate_with_a_crashed_case_never_stops_or_leads() -> None:
+    """A filled mean with a crashed case is not best and does not stop the run (SKY-367)."""
+    emitted: list[Any] = []
+    evaluator = SimpleNamespace(
+        best_development=None,
+        stop_at_score=0.5,
+        versions={"c1": 1, "c2": 2},
+        case_ids={"a": "0", "b": "1"},
+        mailbox=SimpleNamespace(total_evals=2, emit=lambda *args: emitted.append(args)),
+    )
+    crashed = [SimpleNamespace(case_id="a", score=0.9), SimpleNamespace(case_id="b", score=None)]
+
+    autosaddler_runner.AppEvaluator._report_development(evaluator, "c1", "text one", 0.9, crashed)
+
+    assert evaluator.best_development is None
+    assert emitted == []
+    scored = [SimpleNamespace(case_id="a", score=0.9), SimpleNamespace(case_id="b", score=0.7)]
+    with pytest.raises(autosaddler_runner.TargetReached):
+        autosaddler_runner.AppEvaluator._report_development(evaluator, "c2", "text two", 0.8, scored)
+    assert evaluator.best_development["best_candidate"] == "text two"

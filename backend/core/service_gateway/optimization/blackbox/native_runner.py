@@ -90,7 +90,7 @@ class EvaluatorMailbox:
             **kwargs: Additional upstream evaluation context.
 
         Returns:
-            Parent score and feedback.
+            Parent score (negative infinity for a metric error) and feedback.
 
         Raises:
             EvaluationStopped: When the parent rejects evaluation or does not reply.
@@ -123,7 +123,12 @@ class EvaluatorMailbox:
                     self.error = kind(str(response["error"]))
                     self.stopped.set()
                     raise self.error
-                return float(response["score"]), dict(response.get("info") or {})
+                score = response.get("score")
+                # SKY-367: the parent sends null for a metric error. The pinned
+                # upstream engines need a number, and negative infinity is
+                # their own "no score" value; a sweep fills it with its
+                # scored mean in ``ProgressEvalServer.evaluate_examples``.
+                return (float("-inf") if score is None else float(score)), dict(response.get("info") or {})
             time.sleep(0.05)
         if self.stopped.is_set():
             # The supervisor stopped the run and records why; claiming a reply
@@ -250,7 +255,8 @@ class ProgressEvalServer(EvalServer):
             split: Split name otherwise.
 
         Returns:
-            The unchanged upstream aggregate and per-case details.
+            The upstream aggregate and per-case details, with each null case
+            filled by :func:`_fill_unscored`.
         """
         targets = self._sweep_targets(example_ids, split)
         if set(targets) == set(self._agent_visible_ids()):
@@ -267,7 +273,7 @@ class ProgressEvalServer(EvalServer):
                     "total": len(targets),
                     "scores": [],
                 }
-        return super().evaluate_examples(candidate, example_ids, split)
+        return _fill_unscored(*super().evaluate_examples(candidate, example_ids, split))
 
     def evaluate(self, candidate: str, example: Any | None = None, **kwargs: Any) -> tuple[float, dict[str, Any]]:
         """Score one case, announcing it when it belongs to a streaming sweep.
@@ -331,6 +337,38 @@ class ProgressEvalServer(EvalServer):
                 },
             )
         return result
+
+
+def _fill_unscored(average: float, info: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+    """Give each null case of one sweep the sweep's mean over its scored cases.
+
+    The mailbox turns a parent null into negative infinity, and the parent's
+    JSON never carries a non-finite score, so a non-finite case is a metric
+    error. The engines rank versions by this aggregate, so a case that always
+    crashes must not pull every version to negative infinity (SKY-367).
+
+    Args:
+        average: Upstream's mean over the sweep's cases.
+        info: Upstream's per-case details, with ``scores`` keyed by case id.
+
+    Returns:
+        The filled cases' mean and the details with each null case filled
+        and listed under ``UNSCORED_CASES_KEY``. A sweep that scored no case
+        keeps its mean and lists every case, so no engine ranks it as fully
+        scored.
+    """
+    scores = info.get("scores")
+    if not isinstance(scores, dict) or not scores:
+        return average, info
+    filled = native_engines.fill_unscored([""] * len(scores), list(scores.values()))
+    if not all(math.isfinite(score) for score in filled):
+        return average, {**info, native_engines.UNSCORED_CASES_KEY: list(scores)}
+    unscored = [case for case, score in scores.items() if not math.isfinite(score)]
+    return sum(filled) / len(filled), {
+        **info,
+        "scores": dict(zip(scores, filled, strict=True)),
+        native_engines.UNSCORED_CASES_KEY: unscored,
+    }
 
 
 def _candidate_key(candidate: Any) -> str:
