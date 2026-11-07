@@ -130,7 +130,8 @@ for review until the evidence is there.
   API `https://api-staging.skynetml.com`. Railway is deleted (2026-10-29);
   never log in to, call, deploy to or test on it.
 - Use shared staging for baseline checks. Use the PR preview for changed
-  behavior. For the Before and After evidence, follow section 5: both go on
+  behavior. For the Before and After evidence, follow section 5: a
+  visual-only change may use simulated local renders; other changes go on
   the preview, and staging is only the fallback for the Before. Never
   overwrite shared staging with an unmerged branch.
 - Until AWS staging serves a needed flow, use local Docker evidence and state
@@ -190,12 +191,24 @@ for review until the evidence is there.
   GitHub (no commits, attachments, comments or releases): the repository is
   public. In the PR body, say that the evidence is on the Linear issue and
   name it.
-- Capture the Before first: open the draft PR before you change code,
-  capture the Before on its preview, then implement and capture the After on
-  the same preview. Use staging for the Before only when the preview cannot
-  show the baseline.
+- Visual-only changes may use simulated UI renders (Gilad, 2026-11-07).
+  When the change is layout, styling, copy, labels or static states, and no
+  app logic is under test, render the real frontend code locally with
+  stubbed state. Do not wait for staging or a preview. Use the same stubbed
+  state for Before (`origin/staging`) and After (the branch). Label each
+  image "Simulated UI state, not staging", and name the stubbed boundary in
+  the PR body.
+- Use staging or the PR preview, and video, only when the change shows
+  motion or behavior over time, or when the evidence must prove app logic
+  (data flow, API calls, auth, saved data). Backend behavior still needs its
+  own tests.
+- For preview evidence, capture the Before first: open the draft PR before
+  you change code, capture the Before on its preview, then implement and
+  capture the After on the same preview. Use staging for the Before only
+  when the preview cannot show the baseline.
 - Capture the same flow, data, viewport and state on both versions. Use real
-  running versions; never mockups, staged output or an unrelated preview.
+  running frontend code; never hand-drawn mockups, staged output or an
+  unrelated preview.
 - Label the evidence Before and After. Name its commit or deployment, and
   say what the reviewer should see.
 - Cover the affected layouts, themes and language directions (light and
