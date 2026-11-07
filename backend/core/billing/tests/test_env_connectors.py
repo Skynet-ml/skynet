@@ -14,7 +14,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from core.billing import env_connectors
-from core.billing.budgets import BudgetInsufficientError, BudgetService
+from core.billing.budgets import BudgetFencedError, BudgetInsufficientError, BudgetService
 from core.billing.env_connectors import (
     CONNECTORS,
     connector_endpoint,
@@ -23,6 +23,7 @@ from core.billing.env_connectors import (
     tool_meter,
 )
 from core.billing.runtime import BudgetRuntime
+from core.billing.signals import BudgetReached
 from core.config import settings
 from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 
@@ -164,16 +165,43 @@ def test_tool_outside_catalog_is_refused_without_charge(runtime: BudgetRuntime) 
     assert runtime.service.get(runtime.budget_id, "alice").setup_spent_cents == 0
 
 
-def test_failed_call_releases_its_hold_and_raises(runtime: BudgetRuntime) -> None:
-    """Release the reservation of a call that fails and pass the failure on."""
+def test_failed_call_after_send_settles_its_price_and_raises(runtime: BudgetRuntime) -> None:
+    """Charge the catalog price for a call that fails after the request may have gone out."""
     meter = tool_meter(runtime, CONNECTORS["web_search"])
 
     def fail() -> dict:
-        """Simulate a provider transport failure."""
-        raise RuntimeError("provider down")
+        """Simulate a provider read timeout after the request was sent."""
+        raise ValueError("The selected MCP endpoint could not complete the tool request.")
 
-    with pytest.raises(RuntimeError, match="provider down"):
+    with pytest.raises(ValueError, match="could not complete"):
         meter("firecrawl_search", {"query": "x"}, fail)
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert snapshot.reserved_cents == 0
+    assert snapshot.setup_spent_cents == Decimal(1)
+    with Session(runtime.service._engine) as session:
+        operation = session.scalars(select(ExecutionOperationModel)).one()
+        evidence = session.scalars(select(ExecutionUsageEvidenceModel)).all()
+    assert operation.state == "settled"
+    assert any("ValueError" in repr(row.__dict__) for row in evidence)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        BudgetFencedError("The execution generation is obsolete."),
+        BudgetReached("The approved budget has been reached."),
+    ],
+)
+def test_admission_stop_before_send_releases_its_hold(runtime: BudgetRuntime, error: BaseException) -> None:
+    """Release the reservation when admission stops the call before the provider request."""
+    meter = tool_meter(runtime, CONNECTORS["web_search"])
+
+    def stop() -> dict:
+        """Simulate the broker's check_admission refusing before it sends the request."""
+        raise error
+
+    with pytest.raises(type(error)):
+        meter("firecrawl_search", {"query": "x"}, stop)
     snapshot = runtime.service.get(runtime.budget_id, "alice")
     assert snapshot.reserved_cents == 0
     assert snapshot.setup_spent_cents == 0

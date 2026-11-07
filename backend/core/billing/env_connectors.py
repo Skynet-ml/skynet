@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from ..config import settings
+from .budgets import BudgetError
 from .operation_pricing import ChargePolicy, operation_quote
 from .runtime import BudgetRuntime, PaidResult
 from .signals import BudgetReached
@@ -214,17 +215,24 @@ def tool_meter(
         failures: list[BaseException] = []
 
         def dispatch() -> PaidResult[dict[str, Any] | None]:
-            """Run the call once; a call that raises releases its coverage.
+            """Run the call once and settle its price unless admission stopped it first.
 
             Returns:
-                The settled price with the tool result, or a refusal on failure.
+                The settled price with the tool result or failure, or a refusal when
+                admission stopped the call before the provider request.
             """
             try:
                 return PaidResult(call(), price, evidence)
-            except (Exception, BudgetReached) as error:
-                # Hosted providers do not bill a request that fails, so the hold is released.
+            except (BudgetError, BudgetReached) as error:
+                # Only check_admission raises these, and the broker runs it before it sends
+                # the tool request, so the provider never saw the call.
                 failures.append(error)
                 return PaidResult(None, None, {**evidence, "failure": type(error).__name__}, refused=True)
+            except Exception as error:
+                # The request may have reached the provider (for example a read timeout), and
+                # connectors have no usage reconciler, so the catalog ceiling settles.
+                failures.append(error)
+                return PaidResult(None, price, {**evidence, "failure": type(error).__name__})
 
         result = runtime.execute(
             quote,
