@@ -856,3 +856,99 @@ def test_bad_service_headers_fail_with_a_reason(raw: bytes, message: str) -> Non
     """Each placeholder must name one of the service's secrets, and each header is one line of text."""
     with pytest.raises(ConstraintsError, match=message):
         parse_constraints(raw)
+
+
+_DATA = b'[data]\ncases = "data/cases.jsonl"\n'
+_CASES = b'{"input": "Paris", "expected": [48.85, 2.35]}\n\n{"input": {"text": "Rome"}}\n'
+
+
+def test_the_data_section_loads_every_case_from_the_jsonl_file(tmp_path: Path) -> None:
+    """Each non-blank line is one case; ``expected`` is optional and blank lines are skipped (E58)."""
+    constraints = _read(tmp_path, _DATA, {"data/cases.jsonl": b"\xef\xbb\xbf" + _CASES})
+    assert constraints is not None
+    assert constraints.cases_file == "data/cases.jsonl"
+    assert constraints.cases == ({"input": "Paris", "expected": [48.85, 2.35]}, {"input": {"text": "Rome"}})
+
+
+def test_parsing_alone_keeps_the_cases_path_and_no_cases() -> None:
+    """parse_constraints reads only the toml, so the cases stay empty until the snapshot is read."""
+    constraints = parse_constraints(_DATA)
+    assert constraints.cases_file == "data/cases.jsonl"
+    assert constraints.cases == ()
+
+
+def test_a_file_without_a_data_section_has_no_cases(tmp_path: Path) -> None:
+    """With no ``[data]``, the run has no cases from the file and the candidate runs once with no input."""
+    constraints = _read(tmp_path, b"version = 1\n")
+    assert constraints is not None
+    assert constraints.cases_file is None
+    assert constraints.cases == ()
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        (b"[data]\n", r'\[data\] must set cases = "<path>"'),
+        (b'[data]\ncases = "a.jsonl"\nsplit = [70, 15, 15]\n', r"\[data\] split is not supported.*70/15/15"),
+        (b'[data]\ncases = "a.jsonl"\nformat = "csv"\n', r"\[data\] format is not a supported setting"),
+        (b'[data]\ncases = ["a.jsonl"]\n', r"\[data\] cases must be the path of one JSONL file"),
+        (b'[data]\ncases = "../a.jsonl"\n', r"\[data\] cases"),
+        (b'[data]\ncases = "/a.jsonl"\n', r"\[data\] cases"),
+        (b'[data]\ncases = "."\n', r"\[data\] cases"),
+        (b'[data]\ncases = "data/*.jsonl"\n', r"\[data\] cases"),
+    ],
+)
+def test_a_bad_data_section_fails_with_a_reason(raw: bytes, message: str) -> None:
+    """A missing path, a split, an unknown key or a path that is not one repository file fails (E48, E59)."""
+    with pytest.raises(ConstraintsError, match=message):
+        parse_constraints(raw)
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        (b"", r"'data/cases\.jsonl', which holds no cases"),
+        (b"\n  \n", r"'data/cases\.jsonl', which holds no cases"),
+        (b'{"input": 1}\nnot json\n', r"line 2 of 'data/cases\.jsonl' \(\[data\] cases\) is not a case"),
+        (b'{"input": 1}\n[1, 2]\n', r"line 2 of 'data/cases\.jsonl' .* is not a case"),
+        (b'{"expected": 1}\n', r"line 1 of 'data/cases\.jsonl' .* is not a case"),
+        (b'{"input": 1, "expected": 2, "split": "train"}\n', r"line 1 of 'data/cases\.jsonl' .* is not a case"),
+        (b'{"input": "caf\xe9"}\n', r"'data/cases\.jsonl', which is not UTF-8 text"),
+    ],
+)
+def test_a_bad_cases_file_fails_with_a_reason(tmp_path: Path, text: bytes, message: str) -> None:
+    """An empty or unreadable file, or a line that is not one case, fails the setup check and names the line."""
+    with pytest.raises(ConstraintsError, match=message):
+        _read(tmp_path, _DATA, {"data/cases.jsonl": text})
+
+
+def test_a_missing_linked_or_folder_cases_file_is_refused(tmp_path: Path) -> None:
+    """Only a regular file in the snapshot can hold the cases."""
+    with pytest.raises(ConstraintsError, match=r"\[data\] cases names 'data/cases\.jsonl', but .* no such file"):
+        _read(tmp_path, _DATA)
+    linked = _archive(
+        tmp_path, {CONSTRAINTS_FILE: _DATA, "real.jsonl": _CASES}, link="../real.jsonl", link_name="data/cases.jsonl"
+    )
+    with pytest.raises(ConstraintsError, match=r"'data/cases\.jsonl', which must be a regular file"):
+        read_constraints(linked)
+    folder = tmp_path / "folder.tgz"
+    with tarfile.open(folder, "w:gz") as packed:
+        info = tarfile.TarInfo(CONSTRAINTS_FILE)
+        info.size = len(_DATA)
+        packed.addfile(info, io.BytesIO(_DATA))
+        folder_info = tarfile.TarInfo("data/cases.jsonl")
+        folder_info.type = tarfile.DIRTYPE
+        packed.addfile(folder_info)
+    with pytest.raises(ConstraintsError, match=r"'data/cases\.jsonl', which must be a regular file"):
+        read_constraints(folder)
+
+
+def test_an_oversized_cases_file_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cases file over the size limit, or with too many cases, fails before the run starts."""
+    monkeypatch.setattr("core.service_gateway.optimization.blackbox.repo_constraints._MAX_CASES_FILE_BYTES", 10)
+    with pytest.raises(ConstraintsError, match=r"which is larger than"):
+        _read(tmp_path, _DATA, {"data/cases.jsonl": _CASES})
+    monkeypatch.setattr("core.service_gateway.optimization.blackbox.repo_constraints._MAX_CASES_FILE_BYTES", 1 << 20)
+    monkeypatch.setattr("core.service_gateway.optimization.blackbox.repo_constraints._MAX_CASES", 1)
+    with pytest.raises(ConstraintsError, match=r"holds more than 1 cases"):
+        _read(tmp_path, _DATA, {"data/cases.jsonl": _CASES})

@@ -96,6 +96,15 @@ you return.
   ``[proposer]``. {APP_NAME} protects both files, so no version can change
   them. Give each file's contents and the optimize.toml lines in
   ``summary``.
+  When the metric needs cases, write them in a JSONL file, for example
+  ``data/cases.jsonl``, one ``{{"input": ..., "expected": ...}}`` object on
+  each line (``expected`` is optional), and set
+  ``cases = "data/cases.jsonl"`` in ``[data]``. Write only cases from the
+  user's data. {APP_NAME} hides the file from the agent and the candidate:
+  the candidate gets only each case's ``input``, and the metric gets the
+  whole case. When the metric needs no cases, such as a speed metric or a
+  metric that reads a test report, write no ``[data]`` section. Give the
+  ``[data]`` lines in ``summary``.
   Read the files that show how the project runs and how it is judged (the
   entry point, its tests, the code the task names) with ``read_repo_file``
   and ``list_repo_folder`` before you write. Use only paths and commands
@@ -119,7 +128,8 @@ class WorkspaceCoderSig(dspy.Signature):
     metric_code: str = dspy.OutputField(desc="The whole metric.py; empty to leave it unchanged.")
     summary: str = dspy.OutputField(
         desc="One or two sentences on what the code does and why, then the optimize.toml [run] section when"
-        " the metric needs one, and any instructions or rule file with the optimize.toml lines that name it."
+        " the metric needs one, any instructions or rule file, and the [data] cases file, with the optimize.toml"
+        " lines that name each file."
     )
     open_questions: list[str] = dspy.OutputField(desc="Questions only the user can answer; empty when none.")
 

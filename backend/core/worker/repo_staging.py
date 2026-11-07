@@ -82,6 +82,7 @@ CANDIDATE_BRANCHES_DETAIL = "candidate_branches"
 # so a created repository does not fill with branches nobody reads.
 MAX_CANDIDATE_BRANCHES = 10
 ENVIRONMENT_KEY = "environment"
+UPLOADED_CASES_REFUSED = "This repo defines its cases in optimize.toml. Remove the uploaded cases."
 # Rules the run is held to; a resumed run must arrive at exactly these again.
 _ENFORCED_FIELDS = ("commit", "editable_paths", "protected_paths", "readonly_paths", "services", "rules")
 # Environments recorded before a field existed hold its empty value.
@@ -170,8 +171,9 @@ def stage_repository(
     Raises:
         ConstraintsError: When the repository's ``optimize.toml`` is invalid,
             asks for more than the run approved, or a resumed run's rules
-            changed since they were first recorded.
-        RepoGateError: When the agent's tree still shows a metric file.
+            changed since they were first recorded, or when the request
+            uploads cases and the repository defines its own in ``[data] cases``.
+        RepoGateError: When the agent's tree still shows a metric file or the cases file.
     """
     result = copy.deepcopy(payload)
     repo = result["target"]["repo"]
@@ -205,7 +207,12 @@ def stage_repository(
         # parent's scorer box keeps the full tree, so it scores with the base
         # commit's metric (SKY-353).
         metric = environment.constraints.metric if environment.constraints is not None else MetricSpec()
-        hidden = (*metric.files, metric.exploits)
+        cases_file = environment.constraints.cases_file if environment.constraints is not None else None
+        # Two sources would leave it unclear which cases the run scores on (E58).
+        if cases_file is not None and result.get("cases"):
+            raise ConstraintsError(UPLOADED_CASES_REFUSED)
+        # The cases file holds every case's expected answer, so the agent and the candidate never see it (E61).
+        hidden = (*metric.files, metric.exploits, *((cases_file,) if cases_file is not None else ()))
         agent_archive = strip_archive(snapshot.archive, hidden, workdir / "agent-tree.tgz")
         leaks = check_hidden(
             snapshot.archive,
@@ -228,6 +235,8 @@ def stage_repository(
             part for part in ((result.get("background") or "").strip(), instructions_brief(environment)) if part
         )
     repo["secrets"] = []
+    if cases_file is not None:
+        result["cases"] = list(environment.constraints.cases)
     result[REPO_SNAPSHOT_KEY] = {
         "archive": str(agent_archive),
         "commit": commit,

@@ -24,6 +24,11 @@ command = "pip install -r requirements.txt"
 # Optional. A markdown file of plain-language illegal approaches. Judge models
 # enforce them.
 illegal = "docs/rules.md"
+
+[data]
+# Optional. A JSONL file of the run's cases. Omit [data] when the metric needs
+# no cases.
+cases = "data/cases.jsonl"
 ```
 
 `docs/rules.md` holds one rule in each top-level bullet:
@@ -39,6 +44,31 @@ The rule text lives in these files, not in `optimize.toml`. The old
 `[instructions]` and `[rules]` sections, and an `illegal` list written in
 the file, fail the setup check with a message that says to move the text
 into a file.
+
+## Cases: `[data] cases`
+
+`[data] cases` names the only source of a repository run's cases. The file
+holds one case on each line, as a JSON object:
+
+```json
+{"input": "Paris, the capital", "expected": [48.85, 2.35]}
+{"input": {"text": "Rome"}}
+```
+
+- `input` is required. It goes to the candidate: a function entry gets it as
+  its argument, and a command entry gets it as JSON on stdin.
+- `expected` is optional. Only the metric gets it, in the whole case.
+- Blank lines are skipped. A UTF-8 byte-order mark at the start is allowed.
+- The file is hidden like the `[metric]` files. The optimization agent and
+  the candidate never see it. Only the parent's scorer reads it.
+- The run shuffles the cases with its seed and splits them 70/15/15 into
+  train, validation and test. The same file and seed give the same split.
+  `[data] split` is not supported.
+- A run that uploads its own cases for a repository with `[data]` fails:
+  "This repo defines its cases in optimize.toml. Remove the uploaded cases."
+- Without `[data]`, the run uses its uploaded cases, if any. With no cases at
+  all, the candidate runs once with no input (`None`, or `null` on stdin),
+  and the metric judges that one run.
 
 ## What is enforced
 
@@ -74,6 +104,11 @@ into a file.
   and lines right after it continue that rule. Headings (`#` to `######`,
   then a space, a tab or the line end) and blank lines separate rules. Any other line that starts
   with `#` is rule text.
+- A `[data]` section without `cases`, or with `split` or any other key. A
+  `cases` path that is absolute, leaves the repository, or names no file. A
+  cases file that is a link or a folder, is larger than 20 MiB, is not UTF-8
+  text, holds no case or more than 200,000 cases. A line that is not a JSON
+  object with `input` and an optional `expected`; the message names the line.
 
 ## Where the effective environment is recorded
 
