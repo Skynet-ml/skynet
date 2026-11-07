@@ -506,7 +506,9 @@ def test_optional_extra_arguments_are_fine() -> None:
     assert remote_mcp_repo.scorer_issues(code, has_cases=True) == ([], [])
 
 
-@pytest.mark.parametrize("signature", ["score(repo_path)", "score(repo_path, case)", "score(repo_path, case, output)"])
+@pytest.mark.parametrize(
+    "signature", ["score(repo_path)", "score(repo_path, case)", "score(repo_path, case, output=None)"]
+)
 def test_each_scorer_signature_is_accepted(signature: str) -> None:
     """Accept the scorer with the checkout, the case, and the [run] entry's output for the case (E39)."""
     code = f"def {signature}:\n  return 1.0, 'ok'\n"
@@ -518,8 +520,15 @@ def test_missing_scorer_issue_names_all_three_signatures() -> None:
     """Name every signature the runner accepts when the code defines no scorer."""
     issues, _notes = remote_mcp_repo.scorer_issues("x = 1\n", has_cases=True)
     assert all(
-        name in issues[0] for name in ("score(repo_path)", "score(repo_path, case)", "score(repo_path, case, output)")
+        name in issues[0]
+        for name in ("score(repo_path)", "score(repo_path, case)", "score(repo_path, case, output=None)")
     )
+
+
+def test_a_required_output_is_an_issue_that_names_the_default() -> None:
+    """Refuse output without a default: the runner calls the scorer with (repo_path, case) when nothing ran."""
+    issues, _notes = remote_mcp_repo.scorer_issues("def score(p, case, output):\n  return 1.0, 'ok'\n", True)
+    assert "score(repo_path, case, output=None)" in issues[0]
 
 
 def test_scorer_with_four_required_arguments_names_the_output() -> None:

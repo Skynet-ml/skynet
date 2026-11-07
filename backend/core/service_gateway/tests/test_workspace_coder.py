@@ -329,7 +329,8 @@ def test_coder_prompt_has_the_run_entry_write_the_metric_reads_output() -> None:
 
     assert "[run]" in prompt
     assert 'entry = "geocode.py:geocode"' in prompt
-    assert "score(repo_path, case, output)" in prompt
+    assert "score(repo_path, case, output=None)" in prompt
+    assert "and ``None`` when nothing ran, so always give it the ``None`` default" in prompt
     assert "never imports or calls the candidate's code" in prompt
 
 

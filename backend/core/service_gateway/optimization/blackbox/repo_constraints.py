@@ -23,7 +23,9 @@ and the patch). ``[run]`` and ``[metric]`` also take the role keys mcp (the
 path of a standard ``.mcp.json`` file in the repository, which must exist),
 services and illegal; they share one box, so network and vcpus fail. The
 worker's preflight gate (``core.worker.repo_gate``) fails a run that sets a
-key its sandbox cannot enforce, before any sandbox time (SKY-352).
+key its sandbox cannot enforce, before any sandbox time (SKY-352). That
+includes every ``[run]`` key and the ``[metric]`` mcp, services and illegal
+keys, until SKY-375 runs the entry and gives that box its environment.
 """
 
 from __future__ import annotations
@@ -81,6 +83,8 @@ _HEADER_NAME = re.compile(r"[A-Za-z0-9-]{1,64}")
 _PLACEHOLDER = re.compile(r"\$\{([^}]*)\}")
 _MAX_URL_CHARS = 2_048
 _MAX_HEADER_CHARS = 1_000
+# Wildcard DNS names such as 169.254.169.254.nip.io resolve to the address they hold.
+_DOTTED_IPV4 = re.compile(r"(^|\.)[0-9]{1,3}(\.[0-9]{1,3}){3}(\.|$)")
 _HOST = re.compile(r"(\*\.)?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*(:[0-9]{1,5})?")
 
 
@@ -170,7 +174,7 @@ class RepoConstraints:
     run_timeout: float = _DEFAULT_TIMEOUT_SECONDS
     # network is always None for these two roles: they share one box (E37).
     # [run] gets no MCP file and no services unless it lists them; [metric] gets
-    # the [run] services unless it lists its own (E44).
+    # every declared service unless it lists its own (E44).
     run_role: RoleEnvironment = RoleEnvironment()
     metric_role: RoleEnvironment = RoleEnvironment()
     intent: str | None = None
@@ -610,8 +614,11 @@ def _service(section: Any, name: str) -> ServiceSpec:
 def _service_url(value: Any, label: str) -> str:
     """Read a service's ``url``: an https address on a public host name (E45).
 
-    Skynet calls this address for the run, so an address inside its own
-    network would let a repository file reach internal services (SSRF).
+    This is a parse-time check of the written text only. It refuses the
+    obvious internal names early, but a public name can still resolve to a
+    private address. The relay that calls the url (SKY-374) must resolve the
+    host and refuse private, loopback and link-local addresses at connect
+    time; this check does not stop SSRF on its own.
 
     Args:
         value: The ``url`` value as parsed.
@@ -622,7 +629,9 @@ def _service_url(value: Any, label: str) -> str:
 
     Raises:
         ConstraintsError: When the value is not https, holds credentials, or
-            names an IP address, ``localhost`` or a host without a domain.
+            names an IP address, ``localhost``, an ``.internal`` or ``.local``
+            name, a name that holds a dotted IPv4 address, or a host without a
+            domain.
     """
     if not isinstance(value, str) or len(value) > _MAX_URL_CHARS or not value.startswith("https://"):
         raise ConstraintsError(f"{CONSTRAINTS_FILE}: {label} url must be an https:// address.")
@@ -647,7 +656,8 @@ def _service_url(value: Any, label: str) -> str:
     if (
         is_ip
         or host == "localhost"
-        or host.endswith(".localhost")
+        or host.endswith((".localhost", ".internal", ".local"))
+        or _DOTTED_IPV4.search(host)
         or "." not in host
         or not _HOST.fullmatch(host)
         or not any(char.isalpha() for char in last)
@@ -834,7 +844,7 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
     metric_role = _role(metric_section, "[metric]", services)
     metric_role["mcp"] = _mcp(metric_section, "[metric]")
     if "services" not in metric_section:
-        metric_role["services"] = run_role["services"]
+        metric_role["services"] = tuple(services)
     return RepoConstraints(
         sha256=hashlib.sha256(raw).hexdigest(),
         editable_paths=editable,

@@ -297,7 +297,7 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
     scorer = named or (functions[0] if len(functions) == 1 else None)
     if scorer is None:
         return [
-            "The scorer must define score(repo_path), score(repo_path, case) or score(repo_path, case, output)."
+            "The scorer must define score(repo_path), score(repo_path, case) or score(repo_path, case, output=None)."
         ], []
     args = scorer.args
     positional = len(args.posonlyargs) + len(args.args)
@@ -305,8 +305,9 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
         return [f"The scorer function {scorer.name} takes no arguments. Use score(repo_path)."], []
     # The runner calls the scorer with at most (repo_path, case, output) and
     # without await, so a coroutine or a generator result stops the run. The
-    # output is what the [run] entry returned for the case (E39); the runner
-    # passes it once SKY-375 runs the entry.
+    # output is what the [run] entry returned for the case (E39). The runner
+    # calls fn(repo_path, case) today and passes no output when the file has no
+    # [run] entry, so output must default to None.
     if isinstance(scorer, ast.AsyncFunctionDef):
         return [f"The scorer function {scorer.name} is async. Use a plain def."], []
     if any(isinstance(node, ast.Yield | ast.YieldFrom) for node in _own_nodes(scorer)):
@@ -314,6 +315,11 @@ def scorer_issues(metric_code: str, has_cases: bool) -> tuple[list[str], list[st
     required = positional - len(args.defaults)
     if required > 3 or any(default is None for default in args.kw_defaults):
         return [f"The scorer function {scorer.name} needs more arguments than (repo_path, case, output)."], []
+    if required == 3:
+        return [
+            f"The scorer function {scorer.name} needs output. Write score(repo_path, case, output=None), because"
+            " a run with no [run] entry passes no output."
+        ], []
     issues: list[str] = []
     notes: list[str] = []
     if _returns_bare_number(scorer):
@@ -908,8 +914,8 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
                 min_length=1,
                 max_length=200_000,
                 description="Python that defines score(repo_path), score(repo_path, case) or "
-                "score(repo_path, case, output), where output is what the optimize.toml [run] entry returned "
-                "for the case. It returns a "
+                "score(repo_path, case, output=None), where output is what the optimize.toml [run] entry "
+                "returned for the case and None when nothing ran. It returns a "
                 "(score, feedback) pair or a {'score': float, 'feedback': str} dict. A bare number fails the run.",
             ),
         ],

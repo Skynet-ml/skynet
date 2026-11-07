@@ -180,7 +180,10 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     (``tools = []``) means "none", which differs from the default an absent key
     gives, and a written default (``exploits = ".optimize/exploits"``) still
     asks for a folder to be hidden. ``[proposer] illegal`` is not listed: the
-    judges enforce it in every place.
+    judges enforce it in every place. Every ``[run]`` key and the ``[metric]``
+    role keys are listed: no sandbox runs the candidate entry or gives the
+    run and metric box its MCP servers, services and rules yet (SKY-375), so
+    a run that sets them stops here instead of failing later in the sandbox.
 
     Args:
         raw: The file's contents, already accepted by ``parse_constraints``.
@@ -191,11 +194,13 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
         Each setting's kind, for example ``"proposer.tools"``, and its label, for example ``"[proposer] tools"``.
     """
     document: dict[str, Any] = tomllib.loads(raw.decode("utf-8"))
-    proposer, metric = document.get("proposer", {}), document.get("metric", {})
+    proposer, metric, run = document.get("proposer", {}), document.get("metric", {}), document.get("run", {})
     keys = [(f"proposer.{key}", f"[proposer] {key}") for key in ("tools", "network", "services") if key in proposer]
     keys += [("target", f"[target.{name}]") for name in targets]
     keys += [("services", f"[services.{name}]") for name in services]
-    keys += [(f"metric.{key}", f"[metric] {key}") for key in ("files", "exploits", "reference") if key in metric]
+    keys += [(f"run.{key}", f"[run] {key}") for key in ("entry", "timeout", "mcp", "services", "illegal") if key in run]
+    metric_keys = ("files", "exploits", "reference", "mcp", "services", "illegal")
+    keys += [(f"metric.{key}", f"[metric] {key}") for key in metric_keys if key in metric]
     return keys
 
 

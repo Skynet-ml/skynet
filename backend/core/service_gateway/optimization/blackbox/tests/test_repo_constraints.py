@@ -490,14 +490,14 @@ def test_a_malformed_run_section_fails_with_a_reason(raw: bytes, message: str) -
 _SERVICES = b'[services.maps]\nsecrets = ["MAPS_API_KEY"]\n[services.grader]\nsecrets = ["GRADER_KEY"]\n'
 
 
-def test_run_and_metric_roles_default_to_no_mcp_and_the_run_services() -> None:
-    """[run] gets no MCP file and no services; [metric] gets the [run] services (E44)."""
+def test_run_and_metric_roles_default_to_no_mcp_and_all_declared_services() -> None:
+    """[run] gets no MCP file and no services; [metric] gets every declared service, not the [run] ones (E44)."""
     plain = parse_constraints(b'[run]\nentry = "a.py:f"\n')
     inherited = parse_constraints(_SERVICES + b'[run]\nentry = "a.py:f"\nservices = ["maps"]\n')
 
     assert (plain.run_role, plain.metric_role) == (RoleEnvironment(), RoleEnvironment())
     assert inherited.run_role == RoleEnvironment(services=("maps",))
-    assert inherited.metric_role == RoleEnvironment(services=("maps",))
+    assert inherited.metric_role == RoleEnvironment(services=("maps", "grader"))
 
 
 def test_run_and_metric_accept_the_role_keys() -> None:
@@ -609,6 +609,11 @@ def test_a_service_with_no_or_many_secrets_has_no_default_header() -> None:
         "https://169.254.169.254/latest",
         "https://localhost:8000",
         "https://api.localhost",
+        "https://metadata.google.internal/computeMetadata/v1",
+        "https://redis.default.svc.cluster.local",
+        "https://printer.local",
+        "https://169.254.169.254.nip.io/latest",
+        "https://10.0.0.5.sslip.io",
         "https://intranet/v1",
         "https://0x7f.1",
         "https://2130706433",
@@ -617,7 +622,7 @@ def test_a_service_with_no_or_many_secrets_has_no_default_header() -> None:
     ],
 )
 def test_a_bad_service_url_fails_with_a_reason(url: str) -> None:
-    """url must be https on a public host name: no IP, no localhost, no credentials (SSRF guard, E45)."""
+    """url must be https on a public host name: no IP, no localhost or internal name, no credentials (E45)."""
     raw = f'[services.judge]\nurl = "{url}"\n'.encode()
 
     with pytest.raises(ConstraintsError, match=r"\[services\.judge\] url "):

@@ -70,9 +70,10 @@ you return.
   the candidate's output, write a ``[run]`` section for the repository's
   optimize.toml with ``entry`` set to ``"path/to/file.py:function"`` or a
   command list, for example ``entry = "geocode.py:geocode"``, and write
-  ``score(repo_path, case, output)``: ``output`` is what the entry returned
-  for the case. That metric reads ``output`` and never imports or calls the
-  candidate's code. When the repository is scored by its own tests, put the
+  ``score(repo_path, case, output=None)``: ``output`` is what the entry
+  returned for the case, and ``None`` when nothing ran, so always give it the
+  ``None`` default. That metric reads ``output`` and never imports or calls
+  the candidate's code. When the repository is scored by its own tests, put the
   test command in ``[run] entry``, for example
   ``entry = ["pytest", "-q", "--junitxml=out.xml"]``, and write a metric that
   only reads the saved report; the metric never runs the tests itself. For
