@@ -17,19 +17,14 @@ from core.worker.repo_gate import GateFailure, RepoGateError, check_hidden, chec
 
 _CLEAN = b"""
 version = 1
+instructions = "docs/intent.md"
 
 [paths]
 editable = ["bot"]
 protected = ["bot/eval"]
 
-[rules]
-illegal = ["Do not hardcode answers."]
-
 [proposer]
-illegal = ["Do not read the metric."]
-
-[instructions]
-intent = "Answer the question."
+illegal = "docs/rules.md"
 """
 
 
@@ -53,7 +48,7 @@ def _archive(tmp_path: Path, files: dict[str, bytes]) -> Path:
 
 
 def test_a_clean_file_passes(tmp_path: Path) -> None:
-    """Paths, rules, proposer rules and instructions are enforced or advisory, so they pass in both places."""
+    """Paths, proposer rules and instructions are enforced or advisory, so they pass in both places."""
     archive = _archive(tmp_path, {CONSTRAINTS_FILE: _CLEAN})
 
     assert check_repository(archive, (), place="local") == []
@@ -136,11 +131,11 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
         (b'[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n', "[run] mcp"),
         (b'[services.maps]\n[run]\nentry = "a.py:f"\nservices = ["maps"]\n', "[run] services"),
         (b'[run]\nentry = "a.py:f"\nservices = []\n', "[run] services"),
-        (b'[run]\nentry = "a.py:f"\nillegal = ["No hard-coded answers."]\n', "[run] illegal"),
+        (b'[run]\nentry = "a.py:f"\nillegal = "rules/run.md"\n', "[run] illegal"),
         (b'[metric]\nmcp = "eval/.mcp.json"\n', "[metric] mcp"),
         (b'[services.grader]\n[metric]\nservices = ["grader"]\n', "[metric] services"),
         (b"[metric]\nservices = []\n", "[metric] services"),
-        (b'[metric]\nillegal = ["Never read the answers."]\n', "[metric] illegal"),
+        (b'[metric]\nillegal = "rules/metric.md"\n', "[metric] illegal"),
     ],
 )
 @pytest.mark.parametrize("place", ["local", "cloud"])

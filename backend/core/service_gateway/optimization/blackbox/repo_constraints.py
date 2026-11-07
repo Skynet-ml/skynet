@@ -7,10 +7,13 @@ add instructions for the agent. It can never widen an editable path or hold a
 secret value; asking for either fails the setup check with the reason.
 
 Enforced: ``[paths] editable`` and ``[paths] protected`` (every version is
-checked against them before it is scored or published), and ``[rules]
-illegal`` with its alias ``[proposer] illegal``, plain-language rules that
-judge models check during the run and on every version before it is scored.
-Not enforced: ``[instructions]``, which the agent reads as guidance only.
+checked against them before it is scored or published), and ``[proposer]
+illegal``, the path of a markdown file whose top-level bullets are
+plain-language rules that judge models check during the run and on every
+version before it is scored. Not enforced: the top-level ``instructions``
+path, a text file the agent reads as guidance only. Rule text lives in those
+files, not in the toml (E48), and every file they name is protected like
+``optimize.toml`` itself, so no version can rewrite its own rules.
 
 Parsed and validated here, but not enforced yet: ``[proposer]`` and
 ``[target.<name>]`` (tools, network, services, and for a target its entry,
@@ -38,7 +41,7 @@ import socket
 import tarfile
 import tomllib
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
@@ -47,8 +50,7 @@ CONSTRAINTS_FILE = "optimize.toml"
 _MAX_FILE_BYTES = 64 * 1024
 _MAX_PATHS = 200
 _MAX_INTENT_CHARS = 4_000
-_MAX_INVARIANTS = 50
-_MAX_INVARIANT_CHARS = 500
+_MAX_RULE_FILE_BYTES = 32 * 1024
 _MAX_COMMAND_CHARS = 300
 _MAX_RULES = 50
 _MAX_RULE_CHARS = 500
@@ -65,8 +67,6 @@ _TARGET_KEYS = _ROLE_KEYS | {"entry", "vcpus", "timeout"}
 _SECTIONS: dict[str, frozenset[str]] = {
     "paths": frozenset({"editable", "protected"}),
     "setup": frozenset({"command"}),
-    "instructions": frozenset({"intent", "invariants"}),
-    "rules": frozenset({"illegal"}),
     "proposer": _ROLE_KEYS,
     "metric": frozenset({"files", "exploits", "reference", "mcp", "services", "illegal"}),
     "run": frozenset({"entry", "timeout", "mcp", "services", "illegal"}),
@@ -76,6 +76,9 @@ _RUN_ROLE_SECTIONS = ("run", "metric")
 # The candidate and the metric share one box today (E37), so neither can size
 # or wall off its own box; these keys fail with that reason, not as unknown.
 _SHARED_BOX_KEYS = frozenset({"network", "vcpus"})
+_BULLET = re.compile(r"[-*+](?:[ \t]+(.*))?")
+# Only an ATX heading counts; "#1 Do not ..." or "#tag" is text and must not be dropped as a heading.
+_HEADING = re.compile(r"#{1,6}(?:[ \t]|$)")
 # Each of these holds one table per name, so its keys are checked per table.
 _NAMED_SECTIONS = frozenset({"target", "services"})
 _TABLE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
@@ -108,6 +111,8 @@ class RoleEnvironment:
     illegal: tuple[str, ...] = ()
     # Only [run] and [metric] set it: the repository path of their .mcp.json file (E46).
     mcp: str | None = None
+    # The repository path the file names in illegal; read_constraints fills illegal from it (E48).
+    illegal_file: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -162,8 +167,10 @@ class MetricSpec:
 class RepoConstraints:
     """What a repository's constraints file proposes, already validated.
 
-    ``rules`` and ``proposer.illegal`` hold the same merged list: ``[rules]
-    illegal`` first, then ``[proposer] illegal``.
+    ``rules`` and ``proposer.illegal`` hold the same list: the top-level
+    bullets of the ``[proposer] illegal`` file. :func:`parse_constraints`
+    reads only the toml, so it leaves ``intent`` and every role's ``illegal``
+    empty; :func:`read_constraints` fills them from the files in the snapshot.
     """
 
     sha256: str
@@ -178,13 +185,18 @@ class RepoConstraints:
     # every declared service unless it lists its own (E44).
     run_role: RoleEnvironment = RoleEnvironment()
     metric_role: RoleEnvironment = RoleEnvironment()
+    instructions_file: str | None = None
     intent: str | None = None
-    invariants: tuple[str, ...] = ()
     rules: tuple[str, ...] = ()
     proposer: RoleEnvironment = RoleEnvironment()
     targets: Mapping[str, TargetStage] = field(default_factory=dict)
     services: Mapping[str, ServiceSpec] = field(default_factory=dict)
     metric: MetricSpec = MetricSpec()
+
+    @property
+    def rule_files(self) -> tuple[str, ...]:
+        """Return the distinct repository paths of the instructions and rule files the toml names."""
+        return tuple(dict.fromkeys(path for _, path in _rule_file_settings(self)))
 
 
 @dataclass(frozen=True)
@@ -226,9 +238,7 @@ class RepoEnvironment:
             "readonly_paths": list(readonly_paths),
             "secret_names": sorted(secret_names),
             "services": [],
-            "instructions": {"intent": file.intent, "invariants": list(file.invariants)}
-            if file and (file.intent or file.invariants)
-            else None,
+            "instructions": {"path": file.instructions_file, "intent": file.intent} if file and file.intent else None,
             "rules": list(self.rules),
             "notes": list(self.notes),
         }
@@ -311,25 +321,47 @@ def _text(value: Any, setting: str, limit: int) -> str:
     return value.strip()
 
 
-def _illegal(section: Mapping[str, Any], label: str) -> tuple[str, ...]:
-    """Read an optional ``illegal`` list of plain-language rules.
+def _one_file(raw: Any, setting: str) -> str:
+    """Read the repository path of one file, such as an ``.mcp.json`` or a rule file.
+
+    Args:
+        raw: The value as parsed.
+        setting: The setting it came from, such as ``[run] mcp``, named in errors.
+
+    Returns:
+        The cleaned repository-relative path.
+
+    Raises:
+        ConstraintsError: When the value is not a path to one file inside the repository.
+    """
+    path = _clean_path(raw, setting)
+    if path == ".":
+        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {setting} must name one file, not the whole repository.")
+    return path
+
+
+def _illegal_file(section: Mapping[str, Any], label: str) -> str | None:
+    """Read the optional ``illegal`` path: the markdown file that holds a role's rules (E48).
 
     Args:
         section: The parsed table.
         label: The table as the file names it, such as ``[proposer]``, used in errors.
 
     Returns:
-        The stripped rules in file order; empty when the key is absent.
+        The repository path of the rule file, or ``None`` when the key is absent.
 
     Raises:
-        ConstraintsError: When the value is not a list of 1 to the maximum rules of bounded text.
+        ConstraintsError: When the value is an inline list of rules, or not a path to one file in the repository.
     """
     if "illegal" not in section:
-        return ()
-    illegal = section["illegal"]
-    if not isinstance(illegal, list) or not 1 <= len(illegal) <= _MAX_RULES:
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {label} illegal must list 1 to {_MAX_RULES} rules.")
-    return tuple(_text(item, f"{label} illegal", _MAX_RULE_CHARS) for item in illegal)
+        return None
+    if not isinstance(section["illegal"], str):
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} illegal must be the path of a markdown rule file, not the rules"
+            " themselves. Move the rules into a file in the repository, one top-level '- ' bullet for each rule,"
+            f' and set illegal = "<path>" in {label}.'
+        )
+    return _one_file(section["illegal"], f"{label} illegal")
 
 
 def _names(section: Mapping[str, Any], key: str, label: str) -> tuple[str, ...]:
@@ -405,7 +437,7 @@ def _role(section: Mapping[str, Any], label: str, services: Mapping[str, Service
         "tools": _names(section, "tools", label),
         "network": _network(section, label),
         "services": named,
-        "illegal": _illegal(section, label),
+        "illegal_file": _illegal_file(section, label),
     }
 
 
@@ -424,10 +456,7 @@ def _mcp(section: Mapping[str, Any], label: str) -> str | None:
     """
     if "mcp" not in section:
         return None
-    path = _clean_path(section["mcp"], f"{label} mcp")
-    if path == ".":
-        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {label} mcp must name one file, not the whole repository.")
-    return path
+    return _one_file(section["mcp"], f"{label} mcp")
 
 
 def _entry(value: Any, label: str) -> str | tuple[str, ...]:
@@ -801,6 +830,18 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
     version = document.pop("version", 1)
     if version != 1:
         raise ConstraintsError(f"{CONSTRAINTS_FILE}: version {version!r} is not supported; use version = 1.")
+    instructions = document.pop("instructions", None)
+    # The older forms held the text in the toml (E48); name the move instead of "not supported".
+    if isinstance(instructions, dict):
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: [instructions] is no longer supported. Move the intent and invariants text into"
+            ' a file in the repository and set instructions = "<path>" at the top of the file, before any section.'
+        )
+    if "rules" in document:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: [rules] is no longer supported. Move the rules into a markdown file in the"
+            " repository, one top-level '- ' bullet for each rule, and set illegal = \"<path>\" in [proposer]."
+        )
     for name, section in document.items():
         if name not in _SECTIONS and name not in _NAMED_SECTIONS:
             raise ConstraintsError(f"{CONSTRAINTS_FILE}: [{name}] is not a supported section.")
@@ -824,7 +865,6 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
             raise ConstraintsError(f"{CONSTRAINTS_FILE}: [{name}] {unknown[0]} is not a supported setting.")
     paths = document.get("paths", {})
     setup = document.get("setup", {})
-    instructions = document.get("instructions", {})
     protected = _paths(paths, "protected") or ()
     if "." in protected:
         raise ConstraintsError(f"{CONSTRAINTS_FILE}: [paths] protected cannot protect the whole repository.")
@@ -834,17 +874,9 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
             f"{CONSTRAINTS_FILE}: [paths] editable is empty, so no version could change anything."
             " List at least one path, or remove the setting to keep the approved ones."
         )
-    invariants = instructions.get("invariants", [])
-    if not isinstance(invariants, list) or len(invariants) > _MAX_INVARIANTS:
-        raise ConstraintsError(
-            f"{CONSTRAINTS_FILE}: [instructions] invariants must be a list of at most {_MAX_INVARIANTS} items."
-        )
     services = {name: _service(table, name) for name, table in _named_tables(document, "services").items()}
     targets = {name: _target(table, name, services) for name, table in _named_tables(document, "target").items()}
     proposer = _role(document.get("proposer", {}), "[proposer]", services)
-    # [rules] illegal is the older name for [proposer] illegal; a file with both keeps both lists.
-    rules = (*_illegal(document.get("rules", {}), "[rules]"), *proposer["illegal"])
-    proposer["illegal"] = rules
     run_entry, run_timeout = _run(document.get("run"))
     run_section = document.get("run", {})
     run_role = _role(run_section, "[run]", services)
@@ -863,11 +895,7 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         run_timeout=run_timeout,
         run_role=RoleEnvironment(**run_role),
         metric_role=RoleEnvironment(**metric_role),
-        intent=_text(instructions["intent"], "[instructions] intent", _MAX_INTENT_CHARS)
-        if "intent" in instructions
-        else None,
-        invariants=tuple(_text(item, "[instructions] invariants", _MAX_INVARIANT_CHARS) for item in invariants),
-        rules=rules,
+        instructions_file=None if instructions is None else _one_file(instructions, "instructions"),
         proposer=RoleEnvironment(**proposer),
         targets=targets,
         services=services,
@@ -885,15 +913,184 @@ def read_constraints(archive: Path) -> RepoConstraints | None:
         The validated proposal, or ``None`` when the repository has no such file.
 
     Raises:
-        ConstraintsError: When the file is not a regular file, is invalid, or
-            names an MCP file the snapshot does not hold.
+        ConstraintsError: When the file is not a regular file or is invalid, when
+            it names an MCP file the snapshot does not hold, or when a named
+            instructions or rule file is missing, not a regular text file, too
+            large, empty, or not a list of top-level bullets.
     """
     raw = read_constraints_file(archive)
     if raw is None:
         return None
     constraints = parse_constraints(raw)
     check_mcp_files(constraints, archive)
-    return constraints
+    return _load_rule_files(constraints, archive)
+
+
+def _rule_file_settings(constraints: RepoConstraints) -> list[tuple[str, str]]:
+    """List each setting that names an instructions or rule file, with the path it names.
+
+    Args:
+        constraints: The parsed proposal.
+
+    Returns:
+        ``(setting, path)`` pairs in file order, such as ``("[proposer] illegal", "docs/rules.md")``.
+    """
+    roles = [
+        ("[proposer] illegal", constraints.proposer),
+        ("[run] illegal", constraints.run_role),
+        ("[metric] illegal", constraints.metric_role),
+        *((f"[target.{name}] illegal", stage) for name, stage in constraints.targets.items()),
+    ]
+    settings = [("instructions", constraints.instructions_file)]
+    settings += [(setting, role.illegal_file) for setting, role in roles]
+    return [(setting, path) for setting, path in settings if path is not None]
+
+
+def _load_rule_files(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
+    """Fill the intent and every role's rules from the files the toml names (E48).
+
+    Args:
+        constraints: The parsed proposal, with paths but no rule text.
+        archive: Packed tree from :func:`fetch_snapshot`, the same snapshot the toml came from.
+
+    Returns:
+        The proposal with ``intent``, ``rules`` and each role's ``illegal`` filled.
+
+    Raises:
+        ConstraintsError: When a named file is missing, not a regular text file,
+            too large, empty, or not a list of top-level bullets.
+    """
+    settings = _rule_file_settings(constraints)
+    if not settings:
+        return constraints
+    texts: dict[str, str] = {}
+    with tarfile.open(archive, "r:gz") as packed:
+        members = {str(PurePosixPath(m.name)): m for m in packed.getmembers()}
+        for setting, path in settings:
+            if path not in texts:
+                texts[path] = _read_text_file(packed, members.get(path), setting, path)
+
+    def rules_of(role: RoleEnvironment, setting: str) -> RoleEnvironment:
+        """Return the role with its ``illegal`` rules read from its rule file."""
+        if role.illegal_file is None:
+            return role
+        return replace(role, illegal=_split_rules(texts[role.illegal_file], setting, role.illegal_file))
+
+    intent = None
+    if constraints.instructions_file is not None:
+        intent = texts[constraints.instructions_file].strip()
+        if not intent:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: instructions names '{constraints.instructions_file}', but that file is empty."
+            )
+        if len(intent) > _MAX_INTENT_CHARS:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: the instructions file '{constraints.instructions_file}' is longer than"
+                f" {_MAX_INTENT_CHARS} characters."
+            )
+    proposer = rules_of(constraints.proposer, "[proposer] illegal")
+    return replace(
+        constraints,
+        intent=intent,
+        rules=proposer.illegal,
+        proposer=proposer,
+        run_role=rules_of(constraints.run_role, "[run] illegal"),
+        metric_role=rules_of(constraints.metric_role, "[metric] illegal"),
+        targets={name: rules_of(stage, f"[target.{name}] illegal") for name, stage in constraints.targets.items()},
+    )
+
+
+def _read_text_file(packed: tarfile.TarFile, member: tarfile.TarInfo | None, setting: str, path: str) -> str:
+    """Read one instructions or rule file from the snapshot as text.
+
+    Args:
+        packed: The open snapshot.
+        member: The file's entry, or ``None`` when the snapshot has no such path.
+        setting: The setting that names the file, such as ``[proposer] illegal``, named in errors.
+        path: The repository path the setting names.
+
+    Returns:
+        The file's text.
+
+    Raises:
+        ConstraintsError: When the file is missing, is a link or folder, is too large, or is not UTF-8 text.
+    """
+    if member is None:
+        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {setting} names '{path}', but the repository has no such file.")
+    if not member.isfile():
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {setting} names '{path}', which must be a regular file, not a link or folder."
+        )
+    if member.size > _MAX_RULE_FILE_BYTES:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {setting} names '{path}', which is larger than {_MAX_RULE_FILE_BYTES // 1024} KiB."
+        )
+    handle = packed.extractfile(member)
+    try:
+        # utf-8-sig drops a leading byte-order mark, which editors on Windows add.
+        return (handle.read() if handle is not None else b"").decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {setting} names '{path}', which is not UTF-8 text.") from exc
+
+
+def _split_rules(text: str, setting: str, path: str) -> tuple[str, ...]:
+    """Split a markdown rule file into its rules: one rule for each top-level bullet.
+
+    Indented lines, and lines that directly follow a bullet with no blank line
+    between, continue that bullet. Headings and blank lines between bullets
+    are allowed; any other text outside a bullet is refused, so a rule cannot
+    be lost by being written as a paragraph.
+
+    Args:
+        text: The file's text.
+        setting: The setting that names the file, named in errors.
+        path: The file's repository path, named in errors.
+
+    Returns:
+        The rules in file order, each joined onto one line.
+
+    Raises:
+        ConstraintsError: When the file holds no bullet, more than the maximum
+            bullets, a bullet that is empty or too long, or text outside a bullet.
+    """
+    rules: list[list[str]] = []
+    open_rule = False
+    after_blank = False
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            after_blank = True
+            continue
+        bullet = _BULLET.fullmatch(line.rstrip())
+        if bullet is not None:
+            rules.append([(bullet.group(1) or "").strip()])
+            open_rule = True
+        elif _HEADING.match(line):
+            open_rule = False
+        elif open_rule and (line[0] in " \t" or not after_blank):
+            rules[-1].append(line.strip())
+        else:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: line {number} of '{path}' ({setting}) is not part of a top-level bullet."
+                " Write each rule as a line that starts with '- '."
+            )
+        after_blank = False
+    if not rules:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {setting} names '{path}', which holds no rules. Write each rule as a line"
+            " that starts with '- '."
+        )
+    if len(rules) > _MAX_RULES:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: '{path}' ({setting}) holds {len(rules)} rules; the most is {_MAX_RULES}."
+        )
+    joined = [" ".join(part for part in parts if part) for parts in rules]
+    for number, rule in enumerate(joined, start=1):
+        if not rule or len(rule) > _MAX_RULE_CHARS:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: rule {number} in '{path}' ({setting}) must be text of 1 to"
+                f" {_MAX_RULE_CHARS} characters."
+            )
+    return tuple(joined)
 
 
 def check_mcp_files(constraints: RepoConstraints, archive: Path) -> None:
@@ -967,8 +1164,8 @@ def effective_environment(
 ) -> RepoEnvironment:
     """Combine the customer's approved settings with what the repository proposes.
 
-    The constraints file itself is always protected, so no version can change
-    the rules it is scored under.
+    The constraints file and every instructions or rule file it names are
+    always protected, so no version can change the rules it is scored under.
 
     Args:
         constraints: The repository's proposal, or ``None`` when it has none.
@@ -1002,7 +1199,7 @@ def effective_environment(
                 f" paths ({approved}). A repository file can only narrow them; widen them in the run's settings."
             )
         editable = constraints.editable_paths
-    protected = tuple(dict.fromkeys((CONSTRAINTS_FILE, *constraints.protected_paths)))
+    protected = tuple(dict.fromkeys((CONSTRAINTS_FILE, *constraints.rule_files, *constraints.protected_paths)))
     # Protected paths win over editable ones when a patch is checked, so this
     # run could only spend its budget on versions that are all refused.
     if all(_inside(path, protected) for path in editable):
@@ -1054,11 +1251,8 @@ def instructions_brief(environment: RepoEnvironment) -> str:
         ]
         lines += [f"- {label}: {rule}" for label, rule in numbered_rules(environment.rules)]
     file = environment.constraints
-    if file is not None and (file.intent or file.invariants):
-        lines += ["", "Guidance from the repository (not enforced; the scorer decides):"]
-        if file.intent:
-            lines += ["", file.intent]
-        lines += [f"- {item}" for item in file.invariants]
+    if file is not None and file.intent:
+        lines += ["", f"Guidance from `{file.instructions_file}` (not enforced; the scorer decides):", "", file.intent]
     return "\n".join(lines)
 
 
