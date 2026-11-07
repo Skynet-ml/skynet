@@ -145,6 +145,8 @@ class McpToolsBroker:
         timeout_seconds: float = 30,
         authorize_tool: Callable[[str, str, dict[str, Any]], bool] | None = None,
         on_tool_event: Callable[[dict[str, Any]], None] | None = None,
+        headers: Mapping[str, str] | None = None,
+        meter: Callable[[str, Mapping[str, Any], Callable[[], dict[str, Any]]], dict[str, Any]] | None = None,
     ) -> None:
         """Retain endpoint credentials and resolve a permitted destination outside the guest.
 
@@ -157,11 +159,19 @@ class McpToolsBroker:
             timeout_seconds: Per-request timeout without tool-call retries.
             authorize_tool: Optional blocking approval gate for a live chat call.
             on_tool_event: Optional sink for tool lifecycle events.
+            headers: Optional parent-held credential headers, such as a provider API key header.
+            meter: Optional hook that pays for one tool call; it gets the tool name, the
+                arguments and the physical call, and returns the call's result.
         """
         self.url = url
         self.address = _pinned_address(url, allow_private)
-        self.headers = {"Authorization": auth_header} if auth_header else None
-        self._redactions = credential_fragments(auth_header, endpoint=url)
+        merged = {**({"Authorization": auth_header} if auth_header else {}), **dict(headers or {})}
+        self.headers = merged or None
+        fragments = set(credential_fragments(auth_header, endpoint=url))
+        for value in (headers or {}).values():
+            fragments.update(credential_fragments(value))
+        self._redactions = tuple(sorted(fragments, key=len, reverse=True))
+        self.meter = meter
         self.tool_filter = tuple(tool_filter) if tool_filter else None
         self.check_admission = check_admission
         self.timeout_seconds = timeout_seconds
@@ -293,7 +303,10 @@ class McpToolsBroker:
             approved = self.authorize_tool is None or self.authorize_tool(call_id, tool_name, arguments)
             if approved:
                 try:
-                    result = self._run_request(method, params)
+                    if self.meter is None:
+                        result = self._run_request(method, params)
+                    else:
+                        result = self.meter(tool_name, arguments, lambda: self._run_request(method, params))
                 except Exception as error:
                     if self.on_tool_event is not None:
                         self.on_tool_event(

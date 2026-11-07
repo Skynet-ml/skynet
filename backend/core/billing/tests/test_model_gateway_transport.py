@@ -1106,6 +1106,87 @@ def test_selected_tools_keep_credentials_outside_guest_and_cannot_call_models(
     assert state.json()["blocked_reason"] == "generation_fenced"
 
 
+def test_catalog_connectors_share_one_gateway_with_a_live_roster(
+    gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Open one metered, parent-keyed roster per connector beside the live MCP roster."""
+    brokers: dict[str, dict[str, Any]] = {}
+
+    class RecordingBroker:
+        """Record each roster's parent-only endpoint and answer with its own name."""
+
+        def __init__(self, url, **kwargs):
+            """Keep the connection the parent chose for this roster."""
+            self.name = url.split("/")[2]
+            brokers[self.name] = {"url": url, **kwargs}
+
+        def dispatch(self, body):
+            """Run a metered call when a meter exists, then name the answering roster."""
+            meter = brokers[self.name].get("meter")
+            if meter is not None:
+                tool = brokers[self.name]["tool_filter"][0]
+                meter(tool, {"q": "x"}, lambda: {"content": []})
+            payload = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"roster": self.name}})
+            return ModelHTTPResult(200, "application/json", payload.encode())
+
+    monkeypatch.setattr(gateway_module, "McpToolsBroker", RecordingBroker)
+    monkeypatch.setattr(settings, "google_maps_api_key", SecretStr("maps-parent-secret"))
+    monkeypatch.setattr(settings, "firecrawl_api_key", SecretStr("firecrawl-parent-secret"))
+    payload = {
+        "model_config": {"name": "fixture/text"},
+        "tool_source": {"kind": "live_mcp", "mcp_url": "https://selected.example/mcp", "tool_filter": ["lookup"]},
+        "env_connectors": ["maps", "web_search"],
+    }
+
+    protected = gateway.protect_payload(payload, managed_key="upstream-secret")
+    again = gateway.protect_payload({"env_connectors": ["maps"]}, managed_key="upstream-secret")
+
+    assert set(brokers) == {"selected.example", "mapstools.googleapis.com", "mcp.firecrawl.dev"}
+    assert brokers["mapstools.googleapis.com"]["headers"] == {"X-Goog-Api-Key": "maps-parent-secret"}
+    assert brokers["mcp.firecrawl.dev"]["tool_filter"] == ["firecrawl_search", "firecrawl_scrape"]
+    assert "meter" not in brokers["selected.example"]
+    for secret in ("maps-parent-secret", "firecrawl-parent-secret", "upstream-secret", "googleapis", "firecrawl.dev"):
+        assert secret not in json.dumps(protected)
+    routes = protected["_skynet_connector_routes"]
+    assert again["_skynet_connector_routes"]["maps"] == routes["maps"]
+    tokens = {protected["_skynet_tools_route"]["token"], routes["maps"]["token"], routes["web_search"]["token"]}
+    assert len(tokens) == 3
+    answered = {}
+    for name, route in {"live": protected["_skynet_tools_route"], **routes}.items():
+        headers = {"Authorization": f"Bearer {route['token']}"}
+        response = httpx.post(
+            f"{gateway.url}/_mcp",
+            headers=headers,
+            json={"jsonrpc": "2.0", "method": "tools/call", "id": 1},
+            trust_env=False,
+        )
+        assert response.status_code == 200
+        answered[name] = response.json()["result"]["roster"]
+        assert (
+            httpx.post(f"{gateway.url}/chat/completions", headers=headers, json={}, trust_env=False).status_code == 401
+        )
+        assert httpx.get(f"{gateway.url}/_budget/state", headers=headers, trust_env=False).status_code == 200
+    assert answered == {
+        "live": "selected.example",
+        "maps": "mapstools.googleapis.com",
+        "web_search": "mcp.firecrawl.dev",
+    }
+    snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, "alice")
+    assert snapshot.setup_spent_cents == Decimal("2.4")
+    assert snapshot.reserved_cents == 0
+    assert gateway.dispatch_guest(routes["maps"]["token"], "/v1/_mcp", {"method": "tools/call"}, {}).status == 200
+
+
+def test_connector_without_key_fails_setup_with_its_name(
+    gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse a run that asks for a connector whose key is missing, and name it."""
+    monkeypatch.setattr(settings, "google_maps_api_key", None)
+    with pytest.raises(ValueError, match=r"maps \(GOOGLE_MAPS_API_KEY\)"):
+        gateway.protect_payload({"env_connectors": ["maps"]}, managed_key="upstream-secret")
+    assert gateway._connectors == {}
+
+
 def test_remote_runtime_streams_and_metered_mailbox_scrubs_protocol(gateway: ModelGateway) -> None:
     """Round-trip a real guest model request without exposing protocol data in output."""
     gateway.bind_sandbox(

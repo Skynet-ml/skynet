@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from ..billing.env_connectors import CONNECTOR_ROUTES_KEY
 from ..billing.host_agent import HOST_AGENT_PATH, HOST_AGENT_TOKEN_KEY
 from ..billing.model_dispatch import ModelHTTPResult
 from ..config import settings
@@ -73,6 +74,10 @@ def model_forwarder(payload: dict[str, Any]) -> Any:
                     register({**route, "token": route[HOST_AGENT_TOKEN_KEY]}, frozenset({HOST_AGENT_PATH}))
     register(payload.get("_skynet_target_route"), model_paths)
     register(payload.get("_skynet_tools_route"), frozenset({"/v1/_mcp", "/v1/_budget/state"}))
+    connector_routes = payload.get(CONNECTOR_ROUTES_KEY)
+    if isinstance(connector_routes, dict):
+        for route in connector_routes.values():
+            register(route, frozenset({"/v1/_mcp", "/v1/_budget/state"}))
     register(payload.get("_skynet_packages_route"), frozenset({"/v1/_packages"}))
     register(payload.get("_skynet_evaluator_route"), frozenset({"/v1/_evaluator", "/v1/_budget/state"}))
 

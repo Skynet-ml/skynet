@@ -560,6 +560,21 @@ class Settings(BaseSettings):
         alias="FIRECRAWL_API_KEY",
         description="Firecrawl API key. When set, the wizard agent gets web_search, fetch_url and crawl_site tools so it can search the web and read links the user gives it. Unset leaves the agent without web access.",
     )
+    google_maps_api_key: SecretStr | None = Field(
+        default=None,
+        alias="GOOGLE_MAPS_API_KEY",
+        description="Google Maps Platform key with the Maps Grounding Lite API enabled. When set, runs can use the `maps` connector; the parent gateway holds the key and meters each call. Unset leaves the connector unavailable.",
+    )
+    browserbase_api_key: SecretStr | None = Field(
+        default=None,
+        alias="BROWSERBASE_API_KEY",
+        description="Browserbase API key. When set, runs can use the `browser` connector; the parent gateway holds the key and meters each call. Unset leaves the connector unavailable.",
+    )
+    browserbase_project_id: str | None = Field(
+        default=None,
+        alias="BROWSERBASE_PROJECT_ID",
+        description="Optional Browserbase project ID sent with the `browser` connector's requests.",
+    )
     # Every *_CENTS variable still reads its pre-rename *_CREDITS name so existing deployments keep their values.
     openrouter_balance_floor_cents: int = Field(
         default=1000,

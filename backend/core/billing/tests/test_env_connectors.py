@@ -1,0 +1,202 @@
+"""Check the hosted MCP connector catalog, its key gating and its per-call metering."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Iterator
+from decimal import Decimal
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
+from pydantic import SecretStr
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from core.billing import env_connectors
+from core.billing.budgets import BudgetInsufficientError, BudgetService
+from core.billing.env_connectors import (
+    CONNECTORS,
+    connector_endpoint,
+    offered_connectors,
+    require_connectors,
+    tool_meter,
+)
+from core.billing.runtime import BudgetRuntime
+from core.config import settings
+from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
+
+MAPS_KEY = "maps-parent-only-key"
+FIRECRAWL_KEY = "fc-parent-only-key"
+BROWSERBASE_KEY = "bb-parent-only-key"
+
+
+@pytest.fixture(autouse=True)
+def _keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Configure every connector key and pin the usage markup to 1.0."""
+    monkeypatch.setattr(settings, "usage_markup", 1.0)
+    monkeypatch.setattr(settings, "google_maps_api_key", SecretStr(MAPS_KEY))
+    monkeypatch.setattr(settings, "firecrawl_api_key", SecretStr(FIRECRAWL_KEY))
+    monkeypatch.setattr(settings, "browserbase_api_key", SecretStr(BROWSERBASE_KEY))
+    monkeypatch.setattr(settings, "browserbase_project_id", "project-fixture")
+
+
+def _runtime(tmp_path: Path, budget_cents: int) -> Iterator[BudgetRuntime]:
+    """Open a funded setup-phase run budget on a private SQLite ledger.
+
+    Args:
+        tmp_path: Directory for the ledger file.
+        budget_cents: Run budget size.
+
+    Yields:
+        The runtime that pays for connector calls.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'ledger.db'}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            BillingCustomerModel(username="alice", stripe_customer_id="fixture", balance_cents=50, grant_remaining=0)
+        )
+        session.commit()
+    ledger = BudgetService(engine=engine)
+    budget = ledger.create("alice", budget_cents, idempotency_key="fixture")
+    yield BudgetRuntime(ledger, username="alice", budget_id=budget.id, generation=0, phase="setup")
+    engine.dispose()
+
+
+@pytest.fixture
+def runtime(tmp_path: Path) -> Iterator[BudgetRuntime]:
+    """Provide a run budget with room for several connector calls."""
+    yield from _runtime(tmp_path, 20)
+
+
+@pytest.fixture
+def tight_runtime(tmp_path: Path) -> Iterator[BudgetRuntime]:
+    """Provide a run budget too small for one Maps call."""
+    yield from _runtime(tmp_path, 1)
+
+
+def test_catalog_lists_three_hosted_connectors_with_prices() -> None:
+    """Give each connector an HTTPS MCP URL, a real settings field, allowed tools and prices."""
+    assert set(CONNECTORS) == {"maps", "web_search", "browser"}
+    for connector in CONNECTORS.values():
+        assert urlsplit(connector.url).scheme == "https"
+        assert connector.key_setting in type(settings).model_fields
+        assert connector.tools
+        assert all(isinstance(price, Decimal) and price >= 0 for price in connector.tools.values())
+        assert connector.price_source.startswith("https://")
+    assert CONNECTORS["maps"].url == "https://mapstools.googleapis.com/mcp"
+    assert CONNECTORS["web_search"].key_setting == "firecrawl_api_key"
+
+
+def test_connector_without_key_is_not_offered_and_setup_names_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hide a keyless connector and name it, with its env setting, in the setup error."""
+    assert offered_connectors() == ("maps", "web_search", "browser")
+    monkeypatch.setattr(settings, "google_maps_api_key", None)
+    monkeypatch.setattr(settings, "browserbase_api_key", SecretStr("  "))
+    assert offered_connectors() == ("web_search",)
+    with pytest.raises(ValueError, match=r"maps \(GOOGLE_MAPS_API_KEY\), browser \(BROWSERBASE_API_KEY\)"):
+        require_connectors(["maps", "web_search", "browser"])
+    assert [connector.name for connector in require_connectors(["web_search", "web_search"])] == ["web_search"]
+
+
+@pytest.mark.parametrize("names", [["unknown"], "maps", [3]])
+def test_unknown_or_malformed_connector_list_is_refused(names: object) -> None:
+    """Refuse names outside the catalog and lists that are not plain names."""
+    with pytest.raises(ValueError, match="connector"):
+        require_connectors(names)
+
+
+def test_endpoint_places_each_key_where_its_provider_reads_it() -> None:
+    """Send Maps and Firecrawl keys as headers and the Browserbase key in the query."""
+    assert connector_endpoint(CONNECTORS["maps"]) == (
+        "https://mapstools.googleapis.com/mcp",
+        {"X-Goog-Api-Key": MAPS_KEY},
+    )
+    assert connector_endpoint(CONNECTORS["web_search"]) == (
+        "https://mcp.firecrawl.dev/v2/mcp",
+        {"Authorization": f"Bearer {FIRECRAWL_KEY}"},
+    )
+    url, headers = connector_endpoint(CONNECTORS["browser"])
+    assert headers == {}
+    assert parse_qs(urlsplit(url).query) == {
+        "browserbaseApiKey": [BROWSERBASE_KEY],
+        "browserbaseProjectId": ["project-fixture"],
+    }
+
+
+def test_each_call_reserves_and_settles_its_catalog_price(runtime: BudgetRuntime) -> None:
+    """Settle the catalog price as a tool cost in the run budget, once per call."""
+    meter = tool_meter(runtime, CONNECTORS["maps"])
+    calls = []
+
+    def call() -> dict:
+        """Record that coverage exists before the provider sees the call."""
+        calls.append(runtime.service.get(runtime.budget_id, "alice").reserved_cents)
+        return {"content": [{"type": "text", "text": "Cafe"}]}
+
+    assert meter("search_places", {"textQuery": "cafe"}, call) == {"content": [{"type": "text", "text": "Cafe"}]}
+    meter("lookup_weather", {"location": "Tel Aviv"}, call)
+
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert calls[0] > 0
+    assert snapshot.reserved_cents == 0
+    assert snapshot.setup_spent_cents == Decimal("2.1")
+    with Session(runtime.service._engine) as session:
+        operations = session.scalars(select(ExecutionOperationModel)).all()
+    assert [(operation.cost_kind, operation.role) for operation in operations] == [("tool", "maps")] * 2
+
+
+def test_call_outside_budget_is_refused_before_provider(tight_runtime: BudgetRuntime) -> None:
+    """Refuse a call whose price does not fit, without reaching the provider."""
+    meter = tool_meter(tight_runtime, CONNECTORS["maps"])
+    called = []
+    with pytest.raises(BudgetInsufficientError):
+        meter("search_places", {"textQuery": "cafe"}, lambda: called.append(1) or {})
+    assert called == []
+
+
+def test_tool_outside_catalog_is_refused_without_charge(runtime: BudgetRuntime) -> None:
+    """Refuse an unlisted tool name before any reservation."""
+    meter = tool_meter(runtime, CONNECTORS["maps"])
+    with pytest.raises(ValueError, match="outside the selected roster"):
+        meter("delete_everything", {}, lambda: pytest.fail("The provider must not be called."))
+    assert runtime.service.get(runtime.budget_id, "alice").setup_spent_cents == 0
+
+
+def test_failed_call_releases_its_hold_and_raises(runtime: BudgetRuntime) -> None:
+    """Release the reservation of a call that fails and pass the failure on."""
+    meter = tool_meter(runtime, CONNECTORS["web_search"])
+
+    def fail() -> dict:
+        """Simulate a provider transport failure."""
+        raise RuntimeError("provider down")
+
+    with pytest.raises(RuntimeError, match="provider down"):
+        meter("firecrawl_search", {"query": "x"}, fail)
+    snapshot = runtime.service.get(runtime.budget_id, "alice")
+    assert snapshot.reserved_cents == 0
+    assert snapshot.setup_spent_cents == 0
+
+
+def test_keys_stay_out_of_quotes_errors_and_logs(
+    runtime: BudgetRuntime, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Keep every connector key out of the run record, the errors and the logs."""
+    caplog.set_level(logging.DEBUG)
+    for connector in CONNECTORS.values():
+        tool = next(iter(connector.tools))
+        tool_meter(runtime, connector)(tool, {"q": "x"}, lambda: {"content": []})
+    monkeypatch.setattr(settings, "google_maps_api_key", None)
+    with pytest.raises(ValueError) as refused:
+        connector_endpoint(CONNECTORS["maps"])
+    with Session(runtime.service._engine) as session:
+        rows = [
+            *session.scalars(select(ExecutionOperationModel)).all(),
+            *session.scalars(select(ExecutionUsageEvidenceModel)).all(),
+        ]
+        record = repr([row.__dict__ for row in rows])
+    assert "maps" in record
+    surfaces = record + str(refused.value) + caplog.text + repr(env_connectors.CONNECTORS)
+    for secret in (MAPS_KEY, FIRECRAWL_KEY, BROWSERBASE_KEY):
+        assert secret not in surfaces
