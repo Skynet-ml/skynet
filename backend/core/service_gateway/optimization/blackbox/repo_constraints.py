@@ -14,23 +14,34 @@ Not enforced: ``[instructions]``, which the agent reads as guidance only.
 
 Parsed and validated here, but not enforced yet: ``[proposer]`` and
 ``[target.<name>]`` (tools, network, services, and for a target its entry,
-vcpus and timeout), ``[services.<name>]`` (the secret names a service needs)
-and ``[metric]`` (the files and exploit folder hidden from the agent). The
+vcpus and timeout), ``[services.<name>]`` (the secret names a service needs,
+and for a user's own API an https ``url`` and ``headers``),
+``[metric]`` (the files and exploit folder hidden from the agent) and
+``[run]`` (the entry that starts the candidate for each case, and its
+timeout; with no ``[run]``, nothing runs and the metric judges only the tree
+and the patch). ``[run]`` and ``[metric]`` also take the role keys mcp (the
+path of a standard ``.mcp.json`` file in the repository, which must exist),
+services and illegal; they share one box, so network and vcpus fail. The
 worker's preflight gate (``core.worker.repo_gate``) fails a run that sets a
-key its sandbox cannot enforce, before any sandbox time (SKY-352).
+key its sandbox cannot enforce, before any sandbox time (SKY-352). That
+includes every ``[run]`` key and the ``[metric]`` mcp, services and illegal
+keys, until SKY-375 runs the entry and gives that box its environment.
 """
 
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import math
 import re
+import socket
 import tarfile
 import tomllib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 CONSTRAINTS_FILE = "optimize.toml"
 _MAX_FILE_BYTES = 64 * 1024
@@ -57,12 +68,24 @@ _SECTIONS: dict[str, frozenset[str]] = {
     "instructions": frozenset({"intent", "invariants"}),
     "rules": frozenset({"illegal"}),
     "proposer": _ROLE_KEYS,
-    "metric": frozenset({"files", "exploits", "reference"}),
+    "metric": frozenset({"files", "exploits", "reference", "mcp", "services", "illegal"}),
+    "run": frozenset({"entry", "timeout", "mcp", "services", "illegal"}),
 }
+# These two roles name their MCP servers in a .mcp.json file, not catalog tool names (E46).
+_RUN_ROLE_SECTIONS = ("run", "metric")
+# The candidate and the metric share one box today (E37), so neither can size
+# or wall off its own box; these keys fail with that reason, not as unknown.
+_SHARED_BOX_KEYS = frozenset({"network", "vcpus"})
 # Each of these holds one table per name, so its keys are checked per table.
 _NAMED_SECTIONS = frozenset({"target", "services"})
 _TABLE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _SECRET_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,127}")
+_HEADER_NAME = re.compile(r"[A-Za-z0-9-]{1,64}")
+_PLACEHOLDER = re.compile(r"\$\{([^}]*)\}")
+_MAX_URL_CHARS = 2_048
+_MAX_HEADER_CHARS = 1_000
+# Wildcard DNS names such as 169.254.169.254.nip.io resolve to the address they hold.
+_DOTTED_IPV4 = re.compile(r"(^|\.)[0-9]{1,3}(\.[0-9]{1,3}){3}(\.|$)")
 _HOST = re.compile(r"(\*\.)?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*(:[0-9]{1,5})?")
 
 
@@ -83,6 +106,8 @@ class RoleEnvironment:
     network: tuple[str, ...] | None = None
     services: tuple[str, ...] = ()
     illegal: tuple[str, ...] = ()
+    # Only [run] and [metric] set it: the repository path of their .mcp.json file (E46).
+    mcp: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -104,6 +129,24 @@ class ServiceSpec:
     """One ``[services.<name>]`` declaration: the names of the secrets it needs, never values."""
 
     secrets: tuple[str, ...] = ()
+    # A user's own API (E45), such as a custom model provider; None for a catalog connector.
+    url: str | None = None
+    # As written in the file, with ${SECRET} placeholders; None when the file sets none.
+    headers: Mapping[str, str] | None = None
+
+    @property
+    def request_headers(self) -> dict[str, str]:
+        """Return the headers to send, with ``${SECRET}`` placeholders still unresolved.
+
+        Returns:
+            The file's headers, or ``Authorization: Bearer ${SECRET}`` when it
+            sets none and the service has exactly one secret (E45).
+        """
+        if self.headers is not None:
+            return dict(self.headers)
+        if len(self.secrets) == 1:
+            return {"Authorization": f"Bearer ${{{self.secrets[0]}}}"}
+        return {}
 
 
 @dataclass(frozen=True)
@@ -127,6 +170,14 @@ class RepoConstraints:
     editable_paths: tuple[str, ...] | None = None
     protected_paths: tuple[str, ...] = ()
     setup_command: str | None = None
+    # None means the file has no [run] section, so no candidate runs (E39).
+    run_entry: str | tuple[str, ...] | None = None
+    run_timeout: float = _DEFAULT_TIMEOUT_SECONDS
+    # network is always None for these two roles: they share one box (E37).
+    # [run] gets no MCP file and no services unless it lists them; [metric] gets
+    # every declared service unless it lists its own (E44).
+    run_role: RoleEnvironment = RoleEnvironment()
+    metric_role: RoleEnvironment = RoleEnvironment()
     intent: str | None = None
     invariants: tuple[str, ...] = ()
     rules: tuple[str, ...] = ()
@@ -358,12 +409,33 @@ def _role(section: Mapping[str, Any], label: str, services: Mapping[str, Service
     }
 
 
+def _mcp(section: Mapping[str, Any], label: str) -> str | None:
+    """Read the optional ``mcp`` path of ``[run]`` or ``[metric]``.
+
+    Args:
+        section: The parsed table.
+        label: The table as the file names it, used in errors.
+
+    Returns:
+        The repository-relative path of the ``.mcp.json`` file, or ``None`` when the key is absent.
+
+    Raises:
+        ConstraintsError: When the value is not a path to one file inside the repository.
+    """
+    if "mcp" not in section:
+        return None
+    path = _clean_path(section["mcp"], f"{label} mcp")
+    if path == ".":
+        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {label} mcp must name one file, not the whole repository.")
+    return path
+
+
 def _entry(value: Any, label: str) -> str | tuple[str, ...]:
-    """Read how the runner starts a target stage.
+    """Read how the runner starts a target stage or the ``[run]`` candidate.
 
     Args:
         value: The ``entry`` value as parsed.
-        label: The stage's table, used in errors.
+        label: The entry's table, used in errors.
 
     Returns:
         ``"path.py:function"`` with a cleaned path, or the command as a tuple.
@@ -433,17 +505,57 @@ def _target(section: Any, name: str, services: Mapping[str, ServiceSpec]) -> Tar
         or not (vcpus == 1 or (vcpus % 2 == 0 and 2 <= vcpus <= 32))
     ):
         raise ConstraintsError(f"{CONSTRAINTS_FILE}: {label} vcpus must be 1 or an even number from 2 to 32.")
-    timeout = section.get("timeout", _DEFAULT_TIMEOUT_SECONDS)
-    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
-        raise ConstraintsError(
-            f"{CONSTRAINTS_FILE}: {label} timeout must be a positive number of seconds for each skynet.call."
-        )
     return TargetStage(
         **_role(section, label, services),
         entry=_entry(section["entry"], label),
         vcpus=vcpus,
-        timeout=float(timeout),
+        timeout=_timeout(section, label, "skynet.call"),
     )
+
+
+def _timeout(section: Mapping[str, Any], label: str, unit: str) -> float:
+    """Read an optional ``timeout`` in seconds.
+
+    Args:
+        section: The parsed table.
+        label: The table as the file names it, used in errors.
+        unit: What one timeout covers, such as ``skynet.call``, named in errors.
+
+    Returns:
+        The timeout, or the 60-second default when the key is absent.
+
+    Raises:
+        ConstraintsError: When the value is not a positive finite number.
+    """
+    timeout = section.get("timeout", _DEFAULT_TIMEOUT_SECONDS)
+    # bool is an int in Python, so ``timeout = true`` would otherwise read as 1.
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} timeout must be a positive number of seconds for each {unit}."
+        )
+    return float(timeout)
+
+
+def _run(section: Mapping[str, Any] | None) -> tuple[str | tuple[str, ...] | None, float]:
+    """Read the ``[run]`` section: how Skynet starts the candidate for each case (E39).
+
+    Args:
+        section: The parsed ``[run]`` table, or ``None`` when the file has none.
+
+    Returns:
+        The entry, or ``None`` when the file has no ``[run]``, and the timeout in seconds for each case.
+
+    Raises:
+        ConstraintsError: When ``[run]`` has no entry, or the entry or timeout is malformed.
+    """
+    if section is None:
+        return None, _DEFAULT_TIMEOUT_SECONDS
+    if "entry" not in section:
+        raise ConstraintsError(
+            f'{CONSTRAINTS_FILE}: [run] entry is missing. Name the function ("path/to/file.py:function")'
+            ' or the command (["pytest", "-q"]) that runs the candidate for each case.'
+        )
+    return _entry(section["entry"], "[run]"), _timeout(section, "[run]", "case")
 
 
 def _service(section: Any, name: str) -> ServiceSpec:
@@ -474,11 +586,11 @@ def _service(section: Any, name: str) -> ServiceSpec:
             " and use only letters, digits, '-' and '_' (at most 64)."
         )
     label = f"[services.{name}]"
-    unknown = sorted(set(section) - {"secrets"})
+    unknown = sorted(set(section) - {"secrets", "url", "headers"})
     if unknown:
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE}: {label} {unknown[0][:100]} is not a supported setting. The file may hold"
-            " only secret names, in secrets = [...]; never put a secret value in it."
+            " only secret names in secrets = [...], a url and headers; never put a secret value in it."
         )
     secrets = section.get("secrets", [])
     if not isinstance(secrets, list) or len(secrets) > _MAX_NAMES:
@@ -492,7 +604,116 @@ def _service(section: Any, name: str) -> ServiceSpec:
                 f"{CONSTRAINTS_FILE}: {label} secrets entry {index} is not a secret name. The file may hold"
                 " only secret names (A-Z, 0-9 and _, such as MAPS_API_KEY), never values."
             )
-    return ServiceSpec(secrets=tuple(dict.fromkeys(secrets)))
+    names = tuple(dict.fromkeys(secrets))
+    return ServiceSpec(
+        secrets=names,
+        url=_service_url(section["url"], label) if "url" in section else None,
+        headers=_service_headers(section["headers"], label, names) if "headers" in section else None,
+    )
+
+
+def _service_url(value: Any, label: str) -> str:
+    """Read a service's ``url``: an https address on a public host name (E45).
+
+    This is a parse-time check of the written text only. It refuses the
+    obvious internal names early, but a public name can still resolve to a
+    private address. The relay that calls the url (SKY-374) must resolve the
+    host and refuse private, loopback and link-local addresses at connect
+    time; this check does not stop SSRF on its own.
+
+    Args:
+        value: The ``url`` value as parsed.
+        label: The service's table, used in errors.
+
+    Returns:
+        The url as written.
+
+    Raises:
+        ConstraintsError: When the value is not https, holds credentials, or
+            names an IP address, ``localhost``, an ``.internal`` or ``.local``
+            name, a name that holds a dotted IPv4 address, or a host without a
+            domain.
+    """
+    if not isinstance(value, str) or len(value) > _MAX_URL_CHARS or not value.startswith("https://"):
+        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {label} url must be an https:// address.")
+    try:
+        parts = urlsplit(value)
+        parts.port  # noqa: B018 - reading it raises ValueError for a bad port
+    except ValueError as error:
+        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {label} url is not a valid address.") from error
+    if parts.username is not None or parts.password is not None:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} url must not hold credentials; list the secret in secrets"
+            " and use it in headers."
+        )
+    host = (parts.hostname or "").rstrip(".")
+    try:
+        ipaddress.ip_address(host)
+        is_ip = True
+    except ValueError:
+        is_ip = False
+    if not is_ip:
+        # inet_aton reads the IPv4 forms that ip_address refuses, such as 0x7f.0x1 or
+        # 169.254.169.0xfe, the way an HTTP client resolves them.
+        try:
+            socket.inet_aton(host)
+            is_ip = True
+        except (OSError, ValueError):  # ValueError: a NUL in the host, which TOML's \u0000 allows
+            pass
+    # A last label with no letter also catches IP forms that ip_address refuses, such as 0x7f.1.
+    last = host.rsplit(".", 1)[-1]
+    if (
+        is_ip
+        or host == "localhost"
+        or host.endswith((".localhost", ".internal", ".local"))
+        or _DOTTED_IPV4.search(host)
+        or "." not in host
+        or not _HOST.fullmatch(host)
+        or not any(char.isalpha() for char in last)
+    ):
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} url must name a public host such as api.example.com,"
+            " not an IP address or localhost."
+        )
+    return value
+
+
+def _service_headers(value: Any, label: str, secrets: Sequence[str]) -> dict[str, str]:
+    """Read a service's ``headers`` table, whose values may hold ``${SECRET}`` placeholders (E45).
+
+    Args:
+        value: The ``headers`` value as parsed.
+        label: The service's table, used in errors.
+        secrets: The service's secret names; each placeholder must name one.
+
+    Returns:
+        The headers as written.
+
+    Raises:
+        ConstraintsError: When the value is not a table of header names to
+            text, or a placeholder names a secret the service does not list.
+    """
+    if not isinstance(value, dict) or len(value) > _MAX_NAMES:
+        raise ConstraintsError(
+            f"{CONSTRAINTS_FILE}: {label} headers must be a table of at most {_MAX_NAMES} header names to text."
+        )
+    for header, text in value.items():
+        if not _HEADER_NAME.fullmatch(header):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: {label} header name {header[:100]!r} must use only letters, digits and '-'."
+            )
+        if not isinstance(text, str) or len(text) > _MAX_HEADER_CHARS or "\r" in text or "\n" in text:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: {label} headers {header} must be one line of at most {_MAX_HEADER_CHARS}"
+                " characters."
+            )
+        for placeholder in _PLACEHOLDER.findall(text):
+            if placeholder not in secrets:
+                raise ConstraintsError(
+                    f"{CONSTRAINTS_FILE}: {label} headers {header} uses ${{{placeholder[:100]}}}, but"
+                    f" {placeholder[:100]} is not in its secrets."
+                )
+    return dict(value)
 
 
 def _named_tables(document: Mapping[str, Any], section_name: str) -> Mapping[str, Any]:
@@ -587,6 +808,17 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
             raise ConstraintsError(f"{CONSTRAINTS_FILE}: {name} must be a [{name}] table.")
         if name in _NAMED_SECTIONS:
             continue
+        shared = sorted(set(section) & _SHARED_BOX_KEYS) if name in _RUN_ROLE_SECTIONS else []
+        if name in _RUN_ROLE_SECTIONS and "tools" in section:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: [{name}] tools is not supported. List the MCP servers in a .mcp.json"
+                f' file in the repository and set mcp = "<path>" in [{name}] instead.'
+            )
+        if shared:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: [{name}] {shared[0]} is not supported: the candidate and the metric"
+                " share one box, so neither can set its own network or vcpus. Remove the setting."
+            )
         unknown = sorted(set(section) - _SECTIONS[name])
         if unknown:
             raise ConstraintsError(f"{CONSTRAINTS_FILE}: [{name}] {unknown[0]} is not a supported setting.")
@@ -613,11 +845,24 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
     # [rules] illegal is the older name for [proposer] illegal; a file with both keeps both lists.
     rules = (*_illegal(document.get("rules", {}), "[rules]"), *proposer["illegal"])
     proposer["illegal"] = rules
+    run_entry, run_timeout = _run(document.get("run"))
+    run_section = document.get("run", {})
+    run_role = _role(run_section, "[run]", services)
+    run_role["mcp"] = _mcp(run_section, "[run]")
+    metric_section = document.get("metric", {})
+    metric_role = _role(metric_section, "[metric]", services)
+    metric_role["mcp"] = _mcp(metric_section, "[metric]")
+    if "services" not in metric_section:
+        metric_role["services"] = tuple(services)
     return RepoConstraints(
         sha256=hashlib.sha256(raw).hexdigest(),
         editable_paths=editable,
         protected_paths=protected,
         setup_command=_text(setup["command"], "[setup] command", _MAX_COMMAND_CHARS) if "command" in setup else None,
+        run_entry=run_entry,
+        run_timeout=run_timeout,
+        run_role=RoleEnvironment(**run_role),
+        metric_role=RoleEnvironment(**metric_role),
         intent=_text(instructions["intent"], "[instructions] intent", _MAX_INTENT_CHARS)
         if "intent" in instructions
         else None,
@@ -626,7 +871,7 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         proposer=RoleEnvironment(**proposer),
         targets=targets,
         services=services,
-        metric=_metric(document.get("metric", {})),
+        metric=_metric(metric_section),
     )
 
 
@@ -640,10 +885,41 @@ def read_constraints(archive: Path) -> RepoConstraints | None:
         The validated proposal, or ``None`` when the repository has no such file.
 
     Raises:
-        ConstraintsError: When the file is not a regular file or is invalid.
+        ConstraintsError: When the file is not a regular file, is invalid, or
+            names an MCP file the snapshot does not hold.
     """
     raw = read_constraints_file(archive)
-    return None if raw is None else parse_constraints(raw)
+    if raw is None:
+        return None
+    constraints = parse_constraints(raw)
+    check_mcp_files(constraints, archive)
+    return constraints
+
+
+def check_mcp_files(constraints: RepoConstraints, archive: Path) -> None:
+    """Check that each ``mcp`` file that ``[run]`` or ``[metric]`` names is in the snapshot.
+
+    Only the file's presence is checked; its server list is read where the
+    servers start (E46).
+
+    Args:
+        constraints: The validated proposal.
+        archive: Packed tree from :func:`fetch_snapshot`.
+
+    Raises:
+        ConstraintsError: When a named file is missing or is not a regular file.
+    """
+    roles = (("[run]", constraints.run_role), ("[metric]", constraints.metric_role))
+    wanted = {label: role.mcp for label, role in roles if role.mcp is not None}
+    if not wanted:
+        return
+    with tarfile.open(archive, "r:gz") as packed:
+        files = {str(PurePosixPath(m.name)) for m in packed.getmembers() if m.isfile()}
+    for label, path in wanted.items():
+        if path not in files:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: {label} mcp names '{path}', but the repository has no such file."
+            )
 
 
 def read_constraints_file(archive: Path) -> bytes | None:
