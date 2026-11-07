@@ -149,6 +149,7 @@ def test_sample_run_converts_to_repo_files_and_valid_request() -> None:
     files = conversion["files"]
     assert set(files) == {
         "optimize.toml",
+        "docs/intent.md",
         "README.md",
         "requirements.txt",
         "program/__init__.py",
@@ -166,6 +167,8 @@ def test_sample_run_converts_to_repo_files_and_valid_request() -> None:
     tomllib.loads(files["optimize.toml"])
     constraints = parse_constraints(files["optimize.toml"].encode())
     assert constraints.editable_paths == ("program",)
+    assert constraints.instructions_file == "docs/intent.md"
+    assert files["docs/intent.md"].rstrip().endswith("program/__init__.py keeps defining run(input).")
 
     request = BlackboxRunRequest.model_validate(conversion["request"])
     assert request.recipe == "repo"

@@ -6,6 +6,9 @@ owner approved. It cannot widen them, and it cannot grant services.
 
 ```toml
 version = 1
+# Optional. A markdown file with the run's intent. The optimization agent reads
+# it as guidance; it is not enforced. Put it before any section.
+instructions = "docs/intent.md"
 
 [paths]
 # Optional. Each path must be inside an approved editable path.
@@ -17,18 +20,25 @@ protected = ["bot/geocode/eval", "data/labels.csv"]
 # Optional. Used only when the run has no setup command of its own.
 command = "pip install -r requirements.txt"
 
-[instructions]
-# Optional. The optimization agent reads these as guidance. They are not enforced.
-intent = "Return the coordinates of the place the sender most likely means."
-invariants = ["Keep the reply format unchanged."]
-
-[rules]
-# Optional. Plain-language illegal approaches. Judge models enforce them.
-illegal = [
-  "Do not hardcode answers for dataset cases.",
-  "Do not call an outside geocoding service.",
-]
+[proposer]
+# Optional. A markdown file of plain-language illegal approaches. Judge models
+# enforce them.
+illegal = "docs/rules.md"
 ```
+
+`docs/rules.md` holds one rule in each top-level bullet:
+
+```markdown
+# Rules
+
+- Do not hardcode answers for dataset cases.
+- Do not call an outside geocoding service.
+```
+
+The rule text lives in these files, not in `optimize.toml`. The old
+`[instructions]` and `[rules]` sections, and an `illegal` list written in
+the file, fail the setup check with a message that says to move the text
+into a file.
 
 ## What is enforced
 
@@ -37,8 +47,9 @@ illegal = [
 | `[paths] editable` | The parent checks every version before it is scored or published. A path outside the approved editable paths fails the setup check. |
 | `[paths] protected` | The parent rejects a version that changes a protected path, in its patch or while its code runs. A write that the code undoes before it exits also counts. The rejection names the path and the rule, with secret values hidden. `optimize.toml` itself is always protected. |
 | `[setup] command` | Runs once on the starting commit, with package-registry network and no secrets. The box goes offline before any version runs. |
-| `[instructions]` | Not enforced. The agent reads them in its brief. The scorer decides the score. |
-| `[rules] illegal` | Enforced by judge models. See "Plain-language rules" below. |
+| `instructions` | Not enforced. The agent reads the file in its brief. The scorer decides the score. |
+| `[proposer] illegal` | Enforced by judge models. See "Plain-language rules" below. |
+| Rule files | The `instructions` file and every `illegal` file (in `[proposer]`, `[run]`, `[metric]` and `[target.<name>]`) are protected like `optimize.toml`, so no version can change its own rules. |
 
 ## What fails the setup check
 
@@ -53,6 +64,15 @@ illegal = [
   without the file whose only approved editable path is `optimize.toml`,
   because `optimize.toml` is always protected.
 - An `optimize.toml` that is a link or a folder, or a file larger than 64 KiB.
+- An `instructions` or `illegal` path that is absolute, leaves the
+  repository, or names no file. A rule file that is a link or a folder, is
+  larger than 32 KiB, or is not UTF-8 text. An empty instructions file, or
+  one longer than 4,000 characters.
+- A rule file with no bullets, more than 50 rules, a rule longer than 500
+  characters, or text outside a top-level bullet. A line that starts with
+  `- `, `* ` or `+ ` at the start of the line opens a rule. Indented lines
+  and lines right after it continue that rule. Headings and blank lines
+  separate rules.
 
 ## Where the effective environment is recorded
 
@@ -64,13 +84,14 @@ A resumed run that arrives at different rules fails instead of continuing.
 
 ## Plain-language rules
 
-`[rules] illegal` lists up to 50 rules, each up to 500 characters. The
+The `[proposer] illegal` file holds up to 50 rules, each up to 500 characters. The
 agent's brief lists every rule at the start as "Rule 1", "Rule 2" and so on.
 Skynet enforces them in three places:
 
 1. **Blocked versions.** When the path rules refuse a version, the agent gets
-   this text and continues: "Illegal action. Read the constraints file. You
-   cannot do this action. Do not repeat it, because it wastes time." This is
+   this text and continues: "Illegal action. Read optimize.toml and the rule
+   files it names. You cannot do this action. Do not repeat it, because it
+   wastes time." This is
    the same for the parent's check and for the sandbox's early checks:
    AutoResearch `eval.sh`, Meta-Harness `save.sh` and its candidate check, the
    AutoSaddler verifier, and the ShinkaEvolve file-edit check (model and agent
@@ -78,8 +99,9 @@ Skynet enforces them in three places:
 2. **Judge during the run.** About every 15 agent actions, a fast judge model
    reads the recent actions and the current diff against the rules. When it
    sees work that goes toward a violation, the agent's next scoring reply
-   carries this note: "Check the constraints file. You are probably about to
-   violate rule X." The agent may continue.
+   carries this note: "Check the rule file that optimize.toml names. You are
+   probably about to break one of its rules: <reason>." The agent may
+   continue.
 3. **Judge on each version.** Before the scorer runs, a stronger judge reads
    the full diff of the version. When the diff breaks a rule, the version is
    an "illegal approach": it gets a score of 0 and the judge's reason as its

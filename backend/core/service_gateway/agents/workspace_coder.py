@@ -87,6 +87,15 @@ you return.
   whole ``[run]`` section in ``summary``, so the setup assistant shows it to
   the user. With no ``[run]``, nothing runs and the metric judges only the
   checkout.
+  Never put rule text in optimize.toml. When the user states the run's
+  intent, write it in a markdown file, for example ``docs/intent.md``, and
+  set ``instructions = "docs/intent.md"`` at the top of optimize.toml, before
+  any section. When the user names approaches the run must not use, write
+  them in a markdown file, for example ``docs/rules.md``, one top-level
+  ``- `` bullet for each rule, and set ``illegal = "docs/rules.md"`` in
+  ``[proposer]``. {APP_NAME} protects both files, so no version can change
+  them. Give each file's contents and the optimize.toml lines in
+  ``summary``.
   Read the files that show how the project runs and how it is judged (the
   entry point, its tests, the code the task names) with ``read_repo_file``
   and ``list_repo_folder`` before you write. Use only paths and commands
@@ -110,7 +119,7 @@ class WorkspaceCoderSig(dspy.Signature):
     metric_code: str = dspy.OutputField(desc="The whole metric.py; empty to leave it unchanged.")
     summary: str = dspy.OutputField(
         desc="One or two sentences on what the code does and why, then the optimize.toml [run] section when"
-        " the metric needs one."
+        " the metric needs one, and any instructions or rule file with the optimize.toml lines that name it."
     )
     open_questions: list[str] = dspy.OutputField(desc="Questions only the user can answer; empty when none.")
 

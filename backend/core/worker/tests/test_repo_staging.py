@@ -111,29 +111,29 @@ def _stage_with(
 
 
 _CONSTRAINTS = """
+instructions = "docs/intent.md"
+
 [paths]
 editable = ["src/geocode"]
 protected = ["src/geocode/eval"]
-
-[instructions]
-intent = "Pick the place the sender means."
 """
+_FILES = {"optimize.toml": _CONSTRAINTS, "docs/intent.md": "Pick the place the sender means.\n"}
 
 
 def test_staging_applies_the_repository_constraints_and_records_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The file narrows the editable paths, protects its judge, briefs the agent, and is saved with the run."""
-    staged_payload, staged = _stage_with({"optimize.toml": _CONSTRAINTS}, monkeypatch)
+    staged_payload, staged = _stage_with(_FILES, monkeypatch)
 
     repo = staged_payload["target"]["repo"]
     assert repo["editable_paths"] == ["src/geocode"]
-    assert staged.protected_paths == ("optimize.toml", "src/geocode/eval")
+    assert staged.protected_paths == ("optimize.toml", "docs/intent.md", "src/geocode/eval")
     assert staged.intent == "Pick the place the sender means."
     environment = repo["environment"]
     assert environment["commit"] == "c" * 40
     assert environment["editable_paths"] == ["src/geocode"]
-    assert environment["protected_paths"] == ["optimize.toml", "src/geocode/eval"]
+    assert environment["protected_paths"] == ["optimize.toml", "docs/intent.md", "src/geocode/eval"]
     assert environment["secret_names"] == ["API_KEY"]
     assert environment["services"] == []
     assert environment["roles"] == {
@@ -177,32 +177,34 @@ def test_staging_refuses_a_file_that_asks_for_more(
 
 def test_a_resumed_run_with_different_rules_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """A run resumes only under the rules first recorded for it."""
-    first, staged = _stage_with({"optimize.toml": _CONSTRAINTS}, monkeypatch)
+    first, staged = _stage_with(_FILES, monkeypatch)
     staged.cleanup()
     resumed = _payload("c" * 40)
     resumed["target"]["repo"]["environment"] = first["target"]["repo"]["environment"]
 
-    again, staged = _stage_with({"optimize.toml": _CONSTRAINTS}, monkeypatch, resumed)
+    again, staged = _stage_with(_FILES, monkeypatch, resumed)
     staged.cleanup()
-    assert again["target"]["repo"]["environment"]["protected_paths"] == ["optimize.toml", "src/geocode/eval"]
+    assert again["target"]["repo"]["environment"]["protected_paths"] == [
+        "optimize.toml",
+        "docs/intent.md",
+        "src/geocode/eval",
+    ]
     assert again["_repo_snapshot"]["constrained"] is True
 
     with pytest.raises(ConstraintsError, match="environment changed since it was recorded"):
         _stage_with({}, monkeypatch, resumed)
 
 
-_RULED = (
-    _CONSTRAINTS
-    + """
-[rules]
-illegal = ["Do not hardcode answers for dataset cases.", "Do not call an outside geocoding service."]
-"""
-)
+_RULED = {
+    **_FILES,
+    "optimize.toml": _CONSTRAINTS + '\n[proposer]\nillegal = "docs/rules.md"\n',
+    "docs/rules.md": "- Do not hardcode answers for dataset cases.\n- Do not call an outside geocoding service.\n",
+}
 
 
 def test_staging_keeps_the_plain_language_rules_for_the_judges(monkeypatch: pytest.MonkeyPatch) -> None:
     """The rules reach the parent's judges and the recorded environment, and a resume must keep them."""
-    first, staged = _stage_with({"optimize.toml": _RULED}, monkeypatch)
+    first, staged = _stage_with(_RULED, monkeypatch)
     staged.cleanup()
 
     assert staged.constrained is True
@@ -215,25 +217,25 @@ def test_staging_keeps_the_plain_language_rules_for_the_judges(monkeypatch: pyte
 
     resumed = _payload("c" * 40)
     resumed["target"]["repo"]["environment"] = first["target"]["repo"]["environment"]
-    with pytest.raises(ConstraintsError, match=r"\(rules\)"):
-        _stage_with({"optimize.toml": _CONSTRAINTS}, monkeypatch, resumed)
+    with pytest.raises(ConstraintsError, match=r"\(protected_paths, rules\)"):
+        _stage_with(_FILES, monkeypatch, resumed)
 
 
 def test_a_run_recorded_before_rules_existed_resumes_without_rules(monkeypatch: pytest.MonkeyPatch) -> None:
     """An environment saved before the rules field existed counts as having no rules."""
-    first, staged = _stage_with({"optimize.toml": _CONSTRAINTS}, monkeypatch)
+    first, staged = _stage_with(_FILES, monkeypatch)
     staged.cleanup()
     resumed = _payload("c" * 40)
     resumed["target"]["repo"]["environment"] = {
         key: value for key, value in first["target"]["repo"]["environment"].items() if key != "rules"
     }
 
-    _, staged = _stage_with({"optimize.toml": _CONSTRAINTS}, monkeypatch, resumed)
+    _, staged = _stage_with(_FILES, monkeypatch, resumed)
     staged.cleanup()
     assert staged.rules == ()
 
-    with pytest.raises(ConstraintsError, match=r"\(rules\)"):
-        _stage_with({"optimize.toml": _RULED}, monkeypatch, resumed)
+    with pytest.raises(ConstraintsError, match=r"\(protected_paths, rules\)"):
+        _stage_with(_RULED, monkeypatch, resumed)
 
 
 def test_a_tree_without_a_constraints_file_is_not_constrained(monkeypatch: pytest.MonkeyPatch) -> None:
