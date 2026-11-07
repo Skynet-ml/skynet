@@ -1,7 +1,7 @@
 """Let one worker pod at a time claim a hardening job with a lease, and keep its budget hold (SKY-369).
 
 Revision ID: c1d3e5f7a9b2
-Revises: 6e7f0a3eb85b
+Revises: c4a8e2f61d93
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "c1d3e5f7a9b2"
-down_revision: str | Sequence[str] | None = "6e7f0a3eb85b"
+down_revision: str | Sequence[str] | None = "c4a8e2f61d93"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
