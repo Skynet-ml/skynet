@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import http.server
 import json
 import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -421,10 +424,56 @@ def test_guard_policy_holds_no_hidden_names(tmp_path: Path) -> None:
         assert path not in text
 
 
+@pytest.mark.parametrize(
+    ("tool", "tool_input"),
+    [
+        ("Read", {"file_path": "alias/optimize.toml"}),
+        ("Bash", {"command": "cd src && cat ../optimize.toml"}),
+        ("Bash", {"command": "cd src; cd deep && cat ../../metric/score.py"}),
+        ("exec_command", {"cmd": "cat ../optimize.toml", "workdir": "src"}),
+        ("Bash", {"command": 'cat "$(pwd)/optimize.toml"'}),
+        ("Bash", {"command": "cat $(pwd)/optimize.toml"}),
+        ("Bash", {"command": "cat `pwd`/data/cases.jsonl"}),
+        ("Read", {"file_path": "${PWD}/optimize.toml"}),
+    ],
+    ids=[
+        "symlink-alias",
+        "cd-parent",
+        "cd-chain",
+        "codex-workdir",
+        "quoted-pwd",
+        "bare-pwd",
+        "backquote-pwd",
+        "brace-pwd",
+    ],
+)
+def test_guard_resolves_aliases_working_directories_and_pwd(tmp_path: Path, tool: str, tool_input: dict) -> None:
+    """Refuse a hidden path that a symbolic link, a cd, a workdir or a pwd form names."""
+    policy = _policy(tmp_path)
+    (Path(policy["workspace"]) / "alias").symlink_to(".")
+    assert harness_bridge.guard_check(policy, tool, tool_input) is not None
+
+
+def test_guard_folds_case_only_when_the_policy_says_so(tmp_path: Path) -> None:
+    """Refuse OPTIMIZE.TOML on a case-folding policy, and only there."""
+    workspace = tmp_path / "work"
+    call = {"file_path": "OPTIMIZE.TOML"}
+    folded = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", fold_case=True)
+    exact = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log")
+    assert harness_bridge.guard_check(folded, "Read", call) == "config"
+    assert harness_bridge.guard_check(folded, "Read", {"file_path": "Metric/Score.py"}) == "scoring"
+    assert harness_bridge.guard_check(exact, "Read", call) is None
+
+
+def _digest(policy_file: Path) -> str:
+    """Hash the policy file as the guard checks it."""
+    return hashlib.sha256(policy_file.read_bytes()).hexdigest()
+
+
 def _guard(mode: str, policy_file: Path, request: dict) -> dict:
     """Run the guard CLI once and parse its answer."""
     completed = subprocess.run(
-        harness_bridge.guard_command(mode, policy_file),
+        harness_bridge.guard_command(mode, policy_file, _digest(policy_file)),
         input=json.dumps(request),
         capture_output=True,
         text=True,
@@ -444,7 +493,7 @@ def test_guard_cli_answers_codex_hooks_and_js_checks_and_logs_only_tool_and_kind
     assert _guard("hook", policy_file, {"tool_name": "exec_command", "tool_input": {"cmd": "ls src"}}) == {}
     checked = _guard("check", policy_file, {"tool": "read", "input": {"path": "data/cases.jsonl"}})
     assert checked == {"reason": harness_bridge.GUARD_REFUSAL}
-    assert _guard("check", policy_file, {"tool": "read", "input": {"path": "src/app.py"}}) == {}
+    assert _guard("check", policy_file, {"tool": "read", "input": {"path": "src/app.py"}}) == {"reason": None}
     assert harness_bridge.read_refusals(session) == [
         {"tool": "exec_command", "kind": "config"},
         {"tool": "read", "kind": "scoring"},
@@ -489,20 +538,88 @@ console.log(JSON.stringify({{ blocked, allowed: allowed ?? null, thrown }}));
     assert result["thrown"] == harness_bridge.GUARD_REFUSAL
 
 
+@pytest.mark.parametrize("mode", ["hook", "check"])
+@pytest.mark.parametrize("broken", ["missing", "corrupt", "no-hashes", "emptied", "signed-empty", "surrogate"])
+def test_guard_cli_refuses_when_it_cannot_answer(tmp_path: Path, mode: str, broken: str) -> None:
+    """Refuse the call when the policy is gone, changed or broken, or the input cannot be hashed (D22)."""
+    session = tmp_path / "session"
+    harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
+    policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
+    digest = _digest(policy_file)
+    hook_input: dict = {"cmd": "cat src/app.py"}
+    check_input: dict = {"path": "src/app.py"}
+    if broken == "missing":
+        policy_file.unlink()
+    elif broken == "corrupt":
+        policy_file.write_text("{not json")
+    elif broken == "no-hashes":
+        policy_file.write_text(json.dumps({"workspace": str(tmp_path / "work")}))
+    elif broken == "emptied":
+        # The agent can write the session folder and swap in a policy that allows everything.
+        policy = json.loads(policy_file.read_text())
+        policy_file.write_text(json.dumps({**policy, "hashes": {}}))
+    elif broken == "signed-empty":
+        policy = json.loads(policy_file.read_text())
+        digest = harness_bridge.write_guard_policy(policy_file, {**policy, "hashes": {}})
+    else:
+        # The lone surrogate comes first, so a strict UTF-8 hash would crash before the hidden name.
+        hook_input = {"cmd": "cat src/\ud800.py optimize.toml"}
+        check_input = {"file_path": "optimize.toml", "path": "src/\ud800.py"}
+    if mode == "hook":
+        raw = json.dumps({"tool_name": "exec_command", "tool_input": hook_input})
+    else:
+        raw = json.dumps({"tool": "read", "input": check_input})
+    completed = subprocess.run(
+        harness_bridge.guard_command(mode, policy_file, digest), input=raw, capture_output=True, text=True, check=True
+    )
+    answer = json.loads(completed.stdout)
+    if mode == "hook":
+        assert answer["hookSpecificOutput"]["permissionDecision"] == "deny"
+    else:
+        assert answer == {"reason": harness_bridge.GUARD_REFUSAL}
+
+
+@pytest.mark.skipif(_NODE is None, reason="node is not installed")
+def test_pi_extension_refuses_when_the_guard_cannot_run(tmp_path: Path) -> None:
+    """Block every call when the guard process fails, instead of letting it run (D22)."""
+    session = tmp_path / "session"
+    env = harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
+    (session / harness_bridge.GUARD_DIR / "policy.json").unlink()
+    broken = (
+        Path(env["APP_GUARD_PI"]).read_text().replace(json.dumps(sys.executable), json.dumps("/nonexistent/python"))
+    )
+    pi_module = tmp_path / "pi-guard.mjs"
+    pi_module.write_text(broken)
+    script = f"""
+const pi = (await import({json.dumps(pi_module.as_uri())})).default;
+let handler;
+pi({{ on: (name, fn) => {{ handler = fn; }} }});
+console.log(JSON.stringify(await handler({{ toolName: "read", input: {{ path: "src/app.py" }} }})));
+"""
+    completed = subprocess.run([_NODE, "--input-type=module", "-e", script], capture_output=True, text=True, check=True)
+    assert json.loads(completed.stdout) == {"block": True, "reason": harness_bridge.GUARD_REFUSAL}
+
+
 def test_run_session_reports_refusals_and_keeps_running(tmp_path: Path) -> None:
     """Install the guard for a session with hidden paths, report each refusal, and finish the session."""
     command = (
         'printf \'{"tool":"read","input":{"path":".optimize/exploits"}}\' | '
-        '"$APP_GUARD_PYTHON" "$APP_GUARD_BRIDGE" guard check "$APP_GUARD_POLICY"; echo done'
+        '"$APP_GUARD_PYTHON" "$APP_GUARD_BRIDGE" guard check "$APP_GUARD_POLICY" "$APP_GUARD_DIGEST"; echo done'
     )
     session = tmp_path / "session"
-    python, bridge, _, _, policy = harness_bridge.guard_command(
-        "check", session / harness_bridge.GUARD_DIR / "policy.json"
-    )
+    guard_dir = session / harness_bridge.GUARD_DIR
+    expected = harness_bridge.guard_policy(tmp_path / "work", _HIDDEN, guard_dir / "refusals.jsonl")
+    digest = hashlib.sha256(json.dumps(expected).encode()).hexdigest()
+    python, bridge, _, _, policy, _ = harness_bridge.guard_command("check", guard_dir / "policy.json", digest)
     proposer = {
         **_PLAIN,
         "run_command": command,
-        "env": {"APP_GUARD_PYTHON": python, "APP_GUARD_BRIDGE": bridge, "APP_GUARD_POLICY": policy},
+        "env": {
+            "APP_GUARD_PYTHON": python,
+            "APP_GUARD_BRIDGE": bridge,
+            "APP_GUARD_POLICY": policy,
+            "APP_GUARD_DIGEST": digest,
+        },
         "hidden_paths": _HIDDEN,
     }
     outcome = run_session(proposer, workspace=tmp_path / "work", prompt="go", model="m1", session_dir=session)
@@ -514,6 +631,18 @@ def test_run_session_reports_refusals_and_keeps_running(tmp_path: Path) -> None:
     assert record["event"] == "proposer.refusal"
     assert record["fields"] == {"tool": "read", "kind": "scoring"}
     assert ".optimize" not in json.dumps(record)
+
+
+def test_run_session_reports_host_agent_refusals(tmp_path: Path) -> None:
+    """Take a host CLI turn's refusals from the shim's summary line, with no guard in the session."""
+    line = json.dumps(
+        {"type": "host_agent.result", "text": "ok", "usage": {}, "refusals": [{"tool": "Read", "kind": "config"}]}
+    )
+    proposer = {**_PLAIN, "output_format": "host_agent", "run_command": f"printf '%s\\n' '{line}'"}
+    outcome = run_session(proposer, workspace=tmp_path / "work", prompt="go", model="m1", session_dir=tmp_path / "s")
+    assert outcome.returncode == 0
+    assert outcome.text == "ok"
+    assert outcome.refusals == [{"tool": "Read", "kind": "config"}]
 
 
 def test_run_session_without_hidden_paths_installs_no_guard(tmp_path: Path) -> None:
@@ -557,3 +686,85 @@ def test_codex_launch_installs_the_guard_hooks_before_it_starts(tmp_path: Path) 
     env = {"APP_GUARD_CODEX": str(tmp_path / "hooks.json")}
     subprocess.run(["bash", "-c", harness._GUARD_CODEX_COPY], cwd=tmp_path, env=env, check=True)
     assert (tmp_path / ".app" / "codex" / "hooks.json").read_text() == "{}"
+
+
+# APP_TEST_CODEX can point at the pinned install (npm i @openai/codex@<CODEX_VERSION>).
+_CODEX = os.environ.get("APP_TEST_CODEX") or shutil.which("codex")
+
+
+class _FakeResponses(http.server.BaseHTTPRequestHandler):
+    """Answer the Responses API: one ``cat optimize.toml`` call, then a final message."""
+
+    tool_outputs: list[str] = []
+
+    def log_message(self, *args: object) -> None:
+        """Keep the test output quiet."""
+
+    def do_POST(self) -> None:
+        """Stream one model turn as server-sent events."""
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        outputs = [item["output"] for item in body.get("input", []) if item.get("type") == "function_call_output"]
+        _FakeResponses.tool_outputs.extend(outputs)
+        if outputs:
+            item = {
+                "type": "message",
+                "id": "m1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "done"}],
+            }
+        else:
+            arguments = json.dumps({"cmd": "cat optimize.toml"})
+            item = {
+                "type": "function_call",
+                "id": "f1",
+                "call_id": "c1",
+                "name": "exec_command",
+                "arguments": arguments,
+            }
+        usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        events = [
+            {"type": "response.created", "response": {"id": "r1"}},
+            {"type": "response.output_item.done", "item": item},
+            {"type": "response.completed", "response": {"id": "r1", "usage": usage}},
+        ]
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.end_headers()
+        for event in events:
+            self.wfile.write(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode())
+
+
+@pytest.mark.skipif(_CODEX is None, reason="codex is not installed")
+def test_installed_codex_runs_the_guard_hook_and_refuses_a_hidden_read(tmp_path: Path) -> None:
+    """Drive the real Codex against a fake model: its shell read of optimize.toml is refused and logged."""
+    assert _CODEX is not None
+    _FakeResponses.tool_outputs = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeResponses)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    (workspace / "optimize.toml").write_text("secret = 1\n")
+    gateway = harness.GatewayConfig(url=f"http://127.0.0.1:{server.server_address[1]}/v1", api_key="k")
+    proposer = {
+        **harness.launch_payload(harness._codex_launch("fake-model", gateway)),
+        "hidden_paths": ["optimize.toml"],
+    }
+    path = f"{Path(_CODEX).parent}{os.pathsep}{os.environ.get('PATH', '')}"
+    try:
+        outcome = run_session(
+            proposer,
+            workspace=workspace,
+            prompt="Read the config.",
+            model="fake-model",
+            session_dir=tmp_path / "session",
+            timeout_seconds=120,
+            extra_env={"PATH": path},
+            api_key="k",
+        )
+    finally:
+        server.shutdown()
+    assert outcome.returncode == 0, outcome.stderr
+    assert outcome.refusals == [{"tool": "Bash", "kind": "config"}]
+    assert len(_FakeResponses.tool_outputs) == 1
+    assert harness_bridge.GUARD_REFUSAL in _FakeResponses.tool_outputs[0]
+    assert "secret" not in _FakeResponses.tool_outputs[0]

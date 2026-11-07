@@ -187,6 +187,11 @@ def host_cli_argv(
     return argv
 
 
+# The host agent runs on macOS, whose default file system ignores case, so
+# OPTIMIZE.TOML opens optimize.toml; the guard compares names without case.
+_FOLD_CASE = sys.platform == "darwin"
+
+
 def claude_hidden_rules(workdir: Path, hidden_paths: Sequence[str], full: bool) -> list[str]:
     """Build the Claude deny rules that refuse each hidden path by its exact name.
 
@@ -236,9 +241,11 @@ def install_codex_guard(turn: Path, workdir: Path, codex_home: Path, hidden_path
     log = guard_dir / "refusals.jsonl"
     log.write_text("", encoding="utf-8")
     policy_file = guard_dir / "policy.json"
-    policy_file.write_text(json.dumps(harness_bridge.guard_policy(workdir, list(hidden_paths), log)), encoding="utf-8")
+    digest = harness_bridge.write_guard_policy(
+        policy_file, harness_bridge.guard_policy(workdir, list(hidden_paths), log, _FOLD_CASE)
+    )
     python = os.path.realpath(sys.executable)
-    command = [python, "-I", str(bridge), "guard", "hook", str(policy_file)]
+    command = [python, "-I", str(bridge), "guard", "hook", str(policy_file), digest]
     hook = {"type": "command", "command": shlex.join(command), "timeout": 10}
     (codex_home / "hooks.json").write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [hook]}]}}), encoding="utf-8")
     return list(dict.fromkeys([os.path.realpath(sys.base_prefix), str(Path(python).parent)]))
@@ -263,7 +270,7 @@ def host_refusals(
         return []
     if cli == "codex":
         return harness_bridge.read_refusals(turn)
-    policy = harness_bridge.guard_policy(workdir, list(hidden_paths), turn / "unused.jsonl")
+    policy = harness_bridge.guard_policy(workdir, list(hidden_paths), turn / "unused.jsonl", _FOLD_CASE)
     refusals = []
     for document in _json_documents(stdout):
         for denial in document.get("permission_denials") or ():
@@ -1254,7 +1261,7 @@ def run_host_agent(
             tool refuses by exact name.
 
     Returns:
-        ``{status, result_tar_b64, usage, transcript_tail, error?}``.
+        ``{status, result_tar_b64, usage, transcript_tail, refusals, error?}``.
     """
     if cli not in HOST_CLIS:
         return _not_started(_error(FAILED_KEY, f"Unknown host CLI {cli!r}."))
@@ -1302,6 +1309,8 @@ def run_host_agent(
             guard_roots: list[str] = []
             if hidden_paths and cli == "codex":
                 guard_roots = install_codex_guard(turn, workdir, Path(env["CODEX_HOME"]), hidden_paths)
+                # Codex skips a new hooks.json hook until it is trusted.
+                isolation_args = (*isolation_args, "--dangerously-bypass-hook-trust")
             binary = _command(cli_binary(cli, settings), env)
             model = str(body.get("model") or "")
             argv = host_cli_argv(
@@ -1338,7 +1347,8 @@ def run_host_agent(
         # The transcript and the error text go to the guest like the files do.
         stdout, stderr = _redact(completed.stdout, secret_values), _redact(completed.stderr, secret_values)
         text, usage, cli_error = parse_cli_output(cli, stdout)
-        for refusal in host_refusals(cli, stdout, turn, workdir, hidden_paths):
+        refusals = host_refusals(cli, stdout, turn, workdir, hidden_paths)
+        for refusal in refusals:
             # A refusal does not stop the turn; only the tool and the path kind are logged.
             logger.warning("Host agent: refused a %s call on a hidden %s path", refusal["tool"], refusal["kind"])
         transcript = text or stdout or stderr
@@ -1363,6 +1373,8 @@ def run_host_agent(
             "result_tar_b64": base64.b64encode(_pack(workdir, secret_values)).decode("ascii"),
             "usage": {**usage, "model_ms": usage["model_ms"] or elapsed_ms, "cost": 0.0},
             "transcript_tail": transcript[-_TRANSCRIPT_TAIL_CHARS:],
+            # The proposer side writes these to the run log.
+            "refusals": refusals,
         }
     except HostAgentRequestError as error:
         # Every HostAgentRequestError comes from a check that runs before the CLI starts.

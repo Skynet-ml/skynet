@@ -237,6 +237,30 @@ def parse_host_agent_output(stdout: str) -> tuple[str | None, Usage]:
     return text, usage
 
 
+def parse_host_agent_refusals(stdout: str) -> list[dict[str, str]]:
+    """Read the hidden-path refusals the host-agent shim reports for a host CLI turn.
+
+    The parent runs the host CLI, so its refusals reach the session only
+    through the shim's summary line, not through the session's guard log.
+
+    Args:
+        stdout: Captured shim output.
+
+    Returns:
+        One ``{"tool", "kind"}`` entry per refusal.
+    """
+    refusals: list[dict[str, str]] = []
+    for event in _json_lines(stdout):
+        if event.get("type") != "host_agent.result" or not isinstance(event.get("refusals"), list):
+            continue
+        refusals.extend(
+            {"tool": entry["tool"], "kind": entry["kind"]}
+            for entry in event["refusals"]
+            if isinstance(entry, dict) and isinstance(entry.get("tool"), str) and isinstance(entry.get("kind"), str)
+        )
+    return refusals
+
+
 # Codex items that are the agent acting rather than talking or thinking; each
 # is announced on ``item.started`` and settled on ``item.completed``.
 _CODEX_TOOL_ITEMS = frozenset({"command_execution", "file_change", "mcp_tool_call", "web_search"})
@@ -355,24 +379,32 @@ GUARD_REFUSAL = (
 )
 _GUARD_COMMAND_KEYS = frozenset({"command", "cmd", "script"})
 _GUARD_PATH_KEYS = frozenset({"pattern", "glob", "dir", "directory", "include", "target"})
+_GUARD_BASE_KEYS = frozenset({"workdir", "cwd", "working_directory"})
+_GUARD_CD_WORDS = frozenset({"cd", "pushd"})
 _GUARD_PATCH_RE = re.compile(r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$", re.MULTILINE)
 _GUARD_WORD_RE = re.compile(r"[\w.~/@+-]+")
+_GUARD_PWD_RE = re.compile(r"\$\{PWD\}|\$PWD\b|\$\(\s*pwd\s*\)|`\s*pwd\s*`")
 _GUARD_SHELL_DEPTH = 3
+_GUARD_MAX_BASES = 4
 # One check function shared by the Pi extension and the OpenCode plugin. It
 # asks this module for the verdict, so the matching lives in one place.
 _GUARD_JS_CHECK = """import {{ execFileSync }} from "node:child_process";
 
+const APP_GUARD_REFUSAL = {refusal};
+
 function appGuardReason(tool, input) {{
   try {{
-    const reply = execFileSync({python}, [{bridge}, "guard", "check", {policy}], {{
+    const reply = execFileSync({python}, [{bridge}, "guard", "check", {policy}, {digest}], {{
       input: JSON.stringify({{ tool: String(tool || ""), input: input ?? null }}),
       timeout: 10000,
       encoding: "utf8",
     }});
-    return JSON.parse(reply || "{{}}").reason || null;
+    const verdict = JSON.parse(reply);
+    if (!verdict || typeof verdict !== "object" || !("reason" in verdict)) return APP_GUARD_REFUSAL;
+    return verdict.reason || null;
   }} catch {{
-    // Fail open: the hidden files are not in the sandbox, so guard 1 still holds.
-    return null;
+    // Fail closed (D22): a guard that cannot answer refuses the call.
+    return APP_GUARD_REFUSAL;
   }}
 }}
 """
@@ -405,7 +437,7 @@ def hidden_kind(path: str) -> str:
     Returns:
         ``"config"`` for an ``optimize.toml`` file, else ``"scoring"``.
     """
-    return "config" if PurePosixPath(path).name == "optimize.toml" else "scoring"
+    return "config" if PurePosixPath(path).name.casefold() == "optimize.toml" else "scoring"
 
 
 def _path_hash(path: str) -> str:
@@ -417,10 +449,11 @@ def _path_hash(path: str) -> str:
     Returns:
         The SHA-256 hex digest.
     """
-    return hashlib.sha256(path.encode("utf-8")).hexdigest()
+    # A tool call can carry a lone surrogate, which strict UTF-8 cannot encode.
+    return hashlib.sha256(path.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
-def guard_policy(workspace: Path, hidden_paths: list[str], log: Path) -> dict[str, Any]:
+def guard_policy(workspace: Path, hidden_paths: list[str], log: Path, fold_case: bool = False) -> dict[str, Any]:
     """Build the refusal policy of one session.
 
     The policy holds hashes, not names, because the agent can read the file
@@ -430,56 +463,80 @@ def guard_policy(workspace: Path, hidden_paths: list[str], log: Path) -> dict[st
         workspace: Directory the agent works in.
         hidden_paths: Repository-relative hidden files and directories.
         log: File each refusal is appended to.
+        fold_case: Whether the workspace's file system ignores case, so that
+            ``OPTIMIZE.TOML`` names the same file as ``optimize.toml``.
 
     Returns:
-        The policy: workspace, path hashes mapped to their kind, and log file.
+        The policy: workspace, path hashes mapped to their kind, case
+        folding, and log file.
     """
     hashes = {}
     for path in hidden_paths:
         normalized = os.path.normpath(str(path).strip().strip("/"))
         if normalized in ("", ".") or normalized.startswith(".."):
             continue
-        hashes[_path_hash(normalized.replace(os.sep, "/"))] = hidden_kind(normalized)
-    return {"workspace": str(workspace), "hashes": hashes, "log": str(log)}
+        key = normalized.replace(os.sep, "/")
+        hashes[_path_hash(key.casefold() if fold_case else key)] = hidden_kind(normalized)
+    return {"workspace": str(workspace), "hashes": hashes, "fold_case": fold_case, "log": str(log)}
 
 
-def _hidden_match(text: str, roots: list[str], hashes: dict[str, str]) -> str | None:
+def _expand_pwd(text: str, root: str) -> str:
+    """Replace the shell forms of the working directory with the workspace path.
+
+    Args:
+        text: One string from a tool call.
+        root: The workspace path.
+
+    Returns:
+        The text with ``$PWD``, ``${PWD}``, ``$(pwd)`` and backquoted ``pwd`` replaced.
+    """
+    return _GUARD_PWD_RE.sub(lambda _: root, text)
+
+
+def _hidden_match(text: str, roots: list[str], bases: list[str], hashes: dict[str, str], fold: bool) -> str | None:
     """Return the kind of the hidden path one candidate names, if any.
 
     Matching is exact: the candidate, or one of its parent directories, must
-    be a hidden path. A glob such as ``**/*`` names no hidden path.
+    be a hidden path. A glob such as ``**/*`` names no hidden path. The
+    candidate is resolved against every directory the call can work in, and
+    symbolic links are followed, so an alias of the workspace still matches.
 
     Args:
         text: One path-like string from a tool call.
         roots: The workspace path and its resolved form.
+        bases: Directories a relative candidate can be relative to.
         hashes: Policy hashes mapped to their kind.
+        fold: Whether to compare paths without case.
 
     Returns:
         The hidden kind, or ``None``.
     """
     candidate = text.strip().strip("'\"`").removeprefix("file://")
-    for variable in ("$PWD/", "${PWD}/"):
-        if candidate.startswith(variable):
-            candidate = roots[0] + "/" + candidate[len(variable) :]
     if not candidate:
         return None
-    for root in roots:
-        relative = os.path.relpath(os.path.normpath(Path(root) / candidate), root)
-        if relative == "." or relative.startswith(".."):
-            continue
-        parts = PurePosixPath(Path(relative).as_posix()).parts
-        for end in range(1, len(parts) + 1):
-            kind = hashes.get(_path_hash("/".join(parts[:end])))
-            if kind:
-                return kind
+    for base in bases:
+        path = os.path.normpath(Path(base, candidate))
+        for full in dict.fromkeys((path, os.path.realpath(path))):
+            for root in roots:
+                relative = os.path.relpath(full, root)
+                if relative == "." or relative.startswith(".."):
+                    continue
+                if fold:
+                    relative = relative.casefold()
+                parts = PurePosixPath(Path(relative).as_posix()).parts
+                for end in range(1, len(parts) + 1):
+                    kind = hashes.get(_path_hash("/".join(parts[:end])))
+                    if kind:
+                        return kind
     return None
 
 
-def _shell_words(command: str, depth: int = 0) -> Iterator[str]:
+def _shell_words(command: str, bases: list[str], depth: int = 0) -> Iterator[str]:
     """Yield every word, and every path-like run inside a word, of a shell command.
 
     Args:
         command: Shell command text.
+        bases: Receives the directory of each ``cd`` or ``pushd`` in the command.
         depth: Nesting level, for quoted scripts such as ``bash -lc '...'``.
 
     Yields:
@@ -491,19 +548,23 @@ def _shell_words(command: str, depth: int = 0) -> Iterator[str]:
         words = list(lexer)
     except ValueError:
         words = command.split()
-    for word in words:
+    for previous, word in zip(["", *words], words, strict=False):
+        if previous in _GUARD_CD_WORDS:
+            bases.append(word)
         yield word
         yield from _GUARD_WORD_RE.findall(word)
         if depth < _GUARD_SHELL_DEPTH and any(character.isspace() for character in word):
-            yield from _shell_words(word, depth + 1)
+            yield from _shell_words(word, bases, depth + 1)
 
 
-def _guard_candidates(tool: str, tool_input: Any) -> Iterator[str]:
+def _guard_candidates(tool: str, tool_input: Any, root: str, bases: list[str]) -> Iterator[str]:
     """Yield the path-like strings of one tool call.
 
     Args:
         tool: The harness's tool name.
         tool_input: The tool's arguments.
+        root: The workspace path, for ``$PWD`` and its other forms.
+        bases: Receives the working directories the call names.
 
     Yields:
         Candidate path strings.
@@ -520,10 +581,14 @@ def _guard_candidates(tool: str, tool_input: Any) -> Iterator[str]:
             continue
         if not isinstance(value, str):
             continue
+        value = _expand_pwd(value, root)
         if "*** Begin Patch" in value:
             yield from _GUARD_PATCH_RE.findall(value)
         if name in _GUARD_COMMAND_KEYS:
-            yield from _shell_words(value)
+            yield from _shell_words(value, bases)
+        elif name in _GUARD_BASE_KEYS:
+            bases.append(value)
+            yield value
         elif "path" in name or "file" in name or name in _GUARD_PATH_KEYS:
             # A grep pattern is a regex over file contents, not a path.
             if name == "pattern" and "grep" in tool.lower():
@@ -541,14 +606,26 @@ def guard_check(policy: dict[str, Any], tool: str, tool_input: Any) -> str | Non
 
     Returns:
         The hidden kind the call names, or ``None`` to let it run.
+
+    Raises:
+        ValueError: When the policy has no hashes, so the guard cannot answer.
     """
-    hashes = policy.get("hashes") or {}
-    if not hashes:
-        return None
+    hashes = policy.get("hashes")
+    # A session gets a guard only when it has hidden paths, so an empty table is a broken policy.
+    if not isinstance(hashes, dict) or not hashes:
+        raise ValueError("guard policy has no hashes")
     workspace = str(policy.get("workspace") or Path.cwd())
     roots = list(dict.fromkeys([workspace, os.path.realpath(workspace)]))
-    for candidate in _guard_candidates(tool, tool_input):
-        kind = _hidden_match(candidate, roots, hashes)
+    named: list[str] = []
+    candidates = list(_guard_candidates(tool, tool_input, roots[0], named))
+    # A later cd is relative to an earlier one, so each one extends every known directory.
+    bases = list(roots)
+    for directory in named[:_GUARD_MAX_BASES]:
+        bases += [os.path.normpath(Path(base, directory)) for base in bases]
+        bases = list(dict.fromkeys(bases))
+    fold = bool(policy.get("fold_case"))
+    for candidate in candidates:
+        kind = _hidden_match(candidate, roots, bases, hashes, fold)
         if kind:
             return kind
     return None
@@ -558,31 +635,45 @@ def guard_main(argv: list[str]) -> int:
     """Answer one tool-call check from a harness hook.
 
     ``hook`` reads a Codex ``PreToolUse`` event and prints its deny answer.
-    ``check`` reads ``{"tool", "input"}`` and prints ``{"reason"}`` or ``{}``.
-    Each refusal appends only the tool and the path kind to the policy log.
+    ``check`` reads ``{"tool", "input"}`` and prints ``{"reason"}``, with a
+    ``null`` reason to let the call run. Each refusal appends only the tool
+    and the path kind to the policy log. A guard that cannot answer (a
+    missing, changed or broken policy, unreadable input) refuses the call
+    (D22).
 
     Args:
-        argv: ``[mode, policy_file]``.
+        argv: ``[mode, policy_file, digest]``, where ``digest`` is the
+            SHA-256 of the policy file as the session wrote it.
 
     Returns:
         The exit code: 0, or 2 for a usage error.
     """
-    if len(argv) != 2 or argv[0] not in ("hook", "check"):
-        print("usage: harness_bridge.py guard <hook|check> <policy.json>", file=sys.stderr)
+    if len(argv) != 3 or argv[0] not in ("hook", "check"):
+        print("usage: harness_bridge.py guard <hook|check> <policy.json> <sha256>", file=sys.stderr)
         return 2
-    mode, policy_file = argv
-    policy = json.loads(Path(policy_file).read_text(encoding="utf-8"))
-    request = json.loads(sys.stdin.read() or "{}")
-    if mode == "hook":
-        tool, tool_input = str(request.get("tool_name") or ""), request.get("tool_input")
-    else:
-        tool, tool_input = str(request.get("tool") or ""), request.get("input")
-    kind = guard_check(policy, tool, tool_input)
-    if kind and policy.get("log"):
-        with Path(policy["log"]).open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"tool": tool, "kind": kind}) + "\n")
+    mode, policy_file, digest = argv
+    tool, kind = "", None
+    try:
+        raw = Path(policy_file).read_bytes()
+        # The agent can write the session folder; a policy it rewrote must not answer.
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError("guard policy changed")
+        policy = json.loads(raw)
+        request = json.loads(sys.stdin.read() or "{}")
+        if mode == "hook":
+            tool, tool_input = str(request.get("tool_name") or ""), request.get("tool_input")
+        else:
+            tool, tool_input = str(request.get("tool") or ""), request.get("input")
+        kind = guard_check(policy, tool, tool_input)
+        if kind and policy.get("log"):
+            with Path(policy["log"]).open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"tool": tool, "kind": kind}) + "\n")
+    # Every failure refuses: a crashed hook lets the call run.
+    except Exception as error:
+        print(f"guard error: {type(error).__name__}", file=sys.stderr)
+        kind = kind or "unknown"
     if mode == "check":
-        print(json.dumps({"reason": GUARD_REFUSAL} if kind else {}))
+        print(json.dumps({"reason": GUARD_REFUSAL if kind else None}))
     elif kind:
         decision = {
             "hookEventName": "PreToolUse",
@@ -593,29 +684,46 @@ def guard_main(argv: list[str]) -> int:
     return 0
 
 
-def guard_command(mode: str, policy_file: Path) -> list[str]:
+def write_guard_policy(policy_file: Path, policy: dict[str, Any]) -> str:
+    """Write one session's guard policy and return the digest its hooks check.
+
+    Args:
+        policy_file: Where to write the policy.
+        policy: Policy from :func:`guard_policy`.
+
+    Returns:
+        The SHA-256 hex digest of the written file.
+    """
+    raw = json.dumps(policy).encode("utf-8")
+    policy_file.write_bytes(raw)
+    return hashlib.sha256(raw).hexdigest()
+
+
+def guard_command(mode: str, policy_file: Path, digest: str) -> list[str]:
     """Build the command line that runs one guard check.
 
     Args:
         mode: ``"hook"`` or ``"check"``.
         policy_file: The session's policy file.
+        digest: The policy digest from :func:`write_guard_policy`.
 
     Returns:
         The argument list.
     """
-    return [sys.executable, str(Path(__file__).resolve()), "guard", mode, str(policy_file)]
+    return [sys.executable, str(Path(__file__).resolve()), "guard", mode, str(policy_file), digest]
 
 
-def codex_hooks(policy_file: Path) -> dict[str, Any]:
+def codex_hooks(policy_file: Path, digest: str) -> dict[str, Any]:
     """Build a Codex ``hooks.json`` that sends every tool call through the guard.
 
     Args:
         policy_file: The session's policy file.
+        digest: The policy digest from :func:`write_guard_policy`.
 
     Returns:
         The hooks document.
     """
-    hook = {"type": "command", "command": shlex.join(guard_command("hook", policy_file)), "timeout": 10}
+    hook = {"type": "command", "command": shlex.join(guard_command("hook", policy_file, digest)), "timeout": 10}
     return {"hooks": {"PreToolUse": [{"hooks": [hook]}]}}
 
 
@@ -635,14 +743,20 @@ def install_guard(session_dir: Path, workspace: Path, hidden_paths: list[str]) -
     log = guard_dir / "refusals.jsonl"
     log.write_text("", encoding="utf-8")
     policy_file = guard_dir / "policy.json"
-    policy_file.write_text(json.dumps(guard_policy(workspace, hidden_paths, log)), encoding="utf-8")
-    python, bridge, _, _, policy = guard_command("check", policy_file)
-    check = _GUARD_JS_CHECK.format(python=json.dumps(python), bridge=json.dumps(bridge), policy=json.dumps(policy))
+    digest = write_guard_policy(policy_file, guard_policy(workspace, hidden_paths, log))
+    python, bridge, _, _, policy, _ = guard_command("check", policy_file, digest)
+    check = _GUARD_JS_CHECK.format(
+        refusal=json.dumps(GUARD_REFUSAL),
+        python=json.dumps(python),
+        bridge=json.dumps(bridge),
+        policy=json.dumps(policy),
+        digest=json.dumps(digest),
+    )
     pi_extension = guard_dir / "pi-guard.ts"
     pi_extension.write_text(check + _GUARD_PI_EXTENSION, encoding="utf-8")
     (guard_dir / "plugin" / "app-guard.js").write_text(check + _GUARD_OPENCODE_PLUGIN, encoding="utf-8")
     codex_file = guard_dir / "codex-hooks.json"
-    codex_file.write_text(json.dumps(codex_hooks(policy_file)), encoding="utf-8")
+    codex_file.write_text(json.dumps(codex_hooks(policy_file, digest)), encoding="utf-8")
     return {
         "APP_GUARD_PI": str(pi_extension),
         "APP_GUARD_CODEX": str(codex_file),
@@ -887,7 +1001,11 @@ def run_session(
         reader.join(timeout=30)
     stdout = "".join(monitor.chunks)
     (session_dir / f"run-{attempt}.stdout").write_text(stdout, encoding="utf-8")
-    text, usage = parse_output(proposer.get("output_format", "plain"), stdout)
+    output_format = proposer.get("output_format", "plain")
+    text, usage = parse_output(output_format, stdout)
+    refusals = read_refusals(session_dir) if hidden_paths else []
+    if output_format == "host_agent":
+        refusals += parse_host_agent_refusals(stdout)
     return SessionOutcome(
         text=text,
         stdout=stdout,
@@ -900,7 +1018,7 @@ def run_session(
         budget_exceeded=monitor.budget_exceeded,
         tool_calls=monitor.tool_calls,
         tool_cap_reached=monitor.tool_cap_reached,
-        refusals=read_refusals(session_dir) if hidden_paths else [],
+        refusals=refusals,
     )
 
 

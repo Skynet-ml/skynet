@@ -350,7 +350,10 @@ def _codex_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str |
         files={".app/codex/config.toml": config_toml},
         run_command=(
             f"{_GUARD_CODEX_COPY}"
+            # Codex skips a new hooks.json hook until it is trusted, so the guard
+            # needs the trust flag; without the guard no repository hook gets it.
             'CODEX_HOME="$PWD/.app/codex" codex exec --skip-git-repo-check '
+            "${APP_GUARD_CODEX:+--dangerously-bypass-hook-trust} "
             f"--dangerously-bypass-approvals-and-sandbox --json {_PROMPT_ARG}"
         ),
         env=_base_env(model, gateway),

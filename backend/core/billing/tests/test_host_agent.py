@@ -1525,7 +1525,30 @@ def test_codex_turns_install_a_guard_hook_that_refuses_hidden_paths(tmp_path: Pa
     denied = call("cat data/cases.jsonl")
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert call("ls src") == {}
-    assert host_agent.host_refusals("codex", "", turn, workspace, _HIDDEN) == [
-        {"tool": "exec_command", "kind": "scoring"}
-    ]
+    expected = [{"tool": "exec_command", "kind": "scoring"}]
+    if sys.platform == "darwin":
+        # The default macOS file system opens DATA/CASES.JSONL as data/cases.jsonl.
+        assert call("cat DATA/CASES.JSONL")["hookSpecificOutput"]["permissionDecision"] == "deny"
+        expected *= 2
+    assert host_agent.host_refusals("codex", "", turn, workspace, _HIDDEN) == expected
     assert "cases" not in (turn / "guard" / "refusals.jsonl").read_text()
+
+
+@pytest.mark.parametrize("hidden", [(), ("optimize.toml",)])
+def test_codex_turns_trust_the_guard_hook_only_when_paths_are_hidden(
+    local: Settings, guest: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hidden: tuple[str, ...]
+) -> None:
+    """Codex skips an untrusted hooks.json hook, so a guarded turn passes the trust flag and no other turn does.
+
+    Args:
+        hidden: The run's hidden paths.
+    """
+    monkeypatch.setenv("FAKE_CLI_NAME", "codex")
+    body = {"model": "", "prompt": "x", "workspace_tar_b64": _workspace_tar(guest)}
+
+    document = run_host_agent(body, local, cli="codex", permission="workspace_only", hidden_paths=hidden)
+
+    assert document["status"] == "ok", document
+    assert document["refusals"] == []
+    argv = json.loads((tmp_path / "record.json").read_text())["argv"]
+    assert ("--dangerously-bypass-hook-trust" in argv) == bool(hidden)
