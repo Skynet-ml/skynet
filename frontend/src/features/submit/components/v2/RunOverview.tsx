@@ -39,7 +39,7 @@ import { tip } from "@/shared/lib/tooltips";
 import { cn } from "@/shared/lib/utils";
 import { readRewardSpec } from "@/shared/lib/reward";
 import type { ModelConfig } from "@/shared/types/api";
-import { HARDENING_SURVIVED, hardeningAttacks, type HardeningJob } from "@/shared/types/hardening";
+import { HARDENING_SURVIVED, hardeningSurvived, type HardeningJob } from "@/shared/types/hardening";
 import type { ContractCheckState } from "../../hooks/use-contract-check";
 import { useWizardV2ShellOptional } from "../../hooks/use-unified-wizard";
 import { economyEligible } from "../../lib/model-config";
@@ -304,7 +304,11 @@ export function RunOverview({
         </div>
         {hardening && HARDENING_SURVIVED.has(hardening.status) && (
           <p className="text-sm text-muted-foreground">
-            {t("submit.v2.overview.hardening_survived", { n: fmt(hardeningAttacks(hardening)) })}
+            {hardeningSurvived(hardening) > 0
+              ? t("submit.v2.overview.hardening_survived", { n: fmt(hardeningSurvived(hardening)) })
+              : hardening.status === "budget_stop"
+                ? t("submit.v2.harden.budget", { k: hardening.round, m: hardening.fixed_count })
+                : t("submit.v2.harden.clean", { k: hardening.round })}
           </p>
         )}
         <RunOnChoice />

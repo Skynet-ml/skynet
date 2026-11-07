@@ -10,12 +10,36 @@ import {
   retryHardeningJob,
   setHardeningExploitVerdict,
 } from "@/shared/lib/api";
+import { subscriptionAgentModel, type LocalStatus } from "@/features/local-runtime";
+import type { CatalogModel, ModelConfig } from "@/shared/types/api";
 import type { CreateHardeningJobRequest, HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { WIZARD_HARDENING_KEY, keepSessionValue, readSessionValue } from "../lib/session-state";
 
 const POLL_MS = 4000;
 // Only the worker moves a job out of these; every other status waits on the user or is final.
 const POLLED: ReadonlySet<HardeningStatus> = new Set(["preflight", "running"]);
+
+/**
+ * The default attacker and judge. A managed reflection model serves as is. In
+ * local mode a subscription reflection model maps to a model its CLI serves.
+ * Any other reflection model (BYOK, or a subscription in a hosted build) falls
+ * back to the catalog default, since a hardening job bills managed usage.
+ */
+export function hardeningDefaultModel(
+  reflection: ModelConfig | null | undefined,
+  models: CatalogModel[],
+  local: boolean,
+  status: LocalStatus | null,
+): string {
+  const name = reflection?.name.trim() ?? "";
+  const source = reflection?.token_source;
+  if (name && (!source || source === "managed")) return name;
+  if (local && name && source === "subscription" && reflection?.cli_provider) {
+    const mapped = subscriptionAgentModel(name, reflection.cli_provider, status);
+    if (mapped) return mapped;
+  }
+  return models.find((m) => m.is_default)?.value ?? models[0]?.value ?? "";
+}
 
 export type HardeningSettings = Omit<CreateHardeningJobRequest, "draft_id">;
 

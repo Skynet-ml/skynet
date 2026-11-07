@@ -290,6 +290,7 @@
   "submit.v2.harden.done": "指标经受住了 {n} 次攻击。已修复 {m} 个漏洞，套件含 {s} 个案例。",
   "submit.v2.harden.rejected": "你拒绝了修复。加固已停止，metric.py 保持原样。",
   "submit.v2.harden.failed": "本轮失败",
+  "submit.v2.harden.stale_title": "metric.py 已更改",
   "submit.v2.harden.stale": "此任务开始后 metric.py 发生了变化。请重试，以在新代码上重放套件。",
   "submit.v2.harden.spent_so_far": "迄今已花费：{spent}",
   "submit.v2.harden.facts.title": "任务",

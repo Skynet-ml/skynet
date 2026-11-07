@@ -3902,6 +3902,7 @@
   "submit.v2.harden.done": "Metric survived {n} attacks. {m} exploits fixed, suite of {s} cases.",
   "submit.v2.harden.rejected": "You rejected the fix. Hardening stopped, and metric.py stays as it was.",
   "submit.v2.harden.failed": "The round failed",
+  "submit.v2.harden.stale_title": "metric.py changed",
   "submit.v2.harden.stale": "metric.py changed after this job started. Retry to replay the suite on the new code.",
   "submit.v2.harden.spent_so_far": "Spent so far: {spent}",
   "submit.v2.harden.facts.title": "Job",

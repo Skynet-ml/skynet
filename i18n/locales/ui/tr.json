@@ -290,6 +290,7 @@
   "submit.v2.harden.done": "Metrik {n} saldırıya dayandı. {m} açık düzeltildi, paket {s} örnek içeriyor.",
   "submit.v2.harden.rejected": "Düzeltmeyi reddettiniz. Sağlamlaştırma durdu ve metric.py olduğu gibi kalıyor.",
   "submit.v2.harden.failed": "Tur başarısız oldu",
+  "submit.v2.harden.stale_title": "metric.py değişti",
   "submit.v2.harden.stale": "metric.py bu iş başladıktan sonra değişti. Paketi yeni kod üzerinde yeniden oynatmak için yeniden deneyin.",
   "submit.v2.harden.spent_so_far": "Şu ana kadar harcanan: {spent}",
   "submit.v2.harden.facts.title": "İş",

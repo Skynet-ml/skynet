@@ -3902,6 +3902,7 @@
   "submit.v2.harden.done": "המדד שרד {n} תקיפות. {m} פרצות תוקנו, חבילה של {s} מקרים.",
   "submit.v2.harden.rejected": "דחיתם את התיקון. ההקשחה נעצרה, ו־metric.py נשאר כמו שהיה.",
   "submit.v2.harden.failed": "הסבב נכשל",
+  "submit.v2.harden.stale_title": "metric.py השתנה",
   "submit.v2.harden.stale": "metric.py השתנה אחרי שהעבודה התחילה. נסו שוב כדי להריץ את החבילה על הקוד החדש.",
   "submit.v2.harden.spent_so_far": "הוצאה עד עכשיו: {spent}",
   "submit.v2.harden.facts.title": "העבודה",

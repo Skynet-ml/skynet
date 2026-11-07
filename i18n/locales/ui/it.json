@@ -290,6 +290,7 @@
   "submit.v2.harden.done": "La metrica ha resistito a {n} attacchi. {m} exploit corretti, suite di {s} casi.",
   "submit.v2.harden.rejected": "Hai rifiutato la correzione. Il rafforzamento si è fermato e metric.py resta invariato.",
   "submit.v2.harden.failed": "Il round non è riuscito",
+  "submit.v2.harden.stale_title": "metric.py è cambiato",
   "submit.v2.harden.stale": "metric.py è cambiato dopo l'avvio di questo job. Riprova per rieseguire la suite sul nuovo codice.",
   "submit.v2.harden.spent_so_far": "Speso finora: {spent}",
   "submit.v2.harden.facts.title": "Job",

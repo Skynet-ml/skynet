@@ -290,6 +290,7 @@
   "submit.v2.harden.done": "मीट्रिक ने {n} हमले झेले। {m} exploits ठीक किए गए, {s} मामलों का सूट।",
   "submit.v2.harden.rejected": "आपने सुधार अस्वीकार किया। हार्डनिंग रुक गई, और metric.py पहले जैसा रहता है।",
   "submit.v2.harden.failed": "राउंड विफल रहा",
+  "submit.v2.harden.stale_title": "metric.py बदला",
   "submit.v2.harden.stale": "इस जॉब के शुरू होने के बाद metric.py बदला। नए कोड पर सूट फिर से चलाने के लिए फिर से प्रयास करें।",
   "submit.v2.harden.spent_so_far": "अब तक खर्च: {spent}",
   "submit.v2.harden.facts.title": "जॉब",

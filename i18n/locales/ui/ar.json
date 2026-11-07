@@ -290,6 +290,7 @@
   "submit.v2.harden.done": "صمد المقياس أمام {n} هجمات. تم إصلاح {m} ثغرات، ومجموعة من {s} حالات.",
   "submit.v2.harden.rejected": "رفضت الإصلاح. توقفت التقوية، ويبقى metric.py كما كان.",
   "submit.v2.harden.failed": "فشلت الجولة",
+  "submit.v2.harden.stale_title": "تغيّر metric.py",
   "submit.v2.harden.stale": "تغيّر metric.py بعد بدء هذه المهمة. أعد المحاولة لإعادة تشغيل المجموعة على الكود الجديد.",
   "submit.v2.harden.spent_so_far": "المُنفق حتى الآن: {spent}",
   "submit.v2.harden.facts.title": "المهمة",

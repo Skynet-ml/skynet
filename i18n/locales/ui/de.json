@@ -290,6 +290,7 @@
   "submit.v2.harden.done": "Metrik hat {n} Angriffe überstanden. {m} Exploits behoben, Suite mit {s} Fällen.",
   "submit.v2.harden.rejected": "Sie haben die Korrektur abgelehnt. Die Härtung wurde beendet, und metric.py bleibt unverändert.",
   "submit.v2.harden.failed": "Die Runde ist fehlgeschlagen",
+  "submit.v2.harden.stale_title": "metric.py wurde geändert",
   "submit.v2.harden.stale": "metric.py wurde nach dem Start dieses Jobs geändert. Wiederholen Sie, um die Suite mit dem neuen Code erneut auszuführen.",
   "submit.v2.harden.spent_so_far": "Bisher ausgegeben: {spent}",
   "submit.v2.harden.facts.title": "Job",

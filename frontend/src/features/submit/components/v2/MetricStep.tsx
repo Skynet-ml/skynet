@@ -222,7 +222,7 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
           guided={guided}
           onBack={onBack}
           hardening={hardening}
-          defaultModel={state.optimizer.reflectionModel?.name ?? null}
+          reflectionModel={state.optimizer.reflectionModel ?? null}
         />
       </WizardScreen>
       {!repo && (

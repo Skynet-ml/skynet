@@ -290,6 +290,7 @@
   "submit.v2.harden.done": "指標頂住咗 {n} 次攻擊。修正咗 {m} 個漏洞，套件有 {s} 個案例。",
   "submit.v2.harden.rejected": "你拒絕咗修正。加固停咗，metric.py 保持原樣。",
   "submit.v2.harden.failed": "呢一輪失敗咗",
+  "submit.v2.harden.stale_title": "metric.py 改咗",
   "submit.v2.harden.stale": "呢個工作開始之後 metric.py 改咗。重試就會喺新程式碼上重播套件。",
   "submit.v2.harden.spent_so_far": "到目前為止用咗：{spent}",
   "submit.v2.harden.facts.title": "工作",

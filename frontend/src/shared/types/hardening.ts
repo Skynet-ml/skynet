@@ -98,7 +98,22 @@ export const HARDENING_SURVIVED: ReadonlySet<HardeningStatus> = new Set([
   "done",
 ]);
 
-/** Every attacker claim the job judged, across its rounds: the attacks the metric faced. */
-export function hardeningAttacks(job: HardeningJob): number {
-  return job.rounds_detail.reduce((sum, round) => sum + round.exploits.length, 0);
+/**
+ * The attacks the metric withstood, across its rounds: a claim the judge called
+ * valid and the user did not confirm, a claim the user rejected, or a confirmed
+ * exploit whose round ended in an approved fix. A confirmed exploit in a round
+ * that never got its fix (a budget stop) does not count.
+ */
+export function hardeningSurvived(job: HardeningJob): number {
+  return job.rounds_detail.reduce(
+    (sum, round) =>
+      sum +
+      round.exploits.filter(
+        (e) =>
+          e.user_verdict === "rejected" ||
+          (e.label === "valid" && e.user_verdict !== "confirmed") ||
+          (e.user_verdict === "confirmed" && round.status === "fixed"),
+      ).length,
+    0,
+  );
 }

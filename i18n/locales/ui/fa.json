@@ -290,6 +290,7 @@
   "submit.v2.harden.done": "معیار در برابر {n} حمله مقاومت کرد. {m} سوءاستفاده اصلاح شد، مجموعه‌ای از {s} مورد.",
   "submit.v2.harden.rejected": "شما اصلاح را رد کردید. مقاوم‌سازی متوقف شد و metric.py بدون تغییر می‌ماند.",
   "submit.v2.harden.failed": "دور ناموفق بود",
+  "submit.v2.harden.stale_title": "metric.py تغییر کرد",
   "submit.v2.harden.stale": "metric.py پس از شروع این کار تغییر کرد. برای بازاجرای مجموعه روی کد جدید، دوباره تلاش کنید.",
   "submit.v2.harden.spent_so_far": "تاکنون هزینه‌شده: {spent}",
   "submit.v2.harden.facts.title": "کار",

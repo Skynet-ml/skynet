@@ -290,6 +290,7 @@
   "submit.v2.harden.done": "Метрика витримала атак: {n}. Виправлено експлойтів: {m}, набір із {s} випадків.",
   "submit.v2.harden.rejected": "Ви відхилили виправлення. Зміцнення зупинено, metric.py залишається без змін.",
   "submit.v2.harden.failed": "Раунд завершився з помилкою",
+  "submit.v2.harden.stale_title": "metric.py змінився",
   "submit.v2.harden.stale": "metric.py змінився після запуску цього завдання. Повторіть, щоб відтворити набір на новому коді.",
   "submit.v2.harden.spent_so_far": "Витрачено на цей момент: {spent}",
   "submit.v2.harden.facts.title": "Завдання",

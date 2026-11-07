@@ -2,11 +2,12 @@
 
 import * as React from "react";
 import { useWizardStateOptional } from "@/features/agent-panel";
+import { useLocalStatus } from "@/features/local-runtime";
 import { getModelCatalog, cachedCatalog } from "@/shared/lib/model-catalog";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { getActiveIntlLocale } from "@/shared/lib/runtime-locale";
 import { cn } from "@/shared/lib/utils";
-import type { CatalogModel } from "@/shared/types/api";
+import type { CatalogModel, ModelConfig } from "@/shared/types/api";
 import type {
   HardeningCheckResult,
   HardeningExploit,
@@ -15,7 +16,7 @@ import type {
   HardeningRound,
   HardeningView,
 } from "@/shared/types/hardening";
-import { hardeningAttacks } from "@/shared/types/hardening";
+import { hardeningSurvived } from "@/shared/types/hardening";
 import {
   ArrowLeft,
   CaretDown,
@@ -34,7 +35,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/shared/ui/primitives/select";
-import type { HardeningState } from "../../hooks/use-hardening";
+import { hardeningDefaultModel, type HardeningState } from "../../hooks/use-hardening";
 import { v2Msg } from "./ArtifactConfirmCard";
 
 const DEFAULT_ROUNDS = 5;
@@ -337,7 +338,7 @@ function FactsPanel({ job, t, usd }: { job: HardeningJob; t: T; usd: (n: number)
 }
 
 function SettingsForm({
-  defaultModel,
+  reflectionModel,
   local,
   busy,
   onStart,
@@ -345,7 +346,7 @@ function SettingsForm({
   t,
   usd,
 }: {
-  defaultModel: string | null;
+  reflectionModel: ModelConfig | null;
   local: boolean;
   busy: boolean;
   onStart: (s: { rounds: number; cap: number; attacker: string; judge: string; view: HardeningView }) => void;
@@ -364,7 +365,8 @@ function SettingsForm({
       live = false;
     };
   }, [models.length]);
-  const fallback = defaultModel ?? models.find((m) => m.is_default)?.value ?? models[0]?.value ?? "";
+  const { status } = useLocalStatus(local);
+  const fallback = hardeningDefaultModel(reflectionModel, models, local, status);
   const [open, setOpen] = React.useState(false);
   const [rounds, setRounds] = React.useState(DEFAULT_ROUNDS);
   const [cap, setCap] = React.useState(DEFAULT_CAP_USD);
@@ -519,20 +521,20 @@ function ModelSelect({
  *   guided: Use the guided wording where it exists.
  *   onBack: Go back to the code editor.
  *   hardening: The draft's hardening job and its actions.
- *   defaultModel: The run's reflection model, the default attacker and judge.
+ *   reflectionModel: The run's reflection model, the default attacker and judge when it can serve.
  */
 export function HardenMetricScreen({
   active,
   guided,
   onBack,
   hardening: h,
-  defaultModel,
+  reflectionModel,
 }: {
   active: boolean;
   guided: boolean;
   onBack: () => void;
   hardening: HardeningState;
-  defaultModel: string | null;
+  reflectionModel: ModelConfig | null;
 }) {
   const t: T = (key, params) => v2Msg(key, guided, params);
   const locale = getActiveIntlLocale();
@@ -549,7 +551,7 @@ export function HardenMetricScreen({
   } else if (!job) {
     body = (
       <SettingsForm
-        defaultModel={defaultModel}
+        reflectionModel={reflectionModel}
         local={isLocalMode()}
         busy={h.busy}
         t={t}
@@ -568,11 +570,13 @@ export function HardenMetricScreen({
     );
   } else {
     const k = job.round;
-    const survived = hardeningAttacks(job);
+    const survived = hardeningSurvived(job);
     const summary: Record<string, string | null> = {
       clean_stop: t("submit.v2.harden.clean", { k }),
       budget_stop: t("submit.v2.harden.budget", { k, m: job.fixed_count }),
-      done: t("submit.v2.harden.done", { n: survived, m: job.fixed_count, s: job.suite_count }),
+      done: survived
+        ? t("submit.v2.harden.done", { n: survived, m: job.fixed_count, s: job.suite_count })
+        : t("submit.v2.harden.clean", { k }),
       rejected: t("submit.v2.harden.rejected"),
     };
     body = (
@@ -612,8 +616,14 @@ export function HardenMetricScreen({
         {job.status === "waiting_fix" && round?.fix && <FixPanel fix={round.fix} h={h} t={t} />}
         {(job.status === "failed" || job.status === "stale") && (
           <section className="space-y-2">
-            <h3 className="text-base font-semibold">{t("submit.v2.harden.failed")}</h3>
-            <p className="text-sm">{job.error ?? t("submit.v2.harden.stale")}</p>
+            <h3 className="text-base font-semibold">
+              {t(job.status === "stale" ? "submit.v2.harden.stale_title" : "submit.v2.harden.failed")}
+            </h3>
+            {job.status === "stale" ? (
+              <p className="text-sm">{t("submit.v2.harden.stale")}</p>
+            ) : (
+              job.error && <p className="text-sm">{job.error}</p>
+            )}
             {job.place === "cloud" && (
               <p className="text-sm text-muted-foreground">
                 {t("submit.v2.harden.spent_so_far", { spent: usd(job.spent_usd) })}
