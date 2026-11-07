@@ -19,7 +19,7 @@ registerHooks({
 const { initialWizardV2State, emptyRepoDraft } = await import("./wizard-v2.ts");
 const { stepPages } = await import("./wizard-pages.ts");
 const { computeStepIssue } = await import("./step-issue.ts");
-const { repoRunRequest } = await import("./repo-run.ts");
+const { finishedHardeningJobId, repoRunRequest } = await import("./repo-run.ts");
 const { prepareModelConfig } = await import("./model-config.ts");
 
 const model = { name: "openai/gpt-default", token_source: "managed" as const };
@@ -214,4 +214,42 @@ test("a repository run sends a staged dataset by reference", () => {
   assert.deepEqual(request?.input_fields, ["url"]);
   state.task.needsData = false;
   assert.equal(repoRunRequest(state, options)?.staged_dataset_id, undefined);
+});
+
+test("a repository run carries no hardening job of its own", () => {
+  assert.equal("hardening_job_id" in (repoRunRequest(repoState(), options) ?? {}), false);
+});
+
+test("the run submit takes the hardening job id only from a finished job", async () => {
+  const reads: string[] = [];
+  const jobOf = (status: string) => async (draftId: string) => {
+    reads.push(draftId);
+    return { id: "job-1", status } as never;
+  };
+  for (const status of ["clean_stop", "budget_stop", "done"]) {
+    assert.equal(await finishedHardeningJobId("draft-1", jobOf(status)), "job-1", status);
+  }
+  for (const status of ["preflight", "preflight_failed", "running", "waiting_review", "waiting_fix", "rejected", "failed", "stale"]) {
+    assert.equal(await finishedHardeningJobId("draft-1", jobOf(status)), null, status);
+  }
+  assert.ok(reads.every((id) => id === "draft-1"));
+});
+
+test("a setup without a hardening job submits as before", async () => {
+  let reads = 0;
+  const read = async () => {
+    reads += 1;
+    return null;
+  };
+  assert.equal(await finishedHardeningJobId(null, read), null);
+  assert.equal(reads, 0);
+  assert.equal(await finishedHardeningJobId("draft-1", read), null);
+  assert.equal(reads, 1);
+});
+
+test("a failed hardening read never blocks the run submit", async () => {
+  const read = async () => {
+    throw new Error("offline");
+  };
+  assert.equal(await finishedHardeningJobId("draft-1", read), null);
 });

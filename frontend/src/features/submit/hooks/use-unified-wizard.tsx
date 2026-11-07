@@ -32,6 +32,7 @@ import {
   getOptimizationPayload,
   getOptimizerCatalog,
   getConnectors,
+  getLatestHardeningJob,
   getStagedDataset,
   hostedRunsAvailable,
   isInsufficientFundsError,
@@ -94,7 +95,7 @@ import {
   preflightMayAdvance,
   preflightPendingMessageKey,
 } from "../lib/preflight-outcome";
-import { repoRunRequest } from "../lib/repo-run";
+import { finishedHardeningJobId, repoRunRequest } from "../lib/repo-run";
 import {
   currentRunFailure,
   runFailureFromCheck,
@@ -102,6 +103,7 @@ import {
   type RunFailure,
 } from "../lib/run-failure";
 import {
+  WIZARD_HARDENING_KEY,
   WIZARD_SCHEDULE_KEY,
   WIZARD_SESSION_KEY,
   WIZARD_VIEW_KEYS,
@@ -761,7 +763,15 @@ export function WizardV2Provider({
       return;
     }
     try {
-      const result = await submitRepoRun(request, undefined, runOn);
+      const hardeningJobId = await finishedHardeningJobId(
+        readSessionValue(WIZARD_HARDENING_KEY),
+        getLatestHardeningJob,
+      );
+      const result = await submitRepoRun(
+        hardeningJobId ? { ...request, hardening_job_id: hardeningJobId } : request,
+        undefined,
+        runOn,
+      );
       track(TelemetryEvent.RunSubmitted, {
         artifact_kind: "repo",
         data_mode: "single",
