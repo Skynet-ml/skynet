@@ -126,6 +126,7 @@ from .constants import (
 )
 from .log_handler import route_sandbox_logs
 from .memory_guard import memory_usage_fraction
+from .repo_gate import RepoGateError, check_repository, sandbox_place
 from .repo_staging import (
     ENVIRONMENT_KEY,
     StagedRepository,
@@ -1018,6 +1019,14 @@ class BackgroundWorker:
                                 engine=byok_engine,
                             )
                             self._record_repo_commit(optimization_id, payload_dict["target"]["repo"]["commit"])
+                            # Before the setup model and the scorer box, so a refused run costs nothing.
+                            gate_failures = check_repository(
+                                staged_repository.snapshot.archive,
+                                staged_repository.secrets,
+                                place=sandbox_place(settings.local_mode),
+                            )
+                            if gate_failures:
+                                raise RepoGateError(gate_failures)
                             inferred_setup = infer_repo_setup(payload_dict, staged_repository, budget_gateway)
                             if inferred_setup is not None:
                                 self._record_setup_command(optimization_id, inferred_setup)

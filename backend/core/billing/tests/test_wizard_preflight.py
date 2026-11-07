@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import io
+import tarfile
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
@@ -554,3 +556,44 @@ def test_unified_byok_roles_are_aliased_before_setup_protection(setup_client, mo
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "succeeded"
     assert events == ["alias", "protect"]
+
+
+def test_preflight_shows_every_gate_failure_before_any_paid_setup(
+    setup_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Refuse an unenforceable optimize.toml in the setup check, in the user's language, before the setup model runs."""
+    client, _engine, calls = setup_client
+    archive = tmp_path / "tree.tgz"
+    raw = b'[proposer]\ntools = ["bash"]\n[services.maps]\nsecrets = ["GOOGLE_MAPS_API_KEY"]\n'
+    with tarfile.open(archive, "w:gz") as packed:
+        info = tarfile.TarInfo("optimize.toml")
+        info.size = len(raw)
+        packed.addfile(info, io.BytesIO(raw))
+    cleaned = []
+    staged = SimpleNamespace(
+        snapshot=SimpleNamespace(archive=archive),
+        secrets={},
+        close_scorers=lambda: cleaned.append("scorers"),
+        cleanup=lambda: cleaned.append("tree"),
+    )
+    inferred = []
+    monkeypatch.setattr(wizard_preflight.settings, "local_mode", False)
+    monkeypatch.setattr(wizard_preflight, "is_repo_payload", lambda payload: True)
+    monkeypatch.setattr(wizard_preflight, "stage_repository", lambda payload, **kwargs: (payload, staged))
+    monkeypatch.setattr(wizard_preflight, "infer_repo_setup", lambda *args: inferred.append(args))
+
+    response = client.post("/wizard/preflight", json={**_request(_budget(client)), "locale": "he"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "failed"
+    assert [(check["key"], check["message_code"]) for check in body["checks"]] == [
+        ("setup", "repo_gate.unenforced_cloud"),
+        ("setup", "repo_gate.unenforced_cloud"),
+        ("setup", "repo_gate.missing_secret"),
+    ]
+    assert body["checks"][0]["message"] == t_locale("he", "repo_gate.unenforced_cloud", key="[proposer] tools")
+    assert not inferred
+    assert not calls
+    assert body["budget"]["setup_spent_cents"] == "0"
+    assert cleaned == ["scorers", "tree"]
