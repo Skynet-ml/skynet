@@ -25,7 +25,6 @@ from core.billing.env_connectors import (
     connector_endpoint,
     offered_connectors,
     relay_request,
-    require_connectors,
     tool_meter,
 )
 from core.billing.mcp_broker import McpToolsBroker, ToolCall
@@ -131,25 +130,12 @@ def test_catalog_lists_three_hosted_connectors_with_prices() -> None:
     assert CONNECTORS[FIRECRAWL].key_setting == "firecrawl_api_key"
 
 
-def test_connector_without_key_is_not_offered_and_setup_names_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hide a keyless connector and name it, with its env setting, in the setup error."""
+def test_connector_without_key_is_not_offered(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hide a connector whose provider key is missing or blank."""
     assert offered_connectors() == (MAPS, FIRECRAWL, BROWSERBASE)
     monkeypatch.setattr(settings, "google_maps_api_key", None)
     monkeypatch.setattr(settings, "browserbase_api_key", SecretStr("  "))
     assert offered_connectors() == (FIRECRAWL,)
-    with pytest.raises(
-        ValueError,
-        match=r"mapstools.googleapis.com \(GOOGLE_MAPS_API_KEY\), mcp.browserbase.com \(BROWSERBASE_API_KEY\)",
-    ):
-        require_connectors([MAPS, FIRECRAWL, BROWSERBASE])
-    assert [connector.host for connector in require_connectors([FIRECRAWL, FIRECRAWL])] == [FIRECRAWL]
-
-
-@pytest.mark.parametrize("names", [["unknown"], ["maps"], MAPS, [3]])
-def test_unknown_or_malformed_connector_list_is_refused(names: object) -> None:
-    """Refuse names outside the catalog and lists that are not plain names."""
-    with pytest.raises(ValueError, match="connector"):
-        require_connectors(names)
 
 
 def test_endpoint_places_each_key_where_its_provider_reads_it() -> None:

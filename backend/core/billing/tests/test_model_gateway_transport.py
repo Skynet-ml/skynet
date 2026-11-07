@@ -24,6 +24,7 @@ from core.api.preflight_execution import _verify_model_routes
 from core.billing import model_gateway as gateway_module
 from core.billing.budgets import BudgetInsufficientError, BudgetService
 from core.billing.byok_upstreams import UPSTREAMS
+from core.billing.mcp_oauth_client import McpOAuthError
 from core.billing.model_dispatch import ModelHTTPResult, response_complete
 from core.billing.model_gateway import (
     EMBEDDING_ROUTE_KEY,
@@ -1106,93 +1107,12 @@ def test_selected_tools_keep_credentials_outside_guest_and_cannot_call_models(
     assert state.json()["blocked_reason"] == "generation_fenced"
 
 
-def test_catalog_connectors_share_one_gateway_with_a_live_roster(
-    gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Open one metered, parent-keyed roster per connector beside the live MCP roster."""
-    brokers: dict[str, dict[str, Any]] = {}
-
-    class RecordingBroker:
-        """Record each roster's parent-only endpoint and answer with its own name."""
-
-        def __init__(self, url, **kwargs):
-            """Keep the connection the parent chose for this roster."""
-            self.name = url.split("/")[2]
-            brokers[self.name] = {"url": url, **kwargs}
-
-        def dispatch(self, body):
-            """Run a metered call when a meter exists, then name the answering roster."""
-            meter = brokers[self.name].get("meter")
-            if meter is not None:
-                tool = brokers[self.name]["tool_filter"][0]
-                meter(tool, {"q": "x"}, lambda: {"content": []})
-            payload = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"roster": self.name}})
-            return ModelHTTPResult(200, "application/json", payload.encode())
-
-    monkeypatch.setattr(gateway_module, "McpToolsBroker", RecordingBroker)
+def test_catalog_host_gets_no_connector_route(gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give a catalog host no route: a role reaches it only through its .mcp.json and a managed binding."""
     monkeypatch.setattr(settings, "google_maps_api_key", SecretStr("maps-parent-secret"))
-    monkeypatch.setattr(settings, "firecrawl_api_key", SecretStr("firecrawl-parent-secret"))
-    payload = {
-        "model_config": {"name": "fixture/text"},
-        "tool_source": {"kind": "live_mcp", "mcp_url": "https://selected.example/mcp", "tool_filter": ["lookup"]},
-        "env_connectors": ["mapstools.googleapis.com", "mcp.firecrawl.dev"],
-    }
-
-    protected = gateway.protect_payload(payload, managed_key="upstream-secret")
-    again = gateway.protect_payload({"env_connectors": ["mapstools.googleapis.com"]}, managed_key="upstream-secret")
-
-    assert set(brokers) == {"selected.example", "mapstools.googleapis.com", "mcp.firecrawl.dev"}
-    assert brokers["mapstools.googleapis.com"]["headers"] == {"X-Goog-Api-Key": "maps-parent-secret"}
-    assert brokers["mcp.firecrawl.dev"]["tool_filter"] == ["firecrawl_search", "firecrawl_scrape"]
-    assert "meter" not in brokers["selected.example"]
-    for secret in ("maps-parent-secret", "firecrawl-parent-secret", "upstream-secret", "selected.example"):
-        assert secret not in json.dumps(protected)
-    routes = protected["_skynet_connector_routes"]
-    assert again["_skynet_connector_routes"]["mapstools.googleapis.com"] == routes["mapstools.googleapis.com"]
-    tokens = {
-        protected["_skynet_tools_route"]["token"],
-        routes["mapstools.googleapis.com"]["token"],
-        routes["mcp.firecrawl.dev"]["token"],
-    }
-    assert len(tokens) == 3
-    answered = {}
-    for name, route in {"live": protected["_skynet_tools_route"], **routes}.items():
-        headers = {"Authorization": f"Bearer {route['token']}"}
-        response = httpx.post(
-            f"{gateway.url}/_mcp",
-            headers=headers,
-            json={"jsonrpc": "2.0", "method": "tools/call", "id": 1},
-            trust_env=False,
-        )
-        assert response.status_code == 200
-        answered[name] = response.json()["result"]["roster"]
-        assert (
-            httpx.post(f"{gateway.url}/chat/completions", headers=headers, json={}, trust_env=False).status_code == 401
-        )
-        assert httpx.get(f"{gateway.url}/_budget/state", headers=headers, trust_env=False).status_code == 200
-    assert answered == {
-        "live": "selected.example",
-        "mapstools.googleapis.com": "mapstools.googleapis.com",
-        "mcp.firecrawl.dev": "mcp.firecrawl.dev",
-    }
-    snapshot = gateway.runtime.service.get(gateway.runtime.budget_id, "alice")
-    assert snapshot.setup_spent_cents == Decimal("2.4")
-    assert snapshot.reserved_cents == 0
-    assert (
-        gateway.dispatch_guest(
-            routes["mapstools.googleapis.com"]["token"], "/v1/_mcp", {"method": "tools/call"}, {}
-        ).status
-        == 200
-    )
-
-
-def test_connector_without_key_fails_setup_with_its_name(
-    gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Refuse a run that asks for a connector whose key is missing, and name it."""
-    monkeypatch.setattr(settings, "google_maps_api_key", None)
-    with pytest.raises(ValueError, match=r"mapstools.googleapis.com \(GOOGLE_MAPS_API_KEY\)"):
+    with pytest.raises(McpOAuthError) as caught:
         gateway.protect_payload({"env_connectors": ["mapstools.googleapis.com"]}, managed_key="upstream-secret")
+    assert caught.value.code == "mcp_connection.unknown_connector"
     assert gateway._connectors == {}
 
 

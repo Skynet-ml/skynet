@@ -30,7 +30,7 @@ from .runtime import BudgetRuntime, PaidResult
 
 CONNECTOR_PRICE_VERSION = "env-connectors-2026-11-06"
 CONNECTOR_COST_KIND = "tool"
-# Payload key listing the catalog connectors, by host, a run asks for.
+# Payload key listing the owner's OAuth MCP connections, by name, that a run asks for.
 CONNECTORS_KEY = "env_connectors"
 # Payload key carrying each connector's scoped route; only the parent gateway writes it.
 CONNECTOR_ROUTES_KEY = "_skynet_connector_routes"
@@ -134,32 +134,6 @@ def _connector_key(connector: Connector) -> str | None:
 def offered_connectors() -> tuple[str, ...]:
     """Return the hosts of the catalog connectors whose provider key is configured."""
     return tuple(host for host, connector in CONNECTORS.items() if _connector_key(connector))
-
-
-def require_connectors(hosts: Any) -> tuple[Connector, ...]:
-    """Check a requested connector list against the catalog and the configured keys.
-
-    Args:
-        hosts: Connector hosts from the run's tool list.
-
-    Returns:
-        The distinct requested catalog entries, in request order.
-
-    Raises:
-        ValueError: When the list is malformed, names a host outside the catalog,
-            or a connector has no key in config. The message names the host.
-    """
-    if not isinstance(hosts, list) or not all(isinstance(host, str) for host in hosts):
-        raise ValueError("The connector list must be a list of connector hosts.")
-    unknown = sorted({host for host in hosts if host not in CONNECTORS})
-    if unknown:
-        raise ValueError(f"Unknown connector: {', '.join(unknown)}.")
-    selected = tuple(CONNECTORS[host] for host in dict.fromkeys(hosts))
-    missing = [connector for connector in selected if _connector_key(connector) is None]
-    if missing:
-        details = ", ".join(f"{connector.host} ({connector.key_env})" for connector in missing)
-        raise ValueError(f"These connectors have no key in config: {details}.")
-    return selected
 
 
 def connector_endpoint(connector: Connector) -> tuple[str, dict[str, str]]:
