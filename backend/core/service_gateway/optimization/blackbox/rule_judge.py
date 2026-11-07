@@ -15,15 +15,18 @@ agent's recent steps against them during the run:
   the run log.
 
 The hook never sees the metric, the scorer, its data or its labels, so it
-cannot leak them to the agent or judge by the score. The final judge that
-scored rejected versions 0 is gone (SKY-349): a hint is enough, and a
-wrong rejection lost real improvements.
+cannot leak them to the agent or judge by the score. A step that runs the
+scoring script or carries a score reply is withheld before it reaches the
+hook, because the reply holds the score and the scorer's feedback. The final
+judge that scored rejected versions 0 is gone (SKY-349): a hint is enough,
+and a wrong rejection lost real improvements.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -49,6 +52,11 @@ _MAX_ACTION_CHARS = 2_000
 # One step is the agent's latest tool call and its result: the last two turns
 # of a model call. Older turns were already seen by earlier calls.
 _STEP_TURNS = 2
+_EVAL_SCRIPT = "eval.sh"
+# A score reply holds "score" and "info"; ``info`` carries the scorer's
+# feedback. The keys can be JSON-escaped once or more inside a turn.
+_SCORE_REPLY_KEYS = tuple(re.compile(rf'\\*"{key}\\*"\s*:') for key in ("score", "info"))
+WITHHELD_STEP = "The agent ran the scoring script. The call and its reply are withheld."
 
 EVENT_BLOCK = RULE_BLOCK_EVENT
 EVENT_NOTE = "rule.note"
@@ -77,7 +85,9 @@ def watch_prompt(intent: str | None, rules: Sequence[str], steps: Sequence[str])
         steps: The agent's recent steps, oldest first.
 
     Returns:
-        The prompt. It holds no metric, scorer, data or labels.
+        The prompt. It holds no metric, scorer, data or labels. The steps
+        hold no score or scorer feedback when they come from
+        :func:`describe_model_call`.
     """
     rules_text = "\n".join(f"{label}: {rule}" for label, rule in numbered_rules(rules)) or "(no rules)"
     intent_text = (intent or "").strip()[:_MAX_INTENT_CHARS] or "(no intent given)"
@@ -98,14 +108,17 @@ def describe_model_call(body: Mapping[str, Any]) -> str:
 
     Each call the coding agent makes carries its latest tool call and its
     result as its last turns, in any of the chat, messages or responses
-    formats. The system prompt and instructions are left out.
+    formats. The system prompt and instructions are left out. A step that
+    runs the scoring script, or that carries a score reply, becomes
+    :data:`WITHHELD_STEP`, so the hook never reads a score or the scorer's
+    feedback.
 
     Args:
         body: The model request the agent sent.
 
     Returns:
         The end of the call's latest turns as JSON text, at most
-        ``_MAX_ACTION_CHARS`` characters.
+        ``_MAX_ACTION_CHARS`` characters, or :data:`WITHHELD_STEP`.
     """
     turns = body.get("messages") if isinstance(body.get("messages"), list) else body.get("input")
     if isinstance(turns, str):
@@ -115,7 +128,10 @@ def describe_model_call(body: Mapping[str, Any]) -> str:
         latest = latest[-_STEP_TURNS:]
     else:
         latest = []
-    return json.dumps(latest, ensure_ascii=False, default=str)[-_MAX_ACTION_CHARS:]
+    text = json.dumps(latest, ensure_ascii=False, default=str)
+    if _EVAL_SCRIPT in text or all(key.search(text) for key in _SCORE_REPLY_KEYS):
+        return WITHHELD_STEP
+    return text[-_MAX_ACTION_CHARS:]
 
 
 def run_log_emitter(owner: str) -> Emit:

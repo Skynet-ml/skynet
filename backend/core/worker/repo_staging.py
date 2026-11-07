@@ -349,15 +349,22 @@ def _rule_watch_setting(payload: dict[str, Any]) -> tuple[bool, str, float]:
     Raises:
         ConstraintsError: When the setting is not an object of the expected types.
     """
-    setting = payload.get(RULE_WATCH_KEY) or {}
+    # JSON null means "not set", for the whole setting and for the model. Any
+    # other falsy value is a mistake, so it must not fall back to the defaults.
+    setting = payload.get(RULE_WATCH_KEY)
+    if setting is None:
+        setting = {}
     if not isinstance(setting, dict):
         setting = {"enabled": None}
     enabled = setting.get("enabled", settings.rule_watch_enabled)
-    model = setting.get("model") or settings.rule_watch_model
+    model = setting.get("model")
+    model_ok = model is None or (isinstance(model, str) and bool(model.strip()))
+    if model is None:
+        model = settings.rule_watch_model
     threshold = setting.get("threshold", settings.rule_watch_threshold)
     if (
         not isinstance(enabled, bool)
-        or not isinstance(model, str)
+        or not model_ok
         or isinstance(threshold, bool)
         or not isinstance(threshold, (int, float))
         or not 0 <= threshold <= 1

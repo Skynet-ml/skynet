@@ -32,6 +32,7 @@ from core.service_gateway.optimization.blackbox.rule_judge import (
     JUDGE_ANSWER_TOKENS,
     JUDGE_REASONING_TOKENS,
     WATCH_EVERY_ACTIONS,
+    WITHHELD_STEP,
 )
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult, SandboxSpec
 from core.worker import repo_staging
@@ -608,6 +609,43 @@ def test_a_run_that_turns_the_watch_on_binds_one_managed_hook_billed_to_the_run(
     staged.close_scorers()
 
 
+def test_the_watch_never_reads_a_score_or_the_scorers_feedback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An eval.sh call and its reply carry the score and feedback, so the hook gets a withheld step instead."""
+    monkeypatch.setattr(repo_staging, "agent_model_id", lambda configured="": "vendor/fast")
+    payload, staged = _ruled_binding(tmp_path, ("Do not hardcode answers.",), intent="Find places.", watch=True)
+    gateway = _Gateway()
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1", managed_key="managed-key")
+    (observer,) = gateway.observers["optimization"]
+    reply = json.dumps({"score": 0.4217, "info": {"feedback": "FEEDBACK-SECRET: case 3 names the wrong city"}})
+
+    for index in range(WATCH_EVERY_ACTIONS - 1):
+        observer({"messages": [{"role": "user", "content": f"edit {index}"}]})
+    observer(
+        {
+            "messages": [
+                {"role": "user", "content": "edit 13"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"function": {"name": "shell", "arguments": json.dumps({"command": "./eval.sh case-3"})}}
+                    ],
+                },
+                {"role": "tool", "content": reply},
+            ]
+        }
+    )
+    assert gateway.watched.wait(5)
+
+    (_model, prompt) = gateway.judged[0]
+    assert "edit 12" in prompt
+    assert WITHHELD_STEP in prompt
+    assert "0.4217" not in prompt
+    assert "FEEDBACK-SECRET" not in prompt
+    assert "eval.sh" not in prompt
+    staged.close_scorers()
+
+
 def test_the_watch_is_off_by_default_and_costs_nothing(tmp_path: Path) -> None:
     """Rules alone register no model and observe no agent call unless the run turns the watch on."""
     payload, staged = _ruled_binding(tmp_path, ("Do not hardcode answers.",), intent="Find places.")
@@ -653,7 +691,13 @@ def test_the_watch_setting_takes_the_runs_values() -> None:
     [
         True,
         "on",
+        False,
+        0,
+        [],
+        "",
         {"enabled": "yes"},
+        {"enabled": True, "model": ""},
+        {"enabled": True, "model": 0},
         {"enabled": True, "model": 3},
         {"enabled": True, "threshold": 1.5},
         {"enabled": True, "threshold": -0.1},
@@ -1048,6 +1092,16 @@ def test_publishing_pushes_the_version_and_records_the_pull_request(
     monkeypatch.setattr(repo_staging, "push_version", lambda *args: pushed.append(args))
 
     def fake_open(token: str, repository: str, **fields: Any) -> PublishedChange:
+        """Record the pull request instead of opening it.
+
+        Args:
+            token: The GitHub token.
+            repository: The target repository.
+            fields: The pull request fields.
+
+        Returns:
+            A fixed draft pull request.
+        """
         opened.append({"token": token, "repository": repository, **fields})
         return PublishedChange(branch=fields["head"], url="https://github.com/acme/app/pull/7", number=7, draft=True)
 
@@ -1101,6 +1155,14 @@ def test_publishing_failure_is_recorded_not_raised(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(repo_staging, "github_token", lambda engine, username: "tok")
 
     def refuse(*_args: Any) -> None:
+        """Fail the push the way GitHub does.
+
+        Args:
+            _args: The push arguments, ignored.
+
+        Raises:
+            RepoPublishError: Always.
+        """
         raise RepoPublishError("Could not push the branch: git push failed: denied")
 
     monkeypatch.setattr(repo_staging, "push_version", refuse)

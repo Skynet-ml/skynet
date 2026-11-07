@@ -18,6 +18,7 @@ from ..rule_judge import (
     EVENT_VERDICT,
     ILLEGAL_ACTION_MESSAGE,
     WATCH_EVERY_ACTIONS,
+    WITHHELD_STEP,
     RuleJudge,
     describe_model_call,
     run_log_emitter,
@@ -332,3 +333,63 @@ def test_a_step_keeps_only_the_latest_tool_call_and_its_result() -> None:
     assert "CALL" in step
     assert "RESULT" in step
     assert "FIRST" not in step
+
+
+_SCORE_REPLY = json.dumps({"score": 0.4217, "info": {"feedback": "FEEDBACK-SECRET: case 3 is wrong"}})
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"function": {"name": "shell", "arguments": '{"command": "./eval.sh case-3"}'}}],
+                },
+                {"role": "tool", "content": _SCORE_REPLY},
+            ]
+        },
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "name": "bash", "input": {"command": "./eval.sh"}}],
+                },
+                {"role": "user", "content": [{"type": "tool_result", "content": _SCORE_REPLY}]},
+            ]
+        },
+        {
+            "input": [
+                {"type": "function_call", "name": "shell", "arguments": '{"cmd": ["bash", "-lc", "./eval.sh"]}'},
+                {"type": "function_call_output", "output": _SCORE_REPLY},
+            ]
+        },
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"function": {"name": "shell", "arguments": "make score"}}],
+                },
+                {"role": "tool", "content": _SCORE_REPLY},
+            ]
+        },
+    ],
+)
+def test_a_scoring_step_is_withheld_from_the_hook(body: dict[str, Any]) -> None:
+    """An eval.sh call or a score reply never reaches the hook, so it cannot read the score or the feedback."""
+    step = describe_model_call(body)
+    prompt = watch_prompt(_INTENT, _RULES, [step])
+
+    assert step == WITHHELD_STEP
+    assert "0.4217" not in prompt
+    assert "FEEDBACK-SECRET" not in prompt
+
+
+def test_an_ordinary_result_that_mentions_a_score_still_reaches_the_hook() -> None:
+    """Only a score reply is withheld; a test run that prints the word "score" is ordinary work."""
+    body = {"messages": [{"role": "tool", "content": "tests/test_score.py::test_score PASSED"}]}
+
+    assert "test_score PASSED" in describe_model_call(body)
