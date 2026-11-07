@@ -24,7 +24,8 @@ full PR, review and merge procedure.
   the same time.
 - Each agent runs at most one headless browser at a time and closes it when
   done. Prefer the cloud preview (AWS). Start a local dev server only when
-  there is no other way.
+  there is no other way. For a visual-only change, render the frontend
+  locally (section 5).
 
 ### 1a. Fix bugs locally, deploy once (MANDATORY)
 
@@ -37,7 +38,8 @@ bugs before you push. Follow this order for every PR:
    example, two subagents). Verify each finding with a failing test, then
    fix it. Repeat until a review finds nothing new.
 3. Push once. Let CI, the preview build and the automated review gate run.
-4. Run the acceptance checks on the PR preview.
+4. Run the acceptance checks on the PR preview. A visual-only change uses
+   section 5 instead.
 5. Capture the After evidence last, on the final commit.
 
 If the review gate or the acceptance checks find a bug, fix all findings
@@ -149,7 +151,11 @@ for review until the evidence is there.
   evidence keeps the PR draft. An infrastructure failure is a blocker, not a
   pass.
 - Documentation-only work with no runtime effect may skip staging acceptance.
-  Explain that exemption in the description. The Opus 5.5 review must approve
+  Explain that exemption in the description.
+- A visual-only change with no app logic under test (section 5) may skip the
+  preview acceptance checks and the served-commit check. Its simulated
+  renders are the acceptance evidence. Explain that exemption in the
+  description. The Opus 5.5 review must approve
   the staging evidence, the visual-only simulated-render evidence, the
   costly-flow alternative or the documentation exemption. A changed review policy cancels earlier approval.
 
