@@ -83,6 +83,26 @@ def test_repo_run_is_stored_with_its_target(client_and_store: tuple[Any, _FakeJo
     assert body["module_name"] == BLACKBOX_MODULE_NAME
 
 
+def test_repo_run_keeps_its_hardening_job_id(client_and_store: tuple[Any, _FakeJobStore]) -> None:
+    """The setup's hardening job id reaches the stored payload, where the publish reads it (SKY-373)."""
+    client, store = client_and_store
+
+    resp = client.post("/blackbox/run", json=repo_payload(hardening_job_id="hardening-1"))
+
+    assert resp.status_code == 201, resp.json()
+    assert store._jobs[resp.json()["optimization_id"]]["payload"]["hardening_job_id"] == "hardening-1"
+
+
+def test_repo_run_without_a_hardening_job_stores_none(client_and_store: tuple[Any, _FakeJobStore]) -> None:
+    """A run with no hardening job submits as before, with no job id."""
+    client, store = client_and_store
+
+    resp = client.post("/blackbox/run", json=repo_payload())
+
+    assert resp.status_code == 201, resp.json()
+    assert store._jobs[resp.json()["optimization_id"]]["payload"]["hardening_job_id"] is None
+
+
 def test_non_repository_target_is_rejected(client_and_store: tuple[Any, _FakeJobStore]) -> None:
     """Text targets submit to ``/optimize``; this route turns them away."""
     client, store = client_and_store

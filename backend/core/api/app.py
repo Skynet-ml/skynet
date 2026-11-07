@@ -54,6 +54,7 @@ from ..billing import (
     warn_if_local_key_uncapped,
 )
 from ..billing.data_policy import configure_data_policy
+from ..billing.mcp_oauth_client import configure_mcp_connections
 from ..brand import APP_NAME
 from ..config import LOCAL_MODE_LOOPBACK_HOSTS, settings
 from ..connectors.registry import oauth_config_problems
@@ -127,6 +128,7 @@ from .routers.local_hosted_link import create_local_hosted_link_router
 from .routers.local_hosted_proxy import create_local_hosted_proxy_router
 from .routers.local_notifications import create_local_notifications_router
 from .routers.local_runtime import create_local_runtime_router
+from .routers.mcp_connections import create_mcp_connections_router
 from .routers.mcp_oauth import create_mcp_oauth_router
 from .routers.mcp_probe import create_mcp_probe_router
 from .routers.model_privacy import create_model_privacy_router
@@ -742,6 +744,7 @@ def create_app(
     job_store = get_job_store()
     configure_notification_preferences(job_store.engine)
     configure_data_policy(job_store.engine)
+    configure_mcp_connections(job_store.engine)
 
     worker: BackgroundWorker | None = None
     queue_metrics_refresher = None
@@ -1389,6 +1392,7 @@ def create_app(
     app.include_router(create_shared_with_me_router(job_store=job_store), tags=["Folders"])
     app.include_router(create_continuous_router(job_store=job_store), tags=["Optimizations"])
     app.include_router(create_connectors_router(job_store=job_store), tags=["Connectors"])
+    app.include_router(create_mcp_connections_router(), tags=["Connectors"])
     app.include_router(create_saved_secrets_router(job_store=job_store), tags=["Settings"])
     app.include_router(create_tagging_session_router(job_store=job_store), tags=["Optimizations"])
     app.include_router(create_tagging_session_share_router(job_store=job_store), tags=["Optimizations"])

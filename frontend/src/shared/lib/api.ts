@@ -3655,6 +3655,14 @@ export interface McpProbeResponse {
   error: string | null;
 }
 
+/** Finish an MCP server sign-in with the state and code the callback passed in the URL fragment. */
+export function finishMcpConnection(body: { state: string; code: string }) {
+  return request<{ name: string }>("/mcp/connections/finish", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 /** Check that a live MCP server answers and list its tools (wizard preflight). */
 export function probeMcp(payload: { mcp_url: string; auth_header?: string }) {
   return request<McpProbeResponse>("/mcp/probe", {
