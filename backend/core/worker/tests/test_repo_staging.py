@@ -1501,9 +1501,10 @@ def test_staging_keeps_the_services_each_role_lists(monkeypatch: pytest.MonkeyPa
 def test_staging_keeps_the_run_entry_and_its_services(monkeypatch: pytest.MonkeyPatch) -> None:
     """The [run] entry, its timeout and the services it lists reach the staged run (E38)."""
     files = {
+        **_FILES,
         "optimize.toml": _CONSTRAINTS
         + '\n[services.judge]\nsecrets = ["JUDGE_KEY"]\nurl = "https://judge.example.com/v1"\n'
-        + '\n[run]\nentry = "src/geocode/app.py:main"\ntimeout = 12\nservices = ["judge"]\n'
+        + '\n[run]\nentry = "src/geocode/app.py:main"\ntimeout = 12\nservices = ["judge"]\n',
     }
     _, staged = _stage_with(files, monkeypatch)
     try:
