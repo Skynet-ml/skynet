@@ -134,6 +134,9 @@ class BlackboxBudget(BaseModel):
 REPO_SECRET_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"
 REPO_NAME_PATTERN = r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$"
 REPO_COMMIT_PATTERN = r"^[0-9a-f]{40}$"
+# An exact host, or ``*.`` and a suffix of two or more labels: ``*.com``
+# would let a secret go to any host of a top-level domain.
+REPO_SECRET_HOST_PATTERN = re.compile(r"^(\*\.)?[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$")
 
 
 # One environment variable a repository needs to build or score. ``value`` is
@@ -148,6 +151,32 @@ class BlackboxRepoSecret(BaseModel):
     saved_secret_id: str | None = Field(default=None, min_length=1, max_length=64)
     credential_ref: str | None = Field(default=None, min_length=1, max_length=64)
     credential_revision: int | None = Field(default=None, ge=1)
+    # The hosts this secret may go to (SKY-381 E52): an exact host or
+    # ``*.suffix``. The run, not the repository, sets them, so a shared file
+    # cannot send the secret to another host. Empty means no host, and the
+    # setup check fails for a user-bound secret that a url uses.
+    allowed_hosts: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _clean_allowed_hosts(cls, hosts: list[str]) -> list[str]:
+        """Normalize each allowed host and refuse one that is not a host or ``*.suffix``.
+
+        Args:
+            hosts: The hosts as given.
+
+        Returns:
+            The lower-case hosts without a trailing dot, in order, without repeats.
+
+        Raises:
+            ValueError: When an entry is not an exact host or ``*.`` and a
+                suffix of two or more labels.
+        """
+        cleaned = [host.strip().rstrip(".").lower() for host in hosts]
+        for host in cleaned:
+            if len(host) > 253 or not REPO_SECRET_HOST_PATTERN.match(host):
+                raise ValueError(f"Allowed host '{host}' must be a host such as api.example.com, or *.example.com.")
+        return list(dict.fromkeys(cleaned))
 
     @model_validator(mode="after")
     def _ensure_one_source(self) -> BlackboxRepoSecret:

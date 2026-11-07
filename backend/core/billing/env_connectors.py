@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -380,6 +380,21 @@ def _escaped_forms(fragment: str) -> set[str]:
     return {escaped, escaped.replace("/", "\\/"), html_safe, html_safe.replace("/", "\\/")}
 
 
+def host_allowed(host: str, allowed: Collection[str]) -> bool:
+    """Tell whether a run lets a secret go to ``host`` (E52).
+
+    Args:
+        host: The lower-case host of the url that receives the secret.
+        allowed: The secret's ``allowed_hosts``: exact hosts, or ``*.suffix``,
+            which matches each host below the suffix but not the suffix itself.
+
+    Returns:
+        Whether one entry matches; ``False`` for an empty list.
+    """
+    host = host.rstrip(".").lower()
+    return any(host == entry or (entry.startswith("*.") and host.endswith(entry[1:])) for entry in allowed)
+
+
 def relay_request(
     *,
     url: str,
@@ -388,6 +403,7 @@ def relay_request(
     user_secrets: Mapping[str, str],
     bindings: Mapping[str, str],
     secret_hosts: Mapping[str, str],
+    allowed_hosts: Mapping[str, Collection[str]],
     send: Callable[[str, dict[str, str], bytes], bytes],
     runtime: BudgetRuntime | None = None,
 ) -> bytes:
@@ -407,6 +423,9 @@ def relay_request(
         bindings: ``user`` or ``managed`` for each secret name.
         secret_hosts: The one host each secret may go to, from
             :attr:`RepoConstraints.secret_hosts`.
+        allowed_hosts: Each user secret's ``allowed_hosts`` from the run. The
+            repository's files cannot widen them; a managed secret goes only
+            to its catalog endpoint.
         send: Sends the filled request and returns the answer body.
         runtime: The run budget; required when a managed secret is used.
 
@@ -424,6 +443,8 @@ def relay_request(
     for name in names:
         if secret_hosts.get(name) != host:
             raise ValueError(f"${{{name}}} may not go to {host}.")
+        if bindings.get(name) != MANAGED_BINDING and not host_allowed(host, allowed_hosts.get(name, ())):
+            raise ValueError(f"${{{name}}} may not go to {host}: the run does not allow that host.")
     values = resolve_secrets(names, host, user_secrets, bindings)
     filled = {key: _fill(value, values) for key, value in headers.items()}
     fragments = {fragment for value in values.values() for fragment in credential_fragments(value)}

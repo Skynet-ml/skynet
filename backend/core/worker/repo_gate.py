@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from ..billing.env_connectors import CONNECTORS, MANAGED_BINDING, managed_key_host
+from ..billing.env_connectors import CONNECTORS, MANAGED_BINDING, host_allowed, managed_key_host
 from ..exceptions import ServiceError
 from ..i18n_en import t_en
 from ..i18n_keys import I18nKey
@@ -87,6 +87,7 @@ def check_repository(
     *,
     place: Place,
     bindings: Mapping[str, str] | None = None,
+    allowed_hosts: Mapping[str, Collection[str]] | None = None,
 ) -> list[GateFailure]:
     """List every reason the repository's ``optimize.toml`` stops this run.
 
@@ -98,6 +99,8 @@ def check_repository(
         place: Where the run's sandbox runs.
         bindings: Each ``${NAME}``'s binding, ``user`` or ``managed`` (E50);
             a name it does not hold binds to the user's secret.
+        allowed_hosts: Each user secret's ``allowed_hosts`` (E52); a name it
+            does not hold may go to no host.
 
     Returns:
         The failures, in file order. An empty list means the run may start.
@@ -115,15 +118,20 @@ def check_repository(
         for kind, key in _set_keys(raw, constraints.targets, constraints.services)
         if key in specific or kind not in ENFORCED[place]
     ]
-    return failures + _secret_failures(constraints, secret_names, bindings or {}, place)
+    return failures + _secret_failures(constraints, secret_names, bindings or {}, allowed_hosts or {}, place)
 
 
 def _secret_failures(
-    constraints: RepoConstraints, secret_names: Collection[str], bindings: Mapping[str, str], place: Place
+    constraints: RepoConstraints,
+    secret_names: Collection[str],
+    bindings: Mapping[str, str],
+    allowed_hosts: Mapping[str, Collection[str]],
+    place: Place,
 ) -> list[GateFailure]:
-    """List each ``${NAME}`` that cannot be filled at run start (E50, E53).
+    """List each ``${NAME}`` that cannot be filled at run start (E50, E52, E53).
 
-    A user-bound name needs a secret in the run. A managed name needs a host
+    A user-bound name needs a secret in the run, and the host that receives
+    it must be on that secret's ``allowed_hosts``. A managed name needs a host
     in the connector catalog for which Skynet holds a key. A secret that only
     a stdio server uses has no host, and a Skynet key never enters a box, so
     such a name cannot be managed.
@@ -132,6 +140,7 @@ def _secret_failures(
         constraints: The file with each role's MCP servers filled.
         secret_names: Names of the secrets this run has; never values.
         bindings: Each name's binding; a missing name means ``user``.
+        allowed_hosts: Each user secret's allowed hosts; a missing name allows none.
         place: Where the run's sandbox runs.
 
     Returns:
@@ -157,6 +166,9 @@ def _secret_failures(
         seen.add(name)
         if bindings.get(name) != MANAGED_BINDING:
             if name in secret_names:
+                failure = _host_failure(name, hosts.get(name, ""), allowed_hosts.get(name, ()), setting, place)
+                if failure is not None:
+                    failures.append(failure)
                 continue
             if mcp_path is None:
                 failure = _failure(
@@ -187,6 +199,34 @@ def _secret_failures(
                 )
             )
     return failures
+
+
+def _host_failure(name: str, host: str, allowed: Collection[str], setting: str, place: Place) -> GateFailure | None:
+    """Refuse a user secret that goes to a host its ``allowed_hosts`` does not list (E52).
+
+    Args:
+        name: The secret's name.
+        host: The one host that receives the secret; empty when only a stdio
+            server uses it, so the secret never leaves the box over the relay.
+        allowed: The secret's allowed hosts.
+        setting: The ``optimize.toml`` setting that uses the secret.
+        place: Where the run's sandbox runs.
+
+    Returns:
+        The failure, or ``None`` when the host is allowed or there is none.
+    """
+    if not host or host_allowed(host, allowed):
+        return None
+    if not allowed:
+        return _failure(f"{setting} secrets", place, I18nKey.REPO_GATE_SECRET_HOST_UNLISTED, secret=name, host=host)
+    return _failure(
+        f"{setting} secrets",
+        place,
+        I18nKey.REPO_GATE_SECRET_HOST_NOT_ALLOWED,
+        secret=name,
+        host=host,
+        allowed=", ".join(allowed),
+    )
 
 
 def check_hidden(

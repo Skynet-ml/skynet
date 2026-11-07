@@ -259,6 +259,8 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "repo_gate.missing_secret": "The service {service} in optimize.toml needs the secret {secret}, but this run has no secret with that name. Add the secret to the run or remove the name from the file.",
     "repo_gate.unknown_connector": "The service {service} in optimize.toml is not a connector. Use one of these names: {known}.",
     "repo_gate.missing_mcp_secret": "The MCP server {server} in {path} needs the secret {secret}, but this run has no secret with that name. Add the secret to the run.",
+    "repo_gate.secret_host_not_allowed": "The secret {secret} may go only to {allowed}, but the repository sends it to {host}. Add {host} to the allowed hosts of {secret} in the run, or change the url.",
+    "repo_gate.secret_host_unlisted": "The secret {secret} has no allowed hosts, but the repository sends it to {host}. Add {host} to the allowed hosts of {secret} in the run.",
     "repo_gate.managed_secret_unavailable": f"The secret {{secret}} is bound to a {APP_NAME} key, but {APP_NAME} has no key for {{host}}. Bind the secret to user, or use one of these hosts, which have a {APP_NAME} key: {{known}}.",
     "repo_gate.proposer_hosts_unsupported": "optimize.toml sets [proposer] network to {hosts}. Allowed hosts for the proposer are not supported yet. Remove the list to run.",
     "serve.subscription_model_hosted": (

@@ -376,6 +376,21 @@ def resolve_repo_secrets(
     return values
 
 
+def repo_secret_allowed_hosts(payload: dict[str, Any]) -> dict[str, tuple[str, ...]]:
+    """Read each repository secret's ``allowed_hosts`` before staging empties the list (E52).
+
+    Args:
+        payload: Black-box run payload.
+
+    Returns:
+        Secret name to its allowed hosts; empty without a repository target.
+    """
+    return {
+        str(entry.get("name") or ""): tuple(str(host) for host in entry.get("allowed_hosts") or ())
+        for entry in _repo_secrets(payload)[1]
+    }
+
+
 def _scrubbable_model_configs(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Collect every model configuration whose arbitrary extras cross a trust boundary.
 

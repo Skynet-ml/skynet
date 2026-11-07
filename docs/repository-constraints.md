@@ -118,6 +118,13 @@ mcp = "eval/.mcp.json"
   that says to move each name into `headers`.
 - Each secret goes to one host only: the host of the `url` that uses it. A
   file that sends the same `${NAME}` to two hosts fails.
+- The run, not the repository, says where each user secret may go. Each
+  secret in `target.repo.secrets` has `allowed_hosts`: up to 20 entries, each
+  an exact host (`api.example.com`) or a suffix (`*.example.com`, which
+  matches `eu.api.example.com` but not `example.com`). A `[services]` url and
+  an MCP server url must both use a host on the list. An empty or missing
+  list allows no host, so a shared file cannot send your key to a host you
+  did not choose. A secret that only a stdio server uses needs no host.
 - Each `${NAME}` binds to `user` (the user's own secret, with no Skynet fee)
   or `managed` (Skynet's key, metered for each call). The run sets this in
   `target.repo.secret_bindings`; a name it does not list is `user`. Managed
@@ -125,7 +132,9 @@ mcp = "eval/.mcp.json"
   `https://mapstools.googleapis.com/mcp`, and only when Skynet holds a key
   for that host. A stdio secret cannot be managed.
 - The setup check fails before any sandbox starts when a user-bound secret
-  is missing from the run, or when a managed secret has no Skynet key.
+  is missing from the run, when its host is not on its `allowed_hosts`, or
+  when a managed secret has no Skynet key. A managed secret goes only to its
+  catalog host and needs no `allowed_hosts`.
 - The relay removes each filled secret value from the answers it returns.
 - Saved user secrets are encrypted at rest (Fernet) and are decrypted only
   in the trusted parent at run start.

@@ -23,6 +23,7 @@ from core.billing.budgets import BudgetFencedError, BudgetInsufficientError, Bud
 from core.billing.env_connectors import (
     CONNECTORS,
     connector_endpoint,
+    host_allowed,
     offered_connectors,
     relay_request,
     tool_meter,
@@ -366,6 +367,7 @@ def test_relay_fills_user_secret_and_removes_it_from_the_echo(
         user_secrets={"JUDGE_KEY": secret},
         bindings={},
         secret_hosts={"JUDGE_KEY": "api.judge.example"},
+        allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
         send=echo,
         runtime=runtime,
     )
@@ -390,6 +392,7 @@ def test_relay_fills_managed_key_meters_the_call_and_removes_the_key(
         user_secrets={},
         bindings={"GOOGLE_MAPS_KEY": "managed"},
         secret_hosts={"GOOGLE_MAPS_KEY": MAPS},
+        allowed_hosts={},
         send=echo,
         runtime=runtime,
     )
@@ -410,19 +413,55 @@ def test_relay_does_not_meter_a_managed_tools_list(
         user_secrets={},
         bindings={"GOOGLE_MAPS_KEY": "managed"},
         secret_hosts={"GOOGLE_MAPS_KEY": MAPS},
+        allowed_hosts={},
         send=echo,
         runtime=runtime,
     )
     assert _operations(runtime) == []
 
 
+JUDGE = {"KEY": ["api.judge.example"]}
+
+
 @pytest.mark.parametrize(
-    ("url", "user_secrets", "bindings", "secret_hosts", "message"),
+    ("host", "allowed", "expected"),
     [
-        ("https://api.judge.example/v1", {}, {}, {"KEY": "api.judge.example"}, r"\$\{KEY\} has no value"),
-        ("https://api.judge.example/v1", {}, {"KEY": "managed"}, {"KEY": "api.judge.example"}, "not in the connector"),
-        ("https://evil.example/v1", {"KEY": "v"}, {}, {"KEY": "api.judge.example"}, "may not go to evil.example"),
-        (f"https://{MAPS}/mcp", {}, {"KEY": "managed"}, {"KEY": MAPS}, "Skynet has no key"),
+        ("api.judge.example", ["api.judge.example"], True),
+        ("eu.api.judge.example", ["*.judge.example"], True),
+        ("judge.example", ["*.judge.example"], False),
+        ("evil-judge.example", ["*.judge.example"], False),
+        ("api.judge.example", [], False),
+        ("API.Judge.Example.", ["api.judge.example"], True),
+    ],
+)
+def test_host_allowed_matches_an_exact_host_or_a_suffix(host: str, allowed: list[str], expected: bool) -> None:
+    """Match an exact host, or a host below a ``*.`` suffix but not the suffix itself; an empty list allows none."""
+    assert host_allowed(host, allowed) is expected
+
+
+@pytest.mark.parametrize(
+    ("url", "user_secrets", "bindings", "secret_hosts", "allowed_hosts", "message"),
+    [
+        ("https://api.judge.example/v1", {}, {}, {"KEY": "api.judge.example"}, JUDGE, r"\$\{KEY\} has no value"),
+        (
+            "https://api.judge.example/v1",
+            {},
+            {"KEY": "managed"},
+            {"KEY": "api.judge.example"},
+            {},
+            "not in the connector",
+        ),
+        (
+            "https://evil.example/v1",
+            {"KEY": "v"},
+            {},
+            {"KEY": "api.judge.example"},
+            JUDGE,
+            "may not go to evil.example",
+        ),
+        ("https://evil.example/v1", {"KEY": "v"}, {}, {"KEY": "evil.example"}, JUDGE, "does not allow that host"),
+        ("https://api.judge.example/v1", {"KEY": "v"}, {}, {"KEY": "api.judge.example"}, {}, "does not allow"),
+        (f"https://{MAPS}/mcp", {}, {"KEY": "managed"}, {"KEY": MAPS}, {}, "Skynet has no key"),
     ],
 )
 def test_relay_refuses_before_sending(
@@ -431,9 +470,10 @@ def test_relay_refuses_before_sending(
     user_secrets: dict[str, str],
     bindings: dict[str, str],
     secret_hosts: dict[str, str],
+    allowed_hosts: dict[str, list[str]],
     message: str,
 ) -> None:
-    """Refuse a missing value, a managed key for a host outside the catalog or with no key, and a wrong host."""
+    """Refuse a missing value, a managed key outside the catalog or with no key, a wrong host, and a host the run does not allow."""
     monkeypatch.setattr(settings, "google_maps_api_key", None)
     with pytest.raises(ValueError, match=message):
         relay_request(
@@ -443,6 +483,7 @@ def test_relay_refuses_before_sending(
             user_secrets=user_secrets,
             bindings=bindings,
             secret_hosts=secret_hosts,
+            allowed_hosts=allowed_hosts,
             send=lambda *_args: pytest.fail("The relay must not send."),
         )
 
@@ -457,6 +498,7 @@ def test_relay_needs_a_budget_for_a_managed_tool_call() -> None:
             user_secrets={},
             bindings={"GOOGLE_MAPS_KEY": "managed"},
             secret_hosts={"GOOGLE_MAPS_KEY": MAPS},
+            allowed_hosts={},
             send=lambda *_args: pytest.fail("The relay must not send."),
         )
 
@@ -484,6 +526,7 @@ def test_relay_refuses_a_managed_call_that_the_meter_cannot_read(
             user_secrets={},
             bindings={"GOOGLE_MAPS_KEY": "managed"},
             secret_hosts={"GOOGLE_MAPS_KEY": MAPS},
+            allowed_hosts={},
             send=lambda *_args: pytest.fail("The relay must not send."),
             runtime=runtime,
         )
@@ -506,7 +549,23 @@ def test_relay_removes_a_json_escaped_echo_of_the_secret() -> None:
         user_secrets={"JUDGE_KEY": secret},
         bindings={},
         secret_hosts={"JUDGE_KEY": "api.judge.example"},
+        allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
         send=lambda *_args: ('{"echo": ["' + '", "'.join(forms) + '"]}').encode(),
     ).decode()
     assert all(form not in answer for form in forms)
     assert json.loads(answer)["echo"] == ["[REDACTED]"] * 3
+
+
+def test_relay_refuses_a_shared_file_that_sends_a_user_key_to_another_host() -> None:
+    """Refuse ``${GOOGLE_MAPS_KEY}`` that a shared file points at a host the user's run does not allow (E52)."""
+    with pytest.raises(ValueError, match=r"may not go to collector\.example"):
+        relay_request(
+            url="https://collector.example/mcp",
+            headers={"X-Goog-Api-Key": "${GOOGLE_MAPS_KEY}"},
+            body=b"{}",
+            user_secrets={"GOOGLE_MAPS_KEY": "user-maps-key"},
+            bindings={},
+            secret_hosts={"GOOGLE_MAPS_KEY": "collector.example"},
+            allowed_hosts={"GOOGLE_MAPS_KEY": [MAPS]},
+            send=lambda *_args: pytest.fail("The relay must not send."),
+        )

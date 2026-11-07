@@ -9,12 +9,13 @@ from typing import Any
 
 import pytest
 from cryptography.fernet import Fernet
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session
 
 from ...config import settings
 from ...connectors.saved_secrets import SavedSecretStore
+from ...models.blackbox import BlackboxRepoSecret
 from ...provider_registry import BYOK_PROVIDER_SLUGS
 from ...storage.models import (
     Base,
@@ -38,6 +39,7 @@ from ..protected_credentials import (
     has_exposed_execution_credentials,
     prepare_protected_credentials,
     protect_execution_credentials,
+    repo_secret_allowed_hosts,
     resolve_current_openrouter_key,
     resolve_execution_credentials,
     resolve_repo_secrets,
@@ -608,3 +610,62 @@ def test_hosted_subscription_model_is_refused(harness: _Harness, monkeypatch: py
 
     with pytest.raises(ValueError, match="only in local mode"):
         prepare_protected_credentials(payload, username="alice", vault=harness.vault)
+
+
+def test_repo_secret_allowed_hosts_reads_each_secret_list() -> None:
+    """Return each secret's allowed hosts, an empty tuple when it has none, and nothing without a repository."""
+    payload = {
+        "target": {
+            "repo": {
+                "repository": "acme/bot",
+                "secrets": [
+                    {"name": "JUDGE_KEY", "allowed_hosts": ["api.judge.example", "*.judge.example"]},
+                    {"name": "OTHER_KEY"},
+                ],
+            }
+        }
+    }
+
+    assert repo_secret_allowed_hosts(payload) == {
+        "JUDGE_KEY": ("api.judge.example", "*.judge.example"),
+        "OTHER_KEY": (),
+    }
+    assert repo_secret_allowed_hosts({"target": {"kind": "prompt"}}) == {}
+
+
+def test_repo_secret_allowed_hosts_survive_vaulting(harness: _Harness) -> None:
+    """Keep each secret's allowed hosts next to its reference, so the setup check can read them (E52)."""
+    vault = ProtectedCredentialVault(engine=harness.engine)
+    binding_id = harness.execution_budget(key="repo-secret-hosts")
+    payload = _repo_payload([{"name": "API_KEY", "value": "inline-api-value", "allowed_hosts": ["api.example.com"]}])
+
+    stored = protect_execution_credentials(payload, username="alice", binding_id=binding_id, vault=vault)
+
+    assert repo_secret_allowed_hosts(stored) == {"API_KEY": ("api.example.com",)}
+
+
+def test_repo_secret_allowed_hosts_are_cleaned() -> None:
+    """Lower-case each host, drop a trailing dot and repeats, and default to no host."""
+    secret = BlackboxRepoSecret(
+        name="API_KEY", value="v", allowed_hosts=[" API.Example.com. ", "api.example.com", "*.Example.com"]
+    )
+
+    assert secret.allowed_hosts == ["api.example.com", "*.example.com"]
+    assert BlackboxRepoSecret(name="API_KEY", value="v").allowed_hosts == []
+
+
+@pytest.mark.parametrize(
+    "hosts",
+    [
+        ["*.com"],
+        ["localhost"],
+        ["https://api.example.com"],
+        ["api.example.com/v1"],
+        ["*.*.example.com"],
+        ["a.example.com"] * 21,
+    ],
+)
+def test_repo_secret_allowed_hosts_refuse_a_bad_entry(hosts: list[str]) -> None:
+    """Refuse a top-level-domain wildcard, a bare name, a url, a path, a double wildcard and more than 20 entries."""
+    with pytest.raises(ValidationError):
+        BlackboxRepoSecret(name="API_KEY", value="v", allowed_hosts=hosts)
