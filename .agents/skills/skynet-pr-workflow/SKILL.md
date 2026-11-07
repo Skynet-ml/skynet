@@ -155,9 +155,10 @@ for review until the evidence is there.
 - A visual-only change with no app logic under test (section 5) may skip the
   preview acceptance checks and the served-commit check. Its simulated
   renders are the acceptance evidence. Explain that exemption in the
-  description. The Opus 5.5 review must approve
-  the staging evidence, the visual-only simulated-render evidence, the
-  costly-flow alternative or the documentation exemption. A changed review policy cancels earlier approval.
+  description.
+- The Opus 5.5 review must approve the staging evidence, the visual-only
+  simulated-render evidence, the costly-flow alternative or the
+  documentation exemption. A changed review policy cancels earlier approval.
 
 ### Real data and costly workflows
 
