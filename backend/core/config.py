@@ -1125,17 +1125,24 @@ class Settings(BaseSettings):
     rule_watch_model: str = Field(
         default="",
         description=(
-            "Model id of the fast judge that watches a repository run's recent "
-            "actions against its plain-language rules. Empty follows the model "
-            "catalog's best-value default."
+            "Model id of the watch hook that reads a repository run's recent "
+            "steps against its intent and plain-language rules. Empty follows "
+            "the model catalog's best-value default. A run may name its own."
         ),
     )
-    rule_judge_model: str = Field(
-        default="",
+
+    # The watch hook defaults (SKY-349); a run's own setting overrides them.
+    rule_watch_enabled: bool = Field(
+        default=False,
+        description="Whether a repository run's watch hook is on when the run does not say.",
+    )
+    rule_watch_threshold: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
         description=(
-            "Model id of the judge that reads each repository version's full diff "
-            "against its plain-language rules before it is scored. Empty follows "
-            "the model catalog's strongest model."
+            "Lowest confidence at which a watch hook verdict other than ok "
+            "warns the agent, when the run does not set its own."
         ),
     )
 

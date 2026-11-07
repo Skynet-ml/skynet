@@ -581,7 +581,7 @@ def test_regression_guard_restores_the_seed(
     assert response.engine_used == BLACKBOX_ENGINE_BEST_OF_N
 
 
-_ILLEGAL_WINS_ON_SCORE_CODE = """
+_OLD_JUDGE_KEY_CODE = """
 def score(candidate, case=None):
     if candidate == "xyz":
         return {"score": 0.0, "feedback": "rule broken", "illegal_approach": {"rule": "r1", "reason": "cheats"}}
@@ -589,10 +589,10 @@ def score(candidate, case=None):
 """
 
 
-def test_regression_guard_refuses_an_illegal_winner_with_a_higher_score(
+def test_a_judge_key_in_side_info_never_changes_the_winner(
     fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A judge-rejected winner never wins, even when its fixed score beats negative legal scores."""
+    """No judge prunes the final selection: an ``illegal_approach`` key is plain side info (SKY-349)."""
     monkeypatch.setattr(
         service_mod,
         "run_strategy",
@@ -603,133 +603,15 @@ def test_regression_guard_refuses_an_illegal_winner_with_a_higher_score(
     )
 
     response = run_blackbox_optimization(
-        _payload(scorer={"kind": "python", "metric_code": _ILLEGAL_WINS_ON_SCORE_CODE}),
+        _payload(scorer={"kind": "python", "metric_code": _OLD_JUDGE_KEY_CODE}),
         artifact_id="job-3b",
         gepa_log_dir_path=str(tmp_path),
     )
 
-    assert response.regression_guard_applied is True
-    assert response.best_candidate == "hello world"
-    assert response.best_score == response.baseline_score == pytest.approx(-3.2)
-
-
-_LEGAL_RUNNER_UP_CODE = """
-def score(candidate, case=None):
-    if candidate == "xyz":
-        return {"score": 0.0, "feedback": "rule broken", "illegal_approach": {"rule": "r1", "reason": "cheats"}}
-    if candidate == "legal-better":
-        return {"score": -2.0, "feedback": "legal improvement"}
-    return {"score": -3.2, "feedback": "legal"}
-"""
-
-
-def test_a_rejected_winner_gives_way_to_the_best_legal_version(
-    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """With negative scores, a judge-rejected winner yields to the best legal version, not the seed."""
-
-    def search(
-        strategy: object, task: object, server: EvalServer, ctx: object, cb: object = None, *, caps: object = None
-    ) -> tuple[Result, list[object]]:
-        """Score a legal improvement and a rejected version, then return the server's top score."""
-        server.evaluate("legal-better")
-        server.evaluate("xyz")
-        return Result(best_candidate=server.best_candidate, best_score=server.best_score, total_evals=server.used), []
-
-    monkeypatch.setattr(service_mod, "run_strategy", search)
-
-    response = run_blackbox_optimization(
-        _payload(scorer={"kind": "python", "metric_code": _LEGAL_RUNNER_UP_CODE}),
-        artifact_id="job-3c",
-        gepa_log_dir_path=str(tmp_path),
-    )
-
     assert response.regression_guard_applied is False
-    assert response.best_candidate == "legal-better"
-    assert response.best_score == pytest.approx(-2.0)
+    assert response.best_candidate == "xyz"
+    assert response.best_score == pytest.approx(0.0)
     assert response.baseline_score == pytest.approx(-3.2)
-
-
-_CRASHING_RUNNER_UP_CODE = """
-def score(candidate, case=None):
-    if candidate == "broken":
-        raise RuntimeError("syntax error in the version")
-    if candidate == "xyz":
-        return {"score": -0.5, "feedback": "rule broken", "illegal_approach": {"rule": "r1", "reason": "cheats"}}
-    if candidate == "legal-better":
-        return {"score": -2.0, "feedback": "legal improvement"}
-    return {"score": -3.2, "feedback": "legal"}
-"""
-
-
-def test_a_version_that_crashed_the_scorer_is_not_the_legal_fallback(
-    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A crashed version's 0.0 floor beats negative legal scores, yet the fallback skips it."""
-
-    def search(
-        strategy: object, task: object, server: EvalServer, ctx: object, cb: object = None, *, caps: object = None
-    ) -> tuple[Result, list[object]]:
-        """Score a legal improvement, a rejected version and a crashing one; return the rejected one."""
-        server.evaluate("legal-better")
-        server.evaluate("xyz")
-        server.evaluate("broken")
-        return Result(best_candidate="xyz", best_score=-0.5, total_evals=server.used), []
-
-    monkeypatch.setattr(service_mod, "run_strategy", search)
-
-    response = run_blackbox_optimization(
-        _payload(scorer={"kind": "python", "metric_code": _CRASHING_RUNNER_UP_CODE}),
-        artifact_id="job-3d",
-        gepa_log_dir_path=str(tmp_path),
-    )
-
-    assert response.regression_guard_applied is False
-    assert response.best_candidate == "legal-better"
-    assert response.best_score == pytest.approx(-2.0)
-
-
-_PARTLY_CRASHING_RUNNER_UP_CODE = """
-def score(candidate, case=None):
-    if candidate == "flaky":
-        if case and case.get("i") == 0:
-            raise IndexError("edge case")
-        return {"score": -1.0, "feedback": "ok"}
-    if candidate == "xyz":
-        return {"score": 0.0, "feedback": "rule broken", "illegal_approach": {"rule": "r1", "reason": "cheats"}}
-    if candidate == "legal-better":
-        return {"score": -2.0, "feedback": "legal improvement"}
-    return {"score": -3.2, "feedback": "legal"}
-"""
-
-
-def test_a_version_that_crashed_on_an_earlier_case_is_not_the_legal_fallback(
-    fake_lm: FakeReflectionLM, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A version that crashed on one case but not the last is still skipped as the fallback."""
-    cases = [{"i": 0}, {"i": 1}]
-
-    def search(
-        strategy: object, task: object, server: EvalServer, ctx: object, cb: object = None, *, caps: object = None
-    ) -> tuple[Result, list[object]]:
-        """Score each version on every case, with the flaky one crashing on the first; return the rejected one."""
-        for case in cases:
-            server.evaluate("legal-better", case)
-            server.evaluate("xyz", case)
-            server.evaluate("flaky", case)
-        return Result(best_candidate="xyz", best_score=0.0, total_evals=server.used), []
-
-    monkeypatch.setattr(service_mod, "run_strategy", search)
-
-    response = run_blackbox_optimization(
-        _payload(scorer={"kind": "python", "metric_code": _PARTLY_CRASHING_RUNNER_UP_CODE}, cases=cases),
-        artifact_id="job-3e",
-        gepa_log_dir_path=str(tmp_path),
-    )
-
-    assert response.regression_guard_applied is False
-    assert response.best_candidate == "legal-better"
-    assert response.best_score == pytest.approx(-2.0)
 
 
 def test_seedless_run_without_cases_scores_the_version_alone(fake_lm: FakeReflectionLM, tmp_path: Path) -> None:

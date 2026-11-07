@@ -22,7 +22,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import dspy
 
@@ -112,7 +112,6 @@ from .protocol import (
 )
 from .registry import ENGINES, EngineCapabilities, get_engine
 from .repo_scorer import REPO_SCORER_URL, SETUP_ALLOWANCE_SECONDS
-from .rule_judge import ILLEGAL_APPROACH_KEY
 from .runner import side_info_json_default
 from .sandbox import current_sandbox_runtime, sandbox_runtime_from_settings
 from .scorer import JobScorer, RemoteScorer, build_scorer
@@ -491,9 +490,6 @@ class FinalRun:
     # Per case, the trusted observation of the run stage (time, model calls,
     # service cost); ``None`` where the scorer does not measure one.
     observations: list[dict[str, Any] | None] = field(default_factory=list)
-    # Set when the rule judge rejected the version: its fixed score can beat
-    # negative legal scores, so selection must check this flag, not the score.
-    illegal: bool = False
 
 
 def _mean_named_scores(side_infos: list[dict[str, Any]]) -> dict[str, BlackboxNamedScore]:
@@ -629,7 +625,6 @@ def _final_run(
         cases=[(score, feedback) for (score, _, _), feedback in zip(scored, feedbacks, strict=True)] if cases else [],
         runs=len(scored),
         observations=[observation for _, _, observation in scored] if cases else [],
-        illegal=any(ILLEGAL_APPROACH_KEY in side_info for side_info in side_infos),
     )
 
 
@@ -736,31 +731,6 @@ def _version_history(server: EvalServer, val_scores: dict[str, float] | None = N
         versions[i].side_info = without_images(versions[i].side_info)
         total -= sizes[i] - len(json.dumps(versions[i].side_info))
     return versions
-
-
-def _best_legal_candidate(server: EvalServer, rejected: Candidate) -> Candidate | None:
-    """Return the highest-scoring version the search scored that the rule judge did not reject.
-
-    Args:
-        server: The run's root eval server.
-        rejected: The winner the rule judge rejected in the final run.
-
-    Returns:
-        That version, or ``None`` when every other scored version was
-        rejected or crashed the scorer.
-    """
-    rejected_key = candidate_key(rejected)
-    # A crashed version has no trustworthy score (a metric error has none at
-    # all), and scoring it again in the final run would fail the job.
-    legal = [
-        record
-        for record in server.history
-        if candidate_key(record.candidate) != rejected_key
-        and ILLEGAL_APPROACH_KEY not in record.side_info
-        and not record.crashed
-    ]
-    # A metric error marks the record crashed, so every legal mean is a number.
-    return max(legal, key=lambda record: cast(float, record.mean_score)).candidate if legal else None
 
 
 def _progress_listener(progress_callback: ProgressCallback | None) -> Callable[[EvalServer, float | None], None]:
@@ -1338,22 +1308,7 @@ def _run_job(
                     concurrency=concurrency,
                 )
             )
-            fallback = _best_legal_candidate(server, best_candidate) if best_val.illegal else None
-            if fallback is not None and fallback != seed_candidate:
-                logger.info("the rule judge rejected the optimized version; trying the best legal version")
-                best_candidate = fallback
-                best_val = _final_run(
-                    scorer,
-                    best_candidate,
-                    select_on,
-                    label="best legal version",
-                    phase=PHASE_FINAL,
-                    concurrency=concurrency,
-                )
-            if baseline_val is not None and best_val.illegal and not baseline_val.illegal:
-                logger.info("the rule judge rejected the optimized version; keeping the starting point")
-                best_candidate, best_val, regression_guard_applied = seed_candidate, baseline_val, True
-            elif baseline_val is not None and best_val.score is None:
+            if baseline_val is not None and best_val.score is None:
                 logger.info("the optimized version has no score (%s); keeping the starting point", METRIC_ERROR)
                 best_candidate, best_val, regression_guard_applied = seed_candidate, baseline_val, True
             elif (

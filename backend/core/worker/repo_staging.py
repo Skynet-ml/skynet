@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..api.model_catalog import agent_model_id, catalog_snapshot, lowest_effort_from_low, strongest_model_id
+from ..api.model_catalog import agent_model_id, catalog_snapshot, lowest_effort_from_low
 from ..billing.model_gateway import ROUTE_KEY
 from ..billing.operation_pricing import ChargePolicy
 from ..billing.protected_credentials import ProtectedCredentialVault, resolve_repo_secrets
@@ -43,7 +43,6 @@ from ..service_gateway.optimization.blackbox.repo_setup import infer_setup_comma
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY, patch_paths, patch_violations
 from ..service_gateway.optimization.blackbox.repo_workspace import RepoWorkspace
 from ..service_gateway.optimization.blackbox.rule_judge import (
-    ILLEGAL_APPROACH_KEY,
     JUDGE_ANSWER_TOKENS,
     JUDGE_REASONING_TOKENS,
     RuleJudge,
@@ -67,6 +66,9 @@ _ENFORCED_FIELDS = ("commit", "editable_paths", "protected_paths", "readonly_pat
 _ENFORCED_DEFAULTS: dict[str, Any] = {"rules": []}
 _SETUP_ANSWER_TOKENS = 1_024
 _JUDGE_ROLE = "judge"
+# The per-run watch hook setting: ``{"enabled", "model", "threshold"}``, each
+# optional; a missing key takes the server default (SKY-349).
+RULE_WATCH_KEY = "rule_watch"
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,7 @@ class StagedRepository:
     protected_paths: tuple[str, ...] = ()
     constrained: bool = False
     rules: tuple[str, ...] = ()
+    intent: str | None = None
 
     def close_scorers(self) -> None:
         """Close the parent's scoring boxes; the gateway still stops any that fail to close."""
@@ -183,6 +186,7 @@ def stage_repository(
         protected_paths=environment.protected_paths,
         constrained=environment.constraints is not None,
         rules=environment.rules,
+        intent=environment.constraints.intent if environment.constraints is not None else None,
     )
 
 
@@ -333,54 +337,84 @@ def _route_asker(gateway: Any, route: dict[str, str]) -> Callable[[str], str | N
     return ask
 
 
-def _rule_judge(staged: StagedRepository, gateway: Any, *, owner_id: str, managed_key: str) -> RuleJudge | None:
-    """Build the judge that enforces the repository's constraints file, when it has one.
-
-    Both judge models run on the managed key through routes only the parent
-    holds, so their cost counts in the run's budget and the guest cannot call them.
+def _rule_watch_setting(payload: dict[str, Any]) -> tuple[bool, str, float]:
+    """Read the run's watch hook setting, with the server defaults for what it leaves out.
 
     Args:
+        payload: Protected run payload.
+
+    Returns:
+        Whether the hook is on, its model, and the confidence at which it warns.
+
+    Raises:
+        ConstraintsError: When the setting is not an object of the expected types.
+    """
+    # JSON null means "not set", for the whole setting and for the model. Any
+    # other falsy value is a mistake, so it must not fall back to the defaults.
+    setting = payload.get(RULE_WATCH_KEY)
+    if setting is None:
+        setting = {}
+    if not isinstance(setting, dict):
+        setting = {"enabled": None}
+    enabled = setting.get("enabled", settings.rule_watch_enabled)
+    model = setting.get("model")
+    model_ok = model is None or (isinstance(model, str) and bool(model.strip()))
+    if model is None:
+        model = settings.rule_watch_model
+    threshold = setting.get("threshold", settings.rule_watch_threshold)
+    if (
+        not isinstance(enabled, bool)
+        or not model_ok
+        or isinstance(threshold, bool)
+        or not isinstance(threshold, (int, float))
+        or not 0 <= threshold <= 1
+    ):
+        raise ConstraintsError(
+            f"'{RULE_WATCH_KEY}' must be an object with a boolean 'enabled', a model name and a 'threshold' from 0 to 1."
+        )
+    return enabled, model, float(threshold)
+
+
+def _rule_judge(
+    payload: dict[str, Any], staged: StagedRepository, gateway: Any, *, owner_id: str, managed_key: str
+) -> RuleJudge | None:
+    """Build the constraints-file enforcement, with the watch hook when the run turned it on.
+
+    The watch hook model runs on the managed key through a route only the
+    parent holds, so its cost counts in the run's budget and the guest cannot
+    call it. With the hook off, no model is asked.
+
+    Args:
+        payload: Protected run payload, which holds the watch hook setting.
         staged: The fetched tree and its constraints.
         gateway: The run's model gateway.
         owner_id: Job identity that owns the rule events.
         managed_key: The platform's OpenRouter key, or ``""`` when not configured.
 
     Returns:
-        The judge, or ``None`` when the repository has no ``optimize.toml``.
+        The enforcement, or ``None`` when the repository has no ``optimize.toml``.
 
     Raises:
-        ConstraintsError: When the file has plain-language rules but no judge model can be reached.
+        ConstraintsError: When the watch hook setting is invalid, or the hook
+            is on but its model cannot be reached.
     """
     if not staged.constrained:
         return None
-    if not staged.rules:
-        return RuleJudge(
-            (), ask_fast=lambda _prompt: None, ask_strong=lambda _prompt: None, emit=run_log_emitter(owner_id)
-        )
+    enabled, model, threshold = _rule_watch_setting(payload)
+    emit = run_log_emitter(owner_id)
+    if not enabled or not (staged.rules or staged.intent):
+        return RuleJudge(staged.rules, intent=staged.intent, ask=None, emit=emit)
     if not managed_key:
-        raise ConstraintsError(
-            "optimize.toml has [rules], but the judge models that check them are not configured on this server."
-        )
-    policy = ChargePolicy("managed_model")
-    fast = gateway.register(
-        model=agent_model_id(settings.rule_watch_model),
+        raise ConstraintsError("The run turned the rule watch on, but its model is not configured on this server.")
+    route = gateway.register(
+        model=agent_model_id(model),
         api_key=managed_key,
         role=_JUDGE_ROLE,
-        policy=policy,
-        parent_only=True,
-    )
-    strong = gateway.register(
-        model=strongest_model_id(settings.rule_judge_model),
-        api_key=managed_key,
-        role=_JUDGE_ROLE,
-        policy=policy,
+        policy=ChargePolicy("managed_model"),
         parent_only=True,
     )
     judge = RuleJudge(
-        staged.rules,
-        ask_fast=_route_asker(gateway, fast),
-        ask_strong=_route_asker(gateway, strong),
-        emit=run_log_emitter(owner_id),
+        staged.rules, intent=staged.intent, ask=_route_asker(gateway, route), emit=emit, threshold=threshold
     )
     gateway.observe_role("optimization", lambda body: judge.record_action(describe_model_call(body)))
     return judge
@@ -423,15 +457,15 @@ def bind_repo_scorer(
         staged: The fetched tree and decrypted secrets.
         gateway: The run's model gateway, already bound to its sandbox broker.
         owner_id: Job identity naming the box's operations.
-        managed_key: The platform's OpenRouter key, which pays for the rule
-            judges under the run's budget; ``""`` when not configured.
+        managed_key: The platform's OpenRouter key, which pays for the
+            watch hook under the run's budget; ``""`` when not configured.
 
     Raises:
-        ConstraintsError: When the repository's plain-language rules cannot be judged.
+        ConstraintsError: When the run turned the watch hook on but it cannot run.
         ServiceError: When the scorer has a model but no scoped route from the trusted parent.
     """
     model_gateway = _repo_model_gateway(payload["scorer"])
-    rule_judge = _rule_judge(staged, gateway, owner_id=owner_id, managed_key=managed_key)
+    rule_judge = _rule_judge(payload, staged, gateway, owner_id=owner_id, managed_key=managed_key)
     descriptor = payload["_budget_gateway_descriptor"]
     target = payload["target"]
     scorer_spec = payload["scorer"]
@@ -528,24 +562,6 @@ def _ranking_score(result: dict[str, Any], candidate: str) -> float:
     return float("-inf") if score is None else score
 
 
-def _version_illegal(result: dict[str, Any], candidate: str) -> bool:
-    """Return whether the rule judge rejected one version during the run.
-
-    Args:
-        result: Finished black-box result.
-        candidate: The version's patch.
-
-    Returns:
-        ``True`` when the version's recorded side info carries the judge's rejection.
-    """
-    return any(
-        isinstance(version, dict)
-        and version.get("candidate") == candidate
-        and ILLEGAL_APPROACH_KEY in (version.get("side_info") or {})
-        for version in result.get("versions") or []
-    )
-
-
 def _version_metric_error(result: dict[str, Any], candidate: str) -> bool:
     """Return whether the metric or scorer crashed on one version during the run.
 
@@ -575,12 +591,12 @@ def improved_patch(result: dict[str, Any]) -> str | None:
 
     Returns:
         The best version's patch, or ``None`` when it is empty, no better,
-        an approach the rule judge rejected, or a version the metric crashed on.
+        or a version the metric crashed on.
     """
     best = result.get("best_candidate")
     if not isinstance(best, str) or not best.strip() or result.get("regression_guard_applied"):
         return None
-    if _version_illegal(result, best) or _version_metric_error(result, best):
+    if _version_metric_error(result, best):
         return None
     baseline, optimized = result.get("baseline_score"), result.get("best_score")
     if baseline is None or optimized is None:
@@ -722,10 +738,8 @@ def _candidate_versions(
         seen.add(patch)
         # The patches came back from the guest, so the editing rules are
         # checked again before any of them reaches the repository.
-        if (
-            _version_illegal(result, patch)
-            or _version_metric_error(result, patch)
-            or patch_violations(patch, repo["editable_paths"], staged.snapshot.readonly_paths, staged.protected_paths)
+        if _version_metric_error(result, patch) or patch_violations(
+            patch, repo["editable_paths"], staged.snapshot.readonly_paths, staged.protected_paths
         ):
             skipped += 1
             continue
