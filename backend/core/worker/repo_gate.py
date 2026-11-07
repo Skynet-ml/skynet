@@ -10,6 +10,8 @@ the same failures the run would stop on.
 
 from __future__ import annotations
 
+import posixpath
+import tarfile
 import tomllib
 from collections.abc import Collection
 from dataclasses import dataclass, field
@@ -20,13 +22,16 @@ from ..exceptions import ServiceError
 from ..i18n_en import t_en
 from ..i18n_keys import I18nKey
 from ..service_gateway.optimization.blackbox.repo_constraints import parse_constraints, read_constraints_file
+from ..service_gateway.optimization.blackbox.repo_tree import inside
 
 Place = Literal["local", "cloud"]
 
-# The settings each place's sandbox runtime enforces. Both are empty: no
-# runtime wires these keys into the proposer or target boxes yet. The issue
-# that enforces a setting adds its kind here, and the gate stops refusing it.
-ENFORCED: dict[Place, frozenset[str]] = {"local": frozenset(), "cloud": frozenset()}
+# The settings each place's sandbox runtime enforces. Staging strips the
+# metric files and the exploit folder from the agent's tree in both places,
+# and ``check_hidden`` proves it (SKY-353). The issue that enforces another
+# setting adds its kind here, and the gate stops refusing it.
+_METRIC_HIDING = frozenset({"metric.files", "metric.exploits"})
+ENFORCED: dict[Place, frozenset[str]] = {"local": _METRIC_HIDING, "cloud": _METRIC_HIDING}
 
 _UNENFORCED_CODE: dict[Place, I18nKey] = {
     "local": I18nKey.REPO_GATE_UNENFORCED_LOCAL,
@@ -100,6 +105,66 @@ def check_repository(archive: Path, secret_names: Collection[str], *, place: Pla
             if name not in secret_names
         ]
     return failures
+
+
+def check_hidden(
+    original_archive: Path,
+    agent_archive: Path,
+    hidden_paths: Collection[str],
+    *,
+    place: Place,
+    optional_paths: Collection[str] = (),
+) -> list[GateFailure]:
+    """List every metric file the agent's tree still shows.
+
+    A file fails when the agent's tree holds it under a hidden path, when the
+    full tree has a symbolic link under a hidden path whose target outside
+    the hidden paths the agent can still read, or when a hidden path lies
+    below a symbolic link. A hidden path that matches no file also fails,
+    unless it is optional.
+
+    Args:
+        original_archive: The full tree that ``stage_repository`` fetched.
+        agent_archive: The stripped tree the proposer's workspace receives.
+        hidden_paths: The ``[metric] files`` entries and the exploit folder.
+        place: Where the run's sandbox runs.
+        optional_paths: Hidden paths that may match no file, such as the
+            exploit folder.
+
+    Returns:
+        One failure per visible path; an empty list means the metric is hidden.
+    """
+    hidden = [posixpath.normpath(path) for path in hidden_paths]
+    with tarfile.open(agent_archive) as packed:
+        visible = [posixpath.normpath(name) for name in packed.getnames()]
+    with tarfile.open(original_archive) as packed:
+        members = packed.getmembers()
+    names = [posixpath.normpath(member.name) for member in members]
+    links = [member for member in members if member.issym()]
+    targets = [
+        target
+        for member in links
+        if inside(posixpath.normpath(member.name), hidden)
+        and not inside(
+            target := posixpath.normpath(
+                posixpath.join(posixpath.dirname(posixpath.normpath(member.name)), member.linkname)
+            ),
+            hidden,
+        )
+    ]
+    optional = {posixpath.normpath(path) for path in optional_paths}
+    # A misspelled metric path hides nothing, so the agent could read the
+    # real metric; the run stops instead of guessing (SKY-353).
+    leaked = [path for path in hidden if path not in optional and not any(inside(name, [path]) for name in names)]
+    # A hidden path below a linked folder lives at the link's target, which the
+    # strip cannot see by name, so the run stops instead of guessing.
+    leaked += [path for path in hidden if any(path.startswith(posixpath.normpath(link.name) + "/") for link in links)]
+    leaked += [path for path in visible if inside(path, hidden)]
+    leaked += [path for path in targets if any(inside(name, [path]) for name in visible)]
+    return [
+        _failure("[metric] files", place, _UNENFORCED_CODE[place], key=f"[metric] files: {path}")
+        for path in dict.fromkeys(leaked)
+    ]
 
 
 def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -> list[tuple[str, str]]:

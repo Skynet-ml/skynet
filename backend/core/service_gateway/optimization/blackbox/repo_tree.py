@@ -8,6 +8,7 @@ the agent's workspace and the trusted scorer apply the same rules.
 from __future__ import annotations
 
 import base64
+import posixpath
 import re
 import subprocess
 import tarfile
@@ -62,6 +63,8 @@ _GITLINK_MODE = "160000"
 _MODE_LINE = re.compile(r"^(?:new file mode|deleted file mode|old mode|new mode) (\d{6})$")
 _INDEX_MODE = re.compile(r"^index [0-9a-f]+\.\.[0-9a-f]+ (\d{6})$")
 _PATH_PREFIXES = ("rename from ", "rename to ", "copy from ", "copy to ")
+_HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+_FILE_LINE = re.compile(r'^(?:--- (?:a/|"a/|/dev/null)|\+\+\+ (?:b/|"b/|/dev/null))')
 
 
 def _unquote(token: str) -> str:
@@ -144,7 +147,7 @@ def patch_paths(patch: str) -> list[str]:
     # Hunk bodies can hold lines that look like headers ("--- a/x" is a
     # removed "-- a/x"), so only the lines before a file's first hunk count.
     in_header = False
-    for line in patch.splitlines():
+    for line in patch.split("\n"):
         if line.startswith("diff --git "):
             in_header = True
             found.extend(_header_paths(line[len("diff --git ") :]))
@@ -161,7 +164,49 @@ def patch_paths(patch: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-def _inside(path: str, roots: Iterable[str]) -> bool:
+def _unreadable(patch: str) -> bool:
+    """Report whether a patch holds a file header that :func:`patch_paths` cannot read.
+
+    ``git apply`` strips any first path component and also applies plain
+    ``---``/``+++`` diffs found between hunks, so a header with other prefixes
+    or a header outside a ``diff --git`` section could change a hidden or
+    protected file unseen (SKY-353). Hunk lines are counted, because a hunk
+    body can hold lines that look like headers.
+
+    Args:
+        patch: ``git diff`` output.
+
+    Returns:
+        Whether any header is unreadable or stands outside a ``diff --git`` section.
+    """
+    state, old, new = "outside", 0, 0
+    for section in re.split(r"(?m)^(?=diff --git )", patch):
+        if section.startswith("diff --git "):
+            header = section.split("\n", 1)[0][len("diff --git ") :]
+            renamed = re.search(r"(?m)^(?:rename|copy) (?:from|to) ", section)
+            if not _header_paths(header) and not (header.startswith(("a/", '"a/')) and renamed):
+                return True
+    for line in patch.split("\n"):
+        if state == "hunk" and (old > 0 or new > 0):
+            tag = line[:1] or " "
+            if tag not in " -+\\":
+                return True
+            old -= tag in " -"
+            new -= tag in " +"
+            continue
+        if line.startswith("diff --git "):
+            state = "header"
+        elif line.startswith(("--- ", "+++ ")):
+            if state != "header" or not _FILE_LINE.match(line):
+                return True
+        elif line.startswith("GIT binary patch") and state == "header":
+            state = "binary"
+        elif (hunk := _HUNK.match(line)) and state in ("header", "hunk"):
+            state, old, new = "hunk", int(hunk.group(1) or 1), int(hunk.group(2) or 1)
+    return False
+
+
+def inside(path: str, roots: Iterable[str]) -> bool:
     """Report whether ``path`` is one of ``roots`` or lies below one.
 
     Args:
@@ -197,7 +242,7 @@ def patch_violations(
     editable, readonly, protected = list(editable_paths), list(readonly_paths), list(protected_paths)
     problems: list[str] = []
     in_header = False
-    for line in patch.splitlines():
+    for line in patch.split("\n"):
         if line.startswith("diff --git "):
             in_header = True
         elif line.startswith(("@@", "GIT binary patch")):
@@ -206,17 +251,79 @@ def patch_violations(
         if mode and mode.group(1) == _GITLINK_MODE:
             problems.append("Submodules are read-only; the change adds, moves, or updates one.")
             break
+    if _unreadable(patch):
+        problems.append("The change has a file header Skynet cannot read, so it cannot check the files it touches.")
     for path in patch_paths(patch):
         parts = path.split("/")
         if path.startswith("/") or any(part in ("", ".", "..") for part in parts) or ".git" in parts:
             problems.append(f"'{path}' is not a path inside the repository.")
-        elif _inside(path, protected):
+        elif inside(path, protected):
             problems.append(f"'{path}' is protected by the repository's optimize.toml ([paths] protected).")
-        elif _inside(path, readonly):
+        elif inside(path, readonly):
             problems.append(f"'{path}' is a submodule or Git LFS file, which are read-only.")
-        elif not _inside(path, editable):
+        elif not inside(path, editable):
             problems.append(f"'{path}' is outside the editable paths.")
     return problems
+
+
+def _member_path(name: str) -> str:
+    """Normalize an archive member name to a repository-relative path.
+
+    Args:
+        name: Member name, which may start with ``./``.
+
+    Returns:
+        The path without a leading ``./`` or trailing ``/``.
+    """
+    return posixpath.normpath(name).lstrip("/") if name not in ("", ".", "./") else "."
+
+
+def strip_archive(archive: Path, hidden_paths: Iterable[str], destination: Path) -> Path:
+    """Pack a copy of a tree without the files the agent must never see.
+
+    The metric files and the exploit folder stay in the trusted scorer's tree
+    only, so the proposer cannot read the metric or the attacks on it (SKY-353).
+    A hard link to a hidden file is dropped too, because it carries the file's
+    bytes under another name.
+
+    Args:
+        archive: Packed full tree.
+        hidden_paths: Repository-relative files and folders to leave out.
+        destination: Where to write the stripped archive.
+
+    Returns:
+        ``destination``.
+    """
+    hidden = [_member_path(path) for path in hidden_paths]
+    with tarfile.open(archive) as source, tarfile.open(destination, "w:gz") as target:
+        for member in source:
+            if inside(_member_path(member.name), hidden):
+                continue
+            if member.islnk() and inside(_member_path(member.linkname), hidden):
+                continue
+            target.addfile(member, source.extractfile(member) if member.isreg() else None)
+    return destination
+
+
+def drop_paths(patch: str, hidden_paths: Iterable[str]) -> str:
+    """Remove the file sections of a patch that touch a hidden path.
+
+    The scorer box always scores with the base commit's metric, so a version
+    that writes a metric file or the exploit folder keeps the rest of its
+    change and loses only that part (SKY-353).
+
+    Args:
+        patch: ``git diff`` output for one version.
+        hidden_paths: Repository-relative files and folders the version may not change.
+
+    Returns:
+        The patch without those sections; unchanged when nothing is hidden.
+    """
+    hidden = list(hidden_paths)
+    if not hidden or not patch:
+        return patch
+    sections = re.split(r"(?m)^(?=diff --git )", patch)
+    return "".join(section for section in sections if not any(inside(path, hidden) for path in patch_paths(section)))
 
 
 def archive_chunks(archive: Path) -> Iterator[str]:
@@ -318,7 +425,23 @@ def version_patch(checkout: Path) -> str:
         ``git diff --binary`` output; empty when nothing changed.
     """
     _git(["add", "--all"], checkout)
-    return _git(["diff", "--cached", "--binary", "--no-color", "--no-ext-diff", BASE_REF], checkout)
+    # The agent can set git config in its checkout; other path prefixes would
+    # hide which files a version touches, so the scorer would refuse it.
+    pinned = ["-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false"]
+    return _git(
+        [
+            *pinned,
+            "diff",
+            "--cached",
+            "--binary",
+            "--no-color",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            BASE_REF,
+        ],
+        checkout,
+    )
 
 
 def reset_tree(checkout: Path) -> None:

@@ -34,13 +34,20 @@ from ..models.common import ModelConfig
 from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     ConstraintsError,
+    MetricSpec,
     effective_environment,
     instructions_brief,
     read_constraints,
 )
 from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
 from ..service_gateway.optimization.blackbox.repo_setup import infer_setup_command
-from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY, patch_paths, patch_violations
+from ..service_gateway.optimization.blackbox.repo_tree import (
+    REPO_SNAPSHOT_KEY,
+    drop_paths,
+    patch_paths,
+    patch_violations,
+    strip_archive,
+)
 from ..service_gateway.optimization.blackbox.repo_workspace import RepoWorkspace
 from ..service_gateway.optimization.blackbox.rule_judge import (
     JUDGE_ANSWER_TOKENS,
@@ -51,6 +58,7 @@ from ..service_gateway.optimization.blackbox.rule_judge import (
 )
 from ..service_gateway.optimization.blackbox.sandbox import SandboxSpec
 from ..service_gateway.optimization.blackbox.sandbox_scorer import ScorerGateway, scorer_gateway
+from .repo_gate import RepoGateError, check_hidden, sandbox_place
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +91,7 @@ class StagedRepository:
     constrained: bool = False
     rules: tuple[str, ...] = ()
     intent: str | None = None
+    hidden_paths: tuple[str, ...] = ()
 
     def close_scorers(self) -> None:
         """Close the parent's scoring boxes; the gateway still stops any that fail to close."""
@@ -133,6 +142,7 @@ def stage_repository(
         ConstraintsError: When the repository's ``optimize.toml`` is invalid,
             asks for more than the run approved, or a resumed run's rules
             changed since they were first recorded.
+        RepoGateError: When the agent's tree still shows a metric file.
     """
     result = copy.deepcopy(payload)
     repo = result["target"]["repo"]
@@ -160,6 +170,21 @@ def stage_repository(
             secret_names=secrets,
         )
         _ensure_unchanged(repo.get(ENVIRONMENT_KEY), record)
+        # The guest's workspace (Vercel or local Docker) unpacks this copy; the
+        # parent's scorer box keeps the full tree, so it scores with the base
+        # commit's metric (SKY-353).
+        metric = environment.constraints.metric if environment.constraints is not None else MetricSpec()
+        hidden = (*metric.files, metric.exploits)
+        agent_archive = strip_archive(snapshot.archive, hidden, workdir / "agent-tree.tgz")
+        leaks = check_hidden(
+            snapshot.archive,
+            agent_archive,
+            hidden,
+            place=sandbox_place(settings.local_mode),
+            optional_paths=(metric.exploits,),
+        )
+        if leaks:
+            raise RepoGateError(leaks)
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
@@ -173,7 +198,7 @@ def stage_repository(
         )
     repo["secrets"] = []
     result[REPO_SNAPSHOT_KEY] = {
-        "archive": str(snapshot.archive),
+        "archive": str(agent_archive),
         "commit": commit,
         "readonly_paths": list(snapshot.readonly_paths),
         "secret_names": sorted(secrets),
@@ -187,6 +212,7 @@ def stage_repository(
         constrained=environment.constraints is not None,
         rules=environment.rules,
         intent=environment.constraints.intent if environment.constraints is not None else None,
+        hidden_paths=hidden,
     )
 
 
@@ -486,6 +512,7 @@ def bind_repo_scorer(
             setup_command=target.get("setup_command"),
             secrets=staged.secrets,
             protected_paths=staged.protected_paths,
+            hidden_paths=staged.hidden_paths,
         ),
         str(scorer_spec["metric_code"]),
         timeout_seconds=float(scorer_spec["timeout_seconds"]),
@@ -580,6 +607,44 @@ def _version_metric_error(result: dict[str, Any], candidate: str) -> bool:
     )
 
 
+def _scored_candidate(candidate: Any, hidden_paths: tuple[str, ...]) -> Any:
+    """Drop the hidden-path edits from one recorded candidate.
+
+    Args:
+        candidate: A patch, a mapping of patches, or anything else.
+        hidden_paths: Metric files and the exploit folder.
+
+    Returns:
+        The candidate with every patch reduced to the scored change.
+    """
+    if isinstance(candidate, str):
+        return drop_paths(candidate, hidden_paths)
+    if isinstance(candidate, dict):
+        return {key: _scored_candidate(value, hidden_paths) for key, value in candidate.items()}
+    return candidate
+
+
+def drop_hidden_edits(result: dict[str, Any], hidden_paths: tuple[str, ...]) -> None:
+    """Replace every version a finished result records with the change the scorer scored.
+
+    Serving, download and publishing all read these fields, so a version's
+    edits to a metric file or the exploit folder never leave the run (SKY-353).
+
+    Args:
+        result: Finished black-box result, updated in place.
+        hidden_paths: Metric files and the exploit folder.
+    """
+    if not hidden_paths:
+        return
+    for key in ("seed_candidate", "best_candidate"):
+        if key in result:
+            result[key] = _scored_candidate(result[key], hidden_paths)
+    for key in ("versions", "candidate_tree", "lanes"):
+        for entry in result.get(key) or []:
+            if isinstance(entry, dict) and "candidate" in entry:
+                entry["candidate"] = _scored_candidate(entry["candidate"], hidden_paths)
+
+
 def improved_patch(result: dict[str, Any]) -> str | None:
     """Return the best version when it beat the starting code, else ``None``.
 
@@ -665,6 +730,7 @@ def publish_improvement(
         ``details.candidate_branches`` for a created repository), or ``None``
         when the run did not improve an existing repository.
     """
+    drop_hidden_edits(result, staged.hidden_paths)
     if payload["target"]["repo"].get("created_by_skynet"):
         return publish_candidates(
             result, payload, staged, username=username, engine=engine, optimization_id=optimization_id

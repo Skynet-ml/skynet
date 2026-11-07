@@ -15,7 +15,9 @@ Pareto front.
 from __future__ import annotations
 
 import json
+import logging
 import math
+import re
 import shlex
 import threading
 from collections.abc import Mapping
@@ -24,10 +26,13 @@ from typing import Any
 from ....billing.model_dispatch import ModelHTTPResult
 from . import runner, sandbox_log
 from .harness import ENV_API_KEY, ENV_MODEL
-from .repo_workspace import REPO_DIR, RepoWorkspace, redact
+from .protocol import STATUS_KEY
+from .repo_workspace import HIDDEN_CHANGED, REPO_DIR, WORK_DIR, RepoWorkspace, redact
 from .rule_judge import RuleJudge
 from .sandbox import SandboxSession
 from .sandbox_scorer import RUNNER_SOURCE, ScorerGateway, _raise_control
+
+logger = logging.getLogger(__name__)
 
 CASES_KEY = "cases"
 # The guest names no real endpoint: its requests reach only the parent relay.
@@ -38,6 +43,17 @@ CALLS_DIR = f"{REPO_DIR}/calls"
 # prepared tree with its installed dependencies can take a while, so its relay
 # gets an allowance on top of the scorer's own timeout.
 SETUP_ALLOWANCE_SECONDS = 1_800.0
+# The proposer gets only these keys, so the scorer's other side information
+# (weights, formulas, metric source) never reveals the metric (SKY-353).
+_PROPOSER_KEYS = ("score", "feedback", STATUS_KEY, "scores")
+# A traceback names the metric's files and quotes its source lines, and on
+# Python 3.11+ adds caret lines under them; every indented line goes. An
+# exception group draws the same frames behind "| " margins.
+_TRACEBACK = re.compile(
+    r"^[ +|]*(?:Exception Group )?Traceback \(most recent call last\):\n"
+    r"|^(?P<margin>[ |]*?)  File \".*\n(?:(?P=margin)    .*\n)*",
+    re.MULTILINE,
+)
 
 
 class RepoScoreError(Exception):
@@ -176,21 +192,41 @@ class RepoScorer:
                 )
             if result.timed_out:
                 raise RepoScoreError(f"The scorer exceeded its {self._timeout_seconds:g}s timeout.")
-            tampered = self._workspace.protected_changes()
+            changes = self._workspace.protected_changes()
+            # A hidden change is not a [paths] rule the agent knows, so it
+            # skips the rule judge and its "do not repeat it" message.
+            tampered = [change for change in changes if change != HIDDEN_CHANGED]
             if tampered:
                 # The version's code names these files and can read the secrets.
                 reason = redact(" ".join(tampered), secrets)
                 raise RepoScoreError(judge.blocked([reason]) if judge is not None else reason)
+            if changes:
+                raise RepoScoreError(HIDDEN_CHANGED)
             text = session.read_file(f"{CALLS_DIR}/{self._calls:06d}/{runner.OUTPUT_FILE}")
+        # The version's code runs next to the hidden metric and can print or
+        # raise its contents, so the guest gets only a fixed message; the
+        # details stay in the server log (SKY-353).
         if text is None:
-            output = redact((result.stderr or result.stdout)[-2_000:], secrets)
-            raise RepoScoreError(f"The scorer did not finish (exit {result.exit_code}): {output}")
+            logger.warning(
+                "Repository scorer did not finish (exit %s): %s",
+                result.exit_code,
+                redact((result.stderr or result.stdout)[-2_000:], secrets),
+            )
+            raise RepoScoreError(f"The scorer did not finish (exit {result.exit_code}).")
         output = json.loads(redact(text, secrets))
         _raise_control(output)
-        if output.get("error") or output.get("score") is None:
-            raise RepoScoreError(str(output.get("error") or "The scorer returned no score."))
+        if output.get("error"):
+            logger.warning("Repository scorer raised: %s", output["error"])
+            raise RepoScoreError("The scorer raised an error, so the version has no score.")
+        if output.get("score") is None:
+            raise RepoScoreError("The scorer returned no score.")
+        try:
+            score = float(output["score"])
+        except (TypeError, ValueError):
+            # The error text would echo the value, which the version's code controls.
+            raise RepoScoreError("The scorer returned a score that is not a number.") from None
         side_info = fold_case_scores(output.get("side_info") or {})
-        return {**side_info, "score": float(output["score"])}
+        return {**side_info, "score": score}
 
     def _model_env(self) -> dict[str, str]:
         """Return the env that points code in the box at the run's model route.
@@ -237,7 +273,8 @@ class RepoScorer:
             document = self.score(candidate, body.get("case"))
         except RepoScoreError as error:
             # Plain text: the guest's relay client quotes the body in its error.
-            return ModelHTTPResult(422, "text/plain; charset=utf-8", str(error).encode())
+            return ModelHTTPResult(422, "text/plain; charset=utf-8", _scrub(str(error), self._root).encode())
+        document = _for_proposer(document, self._root)
         notes = self._rule_judge.take_notes() if self._rule_judge is not None else []
         if notes:
             feedback = document.get("feedback")
@@ -268,3 +305,61 @@ class RepoScorer:
     def close(self) -> None:
         """Destroy the workspace box."""
         self._workspace.close()
+
+
+def _scrub(text: str, root: str | None) -> str:
+    """Remove traceback frames and the scorer box's absolute paths from text the proposer reads.
+
+    Args:
+        text: An error or a feedback string from the scorer box.
+        root: The box's working directory; ``None`` before it is known.
+
+    Returns:
+        The text with repository-relative paths and without traceback frames.
+    """
+    text = _TRACEBACK.sub("", text if text.endswith("\n") else f"{text}\n").rstrip("\n")
+    if root:
+        text = (
+            text.replace(f"{root}/{WORK_DIR}/", "")
+            .replace(f"{root}/{WORK_DIR}", ".")
+            .replace(f"{root}/", "")
+            .replace(root, "")
+        )
+    return text
+
+
+def _for_proposer(document: Mapping[str, Any], root: str | None) -> dict[str, Any]:
+    """Keep only the score, the feedback and the named scores of a scoring result.
+
+    Args:
+        document: What :meth:`RepoScorer.score` returned.
+        root: The box's working directory, scrubbed from the feedback.
+
+    Returns:
+        The reply the guest receives.
+    """
+    reply = {key: document[key] for key in _PROPOSER_KEYS if key in document}
+    if isinstance(reply.get("feedback"), str):
+        reply["feedback"] = _scrub(reply["feedback"], root)
+    if isinstance(reply.get("scores"), Mapping):
+        reply["scores"] = {
+            name: _named_score(entry, root) if isinstance(entry, Mapping) else entry
+            for name, entry in reply["scores"].items()
+        }
+    return reply
+
+
+def _named_score(entry: Mapping[str, Any], root: str | None) -> dict[str, Any]:
+    """Keep only the score and the scrubbed feedback of one named score.
+
+    Args:
+        entry: One value of the result's ``scores`` mapping.
+        root: The box's working directory, scrubbed from the feedback.
+
+    Returns:
+        The named score the guest receives.
+    """
+    kept = {key: entry[key] for key in ("score", "feedback") if key in entry}
+    if isinstance(kept.get("feedback"), str):
+        kept["feedback"] = _scrub(kept["feedback"], root)
+    return kept

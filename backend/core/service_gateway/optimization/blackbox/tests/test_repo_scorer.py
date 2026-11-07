@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import traceback
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -13,7 +15,7 @@ from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
 
-from ..repo_scorer import RepoScoreError, RepoScorer, fold_case_scores
+from ..repo_scorer import RepoScoreError, RepoScorer, _scrub, fold_case_scores
 from ..repo_workspace import RepoWorkspace
 from ..rule_judge import (
     EVENT_BLOCK,
@@ -104,8 +106,8 @@ def test_versions_outside_the_editable_paths_are_refused(scored: tuple[RepoScore
         scorer.score(_patch(root / "bad", archive, {"README": "changed\n"}))
 
 
-def test_a_failing_scorer_is_reported(tmp_path: Path) -> None:
-    """A scorer that raises surfaces its error as an unscorable version."""
+def test_a_failing_scorer_is_reported(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A scorer that raises gives an unscorable version and logs its error on the server."""
     archive = _archive(tmp_path, {"src/app.py": "x = 1\n"})
     scorer = RepoScorer(
         RepoWorkspace(
@@ -121,8 +123,9 @@ def test_a_failing_scorer_is_reported(tmp_path: Path) -> None:
         timeout_seconds=60,
     )
     try:
-        with pytest.raises(RepoScoreError, match="tests failed"):
+        with caplog.at_level(logging.WARNING), pytest.raises(RepoScoreError, match="raised an error"):
             scorer.score("")
+        assert "tests failed" in caplog.text
     finally:
         scorer.close()
 
@@ -524,3 +527,200 @@ def test_a_watch_note_reaches_the_agent_in_its_next_scoring_reply(tmp_path: Path
         assert [event["kind"] for event in events] == [EVENT_VERDICT, EVENT_NOTE]
     finally:
         scorer.close()
+
+
+def _leaky(tmp_path: Path, code: str, rule_judge: RuleJudge | None = None) -> RepoScorer:
+    """Open a scorer whose metric names its own files and internals.
+
+    Args:
+        tmp_path: Scratch folder.
+        code: Scorer source.
+        rule_judge: The run's rule judge, if any.
+
+    Returns:
+        The scorer.
+    """
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/metric.py": "WEIGHT = 0.3\n"})
+    return RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=60, network_disabled=True),
+            archive=archive,
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+            hidden_paths=["eval"],
+        ),
+        code,
+        timeout_seconds=60,
+        rule_judge=rule_judge,
+    )
+
+
+def test_the_proposer_gets_only_the_score_and_the_feedback(tmp_path: Path) -> None:
+    """Extra keys, the box's paths and each case's extras never reach the agent (SKY-353)."""
+    scorer = _leaky(
+        tmp_path,
+        "import os\ndef score(repo_path):\n"
+        "    return {'score': 0.5, 'feedback': 'read ' + os.path.join(repo_path, 'eval/metric.py'),"
+        " 'weights': {'accuracy': 0.3}, 'metric_source': open(os.path.join(repo_path, 'eval/metric.py')).read(),"
+        " 'cases': {'a': {'score': 1, 'feedback': 'at ' + repo_path, 'formula': 'w * x'}}}\n",
+    )
+    try:
+        reply = scorer.dispatch({"candidate": ""})
+        assert reply.status == 200
+        document = json.loads(reply.body)
+        assert document == {
+            "score": pytest.approx(0.5),
+            "feedback": "read eval/metric.py",
+            "scores": {"a": {"score": pytest.approx(1.0), "feedback": "at ."}},
+        }
+    finally:
+        scorer.close()
+
+
+def test_a_crashing_metric_sends_no_traceback_or_box_path(tmp_path: Path) -> None:
+    """A scorer crash tells the agent only that the scorer failed, not its paths or lines (SKY-353)."""
+    scorer = _leaky(
+        tmp_path,
+        "import os\ndef score(repo_path):\n    open(os.path.join(repo_path, 'eval/missing.csv'))\n",
+    )
+    try:
+        reply = scorer.dispatch({"candidate": ""})
+        assert reply.status == 422
+        text = reply.body.decode()
+        assert "eval/missing.csv" not in text
+        assert "Traceback" not in text
+        assert 'File "' not in text
+        assert "os.path.join" not in text
+        assert ".app-repo" not in text
+        assert str(tmp_path) not in text
+    finally:
+        scorer.close()
+
+
+def test_a_write_under_the_hidden_metric_skips_the_rule_judge(tmp_path: Path) -> None:
+    """A hidden-file change gets the neutral 422, not the judge's message or a rule.block event (SKY-353)."""
+    events: list[dict[str, Any]] = []
+    judge = RuleJudge(
+        ("Do not hardcode answers for dataset cases.",),
+        intent="Raise the value in a general way.",
+        ask=_StubJudge(_LEGAL),
+        emit=events.append,
+        run_watch=lambda watch: watch(),
+    )
+    scorer = _leaky(
+        tmp_path,
+        "import os\ndef score(repo_path):\n"
+        "    open(os.path.join(repo_path, 'eval/cache.txt'), 'w').write('1')\n"
+        "    return {'score': 1.0}\n",
+        rule_judge=judge,
+    )
+    try:
+        reply = scorer.dispatch({"candidate": ""})
+        assert reply.status == 422
+        assert reply.body.decode() == "The metric files changed while the version ran."
+        assert events == []
+    finally:
+        scorer.close()
+
+
+@pytest.mark.parametrize("score", ["0.5 WEIGHT = 0.3", [0.3], {"w": 0.3}], ids=["text", "list", "object"])
+def test_a_score_that_is_not_a_number_gets_a_fixed_422(tmp_path: Path, score: Any) -> None:
+    """The 422 never echoes a score value that the version's code can set (SKY-353).
+
+    The runner checks the score, so the code rewrites the output file after the runner writes it.
+    """
+    forged = json.dumps({"score": score})
+    scorer = _leaky(
+        tmp_path,
+        "import atexit, os, sys\n"
+        f"atexit.register(lambda: open(os.path.join(sys.argv[1], 'output.json'), 'w').write({forged!r}))\n"
+        "def score(repo_path):\n    return {'score': 1.0, 'feedback': 'ok'}\n",
+    )
+    try:
+        reply = scorer.dispatch({"candidate": ""})
+        assert reply.status == 422
+        assert reply.body.decode() == "The scorer returned a score that is not a number."
+    finally:
+        scorer.close()
+
+
+def test_a_version_that_rewrites_the_metric_gets_the_base_score(tmp_path: Path) -> None:
+    """The scorer box keeps the base commit's metric, so editing it changes nothing (SKY-353)."""
+    scorer = _leaky(
+        tmp_path,
+        "import os, runpy\ndef score(repo_path):\n"
+        "    weight = runpy.run_path(os.path.join(repo_path, 'eval/metric.py'))['WEIGHT']\n"
+        "    return {'score': weight, 'feedback': 'ok'}\n",
+    )
+    try:
+        archive = tmp_path / "tree.tgz"
+        baseline = json.loads(scorer.dispatch({"candidate": ""}).body)["score"]
+        cheat = _patch(tmp_path / "cheat", archive, {"src/app.py": "x = 2\n", "eval/metric.py": "WEIGHT = 99\n"})
+        reply = scorer.dispatch({"candidate": cheat})
+        assert reply.status == 200
+        assert json.loads(reply.body)["score"] == pytest.approx(baseline) == pytest.approx(0.3)
+    finally:
+        scorer.close()
+
+
+@pytest.mark.parametrize(
+    "leak",
+    [
+        "import sys\nsys.stderr.write(SOURCE)\nsys.stderr.flush()\nos._exit(3)\n",
+        "raise RuntimeError(SOURCE)\n",
+    ],
+    ids=["stderr-and-exit", "exception-text"],
+)
+def test_a_version_that_reads_the_hidden_metric_gets_a_422_without_it(
+    tmp_path: Path, leak: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Version code that prints or raises a hidden file's content sends none of it to the guest (SKY-353)."""
+    scorer = _leaky(
+        tmp_path,
+        "import os, runpy\ndef score(repo_path):\n"
+        "    runpy.run_path(os.path.join(repo_path, 'src/app.py'))\n"
+        "    return {'score': 1.0, 'feedback': 'ok'}\n",
+    )
+    try:
+        cheat = _patch(
+            tmp_path / "cheat",
+            tmp_path / "tree.tgz",
+            {"src/app.py": f"import os\nSOURCE = open('eval/metric.py').read()\n{leak}"},
+        )
+        with caplog.at_level(logging.WARNING):
+            reply = scorer.dispatch({"candidate": cheat})
+        assert reply.status == 422
+        assert "WEIGHT" not in reply.body.decode()
+        assert "WEIGHT = 0.3" in caplog.text
+    finally:
+        scorer.close()
+
+
+def _grouped_failure() -> None:
+    """Raise an exception group that holds a nested group, as a metric might."""
+    try:
+        {}["missing"]  # METRIC_LINE_ONE
+    except KeyError as error:
+        inner = ExceptionGroup("inner", [ValueError("bad")])
+        raise ExceptionGroup("checks failed", [error, inner]) from None  # METRIC_LINE_TWO
+
+
+def test_an_exception_group_traceback_sends_no_frame_or_source_line() -> None:
+    """Exception group frames sit behind ``|`` margins and must go like plain frames (SKY-353)."""
+    try:
+        _grouped_failure()
+    except ExceptionGroup as group:
+        text = "".join(traceback.format_exception(group))
+
+    scrubbed = _scrub(text, None)
+
+    assert "  |   File " in text
+    assert "METRIC_LINE_TWO" in text
+    assert "METRIC_LINE" not in scrubbed
+    assert 'File "' not in scrubbed
+    assert "Traceback" not in scrubbed
+    assert "ExceptionGroup: checks failed (2 sub-exceptions)" in scrubbed
+    assert "ValueError: bad" in scrubbed

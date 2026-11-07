@@ -494,3 +494,63 @@ def test_a_workspace_without_protected_paths_skips_the_check(
 
     assert space.protected_changes() == ()
     assert all("hashlib" not in command for command, _, _ in runtime.boxes[0].commands)
+
+
+def test_a_version_that_edits_a_metric_file_is_laid_out_with_the_base_metric(tmp_path: Path) -> None:
+    """The metric comes from the base commit: a version's edit to it is dropped, its other edits stay (SKY-353)."""
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "src/metric.py": "def score(): return 0.1\n"})
+    space = RepoWorkspace(
+        runtime=_Runtime(),
+        spec=_ONLINE,
+        archive=archive,
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command=None,
+        secrets={},
+        hidden_paths=["src/metric.py", ".optimize/exploits"],
+    )
+    try:
+        edits = {"src/app.py": "x = 2\n", "src/metric.py": "def score(): return 1.0\n", ".optimize/exploits/a": "a\n"}
+        patch = _patch(tmp_path / "cheat", archive, edits)
+        assert space.violations(patch) == []
+        laid = space.checkout(patch)
+        assert laid.path == WORK_DIR
+        box = space.session()
+        assert box.read_file(f"{WORK_DIR}/src/metric.py") == "def score(): return 0.1\n"
+        assert box.read_file(f"{WORK_DIR}/src/app.py") == "x = 2\n"
+        assert box.read_file(f"{WORK_DIR}/.optimize/exploits/a") is None
+    finally:
+        space.close()
+
+
+def test_version_code_that_rewrites_the_hidden_metric_while_it_runs_is_caught(tmp_path: Path) -> None:
+    """Fingerprint the hidden metric like a protected file, and never name it to the agent (SKY-353)."""
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", "eval/metric.py": "def score(): return 0.1\n"})
+    space = RepoWorkspace(
+        runtime=_Runtime(),
+        spec=_ONLINE,
+        archive=archive,
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command=None,
+        secrets={},
+        hidden_paths=["eval/metric.py", ".optimize/exploits"],
+    )
+    try:
+        version = _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"})
+        space.checkout(version)
+        assert space.stamp_before_run() is None
+        space.session().run(f"cd {WORK_DIR} && cat eval/metric.py > /dev/null")
+        assert space.protected_changes() == ()
+
+        space.checkout(version)
+        space.stamp_before_run()
+        space.session().run(f"cd {WORK_DIR} && printf 'def score(): return 1.0\\n' > eval/metric.py")
+        assert space.protected_changes() == ("The metric files changed while the version ran.",)
+
+        space.checkout(version)
+        space.stamp_before_run()
+        space.session().run(f"cd {WORK_DIR} && mkdir -p .optimize/exploits && touch .optimize/exploits/a")
+        assert space.protected_changes() == ("The metric files changed while the version ran.",)
+    finally:
+        space.close()
