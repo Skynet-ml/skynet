@@ -73,8 +73,31 @@ export function hardeningScorer(state: Pick<WizardV2State, "workspace" | "optimi
   const optimizer = { ...state.optimizer, taskModel: null };
   const metric = runModels(optimizer, true, code).at(-1);
   if (!metric) return scorer;
-  const isRole = [reflection, ...optimizer.extraReflectionModels].some((role) => role?.name === metric.name);
+  // runModels returns a role's own object; only a new config needs a connection.
+  const isRole = [reflection, ...optimizer.extraReflectionModels].includes(metric);
   return { ...scorer, model: prepareModelConfig(isRole ? metric : withByokProvider(metric, reflection)) };
+}
+
+/** The leading `provider/` segment of a model name, or null for a bare name. */
+function modelPrefix(name: string): string | null {
+  const stripped = name.trim().replace(/^\/+|\/+$/g, "");
+  return stripped.includes("/") ? stripped.split("/", 1)[0] || null : null;
+}
+
+// The server's LITELLM_TO_BYOK_PROVIDER (backend/core/provider_registry.py), the
+// reverse of BYOK_TO_LITELLM_PROVIDER in features/billing/lib/byok.ts. A copy,
+// because the repo-run test loader cannot import a feature's index.
+const LITELLM_TO_BYOK_PROVIDER: Readonly<Record<string, string>> = {
+  gemini: "google",
+  together_ai: "together",
+  cohere_chat: "cohere",
+  fireworks_ai: "fireworks",
+  meta_llama: "meta",
+};
+
+/** The BYOK vault slug for a LiteLLM provider prefix (`gemini` → `google`). */
+function byokProviderForLitellm(prefix: string): string {
+  return LITELLM_TO_BYOK_PROVIDER[prefix] ?? prefix;
 }
 
 /**
@@ -91,12 +114,20 @@ export function hardeningScorer(state: Pick<WizardV2State, "workspace" | "optimi
  *   else the config unchanged.
  */
 function withByokProvider(metric: ModelConfig, reflection: ModelConfig): ModelConfig {
-  const provider = reflection.byok_provider;
-  if (metric.token_source !== "byok" || reflection.token_source !== "byok" || !provider) return metric;
-  const name = metric.name.trim().replace(/^\/+|\/+$/g, "");
+  if (metric.token_source !== "byok" || reflection.token_source !== "byok") return metric;
+  const reflectionPrefix = modelPrefix(reflection.name);
+  // A reflection model typed in by hand has no byok_provider; the server then
+  // takes the provider from its name.
+  const provider = reflection.byok_provider || (reflectionPrefix && byokProviderForLitellm(reflectionPrefix));
+  if (!provider) return metric;
+  // An openai/ reflection name on another provider's connection means a custom
+  // endpoint, which also serves openai/ names.
+  const customBase = reflectionPrefix === "openai" && byokProviderForLitellm("openai") !== provider;
+  const prefix = modelPrefix(metric.name);
   // A bare name carries no provider that could contradict the connection.
-  const prefix = name.includes("/") ? name.split("/", 1)[0] : null;
-  return prefix === null || prefix === provider ? { ...metric, byok_provider: provider } : metric;
+  const routable =
+    prefix === null || byokProviderForLitellm(prefix) === provider || (customBase && prefix === "openai");
+  return routable ? { ...metric, byok_provider: provider } : metric;
 }
 
 /** The repository run request, or null while the wizard cannot run it yet. */

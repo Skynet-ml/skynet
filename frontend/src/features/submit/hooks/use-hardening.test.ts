@@ -428,6 +428,37 @@ if (!process.env.JITI_ALIAS) {
       assert.deepEqual(createdScorer(sent).model, { name: "anthropic/judge", token_source: "byok" });
     });
 
+    void it("takes the connection from the reflection name when the BYOK reflection model has no byok_provider", async () => {
+      for (const [reflectionName, provider] of [
+        ["openai/gpt-4o", "openai"],
+        ["gemini/gemini-2.5-pro", "google"],
+      ]) {
+        const { sent } = await startWith(repo, llmMetric("llm('judge this', model='gpt-4o-mini')"), {
+          ...optimizer,
+          reflectionModel: { name: reflectionName, token_source: "byok" },
+        });
+        assert.deepEqual(createdScorer(sent).model, {
+          name: "gpt-4o-mini",
+          token_source: "byok",
+          byok_provider: provider,
+        });
+      }
+    });
+
+    void it("treats an extra reflection model name as a new config when the engine is not ShinkaEvolve", async () => {
+      const { sent } = await startWith(repo, llmMetric("llm('judge this', model='gpt-4o-mini')"), {
+        ...optimizer,
+        reflectionModel: { name: "openai/reflect", token_source: "byok", byok_provider: "openai" },
+        // Left over from an earlier ShinkaEvolve choice; GEPA does not use it.
+        extraReflectionModels: [{ name: "gpt-4o-mini", token_source: "byok" }],
+      });
+      assert.deepEqual(createdScorer(sent).model, {
+        name: "gpt-4o-mini",
+        token_source: "byok",
+        byok_provider: "openai",
+      });
+    });
+
     void it("adds no model for a metric without llm() or with two model names", async () => {
       assert.equal("model" in createdScorer((await startWith(repo)).sent), false);
       const two = llmMetric("llm('a', model='x/one') + llm('b', model='x/two')");
