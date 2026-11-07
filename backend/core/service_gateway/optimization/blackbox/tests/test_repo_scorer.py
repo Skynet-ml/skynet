@@ -588,6 +588,7 @@ def test_a_crashing_metric_sends_no_traceback_or_box_path(tmp_path: Path) -> Non
         assert "eval/missing.csv" in text
         assert "Traceback" not in text
         assert 'File "' not in text
+        assert "os.path.join" not in text
         assert ".app-repo" not in text
         assert str(tmp_path) not in text
     finally:

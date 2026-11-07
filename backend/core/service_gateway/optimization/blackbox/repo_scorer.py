@@ -43,8 +43,9 @@ SETUP_ALLOWANCE_SECONDS = 1_800.0
 # The proposer gets only these keys, so the scorer's other side information
 # (weights, formulas, metric source) never reveals the metric (SKY-353).
 _PROPOSER_KEYS = ("score", "feedback", STATUS_KEY, "scores")
-# A traceback names the metric's files and quotes its source lines.
-_TRACEBACK = re.compile(r"^Traceback \(most recent call last\):\n|^  File \".*\n(?:    .*\n)?", re.MULTILINE)
+# A traceback names the metric's files and quotes its source lines, and on
+# Python 3.11+ adds caret lines under them; every indented line goes.
+_TRACEBACK = re.compile(r"^Traceback \(most recent call last\):\n|^  File \".*\n(?:    .*\n)*", re.MULTILINE)
 
 
 class RepoScoreError(Exception):
