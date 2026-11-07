@@ -318,6 +318,8 @@
     "repo_gate.unenforced_local": "optimize.toml에서 {key}을(를) 설정합니다. 로컬 Docker 샌드박스는 아직 이 설정을 적용할 수 없습니다. 실행하려면 이 설정을 제거하세요.",
     "repo_gate.unenforced_cloud": "optimize.toml에서 {key}을(를) 설정합니다. 클라우드 샌드박스는 아직 이 설정을 적용할 수 없습니다. 실행하려면 이 설정을 제거하세요.",
     "repo_gate.missing_secret": "optimize.toml의 서비스 {service}에 시크릿 {secret}이(가) 필요하지만, 이 실행에는 그 이름의 시크릿이 없습니다. 실행에 시크릿을 추가하거나 파일에서 이름을 제거하세요.",
+    "repo_gate.unknown_connector": "optimize.toml의 서비스 {service}은(는) 커넥터가 아닙니다. 다음 이름 중 하나를 사용하세요: {known}.",
+    "repo_gate.proposer_hosts_unsupported": "optimize.toml에서 [proposer] network를 {hosts}(으)로 설정합니다. 제안자의 허용 호스트는 아직 지원되지 않습니다. 실행하려면 목록을 제거하세요.",
     "optimization.retry_no_payload": "원본 최적화에 다시 시도할 저장된 페이로드가 없습니다.",
     "optimization.retry_wrong_status": "'failed' 또는 'cancelled' 상태의 최적화만 다시 시도할 수 있습니다. 이 최적화는 '{status}' 상태입니다. 대신 복제하세요.",
     "quota.reached": "사용자당 최적화 한도({quota}개)에 도달했습니다. 새로 만들려면 기존 최적화를 삭제하세요.",

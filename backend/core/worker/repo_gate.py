@@ -96,10 +96,11 @@ def check_repository(archive: Path, secret_names: Collection[str], *, place: Pla
     if raw is None:
         return []
     constraints = parse_constraints(raw)
+    specific = _specific_failures(constraints, place)
     failures = [
-        _failure(key, place, _UNENFORCED_CODE[place], key=_detail(key, constraints))
+        specific.get(key) or _failure(key, place, _UNENFORCED_CODE[place], key=key)
         for kind, key in _set_keys(raw, constraints.targets, constraints.services)
-        if kind not in ENFORCED[place]
+        if key in specific or kind not in ENFORCED[place]
     ]
     for service, spec in constraints.services.items():
         failures += [
@@ -198,26 +199,36 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     return keys
 
 
-def _detail(label: str, constraints: RepoConstraints) -> str:
-    """Add the specific reason to a refused setting's label, so the message says what to change.
+def _specific_failures(constraints: RepoConstraints, place: Place) -> dict[str, GateFailure]:
+    """Find the settings that fail for a reason of their own, whatever ``ENFORCED`` holds.
 
-    A ``[services.<name>]`` name must be a connector in the catalog (SKY-354),
-    and the proposer gets no allowed hosts until the protected broker can give
-    a guest box an allowlist.
+    A ``[services.<name>]`` name must be a connector in the catalog (SKY-354).
+    The proposer gets no allowed hosts until the protected broker can give a
+    guest box an allowlist, so a non-empty ``[proposer] network`` fails even
+    when the place enforces the key.
 
     Args:
-        label: The setting's label, for example ``"[proposer] network"``.
         constraints: The parsed file.
+        place: Where the run's sandbox runs.
 
     Returns:
-        The label, with the reason when one applies.
+        Each such setting's failure, by its label.
     """
-    if label == "[proposer] network" and constraints.proposer.network:
-        return f"{label} = {list(constraints.proposer.network)}, but allowed hosts are not supported yet"
-    service = label.removeprefix("[services.").removesuffix("]")
-    if label.startswith("[services.") and service not in CONNECTORS:
-        return f"{label}, which names no connector (known: {', '.join(CONNECTORS)})"
-    return label
+    found: dict[str, GateFailure] = {}
+    if constraints.proposer.network:
+        found["[proposer] network"] = _failure(
+            "[proposer] network",
+            place,
+            I18nKey.REPO_GATE_PROPOSER_HOSTS_UNSUPPORTED,
+            hosts=", ".join(constraints.proposer.network),
+        )
+    for name in constraints.services:
+        if name not in CONNECTORS:
+            label = f"[services.{name}]"
+            found[label] = _failure(
+                label, place, I18nKey.REPO_GATE_UNKNOWN_CONNECTOR, service=name, known=", ".join(CONNECTORS)
+            )
+    return found
 
 
 def _failure(setting: str, place: Place, code: I18nKey, **params: str) -> GateFailure:

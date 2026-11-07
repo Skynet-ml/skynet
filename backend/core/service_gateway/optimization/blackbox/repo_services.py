@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ....billing.env_connectors import CONNECTORS, connector_endpoint
 from .docker_egress_proxy import target_allowed
@@ -66,12 +66,16 @@ def plan_roles(constraints: RepoConstraints) -> dict[str, object]:
     Args:
         constraints: The repository's parsed ``optimize.toml``.
 
+    A target's box is offline except for the relay, whatever its ``network``
+    says, so its plan records no allowed host, the same as :func:`stage_spec`.
+
     Returns:
         ``{"proposer": plan, "targets": {name: plan}}``.
     """
+    targets = {name: replace(plan_role(stage), allowed_hosts=()) for name, stage in constraints.targets.items()}
     return {
         "proposer": plan_role(constraints.proposer).record(),
-        "targets": {name: plan_role(stage).record() for name, stage in constraints.targets.items()},
+        "targets": {name: plan.record() for name, plan in targets.items()},
     }
 
 
@@ -199,15 +203,20 @@ def unhealthy_services(services: Collection[str], probe: Callable[[str], bool]) 
     return failed
 
 
-def stage_spec(name: str, stage: TargetStage, *, lifetime_seconds: float, tags: Mapping[str, str]) -> SandboxSpec:
+def stage_spec(
+    name: str, stage: TargetStage, *, candidate_id: str, lifetime_seconds: float, tags: Mapping[str, str]
+) -> SandboxSpec:
     """Build the spec of one stage box for one candidate evaluation.
 
     A target is offline except for the relay, which the parent's mailbox
-    serves, so the box gets no host and no secret (E27).
+    serves, so the box gets no host and no secret, and its ``network`` is not
+    used (E27). The box has no fixed name, so two candidates never share one,
+    and its hold is keyed to the candidate and the stage (E29, E31).
 
     Args:
         name: The ``[target.<name>]`` table name.
         stage: Its parsed settings.
+        candidate_id: The candidate this box evaluates.
         lifetime_seconds: The candidate evaluation's limit, which is also the
             box's hold (E31).
         tags: The job's labels, so the sweep finds the box.
@@ -217,10 +226,10 @@ def stage_spec(name: str, stage: TargetStage, *, lifetime_seconds: float, tags: 
     """
     return SandboxSpec(
         lifetime_seconds=lifetime_seconds,
-        name=f"app-stage-{name}",
         tags=dict(tags),
         vcpus=stage.vcpus,
         network_disabled=True,
+        operation_key=f"stage:{candidate_id}:{name}",
     )
 
 
@@ -238,8 +247,8 @@ def open_stage_boxes(runtime: SandboxRuntime, specs: Mapping[str, SandboxSpec]) 
         Each stage's open box, by stage name.
 
     Raises:
-        BudgetExhaustedError: When the budget refuses a box; the run stops as
-            ``budget_reached`` with the best candidate so far.
+        Exception: Whatever ``runtime.open`` raises, after the boxes that
+            opened close.
     """
     opened: dict[str, SandboxSession] = {}
     try:

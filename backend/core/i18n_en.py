@@ -237,6 +237,8 @@ ENGLISH_MESSAGES: dict[str, str] = {
     "repo_gate.unenforced_local": "optimize.toml sets {key}. The local Docker sandbox cannot enforce this setting yet. Remove it to run.",
     "repo_gate.unenforced_cloud": "optimize.toml sets {key}. The cloud sandbox cannot enforce this setting yet. Remove it to run.",
     "repo_gate.missing_secret": "The service {service} in optimize.toml needs the secret {secret}, but this run has no secret with that name. Add the secret to the run or remove the name from the file.",
+    "repo_gate.unknown_connector": "The service {service} in optimize.toml is not a connector. Use one of these names: {known}.",
+    "repo_gate.proposer_hosts_unsupported": "optimize.toml sets [proposer] network to {hosts}. Allowed hosts for the proposer are not supported yet. Remove the list to run.",
     "serve.subscription_model_hosted": (
         f"This run used a local subscription model. Serve it in the {APP_NAME} Mac app, "
         "or start a new optimization with a managed model or your own provider key."

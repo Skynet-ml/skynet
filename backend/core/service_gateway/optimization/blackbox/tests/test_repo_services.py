@@ -97,19 +97,20 @@ def _specs(names: tuple[str, ...]) -> Mapping[str, SandboxSpec]:
     """
     targets = parse_constraints(_FILE).targets
     return {
-        name: repo_services.stage_spec(name, targets[name], lifetime_seconds=60, tags={"job": "j"}) for name in names
+        name: repo_services.stage_spec(name, targets[name], candidate_id="c1", lifetime_seconds=60, tags={"job": "j"})
+        for name in names
     }
 
 
 def test_each_role_gets_only_its_listed_hosts_servers_and_services() -> None:
-    """The record names every role's plan, and an unset network keeps the role's default."""
+    """The record names every role's plan; the proposer keeps its list, and every target is offline."""
     plans = repo_services.plan_roles(parse_constraints(_FILE))
 
     assert plans == {
         "proposer": {"allowed_hosts": ["pypi.org"], "mcp_servers": ["maps"], "services": ["maps"]},
         "targets": {
             "planner": {"allowed_hosts": [], "mcp_servers": ["web_search"], "services": ["maps"]},
-            "router": {"allowed_hosts": None, "mcp_servers": [], "services": []},
+            "router": {"allowed_hosts": [], "mcp_servers": [], "services": []},
         },
     }
 
@@ -160,6 +161,32 @@ def test_no_secret_reaches_a_stage_box() -> None:
         assert spec.network_disabled
         assert _SECRET not in repr(spec)
     assert _specs(("planner",))["planner"].vcpus == 4
+
+
+def test_each_candidate_gets_its_own_stage_box() -> None:
+    """A stage box has no fixed name, and its hold key names the candidate and the stage (E29)."""
+    stage = parse_constraints(_FILE).targets["planner"]
+
+    first = repo_services.stage_spec("planner", stage, candidate_id="c1", lifetime_seconds=60, tags={})
+    second = repo_services.stage_spec("planner", stage, candidate_id="c2", lifetime_seconds=60, tags={})
+
+    assert first.name is None
+    assert second.name is None
+    assert first.operation_key == "stage:c1:planner"
+    assert first.operation_key != second.operation_key
+
+
+def test_a_target_network_list_gives_its_box_no_host() -> None:
+    """A target box is offline except for the relay, so the plan and the spec both hold no host."""
+    raw = b'version = 1\n[target.web]\nentry = "a.py:f"\nnetwork = ["api.example.com"]\n'
+    constraints = parse_constraints(raw)
+
+    plans = repo_services.plan_roles(constraints)
+    spec = repo_services.stage_spec("web", constraints.targets["web"], candidate_id="c1", lifetime_seconds=60, tags={})
+
+    assert plans["targets"] == {"web": {"allowed_hosts": [], "mcp_servers": [], "services": []}}
+    assert spec.allowed_hosts == ()
+    assert spec.network_disabled
 
 
 def test_a_service_gets_only_the_secrets_it_names() -> None:
@@ -276,7 +303,7 @@ def test_allowed_calls_work_forbidden_calls_fail_and_no_key_is_exposed() -> None
     assert not repo_services.host_allowed("maps.googleapis.com", proposer.allowed_hosts)
     assert "maps" in proposer.mcp_servers
     assert "web_search" not in proposer.mcp_servers
-    spec = repo_services.stage_spec("planner", planner, lifetime_seconds=60, tags={})
+    spec = repo_services.stage_spec("planner", planner, candidate_id="c1", lifetime_seconds=60, tags={})
     service = repo_services.service_environment("maps", constraints.services["maps"], {"GOOGLE_MAPS_API_KEY": _SECRET})
     assert service == {"GOOGLE_MAPS_API_KEY": _SECRET}
     assert _SECRET not in repr(spec)
