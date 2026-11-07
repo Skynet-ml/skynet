@@ -22,8 +22,9 @@ import { Button } from "@/shared/ui/primitives/button";
 import { Input } from "@/shared/ui/primitives/input";
 import { Label } from "@/shared/ui/primitives/label";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/primitives/tooltip";
-import { finishMcpConnection, type ConnectorProvider, type ConnectorStatus } from "@/shared/lib/api";
-import { parseMcpFinish } from "@/shared/lib/mcp-finish";
+import { finishOAuth, type ConnectorProvider, type ConnectorStatus } from "@/shared/lib/api";
+import { parseOAuthFinish } from "@/shared/lib/oauth-finish";
+import { forgetOAuthReturn, takeOAuthReturn } from "@/shared/lib/oauth-return";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { knownErrorCodeMessage, userErrorMessage } from "@/shared/lib/user-error";
 import { cn } from "@/shared/lib/utils";
@@ -96,21 +97,37 @@ function useConnectorErrorParam() {
 }
 
 /**
- * Finish an MCP server sign-in from the ``#mcp_state=..&mcp_code=..`` fragment
- * of the callback redirect. The backend checks that this signed-in user
- * started the sign-in. The fragment is cleared first, so the code is sent once.
+ * Finish an MCP server or connector sign-in from the
+ * ``#oauth_flow=..&oauth_state=..&oauth_code=..`` fragment of the callback
+ * redirect. The backend checks that this signed-in user started the sign-in.
+ * The fragment is cleared first, so the code is sent once. A linked connector
+ * refreshes the list quietly, then returns to the page that started the flow.
  */
-function useMcpFinishFragment() {
+function useOAuthFinishFragment(refetch: () => unknown) {
   React.useEffect(() => {
-    const finish = parseMcpFinish(window.location.hash);
-    if (!finish) return;
+    const finish = parseOAuthFinish(window.location.hash);
+    if (!finish || (finish.flow !== "mcp" && !finish.flow.startsWith("connector:"))) return;
     const url = new URL(window.location.href);
     window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}`);
-    finishMcpConnection(finish)
-      .then(({ name }) =>
-        toast.success(formatMsg("connectors.toast.provider_connected", { provider: name }), TOAST_OPTIONS),
-      )
-      .catch((err) => toast.error(userErrorMessage(err, msg("connectors.toast.failed")), TOAST_OPTIONS));
+    finishOAuth(finish.path, finish)
+      .then((answer) => {
+        if (finish.flow === "mcp") {
+          forgetOAuthReturn();
+          toast.success(
+            formatMsg("connectors.toast.provider_connected", { provider: answer?.name ?? "" }),
+            TOAST_OPTIONS,
+          );
+          return;
+        }
+        const back = takeOAuthReturn();
+        if (back) window.location.replace(back);
+        else void refetch();
+      })
+      .catch((err) => {
+        forgetOAuthReturn();
+        toast.error(userErrorMessage(err, msg("connectors.toast.failed")), TOAST_OPTIONS);
+      });
+    // Runs once on mount: the fragment is read and cleared in the same pass.
   }, []);
 }
 
@@ -450,7 +467,7 @@ export function ConnectorsTab() {
     if (targetFocus) clearFocus();
   }, [targetFocus, clearFocus]);
   useConnectorErrorParam();
-  useMcpFinishFragment();
+  useOAuthFinishFragment(refetch);
 
   return (
     <div data-setup="connectors" className="space-y-4">

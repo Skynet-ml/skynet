@@ -3655,11 +3655,16 @@ export interface McpProbeResponse {
   error: string | null;
 }
 
-/** Finish an MCP server sign-in with the state and code the callback passed in the URL fragment. */
-export function finishMcpConnection(body: { state: string; code: string }) {
-  return request<{ name: string }>("/mcp/connections/finish", {
+/**
+ * Finish an OAuth sign-in at ``path`` (from ``oauthFinishPath``) with the state
+ * and code that the callback passed in the URL fragment. The backend links the
+ * account only for the user who started the sign-in. An MCP finish answers
+ * with the server name.
+ */
+export function finishOAuth(path: string, { state, code }: { state: string; code: string }) {
+  return request<{ name?: string } | undefined>(path, {
     method: "POST",
-    body: JSON.stringify(body),
+    body: JSON.stringify({ state, code }),
   });
 }
 

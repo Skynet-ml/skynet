@@ -12,7 +12,8 @@ import {
   X,
 } from "@/shared/ui/icons";
 import { toast } from "react-toastify";
-import { startOpenRouterOAuth } from "@/shared/lib/api";
+import { finishOAuth, startOpenRouterOAuth } from "@/shared/lib/api";
+import { parseOAuthFinish } from "@/shared/lib/oauth-finish";
 import { isLocalMode } from "@/shared/lib/runtime-env";
 import { msg, formatMsg } from "@/shared/lib/messages";
 import { knownErrorCodeMessage, userErrorMessage } from "@/shared/lib/user-error";
@@ -57,6 +58,26 @@ function useByokErrorParam() {
       "",
       `${url.pathname}${url.search}${url.hash}`,
     );
+  }, []);
+}
+
+/**
+ * Finish "Continue with OpenRouter" from the
+ * ``#oauth_flow=openrouter&oauth_state=..&oauth_code=..`` fragment of the
+ * callback redirect. The backend saves the key only for the user who started
+ * the sign-in. The fragment is cleared first, so the code is sent once.
+ */
+function useOpenRouterFinishFragment() {
+  const { reload } = useByokKeys();
+  React.useEffect(() => {
+    const finish = parseOAuthFinish(window.location.hash);
+    if (finish?.flow !== "openrouter") return;
+    const url = new URL(window.location.href);
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}`);
+    finishOAuth(finish.path, finish)
+      .then(() => reload())
+      .catch((err) => toast.error(userErrorMessage(err, msg("settings.keys.save_failed_toast"))));
+    // Runs once on mount: the fragment is read and cleared in the same pass.
   }, []);
 }
 
@@ -319,6 +340,7 @@ function ProviderKeyRow({ provider }: { provider: ByokProviderInfo }) {
  */
 export function ByokKeysSection() {
   useByokErrorParam();
+  useOpenRouterFinishFragment();
   return (
     <div data-setup="model-keys" className="space-y-3">
       <p className="text-xs text-muted-foreground">
