@@ -58,15 +58,17 @@ CASES_KEY = "cases"
 REPO_SCORER_URL = "https://scoped-evaluator.invalid/score"
 RUNNER_PATH = f"{REPO_DIR}/app_runner.py"
 CALLS_DIR = f"{REPO_DIR}/calls"
-# The guest waits for the version's checkout and the scorer together; copying a
-# prepared tree with its installed dependencies can take a while, so its relay
-# gets an allowance on top of the scorer's own timeout.
-SETUP_ALLOWANCE_SECONDS = 1_800.0
 STAGE_DIR = ".app-stage"
 _STAGE_TREE = f"{STAGE_DIR}/tree"
 # Unpacking the tree and applying the version in a stage box; the box's hold
 # covers this on top of the scorer's own timeout.
 _STAGE_LAYOUT_SECONDS = 600.0
+# The guest waits for the version's checkout, its stage boxes' layout and the
+# scorer together; copying a prepared tree with its installed dependencies can
+# take a while, so its relay gets an allowance on top of the scorer's own
+# timeout. The guest does not know whether the run has stages, so every
+# repository run gets the layout time too; it only matters when the parent hangs.
+SETUP_ALLOWANCE_SECONDS = 1_800.0 + _STAGE_LAYOUT_SECONDS
 _STAGE_ERROR_CHARS = 500
 # The proposer gets only these keys, so the scorer's other side information
 # (weights, formulas, metric source) never reveals the metric (SKY-353).
@@ -216,7 +218,7 @@ class RepoScorer:
                 "case": case,
                 "gateway": gateway.runner_payload() if gateway is not None else None,
             }
-            with self._stage_relay(session, patch, f"{CALLS_DIR}/{self._calls:06d}/stages") as relay:
+            with self._stage_relay(patch, f"{CALLS_DIR}/{self._calls:06d}/stages") as relay:
                 if relay is not None:
                     document["stages"] = relay.config(root)
                 session.write_files({f"{CALLS_DIR}/{self._calls:06d}/{runner.INPUT_FILE}": json.dumps(document)})
@@ -238,7 +240,12 @@ class RepoScorer:
                     )
             if result.timed_out:
                 raise RepoScoreError(f"The scorer exceeded its {self._timeout_seconds:g}s timeout.")
-            changes = (*(relay.changes if relay is not None else ()), *self._workspace.protected_changes())
+            unchecked = relay is not None and relay.unchecked
+            # After a failed answer check the answer went in by a file write, which moves
+            # every ctime, so only the checks the answers passed can still name a change.
+            final = () if unchecked else self._workspace.protected_changes()
+            # Each stage answer checks again, so a lasting change would repeat once per answer.
+            changes = tuple(dict.fromkeys((*(relay.changes if relay is not None else ()), *final)))
             # A hidden change is not a [paths] rule the agent knows, so it
             # skips the rule judge and its "do not repeat it" message.
             tampered = [change for change in changes if change != HIDDEN_CHANGED]
@@ -248,6 +255,8 @@ class RepoScorer:
                 raise RepoScoreError(judge.blocked([reason]) if judge is not None else reason)
             if changes:
                 raise RepoScoreError(HIDDEN_CHANGED)
+            if unchecked:
+                raise RepoScoreError("A stage answer could not be checked or delivered, so the version has no score.")
             text = session.read_file(f"{CALLS_DIR}/{self._calls:06d}/{runner.OUTPUT_FILE}")
         # The version's code runs next to the hidden metric and can print or
         # raise its contents, so the guest gets only a fixed message; the
@@ -289,7 +298,7 @@ class RepoScorer:
         return {ENV_API_KEY: gateway.api_key, ENV_MODEL: gateway.model}
 
     @contextlib.contextmanager
-    def _stage_relay(self, scorer_box: SandboxSession, patch: str, response_dir: str) -> Iterator[_StageRelay | None]:
+    def _stage_relay(self, patch: str, response_dir: str) -> Iterator[_StageRelay | None]:
         """Open this evaluation's stage boxes, lay the version out in each, and relay calls to them.
 
         Every box opens before the scorer's first sample, or none stays open
@@ -298,7 +307,6 @@ class RepoScorer:
         on a failure.
 
         Args:
-            scorer_box: The scorer's box, where answers are written.
             patch: The version being scored.
             response_dir: The call's answer folder, relative to the scorer box.
 
@@ -337,7 +345,6 @@ class RepoScorer:
         relay = _StageRelay(
             boxes,
             self._stages,
-            scorer_box=scorer_box,
             response_dir=response_dir,
             max_concurrency=self._max_concurrency,
             env=self._model_env(),
@@ -469,7 +476,6 @@ class _StageRelay:
         boxes: Mapping[str, SandboxSession],
         stages: Mapping[str, TargetStage],
         *,
-        scorer_box: SandboxSession,
         response_dir: str,
         max_concurrency: int,
         env: Mapping[str, str],
@@ -480,17 +486,15 @@ class _StageRelay:
         Args:
             boxes: Each stage's open box, by stage name.
             stages: Each stage's settings, by stage name.
-            scorer_box: The scorer's box, where answers are written.
             response_dir: The call's answer folder, relative to the scorer box.
             max_concurrency: How many calls to one stage run at the same time.
             env: The run's model route, so stage code reaches models only
                 through the parent's mailbox.
-            workspace: The scorer box's workspace, whose protected files
-                each answer write must not appear to change.
+            workspace: The scorer box's workspace, which checks the
+                protected files and writes each answer into the scorer box.
         """
         self._boxes = dict(boxes)
         self._stages = stages
-        self._scorer_box = scorer_box
         self._response_dir = response_dir
         self._env = dict(env)
         # A fresh nonce for each evaluation: version code cannot forge a frame
@@ -508,6 +512,8 @@ class _StageRelay:
         self._answer_lock = threading.Lock()
         self._closed = False
         self.changes: list[str] = []
+        # A failed check is not tampering, so it never reaches the rule judge.
+        self.unchecked = False
 
     def config(self, root: str) -> dict[str, Any]:
         """Describe the relay to the runner in the scorer box.
@@ -537,11 +543,15 @@ class _StageRelay:
             lines = self._pending.split("\n")
             self._pending = lines.pop()
             for line in lines:
-                if not line.startswith(self._prefix):
+                # Another thread of the scorer may have left a partial line just before the frame.
+                start = line.find(self._prefix)
+                if start < 0:
                     sandbox_log.ignore_output(stream, line + "\n")
                     continue
+                if start:
+                    sandbox_log.ignore_output(stream, line[:start] + "\n")
                 try:
-                    frame = json.loads(line[len(self._prefix) :])
+                    frame = json.loads(line[start + len(self._prefix) :])
                     identity, name = frame["id"], frame["stage"]
                 except (ValueError, KeyError, TypeError):
                     continue
@@ -644,19 +654,12 @@ class _StageRelay:
         with self._answer_lock:
             if self._closed:
                 return
-            # A file write moves the change time of every file in the box, so the
-            # protected files are checked before each answer and stamped again
-            # after it. Only a write the version undoes before an answer arrives
-            # goes unseen; a lasting change still differs from the prepared tree.
-            self.changes.extend(self._workspace.protected_changes())
-            try:
-                self._scorer_box.write_files({f"{self._response_dir}/{identity}.json": json.dumps(response)})
-            except Exception as error:
-                # The scorer then waits until its own timeout, which fails the version.
-                logger.warning("A stage answer could not reach the scorer box: %s", error)
-            unstamped = self._workspace.stamp_before_run()
-            if unstamped:
-                self.changes.append(unstamped)
+            changes = self._workspace.answer(f"{self._response_dir}/{identity}.json", json.dumps(response))
+            if changes is None:
+                # The scorer may wait until its own timeout; either way the version gets no score.
+                self.unchecked = True
+            else:
+                self.changes.extend(changes)
 
     def close(self) -> None:
         """Stop queued calls, keep late answers out of the scorer box, and close every stage box."""

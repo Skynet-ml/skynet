@@ -213,8 +213,9 @@ def stage_spec(
     """Build the spec of one stage box for one candidate evaluation.
 
     A target is offline except for the relay, which the parent's mailbox
-    serves, so the box gets no host and no secret, and its ``network`` is not
-    used (E27). The box has no fixed name, so two evaluations never share one,
+    serves, so the spec gives the box no host and no secret, and its
+    ``network`` is not used (E27). The model route key is not in the spec:
+    the relay passes it in each stage call's environment at run time. The box has no fixed name, so two evaluations never share one,
     and its hold is keyed to the evaluation and the stage (E29, E31). A reused
     key returns the earlier reservation, so the id must be new for every
     evaluation, also when one candidate is evaluated again. The

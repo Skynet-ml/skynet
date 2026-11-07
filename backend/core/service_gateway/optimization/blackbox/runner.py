@@ -182,7 +182,8 @@ class StageClient:
         # The real stdout: a scorer that redirects sys.stdout must still reach the relay.
         stream = sys.__stdout__ or sys.stdout
         with self._lock:
-            stream.write(frame + "\n")
+            # The leading newline ends any partial line the scorer printed before this call.
+            stream.write("\n" + frame + "\n")
             stream.flush()
         path = self._responses / f"{identity}.json"
         while True:

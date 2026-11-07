@@ -161,6 +161,21 @@ def test_a_parent_box_without_a_network_switch_fails_closed() -> None:
         session.disable_network()
 
 
+def test_a_closed_parent_box_leaves_the_broker_and_the_open_one_still_closes_with_it() -> None:
+    """A run opens stage boxes for each evaluation, so the broker must not keep the closed ones until the job ends."""
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120)
+    parent = broker.parent_runtime(())
+    first, second, third = (parent.open(SandboxSpec(lifetime_seconds=60, operation_key=key)) for key in ("a", "b", "c"))
+    runtime.sessions[1].fail_close = True
+    first.close()
+    with pytest.raises(UsagePendingError):
+        second.close()
+    assert broker._parent_sessions == [third]
+    broker.close()
+    assert [session.close_calls for session in runtime.sessions] == [1, 1, 1]
+
+
 def test_broker_rejects_host_paths_and_closes_every_session_after_failure() -> None:
     """Do not let one uncertain settlement leave other owned compute running."""
     runtime = FakeRuntime()
