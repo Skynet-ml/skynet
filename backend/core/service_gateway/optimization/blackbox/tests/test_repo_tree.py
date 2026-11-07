@@ -274,7 +274,7 @@ def test_protected_paths_are_refused_even_under_the_whole_tree(tmp_path: Path) -
 
     problems = patch_violations(version_patch(checkout), ["."], [], ["eval"])
 
-    assert problems == ["'eval/labels.json' is protected by the repository's optimize.toml ([paths] protected)."]
+    assert problems == ["'eval/labels.json' is protected by the repository rules ([paths] protected)."]
 
 
 def test_strip_archive_leaves_out_every_hidden_path(tmp_path: Path) -> None:

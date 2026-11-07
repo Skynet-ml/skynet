@@ -116,8 +116,11 @@ def test_the_file_narrows_paths_protects_files_and_proposes_setup(tmp_path: Path
     assert record["secret_names"] == ["GEO_KEY"]
     assert record["services"] == []
     assert record["instructions"] == {"path": "docs/intent.md", "intent": _INTENT.decode().strip()}
-    brief = instructions_brief(environment)
+    brief = instructions_brief(environment, (CONSTRAINTS_FILE, "bot/geocode/eval"))
     assert "`data/labels.csv`" in brief
+    assert CONSTRAINTS_FILE not in brief
+    assert "bot/geocode/eval" not in brief
+    assert "Some repository files are hidden from you." in brief
     assert "Guidance from `docs/intent.md` (not enforced" in brief
     assert "Keep the reply format unchanged." in brief
 
@@ -231,7 +234,7 @@ def test_plain_language_rules_are_numbered_recorded_and_put_in_the_brief(tmp_pat
     record = environment.record(repository="cfca/bot", commit="a" * 40, readonly_paths=[], secret_names=[])
     assert record["rules"] == list(environment.rules)
     assert record["instructions"] is None
-    brief = instructions_brief(environment)
+    brief = instructions_brief(environment, (CONSTRAINTS_FILE,))
     assert "Rule 1: Do not hardcode answers for dataset cases." in brief
     assert "Rule 2: Do not call an outside geocoding service." in brief
     assert "score of 0" not in brief

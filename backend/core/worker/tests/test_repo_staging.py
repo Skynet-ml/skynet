@@ -7,6 +7,7 @@ import io
 import json
 import subprocess
 import tarfile
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,7 @@ from core.service_gateway.optimization.blackbox.sandbox import CommandResult, Lo
 from core.service_gateway.optimization.blackbox.service import legacy_case_splits
 from core.storage.models import Base
 from core.worker import repo_staging
+from core.worker.repo_gate import check_hidden
 
 
 def _payload(commit: str | None) -> dict[str, Any]:
@@ -1177,7 +1179,7 @@ def test_publishing_refuses_a_version_that_changes_a_protected_path(
     outcome = _publish(_result(0.5, 0.8), staged)
 
     assert outcome is not None
-    assert "protected by the repository's optimize.toml" in outcome["error"]
+    assert "protected by the repository rules" in outcome["error"]
 
 
 def test_publishing_failure_is_recorded_not_raised(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1383,9 +1385,9 @@ def test_the_agent_tree_has_no_metric_file_and_no_exploit_folder(monkeypatch: py
     try:
         agent = Path(staged_payload["_repo_snapshot"]["archive"])
         assert agent != staged.snapshot.archive
-        assert _names(agent) == {"optimize.toml", "src/app.py", "eval/data.csv"}
-        assert {"eval/scorer.py", ".optimize/exploits/cheat.py"} <= _names(staged.snapshot.archive)
-        assert staged.hidden_paths == ("eval/scorer.py", ".optimize/exploits")
+        assert _names(agent) == {"src/app.py", "eval/data.csv"}
+        assert {"optimize.toml", "eval/scorer.py", ".optimize/exploits/cheat.py"} <= _names(staged.snapshot.archive)
+        assert staged.hidden_paths == ("optimize.toml", "eval/scorer.py", ".optimize/exploits")
     finally:
         staged.cleanup()
 
@@ -1818,9 +1820,132 @@ def test_the_cases_file_is_hidden_from_the_agent_and_the_candidate(monkeypatch: 
         assert "data/cases.jsonl" not in _names(Path(staged_payload["_repo_snapshot"]["archive"]))
         assert "data/cases.jsonl" in _names(staged.snapshot.archive)
         # hidden_paths is also the list the candidate box drops (SKY-375), so the candidate never sees it.
-        assert staged.hidden_paths == ("eval/scorer.py", ".optimize/exploits", "data/cases.jsonl")
+        assert staged.hidden_paths == ("optimize.toml", "eval/scorer.py", ".optimize/exploits", "data/cases.jsonl")
     finally:
         staged.cleanup()
+
+
+_EVERY_HIDDEN_KEY = {
+    "optimize.toml": """instructions = "docs/intent.md"
+
+[paths]
+editable = ["src"]
+protected = ["src/judge.py"]
+
+[proposer]
+illegal = "docs/rules.md"
+
+[run]
+entry = "src/app.py:main"
+timeout = 30
+illegal = "docs/run-rules.md"
+
+[metric]
+files = ["eval/scorer.py"]
+exploits = "eval/attacks"
+reference = "eval/reference.json"
+illegal = "eval/metric-rules.md"
+mcp = "eval/mcp.json"
+
+[data]
+cases = "data/cases.jsonl"
+""",
+    "docs/intent.md": "Pick the place the sender means.\n",
+    "docs/rules.md": "- Do not hardcode answers.\n",
+    "docs/run-rules.md": "- Do not open the network.\n",
+    "src/app.py": "def main(case):\n    return case\n",
+    "src/judge.py": "x = 1\n",
+    "eval/scorer.py": "def score(): ...\n",
+    "eval/attacks/cheat.py": "cheat\n",
+    "eval/reference.json": "{}\n",
+    "eval/metric-rules.md": "- Penalize answers with no postcode.\n",
+    "eval/mcp.json": '{"mcpServers": {}}\n',
+    "data/cases.jsonl": _CASES_JSONL,
+}
+_EVERY_HIDDEN_PATH = (
+    "optimize.toml",
+    "eval/scorer.py",
+    "eval/attacks",
+    "eval/reference.json",
+    "data/cases.jsonl",
+    "eval/metric-rules.md",
+    "eval/mcp.json",
+)
+
+
+def test_every_scoring_side_path_is_hidden_and_the_rule_files_stay_visible(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One list hides every scoring-side key from the agent's tree and the candidate box (E62)."""
+    staged_payload, staged = _stage_with(_EVERY_HIDDEN_KEY, monkeypatch)
+    try:
+        agent = _names(Path(staged_payload["_repo_snapshot"]["archive"]))
+        assert staged.hidden_paths == _EVERY_HIDDEN_PATH
+        assert agent == {"docs/intent.md", "docs/rules.md", "docs/run-rules.md", "src/app.py", "src/judge.py"}
+    finally:
+        staged.cleanup()
+
+
+def test_the_brief_carries_the_visible_rules_and_names_no_hidden_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent reads its rules in the brief, never in optimize.toml, and learns no hidden name (E62)."""
+    staged_payload, staged = _stage_with(_EVERY_HIDDEN_KEY, monkeypatch)
+    staged.cleanup()
+    brief = staged_payload["background"]
+
+    for path in (*_EVERY_HIDDEN_PATH, "eval/", "metric-rules", "mcp.json"):
+        assert path not in brief
+    assert "Editable, change only these paths: `src`." in brief
+    assert (
+        "Protected, every change to them is rejected before scoring: "
+        "`docs/intent.md`, `docs/rules.md`, `docs/run-rules.md`, `src/judge.py`."
+    ) in brief
+    assert "`src/app.py:main`, with a limit of 30 seconds" in brief
+    assert "- Rule 1: Do not hardcode answers." in brief
+    assert "- Do not open the network." in brief
+    assert "Pick the place the sender means." in brief
+
+
+def test_a_hidden_path_shared_with_a_visible_role_stays_visible() -> None:
+    """One .mcp.json for [run] and [metric] is the candidate's file too, so hiding it would break the run."""
+    constraints = repo_staging.read_constraints(
+        _tree(
+            Path(tempfile.mkdtemp()),
+            {
+                "optimize.toml": '[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:main"\nmcp = ".mcp.json"'
+                '\n\n[metric]\nmcp = ".mcp.json"\n',
+                ".mcp.json": '{"mcpServers": {}}\n',
+                "src/app.py": "def main(case):\n    return case\n",
+            },
+        )
+    )
+
+    assert repo_staging.hidden_repo_paths(constraints) == ("optimize.toml", ".optimize/exploits")
+
+
+@pytest.mark.parametrize("path", _EVERY_HIDDEN_PATH)
+def test_check_hidden_reports_a_leak_of_each_scoring_side_path(tmp_path: Path, path: str) -> None:
+    """An agent tree that still holds any one hidden file stops the run, whatever kind of file it is."""
+    original = _tree(tmp_path, _EVERY_HIDDEN_KEY)
+    leaked = {name: text for name, text in _EVERY_HIDDEN_KEY.items() if name == path or name.startswith(path + "/")}
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    agent = _tree(agent_dir, {"src/app.py": "x = 1\n", **leaked})
+
+    failures = check_hidden(original, agent, _EVERY_HIDDEN_PATH, place="cloud")
+
+    assert [failure.params["key"] for failure in failures] == [f"[metric] files: {next(iter(leaked))}"]
+
+
+def test_a_version_edit_to_optimize_toml_is_dropped_before_it_leaves_the_run() -> None:
+    """A version that rewrites its own rules keeps only the scored change (E62)."""
+    toml_edit = (
+        "diff --git a/optimize.toml b/optimize.toml\n--- a/optimize.toml\n+++ b/optimize.toml\n"
+        "@@ -1 +1 @@\n-version = 1\n+version = 2\n"
+    )
+    result = {"best_candidate": toml_edit + _EDIT, "versions": [{"candidate": toml_edit + _EDIT}]}
+
+    repo_staging.drop_hidden_edits(result, _EVERY_HIDDEN_PATH)
+
+    assert result["best_candidate"] == _EDIT
+    assert result["versions"][0]["candidate"] == _EDIT
 
 
 def test_staging_loads_the_cases_from_the_file(monkeypatch: pytest.MonkeyPatch) -> None:

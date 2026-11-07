@@ -37,7 +37,7 @@ from typing import Any
 from .... import run_log
 from . import sandbox_log
 from .classification import HOOK_LABELS, ClassificationError, HookClassification, answer_format, parse_hook_reply
-from .repo_constraints import CONSTRAINTS_FILE, numbered_rules
+from .repo_constraints import numbered_rules
 from .repo_tree import ILLEGAL_ACTION_MESSAGE, PATH_RULE, RULE_BLOCK_EVENT
 
 logger = logging.getLogger(__name__)
@@ -71,13 +71,10 @@ _EVENT_TITLES = {
 }
 _NOTES = {
     "off_intent": (
-        f"Check the run's intent in the instructions file that {CONSTRAINTS_FILE} names. Your recent work seems"
-        " to move away from it: {reason}"
-    ),
-    "breaks_rule": (
-        f"Check the rule file that {CONSTRAINTS_FILE} names. You are probably about to break one of its rules:"
+        "Check the run's intent in the instructions in your brief. Your recent work seems to move away from it:"
         " {reason}"
     ),
+    "breaks_rule": ("Check the rules in your brief. You are probably about to break one of them: {reason}"),
 }
 
 Ask = Callable[[str], "str | None"]
@@ -103,7 +100,7 @@ def watch_prompt(intent: str | None, rules: Sequence[str], steps: Sequence[str])
     recent = "\n".join(f"- {step}" for step in steps)[-_MAX_STEPS_CHARS:]
     return (
         "You watch a code optimization agent. The intent comes from the repository's instructions file,"
-        f" and the rules come from the rule file. {CONSTRAINTS_FILE} names both files.\n\n"
+        " and the rules come from the rule file.\n\n"
         f"<intent>\n{intent_text}\n</intent>\n\n<rules>\n{rules_text}\n</rules>\n\n"
         'Read the agent\'s recent steps. Use "breaks_rule" when the work goes toward a rule violation,'
         ' "off_intent" when it moves away from the intent, and "ok" otherwise. Flag only clear signs,'

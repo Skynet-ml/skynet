@@ -488,7 +488,7 @@ def test_a_blocked_version_gets_only_the_fixed_message(tmp_path: Path) -> None:
             {
                 "kind": EVENT_BLOCK,
                 "rule": "optimize.toml [paths]",
-                "reason": "'eval/labels.csv' is protected by the repository's optimize.toml ([paths] protected).",
+                "reason": "'eval/labels.csv' is protected by the repository rules ([paths] protected).",
             }
         ]
     finally:
@@ -538,7 +538,7 @@ def test_a_watch_note_reaches_the_agent_in_its_next_scoring_reply(tmp_path: Path
         version = _patch(tmp_path / "v1", archive, {"src/app.py": "x = 4\n"})
         warned = json.loads(scorer.dispatch({"candidate": version}).body)
         assert warned["feedback"] == (
-            "Check the rule file that optimize.toml names. You are probably about to break one of its rules:"
+            "Check the rules in your brief. You are probably about to break one of them:"
             " It reads expected answers.\n\nvalue read"
         )
         assert warned["score"] == pytest.approx(0.4)

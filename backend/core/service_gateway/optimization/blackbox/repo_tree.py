@@ -28,7 +28,7 @@ _GIT_IDENTITY = ["-c", "user.name=app", "-c", "user.email=app@localhost", "-c", 
 # text, both in the sandbox and in the parent, and logs the reason as a
 # ``rule.block`` run event instead. ``rule_judge`` and its tests use these.
 ILLEGAL_ACTION_MESSAGE = (
-    "Illegal action. Read optimize.toml and the rule files it names. You cannot do this action. Do not repeat it,"
+    "Illegal action. Read the repository rules in your brief. You cannot do this action. Do not repeat it,"
     " because it wastes time."
 )
 RULE_BLOCK_EVENT = "rule.block"
@@ -276,7 +276,7 @@ def patch_violations(
             # Generic text: the proposer must not learn where the hidden attacks live (SKY-353).
             problems.append(f"'{path}' may not be changed.")
         elif inside(path, protected):
-            problems.append(f"'{path}' is protected by the repository's optimize.toml ([paths] protected).")
+            problems.append(f"'{path}' is protected by the repository rules ([paths] protected).")
         elif inside(path, readonly):
             problems.append(f"'{path}' is a submodule or Git LFS file, which are read-only.")
         elif not inside(path, editable):

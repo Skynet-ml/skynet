@@ -45,11 +45,12 @@ import hashlib
 import ipaddress
 import json
 import math
+import posixpath
 import re
 import socket
 import tarfile
 import tomllib
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -1668,24 +1669,42 @@ def effective_environment(
     )
 
 
-def instructions_brief(environment: RepoEnvironment) -> str:
+def instructions_brief(environment: RepoEnvironment, hidden_paths: Collection[str]) -> str:
     """Write the repository's rules as text the optimization agent reads.
+
+    The agent never sees ``optimize.toml`` or the scorer's files, so this
+    brief is its only copy of the rules, and it names no hidden path (E61).
 
     Args:
         environment: The effective rules.
+        hidden_paths: The paths only the parent's scorer reads.
 
     Returns:
-        Markdown naming the protected paths, every numbered plain-language
-        rule, and the file's instructions, marked as guidance where the
-        runtime does not enforce them.
+        Markdown naming the editable and the visible protected paths, the
+        ``[run]`` entry and timeout, every numbered plain-language rule, the
+        ``[run]`` rules and the file's instructions, marked as guidance where
+        the runtime does not enforce them.
     """
+    hidden = {posixpath.normpath(path) for path in hidden_paths}
+    protected = [path for path in environment.protected_paths if posixpath.normpath(path) not in hidden]
     lines = [
-        f"## Repository rules ({CONSTRAINTS_FILE})",
+        "## Repository rules",
         "",
-        "Protected, every change to them is rejected before scoring: "
-        + ", ".join(f"`{path}`" for path in environment.protected_paths)
-        + ".",
+        "Editable, change only these paths: " + ", ".join(f"`{path}`" for path in environment.editable_paths) + ".",
     ]
+    if protected:
+        lines.append(
+            "Protected, every change to them is rejected before scoring: "
+            + ", ".join(f"`{path}`" for path in protected)
+            + "."
+        )
+    lines.append("Some repository files are hidden from you. Only the scorer reads them, and you cannot change them.")
+    file = environment.constraints
+    if file is not None and file.run_entry is not None:
+        entry = file.run_entry if isinstance(file.run_entry, str) else " ".join(file.run_entry)
+        lines.append(
+            f"Each version runs through `{entry}`, with a limit of {file.run_timeout:g} seconds each time it runs."
+        )
     if environment.rules:
         lines += [
             "",
@@ -1695,7 +1714,9 @@ def instructions_brief(environment: RepoEnvironment) -> str:
             "",
         ]
         lines += [f"- {label}: {rule}" for label, rule in numbered_rules(environment.rules)]
-    file = environment.constraints
+    if file is not None and file.run_role.illegal:
+        lines += ["", "Rules for the code that each version runs:", ""]
+        lines += [f"- {rule}" for rule in file.run_role.illegal]
     if file is not None and file.intent:
         lines += ["", f"Guidance from `{file.instructions_file}` (not enforced; the scorer decides):", "", file.intent]
     return "\n".join(lines)

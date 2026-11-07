@@ -382,9 +382,7 @@ def test_protected_paths_win_over_editable_ones_before_the_box_opens(tmp_path: P
     try:
         rigged = space.checkout(_patch(tmp_path / "rigged", archive, {"src/judge.py": "ok = 'always'\n"}))
         assert rigged.path is None
-        assert rigged.problems == (
-            "'src/judge.py' is protected by the repository's optimize.toml ([paths] protected).",
-        )
+        assert rigged.problems == ("'src/judge.py' is protected by the repository rules ([paths] protected).",)
         assert runtime.boxes == []
         rules = space.checkout(_patch(tmp_path / "rules", archive, {"optimize.toml": "[paths]\neditable = ['.']\n"}))
         assert rules.path is None
@@ -563,6 +561,50 @@ def test_a_workspace_without_protected_paths_skips_the_check(
 
     assert space.protected_changes() == ()
     assert all("def digest(path)" not in command for command, _, _ in runtime.boxes[0].commands)
+
+
+_SCORING_SIDE = {
+    "optimize.toml": '[paths]\neditable = ["src"]\n',
+    "eval/scorer.py": "def score(): return 0.1\n",
+    "eval/reference.json": "{}\n",
+    "data/cases.jsonl": '{"input": 1, "expected": 2}\n',
+}
+
+
+@pytest.mark.parametrize("cutoff", ["ok", "leaky"])
+def test_the_candidate_runs_offline_and_without_the_scoring_side_files(tmp_path: Path, cutoff: str) -> None:
+    """Setup gets the network, then the box goes offline and the hidden files go out before version code runs (E61)."""
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", **_SCORING_SIDE})
+    runtime = _Runtime(cutoff)
+    space = RepoWorkspace(
+        runtime=runtime,
+        spec=_ONLINE,
+        archive=archive,
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command="true",
+        secrets={},
+        hidden_paths=[*_SCORING_SIDE, ".optimize/exploits"],
+    )
+    try:
+        version = _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"})
+        if cutoff == "leaky":
+            with pytest.raises(NetworkCutoffError):
+                space.checkout(version)
+            assert all("version.patch" not in command for command, _, _ in runtime.boxes[0].commands)
+            return
+        space.checkout(version)
+        box = space.session()
+        candidate = box.run(f"cd {WORK_DIR} && cat {' '.join(_SCORING_SIDE)} 2>/dev/null; true")
+
+        commands = runtime.boxes[0].commands
+        probe = next(index for index, entry in enumerate(commands) if "/dev/tcp/" in entry[0])
+        assert not any(online for _, online, _ in commands[probe:])
+        assert all("version.patch" not in command for command, _, _ in commands[:probe])
+        assert candidate.stdout == ""
+        assert all(box.read_file(f"{WORK_DIR}/{name}") is None for name in _SCORING_SIDE)
+    finally:
+        space.close()
 
 
 def test_a_version_that_edits_a_metric_file_is_laid_out_with_the_base_metric(tmp_path: Path) -> None:

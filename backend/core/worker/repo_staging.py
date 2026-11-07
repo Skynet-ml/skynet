@@ -43,8 +43,10 @@ from ..models.common import ModelConfig
 from ..models.hardening import HardeningJob, HardeningJobModel
 from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
+    CONSTRAINTS_FILE,
     ConstraintsError,
     MetricSpec,
+    RepoConstraints,
     ServiceSpec,
     TargetStage,
     effective_environment,
@@ -148,6 +150,45 @@ def is_repo_payload(payload: dict[str, Any]) -> bool:
     return isinstance(target, dict) and target.get("kind") == "repo" and isinstance(target.get("repo"), dict)
 
 
+def hidden_repo_paths(constraints: RepoConstraints | None) -> tuple[str, ...]:
+    """Return every repository path that only the parent's scorer may read (E61, E62).
+
+    The optimization agent's tree, the candidate's box, every tool and every
+    published version leave these out. A path that a visible role also names,
+    such as one ``.mcp.json`` for ``[run]`` and ``[metric]``, stays visible,
+    because hiding it would break that role.
+
+    Args:
+        constraints: The repository's validated constraints, or ``None`` without a file.
+
+    Returns:
+        ``optimize.toml``, the ``[metric]`` files, exploit folder, reference,
+        rule file and ``mcp`` file, and the ``[data] cases`` file, without
+        the keys the file does not set.
+    """
+    if constraints is None:
+        return (MetricSpec().exploits,)
+    metric = constraints.metric
+    hidden = (
+        CONSTRAINTS_FILE,
+        *metric.files,
+        metric.exploits,
+        metric.reference,
+        constraints.cases_file,
+        constraints.metric_role.illegal_file,
+        constraints.metric_role.mcp,
+    )
+    visible = {
+        constraints.instructions_file,
+        constraints.proposer.illegal_file,
+        constraints.run_role.illegal_file,
+        constraints.run_role.mcp,
+        *(stage.illegal_file for stage in constraints.targets.values()),
+        *(stage.mcp for stage in constraints.targets.values()),
+    }
+    return tuple(dict.fromkeys(path for path in hidden if path is not None and path not in visible))
+
+
 def stage_repository(
     payload: dict[str, Any],
     *,
@@ -211,15 +252,15 @@ def stage_repository(
         # Two sources would leave it unclear which cases the run scores on (E58).
         if cases_file is not None and result.get("cases"):
             raise ConstraintsError(UPLOADED_CASES_REFUSED)
-        # The cases file holds every case's expected answer, so the agent and the candidate never see it (E61).
-        hidden = (*metric.files, metric.exploits, *((cases_file,) if cases_file is not None else ()))
+        hidden = hidden_repo_paths(environment.constraints)
         agent_archive = strip_archive(snapshot.archive, hidden, workdir / "agent-tree.tgz")
+        # Nothing checks that [metric] reference names a file, so a missing one is not a leak.
         leaks = check_hidden(
             snapshot.archive,
             agent_archive,
             hidden,
             place=sandbox_place(settings.local_mode),
-            optional_paths=(metric.exploits,),
+            optional_paths=tuple(path for path in (metric.exploits, metric.reference) if path is not None),
         )
         if leaks:
             raise RepoGateError(leaks)
@@ -232,7 +273,7 @@ def stage_repository(
     result["target"]["setup_command"] = environment.setup_command
     if environment.constraints is not None:
         result["background"] = "\n\n".join(
-            part for part in ((result.get("background") or "").strip(), instructions_brief(environment)) if part
+            part for part in ((result.get("background") or "").strip(), instructions_brief(environment, hidden)) if part
         )
     repo["secrets"] = []
     if cases_file is not None:
