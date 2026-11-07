@@ -1447,7 +1447,10 @@ def test_the_stored_result_keeps_only_the_scored_change(monkeypatch: pytest.Monk
 
 def test_staging_keeps_the_target_stages_and_the_stripped_tree(monkeypatch: pytest.MonkeyPatch) -> None:
     """The run's ``[target.<name>]`` stages and the tree without the metric reach the parent's scorer."""
-    files = {"optimize.toml": _CONSTRAINTS + '\n[target.locate]\nentry = "src/geocode/locate.py:run"\ntimeout = 5\n'}
+    files = {
+        **_FILES,
+        "optimize.toml": _CONSTRAINTS + '\n[target.locate]\nentry = "src/geocode/locate.py:run"\ntimeout = 5\n',
+    }
     _, staged = _stage_with(files, monkeypatch)
     try:
         assert list(staged.targets) == ["locate"]
@@ -1483,8 +1486,9 @@ def test_binding_hands_the_stages_to_the_scorer(tmp_path: Path) -> None:
 def test_staging_keeps_the_services_each_role_lists(monkeypatch: pytest.MonkeyPatch) -> None:
     """The run's services and each role's list reach the parent, so the relay can check the caller."""
     files = {
+        **_FILES,
         "optimize.toml": _CONSTRAINTS
-        + '\n[services.judge]\nsecrets = ["JUDGE_KEY"]\nurl = "https://judge.example.com/v1"\n'
+        + '\n[services.judge]\nsecrets = ["JUDGE_KEY"]\nurl = "https://judge.example.com/v1"\n',
     }
     _, staged = _stage_with(files, monkeypatch)
     try:

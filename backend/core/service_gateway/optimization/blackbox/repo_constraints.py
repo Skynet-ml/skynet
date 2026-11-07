@@ -78,6 +78,8 @@ _RUN_ROLE_SECTIONS = ("run", "metric")
 _SHARED_BOX_KEYS = frozenset({"network", "vcpus"})
 # A bullet that starts a rule: "- ", "* " or "+ " at the start of the line.
 _BULLET = re.compile(r"[-*+](?:[ \t]+(.*))?")
+# Only an ATX heading counts; "#1 Do not ..." or "#tag" is text and must not be dropped as a heading.
+_HEADING = re.compile(r"#{1,6}(?:[ \t]|$)")
 # Each of these holds one table per name, so its keys are checked per table.
 _NAMED_SECTIONS = frozenset({"target", "services"})
 _TABLE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
@@ -1026,7 +1028,8 @@ def _read_text_file(packed: tarfile.TarFile, member: tarfile.TarInfo | None, set
         )
     handle = packed.extractfile(member)
     try:
-        return (handle.read() if handle is not None else b"").decode("utf-8")
+        # utf-8-sig drops a leading byte-order mark, which editors on Windows add.
+        return (handle.read() if handle is not None else b"").decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise ConstraintsError(f"{CONSTRAINTS_FILE}: {setting} names '{path}', which is not UTF-8 text.") from exc
 
@@ -1062,7 +1065,7 @@ def _split_rules(text: str, setting: str, path: str) -> tuple[str, ...]:
         if bullet is not None:
             rules.append([(bullet.group(1) or "").strip()])
             open_rule = True
-        elif line.startswith("#"):
+        elif _HEADING.match(line):
             open_rule = False
         elif open_rule and (line[0] in " \t" or not after_blank):
             rules[-1].append(line.strip())

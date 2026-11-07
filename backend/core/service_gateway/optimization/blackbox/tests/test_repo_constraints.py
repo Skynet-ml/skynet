@@ -263,12 +263,18 @@ def test_parsing_alone_keeps_the_paths_and_leaves_the_text_empty() -> None:
             b"# Title\n\n- one\n  more of one\n\n  still one\n## Next\n- two\nlazy two\n",
             ("one more of one still one", "two lazy two"),
         ),
-        (b"\xef\xbb\xbf- one\n", None),
+        (b"\xef\xbb\xbf- one\n", ("one",)),
+        (b"- Do not X.\n#1 Do not hardcode answers.\n", ("Do not X. #1 Do not hardcode answers.",)),
+        (b"- Do not X.\n#hashtag text\n", ("Do not X. #hashtag text",)),
+        (b"#\n###### Deep\n- one\n", ("one",)),
         (b"- one\r\n- two\r\n", ("one", "two")),
     ],
 )
 def test_each_top_level_bullet_is_one_rule(tmp_path: Path, text: bytes, rules: tuple[str, ...] | None) -> None:
-    """Indented and directly following lines continue a bullet; headings and blank lines separate them."""
+    """Indented and directly following lines continue a bullet; headings and blank lines separate them.
+
+    A leading byte-order mark is dropped. A ``#`` line that is not a heading is text, so it continues a bullet.
+    """
     if rules is None:
         with pytest.raises(ConstraintsError, match=r"line 1 of 'docs/rules\.md' .* is not part of a top-level bullet"):
             _read(tmp_path, _RULES, {"docs/rules.md": text})
@@ -288,6 +294,9 @@ def test_each_top_level_bullet_is_one_rule(tmp_path: Path, text: bytes, rules: t
             b"- one\n\nA paragraph after a blank line.\n",
             r"line 3 of 'docs/rules\.md' .* not part of a top-level bullet",
         ),
+        (b"#1 Do not hardcode answers.\n- one\n", r"line 1 of 'docs/rules\.md' .* not part of a top-level bullet"),
+        (b"- one\n\n#hashtag text\n", r"line 3 of 'docs/rules\.md' .* not part of a top-level bullet"),
+        (b"####### Too deep\n- one\n", r"line 1 of 'docs/rules\.md' .* not part of a top-level bullet"),
         (b"- one\n-\n", r"rule 2 in 'docs/rules\.md' .* must be text of 1 to 500 characters"),
         (b"- " + b"x" * 501 + b"\n", r"rule 1 in 'docs/rules\.md' .* must be text of 1 to 500 characters"),
         (b"- x\n" * 51, r"holds 51 rules; the most is 50"),
