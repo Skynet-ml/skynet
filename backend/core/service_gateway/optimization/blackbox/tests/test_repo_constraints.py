@@ -15,6 +15,7 @@ from ..repo_constraints import (
     RoleEnvironment,
     ServiceSpec,
     TargetStage,
+    _service_url,
     effective_environment,
     instructions_brief,
     parse_constraints,
@@ -621,6 +622,7 @@ def test_a_service_with_no_or_many_secrets_has_no_default_header() -> None:
         "https://127.0.0.0x1",
         "https://0xa.0.0.0x1",
         "https://192.168.1.0xff",
+        "https://ex\\u0000.com/v1",
         "https://2130706433",
         "https://user:pw@llm.example.com",
         "https://llm.example.com:99999",
@@ -632,6 +634,12 @@ def test_a_bad_service_url_fails_with_a_reason(url: str) -> None:
 
     with pytest.raises(ConstraintsError, match=r"\[services\.judge\] url "):
         parse_constraints(raw)
+
+
+def test_a_service_url_host_with_a_nul_fails_with_a_reason() -> None:
+    """A NUL in the host is a ConstraintsError, not the ValueError that inet_aton raises for it."""
+    with pytest.raises(ConstraintsError, match=r"\[services\.judge\] url "):
+        _service_url("https://ex\x00.com/v1", "[services.judge]")
 
 
 @pytest.mark.parametrize(

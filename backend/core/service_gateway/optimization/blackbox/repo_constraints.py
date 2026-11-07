@@ -658,7 +658,7 @@ def _service_url(value: Any, label: str) -> str:
         try:
             socket.inet_aton(host)
             is_ip = True
-        except OSError:
+        except (OSError, ValueError):  # ValueError: a NUL in the host, which TOML's \u0000 allows
             pass
     # A last label with no letter also catches IP forms that ip_address refuses, such as 0x7f.1.
     last = host.rsplit(".", 1)[-1]
