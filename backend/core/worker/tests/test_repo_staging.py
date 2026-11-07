@@ -567,6 +567,29 @@ def _ruled_binding(
     )
 
 
+def _agent_call(command: str, result: str = "ok") -> dict[str, Any]:
+    """Build an agent model call that ends with one shell tool call and its result.
+
+    Args:
+        command: The shell command.
+        result: The tool result text.
+
+    Returns:
+        The request body.
+    """
+    return {
+        "messages": [
+            {"role": "user", "content": "This is round 2 (explore)."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"function": {"name": "shell", "arguments": json.dumps({"command": command})}}],
+            },
+            {"role": "tool", "content": result},
+        ]
+    }
+
+
 def _trigger_watch(gateway: Any) -> None:
     """Send enough agent model calls to start one watch, and wait for it.
 
@@ -575,7 +598,7 @@ def _trigger_watch(gateway: Any) -> None:
     """
     (observer,) = gateway.observers["optimization"]
     for index in range(WATCH_EVERY_ACTIONS):
-        observer({"messages": [{"role": "user", "content": f"edit {index}"}]})
+        observer(_agent_call(f"edit {index}"))
     assert gateway.watched.wait(5)
 
 
@@ -610,36 +633,26 @@ def test_a_run_that_turns_the_watch_on_binds_one_managed_hook_billed_to_the_run(
 
 
 def test_the_watch_never_reads_a_score_or_the_scorers_feedback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An eval.sh call and its reply carry the score and feedback, so the hook gets a withheld step instead."""
+    """Engine files and tool results carry the scores and feedback, so the hook reads only safe tool inputs."""
     monkeypatch.setattr(repo_staging, "agent_model_id", lambda configured="": "vendor/fast")
     payload, staged = _ruled_binding(tmp_path, ("Do not hardcode answers.",), intent="Find places.", watch=True)
     gateway = _Gateway()
     repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1", managed_key="managed-key")
     (observer,) = gateway.observers["optimization"]
     reply = json.dumps({"score": 0.4217, "info": {"feedback": "FEEDBACK-SECRET: case 3 names the wrong city"}})
+    state = "## Leaderboard\n\n| c001 | 0.4217 |\n\n## Failure dossier\n\n- `ex7`: FEEDBACK-SECRET wrong city\n"
 
-    for index in range(WATCH_EVERY_ACTIONS - 1):
-        observer({"messages": [{"role": "user", "content": f"edit {index}"}]})
-    observer(
-        {
-            "messages": [
-                {"role": "user", "content": "edit 13"},
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {"function": {"name": "shell", "arguments": json.dumps({"command": "./eval.sh case-3"})}}
-                    ],
-                },
-                {"role": "tool", "content": reply},
-            ]
-        }
-    )
+    for index in range(WATCH_EVERY_ACTIONS - 3):
+        observer(_agent_call(f"edit {index}"))
+    observer(_agent_call("cat STATE.md", state))
+    observer(_agent_call("./eval.sh case-3", reply))
+    observer(_agent_call("jq -r .info.feedback last.json", "FEEDBACK-SECRET: case 3 names the wrong city"))
     assert gateway.watched.wait(5)
 
     (_model, prompt) = gateway.judged[0]
-    assert "edit 12" in prompt
+    assert "edit 11" in prompt
     assert WITHHELD_STEP in prompt
+    assert "jq -r .info.feedback last.json" in prompt
     assert "0.4217" not in prompt
     assert "FEEDBACK-SECRET" not in prompt
     assert "eval.sh" not in prompt

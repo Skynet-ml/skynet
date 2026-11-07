@@ -15,9 +15,11 @@ agent's recent steps against them during the run:
   the run log.
 
 The hook never sees the metric, the scorer, its data or its labels, so it
-cannot leak them to the agent or judge by the score. A step that runs the
-scoring script or carries a score reply is withheld before it reaches the
-hook, because the reply holds the score and the scorer's feedback. The final
+cannot leak them to the agent or judge by the score. A step is only the
+agent's tool calls: the tool name and its input. Tool results never reach the
+hook, and a call that touches an engine file (``eval.sh``, ``STATE.md`` or
+``archive/``) is withheld, so the hook gets no scorer or engine output. The
+agent's own inputs, such as notebook text, can still quote a score. The final
 judge that scored rejected versions 0 is gone (SKY-349): a hint is enough,
 and a wrong rejection lost real improvements.
 """
@@ -49,14 +51,14 @@ JUDGE_REASONING_TOKENS = 8_000
 _MAX_STEPS_CHARS = 60_000
 _MAX_INTENT_CHARS = 4_000
 _MAX_ACTION_CHARS = 2_000
-# One step is the agent's latest tool call and its result: the last two turns
-# of a model call. Older turns were already seen by earlier calls.
-_STEP_TURNS = 2
-_EVAL_SCRIPT = "eval.sh"
-# A score reply holds "score" and "info"; ``info`` carries the scorer's
-# feedback. The keys can be JSON-escaped once or more inside a turn.
-_SCORE_REPLY_KEYS = tuple(re.compile(rf'\\*"{key}\\*"\s*:') for key in ("score", "info"))
-WITHHELD_STEP = "The agent ran the scoring script. The call and its reply are withheld."
+# The engine keeps scores and the scorer's feedback in these files (STATE.md's
+# leaderboard and failure dossier, archive/index.tsv) and runs the scorer
+# through eval.sh. A call that names one never reaches the hook.
+_ENGINE_FILES = re.compile(r"eval\.sh|STATE\.md|\barchive\b")
+_CALL_ITEMS = frozenset({"function_call", "custom_tool_call", "local_shell_call"})
+_RESULT_ITEMS = frozenset({"function_call_output", "custom_tool_call_output", "local_shell_call_output"})
+WITHHELD_STEP = "The agent used an engine file. The call is withheld."
+NO_TOOL_CALL_STEP = "The agent made no tool call."
 
 EVENT_BLOCK = RULE_BLOCK_EVENT
 EVENT_NOTE = "rule.note"
@@ -85,9 +87,9 @@ def watch_prompt(intent: str | None, rules: Sequence[str], steps: Sequence[str])
         steps: The agent's recent steps, oldest first.
 
     Returns:
-        The prompt. It holds no metric, scorer, data or labels. The steps
-        hold no score or scorer feedback when they come from
-        :func:`describe_model_call`.
+        The prompt. It holds no metric, scorer, data or labels. Steps from
+        :func:`describe_model_call` hold no scorer or engine output; the
+        agent's own tool inputs can still quote a score.
     """
     rules_text = "\n".join(f"{label}: {rule}" for label, rule in numbered_rules(rules)) or "(no rules)"
     intent_text = (intent or "").strip()[:_MAX_INTENT_CHARS] or "(no intent given)"
@@ -106,32 +108,132 @@ def watch_prompt(intent: str | None, rules: Sequence[str], steps: Sequence[str])
 def describe_model_call(body: Mapping[str, Any]) -> str:
     """Describe one agent model call as a step for the watch hook.
 
-    Each call the coding agent makes carries its latest tool call and its
-    result as its last turns, in any of the chat, messages or responses
-    formats. The system prompt and instructions are left out. A step that
-    runs the scoring script, or that carries a score reply, becomes
-    :data:`WITHHELD_STEP`, so the hook never reads a score or the scorer's
-    feedback.
+    Each call the coding agent makes ends with its latest tool calls and their
+    results, in any of the chat, messages or responses formats. The step keeps
+    only those tool calls: each tool's name and its input (a command, a file
+    path or edit content). Tool results, the agent's text, the prompt and the
+    system prompt are left out, so the hook gets no scorer or engine output. A
+    call that names an engine file makes the step :data:`WITHHELD_STEP`.
 
     Args:
         body: The model request the agent sent.
 
     Returns:
-        The end of the call's latest turns as JSON text, at most
-        ``_MAX_ACTION_CHARS`` characters, or :data:`WITHHELD_STEP`.
+        The tool calls as JSON text, at most ``_MAX_ACTION_CHARS`` characters,
+        :data:`WITHHELD_STEP`, or :data:`NO_TOOL_CALL_STEP`.
     """
     turns = body.get("messages") if isinstance(body.get("messages"), list) else body.get("input")
-    if isinstance(turns, str):
-        latest: Any = turns
-    elif isinstance(turns, list):
-        latest = [turn for turn in turns if not (isinstance(turn, dict) and turn.get("role") == "system")]
-        latest = latest[-_STEP_TURNS:]
-    else:
-        latest = []
-    text = json.dumps(latest, ensure_ascii=False, default=str)
-    if _EVAL_SCRIPT in text or all(key.search(text) for key in _SCORE_REPLY_KEYS):
+    calls = _latest_tool_calls(turns) if isinstance(turns, list) else []
+    if not calls:
+        return NO_TOOL_CALL_STEP
+    text = json.dumps(calls, ensure_ascii=False, default=str)
+    if _ENGINE_FILES.search(text):
         return WITHHELD_STEP
-    return text[-_MAX_ACTION_CHARS:]
+    return text[:_MAX_ACTION_CHARS]
+
+
+def _latest_tool_calls(turns: Sequence[Any]) -> list[dict[str, Any]]:
+    """Return the agent's latest tool calls, skipping the results that follow them.
+
+    Older calls were already seen by earlier model calls, so only the last
+    group of calls counts.
+
+    Args:
+        turns: The call's turns or input items, oldest first.
+
+    Returns:
+        ``{"tool", "input"}`` for each call in the latest group, in order.
+    """
+    calls: list[dict[str, Any]] = []
+    index = len(turns) - 1
+    while index >= 0 and _is_result(turns[index]):
+        index -= 1
+    while index >= 0:
+        turn = turns[index]
+        if isinstance(turn, dict) and turn.get("type") == "reasoning":
+            index -= 1
+            continue
+        found = _turn_calls(turn)
+        if not found:
+            break
+        calls[:0] = found
+        if isinstance(turn, dict) and turn.get("type") not in _CALL_ITEMS:
+            break
+        index -= 1
+    return calls
+
+
+def _is_result(turn: Any) -> bool:
+    """Return whether a turn only carries tool results.
+
+    Args:
+        turn: One turn or input item.
+
+    Returns:
+        ``True`` for a chat ``tool`` turn, a user turn of ``tool_result``
+        blocks, or a responses output item.
+    """
+    if not isinstance(turn, dict):
+        return False
+    if turn.get("role") == "tool" or turn.get("type") in _RESULT_ITEMS:
+        return True
+    content = turn.get("content")
+    return (
+        turn.get("role") == "user"
+        and isinstance(content, list)
+        and bool(content)
+        and all(isinstance(block, dict) and block.get("type") == "tool_result" for block in content)
+    )
+
+
+def _turn_calls(turn: Any) -> list[dict[str, Any]]:
+    """Return the tool calls one turn makes.
+
+    Args:
+        turn: One turn or input item.
+
+    Returns:
+        ``{"tool", "input"}`` for each call; empty when the turn makes none.
+    """
+    if not isinstance(turn, dict):
+        return []
+    kind = turn.get("type")
+    if kind == "local_shell_call":
+        return [{"tool": "shell", "input": turn.get("action")}]
+    if kind in _CALL_ITEMS:
+        return [{"tool": turn.get("name"), "input": _call_input(turn.get("arguments", turn.get("input")))}]
+    if turn.get("role") != "assistant":
+        return []
+    calls = [
+        {"tool": call["function"].get("name"), "input": _call_input(call["function"].get("arguments"))}
+        for call in turn.get("tool_calls") or []
+        if isinstance(call, dict) and isinstance(call.get("function"), dict)
+    ]
+    content = turn.get("content")
+    if isinstance(content, list):
+        calls += [
+            {"tool": block.get("name"), "input": block.get("input")}
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "tool_use"
+        ]
+    return calls
+
+
+def _call_input(arguments: Any) -> Any:
+    """Return a call's input, read as JSON when it is JSON text.
+
+    Args:
+        arguments: The call's arguments or input.
+
+    Returns:
+        The parsed value, or the text itself when it is not JSON.
+    """
+    if not isinstance(arguments, str):
+        return arguments
+    try:
+        return json.loads(arguments)
+    except ValueError:
+        return arguments
 
 
 def run_log_emitter(owner: str) -> Emit:

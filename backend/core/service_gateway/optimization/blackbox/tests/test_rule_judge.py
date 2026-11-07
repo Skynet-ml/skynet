@@ -17,6 +17,7 @@ from ..rule_judge import (
     EVENT_NOTE,
     EVENT_VERDICT,
     ILLEGAL_ACTION_MESSAGE,
+    NO_TOOL_CALL_STEP,
     WATCH_EVERY_ACTIONS,
     WITHHELD_STEP,
     RuleJudge,
@@ -264,40 +265,147 @@ def test_the_watch_runs_off_the_agent_path_and_a_failure_is_dropped() -> None:
     assert judge.take_notes() == []
 
 
+_SCORE_REPLY = json.dumps({"score": 0.4217, "info": {"feedback": "FEEDBACK-SECRET: case 3 is wrong"}})
+
+
+def _chat_call(name: str, arguments: dict[str, Any], result: str) -> dict[str, Any]:
+    """Build a chat-format model call that ends with one tool call and its result.
+
+    Args:
+        name: The tool name.
+        arguments: The tool input.
+        result: The tool result text.
+
+    Returns:
+        The request body.
+    """
+    return {
+        "messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "PROMPT"},
+            {
+                "role": "assistant",
+                "content": "THINKING",
+                "tool_calls": [{"id": "t1", "function": {"name": name, "arguments": json.dumps(arguments)}}],
+            },
+            {"role": "tool", "tool_call_id": "t1", "content": result},
+        ]
+    }
+
+
+def _messages_call(name: str, tool_input: dict[str, Any], result: str) -> dict[str, Any]:
+    """Build a messages-format model call that ends with one tool call and its result.
+
+    Args:
+        name: The tool name.
+        tool_input: The tool input.
+        result: The tool result text.
+
+    Returns:
+        The request body.
+    """
+    return {
+        "system": "SYSTEM",
+        "messages": [
+            {"role": "user", "content": "PROMPT"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "THINKING"},
+                    {"type": "tool_use", "id": "t1", "name": name, "input": tool_input},
+                ],
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": result}]},
+        ],
+    }
+
+
+def _responses_call(name: str, arguments: dict[str, Any], result: str) -> dict[str, Any]:
+    """Build a responses-format model call that ends with one tool call and its result.
+
+    Args:
+        name: The tool name.
+        arguments: The tool input.
+        result: The tool result text.
+
+    Returns:
+        The request body.
+    """
+    return {
+        "instructions": "SYSTEM",
+        "input": [
+            {"role": "user", "content": "PROMPT"},
+            {"type": "reasoning", "summary": [{"text": "THINKING"}]},
+            {"type": "function_call", "call_id": "t1", "name": name, "arguments": json.dumps(arguments)},
+            {"type": "function_call_output", "call_id": "t1", "output": result},
+        ],
+    }
+
+
+_FORMATS = pytest.mark.parametrize("build", [_chat_call, _messages_call, _responses_call])
+
+
+@_FORMATS
+def test_a_step_is_the_latest_tool_call_and_its_input_only(build: Any) -> None:
+    """A step keeps the tool name and input; the result, the agent's text and the prompts never reach the hook."""
+    step = describe_model_call(build("shell", {"command": "pytest tests -q"}, "RESULT-TEXT"))
+
+    assert "shell" in step
+    assert "pytest tests -q" in step
+    for absent in ("RESULT-TEXT", "THINKING", "PROMPT", "SYSTEM"):
+        assert absent not in step
+
+
+def test_an_edit_call_keeps_its_path_and_content() -> None:
+    """The hook reads what the agent writes, so it can spot a hardcoded answer."""
+    step = describe_model_call(
+        _messages_call("Edit", {"file_path": "repo/bot.py", "new_string": "ANSWERS = {'case 3': 'Paris'}"}, "ok")
+    )
+
+    assert "repo/bot.py" in step
+    assert "ANSWERS = {'case 3': 'Paris'}" in step
+
+
+def test_parallel_calls_all_reach_the_hook_but_older_calls_do_not() -> None:
+    """The latest group of calls is the step; calls before the last results were seen by earlier steps."""
+    body = {
+        "input": [
+            {"type": "function_call", "name": "shell", "arguments": '{"command": "OLD-CALL"}'},
+            {"type": "function_call_output", "output": "old"},
+            {"type": "function_call", "name": "shell", "arguments": '{"command": "FIRST-CALL"}'},
+            {"type": "custom_tool_call", "name": "apply_patch", "input": "SECOND-CALL"},
+            {"type": "function_call_output", "output": "one"},
+            {"type": "custom_tool_call_output", "output": "two"},
+        ]
+    }
+
+    step = describe_model_call(body)
+
+    assert "FIRST-CALL" in step
+    assert "SECOND-CALL" in step
+    assert "OLD-CALL" not in step
+
+
 @pytest.mark.parametrize(
-    ("body", "expected", "absent"),
+    "body",
     [
-        (
-            {"messages": [{"role": "system", "content": "SYSTEM"}, {"role": "user", "content": "run tests"}]},
-            "run tests",
-            "SYSTEM",
-        ),
-        (
-            {"system": "SYSTEM", "messages": [{"role": "user", "content": [{"type": "tool_result", "content": "ok"}]}]},
-            "tool_result",
-            "SYSTEM",
-        ),
-        (
-            {"instructions": "SYSTEM", "input": [{"type": "function_call", "name": "shell", "arguments": "ls"}]},
-            "shell",
-            "SYSTEM",
-        ),
+        {"messages": [{"role": "system", "content": "SYSTEM"}, {"role": "user", "content": "run tests"}]},
+        {"messages": [{"role": "assistant", "content": "I will think first."}]},
+        {"input": "a plain prompt"},
+        {},
     ],
 )
-def test_a_model_call_is_described_by_its_latest_turns(body: dict[str, Any], expected: str, absent: str) -> None:
-    """Each agent model call becomes one action: its latest turns, never its system prompt."""
-    action = describe_model_call(body)
-
-    assert expected in action
-    assert absent not in action
+def test_a_call_without_a_tool_call_is_a_fixed_step(body: dict[str, Any]) -> None:
+    """Text alone carries no tool input, so the hook gets a fixed line and no prompt text."""
+    assert describe_model_call(body) == NO_TOOL_CALL_STEP
 
 
-def test_a_long_model_call_is_cut_to_its_end() -> None:
-    """Only the end of a long turn is kept, so a watch prompt stays small."""
-    action = describe_model_call({"messages": [{"role": "user", "content": "A" * 50_000 + "TAIL"}]})
+def test_a_long_tool_input_is_cut() -> None:
+    """Only the start of a long input is kept, with the tool name, so a watch prompt stays small."""
+    step = describe_model_call(_chat_call("write", {"path": "repo/a.py", "content": "A" * 50_000}, "ok"))
 
-    assert "TAIL" in action
-    assert len(action) <= 2_000
+    assert step.startswith('[{"tool": "write"')
+    assert len(step) <= 2_000
 
 
 def test_rule_events_reach_the_run_log(caplog: pytest.LogCaptureFixture) -> None:
@@ -318,69 +426,27 @@ def test_rule_events_reach_the_run_log(caplog: pytest.LogCaptureFixture) -> None
     assert "A lookup table." in record.getMessage()
 
 
-def test_a_step_keeps_only_the_latest_tool_call_and_its_result() -> None:
-    """Older turns were already seen by earlier calls, so one step holds the last two turns."""
-    body = {
-        "messages": [
-            {"role": "user", "content": "FIRST"},
-            {"role": "assistant", "content": "CALL"},
-            {"role": "tool", "content": "RESULT"},
-        ]
-    }
-
-    step = describe_model_call(body)
-
-    assert "CALL" in step
-    assert "RESULT" in step
-    assert "FIRST" not in step
+_STATE_MD = (
+    "# Round 2\n\n## Leaderboard\n\n| id | score |\n| --- | --- |\n| c001 | 0.4217 |\n\n"
+    "## Failure dossier\n\n- `ex7` scored 0.100: FEEDBACK-SECRET expected 'Paris' but got 'paris'\n"
+)
 
 
-_SCORE_REPLY = json.dumps({"score": 0.4217, "info": {"feedback": "FEEDBACK-SECRET: case 3 is wrong"}})
-
-
+@_FORMATS
 @pytest.mark.parametrize(
-    "body",
+    ("name", "tool_input", "result"),
     [
-        {
-            "messages": [
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [{"function": {"name": "shell", "arguments": '{"command": "./eval.sh case-3"}'}}],
-                },
-                {"role": "tool", "content": _SCORE_REPLY},
-            ]
-        },
-        {
-            "messages": [
-                {
-                    "role": "assistant",
-                    "content": [{"type": "tool_use", "name": "bash", "input": {"command": "./eval.sh"}}],
-                },
-                {"role": "user", "content": [{"type": "tool_result", "content": _SCORE_REPLY}]},
-            ]
-        },
-        {
-            "input": [
-                {"type": "function_call", "name": "shell", "arguments": '{"cmd": ["bash", "-lc", "./eval.sh"]}'},
-                {"type": "function_call_output", "output": _SCORE_REPLY},
-            ]
-        },
-        {
-            "messages": [
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [{"function": {"name": "shell", "arguments": "make score"}}],
-                },
-                {"role": "tool", "content": _SCORE_REPLY},
-            ]
-        },
+        ("Read", {"file_path": "/work/STATE.md"}, _STATE_MD),
+        ("shell", {"command": "cat archive/index.tsv"}, "id\tscore\tround\nc001\t0.4217\t1\n"),
+        ("shell", {"command": "./eval.sh case-3"}, _SCORE_REPLY),
+        ("shell", {"command": "sed -i 's/a/b/' eval.sh"}, ""),
     ],
 )
-def test_a_scoring_step_is_withheld_from_the_hook(body: dict[str, Any]) -> None:
-    """An eval.sh call or a score reply never reaches the hook, so it cannot read the score or the feedback."""
-    step = describe_model_call(body)
+def test_a_call_that_touches_an_engine_file_is_withheld(
+    build: Any, name: str, tool_input: dict[str, Any], result: str
+) -> None:
+    """STATE.md, archive/ and eval.sh hold or make the scores and the scorer's feedback, so the call is withheld."""
+    step = describe_model_call(build(name, tool_input, result))
     prompt = watch_prompt(_INTENT, _RULES, [step])
 
     assert step == WITHHELD_STEP
@@ -388,8 +454,16 @@ def test_a_scoring_step_is_withheld_from_the_hook(body: dict[str, Any]) -> None:
     assert "FEEDBACK-SECRET" not in prompt
 
 
-def test_an_ordinary_result_that_mentions_a_score_still_reaches_the_hook() -> None:
-    """Only a score reply is withheld; a test run that prints the word "score" is ordinary work."""
-    body = {"messages": [{"role": "tool", "content": "tests/test_score.py::test_score PASSED"}]}
+@_FORMATS
+@pytest.mark.parametrize(
+    "command",
+    ["jq -r .info.feedback r.json", "python -c \"import json; print(json.load(open('r.json'))['score'])\""],
+)
+def test_derived_scorer_output_never_reaches_the_hook(build: Any, command: str) -> None:
+    """A command that prints the score or feedback reaches the hook, but its output never does."""
+    step = describe_model_call(build("shell", {"command": command}, _SCORE_REPLY))
+    prompt = watch_prompt(_INTENT, _RULES, [step])
 
-    assert "test_score PASSED" in describe_model_call(body)
+    assert "r.json" in step
+    assert "0.4217" not in prompt
+    assert "FEEDBACK-SECRET" not in prompt
