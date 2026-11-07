@@ -36,6 +36,7 @@ import {
   SelectValue,
 } from "@/shared/ui/primitives/select";
 import { hardeningDefaultModel, type HardeningState } from "../../hooks/use-hardening";
+import { hardeningErrorKey } from "../../lib/hardening-error";
 import { v2Msg } from "./ArtifactConfirmCard";
 
 const DEFAULT_ROUNDS = 5;
@@ -626,7 +627,7 @@ export function HardenMetricScreen({
             {job.status === "stale" ? (
               <p className="text-sm">{t("submit.v2.harden.stale")}</p>
             ) : (
-              job.error && <p className="text-sm">{job.error}</p>
+              job.error && <p className="text-sm">{t(hardeningErrorKey(job.error))}</p>
             )}
             {job.place === "cloud" && (
               <p className="text-sm text-muted-foreground">
