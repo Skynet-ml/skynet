@@ -381,6 +381,12 @@ def test_repo_serve_reports_a_sandbox_failure(
 def test_repo_serve_refuses_a_run_whose_optimize_toml_uses_a_removed_form(
     repo_serve: tuple[TestClient, _Harness, dict[str, Any]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A run pinned to an old ``optimize.toml`` form gets a clear 502 and opens no sandbox.
+
+    Args:
+        repo_serve: Client, ledger harness and captured sandbox calls.
+        monkeypatch: Replaces the GitHub fetch.
+    """
     client, _harness, state = repo_serve
     legacy = b'[metric]\nfiles = ["eval/scorer.py"]\n\n[proposer]\nillegal = ["Never read eval/"]\n'
 

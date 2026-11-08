@@ -45,9 +45,16 @@ from .. import (
     sandbox_log,
 )
 from ..harness import GatewayConfig, build_launch, launch_payload
-from ..native_runtime import NativeOptions, _bootstrap_command, check_native_runtime, run_native_engine
+from ..native_runtime import (
+    NativeOptions,
+    _bootstrap_command,
+    check_native_runtime,
+    native_task_payload,
+    run_native_engine,
+)
 from ..protocol import EvalServer, Result, ScorerAbortError, Task
 from ..sandbox import CommandResult, SandboxSpec
+from ..workspace_scorer import case_document
 
 
 class FakeSession:
@@ -1322,8 +1329,21 @@ def test_autosaddler_transport_runs_with_zero_one_or_many_cases(
     assert result.best_candidate == "better"
     sent = json.loads(session.files["native_input.json"])["task"]
     assert sent["seed_candidate"] == (task.seed_candidate or "")
-    assert sent["train_set"] == ([{"id": index} for index in range(len(task.cases))] or None)
+    assert sent["train_set"] == ([{"id": index, "input": case} for index, case in enumerate(task.cases)] or None)
     assert "val_set" not in sent
+
+
+def test_a_bare_case_reaches_the_guest_whole_without_expected() -> None:
+    """A case with no ``input`` key is its own input in the parent, so the guest gets the same input."""
+    task = Task("seed", cases=[{"question": "2+2?", "answer": "4"}, {"question": "3+3?", "expected": "6"}])
+
+    sent = native_task_payload("autosaddler", task)["train_set"]
+
+    assert sent == [
+        {"id": 0, "input": {"question": "2+2?", "answer": "4"}},
+        {"id": 1, "input": {"question": "3+3?"}},
+    ]
+    assert case_document(task.cases[0])["input"] == sent[0]["input"]
 
 
 @pytest.mark.parametrize("engine_id", ["autoresearch", "meta_harness"])

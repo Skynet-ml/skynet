@@ -829,19 +829,22 @@ def _guest_case(index: int, case: Any) -> dict[str, Any]:
 
     The guest runs proposer and candidate code, so it gets only the case's
     position and its input. Only the parent's metric side gets ``expected``
-    (E42, E61).
+    (E42, E61). A dict with no ``input`` key is its own input, as
+    ``case_document`` reads it, so the guest gets it whole without ``expected``.
 
     Args:
         index: The case's position in the task's cases.
         case: A task case: a dict, or a model such as ``UnifiedCase``.
 
     Returns:
-        ``{"id": index, "input": ...}``, without ``input`` when the case has none.
+        ``{"id": index, "input": ...}``, or ``{"id": index}`` for a case that is not a dict.
     """
     plain = _plain_case(case)
-    if isinstance(plain, dict) and "input" in plain:
+    if not isinstance(plain, dict):
+        return {"id": index}
+    if "input" in plain:
         return {"id": index, "input": plain["input"]}
-    return {"id": index}
+    return {"id": index, "input": {key: value for key, value in plain.items() if key != "expected"}}
 
 
 def native_task_payload(engine_id: str, task: Task) -> dict[str, Any]:
