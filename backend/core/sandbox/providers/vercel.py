@@ -16,6 +16,9 @@ exec and stop flow comes from ``harbor/environments/vercel.py``. Changes:
 - A setup box can become one run-scoped snapshot (see ``..snapshots``), and
   a trial box can start from it. A box that holds env values or injected
   headers is refused, and the snapshot storage is metered as sandbox cost.
+- Compose services (see ``..services``) run as processes in the box. The
+  box grows by their size, so the reservation prices them. They start after
+  the create or the snapshot restore, and stop before a snapshot.
 - Harbor's directory transfer and log streaming features are left out.
 """
 
@@ -30,7 +33,7 @@ import shlex
 import subprocess
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -41,11 +44,12 @@ from core.billing.signals import BudgetReached
 from core.billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP, VercelSnapshotReservation, VercelUsageReservation
 from core.config import settings
 
-from ..capabilities import VERCEL_CAPABILITIES, SandboxSpecError, resolve_resources
+from ..capabilities import VERCEL_CAPABILITIES, SandboxSpecError, resolve_resources, validate_spec
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from ..pacing import SYSTEM_CLOCK, Clock, ProviderAtCapacityError, ProviderPacing, create_with_capacity
 from ..resources import ResourceMode, SandboxSpec
+from ..services import ComposeService, box_resources, start_services, stop_services
 from ..snapshots import (
     SNAPSHOT_TIMEOUT,
     BuiltSnapshot,
@@ -183,6 +187,18 @@ def _is_not_found(error: BaseException) -> bool:
     return SandboxApiError is not None and isinstance(error, SandboxApiError) and error.status_code == 404
 
 
+async def _close_client(client: Any) -> None:
+    """Close a snapshot SDK client, bounded so a hung close cannot hold the caller.
+
+    Args:
+        client: The SDK client.
+    """
+    try:
+        await asyncio.wait_for(client.aclose(), STOP_TIMEOUT)
+    except Exception as error:
+        logger.warning("Sandbox snapshot client did not close: %s", type(error).__name__)
+
+
 def box_name(operation_key: str | None, budget: Any | None = None) -> str:
     """Make the provider name of one box.
 
@@ -250,6 +266,7 @@ class VercelEnvironment(SandboxEnvironment):
         clock: Clock | None = None,
         snapshot_id: str | None = None,
         snapshot_usage_factory: UsageFactory = VercelSnapshotReservation,
+        services: Sequence[ComposeService] = (),
     ) -> None:
         """Check the spec and prepare the box without a network call.
 
@@ -264,10 +281,12 @@ class VercelEnvironment(SandboxEnvironment):
             clock: The clock for waits and timings.
             snapshot_id: Start the box from this run snapshot instead of the image.
             snapshot_usage_factory: Makes the storage reservation of a snapshot.
+            services: The compose services in start order. The box grows by
+                their size.
 
         Raises:
-            SandboxSpecError: The spec is invalid, or a protected box has no
-                operation key.
+            SandboxSpecError: The spec is invalid, a protected box has no
+                operation key, or the services do not fit the largest box.
         """
         if budget is not None:
             if spec.operation_key is None:
@@ -275,7 +294,14 @@ class VercelEnvironment(SandboxEnvironment):
             # A protected box injects no headers: credentials stay in the
             # control plane, outside the guest.
             self.capabilities = dataclasses.replace(VERCEL_CAPABILITIES, protected=True, injects_headers=False)
+        if services:
+            # Check the workload size alone first, so an invalid request is not
+            # hidden by the larger size that the services add.
+            validate_spec(spec, self.capabilities)
+            spec = dataclasses.replace(spec, resources=box_resources(spec.resources, services, self.capabilities))
         super().__init__(spec)
+        self._services = tuple(services)
+        self._services_up: list[ComposeService] = []
         self._budget = budget
         self._client_factory = client_factory or self._make_client
         self._usage_factory = usage_factory
@@ -478,6 +504,8 @@ class VercelEnvironment(SandboxEnvironment):
             SandboxInfraError: The box came back without a usable session, or
                 a ``stop()`` ended the start.
         """
+        if self._stop_task is not None:
+            raise SandboxInfraError("The Vercel sandbox is stopped; it cannot start again.")
         self._starting = asyncio.ensure_future(self._start())
         try:
             await self._starting
@@ -504,6 +532,9 @@ class VercelEnvironment(SandboxEnvironment):
                 bucket=self._pacing.creates if self._pacing else None,
                 clock=self._clock,
             )
+        if self._services:
+            with self.timings.phase("services"):
+                await start_services(self, self._services, self._services_up)
 
     async def _create(self, usage: Any | None) -> None:
         """Send the create call and confirm the session.
@@ -1019,6 +1050,9 @@ class VercelEnvironment(SandboxEnvironment):
                 request,
                 operation_key=f"{self.spec.operation_key}:snapshot",
             )
+        # D5: a snapshot never holds a running service; each box from the
+        # snapshot starts its own services.
+        await stop_services(self, self._services_up)
         self._halted = True
         # The snapshot stops the session, so a renewer would fund time nobody uses.
         if self._renewer is not None:
@@ -1077,8 +1111,7 @@ class VercelEnvironment(SandboxEnvironment):
                     )
             return None
         finally:
-            with contextlib.suppress(Exception):
-                await client.aclose()
+            await _close_client(client)
 
     @classmethod
     async def delete_snapshot(cls, built: BuiltSnapshot, *, client: Any | None = None) -> None:
@@ -1121,8 +1154,7 @@ class VercelEnvironment(SandboxEnvironment):
                     logger.warning("Snapshot builder %s was not removed: %s", built.builder_name, type(error).__name__)
         finally:
             if owned:
-                with contextlib.suppress(Exception):
-                    await client.aclose()
+                await _close_client(client)
 
     @classmethod
     async def stop_job_sandboxes(cls, job_id: str) -> int:
