@@ -436,12 +436,50 @@ def test_session_commands_address_the_container(fake_docker: tuple[str, Path]) -
     run, read, remove = _calls(log)
     assert result.ok
     timeout = ["timeout", "--signal=KILL", "5s"]
-    loader = ["bash", "-c", docker_sandbox._ENV_LOADER, "skynet-env"]
-    assert run == ["exec", "-i", "-w", "/workspace", "box1", *loader, *timeout, "bash", "-lc", "echo hi"]
+    loader = [*docker_sandbox._SHELL, docker_sandbox._ENV_LOADER, "skynet-env"]
+    assert run == [
+        "exec",
+        "-i",
+        "-w",
+        "/workspace",
+        "box1",
+        *loader,
+        *timeout,
+        "bash",
+        "--noprofile",
+        "--norc",
+        "-c",
+        "echo hi",
+    ]
     assert json.loads(Path(f"{log}.env").read_text()) == {"K": "V=1\nnext"}
     assert read[:4] == ["exec", "-w", "/workspace", "box1"]
     assert read[-1] == "out/a.txt"
     assert remove == ["rm", "-f", "box1"]
+
+
+def test_a_planted_shell_profile_never_runs_and_the_env_still_reaches_the_command(
+    fake_docker: tuple[str, Path], tmp_path: Path
+) -> None:
+    """Run the exec argv in a real bash: profiles in ``$HOME`` stay unread, and the env loader still works (E38)."""
+    binary, log = fake_docker
+    DockerSandboxSession(binary, "box1", env={}, owner=None).run('printf %s "$K"', env={"K": "V=1"})
+    home = tmp_path / "home"
+    home.mkdir()
+    marker = tmp_path / "profile-ran"
+    for name in (".bash_profile", ".bash_login", ".profile", ".bashrc"):
+        (home / name).write_text(f"echo {name} >> {marker}\n")
+
+    shell = subprocess.run(
+        _calls(log)[0][5:],
+        input=docker_sandbox._env_stream({"K": "V=1"}),
+        env={"PATH": os.environ["PATH"], "HOME": str(home), "SSH_CLIENT": "10.0.0.1 1 22"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert shell.stdout == "V=1"
+    assert not marker.exists()
 
 
 def test_box_and_command_secrets_stay_off_every_command_line(fake_docker: tuple[str, Path]) -> None:

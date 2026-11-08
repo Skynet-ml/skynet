@@ -79,7 +79,7 @@ def score(repo_path):
     return {{
         "score": 1.0 if direct == "OK" and judged == "OK" else 0.0,
         "feedback": direct + " " + judged,
-        "secret": os.environ["API_KEY"],
+        "secret": os.environ.get("API_KEY"),
         "leaked": leaked,
         "has_key": bool(os.environ.get("APP_API_KEY")),
     }}
@@ -217,7 +217,8 @@ def test_a_managed_call_from_the_box_is_metered(
     assert document["score"] == 1.0
     assert document["leaked"] is False
     assert document["has_key"] is True
-    assert document["secret"] == "[secret]"
+    # No run secret enters the box (E38); the parent keeps it for redaction.
+    assert document["secret"] is None
     assert len(sent) == 2
     assert all(request.headers["authorization"] == f"Bearer {MANAGED_KEY}" for request in sent)
     route = result["scorer"]["model"]["extra"][ROUTE_KEY]

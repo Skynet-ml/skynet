@@ -86,7 +86,7 @@ class SandboxSession(Protocol):
         timeout_seconds: float | None = None,
         on_output: OutputSink | None = None,
     ) -> CommandResult:
-        """Run ``command`` through ``bash -lc`` in the working directory and wait for it.
+        """Run ``command`` through ``bash --noprofile --norc -c`` in the working directory and wait for it.
 
         Args:
             command: Shell command line.
