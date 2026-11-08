@@ -1020,7 +1020,7 @@ def test_concurrent_calls_to_one_stage_run_in_parallel(tmp_path: Path) -> None:
         "from skynet import call\n"
         "def score(repo_path, case=None):\n"
         "    with ThreadPoolExecutor(4) as pool:\n"
-        "        values = list(pool.map(lambda value: call('slow', value), [0.6] * 4))\n"
+        "        values = list(pool.map(lambda value: call('slow', value), [1.5] * 4))\n"
         "    return sum(values), 'ok'\n"
     )
     stages = {"slow": TargetStage(entry="src/stages.py:slow", timeout=30)}
@@ -1028,8 +1028,10 @@ def test_concurrent_calls_to_one_stage_run_in_parallel(tmp_path: Path) -> None:
     scorer, _ = _stage_scorer(tmp_path, code, runtime, stages, max_concurrency=4)
     try:
         started = time.monotonic()
-        assert scorer.score("")["score"] == pytest.approx(2.4)
-        assert time.monotonic() - started < 2.0
+        assert scorer.score("")["score"] == pytest.approx(6.0)
+        # One call after another takes at least 6 s. The wide margin keeps a
+        # loaded test host, where each process start is slow, from failing it.
+        assert time.monotonic() - started < 4.5
     finally:
         scorer.close()
 

@@ -92,6 +92,13 @@ visible role also names stays visible. For example, one `.mcp.json` for
 it. The `instructions` file, the `[proposer] illegal` file and the
 `[run] illegal` file always stay visible.
 
+The file is refused when one of these visible paths lies inside the hidden
+scoring paths (a `[metric] files` path, the exploits folder, the reference
+or the cases file): the `instructions` file, an `illegal` file of
+`[proposer]`, `[run]` or a `[target.<name>]`, the `mcp` file of one of those
+roles, the `[run] entry` file, or an editable path. The agent's tree leaves
+out everything inside a hidden path, so such a file would be stripped.
+
 The run stops before any model is called when the agent's tree still holds
 a hidden file. A version's edit to a hidden path, `optimize.toml` included,
 is dropped from the result.

@@ -1054,6 +1054,52 @@ def _refuse_visible_cases(cases_file: str | None, rule_files: list[tuple[str, st
             )
 
 
+def _scoring_paths(metric: MetricSpec, cases_file: str | None) -> tuple[str, ...]:
+    """Return the hidden paths that can hold other files: the scorer's side of the tree (E62).
+
+    Args:
+        metric: The validated ``[metric]`` section.
+        cases_file: The ``[data] cases`` path, or ``None``.
+
+    Returns:
+        The ``[metric]`` files, exploit folder and reference, and the cases file.
+    """
+    return tuple(path for path in (*metric.files, metric.exploits, metric.reference, cases_file) if path is not None)
+
+
+def _refuse_hidden_visible_files(
+    scoring: Sequence[str], visible: list[tuple[str, str | None]], run_entry: str | tuple[str, ...] | None
+) -> None:
+    """Refuse a visible file or the ``[run]`` entry inside the scorer's side (D43, E62).
+
+    The agent's tree leaves out every path inside a hidden one, so such a
+    rule file would be stripped and the brief would name a hidden path.
+
+    Args:
+        scoring: The paths from ``_scoring_paths``.
+        visible: Each visible file setting and its path, or ``None`` when unset.
+        run_entry: The ``[run]`` entry, or ``None``.
+
+    Raises:
+        ConstraintsError: When one of those paths equals or lies inside a scoring path.
+    """
+    for setting, path in visible:
+        if path is not None and _inside(path, scoring):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: {setting} '{path}' is inside the hidden scoring files ([metric] or"
+                " [data] cases), but the agent must read it. Move it out of the hidden paths."
+            )
+    if run_entry is None:
+        return
+    parts = (run_entry.rpartition(":")[0],) if isinstance(run_entry, str) else run_entry
+    for part in parts:
+        if _inside(posixpath.normpath(part.strip()), scoring):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: [run] entry names '{part}', which is inside the hidden scoring files"
+                " ([metric] or [data] cases). The candidate's box does not hold them; name a visible file."
+            )
+
+
 def parse_constraints(raw: bytes) -> RepoConstraints:
     """Validate the bytes of a constraints file.
 
@@ -1148,6 +1194,11 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
     ]
     rule_files += [(f"[target.{name}] illegal", stage.illegal_file) for name, stage in targets.items()]
     _refuse_visible_cases(cases_file, rule_files)
+    metric = _metric(metric_section)
+    visible = [item for item in rule_files if item[0] != "[metric] illegal"]
+    visible += [("[proposer] mcp", proposer["mcp"]), ("[run] mcp", run_role["mcp"])]
+    visible += [(f"[target.{name}] mcp", stage.mcp) for name, stage in targets.items()]
+    _refuse_hidden_visible_files(_scoring_paths(metric, cases_file), visible, run_entry)
     return RepoConstraints(
         sha256=hashlib.sha256(raw).hexdigest(),
         editable_paths=editable,
@@ -1161,7 +1212,7 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         proposer=RoleEnvironment(**proposer),
         targets=targets,
         services=services,
-        metric=_metric(metric_section),
+        metric=metric,
         cases_file=cases_file,
     )
 
@@ -1621,7 +1672,8 @@ def effective_environment(
 
     Raises:
         ConstraintsError: When the file proposes an editable path outside the approved ones,
-            or when the protected paths (always including the file itself) cover every editable path.
+            an editable path lies inside the hidden scoring files, or the protected paths
+            (always including the file itself) cover every editable path.
     """
     if constraints is None:
         editable = tuple(approved_editable)
@@ -1643,6 +1695,14 @@ def effective_environment(
                 f" paths ({approved}). A repository file can only narrow them; widen them in the run's settings."
             )
         editable = constraints.editable_paths
+    # The brief names every editable path, so one inside the scorer's side would name a hidden path.
+    scoring = _scoring_paths(constraints.metric, constraints.cases_file)
+    hidden_editable = [path for path in editable if _inside(path, scoring)]
+    if hidden_editable:
+        raise ConstraintsError(
+            f"'{hidden_editable[0]}' is editable, but it is inside the hidden scoring files of {CONSTRAINTS_FILE}"
+            " ([metric] or [data] cases). Make only paths outside them editable."
+        )
     protected = tuple(
         dict.fromkeys((CONSTRAINTS_FILE, *constraints.rule_files, *constraints.mcp_files, *constraints.protected_paths))
     )

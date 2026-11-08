@@ -1964,6 +1964,38 @@ def test_the_brief_names_no_protected_path_inside_a_hidden_folder(
     assert "Protected, every change" not in staged_payload["background"]
 
 
+@pytest.mark.parametrize(
+    ("toml", "message"),
+    [
+        (
+            '[paths]\neditable = ["src", "eval"]\n\n[metric]\nfiles = ["eval"]\n',
+            r"'eval' is editable, but it is inside the hidden",
+        ),
+        (
+            '[proposer]\nillegal = "eval/rules.md"\n\n[metric]\nfiles = ["eval"]\n',
+            r"\[proposer\] illegal 'eval/rules\.md' is inside the hidden",
+        ),
+        ('[run]\nentry = "eval/run.py:main"\n\n[metric]\nfiles = ["eval"]\n', r"\[run\] entry names 'eval/run\.py'"),
+    ],
+    ids=["editable", "rule-file", "run-entry"],
+)
+def test_staging_refuses_a_brief_path_inside_the_hidden_scoring_files(
+    monkeypatch: pytest.MonkeyPatch, toml: str, message: str
+) -> None:
+    """The run stops before it starts when the brief would name a hidden path or a rule file would be stripped."""
+    files = {
+        "optimize.toml": toml,
+        "src/app.py": "def main(case):\n    return case\n",
+        "eval/rules.md": "- No cheating.\n",
+        "eval/run.py": "def main(case):\n    return case\n",
+    }
+    payload = _payload("c" * 40)
+    payload["target"]["repo"]["editable_paths"] = ["."]
+
+    with pytest.raises(ConstraintsError, match=message):
+        _stage_with(files, monkeypatch, payload)
+
+
 @pytest.mark.parametrize("path", _EVERY_HIDDEN_PATH)
 def test_check_hidden_reports_a_leak_of_each_scoring_side_path(tmp_path: Path, path: str) -> None:
     """An agent tree that still holds any one hidden file stops the run, whatever kind of file it is."""

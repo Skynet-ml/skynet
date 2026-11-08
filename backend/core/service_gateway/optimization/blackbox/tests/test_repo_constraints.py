@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import tarfile
 from dataclasses import replace
 from pathlib import Path
@@ -1295,6 +1296,70 @@ def test_a_cases_file_that_is_also_the_instructions_is_refused() -> None:
         ConstraintsError, match=r"\[data\] cases and instructions name the same file 'data/cases\.jsonl'"
     ):
         parse_constraints(raw)
+
+
+@pytest.mark.parametrize(
+    ("setting", "line"),
+    [
+        ("instructions", 'instructions = "eval/rules.md"\n'),
+        ("[proposer] illegal", '[proposer]\nillegal = "eval/rules.md"\n'),
+        ("[run] illegal", '[run]\nentry = "src/app.py:main"\nillegal = "eval/rules.md"\n'),
+        ("[target.lint] illegal", '[target.lint]\nentry = "src/app.py:main"\nillegal = "eval/rules.md"\n'),
+        ("[proposer] mcp", '[proposer]\nmcp = "eval/rules.md"\n'),
+        ("[run] mcp", '[run]\nentry = "src/app.py:main"\nmcp = "eval/rules.md"\n'),
+        ("[target.lint] mcp", '[target.lint]\nentry = "src/app.py:main"\nmcp = "eval/rules.md"\n'),
+    ],
+)
+def test_a_visible_file_inside_a_hidden_metric_folder_is_refused(setting: str, line: str) -> None:
+    """The agent's tree leaves out the metric folder, so a rule or mcp file there would be stripped (D43)."""
+    raw = f'{line}\n[metric]\nfiles = ["eval"]\n'.encode()
+
+    with pytest.raises(ConstraintsError, match=rf"{re.escape(setting)} 'eval/rules\.md' is inside the hidden"):
+        parse_constraints(raw)
+
+
+@pytest.mark.parametrize("metric", ['[metric]\nreference = "eval/rules.md"\n', ""], ids=["reference", "exploits"])
+def test_a_rule_file_on_another_scoring_path_is_refused(metric: str) -> None:
+    """The reference and the exploits folder are hidden too, so no rule file can be there (D43)."""
+    path = "eval/rules.md" if metric else ".optimize/exploits/rules.md"
+    raw = f'[proposer]\nillegal = "{path}"\n\n{metric}'.encode()
+
+    with pytest.raises(ConstraintsError, match="is inside the hidden"):
+        parse_constraints(raw)
+
+
+@pytest.mark.parametrize("entry", ['"eval/run.py:main"', '["python", "eval/run.py"]'], ids=["function", "command"])
+def test_a_run_entry_inside_the_hidden_scoring_files_is_refused(entry: str) -> None:
+    """The brief names the ``[run]`` entry, and the candidate's box does not hold a hidden file (E62)."""
+    raw = f'[run]\nentry = {entry}\n\n[metric]\nfiles = ["eval"]\n'.encode()
+
+    with pytest.raises(ConstraintsError, match=r"\[run\] entry names 'eval/run\.py'"):
+        parse_constraints(raw)
+
+
+def test_a_visible_mcp_file_shared_with_the_metric_is_still_allowed() -> None:
+    """One ``.mcp.json`` for ``[proposer]`` and ``[metric]`` is not inside a hidden folder, so it stays valid."""
+    constraints = parse_constraints(b'[proposer]\nmcp = ".mcp.json"\n\n[metric]\nmcp = ".mcp.json"\n')
+
+    assert constraints.proposer.mcp == ".mcp.json"
+
+
+@pytest.mark.parametrize(
+    ("toml", "editable"),
+    [
+        ('[metric]\nfiles = ["eval"]\n', "eval"),
+        ('[metric]\nfiles = ["eval"]\n', "eval/labels.json"),
+        ('[data]\ncases = "data/cases.jsonl"\n', "data/cases.jsonl"),
+        ("", ".optimize/exploits"),
+    ],
+    ids=["metric-folder", "inside-metric-folder", "cases", "exploits"],
+)
+def test_an_editable_path_inside_the_hidden_scoring_files_is_refused(toml: str, editable: str) -> None:
+    """The brief names every editable path, so none can be a hidden path or lie inside one (E62)."""
+    constraints = parse_constraints(toml.encode())
+
+    with pytest.raises(ConstraintsError, match=rf"'{re.escape(editable)}' is editable, but it is inside the hidden"):
+        effective_environment(constraints, approved_editable=["src", editable], approved_setup=None)
 
 
 @pytest.mark.parametrize("section", ["proposer", "run", "metric", "target.lint"])
