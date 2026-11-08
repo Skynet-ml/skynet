@@ -74,6 +74,13 @@ PACKAGE_REGISTRY_HOSTS = tuple(
 PROPOSER_REGISTRY_HOSTS = ("files.pythonhosted.org", "pypi.org", "registry.npmjs.org")
 _PYPI_HOSTS = frozenset({"files.pythonhosted.org", "pypi.org"})
 _MS_PER_HOUR = Decimal(3_600_000)
+# Assumed snapshot storage price and size bound (SKY-430): the public pricing
+# page names no snapshot rate yet, so the hold uses this rate and cap, and a
+# larger snapshot stays pending for manual reconciliation.
+_SNAPSHOT_GB_MONTH_USD = Decimal("0.08")
+_HOURS_PER_MONTH = Decimal(730)
+SANDBOX_SNAPSHOT_BYTES_CAP = 32_000_000_000
+_SNAPSHOT_RETENTION_CEILING_MS = 3_650 * 86_400_000
 _IMMUTABLE_IMAGE = re.compile(r".+@sha256:[0-9a-f]{64}\Z")
 _SESSION_FIELDS = (
     "id",
@@ -448,7 +455,10 @@ class VercelUsageReservation:
         """
         path = response.request.url.path
         is_create = path == "/api/v3/sandboxes" and response.request.method == "POST"
-        is_session = re.fullmatch(r"/api/v2/sandboxes/sessions/[^/]+(?:/stop|/extend-timeout)?", path) is not None
+        # A snapshot stops the session, so its answer carries the final session receipt.
+        is_session = (
+            re.fullmatch(r"/api/v2/sandboxes/sessions/[^/]+(?:/stop|/extend-timeout|/snapshot)?", path) is not None
+        )
         if response.request.url.host != "vercel.com" or not response.is_success or not (is_create or is_session):
             return
         try:
@@ -606,6 +616,179 @@ class VercelUsageReservation:
             self.runtime.unpin(self.operation.id)
         except BaseException:
             self.pending()
+            raise
+
+
+def _snapshot_usd(size_bytes: int, retained_ms: int, rate: Decimal) -> Decimal:
+    """Price stored snapshot bytes for a retention time.
+
+    Args:
+        size_bytes: Stored snapshot size.
+        retained_ms: Time the snapshot existed.
+        rate: Storage price in USD per GB-month.
+
+    Returns:
+        The storage cost in USD.
+    """
+    return Decimal(size_bytes) / _BYTES_PER_GB * Decimal(retained_ms) / _MS_PER_HOUR * rate / _HOURS_PER_MONTH
+
+
+def quote_vercel_snapshot(request: Mapping[str, Any]) -> OperationQuote:
+    """Price one run-scoped snapshot before the snapshot call.
+
+    Args:
+        request: The snapshot parameters with ``session_id`` and ``retention_ms``,
+            the Vercel expiry of the snapshot.
+
+    Returns:
+        Coverage for the size cap stored for the whole retention.
+
+    Raises:
+        UnpricedOperationError: When the retention is missing or unbounded.
+    """
+    retention_ms = request.get("retention_ms")
+    if (
+        isinstance(retention_ms, bool)
+        or not isinstance(retention_ms, int)
+        or not 0 < retention_ms <= _SNAPSHOT_RETENTION_CEILING_MS
+        or not isinstance(request.get("session_id"), str)
+    ):
+        raise UnpricedOperationError("A Vercel snapshot needs a bounded expiry and an exact source session.")
+    maximum = _snapshot_usd(SANDBOX_SNAPSHOT_BYTES_CAP, retention_ms, _SNAPSHOT_GB_MONTH_USD)
+    return operation_quote(
+        request,
+        maximum,
+        ChargePolicy("sandbox"),
+        {
+            "provider": "vercel",
+            "resource": "snapshot",
+            "price_version": _PRICE_VERSION,
+            "source": _PRICING_URL,
+            "storage_gb_month_usd": str(_SNAPSHOT_GB_MONTH_USD),
+            "hours_per_month": str(_HOURS_PER_MONTH),
+            "maximum_snapshot_bytes": SANDBOX_SNAPSHOT_BYTES_CAP,
+            "request": dict(request),
+        },
+    )
+
+
+def vercel_snapshot_actual_usd(
+    snapshot: Mapping[str, Any], *, snapshot_id: str, price_snapshot: Mapping[str, Any]
+) -> Decimal:
+    """Price a deleted snapshot from its provider size and lifetime.
+
+    Args:
+        snapshot: The provider state of the snapshot after the delete call.
+        snapshot_id: The one admitted snapshot.
+        price_snapshot: The admitted snapshot quote.
+
+    Returns:
+        The stored bytes times the time from creation to deletion, capped at the expiry.
+
+    Raises:
+        UsagePendingError: When the snapshot is not deleted or its evidence is uncertain.
+    """
+    if snapshot.get("id") != snapshot_id or snapshot.get("status") != "deleted":
+        raise UsagePendingError("The cloud sandbox snapshot is not confirmed deleted.")
+    size = _integer(snapshot.get("size_bytes"), "snapshot size")
+    created = _integer(snapshot.get("created_at"), "snapshot created_at")
+    ended = _integer(snapshot.get("updated_at"), "snapshot updated_at")
+    expires = snapshot.get("expires_at")
+    if expires is not None:
+        ended = min(ended, _integer(expires, "snapshot expires_at"))
+    if ended < created:
+        raise UsagePendingError("The cloud sandbox snapshot returned inconsistent timestamps.")
+    try:
+        cap = price_snapshot["maximum_snapshot_bytes"]
+        rate = exact_nonnegative(price_snapshot["storage_gb_month_usd"])
+        if price_snapshot.get("provider") != "vercel" or price_snapshot.get("resource") != "snapshot":
+            raise ValueError("Unsupported snapshot billing policy")
+    except (KeyError, TypeError, ValueError) as error:
+        raise UsagePendingError("The snapshot admission has no usable price snapshot.") from error
+    if size > cap:
+        raise UsagePendingError("The cloud sandbox snapshot is larger than its admitted size cap.")
+    return _snapshot_usd(size, ended - created, rate)
+
+
+class VercelSnapshotReservation:
+    """Own the sandbox-cost hold of one run-scoped snapshot until it is deleted."""
+
+    def __init__(self, runtime: BudgetRuntime, request: Mapping[str, Any], *, operation_key: str) -> None:
+        """Reserve and claim one snapshot before the snapshot call.
+
+        Args:
+            runtime: Authenticated budget authority retained outside the guest.
+            request: The parameters that :func:`quote_vercel_snapshot` prices.
+            operation_key: Stable logical identity of the snapshot.
+
+        Raises:
+            OperationCompletedError: The snapshot operation already settled.
+            UsagePendingError: Another caller already dispatched it.
+        """
+        self.runtime = runtime
+        self.quote = quote_vercel_snapshot(request)
+        self.operation = runtime.reserve(self.quote, operation_key=operation_key, cost_kind="sandbox", role="runtime")
+        if self.operation.state == "settled":
+            raise OperationCompletedError("This snapshot operation already completed.")
+        runtime.pin(self.operation.id, cent_units(self.operation.max_cents))
+        claimed = runtime.service.mark_dispatched(self.operation.id, runtime.username)
+        if not claimed.dispatch_claimed:
+            raise UsagePendingError("This snapshot was already dispatched; reconcile it by hand.")
+        self.snapshot_id: str | None = None
+
+    def bind(self, snapshot_id: str) -> None:
+        """Record the provider identity of the created snapshot.
+
+        Args:
+            snapshot_id: The Vercel snapshot id.
+        """
+        self.snapshot_id = snapshot_id
+        self.runtime.service.mark_dispatched(self.operation.id, self.runtime.username, snapshot_id)
+
+    def pending(self, evidence: Mapping[str, Any] | None = None) -> None:
+        """Keep the hold when the snapshot result or its deletion is uncertain.
+
+        Args:
+            evidence: The last provider state of the snapshot, or ``None``.
+        """
+        current = self.runtime.service.get_operation(self.operation.id, self.runtime.username)
+        if current.state in {"dispatched", "pending"}:
+            record = {"provider": "vercel", "snapshot_id": self.snapshot_id, "snapshot": dict(evidence or {})}
+            self.runtime.service.mark_pending(
+                self.operation.id,
+                self.runtime.username,
+                evidence_key=json_fingerprint(record),
+                evidence=record,
+            )
+
+    def settle(self, snapshot: Mapping[str, Any]) -> None:
+        """Settle a deleted snapshot at its stored size and lifetime.
+
+        Args:
+            snapshot: The provider state of the snapshot after the delete call.
+
+        Raises:
+            UsagePendingError: When the deletion or the size is uncertain.
+            BudgetError: When the evidence breaks the reserved bounds.
+        """
+        try:
+            if self.snapshot_id is None:
+                raise UsagePendingError("The snapshot call returned no snapshot identity.")
+            usd = vercel_snapshot_actual_usd(
+                snapshot, snapshot_id=self.snapshot_id, price_snapshot=self.quote.price_snapshot
+            )
+            charge = vercel_charge_policy(self.quote.price_snapshot).convert(usd)
+            self.runtime.service.settle(
+                self.operation.id,
+                self.runtime.username,
+                evidence_key=f"vercel-snapshot-delete:{self.snapshot_id}",
+                actual_cents=charge.total,
+                actual_wallet_cents=charge.wallet,
+                evidence={"provider": "vercel", "snapshot": dict(snapshot), "provider_usd": str(usd)},
+            )
+            self.runtime.unpin(self.operation.id)
+        except BaseException:
+            self.pending(snapshot)
             raise
 
 

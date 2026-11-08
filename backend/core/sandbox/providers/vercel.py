@@ -13,7 +13,10 @@ exec and stop flow comes from ``harbor/environments/vercel.py``. Changes:
   same box instead of a second one.
 - A network policy change is read back and fails closed.
 - Each box records its phase timings.
-- Harbor's snapshot, directory transfer and log streaming features are left out.
+- A setup box can become one run-scoped snapshot (see ``..snapshots``), and
+  a trial box can start from it. A box that holds env values or injected
+  headers is refused, and the snapshot storage is metered as sandbox cost.
+- Harbor's directory transfer and log streaming features are left out.
 """
 
 from __future__ import annotations
@@ -28,14 +31,14 @@ import subprocess
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
 
 from core.billing.operation_pricing import json_fingerprint
 from core.billing.signals import BudgetReached
-from core.billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP, VercelUsageReservation
+from core.billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP, VercelSnapshotReservation, VercelUsageReservation
 from core.config import settings
 
 from ..capabilities import VERCEL_CAPABILITIES, SandboxSpecError, resolve_resources
@@ -43,6 +46,7 @@ from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, Sandbo
 from ..errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from ..pacing import SYSTEM_CLOCK, Clock, ProviderAtCapacityError, ProviderPacing, create_with_capacity
 from ..resources import ResourceMode, SandboxSpec
+from ..snapshots import SNAPSHOT_TIMEOUT, BuiltSnapshot, SnapshotRefusedError, refuse_secrets, snapshot_expiration
 from ..telemetry import BoxTimings, current_output_sink
 
 try:
@@ -61,6 +65,7 @@ try:
         SandboxResponseError,
         SandboxServiceOptions,
         SandboxStreamError,
+        SnapshotSource,
         TagFilter,
     )
 except ImportError:
@@ -76,6 +81,7 @@ except ImportError:
     SandboxResponseError = None
     SandboxServiceOptions = None
     SandboxStreamError = None
+    SnapshotSource = None
     TagFilter = None
 
 logger = logging.getLogger(__name__)
@@ -223,6 +229,8 @@ class VercelEnvironment(SandboxEnvironment):
         pacing: ProviderPacing | None = None,
         at_capacity: Callable[[], Awaitable[bool]] | None = None,
         clock: Clock | None = None,
+        snapshot_id: str | None = None,
+        snapshot_usage_factory: UsageFactory = VercelSnapshotReservation,
     ) -> None:
         """Check the spec and prepare the box without a network call.
 
@@ -235,6 +243,8 @@ class VercelEnvironment(SandboxEnvironment):
             pacing: The read and create buckets of the provider.
             at_capacity: Returns True while the provider has no capacity.
             clock: The clock for waits and timings.
+            snapshot_id: Start the box from this run snapshot instead of the image.
+            snapshot_usage_factory: Makes the storage reservation of a snapshot.
 
         Raises:
             SandboxSpecError: The spec is invalid, or a protected box has no
@@ -265,6 +275,10 @@ class VercelEnvironment(SandboxEnvironment):
         self._stop_task: asyncio.Future[None] | None = None
         self._halted = False
         self._funded_until: float | None = None
+        self.snapshot_id = snapshot_id
+        self._snapshot_usage_factory = snapshot_usage_factory
+        self._secret_exposed = False
+        self._snapshotted = False
 
     @property
     def usage(self) -> Any | None:
@@ -361,6 +375,7 @@ class VercelEnvironment(SandboxEnvironment):
             "ports": [],
             "persistent": False,
             "environment_fingerprint": json_fingerprint(dict(self.spec.env)),
+            **({"snapshot_id": self.snapshot_id} if self.snapshot_id else {}),
         }
 
     def _resources(self) -> Any | None:
@@ -475,7 +490,8 @@ class VercelEnvironment(SandboxEnvironment):
                 while True:
                     operation = self._client.create_sandbox(
                         name=self.name,
-                        image=self._image(),
+                        image=None if self.snapshot_id else self._image(),
+                        source=SnapshotSource(snapshot_id=self.snapshot_id) if self.snapshot_id else None,
                         ports=[],
                         execution_time_limit=timedelta(milliseconds=first_ms),
                         resources=self._resources(),
@@ -493,7 +509,8 @@ class VercelEnvironment(SandboxEnvironment):
                             raise
                         if error.status_code == 429 and usage is None:
                             raise ProviderAtCapacityError("Vercel has no sandbox capacity.") from error
-                        # The image build is still running; Vercel made no box.
+                        # The image or snapshot is still being prepared; Vercel
+                        # made no box, so this is a provider state, not a failed attempt.
                         if error.code != "image_not_ready" or self._clock.monotonic() >= deadline:
                             raise
                     await self._clock.sleep(IMAGE_RETRY_DELAY)
@@ -594,7 +611,9 @@ class VercelEnvironment(SandboxEnvironment):
                 box = await asyncio.wait_for(self._client.get_sandbox(name=self.name), STOP_TIMEOUT)
             except Exception as lookup_error:
                 logger.warning("Sandbox %s lookup failed: %s", self.name, type(lookup_error).__name__)
-        if box is not None:
+        # The snapshot already stopped the session; the builder box stays so
+        # other pods can find the snapshot by its name until the run deletes it.
+        if box is not None and not self._snapshotted:
             try:
                 await asyncio.wait_for(box.stop(), STOP_TIMEOUT)
             except Exception as stop_error:
@@ -702,6 +721,8 @@ class VercelEnvironment(SandboxEnvironment):
                 command outlived its kill deadline.
         """
         session = self._require_session()
+        if env:
+            self._secret_exposed = True
         with self.timings.phase("run"):
             token = uuid.uuid4().hex
             sentinel = f"{EXIT_PREFIX}{token}"
@@ -922,6 +943,129 @@ class VercelEnvironment(SandboxEnvironment):
             updated = await session.update_network_policy(self._sdk_policy(policy, update=True))
         if not policy_confirmed(policy, updated.network_policy):
             raise SandboxInfraError("Vercel did not confirm the sandbox network policy.")
+
+    async def snapshot(self, *, run_deadline: datetime, now: datetime | None = None) -> BuiltSnapshot:
+        """Turn the set-up box into the run snapshot. The box stops here.
+
+        Call it after setup and before any secret enters the box. A failed
+        snapshot is not retried: the call may have reached Vercel.
+
+        Args:
+            run_deadline: The latest time the run can end.
+            now: The current time, or ``None`` for the wall clock.
+
+        Returns:
+            The snapshot that trial boxes start from.
+
+        Raises:
+            SnapshotRefusedError: The box holds env values or injected headers.
+            SandboxInfraError: The box is not running or the snapshot did not finish.
+        """
+        refuse_secrets(self.spec)
+        if self._secret_exposed:
+            raise SnapshotRefusedError("A box that ran a command with env values cannot become a snapshot.")
+        session = self._require_session()
+        expiration = snapshot_expiration(run_deadline, now or datetime.now(run_deadline.tzinfo))
+        reservation = None
+        if self._budget is not None:
+            request = {"session_id": session.id, "retention_ms": math.ceil(expiration.total_seconds() * 1000)}
+            reservation = await asyncio.to_thread(
+                self._snapshot_usage_factory,
+                self._budget,
+                request,
+                operation_key=f"{self.spec.operation_key}:snapshot",
+            )
+        self._halted = True
+        # The snapshot stops the session, so a renewer would fund time nobody uses.
+        if self._renewer is not None:
+            self._renewer.cancel()
+            with contextlib.suppress(BaseException):
+                await self._renewer
+        try:
+            with self.timings.phase("snapshot"), self._stop_guard():
+                async with asyncio.timeout(SNAPSHOT_TIMEOUT):
+                    created = await session.snapshot(expiration=expiration)
+            if created.status != "created":
+                raise SandboxInfraError(f"The Vercel snapshot ended as {created.status}.")
+            self._snapshotted = True
+            if reservation is not None:
+                await asyncio.to_thread(reservation.bind, created.id)
+        except BaseException as error:
+            if reservation is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(reservation.pending)
+            if isinstance(error, TimeoutError):
+                raise SandboxInfraError("The Vercel snapshot did not finish in time.") from error
+            raise
+        return BuiltSnapshot(
+            snapshot_id=created.id,
+            builder_name=self.name,
+            expires_at_ms=created.expires_at,
+            reservation=reservation,
+        )
+
+    @classmethod
+    async def find_snapshot(cls, builder_name: str) -> BuiltSnapshot | None:
+        """Find a live snapshot that another pod built from a builder box.
+
+        Args:
+            builder_name: The stable name of the builder box.
+
+        Returns:
+            The newest live snapshot, or ``None``. Its hold belongs to the pod
+            that built it.
+        """
+        client = cls._make_client(None)
+        try:
+            now_ms = int(time.time() * 1000)
+            async for found in client.query_snapshots(name=builder_name, sort_order="desc"):
+                if found.status == "created" and (found.expires_at is None or found.expires_at > now_ms):
+                    return BuiltSnapshot(
+                        snapshot_id=found.id, builder_name=builder_name, expires_at_ms=found.expires_at
+                    )
+            return None
+        finally:
+            with contextlib.suppress(Exception):
+                await client.aclose()
+
+    @classmethod
+    async def delete_snapshot(cls, built: BuiltSnapshot, *, client: Any | None = None) -> None:
+        """Delete a run snapshot, settle its storage, then remove the builder box.
+
+        Args:
+            built: The snapshot to delete.
+            client: The SDK client, or ``None`` for one from the settings.
+
+        Raises:
+            Exception: The provider delete failed; the hold stays pending.
+        """
+        owned = client is None
+        client = client or cls._make_client(None)
+        try:
+            try:
+                handle = await asyncio.wait_for(client.get_snapshot(snapshot_id=built.snapshot_id), STOP_TIMEOUT)
+                if handle.status != "deleted":
+                    await asyncio.wait_for(handle.delete(), STOP_TIMEOUT)
+            except BaseException:
+                if built.reservation is not None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.to_thread(built.reservation.pending)
+                raise
+            if built.reservation is not None:
+                state = {
+                    name: getattr(handle, name, None)
+                    for name in ("id", "status", "size_bytes", "created_at", "updated_at", "expires_at")
+                }
+                await asyncio.to_thread(built.reservation.settle, state)
+            try:
+                box = await asyncio.wait_for(client.get_sandbox(name=built.builder_name), STOP_TIMEOUT)
+                await asyncio.wait_for(box.destroy(), STOP_TIMEOUT)
+            except Exception as error:
+                logger.warning("Snapshot builder %s was not removed: %s", built.builder_name, type(error).__name__)
+        finally:
+            if owned:
+                with contextlib.suppress(Exception):
+                    await client.aclose()
 
     @classmethod
     async def stop_job_sandboxes(cls, job_id: str) -> int:
