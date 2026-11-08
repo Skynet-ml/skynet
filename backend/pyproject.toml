@@ -129,6 +129,11 @@ render = [
     "pillow>=13.0.0",
     "networkx>=3",
 ]
+e2b = [
+    # The E2B sandbox provider (core.sandbox.providers.e2b). It is not
+    # allowed in production; the factory refuses it there.
+    "e2b>=2.52",
+]
 daytona = [
     # SBX-25b: the dev-only Daytona sandbox provider (core.sandbox.providers.daytona).
     "daytona>=0.210.0",

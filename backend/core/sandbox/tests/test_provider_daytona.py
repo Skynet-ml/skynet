@@ -24,6 +24,7 @@ from core.sandbox.errors import (
     SandboxInfraError,
     SandboxRejectedError,
     SandboxTransientError,
+    StartTimeoutError,
 )
 from core.sandbox.factory import ProductionNotAllowedError
 from core.sandbox.providers import daytona
@@ -57,6 +58,20 @@ class FakeForbiddenError(FakeDaytonaError):
 
 class FakeRateLimitError(FakeDaytonaError):
     """Stand in for ``daytona.DaytonaRateLimitError``."""
+
+
+class FakeTimeoutError(FakeDaytonaError):
+    """Stand in for ``daytona.DaytonaTimeoutError``, which is not a ``TimeoutError``."""
+
+    def __init__(self, message: str, sandbox_id: str | None = None) -> None:
+        """Store the id of the box that the timed-out create made.
+
+        Args:
+            message: The error message.
+            sandbox_id: The box id, or ``None``.
+        """
+        super().__init__(message)
+        self.sandbox_id = sandbox_id
 
 
 @dataclass
@@ -255,6 +270,7 @@ class FakeBox:
     deleted: bool = False
     fail_delete: Exception | None = None
     fail_mkdir: bool = False
+    delete_delay: float = 0.0
     network_updates: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -280,6 +296,8 @@ class FakeBox:
         Raises:
             Exception: ``fail_delete`` is set.
         """
+        if self.delete_delay:
+            await asyncio.sleep(self.delete_delay)
         if self.fail_delete is not None:
             raise self.fail_delete
         self.check_alive()
@@ -303,6 +321,7 @@ class FakeClient:
     clients: ClassVar[list[FakeClient]] = []
     create_error: ClassVar[Exception | None] = None
     create_delay: ClassVar[float] = 0.0
+    create_times_out: ClassVar[bool] = False
     _ids: ClassVar[Iterator[int]] = itertools.count()
 
     def __init__(self) -> None:
@@ -322,6 +341,7 @@ class FakeClient:
 
         Raises:
             Exception: ``create_error`` is set.
+            FakeTimeoutError: ``create_times_out`` is set; the box exists.
         """
         cls = type(self)
         if cls.create_delay:
@@ -331,7 +351,26 @@ class FakeClient:
         cls.created.append(params)
         box = FakeBox(id=f"box-{next(cls._ids)}", labels=dict(params.labels or {}), env=dict(params.env_vars or {}))
         cls.boxes.append(box)
+        if cls.create_times_out:
+            raise FakeTimeoutError(f"Sandbox {box.id} failed to become ready", sandbox_id=box.id)
         return box
+
+    async def get(self, sandbox_id_or_name: str) -> FakeBox:
+        """Find a live box by id.
+
+        Args:
+            sandbox_id_or_name: The box id.
+
+        Returns:
+            The box.
+
+        Raises:
+            FakeNotFoundError: No live box has the id.
+        """
+        for box in type(self).boxes:
+            if box.id == sandbox_id_or_name and not box.deleted:
+                return box
+        raise FakeNotFoundError(f"sandbox {sandbox_id_or_name} not found")
 
     async def list(self, query: Any) -> Any:
         """Yield the live boxes whose labels match the query.
@@ -366,6 +405,7 @@ def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> type[FakeClient]:
     monkeypatch.setattr(FakeClient, "clients", [])
     monkeypatch.setattr(FakeClient, "create_error", None)
     monkeypatch.setattr(FakeClient, "create_delay", 0.0)
+    monkeypatch.setattr(FakeClient, "create_times_out", False)
     names = {
         "AsyncDaytona": FakeClient,
         "CreateSandboxFromImageParams": FakeParams,
@@ -375,6 +415,7 @@ def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> type[FakeClient]:
         "DaytonaAuthorizationError": FakeAuthorizationError,
         "DaytonaForbiddenError": FakeForbiddenError,
         "DaytonaRateLimitError": FakeRateLimitError,
+        "DaytonaTimeoutError": FakeTimeoutError,
         "ListSandboxesQuery": _fake_query,
         "Resources": _fake_resources,
         "SessionExecuteRequest": _fake_request,
@@ -452,6 +493,76 @@ async def test_cancel_during_create_still_deletes_the_box(fake_sdk: type[FakeCli
     assert len(fake_sdk.boxes) == 1
     await env.stop()
     assert fake_sdk.boxes[0].deleted
+
+
+async def test_create_timeout_raises_start_timeout_and_deletes_the_box(fake_sdk: type[FakeClient]) -> None:
+    """Map the SDK create timeout to StartTimeoutError, and delete the box it made."""
+    fake_sdk.create_times_out = True
+    with pytest.raises(StartTimeoutError) as caught:
+        async with DaytonaEnvironment(_SPEC):
+            pass
+    assert caught.value.seconds == daytona.CREATE_TIMEOUT_SEC
+    assert isinstance(caught.value.__cause__, FakeTimeoutError)
+    (box,) = fake_sdk.boxes
+    assert box.deleted
+    assert fake_sdk.clients[0].closed
+
+
+async def test_create_timeout_keeps_the_timeout_when_the_box_lookup_fails(
+    fake_sdk: type[FakeClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise StartTimeoutError, not the lookup error, when Daytona cannot find the box."""
+    fake_sdk.create_times_out = True
+
+    async def _lost(self: FakeClient, sandbox_id_or_name: str) -> FakeBox:
+        """Fail every lookup.
+
+        Args:
+            sandbox_id_or_name: The box id.
+
+        Raises:
+            FakeDaytonaError: Always.
+        """
+        raise FakeDaytonaError("lookup failed")
+
+    monkeypatch.setattr(FakeClient, "get", _lost)
+    with pytest.raises(StartTimeoutError):
+        async with DaytonaEnvironment(_SPEC):
+            pass
+    assert fake_sdk.clients[0].closed
+
+
+async def test_second_cancel_during_create_still_deletes_the_box(fake_sdk: type[FakeClient]) -> None:
+    """Keep waiting for the create through a second cancel, so stop deletes the box."""
+    fake_sdk.create_delay = 0.05
+    env = DaytonaEnvironment(_SPEC)
+    task = asyncio.create_task(env.start())
+    await asyncio.sleep(0.01)
+    task.cancel()
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(fake_sdk.boxes) == 1
+    await env.stop()
+    assert fake_sdk.boxes[0].deleted
+
+
+async def test_second_cancel_during_stop_still_deletes_the_box(fake_sdk: type[FakeClient]) -> None:
+    """Finish the delete and close the client through two cancels during stop."""
+    env = DaytonaEnvironment(_SPEC)
+    await env.start()
+    (box,) = fake_sdk.boxes
+    box.delete_delay = 0.05
+    task = asyncio.create_task(env.stop())
+    await asyncio.sleep(0.01)
+    task.cancel()
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert box.deleted
+    assert fake_sdk.clients[0].closed
 
 
 async def test_stop_ignores_a_box_that_is_already_gone(fake_sdk: type[FakeClient]) -> None:

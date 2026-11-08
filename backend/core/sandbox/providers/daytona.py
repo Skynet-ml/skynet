@@ -37,6 +37,7 @@ from ..errors import (
     SandboxInfraError,
     SandboxRejectedError,
     SandboxTransientError,
+    StartTimeoutError,
 )
 from ..resources import ResourceMode, SandboxSpec
 from ..timeouts import Phase, PhaseTimeouts
@@ -51,6 +52,7 @@ try:
         DaytonaForbiddenError,
         DaytonaNotFoundError,
         DaytonaRateLimitError,
+        DaytonaTimeoutError,
         ListSandboxesQuery,
         Resources,
         SessionExecuteRequest,
@@ -64,6 +66,7 @@ except ImportError:
     DaytonaForbiddenError = None
     DaytonaNotFoundError = None
     DaytonaRateLimitError = None
+    DaytonaTimeoutError = None
     ListSandboxesQuery = None
     Resources = None
     SessionExecuteRequest = None
@@ -144,6 +147,7 @@ class DaytonaEnvironment(SandboxEnvironment):
         """Create the Daytona box. Do nothing when the sandbox already runs.
 
         Raises:
+            StartTimeoutError: The box did not become ready in time.
             SandboxError: Daytona refused or failed the create call.
         """
         if self._sandbox is not None:
@@ -167,16 +171,20 @@ class DaytonaEnvironment(SandboxEnvironment):
             self._sandbox = await asyncio.shield(create)
         except asyncio.CancelledError:
             # A cancel must not lose a box that Daytona already made: wait for
-            # the create to end, keep the box, so stop() can delete it.
-            with contextlib.suppress(Exception):
-                self._sandbox = await create
+            # the create to end, also through more cancels, and keep the box,
+            # so stop() can delete it.
+            while not create.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(create)
+            if not create.cancelled() and create.exception() is None:
+                self._sandbox = create.result()
             raise
 
     async def stop(self) -> None:
         """Delete the box and close the client. Safe before start and when called twice.
 
-        A cancel during the delete waits for the delete to finish, then
-        passes the cancel on.
+        A cancel during the delete waits for the delete to finish, also
+        through more cancels, then passes the cancel on.
         """
         sandbox, client = self._sandbox, self._client
         self._sandbox = None
@@ -187,7 +195,11 @@ class DaytonaEnvironment(SandboxEnvironment):
         try:
             await asyncio.shield(cleanup)
         except asyncio.CancelledError:
-            await cleanup
+            while not cleanup.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(cleanup)
+            if not cleanup.cancelled() and cleanup.exception() is not None:
+                logger.warning("The Daytona delete failed during a cancelled stop.", exc_info=cleanup.exception())
             raise
 
     async def exec(
@@ -344,10 +356,33 @@ class DaytonaEnvironment(SandboxEnvironment):
             The new ``AsyncSandbox``.
 
         Raises:
+            StartTimeoutError: The box did not become ready in time.
             SandboxError: Daytona refused or failed the create call.
         """
         with _translated("create"):
-            return await self._client.create(params, timeout=CREATE_TIMEOUT_SEC)
+            try:
+                return await self._client.create(params, timeout=CREATE_TIMEOUT_SEC)
+            except DaytonaTimeoutError as error:
+                # The SDK timeout is not a TimeoutError, and the box can
+                # already exist. Keep it, so stop() deletes it.
+                await self._keep_timed_out_box(error.sandbox_id)
+                raise StartTimeoutError(CREATE_TIMEOUT_SEC) from error
+
+    async def _keep_timed_out_box(self, sandbox_id: str | None) -> None:
+        """Find the box that a timed-out create made, so stop() can delete it.
+
+        A failed lookup only logs: the box TTL deletes a box that stays lost,
+        and the caller needs the timeout error, not the lookup error.
+
+        Args:
+            sandbox_id: The box id from the SDK timeout, or ``None``.
+        """
+        if not sandbox_id:
+            return
+        try:
+            self._sandbox = await self._client.get(sandbox_id)
+        except Exception:
+            logger.warning("Daytona could not find the timed-out box %s.", sandbox_id, exc_info=True)
 
     def _require_running(self) -> Any:
         """Return the running box.
