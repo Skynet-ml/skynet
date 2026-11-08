@@ -1498,6 +1498,57 @@ async def test_snapshot_stops_the_services_first(client: FakeClient, log: list[s
     await env.stop()
 
 
+async def test_cancel_in_the_service_stop_reserves_no_snapshot_hold(client: FakeClient, log: list[str]) -> None:
+    """Check that the service stop runs before the hold, so a cancel there leaves no hold without pending."""
+    env = make_env(client, log, services=SERVICES)
+    await env.start()
+    reserved: list[str] = []
+    real_factory = env._snapshot_usage_factory
+
+    def factory(*args: Any, **kwargs: Any) -> Any:
+        """Record the hold and make it.
+
+        Args:
+            args: The factory arguments.
+            kwargs: The factory keyword arguments.
+
+        Returns:
+            The fake reservation.
+        """
+        reserved.append("reserved")
+        return real_factory(*args, **kwargs)
+
+    env._snapshot_usage_factory = factory
+    real_exec = env.exec
+    stopping = asyncio.Event()
+
+    async def exec_(command: str, **kwargs: Any) -> Any:
+        """Hang in the service stop.
+
+        Args:
+            command: The shell command.
+            kwargs: The exec keyword arguments.
+
+        Returns:
+            The result of the real exec.
+        """
+        if "kill -TERM" in command:
+            stopping.set()
+            await asyncio.sleep(3600)
+        return await real_exec(command, **kwargs)
+
+    env.exec = exec_
+    task = asyncio.create_task(env.snapshot(run_deadline=DEADLINE, now=NOW))
+    await stopping.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert reserved == []
+    assert not env._halted
+    env.exec = real_exec
+    await env.stop()
+
+
 async def test_start_after_stop_is_refused(client: FakeClient, log: list[str]) -> None:
     """Check that a stopped box never starts again or sends a second create."""
     env = make_env(client, log)

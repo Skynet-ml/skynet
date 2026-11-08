@@ -10,6 +10,7 @@ stop before a snapshot, so a snapshot never holds a running service.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import math
@@ -34,6 +35,11 @@ DEFAULT_SERVICE_MEMORY_MB = 512
 LAUNCH_TIMEOUT = 30.0
 SERVICE_STOP_TIMEOUT = 10.0
 SERVICE_PREFIX = "/tmp/.svc-"
+# A compose file can set any poll timing; these limits keep one setup from
+# waiting for hours. The start deadline covers every service of the box.
+MAX_HEALTHCHECK_RETRIES = 100
+MAX_HEALTHCHECK_DURATION = 600.0
+SERVICES_START_TIMEOUT = 900.0
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -116,21 +122,24 @@ def _service(name: str, body: Any) -> ComposeService:
         raise ComposeError(f"The compose service name {name!r} must use only letters, digits, '.', '_' and '-'.")
     if not isinstance(body, Mapping):
         raise ComposeError(f"The compose service {name} must be a mapping.")
-    parts = [_command_text(name, body.get(key)) for key in ("entrypoint", "command") if body.get(key) is not None]
+    parts = [_command_text(name, key, body.get(key)) for key in ("entrypoint", "command") if body.get(key) is not None]
     if not any(parts):
         # The box has no container runtime, so an image-only service has nothing to run.
         raise ComposeError(
             f"The compose service {name} has no command. The box has no container runtime: "
             "add a 'command' or 'entrypoint' that runs in the box."
         )
-    limits = ((body.get("deploy") or {}).get("resources") or {}).get("limits") or {}
+    limits = _mapping(name, "deploy.resources.limits", _deploy_limits(name, body.get("deploy")))
     cpus = body.get("cpus", limits.get("cpus"))
     memory = body.get("mem_limit", limits.get("memory"))
+    working_dir = body.get("working_dir")
+    if working_dir is not None and not isinstance(working_dir, str):
+        raise ComposeError(f"The compose service {name} has a working_dir that is not a string.")
     return ComposeService(
         name=name,
         command=" ".join(part for part in parts if part),
         environment=_environment(name, body.get("environment")),
-        working_dir=str(body["working_dir"]) if body.get("working_dir") else None,
+        working_dir=working_dir or None,
         cpus=_cpus(name, cpus) if cpus is not None else DEFAULT_SERVICE_CPUS,
         memory_mb=_memory_mb(name, memory) if memory is not None else DEFAULT_SERVICE_MEMORY_MB,
         depends_on=_depends_on(name, body.get("depends_on")),
@@ -138,24 +147,85 @@ def _service(name: str, body: Any) -> ComposeService:
     )
 
 
-def _command_text(name: str, value: Any) -> str:
+def _mapping(name: str, field: str, value: Any) -> Mapping[Any, Any]:
+    """Read an optional compose mapping field.
+
+    Args:
+        name: The service name, for the error.
+        field: The field name, for the error.
+        value: The field value, or ``None``.
+
+    Returns:
+        The mapping, or an empty mapping when the field is not set.
+
+    Raises:
+        ComposeError: The value is not a mapping.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ComposeError(f"The {field} of compose service {name} is not a mapping.")
+    return value
+
+
+def _deploy_limits(name: str, deploy: Any) -> Any:
+    """Return the ``deploy.resources.limits`` value of a service.
+
+    Args:
+        name: The service name, for the error.
+        deploy: The ``deploy`` value, or ``None``.
+
+    Returns:
+        The ``limits`` value, or ``None`` when it is not set.
+
+    Raises:
+        ComposeError: ``deploy`` or ``resources`` is not a mapping.
+    """
+    resources = _mapping(name, "deploy", deploy).get("resources")
+    return _mapping(name, "deploy.resources", resources).get("limits")
+
+
+def _scalar(name: str, field: str, value: Any) -> str:
+    """Turn one compose scalar into text.
+
+    Only plain scalars pass, so YAML aliases cannot expand a nested list into
+    a huge string.
+
+    Args:
+        name: The service name, for the error.
+        field: The field name, for the error.
+        value: The value.
+
+    Returns:
+        The value as text.
+
+    Raises:
+        ComposeError: The value is not a string or a number.
+    """
+    if not isinstance(value, str | int | float):
+        raise ComposeError(f"The {field} of compose service {name} has an item that is not a string or a number.")
+    return str(value)
+
+
+def _command_text(name: str, field: str, value: Any) -> str:
     """Turn a compose ``command`` or ``entrypoint`` into shell text.
 
     Args:
         name: The service name, for the error.
-        value: A string, or a list of arguments.
+        field: The field name, for the error.
+        value: A string, or a list of scalar arguments.
 
     Returns:
         The shell text.
 
     Raises:
-        ComposeError: The value is neither a string nor a list.
+        ComposeError: The value is neither a string nor a list of scalars.
     """
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, list):
-        return shlex.join(str(item) for item in value)
-    raise ComposeError(f"The compose service {name} has a command that is not a string or a list.")
+        return shlex.join(_scalar(name, field, item) for item in value)
+    raise ComposeError(f"The {field} of compose service {name} is not a string or a list.")
 
 
 def _environment(name: str, value: Any) -> tuple[tuple[str, str], ...]:
@@ -170,14 +240,19 @@ def _environment(name: str, value: Any) -> tuple[tuple[str, str], ...]:
         because the box has no host environment to pass through.
 
     Raises:
-        ComposeError: A key is not a valid variable name.
+        ComposeError: A key is not a valid variable name, or a value is not
+            a scalar.
     """
     if value is None:
         return ()
     if isinstance(value, Mapping):
-        pairs = [(str(key), "" if item is None else str(item)) for key, item in value.items()]
+        pairs = [
+            (_scalar(name, "environment", key), "" if item is None else _scalar(name, "environment", item))
+            for key, item in value.items()
+        ]
     elif isinstance(value, list):
-        pairs = [tuple(str(item).split("=", 1)) for item in value if "=" in str(item)]
+        items = [_scalar(name, "environment", item) for item in value]
+        pairs = [tuple(item.split("=", 1)) for item in items if "=" in item]
     else:
         raise ComposeError(f"The compose service {name} has an environment that is not a mapping or a list.")
     for key, _ in pairs:
@@ -244,12 +319,13 @@ def _depends_on(name: str, value: Any) -> tuple[str, ...]:
         The names of the services this one needs.
 
     Raises:
-        ComposeError: The value is neither a list nor a mapping.
+        ComposeError: The value is neither a list nor a mapping, or a name
+            is not a scalar.
     """
     if value is None:
         return ()
     if isinstance(value, Mapping | list):
-        return tuple(str(item) for item in value)
+        return tuple(_scalar(name, "depends_on", item) for item in value)
     raise ComposeError(f"The compose service {name} has a depends_on that is not a list or a mapping.")
 
 
@@ -265,17 +341,52 @@ def _duration(name: str, value: Any, default: float) -> float:
         The duration in seconds.
 
     Raises:
-        ComposeError: The text is not a duration.
+        ComposeError: The value is not a duration, or it is longer than
+            ``MAX_HEALTHCHECK_DURATION``.
     """
     if value is None:
         return default
     if isinstance(value, int | float) and not isinstance(value, bool):
-        return float(value)
-    text = str(value).strip()
-    parts = _DURATION_PART.findall(text)
-    if not parts or "".join(number + unit for number, unit in parts) != text:
+        seconds = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        parts = _DURATION_PART.findall(text)
+        if not parts or "".join(number + unit for number, unit in parts) != text:
+            raise ComposeError(f"The compose service {name} has an invalid duration {value!r}.")
+        seconds = sum(float(number) * _UNIT_SECONDS[unit] for number, unit in parts)
+    else:
         raise ComposeError(f"The compose service {name} has an invalid duration {value!r}.")
-    return sum(float(number) * _UNIT_SECONDS[unit] for number, unit in parts)
+    if not math.isfinite(seconds) or not 0 <= seconds <= MAX_HEALTHCHECK_DURATION:
+        raise ComposeError(
+            f"The compose service {name} has a healthcheck duration {value!r} outside "
+            f"0 to {MAX_HEALTHCHECK_DURATION:g} seconds."
+        )
+    return seconds
+
+
+def _retries(name: str, value: Any, default: int) -> int:
+    """Read the compose healthcheck ``retries``.
+
+    Args:
+        name: The service name, for the error.
+        value: The retry count, or ``None``.
+        default: The value when the field is not set.
+
+    Returns:
+        The retry count.
+
+    Raises:
+        ComposeError: The value is not an integer from 1 to
+            ``MAX_HEALTHCHECK_RETRIES``.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_HEALTHCHECK_RETRIES:
+        raise ComposeError(
+            f"The compose service {name} has healthcheck retries {value!r}; "
+            f"use an integer from 1 to {MAX_HEALTHCHECK_RETRIES}."
+        )
+    return value
 
 
 def _healthcheck(name: str, value: Any) -> HealthcheckConfig | None:
@@ -289,19 +400,23 @@ def _healthcheck(name: str, value: Any) -> HealthcheckConfig | None:
         The poll with compose defaults, or ``None`` when there is no check.
 
     Raises:
-        ComposeError: The test is not a string or a known list form.
+        ComposeError: The healthcheck is not a mapping, its test is not a
+            string or a known list form, or a timing value is invalid.
     """
-    if not isinstance(value, Mapping) or value.get("disable") or value.get("test") is None:
+    value = _mapping(name, "healthcheck", value)
+    if value.get("disable") or value.get("test") is None:
         return None
     test = value["test"]
+    if isinstance(test, list):
+        test = [_scalar(name, "healthcheck test", item) for item in test]
     if isinstance(test, str):
         command = test
     elif isinstance(test, list) and test and test[0] == "NONE":
         return None
     elif isinstance(test, list) and len(test) == 2 and test[0] == "CMD-SHELL":
-        command = str(test[1])
+        command = test[1]
     elif isinstance(test, list) and len(test) > 1 and test[0] == "CMD":
-        command = shlex.join(str(item) for item in test[1:])
+        command = shlex.join(test[1:])
     else:
         raise ComposeError(f"The compose service {name} has an invalid healthcheck test.")
     defaults = HealthcheckConfig(command="")
@@ -311,7 +426,7 @@ def _healthcheck(name: str, value: Any) -> HealthcheckConfig | None:
         timeout_sec=_duration(name, value.get("timeout"), defaults.timeout_sec),
         start_period_sec=_duration(name, value.get("start_period"), defaults.start_period_sec),
         start_interval_sec=_duration(name, value.get("start_interval"), defaults.start_interval_sec),
-        retries=int(value.get("retries", defaults.retries)),
+        retries=_retries(name, value.get("retries"), defaults.retries),
     )
 
 
@@ -402,6 +517,24 @@ def launch_command(service: ComposeService) -> str:
     return f"env {env}{run} > {service.log_path} 2>&1 < /dev/null & echo $! > {service.pid_path}"
 
 
+def healthcheck_command(service: ComposeService, command: str) -> str:
+    """Build the shell text that runs a check in the directory and env of a service.
+
+    Args:
+        service: The service.
+        command: The healthcheck shell text.
+
+    Returns:
+        The shell text. The env values go in the command line, not the
+        ``exec`` env, so a box with services can still become a snapshot.
+    """
+    if not service.environment and not service.working_dir:
+        return command
+    cd = f"cd {shlex.quote(service.working_dir)} && " if service.working_dir else ""
+    env = "".join(f"{shlex.quote(f'{key}={value}')} " for key, value in service.environment)
+    return f"{cd}env {env}bash --noprofile --norc -c {shlex.quote(command)}"
+
+
 def stop_command(service: ComposeService) -> str:
     """Build the shell text that stops one service and removes its files.
 
@@ -437,16 +570,30 @@ async def start_services(
 
     Raises:
         SandboxInfraError: A service did not start.
-        HealthcheckError: A service did not become healthy.
+        HealthcheckError: A service did not become healthy, or the services
+            did not all become healthy in ``SERVICES_START_TIMEOUT``.
     """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + SERVICES_START_TIMEOUT
     for service in services:
         started.append(service)
         result = await env.exec(launch_command(service), cwd=service.working_dir, timeout_sec=LAUNCH_TIMEOUT)
         if not result.ok:
             raise SandboxInfraError(f"The compose service {service.name} did not start: exit code {result.exit_code}.")
         if service.healthcheck is not None:
+            check = dataclasses.replace(
+                service.healthcheck, command=healthcheck_command(service, service.healthcheck.command)
+            )
             try:
-                await env.healthcheck(service.healthcheck)
+                # A failed probe after the box is gone counts as one failure,
+                # so the deadline is what ends the poll in that case.
+                async with asyncio.timeout_at(deadline):
+                    await env.healthcheck(check)
+            except TimeoutError as error:
+                raise HealthcheckError(
+                    f"The compose service {service.name} did not become healthy in "
+                    f"{SERVICES_START_TIMEOUT:g} seconds. Read {service.log_path} in the box."
+                ) from error
             except HealthcheckError as error:
                 raise HealthcheckError(
                     f"The compose service {service.name} is not healthy. Read {service.log_path} in the box. {error}"

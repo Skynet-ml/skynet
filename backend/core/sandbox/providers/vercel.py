@@ -1038,6 +1038,10 @@ class VercelEnvironment(SandboxEnvironment):
         session = self._require_session()
         now = now or datetime.now(run_deadline.tzinfo)
         expiration = snapshot_expiration(run_deadline, now)
+        # D5: a snapshot never holds a running service; each box from the
+        # snapshot starts its own services. The stop runs before the hold, so
+        # a cancel here leaves no reserved hold without its pending call.
+        await stop_services(self, self._services_up)
         reservation = None
         if self._budget is not None:
             # The expiry slides from the last use, so the hold covers a last use
@@ -1050,9 +1054,6 @@ class VercelEnvironment(SandboxEnvironment):
                 request,
                 operation_key=f"{self.spec.operation_key}:snapshot",
             )
-        # D5: a snapshot never holds a running service; each box from the
-        # snapshot starts its own services.
-        await stop_services(self, self._services_up)
         self._halted = True
         # The snapshot stops the session, so a renewer would fund time nobody uses.
         if self._renewer is not None:

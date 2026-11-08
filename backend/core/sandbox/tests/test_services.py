@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import time
@@ -12,7 +13,7 @@ from typing import Any
 import pytest
 
 from core.sandbox.capabilities import VERCEL_CAPABILITIES
-from core.sandbox.environment import ExecResult, HealthcheckError, SandboxEnvironment
+from core.sandbox.environment import ExecResult, HealthcheckConfig, HealthcheckError, SandboxEnvironment
 from core.sandbox.errors import SandboxInfraError
 from core.sandbox.resources import ResourceMode, ResourceRequest
 from core.sandbox.services import (
@@ -20,6 +21,7 @@ from core.sandbox.services import (
     ComposeService,
     ServicesTooLargeError,
     box_resources,
+    healthcheck_command,
     launch_command,
     parse_compose,
     start_services,
@@ -126,12 +128,42 @@ def test_parse_reads_command_env_size_and_start_order() -> None:
         ("services:\n  a b:\n    command: x\n", "must use only"),
         ("services:\n  a:\n    command: x\n    environment: {'1X': y}\n", "invalid environment name"),
         ("services: {a: [", "not valid YAML"),
+        ("services:\n  a:\n    command: [[x, y]]\n", "command of compose service a has an item"),
+        ("services:\n  a:\n    entrypoint: [{x: y}]\n", "entrypoint of compose service a has an item"),
+        ("services:\n  a:\n    command: x\n    environment: [{a: 1}]\n", "environment of compose service a"),
+        ("services:\n  a:\n    command: x\n    environment: {A: [1]}\n", "environment of compose service a"),
+        ("services:\n  a:\n    command: x\n    environment: {1: x}\n", "invalid environment name"),
+        ("services:\n  a:\n    command: x\n    environment: {'A-B': 1}\n", "invalid environment name"),
+        ("services:\n  a:\n    command: x\n    depends_on: [[b]]\n", "depends_on of compose service a"),
+        ("services:\n  a:\n    command: x\n    healthcheck: {test: [CMD, [x]]}\n", "healthcheck test of"),
+        ("services:\n  a:\n    command: x\n    deploy: fast\n", "deploy of compose service a is not a mapping"),
+        ("services:\n  a:\n    command: x\n    deploy: [1]\n", "deploy of compose service a is not a mapping"),
+        ("services:\n  a:\n    command: x\n    deploy: {resources: big}\n", "deploy.resources of"),
+        ("services:\n  a:\n    command: x\n    deploy: {resources: {limits: 2}}\n", "deploy.resources.limits of"),
+        ("services:\n  a:\n    command: x\n    healthcheck: yes-please\n", "healthcheck of compose service a"),
+        ("services:\n  a:\n    command: x\n    healthcheck: {test: x, retries: many}\n", "healthcheck retries"),
+        ("services:\n  a:\n    command: x\n    healthcheck: {test: x, retries: 1000000000}\n", "from 1 to 100"),
+        ("services:\n  a:\n    command: x\n    healthcheck: {test: x, retries: 0}\n", "from 1 to 100"),
+        ("services:\n  a:\n    command: x\n    healthcheck: {test: x, interval: 24h}\n", "outside 0 to 600"),
+        ("services:\n  a:\n    command: x\n    healthcheck: {test: x, timeout: [1]}\n", "invalid duration"),
+        ("services:\n  a:\n    command: x\n    working_dir: 5\n", "working_dir that is not a string"),
     ],
 )
 def test_parse_rejects_what_the_box_cannot_run(text: str, message: str) -> None:
     """Check that each invalid compose file names its problem."""
     with pytest.raises(ComposeError, match=message):
         parse_compose(text)
+
+
+def test_alias_bomb_is_refused_before_it_expands() -> None:
+    """Check that nested YAML aliases in a command fail fast instead of growing a huge string."""
+    lines = ["a0: &a0 [" + ",".join(["xxxxxxxx"] * 9) + "]"]
+    lines += [f"a{i}: &a{i} [" + ",".join([f"*a{i - 1}"] * 9) + "]" for i in range(1, 7)]
+    text = "\n".join([*lines, "services:\n  s:\n    command: [*a6]"])
+    started = time.monotonic()
+    with pytest.raises(ComposeError, match="has an item that is not a string or a number"):
+        parse_compose(text)
+    assert time.monotonic() - started < 1
 
 
 def test_disabled_healthcheck_is_no_check() -> None:
@@ -245,6 +277,71 @@ async def test_failed_stop_still_stops_the_rest() -> None:
     started = [_service("db"), _service("cache"), _service("app")]
     await stop_services(env, started)
     assert [command.split(".svc-")[1].split(".pid")[0] for command, _ in env.calls] == ["app", "db"]
+
+
+async def test_healthcheck_runs_in_the_service_dir_and_env() -> None:
+    """Check that the health poll gets the working_dir and env of its service on the command line."""
+    (db,) = parse_compose(
+        "services:\n  db:\n    command: postgres\n    working_dir: /srv/my db\n"
+        "    environment: {POSTGRES_USER: app}\n"
+        "    healthcheck: {test: [CMD-SHELL, pg_isready -U $POSTGRES_USER], interval: 0s}\n"
+    )
+    env = FakeEnv()
+    await start_services(env, (db,), [])
+    checks = [command for command, _ in env.calls if "pg_isready" in command and "setsid" not in command]
+    assert checks == [
+        "cd '/srv/my db' && env POSTGRES_USER=app bash --noprofile --norc -c 'pg_isready -U $POSTGRES_USER'"
+    ]
+
+
+def test_healthcheck_without_dir_or_env_keeps_its_command() -> None:
+    """Check that a service with no working_dir and no env runs its check text as is."""
+    assert healthcheck_command(_service("a"), "true") == "true"
+
+
+def test_healthcheck_command_runs_in_a_real_shell(tmp_path: Path) -> None:
+    """Check in bash that the check sees the service directory and env value."""
+    service = _service("a", working_dir=str(tmp_path), environment=(("MODE", "a b"),))
+    result = subprocess.run(
+        ["bash", "-c", healthcheck_command(service, 'echo "$(pwd)|$MODE"')],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+        env={"PATH": os.environ["PATH"]},
+    )
+    assert result.stdout.strip() == f"{tmp_path.resolve()}|a b"
+
+
+async def test_start_deadline_ends_a_poll_on_a_gone_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a poll whose probes all raise ends at the start deadline."""
+
+    class GoneEnv(FakeEnv):
+        """Fail every probe as if the box were gone."""
+
+        async def exec(self, command: str, **kwargs: Any) -> ExecResult:
+            """Raise for each probe.
+
+            Args:
+                command: The shell command.
+                kwargs: Unused.
+
+            Returns:
+                The launch result.
+
+            Raises:
+                SandboxInfraError: Each probe.
+            """
+            if "setsid" not in command:
+                raise SandboxInfraError("gone")
+            return await super().exec(command, **kwargs)
+
+    monkeypatch.setattr("core.sandbox.services.SERVICES_START_TIMEOUT", 0.2)
+    service = _service("db", healthcheck=HealthcheckConfig(command="true", interval_sec=0.01, retries=100))
+    started = time.monotonic()
+    with pytest.raises(HealthcheckError, match=r"db did not become healthy in 0\.2 seconds"):
+        await start_services(GoneEnv(), (service,), [])
+    assert time.monotonic() - started < 5
 
 
 def test_launch_keeps_env_values_out_of_the_exec_env() -> None:
