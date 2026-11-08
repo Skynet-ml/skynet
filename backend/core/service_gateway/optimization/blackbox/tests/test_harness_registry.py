@@ -39,7 +39,7 @@ _OVERRIDES: dict[str, dict[str, str]] = {
 }
 # The golden digests predate the registry, so they cover only these harnesses.
 _PRE_REGISTRY = ("pi", "codex", "opencode", "prime")
-_BUILT_INS = (*_PRE_REGISTRY, "aider", "cline")
+_BUILT_INS = (*_PRE_REGISTRY, "aider", "goose", "cline")
 # sha256 of every launch payload, captured from staging 0e1dd97d5 before the
 # catalog moved into the registry. A changed digest means a changed launch.
 _GOLDEN = {
@@ -259,6 +259,7 @@ def test_registry_keeps_the_catalog_order() -> None:
         "opencode": ("opencode", "1.18.27"),
         "prime": ("prime-agent", "0.9.7"),
         "aider": ("aider", "0.86.2"),
+        "goose": ("goose", "1.57.0"),
         "cline": ("cline", "3.0.74"),
     }
 
