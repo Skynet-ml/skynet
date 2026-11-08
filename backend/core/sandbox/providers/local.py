@@ -38,6 +38,10 @@ LOCAL_CAPABILITIES = EnvironmentCapabilities(name="local")
 _SHELL_FLAGS = ("--noprofile", "--norc", "-c")
 _ENV_PASSTHROUGH = ("SSL_CERT_FILE", "SSL_CERT_DIR")
 _READ_CHUNK = 4096
+# A SIGKILLed shell exits in milliseconds; the 2 s bound only stops a stuck
+# reap from blocking exec.
+_EXIT_POLLS = 200
+_EXIT_POLL_SEC = 0.01
 
 
 class LocalEnvironment(SandboxEnvironment):
@@ -161,22 +165,33 @@ class LocalEnvironment(SandboxEnvironment):
             raise SandboxRejectedError("A local sandbox cannot run commands as root.")
         workdir = self._resolve(cwd) if cwd is not None else root
         limit = timeout_sec if timeout_sec is not None else self._default_timeout
-        process = await asyncio.create_subprocess_exec(
-            "bash",
-            *_SHELL_FLAGS,
-            command,
-            cwd=workdir,
-            env={**self._base_env(root), **(env or {})},
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
+        spawn = asyncio.ensure_future(
+            asyncio.create_subprocess_exec(
+                "bash",
+                *_SHELL_FLAGS,
+                command,
+                cwd=workdir,
+                env={**self._base_env(root), **(env or {})},
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
         )
+        try:
+            process = await asyncio.shield(spawn)
+        except asyncio.CancelledError:
+            # A cancelled spawn makes asyncio kill only the shell pid, so a
+            # child that the shell already forked would outlive exec and stop().
+            # Let the spawn finish, then kill the whole new group.
+            await asyncio.wait({spawn})
+            if not spawn.cancelled() and spawn.exception() is None:
+                await asyncio.shield(_end_process(spawn.result()))
+            raise
         # A stop() that ran during the spawn did not see this group, so the
         # command would run on in a removed directory. A restart gives a new root.
         if self._root is not root:
-            _kill_group(process.pid)
-            await asyncio.shield(process.wait())
+            await asyncio.shield(_end_process(process))
             raise RuntimeError("The local sandbox is not running.")
         # With start_new_session the shell leads a new group whose id is its pid.
         self._groups.add(process.pid)
@@ -192,8 +207,7 @@ class LocalEnvironment(SandboxEnvironment):
             # A timeout, a cancel or an output-sink error must not leave the
             # command or its children running on the host.
             if not finished:
-                _kill_group(process.pid)
-                await asyncio.shield(process.wait())
+                await asyncio.shield(_end_process(process))
             if not _group_exists(process.pid):
                 self._groups.discard(process.pid)
         return ExecResult(exit_code=exit_code, stdout="".join(stdout), stderr="".join(stderr))
@@ -356,6 +370,24 @@ async def _pump(name: str, stream: asyncio.StreamReader, sink: list[str], on_out
                 on_output(name, text)
         if not data:
             return
+
+
+async def _end_process(process: asyncio.subprocess.Process) -> None:
+    """Kill the command's process group, wait a short time for the shell to exit, and close its pipes.
+
+    Args:
+        process: The command whose shell leads the group.
+    """
+    _kill_group(process.pid)
+    # Not process.wait(): it also waits for pipe EOF, and a grandchild that
+    # called setsid() left the group, so it holds the pipes open after the kill.
+    for _ in range(_EXIT_POLLS):
+        if process.returncode is not None:
+            break
+        await asyncio.sleep(_EXIT_POLL_SEC)
+    # Process has no public close; closing the transport drops our pipe ends,
+    # so the readers end and the transport does not leak.
+    process._transport.close()  # type: ignore[attr-defined]
 
 
 def _kill_group(pgid: int) -> None:

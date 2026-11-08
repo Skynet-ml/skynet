@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import asyncio.base_subprocess
+import contextlib
 import logging
 import os
+import signal
 import time
 from pathlib import Path
 
@@ -281,6 +284,53 @@ async def test_stop_during_spawn_kills_the_new_command(monkeypatch: pytest.Monke
         await asyncio.wait_for(box.exec("sleep 60"), 10)
     assert await _wait_until_gone(spawned[0])
     assert box._groups == set()
+
+
+async def test_timeout_returns_while_a_new_session_grandchild_holds_the_pipes() -> None:
+    """Raise the run timeout on time when a grandchild left the group but keeps stdout open."""
+    command = (
+        "python3 -c 'import os, time; os.setsid(); "
+        'open("gc.pid", "w").write(str(os.getpid())); time.sleep(60)\' & wait'
+    )
+    async with LocalEnvironment(_SPEC) as box:
+        started = time.monotonic()
+        try:
+            with pytest.raises(RunTimeoutError):
+                await asyncio.wait_for(box.exec(command, timeout_sec=0.5), 5)
+            assert time.monotonic() - started < 3
+        finally:
+            text = await box.download_file("gc.pid")
+            if text and text.strip():
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(int(text), signal.SIGKILL)
+
+
+async def test_cancel_during_spawn_kills_the_new_process_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kill the whole new group when a cancel lands while asyncio still connects the pipes."""
+    real_connect = asyncio.base_subprocess.BaseSubprocessTransport._connect_pipes
+
+    async def _slow_connect(self: asyncio.base_subprocess.BaseSubprocessTransport, waiter: asyncio.Future) -> None:
+        """Connect the pipes after a delay, so the cancel lands inside the spawn.
+
+        Args:
+            self: The subprocess transport.
+            waiter: The future that the spawn waits on.
+        """
+        await asyncio.sleep(0.5)
+        await real_connect(self, waiter)
+
+    monkeypatch.setattr(asyncio.base_subprocess.BaseSubprocessTransport, "_connect_pipes", _slow_connect)
+    box = LocalEnvironment(_SPEC)
+    await box.start()
+    try:
+        task = asyncio.create_task(box.exec("sleep 60 </dev/null >/dev/null 2>&1 & echo $! > child.pid; wait"))
+        child = await _read_pid(box, "child.pid")
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await _wait_until_gone(child, 3)
+    finally:
+        await box.stop()
 
 
 async def test_on_output_receives_both_streams() -> None:
