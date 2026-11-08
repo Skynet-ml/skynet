@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import gzip
+import json
+import logging
 import os
 import subprocess
 import tarfile
@@ -10,7 +13,10 @@ from typing import Any
 
 import pytest
 
+from core.billing.operation_pricing import json_fingerprint
+
 from .. import repo_serving
+from ..repo_constraints import ConstraintsError
 from ..repo_serving import (
     INTERACTION_KIND,
     check_serve_contract,
@@ -20,6 +26,7 @@ from ..repo_serving import (
 )
 from ..repo_tree import REPO_SNAPSHOT_KEY, archive_chunks, unpack_tree, version_patch
 
+_PRE_STRIP_FINGERPRINT = "50df08bd377bfae0c59352e2cabcf4ae64996e51f9f5d7c1a256471c96aea2b6"
 _SERVE = "def serve(input):\n    return {'answer': input['question'].upper()}\n"
 
 
@@ -278,3 +285,139 @@ def test_the_serving_archive_has_no_scoring_side_path(tmp_path: Path, monkeypatc
     assert served == set(_SERVING_SIDE)
     for path in _SCORING_SIDE:
         assert path not in served
+
+
+def _stage(monkeypatch: pytest.MonkeyPatch, files: dict[str, str]) -> Any:
+    """Point the serving fetch at a real packed tree of ``files``.
+
+    Args:
+        monkeypatch: Replaces the GitHub token and fetch.
+        files: The commit's tree.
+
+    Returns:
+        The ``staged_snapshot`` context for a finished run at that commit.
+    """
+
+    def fake_fetch(repository: str, commit: str, token: str | None, workdir: Path) -> Any:
+        """Pack ``files`` as the commit's snapshot."""
+        return type("Snapshot", (), {"archive": _archive(workdir, files), "commit": commit})()
+
+    monkeypatch.setattr(repo_serving, "github_token", lambda engine, owner: None)
+    monkeypatch.setattr(repo_serving, "fetch_snapshot", fake_fetch)
+    return staged_snapshot(serve_payload(_job(), patch="", inputs={}, optimization_id="opt-1"), engine=None, owner=None)
+
+
+def test_a_replay_stored_before_the_strip_keeps_its_request_fingerprint() -> None:
+    """The stored serve request never held the tree, so rows written before the strip still replay."""
+    payload = serve_payload(_job(), patch="diff", inputs={"q": 1}, optimization_id="opt-1")
+
+    # Pinned from origin/staging at 3ebe6f732, before the serving tree was stripped.
+    assert json_fingerprint(payload) == _PRE_STRIP_FINGERPRINT
+
+
+def test_a_commit_from_before_optimize_toml_still_serves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run pinned before the constraints file existed serves its tree, without the default exploit folder."""
+    files = {"serve.py": _SERVE, "src/app.py": "X = 1\n", ".optimize/exploits/cheat.md": "cheat\n"}
+
+    with _stage(monkeypatch, files) as staged:
+        served = _members(Path(staged[REPO_SNAPSHOT_KEY]["archive"]))
+
+    assert served == {"serve.py", "src/app.py"}
+
+
+def test_a_commit_whose_optimize_toml_no_longer_validates_fails_clearly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse to serve when the hidden list is unknown, and name the broken file."""
+    files = {"serve.py": _SERVE, "optimize.toml": '[metric]\nfiles = ["eval/scorer.py"]\nunknown_key = 1\n'}
+
+    with pytest.raises(ConstraintsError, match=r"optimize\.toml"), _stage(monkeypatch, files):
+        pytest.fail("the snapshot must not be yielded")
+
+
+_FOLDER_TOML = """[metric]
+files = ["scoring"]
+exploits = "scoring/attacks"
+reference = "scoring/reference.json"
+
+[data]
+cases = "scoring/cases.jsonl"
+"""
+_FILE_TOML = """[metric]
+files = ["metric.py"]
+reference = "reference.json"
+
+[data]
+cases = "cases.jsonl"
+"""
+_LEAK = "SCORING_SECRET_4e2b"
+
+
+@pytest.mark.parametrize(
+    ("hidden", "served_side", "roots"),
+    [
+        pytest.param(
+            {
+                "optimize.toml": _FOLDER_TOML,
+                "scoring/score.py": f"def score(repo_path, case):\n    return 1.0  # {_LEAK}\n",
+                "scoring/helpers/util.py": f"K = '{_LEAK}'\n",
+                "scoring/attacks/cheat/why.md": f"{_LEAK}\n",
+                "scoring/reference.json": f'{{"k": "{_LEAK}"}}\n',
+                "scoring/cases.jsonl": f'{{"input": {{"q": "a"}}, "expected": "{_LEAK}"}}\n',
+            },
+            {"serve.py": _SERVE, "src/app.py": "X = 1\n"},
+            ("optimize.toml", "scoring"),
+            id="hidden-folder",
+        ),
+        pytest.param(
+            {
+                "optimize.toml": _FILE_TOML,
+                "metric.py": f"def score(repo_path, case):\n    return 1.0  # {_LEAK}\n",
+                "reference.json": f'{{"k": "{_LEAK}"}}\n',
+                "cases.jsonl": f'{{"input": {{"q": "a"}}, "expected": "{_LEAK}"}}\n',
+                ".optimize/exploits/cheat.md": f"{_LEAK}\n",
+            },
+            {"serve.py": _SERVE, "metric_notes.md": "Public notes.\n"},
+            ("optimize.toml", "metric.py", "reference.json", "cases.jsonl", ".optimize/exploits"),
+            id="single-hidden-files",
+        ),
+    ],
+)
+def test_no_scoring_file_reaches_the_served_tar_metadata_or_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    hidden: dict[str, str],
+    served_side: dict[str, str],
+    roots: tuple[str, ...],
+) -> None:
+    """Check every tar member and byte, the yielded payload and every log record for the scoring side (E62).
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Replaces the fetch.
+        caplog: Captures every log record at debug level.
+        hidden: Scoring-side files, each holding the leak marker.
+        served_side: Files the serving guest needs.
+        roots: The hidden files and folders the commit's ``optimize.toml`` names.
+    """
+    caplog.set_level(logging.DEBUG)
+
+    with _stage(monkeypatch, {**hidden, **served_side}) as staged:
+        archive = Path(staged[REPO_SNAPSHOT_KEY]["archive"])
+        with tarfile.open(archive, "r:gz") as packed:
+            members = packed.getmembers()
+        raw = gzip.decompress(archive.read_bytes())
+        metadata = json.dumps({**staged, REPO_SNAPSHOT_KEY: {**staged[REPO_SNAPSHOT_KEY], "archive": None}})
+
+    names = {member.name.removeprefix("./") for member in members}
+    assert {member.name.removeprefix("./") for member in members if member.isfile()} == set(served_side)
+    for root in roots:
+        assert not any(name == root or name.startswith(root + "/") for name in names), root
+    assert _LEAK.encode() not in raw
+    logs = caplog.text + "".join(str(record.args) for record in caplog.records)
+    for path in hidden:
+        assert path not in metadata
+        assert path not in logs
+    assert _LEAK not in metadata
+    assert _LEAK not in logs
