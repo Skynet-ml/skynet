@@ -55,7 +55,9 @@ GROUP_RULES: dict[ErrorGroup, GroupRule] = {
 # Matched by module and name, not by import: ``core.billing`` imports Stripe,
 # SQLAlchemy and the storage models, and the sandbox package must stay a leaf.
 _BILLING_MODULE_PREFIX = "core.billing"
-_BILLING_ERROR_NAMES = frozenset({"BudgetError", "UsagePendingError", "UnpricedOperationError"})
+_BILLING_ERROR_NAMES = frozenset(
+    {"BudgetError", "UsagePendingError", "UnpricedOperationError", "OperationCompletedError"}
+)
 
 
 class SandboxError(Exception):
@@ -154,7 +156,8 @@ def is_billing_error(exc: BaseException) -> bool:
 
     Returns:
         True when a class in the error's MRO is ``BudgetError``,
-        ``UsagePendingError`` or ``UnpricedOperationError`` from ``core.billing``.
+        ``UsagePendingError``, ``UnpricedOperationError`` or
+        ``OperationCompletedError`` from ``core.billing``.
     """
     return any(
         cls.__name__ in _BILLING_ERROR_NAMES and cls.__module__.startswith(_BILLING_MODULE_PREFIX)

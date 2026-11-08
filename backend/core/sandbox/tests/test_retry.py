@@ -11,7 +11,7 @@ import pytest
 
 from core.billing.budgets import BudgetError
 from core.billing.operation_pricing import UnpricedOperationError
-from core.billing.runtime import UsagePendingError
+from core.billing.runtime import OperationCompletedError, UsagePendingError
 from core.sandbox.environment import HealthcheckError
 from core.sandbox.errors import (
     GROUP_RULES,
@@ -205,8 +205,17 @@ def test_include_cannot_retry_billing_errors_or_cancel() -> None:
     assert policy.should_retry(BudgetError("x")) is False
     assert policy.should_retry(UsagePendingError("x")) is False
     assert policy.should_retry(UnpricedOperationError("x")) is False
+    assert policy.should_retry(OperationCompletedError("x")) is False
     assert policy.should_retry(asyncio.CancelledError()) is False
     assert policy.should_retry(RuntimeError("x")) is True
+
+
+async def test_broad_include_does_not_redispatch_a_completed_operation() -> None:
+    """Run a settled operation once, so a retry cannot start a second paid sandbox."""
+    recorder = _Recorder(OperationCompletedError("already settled"))
+    with pytest.raises(OperationCompletedError):
+        await run_with_retry(recorder, "op", RetryPolicy(max_retries=2, include=(Exception,), **FAST))
+    assert recorder.keys == ["op:attempt-1"]
 
 
 @pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(1), GeneratorExit()], ids=lambda e: type(e).__name__)
