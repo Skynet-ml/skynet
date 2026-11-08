@@ -27,7 +27,7 @@ import shlex
 import subprocess
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from datetime import timedelta
 from typing import Any
 
@@ -646,6 +646,23 @@ class VercelEnvironment(SandboxEnvironment):
         self._halted = True
         return SandboxInfraError(f"The Vercel sandbox session stopped: {type(error).__name__}")
 
+    @contextlib.contextmanager
+    def _stop_guard(self) -> Iterator[None]:
+        """Turn a session-stopped SDK error under a file or policy call into an infra error.
+
+        Yields:
+            Control to the guarded session calls.
+
+        Raises:
+            SandboxInfraError: The session stopped.
+        """
+        try:
+            yield
+        except Exception as error:
+            if _is_session_stopped(error):
+                raise self._session_stopped(error) from error
+            raise
+
     def _cwd(self, session: Any) -> str | None:
         """Return the default working directory of the box.
 
@@ -705,7 +722,7 @@ class VercelEnvironment(SandboxEnvironment):
                         code = await self._wait(session, process, sentinel)
             except TimeoutError as error:
                 with contextlib.suppress(Exception):
-                    await process.kill()
+                    await asyncio.wait_for(process.kill(), CANCEL_GRACE)
                 raise SandboxInfraError("The sandbox command outlived its kill deadline.") from error
             except asyncio.CancelledError:
                 await asyncio.shield(asyncio.ensure_future(self._abort(process)))
@@ -849,25 +866,33 @@ class VercelEnvironment(SandboxEnvironment):
 
         Returns:
             The content, or ``None`` when the file does not exist.
+
+        Raises:
+            SandboxInfraError: The session stopped.
         """
         cwd = self._cwd(session)
-        if not await session.fs.exists(path, cwd=cwd):
-            return None
-        return await session.fs.read_text(path, cwd=cwd)
+        with self._stop_guard():
+            if not await session.fs.exists(path, cwd=cwd):
+                return None
+            return await session.fs.read_text(path, cwd=cwd)
 
     async def upload_files(self, files: Mapping[str, str]) -> None:
         """Write text files into the box.
 
         Args:
             files: Maps each sandbox path to its text content.
+
+        Raises:
+            SandboxInfraError: The session stopped.
         """
         session = self._require_session()
         cwd = self._cwd(session)
-        for path, text in files.items():
-            parent = path.rsplit("/", 1)[0] if "/" in path else ""
-            if parent:
-                await session.fs.mkdir(parent, cwd=cwd, recursive=True)
-            await session.fs.write_text(path, text, cwd=cwd)
+        with self._stop_guard():
+            for path, text in files.items():
+                parent = path.rsplit("/", 1)[0] if "/" in path else ""
+                if parent:
+                    await session.fs.mkdir(parent, cwd=cwd, recursive=True)
+                await session.fs.write_text(path, text, cwd=cwd)
 
     async def download_file(self, path: str) -> str | None:
         """Read one text file from the box.
@@ -887,9 +912,12 @@ class VercelEnvironment(SandboxEnvironment):
             policy: The checked policy.
 
         Raises:
-            SandboxInfraError: The readback does not prove the policy.
+            SandboxInfraError: The session stopped, or the readback does not
+                prove the policy.
         """
-        updated = await self._require_session().update_network_policy(self._sdk_policy(policy, update=True))
+        session = self._require_session()
+        with self._stop_guard():
+            updated = await session.update_network_policy(self._sdk_policy(policy, update=True))
         if not policy_confirmed(policy, updated.network_policy):
             raise SandboxInfraError("Vercel did not confirm the sandbox network policy.")
 

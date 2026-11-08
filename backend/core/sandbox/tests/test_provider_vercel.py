@@ -26,6 +26,15 @@ from core.sandbox.telemetry import use_output_sink
 _PATHS = re.compile(r"> (\S+\.out) 2> (\S+\.err); echo \$\? > (\S+)$")
 
 
+def _gone() -> SandboxApiError:
+    """Build the SDK error that a stopped session answers.
+
+    Returns:
+        A 410 ``sandbox_stopped`` error.
+    """
+    return SandboxApiError(httpx.Response(410), "gone", data={"error": {"code": "sandbox_stopped"}})
+
+
 class FakeClock:
     """Advance time only when the code under test sleeps."""
 
@@ -60,6 +69,16 @@ class FakeFs:
         """Start with no files."""
         self.files: dict[str, str] = {}
         self.dirs: list[str] = []
+        self.stopped = False
+
+    def _check(self) -> None:
+        """Answer 410 after the session stops.
+
+        Raises:
+            SandboxApiError: The session stopped.
+        """
+        if self.stopped:
+            raise _gone()
 
     async def exists(self, path: str, *, cwd: str) -> bool:
         """Tell whether a file exists.
@@ -71,6 +90,7 @@ class FakeFs:
         Returns:
             True when the file exists.
         """
+        self._check()
         return path in self.files
 
     async def read_text(self, path: str, *, cwd: str) -> str:
@@ -83,6 +103,7 @@ class FakeFs:
         Returns:
             The file text.
         """
+        self._check()
         return self.files[path]
 
     async def write_text(self, path: str, text: str, *, cwd: str) -> None:
@@ -93,6 +114,7 @@ class FakeFs:
             text: The file text.
             cwd: The working directory.
         """
+        self._check()
         self.files[path] = text
 
     async def mkdir(self, path: str, *, cwd: str, recursive: bool = True) -> None:
@@ -103,6 +125,7 @@ class FakeFs:
             cwd: The working directory.
             recursive: Unused.
         """
+        self._check()
         self.dirs.append(path)
 
 
@@ -199,7 +222,7 @@ class FakeSession:
             SandboxApiError: The session stopped.
         """
         if self.stops:
-            raise SandboxApiError(httpx.Response(410), "gone", data={"error": {"code": "sandbox_stopped"}})
+            raise _gone()
         return await self.box.create_process(command, args, **kwargs)
 
     async def extend_execution_time_limit(self, duration: timedelta) -> FakeSession:
@@ -224,14 +247,21 @@ class FakeSession:
 
         Returns:
             The session with the planned readback.
+
+        Raises:
+            SandboxApiError: The session stopped.
         """
+        if self.stops:
+            raise _gone()
         self.policies.append(policy)
         self.network_policy = self.next_readback
         return self
 
     async def stop(self) -> None:
-        """Count the stop call."""
+        """Count the stop call; later file calls answer 410."""
         self.stops += 1
+        if self.box is not None:
+            self.box.fs.stopped = True
 
 
 class FakeBox:
@@ -357,7 +387,7 @@ class ResumingBox(FakeBox):
                 The fake process.
             """
             if self.current_session.stops:
-                raise SandboxApiError(httpx.Response(410), "gone", data={"error": {"code": "sandbox_stopped"}})
+                raise _gone()
             self.session_ids.append(session_id)
             process = FakeProcess(self.fs, args[-1], [0])
             self.processes.append(process)
@@ -928,11 +958,49 @@ async def test_410_from_stopped_session_fails_without_resume(log: list[str]) -> 
     box = client.boxes[env.name]
     await box.current_session.stop()
     with pytest.raises(SandboxInfraError):
-        await env.exec("echo paid-work")
-    with pytest.raises(SandboxInfraError):
         await env.download_file("a.txt")
+    assert env._halted is True
+    with pytest.raises(SandboxInfraError):
+        await env.exec("echo paid-work")
     assert box.resumes == 0
     assert box.session_ids == []
+    await env.stop()
+
+
+async def test_upload_after_410_halts_the_box(log: list[str]) -> None:
+    """Check that an upload as the first call after a 410 raises an infra error and halts the box."""
+    client = FakeClient(log)
+    env = make_env(client, log)
+    await env.start()
+    await client.boxes[env.name].current_session.stop()
+    with pytest.raises(SandboxInfraError):
+        await env.upload_files({"dir/a.txt": "data"})
+    assert env._halted is True
+    await env.stop()
+
+
+async def test_download_after_410_halts_the_box(log: list[str]) -> None:
+    """Check that a download as the first call after a 410 raises an infra error and halts the box."""
+    client = FakeClient(log)
+    env = make_env(client, log)
+    await env.start()
+    await client.boxes[env.name].current_session.stop()
+    with pytest.raises(SandboxInfraError):
+        await env.download_file("a.txt")
+    assert env._halted is True
+    await env.stop()
+
+
+async def test_network_policy_after_410_halts_the_box(log: list[str]) -> None:
+    """Check that a policy change as the first call after a 410 raises an infra error and halts the box."""
+    client = FakeClient(log)
+    env = make_env(client, log)
+    await env.start()
+    await client.boxes[env.name].current_session.stop()
+    with pytest.raises(SandboxInfraError):
+        await env.set_network_policy(NetworkPolicy(allowed_hosts=("a.com",)))
+    assert env._halted is True
+    assert env.network_policy is None
     await env.stop()
 
 
