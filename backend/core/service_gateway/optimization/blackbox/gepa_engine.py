@@ -17,10 +17,11 @@ from gepa.core.result import GEPAResult
 from gepa.core.state import GEPAState
 from gepa.gepa_launcher import EngineConfig, GEPAConfig, ReflectionConfig, TrackingConfig, optimize_anything
 
+from ....billing.usage_tags import usage_scope
 from ....constants import OPTIMIZER_NAME_GEPA, PROGRESS_CANDIDATE
 from ....exceptions import ServiceError
 from ..budget_stop import BudgetReached
-from ..trajectory import capture_proposal_prompts, trajectory_watch
+from ..trajectory import capture_proposal_prompts, current_proposal_iteration, trajectory_watch
 from .feedback import STR_CANDIDATE_KEY, emit_scorer_feedback, gepa_side_info
 from .native_engines import ScoredThresholdStopper
 from .native_runtime import run_native_engine
@@ -169,7 +170,10 @@ class GepaEngine:
             """
             if ctx.check_budget is not None:
                 ctx.check_budget()
-            score, side_info = server.evaluate(candidate, example)
+            # The run record keys a GEPA version's calls by the iteration that proposed it,
+            # as its candidate event does; seed and valset sweeps have none and stay run-wide.
+            with usage_scope(candidate=current_proposal_iteration()):
+                score, side_info = server.evaluate(candidate, example)
             if ctx.check_budget is not None:
                 ctx.check_budget()
             emit_scorer_feedback(
@@ -308,7 +312,8 @@ class _LaneReflection:
         """
         if self.check_budget is not None:
             self.check_budget()
-        result = self.reflection_lm(prompt)
+        with usage_scope(candidate=current_proposal_iteration()):
+            result = self.reflection_lm(prompt)
         if self.check_budget is not None:
             self.check_budget()
         return result

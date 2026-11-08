@@ -54,6 +54,7 @@ from ...constants import (
     PROGRESS_VALSET,
     PROGRESS_VALSET_OUTPUTS,
 )
+from ...storage.run_call_store import PROGRAM_EVENT_KEY
 from .logged_scores import reset_logged_metrics
 
 logger = logging.getLogger(__name__)
@@ -1409,7 +1410,7 @@ class TrajectoryWatcher:
             run_dir: Directory GEPA writes ``gepa_state.bin`` into.
             progress_callback: Existing job-level progress callback. Each
                 new candidate is forwarded as
-                ``progress_callback(PROGRESS_CANDIDATE, event.to_metrics())``.
+                ``progress_callback(PROGRESS_CANDIDATE, {**event.to_metrics(), PROGRAM_EVENT_KEY: True})``.
         """
         self._run_dir = run_dir
         self._progress_callback = progress_callback
@@ -1533,7 +1534,7 @@ class TrajectoryWatcher:
             new_events = extract_candidates_from_state(state, self._last_count)
             for event in new_events:
                 try:
-                    self._progress_callback(PROGRESS_CANDIDATE, event.to_metrics())
+                    self._progress_callback(PROGRESS_CANDIDATE, {**event.to_metrics(), PROGRAM_EVENT_KEY: True})
                 except Exception:
                     logger.exception("progress_callback raised for candidate %s", event.id)
             self._last_count += len(new_events)
@@ -1541,7 +1542,7 @@ class TrajectoryWatcher:
             new_rejected = extract_rejected_from_trace(state, self._last_rejected_iteration)
             for rej in new_rejected:
                 try:
-                    self._progress_callback(PROGRESS_REJECTED, rej.to_metrics())
+                    self._progress_callback(PROGRESS_REJECTED, {**rej.to_metrics(), PROGRAM_EVENT_KEY: True})
                 except Exception:
                     logger.exception(
                         "progress_callback raised for rejected proposal %s",

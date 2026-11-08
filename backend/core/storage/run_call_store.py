@@ -14,12 +14,13 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from ..billing.usage_tags import LANE_KEY
 from .models import RunCallModel, RunCandidateModel
 
 BODY_CAP_BYTES = 64 * 1024
@@ -27,6 +28,45 @@ SECRET_MASK = "[REDACTED]"
 CALL_KINDS = frozenset({"model", "mcp", "stage", "evaluator", "host"})
 CANDIDATE_STATES = frozenset({"running", "done", "failed"})
 CANDIDATE_ID_MAX = 64
+# A GEPA program event carries this flag: its calls are tagged with the
+# proposal iteration, not with the program index in ``candidate_id`` (SKY-364).
+PROGRAM_EVENT_KEY = "program_event"
+
+
+def call_candidate_key(candidate: str, lane: str | None) -> str:
+    """Return the run-record key of a candidate, scoped to its Auto lane.
+
+    Auto lanes share one candidate id space, so the lane keeps two lanes'
+    candidate ``"3"`` apart. ``":"`` keeps the key one URL path segment.
+
+    Args:
+        candidate: The candidate id that the call tag or the event carries.
+        lane: The Auto lane tag, or None outside Auto.
+
+    Returns:
+        ``<lane>:<candidate>`` in a lane, else the candidate id.
+    """
+    return f"{lane}:{candidate}" if lane else candidate
+
+
+def event_candidate_key(metrics: dict[str, Any]) -> str | None:
+    """Return the run-record key that a scored-version event finishes.
+
+    Args:
+        metrics: A ``candidate`` or ``rejected`` event payload.
+
+    Returns:
+        The key its calls were recorded under, or None when the event names
+        no recorded candidate, such as the GEPA seed, which no proposal made.
+    """
+    if metrics.get(PROGRAM_EVENT_KEY):
+        iteration = metrics.get("iteration")
+        candidate = None if iteration is None else str(iteration)
+    else:
+        candidate = metrics.get("candidate_id")
+    if candidate in (None, ""):
+        return None
+    return call_candidate_key(str(candidate), metrics.get(LANE_KEY))
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -106,7 +146,7 @@ class PostgresRunCallStore:
 
         Secrets are removed before the cut, so a cut cannot split a secret and
         leave part of it in the stored body. The candidate is marked
-        ``running`` when it has no state yet.
+        ``running`` only when it has no state yet; a finished state never changes.
 
         Args:
             optimization_id: Owning job id.
@@ -151,6 +191,9 @@ class PostgresRunCallStore:
         }
         with Session(self._engine) as session:
             candidate = self._lock_candidate(session, optimization_id, candidate_id, role, "running")
+            # A call never changes a finished state: a partial re-evaluation of a scored version
+            # (AutoResearch) logs no new progress event, so nothing would set it done again, and a
+            # failed candidate stays failed, because a crashed case keeps it out of final selection.
             candidate.last_seq += 1
             seq = candidate.last_seq
             session.add(RunCallModel(seq=seq, **fields))
@@ -178,6 +221,39 @@ class PostgresRunCallStore:
             candidate.state = state
             candidate.updated_at = datetime.now(UTC)
             session.commit()
+
+    def finish_candidate(self, optimization_id: str, candidate_id: str, state: str) -> bool:
+        """Mark a candidate the run record already has ``done`` or ``failed``.
+
+        This only updates: a candidate with no recorded calls gets no row.
+        The caller keys the event with :func:`event_candidate_key`, the same
+        key the calls used, so an update that matches no row means the
+        candidate made no recorded call.
+
+        Args:
+            optimization_id: Owning job id.
+            candidate_id: The candidate within the run.
+            state: ``done`` or ``failed``.
+
+        Returns:
+            Whether a candidate row changed.
+
+        Raises:
+            ValueError: When ``state`` is not ``done`` or ``failed``.
+        """
+        if state not in {"done", "failed"}:
+            raise ValueError(f"not a finished candidate state: {state!r}")
+        with Session(self._engine) as session:
+            result = session.execute(
+                update(RunCandidateModel)
+                .where(
+                    RunCandidateModel.optimization_id == optimization_id,
+                    RunCandidateModel.candidate_id == str(candidate_id)[:CANDIDATE_ID_MAX],
+                )
+                .values(state=state, updated_at=datetime.now(UTC))
+            )
+            session.commit()
+            return bool(result.rowcount)
 
     def _lock_candidate(
         self, session: Session, optimization_id: str, candidate_id: str, role: str, state: str
