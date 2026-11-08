@@ -2354,6 +2354,23 @@ wheels = [
 ]
 
 [[package]]
+name = "kernel"
+version = "0.143.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/92/fb/31543fabc6341f72a823015729d182e7403680f477ac060fd66dad4bc623/kernel-0.143.0.tar.gz", hash = "sha256:d993497c9e4ce864fdfbbda0c7357f11432d3f55b7a095e4480b890cc04f0f1c", size = 487138, upload-time = "2026-11-07T16:34:30.394Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/aa/09/2e7aecccd6855b2fce379c488f68fc7d48861bfe88c9b464ccaa05c0e772/kernel-0.143.0-py3-none-any.whl", hash = "sha256:24291bc85bff6495097947dda590c614e91cccf700b29d33705c2fdc71404d2a", size = 676156, upload-time = "2026-11-07T16:34:28.793Z" },
+]
+
+[[package]]
 name = "keyring"
 version = "25.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2651,6 +2668,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a2/f7/139d22fef48ac78127d18e01d80cf1be40236ae489769d17f35c3d425293/more_itertools-11.0.2.tar.gz", hash = "sha256:392a9e1e362cbc106a2457d37cabf9b36e5e12efd4ebff1654630e76597df804", size = 144659, upload-time = "2026-04-09T15:01:33.297Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cb/98/6af411189d9413534c3eb691182bff1f5c6d44ed2f93f2edfe52a1bbceb8/more_itertools-11.0.2-py3-none-any.whl", hash = "sha256:6e35b35f818b01f691643c6c611bc0902f2e92b46c18fffa77ae1e7c46e912e4", size = 71939, upload-time = "2026-04-09T15:01:32.21Z" },
+]
+
+[[package]]
+name = "mosaic-sandbox"
+version = "0.15.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/da/73/ab1baf849adad239f3ec5660489706bdfb0efb3d14ec7178ab8f03d77086/mosaic_sandbox-0.15.1.tar.gz", hash = "sha256:a4cc30a426770ade48eb019f1d0d89f0d89688813e2b5e291893bd707f2ab0d6", size = 346357, upload-time = "2026-11-07T18:38:00.249Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/df/4c/ac6597dc4d62b439e3e12f843fc1f8ab184ca32cc1027ebc8627e5df788a/mosaic_sandbox-0.15.1-py3-none-any.whl", hash = "sha256:5fecc58d87d19b504fa5037884de2d9f392d0a3ee132c58a4fcb0d1b70912ee6", size = 224135, upload-time = "2026-11-07T18:37:58.488Z" },
 ]
 
 [[package]]
@@ -5161,6 +5187,9 @@ dev = [
 e2b = [
     { name = "e2b" },
 ]
+kernel = [
+    { name = "kernel" },
+]
 langsmith = [
     { name = "langsmith" },
 ]
@@ -5169,6 +5198,9 @@ load = [
 ]
 modal = [
     { name = "modal" },
+]
+mosaic = [
+    { name = "mosaic-sandbox" },
 ]
 render = [
     { name = "build123d" },
@@ -5203,11 +5235,13 @@ requires-dist = [
     { name = "gepa", git = "https://github.com/gepa-ai/gepa?rev=0632cdb5dcc052e690eab439e1b4a7e3e9cfe407" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.25" },
     { name = "httpx", marker = "extra == 'training'", specifier = ">=0.25" },
+    { name = "kernel", marker = "extra == 'kernel'", specifier = ">=0.123.0" },
     { name = "langsmith", marker = "extra == 'langsmith'", specifier = ">=0.14.17" },
     { name = "ldap3", specifier = ">=2.9" },
     { name = "litellm", specifier = ">=1.88.6" },
     { name = "locust", marker = "extra == 'load'", specifier = ">=2.0" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=1.6" },
+    { name = "mosaic-sandbox", marker = "extra == 'mosaic'", specifier = ">=0.15.1,<0.16" },
     { name = "networkx", marker = "extra == 'render'", specifier = ">=3" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "pgvector", specifier = ">=0.3" },
@@ -5247,7 +5281,7 @@ requires-dist = [
     { name = "webauthn", specifier = ">=2.5,<3" },
     { name = "xlrd", specifier = ">=2" },
 ]
-provides-extras = ["dev", "load", "training", "render", "langsmith", "e2b", "daytona", "modal", "runloop", "sail"]
+provides-extras = ["dev", "load", "training", "render", "langsmith", "e2b", "daytona", "modal", "runloop", "kernel", "mosaic", "sail"]
 
 [[package]]
 name = "sniffio"
