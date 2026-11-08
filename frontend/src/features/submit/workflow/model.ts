@@ -67,9 +67,9 @@ export function nodePorts(node: WorkflowNodeSpec): NodePorts {
 
 /**
  * Layered auto-layout: column = longest-path depth from the input anchor,
- * row = order within the column. Deterministic and dependency-free; used by
- * the canvas tidy-up button and to place agent-authored nodes (which arrive
- * without positions).
+ * row = order within the column. Deterministic and dependency-free;
+ * `WorkflowGraphView.tsx` uses it to place nodes that arrive without
+ * positions (agent-authored nodes).
  */
 export function autoLayoutSpec(spec: WorkflowSpec): WorkflowSpec {
   const depth = new Map<string, number>(spec.nodes.map((n) => [n.id, 0]));
