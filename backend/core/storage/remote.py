@@ -33,6 +33,7 @@ from ..constants import (
     PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE,
     PAYLOAD_OVERVIEW_OPTIMIZER_NAME,
     PAYLOAD_OVERVIEW_TOTAL_PAIRS,
+    PROGRESS_CANDIDATE,
     PROGRESS_LANE_STARTED,
     STRUCTURAL_PROGRESS_EVENTS,
     TQDM_KEY_PREFIX,
@@ -3052,9 +3053,10 @@ class RemoteDBJobStore:
             )
             target.latest_metrics = {**(target.latest_metrics or {}), **metrics}
             session.commit()
-            return True
         finally:
             session.close()
+        self._finish_scored_candidate(source_optimization_id, message, metrics)
+        return True
 
     def record_progress(self, optimization_id: str, message: str | None, metrics: dict[str, Any]) -> None:
         """Record a progress event and refresh the job's latest metrics.
@@ -3087,6 +3089,28 @@ class RemoteDBJobStore:
                 optimization_id,
                 self._latest_metrics_with_sticky_tqdm(optimization_id, metrics),
             )
+        self._finish_scored_candidate(optimization_id, message, metrics)
+
+    def _finish_scored_candidate(self, optimization_id: str, message: str | None, metrics: dict[str, Any]) -> None:
+        """Mark a scored version ``done``, or ``failed`` for a crashed case, in the run record.
+
+        The worker writes this state: the engine that scores the version runs
+        in another process, which cannot reach the run's call recorder.
+
+        Args:
+            optimization_id: Job that recorded the version's calls.
+            message: Event name; only ``candidate`` events change a state.
+            metrics: The event's payload, with ``candidate_id`` and ``score``.
+        """
+        candidate_id = (metrics or {}).get("candidate_id") if message == PROGRESS_CANDIDATE else None
+        if candidate_id in (None, ""):
+            return
+        # A version with a crashed case leaves final selection (SKY-350), so its score is None.
+        state = "failed" if metrics.get("score") is None else "done"
+        try:
+            self._run_calls.finish_candidate(optimization_id, str(candidate_id), state)
+        except SQLAlchemyError:
+            logger.warning("Failed to set a candidate state for %s", optimization_id, exc_info=True)
 
     def _insert_progress_event(
         self,

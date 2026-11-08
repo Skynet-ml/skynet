@@ -8,21 +8,28 @@ in its own schema that it drops after.
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
 import threading
 import time
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from core.config import app_env
+from core.service_gateway.optimization.blackbox.feedback import emit_candidate
+from core.storage.base import JobStore
 from core.storage.models import Base, JobModel, RunCallModel, RunCandidateModel
+from core.storage.remote import RemoteDBJobStore
 from core.storage.run_call_store import BODY_CAP_BYTES, SECRET_MASK, PostgresRunCallStore, cut_body, strip_secrets
+from core.worker.engine import BackgroundWorker
+from core.worker.subprocess_runner import _emit_progress_event
 
 SECRET = 'sk-test-"abc\\def'
 TEST_DB_URL = app_env("APP_TEST_DB_URL")
@@ -218,6 +225,83 @@ def test_set_candidate_state_creates_a_candidate_and_rejects_an_unknown_state(st
     assert store.get_candidate("job-1", "cand-9")["call_count"] == 0
     with pytest.raises(ValueError):
         store.set_candidate_state("job-1", "cand-9", "solver", "paused")
+
+
+def test_a_new_call_runs_a_done_candidate_again_and_keeps_a_failed_one_failed(store: PostgresRunCallStore) -> None:
+    """A re-evaluation call shows a scored candidate as running; a crashed candidate stays failed."""
+    store.record_call("job-1", _call(candidate_id="cand-1"), [])
+    store.record_call("job-1", _call(candidate_id="cand-2"), [])
+    assert store.finish_candidate("job-1", "cand-1", "done")
+    assert store.finish_candidate("job-1", "cand-2", "failed")
+
+    store.record_call("job-1", _call(candidate_id="cand-1"), [])
+    store.record_call("job-1", _call(candidate_id="cand-2"), [])
+
+    assert store.get_candidate("job-1", "cand-1")["state"] == "running"
+    assert store.get_candidate("job-1", "cand-2")["state"] == "failed"
+
+
+def test_finish_candidate_changes_only_a_recorded_candidate(store: PostgresRunCallStore) -> None:
+    """A version with no recorded calls adds no row; a running state is not a finished state."""
+    assert not store.finish_candidate("job-1", "cand-9", "done")
+    assert store.get_candidate("job-1", "cand-9") is None
+    with pytest.raises(ValueError):
+        store.finish_candidate("job-1", "cand-9", "running")
+
+
+def _emit_scored_versions(events: Any) -> None:
+    """Report two scored versions from a child process, as the native engine's mailbox does.
+
+    Args:
+        events: The queue the worker drains.
+    """
+
+    def progress(message: str, metrics: dict[str, Any]) -> None:
+        """Send one progress event to the worker.
+
+        Args:
+            message: Event name.
+            metrics: Event payload.
+        """
+        _emit_progress_event(events, message, metrics)
+
+    for candidate_id, score in (("1", 0.5), ("2", None), ("3", 0.9)):
+        emit_candidate(
+            progress,
+            candidate_id=candidate_id,
+            parent_id=None,
+            generation=0,
+            score=score,
+            per_example=[],
+            candidate={"prompt": "p"},
+            discovered_at_evals=1,
+            iteration=None,
+        )
+
+
+def test_the_worker_marks_versions_a_child_process_scored(store: PostgresRunCallStore) -> None:
+    """Candidate events from the engine's process set done or failed in the worker, where the store is."""
+    with Session(store._engine) as session:
+        session.add(JobModel(optimization_id="job-1", status="running", execution_generation=1))
+        session.commit()
+    store.record_call("job-1", _call(candidate_id="1"), [])
+    store.record_call("job-1", _call(candidate_id="2"), [])
+    jobs = object.__new__(RemoteDBJobStore)
+    jobs._session_factory = sessionmaker(bind=store._engine)
+    jobs._run_calls = store
+    context = mp.get_context("spawn")
+    events = context.Queue()
+    child = context.Process(target=_emit_scored_versions, args=(events,))
+    child.start()
+    child.join(60)
+    assert child.exitcode == 0
+    worker = BackgroundWorker(job_store=cast(JobStore, jobs), num_workers=1, poll_interval=1.0)
+
+    worker._drain_subprocess_events("job-1", events, generation=1)
+
+    assert store.get_candidate("job-1", "1")["state"] == "done"
+    assert store.get_candidate("job-1", "2")["state"] == "failed"
+    assert store.get_candidate("job-1", "3") is None
 
 
 @pytest.fixture

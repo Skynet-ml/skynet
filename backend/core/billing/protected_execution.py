@@ -19,7 +19,7 @@ from ..service_gateway.optimization.blackbox.sandbox import (
 )
 from ..service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
 from ..storage.run_call_store import PostgresRunCallStore
-from ..worker.scoped_relay import CallRecorder, register_run_recorder
+from ..worker.scoped_relay import CallRecorder
 from .model_gateway import ModelGateway
 from .model_mailbox import ModelMailbox
 from .operation_pricing import UnpricedOperationError
@@ -147,9 +147,7 @@ def run_call_recorder(gateway: ModelGateway, owner_id: str) -> CallRecorder | No
         return None
     # The worker builds the gateway from the job store's engine, and engine.py
     # passes no store here, so the run-call store reuses the ledger's engine.
-    recorder = CallRecorder(PostgresRunCallStore(gateway.runtime.service.engine), owner_id, "", "")
-    register_run_recorder(recorder)
-    return recorder
+    return CallRecorder(PostgresRunCallStore(gateway.runtime.service.engine), owner_id, "", "")
 
 
 def bind_protected_sandbox(

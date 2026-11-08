@@ -14,7 +14,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
@@ -106,7 +106,7 @@ class PostgresRunCallStore:
 
         Secrets are removed before the cut, so a cut cannot split a secret and
         leave part of it in the stored body. The candidate is marked
-        ``running`` when it has no state yet.
+        ``running`` when it has no state yet or is ``done``.
 
         Args:
             optimization_id: Owning job id.
@@ -151,6 +151,11 @@ class PostgresRunCallStore:
         }
         with Session(self._engine) as session:
             candidate = self._lock_candidate(session, optimization_id, candidate_id, role, "running")
+            # A re-evaluation of a scored candidate (AutoResearch, Meta-Harness repeats) runs it again;
+            # a failed candidate stays failed, because a crashed case keeps it out of final selection.
+            if candidate.state == "done":
+                candidate.state = "running"
+                candidate.updated_at = datetime.now(UTC)
             candidate.last_seq += 1
             seq = candidate.last_seq
             session.add(RunCallModel(seq=seq, **fields))
@@ -178,6 +183,38 @@ class PostgresRunCallStore:
             candidate.state = state
             candidate.updated_at = datetime.now(UTC)
             session.commit()
+
+    def finish_candidate(self, optimization_id: str, candidate_id: str, state: str) -> bool:
+        """Mark a candidate the run record already has ``done`` or ``failed``.
+
+        Only a candidate with recorded calls has a row, so a run that records
+        no calls, or an engine whose candidate ids differ from the call tags,
+        adds no row.
+
+        Args:
+            optimization_id: Owning job id.
+            candidate_id: The candidate within the run.
+            state: ``done`` or ``failed``.
+
+        Returns:
+            Whether a candidate row changed.
+
+        Raises:
+            ValueError: When ``state`` is not ``done`` or ``failed``.
+        """
+        if state not in {"done", "failed"}:
+            raise ValueError(f"not a finished candidate state: {state!r}")
+        with Session(self._engine) as session:
+            result = session.execute(
+                update(RunCandidateModel)
+                .where(
+                    RunCandidateModel.optimization_id == optimization_id,
+                    RunCandidateModel.candidate_id == str(candidate_id)[:CANDIDATE_ID_MAX],
+                )
+                .values(state=state, updated_at=datetime.now(UTC))
+            )
+            session.commit()
+            return bool(result.rowcount)
 
     def _lock_candidate(
         self, session: Session, optimization_id: str, candidate_id: str, role: str, state: str
