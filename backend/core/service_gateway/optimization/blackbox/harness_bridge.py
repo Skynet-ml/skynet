@@ -377,7 +377,8 @@ GUARD_DIR = "guard"
 GUARD_REFUSAL = (
     "Refused: this path is hidden from the agent. It belongs to the run's scoring side. Continue the task without it."
 )
-_GUARD_COMMAND_KEYS = frozenset({"command", "cmd", "script"})
+# Prime Agent has one tool, ``ipython``, whose ``code`` is Python, not a shell command.
+_GUARD_COMMAND_KEYS = frozenset({"command", "cmd", "script", "code"})
 _GUARD_PATH_KEYS = frozenset({"pattern", "glob", "dir", "directory", "include", "target"})
 _GUARD_BASE_KEYS = frozenset({"workdir", "cwd", "working_directory"})
 _GUARD_CD_WORDS = frozenset({"cd", "pushd"})

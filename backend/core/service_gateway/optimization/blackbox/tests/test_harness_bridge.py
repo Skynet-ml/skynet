@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -381,6 +382,7 @@ _TOOL_CALLS = [
     ("bash", lambda path: {"command": f"python -c \"print(open('{path}').read())\""}),
     ("list", lambda path: {"dirPath": path}),
     ("apply_patch", lambda path: {"input": f"*** Begin Patch\n*** Update File: {path}\n*** End Patch"}),
+    ("ipython", lambda path: {"code": f'print(open("{path}").read())'}),
 ]
 
 
@@ -1105,3 +1107,107 @@ def test_installed_codex_runs_the_guard_hook_and_refuses_a_hidden_read(tmp_path:
     assert len(_FakeResponses.tool_outputs) == 1
     assert harness_bridge.GUARD_REFUSAL in _FakeResponses.tool_outputs[0]
     assert "secret" not in _FakeResponses.tool_outputs[0]
+
+
+class _FakeChat(http.server.BaseHTTPRequestHandler):
+    """Answer Chat Completions: one call of ``tool``, then a final message."""
+
+    tool: tuple[str, dict[str, Any]] = ("read", {})
+    tool_outputs: list[str] = []
+
+    def log_message(self, *args: object) -> None:
+        """Keep the test output quiet."""
+
+    def do_POST(self) -> None:
+        """Stream one model turn as server-sent events."""
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        outputs = [message["content"] for message in body.get("messages", []) if message.get("role") == "tool"]
+        _FakeChat.tool_outputs = outputs
+        if outputs or not body.get("tools"):
+            delta: dict[str, Any] = {"role": "assistant", "content": "done"}
+            finish = "stop"
+        else:
+            name, arguments = _FakeChat.tool
+            call = {
+                "index": 0,
+                "id": "c1",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }
+            delta = {"role": "assistant", "content": None, "tool_calls": [call]}
+            finish = "tool_calls"
+        usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        chunks = [
+            {
+                "id": "x",
+                "object": "chat.completion.chunk",
+                "model": "fake-model",
+                "choices": [{"index": 0, "delta": delta}],
+            },
+            {
+                "id": "x",
+                "object": "chat.completion.chunk",
+                "model": "fake-model",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
+                "usage": usage,
+            },
+        ]
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.end_headers()
+        for chunk in chunks:
+            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+        self.wfile.write(b"data: [DONE]\n\n")
+
+
+# Each harness's own read tool and arguments. Prime Agent has only ``ipython``.
+_CHAT_HARNESSES = [
+    ("opencode", harness._opencode_launch, "read", "filePath"),
+    ("pi", harness._pi_launch, "read", "path"),
+    ("prime-agent", harness._prime_agent_launch, "ipython", "code"),
+]
+
+
+@pytest.mark.parametrize(("binary", "launch", "tool", "key"), _CHAT_HARNESSES, ids=[row[0] for row in _CHAT_HARNESSES])
+@pytest.mark.parametrize("target", ["optimize.toml", "notes.txt"])
+def test_installed_chat_harness_loads_the_guard_and_refuses_only_hidden_reads(
+    tmp_path: Path, binary: str, launch: Any, tool: str, key: str, target: str
+) -> None:
+    """Drive the real OpenCode, Pi and Prime Agent against a fake model: only the hidden read is refused."""
+    executable = shutil.which(binary)
+    if executable is None:
+        pytest.skip(f"{binary} is not installed")
+    value = f'print(open("{target}").read())' if key == "code" else target
+    _FakeChat.tool = (tool, {key: value})
+    _FakeChat.tool_outputs = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeChat)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    (workspace / "optimize.toml").write_text("secret = 1\n")
+    (workspace / "notes.txt").write_text("hello\n")
+    (tmp_path / "home").mkdir()
+    gateway = harness.GatewayConfig(url=f"http://127.0.0.1:{server.server_address[1]}/v1", api_key="k")
+    proposer = {**harness.launch_payload(launch("fake-model", gateway)), "hidden_paths": ["optimize.toml"]}
+    path = f"{Path(executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"
+    try:
+        outcome = run_session(
+            proposer,
+            workspace=workspace,
+            prompt="Read the file.",
+            model="fake-model",
+            session_dir=tmp_path / "session",
+            timeout_seconds=120,
+            extra_env={"PATH": path, "HOME": str(tmp_path / "home")},
+            api_key="k",
+        )
+    finally:
+        server.shutdown()
+    assert outcome.returncode == 0, outcome.stderr
+    assert len(_FakeChat.tool_outputs) == 1
+    if target == "optimize.toml":
+        assert outcome.refusals == [{"tool": tool, "kind": "config"}]
+        assert _FakeChat.tool_outputs[0] == harness_bridge.GUARD_REFUSAL
+    else:
+        assert outcome.refusals == []
+        assert "hello" in _FakeChat.tool_outputs[0]
