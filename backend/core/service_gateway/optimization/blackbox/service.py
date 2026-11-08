@@ -1140,6 +1140,7 @@ def _run_job(
                     "editable_paths": list(target.repo.editable_paths),
                     "readonly_paths": list(repo_snapshot.get("readonly_paths") or ()),
                     "constrained": bool(repo_snapshot.get("constrained")),
+                    "proposer_hosts": list(repo_snapshot.get("proposer_hosts") or ()),
                 }
                 if target.repo is not None and repo_snapshot is not None
                 else None
