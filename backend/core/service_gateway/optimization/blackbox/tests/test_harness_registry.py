@@ -37,7 +37,9 @@ _OVERRIDES: dict[str, dict[str, str]] = {
     "plain": {},
     "override": {"install_command": "my-install {model}", "run_command": "my-run {gateway_url}"},
 }
-_BUILT_INS = ("pi", "codex", "opencode", "prime")
+# The goldens cover only the harnesses that existed before the registry.
+_PRE_REGISTRY = ("pi", "codex", "opencode", "prime")
+_BUILT_INS = (*_PRE_REGISTRY, "aider")
 # sha256 of every launch payload, captured from staging 0e1dd97d5 before the
 # catalog moved into the registry. A changed digest means a changed launch.
 _GOLDEN = {
@@ -216,7 +218,7 @@ def _current_digests() -> dict[str, str]:
     """
     out: dict[str, str] = {}
     for h, (gname, gw), effort, protected, (oname, extra) in itertools.product(
-        _BUILT_INS, _GATEWAYS.items(), _EFFORTS, [False, True], _OVERRIDES.items()
+        _PRE_REGISTRY, _GATEWAYS.items(), _EFFORTS, [False, True], _OVERRIDES.items()
     ):
         target = BlackboxTarget(kind=BLACKBOX_TARGET_AGENT, harness=h, model="openrouter/acme/agent-1", **extra)
         payload = launch_payload(build_launch(target, gw, protected=protected, reasoning_effort=effort))
@@ -256,6 +258,7 @@ def test_registry_keeps_the_catalog_order() -> None:
         "codex": ("codex", "0.153.0"),
         "opencode": ("opencode", "1.18.27"),
         "prime": ("prime-agent", "0.9.7"),
+        "aider": ("aider", "0.86.2"),
     }
 
 

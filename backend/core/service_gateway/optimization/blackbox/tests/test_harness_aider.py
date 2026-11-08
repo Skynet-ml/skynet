@@ -41,10 +41,7 @@ Tokens: 1.2k sent, 18 received.
 
 
 def _target(**overrides: object) -> BlackboxTarget:
-    """Build an Aider agent target without the harness-id validation.
-
-    ``aider`` is not in ``BLACKBOX_HARNESSES`` yet, so the model validator
-    would reject it; ``model_construct`` skips validation.
+    """Build a validated Aider agent target.
 
     Args:
         **overrides: Extra target fields.
@@ -56,11 +53,9 @@ def _target(**overrides: object) -> BlackboxTarget:
         "kind": BLACKBOX_TARGET_AGENT,
         "harness": "aider",
         "model": "target-model",
-        "install_command": None,
-        "run_command": None,
     }
     fields.update(overrides)
-    return BlackboxTarget.model_construct(**fields)
+    return BlackboxTarget(**fields)
 
 
 def _config(content: str) -> dict[str, object]:
