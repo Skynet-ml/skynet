@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import PurePosixPath
 from typing import Any, Protocol
 
@@ -22,7 +24,20 @@ from .sandbox_contract import (
 )
 from .sandbox_runtime import write_codex_requirements
 
+logger = logging.getLogger(__name__)
 _MAX_FILE_BYTES = 16 * 1024 * 1024
+# No setting holds a box limit yet, and SBX-23 moves the limit to a setting shared
+# across pods. Each job runs in its own child process, but every child opens its
+# boxes through its broker in this worker parent, so a permit here caps the
+# native engine boxes of all jobs at once (SKY-426). Only engine boxes take one:
+# a job's scorer box counts inside its engine run's permit, and the workspace
+# pool keeps its own limit, so neither can wait on a permit its run holds.
+NATIVE_BOX_LIMIT = 16
+# native_runtime gives each engine box a request identity with this prefix.
+ENGINE_BOX_KEY_PREFIX = "native-engine:"
+_ENGINE_BOX_PERMITS = threading.BoundedSemaphore(NATIVE_BOX_LIMIT)
+# An open that waits for a permit checks this often whether its broker closed.
+_PERMIT_POLL_SECONDS = 1.0
 
 
 class SandboxCommandRunner(Protocol):
@@ -58,6 +73,20 @@ class _OwnedSession:
 
     session: SandboxSession
     lifetime_seconds: float
+    holds_permit: bool = False
+
+
+def _close_owned(owned: _OwnedSession) -> None:
+    """Close one guest box, and give back its engine box permit even when the close fails.
+
+    Args:
+        owned: A box the caller just removed from its broker, so no one else releases it.
+    """
+    try:
+        owned.session.close()
+    finally:
+        if owned.holds_permit:
+            _ENGINE_BOX_PERMITS.release()
 
 
 def _duration(value: Any, maximum: float) -> float:
@@ -356,32 +385,59 @@ class SandboxBroker:
             if request_id in self._opening:
                 raise ServiceError("This sandbox creation is already in progress.")
             self._opening.add(request_id)
+        engine = request_id.startswith(ENGINE_BOX_KEY_PREFIX)
         try:
-            session = self._runtime.open(
-                SandboxSpec(
-                    lifetime_seconds=lifetime,
-                    env=requested["env"],
-                    image=self._image,
-                    vcpus=self._vcpus,
-                    tags=self._tags,
-                    network_disabled=not hosts,
-                    allowed_hosts=tuple(hosts),
-                    operation_key=f"sandbox:{request_id}",
+            if engine:
+                self._take_engine_permit()
+            try:
+                session = self._runtime.open(
+                    SandboxSpec(
+                        lifetime_seconds=lifetime,
+                        env=requested["env"],
+                        image=self._image,
+                        vcpus=self._vcpus,
+                        tags=self._tags,
+                        network_disabled=not hosts,
+                        allowed_hosts=tuple(hosts),
+                        operation_key=f"sandbox:{request_id}",
+                    )
                 )
-            )
+            except BaseException:
+                if engine:
+                    _ENGINE_BOX_PERMITS.release()
+                raise
             identity = uuid.uuid4().hex
+            owned = _OwnedSession(session, lifetime, holds_permit=engine)
             with self._lock:
                 closing = self._closed
                 if not closing:
-                    self._sessions[identity] = _OwnedSession(session, lifetime)
+                    self._sessions[identity] = owned
                     self._opened[request_id] = (requested, identity)
             if closing:
-                session.close()
+                _close_owned(owned)
                 raise ServiceError("The sandbox broker closed during creation.")
             return {"sandbox_id": identity}
         finally:
             with self._lock:
                 self._opening.discard(request_id)
+
+    def _take_engine_permit(self) -> None:
+        """Wait for one engine box permit, and stop waiting when this broker closes.
+
+        A user cancel stops the job's child process, and the job's teardown closes
+        its broker, so a waiting open for a cancelled job ends here.
+
+        Raises:
+            ServiceError: When the broker closes before a permit is free.
+        """
+        if not _ENGINE_BOX_PERMITS.acquire(blocking=False):
+            logger.info("sandbox broker: waiting for one of the %d engine box permits", NATIVE_BOX_LIMIT)
+            while not _ENGINE_BOX_PERMITS.acquire(timeout=_PERMIT_POLL_SECONDS):
+                if self._closed:
+                    raise ServiceError("The sandbox broker is closed.")
+        if self._closed:
+            _ENGINE_BOX_PERMITS.release()
+            raise ServiceError("The sandbox broker is closed.")
 
     def allow_guest_hosts(self, allowed_hosts: tuple[str, ...]) -> None:
         """Set the most a guest-opened box may reach, such as a proposer's registries.
@@ -505,8 +561,13 @@ class SandboxBroker:
             return {}
         if action == "close":
             with self._lock:
-                self._sessions.pop(payload["sandbox_id"], None)
-            owned.session.close()
+                removed = self._sessions.pop(payload["sandbox_id"], None)
+            # Only the caller that removed the box gives back its permit, so two
+            # closes of one box (or a close during broker shutdown) release it once.
+            if removed is None:
+                owned.session.close()
+            else:
+                _close_owned(removed)
             return {}
         raise ServiceError("Unsupported sandbox control action.")
 
@@ -541,13 +602,14 @@ class SandboxBroker:
         """
         with self._lock:
             self._closed = True
-            owned = tuple(item.session for item in self._sessions.values()) + tuple(self._parent_sessions)
+            guests = tuple(self._sessions.values())
+            parents = tuple(self._parent_sessions)
             self._sessions.clear()
             self._parent_sessions.clear()
         failure: BaseException | None = None
-        for session in owned:
+        for close in (*(partial(_close_owned, owned) for owned in guests), *(item.close for item in parents)):
             try:
-                session.close()
+                close()
             except BaseException as error:
                 failure = failure or error
         if failure is not None:

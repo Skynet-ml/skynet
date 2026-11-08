@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from dataclasses import asdict
 from typing import Any
 
@@ -14,9 +16,10 @@ from core.billing.signals import BudgetReached
 from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.exceptions import InfrastructureInterruptionError, ServiceError
 
+from .. import sandbox_broker
 from ..remote_sandbox import RemoteSandboxRuntime, RemoteSandboxSession
 from ..sandbox import _CODEX_REQUIREMENTS_COMMAND, _CODEX_REQUIREMENTS_READBACK, CommandResult, SandboxSpec
-from ..sandbox_broker import SandboxBroker
+from ..sandbox_broker import ENGINE_BOX_KEY_PREFIX, SandboxBroker
 
 IMAGE = "vcr.example/skynet/optimizer@sha256:" + "a" * 64
 
@@ -390,3 +393,259 @@ def test_a_parent_session_forwards_root_commands() -> None:
     assert session.run("id -u", sudo=True).stdout == _CODEX_REQUIREMENTS_READBACK
     assert session.run("true").stdout == "true"
     assert runtime.sessions[0].root_commands == ["id -u"]
+
+
+def _limit_engine_boxes(monkeypatch: pytest.MonkeyPatch, limit: int) -> threading.BoundedSemaphore:
+    """Give the parent brokers a fresh engine box limit and a short closed-broker poll.
+
+    Args:
+        monkeypatch: Pytest fixture for replacing the module permits.
+        limit: How many engine boxes all brokers may hold at once.
+
+    Returns:
+        The new permits.
+    """
+    permits = threading.BoundedSemaphore(limit)
+    monkeypatch.setattr(sandbox_broker, "_ENGINE_BOX_PERMITS", permits)
+    monkeypatch.setattr(sandbox_broker, "_PERMIT_POLL_SECONDS", 0.01)
+    return permits
+
+
+def _free_permits(permits: threading.BoundedSemaphore, limit: int) -> int:
+    """Count the engine box permits nobody holds, and leave the count unchanged.
+
+    Args:
+        permits: The patched engine box permits.
+        limit: The patched box limit.
+
+    Returns:
+        How many permits a new engine box can take now.
+    """
+    taken = 0
+    while taken < limit and permits.acquire(blocking=False):
+        taken += 1
+    for _ in range(taken):
+        permits.release()
+    return taken
+
+
+def _engine_open(name: str) -> dict[str, Any]:
+    """Create an engine box request, as a job child sends it through RemoteSandboxRuntime.
+
+    Args:
+        name: A unique suffix for the request identity.
+
+    Returns:
+        The open payload.
+    """
+    return {"request_id": f"{ENGINE_BOX_KEY_PREFIX}{name}", "spec": {"lifetime_seconds": 60}}
+
+
+class _OpenInThread:
+    """Run one broker open on a thread, so a test can see whether it waits."""
+
+    def __init__(self, broker: SandboxBroker, payload: dict[str, Any]) -> None:
+        """Start the open at once.
+
+        Args:
+            broker: The broker that serves the open.
+            payload: The open request.
+        """
+        self.result: dict[str, Any] | None = None
+        self.error: BaseException | None = None
+        self.thread = threading.Thread(target=self._run, args=(broker, payload), daemon=True)
+        self.thread.start()
+
+    def _run(self, broker: SandboxBroker, payload: dict[str, Any]) -> None:
+        """Keep the open result or its error.
+
+        Args:
+            broker: The broker that serves the open.
+            payload: The open request.
+        """
+        try:
+            self.result = broker.handle("open", payload)
+        except BaseException as error:
+            self.error = error
+
+    def finished(self, timeout: float) -> bool:
+        """Wait for the open to end.
+
+        Args:
+            timeout: The most seconds to wait.
+
+        Returns:
+            Whether the open ended.
+        """
+        self.thread.join(timeout=timeout)
+        return not self.thread.is_alive()
+
+
+def test_engine_boxes_of_all_jobs_share_one_parent_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two job brokers in one worker parent hold at most the limit, and a waiting open goes on after a close."""
+    permits = _limit_engine_boxes(monkeypatch, 2)
+    first, second = FakeRuntime(), FakeRuntime()
+    job_one = SandboxBroker(first, image=IMAGE, max_lifetime_seconds=120)
+    job_two = SandboxBroker(second, image=IMAGE, max_lifetime_seconds=120)
+    held = [job_one.handle("open", _engine_open("a")), job_two.handle("open", _engine_open("b"))]
+
+    waiting = _OpenInThread(job_two, _engine_open("c"))
+    assert not waiting.finished(0.2)
+    assert len(first.sessions) + len(second.sessions) == 2
+
+    job_one.handle("close", held[0])
+    assert waiting.finished(5)
+    assert waiting.error is None
+    assert waiting.result is not None
+    assert first.sessions[0].close_calls == 1
+    assert len(second.sessions) == 2
+    assert _free_permits(permits, 2) == 0
+
+    job_two.handle("close", held[1])
+    job_two.handle("close", waiting.result)
+    assert _free_permits(permits, 2) == 2
+    job_one.close()
+    job_two.close()
+
+
+def test_many_job_threads_never_hold_more_than_the_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Six engine runs over three job brokers never hold more than two boxes at once, and all finish."""
+    permits = _limit_engine_boxes(monkeypatch, 2)
+    lock = threading.Lock()
+    live = [0]
+    peak = [0]
+
+    class CountedRuntime(FakeRuntime):
+        """Count each open box and keep the peak."""
+
+        def open(self, spec: SandboxSpec) -> FakeSession:
+            """Count the box as open, then hold it a moment so runs overlap."""
+            with lock:
+                live[0] += 1
+                peak[0] = max(peak[0], live[0])
+            time.sleep(0.02)
+            return super().open(spec)
+
+    brokers = [SandboxBroker(CountedRuntime(), image=IMAGE, max_lifetime_seconds=120) for _ in range(3)]
+    errors: list[BaseException] = []
+
+    def one_run(index: int) -> None:
+        """Open one engine box, use it a moment, and close it."""
+        broker = brokers[index % 3]
+        try:
+            opened = broker.handle("open", _engine_open(str(index)))
+            time.sleep(0.02)
+            with lock:
+                live[0] -= 1
+            broker.handle("close", opened)
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=one_run, args=(index,)) for index in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert peak[0] == 2
+    assert _free_permits(permits, 2) == 2
+
+
+def test_failed_engine_box_open_releases_the_permit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A provider failure during the open gives the permit back."""
+    permits = _limit_engine_boxes(monkeypatch, 1)
+
+    class FailingRuntime(FakeRuntime):
+        """Fail every box creation."""
+
+        def open(self, spec: SandboxSpec) -> FakeSession:
+            """Fail like a provider that cannot create the box."""
+            raise ServiceError("no box")
+
+    broker = SandboxBroker(FailingRuntime(), image=IMAGE, max_lifetime_seconds=120)
+    with pytest.raises(ServiceError, match="no box"):
+        broker.handle("open", _engine_open("a"))
+
+    assert _free_permits(permits, 1) == 1
+
+
+def test_cancelled_job_releases_its_permits_and_stops_its_waiting_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancel closes the job broker, which frees its held permit and ends its waiting open."""
+    permits = _limit_engine_boxes(monkeypatch, 1)
+    other_runtime = FakeRuntime()
+    cancelled = SandboxBroker(FakeRuntime(), image=IMAGE, max_lifetime_seconds=120)
+    other = SandboxBroker(other_runtime, image=IMAGE, max_lifetime_seconds=120)
+    cancelled.handle("open", _engine_open("held"))
+
+    stuck = _OpenInThread(cancelled, _engine_open("stuck"))
+    other_open = _OpenInThread(other, _engine_open("next"))
+    assert not stuck.finished(0.2)
+
+    cancelled.close()
+    assert stuck.finished(5)
+    assert isinstance(stuck.error, ServiceError)
+    assert other_open.finished(5)
+    assert other_open.error is None
+    assert other_open.result is not None
+    assert len(other_runtime.sessions) == 1
+    other.close()
+    assert _free_permits(permits, 1) == 1
+
+
+def test_failed_box_close_still_releases_the_permit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A close with unresolved usage still frees the permit, and a second close frees nothing more."""
+    permits = _limit_engine_boxes(monkeypatch, 1)
+
+    class PendingRuntime(FakeRuntime):
+        """Open boxes whose close reports unresolved usage."""
+
+        def open(self, spec: SandboxSpec) -> FakeSession:
+            """Return a box whose close fails."""
+            session = FakeSession(fail_close=True)
+            self.sessions.append(session)
+            return session
+
+    broker = SandboxBroker(PendingRuntime(), image=IMAGE, max_lifetime_seconds=120)
+    opened = broker.handle("open", _engine_open("a"))
+    with pytest.raises(UsagePendingError):
+        broker.handle("close", opened)
+    with pytest.raises(ServiceError):
+        broker.handle("close", opened)
+    broker.close()
+
+    assert _free_permits(permits, 1) == 1
+
+
+def test_replayed_engine_open_takes_no_second_permit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A child that retries the same open gets the same box and holds one permit."""
+    permits = _limit_engine_boxes(monkeypatch, 2)
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120)
+
+    opened = broker.handle("open", _engine_open("a"))
+    assert broker.handle("open", _engine_open("a")) == opened
+    assert len(runtime.sessions) == 1
+    assert _free_permits(permits, 2) == 1
+    broker.close()
+    assert _free_permits(permits, 2) == 2
+
+
+def test_scorer_and_pool_boxes_open_while_the_run_holds_the_only_permit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """At a limit of 1, a run's scorer and pool boxes do not wait on the permit their run holds."""
+    permits = _limit_engine_boxes(monkeypatch, 1)
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120)
+    broker.handle("open", _engine_open("run"))
+
+    scorer = _OpenInThread(broker, {"request_id": "scorer:abc", "spec": {"lifetime_seconds": 60}})
+    pool = _OpenInThread(broker, {"request_id": "pool-box", "spec": {"lifetime_seconds": 60}})
+    assert scorer.finished(5)
+    assert pool.finished(5)
+    assert scorer.error is None
+    assert pool.error is None
+    assert len(runtime.sessions) == 3
+    assert _free_permits(permits, 1) == 0
+    broker.close()
+    assert _free_permits(permits, 1) == 1

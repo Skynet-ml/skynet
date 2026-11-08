@@ -19,7 +19,7 @@ from core.exceptions import ServiceError
 from core.models.common import ModelConfig
 from core.service_gateway.language_models import lm_call_count, total_tokens_from_history, usage_by_model_from_history
 
-from .. import native_runtime, sandbox_log
+from .. import sandbox_log
 from .. import sandbox_scorer as sandbox_scorer_mod
 from ..harness import GatewayConfig
 from ..runner import GatewayClient, ScorerError
@@ -877,24 +877,3 @@ def test_scorer_log_events_reach_the_run_log_tagged_with_their_candidate_and_cas
         "case": "1",
     }
     assert not any("hidden from the log" in record.getMessage() for record in records)
-
-
-def test_sandbox_scorer_box_opens_while_its_run_holds_every_engine_box_permit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The scorer box takes no engine box permit, so a run at a limit of 1 can still score.
-
-    Args:
-        monkeypatch: Pytest fixture for the native engine box limit.
-    """
-    permits = threading.BoundedSemaphore(1)
-    monkeypatch.setattr(native_runtime, "_BOX_PERMITS", permits)
-    assert permits.acquire(blocking=False)
-    runtime = _runtime(lambda payload: _OK)
-    scorer = SandboxPythonScorer("def score(c): return 0.5", runtime=runtime, gateway=None, timeout_seconds=5)
-    try:
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            assert pool.submit(scorer, "x").result(timeout=10) == (0.5, {})
-    finally:
-        scorer.close()
-        permits.release()
-
-    assert len(runtime.sessions) == 1

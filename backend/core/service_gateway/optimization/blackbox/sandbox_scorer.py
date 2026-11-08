@@ -560,9 +560,9 @@ class SandboxPythonScorer:
             logger.info("scorer sandbox: opening %s (lifetime %.0fs)", name or "a box", self._spec.lifetime_seconds)
             opened = time.perf_counter()
             check_terminal.note("box_opening")
-            # No engine box permit (native_runtime): this box lives for the whole job and
-            # counts inside its engine run's permit. A permit here would deadlock a run
-            # at a limit of 1, and would starve the next run of a job that keeps the box.
+            # No engine box permit (sandbox_broker): its "scorer:" identity is not an
+            # engine box's, so this box lives for the whole job and counts inside its
+            # engine run's permit. A permit here would deadlock a run at a limit of 1.
             session = self._runtime.open(replace(self._spec, name=name))
             logger.info("scorer sandbox: ready in %.1fs", time.perf_counter() - opened)
             check_terminal.note("box_ready", seconds=round(time.perf_counter() - opened, 1))
