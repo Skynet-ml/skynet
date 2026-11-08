@@ -14,6 +14,7 @@ the run record (E28), with every secret it could carry removed (E52 rule 3).
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import uuid
@@ -21,10 +22,10 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, quote_plus, urlencode, urlsplit
 
 from ..config import settings
-from .credential_safety import credential_fragments, redact_secret_bytes
+from .credential_safety import REDACTED_CREDENTIAL, credential_fragments, redact_secret_bytes
 from .mcp_broker import ToolCall
 from .operation_pricing import ChargePolicy, operation_quote
 from .runtime import BudgetRuntime, PaidResult
@@ -34,6 +35,9 @@ if TYPE_CHECKING:
     from ..worker.scoped_relay import CallRecorder
 
 CONNECTOR_PRICE_VERSION = "env-connectors-2026-11-06"
+# The base64 form of a 1-3 character secret is 2-4 common characters; hiding it would mangle unrelated answer text.
+_MIN_ENCODED_FRAGMENT = 4
+_PERCENT_ESCAPE = re.compile(r"%[0-9A-F]{2}")
 CONNECTOR_COST_KIND = "tool"
 # Payload key listing the owner's OAuth MCP connections, by name, that a run asks for.
 CONNECTORS_KEY = "env_connectors"
@@ -378,11 +382,81 @@ def escaped_forms(fragment: str) -> set[str]:
         fragment: One secret fragment.
 
     Returns:
-        The JSON-escaped, ``\\/``-escaped and HTML-safe JSON forms.
+        The JSON-escaped, ``\\/``-escaped and HTML-safe JSON forms, with
+        lower- and upper-case hex in the ``\\u`` escapes.
     """
     escaped = json.dumps(fragment)[1:-1]
-    html_safe = escaped.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
-    return {escaped, escaped.replace("/", "\\/"), html_safe, html_safe.replace("/", "\\/")}
+    # .NET System.Text.Json writes upper-case hex (\u003C), Python and Go write lower-case;
+    # each case pair for < and > is listed, so an echo that mixes them is also hidden.
+    forms = {escaped} | {
+        escaped.replace("&", "\\u0026").replace("<", lt).replace(">", gt)
+        for lt in ("\\u003c", "\\u003C")
+        for gt in ("\\u003e", "\\u003E")
+    }
+    return forms | {form.replace("/", "\\/") for form in forms}
+
+
+def _either_case(hex_digits: str) -> bytes:
+    """Return a regex that matches hex digits in lower or upper case.
+
+    Args:
+        hex_digits: Lower-case hex digits.
+
+    Returns:
+        The regex bytes.
+    """
+    return "".join(f"[{d}{d.upper()}]" if d.isalpha() else d for d in hex_digits).encode()
+
+
+def json_escape_pattern(fragment: str) -> re.Pattern[bytes] | None:
+    """Return a regex for every JSON string form in which a server may echo a fragment.
+
+    A JSON encoder may write any character as ``\\uXXXX`` with lower- or
+    upper-case hex (.NET writes ``+`` as ``\\u002B``) and ``/`` as ``\\/``,
+    and it may mix forms in one string. A list of literal forms cannot hold
+    every mix, so each character gets its own set of choices.
+
+    Args:
+        fragment: One secret fragment.
+
+    Returns:
+        The compiled regex, or None for a fragment shorter than
+        ``_MIN_ENCODED_FRAGMENT``.
+    """
+    if len(fragment) < _MIN_ENCODED_FRAGMENT:
+        return None
+    parts: list[bytes] = []
+    for char in fragment:
+        choices = {re.escape(char.encode()), re.escape(json.dumps(char)[1:-1].encode())}
+        if char == "/":
+            choices.add(re.escape(b"\\/"))
+        units = char.encode("utf-16-be")
+        choices.add(b"".join(re.escape(b"\\u") + _either_case(units[i : i + 2].hex()) for i in range(0, len(units), 2)))
+        parts.append(b"(?:" + b"|".join(sorted(choices)) + b")")
+    return re.compile(b"".join(parts))
+
+
+def encoded_forms(fragment: str) -> set[str]:
+    """Return the re-encoded forms in which a server may echo a secret fragment.
+
+    Args:
+        fragment: One secret fragment.
+
+    Returns:
+        The standard and URL-safe base64 forms, each with and without ``=``
+        padding, and the ``quote`` and ``quote_plus`` forms with upper- and
+        lower-case escapes; no forms for a fragment shorter than
+        ``_MIN_ENCODED_FRAGMENT``.
+    """
+    if len(fragment) < _MIN_ENCODED_FRAGMENT:
+        return set()
+    raw = fragment.encode()
+    forms: set[str] = set()
+    for encoded in (quote(fragment, safe=""), quote_plus(fragment, safe="")):
+        forms |= {encoded, _PERCENT_ESCAPE.sub(lambda match: match.group().lower(), encoded)}
+    for encoded in (base64.b64encode(raw).decode(), base64.urlsafe_b64encode(raw).decode()):
+        forms |= {encoded, encoded.rstrip("=")}
+    return forms
 
 
 def host_allowed(host: str, allowed: Collection[str]) -> bool:
@@ -413,6 +487,7 @@ def relay_request(
     runtime: BudgetRuntime | None = None,
     recorder: CallRecorder | None = None,
     kind: str = "host",
+    target: str = "",
 ) -> bytes:
     """Send one ``[services]`` or MCP http request with its secrets filled in (E49-E53).
 
@@ -440,6 +515,8 @@ def relay_request(
             filled header value goes to the store as a secret.
         kind: The record kind: ``host`` for a ``[services]`` call, ``mcp``
             for a role ``.mcp.json`` call.
+        target: The record target, such as ``server@host/tool``; the url's
+            host when empty.
 
     Returns:
         The answer body without any filled secret value.
@@ -452,10 +529,11 @@ def relay_request(
     """
     state = _RelayState(set(user_secrets.values()))
     started = recorder.start() if recorder is not None else None
-    try:
-        target = (urlsplit(url).hostname or "").rstrip(".").lower()
-    except ValueError:  # a malformed url such as "http://[::1/x" is refused by _relay, and still recorded
-        target = ""
+    if not target:
+        try:
+            target = (urlsplit(url).hostname or "").rstrip(".").lower()
+        except ValueError:  # a malformed url such as "http://[::1/x" is refused by _relay, and still recorded
+            target = ""
     try:
         answer = _relay(url, headers, body, user_secrets, bindings, secret_hosts, allowed_hosts, send, runtime, state)
     except BaseException as error:  # a worker stop or cancel must still leave the call in the record
@@ -538,7 +616,11 @@ def _relay(
     fragments |= {
         fragment for key, value in filled.items() if value != headers[key] for fragment in credential_fragments(value)
     }
+    # A server can echo a value base64- or percent-encoded, so hide those forms too. Only a value
+    # encoded on its own is caught: inside a longer base64 text its form depends on the byte offset.
+    fragments |= {form for fragment in fragments for form in encoded_forms(fragment)}
     # A server can echo a value JSON-escaped (Go writes & as \u0026, PHP writes / as \/), so hide those forms too.
+    base = set(fragments)
     fragments |= {form for fragment in fragments for form in escaped_forms(fragment)}
     state.secrets |= set(values.values()) | fragments
     ordered = sorted(fragments, key=len, reverse=True)
@@ -570,4 +652,9 @@ def _relay(
             policy = ChargePolicy("managed_model")
             state.cost_usd = float(policy.convert(CONNECTORS[host].tools[tool]).total * policy.cent_usd)
         answer = tool_meter(runtime, CONNECTORS[host])(tool, arguments, ToolCall(run))["body"]
-    return redact_secret_bytes(answer, ordered)
+    redacted = redact_secret_bytes(answer, ordered)
+    for fragment in sorted(base, key=len, reverse=True):
+        pattern = json_escape_pattern(fragment)
+        if pattern is not None:
+            redacted = pattern.sub(REDACTED_CREDENTIAL.encode(), redacted)
+    return redacted

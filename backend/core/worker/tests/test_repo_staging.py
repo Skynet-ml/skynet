@@ -33,8 +33,15 @@ from core.connectors.github_publish import HardeningSummary, PublishedChange, Re
 from core.connectors.github_repo import RepoSnapshot
 from core.exceptions import ServiceError
 from core.models.hardening import HardeningExploit, HardeningJob, HardeningJobModel, HardeningRound
+from core.service_gateway.optimization.blackbox import runner
 from core.service_gateway.optimization.blackbox.protocol import METRIC_ERROR
-from core.service_gateway.optimization.blackbox.repo_constraints import ConstraintsError, ServiceSpec, TargetStage
+from core.service_gateway.optimization.blackbox.repo_constraints import (
+    ConstraintsError,
+    McpServer,
+    RoleEnvironment,
+    ServiceSpec,
+    TargetStage,
+)
 from core.service_gateway.optimization.blackbox.repo_workspace import _PROBE_OK, NetworkCutoffError
 from core.service_gateway.optimization.blackbox.rule_judge import (
     JUDGE_ANSWER_TOKENS,
@@ -350,6 +357,72 @@ def test_staging_pins_the_commit_and_keeps_secrets_in_the_parent(
     assert not staged.workdir.exists()
 
 
+def test_staging_keeps_each_secrets_binding_and_hosts_for_the_relay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Staging reads the bindings and allowed hosts before it empties the secret list, and maps each secret to its host."""
+    payload = _payload("c" * 40)
+    payload["target"]["repo"]["secrets"][0]["allowed_hosts"] = ["api.example.com"]
+    payload["target"]["repo"]["secret_bindings"] = {"API_KEY": "user"}
+    toml = '[services.maps]\nurl = "https://api.example.com/v1"\nheaders = { Authorization = "Bearer ${API_KEY}" }\n'
+
+    _, staged = _stage_with({"optimize.toml": toml}, monkeypatch, payload)
+
+    assert staged.secret_bindings == {"API_KEY": "user"}
+    assert staged.secret_hosts == {"API_KEY": "api.example.com"}
+    assert staged.secret_allowed_hosts == {"API_KEY": ("api.example.com",)}
+    staged.cleanup()
+
+
+def test_staging_keeps_each_roles_own_mcp_servers_for_the_relay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[run] keeps the servers of its own MCP file, and [metric] gets none of them (E49, E55)."""
+    files = {
+        "optimize.toml": '[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n',
+        ".mcp.json": '{"mcpServers": {"search": {"url": "https://search.example.com/mcp"}}}',
+    }
+
+    _, staged = _stage_with(files, monkeypatch)
+
+    assert [server.name for server in staged.mcp_roles["run"].mcp_servers] == ["search"]
+    assert staged.mcp_roles["metric"].mcp_servers == ()
+    staged.cleanup()
+
+
+def test_the_scorer_tree_holds_only_loopback_urls_in_each_roles_mcp_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The scorer box unpacks a tree whose every MCP file points at the runner's relay (E49, E53)."""
+    files = {
+        "optimize.toml": (
+            '[proposer]\nmcp = "agent.mcp.json"\n[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n'
+            '[metric]\nmcp = "tools/metric.mcp.json"\n'
+        ),
+        "agent.mcp.json": '{"mcpServers": {"web": {"url": "https://web.example.com/mcp"}}}',
+        ".mcp.json": '{"mcpServers": {"search": {"url": "https://search.example.com/mcp"}}}',
+        "tools/metric.mcp.json": '{"mcpServers": {"docs": {"type": "http", "url": "https://docs.example.com/mcp"}}}',
+        "a.py": "def f(x):\n    return x\n",
+    }
+
+    _, staged = _stage_with(files, monkeypatch)
+
+    assert staged.scorer_archive is not None
+    with tarfile.open(staged.scorer_archive) as packed:
+        texts = {
+            Path(member.name).as_posix(): packed.extractfile(member).read().decode()  # type: ignore[union-attr]
+            for member in packed
+            if member.isreg()
+        }
+    relay = f"http://127.0.0.1:{runner.RELAY_PORT}/mcp"
+    assert json.loads(texts[".mcp.json"]) == {"mcpServers": {"search": {"type": "http", "url": f"{relay}/search"}}}
+    assert json.loads(texts["tools/metric.mcp.json"]) == {
+        "mcpServers": {"docs": {"type": "http", "url": f"{relay}/docs"}}
+    }
+    assert json.loads(texts["agent.mcp.json"]) == {"mcpServers": {"web": {"type": "http", "url": f"{relay}/web"}}}
+    assert "example.com" not in "".join(texts.values())
+    assert texts["a.py"] == files["a.py"]
+    with tarfile.open(staged.snapshot.archive) as original:
+        assert b"search.example.com" in original.extractfile(".mcp.json").read()  # type: ignore[union-attr]
+    staged.cleanup()
+
+
 def test_failed_fetch_leaves_nothing_on_disk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Remove the scratch folder when the clone fails."""
     workdirs: list[Path] = []
@@ -586,6 +659,58 @@ def test_binding_hands_the_guest_a_route_and_closes_the_box(tmp_path: Path) -> N
     staged.close_scorers()
     assert staged.scorers == []
     assert box.closed
+
+
+def test_binding_gives_the_scorer_the_secret_hosts_and_the_run_budget(tmp_path: Path) -> None:
+    """The scorer's relay gets the bindings, both host maps, and the gateway's budget to meter a Skynet key."""
+    payload, bare = _binding(tmp_path, None)
+    staged = dataclasses.replace(
+        bare,
+        secret_bindings={"API_KEY": "user"},
+        secret_hosts={"API_KEY": "api.example.com"},
+        secret_allowed_hosts={"API_KEY": ("api.example.com",)},
+    )
+    gateway = _Gateway()
+    budget = object()
+    gateway.runtime = budget  # type: ignore[attr-defined]
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    scorer = gateway.evaluator
+    assert scorer._secret_bindings == {"API_KEY": "user"}
+    assert scorer._secret_hosts == {"API_KEY": "api.example.com"}
+    assert scorer._secret_allowed_hosts == {"API_KEY": ("api.example.com",)}
+    assert scorer._budget is budget
+    staged.close_scorers()
+
+
+def test_binding_gives_the_scorer_each_roles_mcp_servers(tmp_path: Path) -> None:
+    """The scorer's relay gets the [run] and [metric] roles, so each call reaches only its own MCP file."""
+    payload, bare = _binding(tmp_path, None)
+    run = RoleEnvironment(
+        mcp=".mcp.json", mcp_servers=(McpServer(name="search", url="https://search.example.com/mcp"),)
+    )
+    staged = dataclasses.replace(bare, mcp_roles={"run": run, "metric": RoleEnvironment()})
+    gateway = _Gateway()
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    assert gateway.evaluator._mcp_roles == {"run": run, "metric": RoleEnvironment()}
+    staged.close_scorers()
+
+
+def test_binding_opens_the_scorer_box_on_the_loopback_tree(tmp_path: Path) -> None:
+    """The scorer box unpacks the tree with rewritten MCP files, never the fetched one."""
+    payload, bare = _binding(tmp_path, None)
+    scorer_tree = tmp_path / "scorer-tree.tgz"
+    scorer_tree.write_bytes(b"tree")
+    staged = dataclasses.replace(bare, scorer_archive=scorer_tree)
+    gateway = _Gateway()
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    assert gateway.evaluator._workspace._archive == scorer_tree
+    staged.close_scorers()
 
 
 def test_binding_gives_the_box_only_the_scorer_models_scoped_route(tmp_path: Path) -> None:

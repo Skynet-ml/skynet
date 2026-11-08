@@ -9,8 +9,10 @@ from __future__ import annotations
 import contextlib
 import copy
 import inspect
+import io
 import itertools
 import json
+import tarfile
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -23,11 +25,13 @@ from core.api.errors import DomainError
 from core.billing.vercel_usage import PROPOSER_REGISTRY_HOSTS
 from core.exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, ServiceError
 from core.i18n import CANCELLATION_REASON
+from core.i18n_keys import I18nKey
 from core.models.blackbox import BlackboxRunRequest
 from core.service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
 from core.storage.base import JobStore
 
 from .. import engine as engine_module
+from .. import repo_gate
 from ..checkpoint_compat import CheckpointCompatibilityError, checkpoint_manifest, validate_checkpoint
 from ..constants import EVENT_ERROR, EVENT_RESULT
 from ..engine import BackgroundWorker, WorkerShutdownError, reset_worker_for_tests
@@ -996,6 +1000,107 @@ def test_repository_run_hands_its_hardening_job_id_to_the_publish(
     assert published_payload["hardening_job_id"] == "hardening-1"
     assert publish.call_args.args[2] is staged
     assert publish.call_args.kwargs["username"] == "alice"
+
+
+_MAPS_TOML = (
+    b'[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
+    b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_KEY}" }\n'
+)
+_MAPS_SECRET = {"name": "GOOGLE_MAPS_KEY", "credential_ref": "ref-maps", "credential_revision": 1}
+
+
+@pytest.mark.parametrize(
+    ("repo_fields", "secrets", "expected"),
+    [
+        ({"secret_bindings": {"GOOGLE_MAPS_KEY": "managed"}}, {}, I18nKey.REPO_GATE_MANAGED_SECRET_UNAVAILABLE),
+        (
+            {"secrets": [{**_MAPS_SECRET, "allowed_hosts": []}]},
+            {"GOOGLE_MAPS_KEY": "fixture-only"},
+            I18nKey.REPO_GATE_SECRET_HOST_UNLISTED,
+        ),
+        (
+            {"secrets": [{**_MAPS_SECRET, "allowed_hosts": ["api.example.com"]}]},
+            {"GOOGLE_MAPS_KEY": "fixture-only"},
+            I18nKey.REPO_GATE_SECRET_HOST_NOT_ALLOWED,
+        ),
+    ],
+)
+def test_the_run_gate_reads_secret_bindings_and_allowed_hosts_before_staging(
+    worker: BackgroundWorker,
+    store: FakeJobStore,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    repo_fields: dict,
+    secrets: dict[str, str],
+    expected: I18nKey,
+) -> None:
+    """The run gate gets the bindings and allowed hosts that staging removes from the payload (E50, E52)."""
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        info = tarfile.TarInfo("optimize.toml")
+        info.size = len(_MAPS_TOML)
+        packed.addfile(info, io.BytesIO(_MAPS_TOML))
+    request = BlackboxRunRequest(
+        username="alice",
+        recipe="repo",
+        scorer={"kind": "python", "metric_code": "def score(candidate, case=None): return 1.0"},
+        target={"kind": "repo", "repo": {"repository": "acme/app", "editable_paths": ["src"], **repo_fields}},
+        reflection_model_config={"name": "gpt-4o"},
+    )
+    store.engine = MagicMock()
+    store.seed_job(
+        "repo-gated",
+        payload=request.model_dump(mode="json", by_alias=True),
+        payload_overview=_BLACKBOX_OVERVIEW,
+        execution_budget_id="budget",
+        execution_budget_generation=0,
+    )
+    worker.enqueue_job("repo-gated")
+    gateway = MagicMock()
+    gateway.protect_payload.side_effect = lambda payload, **kwargs: payload
+    gateway.cost_ceiling_cents.return_value = 100
+    staged = MagicMock()
+    staged.snapshot.archive = archive
+    staged.secrets = secrets
+
+    def stage(payload: dict, **kwargs: object) -> tuple[dict, MagicMock]:
+        """Empty the secret list the way the real step does."""
+        payload["target"]["repo"]["secrets"] = []
+        return payload, staged
+
+    found: list[list[repo_gate.GateFailure]] = []
+
+    def gate(*args: object, **kwargs: object) -> list[repo_gate.GateFailure]:
+        """Run the real gate and keep what it found."""
+        found.append(repo_gate.check_repository(*args, **kwargs))  # type: ignore[arg-type]
+        return found[-1]
+
+    monkeypatch.setattr(repo_gate, "managed_key_host", lambda host: False)
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch("core.worker.engine.notify_job_completed"))
+        stack.enter_context(patch("core.worker.engine.record_server_event"))
+        stack.enter_context(patch.object(worker, "_get_service"))
+        stack.enter_context(patch("core.worker.engine.validate_blackbox_payload"))
+        stack.enter_context(patch("core.worker.engine.payload_uses_token_source", return_value=False))
+        stack.enter_context(patch("core.worker.engine.ModelGateway", return_value=gateway))
+        stack.enter_context(patch("core.worker.engine.BudgetService"))
+        stack.enter_context(patch("core.worker.engine.BudgetRuntime"))
+        stack.enter_context(patch("core.worker.engine.bind_protected_sandbox"))
+        stack.enter_context(patch("core.worker.engine.protected_image", return_value=None))
+        stack.enter_context(
+            patch("core.worker.engine.resolve_execution_credentials", side_effect=lambda payload, **kwargs: payload)
+        )
+        stack.enter_context(patch("core.worker.engine.host_proposer", return_value=None))
+        stack.enter_context(patch("core.worker.engine.stage_repository", side_effect=stage))
+        stack.enter_context(patch("core.worker.engine.check_repository", side_effect=gate))
+        setup = stack.enter_context(patch("core.worker.engine.infer_repo_setup", return_value=None))
+        stack.enter_context(patch.object(worker, "_record_repo_commit"))
+        stack.enter_context(patch.object(worker, "_close_budget_gateway", return_value=(None, None)))
+        worker._process_job("repo-gated", 0)
+    [failures] = found
+    assert expected in [failure.code for failure in failures]
+    setup.assert_not_called()
+    assert store._jobs["repo-gated"]["status"] == "failed"
 
 
 @pytest.mark.parametrize(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import tarfile
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -38,6 +40,7 @@ from core.billing.protected_credentials import scrub_execution_credentials
 from core.billing.runtime import BudgetRuntime, PaidResult
 from core.billing.service import StripeBillingService
 from core.billing.signals import BudgetReached
+from core.i18n_keys import I18nKey
 from core.models import BlackboxRunRequest
 from core.storage.models import (
     Base,
@@ -50,6 +53,7 @@ from core.storage.models import (
 )
 from core.storage.preflights import PreflightStore, WizardPreflightModel
 from core.storage.remote import RemoteDBJobStore
+from core.worker import repo_gate
 
 ROUTE = "/blackbox/run"
 
@@ -314,6 +318,86 @@ def _prepare(harness: _Harness) -> tuple[dict, dict]:
         "preflight_id": checked["id"],
         "preflight_fingerprint": checked["fingerprint"],
     }, checked
+
+
+_MAPS_TOML = (
+    b'[services.maps]\nurl = "https://mapstools.googleapis.com/mcp"\n'
+    b'headers = { Authorization = "Bearer ${GOOGLE_MAPS_KEY}" }\n'
+)
+
+
+@pytest.mark.parametrize(
+    ("repo_fields", "secrets", "expected"),
+    [
+        (
+            {"secret_bindings": {"GOOGLE_MAPS_KEY": "managed"}},
+            {},
+            I18nKey.REPO_GATE_MANAGED_SECRET_UNAVAILABLE,
+        ),
+        (
+            {"secrets": [{"name": "GOOGLE_MAPS_KEY", "value": "fixture-only", "allowed_hosts": []}]},
+            {"GOOGLE_MAPS_KEY": "fixture-only"},
+            I18nKey.REPO_GATE_SECRET_HOST_UNLISTED,
+        ),
+        (
+            {"secrets": [{"name": "GOOGLE_MAPS_KEY", "value": "fixture-only", "allowed_hosts": ["api.example.com"]}]},
+            {"GOOGLE_MAPS_KEY": "fixture-only"},
+            I18nKey.REPO_GATE_SECRET_HOST_NOT_ALLOWED,
+        ),
+    ],
+)
+def test_the_setup_check_gates_secret_bindings_and_allowed_hosts(
+    harness: _Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    repo_fields: dict[str, Any],
+    secrets: dict[str, str],
+    expected: I18nKey,
+) -> None:
+    """The setup check reads bindings and allowed hosts before staging empties the secret list (E50, E52)."""
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        info = tarfile.TarInfo("optimize.toml")
+        info.size = len(_MAPS_TOML)
+        packed.addfile(info, io.BytesIO(_MAPS_TOML))
+
+    def stage(payload: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], SimpleNamespace]:
+        """Empty the secret list the way real staging does, and hand back the packed tree.
+
+        Args:
+            payload: Protected repository payload.
+            **kwargs: Owner and budget binding, unused by the fixture.
+
+        Returns:
+            The payload and a stand-in checkout with the tree and the resolved secrets.
+        """
+        payload["target"]["repo"]["secrets"] = []
+        return payload, SimpleNamespace(
+            snapshot=SimpleNamespace(archive=archive), secrets=secrets, close_scorers=lambda: None, cleanup=lambda: None
+        )
+
+    monkeypatch.setattr(preflight_execution, "stage_repository", stage)
+    monkeypatch.setattr(preflight_execution, "check_repository", repo_gate.check_repository)
+    monkeypatch.setattr(repo_gate, "managed_key_host", lambda host: False)
+    budget = harness.budgets.create(harness.username, 20, idempotency_key="repo-gate-secrets")
+    payload = _payload()
+    payload["target"]["repo"].update(repo_fields)
+
+    response = harness.client.post(
+        "/wizard/preflight",
+        json={
+            "scope": "execution",
+            "workflow": "anything",
+            "payload": {**payload, "execution_budget_id": budget.id, "execution_budget_revision": budget.revision},
+            "execution_budget_id": budget.id,
+            "execution_budget_revision": budget.revision,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    checked = response.json()
+    assert checked["status"] == "failed"
+    assert expected in [check.get("message_code") for check in checked["checks"]]
 
 
 def test_anything_evaluation_protects_the_declared_scorer_model(

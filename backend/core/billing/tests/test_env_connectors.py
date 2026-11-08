@@ -26,6 +26,7 @@ from core.billing.budgets import BudgetFencedError, BudgetInsufficientError, Bud
 from core.billing.env_connectors import (
     CONNECTORS,
     connector_endpoint,
+    encoded_forms,
     host_allowed,
     offered_connectors,
     relay_request,
@@ -539,13 +540,37 @@ def test_relay_refuses_a_managed_call_that_the_meter_cannot_read(
 
 
 def test_relay_removes_a_json_escaped_echo_of_the_secret() -> None:
-    """Hide the secret when the server echoes it with JSON escapes such as \\/ and \\u0026."""
+    """Hide the secret when the server echoes it with JSON escapes such as \\/, \\u0026 and \\u003C."""
     secret = "user/key&part<1>"
     escaped = json.dumps(secret)[1:-1]
     forms = [
         escaped,
         escaped.replace("/", "\\/"),
         escaped.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e").replace("/", "\\/"),
+        escaped.replace("&", "\\u0026").replace("<", "\\u003C").replace(">", "\\u003E"),
+    ]
+    answer = relay_request(
+        url="https://api.judge.example/v1",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        body=b"{}",
+        user_secrets={"JUDGE_KEY": secret},
+        bindings={},
+        secret_hosts={"JUDGE_KEY": "api.judge.example"},
+        allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+        send=lambda *_args: ('{"echo": ["' + '", "'.join(forms) + '"]}').encode(),
+    ).decode()
+    assert all(form not in answer for form in forms)
+    assert json.loads(answer)["echo"] == ["[REDACTED]"] * 4
+
+
+def test_relay_removes_echoes_with_mixed_case_unicode_escapes() -> None:
+    """Hide the secret when one answer holds lower-, upper- and mixed-case \\u escapes of it."""
+    secret = "user/key&part<1>"
+    escaped = json.dumps(secret)[1:-1].replace("&", "\\u0026")
+    forms = [
+        escaped.replace("<", "\\u003c").replace(">", "\\u003E"),
+        escaped.replace("<", "\\u003C").replace(">", "\\u003e"),
+        escaped.replace("<", "\\u003C").replace(">", "\\u003E").replace("/", "\\/"),
     ]
     answer = relay_request(
         url="https://api.judge.example/v1",
@@ -559,6 +584,105 @@ def test_relay_removes_a_json_escaped_echo_of_the_secret() -> None:
     ).decode()
     assert all(form not in answer for form in forms)
     assert json.loads(answer)["echo"] == ["[REDACTED]"] * 3
+
+
+def test_relay_removes_echoes_with_any_unicode_escape_of_any_character() -> None:
+    """Hide a secret that an encoder echoes with \\u escapes of ``/``, ``+``, ``=``, ``'`` and a backtick, in either case."""
+    secret = "user/key+part's/two`end+=="
+    full = "".join(f"\\u{ord(char):04X}" for char in secret)
+    forms = [
+        secret.replace("/", "\\u002f"),
+        secret.replace("/", "\\u002F").replace("+", "\\u002b"),
+        secret.replace("/", "\\/").replace("+", "\\u002B"),
+        secret.replace("+", "\\u002B").replace("=", "\\u003D"),
+        secret.replace("+", "\\u002B").replace("'", "\\u0027").replace("`", "\\u0060"),
+        secret.replace("+", "\\u002B").replace("'", "\\u0027").replace("`", "\\u0060").replace("/", "\\/"),
+        full,
+        full.lower(),
+    ]
+    answer = relay_request(
+        url="https://api.judge.example/v1",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        body=b"{}",
+        user_secrets={"JUDGE_KEY": secret},
+        bindings={},
+        secret_hosts={"JUDGE_KEY": "api.judge.example"},
+        allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+        send=lambda *_args: ('{"echo": ["' + '", "'.join(forms) + '"]}').encode(),
+    ).decode()
+    assert all(form not in answer for form in forms)
+    assert json.loads(answer)["echo"] == ["[REDACTED]"] * 8
+
+
+def test_relay_keeps_text_that_only_resembles_the_secret() -> None:
+    """Keep near-miss text unchanged, so regex characters in a secret cannot widen the escape match."""
+    secret = "key.part+(two)*end?"
+    near = [
+        secret.replace(".", "X"),
+        secret.replace("+", ""),
+        secret.replace("(", ""),
+        secret.upper(),
+        "\\u006Bey.part",
+        "unrelated \\u002B text",
+    ]
+    answer = json.dumps({"near": near, "hit": secret}).encode()
+    redacted = relay_request(
+        url="https://api.judge.example/v1",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        body=b"{}",
+        user_secrets={"JUDGE_KEY": secret},
+        bindings={},
+        secret_hosts={"JUDGE_KEY": "api.judge.example"},
+        allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+        send=lambda *_args: answer,
+    )
+    assert json.loads(redacted) == {"near": near, "hit": "[REDACTED]"}
+
+
+def test_relay_removes_a_base64_or_percent_encoded_echo_of_the_secret() -> None:
+    """Hide a base64 echo, with or without padding, and a percent or ``quote_plus`` echo with either escape case."""
+    secret = "key>>>???~~ /x"
+    raw = secret.encode()
+    standard, urlsafe = base64.b64encode(raw).decode(), base64.urlsafe_b64encode(raw).decode()
+    percent, plus = quote(secret, safe=""), quote_plus(secret, safe="")
+    forms = [standard, standard.rstrip("="), urlsafe, urlsafe.rstrip("="), percent, percent.lower(), plus, plus.lower()]
+    assert "+" in plus
+    assert "%2f" in percent.lower()
+    assert standard != urlsafe
+    assert standard.endswith("=")
+    answer = relay_request(
+        url="https://api.judge.example/v1",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        body=b"{}",
+        user_secrets={"JUDGE_KEY": secret},
+        bindings={},
+        secret_hosts={"JUDGE_KEY": "api.judge.example"},
+        allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+        send=lambda *_args: json.dumps({"echo": forms}).encode(),
+    ).decode()
+    assert all(form not in answer for form in forms)
+    assert json.loads(answer)["echo"] == ["[REDACTED]"] * len(forms)
+
+
+@pytest.mark.parametrize("secret", ["", "a", "ab", "abc"])
+def test_encoded_forms_skip_a_secret_shorter_than_four_characters(secret: str) -> None:
+    """Give no encoded form for an empty or 1-3 character secret, so common short text stays intact."""
+    assert encoded_forms(secret) == set()
+
+
+def test_relay_keeps_short_base64_text_for_a_three_character_secret() -> None:
+    """Hide a 3-character secret itself, but not its 4-character base64 form, which can be ordinary text."""
+    answer = relay_request(
+        url="https://api.judge.example/v1",
+        headers={"X-Key": "${JUDGE_KEY}"},
+        body=b"{}",
+        user_secrets={"JUDGE_KEY": "k3y"},
+        bindings={},
+        secret_hosts={"JUDGE_KEY": "api.judge.example"},
+        allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+        send=lambda *_args: b'{"echo": "k3y", "note": "azN5"}',
+    ).decode()
+    assert json.loads(answer) == {"echo": "[REDACTED]", "note": "azN5"}
 
 
 def test_relay_refuses_a_shared_file_that_sends_a_user_key_to_another_host() -> None:
