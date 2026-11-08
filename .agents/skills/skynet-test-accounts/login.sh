@@ -1,7 +1,7 @@
 # Sign in to Skynet staging or a PR preview with a test account.
 # Usage (bash or zsh): export the credentials as <PREFIX>_EMAIL and
 # <PREFIX>_PASSWORD, set the variables below, then source the script:
-#   export PREFIX=SKYNET_POOL APP=https://staging.skynetml.com API=https://api-staging.skynetml.com
+#   export PREFIX=SKYNET_TEST APP=https://staging.skynetml.com API=https://api-staging.skynetml.com
 #   . ./login.sh
 # Sets TOKEN and nothing else. Prints only the HTTP status of the check.
 if [ -z "$APP" ] || [ -z "$API" ] || [ -z "$PREFIX" ]; then
