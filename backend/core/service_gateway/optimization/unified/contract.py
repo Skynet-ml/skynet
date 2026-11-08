@@ -43,7 +43,7 @@ from ....models.unified import (
 )
 from ...safe_exec import FunctionShape, WorkspaceCodeIntrospection, introspect_workspace_code
 from ..blackbox.harness import GatewayConfig
-from ..blackbox.sandbox import SandboxRuntime
+from ..blackbox.sandbox_contract import SandboxRuntime
 from ..blackbox.workspace_harness import DETAIL_MAX_CHARS, METRIC_ENTRY_NAME, RUN_ENTRY_NAME
 from ..blackbox.workspace_scorer import WorkspaceProbe, build_workspace_scorer
 from .metric_model import metric_declaration_unsafe, resolve_metric_model, scan_metric_llm

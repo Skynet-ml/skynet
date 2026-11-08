@@ -28,8 +28,8 @@ from ..service_gateway import DspyService
 from ..service_gateway.language_models import activate_job_lm_budget, activate_job_usage_registry, job_usage_snapshot
 from ..service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
-from ..service_gateway.optimization.blackbox.sandbox import sandbox_runtime_context
 from ..service_gateway.optimization.blackbox.sandbox_log import stream_logger as sandbox_stream_logger
+from ..service_gateway.optimization.blackbox.sandbox_runtime import sandbox_runtime_context
 from ..service_gateway.optimization.blackbox.service import run_blackbox_optimization
 from ..service_gateway.optimization.budget_stop import BudgetReached
 from ..service_gateway.optimization.llm_error import (

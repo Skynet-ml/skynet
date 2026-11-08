@@ -19,7 +19,7 @@ from ..models.blackbox import BLACKBOX_HARNESS_CODEX
 from ..models.unified import DSPY_OPTIMIZERS
 from ..service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY, archive_chunks
-from ..service_gateway.optimization.blackbox.sandbox import CommandResult, SandboxSpec
+from ..service_gateway.optimization.blackbox.sandbox_contract import CommandResult, SandboxSpec
 from .constants import EVENT_ERROR, EVENT_RESULT, EVENT_TERMINAL
 from .failure_events import failure_event
 from .isolated_runner import EVENT_PREFIX
