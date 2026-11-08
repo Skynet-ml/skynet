@@ -307,7 +307,18 @@ class SandboxPool:
             # Callers expect the error itself, not a group. Boxes catch their
             # own errors, so the group holds the producer or callback error.
             error = errors.exceptions[0]
+            for other in errors.exceptions[1:]:
+                logger.exception("SandboxPool.run raises its first error and drops this one", exc_info=other)
+        except BaseException:
+            # A caller cancel replaces the aclose error, so only the log keeps it.
+            if close_error is not None:
+                logger.exception(
+                    "The candidate iterator's aclose failed before run was cancelled", exc_info=close_error
+                )
+            raise
         if error is not None:
+            if close_error is not None:
+                logger.exception("The candidate iterator's aclose failed before another error", exc_info=close_error)
             # Raised outside the except block, so the error keeps its own
             # __cause__ and __context__ and does not get the group as context.
             raise error

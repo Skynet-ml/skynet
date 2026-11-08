@@ -1131,3 +1131,101 @@ async def test_iterator_error_with_a_failing_aclose_keeps_the_iterator_error(cap
         async with asyncio.timeout(DEADLINE):
             await SandboxPool({"fake": 1}).run(_FailThenCloseFails(), _work(_Tracker()), _Outcomes())
     assert any("aclose failed after an error or a cancel" in record.getMessage() for record in caplog.records)
+
+
+async def test_aclose_error_is_logged_when_on_outcome_fails(caplog: pytest.LogCaptureFixture) -> None:
+    """Raise the callback error when aclose failed first, and log the aclose error."""
+    release = asyncio.Event()
+
+    async def slow(env: SandboxEnvironment, candidate: int) -> int:
+        """Wait for the release, then return the candidate.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Returns:
+            The candidate.
+        """
+        await release.wait()
+        return candidate
+
+    async def broken(_outcome: BoxOutcome[int, object]) -> None:
+        """Fail on the outcome.
+
+        Args:
+            _outcome: The outcome of one box.
+
+        Raises:
+            KeyError: Always.
+        """
+        raise KeyError("callback")
+
+    run = asyncio.create_task(
+        SandboxPool({"fake": 1}).run(_CloseFails([0], stray_cancel=False), _work(_Tracker(), run=slow), broken)
+    )
+    await _settle()
+    release.set()
+    with caplog.at_level(logging.ERROR, logger="core.sandbox.pool"), pytest.raises(KeyError, match="callback"):
+        async with asyncio.timeout(DEADLINE):
+            await run
+    logged = [record.exc_info[1] for record in caplog.records if record.exc_info]
+    assert any(isinstance(error, RuntimeError) and str(error) == "close failed" for error in logged)
+
+
+async def test_aclose_error_is_logged_when_the_caller_cancels(caplog: pytest.LogCaptureFixture) -> None:
+    """Keep the caller's cancel when aclose failed first, and log the aclose error."""
+
+    async def hang(env: SandboxEnvironment, candidate: int) -> int:
+        """Wait forever.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Returns:
+            Never returns.
+        """
+        await asyncio.Event().wait()
+        return candidate
+
+    tracker = _Tracker()
+    run = asyncio.create_task(
+        SandboxPool({"fake": 1}).run(_CloseFails([0], stray_cancel=False), _work(tracker, run=hang), _Outcomes())
+    )
+    await _settle()
+    run.cancel()
+    with caplog.at_level(logging.ERROR, logger="core.sandbox.pool"), pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(DEADLINE):
+            await run
+    logged = [record.exc_info[1] for record in caplog.records if record.exc_info]
+    assert any(isinstance(error, RuntimeError) and str(error) == "close failed" for error in logged)
+    assert tracker.live == 0
+
+
+async def test_on_outcome_errors_in_one_step_raise_one_and_log_the_other(caplog: pytest.LogCaptureFixture) -> None:
+    """Raise one callback error when two fail in the same loop step, and log the other one."""
+    gate = asyncio.Event()
+    calls = 0
+
+    async def broken(outcome: BoxOutcome[int, object]) -> None:
+        """Wait until both callbacks run, then fail.
+
+        Args:
+            outcome: The outcome of one box.
+
+        Raises:
+            ValueError: Always.
+        """
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            gate.set()
+        await gate.wait()
+        raise ValueError(f"callback {outcome.candidate}")
+
+    with caplog.at_level(logging.ERROR, logger="core.sandbox.pool"), pytest.raises(ValueError) as raised:
+        async with asyncio.timeout(DEADLINE):
+            await SandboxPool({"fake": 2}).run(_numbers(2), _work(_Tracker()), broken)
+    logged = [str(record.exc_info[1]) for record in caplog.records if record.exc_info]
+    assert sorted([str(raised.value), *logged]) == ["callback 0", "callback 1"]
