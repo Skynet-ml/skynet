@@ -157,8 +157,9 @@ class RoleEnvironment:
     """The environment one role's box gets: the proposer or one target stage.
 
     ``network`` is ``None`` when the file sets no list, which keeps the role's
-    default (open egress for the proposer, offline plus the relay for a
-    target). An empty tuple means offline.
+    default: the relay and the package registries for the proposer (E57), and
+    the relay only for a target. An empty tuple means the relay only. For the
+    proposer, a list adds its hosts to the registries.
     """
 
     network: tuple[str, ...] | None = None

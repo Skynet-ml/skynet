@@ -25,6 +25,9 @@ command = "pip install -r requirements.txt"
 # Optional. A markdown file of plain-language illegal approaches. Judge models
 # enforce them.
 illegal = "docs/rules.md"
+# Optional. Extra hosts the proposer's box can reach, on top of the relay and
+# the package registries. [] means the relay only.
+network = ["docs.python.org"]
 
 [data]
 # Optional. A JSONL file of the run's cases. Omit [data] when the metric needs
@@ -126,6 +129,7 @@ stops the run.
 | --- | --- |
 | `[paths] editable` | The parent checks every version before it is scored or published. A path outside the approved editable paths fails the setup check. |
 | `[paths] protected` | The parent rejects a version that changes a protected path, in its patch or while its code runs. A write that the code undoes before it exits also counts. The rejection names the path and the rule, with secret values hidden. `optimize.toml` itself is always protected and hidden. |
+| `[proposer] network` | The proposer's box reaches the model relay and nothing else, except the hosts below. With no `network` key, it also reaches the package registries: the account's saved Python index (default `pypi.org` and `files.pythonhosted.org`) and `registry.npmjs.org`. A custom index replaces the PyPI hosts with the index's own host. `network = []` gives the relay only. `network = ["docs.python.org"]` gives the relay, the registries and that host. The run record shows the effective hosts under `roles`. |
 | `[setup] command` | Runs once on the starting commit, with package-registry network and no secrets. The box goes offline before any version runs. |
 | `instructions` | Not enforced. The agent reads the file in its brief. The scorer decides the score. |
 | `[proposer] illegal` | Enforced by judge models. See "Plain-language rules" below. |

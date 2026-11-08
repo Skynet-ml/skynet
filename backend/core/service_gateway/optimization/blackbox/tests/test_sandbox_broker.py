@@ -11,7 +11,7 @@ import pytest
 
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
-from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
+from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.exceptions import InfrastructureInterruptionError, ServiceError
 
 from ..remote_sandbox import RemoteSandboxRuntime, RemoteSandboxSession
@@ -135,6 +135,41 @@ def test_the_guest_route_never_reaches_a_package_registry() -> None:
     broker.close()
     assert runtime.sessions[0].close_calls == 1
     parent.close()
+
+
+def test_a_guest_box_reaches_only_the_hosts_the_parent_granted() -> None:
+    """Open a proposer box on granted registries, and refuse any host beyond them (E57)."""
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120)
+    broker.allow_guest_hosts(PROPOSER_REGISTRY_HOSTS)
+    payload = {"request_id": "proposer", "spec": {"lifetime_seconds": 60, "allowed_hosts": ["pypi.org", "pypi.org"]}}
+    opened = broker.handle("open", payload)
+    assert broker.handle("open", payload) == opened
+    assert runtime.specs[0].allowed_hosts == ("pypi.org",)
+    assert runtime.specs[0].network_disabled is False
+    assert runtime.specs[0].inject_headers == {}
+    for hosts in (["raw.githubusercontent.com"], ["pypi.org", "github.com"], "pypi.org", [1]):
+        with pytest.raises(ServiceError, match="network access"):
+            broker.handle("open", _open_payload(allowed_hosts=hosts))
+    with pytest.raises(ServiceError, match="different spec"):
+        broker.handle("open", {"request_id": "proposer", "spec": {"lifetime_seconds": 60}})
+    broker.handle("open", {"request_id": "offline", "spec": {"lifetime_seconds": 60}})
+    assert runtime.specs[1].network_disabled is True
+    assert runtime.specs[1].allowed_hosts == ()
+
+
+def test_an_empty_grant_keeps_every_guest_box_offline() -> None:
+    """Treat ``network = []`` as no hosts at all, never as open egress."""
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120)
+    broker.allow_guest_hosts(())
+    with pytest.raises(ServiceError, match="network access"):
+        broker.handle("open", _open_payload(allowed_hosts=["pypi.org"]))
+    broker.handle("open", _open_payload(allowed_hosts=[]))
+    assert runtime.specs[0].network_disabled is True
+    for hosts in (("*",), ("",), ("*.example.com",)):
+        with pytest.raises(ServiceError, match="named hosts"):
+            broker.allow_guest_hosts(hosts)
 
 
 def test_the_parent_box_reaches_only_funded_registries_and_carries_no_credentials() -> None:
