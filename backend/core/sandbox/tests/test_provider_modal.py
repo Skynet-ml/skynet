@@ -612,6 +612,45 @@ async def test_cancel_during_a_hung_create_passes_on_after_the_grace_time(
         await env.exec("true")
 
 
+async def test_cancel_during_start_does_not_wait_past_the_grace_time_for_a_hung_terminate(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pass a cancel on after the grace time while the terminate hangs, then finish it in the background."""
+    monkeypatch.setattr(modal_provider, "_CANCEL_GRACE_SEC", 0.05)
+    gate = asyncio.Event()
+    real_terminate = modal_provider._terminate
+
+    async def slow_terminate(sandbox: Any) -> None:
+        """Wait for the gate, then terminate.
+
+        Args:
+            sandbox: The Modal sandbox.
+        """
+        await gate.wait()
+        await real_terminate(sandbox)
+
+    monkeypatch.setattr(modal_provider, "_terminate", slow_terminate)
+    fake_modal.create_gate = asyncio.Event()
+    env = ModalEnvironment(_SPEC)
+    task = asyncio.create_task(env.start())
+    await fake_modal.create_entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    fake_modal.create_gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    box = _box(fake_modal)
+    assert not box.terminated
+    assert len(modal_provider._LATE_TERMINATES) == 1
+    gate.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert box.terminated
+    assert not modal_provider._LATE_TERMINATES
+    with pytest.raises(RuntimeError):
+        await env.exec("true")
+
+
 async def test_start_timeout_ends_start_while_the_create_hangs(
     fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -141,10 +141,11 @@ class ModalEnvironment(SandboxEnvironment):
 
         A cancel during the create waits for the create for at most
         ``_CANCEL_GRACE_SEC``, also through repeat cancels. A sandbox that
-        the create returns in that time is terminated before the cancel
-        passes on. A create that is still open after the grace time keeps a
-        callback that terminates its sandbox when it arrives, so no sandbox
-        leaks and the caller's start timeout stays bounded.
+        the create returns in that time gets a terminate, and the cancel
+        waits for that terminate for at most ``_CANCEL_GRACE_SEC`` more. A
+        create or terminate that is still open after its grace time goes on
+        in the background, so no sandbox leaks and the caller's start
+        timeout stays bounded.
 
         Raises:
             asyncio.CancelledError: The task was cancelled during the create.
@@ -163,7 +164,10 @@ class ModalEnvironment(SandboxEnvironment):
             if create.cancelled() or create.exception() is not None:
                 raise
             terminate = asyncio.ensure_future(_terminate(create.result()))
-            await _wait_through_cancels(terminate)
+            await _wait_through_cancels(terminate, _CANCEL_GRACE_SEC)
+            if not terminate.done():
+                _keep_late_terminate(terminate)
+                raise
             if not terminate.cancelled() and terminate.exception() is not None:
                 # The cancel must still reach the caller; the sweep can stop a leaked box.
                 logger.exception(
@@ -552,6 +556,15 @@ def _terminate_late_sandbox(create: asyncio.Future[Any]) -> None:
     except Exception:
         logger.exception("Could not stop a modal sandbox that arrived after a cancelled start.")
         return
+    _keep_late_terminate(terminate)
+
+
+def _keep_late_terminate(terminate: asyncio.Future[None]) -> None:
+    """Keep a background terminate alive until it ends, and log its error then.
+
+    Args:
+        terminate: The running terminate task.
+    """
     # The loop holds tasks only by weak reference, so keep this one until it ends.
     _LATE_TERMINATES.add(terminate)
     terminate.add_done_callback(_finish_late_terminate)
