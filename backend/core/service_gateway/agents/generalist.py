@@ -16,7 +16,7 @@ Phased exposure (the gate):
   ``profile_datasets``. A repository run gets ``validate_code`` without one.
 * On the Metric screen: the hand-off to the workspace coding agent
   (:mod:`.workspace_coder`), which reads a repository run's checkout.
-* No submit tool: every run optimizes a GitHub repository, and the wizard's
+* No submit tool: every run optimizes a repository, and the wizard's
   own Run button submits it.
 * Always available post-submit: ``cancel_job``, rename/pin.
 
@@ -904,12 +904,15 @@ class WizardState(TypedDict, total=False):
     is_private: bool
     task_objective: str
     task_background: str
-    # Always ``repo`` for a new run: every run optimizes a GitHub repository.
+    # Always ``repo`` for a new run: every run optimizes a repository.
     # Older runs may still carry ``dspy_program`` and a starting version.
     artifact_kind: str
     starting_version: str | dict[str, str]
-    # The repository the run optimizes, as ``owner/name``.
+    # The repository the run optimizes, as ``owner/name`` (GitLab adds subgroups).
     repository: str
+    # Host of ``repository``: ``github``, ``gitlab`` or ``bitbucket``. The
+    # user picks it in the repository picker; the agent only reads it.
+    repo_provider: str
     # True when the agent created ``repository`` through the create route.
     repo_created_by_skynet: bool
     # Whether the user linked a GitHub account; absent while the wizard does not know yet.
@@ -952,6 +955,8 @@ class WizardState(TypedDict, total=False):
 
 # The repository picker's own listing; it answers 409 when GitHub is not linked.
 GITHUB_REPOS_TOOL = "list_github_repositories_connectors_github_repos_get"
+# The picker's listing for GitLab and Bitbucket; ``provider`` names the host.
+HOST_REPOS_TOOL = "list_host_repositories_connectors"
 # The picker's "create a repository" route. The wizard marks a repository it
 # made this way, so the run request sends ``created_by_skynet``.
 GITHUB_CREATE_REPO_TOOL = "create_github_repository_connectors_github_repos_post"
@@ -1007,6 +1012,7 @@ _ALWAYS_TOOLS = frozenset(
         # Generalized wizard patch — any editable field, partial updates.
         "update_wizard_state",
         GITHUB_REPOS_TOOL,
+        HOST_REPOS_TOOL,
         GITHUB_CREATE_REPO_TOOL,
         "update_user_preferences",
         # Account settings. change_setting asks in Ask and Auto-safe;
@@ -1283,7 +1289,7 @@ def validate_wizard_screen(tool_name: str, kwargs: dict[str, Any], state: Wizard
 # agent can see what is already there: the budget is stored as cents, and the
 # metric screen needs the task and the data its code runs on.
 _SCREEN_SNAPSHOT_EXTRAS: dict[str, frozenset[str]] = {
-    "artifact": frozenset({"task_objective", "github_connected"}),
+    "artifact": frozenset({"task_objective", "github_connected", "repo_provider"}),
     "source": frozenset(
         {"task_objective", "artifact_kind", "dataset_ready", "dataset_columns", "input_fields", "expected_field"}
     ),
@@ -1329,7 +1335,7 @@ _SCREEN_ORDER: tuple[str, ...] = (
 # reach past the screen the user is on.
 _SCREEN_ALLOWED_TOOLS: dict[str, frozenset[str]] = {
     "brief": frozenset({"update_wizard_state"}),
-    "artifact": frozenset({"update_wizard_state", GITHUB_REPOS_TOOL, GITHUB_CREATE_REPO_TOOL}),
+    "artifact": frozenset({"update_wizard_state", GITHUB_REPOS_TOOL, HOST_REPOS_TOOL, GITHUB_CREATE_REPO_TOOL}),
     "source": frozenset(
         {
             "update_wizard_state",
@@ -1845,7 +1851,8 @@ def coding_agent_tools(
             ``wizard_patch``, so Continue judges the screen with it.
         lm: The language model of this turn; the coding agent runs on it.
         emit: Sends one stream event.
-        github_token: Returns the caller's GitHub token, or ``None``.
+        github_token: Returns the caller's token for the run's repository
+            host, or ``None``.
 
     Returns:
         The one tool on the Metric screen, unwrapped; empty on any other screen.
@@ -1863,6 +1870,8 @@ def coding_agent_tools(
         if notes:
             context["notes_from_earlier_screens"] = notes
         context["github_connected"] = current.get("github_connected")
+        if current.get("repo_provider"):
+            context["repo_provider"] = current["repo_provider"]
         result = await asyncio.to_thread(
             run_coding_agent, context, request.strip(), lm=lm, emit=emit, github_token=github_token
         )
@@ -2056,11 +2065,13 @@ Rules:
        the task in prose. NEVER leave the run unnamed.
     2. Task — set ``task_objective`` (what "better" means, in the
        user's words) and ``task_background`` (context). Every run
-       optimizes a GitHub repository: set ``repository``
-       (``owner/name``); ``artifact_kind`` is always ``repo`` and there
-       is no starting version. Call
+       optimizes a repository on GitHub, GitLab or Bitbucket: set
+       ``repository`` (``owner/name``); ``artifact_kind`` is always
+       ``repo`` and there is no starting version. Call
        ``list_github_repositories_connectors_github_repos_get`` to find
-       the user's repository. When the user has none, offer
+       the user's repository, or
+       ``list_host_repositories_connectors`` with
+       the ``repo_provider`` for GitLab and Bitbucket. When the user has none, offer
        ``create_github_repository_connectors_github_repos_post`` with a
        name they agree to; it sets the repository on the wizard. Get the
        repository and the objective from the user; never invent them.
@@ -2435,9 +2446,14 @@ SCREEN_FOCUS: dict[str, str] = {
         "accept in ``task_objective``; the screen is not complete until they accept one."
     ),
     "artifact": (
-        "Repository: every run optimizes a GitHub repository. Set ``repository`` as ``owner/name`` and "
-        "``artifact_kind`` ``repo``; there is no starting version. "
-        "When ``github_connected`` is true, find the repository the user names with "
+        "Repository: every run optimizes a repository on GitHub, GitLab or Bitbucket. Set ``repository`` as "
+        "``owner/name`` (GitLab can add subgroups) and ``artifact_kind`` ``repo``; there is no starting version. "
+        "The user picks the host in the picker, and ``repo_provider`` shows it; never change it. "
+        "When ``repo_provider`` is ``gitlab`` or ``bitbucket``, find the repository with "
+        "``list_host_repositories_connectors`` (pass ``repo_provider`` as ``provider`` and the name as ``search``), copy "
+        "its ``full_name``, and tell the user to connect that host on this screen when the listing says it "
+        "is not linked. Skynet creates new repositories only on GitHub. "
+        "When ``repo_provider`` is ``github`` or absent and ``github_connected`` is true, find the repository the user names with "
         "``list_github_repositories`` (pass its name as ``search``) and copy its ``full_name``. The search "
         "matches words in the name and the description. When it finds nothing, or the user describes the "
         'repository ("my CV site") instead of naming it, call it with no ``search`` and choose by name and '
@@ -3408,7 +3424,7 @@ async def _drive_generalist_agent(
             stream's own caller can resolve them.
         steer_key: Client-chosen key the user's mid-turn messages are posted
             under; ``None`` leaves the turn unsteerable.
-        github_token: Returns the caller's GitHub token, or ``None``; the
+        github_token: Returns the caller's repository host token, or ``None``; the
             Metric screen's coding agent reads a repository run with it.
 
     Returns:
@@ -3634,7 +3650,7 @@ async def run_generalist_agent(
             approvals are keyed to it so another account cannot resolve them.
         steer_key: Client-chosen key for messages the user sends while this
             turn runs; they reach the loop at its next step.
-        github_token: Returns the caller's GitHub token, or ``None``; the
+        github_token: Returns the caller's repository host token, or ``None``; the
             Metric screen's coding agent reads a repository run with it.
 
     Yields:

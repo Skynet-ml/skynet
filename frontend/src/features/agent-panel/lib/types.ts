@@ -26,11 +26,13 @@ export interface WizardState {
   is_private?: boolean;
   task_objective?: string;
   task_background?: string;
-  /** `"repo"` when the run optimizes a GitHub repository. */
+  /** `"repo"` when the run optimizes a repository. */
   artifact_kind?: OptimizerTarget;
   starting_version?: string | Record<string, string>;
   /** The repository a repository run optimizes, as `owner/name`. */
   repository?: string;
+  /** The host of `repository`; the user picks it, the agent only reads it. */
+  repo_provider?: "github" | "gitlab" | "bitbucket";
   /** The agent created `repository` on GitHub, so the run request marks it `created_by_skynet`. */
   repo_created_by_skynet?: boolean;
   /** Whether the user linked a GitHub account; unset until the wizard knows. */

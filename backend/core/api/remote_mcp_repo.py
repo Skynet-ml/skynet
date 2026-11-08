@@ -36,7 +36,8 @@ from ..billing.budgets import BudgetConflictError, BudgetError, BudgetService
 from ..billing.operation_pricing import json_fingerprint
 from ..billing.service import StripeBillingService
 from ..config import settings
-from ..connectors import github
+from ..connectors import github, repo_hosts
+from ..connectors.transport import label
 from ..connectors.vault import ConnectorVault
 from ..exceptions import ServiceError
 from ..local.cli_catalog import parse_subscription_model_id
@@ -199,24 +200,25 @@ def _feedback(
     }
 
 
-def _github_token(job_store: Any, username: str) -> str | None:
-    """Return the account's GitHub token, or ``None`` when GitHub is not connected.
+def _github_token(job_store: Any, username: str, provider: str = github.PROVIDER) -> str | None:
+    """Return the account's token for a repository host, or ``None`` when the host is not connected.
 
     Args:
         job_store: Store whose engine holds the connector vault.
         username: The account.
+        provider: The repository host.
 
     Returns:
         The access token, or ``None`` for an anonymous read of a public repository.
     """
     try:
-        return connector_secret(ConnectorVault(job_store.engine), username, github.PROVIDER).access_token
+        return connector_secret(ConnectorVault(job_store.engine), username, provider).access_token
     except DomainError:
         return None
 
 
 def repository_issues(job_store: Any, username: str, repo: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
-    """Check that the repository, its ref and its editable paths exist on GitHub.
+    """Check that the repository, its ref and its editable paths exist on the repository host.
 
     Args:
         job_store: Store whose engine holds the connector vault.
@@ -226,18 +228,26 @@ def repository_issues(job_store: Any, username: str, repo: dict[str, Any]) -> tu
     Returns:
         The issues, the notes, and a sample of the repository's top-level paths.
     """
-    token = _github_token(job_store, username)
+    provider = repo_hosts.provider_of(repo)
+    host = label(provider)
+    if provider == github.PROVIDER:
+        token = _github_token(job_store, username)
+    else:
+        token = _github_token(job_store, username, provider)
     notes: list[str] = []
     if token is None:
-        notes.append("GitHub is not connected to this account, so only a public repository can be read.")
+        notes.append(f"{host} is not connected to this account, so only a public repository can be read.")
     ref = repo.get("commit") or repo.get("branch") or ""
     try:
-        tree = github.tree_entries(token, repo["repository"], ref)
+        if provider == github.PROVIDER:
+            tree = github.tree_entries(token, repo["repository"], ref)
+        else:
+            tree = repo_hosts.host(provider).tree_entries(token, repo["repository"], ref)
     except DomainError as error:
         where = f" at '{ref}'" if ref else ""
-        issue = f"Cannot read {repo['repository']}{where} on GitHub ({error.code})."
+        issue = f"Cannot read {repo['repository']}{where} on {host} ({error.code})."
         if token is None:
-            issue += " For a private repository, connect GitHub in Skynet first."
+            issue += f" For a private repository, connect {host} in Skynet first."
         return [issue], notes, []
     paths = {entry["path"] for entry in tree["entries"]}
     top_level = sorted({path.split("/", 1)[0] for path in paths})[:_TREE_SAMPLE]
@@ -544,7 +554,10 @@ def build_request(spec: dict[str, Any]) -> BlackboxRunRequest:
         "target": {
             "kind": "repo",
             "setup_command": spec["repository"].get("setup_command"),
-            "repo": {key: spec["repository"].get(key) for key in ("repository", "branch", "commit", "editable_paths")},
+            "repo": {
+                **{key: spec["repository"].get(key) for key in ("repository", "branch", "commit", "editable_paths")},
+                **repo_hosts.git_kwargs(repo_hosts.provider_of(spec["repository"])),
+            },
         },
         "task_model_config": None,
         "reflection_model_config": _model_config(entries[0]),
@@ -815,7 +828,7 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
     @mcp.tool(name="repo_draft_set_repository", annotations=writes)
     def repo_draft_set_repository(
         draft_id: Annotated[str, Field(max_length=64)],
-        repository: Annotated[str, Field(description="GitHub repository as owner/name.")],
+        repository: Annotated[str, Field(description="Repository path: owner/name, or group/subgroup/name on GitLab.")],
         editable_paths: Annotated[
             list[str],
             Field(min_length=1, max_length=200, description="Files and folders the run may change; '.' is all."),
@@ -827,24 +840,28 @@ def register_repo_tools(mcp: FastMCP, http_client: Callable[[], httpx.Client], *
         setup_command: Annotated[
             str | None, Field(max_length=2000, description="Command that prepares the checkout; empty to infer it.")
         ] = None,
+        provider: Annotated[
+            Literal["github", "gitlab", "bitbucket"], Field(description="Host of the repository.")
+        ] = "github",
     ) -> dict[str, Any]:
-        """Set the GitHub repository, its branch or commit, and the paths the run may change.
+        """Set the repository on GitHub, GitLab or Bitbucket, its branch or commit, and the paths the run may change.
 
         Skynet checks that the repository and every editable path exist.
         """
         try:
             source = BlackboxRepoSource(
-                repository=repository, branch=branch, commit=commit, editable_paths=editable_paths
+                repository=repository, branch=branch, commit=commit, editable_paths=editable_paths, provider=provider
             )
         except ValidationError as error:
             raise ToolError("; ".join(_validation_issues(error))) from error
         part = {
             **source.model_dump(include={"repository", "branch", "commit", "editable_paths"}),
+            **repo_hosts.git_kwargs(source.provider),
             "setup_command": setup_command,
         }
 
         def check(spec: dict[str, Any], username: str) -> tuple[list[str], list[str], dict[str, Any]]:
-            """Check the repository on GitHub."""
+            """Check the repository on its host."""
             issues, notes, top_level = repository_issues(job_store, username, spec["repository"])
             return issues, notes, {"top_level_paths": top_level}
 

@@ -2053,6 +2053,8 @@ export type ConnectorProvider =
   | "google_drive"
   | "onedrive"
   | "github"
+  | "gitlab"
+  | "bitbucket"
   | "s3"
   | "gcs"
   | "azure_blob"
@@ -2066,6 +2068,15 @@ export type ConnectorProvider =
   | "langsmith"
   | "braintrust"
   | "notion";
+
+/** A host that Skynet can read, clone and publish a repository on. */
+export type RepoHost = "github" | "gitlab" | "bitbucket";
+
+/** Every repository host, in the order the picker shows them. */
+export const REPO_HOSTS: readonly RepoHost[] = ["github", "gitlab", "bitbucket"];
+
+/** Each repository host's brand name, the same in every language. */
+export const REPO_HOST_NAMES: Record<RepoHost, string> = { github: "GitHub", gitlab: "GitLab", bitbucket: "Bitbucket" };
 
 /** One row of a connector's browse listing: a folder to descend into or a file to import. */
 export interface ConnectorEntry {
@@ -2131,9 +2142,9 @@ export interface GithubRepository {
  * The linked account's repositories, most recently pushed first. A ``search``
  * written as ``owner/name`` also offers that public repository by itself.
  */
-export function listGithubRepositories(search: string) {
+export function listGithubRepositories(search: string, host: RepoHost = "github") {
   const params = new URLSearchParams({ search });
-  return request<{ repositories: GithubRepository[] }>(`/connectors/github/repos?${params}`);
+  return request<{ repositories: GithubRepository[] }>(`/connectors/${host}/repos?${params}`);
 }
 
 /** What a new repository is seeded with: the task as README.md, plus the scorer and cases when given. */
@@ -2162,11 +2173,25 @@ export function createGithubRepository(body: CreateGithubRepositoryRequest) {
 }
 
 /** A repository's branch names and its default branch. */
-export function listGithubBranches(repo: string) {
+export function listGithubBranches(repo: string, host: RepoHost = "github") {
   const params = new URLSearchParams({ repo });
   return request<{ default_branch: string | null; branches: string[] }>(
-    `/connectors/github/branches?${params}`,
+    `/connectors/${host}/branches?${params}`,
   );
+}
+
+/** One recent commit of a repository branch, for the commit picker. */
+export interface RepoCommit {
+  sha: string;
+  title: string;
+  date: string | null;
+}
+
+/** List the recent commits of `branch` (the default branch when empty). */
+export function listRepoCommits(repo: string, branch: string, host: RepoHost = "github") {
+  const params = new URLSearchParams({ repo });
+  if (branch) params.set("branch", branch);
+  return request<{ commits: RepoCommit[] }>(`/connectors/${host}/commits?${params}`);
 }
 
 /** One file or folder of a GitHub repository tree. */
@@ -2191,15 +2216,15 @@ export interface GithubFileResponse {
 }
 
 /** A repository's whole tree at a branch or commit id (empty for the default branch). */
-export function githubRepoTree(repo: string, ref: string) {
+export function githubRepoTree(repo: string, ref: string, host: RepoHost = "github") {
   const params = new URLSearchParams({ repo, branch: ref });
-  return request<GithubTreeResponse>(`/connectors/github/tree?${params}`);
+  return request<GithubTreeResponse>(`/connectors/${host}/tree?${params}`);
 }
 
 /** One repository file at a branch or commit id (empty for the default branch), read when it is opened. */
-export function githubRepoFile(repo: string, ref: string, path: string) {
+export function githubRepoFile(repo: string, ref: string, path: string, host: RepoHost = "github") {
   const params = new URLSearchParams({ repo, ref, path });
-  return request<GithubFileResponse>(`/connectors/github/file?${params}`);
+  return request<GithubFileResponse>(`/connectors/${host}/file?${params}`);
 }
 
 /** A short-lived token, API key and app id for opening the Google Picker as the caller. */

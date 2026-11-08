@@ -171,7 +171,7 @@ export function repoRunRequest(
     target: {
       kind: "repo",
       repo: {
-        provider: "github",
+        provider: repo.provider ?? "github",
         repository: repo.repository.trim(),
         branch: repo.branch.trim() || null,
         commit: repo.commit.trim() || null,

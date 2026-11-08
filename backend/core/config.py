@@ -439,6 +439,36 @@ class Settings(BaseSettings):
         alias="GITHUB_OAUTH_REDIRECT_URI",
         description="Absolute URL of this backend's /connectors/github/oauth/callback as registered on the GitHub app. Unset derives it from the incoming request.",
     )
+    gitlab_oauth_client_id: str | None = Field(
+        default=None,
+        alias="GITLAB_OAUTH_CLIENT_ID",
+        description="Application id of the gitlab.com OAuth application used by the GitLab connector. Unset hides 'Continue with GitLab'; users can still paste a personal access token.",
+    )
+    gitlab_oauth_client_secret: SecretStr | None = Field(
+        default=None,
+        alias="GITLAB_OAUTH_CLIENT_SECRET",
+        description="Secret of the gitlab.com OAuth application. The worker also needs it, because GitLab access tokens expire after two hours and the worker refreshes them.",
+    )
+    gitlab_oauth_redirect_uri: str | None = Field(
+        default=None,
+        alias="GITLAB_OAUTH_REDIRECT_URI",
+        description="Absolute URL of this backend's /connectors/gitlab/oauth/callback as registered on the GitLab application. Unset derives it from the incoming request.",
+    )
+    bitbucket_oauth_client_id: str | None = Field(
+        default=None,
+        alias="BITBUCKET_OAUTH_CLIENT_ID",
+        description="Key of the Bitbucket Cloud OAuth consumer used by the Bitbucket connector. Unset hides 'Continue with Bitbucket'; users can still paste a Bitbucket OAuth access token.",
+    )
+    bitbucket_oauth_client_secret: SecretStr | None = Field(
+        default=None,
+        alias="BITBUCKET_OAUTH_CLIENT_SECRET",
+        description="Secret of the Bitbucket Cloud OAuth consumer. The worker also needs it, because Bitbucket access tokens expire after two hours and the worker refreshes them.",
+    )
+    bitbucket_oauth_redirect_uri: str | None = Field(
+        default=None,
+        alias="BITBUCKET_OAUTH_REDIRECT_URI",
+        description="Absolute URL of this backend's /connectors/bitbucket/oauth/callback as registered on the Bitbucket consumer. Unset derives it from the incoming request.",
+    )
     microsoft_oauth_client_id: str | None = Field(
         default=None,
         alias="MICROSOFT_OAUTH_CLIENT_ID",

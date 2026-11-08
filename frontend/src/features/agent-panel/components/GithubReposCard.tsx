@@ -2,9 +2,10 @@
 
 import * as React from "react";
 
+import { REPO_HOST_NAMES, type RepoHost } from "@/shared/lib/api";
 import { formatMsg, msg } from "@/shared/lib/messages";
 import { StepRow } from "@/shared/ui/agent/activity-steps";
-import { GithubLogo, Lock } from "@/shared/ui/icons";
+import { GitBranch, GithubLogo, Lock } from "@/shared/ui/icons";
 import type { AgentToolCall } from "@/shared/ui/agent/types";
 
 interface Repo {
@@ -25,7 +26,21 @@ function parsed(value: unknown): unknown {
   }
 }
 
-/** The repositories a GitHub repos call returned, or null for a refusal or an error. */
+/** The host a repos call listed: the GitLab or Bitbucket route names it, the GitHub route does not. */
+export function reposHost(call: AgentToolCall): RepoHost {
+  const args = parsed(call.payload?.arguments);
+  const provider = args && typeof args === "object" ? (args as Record<string, unknown>).provider : null;
+  return provider === "gitlab" || provider === "bitbucket" ? provider : "github";
+}
+
+/** The title of a repos call's step line. */
+export function reposTitle(host: RepoHost): string {
+  return host === "github"
+    ? msg("agent.tool.github_repos.title")
+    : formatMsg("agent.tool.host_repos.title", { host: REPO_HOST_NAMES[host] });
+}
+
+/** The repositories a GitHub, GitLab or Bitbucket repos call returned, or null for a refusal or an error. */
 export function githubRepos(call: AgentToolCall): Repo[] | null {
   const result = parsed(call.payload?.result);
   const list =
@@ -47,13 +62,15 @@ export function githubRepos(call: AgentToolCall): Repo[] | null {
 }
 
 /**
- * The setup agent's look at the user's GitHub repositories, as one step
+ * The setup agent's look at the user's GitHub, GitLab or Bitbucket repositories, as one step
  * line: the search it ran and how many repositories came back. The line
  * opens to the repositories, private ones marked, each with its language
  * and description.
  */
 export function GithubReposCard({ call }: { call: AgentToolCall }) {
   const repos = githubRepos(call);
+  const host = reposHost(call);
+  const title = reposTitle(host);
   const args = parsed(call.payload?.arguments);
   const search =
     args && typeof args === "object" && typeof (args as Record<string, unknown>).search === "string"
@@ -69,11 +86,11 @@ export function GithubReposCard({ call }: { call: AgentToolCall }) {
   const detail = [search && `“${search}”`, count].filter(Boolean).join(" · ");
   return (
     <StepRow
-      icon={GithubLogo}
-      label={msg("agent.tool.github_repos.title")}
+      icon={host === "github" ? GithubLogo : GitBranch}
+      label={title}
       detail={detail ? <span dir="auto">{detail}</span> : undefined}
       status={failed ? "error" : call.status}
-      errorLabel={failed ? msg("agent.tool.github_repos.title") : undefined}
+      errorLabel={failed ? title : undefined}
     >
       {repos && repos.length > 0 ? (
         <ul className="flex flex-col gap-1.5">

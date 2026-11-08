@@ -491,6 +491,10 @@ const RENDERERS: Record<string, ToolRenderer> = {
     card: (call) => <GithubReposCard call={call} />,
   },
 
+  list_host_repositories_connectors: {
+    card: (call) => <GithubReposCard call={call} />,
+  },
+
   optimizer_catalog_optimizers_get: {
     card: (call) => <OptimizerCatalogCard call={call} />,
   },

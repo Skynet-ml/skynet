@@ -7,7 +7,7 @@ import {
   lockedCodeFiles,
   useWizardStateOptional,
 } from "@/features/agent-panel";
-import { githubRepoFile, githubRepoTree } from "@/shared/lib/api";
+import { githubRepoFile, githubRepoTree, type RepoHost } from "@/shared/lib/api";
 import { contractCheckMessage } from "@/shared/lib/i18n";
 import { msg } from "@/shared/lib/messages";
 import type { ContractCheckResponse } from "@/shared/types/unified-run";
@@ -32,27 +32,28 @@ import { WizardScreen } from "./WizardScreen";
 const AUTO_FIX_ROUNDS = 3;
 
 /**
- * The repository's checkout for the IDE's explorer, read from GitHub at the
+ * The repository's checkout for the IDE's explorer, read from its host at the
  * run's commit (or branch) as the run will clone it.
  *
  * Args:
  *   repository: The repository as `owner/name`.
  *   ref: The commit or branch; empty for the default branch.
+ *   host: The repository's host.
  *
  * Returns:
  *   The tree, fetched now, and a reader that fetches each file when it is opened.
  */
-function repoSource(repository: string, ref: string): RepoSource {
+function repoSource(repository: string, ref: string, host: RepoHost): RepoSource {
   const reads = new Map<string, ReturnType<RepoSource["read"]>>();
   const fetchFile = async (path: string): ReturnType<RepoSource["read"]> => {
-    const file = await githubRepoFile(repository, ref, path);
+    const file = await githubRepoFile(repository, ref, path, host);
     if (file.text !== null) return { text: file.text };
     return { issue: file.binary ? "binary" : file.too_large ? "too_large" : "missing" };
   };
   return {
     // A repository run's workspace is run.py and metric.py, nothing else.
     folder: repoFolderName(repository, new Set([RUN_FILE, METRIC_FILE])),
-    tree: githubRepoTree(repository, ref).then((tree) => indexRepoTree(tree.entries)),
+    tree: githubRepoTree(repository, ref, host).then((tree) => indexRepoTree(tree.entries)),
     read: (path) => {
       let read = reads.get(path);
       if (!read) {
@@ -125,9 +126,10 @@ export function MetricStep({ page, onBack }: { page: number; onBack: () => void 
   const repoDraft = task.repo && !repoIssue(task.repo) ? task.repo : null;
   const repoName = repoDraft?.repository.trim() ?? "";
   const repoRef = repoDraft ? repoDraft.commit.trim() || repoDraft.branch.trim() : "";
+  const repoHost = repoDraft?.provider ?? "github";
   const repoFiles = React.useMemo(
-    () => (repoName ? repoSource(repoName, repoRef) : null),
-    [repoName, repoRef],
+    () => (repoName ? repoSource(repoName, repoRef, repoHost) : null),
+    [repoName, repoRef, repoHost],
   );
 
   const setMetricCode = React.useCallback(

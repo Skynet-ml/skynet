@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from ....config import settings
+from ....connectors import repo_hosts
 from ....connectors.github_repo import RepoFetchError, fetch_snapshot, github_token
 from ....constants import TOKEN_SOURCE_MANAGED
 from ....models.common import ModelConfig
@@ -108,7 +109,11 @@ def serve_payload(
     stored = job_data["payload"]
     repo = stored["target"]["repo"]
     payload: dict[str, Any] = {
-        "repo": {"repository": repo["repository"], "commit": repo["commit"]},
+        "repo": {
+            "repository": repo["repository"],
+            "commit": repo["commit"],
+            **repo_hosts.git_kwargs(repo_hosts.provider_of(repo)),
+        },
         "patch": patch,
         "inputs": inputs,
         "token_source": stored.get("token_source") or TOKEN_SOURCE_MANAGED,
@@ -138,16 +143,20 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
     Raises:
         RepoFetchError: When the repository cannot be fetched at its commit.
     """
+    repo = payload["repo"]
+    provider = repo_hosts.provider_of(repo)
     token = None
     if engine is not None and owner:
         try:
-            token = github_token(engine, owner)
+            if provider == repo_hosts.DEFAULT_PROVIDER:
+                token = github_token(engine, owner)
+            else:
+                token = repo_hosts.host_token(engine, owner, provider)
         except RepoFetchError:
             token = None
     workdir = Path(tempfile.mkdtemp(prefix="repo-serve-"))
     try:
-        repo = payload["repo"]
-        snapshot = fetch_snapshot(repo["repository"], repo["commit"], token, workdir)
+        snapshot = fetch_snapshot(repo["repository"], repo["commit"], token, workdir, **repo_hosts.git_kwargs(provider))
         yield {**payload, REPO_SNAPSHOT_KEY: {"archive": str(snapshot.archive), "commit": snapshot.commit}}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

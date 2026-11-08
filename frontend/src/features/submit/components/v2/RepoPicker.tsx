@@ -7,15 +7,27 @@ import { Button } from "@/shared/ui/primitives/button";
 import { SearchField } from "@/shared/ui/search-field";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { InlineErrorRow } from "@/shared/ui/inline-error-row";
-import { listGithubRepositories, type GithubRepository } from "@/shared/lib/api";
+import { Bitbucket, GitLab } from "@/shared/ui/brand-marks";
+import { listGithubRepositories, type GithubRepository, type RepoHost } from "@/shared/lib/api";
 import { formatRelativeTime } from "@/shared/lib/formatters";
 import { msg } from "@/shared/lib/messages";
 import { cn } from "@/shared/lib/utils";
 
-import { REPO_NAME_PATTERN } from "../../lib/wizard-v2";
+import { isRepoPath } from "../../lib/wizard-v2";
 
-// Long enough that typing a whole owner/name asks GitHub once, not per key.
+// Long enough that typing a whole owner/name asks the host once, not per key.
 const LOOKUP_DELAY_MS = 400;
+
+/** The host's logo: GitHub's icon, or the GitLab or Bitbucket mark at ``size`` pixels. */
+export function HostMark({ host, size, className }: { host: RepoHost; size: number; className?: string }) {
+  if (host === "github") return <GithubLogo className={className} aria-hidden="true" />;
+  const Mark = host === "gitlab" ? GitLab.Mark : Bitbucket.Mark;
+  return (
+    <span className={cn("inline-flex items-center justify-center", className)} aria-hidden="true">
+      <Mark size={size} />
+    </span>
+  );
+}
 
 function VisibilityBadge({ repo }: { repo: GithubRepository }) {
   const Icon = repo.private ? Lock : Globe;
@@ -90,15 +102,17 @@ export function RepoRowsSkeleton() {
 
 /**
  * The linked account's repositories as a searchable list. Typing a full
- * ``owner/name`` the list lacks asks GitHub for it, so a public repository
+ * ``owner/name`` the list lacks asks the host for it, so a public repository
  * outside the account can still be chosen.
  */
 export function RepoPicker({
   value,
   onPick,
+  host = "github",
 }: {
   value: string;
   onPick: (repo: GithubRepository) => void;
+  host?: RepoHost;
 }) {
   const [repos, setRepos] = useState<GithubRepository[] | null>(null);
   const [failed, setFailed] = useState(false);
@@ -106,12 +120,13 @@ export function RepoPicker({
   const [search, setSearch] = useState("");
   const [offer, setOffer] = useState<GithubRepository | null>(null);
   // A chosen repository folds the list away until the user asks to change it.
-  const [browsing, setBrowsing] = useState(() => !REPO_NAME_PATTERN.test(value.trim()));
+  const [browsing, setBrowsing] = useState(() => !isRepoPath(value.trim(), host));
 
   useEffect(() => {
     let cancelled = false;
     setFailed(false);
-    listGithubRepositories("")
+    setRepos(null);
+    listGithubRepositories("", host)
       .then((res) => {
         if (!cancelled) setRepos(res.repositories);
       })
@@ -121,7 +136,7 @@ export function RepoPicker({
     return () => {
       cancelled = true;
     };
-  }, [attempt]);
+  }, [attempt, host]);
 
   const needle = search.trim().toLowerCase();
   const matches = useMemo(
@@ -129,14 +144,14 @@ export function RepoPicker({
     [repos, needle],
   );
   const listed = matches.some((repo) => repo.full_name.toLowerCase() === needle);
-  const lookup = repos !== null && REPO_NAME_PATTERN.test(search.trim()) && !listed;
+  const lookup = repos !== null && isRepoPath(search.trim(), host) && !listed;
 
   useEffect(() => {
     setOffer(null);
     if (!lookup) return;
     let cancelled = false;
     const timer = window.setTimeout(() => {
-      listGithubRepositories(search.trim())
+      listGithubRepositories(search.trim(), host)
         .then((res) => {
           const found = res.repositories.find((repo) => repo.full_name.toLowerCase() === needle);
           if (!cancelled) setOffer(found ?? null);
@@ -149,14 +164,14 @@ export function RepoPicker({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [lookup, search, needle]);
+  }, [lookup, search, needle, host]);
 
   const current = (repos ?? []).find((repo) => repo.full_name === value.trim()) ?? null;
 
   if (!browsing && value.trim()) {
     return (
       <div className="flex items-start gap-3 rounded-xl border border-border bg-background p-3">
-        <GithubLogo className="mt-0.5 size-5 shrink-0 text-[#3D2E22]" aria-hidden="true" />
+        <HostMark host={host} size={20} className="mt-0.5 size-5 shrink-0 text-[#3D2E22]" />
         {current ? (
           <RepoSummary repo={current} />
         ) : (
@@ -238,10 +253,7 @@ export function RepoPicker({
                       : "border-border bg-background hover:border-[#C8A882] hover:bg-muted/30",
                   )}
                 >
-                  <GithubLogo
-                    className="mt-0.5 size-4 shrink-0 text-muted-foreground"
-                    aria-hidden="true"
-                  />
+                  <HostMark host={host} size={16} className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
                   <RepoSummary repo={repo} />
                 </button>
               </li>

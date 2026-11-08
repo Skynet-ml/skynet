@@ -18,7 +18,7 @@ from pathlib import Path
 from ..api.errors import DomainError
 from ..brand import APP_NAME
 from .github import API_URL, PROVIDER, _headers
-from .github_repo import GITHUB_HOST, RepoFetchError, _git, git_auth_env
+from .github_repo import RepoFetchError, _git, git_auth_env, git_host
 from .transport import get_json, request
 
 COMMIT_AUTHOR = ["-c", f"user.name={APP_NAME}", "-c", "user.email=noreply@skynetml.com", "-c", "commit.gpgsign=false"]
@@ -105,6 +105,7 @@ def push_version(
     token: str | None,
     *,
     remote: str | None = None,
+    provider: str = "github",
 ) -> None:
     """Commit ``patch`` on top of ``commit`` and push it as a new branch.
 
@@ -114,17 +115,19 @@ def push_version(
         patch: ``git diff --binary`` output of the version.
         branch: New branch name.
         message: Commit message.
-        token: GitHub token; ``None`` for a local remote.
+        token: Host token; ``None`` for a local remote.
         remote: Push URL override, used by tests with a local repository.
+        provider: Repository host, see :data:`~.github_repo.GIT_HOSTS`.
 
     Raises:
         RepoPublishError: When the clone, the patch or the push fails.
     """
-    environment = git_auth_env(token)
     workdir = Path(tempfile.mkdtemp(prefix="app-publish-"))
     try:
+        origin, user = git_host(provider)
+        environment = git_auth_env(token, origin, user)
         _git(["init", "--quiet"], workdir, environment)
-        _git(["remote", "add", "origin", remote or f"{GITHUB_HOST}/{repository}.git"], workdir, environment)
+        _git(["remote", "add", "origin", remote or f"{origin}/{repository}.git"], workdir, environment)
         _git(["fetch", "--quiet", "--depth", "1", "origin", commit], workdir, environment)
         _git([*_NO_LFS, "-c", "advice.detachedHead=false", "checkout", "--quiet", "FETCH_HEAD"], workdir, environment)
         applied = subprocess.run(
@@ -170,6 +173,7 @@ def push_candidates(
     token: str | None,
     *,
     remote: str | None = None,
+    provider: str = "github",
 ) -> dict[str, str]:
     """Push each version to its own branch and move the best branch to one of them.
 
@@ -183,8 +187,9 @@ def push_candidates(
         versions: ``(version id, git diff --binary against commit)`` pairs.
             An empty patch puts the branch on ``commit`` itself.
         best_id: Id of the version ``skynet/best`` points at.
-        token: GitHub token; ``None`` for a local remote.
+        token: Host token; ``None`` for a local remote.
         remote: Push URL override, used by tests with a local repository.
+        provider: Repository host, see :data:`~.github_repo.GIT_HOSTS`.
 
     Returns:
         Each pushed branch, ``skynet/best`` included, mapped to its commit id.
@@ -198,11 +203,12 @@ def push_candidates(
         raise RepoPublishError("Two candidate versions have the same id.")
     if best_id not in {version_id for version_id, _ in versions}:
         raise RepoPublishError(f"The best version '{best_id}' is not one of the candidates.")
-    environment = git_auth_env(token)
     workdir = Path(tempfile.mkdtemp(prefix="app-candidates-"))
     try:
+        origin, user = git_host(provider)
+        environment = git_auth_env(token, origin, user)
         _git(["init", "--quiet"], workdir, environment)
-        _git(["remote", "add", "origin", remote or f"{GITHUB_HOST}/{repository}.git"], workdir, environment)
+        _git(["remote", "add", "origin", remote or f"{origin}/{repository}.git"], workdir, environment)
         _git(["fetch", "--quiet", "--depth", "1", "origin", commit], workdir, environment)
         date = _git(["log", "-1", "--format=%cI", "FETCH_HEAD"], workdir, environment).strip()
         dated = {**environment, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}

@@ -991,15 +991,16 @@ def create_generalist_agent_router(*, job_store=None) -> APIRouter:
         usage_sink: list = []
 
         def _github_token() -> str | None:
-            """Load the caller's GitHub token for the coding agent's repository reads.
+            """Load the caller's token for the run's repository host, for the coding agent's reads.
 
             Returns:
-                The token, or ``None`` when GitHub is not linked or the link expired.
+                The token, or ``None`` when the host is not linked or the link expired.
             """
             if engine is None:
                 return None
+            provider = str(wizard_state.get("repo_provider") or github.PROVIDER)
             try:
-                return connector_secret(ConnectorVault(engine), current_user.username, github.PROVIDER).access_token
+                return connector_secret(ConnectorVault(engine), current_user.username, provider).access_token
             except DomainError:
                 return None
 

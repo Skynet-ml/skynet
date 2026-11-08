@@ -19,7 +19,8 @@ from typing import Any
 import dspy
 
 from ...brand import APP_NAME
-from ...connectors import github
+from ...connectors import github, repo_hosts
+from ...connectors.transport import label
 from .conversation_react import ConversationReAct
 from .repo_browser import RepoBrowser
 
@@ -149,12 +150,13 @@ def open_repo(state: dict[str, Any], github_token: Callable[[], str | None] | No
 
     Args:
         state: The wizard snapshot with this turn's writes merged in.
-        github_token: Returns the caller's GitHub token, or ``None`` when it
-            has none; ``None`` when the caller cannot supply one.
+        github_token: Returns the caller's token for the run's repository
+            host, or ``None`` when it has none; ``None`` when the caller
+            cannot supply one.
 
     Returns:
         The browser, or ``None`` with the reason the agent cannot read the
-        repository. A failed GitHub read leaves the agent without the tools
+        repository. A failed host read leaves the agent without the tools
         rather than failing the turn.
     """
     if state.get("artifact_kind") != "repo":
@@ -162,21 +164,30 @@ def open_repo(state: dict[str, Any], github_token: Callable[[], str | None] | No
     repository = str(state.get("repository") or "").strip()
     if not repository:
         return None, "No repository is chosen yet."
-    if state.get("github_connected") is not True or github_token is None:
-        return None, "GitHub is not linked, so the repository cannot be read."
+    provider = str(state.get("repo_provider") or github.PROVIDER)
+    if provider not in repo_hosts.HOSTS:
+        return None, "The repository host is not supported."
+    host = label(provider)
+    # The wizard reports only the GitHub link; for another host the token lookup is the check.
+    if (provider == github.PROVIDER and state.get("github_connected") is not True) or github_token is None:
+        return None, f"{host} is not linked, so the repository cannot be read."
     try:
         token = github_token()
     except Exception as exc:  # a vault or database failure must not fail the whole hand-off
-        logger.info("Coding agent cannot load the GitHub token: %s", type(exc).__name__)
+        logger.info("Coding agent cannot load the %s token: %s", host, type(exc).__name__)
         token = None
     if not token:
-        return None, "GitHub is not linked, so the repository cannot be read."
+        return None, f"{host} is not linked, so the repository cannot be read."
     try:
-        tree = github.tree_entries(token, repository, "")
-    except Exception as exc:  # any GitHub failure leaves the agent without the repository, not the turn
+        if provider == github.PROVIDER:
+            tree = github.tree_entries(token, repository, "")
+        else:
+            tree = repo_hosts.host(provider).tree_entries(token, repository, "")
+    except Exception as exc:  # any host failure leaves the agent without the repository, not the turn
         logger.info("Coding agent cannot open %s: %s", repository, type(exc).__name__)
-        return None, f"GitHub refused to list {repository}."
+        return None, f"{host} refused to list {repository}."
     browser = RepoBrowser(
+        provider=provider,
         token=token,
         repository=repository,
         branch="",

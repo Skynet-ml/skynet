@@ -370,6 +370,7 @@ const TOOL_TITLES: Record<string, LocaleString> = {
   blackbox_engines_blackbox_engines_get: () => msg("agent.tool.blackbox_engines.title"),
   optimizer_catalog_optimizers_get: () => msg("agent.tool.optimizers.title"),
   list_github_repositories_connectors_github_repos_get: () => msg("agent.tool.github_repos.title"),
+  list_host_repositories_connectors: () => msg("agent.tool.host_repos.any_title"),
   serve_info_serve: () => msg("auto.features.agent.panel.lib.tool.meta.literal.74"),
   serve_pair_info_serve: () => msg("auto.features.agent.panel.lib.tool.meta.literal.75"),
   request_user_dataset_datasets_request_upload_post: () => msg(

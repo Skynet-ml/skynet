@@ -566,9 +566,9 @@ export interface BlackboxRepoSecret {
   allowed_hosts?: string[];
 }
 
-/** A GitHub repository optimized as a whole; each version is a patch against `commit`. */
+/** A GitHub, GitLab or Bitbucket repository optimized as a whole; each version is a patch against `commit`. */
 export interface BlackboxRepoSource {
-  provider?: "github";
+  provider?: "github" | "gitlab" | "bitbucket";
   repository: string;
   branch?: string | null;
   commit?: string | null;
