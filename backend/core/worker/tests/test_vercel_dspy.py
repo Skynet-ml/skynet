@@ -118,9 +118,18 @@ def test_remote_result_and_checkpoint_stream(tmp_path: Path, monkeypatch: pytest
     assert not (tmp_path.parent / "escaped.bin").exists()
 
 
-def _descriptor_payload(tmp_path: Path) -> dict[str, Any]:
-    """Build a run payload that carries only the parent's opaque sandbox descriptor."""
+def _descriptor_payload(tmp_path: Path, **extra: Any) -> dict[str, Any]:
+    """Build a run payload that carries the parent's opaque sandbox descriptor.
+
+    Args:
+        tmp_path: Checkpoint directory.
+        **extra: More payload keys, such as the proposer settings.
+
+    Returns:
+        The payload.
+    """
     return {
+        **extra,
         "_gepa_log_dir": str(tmp_path),
         "_budget_gateway_descriptor": {
             "url": "http://127.0.0.1:9876",
@@ -139,7 +148,9 @@ def test_the_parent_writes_the_codex_requirements_before_the_optimizer_starts(
     monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
     events: queue.Queue = queue.Queue()
 
-    vercel_dspy.run_vercel_dspy(_descriptor_payload(tmp_path), "job-req", events, "spawn")
+    vercel_dspy.run_vercel_dspy(
+        _descriptor_payload(tmp_path, proposer={"harness": "codex"}), "job-req", events, "spawn"
+    )
 
     assert session.steps[:2] == ["probe", "codex_requirements"]
     assert session.steps.index("codex_requirements") < session.steps.index("write_files")
@@ -156,7 +167,9 @@ def test_a_failed_codex_requirements_write_stops_the_run_before_the_optimizer(
     monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
     events: queue.Queue = queue.Queue()
 
-    vercel_dspy.run_vercel_dspy(_descriptor_payload(tmp_path), "job-req-fail", events, "spawn")
+    vercel_dspy.run_vercel_dspy(
+        _descriptor_payload(tmp_path, optimizer={"choice": "gepa", "proposer": {}}), "job-req-fail", events, "spawn"
+    )
 
     assert "optimizer" not in session.steps
     assert not session.files
@@ -164,6 +177,39 @@ def test_a_failed_codex_requirements_write_stops_the_run_before_the_optimizer(
     event = events.get_nowait()
     assert event["type"] == "error"
     assert "Codex cannot start" in json.dumps(event)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {},
+        {"proposer": {"harness": "pi"}},
+        {"proposer": {"harness": "codex", "host_cli": "codex"}},
+        {"optimizer": {"choice": "dspy_gepa", "proposer": {"harness": "codex"}}},
+        {"optimizer": {"choice": "gepa", "proposer": {"harness": "opencode"}}},
+    ],
+    ids=["no-proposer", "pi", "host-cli", "dspy", "unified-opencode"],
+)
+def test_a_run_without_a_sandbox_codex_proposer_skips_the_root_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: dict[str, Any]
+) -> None:
+    """Skip the root write when no Codex proposer starts in the box, so a read-only local box still runs."""
+    session = FakeSession()
+    session.requirements_error = AssertionError("the run must not write the Codex requirements")
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
+    events: queue.Queue = queue.Queue()
+
+    vercel_dspy.run_vercel_dspy(_descriptor_payload(tmp_path, **extra), "job-skip", events, "spawn")
+
+    assert "codex_requirements" not in session.steps
+    assert events.get_nowait()["type"] == "result"
+
+
+def test_a_setup_check_never_writes_the_codex_requirements() -> None:
+    """A setup check never runs the proposer, so it needs no root write."""
+    assert not vercel_dspy._starts_codex({"_preflight": True, "proposer": {"harness": "codex"}})
+    assert vercel_dspy._starts_codex({"proposer": {"harness": "codex"}})
+    assert vercel_dspy._starts_codex({"proposer": {}})
 
 
 def test_remote_preflight_never_reads_submitted_checkpoint_directory(

@@ -50,6 +50,9 @@ WORKSPACE_DIR = "/workspace"
 _TMPFS_MOUNTS = (
     f"{WORKSPACE_DIR}:rw,exec,nosuid,mode=1777,size=4g",
     "/tmp:rw,exec,nosuid,mode=1777,size=1g",
+    # Root-owned and 0755, so only a ``sudo`` command can write the Codex
+    # requirements file here; the box's own user cannot change it (SKY-389).
+    "/etc/codex:rw,noexec,nosuid,mode=0755,size=1m",
 )
 _PIDS_LIMIT = 1024
 _CLI_TIMEOUT_SECONDS = 60.0
