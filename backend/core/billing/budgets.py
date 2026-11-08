@@ -260,6 +260,15 @@ class BudgetService:
         """
         self._engine = engine
 
+    @property
+    def engine(self) -> Any:
+        """Return the application database engine that the ledger writes to.
+
+        Returns:
+            The SQLAlchemy engine this service was bound to.
+        """
+        return self._engine
+
     @contextmanager
     def _transaction(self, session: Session | None = None) -> Iterator[Session]:
         """Keep mutations atomic, optionally joining a caller's job-creation transaction.

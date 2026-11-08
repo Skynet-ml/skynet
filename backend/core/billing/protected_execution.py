@@ -147,10 +147,7 @@ def run_call_recorder(gateway: ModelGateway, owner_id: str) -> CallRecorder | No
         return None
     # The worker builds the gateway from the job store's engine, and engine.py
     # passes no store here, so the run-call store reuses the ledger's engine.
-    engine = getattr(gateway.runtime.service, "_engine", None)
-    if engine is None:
-        return None
-    return CallRecorder(PostgresRunCallStore(engine), owner_id, "", "")
+    return CallRecorder(PostgresRunCallStore(gateway.runtime.service.engine), owner_id, "", "")
 
 
 def bind_protected_sandbox(
