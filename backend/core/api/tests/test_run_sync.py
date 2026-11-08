@@ -11,11 +11,13 @@ import asyncio
 import base64
 import json
 import threading
+from types import SimpleNamespace
 from typing import Any
 
 import fakeredis
 import httpx
 import pytest
+from fakeredis import _basefakesocket
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
@@ -724,6 +726,10 @@ def test_import_is_rate_limited(
     hosted_store: _SQLiteJobStore, bundle: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Imports share the submission rate cap, so a refused import still counts toward it."""
+    # fakeredis reads the wall clock on every command, so a slow CI shard saw the
+    # window TTL count down mid-test (SKY-391). A fixed clock makes Retry-After exact.
+    clock = [1_000_000.0]
+    monkeypatch.setattr(_basefakesocket, "time", SimpleNamespace(time=lambda: clock[0]))
     redis = fakeredis.FakeStrictRedis(decode_responses=True)
     monkeypatch.setattr(rate_limit, "shared_redis_client", lambda: redis)
     monkeypatch.setattr(settings, "rate_limit_submissions_per_minute", 2)
@@ -731,6 +737,9 @@ def test_import_is_rate_limited(
     assert _import(hosted_store, bundle).status_code == 201
     resp = _import(hosted_store, bundle)
     assert resp.status_code == 429
-    # The window TTL counts down in real time, so a slow run can report 59 seconds.
-    assert resp.json()["detail"] in {t_en("rate_limit.exceeded", retry_after=s) for s in (59, 60)}
+    assert resp.json()["detail"] == t_en("rate_limit.exceeded", retry_after=60)
+    clock[0] += 2
+    resp = _import(hosted_store, bundle)
+    assert resp.status_code == 429
+    assert resp.json()["detail"] == t_en("rate_limit.exceeded", retry_after=58)
     assert _count(hosted_store, JobModel) == 1

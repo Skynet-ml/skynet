@@ -357,9 +357,24 @@ def test_coder_prompt_places_metric_secrets_and_candidate_mcp_servers() -> None:
     """Metric-only services go in [metric] services (E44); the candidate's MCP servers go in an mcp file (E46)."""
     prompt = " ".join(workspace_coder.CODER_PROMPT.split())
 
-    assert "List in ``[metric] services`` the services only the metric calls" in prompt
+    assert "list in each role's ``services`` every service the role calls" in prompt.lower()
     assert 'standard ``.mcp.json`` file and set ``mcp = "<path>"`` in ``[run]``' in prompt
     assert "[run] tools" not in prompt
+
+
+def test_coder_prompt_writes_secrets_only_as_placeholders() -> None:
+    """Services and MCP files hold ``${NAME}`` placeholders, never values, and the summary names the secrets (E56)."""
+    prompt = " ".join(workspace_coder.CODER_PROMPT.split())
+
+    assert "Write each API that a role calls as ``[services.<name>]``" in prompt
+    assert 'headers = { Authorization = "Bearer ${JUDGE_KEY}" }' in prompt
+    assert "Only http servers with a ``url`` are supported now" in prompt
+    assert "Put placeholders such as ``${MAPS_KEY}`` only in ``headers``." in prompt
+    assert "``env``" not in prompt
+    assert "Never write a secret value into any file, even when the user pastes one" in prompt
+    assert "tell the user to add the secret to the run" in prompt
+    assert "Name every secret the run needs in ``summary``" in prompt
+    assert "secrets = [" not in prompt
 
 
 def test_coder_prompt_writes_the_rules_into_files_and_their_paths_into_the_toml() -> None:
@@ -372,3 +387,13 @@ def test_coder_prompt_writes_the_rules_into_files_and_their_paths_into_the_toml(
     assert 'set ``illegal = "docs/rules.md"`` in ``[proposer]``' in prompt
     assert "[instructions]" not in prompt
     assert "[rules]" not in prompt
+
+
+def test_coder_prompt_writes_the_cases_into_a_jsonl_file_named_in_data() -> None:
+    """Cases the metric needs go in a hidden JSONL file named by [data] cases; with no cases, no [data] (E58, E40)."""
+    prompt = " ".join(workspace_coder.CODER_PROMPT.split())
+
+    assert 'one ``{"input": ..., "expected": ...}`` object on each line' in prompt
+    assert 'set ``cases = "data/cases.jsonl"`` in ``[data]``' in prompt
+    assert "hides the file from the agent and the candidate" in prompt
+    assert "write no ``[data]`` section" in prompt

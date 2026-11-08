@@ -59,12 +59,15 @@ from .models import (
     MonthlyActiveUserModel,
     OptimizationShareGrantModel,
     ProgressEventModel,
+    RunCallModel,
+    RunCandidateModel,
     RunFolderItemModel,
     UserModel,
     UserQuotaAuditModel,
     UserQuotaOverrideModel,
     UserStorageQuotaOverrideModel,
 )
+from .run_call_store import PostgresRunCallStore
 from .schema_lock import schema_bootstrap_lock
 from .usage import (
     StorageItem,
@@ -587,6 +590,7 @@ class RemoteDBJobStore:
         self._checkpoints = PostgresCheckpointBlobStore(self._engine)
         self._grid_pair_results = PostgresGridPairResultStore(self._engine)
         self._agent_runs = PostgresAgentRunStore(self._engine)
+        self._run_calls = PostgresRunCallStore(self._engine)
         parsed_url = urlparse(db_url)
         db_location = parsed_url.hostname or "<masked>"
         if parsed_url.port:
@@ -1246,6 +1250,8 @@ class RemoteDBJobStore:
             session.query(BlackboxAgentRunModel).filter(
                 BlackboxAgentRunModel.optimization_id == optimization_id
             ).delete()
+            session.query(RunCallModel).filter(RunCallModel.optimization_id == optimization_id).delete()
+            session.query(RunCandidateModel).filter(RunCandidateModel.optimization_id == optimization_id).delete()
             session.query(RunFolderItemModel).filter(RunFolderItemModel.optimization_id == optimization_id).delete()
             self._close_deleted_job_budgets(session, [optimization_id])
             self._delete_grid_pair_children(session, optimization_id)
@@ -1302,6 +1308,12 @@ class RemoteDBJobStore:
             synchronize_session=False
         )
         session.query(BlackboxAgentRunModel).filter(BlackboxAgentRunModel.optimization_id.in_(child_ids)).delete(
+            synchronize_session=False
+        )
+        session.query(RunCallModel).filter(RunCallModel.optimization_id.in_(child_ids)).delete(
+            synchronize_session=False
+        )
+        session.query(RunCandidateModel).filter(RunCandidateModel.optimization_id.in_(child_ids)).delete(
             synchronize_session=False
         )
         session.query(JobModel).filter(JobModel.optimization_id.in_(child_ids)).delete(synchronize_session=False)
@@ -1392,6 +1404,12 @@ class RemoteDBJobStore:
             session.query(BlackboxAgentRunModel).filter(
                 BlackboxAgentRunModel.optimization_id.in_(optimization_ids)
             ).delete(synchronize_session=False)
+            session.query(RunCallModel).filter(RunCallModel.optimization_id.in_(optimization_ids)).delete(
+                synchronize_session=False
+            )
+            session.query(RunCandidateModel).filter(RunCandidateModel.optimization_id.in_(optimization_ids)).delete(
+                synchronize_session=False
+            )
             session.query(RunFolderItemModel).filter(RunFolderItemModel.optimization_id.in_(optimization_ids)).delete(
                 synchronize_session=False
             )
@@ -1439,6 +1457,71 @@ class RemoteDBJobStore:
             The record, or ``None`` when no row exists.
         """
         return self._agent_runs.get(optimization_id, run_id)
+
+    def record_run_call(self, optimization_id: str, call: dict[str, Any], secrets: list[str]) -> int:
+        """Write one relay call of a run, with its secrets removed and its bodies cut.
+
+        Args:
+            optimization_id: Owning job id.
+            call: The call record the relay builds.
+            secrets: Every secret value the call could carry.
+
+        Returns:
+            The new call's ``seq``, which is also its cursor.
+        """
+        return self._run_calls.record_call(optimization_id, call, secrets)
+
+    def set_run_candidate_state(self, optimization_id: str, candidate_id: str, role: str, state: str) -> None:
+        """Insert or update one candidate's role and lifecycle state.
+
+        Args:
+            optimization_id: Owning job id.
+            candidate_id: The candidate within the run.
+            role: The candidate's role or stage.
+            state: ``running``, ``done`` or ``failed``.
+        """
+        self._run_calls.set_candidate_state(optimization_id, candidate_id, role, state)
+
+    def list_run_calls(
+        self, optimization_id: str, candidate_id: str, *, since: int = 0, limit: int = 100
+    ) -> list[dict]:
+        """Return a candidate's relay calls after the ``since`` cursor, oldest first.
+
+        Args:
+            optimization_id: Owning job id.
+            candidate_id: The candidate within the run.
+            since: The last call ``seq`` the caller holds.
+            limit: The most calls to return.
+
+        Returns:
+            The call records.
+        """
+        return self._run_calls.list_calls(optimization_id, candidate_id, since=since, limit=limit)
+
+    def get_run_candidate(self, optimization_id: str, candidate_id: str) -> dict | None:
+        """Return one candidate's summary, or ``None`` when the run has no such candidate.
+
+        Args:
+            optimization_id: Owning job id.
+            candidate_id: The candidate within the run.
+
+        Returns:
+            The candidate summary, or ``None``.
+        """
+        return self._run_calls.get_candidate(optimization_id, candidate_id)
+
+    def list_run_candidates(self, optimization_id: str, *, limit: int = 100, offset: int = 0) -> list[dict]:
+        """Return one page of the run's candidates with role, state, call count and cost so far.
+
+        Args:
+            optimization_id: Owning job id.
+            limit: The most candidates to return.
+            offset: The number of candidates to skip, in start order.
+
+        Returns:
+            One summary for each candidate on the page.
+        """
+        return self._run_calls.list_candidates(optimization_id, limit=limit, offset=offset)
 
     def save_gepa_checkpoint(
         self,
@@ -2094,6 +2177,8 @@ class RemoteDBJobStore:
             session.query(BlackboxAgentRunModel).filter(
                 BlackboxAgentRunModel.optimization_id == optimization_id
             ).delete()
+            session.query(RunCallModel).filter(RunCallModel.optimization_id == optimization_id).delete()
+            session.query(RunCandidateModel).filter(RunCandidateModel.optimization_id == optimization_id).delete()
             # A distributed grid's pair children belong to the discarded
             # attempt: drop them so the re-claimed parent fans out fresh rows
             # instead of "resuming" stale terminal children. Deleted

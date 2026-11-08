@@ -25,7 +25,7 @@ from gepa.oa.task import Task as UpstreamTask
 from core.billing.pricing import model_token_costs
 from core.billing.runtime import UsagePendingError
 from core.billing.usage_tags import USAGE_TAGS_HEADER
-from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
+from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_HOSTS
 from core.constants import PROGRESS_CANDIDATE, PROGRESS_CASE_SCORED
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxProposer, BlackboxTarget
@@ -391,7 +391,7 @@ def test_protected_managed_runtime_does_not_nest_upstream_jail(tmp_path: Path, m
 def test_repository_tree_and_rules_reach_every_repository_engine(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine_id: str
 ) -> None:
-    """Upload the packed tree chunk by chunk with its rules; the guest never gets registry network."""
+    """Upload the packed tree chunk by chunk with its rules; with no proposer hosts the box gets no registry."""
     monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
     chunks = [tmp_path / "tree.0000.b64", tmp_path / "tree.0001.b64"]
     for index, chunk in enumerate(chunks):
@@ -409,7 +409,7 @@ def test_repository_tree_and_rules_reach_every_repository_engine(
     task = Task("", cases=[{"id": "a"}, {"id": "b"}])
     run_native_engine(engine_id, task, EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
 
-    assert ctx.native_options.sandbox_runtime.spec.allowed_hosts == ()
+    assert ctx.native_options.sandbox_runtime.spec.allowed_hosts == ("gateway.example",)
     assert not set(ctx.native_options.sandbox_runtime.spec.allowed_hosts) & set(PACKAGE_REGISTRY_HOSTS)
     assert (session.files["repo-tree/tree.0000.b64"], session.files["repo-tree/tree.0001.b64"]) == ("chunk0", "chunk1")
     assert json.loads(session.files["native_input.json"])["repo"] == {
@@ -419,6 +419,53 @@ def test_repository_tree_and_rules_reach_every_repository_engine(
         "constrained": True,
     }
     assert session.files["repo_tree.py"] == Path(repo_tree.__file__).read_text()
+
+
+@pytest.mark.parametrize(
+    ("protected", "proposer_hosts", "expected"),
+    [
+        (True, list(PROPOSER_REGISTRY_HOSTS), PROPOSER_REGISTRY_HOSTS),
+        (False, list(PROPOSER_REGISTRY_HOSTS), tuple(sorted((*PROPOSER_REGISTRY_HOSTS, "gateway.example")))),
+        (True, [], ()),
+        (True, None, ()),
+        (False, None, ("gateway.example",)),
+    ],
+)
+def test_the_proposer_box_reaches_only_its_staged_hosts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected: bool,
+    proposer_hosts: list[str] | None,
+    expected: tuple[str, ...],
+) -> None:
+    """Open the proposer box on the staged hosts only, offline when there are none (E57).
+
+    A missing ``proposer_hosts`` key keeps the box offline except the model
+    route; it never falls back to open egress.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pinned source fixture.
+        protected: Whether the model goes through the parent's mailbox.
+        proposer_hosts: The staged hosts, or ``None`` for a snapshot without the key.
+        expected: The hosts the opened box may reach.
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    session.candidate = ""
+    runtime = FakeRuntime(session)
+    runtime.injects_headers = not protected
+    ctx = _context(tmp_path, runtime)
+    repo: dict[str, Any] = {"chunks": [], "editable_paths": ["."], "readonly_paths": []}
+    if proposer_hosts is not None:
+        repo["proposer_hosts"] = proposer_hosts
+    ctx.native_options = replace(ctx.native_options, repo=repo)
+    run_native_engine("gepa_repo", Task("", cases=[{"id": "a"}]), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+
+    assert runtime.spec is not None
+    assert runtime.spec.allowed_hosts == expected
+    assert runtime.spec.network_disabled is (not expected)
+    assert "raw.githubusercontent.com" not in runtime.spec.allowed_hosts
 
 
 @pytest.mark.parametrize("engine_id", ["gepa_repo", "best_of_n_repo"])

@@ -48,10 +48,6 @@ class ServiceSecretError(ValueError):
     """A service names a secret that has no value; the message names the service and the secret."""
 
 
-class UnknownConnectorError(ValueError):
-    """A ``[services.<name>]`` table names no catalog connector; the message lists the known names."""
-
-
 def plan_role(role: RoleEnvironment) -> RolePlan:
     """Work out one role's box from its parsed environment.
 
@@ -59,12 +55,16 @@ def plan_role(role: RoleEnvironment) -> RolePlan:
         role: The ``[proposer]`` or ``[target.<name>]`` environment.
 
     Returns:
-        The role's hosts, MCP servers and services.
+        The role's hosts, the servers of its own MCP file (E49) and services.
     """
-    return RolePlan(allowed_hosts=role.network, mcp_servers=mcp_servers(role.tools), services=role.services)
+    return RolePlan(
+        allowed_hosts=role.network,
+        mcp_servers=tuple(server.name for server in role.mcp_servers),
+        services=role.services,
+    )
 
 
-def plan_roles(constraints: RepoConstraints) -> dict[str, object]:
+def plan_roles(constraints: RepoConstraints, *, proposer_hosts: tuple[str, ...]) -> dict[str, object]:
     """Describe every role's plan as JSON for the run's environment record.
 
     A target's box is offline except for the relay, whatever its ``network``
@@ -72,30 +72,17 @@ def plan_roles(constraints: RepoConstraints) -> dict[str, object]:
 
     Args:
         constraints: The repository's parsed ``optimize.toml``.
+        proposer_hosts: The hosts the proposer's box reaches besides the
+            relay, after the registry default applies (E57).
 
     Returns:
         ``{"proposer": plan, "targets": {name: plan}}``.
     """
     targets = {name: replace(plan_role(stage), allowed_hosts=()) for name, stage in constraints.targets.items()}
     return {
-        "proposer": plan_role(constraints.proposer).record(),
+        "proposer": replace(plan_role(constraints.proposer), allowed_hosts=proposer_hosts).record(),
         "targets": {name: plan.record() for name, plan in targets.items()},
     }
-
-
-def mcp_servers(tools: Collection[str]) -> tuple[str, ...]:
-    """Pick the tool entries that name a catalog MCP server, in file order.
-
-    Any other entry is a harness built-in, so a server that is not listed never
-    reaches the role's harness.
-
-    Args:
-        tools: The role's ``tools`` list.
-
-    Returns:
-        The distinct catalog server names.
-    """
-    return tuple(name for name in dict.fromkeys(tools) if name in CONNECTORS)
 
 
 def host_allowed(host: str, allowed: Collection[str]) -> bool:
@@ -135,11 +122,11 @@ def unenforceable_hosts(allowed: Collection[str]) -> list[str]:
 def service_environment(name: str, spec: ServiceSpec, secrets: Mapping[str, str]) -> dict[str, str]:
     """Build one service's environment from only the secrets it names.
 
-    A service is a connector in the catalog: ``[services.maps]`` is the
-    ``maps`` connector, and no sidecar process, command or image runs for it.
+    The secrets are the ``${NAME}`` placeholders of its headers (E53); no
+    sidecar process, command or image runs for it.
 
     Args:
-        name: The ``[services.<name>]`` table name, a connector name.
+        name: The ``[services.<name>]`` table name.
         spec: Its declaration.
         secrets: Every secret this run has, by name.
 
@@ -147,32 +134,29 @@ def service_environment(name: str, spec: ServiceSpec, secrets: Mapping[str, str]
         The named secrets, and nothing else.
 
     Raises:
-        UnknownConnectorError: When the name is not a connector.
         ServiceSecretError: When a named secret has no value.
     """
-    if name not in CONNECTORS:
-        raise UnknownConnectorError(f"Service {name} is not a connector; known: {', '.join(CONNECTORS)}.")
     missing = [secret for secret in spec.secrets if not secrets.get(secret)]
     if missing:
         raise ServiceSecretError(f"Service {name} needs the secret {missing[0]}, which has no value.")
     return {secret: secrets[secret] for secret in spec.secrets}
 
 
-def probe_connector(name: str, send: Callable[[str, Mapping[str, str]], bool]) -> bool:
+def probe_connector(host: str, send: Callable[[str, Mapping[str, str]], bool]) -> bool:
     """Check that one service's connector answers, with the key the parent holds.
 
     The parent sends the probe, so the key never enters a box.
 
     Args:
-        name: The service's connector name.
+        host: The connector's catalog host, such as ``mapstools.googleapis.com``.
         send: Sends one request to the URL with the headers, and returns
             whether the connector answered as healthy.
 
     Returns:
-        ``False`` when the name is not a connector, Skynet holds no key for
+        ``False`` when the host is not in the catalog, Skynet holds no key for
         it, or ``send`` says no or raises.
     """
-    connector = CONNECTORS.get(name)
+    connector = CONNECTORS.get(host)
     if connector is None:
         return False
     try:
