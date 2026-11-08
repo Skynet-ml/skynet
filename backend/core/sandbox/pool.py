@@ -75,10 +75,18 @@ class TrialFingerprintError(RuntimeError):
     """Say that a trial's config differs from the config saved for its key."""
 
 
+@dataclass(frozen=True)
+class TrialClaim:
+    """Give the attempt number of a claim and the earlier attempts that an interruption ended."""
+
+    attempt: int
+    interrupted: int = 0
+
+
 class TrialStore(Protocol):
     """Store the durable trial rows of a job. The pool calls it from a thread."""
 
-    def claim_trial(self, job_id: str, trial_key: str, fingerprint: str, worker_id: str) -> int | None:
+    def claim_trial(self, job_id: str, trial_key: str, fingerprint: str, worker_id: str) -> TrialClaim | None:
         """Claim a registered trial row when it is pending or retryable_failed.
 
         Args:
@@ -88,7 +96,8 @@ class TrialStore(Protocol):
             worker_id: The worker that claims the row.
 
         Returns:
-            The new attempt number, or None when the row is not claimable.
+            The new attempt number and the row's count of interrupted
+            attempts, or None when the row is not claimable.
 
         Raises:
             TrialFingerprintError: The saved fingerprint differs.
@@ -105,6 +114,7 @@ class TrialStore(Protocol):
         *,
         result_ref: Any = None,
         error: str | None = None,
+        interrupted: bool = False,
     ) -> bool:
         """Write the end state of a running attempt.
 
@@ -115,6 +125,8 @@ class TrialStore(Protocol):
             status: ``succeeded``, ``retryable_failed`` or ``failed``.
             result_ref: A JSON value that points to the result.
             error: The error text of a failed attempt.
+            interrupted: Whether a cancel ended the attempt; the row then
+                counts one more interrupted attempt.
 
         Returns:
             True when the row was running this attempt and now has the status.
@@ -461,7 +473,9 @@ class SandboxPool:
         the row and matches the ``:attempt-N`` key across restarts. A failed
         attempt goes to ``retryable_failed`` only when the retry policy
         retries its error and attempts are left; the default policy never
-        retries, so the row goes to ``failed`` (SKY-406 D3, D10).
+        retries, so the row goes to ``failed`` (SKY-406 D3, D10). A cancelled
+        attempt goes to ``retryable_failed`` under every policy, so a resume
+        runs it again.
 
         Args:
             box_key: The candidate's operation key, which is the trial key.
@@ -475,19 +489,45 @@ class SandboxPool:
         Raises:
             TrialFingerprintError: The saved fingerprint differs.
             LookupError: The job has no row for the key.
+            asyncio.CancelledError: The run was cancelled; the row is back in
+                the queue first.
         """
         fingerprint = trials.fingerprint(candidate)
         while True:
-            attempt = await asyncio.to_thread(
+            # A cancel during the claim can leave the row running with no
+            # attempt here to write back; requeue_for_resume resets it.
+            claim = await asyncio.to_thread(
                 trials.store.claim_trial, trials.job_id, box_key, fingerprint, trials.worker_id
             )
-            if attempt is None:
+            if claim is None:
                 return None
+            attempt = claim.attempt
             try:
                 result = await self._attempt(attempt_key(box_key, attempt), candidate=candidate, work=work)
                 result_ref = trials.result_ref(result) if trials.result_ref is not None else None
+            except asyncio.CancelledError:
+                # A pod shutdown, a user cancel or a failed sibling is a Skynet
+                # interruption, not a failure of the trial, and Skynet pays for
+                # it (SKY-406 D3). So the row goes back to the queue under every
+                # policy and the attempt does not use a retry of the policy. The
+                # shield lets the write end while the cancel goes on.
+                try:
+                    await asyncio.shield(
+                        self._finish_trial(
+                            trials,
+                            box_key,
+                            attempt,
+                            TrialStatus.RETRYABLE_FAILED,
+                            error="interrupted before the attempt ended",
+                            interrupted=True,
+                        )
+                    )
+                except Exception:
+                    logger.exception("Could not return interrupted trial %s to the queue; a resume resets it", box_key)
+                raise
             except Exception as exc:
-                retry = attempt < self.retry_policy.max_attempts and self.retry_policy.should_retry(exc)
+                used = attempt - claim.interrupted
+                retry = used < self.retry_policy.max_attempts and self.retry_policy.should_retry(exc)
                 status = TrialStatus.RETRYABLE_FAILED if retry else TrialStatus.FAILED
                 error = f"{type(exc).__name__}: {exc}"[:TRIAL_ERROR_MAX_CHARS]
                 await self._finish_trial(trials, box_key, attempt, status, error=error)
@@ -507,6 +547,7 @@ class SandboxPool:
         *,
         result_ref: Any = None,
         error: str | None = None,
+        interrupted: bool = False,
     ) -> None:
         """Write the end state of an attempt; log when the row was not this attempt's.
 
@@ -517,6 +558,7 @@ class SandboxPool:
             status: The end state.
             result_ref: A JSON value that points to the result.
             error: The error text of a failed attempt.
+            interrupted: Whether a cancel ended the attempt.
         """
         written = await asyncio.to_thread(
             functools.partial(
@@ -527,6 +569,7 @@ class SandboxPool:
                 status,
                 result_ref=result_ref,
                 error=error,
+                interrupted=interrupted,
             )
         )
         if not written:

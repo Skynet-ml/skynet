@@ -41,7 +41,7 @@ from ..constants import (
     TQDM_KEY_PREFIX,
     WORKER_RESTART_CAUSE,
 )
-from ..sandbox.pool import CLAIMABLE_TRIAL_STATUSES, TrialFingerprintError, TrialStatus
+from ..sandbox.pool import CLAIMABLE_TRIAL_STATUSES, TrialClaim, TrialFingerprintError, TrialStatus
 from ..worker.checkpoint_compat import CheckpointCompatibilityError, validate_checkpoint
 from .agent_run_store import PostgresAgentRunStore
 from .base import JobRecord, LogEntryRecord, ProgressEventRecord
@@ -567,7 +567,7 @@ class PostgresSandboxTrialStore:
                     f"job {job_id}: the config of trials {changed} differs from the saved config"
                 )
 
-    def claim_trial(self, job_id: str, trial_key: str, fingerprint: str, worker_id: str) -> int | None:
+    def claim_trial(self, job_id: str, trial_key: str, fingerprint: str, worker_id: str) -> TrialClaim | None:
         """Claim a pending or retryable_failed row and count one more attempt.
 
         Args:
@@ -577,7 +577,8 @@ class PostgresSandboxTrialStore:
             worker_id: The worker that claims the row.
 
         Returns:
-            The new attempt number, or None when the row is not claimable.
+            The new attempt number and the row's count of interrupted
+            attempts, or None when the row is not claimable.
 
         Raises:
             TrialFingerprintError: The saved fingerprint differs.
@@ -606,15 +607,15 @@ class PostgresSandboxTrialStore:
             "now": datetime.now(UTC),
         }
         with self._session_factory() as session, session.begin():
-            attempt = session.execute(
+            claimed = session.execute(
                 text(
                     "UPDATE sandbox_trials SET status = :running, attempt = attempt + 1, "
-                    f"claimed_by = :worker, updated_at = :now WHERE {match} RETURNING attempt"
+                    f"claimed_by = :worker, updated_at = :now WHERE {match} RETURNING attempt, interrupted"
                 ),
                 params,
-            ).scalar_one_or_none()
-            if attempt is not None:
-                return int(attempt)
+            ).one_or_none()
+            if claimed is not None:
+                return TrialClaim(attempt=int(claimed.attempt), interrupted=int(claimed.interrupted))
             saved_fingerprint = session.execute(
                 text("SELECT fingerprint FROM sandbox_trials WHERE optimization_id = :job AND trial_key = :key"),
                 params,
@@ -636,6 +637,7 @@ class PostgresSandboxTrialStore:
         *,
         result_ref: Any = None,
         error: str | None = None,
+        interrupted: bool = False,
     ) -> bool:
         """Write the end state of a running attempt.
 
@@ -646,10 +648,20 @@ class PostgresSandboxTrialStore:
             status: ``succeeded``, ``retryable_failed`` or ``failed``.
             result_ref: A JSON value that points to the result.
             error: The error text of a failed attempt.
+            interrupted: Whether a cancel ended the attempt; the row then
+                counts one more interrupted attempt.
 
         Returns:
             True when the row was running this attempt and now has the status.
         """
+        values: dict[Any, Any] = {
+            SandboxTrialModel.status: TrialStatus(status).value,
+            SandboxTrialModel.result_ref: result_ref,
+            SandboxTrialModel.error: error,
+            SandboxTrialModel.updated_at: datetime.now(UTC),
+        }
+        if interrupted:
+            values[SandboxTrialModel.interrupted] = SandboxTrialModel.interrupted + 1
         with self._session_factory() as session, session.begin():
             updated = (
                 session.query(SandboxTrialModel)
@@ -659,15 +671,7 @@ class PostgresSandboxTrialStore:
                     SandboxTrialModel.attempt == attempt,
                     SandboxTrialModel.status == TrialStatus.RUNNING.value,
                 )
-                .update(
-                    {
-                        SandboxTrialModel.status: TrialStatus(status).value,
-                        SandboxTrialModel.result_ref: result_ref,
-                        SandboxTrialModel.error: error,
-                        SandboxTrialModel.updated_at: datetime.now(UTC),
-                    },
-                    synchronize_session=False,
-                )
+                .update(values, synchronize_session=False)
             )
         return updated == 1
 
@@ -693,6 +697,7 @@ class PostgresSandboxTrialStore:
                     "fingerprint": row.fingerprint,
                     "status": row.status,
                     "attempt": row.attempt,
+                    "interrupted": row.interrupted,
                     "result_ref": row.result_ref,
                     "error": row.error,
                     "claimed_by": row.claimed_by,
@@ -2280,6 +2285,27 @@ class RemoteDBJobStore:
                 # Workers claim only their own version's jobs; a pinned image carries
                 # the optimizer, so the current workers can run it.
                 job.code_version = self._current_code_version  # type: ignore[assignment]
+            # A hard crash leaves its trials running, and a claim takes only
+            # pending and retryable_failed rows, so the resume would skip them.
+            # This reset is safe here: the job is terminal or its lease expired,
+            # the budget generation is fenced, and no reserved or pending budget
+            # usage is left, so no worker of the old generation still runs paid
+            # work. A late write of an old attempt cannot land, because
+            # finish_trial matches the attempt number and the running status.
+            # Skynet pays for the crash (SKY-406 D3), so the attempt counts as
+            # interrupted and does not use a retry of the policy.
+            session.query(SandboxTrialModel).filter(
+                SandboxTrialModel.optimization_id == optimization_id,
+                SandboxTrialModel.status == TrialStatus.RUNNING.value,
+            ).update(
+                {
+                    SandboxTrialModel.status: TrialStatus.RETRYABLE_FAILED.value,
+                    SandboxTrialModel.interrupted: SandboxTrialModel.interrupted + 1,
+                    SandboxTrialModel.error: "interrupted: the worker stopped before the attempt ended",
+                    SandboxTrialModel.updated_at: datetime.now(UTC),
+                },
+                synchronize_session=False,
+            )
             job.status = "pending"  # type: ignore[assignment]
             job.claimed_by = None  # type: ignore[assignment]
             job.claimed_at = None  # type: ignore[assignment]

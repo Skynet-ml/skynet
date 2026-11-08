@@ -18,6 +18,7 @@ from core.sandbox.pool import (
     BoxWork,
     DurableTrials,
     SandboxPool,
+    TrialClaim,
     TrialFingerprintError,
     TrialStatus,
 )
@@ -1248,10 +1249,13 @@ class _MemoryTrials:
         Args:
             rows: The fingerprint and status of each trial key.
         """
-        self.rows = {key: {"fingerprint": fp, "status": status, "attempt": 0} for key, (fp, status) in rows.items()}
+        self.rows = {
+            key: {"fingerprint": fp, "status": status, "attempt": 0, "interrupted": 0}
+            for key, (fp, status) in rows.items()
+        }
         self.finished: list[tuple[str, int, TrialStatus, object]] = []
 
-    def claim_trial(self, job_id: str, trial_key: str, fingerprint: str, worker_id: str) -> int | None:
+    def claim_trial(self, job_id: str, trial_key: str, fingerprint: str, worker_id: str) -> TrialClaim | None:
         """Claim a claimable row and count one more attempt.
 
         Args:
@@ -1261,7 +1265,8 @@ class _MemoryTrials:
             worker_id: The worker.
 
         Returns:
-            The new attempt number, or None when the row is not claimable.
+            The new attempt number and the interrupted count, or None when
+            the row is not claimable.
 
         Raises:
             TrialFingerprintError: The saved fingerprint differs.
@@ -1273,7 +1278,7 @@ class _MemoryTrials:
             return None
         row["status"] = TrialStatus.RUNNING
         row["attempt"] += 1
-        return row["attempt"]
+        return TrialClaim(attempt=row["attempt"], interrupted=row["interrupted"])
 
     def finish_trial(
         self,
@@ -1284,6 +1289,7 @@ class _MemoryTrials:
         *,
         result_ref: object = None,
         error: str | None = None,
+        interrupted: bool = False,
     ) -> bool:
         """Write the end state of the running attempt.
 
@@ -1294,6 +1300,7 @@ class _MemoryTrials:
             status: The end state.
             result_ref: The result reference.
             error: The error text.
+            interrupted: Whether a cancel ended the attempt.
 
         Returns:
             True when the row was running this attempt.
@@ -1302,6 +1309,7 @@ class _MemoryTrials:
         if row["attempt"] != attempt or row["status"] != TrialStatus.RUNNING:
             return False
         row["status"] = status
+        row["interrupted"] += int(interrupted)
         self.finished.append((trial_key, attempt, status, result_ref if error is None else error))
         return True
 
@@ -1464,3 +1472,77 @@ async def test_durable_trials_need_a_stable_key() -> None:
         await SandboxPool({"fake": 1}).run(
             _numbers(1), _work(_Tracker()), _Outcomes(), trials=_trials(_MemoryTrials({}))
         )
+
+
+async def test_durable_trials_cancel_returns_the_trial_and_resume_runs_only_it() -> None:
+    """Put a cancelled trial back in the queue, and run only it on resume, with no retry used."""
+    hung = asyncio.Event()
+
+    async def hang_on_one(env: SandboxEnvironment, candidate: int) -> int:
+        """Return the candidate, but wait for ever on candidate 1.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Returns:
+            The candidate.
+        """
+        if candidate == 1:
+            hung.set()
+            await asyncio.Event().wait()
+        return candidate
+
+    others_done = asyncio.Event()
+    done: list[int] = []
+
+    async def record(outcome: BoxOutcome[int, object]) -> None:
+        """Record a finished trial, and say when both other trials are done.
+
+        Args:
+            outcome: The outcome of one box.
+        """
+        done.append(outcome.candidate)
+        if len(done) == 2:
+            others_done.set()
+
+    store = _MemoryTrials({f"t-{n}": ("fp", TrialStatus.PENDING) for n in range(3)})
+    run = asyncio.create_task(
+        SandboxPool({"fake": 3}).run(
+            _numbers(3), _work(_Tracker(), run=hang_on_one), record, key=lambda n: f"t-{n}", trials=_trials(store)
+        )
+    )
+    async with asyncio.timeout(DEADLINE):
+        await hung.wait()
+        await others_done.wait()
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+    assert store.rows["t-1"]["status"] == TrialStatus.RETRYABLE_FAILED
+    assert store.rows["t-1"]["interrupted"] == 1
+
+    async def flaky(env: SandboxEnvironment, candidate: int) -> int:
+        """Fail every time.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Raises:
+            SandboxTransientError: Always.
+        """
+        raise SandboxTransientError("flake")
+
+    store.finished.clear()
+    tracker = _Tracker()
+    policy = RetryPolicy(max_retries=1, wait_min=0, wait_max=0)
+    async with asyncio.timeout(DEADLINE):
+        await SandboxPool({"fake": 3}, retry_policy=policy).run(
+            _numbers(3), _work(tracker, run=flaky), _Outcomes(), key=lambda n: f"t-{n}", trials=_trials(store)
+        )
+    # One retry is allowed; the interrupted attempt 1 does not use it.
+    assert [(key, attempt, status) for key, attempt, status, _ref in store.finished] == [
+        ("t-1", 2, TrialStatus.RETRYABLE_FAILED),
+        ("t-1", 3, TrialStatus.FAILED),
+    ]
+    assert tracker.created == 2

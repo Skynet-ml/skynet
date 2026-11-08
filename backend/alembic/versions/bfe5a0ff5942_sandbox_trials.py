@@ -17,7 +17,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """Create the trials table and its claim index idempotently."""
+    """Create the trials table, its interrupted column and its claim index idempotently."""
     op.execute(
         """
         CREATE TABLE IF NOT EXISTS sandbox_trials (
@@ -26,6 +26,7 @@ def upgrade() -> None:
             fingerprint VARCHAR(128) NOT NULL,
             status VARCHAR(16) NOT NULL DEFAULT 'pending',
             attempt INTEGER NOT NULL DEFAULT 0,
+            interrupted INTEGER NOT NULL DEFAULT 0,
             result_ref JSONB,
             error TEXT,
             claimed_by VARCHAR(255),
@@ -37,6 +38,9 @@ def upgrade() -> None:
         )
         """
     )
+    # A preview database can hold the table from an earlier build of this
+    # revision, without the interrupted column.
+    op.execute("ALTER TABLE sandbox_trials ADD COLUMN IF NOT EXISTS interrupted INTEGER NOT NULL DEFAULT 0")
     op.execute("CREATE INDEX IF NOT EXISTS ix_sandbox_trials_job_status ON sandbox_trials (optimization_id, status)")
 
 

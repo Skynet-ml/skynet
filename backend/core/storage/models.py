@@ -1531,7 +1531,8 @@ class SandboxTrialModel(Base):
     runs the trial's box and writes ``succeeded``, ``retryable_failed`` or
     ``failed`` when the attempt ends. ``attempt`` is the number of the last
     claimed attempt, the ``N`` of the ``<trial_key>:attempt-N`` operation key.
-    ``fingerprint`` identifies the trial's config: a resume with another
+    ``interrupted`` counts the attempts that a cancel or a crash ended; they do
+    not use a retry of the policy. ``fingerprint`` identifies the trial's config: a resume with another
     config for the same key fails. Rows go with their job via the cascading
     foreign key.
     """
@@ -1552,6 +1553,7 @@ class SandboxTrialModel(Base):
     fingerprint: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    interrupted: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     result_ref: Mapped[Any | None] = mapped_column(JSON_STORE, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     claimed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
