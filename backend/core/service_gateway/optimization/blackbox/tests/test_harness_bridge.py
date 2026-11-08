@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -601,7 +602,7 @@ def test_guard_cli_answers_codex_hooks_and_js_checks_and_logs_only_tool_and_kind
 
 
 def test_read_refusals_skips_lines_the_agent_broke(tmp_path: Path) -> None:
-    """Skip a line that is not JSON, a non-object, and an entry without a string tool and kind."""
+    """Skip a line that is not JSON, too deep to parse, a non-object, or without a string tool and kind."""
     log = tmp_path / harness_bridge.GUARD_DIR / "refusals.jsonl"
     log.parent.mkdir()
     lines = [
@@ -611,6 +612,7 @@ def test_read_refusals_skips_lines_the_agent_broke(tmp_path: Path) -> None:
         json.dumps(["Read", "config"]),
         json.dumps({"tool": "Read"}),
         json.dumps({"tool": 3, "kind": "config"}),
+        "[" * 5000,
         json.dumps({"tool": "Read", "kind": "config"}),
     ]
     log.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -619,6 +621,56 @@ def test_read_refusals_skips_lines_the_agent_broke(tmp_path: Path) -> None:
         {"tool": "Bash", "kind": "scoring"},
         {"tool": "Read", "kind": "config"},
     ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd . && cd . && cd . && cd . && cd data && cat cases.jsonl",
+        "cd {work} && cd {work} && cd {work} && cd {work} && cd {work}/data && cat cases.jsonl",
+        "pushd . && pushd . && pushd . && pushd . && pushd data && cat cases.jsonl",
+    ],
+    ids=["five-cd", "absolute-cd", "pushd"],
+)
+def test_guard_refuses_more_directory_changes_than_it_can_follow(tmp_path: Path, command: str) -> None:
+    """Refuse a call with more cd or pushd steps than the guard follows, in the check and the CLI."""
+    session = tmp_path / "session"
+    harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
+    policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
+    command = command.format(work=tmp_path / "work")
+    with pytest.raises(ValueError, match="directory changes"):
+        harness_bridge.guard_check(json.loads(policy_file.read_text()), "Bash", {"command": command})
+    denied = _guard("hook", policy_file, {"tool_name": "Bash", "tool_input": {"command": command}})
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_guard_still_follows_four_directory_changes(tmp_path: Path) -> None:
+    """Resolve a hidden path behind the largest number of cd steps the guard follows."""
+    command = "cd . && cd . && cd . && cd data && cat cases.jsonl"
+    assert harness_bridge.guard_check(_policy(tmp_path), "Bash", {"command": command}) == "scoring"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo " + "w " * 40_000,
+        "cd a && cd b && cd c && " + " ".join(f"w{i}" for i in range(2_000)),
+        "cat $X/" + "/".join(["a"] * 40),
+    ],
+    ids=["too-long", "too-many-checks", "too-deep-after-expansion"],
+)
+def test_guard_refuses_a_call_above_its_cost_caps_fast(tmp_path: Path, command: str) -> None:
+    """Refuse a call the guard cannot check well inside the hook timeout, and answer fast."""
+    session = tmp_path / "session"
+    harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
+    policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
+    with pytest.raises(ValueError):
+        harness_bridge.guard_check(json.loads(policy_file.read_text()), "Bash", {"command": command})
+    started = time.monotonic()
+    denied = _guard("hook", policy_file, {"tool_name": "Bash", "tool_input": {"command": command}})
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    # The hook timeout is 10 s; the CLI start-up is most of this time.
+    assert time.monotonic() - started < 3
 
 
 _NODE = shutil.which("node")

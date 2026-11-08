@@ -390,7 +390,13 @@ _GUARD_HOME_RE = re.compile(r"\$\{HOME\}|\$HOME\b|(?<![^\s;|&()<>=:'\"`])~(?=/|$
 # expansion the guard cannot resolve, such as ``${PWD:-x}`` or ``$(pwd -P)``.
 _GUARD_DYNAMIC_PREFIX = frozenset("$)}`")
 _GUARD_SHELL_DEPTH = 3
+# A hook that the harness kills at its timeout lets the call run. These caps
+# keep the worst call the guard accepts far below that timeout; a call above a
+# cap is refused.
 _GUARD_MAX_BASES = 4
+_GUARD_MAX_TEXT = 64_000
+_GUARD_MAX_CHECKS = 8_000
+_GUARD_MAX_PARTS = 32
 # One check function shared by the Pi extension and the OpenCode plugin. It
 # asks this module for the verdict, so the matching lives in one place.
 _GUARD_JS_CHECK = """import {{ execFileSync }} from "node:child_process";
@@ -536,6 +542,9 @@ def _dynamic_match(text: str, hashes: dict[str, str], fold: bool) -> str | None:
         if not after_expansion and not (run.startswith("~") and not run.startswith("~/")):
             continue
         parts = [part for part in run.split("/") if part not in ("", ".")]
+        # The check below is quadratic in the parts of one run.
+        if len(parts) > _GUARD_MAX_PARTS:
+            raise ValueError("path after an expansion too deep to check")
         for start in range(len(parts)):
             for end in range(start + 1, len(parts) + 1):
                 key = "/".join(parts[start:end])
@@ -642,6 +651,9 @@ def _guard_candidates(
             name in _GUARD_COMMAND_KEYS | _GUARD_BASE_KEYS | _GUARD_PATH_KEYS or "path" in name or "file" in name
         ):
             texts.append(value)
+            # Checked before the shell parse, which is the slow step on a long command.
+            if sum(map(len, texts)) > _GUARD_MAX_TEXT:
+                raise ValueError("tool call too long to check")
         if "*** Begin Patch" in value:
             yield from _GUARD_PATCH_RE.findall(value)
         if name in _GUARD_COMMAND_KEYS:
@@ -668,7 +680,8 @@ def guard_check(policy: dict[str, Any], tool: str, tool_input: Any) -> str | Non
         The hidden kind the call names, or ``None`` to let it run.
 
     Raises:
-        ValueError: When the policy has no hashes, so the guard cannot answer.
+        ValueError: When the policy has no hashes, or the call is above a
+            cost cap, so the guard cannot answer in time.
     """
     hashes = policy.get("hashes")
     # A session gets a guard only when it has hidden paths, so an empty table is a broken policy.
@@ -685,11 +698,16 @@ def guard_check(policy: dict[str, Any], tool: str, tool_input: Any) -> str | Non
         kind = _dynamic_match(text, hashes, fold)
         if kind:
             return kind
+    if len(named) > _GUARD_MAX_BASES:
+        raise ValueError("too many directory changes to check")
     # A later cd is relative to an earlier one, so each one extends every known directory.
     bases = list(roots)
-    for directory in named[:_GUARD_MAX_BASES]:
+    for directory in named:
         bases += [os.path.normpath(Path(base, directory)) for base in bases]
         bases = list(dict.fromkeys(bases))
+    candidates = list(dict.fromkeys(candidates))
+    if len(bases) * sum(1 + candidate.count("/") for candidate in candidates) > _GUARD_MAX_CHECKS:
+        raise ValueError("tool call too large to check")
     for candidate in candidates:
         kind = _hidden_match(candidate, roots, bases, hashes, fold)
         if kind:
@@ -852,7 +870,8 @@ def read_refusals(session_dir: Path) -> list[dict[str, str]]:
     for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             entry = json.loads(line)
-        except ValueError:
+        # Deeply nested brackets make the parser raise RecursionError, not ValueError.
+        except (ValueError, RecursionError):
             continue
         if isinstance(entry, dict) and isinstance(entry.get("tool"), str) and isinstance(entry.get("kind"), str):
             refusals.append({"tool": entry["tool"], "kind": entry["kind"]})
