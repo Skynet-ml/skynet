@@ -147,7 +147,8 @@ def _validate_network(spec: SandboxSpec, caps: EnvironmentCapabilities) -> None:
     """
     if spec.network_disabled and (spec.inject_headers or spec.allowed_hosts):
         raise SandboxSpecError("A sandbox with no network cannot allow hosts or inject headers.")
-    if not set(spec.inject_headers) <= set(spec.allowed_hosts):
+    # An empty allowlist means open egress, which reaches every injection host.
+    if spec.allowed_hosts and not set(spec.inject_headers) <= set(spec.allowed_hosts):
         raise SandboxSpecError("Header injection is allowed only for hosts in allowed_hosts.")
     if spec.inject_headers and not caps.injects_headers:
         raise SandboxSpecError(f"The {caps.name} sandbox does not inject egress headers.")

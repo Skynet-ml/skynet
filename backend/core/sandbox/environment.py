@@ -182,7 +182,8 @@ class SandboxEnvironment(ABC):
         """
         if policy.disabled and policy.allowed_hosts:
             raise SandboxSpecError("A sandbox with no network cannot allow hosts.")
-        if not policy.disabled and not set(self.spec.inject_headers) <= set(policy.allowed_hosts):
+        # An empty allowlist means open egress, which reaches every injection host.
+        if policy.allowed_hosts and not set(self.spec.inject_headers) <= set(policy.allowed_hosts):
             raise SandboxSpecError("The policy must keep every host that receives injected headers.")
         if policy == self._network_policy:
             return
@@ -225,10 +226,12 @@ class SandboxEnvironment(ABC):
         started = time.monotonic()
         failures = 0
         while True:
+            # Docker semantics: a probe counts by the time it starts, not when it ends.
+            probe_started = time.monotonic()
             result = await self.exec(config.command, timeout_sec=config.timeout_sec)
             if result.ok:
                 return
-            if time.monotonic() - started < config.start_period_sec:
+            if probe_started - started < config.start_period_sec:
                 await asyncio.sleep(config.start_interval_sec)
                 continue
             failures += 1

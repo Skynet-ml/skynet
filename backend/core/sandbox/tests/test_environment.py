@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -35,6 +36,7 @@ from core.sandbox import (
     resolve_resources,
     validate_spec,
 )
+from core.sandbox import environment as environment_module
 
 from .fake_provider import FAKE_CAPABILITIES, InMemorySandbox
 
@@ -241,6 +243,11 @@ def test_rejects_contradictory_network_specs(spec_fields: dict, message: str) ->
         validate_spec(SandboxSpec(lifetime_seconds=60, **spec_fields), VERCEL_CAPABILITIES)
 
 
+def test_open_egress_allows_header_injection() -> None:
+    """Accept header injection when an empty allowlist leaves egress open."""
+    validate_spec(SandboxSpec(lifetime_seconds=60, inject_headers={"a.example": {"x": "1"}}), VERCEL_CAPABILITIES)
+
+
 def test_rejects_unsupported_network_features() -> None:
     """Reject header injection and network modes that the provider lacks."""
     caps = EnvironmentCapabilities(name="plain")
@@ -283,6 +290,35 @@ async def test_healthcheck_ignores_failures_in_the_start_period() -> None:
         config = HealthcheckConfig(command="check", start_period_sec=60, start_interval_sec=0, retries=1)
         await env.healthcheck(config)
         assert len(env.commands) == 6
+
+
+async def test_healthcheck_start_period_uses_the_probe_start_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip a probe that starts in the start period, even when it ends after it."""
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(environment_module, "time", SimpleNamespace(monotonic=lambda: clock.now))
+
+    class SlowProbe(InMemorySandbox):
+        async def exec(self, command: str, **kwargs) -> ExecResult:
+            """Fail every probe after it runs for its full timeout.
+
+            Args:
+                command: The shell command.
+                **kwargs: The exec options.
+
+            Returns:
+                A failed result.
+            """
+            self.commands.append(command)
+            clock.now += kwargs["timeout_sec"]
+            return ExecResult(1, stderr="timed out")
+
+    async with SlowProbe(_spec()) as env:
+        config = HealthcheckConfig(
+            command="check", start_period_sec=10, timeout_sec=30, retries=1, interval_sec=0, start_interval_sec=0
+        )
+        with pytest.raises(HealthcheckError, match="1 times"):
+            await env.healthcheck(config)
+        assert env.commands == ["check", "check"]
 
 
 async def test_healthcheck_error_reports_the_last_stderr() -> None:
@@ -341,13 +377,21 @@ async def test_set_network_policy_applies_once_and_skips_no_change() -> None:
 
 
 async def test_set_network_policy_keeps_header_injection_hosts() -> None:
-    """Reject a policy that drops a host which receives injected headers."""
+    """Reject an allowlist that drops a host which receives injected headers."""
     spec = SandboxSpec(lifetime_seconds=60, allowed_hosts=("a.example",), inject_headers={"a.example": {"x": "1"}})
     async with InMemorySandbox(spec) as env:
         with pytest.raises(SandboxSpecError, match="injected headers"):
-            await env.set_network_policy(NetworkPolicy())
+            await env.set_network_policy(NetworkPolicy(allowed_hosts=("b.example",)))
         await env.disable_network()
         assert env.network_policy.disabled
+
+
+async def test_set_network_policy_allows_open_egress_with_header_injection() -> None:
+    """Accept an open-egress policy on a sandbox that injects headers."""
+    spec = SandboxSpec(lifetime_seconds=60, allowed_hosts=("a.example",), inject_headers={"a.example": {"x": "1"}})
+    async with InMemorySandbox(spec) as env:
+        await env.set_network_policy(NetworkPolicy())
+        assert env.network_policy == NetworkPolicy()
 
 
 async def test_set_network_policy_needs_dynamic_policy_support() -> None:
