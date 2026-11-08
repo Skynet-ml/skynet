@@ -95,12 +95,26 @@ visible role also names stays visible. For example, one `.mcp.json` for
 it. The `instructions` file, the `[proposer] illegal` file and the
 `[run] illegal` file always stay visible.
 
-The file is refused when one of these visible paths lies inside the hidden
-scoring paths (a `[metric] files` path, the exploits folder, the reference
-or the cases file): the `instructions` file, an `illegal` file of
-`[proposer]`, `[run]` or a `[target.<name>]`, the `mcp` file of one of those
-roles, the `[run] entry` file, or an editable path. The agent's tree leaves
-out everything inside a hidden path, so such a file would be stripped.
+`optimize.toml` is always hidden, also when a visible setting names it. The
+file is refused in these cases:
+
+- A visible setting names a hidden path or a path inside one. The visible
+  settings are the `instructions` file, an `illegal` file of `[proposer]`,
+  `[run]` or a `[target.<name>]`, and the `mcp` file of one of those roles.
+  The hidden paths here are `optimize.toml`, a `[metric] files` path, the
+  exploits folder, the reference and the cases file.
+- The `[run] entry` names a file that is in the hidden list or inside one
+  of its paths. This includes `optimize.toml`, the `[metric] illegal` file
+  and the `[metric] mcp` file.
+- An editable path is in the hidden list or inside one of its paths. This
+  also includes `optimize.toml`, the `[metric] illegal` file and the
+  `[metric] mcp` file.
+
+An `mcp` file that a visible role also names is not hidden, so the
+`[run] entry` and the editable paths may name it. The agent's tree leaves
+out everything inside a hidden path, and the brief names the entry and the
+editable paths. So these refusals keep every hidden path out of the tree's
+rule files and out of the brief.
 
 The file is also refused when a hidden path is a symlink, lies inside a
 symlinked folder, or holds a symlink or a hard link to a file outside it.
