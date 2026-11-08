@@ -304,6 +304,8 @@ def verify_pending(ident, value):
     if status is None or status >= 300:
         # The resend route answers 200 but sends nothing within 60 s of the last code.
         time.sleep(61)
+        # Read the inbox again: a late sign-up email can arrive during the wait, and its code is not the new one.
+        seen = set(mail_ids(email, inbox_auth()))
         status, _ = curl(f"{app}/api/email-verify/request", body={"email": email})
         print("code request: HTTP", status)
         code = email_code(email, seen)
