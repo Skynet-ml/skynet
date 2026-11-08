@@ -22,6 +22,7 @@ from ..config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, app_env
 from ..exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
 from ..i18n_en import t_en
 from ..local.cli_catalog import CliProvider, parse_subscription_model_id
+from ..storage.run_call_store import call_candidate_key
 from .budgets import BudgetError, BudgetInsufficientError
 from .byok_upstreams import (
     OPENROUTER,
@@ -56,7 +57,7 @@ from .protected_credentials import (
 from .remote_evaluator import RemoteEvaluatorBroker, RemoteEvaluatorTransportError
 from .runtime import BudgetRuntime, ProviderFailedError, UsagePendingError
 from .signals import BudgetReached
-from .usage_tags import USAGE_TAGS_HEADERS, header_tags
+from .usage_tags import LANE_KEY, USAGE_TAGS_HEADERS, header_tags
 
 if TYPE_CHECKING:
     # Type-only: the worker relay imports billing modules, so a runtime import could cycle.
@@ -929,9 +930,10 @@ class ModelGateway:
         recorder = self.recorder
         if recorder is None:
             return dispatch()
-        candidate = header_tags(headers).get("candidate")
+        tags = header_tags(headers)
+        candidate = tags.get("candidate")
         if candidate:
-            recorder = recorder.bind(candidate_id=candidate)
+            recorder = recorder.bind(candidate_id=call_candidate_key(candidate, tags.get(LANE_KEY)))
         secret_values = [token, self._route_keys.get(token, "")]
         if route is not None:
             kind, target, recorder = "model", route.model, recorder.bind(role=route.role)

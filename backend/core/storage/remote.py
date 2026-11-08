@@ -35,6 +35,7 @@ from ..constants import (
     PAYLOAD_OVERVIEW_TOTAL_PAIRS,
     PROGRESS_CANDIDATE,
     PROGRESS_LANE_STARTED,
+    PROGRESS_REJECTED,
     STRUCTURAL_PROGRESS_EVENTS,
     TQDM_KEY_PREFIX,
     WORKER_RESTART_CAUSE,
@@ -68,7 +69,7 @@ from .models import (
     UserQuotaOverrideModel,
     UserStorageQuotaOverrideModel,
 )
-from .run_call_store import PostgresRunCallStore
+from .run_call_store import PROGRAM_EVENT_KEY, PostgresRunCallStore, event_candidate_key
 from .schema_lock import schema_bootstrap_lock
 from .usage import (
     StorageItem,
@@ -3099,16 +3100,21 @@ class RemoteDBJobStore:
 
         Args:
             optimization_id: Job that recorded the version's calls.
-            message: Event name; only ``candidate`` events change a state.
+            message: Event name; ``candidate`` events and GEPA program
+                ``rejected`` events change a state.
             metrics: The event's payload, with ``candidate_id`` and ``score``.
         """
-        candidate_id = (metrics or {}).get("candidate_id") if message == PROGRESS_CANDIDATE else None
-        if candidate_id in (None, ""):
+        metrics = metrics or {}
+        program_rejection = message == PROGRESS_REJECTED and metrics.get(PROGRAM_EVENT_KEY)
+        if message != PROGRESS_CANDIDATE and not program_rejection:
+            return
+        key = event_candidate_key(metrics)
+        if key is None:
             return
         # A version with a crashed case leaves final selection (SKY-350), so its score is None.
-        state = "failed" if metrics.get("score") is None else "done"
+        state = "done" if program_rejection or metrics.get("score") is not None else "failed"
         try:
-            self._run_calls.finish_candidate(optimization_id, str(candidate_id), state)
+            self._run_calls.finish_candidate(optimization_id, key, state)
         except SQLAlchemyError:
             logger.warning("Failed to set a candidate state for %s", optimization_id, exc_info=True)
 

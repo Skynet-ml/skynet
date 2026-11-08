@@ -20,6 +20,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from ..billing.usage_tags import LANE_KEY
 from .models import RunCallModel, RunCandidateModel
 
 BODY_CAP_BYTES = 64 * 1024
@@ -27,6 +28,45 @@ SECRET_MASK = "[REDACTED]"
 CALL_KINDS = frozenset({"model", "mcp", "stage", "evaluator", "host"})
 CANDIDATE_STATES = frozenset({"running", "done", "failed"})
 CANDIDATE_ID_MAX = 64
+# A GEPA program event carries this flag: its calls are tagged with the
+# proposal iteration, not with the program index in ``candidate_id`` (SKY-364).
+PROGRAM_EVENT_KEY = "program_event"
+
+
+def call_candidate_key(candidate: str, lane: str | None) -> str:
+    """Return the run-record key of a candidate, scoped to its Auto lane.
+
+    Auto lanes share one candidate id space, so the lane keeps two lanes'
+    candidate ``"3"`` apart. ``":"`` keeps the key one URL path segment.
+
+    Args:
+        candidate: The candidate id that the call tag or the event carries.
+        lane: The Auto lane tag, or None outside Auto.
+
+    Returns:
+        ``<lane>:<candidate>`` in a lane, else the candidate id.
+    """
+    return f"{lane}:{candidate}" if lane else candidate
+
+
+def event_candidate_key(metrics: dict[str, Any]) -> str | None:
+    """Return the run-record key that a scored-version event finishes.
+
+    Args:
+        metrics: A ``candidate`` or ``rejected`` event payload.
+
+    Returns:
+        The key its calls were recorded under, or None when the event names
+        no recorded candidate, such as the GEPA seed, which no proposal made.
+    """
+    if metrics.get(PROGRAM_EVENT_KEY):
+        iteration = metrics.get("iteration")
+        candidate = None if iteration is None else str(iteration)
+    else:
+        candidate = metrics.get("candidate_id")
+    if candidate in (None, ""):
+        return None
+    return call_candidate_key(str(candidate), metrics.get(LANE_KEY))
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -187,9 +227,10 @@ class PostgresRunCallStore:
     def finish_candidate(self, optimization_id: str, candidate_id: str, state: str) -> bool:
         """Mark a candidate the run record already has ``done`` or ``failed``.
 
-        Only a candidate with recorded calls has a row, so a run that records
-        no calls, or an engine whose candidate ids differ from the call tags,
-        adds no row.
+        This only updates: a candidate with no recorded calls gets no row.
+        The caller keys the event with :func:`event_candidate_key`, the same
+        key the calls used, so an update that matches no row means the
+        candidate made no recorded call.
 
         Args:
             optimization_id: Owning job id.

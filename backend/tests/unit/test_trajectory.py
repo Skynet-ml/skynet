@@ -52,6 +52,7 @@ from core.service_gateway.optimization.trajectory import (
     serialize_valset_rows,
     trajectory_watch,
 )
+from core.storage.run_call_store import PROGRAM_EVENT_KEY
 
 
 def _minimal_state() -> dict:
@@ -888,3 +889,5 @@ class TestResumeBaseline:
             candidates = [x for m, x in emitted if m == PROGRESS_CANDIDATE]
             assert len(candidates) == 1
             assert candidates[0]["candidate_id"] == "2"
+            # The run record keys a program event on its iteration, not on the program index.
+            assert candidates[0][PROGRAM_EVENT_KEY] is True

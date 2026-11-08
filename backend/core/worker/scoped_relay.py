@@ -21,10 +21,11 @@ import httpx
 from ..billing.env_connectors import CONNECTOR_ROUTES_KEY, escaped_forms
 from ..billing.host_agent import HOST_AGENT_PATH, HOST_AGENT_TOKEN_KEY
 from ..billing.model_dispatch import ModelHTTPResult
-from ..billing.usage_tags import current_tags
+from ..billing.usage_tags import LANE_KEY, current_tags
 from ..config import settings
 from ..models.blackbox import BLACKBOX_TARGET_REPO
 from ..service_gateway.optimization.blackbox.repo_scorer import SETUP_ALLOWANCE_SECONDS
+from ..storage.run_call_store import call_candidate_key
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,8 @@ class CallRecorder:
         The write is synchronous: the caller waits for the row write and for
         the lock on the call's candidate row, which keeps ``seq`` in commit
         order. A recorder with no candidate id writes under the candidate of
-        the parent's open usage scope, else under ``NO_CANDIDATE_ID``.
+        the parent's open usage scope, keyed by its Auto lane, else under
+        ``NO_CANDIDATE_ID``.
 
         Args:
             started: When the call started.
@@ -136,8 +138,10 @@ class CallRecorder:
             duration_ms: The duration another process measured, such as the
                 egress proxy; None measures it from ``started``.
         """
+        tags = current_tags()
+        scoped = call_candidate_key(tags["candidate"], tags.get(LANE_KEY)) if tags.get("candidate") else ""
         call = {
-            "candidate_id": self.candidate_id or current_tags().get("candidate") or NO_CANDIDATE_ID,
+            "candidate_id": self.candidate_id or scoped or NO_CANDIDATE_ID,
             "role": self.role,
             "kind": kind,
             "target": target,

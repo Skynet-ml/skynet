@@ -22,14 +22,23 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from core.billing.usage_tags import usage_scope
 from core.config import app_env
 from core.constants import PROGRESS_CANDIDATE, PROGRESS_REJECTED
 from core.service_gateway.optimization.blackbox.feedback import emit_candidate
 from core.storage.base import JobStore
 from core.storage.models import Base, JobModel, ProgressEventModel, RunCallModel, RunCandidateModel
 from core.storage.remote import RemoteDBJobStore
-from core.storage.run_call_store import BODY_CAP_BYTES, SECRET_MASK, PostgresRunCallStore, cut_body, strip_secrets
+from core.storage.run_call_store import (
+    BODY_CAP_BYTES,
+    PROGRAM_EVENT_KEY,
+    SECRET_MASK,
+    PostgresRunCallStore,
+    cut_body,
+    strip_secrets,
+)
 from core.worker.engine import BackgroundWorker
+from core.worker.scoped_relay import CallRecorder
 from core.worker.subprocess_runner import _emit_progress_event
 
 SECRET = 'sk-test-"abc\\def'
@@ -350,6 +359,47 @@ def test_candidate_ids_that_differ_from_the_call_tags_change_no_row(store: Postg
     assert store.get_candidate("job-1", "a") is None
     assert store.get_candidate("job-1", "b") is None
     assert store.get_candidate("job-2", "a")["state"] == "running"
+
+
+def test_two_auto_lanes_with_the_same_candidate_id_stay_apart(store: PostgresRunCallStore) -> None:
+    """Calls and events carry the Auto lane, so one lane's candidate "3" never marks another lane's."""
+    with Session(store._engine) as session:
+        session.add(JobModel(optimization_id="job-1", status="running"))
+        session.commit()
+    recorder = CallRecorder(store, "job-1", "", "")
+    for lane in ("explore-gepa", "explore-best_of_n"):
+        with usage_scope(candidate="3", lane=lane):
+            recorder.record(recorder.start(), kind="model", target="m", status="ok")
+    jobs = _job_store(store)
+
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, {"candidate_id": "3", "score": 0.5, "lane": "explore-gepa"})
+
+    assert store.get_candidate("job-1", "explore-gepa:3")["state"] == "done"
+    assert store.get_candidate("job-1", "explore-best_of_n:3")["state"] == "running"
+    assert store.get_candidate("job-1", "3") is None
+
+
+def test_dspy_seed_zero_does_not_mark_iteration_zero(store: PostgresRunCallStore) -> None:
+    """A DSPy program event keys on its accepting iteration, so the seed program "0" leaves iteration 0 alone."""
+    with Session(store._engine) as session:
+        session.add(JobModel(optimization_id="job-1", status="running"))
+        session.commit()
+    store.record_call("job-1", _call(candidate_id="0"), [])
+    store.record_call("job-1", _call(candidate_id="1"), [])
+    jobs = _job_store(store)
+
+    seed = {"candidate_id": "0", "iteration": None, "score": 0.4, PROGRAM_EVENT_KEY: True}
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, seed)
+    assert store.get_candidate("job-1", "0")["state"] == "running"
+
+    accepted = {"candidate_id": "1", "iteration": 0, "score": 0.6, PROGRAM_EVENT_KEY: True}
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, accepted)
+    assert store.get_candidate("job-1", "0")["state"] == "done"
+    assert store.get_candidate("job-1", "1")["state"] == "running"
+
+    rejected = {"iteration": 1, "score": 0.2, PROGRAM_EVENT_KEY: True}
+    jobs.record_progress("job-1", PROGRESS_REJECTED, rejected)
+    assert store.get_candidate("job-1", "1")["state"] == "done"
 
 
 @pytest.fixture
