@@ -129,6 +129,10 @@ render = [
     "pillow>=13.0.0",
     "networkx>=3",
 ]
+modal = [
+    # The dev-only Modal sandbox provider (core.sandbox.providers.modal).
+    "modal>=1.6",
+]
 
 [tool.uv]
 # dspy 3.3.1's metadata hard-pins gepa[dspy]==0.1.4. That PyPI release ships neither
