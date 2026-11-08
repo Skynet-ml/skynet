@@ -149,7 +149,8 @@ def refuse_secrets(spec: SandboxSpec) -> None:
     """Refuse a box spec that carries secrets.
 
     A snapshot keeps the whole file system and every later trial box starts
-    from it, so a value in it would leak into every trial.
+    from it, so a value in it would leak into every trial. This guard does not
+    cover files sent with ``upload_files`` or written by setup commands.
 
     Args:
         spec: The spec of the box to snapshot.
@@ -233,6 +234,8 @@ class SnapshotCache:
         self._entries: dict[str, BuiltSnapshot] = {}
         self._last_used: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        # Keys found through ``lookup``: another pod built them and deletes them.
+        self._borrowed: set[str] = set()
         self._closed = False
 
     def expiration(self, now: datetime | None = None) -> timedelta:
@@ -288,6 +291,10 @@ class SnapshotCache:
                 name = self.builder_name(cache_key)
                 found = await self._lookup(name) if self._lookup is not None else None
                 built = found if found is not None else await build(name)
+                if found is not None:
+                    self._borrowed.add(cache_key)
+                else:
+                    self._borrowed.discard(cache_key)
                 self._entries[cache_key] = built
                 self._last_used[cache_key] = self._clock.monotonic()
                 return built
@@ -295,22 +302,23 @@ class SnapshotCache:
     async def evict_idle(self, idle_for: float) -> list[str]:
         """Delete the snapshots that no trial used for a time.
 
+        A snapshot that another pod built only leaves this cache; its owner
+        deletes it.
+
         Args:
             idle_for: The idle time, in seconds, after which a snapshot goes.
 
         Returns:
-            The cache keys that were deleted.
+            The cache keys that left the cache.
         """
         cutoff = self._clock.monotonic() - idle_for
         stale = [key for key, used in self._last_used.items() if used <= cutoff]
-        for key in stale:
-            await self._drop(key)
-        return stale
+        return [key for key in stale if await self._drop(key, cutoff=cutoff)]
 
     async def close(self) -> None:
         """Delete every snapshot of the run and refuse new builds.
 
-        Each delete runs even when an earlier one fails; the first failure is
+        Only the pod that built a snapshot deletes it. Each delete runs even when an earlier one fails; the first failure is
         raised after all of them.
         """
         self._closed = True
@@ -347,20 +355,37 @@ class SnapshotCache:
             self._last_used[cache_key] = self._clock.monotonic()
         return built
 
-    async def _drop(self, cache_key: str) -> None:
-        """Delete one snapshot and forget it.
+    async def _drop(self, cache_key: str, *, cutoff: float | None = None) -> bool:
+        """Forget one snapshot, and delete it when this pod built it.
 
-        The entry stays when the delete fails, so the run-end close tries again.
+        The key lock keeps a caller from getting a snapshot during its delete.
+        The entry comes back when the delete fails, so the run-end close tries
+        again.
 
         Args:
             cache_key: The setup cache key.
+            cutoff: Keep the snapshot when a trial used it after this time.
+
+        Returns:
+            Whether the snapshot left the cache.
         """
-        built = self._entries.get(cache_key)
-        if built is None:
-            return
-        await self._delete(built)
-        self._entries.pop(cache_key, None)
-        self._last_used.pop(cache_key, None)
+        async with self._locks.setdefault(cache_key, asyncio.Lock()):
+            used = self._last_used.get(cache_key)
+            if cache_key not in self._entries or (cutoff is not None and used is not None and used > cutoff):
+                return False
+            built = self._entries.pop(cache_key)
+            self._last_used.pop(cache_key, None)
+            if cache_key in self._borrowed:
+                self._borrowed.discard(cache_key)
+                return True
+            try:
+                await self._delete(built)
+            except BaseException:
+                self._entries[cache_key] = built
+                if used is not None:
+                    self._last_used[cache_key] = used
+                raise
+            return True
 
     @contextlib.asynccontextmanager
     async def _cross_pod_lock(self, cache_key: str) -> AsyncIterator[None]:

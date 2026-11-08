@@ -239,6 +239,75 @@ async def test_idle_snapshot_is_evicted() -> None:
     assert provider.deletes == ["snap-1"]
 
 
+async def test_borrowed_snapshot_is_only_dropped_from_the_cache() -> None:
+    """Check that a pod never deletes a snapshot that another pod built."""
+    provider = Provider()
+    owner_clock, borrower_clock = FakeClock(), FakeClock()
+    owner = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup, clock=owner_clock)
+    borrower = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup, clock=borrower_clock)
+    built = await owner.get_or_build(_key(), provider.build)
+    assert (await borrower.get_or_build(_key(), provider.build)).snapshot_id == built.snapshot_id
+    borrower_clock.now = 1_000.0
+    assert await borrower.evict_idle(600.0) == [_key()]
+    await borrower.close()
+    assert provider.deletes == []
+    assert (await owner.get_or_build(_key(), provider.build)).snapshot_id == built.snapshot_id
+    await owner.close()
+    assert provider.deletes == [built.snapshot_id]
+    assert len(provider.builds) == 1
+
+
+async def test_caller_never_gets_a_snapshot_during_its_eviction() -> None:
+    """Check that a caller waits for an eviction and then builds a new snapshot."""
+    provider = Provider()
+
+    async def slow_delete(built: BuiltSnapshot) -> None:
+        """Delete after a delay, like the Vercel delete calls.
+
+        Args:
+            built: The snapshot to delete.
+        """
+        await asyncio.sleep(0.1)
+        await provider.delete(built)
+
+    clock = FakeClock()
+    cache = SnapshotCache("run-1", DEADLINE, delete=slow_delete, lookup=provider.lookup, clock=clock)
+    await cache.get_or_build(_key(), provider.build)
+    clock.now = 1_000.0
+    eviction = asyncio.create_task(cache.evict_idle(600.0))
+    await asyncio.sleep(0.01)
+    hit = await cache.get_or_build(_key(), provider.build)
+    assert await eviction == [_key()]
+    assert hit.snapshot_id not in provider.deletes
+    assert len(provider.builds) == 2
+
+
+async def test_failed_eviction_keeps_the_snapshot_for_the_next_close() -> None:
+    """Check that a failed eviction delete puts the entry back."""
+    provider = Provider()
+    calls: list[str] = []
+
+    async def flaky_delete(built: BuiltSnapshot) -> None:
+        """Fail the first delete, then delete.
+
+        Args:
+            built: The snapshot to delete.
+        """
+        calls.append(built.snapshot_id)
+        if len(calls) == 1:
+            raise RuntimeError("provider error")
+        await provider.delete(built)
+
+    clock = FakeClock()
+    cache = SnapshotCache("run-1", DEADLINE, delete=flaky_delete, clock=clock)
+    await cache.get_or_build(_key(), provider.build)
+    clock.now = 1_000.0
+    with pytest.raises(RuntimeError):
+        await cache.evict_idle(600.0)
+    await cache.close()
+    assert provider.deletes == ["snap-1"]
+
+
 def _api_error(code: str) -> SandboxApiError:
     """Build an SDK error with one error code.
 
@@ -282,6 +351,30 @@ class FakeSnapshotUsage:
             evidence: Unused.
         """
         self.log.append("snapshot-pending")
+
+    def settle(self, snapshot: Any) -> None:
+        """Log a settled hold.
+
+        Args:
+            snapshot: The provider state after the delete.
+        """
+        self.log.append(f"snapshot-settle:{snapshot['status']}")
+
+
+class FailingBindUsage(FakeSnapshotUsage):
+    """Fail to record the snapshot id, like a lost database write."""
+
+    def bind(self, snapshot_id: str) -> None:
+        """Log the bind and fail.
+
+        Args:
+            snapshot_id: The snapshot id.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        self.log.append(f"snapshot-bind-failed:{snapshot_id}")
+        raise RuntimeError("database down")
 
 
 def _snapshotting_env(log: list[str], client: FakeClient, **spec_fields: Any) -> VercelEnvironment:
@@ -504,6 +597,50 @@ def database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Engine
         session.commit()
     yield engine
     engine.dispose()
+
+
+async def test_failed_bind_deletes_the_snapshot_and_removes_the_builder() -> None:
+    """Check that a snapshot whose hold was not bound is deleted, settled and not kept."""
+    log: list[str] = []
+    handle = FakeSnapshotHandle("snap-9", 1_000)
+    client = SnapshotClient(log, handle)
+    env = _snapshotting_env(log, client)
+
+    def factory(budget: Any, request: dict[str, Any], *, operation_key: str) -> FailingBindUsage:
+        """Make a reservation whose bind fails.
+
+        Args:
+            budget: Unused.
+            request: The snapshot request.
+            operation_key: The operation key.
+
+        Returns:
+            The fake reservation.
+        """
+        return FailingBindUsage(log, request, operation_key)
+
+    env._snapshot_usage_factory = factory
+    await env.start()
+
+    async def snapshot(*, expiration: Any = None) -> Any:
+        """Return a created snapshot.
+
+        Args:
+            expiration: Unused.
+
+        Returns:
+            The snapshot handle.
+        """
+        return SimpleNamespace(id="snap-9", status="created", expires_at=1_000)
+
+    client.boxes[env.name].current_session.snapshot = snapshot
+    with pytest.raises(RuntimeError):
+        await env.snapshot(run_deadline=DEADLINE, now=NOW)
+    assert handle.status == "deleted"
+    assert "snapshot-settle:deleted" in log
+    assert env._snapshotted is False
+    await env.stop()
+    assert client.boxes[env.name].destroys >= 1
 
 
 def _runtime(database: Engine) -> BudgetRuntime:

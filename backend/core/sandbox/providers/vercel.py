@@ -987,9 +987,17 @@ class VercelEnvironment(SandboxEnvironment):
                     created = await session.snapshot(expiration=expiration)
             if created.status != "created":
                 raise SandboxInfraError(f"The Vercel snapshot ended as {created.status}.")
-            self._snapshotted = True
             if reservation is not None:
-                await asyncio.to_thread(reservation.bind, created.id)
+                try:
+                    await asyncio.to_thread(reservation.bind, created.id)
+                except BaseException:
+                    # No pod owns an unbound snapshot, so delete it now. The
+                    # delete settles the hold; teardown still removes the builder.
+                    orphan = BuiltSnapshot(created.id, self.name, created.expires_at, reservation)
+                    with contextlib.suppress(Exception):
+                        await self.delete_snapshot(orphan, client=self._client)
+                    raise
+            self._snapshotted = True
         except BaseException as error:
             if reservation is not None:
                 with contextlib.suppress(Exception):
