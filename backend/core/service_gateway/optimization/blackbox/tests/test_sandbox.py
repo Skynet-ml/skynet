@@ -12,13 +12,16 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 from pydantic import ValidationError
 
+from core.billing.budgets import BudgetError
+from core.billing.runtime import UsagePendingError
 from core.config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, Settings
 from core.exceptions import ServiceError
-from core.sandbox import SandboxSpecError
+from core.sandbox import SandboxSpecError, sync_bridge
 from core.sandbox import factory as sandbox_factory
 from core.sandbox.environment import NetworkPolicy, SandboxEnvironment
 from core.sandbox.errors import (
@@ -1117,6 +1120,70 @@ def test_async_session_keeps_box_death_errors_retryable(
         assert raised.value is error
     finally:
         session.close()
+
+
+def test_async_session_close_logs_a_stop_past_the_deadline(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stop that outlives the bridge deadline is logged, so the caller keeps its finished result."""
+    monkeypatch.setattr(sync_bridge, "_STOP_TIMEOUT_SECONDS", 0.2)
+    session = _fake_runtime(monkeypatch).open(SandboxSpec(lifetime_seconds=60, tags={"skynet_job": "job-9"}))
+
+    async def slow_stop() -> None:
+        """Outlive the shortened stop deadline."""
+        await anyio.sleep(1.0)
+
+    monkeypatch.setattr(session._session.environment, "stop", slow_stop)
+
+    def finish() -> str:
+        """Return a result and close in ``finally``, like the native runtime does."""
+        try:
+            return "winner"
+        finally:
+            session.close()
+
+    with caplog.at_level(logging.ERROR, logger=sandbox_mod.logger.name):
+        assert finish() == "winner"
+    [record] = caplog.records
+    assert "job-9" in record.getMessage()
+    assert record.exc_info is not None
+    assert record.exc_info[0] is TimeoutError
+
+
+def test_async_session_close_keeps_the_original_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failing stop does not replace the error that the caller raised before ``close``."""
+    session = _fake_runtime(monkeypatch).open(SandboxSpec(lifetime_seconds=60))
+
+    async def bad_stop() -> None:
+        """Fail the stop."""
+        raise RuntimeError("stop failed")
+
+    monkeypatch.setattr(session._session.environment, "stop", bad_stop)
+    with caplog.at_level(logging.ERROR, logger=sandbox_mod.logger.name), pytest.raises(ValueError, match="original"):
+        try:
+            raise ValueError("original")
+        finally:
+            session.close()
+    [record] = caplog.records
+    assert record.exc_info is not None
+    assert record.exc_info[0] is RuntimeError
+
+
+@pytest.mark.parametrize("error", [UsagePendingError("usage pending"), BudgetError("over budget")])
+def test_async_session_close_raises_usage_errors(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    """Usage errors still reach the caller, as they do from the legacy Vercel close."""
+    session = _fake_runtime(monkeypatch).open(SandboxSpec(lifetime_seconds=60))
+
+    async def unsettled_stop() -> None:
+        """Fail the stop with a usage error."""
+        raise error
+
+    monkeypatch.setattr(session._session.environment, "stop", unsettled_stop)
+    with pytest.raises(type(error)) as raised:
+        session.close()
+    assert raised.value is error
 
 
 def test_async_runtime_maps_a_bad_open_spec_to_service_error(monkeypatch: pytest.MonkeyPatch) -> None:

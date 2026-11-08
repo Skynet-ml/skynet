@@ -34,8 +34,9 @@ from typing import Any
 
 import httpx
 
+from ....billing.budgets import BudgetError
 from ....billing.operation_pricing import json_fingerprint
-from ....billing.runtime import BudgetRuntime
+from ....billing.runtime import BudgetRuntime, UsagePendingError
 from ....billing.signals import BudgetReached
 from ....billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP, VercelUsageReservation
 from ....config import Settings, app_env, with_legacy_env
@@ -1054,8 +1055,21 @@ class AsyncBridgeSession:
             bridge_run(self._session.environment.disable_network)
 
     def close(self) -> None:
-        """Stop the sandbox."""
-        self._session.close()
+        """Stop the sandbox, and log a teardown failure like the legacy sessions do.
+
+        Callers close in ``finally`` blocks and catch only usage errors, so any
+        other stop failure here would replace a finished result or the real error.
+
+        Raises:
+            UsagePendingError: When paid usage cannot yet be reconciled.
+            BudgetError: When trusted usage violates the reserved bounds.
+        """
+        try:
+            self._session.close()
+        except (UsagePendingError, BudgetError):
+            raise
+        except Exception:
+            logger.exception("failed to stop the sandbox of job %s", self.log_owner or "?")
 
 
 class AsyncBridgeRuntime:
