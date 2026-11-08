@@ -48,39 +48,33 @@ void describe("Composer", () => {
     assert.match(html, /<textarea/);
   });
 
-  void it("shows a paused header and Send now for an idle paused tray", () => {
+  void it("shows held input as plain tray rows with no Send now", () => {
     const store = new SteerQueue();
     store.setBusy(true);
     store.enqueue("held");
-    store.pause();
+    store.hold();
     store.setBusy(false);
     const html = render({ midTurn: midTurnOf(() => store, store.getSnapshot()) });
-    assert.ok(html.includes(msg("agent.pending.paused")), html);
-    assert.ok(html.includes(msg("agent.pending.send_now")), html);
-    assert.ok(html.includes('role="status"'), html);
+    assert.ok(html.includes("held"), html);
+    assert.ok(!html.includes(">Send now<"), html);
+    assert.ok(!html.includes('role="status"'), html);
   });
 
-  void it("shows no tray header for a running turn with pending input", () => {
+  void it("shows queued rows for a running turn", () => {
     const store = new SteerQueue();
     store.setBusy(true);
     store.enqueue("next");
     const html = render({ streaming: true, onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
-    assert.ok(!html.includes(msg("agent.pending.paused")), html);
-    assert.ok(!html.includes(msg("agent.pending.send_now")), html);
     assert.ok(html.includes(`aria-label="${msg("agent.pending.remove")}"`), html);
     assert.ok(!html.includes("opacity-0"), html);
   });
 
-  void it("disables an over-limit Send now with a visible reason", () => {
+  void it("keeps steers out of the tray, because the chat shows them", () => {
     const store = new SteerQueue();
-    store.setMaxLength(3);
-    store.setBusy(true);
-    store.enqueue("long");
-    store.pause();
-    store.setBusy(false);
-    const html = render({ onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
-    const label = msg("agent.pending.send_now");
-    assert.match(html, new RegExp(`<button[^>]*disabled=""[^>]*>${label}</button>`));
-    assert.ok(html.includes(msg("agent.pending.too_long", { count: 4, max: 3 })), html);
+    store.openTurn({ post: () => new Promise(() => {}), withdraw: async () => ({ ids: [], delivered: [] }) });
+    store.steer("use pandas");
+    const html = render({ streaming: true, onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
+    assert.ok(!html.includes("use pandas"), html);
+    assert.ok(!html.includes(`aria-label="${msg("agent.pending.list_label")}"`), html);
   });
 });

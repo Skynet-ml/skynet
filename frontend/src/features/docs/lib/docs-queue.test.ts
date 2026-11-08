@@ -34,12 +34,12 @@ test("docs Enter and Tab queue without a steering channel", () => {
   }
 });
 
-test("a rate-limited docs ask leaves remaining follow-ups paused without retries", async () => {
+test("a rate-limited docs ask leaves remaining follow-ups held without retries", async () => {
   const sent: string[] = [];
   const queue = new SteerQueue((text) => {
     sent.push(text);
     queue.setBusy(true);
-    assert.equal(docsAskFailure(429, true, () => queue.pause()), "rate");
+    assert.equal(docsAskFailure(429, true, () => queue.hold()), "rate");
     queue.setBusy(false);
   });
   queue.setBusy(true);
@@ -49,12 +49,12 @@ test("a rate-limited docs ask leaves remaining follow-ups paused without retries
   queue.setBusy(false);
   await flush();
   assert.deepEqual(sent, ["rate-limited question"]);
-  assert.equal(queue.getSnapshot().paused, true);
+  assert.equal(queue.getSnapshot().held, true);
   assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), ["remaining one", "remaining two"]);
 });
 
 test("ordinary docs responses keep the existing non-rate error behavior", () => {
-  const unexpectedPause = () => assert.fail("only rate limits pause the queue");
+  const unexpectedPause = () => assert.fail("only rate limits hold the queue");
   assert.equal(docsAskFailure(200, true, unexpectedPause), null);
   assert.equal(docsAskFailure(200, false, unexpectedPause), "error");
   assert.equal(docsAskFailure(422, true, unexpectedPause), "tooLong");
@@ -66,14 +66,14 @@ test("a manual docs question does not clear the rate-limit hold", async () => {
   const queue = new SteerQueue((text) => { sent.push(text); });
   queue.setBusy(true);
   queue.enqueue("remaining question");
-  docsAskFailure(429, true, () => queue.pause());
+  docsAskFailure(429, true, () => queue.hold());
   queue.setBusy(false);
   queue.setBusy(true);
   queue.setBusy(false);
   await flush();
   assert.deepEqual(sent, []);
-  assert.equal(queue.getSnapshot().paused, true);
-  queue.sendNow();
+  assert.equal(queue.getSnapshot().held, true);
+  assert.equal(queue.takeHeld(), "remaining question");
   await flush();
-  assert.deepEqual(sent, ["remaining question"]);
+  assert.deepEqual(sent, []);
 });

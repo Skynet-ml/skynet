@@ -17,7 +17,9 @@ export interface PendingMessage {
 
 export interface SteerQueueSnapshot {
   maxLength?: number;
-  paused: boolean;
+  /** A Stop or a failed turn returned unread input; the composer takes it back
+   *  into its draft (`takeHeld`) so nothing is sent until the user acts. */
+  held: boolean;
   /** Follow-ups waiting for the chat to go idle, sent in order. */
   queued: readonly PendingMessage[];
   /** Messages handed to the running turn that the agent has not read yet. */
@@ -46,23 +48,21 @@ interface SteerEntry extends PendingMessage {
   pulling: boolean;
 }
 
-const EMPTY: SteerQueueSnapshot = { queued: [], steering: [], canSteer: false, paused: false };
+const EMPTY: SteerQueueSnapshot = { queued: [], steering: [], canSteer: false, held: false };
 
 /**
  * One chat's queued follow-ups and in-flight steers. The owner reports when
  * the chat is busy (`setBusy`), opens each steerable turn (`openTurn`) and
  * reports applied steers; the queue sends its head through `send` whenever
  * the chat goes idle, one at a time. When a steerable turn ends, steers the
- * agent never read are withdrawn and put at the front of the queue.
+ * agent never read are withdrawn and put at the front of the queue. A Stop
+ * or a failed turn holds the input instead, for the composer to take back.
  */
 export class SteerQueue {
   private queued: PendingMessage[] = [];
   private steering: SteerEntry[] = [];
   private busy = false;
-  private paused = false;
-  private sendTogether = false;
-  private sendIntent = 0;
-  private internalStop = false;
+  private held = false;
   private settling = 0;
   private turn = 0;
   private channel: SteerChannel | null = null;
@@ -119,9 +119,7 @@ export class SteerQueue {
    * turns on its own.
    */
   setBusy(busy: boolean, failed = false): void {
-    if (!busy && failed && this.busy) this.pause();
-    if (busy && !this.busy) this.sendIntent += 1;
-    if (busy) this.sendTogether = false;
+    if (!busy && failed && this.busy) this.hold();
     if (!busy && this.channel) {
       this.endTurn();
       return;
@@ -135,8 +133,6 @@ export class SteerQueue {
 
   /** A steerable turn started; `channel` delivers messages into it. */
   openTurn(channel: SteerChannel): void {
-    this.sendIntent += 1;
-    this.sendTogether = false;
     if (this.channel) this.endTurn();
     this.turn += 1;
     this.channel = channel;
@@ -378,64 +374,12 @@ export class SteerQueue {
     this.emit();
   }
 
-  /**
-   * Put the steers in the order of `ids`. The turn's unread steers are taken
-   * back and posted again in the new order, since the agent reads them in
-   * the order they arrived.
-   */
-  reorderSteering(ids: readonly string[]): void {
-    const byId = new Map(this.steering.map((e) => [e.id, e]));
-    const next = ids.map((id) => byId.get(id)).filter((e): e is SteerEntry => e !== undefined);
-    if (next.length !== this.steering.length) return;
-    this.steering = next;
-    this.trayOrder = [...ids, ...this.trayOrder.filter((id) => !ids.includes(id))];
-    this.emit();
-    const channel = this.channel;
-    if (!channel) return;
-    const turn = this.turn;
-    const prior = this.postChain;
-    const pending = [...this.withdrawals];
-    const repost = async () => {
-      await Promise.allSettled(pending);
-      await prior;
-      if (this.channel !== channel || this.turn !== turn) return;
-      const live = this.steering.filter((e) => e.turn === turn && e.serverId !== null && !e.pulling);
-      if (live.length === 0) return;
-      const returned = await this.withdraw(channel, live);
-      const unknown = (returned ?? live).filter((entry) => this.steering.includes(entry) &&
-        (returned === null || entry.uncertain));
-      this.returnToQueue(unknown.map(({ id, text, serverId }) => ({ id, text, serverId, uncertain: true })));
-      const back = (returned ?? []).filter((e) => this.steering.includes(e) && !e.discarded && !e.uncertain);
-      this.steering = this.steering.filter((e) => !live.includes(e) || back.includes(e));
-      if (returned === null || this.channel !== channel || this.turn !== turn) {
-        // Unknown outcomes stay paused; a finished turn returns unread input.
-        this.steering = this.steering.filter((e) => !back.includes(e));
-        this.returnToQueue(back.map(({ id, text, serverId }) => ({ id, text, serverId, uncertain: returned === null })));
-        this.emit();
-        this.schedulePump();
-        return;
-      }
-      let chain = Promise.resolve();
-      for (const entry of back) {
-        entry.serverId = null;
-        this.post(entry, channel, chain);
-        chain = entry.posting;
-      }
-      await chain;
-    };
-    const operation = repost();
-    this.withdrawals.add(operation);
-    const finish = () => this.withdrawals.delete(operation);
-    void operation.then(finish, finish);
-    this.postChain = operation;
-  }
-
   /** Hold `text` until the chat is idle, then send it as its own turn. */
   enqueue(text: string): void {
     const trimmed = text.trim();
     if (!trimmed) return;
     // A Stop held an earlier tray; once that tray is gone, new input is a new intent.
-    if (this.paused && !this.holdsInput()) this.paused = false;
+    if (this.held && !this.holdsInput()) this.held = false;
     const item = { id: this.makeId(), text: trimmed };
     this.queued = [...this.queued, item];
     this.trayOrder.push(item.id);
@@ -469,90 +413,37 @@ export class SteerQueue {
 
   /** Drop everything (a new chat or a reset). */
   clear(): void {
-    this.sendIntent += 1;
     this.queued = [];
     this.steering = [];
-    this.paused = false;
-    this.sendTogether = false;
+    this.held = false;
     this.trayOrder = [];
     this.emit();
   }
 
-  /** Hold pending input after a user Stop, including steers still being withdrawn. */
-  pause(): void {
-    if (!this.internalStop) this.sendIntent += 1;
-    // An empty tray has nothing to hold; pausing it would hold later Tab input.
-    if (this.holdsInput()) this.paused = true;
-    this.sendTogether = false;
+  /**
+   * Hold pending input after a user Stop, an edit or a failed turn, including
+   * steers still being withdrawn. Nothing is sent until the composer takes
+   * the input back into its draft and the user sends it again.
+   */
+  hold(): void {
+    // An empty tray has nothing to hold; holding it would hold later Tab input.
+    if (this.holdsInput()) this.held = true;
     this.emit();
   }
 
-  /** Resume the head through the owner's normal turn-start path. */
-  sendNow(id?: string): void {
-    const intent = this.sendIntent;
-    if (this.settling > 0) {
-      void Promise.allSettled([...this.settlingOperations.values()]).then(() => {
-        if (intent === this.sendIntent) this.sendNow(id);
-      });
-      return;
-    }
-    const item = id ? this.queued.find((entry) => entry.id === id) : this.queued.find((entry) => !entry.uncertain);
-    if (this.busy || (!this.paused && !item?.uncertain)) return;
-    if (!item || item.text.length > this.maxLength) return;
-    const queued = this.queued;
-    const order = this.trayOrder;
-    this.paused = false;
-    this.queued = this.queued.filter((entry) => entry !== item);
+  /**
+   * Take the held input back for the composer's draft, in tray order and
+   * joined by blank lines. Null while steers are still being withdrawn, so
+   * the text never comes back out of order. Messages whose delivery is
+   * unknown stay in the tray: the agent may already have read them.
+   */
+  takeHeld(): string | null {
+    if (!this.held || this.settling > 0 || this.withdrawals.size > 0) return null;
+    const taken = this.queued.filter((item) => !item.uncertain);
+    this.queued = this.queued.filter((item) => item.uncertain);
+    this.held = false;
     this.emit();
-    if (!this.startSend(item.text)) {
-      this.queued = queued;
-      this.trayOrder = order;
-      this.paused = true;
-      this.emit();
-    }
-  }
-
-  /** Stop the active turn, then send the settled tray as one follow-up. */
-  stopAndSendNow(stop: () => void): void {
-    if (!this.busy || !this.hasPending()) return;
-    const turn = this.turn;
-    const intent = ++this.sendIntent;
-    if (this.settling > 0) {
-      void Promise.allSettled([...this.settlingOperations.values()]).then(() => {
-        if (turn === this.turn && intent === this.sendIntent) this.stopAndSendNow(stop);
-      });
-      return;
-    }
-    const finish = () => {
-      if (turn !== this.turn || intent !== this.sendIntent) return;
-      const text = this.queued.filter((entry) => !entry.uncertain).map((entry) => entry.text).join("\n\n");
-      if (!text || text.length > this.maxLength) return;
-      this.internalStop = true;
-      try {
-        this.pause();
-        if (this.busy) stop();
-      } finally {
-        this.internalStop = false;
-      }
-      if (intent !== this.sendIntent) return;
-      this.sendTogether = true;
-      this.schedulePump();
-    };
-    const channel = this.channel;
-    const entries = this.steering.filter((entry) => entry.turn === turn);
-    if (!channel || entries.length === 0) { finish(); return; }
-    this.channel = null;
-    this.settling += 1;
-    this.emit();
-    const operation = this.settle(entries, channel, this.postChain);
-    for (const entry of entries) this.settlingOperations.set(entry.id, operation);
-    void operation.then(() => {
-      for (const entry of entries) this.settlingOperations.delete(entry.id);
-      if (this.turn !== turn || intent !== this.sendIntent) return;
-      if (this.busy) this.channel = channel;
-      this.emit();
-      finish();
-    });
+    return taken.length ? taken.map((item) => item.text).join("\n\n") : null;
   }
 
   private holdsInput(): boolean {
@@ -579,7 +470,7 @@ export class SteerQueue {
       queued: this.queued,
       steering: this.steering.map(({ id, text, pulling }) => ({ id, text, pulling })),
       canSteer: this.busy && this.channel !== null,
-      paused: this.paused,
+      held: this.held,
     };
     for (const listener of this.listeners) listener();
   }
@@ -596,35 +487,11 @@ export class SteerQueue {
   }
 
   private pump(): void {
-    if (this.busy || this.settling > 0 || (this.paused && !this.sendTogether)) return;
-    if (this.sendTogether) {
-      const queued = this.queued;
-      const order = this.trayOrder;
-      const sendable = this.queued.filter((item) => !item.uncertain);
-      const text = sendable.map((item) => item.text).join("\n\n");
-      if (!text || text.length > this.maxLength) {
-        this.sendTogether = false;
-        this.paused = true;
-        this.emit();
-        return;
-      }
-      this.queued = this.queued.filter((item) => item.uncertain);
-      this.sendTogether = false;
-      this.paused = false;
-      this.emit();
-      if (!this.startSend(text)) {
-        this.queued = queued;
-        this.trayOrder = order;
-        this.paused = true;
-        this.emit();
-      }
-      return;
-    }
+    if (this.busy || this.settling > 0 || this.held) return;
     const head = this.queued.find((item) => !item.uncertain);
     if (!head) return;
     if (head.text.length > this.maxLength) {
-      this.paused = true;
-      this.emit();
+      this.hold();
       return;
     }
     const queued = this.queued;
@@ -634,13 +501,11 @@ export class SteerQueue {
     if (!this.startSend(head.text)) {
       this.queued = queued;
       this.trayOrder = order;
-      this.paused = true;
-      this.emit();
+      this.hold();
     }
   }
 
   private startSend(text: string): boolean {
-    this.sendIntent += 1;
     this.busy = true;
     if (this.send(text) !== false) return true;
     this.busy = false;
@@ -650,8 +515,7 @@ export class SteerQueue {
 
 /** The mid-turn surface a chat hands to its composer. */
 export interface MidTurnQueue extends SteerQueueSnapshot {
-  sendNow: (id?: string) => void;
-  stopAndSendNow: (stop: () => void) => void;
+  takeHeld: () => string | null;
   steer: (text: string) => void;
   queue: (text: string) => void;
   promote: (id: string) => void;
@@ -660,7 +524,6 @@ export interface MidTurnQueue extends SteerQueueSnapshot {
   edit: (id: string) => Promise<string | null>;
   remove: (id: string) => void;
   reorderQueued: (ids: readonly string[]) => void;
-  reorderSteering: (ids: readonly string[]) => void;
   recallLast: () => string | null;
 }
 
@@ -672,15 +535,13 @@ export function midTurnOf(
 ): MidTurnQueue {
   return {
     ...snapshot,
-    sendNow: (id) => getStore()?.sendNow(id),
-    stopAndSendNow: (stop) => getStore()?.stopAndSendNow(stop),
+    takeHeld: () => getStore()?.takeHeld() ?? null,
     steer: (text) => getStore()?.steer(text),
     queue: (text) => getStore()?.enqueue(text),
     promote: (id) => getStore()?.promote(id),
     edit: async (id) => (await getStore()?.edit(id)) ?? null,
     remove: (id) => getStore()?.remove(id),
     reorderQueued: (ids) => getStore()?.reorderQueued(ids),
-    reorderSteering: (ids) => getStore()?.reorderSteering(ids),
     recallLast: () => getStore()?.recallLast() ?? null,
   };
 }

@@ -7,7 +7,7 @@ import { postAgentSteer, withdrawAgentSteers } from "@/shared/lib/api";
 import { midTurnOf, SteerQueue, type MidTurnQueue, type SteerChannel } from "./steer-queue";
 
 export interface UseSteerQueueArgs {
-  /** Abort the owner's active turn after pending input is paused. */
+  /** Abort the owner's active turn after pending input is held. */
   stop?: () => void;
   /** A turn is running in this chat. */
   busy: boolean;
@@ -63,7 +63,7 @@ export function useSteerQueue({ busy, failed = false, send, stop, maxLength }: U
   const snapshot = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const midTurn = React.useMemo(() => midTurnOf(() => store, snapshot), [store, snapshot]);
   const stopTurn = React.useCallback(() => {
-    store.pause();
+    store.hold();
     stop?.();
   }, [store, stop]);
   return { store, midTurn, stop: stopTurn };

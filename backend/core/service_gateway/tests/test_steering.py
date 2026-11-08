@@ -215,6 +215,44 @@ def test_steer_reaches_the_next_step_as_the_newest_user_message() -> None:
     assert not any(m["role"] == "assistant" and not m.get("tool_calls") for m in lm.requests[2]["messages"])
 
 
+class _SteerableLM(_ScriptedLM):
+    """A scripted LM whose second step follows the newest user message."""
+
+    def forward(self, prompt=None, messages=None, **kwargs):
+        """Pick the second step's tool call from the newest user message, then answer.
+
+        Args:
+            prompt: Unused legacy prompt.
+            messages: The rendered chat messages.
+            **kwargs: Provider kwargs, including ``tools``.
+
+        Returns:
+            An OpenAI-shaped response carrying one tool call.
+        """
+        if len(self.requests) == 1:
+            newest = _user_texts(messages or [])[-1]
+            color = "blue" if "use blue instead" in newest else "red"
+            self._script.insert(0, ("lookup", {"name": color}))
+        return super().forward(prompt=prompt, messages=messages, **kwargs)
+
+
+@pytest.mark.parametrize("steer", [None, "use blue instead"])
+def test_steer_changes_what_the_agent_does_next(steer: str | None) -> None:
+    """A message sent mid-turn changes the agent's next tool call, not only its prompt."""
+    store = SteerStore()
+    events: list[dict[str, Any]] = []
+    lm = _SteerableLM([("lookup", {"name": "a"}), ("submit", {"reply": "done"})])
+    program = _steered_program(store, events, posts={"a": steer} if steer else {}, conversation=False)
+
+    with dspy.context(lm=lm, adapter=dspy.ChatAdapter(use_native_function_calling=True)):
+        program(user_message="make it red")
+
+    tool_results = [str(m["content"]) for m in lm.requests[2]["messages"] if m["role"] == "tool"]
+    expected = "blue" if steer else "red"
+    assert tool_results[-1] == f"value of {expected}"
+    assert [e["event"] for e in events] == ([STEER_APPLIED_EVENT] if steer else [])
+
+
 def test_steered_calls_keep_extending_the_previous_prompt() -> None:
     """Steering keeps the append-only prompt shape the prompt cache relies on."""
     store = SteerStore()

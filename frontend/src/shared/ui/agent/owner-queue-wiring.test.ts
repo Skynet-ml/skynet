@@ -4,7 +4,7 @@ import test from "node:test";
 import ts from "typescript";
 
 import { discardStaleDocsResponse, docsAskFailure } from "../../../features/docs/lib/docs-queue.ts";
-import { askBody, isQuestionTooLong, trimHistory, MAX_QUESTION_CHARS } from "../../../features/docs/lib/docs-answer.ts";
+import { askBody, isQuestionTooLong, trimHistory } from "../../../features/docs/lib/docs-answer.ts";
 import { handleComposerEscape } from "./composer-keys.ts";
 import { midTurnOf, SteerQueue } from "./steer-queue.ts";
 import { visibleSuggestion } from "./next-prompt.ts";
@@ -39,36 +39,8 @@ test("PR929 F5 unmount disables the sender during settlement", async () => {
   resolve({ ids: ["id"], delivered: [] });
   await flush();
   assert.deepEqual(sent, []);
-  assert.equal(store.getSnapshot().paused, true);
+  assert.equal(store.getSnapshot().held, true);
   assert.equal(store.getSnapshot().queued[0]?.text, "unseen");
-});
-
-test("PR929 F4 a delayed joined send stops its clicked session", async () => {
-  const file = "src/features/agent-panel/hooks/use-generalist-agent.ts";
-  const activeKeyRef = { current: "A" };
-  const aborted: string[] = [];
-  let resolve!: (result: { ids: string[]; delivered: string[] }) => void;
-  const store = new SteerQueue(() => true);
-  store.openTurn({ post: async () => "id", withdraw: () => new Promise((done) => { resolve = done; }) });
-  store.steer("A"); store.enqueue("B");
-  await flush();
-  const context = {
-    activeKeyRef, steerQueueFor: () => store, sessionsRef: { current: new Map() },
-    abortSession: (key: string) => { aborted.push(key); store.setBusy(false); },
-    patchSession: () => {}, patchThinking: () => {}, patchMessages: () => {}, closeThinking,
-  };
-  const hasStopSession = readFileSync(new URL(`../../../../${file}`, import.meta.url), "utf8").includes("const stopSession");
-  const stopSession = hasStopSession ? expression(file, "stopSession", context) : undefined;
-  const stop = expression(file, "stop", { ...context, stopSession });
-  const midTurn = expression(file, "midTurn", {
-    midTurnOf, activeSteerQueue: store, steerSnapshot: store.getSnapshot(), activeKey: "A", stopSession,
-  })();
-  midTurn.stopAndSendNow(stop);
-  await flush();
-  activeKeyRef.current = "B";
-  resolve({ ids: ["id"], delivered: [] });
-  await flush();
-  assert.deepEqual(aborted, ["A"]);
 });
 
 for (const thinking of [false, true]) {
@@ -117,7 +89,7 @@ for (const thinking of [false, true]) {
 }
 
 for (const failure of ["replacement", "network"] as const) {
-  test(`R3 docs ${failure} closes or pauses the right steering channel`, async () => {
+  test(`R3 docs ${failure} closes or holds the right steering channel`, async () => {
     const store = new SteerQueue();
     store.openTurn({ post: async () => "old", withdraw: async (ids) => ({ ids, delivered: [] }) });
     store.enqueue("keep after failure");
@@ -137,7 +109,7 @@ for (const failure of ["replacement", "network"] as const) {
       readServerSentEvents: async () => {},
     });
     await callback("question");
-    if (failure === "network") assert.equal(store.getSnapshot().paused, true);
+    if (failure === "network") assert.equal(store.getSnapshot().held, true);
     else assert.equal(replacementCanSteer, false, "old channel must close before replacement fetch");
   });
 }
@@ -206,30 +178,6 @@ function expression(file: string, name: string, context: Record<string, unknown>
   const text = found.getText(source).replace(/^export /, "");
   const code = ts.transpileModule(`(${text})`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   return new Function(...Object.keys(context), `return ${code}`)(...Object.values(context));
-}
-
-for (const [file, limit] of [
-  [docs, 8000],
-] as const) {
-  test(`${file} preserves an over-limit Stop and send now join`, async () => {
-    const noop = () => {};
-    const options = expression(file, "useSteerQueue", {
-      streaming: true, status: "streaming", sendQueued: noop, stopAnswer: noop, stopTurn: noop,
-      MAX_QUESTION_CHARS,
-    });
-    const sent: string[] = [];
-    const queue = new SteerQueue((text) => { sent.push(text); });
-    if (options.maxLength !== undefined) queue.setMaxLength(options.maxLength);
-    queue.setBusy(true);
-    const text = "x".repeat(limit / 2);
-    queue.enqueue(text);
-    queue.enqueue(text);
-    queue.stopAndSendNow(() => queue.setBusy(false));
-    await flush();
-    assert.deepEqual(sent, []);
-    assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), [text, text]);
-    assert.equal(queue.getSnapshot().paused, false);
-  });
 }
 
 for (const reason of ["stopped", "superseded"]) {
@@ -310,7 +258,7 @@ test("R2 an idle next-prompt hint cannot block streaming Escape", () => {
 {
   const file = "src/features/agent-panel/hooks/use-generalist-agent.ts";
   for (const action of ["editAndResend", "retry"]) {
-  test(`R2 ${file} pauses unread input before ${action}`, () => {
+  test(`R2 ${file} holds unread input before ${action}`, () => {
     const queue = new SteerQueue();
     queue.setBusy(true);
     queue.enqueue("keep after replacement");
@@ -322,7 +270,7 @@ test("R2 an idle next-prompt hint cannot block streaming Escape", () => {
       autoFixAttemptsRef: { current: 0 }, requestRun: () => {}, runAgent: () => {},
     });
     callback(0, "replacement");
-    assert.equal(queue.getSnapshot().paused, true);
+    assert.equal(queue.getSnapshot().held, true);
   });
   }
 }

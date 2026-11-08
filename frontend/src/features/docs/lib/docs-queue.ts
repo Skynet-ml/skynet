@@ -8,9 +8,9 @@ export async function discardStaleDocsResponse(response: Response, stale: boolea
 }
 
 /** Classify the ask response and hold follow-ups after a rate limit. */
-export function docsAskFailure(status: number, hasBody: boolean, pause: () => void): DocsAskNotice {
+export function docsAskFailure(status: number, hasBody: boolean, hold: () => void): DocsAskNotice {
   if (status === 429) {
-    pause();
+    hold();
     return "rate";
   }
   if (status === 422) return "tooLong";

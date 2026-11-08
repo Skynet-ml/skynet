@@ -122,6 +122,13 @@ export function Composer({
   React.useEffect(() => {
     valueRef.current = value;
   }, [value]);
+  // After Stop or a failed turn the store holds the unread messages instead of
+  // starting a new paid turn; they come back into the draft, in order.
+  React.useEffect(() => {
+    if (!midTurn?.held) return;
+    const text = midTurn.takeHeld();
+    if (text) onChange(appendToDraft(valueRef.current, text));
+  }, [midTurn, onChange]);
   const dictation = useDictation({
     language: locale,
     onText: (text) => {
@@ -167,7 +174,6 @@ export function Composer({
   const [attaching, setAttaching] = React.useState(0);
   const [lengthNotice, setLengthNotice] = React.useState<string | null>(null);
   const maxLength = midTurn?.maxLength ?? 20_000;
-  const headLength = midTurn?.queued.find((item) => !item.uncertain)?.text.length ?? 0;
   const tooLong = (count: number) => msg("agent.pending.too_long", { count, max: maxLength });
   const attachFiles = async (picked: File[]) => {
     const {
@@ -332,17 +338,11 @@ export function Composer({
       {midTurn && (
         <PendingMessages
           queued={midTurn.queued}
-          steering={midTurn.steering}
           canPromote={midTurn.canSteer}
-          paused={midTurn.paused}
-          streaming={Boolean(streaming)}
-          sendNowReason={headLength > maxLength ? tooLong(headLength) : undefined}
-          onSendNow={midTurn.sendNow}
           onPromote={midTurn.promote}
           onEdit={(id) => void editPending(id)}
           onRemove={midTurn.remove}
           onReorderQueued={midTurn.reorderQueued}
-          onReorderSteering={midTurn.reorderSteering}
         />
       )}
       <ComposerLoader active={Boolean(streaming)} radius={16}>

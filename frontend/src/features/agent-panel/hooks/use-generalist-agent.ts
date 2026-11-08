@@ -1006,7 +1006,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
         messageIndex,
         runtimesRef.current.get(key)?.unsavedEdit ?? null,
       );
-      steerQueueFor(key).pause();
+      steerQueueFor(key).hold();
       requestRun(key, trimmed, truncated, undefined, regenerate, false, editUserTurn);
     },
     [requestRun, steerQueueFor],
@@ -1032,7 +1032,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     const { regenerate, editUserTurn } = retryMode(
       runtimesRef.current.get(key)?.unsavedEdit ?? null,
     );
-    steerQueueFor(key).pause();
+    steerQueueFor(key).hold();
     requestRun(
       key,
       lastUser.content,
@@ -1045,7 +1045,7 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
   }, [requestRun, steerQueueFor]);
 
   const stopSession = React.useCallback((key: string) => {
-    steerQueueFor(key).pause();
+    steerQueueFor(key).hold();
     const wasQueued = sessionsRef.current.get(key)?.status === "queued";
     abortSession(key);
     patchSession(key, { status: "idle", statusLabel: "" });
@@ -1182,14 +1182,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     activeSteerQueue.getSnapshot,
   );
   const midTurn = React.useMemo(
-    () => ({
-      ...midTurnOf(() => activeSteerQueue, steerSnapshot),
-      stopAndSendNow: () => {
-        const key = activeKey;
-        activeSteerQueue.stopAndSendNow(() => stopSession(key));
-      },
-    }),
-    [activeKey, activeSteerQueue, steerSnapshot, stopSession],
+    () => midTurnOf(() => activeSteerQueue, steerSnapshot),
+    [activeSteerQueue, steerSnapshot],
   );
 
   const confirmApproval = React.useCallback(
