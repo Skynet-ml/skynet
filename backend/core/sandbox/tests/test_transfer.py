@@ -198,3 +198,61 @@ def test_manual_fallback_round_trip(repo: Path, tmp_path: Path, monkeypatch: pyt
 
     assert (dest / "repo" / "pkg" / "main.py").read_text() == "print('hi')\n"
     assert stat.S_IMODE((dest / "repo" / "run.sh").stat().st_mode) == 0o755
+
+
+def _path_max_chain() -> bytes:
+    """Build a symlink chain whose resolved path passes ``PATH_MAX``, then write through it.
+
+    Returns:
+        The tar archive bytes.
+    """
+    comp = "d" * 247
+    steps = "abcdefghijklmnop"
+    path = ""
+    members = []
+    for step in steps:
+        members.append(_member(str(Path(path, comp)), tarfile.DIRTYPE))
+        members.append(_member(str(Path(path, step)), tarfile.SYMTYPE, comp))
+        path = str(Path(path, comp))
+    linkpath = str(Path(*steps, "l" * 254))
+    members.append(_member(linkpath, tarfile.SYMTYPE, "../" * len(steps)))
+    members.append(_member("escape", tarfile.SYMTYPE, linkpath + "/.."))
+    members.append(_member("escape/PWNED.txt"))
+    return _archive(*members)
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_unpack_refuses_path_max_symlink_chain(tmp_path: Path, extract_path: str) -> None:
+    """A symlink chain longer than ``PATH_MAX`` fails before any member is written."""
+    dest = tmp_path / "box" / "out"
+
+    with pytest.raises(UnsafeArchiveError):
+        unpack(_path_max_chain(), dest)
+
+    assert list(dest.iterdir()) == []
+    assert _outside(tmp_path, dest) == []
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_unpack_writes_into_read_only_directory_member(tmp_path: Path, extract_path: str) -> None:
+    """A directory member without write or search bits does not block the files inside it."""
+    folder = _member("d", tarfile.DIRTYPE)
+    folder.mode = 0o555
+    dest = tmp_path / "out"
+
+    unpack(_archive(folder, _member("d/f.txt")), dest)
+
+    assert (dest / "d" / "f.txt").is_file()
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize(("mode", "expected"), [(0o6777, 0o755), (0o1666, 0o644), (0o000, 0o600)])
+def test_unpack_masks_file_modes(mode: int, expected: int, tmp_path: Path, extract_path: str) -> None:
+    """File modes lose setuid, setgid, sticky and group/other write bits, and stay owner-writable."""
+    script = _member("s.sh")
+    script.mode = mode
+    dest = tmp_path / "out"
+
+    unpack(_archive(script), dest)
+
+    assert stat.S_IMODE((dest / "s.sh").stat().st_mode) == expected
