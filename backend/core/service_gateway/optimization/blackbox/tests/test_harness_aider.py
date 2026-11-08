@@ -1,0 +1,206 @@
+"""Tests for the Aider harness: registry entry, launch, protected build and output parsing."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from core.models.blackbox import BLACKBOX_TARGET_AGENT, BlackboxTarget
+
+from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
+from ..harness_bridge import parse_plain_output
+from ..harnesses import REGISTRY
+from ..harnesses.aider import (
+    _PROTECTED_ENV,
+    _SNAPSHOT_UNTRACKED_WORKSPACE,
+    AIDER_CONFIG_FILE,
+    AIDER_UV_VERSION,
+    AIDER_VERSION,
+    SPEC,
+)
+
+_GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="secret-key")
+_RELAY_URL = "http://127.0.0.1:3210/v1"
+# A synthetic recording of Aider 0.86 stdout in scripting mode with --no-pretty.
+_RECORDED_STDOUT = """\
+Aider v0.86.2
+Model: openai/target-model with whole edit format
+Git repo: .git with 3 files
+Repo-map: disabled
+Added AGENTS.md to the chat (read-only).
+
+The answer is 42.
+
+Tokens: 1.2k sent, 18 received.
+"""
+
+
+def _target(**overrides: object) -> BlackboxTarget:
+    """Build an Aider agent target without the harness-id validation.
+
+    ``aider`` is not in ``BLACKBOX_HARNESSES`` yet, so the model validator
+    would reject it; ``model_construct`` skips validation.
+
+    Args:
+        **overrides: Extra target fields.
+
+    Returns:
+        The target.
+    """
+    fields: dict[str, object] = {
+        "kind": BLACKBOX_TARGET_AGENT,
+        "harness": "aider",
+        "model": "target-model",
+        "install_command": None,
+        "run_command": None,
+    }
+    fields.update(overrides)
+    return BlackboxTarget.model_construct(**fields)
+
+
+def _config(content: str) -> dict[str, object]:
+    """Parse the generated config, whose values are all JSON scalars or lists.
+
+    Args:
+        content: The YAML text.
+
+    Returns:
+        The settings by key.
+    """
+    settings: dict[str, object] = {}
+    for line in content.splitlines():
+        key, _, value = line.partition(": ")
+        settings[key] = json.loads(value)
+    return settings
+
+
+def test_registry_lists_aider_with_its_pin_and_plain_parser() -> None:
+    """Aider registers under its own id with a pinned release and the plain parser."""
+    assert REGISTRY["aider"] is SPEC
+    assert SPEC.binary == "aider"
+    assert SPEC.version == AIDER_VERSION == "0.86.2"
+    assert SPEC.output_format == "plain"
+
+
+def test_launch_points_aider_at_the_gateway_through_its_config_file() -> None:
+    """The gateway URL is in the config file, the key comes from the env, and the run is non-interactive."""
+    launch = build_launch(_target(), _GATEWAY)
+
+    settings = _config(launch.files[AIDER_CONFIG_FILE])
+    assert settings["openai-api-base"] == _GATEWAY.url
+    assert settings["read"] == ["AGENTS.md"]
+    assert settings["yes-always"] is True
+    assert settings["auto-commits"] is False
+    assert settings["analytics-disable"] is True
+    assert settings["check-update"] is False
+    assert "reasoning-effort" not in settings
+    assert launch.instructions_file == "AGENTS.md"
+    assert f"aider --config {AIDER_CONFIG_FILE} " in launch.run_command
+    assert '--model "openai/$APP_MODEL"' in launch.run_command
+    assert '--message-file "$APP_PROMPT_FILE"' in launch.run_command
+    assert 'OPENAI_API_KEY="$APP_API_KEY" aider' in launch.run_command
+    assert launch.parse_output is parse_plain_output
+
+
+def test_launch_never_writes_the_gateway_key_or_a_provider_key() -> None:
+    """Only the gateway token reaches the box, and only through APP_API_KEY."""
+    launch = build_launch(_target(), _GATEWAY)
+
+    assert _GATEWAY.api_key not in launch.run_command
+    assert _GATEWAY.api_key not in launch.install_command
+    assert all(_GATEWAY.api_key not in content for content in launch.files.values())
+    assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
+    assert launch.env["APP_MODEL"] == "target-model"
+    assert not {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"} & set(launch.env)
+
+
+def test_install_pins_uv_and_aider() -> None:
+    """The open install skips work when the pin is present and otherwise installs that exact release."""
+    install = build_launch(_target(), _GATEWAY).install_command
+
+    assert "aider --version" in install
+    assert "0[.]86[.]2" in install
+    assert f"https://astral.sh/uv/{AIDER_UV_VERSION}/install.sh" in install
+    assert f"aider-chat=={AIDER_VERSION}" in install
+    assert "aider.chat/install.sh" not in install
+
+
+def test_reasoning_effort_reaches_the_config_and_skips_the_metadata_check() -> None:
+    """A chosen effort is set for the model, and Aider does not drop it for an unknown gateway id."""
+    launch = build_launch(_target(), _GATEWAY, reasoning_effort="high")
+
+    settings = _config(launch.files[AIDER_CONFIG_FILE])
+    assert settings["reasoning-effort"] == "high"
+    assert settings["check-model-accepts-settings"] is False
+
+
+def test_protected_build_uses_the_pinned_check_env_flags_and_relay(tmp_path: Path) -> None:
+    """A protected launch checks the preinstalled pin, blocks network side paths, and rewrites the gateway URL."""
+    launch = build_launch(_target(run_command="true"), _GATEWAY, protected=True)
+
+    assert launch.install_command == pinned_harness_check("aider")
+    assert "uv tool install" not in launch.install_command
+    for key, value in _PROTECTED_ENV.items():
+        assert launch.env[key] == value
+    for name, content in launch.files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    subprocess.run(
+        launch.run_command,
+        shell=True,
+        cwd=tmp_path,
+        env={"PATH": os.defpath, "APP_BUDGET_RELAY_URL": _RELAY_URL},
+        timeout=10,
+        check=True,
+    )
+    settings = _config((tmp_path / AIDER_CONFIG_FILE).read_text())
+    assert settings["openai-api-base"] == _RELAY_URL
+
+
+def test_open_build_keeps_the_protected_env_out() -> None:
+    """The default launch is unchanged by the protected-only flags."""
+    launch = build_launch(_target(), _GATEWAY)
+
+    assert not set(_PROTECTED_ENV) & set(launch.env)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_snapshot_commits_a_plain_workspace_once(tmp_path: Path) -> None:
+    """A workspace that is not a git repo is committed so Aider can see its files; a repo is left alone."""
+    (tmp_path / "task.txt").write_text("files before the run\n")
+    env = {"PATH": os.environ.get("PATH", os.defpath), "HOME": str(tmp_path), "GIT_CONFIG_NOSYSTEM": "1"}
+
+    for _ in range(2):
+        subprocess.run(["sh", "-c", _SNAPSHOT_UNTRACKED_WORKSPACE + "true"], cwd=tmp_path, env=env, check=True)
+
+    log = subprocess.run(
+        ["git", "log", "--format=%an <%ae> %s"], cwd=tmp_path, env=env, check=True, capture_output=True, text=True
+    )
+    assert log.stdout.splitlines() == ["Agent <agent@localhost> Task files before agent run"]
+    tracked = subprocess.run(["git", "ls-files"], cwd=tmp_path, env=env, check=True, capture_output=True, text=True)
+    assert tracked.stdout.split() == ["task.txt"]
+
+
+def test_plain_parser_keeps_the_recorded_aider_transcript() -> None:
+    """The bridge keeps Aider's stdout as the answer and reports no usage."""
+    launch = build_launch(_target(), _GATEWAY)
+
+    answer, usage = launch.parse_output(_RECORDED_STDOUT)
+    assert answer == _RECORDED_STDOUT.strip()
+    assert "The answer is 42." in answer
+    assert usage == {}
+    assert launch.parse_output("") == (None, {})
+
+
+def test_launch_payload_names_the_plain_parser() -> None:
+    """The sandbox bridge receives the plain parser name for Aider."""
+    payload = launch_payload(build_launch(_target(), _GATEWAY))
+
+    assert payload["output_format"] == "plain"
+    assert payload["files"][AIDER_CONFIG_FILE]
