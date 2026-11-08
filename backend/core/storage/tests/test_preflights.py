@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections.abc import Iterator
@@ -269,20 +270,52 @@ def test_settlement_cannot_manufacture_success_for_unperformed_checks(
         store.finish(first.document["id"], claim_token=first.token, status="succeeded", result=SUCCESS)
 
 
-def test_heartbeat_keeps_live_owner_and_stops_cleanly_after_finish(store: PreflightStore) -> None:
+def test_heartbeat_keeps_live_owner_and_stops_cleanly_after_finish(
+    store: PreflightStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Renew through a real short lease and preserve a completed result inside the context.
 
     Args:
         store: Private setup fixture.
+        monkeypatch: Wraps renew so the test waits on real renewals instead of fixed sleeps.
     """
-    store.lease_seconds = 0.3
+    # SKY-404: a 0.3 s lease with fixed sleeps expired on slow CI before the first renewal.
+    store.lease_seconds = 1.5
+    renew = store.renew
+    renewed_past_claim_lease = threading.Event()
+    renewed_after_finish = threading.Event()
+    claim_lease_ends = math.inf
+    finished_at = math.inf
+
+    def recording_renew(identity: str, *, claim_token: str) -> bool:
+        """Delegate to the real renew and signal the renewals the test waits for.
+
+        Args:
+            identity: Claimed setup record.
+            claim_token: Private current-owner token.
+
+        Returns:
+            The real renew result.
+        """
+        started = time.monotonic()
+        renewed = renew(identity, claim_token=claim_token)
+        if renewed and time.monotonic() > claim_lease_ends:
+            renewed_past_claim_lease.set()
+        # A renewal that started before finish returned can commit while the row is still running.
+        if renewed and started > finished_at:
+            renewed_after_finish.set()
+        return renewed
+
+    monkeypatch.setattr(store, "renew", recording_renew)
     budget_id = _budget(store)
     claim = _claim(store, budget_id)
+    claim_lease_ends = time.monotonic() + store.lease_seconds
     with store.heartbeat(claim.document["id"], claim_token=claim.token):
-        time.sleep(0.45)
+        assert renewed_past_claim_lease.wait(timeout=4)
         assert _claim(store, budget_id).token is None
         finished = store.finish(claim.document["id"], claim_token=claim.token, status="succeeded", result=SUCCESS)
-        time.sleep(0.15)
+        finished_at = time.monotonic()
+        assert renewed_after_finish.wait(timeout=4)
     assert finished["status"] == "succeeded"
     with Session(store.engine) as session:
         row = session.get(WizardPreflightModel, claim.document["id"])
