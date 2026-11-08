@@ -121,6 +121,10 @@ def workspace_gateway(config: ModelConfig, gateway: GatewayConfig | None) -> Sco
 def case_document(case: Any) -> dict[str, Any]:
     """Return the ``{"input", "expected"}`` form the harness reads.
 
+    The harness gives the candidate only ``input`` (E42, E62). A dict with no
+    ``input`` key is its own input, so its ``expected`` key moves out of that
+    input and becomes the case's ``expected``.
+
     Args:
         case: A :class:`UnifiedCase`, a case mapping or ``None``.
 
@@ -132,7 +136,10 @@ def case_document(case: Any) -> dict[str, Any]:
     if isinstance(case, dict):
         if "input" in case:
             return {"input": dict(case.get("input") or {}), "expected": case.get("expected")}
-        return {"input": dict(case), "expected": None}
+        return {
+            "input": {key: value for key, value in case.items() if key != "expected"},
+            "expected": case.get("expected"),
+        }
     return {"input": {}, "expected": None}
 
 
