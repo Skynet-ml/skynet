@@ -90,14 +90,10 @@ from ..models.results import TerminalOutcome, result_scores
 from ..notifications import notify_job_completed
 from ..notifications.run_watcher import RunNotificationWatcher
 from ..registry import ServiceRegistry
+from ..sandbox.sweep import remove_idle_sandbox_networks, stop_job_sandboxes
 from ..service_gateway import DspyService
 from ..service_gateway.embedding_pipeline import embed_finished_job
-from ..service_gateway.optimization.blackbox.docker_sandbox import (
-    docker_runtime_from_settings,
-    remove_idle_sandbox_networks,
-)
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
-from ..service_gateway.optimization.blackbox.sandbox import sandbox_runtime_from_settings
 from ..service_gateway.optimization.blackbox.service import validate_blackbox_payload
 from ..service_gateway.optimization.trajectory import GEPA_STATE_FILENAME
 from ..service_gateway.optimization.unified.contract import validate_unified_payload
@@ -2283,19 +2279,14 @@ class BackgroundWorker:
         Args:
             optimization_id: The job whose boxes to stop.
         """
-        # The local availability probe also checks the image; leftover boxes
-        # are removed by label, which needs only the Docker CLI.
-        runtime = (
-            docker_runtime_from_settings(settings) if settings.local_mode else sandbox_runtime_from_settings(settings)
-        )
-        if runtime is None:
-            return
         try:
-            stopped = runtime.stop_job_sandboxes(optimization_id)
+            stopped = stop_job_sandboxes(
+                optimization_id, local_mode=settings.local_mode, docker_bin=settings.docker_bin
+            )
         except Exception as exc:  # isolation boundary: a failed sweep must not mask the job's outcome
             logger.warning("Optimization %s: sandbox sweep failed: %s", optimization_id, exc)
             return
-        if stopped == 0:
+        if not stopped:
             return
         logger.info("Optimization %s: stopped %d sandbox(es) the job left running", optimization_id, stopped)
         with contextlib.suppress(Exception):
