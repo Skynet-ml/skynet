@@ -16,14 +16,20 @@ import logging
 import posixpath
 import threading
 import time
+import uuid
 from typing import Any
+
+from tenacity import Retrying, retry_if_exception, stop_after_attempt
 
 from ....billing.budgets import BudgetError
 from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import UsagePendingError
 from ....config import Settings, settings
-from ....exceptions import ServiceError
+from ....exceptions import InfrastructureInterruptionError, ServiceError
 from ....models.blackbox import BlackboxTarget
+from ....sandbox.environment import HealthcheckConfig
+from ....sandbox.errors import GROUP_RULES, ErrorGroup, classify
+from ....sandbox.retry import DEFAULT_RETRY_POLICY, RetryPolicy, attempt_key
 from .agent_runs import AgentRun, AgentRunRecorder
 from .harness import ANSWER_FILE, PROMPT_FILE, GatewayConfig, HarnessLaunch, build_launch, pinned_harness_check
 from .heartbeat import heartbeat
@@ -63,6 +69,75 @@ _STEP_CHARS = 6_000
 _FEEDBACK_OUTPUT_CHARS = 2_000
 _FEEDBACK_TRANSCRIPT_CHARS = 1_500
 _CHECK_OUTPUT_CHARS = 2_000
+# The readiness box must answer a trivial command before the real checks run,
+# so a slow boot is a few failed probes instead of a failed setup (SKY-428).
+READINESS_HEALTHCHECK = HealthcheckConfig(command="true", interval_sec=2.0, timeout_sec=30.0, retries=3)
+# Skynet errors that ``core.sandbox.classify`` does not know, in Harbor's groups.
+# Order matters: the first matching class wins (SKY-428).
+_ERROR_GROUPS: tuple[tuple[type[BaseException], ErrorGroup], ...] = (
+    (ServiceError, ErrorGroup.REJECTED),
+    (InfrastructureInterruptionError, ErrorGroup.INFRA),
+    (ConnectionError, ErrorGroup.TRANSIENT),
+    (TimeoutError, ErrorGroup.TRANSIENT),
+)
+COST_OWNER_SKYNET = "skynet"
+COST_OWNER_USER = "user"
+
+
+def error_group(exc: BaseException) -> ErrorGroup | None:
+    """Return the Harbor error group of an agent attempt's error.
+
+    Args:
+        exc: The error that the attempt raised.
+
+    Returns:
+        The group from ``core.sandbox.classify``, else from the Skynet table,
+        else ``None`` for an unknown error.
+    """
+    group = classify(exc)
+    if group is not None:
+        return group
+    for cls, mapped in _ERROR_GROUPS:
+        if isinstance(exc, cls):
+            return mapped
+    return None
+
+
+def should_retry(policy: RetryPolicy, exc: BaseException) -> bool:
+    """Say whether an agent attempt that raised ``exc`` runs again in a fresh box.
+
+    It extends :meth:`RetryPolicy.should_retry` with the Skynet table, with the
+    same rules: no-retry groups never retry, ``include`` narrows, ``exclude`` wins.
+
+    Args:
+        policy: The scorer's retry policy.
+        exc: The error that the attempt raised.
+
+    Returns:
+        True when the attempt runs again.
+    """
+    if not isinstance(exc, Exception) or classify(exc) is not None:
+        return policy.should_retry(exc)
+    group = error_group(exc)
+    if group is None:
+        return policy.should_retry(exc)
+    if policy.max_retries == 0 or not GROUP_RULES[group].retryable:
+        return False
+    if policy.exclude and isinstance(exc, policy.exclude):
+        return False
+    return isinstance(exc, policy.include) if policy.include else True
+
+
+def cost_owner(group: ErrorGroup | None) -> str:
+    """Return who carries the cost of an attempt that ended in ``group``.
+
+    Args:
+        group: The attempt's error group; ``None`` for a success or an unknown error.
+
+    Returns:
+        ``skynet`` for an infrastructure failure, else ``user``.
+    """
+    return COST_OWNER_SKYNET if group is ErrorGroup.INFRA else COST_OWNER_USER
 
 
 def gateway_from_settings(settings: Settings) -> GatewayConfig | None:
@@ -360,6 +435,8 @@ class SandboxAgentScorer:
         job_id: str | None = None,
         max_lifetime_seconds: float | None = None,
         recorder: AgentRunRecorder | None = None,
+        retry_policy: RetryPolicy = DEFAULT_RETRY_POLICY,
+        healthcheck: HealthcheckConfig = READINESS_HEALTHCHECK,
     ) -> None:
         """Bind the wrapper to a sandbox runtime and the job's target.
 
@@ -371,6 +448,9 @@ class SandboxAgentScorer:
             job_id: Tags the sandboxes with the job, when known.
             max_lifetime_seconds: Ceiling on a box's lifetime; the configured one when unset.
             recorder: Receives every run's record and live transcript; inert when unset.
+            retry_policy: Which attempt errors run again in a fresh box; the
+                default never retries. Advanced mode sets the count and classes.
+            healthcheck: The readiness poll that :meth:`check_ready` runs first.
         """
         self._scorer = scorer
         self._runtime = runtime
@@ -390,6 +470,8 @@ class SandboxAgentScorer:
         self._dead_runs = 0
         self._alive = False
         self._run_ids = itertools.count(1)
+        self._retry_policy = retry_policy
+        self._healthcheck = healthcheck
 
     def check_ready(self) -> dict[str, str]:
         """Verify a seedless agent's offline CLI, dependencies, and command syntax.
@@ -399,7 +481,8 @@ class SandboxAgentScorer:
 
         Raises:
             ServiceError: When protected runtime requirements, authored
-                dependencies, or command syntax are invalid.
+                dependencies, or command syntax are invalid, or the box
+                never passes its healthcheck.
         """
         if not getattr(self._runtime, "protected", False):
             raise ServiceError("Agent readiness requires a protected sandbox runtime.")
@@ -414,6 +497,7 @@ class SandboxAgentScorer:
         session = self._runtime.open(spec)
         failed = False
         try:
+            self._wait_healthy(session, lifetime)
             files = {
                 f".app/readiness-{index}.sh": command
                 for index, command in enumerate(
@@ -458,6 +542,43 @@ class SandboxAgentScorer:
             except UsagePendingError:
                 if not failed:
                     raise
+
+    def _wait_healthy(self, session: SandboxSession, lifetime: float) -> None:
+        """Poll the healthcheck command until the box answers, with Docker HEALTHCHECK semantics.
+
+        Args:
+            session: The open readiness box.
+            lifetime: The box lifetime, which caps each probe's timeout.
+
+        Raises:
+            ServiceError: ``retries`` consecutive probes failed after the start period.
+        """
+        config = self._healthcheck
+        started = time.monotonic()
+        failures = 0
+        while True:
+            probe_started = time.monotonic()
+            try:
+                result = session.run(config.command, timeout_seconds=min(config.timeout_sec, lifetime))
+            except (BudgetError, UsagePendingError, UnpricedOperationError):
+                raise
+            except Exception as error:
+                # A transport error is one failed probe, not the end of the poll.
+                last_failure = f"{type(error).__name__}: {error}"
+            else:
+                if result.ok:
+                    return
+                last_failure = f"exit code {result.exit_code}"
+            if probe_started - started < config.start_period_sec:
+                time.sleep(config.start_interval_sec)
+                continue
+            failures += 1
+            if failures >= config.retries:
+                raise ServiceError(
+                    f"The agent sandbox failed its readiness healthcheck {failures} times in a row "
+                    f"({last_failure[:500]})."
+                )
+            time.sleep(config.interval_sec)
 
     def __call__(self, candidate: Candidate, case: Any = None) -> tuple[float, SideInfo]:
         """Run the agent on ``case`` with ``candidate`` as its harness, then score the record.
@@ -543,12 +664,14 @@ class SandboxAgentScorer:
         Returns:
             ``case``, ``output`` (the answer file, else the parsed final
             message), ``transcript``, ``exit_code``, ``timed_out``,
-            ``elapsed_seconds``, ``check``, ``usage`` and ``error``.
+            ``elapsed_seconds``, ``check``, ``usage``, ``error`` and
+            ``attempts`` (one entry per box: its operation key, error group
+            and cost owner).
 
         Raises:
             ServiceError: When the version or case ships an unsafe path, or the
-                sandbox could not be created or driven twice in a row; the eval
-                server turns the latter into a floor score.
+                sandbox could not be created or driven on its last allowed
+                attempt; the eval server turns the latter into a floor score.
         """
         return self._run(candidate, case, *self._next_label(case))
 
@@ -569,7 +692,11 @@ class SandboxAgentScorer:
         return run_id, label
 
     def _run(self, candidate: Candidate, case: Any, run_id: int, label: str) -> dict[str, Any]:
-        """Run the agent once, retrying in a fresh box when the first one dies; see :meth:`run`.
+        """Run the agent, one fresh box per attempt, as the retry policy allows; see :meth:`run`.
+
+        Each attempt gets its own ``:attempt-N`` operation key, so a protected
+        runtime opens a new reservation and box for it and never charges one
+        attempt twice.
 
         Args:
             candidate: The harness version.
@@ -588,33 +715,74 @@ class SandboxAgentScorer:
             PROMPT_FILE: case_prompt(case),
         }
         run = self._recorder.begin(run_id=run_id, label=label, case_id=case_name(case), model=self._target.model)
+        policy = self._retry_policy
+        base_key = f"agent-run:{uuid.uuid4().hex}"
+        attempts: list[dict[str, Any]] = []
+
+        def note_failure(attempt: int, key: str, exc: BaseException) -> None:
+            """Record a failed attempt and, when it runs again, say so in the transcript.
+
+            Args:
+                attempt: The attempt number, from 1.
+                key: The attempt's operation key.
+                exc: The attempt's error.
+            """
+            group = error_group(exc)
+            owner = cost_owner(group)
+            attempts.append(
+                {
+                    "attempt": attempt,
+                    "operation_key": key,
+                    "error_group": group.value if group else None,
+                    "cost_owner": owner,
+                }
+            )
+            if attempt < policy.max_attempts and should_retry(policy, exc):
+                logger.warning(
+                    "%s: attempt %d failed (%s, cost owner %s); retrying in a fresh box",
+                    label,
+                    attempt,
+                    group or "unknown",
+                    owner,
+                    exc_info=True,
+                )
+                run.write(f"\n[sandbox] attempt {attempt} failed ({group or 'unknown'}); retrying in a fresh box\n")
+
+        retrying = Retrying(
+            stop=stop_after_attempt(policy.max_attempts),
+            retry=retry_if_exception(lambda exc: should_retry(policy, exc)),
+            wait=policy.wait_strategy(),
+            reraise=True,
+        )
         try:
-            record = self._attempt(files, case, label, run)
+            for attempt in retrying:
+                with attempt:
+                    number = attempt.retry_state.attempt_number
+                    key = attempt_key(base_key, number)
+                    try:
+                        record = self._attempt(files, case, label, run, operation_key=key)
+                    except BaseException as exc:
+                        note_failure(number, key, exc)
+                        raise
+                    attempts.append(
+                        {"attempt": number, "operation_key": key, "error_group": None, "cost_owner": COST_OWNER_USER}
+                    )
         except (BudgetError, UsagePendingError, UnpricedOperationError):
             raise
         except ServiceError as exc:
             logger.warning("%s: %s", label, exc)
             run.abort(str(exc))
             raise
-        except Exception:
+        except Exception as exc:
             if getattr(self._runtime, "protected", False):
                 raise
-            # The box died under us (host recycled, transport stalled): one fresh box, one more try.
-            logger.warning("%s: sandbox failed; retrying in a fresh box", label, exc_info=True)
-            run.write("\n[sandbox] the box died; retrying in a fresh one\n")
-            try:
-                record = self._attempt(files, case, label, run)
-            except (BudgetError, UsagePendingError, UnpricedOperationError):
-                raise
-            except ServiceError as exc:
-                logger.warning("%s: %s", label, exc)
-                run.abort(str(exc))
-                raise
-            except Exception as exc:
-                logger.warning("%s: sandbox failed twice; giving up", label, exc_info=True)
-                error = ServiceError(f"agent sandbox failed twice ({type(exc).__name__}): {exc}")
-                run.abort(str(error))
-                raise error from exc
+            count = len(attempts)
+            logger.warning("%s: sandbox failed on attempt %d; giving up", label, count, exc_info=True)
+            tries = "1 attempt" if count == 1 else f"{count} attempts"
+            error = ServiceError(f"agent sandbox failed after {tries} ({type(exc).__name__}): {exc}")
+            run.abort(str(error))
+            raise error from exc
+        record["attempts"] = attempts
         run.finish(record)
         return record
 
@@ -635,7 +803,9 @@ class SandboxAgentScorer:
             setup_steps += 1
         return min(case_lifetime_seconds(self._target.timeout_seconds, setup_steps), self._max_lifetime_seconds)
 
-    def _attempt(self, files: dict[str, str], case: Any, label: str, run: AgentRun) -> dict[str, Any]:
+    def _attempt(
+        self, files: dict[str, str], case: Any, label: str, run: AgentRun, *, operation_key: str
+    ) -> dict[str, Any]:
         """Open one box under a fresh name, drive it and close it.
 
         Args:
@@ -643,6 +813,7 @@ class SandboxAgentScorer:
             case: The task the agent works on.
             label: Prefix of this run's log lines.
             run: The run's record, fed the box's output as it arrives.
+            operation_key: The attempt's own key for its reservation and box.
 
         Returns:
             The run record.
@@ -652,6 +823,7 @@ class SandboxAgentScorer:
             env=self._launch.env,
             name=self._sandbox_name(),
             tags={JOB_TAG: self._job_id} if self._job_id else {},
+            operation_key=operation_key,
         )
         record: dict[str, Any] = {
             "case": case,
