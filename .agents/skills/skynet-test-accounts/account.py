@@ -437,7 +437,7 @@ def main():
     make.add_argument("--label", required=True, help="your issue or PR, for example SKY-123")
     helps = {
         "env": "print the login.sh exports (password included); run it only inside eval",
-        "delete": "delete the account in the app, then its secret; run it after every check",
+        "delete": "delete the account in the app, then its secret; cancel its runs first; run it after every check",
         "forget": (
             "remove only the secret; use it only when register never succeeded, the preview"
             " database is gone, or an earlier delete printed 'account delete: HTTP 200'"

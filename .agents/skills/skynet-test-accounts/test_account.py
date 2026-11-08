@@ -18,7 +18,12 @@ SPEC = importlib.util.spec_from_file_location("account", SCRIPT)
 account = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(account)
 
-FORGET_CASES = ("register", "preview database is gone", "account delete: HTTP 200")
+HELP_CASES = ("register never succeeded", "the preview database is gone", "delete printed 'account delete: HTTP 200'")
+SKILL_CASES = (
+    "`register` never succeeded",
+    "the preview database is gone",
+    "`delete` printed `account delete: HTTP 200`",
+)
 
 
 def help_text(*args):
@@ -43,7 +48,7 @@ def test_every_command_prints_help(cmd):
 def test_forget_help_names_all_cases():
     """Name the three cases in which the account no longer exists."""
     text = help_text("forget")
-    for case in FORGET_CASES:
+    for case in HELP_CASES:
         assert case in text
 
 
@@ -52,7 +57,7 @@ def test_skill_forget_rule_names_all_cases():
     skill = " ".join((HERE / "SKILL.md").read_text().split())
     rule = skill[skill.index("`account.py forget <id>` removes only the secret") :]
     rule = rule[: rule.index("Never use `forget` while the account still exists")]
-    for case in FORGET_CASES:
+    for case in SKILL_CASES:
         assert case in rule
 
 
