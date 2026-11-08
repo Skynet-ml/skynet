@@ -334,33 +334,98 @@ def _scalar(name: str, field: str, value: Any) -> str:
     return str(value)
 
 
-def _unquoted_operator(text: str) -> str | None:
-    """Find the first shell operator character outside quotes and escapes.
+_CUT = ";&|<>"
+
+
+def _compose_words(name: str, field: str, text: str) -> list[str]:
+    """Split a string command into words as compose (go-shellwords) does.
+
+    Compose keeps a backtick region or a ``$(...)`` region as one word, with
+    its quotes and backslashes, so this scanner follows it rather than shlex.
+    Checked against ``docker compose config`` v5.6.1.
 
     Args:
+        name: The service name, for the error.
+        field: The field name, for the error.
         text: The string command, after interpolation.
 
     Returns:
-        The first unquoted ``;``, ``&`` or ``|``, or ``None``.
+        The words that compose passes to the container.
+
+    Raises:
+        ComposeError: The text has an unquoted ``;``, ``&``, ``|``, ``<`` or
+            ``>``, which makes compose drop the rest; an unquoted ``(`` or
+            ``)`` that does not open or close ``$(...)``; or an unclosed
+            quote, backtick, ``$(`` or trailing backslash. Compose rejects
+            the last two kinds too.
     """
-    quote = None
-    escaped = False
+    words: list[str] = []
+    word = ""
+    started = escaped = single = double = backtick = dollar = False
     for char in text:
         if escaped:
+            word += char
             escaped = False
-        elif quote == "'":
-            if char == "'":
-                quote = None
-        elif char == "\\":
-            escaped = True
-        elif quote == '"':
-            if char == '"':
-                quote = None
+            started = True
+            continue
+        if char == "\\":
+            if single or backtick or dollar:
+                word += char
+            escaped = not single
+            continue
+        if char in " \t\r\n" and not (single or double or backtick or dollar):
+            if started:
+                words.append(word)
+                word = ""
+                started = False
+            continue
+        started = True
+        if single:
+            single = char != "'"
+            if single:
+                word += char
+            continue
+        if double:
+            double = char != '"'
+            if double:
+                word += char
+            continue
+        if char == "`" and not dollar:
+            backtick = not backtick
+        elif backtick:
+            pass
+        elif char == "(" and not dollar and word.endswith("$"):
+            dollar = True
+        elif char == ")" and dollar:
+            dollar = False
+        elif char in "()":
+            raise ComposeError(
+                f"The {field} of compose service {name} is not valid shell words: "
+                f"an unquoted {char!r} that does not open or close $(...)."
+            )
+        elif dollar:
+            pass
         elif char in "'\"":
-            quote = char
-        elif char in ";&|":
-            return char
-    return None
+            single, double = char == "'", char == '"'
+            continue
+        elif char in _CUT:
+            # Compose runs no shell: it silently drops everything after this
+            # character. A command that quietly loses its second half is
+            # worse than a parse error.
+            raise ComposeError(
+                f"The {field} of compose service {name} has an unquoted {char!r}. "
+                "Compose runs no shell and drops everything after an unquoted ;, &, |, < or >. "
+                f'Write the {field} as sh -c "..." instead.'
+            )
+        word += char
+    if escaped or single or double or backtick or dollar:
+        raise ComposeError(
+            f"The {field} of compose service {name} is not valid shell words: "
+            "a quote, a backtick, a $( or a trailing backslash is not closed."
+        )
+    if started:
+        words.append(word)
+    return words
 
 
 def _command_text(name: str, field: str, value: Any) -> str:
@@ -377,24 +442,10 @@ def _command_text(name: str, field: str, value: Any) -> str:
 
     Raises:
         ComposeError: The value is neither a string nor a list of scalars,
-            a string has an unclosed quote, or a string has an unquoted
-            ``;``, ``&`` or ``|``.
+            or a string is not valid compose words (see ``_compose_words``).
     """
     if isinstance(value, str):
-        # Compose runs no shell: it splits the string into words and silently
-        # drops everything after the first unquoted `;`, `&` or `|`. A command
-        # that quietly loses its second half is worse than a parse error.
-        operator = _unquoted_operator(value)
-        if operator is not None:
-            raise ComposeError(
-                f"The {field} of compose service {name} has an unquoted {operator!r}. "
-                "Compose runs no shell and drops everything after it. "
-                f'Write the {field} as sh -c "..." instead.'
-            )
-        try:
-            return shlex.join(shlex.split(value))
-        except ValueError as error:
-            raise ComposeError(f"The {field} of compose service {name} is not valid shell words: {error}.") from error
+        return shlex.join(_compose_words(name, field, value))
     if isinstance(value, list):
         return shlex.join(_scalar(name, field, item) for item in value)
     raise ComposeError(f"The {field} of compose service {name} is not a string or a list.")

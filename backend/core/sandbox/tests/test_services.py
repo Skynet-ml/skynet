@@ -189,10 +189,15 @@ def test_string_command_words_are_literal_as_in_compose(tmp_path: Path) -> None:
         parse_compose("services:\n  app:\n    command: echo 'open\n")
 
 
-@pytest.mark.parametrize(("command", "operator"), [("a && b", "&"), ("a; b", ";"), ("a | b", "|"), ("a &", "&")])
+@pytest.mark.parametrize(
+    ("command", "operator"),
+    [("a && b", "&"), ("a; b", ";"), ("a | b", "|"), ("a &", "&"), ("a > f", ">"), ("a < f", "<"), ("a 2>&1", ">")],
+)
 def test_unquoted_shell_operator_fails_the_parse(command: str, operator: str) -> None:
     """Check that an unquoted operator fails, because compose silently drops everything after it."""
-    with pytest.raises(ComposeError, match=rf"unquoted '\{operator}'.*drops everything after it.*sh -c"):
+    with pytest.raises(
+        ComposeError, match=rf"unquoted '\{operator}'.*drops everything after an unquoted ;, &, \|, < or >.*sh -c"
+    ):
         parse_compose(f"services:\n  app:\n    command: {command}\n")
 
 
@@ -202,12 +207,34 @@ def test_unquoted_shell_operator_fails_the_parse(command: str, operator: str) ->
         ('sh -c "a && b"', ["sh", "-c", "a && b"]),
         ("echo 'x;y'", ["echo", "x;y"]),
         ("echo a\\;b", ["echo", "a;b"]),
+        ("echo `a;b`", ["echo", "`a;b`"]),
+        ("echo $$(a;b)", ["echo", "$(a;b)"]),
+        ("echo `a b` $$(c 'd' e) z", ["echo", "`a b`", "$(c 'd' e)", "z"]),
+        ("echo `a\\`b`", ["echo", "`a\\`b`"]),
+        ('echo "q\\b" a\\>b', ["echo", "qb", "a>b"]),
     ],
 )
 def test_quoted_shell_operator_is_a_literal_word(command: str, words: list[str]) -> None:
-    """Check that a quoted or escaped operator stays inside its word."""
+    """Check that a quoted, escaped, backtick or $(...) operator stays inside its word, as in compose."""
     (app,) = parse_compose(f"services:\n  app:\n    command: {command}\n")
     assert shlex.split(app.command) == words
+
+
+@pytest.mark.parametrize(
+    ("command", "error"),
+    [
+        ("echo a(b", "unquoted '\\(' that does not open or close"),
+        ("echo a)b", "unquoted '\\)' that does not open or close"),
+        ("echo $$((1+2))", "unquoted '\\(' that does not open or close"),
+        ("echo `a", "is not closed"),
+        ("echo $$(a", "is not closed"),
+        ("echo a\\", "is not closed"),
+    ],
+)
+def test_command_that_compose_rejects_fails_the_parse(command: str, error: str) -> None:
+    """Check that a stray paren or an unclosed region fails, because compose rejects it too."""
+    with pytest.raises(ComposeError, match=rf"command of compose service app is not valid shell words: .*{error}"):
+        parse_compose(f"services:\n  app:\n    command: {command}\n")
 
 
 def test_nested_interpolation_is_not_supported() -> None:
