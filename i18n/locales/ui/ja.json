@@ -349,6 +349,8 @@
   "submit.v2.repo.secret.remove": "シークレットを削除",
   "submit.v2.repo.issue.secret_name": "シークレット名には英字、数字、アンダースコアを使い、数字で始めないでください。",
   "submit.v2.repo.issue.secret_value": "各シークレットに値を入力してください。",
+  "submit.v2.repo.issue.secret_value_long": "各シークレットの値は最大 16,384 文字です。",
+  "submit.v2.repo.issue.secret_count": "1 回の実行で使えるシークレットは最大 100 個です。いくつか削除してください。",
   "submit.v2.repo.issue.secret_hosts": "許可するホストは api.example.com または *.example.com の形で、各シークレットにつき最大 20 件まで書いてください。",
   "submit.v2.repo.issue.secret_duplicate": "各シークレットに別の名前を付けてください。",
   "submit.v2.repo.check_on_submit": "実行を開始するときにリポジトリに対してチェックされます",

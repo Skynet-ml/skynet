@@ -349,6 +349,8 @@
   "submit.v2.repo.secret.remove": "Rimuovi segreto",
   "submit.v2.repo.issue.secret_name": "Il nome di un segreto usa lettere, cifre e trattini bassi e non inizia con una cifra.",
   "submit.v2.repo.issue.secret_value": "Inserisci un valore per ogni segreto.",
+  "submit.v2.repo.issue.secret_value_long": "Ogni valore di segreto può avere al massimo 16.384 caratteri.",
+  "submit.v2.repo.issue.secret_count": "Un'esecuzione può avere al massimo 100 segreti. Rimuovi alcuni segreti.",
   "submit.v2.repo.issue.secret_hosts": "Scrivi ogni host consentito come api.example.com o *.example.com, fino a 20 per segreto.",
   "submit.v2.repo.issue.secret_duplicate": "Dai a ogni segreto un nome diverso.",
   "submit.v2.repo.check_on_submit": "Verificato sul repository all'avvio",

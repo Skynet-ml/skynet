@@ -11,6 +11,7 @@ import { emptyRepoSecret, type RepoSecretDraft } from "../../lib/wizard-v2";
 /**
  * The secrets a repository run sends, one row each: the environment variable
  * name, its value for this run, and the hosts it may go to (SKY-381 E52).
+ * A row the setup check refused for a host shows its fix until the user edits it.
  */
 export function RepoSecretsField({
   secrets,
@@ -22,7 +23,7 @@ export function RepoSecretsField({
   t: (key: string) => string;
 }) {
   const patch = (index: number, next: Partial<RepoSecretDraft>) =>
-    onChange(secrets.map((secret, i) => (i === index ? { ...secret, ...next } : secret)));
+    onChange(secrets.map((secret, i) => (i === index ? { ...secret, ...next, hostIssue: undefined } : secret)));
 
   return (
     <div className="flex flex-col gap-3">
@@ -71,8 +72,15 @@ export function RepoSecretsField({
               autoComplete="off"
               spellCheck={false}
               dir="ltr"
+              aria-invalid={Boolean(secret.hostIssue)}
+              aria-describedby={secret.hostIssue ? `v2-repo-secret-hosts-issue-${index}` : undefined}
               className={`${TOUCH_FIELD} font-mono`}
             />
+            {secret.hostIssue && (
+              <p id={`v2-repo-secret-hosts-issue-${index}`} role="alert" className="text-xs text-destructive">
+                {secret.hostIssue}
+              </p>
+            )}
           </div>
           <Button
             type="button"

@@ -349,6 +349,8 @@
   "submit.v2.repo.secret.remove": "移除密钥",
   "submit.v2.repo.issue.secret_name": "密钥名称由字母、数字和下划线组成，且不能以数字开头。",
   "submit.v2.repo.issue.secret_value": "请为每个密钥输入值。",
+  "submit.v2.repo.issue.secret_value_long": "每个密钥的值最多可包含 16,384 个字符。",
+  "submit.v2.repo.issue.secret_count": "一次运行最多可包含 100 个密钥。请移除部分密钥。",
   "submit.v2.repo.issue.secret_hosts": "请将每个允许的主机写成 api.example.com 或 *.example.com，每个密钥最多 20 个。",
   "submit.v2.repo.issue.secret_duplicate": "请为每个密钥使用不同的名称。",
   "submit.v2.repo.check_on_submit": "开始运行时会针对仓库进行检查",

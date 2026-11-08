@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { gateReasons } from "./gate-reasons.ts";
+import { gateReasons, secretHostIssues } from "./gate-reasons.ts";
 
 const CATALOG: Record<string, string> = {
   "repo_gate.unknown_connector":
     "The service {service} is not a connector. Use one of these names: {known}.",
   "repo_gate.unenforced_cloud": "optimize.toml sets {key}. Remove it to run.",
+  "repo_gate.secret_host_unlisted": "{secret} has no allowed hosts but goes to {host}.",
+  "repo_gate.secret_host_not_allowed": "{secret} may go only to {allowed} but goes to {host}.",
 };
 
 const translate = (code: string, params?: Record<string, unknown>) =>
@@ -63,4 +65,26 @@ test("other errors and a refusal from an older server give no reasons", () => {
     ),
     [],
   );
+});
+
+test("a secret refused for a host gets its fix message under its own name", () => {
+  const issues = secretHostIssues(
+    refused([
+      { key: "repo_gate.secret_host_unlisted", params: { secret: "API_KEY", host: "a.example.com" } },
+      {
+        key: "repo_gate.secret_host_not_allowed",
+        params: { secret: "API_KEY", allowed: "b.example.com", host: "c.example.com" },
+      },
+      { key: "repo_gate.secret_host_unlisted", params: { secret: "TOKEN", host: "d.example.com" } },
+      { key: "repo_gate.unenforced_cloud", params: { key: "proposer.network", secret: "TOKEN" } },
+      { key: "repo_gate.secret_host_unlisted", params: { host: "e.example.com" } },
+    ]),
+    translate,
+  );
+  assert.deepEqual(issues, {
+    API_KEY:
+      "API_KEY has no allowed hosts but goes to a.example.com. API_KEY may go only to b.example.com but goes to c.example.com.",
+    TOKEN: "TOKEN has no allowed hosts but goes to d.example.com.",
+  });
+  assert.deepEqual(secretHostIssues(new Error("boom"), translate), {});
 });

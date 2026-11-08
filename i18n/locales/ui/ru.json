@@ -349,6 +349,8 @@
   "submit.v2.repo.secret.remove": "Удалить секрет",
   "submit.v2.repo.issue.secret_name": "Имя секрета состоит из букв, цифр и подчёркиваний и не начинается с цифры.",
   "submit.v2.repo.issue.secret_value": "Введите значение для каждого секрета.",
+  "submit.v2.repo.issue.secret_value_long": "Значение каждого секрета может содержать не более 16 384 символов.",
+  "submit.v2.repo.issue.secret_count": "В запуске может быть не более 100 секретов. Удалите часть секретов.",
   "submit.v2.repo.issue.secret_hosts": "Укажите каждый разрешённый хост как api.example.com или *.example.com, не больше 20 для каждого секрета.",
   "submit.v2.repo.issue.secret_duplicate": "Дайте каждому секрету своё имя.",
   "submit.v2.repo.check_on_submit": "Проверяется на репозитории при запуске",

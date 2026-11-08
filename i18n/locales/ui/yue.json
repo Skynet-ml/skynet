@@ -349,6 +349,8 @@
   "submit.v2.repo.secret.remove": "移除密鑰",
   "submit.v2.repo.issue.secret_name": "密鑰名稱用字母、數字同底線，而且唔可以用數字開頭。",
   "submit.v2.repo.issue.secret_value": "請為每個密鑰輸入值。",
+  "submit.v2.repo.issue.secret_value_long": "每個密鑰嘅值最多可以有 16,384 個字元。",
+  "submit.v2.repo.issue.secret_count": "一次執行最多可以有 100 個密鑰。請移除部分密鑰。",
   "submit.v2.repo.issue.secret_hosts": "請將每個允許嘅主機寫成 api.example.com 或者 *.example.com，每個密鑰最多 20 個。",
   "submit.v2.repo.issue.secret_duplicate": "請為每個密鑰用唔同嘅名稱。",
   "submit.v2.repo.check_on_submit": "開始運行嗰陣會對住儲存庫檢查",

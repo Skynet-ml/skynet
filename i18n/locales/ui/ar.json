@@ -349,6 +349,8 @@
   "submit.v2.repo.secret.remove": "إزالة السر",
   "submit.v2.repo.issue.secret_name": "يتكون اسم السر من أحرف وأرقام وشرطات سفلية، ولا يبدأ برقم.",
   "submit.v2.repo.issue.secret_value": "أدخل قيمة لكل سر.",
+  "submit.v2.repo.issue.secret_value_long": "يمكن أن تحتوي قيمة كل سر على 16,384 حرفًا على الأكثر.",
+  "submit.v2.repo.issue.secret_count": "يمكن أن يحتوي التشغيل على 100 سر على الأكثر. احذف بعض الأسرار.",
   "submit.v2.repo.issue.secret_hosts": "اكتب كل خادم مسموح به بصيغة api.example.com أو ‎*.example.com، بحد أقصى 20 لكل سر.",
   "submit.v2.repo.issue.secret_duplicate": "امنح كل سر اسمًا مختلفًا.",
   "submit.v2.repo.check_on_submit": "يُفحص مقابل المستودع عند بدء التشغيل",

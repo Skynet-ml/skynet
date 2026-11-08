@@ -349,6 +349,8 @@
   "submit.v2.repo.secret.remove": "시크릿 삭제",
   "submit.v2.repo.issue.secret_name": "시크릿 이름은 영문자, 숫자, 밑줄로 구성되며 숫자로 시작할 수 없습니다.",
   "submit.v2.repo.issue.secret_value": "각 시크릿의 값을 입력하세요.",
+  "submit.v2.repo.issue.secret_value_long": "각 시크릿 값은 최대 16,384자까지 입력할 수 있습니다.",
+  "submit.v2.repo.issue.secret_count": "실행 하나에 시크릿은 최대 100개까지 둘 수 있습니다. 일부 시크릿을 제거하세요.",
   "submit.v2.repo.issue.secret_hosts": "허용 호스트는 api.example.com 또는 *.example.com 형식으로, 시크릿마다 최대 20개까지 입력하세요.",
   "submit.v2.repo.issue.secret_duplicate": "각 시크릿에 서로 다른 이름을 지정하세요.",
   "submit.v2.repo.check_on_submit": "실행을 시작할 때 저장소를 대상으로 확인합니다",

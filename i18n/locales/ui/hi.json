@@ -349,6 +349,8 @@
   "submit.v2.repo.secret.remove": "सीक्रेट हटाएँ",
   "submit.v2.repo.issue.secret_name": "सीक्रेट के नाम में अक्षर, अंक और अंडरस्कोर होते हैं, और वह अंक से शुरू नहीं होता।",
   "submit.v2.repo.issue.secret_value": "हर सीक्रेट के लिए मान डालें।",
+  "submit.v2.repo.issue.secret_value_long": "हर सीक्रेट का मान अधिकतम 16,384 वर्णों का हो सकता है।",
+  "submit.v2.repo.issue.secret_count": "एक रन में अधिकतम 100 सीक्रेट हो सकते हैं। कुछ सीक्रेट हटाएँ।",
   "submit.v2.repo.issue.secret_hosts": "हर अनुमत होस्ट को api.example.com या *.example.com के रूप में लिखें, हर सीक्रेट के लिए अधिकतम 20।",
   "submit.v2.repo.issue.secret_duplicate": "हर सीक्रेट को अलग नाम दें।",
   "submit.v2.repo.check_on_submit": "रन शुरू करते समय रिपॉज़िटरी पर जाँचा जाता है",

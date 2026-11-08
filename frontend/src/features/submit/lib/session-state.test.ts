@@ -181,7 +181,14 @@ test("a saved setup keeps its repository secrets without their values", () => {
       commit: "",
       editablePaths: ["."],
       setupCommand: "",
-      secrets: [{ name: "API_KEY", value: "do-not-store", allowedHosts: "api.example.com" }],
+      secrets: [
+        {
+          name: "API_KEY",
+          value: "do-not-store",
+          allowedHosts: "api.example.com",
+          hostIssue: "API_KEY has no allowed hosts.",
+        },
+      ],
     },
   };
   const raw = encodeWizardSession("a@x.io", state);

@@ -36,11 +36,12 @@ const SLICES = ["task", "inputs", "optimizer", "workspace", "meta"] as const;
  */
 export function encodeWizardSession(account: string, state: WizardV2State): string {
   const repo = state.task.repo;
-  // A secret value never goes to storage; after a reload the user types it again.
+  // A secret value never goes to storage; after a reload the user types it
+  // again. The setup check's fix message goes with it, since it may be stale.
   const kept = repo?.secrets?.length
     ? {
         ...state,
-        task: { ...state.task, repo: { ...repo, secrets: repo.secrets.map((secret) => ({ ...secret, value: "" })) } },
+        task: { ...state.task, repo: { ...repo, secrets: repo.secrets.map(({ hostIssue: _, ...secret }) => ({ ...secret, value: "" })) } },
       }
     : state;
   return JSON.stringify({ account, state: kept });

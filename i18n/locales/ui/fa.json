@@ -349,6 +349,8 @@
   "submit.v2.repo.secret.remove": "حذف راز",
   "submit.v2.repo.issue.secret_name": "نام راز از حروف، ارقام و زیرخط تشکیل می‌شود و با رقم شروع نمی‌شود.",
   "submit.v2.repo.issue.secret_value": "برای هر راز یک مقدار وارد کنید.",
+  "submit.v2.repo.issue.secret_value_long": "مقدار هر راز می‌تواند حداکثر ۱۶٬۳۸۴ نویسه داشته باشد.",
+  "submit.v2.repo.issue.secret_count": "یک اجرا می‌تواند حداکثر ۱۰۰ راز داشته باشد. چند راز را حذف کنید.",
   "submit.v2.repo.issue.secret_hosts": "هر میزبان مجاز را به شکل api.example.com یا ‎*.example.com بنویسید، حداکثر ۲۰ مورد برای هر راز.",
   "submit.v2.repo.issue.secret_duplicate": "به هر راز نام متفاوتی بدهید.",
   "submit.v2.repo.check_on_submit": "هنگام شروع اجرا در برابر مخزن بررسی می‌شود",

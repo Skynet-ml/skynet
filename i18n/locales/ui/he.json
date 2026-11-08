@@ -3998,6 +3998,8 @@
   "submit.v2.repo.secret.remove": "הסרת הסוד",
   "submit.v2.repo.issue.secret_name": "שם של סוד כולל אותיות, ספרות וקווים תחתונים, ולא מתחיל בספרה.",
   "submit.v2.repo.issue.secret_value": "הזינו ערך לכל סוד.",
+  "submit.v2.repo.issue.secret_value_long": "ערך של סוד יכול להכיל עד 16,384 תווים.",
+  "submit.v2.repo.issue.secret_count": "להרצה יכולים להיות עד 100 סודות. הסירו חלק מהסודות.",
   "submit.v2.repo.issue.secret_hosts": "כתבו כל שרת מורשה בצורה api.example.com או ‎*.example.com, ועד 20 לכל סוד.",
   "submit.v2.repo.issue.secret_duplicate": "תנו לכל סוד שם שונה.",
   "submit.v2.repo.check_on_submit": "נבדק מול המאגר כשמתחילים את ההרצה",

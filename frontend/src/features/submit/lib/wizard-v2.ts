@@ -66,6 +66,8 @@ export interface RepoSecretDraft {
   name: string;
   value: string;
   allowedHosts: string;
+  /** The setup check's fix message for this secret, shown on its row until the user edits it. */
+  hostIssue?: string;
 }
 
 export const emptyRepoSecret = (): RepoSecretDraft => ({ name: "", value: "", allowedHosts: "" });
@@ -242,7 +244,7 @@ const hasModel = (config: ModelConfig | null): boolean => Boolean(config?.name.t
  */
 export function taskIssue(task: TaskSlice): string | null {
   if (!task.objective.trim()) return "submit.v2.task.issue.objective";
-  if (task.repo) return repoIssue(task.repo);
+  if (task.repo) return repoIssue(task.repo) ?? secretsIssue(task.repo.secrets ?? []);
   if (!task.artifactKind) return "submit.v2.task.issue.kind";
   const v = task.startingVersion;
   const empty =
@@ -258,15 +260,17 @@ const COMMIT_SHA = /^[0-9a-f]{40}$/i;
 const SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const SECRET_HOST = /^(\*\.)?[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$/;
 export const MAX_ALLOWED_HOSTS = 20;
+export const MAX_SECRET_VALUE = 16384;
+export const MAX_SECRETS = 100;
 
 /**
  * The allowed hosts as the server stores them: split on commas or spaces,
- * lower case, without a trailing dot, in order, without repeats.
+ * lower case, without trailing dots, in order, without repeats.
  */
 export function parseAllowedHosts(text: string): string[] {
   const hosts = text
     .split(/[\s,]+/)
-    .map((host) => host.replace(/\.$/, "").toLowerCase())
+    .map((host) => host.replace(/\.+$/, "").toLowerCase())
     .filter(Boolean);
   return [...new Set(hosts)];
 }
@@ -275,19 +279,30 @@ export function parseAllowedHosts(text: string): string[] {
 function secretIssue(secret: RepoSecretDraft): string | null {
   if (!SECRET_NAME.test(secret.name.trim())) return "submit.v2.repo.issue.secret_name";
   if (!secret.value) return "submit.v2.repo.issue.secret_value";
+  // The server counts code points, not UTF-16 units.
+  if ([...secret.value].length > MAX_SECRET_VALUE) return "submit.v2.repo.issue.secret_value_long";
   const hosts = parseAllowedHosts(secret.allowedHosts);
   if (hosts.length > MAX_ALLOWED_HOSTS || hosts.some((host) => host.length > 253 || !SECRET_HOST.test(host)))
     return "submit.v2.repo.issue.secret_hosts";
   return null;
 }
 
-/** What a repository target still lacks, or null when it can run. */
+/**
+ * What a repository target still lacks, or null when it can run. It leaves
+ * out the secrets: their values are blank after a reload, and the file
+ * browser and hardening need only the repository fields.
+ */
 export function repoIssue(repo: RepoDraft): string | null {
   if (!REPO_NAME_PATTERN.test(repo.repository.trim())) return "submit.v2.repo.issue.repository";
   if (repo.commit.trim() && !COMMIT_SHA.test(repo.commit.trim()))
     return "submit.v2.repo.issue.commit";
   if (!repo.editablePaths.some((path) => path.trim())) return "submit.v2.repo.issue.paths";
-  const secrets = repo.secrets ?? [];
+  return null;
+}
+
+/** What a repository run's secrets still lack, or null when the server takes them. */
+function secretsIssue(secrets: RepoSecretDraft[]): string | null {
+  if (secrets.length > MAX_SECRETS) return "submit.v2.repo.issue.secret_count";
   for (const secret of secrets) {
     const issue = secretIssue(secret);
     if (issue) return issue;
