@@ -129,6 +129,11 @@ render = [
     "pillow>=13.0.0",
     "networkx>=3",
 ]
+runloop = [
+    # Runloop devbox sandbox provider (SKY-456). Imported lazily by
+    # core.sandbox.providers.runloop; the default legacy backend never needs it.
+    "runloop-api-client>=1.23.2",
+]
 
 [tool.uv]
 # dspy 3.3.1's metadata hard-pins gepa[dspy]==0.1.4. That PyPI release ships neither
