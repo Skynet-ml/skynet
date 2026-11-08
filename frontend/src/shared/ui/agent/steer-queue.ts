@@ -457,7 +457,13 @@ export class SteerQueue {
       if (text !== null) this.steer(text);
       return;
     }
-    if (this.busy || this.settling > 0 || !this.paused) return;
+    if (this.busy || !this.paused) return;
+    // After Stop the tray shows Steer while unread steers are still being
+    // withdrawn; wait for them instead of dropping the click.
+    if (this.settling > 0) {
+      void Promise.allSettled([...this.settlingOperations.values()]).then(() => this.promote(id));
+      return;
+    }
     this.paused = false;
     this.sendItem(item);
   }

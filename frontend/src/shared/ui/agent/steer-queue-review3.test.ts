@@ -91,3 +91,44 @@ test("PR929 F2 a claimed withdrawal stays uncertain in the stopped tray", async 
   assert.deepEqual(applied, []);
   assert.deepEqual(sent, []);
 });
+
+test("PR1005 F1 Steer during the post-Stop withdrawal sends once after it ends", async () => {
+  const withdrawal = deferred<{ ids: string[]; delivered: string[] }>();
+  const { queue, sent } = setup({ post: async () => "a", withdraw: () => withdrawal.promise });
+  queue.steer("A");
+  await flush();
+  queue.enqueue("B");
+  const b = queue.getSnapshot().queued[0]!.id;
+  queue.pause();
+  queue.setBusy(false);
+  await flush();
+  queue.promote(b);
+  await flush();
+  assert.deepEqual(sent, []);
+  withdrawal.resolve({ ids: ["a"], delivered: [] });
+  await flush();
+  await flush();
+  assert.deepEqual(sent, ["B"]);
+  assert.equal(queue.getSnapshot().paused, false);
+  assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), ["A"]);
+  queue.promote(b);
+  await flush();
+  assert.deepEqual(sent, ["B"]);
+});
+
+test("PR1005 refused paused Steer restores tray order and pauses again", async () => {
+  const queue = new SteerQueue(() => false);
+  queue.setBusy(true);
+  queue.enqueue("A"); queue.enqueue("B");
+  queue.pause(); queue.setBusy(false);
+  await flush();
+  queue.promote(queue.getSnapshot().queued[1]!.id);
+  assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), ["A", "B"]);
+  assert.equal(queue.getSnapshot().paused, true);
+  queue.openTurn({ post: async () => "c", withdraw: async () => ({ ids: ["c"], delivered: [] }) });
+  queue.steer("C");
+  await flush();
+  queue.setBusy(false);
+  await flush();
+  assert.deepEqual(queue.getSnapshot().queued.map((item) => item.text), ["C", "A", "B"]);
+});
