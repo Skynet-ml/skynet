@@ -335,10 +335,6 @@ class _BaseFakeJobStore:
         """Write one relay call through the real store; see :meth:`PostgresRunCallStore.record_call`."""
         return self._run_call_store().record_call(optimization_id, call, secrets)
 
-    def set_run_candidate_state(self, optimization_id: str, candidate_id: str, role: str, state: str) -> None:
-        """Set one candidate's state through the real store."""
-        self._run_call_store().set_candidate_state(optimization_id, candidate_id, role, state)
-
     def list_run_calls(
         self, optimization_id: str, candidate_id: str, *, since: int = 0, limit: int = 100
     ) -> list[dict]:
