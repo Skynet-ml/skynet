@@ -15,7 +15,7 @@ from ....billing import budgets
 from ....billing.runtime import OperationCompletedError, UsagePendingError
 from ....billing.signals import BudgetReached
 from ....exceptions import InfrastructureInterruptionError, ServiceError
-from .sandbox import CommandResult, OutputSink, SandboxSpec
+from .sandbox_contract import CommandResult, OutputSink, SandboxSpec
 
 _ERRORS = {
     error.__name__: error

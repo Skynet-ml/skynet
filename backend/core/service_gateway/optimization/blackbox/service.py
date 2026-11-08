@@ -14,12 +14,12 @@ plumbing through :class:`JobSpec` and :func:`run_job`.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import tempfile
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -79,6 +79,7 @@ from ....models.blackbox import (
 )
 from ....models.common import ModelConfig, SplitFractions
 from ....models.results import LMActivity, LMStageStats, ModelTokenUsage
+from ....sandbox.timeouts import Phase
 from ...language_models import (
     build_language_model,
     canonical_model_id,
@@ -115,6 +116,7 @@ from .runner import side_info_json_default
 from .sandbox import current_sandbox_runtime, sandbox_runtime_from_settings
 from .scorer import JobScorer, RemoteScorer, build_scorer
 from .upstream import AUTO_ENGINES, GEPA_REVISION, finite_json
+from .workspace_scorer import run_on_pool
 
 logger = logging.getLogger(__name__)
 
@@ -591,11 +593,11 @@ def _final_run(
     try:
         workers = max(1, min(concurrency, len(targets)))
         logger.info("final run: scoring the %s on %d case(s), %d at a time", label, len(cases), workers)
-        if workers == 1:
-            scored = [score_case(numbered) for numbered in enumerate(targets, start=1)]
-        else:
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="final-run") as pool:
-                scored = list(pool.map(score_case, enumerate(targets, start=1)))
+        scored = run_on_pool(
+            Phase.RUN,
+            [functools.partial(score_case, numbered) for numbered in enumerate(targets, start=1)],
+            workers,
+        )
     except (BudgetError, UsagePendingError, UnpricedOperationError):
         raise
     except ServiceError as exc:

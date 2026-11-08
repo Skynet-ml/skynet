@@ -50,7 +50,7 @@ import re
 import shlex
 import threading
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -75,8 +75,7 @@ from .repo_services import RoleRelayError, mcp_endpoint, open_stage_boxes, servi
 from .repo_tree import archive_chunks, drop_paths
 from .repo_workspace import GIT, HIDDEN_CHANGED, REPO_DIR, WORK_DIR, RepoWorkspace, redact
 from .rule_judge import RuleJudge
-from .sandbox import SandboxSession
-from .sandbox_contract import SandboxRuntime
+from .sandbox_contract import SandboxRuntime, SandboxSession
 from .sandbox_scorer import RUNNER_SOURCE, ScorerGateway, _raise_control
 
 if TYPE_CHECKING:
@@ -110,6 +109,9 @@ _STAGE_ERROR_CHARS = 500
 _SERVICE_TIMEOUT_SECONDS = 120.0
 # The answer is written into the scorer box, base64-encoded.
 _SERVICE_BODY_BYTES = 4 * 1024 * 1024
+# An MCP event stream can stay open for the whole run, so streams get their own threads, apart
+# from the call pool; this caps how many one relay keeps open at a time.
+_MCP_STREAMS = 4
 # The answer's headers travel to relay_request with its body, so the
 # redaction covers both; httpx header lines never hold this separator.
 _HEAD_END = b"\r\n\r\n"
@@ -152,6 +154,31 @@ class _AnswerTooLargeError(Exception):
 
 class _UnreachableError(Exception):
     """A service's host resolves to an address the relay must not reach."""
+
+
+def _streamed(stack: contextlib.ExitStack, head: bytes, chunks: Iterator[bytes]) -> Generator[bytes, None, None]:
+    """Yield an MCP event stream's header lines, then its body as it arrives, and close its connection at the end.
+
+    Args:
+        stack: The open client, response and transport of the stream.
+        head: The header lines and the blank line after them.
+        chunks: The response body.
+
+    Yields:
+        The head first, then each body chunk.
+
+    Raises:
+        _AnswerTooLargeError: When the body passes 4 MiB in all.
+    """
+    with stack:
+        yield head
+        size = 0
+        for chunk in chunks:
+            size += len(chunk)
+            # The whole stream counts: a long-lived stream holds a pool worker and the run record keeps its body.
+            if size > _SERVICE_BODY_BYTES:
+                raise _AnswerTooLargeError
+            yield chunk
 
 
 def fold_case_scores(side_info: Mapping[str, Any]) -> dict[str, Any]:
@@ -823,7 +850,8 @@ class _StageRelay:
 
     Calls to one stage run in parallel, each in its own process and folder,
     up to ``max_concurrency`` at a time (E34). Service requests run in their
-    own pool with the same limit.
+    own pool with the same limit. An MCP GET event stream passes on in its own
+    thread, up to ``_MCP_STREAMS`` at a time, so it never holds that pool.
     """
 
     def __init__(
@@ -908,6 +936,11 @@ class _StageRelay:
             else None
         )
         self._service_pool = ThreadPoolExecutor(max_workers=max_concurrency, thread_name_prefix="stage-service")
+        self._stream_pool = ThreadPoolExecutor(max_workers=_MCP_STREAMS, thread_name_prefix="stage-mcp-stream")
+        self._streams_lock = threading.Lock()
+        self._open_streams: set[str] = set()
+        # The streams whose box-side reader left; each stops at its next event.
+        self._abandoned: set[str] = set()
         self._pending = ""
         self._seen: set[str] = set()
         self._lock = threading.Lock()
@@ -970,7 +1003,7 @@ class _StageRelay:
                 try:
                     frame = json.loads(line[start + len(self._prefix) :])
                     identity = frame["id"]
-                    kind = next((key for key in ("service", "mcp") if key in frame), "stage")
+                    kind = next((key for key in ("service", "mcp", "stop") if key in frame), "stage")
                     name = frame[kind]
                 except (ValueError, KeyError, TypeError):
                     continue
@@ -982,6 +1015,11 @@ class _StageRelay:
                 ):
                     continue
                 self._seen.add(identity)
+                if kind == "stop":
+                    with self._streams_lock:
+                        if isinstance(name, str) and name in self._open_streams:
+                            self._abandoned.add(name)
+                    continue
                 if kind != "stage":
                     refusal = self._refusal(name) if kind == "service" else self._mcp_refusal(name)
                     if refusal is None:
@@ -1056,6 +1094,19 @@ class _StageRelay:
             frame: The guest's ``path``, ``method``, ``headers`` and ``body``.
         """
         label = f"MCP server {name!r}"
+        # Only a GET listener streams. Its place is taken before the request goes out, so a
+        # refused listener never reaches the server; a POST answer ends after its result.
+        listener = frame.get("method") == "GET"
+        if listener:
+            with self._streams_lock:
+                opened = len(self._open_streams) < _MCP_STREAMS
+                if opened:
+                    self._open_streams.add(identity)
+            if not opened:
+                self._answer(
+                    identity, {"status": 503, "error": f"{label} has {_MCP_STREAMS} event streams open already."}
+                )
+                return
         try:
             url, headers = mcp_endpoint(f"[{self._role}]", self._mcp, name)
             response = self._request(url, headers, label, frame, kind="mcp", server=name)
@@ -1065,7 +1116,69 @@ class _StageRelay:
                 # Only the type: h11 puts an illegal header value, a filled secret included, in its message.
                 logger.warning("MCP server %s request failed in the parent: %s", name, type(error).__name__)
                 response = {"status": 502, "error": f"{label} could not be reached."}
-        self._answer(identity, response)
+        stream = response.pop("stream", None)
+        if stream is None:
+            if listener:
+                with self._streams_lock:
+                    self._open_streams.discard(identity)
+                    self._abandoned.discard(identity)
+            self._answer(identity, response)
+            return
+        submitted = False
+        try:
+            if self._answer(identity, response):
+                self._stream_pool.submit(self._stream_parts, name, identity, stream)
+                submitted = True
+        except RuntimeError:
+            pass  # The relay closed between the answer and the submit.
+        finally:
+            # A failed answer (a ServiceError from the box, say) must still free the place, or
+            # four such failures refuse every later listener until the relay closes.
+            if not submitted:
+                self._end_stream(identity, stream)
+
+    def _end_stream(self, identity: str, stream: Generator[bytes, None, None]) -> None:
+        """Close an MCP event stream and free its place.
+
+        Args:
+            identity: The request's id.
+            stream: The masked body.
+        """
+        stream.close()
+        with self._streams_lock:
+            self._open_streams.discard(identity)
+            self._abandoned.discard(identity)
+
+    def _stream_parts(self, name: str, identity: str, stream: Generator[bytes, None, None]) -> None:
+        """Write each masked part of an MCP event stream as its own answer, then an end part.
+
+        Part ``n`` goes to ``<identity>.<n>.json`` with ``"more": true``; the
+        last part has ``"more": false``, and an ``error`` when the stream broke.
+        The stream stops with no last part when the box's reader left.
+
+        Args:
+            name: The MCP server.
+            identity: The request's id.
+            stream: The masked body after the first answer.
+        """
+        part = 0
+        ending: dict[str, Any] = {"more": False}
+        try:
+            for chunk in stream:
+                part += 1
+                if identity in self._abandoned or not self._answer(
+                    f"{identity}.{part}", {"body": base64.b64encode(chunk).decode("ascii"), "more": True}
+                ):
+                    return
+        except _AnswerTooLargeError:
+            ending["error"] = f"MCP server {name!r} answered with more than 4 MiB."
+        except Exception as error:
+            # Only the type, as in _mcp_call.
+            logger.warning("MCP server %s stream failed in the parent: %s", name, type(error).__name__)
+            ending["error"] = f"MCP server {name!r} stream broke."
+        finally:
+            self._end_stream(identity, stream)
+        self._answer(f"{identity}.{part + 1}", ending)
 
     def _service(self, name: str, identity: str, frame: Mapping[str, Any]) -> None:
         """Send one service request and write the response for the scorer.
@@ -1161,7 +1274,7 @@ class _StageRelay:
         record_target = _tool_target(server, origin, _json_object(body)) if server else ""
         status: list[int] = []
 
-        def send(address: str, filled: dict[str, str], content: bytes) -> bytes:
+        def send(address: str, filled: dict[str, str], content: bytes) -> bytes | Generator[bytes, None, None]:
             """Send the filled request once and return its header lines and body together.
 
             Args:
@@ -1170,7 +1283,8 @@ class _StageRelay:
                 content: The guest's body.
 
             Returns:
-                The answer's header lines, a blank line, then its body.
+                The answer's header lines, a blank line, then its body; for an
+                MCP event stream, an iterator that yields them as they arrive.
 
             Raises:
                 _UnreachableError: When the host resolves to a private, loopback
@@ -1183,27 +1297,40 @@ class _StageRelay:
                 # Not a secret refusal: relay_request's ValueError means only that.
                 raise _UnreachableError(str(error)) from error
             transport = _PinnedTransport(origin, pinned)
-            try:
-                with (
+            with contextlib.ExitStack() as stack:
+                stack.callback(transport.close)
+                client = stack.enter_context(
                     httpx.Client(
                         transport=transport, follow_redirects=False, trust_env=False, timeout=_SERVICE_TIMEOUT_SECONDS
-                    ) as client,
-                    client.stream(method, address, headers=[*guest, *filled.items()], content=content) as response,
-                ):
-                    answer = bytearray()
-                    for chunk in response.iter_bytes():
-                        answer.extend(chunk)
-                        if len(answer) > _SERVICE_BODY_BYTES:
-                            raise _AnswerTooLargeError
-                    status.append(response.status_code)
-                    head = b"".join(
+                    )
+                )
+                response = stack.enter_context(
+                    client.stream(method, address, headers=[*guest, *filled.items()], content=content)
+                )
+                head = (
+                    b"".join(
                         key + b": " + value + b"\r\n"
                         for key, value in response.headers.raw
                         if key.decode("latin-1").lower() not in _DECODED_HEADERS
                     )
-                    return head + _HEAD_END[2:] + bytes(answer)
-            finally:
-                transport.close()
+                    + _HEAD_END[2:]
+                )
+                if (
+                    kind == "mcp"
+                    and method == "GET"
+                    and response.headers.get("content-type", "").lower().startswith("text/event-stream")
+                ):
+                    # A GET event stream may stay open for the whole run, so its events pass on as they come;
+                    # a POST event stream ends after its result, so it is read whole like any other answer.
+                    status.append(response.status_code)
+                    return _streamed(stack.pop_all(), head, response.iter_bytes())
+                answer = bytearray()
+                for chunk in response.iter_bytes():
+                    answer.extend(chunk)
+                    if len(answer) > _SERVICE_BODY_BYTES:
+                        raise _AnswerTooLargeError
+                status.append(response.status_code)
+                return head + bytes(answer)
 
         try:
             answer = relay_request(
@@ -1228,11 +1355,29 @@ class _StageRelay:
         except ValueError as error:
             # relay_request names the secret and the host, never a value.
             return {"status": 403, "error": f"{label} was refused: {error}"}
-        head, _, content = (b"\r\n" + answer).partition(_HEAD_END)
+        if isinstance(answer, bytes):
+            head, _, content = (b"\r\n" + answer).partition(_HEAD_END)
+            more: dict[str, Any] = {}
+        else:
+            # The masker may hold the head back with the first event; read on until the head is whole.
+            buffered = b"\r\n"
+            try:
+                for chunk in answer:
+                    buffered += chunk
+                    if _HEAD_END in buffered:
+                        break
+            except _AnswerTooLargeError:
+                return {"status": 502, "error": f"{label} answered with more than 4 MiB."}
+            except BaseException:
+                answer.close()
+                raise
+            head, _, content = buffered.partition(_HEAD_END)
+            more = {"more": True, "stream": answer}
         return {
             "status": status[0],
             "headers": [list(line.decode("latin-1").split(": ", 1)) for line in head.split(b"\r\n") if b": " in line],
             "body": base64.b64encode(content).decode("ascii"),
+            **more,
         }
 
     def _call(self, name: str, identity: str, value: Any) -> None:
@@ -1310,29 +1455,33 @@ class _StageRelay:
             return {"error": f"Stage {name!r} returned output that is not JSON."}
         return {"output": output}
 
-    def _answer(self, identity: str, response: Mapping[str, Any]) -> None:
+    def _answer(self, identity: str, response: Mapping[str, Any]) -> bool:
         """Write one answer where the scorer's ``call`` waits for it.
 
         Args:
             identity: The call's id.
             response: ``{"output"}``, ``{"error"}``, ``{"control"}``, or a
                 service's ``{"status", ...}``.
+
+        Returns:
+            False when the relay is closed and wrote nothing, so a stream stops.
         """
         with self._answer_lock:
             if self._closed:
-                return
+                return False
             changes = self._workspace.answer(f"{self._response_dir}/{identity}.json", json.dumps(response))
             if changes is None:
                 # The scorer may wait until its own timeout; either way the version gets no score.
                 self.unchecked = True
             else:
                 self.changes.extend(changes)
+            return True
 
     def close(self) -> None:
         """Stop queued calls, keep late answers out of the scorer box, and close every stage box."""
         with self._answer_lock:
             self._closed = True
-        for pool in (*self._pools.values(), self._refusals, self._service_pool):
+        for pool in (*self._pools.values(), self._refusals, self._service_pool, self._stream_pool):
             pool.shutdown(wait=False, cancel_futures=True)
         for box in self._boxes.values():
             with contextlib.suppress(Exception):

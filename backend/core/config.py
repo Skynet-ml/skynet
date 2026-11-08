@@ -559,6 +559,13 @@ class Settings(BaseSettings):
         le=VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS,
         description="Ceiling on a sandbox's lifetime in seconds. 2700 (45 minutes) is the Hobby plan limit; Pro and Enterprise teams can raise it to 86400 (24 hours), the most Vercel accepts. A job that outlives its box reopens one on its next call.",
     )
+    # SKY-419: the default stays legacy until staging runs async for one week;
+    # the default change is its own one-line PR.
+    sandbox_backend: Literal["legacy", "async"] = Field(
+        default="legacy",
+        alias="SANDBOX_BACKEND",
+        description="Sandbox backend for blackbox jobs. legacy uses the sync runtimes; async uses the core.sandbox providers through the sync bridge (Vercel, or Docker in local mode).",
+    )
     blackbox_agent_gateway_url: str | None = Field(
         default=None,
         alias="BLACKBOX_AGENT_GATEWAY_URL",

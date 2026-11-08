@@ -14,7 +14,7 @@ instead (`skynet-pr-workflow` section 5).
 `.github/workflows/preview.yml` builds it on every push and deletes it when the
 PR closes. At most 4 previews run at once; a preview with no push for 48 hours
 is deleted. PRs from forks or Dependabot, and PRs whose files cannot change
-the running app (docs, `droid-wiki/`, `tools/reel-skynet/`, tests), get no
+the running app (docs, `droid-wiki/`, tests), get no
 preview; add the label `preview` to ask for one.
 
 Preview builds run the backend and frontend lanes in parallel. Backend

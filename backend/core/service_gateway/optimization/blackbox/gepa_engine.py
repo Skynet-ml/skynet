@@ -7,6 +7,7 @@ eval server is the single scoring path, exactly like upstream ``gepa.oa``.
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 from collections.abc import Callable
@@ -20,6 +21,7 @@ from gepa.gepa_launcher import EngineConfig, GEPAConfig, ReflectionConfig, Track
 from ....billing.usage_tags import usage_scope
 from ....constants import OPTIMIZER_NAME_GEPA, PROGRESS_CANDIDATE
 from ....exceptions import ServiceError
+from ....sandbox.timeouts import Phase
 from ..budget_stop import BudgetReached
 from ..trajectory import capture_proposal_prompts, current_proposal_iteration, trajectory_watch
 from .feedback import STR_CANDIDATE_KEY, emit_scorer_feedback, gepa_side_info
@@ -33,9 +35,11 @@ from .protocol import (
     Result,
     Task,
     engine_score,
+    fill_unscored,
     score_batch,
 )
 from .upstream import GEPA_SOURCE
+from .workspace_scorer import run_on_pool
 
 logger = logging.getLogger(__name__)
 
@@ -140,9 +144,9 @@ class GepaEngine:
                 seed=ctx.seed,
                 max_metric_calls=server.remaining,
                 max_reflection_cost=ctx.proposer_token_budget_usd,
-                # Scorers may be user code or a remote endpoint with no
-                # concurrency guarantees, and a serial loop keeps the budget
-                # accounting exact.
+                # ``batch_evaluator`` is GEPA's only scoring path here, and it
+                # fans a batch out itself up to ``ctx.concurrency``. GEPA's own
+                # pool would only nest a second pool over it.
                 parallel=False,
                 display_progress_bar=False,
             ),
@@ -210,8 +214,15 @@ class GepaEngine:
             Returns:
                 One ``(score, side_info)`` per pair, in order.
             """
-            # Serial, like ``parallel=False`` above: the budget checks stay exact.
-            return score_batch(score_one, pairs, 1)
+            # Text targets keep the serial loop. Agent targets run each case in
+            # its own sandbox, so their batch runs ``ctx.concurrency`` wide on the
+            # process pool, which also holds every run under ``POOL_BOX_LIMIT``.
+            if ctx.concurrency <= 1:
+                return score_batch(score_one, pairs, 1)
+            calls = [functools.partial(score_one, candidate, example) for candidate, example in pairs]
+            results = run_on_pool(Phase.SCORE, calls, ctx.concurrency)
+            filled = fill_unscored([candidate for candidate, _ in pairs], [score for score, _ in results])
+            return [(score, info) for score, (_, info) in zip(filled, results, strict=True)]
 
         kwargs: dict[str, Any] = {
             "seed_candidate": task.seed_candidate,

@@ -1,0 +1,105 @@
+"""Cline CLI harness (``cline``).
+
+Adapted from Harbor 0.25.0 (Apache-2.0), agents/installed/cline: the npm
+install, the seeded ``globalState.json`` that skips the welcome flow, and the
+``-P``/``-m``/``--yolo`` one-shot run with the prompt after ``--``. Harbor
+never gives Cline a base URL; Skynet pins the release and seeds Cline's
+OpenAI-compatible provider with the model gateway URL and token instead.
+"""
+
+from __future__ import annotations
+
+import shlex
+
+from .....models.blackbox import BLACKBOX_HARNESS_CLINE
+from ..harness_bridge import parse_plain_output
+from . import HarnessSpec, register
+from .base import _PROMPT_ARG, ENV_API_KEY, ENV_MODEL, GatewayConfig, HarnessLaunch, _base_env, _npm_install
+
+# npm registry ``dist-tags.latest`` for ``cline`` on 2026-11-08 (Apache-2.0).
+CLINE_VERSION = "3.0.74"
+# Cline's "OpenAI Compatible" provider; it is the one that takes ``--baseurl``.
+CLINE_PROVIDER = "openai"
+# The gateway URL lives in this file rather than on the command line, so a
+# protected run's relay rewrite of generated files reaches it.
+CLINE_BASE_URL_FILE = ".app/cline/base_url"
+_GLOBAL_STATE = '{"welcomeViewCompleted": true, "isNewUser": false}'
+# Skynet's effort names that Cline's ``--thinking`` spells differently; Cline
+# knows none, low, medium, high and xhigh, and gets no flag for anything else.
+_CLINE_THINKING_LEVELS = {"minimal": "low", "max": "xhigh"}
+_CLINE_THINKING_KNOWN = frozenset({"none", "low", "medium", "high", "xhigh"})
+# Cline reads these keys for its other providers. A protected run blanks them,
+# so an inherited key never gives Cline a route around the gateway.
+_PROTECTED_ENV = {
+    "ANTHROPIC_API_KEY": "",
+    "CLINE_API_KEY": "",
+    "OPENROUTER_API_KEY": "",
+    "AI_GATEWAY_API_KEY": "",
+    "V0_API_KEY": "",
+    # Cline documents no telemetry or update switch; this is the generic opt-out.
+    "DO_NOT_TRACK": "1",
+}
+
+
+def _cline_thinking(reasoning_effort: str | None) -> str:
+    """Return the ``--thinking`` flag for the user's effort, or nothing for Cline's default.
+
+    Args:
+        reasoning_effort: The user's effort for the model, or ``None``.
+
+    Returns:
+        The flag with a trailing space, or an empty string.
+    """
+    if not reasoning_effort:
+        return ""
+    level = _CLINE_THINKING_LEVELS.get(reasoning_effort, reasoning_effort)
+    return f"--thinking {level} " if level in _CLINE_THINKING_KNOWN else ""
+
+
+def _cline_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: str | None = None) -> HarnessLaunch:
+    """Build the launch for Cline CLI (``cline``, pinned to :data:`CLINE_VERSION`).
+
+    Each run gets a fresh Cline data directory outside the workspace, so the
+    saved gateway token never lands in the files the run hands back. Cline's
+    plain one-shot output is the answer; the bridge has no parser for its
+    NDJSON stream.
+
+    Args:
+        model: Target model id.
+        gateway: Gateway URL and key.
+        reasoning_effort: The user's effort for the model, or ``None`` for Cline's default.
+
+    Returns:
+        The launch.
+    """
+    key = f'"${ENV_API_KEY}"'
+    model_arg = f'"${ENV_MODEL}"'
+    run_command = (
+        'export CLINE_DATA_DIR="$(mktemp -d)" && '
+        f'printf %s {shlex.quote(_GLOBAL_STATE)} > "$CLINE_DATA_DIR/globalState.json" && '
+        f"cline auth --provider {CLINE_PROVIDER} --apikey {key} --modelid {model_arg} "
+        f'--baseurl "$(cat {CLINE_BASE_URL_FILE})" >/dev/null && '
+        f"OPENAI_API_KEY={key} cline -P {CLINE_PROVIDER} -k {key} -m {model_arg} --yolo "
+        f"{_cline_thinking(reasoning_effort)}-- {_PROMPT_ARG} < /dev/null"
+    )
+    return HarnessLaunch(
+        instructions_file="AGENTS.md",
+        install_command=_npm_install("cline", "cline", CLINE_VERSION),
+        files={CLINE_BASE_URL_FILE: gateway.url},
+        run_command=run_command,
+        env=_base_env(model, gateway),
+        parse_output=parse_plain_output,
+    )
+
+
+SPEC = register(
+    HarnessSpec(
+        id=BLACKBOX_HARNESS_CLINE,
+        launch=_cline_launch,
+        binary="cline",
+        version=CLINE_VERSION,
+        output_format="plain",
+        protected_env=_PROTECTED_ENV,
+        position=70,
+    )
+)
