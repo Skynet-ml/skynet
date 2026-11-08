@@ -464,7 +464,15 @@ class VercelUsageReservation:
         if self.operation.state == "settled":
             raise OperationCompletedError("This sandbox operation already completed; retrieve its saved result.")
         runtime.pin(self.operation.id, cent_units(self.operation.max_cents))
-        claimed = runtime.service.mark_dispatched(self.operation.id, runtime.username)
+        try:
+            claimed = runtime.service.mark_dispatched(self.operation.id, runtime.username)
+        except BaseException:
+            # A refused claim means no sandbox exists for this operation, so a
+            # kept pin would count coverage this runtime no longer holds. An
+            # already-dispatched operation below keeps its pin: its sandbox
+            # may exist and still holds the coverage.
+            runtime.unpin(self.operation.id)
+            raise
         if not claimed.dispatch_claimed:
             raise UsagePendingError("This sandbox was already dispatched; reconcile its exact session.")
         self.session_id: str | None = None
@@ -821,7 +829,15 @@ class VercelSnapshotReservation:
         if self.operation.state == "settled":
             raise OperationCompletedError("This snapshot operation already completed.")
         runtime.pin(self.operation.id, cent_units(self.operation.max_cents))
-        claimed = runtime.service.mark_dispatched(self.operation.id, runtime.username)
+        try:
+            claimed = runtime.service.mark_dispatched(self.operation.id, runtime.username)
+        except BaseException:
+            # A refused claim means no snapshot exists for this operation, so a
+            # kept pin would count coverage this runtime no longer holds. An
+            # already-dispatched operation below keeps its pin: its snapshot
+            # may exist and still holds the coverage.
+            runtime.unpin(self.operation.id)
+            raise
         if not claimed.dispatch_claimed:
             raise UsagePendingError("This snapshot was already dispatched; reconcile it by hand.")
         self.snapshot_id: str | None = None

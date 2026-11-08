@@ -415,3 +415,15 @@ def test_parallel_duplicate_lease_reserves_once(database: Engine) -> None:
     assert _budget_units(database, budget.id)[0] == 40 * CENT_SCALE
     with pytest.raises(BudgetConflictError):
         _lease(service, budget.id, slices=3)
+
+
+def test_lease_keys_match_exactly_on_postgres(database: Engine) -> None:
+    """Keep a lease apart from another lease whose key shares a prefix or differs in case."""
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    _lease(service, budget.id, key="a:slice-1", slices=1)
+    assert len(_lease(service, budget.id, key="a", slices=2)) == 2
+    _lease(service, budget.id, key="Pool", slices=1)
+    assert len(_lease(service, budget.id, key="pool", slices=1)) == 1
+    with pytest.raises(BudgetConflictError):
+        _lease(service, budget.id, key="a", slices=1)

@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from core.billing.budget_amounts import CENT_SCALE
 from core.billing.budgets import MAX_LEASE_SLICES, BudgetConflictError, BudgetInsufficientError, BudgetService
 from core.billing.runtime import BudgetRuntime
-from core.billing.vercel_usage import VercelUsage
+from core.billing.vercel_usage import VercelSnapshotReservation, VercelUsage
 from core.config import settings
 from core.sandbox import metering
 from core.sandbox.factory import PROVIDERS, ProductionNotAllowedError, ProviderEntry, UnknownProviderError
@@ -196,6 +196,31 @@ def test_closed_lease_stops_a_box_that_has_not_dispatched(database: Engine) -> N
     assert _reserved_units(runtime) == 0
 
 
+def test_failed_slice_claim_drops_its_pin(database: Engine) -> None:
+    """Check that a box whose slice claim fails no longer counts as held coverage."""
+    runtime = _runtime(database)
+    lease = PoolLease(runtime, VercelUsage(), CREATE, lease_key="pool-p", boxes=2)
+    taken = lease.take()
+    lease.close()
+    with pytest.raises(BudgetConflictError):
+        VercelUsage().reserve(runtime, CREATE, operation_key="box-0", reserved=taken)
+    assert runtime._pinned == {}
+
+
+def test_failed_snapshot_claim_drops_its_pin(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a snapshot whose dispatch claim fails no longer counts as held coverage."""
+    runtime = _runtime(database)
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        """Fail the dispatch claim like a concurrent release does."""
+        raise BudgetConflictError("released")
+
+    monkeypatch.setattr(runtime.service, "mark_dispatched", refuse)
+    with pytest.raises(BudgetConflictError):
+        VercelSnapshotReservation(runtime, {"session_id": "sbx", "retention_ms": 60_000}, operation_key="snap")
+    assert runtime._pinned == {}
+
+
 def test_lease_box_must_match_the_lease(database: Engine) -> None:
     """Check that a box with another authority or another request cannot claim a slice."""
     runtime = _runtime(database)
@@ -223,6 +248,39 @@ def test_lease_replay_is_idempotent_and_a_different_count_conflicts(database: En
         PoolLease(runtime, VercelUsage(), {**CREATE, "vcpus": 4}, lease_key="pool-e", boxes=2)
     first.close()
     assert _reserved_units(runtime) == 0
+
+
+def test_lease_keys_match_exactly(database: Engine) -> None:
+    """Check that lease replay ignores other leases whose keys share a prefix or differ in case."""
+    runtime = _runtime(database)
+    PoolLease(runtime, VercelUsage(), CREATE, lease_key="a:slice-1", boxes=1)
+    assert len(PoolLease(runtime, VercelUsage(), CREATE, lease_key="a", boxes=2).slices) == 2
+    PoolLease(runtime, VercelUsage(), CREATE, lease_key="Pool", boxes=1)
+    assert len(PoolLease(runtime, VercelUsage(), CREATE, lease_key="pool", boxes=1).slices) == 1
+
+
+def test_smaller_replay_of_a_lease_conflicts(database: Engine) -> None:
+    """Check that a replay asking for fewer slices than the lease holds is refused."""
+    runtime = _runtime(database)
+    PoolLease(runtime, VercelUsage(), CREATE, lease_key="pool-h", boxes=3)
+    with pytest.raises(BudgetConflictError):
+        PoolLease(runtime, VercelUsage(), CREATE, lease_key="pool-h", boxes=2)
+
+
+def test_lease_exit_keeps_the_block_error(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a failed release on exit does not replace the error that ended the block."""
+    runtime = _runtime(database)
+
+    def broken(*args: object, **kwargs: object) -> None:
+        """Fail the release like a lost database connection."""
+        raise RuntimeError("release failed")
+
+    lease = PoolLease(runtime, VercelUsage(), CREATE, lease_key="pool-i", boxes=1)
+    monkeypatch.setattr(runtime.service, "release_slices", broken)
+    with pytest.raises(KeyError), lease:
+        raise KeyError("pool failed")
+    with pytest.raises(RuntimeError), PoolLease(runtime, VercelUsage(), CREATE, lease_key="pool-j", boxes=1):
+        pass
 
 
 def test_lease_that_does_not_fit_reserves_nothing(database: Engine) -> None:

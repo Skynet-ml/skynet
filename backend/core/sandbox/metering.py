@@ -8,6 +8,7 @@ settles against it, and the lease returns the slices it never handed out.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Mapping
@@ -27,6 +28,8 @@ from core.config import settings
 from .errors import SandboxFatalError
 from .factory import PROVIDERS, ProductionNotAllowedError, UnknownProviderError
 
+logger = logging.getLogger(__name__)
+
 _PRODUCTION = "production"
 _WAIT_STEP_SECONDS = 1.0
 
@@ -37,7 +40,14 @@ class ProviderUsage(Protocol):
     name: str
 
     def quote(self, request: Mapping[str, Any]) -> OperationQuote:
-        """Price one box before any provider resource exists."""
+        """Price one box before any provider resource exists.
+
+        Args:
+            request: Final create parameters.
+
+        Returns:
+            Coverage for the box's whole funded lifetime.
+        """
         ...
 
     def reserve(
@@ -48,19 +58,44 @@ class ProviderUsage(Protocol):
         operation_key: str,
         reserved: OperationSnapshot | None = None,
     ) -> Any:
-        """Reserve one box, or claim a lease slice already reserved for it."""
+        """Reserve one box, or claim a lease slice already reserved for it.
+
+        Args:
+            runtime: Authenticated budget authority.
+            request: Final create parameters.
+            operation_key: Stable logical identity of the box.
+            reserved: Optional pool lease slice for this box.
+
+        Returns:
+            The claimed reservation that the box confirms, extends and settles.
+        """
         ...
 
     def confirm(self, reservation: Any, session: Any) -> None:
-        """Verify the created resource matches its funded envelope."""
+        """Verify the created resource matches its funded envelope.
+
+        Args:
+            reservation: The box's claimed reservation.
+            session: Provider session handle.
+        """
         ...
 
     def extend(self, reservation: Any, lifetime_ms: int, *, deadline: float) -> None:
-        """Fund a longer lifetime before the provider grants it."""
+        """Fund a longer lifetime before the provider grants it.
+
+        Args:
+            reservation: The box's claimed reservation.
+            lifetime_ms: Total lifetime after the extension.
+            deadline: ``time.monotonic()`` instant after which waiting stops.
+        """
         ...
 
     def settle(self, reservation: Any) -> None:
-        """Settle the stopped box at its actual provider cost."""
+        """Settle the stopped box at its actual provider cost.
+
+        Args:
+            reservation: The box's claimed reservation.
+        """
         ...
 
 
@@ -251,10 +286,20 @@ class PoolLease:
         """
         return self
 
-    def __exit__(self, *exc: object) -> None:
+    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object) -> None:
         """Return the untaken slices when the ``with`` block ends.
 
         Args:
-            *exc: Exception details, unused.
+            exc_type: Type of the exception that ends the block, if any.
+            exc: The exception that ends the block, if any.
+            tb: Its traceback, unused.
         """
-        self.close()
+        if exc is None:
+            self.close()
+            return
+        try:
+            self.close()
+        except Exception:
+            # The block's own error says why the pool failed; a release error
+            # raised here would replace it, so it is only logged.
+            logger.exception("The pool lease could not return its untaken slices.")

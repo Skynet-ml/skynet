@@ -939,7 +939,10 @@ class BudgetService:
             The slices in index order, newly reserved or replayed.
 
         Raises:
+            ValueError: When the slice count, identifiers, phase, coverage or prices are invalid.
+            BudgetFencedError: When the execution generation is obsolete.
             BudgetConflictError: When the lease key exists with different terms or slice count.
+            BudgetUnreconciledError: When previous-generation paid work is not reconciled.
             BudgetInsufficientError: When the whole lease cannot fit the limit or the funds.
             BudgetInFlightError: When settling covered work may make the lease fit.
         """
@@ -960,7 +963,11 @@ class BudgetService:
         if not prices or not prices.get("version"):
             raise ValueError("A versioned applicable price snapshot is required.")
         admission = _admission(request_fingerprint, prices, scope, charge, phase, cost_kind, role, generation)
-        prefix = f"{lease_key}:slice-"
+        # Exact keys, not a prefix: a prefix also matches another lease whose
+        # key starts with this one, and SQLite LIKE ignores case. The extra
+        # key is the first slice past this count, so a larger lease with this
+        # key is found and refused as a partial match.
+        probe = [*keys, f"{lease_key}:slice-{slices}"]
         with self._transaction() as session:
             wallet, budget = self._locked(session, budget_id, username)
             if generation != budget.generation:
@@ -969,7 +976,7 @@ class BudgetService:
                 session.scalars(
                     select(ExecutionOperationModel).where(
                         ExecutionOperationModel.budget_id == budget_id,
-                        ExecutionOperationModel.operation_key.startswith(prefix, autoescape=True),
+                        ExecutionOperationModel.operation_key.in_(probe),
                         ExecutionOperationModel.attempt == 0,
                     )
                 )
