@@ -6,6 +6,7 @@ import contextvars
 import logging
 import os
 import re
+import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -17,11 +18,21 @@ from pydantic import ValidationError
 
 from core.config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, Settings
 from core.exceptions import ServiceError
+from core.sandbox import SandboxSpecError
 from core.sandbox import factory as sandbox_factory
+from core.sandbox.environment import NetworkPolicy, SandboxEnvironment
+from core.sandbox.errors import (
+    SandboxFatalError,
+    SandboxInfraError,
+    SandboxRejectedError,
+    SandboxTransientError,
+)
 from core.sandbox.factory import ProviderEntry, UnknownProviderError
+from core.sandbox.providers.docker import DockerEnvironment
 from core.sandbox.tests.fake_provider import InMemorySandbox
 
 from .. import sandbox as sandbox_mod
+from .. import sandbox_log
 from ..sandbox import (
     _CODEX_REQUIREMENTS_CHECK,
     _CODEX_REQUIREMENTS_COMMAND,
@@ -947,3 +958,231 @@ def test_async_runtime_refuses_an_unknown_provider() -> None:
     """The bridge runtime checks its provider when it is built, not on the first open."""
     with pytest.raises(UnknownProviderError):
         AsyncBridgeRuntime("nope")
+
+
+def _fake_runtime(monkeypatch: pytest.MonkeyPatch, provider: str = "vercel") -> AsyncBridgeRuntime:
+    """Build a bridge runtime whose provider is the in-memory fake.
+
+    Args:
+        monkeypatch: Pytest fixture.
+        provider: The provider name the fake stands in for.
+
+    Returns:
+        The runtime.
+    """
+    monkeypatch.setitem(
+        sandbox_factory.PROVIDERS,
+        provider,
+        ProviderEntry("core.sandbox.tests.fake_provider", "InMemorySandbox", None, True),
+    )
+    return AsyncBridgeRuntime(provider)
+
+
+def _raising_exec(error: BaseException) -> Any:
+    """Return an ``exec`` replacement that raises ``error``.
+
+    Args:
+        error: The error to raise.
+
+    Returns:
+        The async replacement.
+    """
+
+    async def exec_(*_args: Any, **_kwargs: Any) -> Any:
+        """Raise the scripted error."""
+        raise error
+
+    return exec_
+
+
+def _kill_deadline_error() -> SandboxInfraError:
+    """Build the error both providers raise when a command outlives its kill deadline.
+
+    Returns:
+        A ``SandboxInfraError`` raised from a ``TimeoutError``.
+    """
+    try:
+        try:
+            raise TimeoutError
+        except TimeoutError as timeout:
+            raise SandboxInfraError("The sandbox command outlived its kill deadline.") from timeout
+    except SandboxInfraError as error:
+        return error
+
+
+def test_async_spec_keeps_the_skynet_sandbox_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bridge adds ``SANDBOX_TAG`` as the legacy runtime does, and the spec's tags still win."""
+    session = _fake_runtime(monkeypatch).open(SandboxSpec(lifetime_seconds=60, tags={"skynet_job": "job-1"}))
+    try:
+        assert session._session.environment.spec.tags == {**SANDBOX_TAG, "skynet_job": "job-1"}
+    finally:
+        session.close()
+
+
+def test_async_runtime_stops_a_jobs_sandboxes_through_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The worker's cancel sweep reaches the async provider's tag sweep through the bridge."""
+    runtime = _fake_runtime(monkeypatch)
+    mine = [runtime.open(SandboxSpec(lifetime_seconds=60, tags={"skynet_job": "job-a"})) for _ in range(2)]
+    other = runtime.open(SandboxSpec(lifetime_seconds=60, tags={"skynet_job": "job-b"}))
+    try:
+        assert runtime.stop_job_sandboxes("job-a") == 2
+        assert [s._session.environment.running for s in mine] == [False, False]
+        assert other._session.environment.running is True
+    finally:
+        other.close()
+
+
+def test_async_runtime_without_a_job_sweep_raises_a_service_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A provider class that keeps the abstract sweep fails clearly, so the engine can log it."""
+
+    no_sweep = type("NoSweep", (), {"stop_job_sandboxes": SandboxEnvironment.stop_job_sandboxes})
+    runtime = _fake_runtime(monkeypatch)
+    monkeypatch.setattr(sandbox_mod, "load_provider", lambda _name: no_sweep)
+    with pytest.raises(ServiceError, match="cannot stop a job's sandboxes"):
+        runtime.stop_job_sandboxes("job-a")
+
+
+def test_async_session_disables_the_network_through_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``disable_network`` applies a deny-all policy on the running async box."""
+    session = _fake_runtime(monkeypatch).open(SandboxSpec(lifetime_seconds=60))
+    try:
+        session.disable_network()
+        assert session._session.environment.applied_policies == [NetworkPolicy(disabled=True)]
+    finally:
+        session.close()
+
+
+def test_async_session_run_logs_through_the_job_logger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``run`` goes through ``logged_command``: it owns the job's lines and redacts the box's env."""
+    seen: list[tuple[Any, Any, list[str]]] = []
+    real = sandbox_log.SandboxOutputLog
+
+    def recording(command: str, secrets: Any, owner: Any) -> Any:
+        """Record what the decorator passes, then build the real log."""
+        seen.append((command, owner, list(secrets)))
+        return real(command, secrets, owner)
+
+    monkeypatch.setattr(sandbox_log, "SandboxOutputLog", recording)
+    session = _fake_runtime(monkeypatch).open(
+        SandboxSpec(lifetime_seconds=60, env={"TOKEN": "fake-secret-value"}, tags={"skynet_job": "job-7"})
+    )
+    try:
+        assert session.log_owner == "job-7"
+        assert session.run("true").ok
+    finally:
+        session.close()
+    assert seen == [("true", "job-7", ["fake-secret-value"])]
+
+
+@pytest.mark.parametrize(
+    ("error", "timeout"),
+    [
+        (SandboxSpecError("no such image"), None),
+        (SandboxRejectedError("quota refused"), None),
+        (SandboxFatalError("credentials refused"), None),
+        (_kill_deadline_error(), 30.0),
+    ],
+)
+def test_async_session_maps_unretryable_errors_to_service_error(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException, timeout: float | None
+) -> None:
+    """Errors a fresh box cannot fix reach the scorer as ``ServiceError``, so it does not retry them."""
+    session = _fake_runtime(monkeypatch).open(SandboxSpec(lifetime_seconds=60))
+    monkeypatch.setattr(session._session.environment, "exec", _raising_exec(error))
+    try:
+        with pytest.raises(ServiceError) as raised:
+            session.run("true", timeout_seconds=timeout)
+        assert raised.value.__cause__ is error
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize(
+    ("error", "timeout"),
+    [
+        (SandboxInfraError("the box died"), 30.0),
+        (_kill_deadline_error(), None),
+        (SandboxTransientError("rate limited"), None),
+    ],
+)
+def test_async_session_keeps_box_death_errors_retryable(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException, timeout: float | None
+) -> None:
+    """A dead box keeps its own error, so the scorer's one fresh box still applies."""
+    session = _fake_runtime(monkeypatch).open(SandboxSpec(lifetime_seconds=60))
+    monkeypatch.setattr(session._session.environment, "exec", _raising_exec(error))
+    try:
+        with pytest.raises(type(error)) as raised:
+            session.run("true", timeout_seconds=timeout)
+        assert raised.value is error
+    finally:
+        session.close()
+
+
+def test_async_runtime_maps_a_bad_open_spec_to_service_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spec the provider refuses (here three vCPUs on a fixed-size provider) is not box death."""
+    with pytest.raises(ServiceError, match="cannot open this request"):
+        _fake_runtime(monkeypatch).open(SandboxSpec(lifetime_seconds=60, vcpus=3))
+
+
+def test_local_async_backend_passes_the_docker_image_and_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Local mode gives the async Docker provider the local sandbox image and the Docker CLI path."""
+    image = "sha256:" + "0" * 64
+    # Docker need not run here: the test checks only the provider options.
+    monkeypatch.setattr(sandbox_mod.docker_sandbox, "docker_sandbox_unavailable_reason", lambda _settings: None)
+    runtime = sandbox_runtime_from_settings(
+        _settings(
+            monkeypatch,
+            local_mode=True,
+            api_host="127.0.0.1",
+            sandbox_backend="async",
+            local_sandbox_image=image,
+            docker_bin="/fake/docker",
+        )
+    )
+    assert isinstance(runtime, AsyncBridgeRuntime)
+    assert runtime.provider == "docker"
+    environment = sandbox_factory.create_environment(
+        "docker",
+        sandbox_mod._async_spec(SandboxSpec(lifetime_seconds=60, network_disabled=True)),
+        **runtime._options,
+    )
+    assert isinstance(environment, DockerEnvironment)
+    assert environment._image == image
+    assert environment._docker_bin == "/fake/docker"
+
+
+def test_async_docker_without_an_image_fails_with_a_service_error() -> None:
+    """A Docker box with no image is a setup error, not a dead box."""
+    with pytest.raises(ServiceError, match="needs an image"):
+        AsyncBridgeRuntime("docker").open(SandboxSpec(lifetime_seconds=60, network_disabled=True))
+
+
+def test_async_docker_refuses_open_egress_with_a_clear_error() -> None:
+    """The async Docker provider has no open egress; the bridge says so before it starts a box."""
+    runtime = AsyncBridgeRuntime("docker", image="ubuntu:24.04")
+    with pytest.raises(ServiceError, match="SANDBOX_BACKEND=legacy"):
+        runtime.open(SandboxSpec(lifetime_seconds=60))
+
+
+_DOCKER_UP = (
+    shutil.which("docker") is not None
+    and subprocess.run(["docker", "image", "inspect", "ubuntu:24.04"], capture_output=True, check=False).returncode == 0
+)
+
+
+@pytest.mark.skipif(not _DOCKER_UP, reason="Docker or the local ubuntu:24.04 image is missing.")
+def test_async_docker_runs_a_command_in_a_real_box() -> None:
+    """The bridge opens a real local Docker box, runs a command in it and stops it."""
+    runtime = AsyncBridgeRuntime("docker", image="ubuntu:24.04")
+    session = runtime.open(
+        SandboxSpec(lifetime_seconds=120, env={"GREETING": "hi"}, network_disabled=True, tags={"skynet_job": "sky419"})
+    )
+    try:
+        session.write_files({"a.txt": "alpha"})
+        assert session.read_file("a.txt") == "alpha"
+        result = session.run("echo $GREETING", timeout_seconds=30)
+        assert result.ok
+        assert result.stdout.strip() == "hi"
+    finally:
+        session.close()

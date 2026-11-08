@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import functools
 import logging
 import math
 import os
@@ -39,10 +40,12 @@ from ....billing.signals import BudgetReached
 from ....billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP, VercelUsageReservation
 from ....config import Settings, app_env, with_legacy_env
 from ....exceptions import ServiceError
-from ....sandbox import ExecResult, ResourceRequest
+from ....sandbox import ExecResult, ResourceRequest, SandboxSpecError, network_mode
 from ....sandbox import SandboxSpec as AsyncSandboxSpec
+from ....sandbox.errors import SandboxFatalError, SandboxInfraError, SandboxRejectedError
 from ....sandbox.factory import create_environment, load_provider
 from ....sandbox.sync_bridge import SyncSession, open_session
+from ....sandbox.sync_bridge import run as bridge_run
 from . import docker_sandbox
 from .sandbox_contract import (
     _TIMEOUT_EXIT_CODES,
@@ -929,6 +932,41 @@ class ContainedSubprocessRuntime:
         return LocalSubprocessSession(replace(spec, env=environment), protected_relay=relay)
 
 
+@contextlib.contextmanager
+def _bridge_errors(*, timed: bool = False) -> Iterator[None]:
+    """Turn async provider errors that a retry cannot fix into ``ServiceError``.
+
+    The scorer and agent callers let ``ServiceError`` through and treat any
+    other error as a dead box, which they close and retry in a fresh paid box.
+    A bad spec, a rejected request, a fatal error or a command that outlived
+    its kill deadline fails the same way in a fresh box, and the async path
+    never retries by default (SKY-406 D3, D10). Transient box-death errors
+    stay as they are, so the callers' one fresh box still applies to them.
+
+    Args:
+        timed: The call is a command with a timeout, so an infra error caused
+            by a ``TimeoutError`` is its kill deadline.
+
+    Yields:
+        Control to the bridged call.
+
+    Raises:
+        ServiceError: The provider raised one of the errors above.
+    """
+    try:
+        yield
+    except SandboxSpecError as error:
+        raise ServiceError(f"The sandbox cannot open this request: {error}") from error
+    except (SandboxRejectedError, SandboxFatalError) as error:
+        raise ServiceError(f"The sandbox refused the request: {error}") from error
+    except SandboxInfraError as error:
+        # Both providers raise the kill-deadline error ``from`` the TimeoutError
+        # of their deadline; a dead box has no such cause.
+        if timed and isinstance(error.__cause__, TimeoutError):
+            raise ServiceError(f"The sandbox command outlived its kill deadline: {error}") from error
+        raise
+
+
 class AsyncBridgeSession:
     """Expose a sync-bridge session through the ``SandboxSession`` protocol."""
 
@@ -939,15 +977,24 @@ class AsyncBridgeSession:
             session: The bridge session over a started async environment.
         """
         self._session = session
+        spec = session.environment.spec
+        # ``logged_command`` redacts these values and routes the output to the job.
+        self._env = dict(spec.env)
+        self.log_owner = spec.tags.get(JOB_TAG)
 
     def write_files(self, files: Mapping[str, str]) -> None:
         """Write text files at paths relative to the working directory.
 
         Args:
             files: Relative path → content.
-        """
-        self._session.write_files(files)
 
+        Raises:
+            ServiceError: The provider refused the write for good.
+        """
+        with _bridge_errors():
+            self._session.write_files(files)
+
+    @logged_command
     def run(
         self,
         command: str,
@@ -968,10 +1015,15 @@ class AsyncBridgeSession:
 
         Returns:
             Exit code, captured output and whether the timeout fired.
+
+        Raises:
+            ServiceError: The provider refused the command for good, or the
+                command outlived its kill deadline.
         """
-        result: ExecResult = self._session.run(
-            command, env=env, timeout_seconds=timeout_seconds, on_output=on_output, sudo=sudo
-        )
+        with _bridge_errors(timed=timeout_seconds is not None):
+            result: ExecResult = self._session.run(
+                command, env=env, timeout_seconds=timeout_seconds, on_output=on_output, sudo=sudo
+            )
         # Callers read ``ok`` as "exit code 0"; the async result also counts a timeout.
         return CommandResult(
             exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr, timed_out=result.timed_out
@@ -985,8 +1037,21 @@ class AsyncBridgeSession:
 
         Returns:
             The file's text, or ``None``.
+
+        Raises:
+            ServiceError: The provider refused the read for good.
         """
-        return self._session.read_file(path)
+        with _bridge_errors():
+            return self._session.read_file(path)
+
+    def disable_network(self) -> None:
+        """Switch the running box to deny-all networking; the provider confirms it.
+
+        Raises:
+            ServiceError: The provider cannot switch this box's network off.
+        """
+        with _bridge_errors():
+            bridge_run(self._session.environment.disable_network)
 
     def close(self) -> None:
         """Stop the sandbox."""
@@ -996,18 +1061,23 @@ class AsyncBridgeSession:
 class AsyncBridgeRuntime:
     """Open sandboxes of one async ``core.sandbox`` provider through the sync bridge (SKY-419)."""
 
-    def __init__(self, provider: str) -> None:
+    def __init__(self, provider: str, *, image: str | None = None, docker_bin: str | None = None) -> None:
         """Bind the runtime to a provider and check that this build can load it.
 
         Args:
             provider: A provider name from ``core.sandbox.factory.PROVIDERS``.
+            image: The default image of a provider that takes one (Docker).
+            docker_bin: The Docker CLI path of the Docker provider.
 
         Raises:
             SandboxFatalError: The provider is unknown, missing from this
                 build, or not allowed in production.
         """
         self.provider = provider
-        self.injects_headers = load_provider(provider).capabilities.injects_headers
+        self._capabilities = load_provider(provider).capabilities
+        self.injects_headers = self._capabilities.injects_headers
+        self._sweep_options: dict[str, Any] = {} if docker_bin is None else {"docker_bin": docker_bin}
+        self._options: dict[str, Any] = {**self._sweep_options, **({} if image is None else {"image": image})}
 
     def open(self, spec: SandboxSpec) -> SandboxSession:
         """Create and start a sandbox per ``spec``.
@@ -1017,9 +1087,41 @@ class AsyncBridgeRuntime:
 
         Returns:
             The session over the new sandbox.
+
+        Raises:
+            ServiceError: The provider cannot open this spec, or refused it for good.
         """
-        environment = create_environment(self.provider, _async_spec(spec))
-        return AsyncBridgeSession(open_session(environment))
+        mode = network_mode(disabled=spec.network_disabled, allowed_hosts=tuple(spec.allowed_hosts))
+        if mode not in self._capabilities.network_modes:
+            # The legacy Docker runtime allows open egress; the async Docker
+            # provider allows only deny-all or an allowlist (SKY-419 review).
+            raise ServiceError(
+                f"The async {self._capabilities.name} sandbox does not support {mode.value} network egress. "
+                "Set SANDBOX_BACKEND=legacy, or give the sandbox an allowlist of hosts."
+            )
+        with _bridge_errors():
+            environment = create_environment(self.provider, _async_spec(spec), **self._options)
+            return AsyncBridgeSession(open_session(environment))
+
+    def stop_job_sandboxes(self, job_id: str) -> int:
+        """Stop every box of this provider still up under ``job_id``'s tag.
+
+        A cancel or a stall kills the job's child process before its
+        ``finally`` blocks run, so the worker sweeps the job's boxes by tag.
+
+        Args:
+            job_id: The job whose boxes to stop.
+
+        Returns:
+            How many boxes were stopped.
+
+        Raises:
+            ServiceError: The provider has no job sweep.
+        """
+        sweep = load_provider(self.provider).stop_job_sandboxes
+        if getattr(sweep, "__isabstractmethod__", False):
+            raise ServiceError(f"The {self.provider} sandbox provider cannot stop a job's sandboxes.")
+        return bridge_run(functools.partial(sweep, job_id, **self._sweep_options))
 
 
 def _async_spec(spec: SandboxSpec) -> AsyncSandboxSpec:
@@ -1029,14 +1131,15 @@ def _async_spec(spec: SandboxSpec) -> AsyncSandboxSpec:
         spec: The blackbox spec.
 
     Returns:
-        The same sandbox, with ``vcpus`` moved into the resource request.
+        The same sandbox, with ``vcpus`` moved into the resource request and
+        the Skynet sandbox tag added, as the legacy runtime adds it.
     """
     return AsyncSandboxSpec(
         lifetime_seconds=spec.lifetime_seconds,
         resources=ResourceRequest(cpus=spec.vcpus),
         env=spec.env,
         name=spec.name,
-        tags=spec.tags,
+        tags={**SANDBOX_TAG, **spec.tags},
         image=spec.image,
         inject_headers=spec.inject_headers,
         network_disabled=spec.network_disabled,
@@ -1089,7 +1192,11 @@ def sandbox_runtime_from_settings(settings: Settings) -> SandboxRuntime | None:
     if sandbox_unavailable_reason(settings) is not None:
         return None
     if settings.sandbox_backend == "async":
-        return AsyncBridgeRuntime("docker" if settings.local_mode else "vercel")
+        if settings.local_mode:
+            return AsyncBridgeRuntime(
+                "docker", image=settings.local_sandbox_image or None, docker_bin=settings.docker_bin
+            )
+        return AsyncBridgeRuntime("vercel")
     if settings.local_mode:
         return docker_sandbox.docker_runtime_from_settings(settings)
     return VercelSandboxRuntime(
