@@ -85,6 +85,8 @@ KILL_TIMEOUT = 30.0
 POLL_INTERVAL = 2.0
 RPC_TIMEOUT = 30.0
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+# The Docker provider has no download limit; this matches the Kernel provider's.
+MAX_DOWNLOAD_BYTES = 1024 * 1024 * 1024
 _MAX_LIFETIME_SECONDS = 43_200
 _MAX_LIST_PAGES = 1000
 _CONTROL_BYTES = 64 * 1024
@@ -685,6 +687,50 @@ class _Capture:
         )
 
 
+async def _read_download(response: httpx.Response, path: str) -> str | None:
+    """Check and decode one streamed multipart download answer.
+
+    Args:
+        response: The streamed answer, not read yet.
+        path: The path that the download asked for.
+
+    Returns:
+        The file text, or ``None`` when the file does not exist.
+
+    Raises:
+        SandboxInfraError: The answer is invalid, incomplete or above
+            ``MAX_DOWNLOAD_BYTES``.
+        SandboxError: The answer is not 2xx; see ``_status_error``.
+    """
+    if not response.is_success:
+        await response.aread()
+        if _not_found(response):
+            return None
+        raise _status_error(response, "read a file")
+    media_type, options = parse_options_header(response.headers.get("content-type"))
+    boundary = options.get(b"boundary", b"")
+    if media_type != b"multipart/mixed" or not 1 <= len(boundary) <= 70 or any(not 32 <= b <= 126 for b in boundary):
+        raise SandboxInfraError("sbx gave a download with no valid multipart boundary.")
+    decoder = _Download(path)
+    parser = MultipartParser(boundary, decoder.callbacks())
+    received = 0
+    try:
+        async for chunk in response.aiter_bytes():
+            received += len(chunk)
+            if received > MAX_DOWNLOAD_BYTES:
+                raise SandboxInfraError(f"The sbx download of {path!r} is above the {MAX_DOWNLOAD_BYTES} byte limit.")
+            parser.write(chunk)
+        parser.finalize()
+    except _MissingFileError:
+        return None
+    except ValueError:
+        raise SandboxInfraError("sbx gave a malformed multipart download.") from None
+    # finalize() accepts a cut stream, so the closing boundary must have arrived.
+    if not decoder.ended or decoder.phase != "complete":
+        raise SandboxInfraError("The sbx download ended before the whole file arrived.")
+    return bytes(decoder.content).decode("utf-8")
+
+
 class _Download:
     """Check the one-file multipart download and collect the file bytes."""
 
@@ -1190,43 +1236,23 @@ class SbxEnvironment(SandboxEnvironment):
             The file text, or ``None`` when the file does not exist.
 
         Raises:
-            SandboxInfraError: The sandbox is not running, or the download
-                answer is invalid or incomplete.
+            SandboxTransientError: The connection failed or timed out.
+            SandboxInfraError: The sandbox is not running, the download
+                answer is invalid or incomplete, or it is above
+                ``MAX_DOWNLOAD_BYTES``.
+            SandboxError: The answer is not 2xx; see ``_status_error``.
         """
         runtime = self._runtime
         if runtime is None:
             raise SandboxInfraError("The sbx sandbox is not running.")
-        response = await _call(
-            runtime,
-            "GET",
-            "/v1/files/download",
-            action="read a file",
-            allow_not_found=True,
-            params={"paths": path},
-        )
-        if response is None:
-            return None
-        media_type, options = parse_options_header(response.headers.get("content-type"))
-        boundary = options.get(b"boundary", b"")
-        if (
-            media_type != b"multipart/mixed"
-            or not 1 <= len(boundary) <= 70
-            or any(not 32 <= b <= 126 for b in boundary)
-        ):
-            raise SandboxInfraError("sbx gave a download with no valid multipart boundary.")
-        decoder = _Download(path)
-        parser = MultipartParser(boundary, decoder.callbacks())
+        # A streamed answer lets the size limit hold before the whole file is in memory.
         try:
-            parser.write(response.content)
-            parser.finalize()
-        except _MissingFileError:
-            return None
-        except ValueError:
-            raise SandboxInfraError("sbx gave a malformed multipart download.") from None
-        # finalize() accepts a cut stream, so the closing boundary must have arrived.
-        if not decoder.ended or decoder.phase != "complete":
-            raise SandboxInfraError("The sbx download ended before the whole file arrived.")
-        return bytes(decoder.content).decode("utf-8")
+            async with runtime.stream("GET", "/v1/files/download", params={"paths": path}) as response:
+                return await _read_download(response, path)
+        except httpx.TransportError as error:
+            raise SandboxTransientError(f"sbx could not read a file: {type(error).__name__}.") from None
+        except httpx.HTTPError as error:
+            raise SandboxInfraError(f"sbx could not read a file: {type(error).__name__}.") from None
 
     async def stop(self) -> None:
         """Delete the sandbox once and close the clients. Safe to call again."""
