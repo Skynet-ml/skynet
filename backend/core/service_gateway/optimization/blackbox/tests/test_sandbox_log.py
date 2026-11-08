@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import pytest
 
+from core.sandbox import ResourceRequest, SandboxEnvironment
+from core.sandbox import SandboxSpec as BoxSpec
+from core.sandbox.hooks import BoxEvent, BoxEventInfo, BoxHooks, BoxTimings, TimedPhase
+from core.sandbox.pool import BoxOutcome, BoxWork, SandboxPool
+from core.sandbox.tests.fake_provider import InMemorySandbox
+from core.sandbox.timeouts import Phase
 from core.service_gateway.optimization.blackbox import sandbox_log
 from core.service_gateway.optimization.blackbox.runner import EVENT_PREFIX
 from core.service_gateway.optimization.blackbox.sandbox import (
@@ -329,3 +336,248 @@ def test_streamed_error_is_one_row(captured: _Capture) -> None:
         "[sandbox] Error: boom\n    at a (b.js:1)\n    at c (d.js:2)",
         "[sandbox] done",
     ]
+
+
+class _Clock:
+    """A fake clock that moves only when told to, or by ``tick`` on each read."""
+
+    def __init__(self, tick: float = 0.0) -> None:
+        """Start at zero.
+
+        Args:
+            tick: The seconds each read adds after it returns the time.
+        """
+        self.now = 0.0
+        self.tick = tick
+
+    def __call__(self) -> float:
+        """Return the time, then move it by ``tick``."""
+        now = self.now
+        self.now += self.tick
+        return now
+
+
+class _Writes:
+    """Keep every progress write, or raise on each one."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        """Start with no writes.
+
+        Args:
+            fail: Raise on every write.
+        """
+        self.items: list[tuple[str, dict[str, Any]]] = []
+        self.fail = fail
+
+    def __call__(self, event: str, metrics: dict[str, Any]) -> None:
+        """Keep one write, or raise."""
+        self.items.append((event, metrics))
+        if self.fail:
+            raise RuntimeError("progress store is down")
+
+    def named(self, event: str) -> list[dict[str, Any]]:
+        """Return the metrics of the writes with one event name."""
+        return [metrics for name, metrics in self.items if name == event]
+
+
+class _ClockedSandbox(InMemorySandbox):
+    """Act as the in-memory sandbox; its start and stop move the fake clock."""
+
+    def __init__(self, clock: _Clock) -> None:
+        """Create a stopped box.
+
+        Args:
+            clock: The clock that the start and stop move.
+        """
+        super().__init__(BoxSpec(lifetime_seconds=60, resources=ResourceRequest(cpus=1)))
+        self.clock = clock
+
+    async def start(self) -> None:
+        """Start the box after half a second."""
+        self.clock.now += 0.5
+        await super().start()
+
+    async def stop(self) -> None:
+        """Stop the box after a quarter second."""
+        self.clock.now += 0.25
+        await super().stop()
+
+
+async def _numbers(count: int) -> AsyncIterator[int]:
+    """Yield the numbers from 0 to count - 1."""
+    for number in range(count):
+        yield number
+
+
+async def _settle() -> None:
+    """Let every ready task run until it blocks again."""
+    for _ in range(50):
+        await asyncio.sleep(0)
+
+
+class _Outcomes:
+    """Collect the box outcomes."""
+
+    def __init__(self) -> None:
+        """Start with no outcomes."""
+        self.items: list[BoxOutcome[int, object]] = []
+
+    async def __call__(self, outcome: BoxOutcome[int, object]) -> None:
+        """Store one outcome."""
+        self.items.append(outcome)
+
+
+def _plain_box(clock: _Clock) -> BoxWork[int, object]:
+    """Build box work whose run step yields once and returns the candidate."""
+
+    async def run(env: SandboxEnvironment, candidate: int) -> int:
+        """Yield to the loop once, then return the candidate."""
+        await asyncio.sleep(0)
+        return candidate
+
+    return BoxWork(create=lambda _candidate: _ClockedSandbox(clock), run=run)
+
+
+async def test_job_record_counts_match_the_boxes_in_each_phase(captured: _Capture) -> None:
+    """Five boxes under a run limit of two show two in run and three waiting, then all ended."""
+    clock, writes, gate = _Clock(), _Writes(), asyncio.Event()
+    hooks = BoxHooks()
+    record = sandbox_log.BoxJobRecord(hooks, owner="job-1", progress=writes, clock=clock, interval=0.0)
+    pool = SandboxPool({"fake": 5}, phase_limits={Phase.RUN: 2}, hooks=hooks)
+
+    async def setup(env: SandboxEnvironment, candidate: int) -> None:
+        """Return at once."""
+
+    async def run(env: SandboxEnvironment, candidate: int) -> int:
+        """Wait for the gate."""
+        await gate.wait()
+        return candidate
+
+    work: BoxWork[int, object] = BoxWork(create=lambda _c: _ClockedSandbox(clock), setup=setup, run=run)
+    outcomes = _Outcomes()
+    task = asyncio.create_task(pool.run(_numbers(5), work, outcomes, workers=5))
+    await _settle()
+    live = writes.named(sandbox_log.SANDBOX_BOXES_EVENT)[-1]
+    assert live["sandbox_boxes"] == {"starting": 0, "idle": 3, "setup": 0, "run": 2, "score": 0}
+    assert live["sandbox_boxes_active"] == 5
+    gate.set()
+    await asyncio.wait_for(task, 2.0)
+    record.flush()
+    final = writes.named(sandbox_log.SANDBOX_BOX_TIMINGS_EVENT)[-1]
+    assert final["sandbox_boxes_active"] == 0
+    assert set(final["sandbox_boxes"].values()) == {0}
+    assert (final["sandbox_boxes_ended"], final["sandbox_boxes_failed"]) == (5, 0)
+    assert all(outcome.ok for outcome in outcomes.items)
+
+
+async def test_job_record_holds_the_phase_seconds_after_the_run(captured: _Capture) -> None:
+    """Each phase total is the sum of the seconds every box spent in it."""
+    clock, writes = _Clock(), _Writes()
+    hooks = BoxHooks()
+    record = sandbox_log.BoxJobRecord(hooks, owner="job-1", progress=writes, clock=clock)
+
+    def step(seconds: float) -> Any:
+        """Build a phase step that moves the clock by ``seconds``."""
+
+        async def phase(env: SandboxEnvironment, candidate: int) -> int:
+            """Move the clock, then return the candidate."""
+            clock.now += seconds
+            return candidate
+
+        return phase
+
+    work: BoxWork[int, object] = BoxWork(
+        create=lambda _c: _ClockedSandbox(clock), setup=step(1.0), run=step(2.0), score=step(3.0)
+    )
+    await SandboxPool({"fake": 1}, hooks=hooks).run(_numbers(3), work, _Outcomes())
+    record.flush()
+    final = writes.named(sandbox_log.SANDBOX_BOX_TIMINGS_EVENT)[-1]
+    assert final["sandbox_phase_seconds"] == {
+        "start": 1.5,
+        "wait": 0.0,
+        "setup": 3.0,
+        "run": 6.0,
+        "score": 9.0,
+        "stop": 0.75,
+    }
+    assert final["sandbox_boxes_timed"] == 3
+    assert "box seconds: start 1.5s" in captured.messages(logging.INFO)[-1]
+
+
+async def test_box_timings_count_the_stop_of_a_box_that_fails_in_a_phase() -> None:
+    """A box that fails in setup counts the time after setup as its stop, not as a wait."""
+    clock = _Clock()
+    timings = BoxTimings(clock)
+    for event, at in (
+        (BoxEvent.STARTED, 0.0),
+        (BoxEvent.ENVIRONMENT_STARTED, 1.0),
+        (BoxEvent.SETUP_STARTED, 1.5),
+        (BoxEvent.SETUP_ENDED, 3.5),
+        (BoxEvent.ENDED, 4.0),
+    ):
+        clock.now = at
+        await timings(BoxEventInfo(event, "box-0"))
+    assert timings.totals() == {
+        TimedPhase.START: 1.0,
+        TimedPhase.WAIT: 0.5,
+        TimedPhase.SETUP: 2.0,
+        TimedPhase.RUN: 0.0,
+        TimedPhase.SCORE: 0.0,
+        TimedPhase.STOP: 0.5,
+    }
+    assert timings.boxes == 1
+
+
+async def test_job_record_write_rate_stays_bounded_with_1000_boxes(captured: _Capture) -> None:
+    """A thousand boxes give about one count write per second and summary log lines, not one per event."""
+    clock, writes = _Clock(tick=0.001), _Writes()
+    hooks = BoxHooks()
+    record = sandbox_log.BoxJobRecord(hooks, owner="job-1", progress=writes, clock=clock)
+    outcomes = _Outcomes()
+    await SandboxPool({"fake": 50}, hooks=hooks).run(_numbers(1000), _plain_box(clock), outcomes)
+    record.flush()
+    assert len(outcomes.items) == 1000
+    elapsed = clock.now
+    count_writes = writes.named(sandbox_log.SANDBOX_BOXES_EVENT)
+    assert elapsed > 10
+    assert len(count_writes) <= int(elapsed) + 2
+    assert len(writes.named(sandbox_log.SANDBOX_BOX_TIMINGS_EVENT)) == 1
+    detail = [m for m in captured.messages(logging.DEBUG) if m.startswith("[sandbox] box ")]
+    summaries = [m for m in captured.messages(logging.INFO) if m.startswith("[sandbox] boxes: ")]
+    assert len(detail) == 20 * 5
+    assert len(summaries) <= int(elapsed) + 2
+    assert summaries[-1].startswith("[sandbox] boxes: none live; 1000 ended, 0 failed, 0 cancelled")
+
+
+async def test_a_failing_writer_does_not_fail_the_box(captured: _Capture) -> None:
+    """The progress store raises on every write; each box still succeeds and the error is logged."""
+    clock, writes = _Clock(), _Writes(fail=True)
+    hooks = BoxHooks()
+    record = sandbox_log.BoxJobRecord(hooks, owner="job-1", progress=writes, clock=clock, interval=0.0)
+    outcomes = _Outcomes()
+    await SandboxPool({"fake": 2}, hooks=hooks).run(_numbers(3), _plain_box(clock), outcomes)
+    record.flush()
+    assert len(outcomes.items) == 3
+    assert all(outcome.ok for outcome in outcomes.items)
+    assert writes.named(sandbox_log.SANDBOX_BOX_TIMINGS_EVENT)
+    assert any("Could not write the sandbox box timings" in m for m in captured.messages(logging.ERROR))
+
+
+async def test_a_failed_box_logs_one_warning_with_its_error(captured: _Capture) -> None:
+    """A box whose run raises gets one warning line with the error type and message."""
+    clock, writes = _Clock(), _Writes()
+    hooks = BoxHooks()
+    record = sandbox_log.BoxJobRecord(hooks, owner="job-1", progress=writes, clock=clock)
+
+    async def run(env: SandboxEnvironment, candidate: int) -> int:
+        """Raise a box error."""
+        raise ValueError("bad\x1b[31m input")
+
+    work: BoxWork[int, object] = BoxWork(create=lambda _c: _ClockedSandbox(clock), run=run)
+    await SandboxPool({"fake": 1}, hooks=hooks).run(_numbers(1), work, _Outcomes())
+    record.flush()
+    warnings = [m for m in captured.messages(logging.WARNING) if m.startswith("[sandbox] box ")]
+    assert warnings == ["[sandbox] box box-0:attempt-1 failed: ValueError: bad input"]
+    final = writes.named(sandbox_log.SANDBOX_BOX_TIMINGS_EVENT)[-1]
+    assert (final["sandbox_boxes_ended"], final["sandbox_boxes_failed"]) == (1, 1)
+    assert all(record.sandbox_owner == "job-1" for record in captured.records if hasattr(record, "sandbox_owner"))

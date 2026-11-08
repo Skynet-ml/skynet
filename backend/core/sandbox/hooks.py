@@ -4,14 +4,16 @@ Adapted from Harbor (harbor-framework/harbor), Apache-2.0: :class:`BoxEvent`
 follows ``TrialEvent`` in ``harbor/trial/hooks.py``. Changes: the agent and
 verification events become start and end events for the setup, run and
 score phases; each box ends with exactly one ``ENDED`` or ``CANCELLED``; a
-failing hook logs and never fails the box; and :class:`LiveCounts` derives
-the number of boxes in each state from the events alone.
+failing hook logs and never fails the box; :class:`LiveCounts` derives
+the number of boxes in each state from the events alone; and
+:class:`BoxTimings` adds up the seconds each box spends in each phase.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -175,3 +177,85 @@ class LiveCounts:
     def active(self) -> int:
         """Return the number of live boxes in all states."""
         return len(self._states)
+
+
+class TimedPhase(StrEnum):
+    """Name the parts of a box attempt that :class:`BoxTimings` measures.
+
+    ``START`` runs from ``STARTED`` to ``ENVIRONMENT_STARTED``: the wait for
+    a provider permit, the create, the image wait and the start, which the
+    events cannot tell apart. ``WAIT`` is the time between phases, for
+    example for a phase permit. ``STOP`` runs from the end of the last phase
+    to ``ENDED`` or ``CANCELLED``. A box that fails before
+    ``ENVIRONMENT_STARTED`` counts its stop in ``START``.
+    """
+
+    START = "start"
+    WAIT = "wait"
+    SETUP = "setup"
+    RUN = "run"
+    SCORE = "score"
+    STOP = "stop"
+
+
+_TIMED_PHASE: dict[BoxState, TimedPhase] = {
+    BoxState.STARTING: TimedPhase.START,
+    BoxState.IDLE: TimedPhase.WAIT,
+    BoxState.SETUP: TimedPhase.SETUP,
+    BoxState.RUN: TimedPhase.RUN,
+    BoxState.SCORE: TimedPhase.SCORE,
+}
+
+
+class BoxTimings:
+    """Add up the seconds that the boxes spend in each phase, from the box events.
+
+    Add an instance to :class:`BoxHooks` for every event. A box's own times
+    are kept only while it lives; when it ends they go into the totals, so
+    the memory is O(live boxes).
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        """Start with no boxes and zero totals.
+
+        Args:
+            clock: Gives the time in seconds. Tests pass a fake clock.
+        """
+        self._clock = clock
+        self._open: dict[str, tuple[BoxState, float, dict[TimedPhase, float]]] = {}
+        self._totals: dict[TimedPhase, float] = dict.fromkeys(TimedPhase, 0.0)
+        self.boxes = 0
+
+    async def __call__(self, info: BoxEventInfo) -> None:
+        """Close the box's open part, then open the next one or end the box.
+
+        Args:
+            info: The box event.
+        """
+        now = self._clock()
+        current = self._open.get(info.box_id)
+        if current is None:
+            if info.event not in TERMINAL_EVENTS:
+                self._open[info.box_id] = (_STATE_AFTER[info.event], now, dict.fromkeys(TimedPhase, 0.0))
+            return
+        state, since, phases = current
+        part = _TIMED_PHASE[state]
+        if info.event in TERMINAL_EVENTS:
+            del self._open[info.box_id]
+            if part is TimedPhase.WAIT:
+                part = TimedPhase.STOP
+            phases[part] += now - since
+            for name, seconds in phases.items():
+                self._totals[name] += seconds
+            self.boxes += 1
+            return
+        phases[part] += now - since
+        self._open[info.box_id] = (_STATE_AFTER[info.event], now, phases)
+
+    def totals(self) -> dict[TimedPhase, float]:
+        """Return the seconds of the ended boxes in each phase.
+
+        Returns:
+            A total for every phase, zero included.
+        """
+        return dict(self._totals)
