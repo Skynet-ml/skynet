@@ -123,6 +123,14 @@ class FakeCommandTimeoutError(FakeOperationError):
     """Stand in for ``CommandTimeoutError``."""
 
 
+class FakeTransportError(Exception):
+    """Stand in for ``httpx.TransportError``, which the SDK does not always wrap."""
+
+
+class FakeTransportTimeoutError(FakeTransportError):
+    """Stand in for ``httpx.TimeoutException``."""
+
+
 def _caused_by_status(error: FakeSDKError, status_code: int) -> FakeSDKError:
     """Chain an HTTP status error as the cause, as the SDK does.
 
@@ -348,6 +356,10 @@ def server(monkeypatch: pytest.MonkeyPatch) -> FakeServer:
         "ValidationError": FakeValidationError,
     }.items():
         monkeypatch.setattr(langsmith, name, value)
+    # The fakes replace the HTTPX errors too, so the tests run the same
+    # without the langsmith extra, where the provider catches no HTTPX error.
+    monkeypatch.setattr(langsmith, "_TRANSPORT_ERRORS", (FakeTransportError,))
+    monkeypatch.setattr(langsmith, "_TIMEOUT_ERRORS", (FakeTransportTimeoutError,))
     monkeypatch.delenv("LANGSMITH_SANDBOX_API_URL", raising=False)
     return state
 
@@ -472,7 +484,7 @@ async def test_stop_during_create_stops_the_new_box(server: FakeServer) -> None:
 
 
 async def test_stop_during_a_failing_create_deletes_the_partial_box(server: FakeServer) -> None:
-    """Delete a box that a failing create made after a stop ran, and keep the create error."""
+    """Delete a box that a failing create made after a stop ran, and chain the create error to the infra error."""
     server.create_gate = asyncio.Event()
     server.create_then_fail = True
     env = LangSmithEnvironment(_SPEC)
@@ -480,10 +492,29 @@ async def test_stop_during_a_failing_create_deletes_the_partial_box(server: Fake
     await asyncio.wait_for(server.create_started.wait(), 5)
     await asyncio.wait_for(env.stop(), 5)
     server.create_gate.set()
-    with pytest.raises(SandboxTransientError):
+    with pytest.raises(SandboxInfraError, match="stopped during start") as caught:
         await task
+    assert isinstance(caught.value.__cause__, SandboxTransientError)
     assert server.boxes == {}
     assert server.closed == 2
+
+
+async def test_create_on_a_client_that_stop_closed_is_an_infra_error(server: FakeServer) -> None:
+    """Raise SandboxInfraError, not the raw RuntimeError, when the create fails because a stop closed the client."""
+    server.create_gate = asyncio.Event()
+    env = LangSmithEnvironment(_SPEC)
+    task = asyncio.create_task(env.start())
+    await asyncio.wait_for(server.create_started.wait(), 5)
+    await asyncio.wait_for(env.stop(), 5)
+    closed = RuntimeError("Cannot send a request, as the client has been closed.")
+    server.create_error = closed
+    server.create_gate.set()
+    with pytest.raises(SandboxInfraError, match="stopped during start") as caught:
+        await task
+    assert caught.value.__cause__ is closed
+    assert server.deletes == [env.name, env.name]
+    assert server.closed == 2
+    assert env not in LangSmithEnvironment._running
 
 
 async def test_repeated_cancel_during_stop_finishes_the_delete(server: FakeServer) -> None:
@@ -558,6 +589,9 @@ async def test_start_timeout_raises_and_cleans_up(server: FakeServer) -> None:
         (_caused_by_status(FakeSDKError("conflict"), 409), SandboxRejectedError),
         (_caused_by_status(FakeSDKError("bad gateway"), 502), SandboxTransientError),
         (FakeLangSmithError("base"), SandboxRejectedError),
+        (FakeTransportTimeoutError("read timed out"), StartTimeoutError),
+        (FakeTransportError("protocol error"), SandboxTransientError),
+        (json.JSONDecodeError("Expecting value", "not json", 0), SandboxTransientError),
     ],
 )
 async def test_sdk_errors_map_to_error_groups(server: FakeServer, error: Exception, expected: type) -> None:
@@ -739,7 +773,7 @@ _BOX_ID = "11111111-1111-1111-1111-111111111111"
 
 
 @pytest.fixture
-def transport_failures(server: FakeServer, monkeypatch: pytest.MonkeyPatch) -> dict[str, BaseException | None]:
+def transport_failures(server: FakeServer, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Run the provider on the real SDK over an HTTPX mock transport, with no network.
 
     Args:
@@ -747,11 +781,12 @@ def transport_failures(server: FakeServer, monkeypatch: pytest.MonkeyPatch) -> d
         monkeypatch: Restores the provider module after the test.
 
     Returns:
-        Maps ``"create"`` and ``"read"`` to the transport error that the call raises, or ``None``.
+        Maps ``"create"`` and ``"read"`` to the transport error that the call raises, or ``None``,
+        and ``"create_body"`` to the raw body of a 200 create response, or ``None``.
     """
     if sdk is None:
         pytest.skip("The langsmith extra is not installed.")
-    failures: dict[str, BaseException | None] = {"create": None, "read": None}
+    failures: dict[str, Any] = {"create": None, "read": None, "create_body": None}
 
     def handler(request: Any) -> Any:
         """Answer the sandbox API calls, or raise the configured transport error.
@@ -765,6 +800,8 @@ def transport_failures(server: FakeServer, monkeypatch: pytest.MonkeyPatch) -> d
         if request.method == "POST" and request.url.path.endswith("/boxes"):
             if failures["create"] is not None:
                 raise failures["create"]
+            if failures["create_body"] is not None:
+                return sdk_httpx.Response(200, content=failures["create_body"])
             body = json.loads(request.content)
             return sdk_httpx.Response(
                 200,
@@ -800,6 +837,8 @@ def transport_failures(server: FakeServer, monkeypatch: pytest.MonkeyPatch) -> d
 
     monkeypatch.setattr(langsmith, "AsyncSandboxClient", MockClient)
     monkeypatch.setattr(langsmith, "LangSmithError", SDKLangSmithError)
+    monkeypatch.setattr(langsmith, "_TRANSPORT_ERRORS", (sdk_httpx.TransportError,))
+    monkeypatch.setattr(langsmith, "_TIMEOUT_ERRORS", (sdk_httpx.TimeoutException,))
     for name in (
         "CommandTimeoutError",
         "DataplaneNotConfiguredError",
@@ -828,7 +867,7 @@ def _make_sdk_env() -> LangSmithEnvironment:
 
 
 async def test_raw_read_timeout_during_start_is_a_start_timeout(
-    transport_failures: dict[str, BaseException | None],
+    transport_failures: dict[str, Any],
 ) -> None:
     """Map an HTTPX read timeout of the create call, which the SDK does not wrap, to StartTimeoutError."""
     request = sdk_httpx.Request("POST", "https://api.invalid/v2/sandboxes/boxes")
@@ -841,9 +880,7 @@ async def test_raw_read_timeout_during_start_is_a_start_timeout(
 
 
 @pytest.mark.parametrize("error_cls", ["ReadTimeout", "RemoteProtocolError"])
-async def test_raw_transport_error_after_start_is_transient(
-    transport_failures: dict[str, BaseException | None], error_cls: str
-) -> None:
+async def test_raw_transport_error_after_start_is_transient(transport_failures: dict[str, Any], error_cls: str) -> None:
     """Map an HTTPX read timeout or protocol error of a file read, which the SDK does not wrap, to transient."""
     async with _make_sdk_env() as env:
         request = sdk_httpx.Request("GET", "https://dp.invalid/box/download")
@@ -853,3 +890,12 @@ async def test_raw_transport_error_after_start_is_transient(
         assert isinstance(caught.value.__cause__, getattr(sdk_httpx, error_cls))
         transport_failures["read"] = None
         assert await env.download_file("/tmp/x") == "hi"
+
+
+async def test_broken_json_of_a_create_response_is_transient(transport_failures: dict[str, Any]) -> None:
+    """Map a 200 create response that is not JSON, which the SDK parses without a check, to transient."""
+    transport_failures["create_body"] = b"{not json"
+    env = _make_sdk_env()
+    with pytest.raises(SandboxTransientError) as caught:
+        await env.start()
+    assert isinstance(caught.value.__cause__, json.JSONDecodeError)

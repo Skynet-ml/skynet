@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import logging
 import math
 import os
@@ -82,6 +83,11 @@ except ImportError:
     SandboxOperationError = None
     ValidationError = None
     LangSmithError = None
+
+# Without the extra there is no HTTPX error to catch, and an empty tuple in an
+# except clause matches nothing.
+_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (_sdk_httpx.TransportError,) if _sdk_httpx is not None else ()
+_TIMEOUT_ERRORS: tuple[type[BaseException], ...] = (_sdk_httpx.TimeoutException,) if _sdk_httpx is not None else ()
 
 logger = logging.getLogger(__name__)
 
@@ -197,8 +203,8 @@ class LangSmithEnvironment(SandboxEnvironment):
         Raises:
             StartTimeoutError: The sandbox was not ready in time, by the local
                 deadline or the server. It is deleted first.
-            SandboxInfraError: A ``stop()`` ran during the create. The new
-                sandbox is deleted first.
+            SandboxInfraError: A ``stop()`` ran during the create, also when
+                the create then failed. The new sandbox is deleted first.
             SandboxFatalError: The API key or the account setup is not valid.
             SandboxTransientError: The quota is full, no capacity is free, or
                 the server or the connection failed.
@@ -220,8 +226,13 @@ class LangSmithEnvironment(SandboxEnvironment):
             if not deadline.expired():
                 raise
             raise StartTimeoutError(self._startup_timeout) from None
-        except BaseException:
+        except BaseException as exc:
+            stopped = self._client is not client
             await self._stop_failed_start(client)
+            # A stop() closes the client, so the create can fail with any error,
+            # also a raw "client has been closed" RuntimeError.
+            if stopped and isinstance(exc, Exception):
+                raise SandboxInfraError("The LangSmith sandbox stopped during start.") from exc
             raise
         if self._client is not client:
             await self._stop_failed_start(client)
@@ -490,8 +501,8 @@ def _mapped_errors(*, start_timeout: float | None = None) -> Iterator[None]:
             time, or an HTTP request timed out, during ``start``.
         SandboxFatalError: The API key or the account setup is not valid, or
             the sandbox is gone.
-        SandboxTransientError: The quota is full, no capacity is free, or the
-            server or the connection failed.
+        SandboxTransientError: The quota is full, no capacity is free, the
+            server or the connection failed, or a response is not valid JSON.
         SandboxRejectedError: The server refused the request, the image did
             not start, or the sandbox refused the operation.
     """
@@ -525,12 +536,16 @@ def _mapped_errors(*, start_timeout: float | None = None) -> Iterator[None]:
         if status is not None and (status >= 500 or status in (408, 429)):
             raise SandboxTransientError(f"LangSmith sandbox call failed: HTTP {status}.") from exc
         raise SandboxRejectedError(f"LangSmith refused the sandbox call: {type(exc).__name__}.") from exc
-    except _sdk_httpx.TransportError as exc:
+    except _TRANSPORT_ERRORS as exc:
         # The SDK wraps only connect and pool errors; a read timeout or a
         # broken response reaches the caller as a raw HTTPX error.
-        if start_timeout is not None and isinstance(exc, _sdk_httpx.TimeoutException):
+        if start_timeout is not None and isinstance(exc, _TIMEOUT_ERRORS):
             raise StartTimeoutError(start_timeout) from exc
         raise SandboxTransientError(f"LangSmith sandbox connection failed: {type(exc).__name__}.") from exc
+    except json.JSONDecodeError as exc:
+        # The SDK parses a 200 response without a check. Only the JSON error is
+        # caught: a broader ValueError would also catch an output sink error.
+        raise SandboxTransientError("LangSmith sent a response that is not valid JSON.") from exc
 
 
 def _http_status(exc: BaseException) -> int | None:
