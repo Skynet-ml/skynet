@@ -16,22 +16,27 @@ directory.
 ## Blockers before any submission
 
 1. **The server must be live.** `https://mcp.skynetml.com/mcp` (SKY-229)
-   must serve the five tools with working OAuth. Both directories connect to
-   it during review.
+   must serve the tools in "Tools and annotations" with working OAuth. Both
+   directories connect to it during review.
 2. **Tool annotations.** Fix these in the server (SKY-229), not here:
    - Claude requires a `title` on every tool. The tools have none.
    - OpenAI requires explicit `readOnlyHint`, `destructiveHint` and
      `openWorldHint` booleans on every tool. The read tools lack
-     `destructiveHint`. `start_run` and `stop_run` lack `openWorldHint`.
+     `destructiveHint`, and `repo_draft_review` lacks it too.
+     `repo_draft_submit` and `stop_run` lack `openWorldHint`.
    - OpenAI marks a transaction that cannot be undone as destructive.
-     `start_run` spends balance and has `destructiveHint: false`. A reviewer
-     can flag it. Decide: set it to `true`, or keep `false` and write the
-     justification below.
+     `repo_draft_submit` spends balance and has `destructiveHint: false`. A
+     reviewer can flag it. Decide: set it to `true`, or keep `false` and
+     write the justification below.
+   - `check_run` and `start_run` refuse every call (SKY-316). Remove them
+     from the server before review, or a reviewer sees two tools that
+     always fail.
 3. **Privacy policy.** OpenAI requires that the policy names every category
    of user data that the tools return. <https://skynetml.com/privacy> does
-   not mention AI assistant connectors. Add a section: run specs, workspace
-   code, test cases, results, run status and spend, and the balance go to
-   the AI assistant that the user connects.
+   not mention AI assistant connectors. Add a section: run drafts
+   (repository, editable paths, scorer code, test cases, model choices),
+   results with the winning code change, run status and spend, and the
+   balance go to the AI assistant that the user connects.
 4. **OpenAI domain verification.** The portal gives a token. Serve it as
    plain text at `https://mcp.skynetml.com/.well-known/openai-apps-challenge`
    or at the same path on `skynetml.com`. This needs a small deploy.
@@ -60,26 +65,27 @@ directory.
 | Brand colors | `#B4521F` (light), `#E0935A` (dark) |
 | Category | OpenAI: `Developer Tools`. Claude: pick "Developer tools" or the nearest category in the portal list |
 | Short description (30 characters or fewer) | Optimize your code |
-| One-liner (200 characters or fewer) | Optimize your code against your own metric. Check a run spec before it runs, start it with a spending limit you approve, and get the best version with its score. |
+| One-liner (200 characters or fewer) | Optimize the code in your GitHub repository against your own metric. Set up a run, start it with a spending limit you approve, and get the best version with its score. |
 
 Long description (OpenAI 4000 characters or fewer, Claude 2000 or fewer):
 
-> Skynet improves your code against a metric that you write. You give
-> the code in run.py, a few test cases and a score(input, output,
-> expected) function. Skynet runs optimization engines such as GEPA in a sandbox,
-> scores each new version, and returns the best version with its score next
-> to the starting score. Repository runs start from the Skynet app.
+> Skynet improves the code in a GitHub repository against a metric that
+> you write. You give the repository, the paths the run may change, a
+> Python score function and, when the metric needs them, a few test cases.
+> Skynet runs optimization engines such as GEPA in a sandbox, scores each
+> new version, and returns the best version as a change to your starting
+> commit, with its score next to the starting score.
 >
-> With this connector, your assistant checks a run spec before it runs,
-> suggests a spending limit, starts the run only after you agree to the
-> limit, follows its progress, and shows the result. It can also list your
+> With this connector, your assistant sets up a run step by step, checks
+> its price, suggests a spending limit, starts the run only after you agree
+> to the limit, follows its progress, and shows the result. It can also list your
 > runs and stop a run. A run spends at most the limit you set from your
 > existing Skynet balance. Unused budget is released when the run ends. You
 > need a Skynet account at skynetml.com.
 
 Example prompts:
 
-- Optimize this code with Skynet against my test cases.
+- Optimize the code in my GitHub repository with Skynet against my test cases.
 - Show my recent Skynet runs.
 - What is the status of my last Skynet run?
 
@@ -87,8 +93,15 @@ Example prompts:
 
 | Tool | Suggested title | readOnlyHint | destructiveHint | openWorldHint | Scope | Justification |
 | --- | --- | --- | --- | --- | --- | --- |
-| `check_run` | Check run spec | true | false | false | `runs:read` | Validates a spec and reads the balance. Changes nothing. |
-| `start_run` | Start optimization run | false | see blocker 2 | false | `runs:write` | Starts a job that spends at most the limit the user approves. Idempotent with the same key. |
+| `repo_draft_start` | Start run draft | false | false | false | `runs:write` | Saves a new draft in the user's account. Spends nothing. |
+| `repo_draft_set_repository` | Set draft repository | false | false | false | `runs:write` | Saves the repository, commit and editable paths on the draft. Spends nothing. |
+| `repo_draft_set_data` | Set draft test cases | false | false | false | `runs:write` | Saves the test cases on the draft. Spends nothing. |
+| `repo_draft_set_scorer` | Set draft scorer | false | false | false | `runs:write` | Saves the scorer code on the draft. Spends nothing. |
+| `repo_draft_set_models` | Set draft models | false | false | false | `runs:write` | Saves the model choices on the draft. Spends nothing. |
+| `repo_draft_set_engine` | Set draft engine | false | false | false | `runs:write` | Saves the engine on the draft. Spends nothing. |
+| `repo_draft_set_budget` | Set draft search length | false | false | false | `runs:write` | Saves the scorer-run budget on the draft. It is not a money limit. |
+| `repo_draft_review` | Review run draft | true | false (missing, blocker 2) | false | `runs:read` | Checks the draft, prices it and reads the balance. Changes nothing. |
+| `repo_draft_submit` | Start optimization run | false | see blocker 2 | false (missing, blocker 2) | `runs:write` | Starts a run that spends at most the limit the user approves. Needs `confirm: true`. Idempotent with the same key. |
 | `get_run` | Get run | true | false | false | `runs:read` | Reads one run of the user's account, or a run shared with the user. |
 | `list_runs` | List runs | true | false | false | `runs:read` | Reads the user's own runs. |
 | `stop_run` | Stop run | false | true | false | `runs:write` | Cancels a run of the user's account, or a run shared with edit rights. The MCP tools cannot resume a stopped run. Some GEPA runs show Resume on the run page. |
@@ -130,7 +143,7 @@ the server. Skills cannot be submitted alone; they go in plugin A.
 | Step | Input |
 | --- | --- |
 | Connection | `https://mcp.skynetml.com/mcp` |
-| Tools | The five tools. Every tool needs a `title` (blocker 2). |
+| Tools | The tools in "Tools and annotations". Every tool needs a `title` (blocker 2). |
 | Listing | Name (100 characters or fewer), one-liner, description, 1 to 5 categories, documentation URL, privacy policy URL, support contact, icon, URL slug `skynet` (permanent after publishing) |
 | Use cases | The five positive test cases below. Prerequisite: a Skynet account with a balance. Access: reads and writes |
 | Company | Name and website `https://skynetml.com`, primary contact |
@@ -201,15 +214,18 @@ Policy notes:
   one-word name generic. "Skynet" is the brand name.
 - Screenshots: none. They are only for plugins with custom UI.
 
-Release notes (suggested): "First release. Check, start, follow, list and
-stop Skynet optimization runs, with a spending limit the user approves."
+Release notes (suggested): "First release. Set up, start, follow, list and
+stop Skynet optimization runs on a GitHub repository, with a spending limit
+the user approves."
 
 ## Data handling answers
 
-- Data the tools receive: run specs (objective, starting version, test
-  cases, workspace code, model choices) and run ids.
-- Data the tools return: check results, the suggested limit, the spendable
-  balance in cents, run status, spend, results and the best version.
+- Data the tools receive: run drafts (objective, GitHub repository, branch
+  or commit, editable paths, scorer code, test cases, model and engine
+  choices) and run ids. Skynet reads the repository code from GitHub.
+- Data the tools return: draft issues and notes, the suggested limit, the
+  spendable balance in cents, run status, spend, results and the best
+  version as a code change.
 - Shared runs: the assistant can receive data from runs that other users
   share with the signed-in user.
 - Storage: Skynet stores runs and results in the user's account, the same
@@ -220,12 +236,12 @@ stop Skynet optimization runs, with a spending limit the user approves."
 - API owner: Skynet owns and runs the API. It is not a partner or third
   party API.
 - Other services: the tools send data only to the Skynet server. A run
-  calls the model providers that the user picks in the spec.
+  calls the model providers that the user picks in the draft.
 - Retention: runs stay in the user's account. Copy the retention terms
   from the privacy policy. Confirm them with the owner before you answer.
 - Users under 18: not intended for them. Check the terms of service age
   rule before you answer.
-- Health data: not intended. Users can put any text in a spec, so state
+- Health data: not intended. Users can put any text in a draft, so state
   that Skynet does not ask for health data.
 - Sponsored content: none.
 
@@ -236,12 +252,15 @@ the Claude use cases too.
 
 Positive:
 
-1. "Check whether this Skynet run spec is valid and tell me what limit to
-   set: code that classifies support tickets, with 6 labeled
-   cases and an exact-match metric." Expect `check_run` only. No run starts.
-2. "Optimize the ticket classifier code with Skynet. I agree to a
-   limit of 5 dollars." Expect `check_run`, then `start_run` with `max_cost_cents`
-   500.
+1. "Set up a Skynet run on my repository acme/support-bot and tell me what
+   limit to set: improve the ticket classifier in classifier/, with 6
+   labeled cases and an exact-match metric." Expect `repo_draft_start`, the
+   `repo_draft_set_*` steps, then `repo_draft_review`. No
+   `repo_draft_submit`. No run starts.
+2. "Optimize the ticket classifier in my repository acme/support-bot with
+   Skynet. I agree to a limit of 5 dollars." Expect the draft steps and
+   `repo_draft_review`, then `repo_draft_submit` with `max_cost_cents` 500
+   and `confirm: true`.
 3. "How is my last Skynet run doing? Show the result if it is done." Expect
    `list_runs`, then `get_run`.
 4. "List my Skynet runs that failed." Expect `list_runs` with status
@@ -261,5 +280,5 @@ Negative (no tool call):
   Owner?
 - Which branch or tag does the Claude directory track? `main` serves the
   documentation URL only after promotion.
-- `start_run` `destructiveHint` (blocker 2).
+- `repo_draft_submit` `destructiveHint` (blocker 2).
 - Which countries for the OpenAI publication?

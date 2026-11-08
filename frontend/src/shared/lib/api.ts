@@ -553,7 +553,7 @@ export function submitUnifiedRun(req: UnifiedRunRequest, opts?: { idempotencyKey
   });
 }
 
-/** Queue a repository run; prompts, code, text and DSPy programs submit to `/optimize`. */
+/** Queue a repository run on `/optimize`. */
 export function submitRepoRun(
   req: BlackboxRunRequest,
   opts?: { idempotencyKey?: string },

@@ -4,12 +4,12 @@
     "name": "Skynet",
     "url": "https://skynetml.com"
   },
-  "description": "Skynet plugins: optimize prompts, programs and agents from your coding agent.",
+  "description": "Skynet plugins: optimize the code in your repositories from your coding agent.",
   "plugins": [
     {
       "name": "skynet",
       "source": "./plugins/skynet",
-      "description": "Optimize prompts, programs and agents against your own metric with Skynet, and manage the runs.",
+      "description": "Optimize your code against your own metric with Skynet, and manage the runs.",
       "category": "development"
     }
   ]

@@ -17,7 +17,7 @@ Open decision: a control that lets each user choose how much abstraction Skynet 
 
 ## Product Purpose
 
-Skynet is a self-hostable platform for building, optimizing and serving LLM programs, with GEPA prompt optimization at its core. Users can:
+Skynet is a self-hostable platform that optimizes the code in a repository against a metric that the user owns, and serves the result. Users can:
 
 - Turn a dataset and a task into a new GitHub repository with a first solution, then optimize it and see the held-out lift it earned.
 - Use "Optimize Anything" to hill-climb an existing repository against a scorer they write. Every run optimizes a repository.

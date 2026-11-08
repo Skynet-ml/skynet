@@ -15,11 +15,11 @@
   "interface": {
     "displayName": "Skynet",
     "shortDescription": "Optimize your code",
-    "longDescription": "Skynet improves your code against a metric that you write. You give the code in run.py, a few test cases and a score(input, output, expected) function. Skynet runs optimization engines such as GEPA in a sandbox, scores each new version, and returns the best version with its score next to the starting score. Repository runs start from the Skynet app.\n\nWith this plugin, your assistant checks a run spec before it runs, suggests a spending limit, starts the run only after you agree to the limit, follows its progress, and shows the result. It can also list your runs and stop a run. A run spends at most the limit you set from your existing Skynet balance. Unused budget is released when the run ends. You need a Skynet account at skynetml.com.",
+    "longDescription": "Skynet improves the code in a GitHub repository against a metric that you write. You give the repository, the paths the run may change, a Python score function and, when the metric needs them, a few test cases. Skynet runs optimization engines such as GEPA in a sandbox, scores each new version, and returns the best version as a change to your starting commit, with its score next to the starting score.\n\nWith this plugin, your assistant sets up a run step by step, checks its price, suggests a spending limit, starts the run only after you agree to the limit, follows its progress, and shows the result. It can also list your runs and stop a run. A run spends at most the limit you set from your existing Skynet balance. Unused budget is released when the run ends. You need a Skynet account at skynetml.com.",
     "developerName": "Skynet",
     "category": "Developer Tools",
     "capabilities": [
-      "Check a run spec and suggest a spending limit",
+      "Set up a repository run and suggest a spending limit",
       "Start an optimization run with a limit you approve",
       "Follow a run and show its result",
       "List your runs",
@@ -30,7 +30,7 @@
     "privacyPolicyURL": "https://skynetml.com/privacy",
     "termsOfServiceURL": "https://skynetml.com/terms",
     "defaultPrompt": [
-      "Optimize this code with Skynet against my test cases.",
+      "Optimize the code in my GitHub repository with Skynet against my test cases.",
       "Show my recent Skynet runs.",
       "What is the status of my last Skynet run?"
     ],
@@ -47,16 +47,16 @@
         "test_cases": {
           "positive": [
             {
-              "description": "Check a run spec before it runs",
-              "prompt": "Check whether this Skynet run spec is valid and tell me what limit to set: code that classifies support tickets, with 6 labeled cases and an exact-match metric.",
-              "tools_triggered": "check_run",
-              "expected_behavior": "Calls check_run once. Reports the static check results, the minimum and suggested max_cost_cents, and the spendable balance. Does not start a run."
+              "description": "Check a repository run before it runs",
+              "prompt": "Set up a Skynet run on my repository acme/support-bot and tell me what limit to set: improve the ticket classifier in classifier/, with 6 labeled cases and an exact-match metric.",
+              "tools_triggered": "repo_draft_start, repo_draft_set_repository, repo_draft_set_data, repo_draft_set_scorer, repo_draft_set_models, repo_draft_set_engine, repo_draft_review",
+              "expected_behavior": "Builds the draft one step at a time and fixes the issues each step reports. Calls repo_draft_review and reports the minimum and suggested max_cost_cents and the spendable balance. Does not call repo_draft_submit."
             },
             {
               "description": "Start a run after the user agrees to a limit",
-              "prompt": "Optimize the ticket classifier code with Skynet. I agree to a limit of 5 dollars.",
-              "tools_triggered": "check_run, start_run",
-              "expected_behavior": "Calls check_run first, then start_run with max_cost_cents 500. Returns the optimization_id and the run status."
+              "prompt": "Optimize the ticket classifier in my repository acme/support-bot with Skynet. I agree to a limit of 5 dollars.",
+              "tools_triggered": "repo_draft_start, repo_draft_set_*, repo_draft_review, repo_draft_submit",
+              "expected_behavior": "Builds and reviews the draft first, then calls repo_draft_submit with max_cost_cents 500 and confirm true. Returns the optimization_id and the run status."
             },
             {
               "description": "Follow a run and show its result",
