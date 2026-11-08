@@ -14,6 +14,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Iterator, Sequence
+from typing import Any
 
 import pytest
 
@@ -130,7 +131,7 @@ def _remove_test_resources() -> Iterator[None]:
         _cli("network", "rm", network)
 
 
-def _spec(**overrides: object) -> SandboxSpec:
+def _spec(**overrides: Any) -> SandboxSpec:
     """Return a small offline spec with the test label.
 
     Args:
@@ -139,14 +140,15 @@ def _spec(**overrides: object) -> SandboxSpec:
     Returns:
         The spec.
     """
-    fields: dict[str, object] = {
+    fields: dict[str, Any] = {
         "lifetime_seconds": 300,
         "resources": ResourceRequest(cpus=1),
         "image": BASE_IMAGE,
         "network_disabled": True,
     }
     fields.update(overrides)
-    fields["tags"] = {**TEST_TAGS, **overrides.get("tags", {})}
+    tags: dict[str, str] = overrides.get("tags", {})
+    fields["tags"] = {**TEST_TAGS, **tags}
     return SandboxSpec(**fields)
 
 
@@ -162,18 +164,21 @@ class _FakeDocker:
         self.calls: list[list[str]] = []
         self.answers = answers or {}
 
-    async def __call__(self, docker_bin: str, args: Sequence[str], *, stdin: bytes | None = None) -> _CliResult:
+    async def __call__(
+        self, docker_bin: str, args: Sequence[str], *, stdin: bytes | None = None, cli_seconds: float = 0
+    ) -> _CliResult:
         """Record one call and return the answer for the longest matching prefix.
 
         Args:
             docker_bin: The Docker CLI path.
             args: The CLI arguments.
             stdin: The stdin bytes.
+            cli_seconds: The CLI time limit.
 
         Returns:
             The scripted answer, or a success with no output.
         """
-        del docker_bin, stdin
+        del docker_bin, stdin, cli_seconds
         self.calls.append(list(args))
         joined = " ".join(args)
         matches = [prefix for prefix in self.answers if joined.startswith(prefix)]
@@ -277,6 +282,16 @@ async def test_offline_start_runs_a_hardened_box(fake_docker: _FakeDocker) -> No
     assert run[-2:] == [BASE_IMAGE, "300"]
 
 
+async def test_tags_cannot_replace_the_sweep_labels(fake_docker: _FakeDocker) -> None:
+    """Keep the sandbox and job labels, and drop a role tag, whatever the tags say."""
+    tags = {"skynet": "other", "skynet.job": "other", "skynet.role": "egress", JOB_TAG: "job-1"}
+    await DockerEnvironment(_spec(tags=tags)).start()
+    (run,) = fake_docker.calls
+    labels = {run[index + 1] for index, item in enumerate(run) if item == "--label"}
+    assert {"skynet=blackbox", "skynet.job=job-1"} <= labels
+    assert not any(label.startswith("skynet.role=") for label in labels)
+
+
 async def test_ignore_mode_sets_no_limits(fake_docker: _FakeDocker) -> None:
     """Pass no CPU or memory limit when the resource mode is IGNORE."""
     await DockerEnvironment(_spec(resources=ResourceRequest(cpus=3, mode=ResourceMode.IGNORE))).start()
@@ -299,6 +314,8 @@ async def test_allowlist_start_opens_the_proxy_first(fake_docker: _FakeDocker) -
         ["run", "-d"],
     ]
     assert "--internal" in fake_docker.calls[0]
+    create = fake_docker.calls[0]
+    assert create[create.index("-o") + 1] == "com.docker.network.bridge.inhibit_ipv4=true"
     proxy_run = fake_docker.calls[1]
     assert proxy_run[proxy_run.index("--user") + 1] == "65534:65534"
     assert proxy_run[-2:] == ["a.example.com", "b.example.com"]
@@ -343,6 +360,22 @@ async def test_stop_job_sandboxes_counts_only_boxes(fake_docker: _FakeDocker) ->
     assert fake_docker.calls[-1] == ["network", "rm", "net1"]
 
 
+async def test_stop_job_sandboxes_skips_networks_when_the_list_fails(fake_docker: _FakeDocker) -> None:
+    """Remove no network when Docker cannot list them."""
+    fake_docker.answers["network ls"] = _CliResult(1, b"net1\n", b"daemon error")
+    assert await DockerEnvironment.stop_job_sandboxes("job-1") == 0
+    assert not [call for call in fake_docker.calls if call[:2] == ["network", "rm"]]
+
+
+async def test_proxy_that_exits_fails_the_start_at_once(fake_docker: _FakeDocker) -> None:
+    """Stop the ready poll when the proxy container is gone."""
+    fake_docker.answers["logs"] = _CliResult(1, b"", b"No such container")
+    env = DockerEnvironment(_spec(network_disabled=False, allowed_hosts=("a.example.com",)))
+    with pytest.raises(docker_provider.SandboxInfraError, match="stopped"):
+        await env.start()
+    assert [call[0] for call in fake_docker.calls].count("logs") == 1
+
+
 async def test_idle_network_sweep_keeps_young_and_used_networks(fake_docker: _FakeDocker) -> None:
     """Remove only networks with no container that are old enough."""
     now = int(time.time())
@@ -384,6 +417,28 @@ async def test_exec_reports_a_timeout() -> None:
     async with DockerEnvironment(_spec()) as env:
         result = await env.exec("sleep 30", timeout_sec=1)
     assert result.timed_out
+    assert result.exit_code == 124
+
+
+@needs_docker
+@pytest.mark.parametrize("code", [124, 137])
+async def test_exit_codes_of_a_timeout_do_not_read_as_a_timeout(code: int) -> None:
+    """Report a command that exits 124 or 137 by itself as a normal exit."""
+    async with DockerEnvironment(_spec()) as env:
+        result = await env.exec(f"exit {code}", timeout_sec=30)
+    assert result.exit_code == code
+    assert not result.timed_out
+
+
+@needs_docker
+async def test_timeout_kills_the_whole_process_group() -> None:
+    """Kill the children of a command that the timeout stops."""
+    async with DockerEnvironment(_spec()) as env:
+        result = await env.exec("sleep 301 & sleep 302; wait", timeout_sec=1)
+        remaining = await env.exec("ps -eo args")
+    assert result.timed_out
+    assert "sleep 301" not in remaining.stdout
+    assert "sleep 302" not in remaining.stdout
 
 
 @needs_docker
@@ -429,6 +484,21 @@ async def test_cancelled_exec_leaves_the_box_running() -> None:
     assert _wait_for_no_leftovers() == ([], [])
 
 
+@needs_docker
+@pytest.mark.parametrize("sudo", [False, True])
+async def test_cancelled_exec_kills_the_command_in_the_box(sudo: bool) -> None:
+    """Kill the command and its children in the box, not only the docker exec client."""
+    async with DockerEnvironment(_spec()) as env:
+        command = asyncio.ensure_future(env.exec("sleep 411 & sleep 412; wait", sudo=sudo))
+        await asyncio.sleep(1.5)
+        command.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await command
+        remaining = await env.exec("ps -eo args")
+    assert "sleep 411" not in remaining.stdout
+    assert "sleep 412" not in remaining.stdout
+
+
 @needs_proxy_image
 async def test_proxy_refuses_a_host_that_is_not_listed() -> None:
     """Answer 403 for a host outside the allowlist and block direct egress."""
@@ -439,6 +509,77 @@ async def test_proxy_refuses_a_host_that_is_not_listed() -> None:
     assert refused.stdout.strip() == "403", refused.stderr
     assert direct.stdout.strip() == "blocked", direct.stderr
     assert _wait_for_no_leftovers() == ([], [])
+
+
+@pytest.fixture
+def host_listener() -> Iterator[int]:
+    """Listen on every address of the Docker host in a labelled container.
+
+    Yields:
+        The TCP port of the listener.
+    """
+    port = 20000 + uuid.uuid4().int % 20000
+    server = (
+        "import socket, time\n"
+        "s = socket.socket()\n"
+        "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        f"s.bind(('0.0.0.0', {port}))\n"
+        "s.listen()\n"
+        "print('listening', flush=True)\n"
+        "time.sleep(300)\n"
+    )
+    name = f"sky413-listener-{TEST_RUN[:8]}"
+    assert PROXY_IMAGE is not None
+    started = _cli(
+        "run",
+        "-d",
+        "--rm",
+        "--network",
+        "host",
+        "--name",
+        name,
+        "--label",
+        f"{TEST_LABEL}={TEST_RUN}",
+        "--entrypoint",
+        "python3",
+        PROXY_IMAGE,
+        "-c",
+        server,
+    )
+    assert started.returncode == 0, started.stderr
+    try:
+        deadline = time.monotonic() + 15
+        while "listening" not in _cli("logs", name).stdout:
+            assert time.monotonic() < deadline, "The host listener did not start."
+            time.sleep(0.2)
+        yield port
+    finally:
+        _cli("rm", "-f", name)
+
+
+@needs_proxy_image
+async def test_allowlisted_box_cannot_reach_the_docker_host(host_listener: int) -> None:
+    """Give the box no route to a service that listens on the Docker host."""
+    spec = _spec(image=PROXY_IMAGE, network_disabled=False, allowed_hosts=("example.com",))
+    async with DockerEnvironment(spec) as env:
+        network = f"{env.container_name}-net"
+        gateway = _cli("network", "inspect", "--format", "{{range .IPAM.Config}}{{.Gateway}} {{end}}", network)
+        targets = [address for address in gateway.stdout.split() if ":" not in address]
+        routes = await env.exec("cat /proc/net/route")
+        assert targets, gateway.stderr
+        for address in targets:
+            probe = (
+                "import socket\n"
+                "try:\n"
+                f"    socket.create_connection(('{address}', {host_listener}), timeout=3).close()\n"
+                "    print('open')\n"
+                "except OSError:\n"
+                "    print('blocked')\n"
+            )
+            result = await env.exec(f'python3 -c "{probe}"')
+            assert result.stdout.strip() == "blocked", (address, routes.stdout, result.stderr)
+        refused = await env.exec(f'python3 -c "{PROXY_PROBE}"')
+        assert refused.stdout.strip() == "403", refused.stderr
 
 
 @needs_proxy_image

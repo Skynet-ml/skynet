@@ -74,12 +74,35 @@ _TMPFS_MOUNTS = (
 _PIDS_LIMIT = 1024
 _CLI_TIMEOUT_SECONDS = 60.0
 _KILL_GRACE_SECONDS = 15
-_TIMEOUT_EXIT_CODES = frozenset({124, 137})
+_GROUP_KILL_SECONDS = 10.0
+_TIMEOUT_EXIT_CODE = 124
 _READ_CHUNK_BYTES = 65536
 _SHELL = ("bash", "--noprofile", "--norc", "-c")
 # Reads NUL-terminated NAME=value pairs from stdin, so secrets never appear
 # on a command line that ``ps`` or ``docker inspect`` shows.
 _ENV_LOADER = 'pairs=(); while IFS= read -r -d "" pair; do pairs+=("$pair"); done; exec env -- "${pairs[@]}" "$@"'
+# Runs the command as its own process group, so a timeout or a cancel can
+# kill every process that the command started. Killing the ``docker exec``
+# client does not stop the command in the box. Job control (``set -m``) gives
+# the group without ``setsid``, which some images lack; ``set +m`` then stops
+# the job notices on stderr. The timer leaves a marker file, so a command
+# that exits 124 or 137 by itself never reads as a timeout.
+_EXEC_WRAPPER = (
+    'state=$1 limit=$2; shift 2; timer=; set -m; "$@" & child=$!; echo "$child" > "$state.pid"; '
+    'if [ -n "$limit" ]; then '
+    '(sleep "$limit"; : > "$state.timeout"; kill -KILL -- "-$child") >/dev/null 2>&1 & timer=$!; fi; '
+    'set +m; wait "$child"; code=$?; '
+    'if [ -n "$timer" ]; then kill -KILL -- "-$timer" 2>/dev/null; fi; rm -f -- "$state.pid"; '
+    f'if [ -e "$state.timeout" ]; then exit {_TIMEOUT_EXIT_CODE}; fi; exit "$code"'
+)
+# A cancel can come before the wrapper writes the group id, so the kill
+# waits for it a short time.
+_KILL_GROUP_SCRIPT = (
+    'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1.pid" ] && break; sleep 0.1; done; '
+    'pgid=$(cat -- "$1.pid" 2>/dev/null); rm -f -- "$1.pid" "$1.timeout"; '
+    'case $pgid in ""|*[!0-9]*|0|1) exit 0;; esac; kill -KILL -- "-$pgid" 2>/dev/null; exit 0'
+)
+_TIMEOUT_MARKER_SCRIPT = 'test -e "$1.timeout" && rm -f -- "$1.timeout"'
 _MISSING_FILE_EXIT = 3
 _PACK_FILE_SCRIPT = (
     f'test -f "$1" || exit {_MISSING_FILE_EXIT}; '
@@ -125,10 +148,17 @@ class _Egress:
             The proxy URL under every common name, and a loopback bypass.
         """
         url = f"http://{self.proxy}:{_EGRESS_PORT}"
-        names = ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy", "npm_config_https_proxy", "npm_config_proxy")
+        names: tuple[str, ...] = (
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "https_proxy",
+            "http_proxy",
+            "npm_config_https_proxy",
+            "npm_config_proxy",
+        )
         # The variables stay after the proxy goes away, and loopback must
         # never go through a removed proxy.
-        loopback = dict.fromkeys(("NO_PROXY", "no_proxy"), "localhost,127.0.0.1,::1")
+        loopback: dict[str, str] = dict.fromkeys(("NO_PROXY", "no_proxy"), "localhost,127.0.0.1,::1")
         return dict.fromkeys(names, url) | loopback
 
 
@@ -143,13 +173,16 @@ async def _kill(process: asyncio.subprocess.Process) -> None:
     await process.wait()
 
 
-async def _docker(docker_bin: str, args: Sequence[str], *, stdin: bytes | None = None) -> _CliResult:
+async def _docker(
+    docker_bin: str, args: Sequence[str], *, stdin: bytes | None = None, cli_seconds: float = _CLI_TIMEOUT_SECONDS
+) -> _CliResult:
     """Run one Docker CLI command and capture its output.
 
     Args:
         docker_bin: The Docker CLI path.
         args: The CLI arguments.
         stdin: Bytes for the command's stdin, or ``None`` for no input.
+        cli_seconds: Kill the CLI after this many seconds.
 
     Returns:
         The exit code and the captured output.
@@ -172,7 +205,7 @@ async def _docker(docker_bin: str, args: Sequence[str], *, stdin: bytes | None =
     # the removal by name ran, and that container would then stay behind.
     communication = asyncio.ensure_future(process.communicate(stdin))
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + _CLI_TIMEOUT_SECONDS
+    deadline = loop.time() + cli_seconds
     cancelled: asyncio.CancelledError | None = None
     while not communication.done() and loop.time() < deadline:
         try:
@@ -186,7 +219,7 @@ async def _docker(docker_bin: str, args: Sequence[str], *, stdin: bytes | None =
             await communication
         if cancelled is not None:
             raise cancelled
-        raise SandboxInfraError(f"docker {args[0]} did not finish in {_CLI_TIMEOUT_SECONDS:.0f}s.")
+        raise SandboxInfraError(f"docker {args[0]} did not finish in {cli_seconds:.0f}s.")
     if cancelled is not None:
         raise cancelled
     stdout, stderr = communication.result()
@@ -343,7 +376,10 @@ class DockerEnvironment(SandboxEnvironment):
         self._stopped = False
         self._started_at = 0.0
         owner = spec.tags.get(JOB_TAG)
-        self._labels = {**SANDBOX_LABELS, **spec.tags, **({DOCKER_JOB_LABEL: owner} if owner else {})}
+        # A tag must not replace the labels that the sweeps select on, or
+        # mark a box as a proxy that the job sweep does not count.
+        tags = {key: value for key, value in spec.tags.items() if key != ROLE_LABEL}
+        self._labels = {**tags, **SANDBOX_LABELS, **({DOCKER_JOB_LABEL: owner} if owner else {})}
 
     @property
     def container_name(self) -> str | None:
@@ -405,7 +441,8 @@ class DockerEnvironment(SandboxEnvironment):
             command: The shell command, run by ``bash --noprofile --norc -c``.
             cwd: The working directory; the default is ``/workspace``.
             env: Extra environment variables for this command.
-            timeout_sec: Kill the command after this long; ``None`` sets no limit.
+            timeout_sec: Kill the command's process group after this long and
+                return ``timed_out=True``; ``None`` sets no limit.
             on_output: Receives ``(stream, text)`` chunks while the command runs.
             sudo: Run the command as the container's root user.
 
@@ -414,18 +451,23 @@ class DockerEnvironment(SandboxEnvironment):
 
         Raises:
             SandboxInfraError: The command ran past its kill deadline or Docker is missing.
+                A timeout, a cancel or an error kills the command's whole
+                process group in the box first.
         """
         name = self._require_running()
-        inner = [*_SHELL, command]
+        # The state path is unique, so concurrent commands never share it.
+        state = f"/tmp/.skynet-exec-{uuid.uuid4().hex}"
+        limit = ""
         deadline: float | None = None
         if timeout_sec is not None:
             seconds = max(1, math.ceil(timeout_sec))
-            inner = ["timeout", "--signal=KILL", f"{seconds}s", *inner]
+            limit = str(seconds)
             deadline = seconds + _KILL_GRACE_SECONDS
         stream = _env_stream({**self.spec.env, **(env or {})})
         user = ["-u", "root"] if sudo else []
         workdir = _sandbox_path(cwd) if cwd else WORKSPACE_DIR
-        argv = ["exec", "-i", *user, "-w", workdir, name, *_SHELL, _ENV_LOADER, "skynet-env", *inner]
+        wrapper = [*_SHELL, _EXEC_WRAPPER, "skynet-exec", state, limit, *_SHELL, command]
+        argv = ["exec", "-i", *user, "-w", workdir, name, *_SHELL, _ENV_LOADER, "skynet-env", *wrapper]
         try:
             process = await asyncio.create_subprocess_exec(
                 self._docker_bin,
@@ -436,6 +478,9 @@ class DockerEnvironment(SandboxEnvironment):
             )
         except OSError as error:
             raise SandboxInfraError(f"The Docker CLI {self._docker_bin!r} could not start: {error}") from error
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stderr is not None
         captured: dict[str, list[str]] = {"stdout": [], "stderr": []}
         try:
             async with asyncio.timeout(deadline):
@@ -446,19 +491,60 @@ class DockerEnvironment(SandboxEnvironment):
                 )
                 exit_code = await process.wait()
         except TimeoutError as error:
-            await _kill(process)
+            await self._stop_command(process, name, user, state)
             raise SandboxInfraError(
                 f"The command still ran {_KILL_GRACE_SECONDS}s past its {timeout_sec}s timeout: {command[:200]}"
             ) from error
         except BaseException:
-            await _kill(process)
+            await self._stop_command(process, name, user, state)
             raise
+        timed_out = bool(limit) and exit_code == _TIMEOUT_EXIT_CODE and await self._timeout_fired(name, user, state)
         return ExecResult(
             exit_code=exit_code,
             stdout="".join(captured["stdout"]),
             stderr="".join(captured["stderr"]),
-            timed_out=timeout_sec is not None and exit_code in _TIMEOUT_EXIT_CODES,
+            timed_out=timed_out,
         )
+
+    async def _stop_command(self, process: asyncio.subprocess.Process, name: str, user: list[str], state: str) -> None:
+        """Kill a command's process group in the box, then its ``docker exec`` client.
+
+        The group kill is best effort and bounded; a failure is logged, so the
+        error or cancel that stopped the command still reaches the caller.
+
+        Args:
+            process: The ``docker exec`` client.
+            name: The box's container name.
+            user: The ``-u`` arguments the command ran with; a box without
+                capabilities can kill only processes of the same user.
+            state: The command's state path in the box.
+        """
+        try:
+            await _docker(
+                self._docker_bin,
+                ["exec", *user, name, *_SHELL, _KILL_GROUP_SCRIPT, "skynet-kill", state],
+                cli_seconds=_GROUP_KILL_SECONDS,
+            )
+        except Exception as error:
+            logger.warning("Could not kill a command in the Docker sandbox %s: %s", name, error)
+        finally:
+            await _kill(process)
+
+    async def _timeout_fired(self, name: str, user: list[str], state: str) -> bool:
+        """Read and remove the timeout marker of a command.
+
+        Args:
+            name: The box's container name.
+            user: The ``-u`` arguments the command ran with.
+            state: The command's state path in the box.
+
+        Returns:
+            True when the wrapper's timer killed the command.
+        """
+        result = await _docker(
+            self._docker_bin, ["exec", *user, name, *_SHELL, _TIMEOUT_MARKER_SCRIPT, "skynet-timeout", state]
+        )
+        return result.returncode == 0
 
     async def upload_files(self, files: Mapping[str, str]) -> None:
         """Write text files into the box in one tar stream, creating parents.
@@ -518,13 +604,14 @@ class DockerEnvironment(SandboxEnvironment):
         return data.decode("utf-8", errors="replace")
 
     @classmethod
-    async def stop_job_sandboxes(cls, job_id: str) -> int:
+    async def stop_job_sandboxes(cls, job_id: str, *, docker_bin: str = DEFAULT_DOCKER_BIN) -> int:
         """Remove every container of a job, then the job's networks.
 
         A failure on one container or network is logged and skipped.
 
         Args:
             job_id: The value of the ``JOB_TAG`` tag.
+            docker_bin: The Docker CLI path.
 
         Returns:
             The number of sandbox boxes removed; egress proxies do not count.
@@ -532,7 +619,7 @@ class DockerEnvironment(SandboxEnvironment):
         selector = f"label={DOCKER_JOB_LABEL}={job_id}"
         try:
             listed = await _docker(
-                DEFAULT_DOCKER_BIN,
+                docker_bin,
                 ["ps", "-a", "--filter", selector, "--format", f'{{{{.ID}}}} {{{{.Label "{ROLE_LABEL}"}}}}'],
             )
         except SandboxInfraError as error:
@@ -547,7 +634,7 @@ class DockerEnvironment(SandboxEnvironment):
             if not container:
                 continue
             try:
-                removed = await _docker(DEFAULT_DOCKER_BIN, ["rm", "-f", container])
+                removed = await _docker(docker_bin, ["rm", "-f", container])
             except SandboxInfraError as error:
                 logger.warning("Could not remove the Docker sandbox %s of job %s: %s", container, job_id, error)
                 continue
@@ -560,12 +647,15 @@ class DockerEnvironment(SandboxEnvironment):
                 stopped += 1
         # A network can go only when no container is attached, so it goes last.
         try:
-            networks = await _docker(DEFAULT_DOCKER_BIN, ["network", "ls", "-q", "--filter", selector])
+            networks = await _docker(docker_bin, ["network", "ls", "-q", "--filter", selector])
         except SandboxInfraError as error:
             logger.warning("Could not list the Docker sandbox networks of job %s: %s", job_id, error)
             return stopped
+        if networks.returncode != 0:
+            logger.warning("Could not list the Docker sandbox networks of job %s: %s", job_id, networks.error_line)
+            return stopped
         for network in networks.stdout.decode().split():
-            await _remove(DEFAULT_DOCKER_BIN, ["network", "rm", network], b"not found")
+            await _remove(docker_bin, ["network", "rm", network], b"not found")
         return stopped
 
     async def _apply_network_policy(self, policy: NetworkPolicy) -> None:
@@ -700,7 +790,19 @@ class DockerEnvironment(SandboxEnvironment):
         """
         egress = self._require_egress()
         created = await _docker(
-            self._docker_bin, ["network", "create", "--internal", *_label_args(self._labels), egress.network]
+            self._docker_bin,
+            [
+                "network",
+                "create",
+                "--internal",
+                # Without an address on the bridge, the box cannot reach
+                # services on the Docker host through the gateway; it still
+                # reaches the proxy by name on the same network.
+                "-o",
+                "com.docker.network.bridge.inhibit_ipv4=true",
+                *_label_args(self._labels),
+                egress.network,
+            ],
         )
         if created.returncode != 0:
             raise SandboxInfraError(f"Could not create the Docker sandbox network: {created.error_line}")
@@ -769,6 +871,9 @@ class DockerEnvironment(SandboxEnvironment):
             logs = await _docker(self._docker_bin, ["logs", egress.proxy])
             if marker in logs.stdout or marker in logs.stderr:
                 return
+            if logs.returncode != 0:
+                # --rm removes a proxy that exited, so its logs are gone too.
+                raise SandboxInfraError(f"The Docker sandbox egress proxy stopped: {logs.error_line}")
             if time.monotonic() >= deadline:
                 raise SandboxInfraError(f"The Docker sandbox egress proxy did not start: {logs.error_line}")
             await asyncio.sleep(_EGRESS_POLL_SECONDS)
