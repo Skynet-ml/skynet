@@ -46,6 +46,7 @@ from ..telemetry import BoxTimings, current_output_sink
 
 try:
     import e2b as e2b_sdk
+    import httpx
     from e2b import (
         ALL_TRAFFIC,
         AsyncSandbox,
@@ -59,6 +60,7 @@ try:
     )
 except ImportError:
     e2b_sdk = None
+    httpx = None
     ALL_TRAFFIC = None
     AsyncSandbox = None
     CommandExitException = None
@@ -119,6 +121,20 @@ def _caused_by(error: BaseException, types: tuple[type[BaseException], ...]) -> 
         seen.add(id(current))
         current = current.__cause__
     return False
+
+
+def _is_request_timeout(error: BaseException) -> bool:
+    """Tell whether an SDK call ended on its own request timeout.
+
+    Args:
+        error: The error of the SDK call.
+
+    Returns:
+        True for an httpx timeout or an E2B ``TimeoutException``.
+    """
+    if httpx is not None and isinstance(error, httpx.TimeoutException):
+        return True
+    return TimeoutException is not None and isinstance(error, TimeoutException)
 
 
 def _is_capacity_error(error: BaseException) -> bool:
@@ -297,7 +313,7 @@ class E2BEnvironment(SandboxEnvironment):
         """Build the keyword arguments of the create call.
 
         Returns:
-            The template, timeout, metadata, env and network options.
+            The template, timeouts, metadata, env and network options.
         """
         spec = self.spec
         options: dict[str, Any] = {
@@ -305,6 +321,9 @@ class E2BEnvironment(SandboxEnvironment):
             "metadata": {**spec.tags, BOX_TAG: self.name},
             "envs": dict(spec.env),
             "allow_internet_access": not spec.network_disabled,
+            # The SDK default of 60 s would end a slow create before the
+            # CREATE_TIMEOUT deadline.
+            "request_timeout": CREATE_TIMEOUT,
             # The capacity wait owns the retries; an SDK retry would resend a
             # create that may have reached E2B.
             "retries": 0,
@@ -334,6 +353,8 @@ class E2BEnvironment(SandboxEnvironment):
                 raise
             raise StartTimeoutError(CREATE_TIMEOUT) from None
         except Exception as error:
+            if _is_request_timeout(error):
+                raise StartTimeoutError(CREATE_TIMEOUT) from error
             if _is_capacity_error(error):
                 raise ProviderAtCapacityError(f"E2B has no capacity: {type(error).__name__}") from error
             raise

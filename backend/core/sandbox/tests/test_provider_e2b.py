@@ -530,6 +530,7 @@ async def test_create_turns_off_sdk_retries_and_sends_the_spec() -> None:
         pass
     (call,) = FakeBox.create_calls
     assert call["retries"] == 0
+    assert call["request_timeout"] == e2b.CREATE_TIMEOUT
     assert call["template"] == "tmpl"
     assert call["timeout"] == 300
     assert call["metadata"] == {JOB_TAG: "job-1", e2b.BOX_TAG: "box-a"}
@@ -557,6 +558,25 @@ async def test_create_timeout_raises_start_timeout_and_sweeps_the_box(monkeypatc
     env = e2b.E2BEnvironment(_spec(name="slow"))
     with pytest.raises(StartTimeoutError):
         await env.start()
+    assert FakeBox.boxes == {}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(lambda: e2b.httpx.ReadTimeout("slow create"), id="httpx"),
+        pytest.param(lambda: e2b.TimeoutException("slow create"), id="e2b"),
+    ],
+)
+async def test_create_request_timeout_raises_start_timeout_and_sweeps_the_box(
+    error: Callable[[], BaseException],
+) -> None:
+    """Raise StartTimeoutError for an SDK request timeout and kill the box it left."""
+    FakeBox.leak_on_error = True
+    FakeBox.create_errors = [error()]
+    with pytest.raises(StartTimeoutError):
+        await e2b.E2BEnvironment(_spec(name="slow-request"), clock=FakeClock()).start()
+    assert len(FakeBox.create_calls) == 1
     assert FakeBox.boxes == {}
 
 
