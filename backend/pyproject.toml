@@ -130,6 +130,12 @@ render = [
     "pillow>=13.0.0",
     "networkx>=3",
 ]
+langsmith = [
+    # LangSmith sandbox provider (core.sandbox.providers.langsmith); not
+    # allowed in production. The sandbox client ships in the base package; the
+    # floor is the release whose sandbox API and errors the provider uses.
+    "langsmith>=0.14.17",
+]
 e2b = [
     # The E2B sandbox provider (core.sandbox.providers.e2b). It is not
     # allowed in production; the factory refuses it there.
