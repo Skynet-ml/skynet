@@ -1182,14 +1182,8 @@ export function useGeneralistAgent(args: UseGeneralistAgentArgs): GeneralistAgen
     activeSteerQueue.getSnapshot,
   );
   const midTurn = React.useMemo(
-    () => ({
-      ...midTurnOf(() => activeSteerQueue, steerSnapshot),
-      stopAndSendNow: () => {
-        const key = activeKey;
-        activeSteerQueue.stopAndSendNow(() => stopSession(key));
-      },
-    }),
-    [activeKey, activeSteerQueue, steerSnapshot, stopSession],
+    () => midTurnOf(() => activeSteerQueue, steerSnapshot),
+    [activeSteerQueue, steerSnapshot],
   );
 
   const confirmApproval = React.useCallback(

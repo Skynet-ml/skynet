@@ -1,7 +1,7 @@
 {
   "downloads.web_description": "Optimise in your browser. Nothing to install.",
   "downloads.mobile_description": "Your optimisations, on the go.",
-  "app.meta.description": "Prompt optimisation with DSPy — automatically improve the performance of language models",
+  "app.meta.description": "Optimise your code against your own metric — Skynet automatically improves the code in your repository",
   "app.shell.search.kw.about": "about version API URL feedback reset preferences",
   "app.shell.search.kw.account": "account username role language interface advanced options",
   "app.shell.search.kw.admin": "admin storage quota budgets users",
@@ -21,7 +21,7 @@
   "app.shell.search.kw.wizard": "optimisation optimization wizard code generation dataset split package registry pip models",
   "app.submit.title": "New Optimization",
   "auth.login.meta_description": "Sign in to {term.appName}, a prompt-optimisation platform",
-  "auto.app.submit.layout.template.1": "Create a new prompt optimisation with DSPy — choose {p1}, upload {p2}, and improve performance",
+  "auto.app.submit.layout.template.1": "Start a new optimisation of your code — choose {p1}, upload {p2}, and improve performance",
   "auto.features.agent.panel.components.toolscarousel.literal.17": "Opens a form in the chat where you enter input and run it through the optimised program of a completed run.",
   "auto.features.agent.panel.components.toolscarousel.template.8": "Analyses {p1} to identify columns, types, and examples.",
   "auto.features.agent.panel.lib.tool.meta.literal.23": "Analyse",

@@ -71,8 +71,10 @@ class _FakeSession:
         env: Any = None,
         timeout_seconds: float | None = None,
         on_output: Any = None,
+        sudo: bool = False,
     ) -> CommandResult:
         """Stream the scripted stderr in two chunks that split a line, then return."""
+        self.sudo = sudo
         if on_output is not None:
             half = len(self._stderr) // 2
             on_output("stdout", "out\n")
@@ -212,12 +214,30 @@ def test_an_unreadable_event_line_is_kept_as_plain_output(captured: _Capture) ->
     assert record.getMessage() == "[sandbox] {not json"
 
 
+@pytest.mark.parametrize("sudo", [False, True])
+def test_a_logged_command_passes_sudo_to_the_session(captured: _Capture, sudo: bool) -> None:
+    """The log wrapper keeps the root flag, so a root command never runs as the default user."""
+    session = _FakeSession("")
+
+    session.run("id -u", sudo=sudo)
+
+    assert session.sudo is sudo
+
+
 def test_a_command_that_raises_logs_what_it_wrote_first(captured: _Capture) -> None:
     """A transport error mid-command still leaves the stderr seen so far in the log."""
 
     class _Broken(_FakeSession):
         @sandbox_log.logged_command
-        def run(self, command: str, *, env: Any = None, timeout_seconds: Any = None, on_output: Any = None) -> Any:
+        def run(
+            self,
+            command: str,
+            *,
+            env: Any = None,
+            timeout_seconds: Any = None,
+            on_output: Any = None,
+            sudo: Any = False,
+        ) -> Any:
             """Write a partial line, then fail."""
             on_output("stderr", "partial before the drop")
             raise ConnectionError("gone")

@@ -48,7 +48,7 @@ void describe("Composer", () => {
     assert.match(html, /<textarea/);
   });
 
-  void it("shows a paused header and Send now for an idle paused tray", () => {
+  void it("shows a paused header, a Steer button and no Send now for an idle paused tray", () => {
     const store = new SteerQueue();
     store.setBusy(true);
     store.enqueue("held");
@@ -56,7 +56,8 @@ void describe("Composer", () => {
     store.setBusy(false);
     const html = render({ midTurn: midTurnOf(() => store, store.getSnapshot()) });
     assert.ok(html.includes(msg("agent.pending.paused")), html);
-    assert.ok(html.includes(msg("agent.pending.send_now")), html);
+    assert.ok(!html.includes("Send now"), html);
+    assert.ok(html.includes(`aria-label="${msg("agent.pending.steer")}"`), html);
     assert.ok(html.includes('role="status"'), html);
   });
 
@@ -66,12 +67,12 @@ void describe("Composer", () => {
     store.enqueue("next");
     const html = render({ streaming: true, onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
     assert.ok(!html.includes(msg("agent.pending.paused")), html);
-    assert.ok(!html.includes(msg("agent.pending.send_now")), html);
+    assert.ok(!html.includes("Send now"), html);
     assert.ok(html.includes(`aria-label="${msg("agent.pending.remove")}"`), html);
     assert.ok(!html.includes("opacity-0"), html);
   });
 
-  void it("disables an over-limit Send now with a visible reason", () => {
+  void it("shows the reason an over-limit paused head cannot send", () => {
     const store = new SteerQueue();
     store.setMaxLength(3);
     store.setBusy(true);
@@ -79,8 +80,6 @@ void describe("Composer", () => {
     store.pause();
     store.setBusy(false);
     const html = render({ onStop: () => {}, midTurn: midTurnOf(() => store, store.getSnapshot()) });
-    const label = msg("agent.pending.send_now");
-    assert.match(html, new RegExp(`<button[^>]*disabled=""[^>]*>${label}</button>`));
     assert.ok(html.includes(msg("agent.pending.too_long", { count: 4, max: 3 })), html);
   });
 });

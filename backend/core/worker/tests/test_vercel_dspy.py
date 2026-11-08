@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from core.billing.vercel_usage import proposer_hosts
-from core.exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION
+from core.exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, ServiceError
 from core.service_gateway.optimization.blackbox import remote_sandbox
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult
 from core.service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
@@ -30,13 +30,23 @@ class FakeSession:
         self.files: dict[str, str] = {}
         self.closed = False
         self.path = "gepa_state.bin"
+        self.steps: list[str] = []
+        self.requirements_error: Exception | None = None
 
     def write_files(self, files: dict[str, str]) -> None:
         """Record the staged request."""
+        self.steps.append("write_files")
         self.files.update(files)
+
+    def write_codex_requirements(self) -> None:
+        """Record the parent's requirements write, or fail it the way a bad read-back does."""
+        self.steps.append("codex_requirements")
+        if self.requirements_error is not None:
+            raise self.requirements_error
 
     def run(self, command: str, **kwargs: Any) -> CommandResult:
         """Answer the protocol probe, then emit fragmented checkpoint and optimizer frames."""
+        self.steps.append("probe" if command == vercel_dspy.PROTOCOL_PROBE else "optimizer")
         if command == vercel_dspy.PROTOCOL_PROBE:
             assert not self.files
             return CommandResult(0, stdout=f"{SANDBOX_PROTOCOL}\n")
@@ -106,6 +116,100 @@ def test_remote_result_and_checkpoint_stream(tmp_path: Path, monkeypatch: pytest
     assert session.closed
     assert events.get_nowait()["type"] == "error"
     assert not (tmp_path.parent / "escaped.bin").exists()
+
+
+def _descriptor_payload(tmp_path: Path, **extra: Any) -> dict[str, Any]:
+    """Build a run payload that carries the parent's opaque sandbox descriptor.
+
+    Args:
+        tmp_path: Checkpoint directory.
+        **extra: More payload keys, such as the proposer settings.
+
+    Returns:
+        The payload.
+    """
+    return {
+        **extra,
+        "_gepa_log_dir": str(tmp_path),
+        "_budget_gateway_descriptor": {
+            "url": "http://127.0.0.1:9876",
+            "control_token": "control",
+            "image": "backend@sha256:" + "a" * 64,
+            "lifetime_seconds": 600,
+        },
+    }
+
+
+def test_the_parent_writes_the_codex_requirements_before_the_optimizer_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Write the root-owned file after the protocol check and before any request or optimizer command."""
+    session = FakeSession()
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
+    events: queue.Queue = queue.Queue()
+
+    vercel_dspy.run_vercel_dspy(
+        _descriptor_payload(tmp_path, proposer={"harness": "codex"}), "job-req", events, "spawn"
+    )
+
+    assert session.steps[:2] == ["probe", "codex_requirements"]
+    assert session.steps.index("codex_requirements") < session.steps.index("write_files")
+    assert session.steps[-1] == "optimizer"
+    assert events.get_nowait()["type"] == "result"
+
+
+def test_a_failed_codex_requirements_write_stops_the_run_before_the_optimizer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed: a missing or user-owned file means no request and no optimizer command."""
+    session = FakeSession()
+    session.requirements_error = ServiceError("Codex cannot start: the sandbox did not keep the file.")
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
+    events: queue.Queue = queue.Queue()
+
+    vercel_dspy.run_vercel_dspy(
+        _descriptor_payload(tmp_path, optimizer={"choice": "gepa", "proposer": {}}), "job-req-fail", events, "spawn"
+    )
+
+    assert "optimizer" not in session.steps
+    assert not session.files
+    assert session.closed
+    event = events.get_nowait()
+    assert event["type"] == "error"
+    assert "Codex cannot start" in json.dumps(event)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {},
+        {"proposer": {"harness": "pi"}},
+        {"proposer": {"harness": "codex", "host_cli": "codex"}},
+        {"optimizer": {"choice": "dspy_gepa", "proposer": {"harness": "codex"}}},
+        {"optimizer": {"choice": "gepa", "proposer": {"harness": "opencode"}}},
+    ],
+    ids=["no-proposer", "pi", "host-cli", "dspy", "unified-opencode"],
+)
+def test_a_run_without_a_sandbox_codex_proposer_skips_the_root_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: dict[str, Any]
+) -> None:
+    """Skip the root write when no Codex proposer starts in the box, so a read-only local box still runs."""
+    session = FakeSession()
+    session.requirements_error = AssertionError("the run must not write the Codex requirements")
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", lambda *_args: SimpleNamespace(open=lambda _spec: session))
+    events: queue.Queue = queue.Queue()
+
+    vercel_dspy.run_vercel_dspy(_descriptor_payload(tmp_path, **extra), "job-skip", events, "spawn")
+
+    assert "codex_requirements" not in session.steps
+    assert events.get_nowait()["type"] == "result"
+
+
+def test_a_setup_check_never_writes_the_codex_requirements() -> None:
+    """A setup check never runs the proposer, so it needs no root write."""
+    assert not vercel_dspy._starts_codex({"_preflight": True, "proposer": {"harness": "codex"}})
+    assert vercel_dspy._starts_codex({"proposer": {"harness": "codex"}})
+    assert vercel_dspy._starts_codex({"proposer": {}})
 
 
 def test_remote_preflight_never_reads_submitted_checkpoint_directory(

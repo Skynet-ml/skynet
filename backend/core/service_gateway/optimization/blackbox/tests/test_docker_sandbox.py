@@ -35,11 +35,14 @@ from ..docker_sandbox import (
 from ..native_runtime import native_runtime_unavailable_reason
 from ..sandbox import (
     _RUNTIME_OVERRIDE,
+    CODEX_REQUIREMENTS_PATH,
     JOB_TAG,
     SandboxSpec,
+    check_codex_requirements,
     sandbox_runtime_from_settings,
     sandbox_unavailable_reason,
     scorer_runtime_from_settings,
+    write_codex_requirements,
 )
 from ..sandbox_broker import SandboxBroker
 
@@ -181,7 +184,7 @@ def test_open_starts_an_offline_read_only_box_labelled_with_its_job(fake_docker:
     assert _flag_values(argv, "--cpus") == ["2"]
     assert _flag_values(argv, "--memory") == ["4096m"]
     assert _flag_values(argv, "--pids-limit") == ["1024"]
-    assert [mount.split(":")[0] for mount in _flag_values(argv, "--tmpfs")] == ["/workspace", "/tmp"]
+    assert [mount.split(":")[0] for mount in _flag_values(argv, "--tmpfs")] == ["/workspace", "/tmp", "/etc/codex"]
     assert _flag_values(argv, "-w") == ["/workspace"]
     assert _flag_values(argv, "-e") == ["HOME=/workspace", "TMPDIR=/tmp"]
     assert set(_flag_values(argv, "--label")) == {"skynet=blackbox", "skynet_job=job-7", f"{DOCKER_JOB_LABEL}=job-7"}
@@ -457,6 +460,20 @@ def test_session_commands_address_the_container(fake_docker: tuple[str, Path]) -
     assert remove == ["rm", "-f", "box1"]
 
 
+def test_a_root_command_runs_as_the_container_root_user_only_when_asked(fake_docker: tuple[str, Path]) -> None:
+    """Only a ``sudo`` command adds ``-u root`` to ``docker exec``; a plain one keeps the image user."""
+    binary, log = fake_docker
+    session = DockerSandboxSession(binary, "box1", env={}, owner=None)
+
+    session.run("id -u")
+    session.run("id -u", sudo=True)
+    session.close()
+
+    plain, root, _remove = _calls(log)
+    assert "-u" not in plain
+    assert root[:6] == ["exec", "-i", "-u", "root", "-w", "/workspace"]
+
+
 def test_a_planted_shell_profile_never_runs_and_the_env_still_reaches_the_command(
     fake_docker: tuple[str, Path], tmp_path: Path
 ) -> None:
@@ -719,6 +736,23 @@ def test_live_box_has_no_network_and_a_read_only_root(live_session: DockerSandbo
     assert writes.ok, writes.stderr
     assert identity.stdout.splitlines()[0] == "/workspace"
     assert identity.stdout.split()[-1] == "0000000000000000"
+
+
+@pytest.mark.docker
+@_live
+def test_live_read_only_box_takes_the_root_owned_codex_requirements(live_session: DockerSandboxSession) -> None:
+    """Write the Codex requirements as root in a real read-only box; the box user cannot change them (SKY-389)."""
+    write_codex_requirements(live_session)
+    check_codex_requirements(live_session)
+    tamper = live_session.run(
+        f"echo x >> {CODEX_REQUIREMENTS_PATH} || rm -f {CODEX_REQUIREMENTS_PATH} || touch /etc/codex/other; "
+        f"test -f /etc/codex/other && exit 9; id -u",
+        timeout_seconds=30,
+    )
+
+    assert tamper.stdout.strip().splitlines()[-1] != "0"
+    assert tamper.exit_code != 9
+    check_codex_requirements(live_session)
 
 
 @pytest.mark.docker

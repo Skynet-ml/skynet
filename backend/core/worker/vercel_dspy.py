@@ -15,6 +15,8 @@ from ..billing.runtime import UsagePendingError
 from ..billing.signals import BudgetReached
 from ..brand import APP_NAME
 from ..exceptions import InfrastructureInterruptionError
+from ..models.blackbox import BLACKBOX_HARNESS_CODEX
+from ..models.unified import DSPY_OPTIMIZERS
 from ..service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
 from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY, archive_chunks
 from ..service_gateway.optimization.blackbox.sandbox import CommandResult, SandboxSpec
@@ -55,6 +57,30 @@ def _save_checkpoint(directory: Path, event: dict[str, Any]) -> None:
     temporary = target.with_suffix(".incoming")
     temporary.write_bytes(data)
     temporary.replace(target)
+
+
+def _starts_codex(payload: dict[str, Any]) -> bool:
+    """Tell whether the optimizer in this box can start a contained Codex proposer.
+
+    Args:
+        payload: The run payload (black-box ``proposer`` or unified
+            ``optimizer.proposer``).
+
+    Returns:
+        True for a sandbox proposer on the Codex harness, outside a setup check
+        and a DSPy optimizer.
+    """
+    if "_preflight" in payload:
+        return False
+    optimizer = payload.get("optimizer")
+    if isinstance(optimizer, dict) and optimizer.get("choice") in DSPY_OPTIMIZERS:
+        return False
+    proposer = payload.get("proposer")
+    if proposer is None and isinstance(optimizer, dict):
+        proposer = optimizer.get("proposer")
+    if not isinstance(proposer, dict) or proposer.get("host_cli") is not None:
+        return False
+    return proposer.get("harness", BLACKBOX_HARNESS_CODEX) == BLACKBOX_HARNESS_CODEX
 
 
 def _guest_failure(result: CommandResult) -> Exception:
@@ -166,6 +192,12 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
             )
         )
         _require_image_protocol(session, lifetime)
+        # A Codex proposer runs as a contained subprocess of this box and
+        # cannot run as root, so the parent writes and checks the root-owned
+        # file here, before the optimizer starts (SKY-389). Other runs skip
+        # the write; the guest check still fails closed if Codex starts.
+        if _starts_codex(guest_payload):
+            session.write_codex_requirements()
         session_root = f".app-dspy-{nonce}"
         snapshot = guest_payload.pop(REPO_SNAPSHOT_KEY, None)
         if isinstance(snapshot, dict):

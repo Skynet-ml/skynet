@@ -342,6 +342,27 @@ def rule_blocker(mailbox: EvaluatorMailbox) -> Callable[[str], None]:
     return block
 
 
+def refusal_logger(mailbox: EvaluatorMailbox) -> Callable[[dict[str, str]], None]:
+    """Build the callback that sends a hidden-path refusal to the parent's run log.
+
+    Args:
+        mailbox: Parent connection.
+
+    Returns:
+        A function taking one ``{"tool", "kind"}`` refusal.
+    """
+
+    def refuse(refusal: dict[str, str]) -> None:
+        """Send one ``proposer.refusal`` run event.
+
+        Args:
+            refusal: The refused tool and the hidden path kind.
+        """
+        mailbox.emit(_LOG_PREFIX, harness_bridge.refusal_record(refusal))
+
+    return refuse
+
+
 def repo_verifier(
     base: str,
     editable_paths: Sequence[str],
@@ -1124,15 +1145,19 @@ class AppPromptPack:
 class HarnessTransport:
     """Run one rendered AutoSaddler session through an app agent harness."""
 
-    def __init__(self, proposer: dict[str, Any], model: str) -> None:
+    def __init__(
+        self, proposer: dict[str, Any], model: str, on_refusal: Callable[[dict[str, str]], None] | None = None
+    ) -> None:
         """Remember the launch to replay for every session.
 
         Args:
             proposer: Serialized harness launch from the parent payload.
             model: Model identifier the harness routes to.
+            on_refusal: Receives each hidden-path refusal of a session.
         """
         self.proposer = proposer
         self.model = model
+        self.on_refusal = on_refusal
 
     async def run(self, session: Any, timeout_seconds: float) -> Any:
         """Drive the harness in the rendered workspace and report what it used.
@@ -1159,6 +1184,9 @@ class HarnessTransport:
             session_dir=Path.home() / harness_bridge.SESSIONS_DIR / str(session.session_id),
             timeout_seconds=timeout_seconds,
         )
+        if self.on_refusal is not None:
+            for refusal in outcome.refusals:
+                self.on_refusal(refusal)
         if outcome.timed_out:
             raise TimeoutError(f"Harness session {session.session_id} exceeded {timeout_seconds:.0f}s")
         failed = outcome.failed
@@ -1177,12 +1205,15 @@ class HarnessTransport:
         return TransportOutcome(raw_response=raw, usage=(usage,))
 
 
-def harness_provider(proposer: dict[str, Any], model: str) -> Any:
+def harness_provider(
+    proposer: dict[str, Any], model: str, on_refusal: Callable[[dict[str, str]], None] | None = None
+) -> Any:
     """Build the upstream provider for the proposer harness.
 
     Args:
         proposer: Serialized harness launch from the parent payload.
         model: Model identifier the harness routes to.
+        on_refusal: Receives each hidden-path refusal of a session.
 
     Returns:
         A ``BaseAgentProvider`` rendering the harness's instruction file.
@@ -1193,7 +1224,7 @@ def harness_provider(proposer: dict[str, Any], model: str) -> Any:
         skill_directory=_HARNESS_SKILL_DIRECTORY,
         capability_tools=_HARNESS_CAPABILITY_TOOLS,
     )
-    return BaseAgentProvider(renderer, HarnessTransport(proposer, model))
+    return BaseAgentProvider(renderer, HarnessTransport(proposer, model, on_refusal))
 
 
 class UsageTrackingProvider:
@@ -1441,7 +1472,7 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
             },
         },
     )
-    provider = UsageTrackingProvider(harness_provider(proposer, model), model)
+    provider = UsageTrackingProvider(harness_provider(proposer, model, refusal_logger(mailbox)), model)
     max_evals = int(payload["max_evals"])
     max_iterations = payload.get("max_iterations") or max_evals
     policies = as_policies.PolicyBundle(

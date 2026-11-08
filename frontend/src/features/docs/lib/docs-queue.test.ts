@@ -73,7 +73,4 @@ test("a manual docs question does not clear the rate-limit hold", async () => {
   await flush();
   assert.deepEqual(sent, []);
   assert.equal(queue.getSnapshot().paused, true);
-  queue.sendNow();
-  await flush();
-  assert.deepEqual(sent, ["remaining question"]);
 });

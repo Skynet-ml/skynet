@@ -280,6 +280,7 @@ class VercelSandboxSession:
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
         on_output: OutputSink | None = None,
+        sudo: bool = False,
     ) -> CommandResult:
         """Run ``command`` through ``bash --noprofile --norc -c`` in the working directory and wait for it.
 
@@ -299,6 +300,7 @@ class VercelSandboxSession:
             env: Extra environment for this command.
             timeout_seconds: Kill the command after this long.
             on_output: Receives each new piece of output at every poll.
+            sudo: Run as root through the provider's own sudo option.
 
         Returns:
             Exit code, captured output and whether the timeout fired.
@@ -327,6 +329,7 @@ class VercelSandboxSession:
             cwd=self._cwd,
             env=dict(env) if env else None,
             kill_after=kill_after,
+            sudo=sudo,
         )
         delay = _POLL_FLOOR_SECONDS
         exit_code = None
@@ -791,6 +794,7 @@ class LocalSubprocessSession:
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
         on_output: OutputSink | None = None,
+        sudo: bool = False,
     ) -> CommandResult:
         """Run ``command`` through ``bash --noprofile --norc -c`` in the working directory and wait for it.
 
@@ -799,10 +803,16 @@ class LocalSubprocessSession:
             env: Extra environment for this command.
             timeout_seconds: Kill the command (and everything it spawned) after this long.
             on_output: Receives each line of output as it is written.
+            sudo: Not supported here; a local session never runs a sudo binary on the user's machine.
 
         Returns:
             Exit code, captured output and whether the timeout fired.
+
+        Raises:
+            ServiceError: When ``sudo`` is set.
         """
+        if sudo:
+            raise ServiceError("A local sandbox cannot run commands as root.")
         command_environment = dict(env or {})
         if self._protected_relay is not None:
             command_environment = _contained_environment(command_environment, self._protected_relay)
@@ -982,3 +992,58 @@ def scorer_runtime_from_settings(settings: Settings) -> SandboxRuntime:
     if runtime is not None:
         return runtime
     raise ServiceError(sandbox_unavailable_reason(settings) or _CREDENTIALS_MISSING)
+
+
+CODEX_REQUIREMENTS_PATH = "/etc/codex/requirements.toml"
+# Codex 0.153.0 turns unified exec on unless this root-owned file turns it off.
+# Unified exec adds write_stdin, which types into a live shell that the guard
+# hook never sees; user config keys cannot turn it off (SKY-389).
+CODEX_REQUIREMENTS = "[features]\nunified_exec = false\n"
+_CODEX_REQUIREMENTS_CHECK = f"stat -c %U:%G:%a /etc/codex {CODEX_REQUIREMENTS_PATH}; cat {CODEX_REQUIREMENTS_PATH}"
+_CODEX_REQUIREMENTS_COMMAND = (
+    "set -eu; umask 022; install -d -o root -g root -m 0755 /etc/codex; "
+    f"rm -f {CODEX_REQUIREMENTS_PATH}; "
+    f"printf %s {shlex.quote(CODEX_REQUIREMENTS)} > {CODEX_REQUIREMENTS_PATH}; "
+    f"chown root:root {CODEX_REQUIREMENTS_PATH}; chmod 0644 {CODEX_REQUIREMENTS_PATH}; " + _CODEX_REQUIREMENTS_CHECK
+)
+_CODEX_REQUIREMENTS_READBACK = "root:root:755\nroot:root:644\n" + CODEX_REQUIREMENTS
+
+
+def _require_codex_requirements(result: CommandResult) -> None:
+    """Fail unless a read-back shows the root-owned requirements file with the exact content.
+
+    Args:
+        result: The outcome of a command that ends with the read-back.
+
+    Raises:
+        ServiceError: When the command failed or the read-back does not match.
+    """
+    if not result.ok or result.timed_out or result.stdout != _CODEX_REQUIREMENTS_READBACK:
+        raise ServiceError(
+            f"Codex cannot start: the sandbox did not keep a root-owned {CODEX_REQUIREMENTS_PATH} "
+            "that turns off unified exec."
+        )
+
+
+def write_codex_requirements(session: SandboxSession) -> None:
+    """Write the root-owned Codex requirements file and read it back before Codex starts.
+
+    Args:
+        session: A control-plane session whose ``run`` can run as root.
+
+    Raises:
+        ServiceError: When the write fails or the read-back does not match, so Codex never starts.
+    """
+    _require_codex_requirements(session.run(_CODEX_REQUIREMENTS_COMMAND, timeout_seconds=60, sudo=True))
+
+
+def check_codex_requirements(session: SandboxSession) -> None:
+    """Read back the requirements file that the outer box's control plane wrote, without root.
+
+    Args:
+        session: A contained session inside a box whose parent wrote the file.
+
+    Raises:
+        ServiceError: When the file is missing, not root-owned, or has other content.
+    """
+    _require_codex_requirements(session.run(_CODEX_REQUIREMENTS_CHECK, timeout_seconds=60))

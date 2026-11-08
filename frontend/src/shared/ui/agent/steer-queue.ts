@@ -60,9 +60,6 @@ export class SteerQueue {
   private steering: SteerEntry[] = [];
   private busy = false;
   private paused = false;
-  private sendTogether = false;
-  private sendIntent = 0;
-  private internalStop = false;
   private settling = 0;
   private turn = 0;
   private channel: SteerChannel | null = null;
@@ -120,8 +117,6 @@ export class SteerQueue {
    */
   setBusy(busy: boolean, failed = false): void {
     if (!busy && failed && this.busy) this.pause();
-    if (busy && !this.busy) this.sendIntent += 1;
-    if (busy) this.sendTogether = false;
     if (!busy && this.channel) {
       this.endTurn();
       return;
@@ -135,8 +130,6 @@ export class SteerQueue {
 
   /** A steerable turn started; `channel` delivers messages into it. */
   openTurn(channel: SteerChannel): void {
-    this.sendIntent += 1;
-    this.sendTogether = false;
     if (this.channel) this.endTurn();
     this.turn += 1;
     this.channel = channel;
@@ -452,13 +445,27 @@ export class SteerQueue {
     return item.text;
   }
 
-  /** Move a queued follow-up into the running turn. */
+  /**
+   * Steer a queued follow-up: into the running turn at its next step, or, when
+   * a paused queue is idle, send it now and let the queue continue after it.
+   */
   promote(id: string): void {
-    if (!this.channel || !this.busy) return;
     const item = this.queued.find((entry) => entry.id === id);
     if (!item || item.uncertain || item.text.length > this.maxLength) return;
-    const text = this.take(id);
-    if (text !== null) this.steer(text);
+    if (this.channel && this.busy) {
+      const text = this.take(id);
+      if (text !== null) this.steer(text);
+      return;
+    }
+    if (this.busy || !this.paused) return;
+    // After Stop the tray shows Steer while unread steers are still being
+    // withdrawn; wait for them instead of dropping the click.
+    if (this.settling > 0) {
+      void Promise.allSettled([...this.settlingOperations.values()]).then(() => this.promote(id));
+      return;
+    }
+    this.paused = false;
+    this.sendItem(item);
   }
 
   /** Pull the last queued follow-up back out for editing. */
@@ -469,90 +476,18 @@ export class SteerQueue {
 
   /** Drop everything (a new chat or a reset). */
   clear(): void {
-    this.sendIntent += 1;
     this.queued = [];
     this.steering = [];
     this.paused = false;
-    this.sendTogether = false;
     this.trayOrder = [];
     this.emit();
   }
 
   /** Hold pending input after a user Stop, including steers still being withdrawn. */
   pause(): void {
-    if (!this.internalStop) this.sendIntent += 1;
     // An empty tray has nothing to hold; pausing it would hold later Tab input.
     if (this.holdsInput()) this.paused = true;
-    this.sendTogether = false;
     this.emit();
-  }
-
-  /** Resume the head through the owner's normal turn-start path. */
-  sendNow(id?: string): void {
-    const intent = this.sendIntent;
-    if (this.settling > 0) {
-      void Promise.allSettled([...this.settlingOperations.values()]).then(() => {
-        if (intent === this.sendIntent) this.sendNow(id);
-      });
-      return;
-    }
-    const item = id ? this.queued.find((entry) => entry.id === id) : this.queued.find((entry) => !entry.uncertain);
-    if (this.busy || (!this.paused && !item?.uncertain)) return;
-    if (!item || item.text.length > this.maxLength) return;
-    const queued = this.queued;
-    const order = this.trayOrder;
-    this.paused = false;
-    this.queued = this.queued.filter((entry) => entry !== item);
-    this.emit();
-    if (!this.startSend(item.text)) {
-      this.queued = queued;
-      this.trayOrder = order;
-      this.paused = true;
-      this.emit();
-    }
-  }
-
-  /** Stop the active turn, then send the settled tray as one follow-up. */
-  stopAndSendNow(stop: () => void): void {
-    if (!this.busy || !this.hasPending()) return;
-    const turn = this.turn;
-    const intent = ++this.sendIntent;
-    if (this.settling > 0) {
-      void Promise.allSettled([...this.settlingOperations.values()]).then(() => {
-        if (turn === this.turn && intent === this.sendIntent) this.stopAndSendNow(stop);
-      });
-      return;
-    }
-    const finish = () => {
-      if (turn !== this.turn || intent !== this.sendIntent) return;
-      const text = this.queued.filter((entry) => !entry.uncertain).map((entry) => entry.text).join("\n\n");
-      if (!text || text.length > this.maxLength) return;
-      this.internalStop = true;
-      try {
-        this.pause();
-        if (this.busy) stop();
-      } finally {
-        this.internalStop = false;
-      }
-      if (intent !== this.sendIntent) return;
-      this.sendTogether = true;
-      this.schedulePump();
-    };
-    const channel = this.channel;
-    const entries = this.steering.filter((entry) => entry.turn === turn);
-    if (!channel || entries.length === 0) { finish(); return; }
-    this.channel = null;
-    this.settling += 1;
-    this.emit();
-    const operation = this.settle(entries, channel, this.postChain);
-    for (const entry of entries) this.settlingOperations.set(entry.id, operation);
-    void operation.then(() => {
-      for (const entry of entries) this.settlingOperations.delete(entry.id);
-      if (this.turn !== turn || intent !== this.sendIntent) return;
-      if (this.busy) this.channel = channel;
-      this.emit();
-      finish();
-    });
   }
 
   private holdsInput(): boolean {
@@ -596,30 +531,7 @@ export class SteerQueue {
   }
 
   private pump(): void {
-    if (this.busy || this.settling > 0 || (this.paused && !this.sendTogether)) return;
-    if (this.sendTogether) {
-      const queued = this.queued;
-      const order = this.trayOrder;
-      const sendable = this.queued.filter((item) => !item.uncertain);
-      const text = sendable.map((item) => item.text).join("\n\n");
-      if (!text || text.length > this.maxLength) {
-        this.sendTogether = false;
-        this.paused = true;
-        this.emit();
-        return;
-      }
-      this.queued = this.queued.filter((item) => item.uncertain);
-      this.sendTogether = false;
-      this.paused = false;
-      this.emit();
-      if (!this.startSend(text)) {
-        this.queued = queued;
-        this.trayOrder = order;
-        this.paused = true;
-        this.emit();
-      }
-      return;
-    }
+    if (this.busy || this.settling > 0 || this.paused) return;
     const head = this.queued.find((item) => !item.uncertain);
     if (!head) return;
     if (head.text.length > this.maxLength) {
@@ -627,11 +539,16 @@ export class SteerQueue {
       this.emit();
       return;
     }
+    this.sendItem(head);
+  }
+
+  /** Send one queued item as its own turn; a refused send restores and pauses the tray. */
+  private sendItem(item: PendingMessage): void {
     const queued = this.queued;
     const order = this.trayOrder;
-    this.queued = this.queued.filter((item) => item !== head);
+    this.queued = this.queued.filter((entry) => entry !== item);
     this.emit();
-    if (!this.startSend(head.text)) {
+    if (!this.startSend(item.text)) {
       this.queued = queued;
       this.trayOrder = order;
       this.paused = true;
@@ -640,7 +557,6 @@ export class SteerQueue {
   }
 
   private startSend(text: string): boolean {
-    this.sendIntent += 1;
     this.busy = true;
     if (this.send(text) !== false) return true;
     this.busy = false;
@@ -650,8 +566,6 @@ export class SteerQueue {
 
 /** The mid-turn surface a chat hands to its composer. */
 export interface MidTurnQueue extends SteerQueueSnapshot {
-  sendNow: (id?: string) => void;
-  stopAndSendNow: (stop: () => void) => void;
   steer: (text: string) => void;
   queue: (text: string) => void;
   promote: (id: string) => void;
@@ -672,8 +586,6 @@ export function midTurnOf(
 ): MidTurnQueue {
   return {
     ...snapshot,
-    sendNow: (id) => getStore()?.sendNow(id),
-    stopAndSendNow: (stop) => getStore()?.stopAndSendNow(stop),
     steer: (text) => getStore()?.steer(text),
     queue: (text) => getStore()?.enqueue(text),
     promote: (id) => getStore()?.promote(id),
