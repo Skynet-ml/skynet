@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, quote_plus, urlencode, urlsplit
 
 from ..config import settings
-from .credential_safety import credential_fragments, redact_secret_bytes
+from .credential_safety import REDACTED_CREDENTIAL, credential_fragments, redact_secret_bytes
 from .mcp_broker import ToolCall
 from .operation_pricing import ChargePolicy, operation_quote
 from .runtime import BudgetRuntime, PaidResult
@@ -396,6 +396,46 @@ def escaped_forms(fragment: str) -> set[str]:
     return forms | {form.replace("/", "\\/") for form in forms}
 
 
+def _either_case(hex_digits: str) -> bytes:
+    """Return a regex that matches hex digits in lower or upper case.
+
+    Args:
+        hex_digits: Lower-case hex digits.
+
+    Returns:
+        The regex bytes.
+    """
+    return "".join(f"[{d}{d.upper()}]" if d.isalpha() else d for d in hex_digits).encode()
+
+
+def json_escape_pattern(fragment: str) -> re.Pattern[bytes] | None:
+    """Return a regex for every JSON string form in which a server may echo a fragment.
+
+    A JSON encoder may write any character as ``\\uXXXX`` with lower- or
+    upper-case hex (.NET writes ``+`` as ``\\u002B``) and ``/`` as ``\\/``,
+    and it may mix forms in one string. A list of literal forms cannot hold
+    every mix, so each character gets its own set of choices.
+
+    Args:
+        fragment: One secret fragment.
+
+    Returns:
+        The compiled regex, or None for a fragment shorter than
+        ``_MIN_ENCODED_FRAGMENT``.
+    """
+    if len(fragment) < _MIN_ENCODED_FRAGMENT:
+        return None
+    parts: list[bytes] = []
+    for char in fragment:
+        choices = {re.escape(char.encode()), re.escape(json.dumps(char)[1:-1].encode())}
+        if char == "/":
+            choices.add(re.escape(b"\\/"))
+        units = char.encode("utf-16-be")
+        choices.add(b"".join(re.escape(b"\\u") + _either_case(units[i : i + 2].hex()) for i in range(0, len(units), 2)))
+        parts.append(b"(?:" + b"|".join(sorted(choices)) + b")")
+    return re.compile(b"".join(parts))
+
+
 def encoded_forms(fragment: str) -> set[str]:
     """Return the re-encoded forms in which a server may echo a secret fragment.
 
@@ -580,6 +620,7 @@ def _relay(
     # encoded on its own is caught: inside a longer base64 text its form depends on the byte offset.
     fragments |= {form for fragment in fragments for form in encoded_forms(fragment)}
     # A server can echo a value JSON-escaped (Go writes & as \u0026, PHP writes / as \/), so hide those forms too.
+    base = set(fragments)
     fragments |= {form for fragment in fragments for form in escaped_forms(fragment)}
     state.secrets |= set(values.values()) | fragments
     ordered = sorted(fragments, key=len, reverse=True)
@@ -611,4 +652,9 @@ def _relay(
             policy = ChargePolicy("managed_model")
             state.cost_usd = float(policy.convert(CONNECTORS[host].tools[tool]).total * policy.cent_usd)
         answer = tool_meter(runtime, CONNECTORS[host])(tool, arguments, ToolCall(run))["body"]
-    return redact_secret_bytes(answer, ordered)
+    redacted = redact_secret_bytes(answer, ordered)
+    for fragment in sorted(base, key=len, reverse=True):
+        pattern = json_escape_pattern(fragment)
+        if pattern is not None:
+            redacted = pattern.sub(REDACTED_CREDENTIAL.encode(), redacted)
+    return redacted
