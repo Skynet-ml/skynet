@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -37,24 +38,37 @@ class NetworkPolicyError(RuntimeError):
     """Signal a policy change that the provider did not confirm."""
 
 
+# One DNS label in letter-digit-hyphen form, 1 to 63 characters, with no
+# hyphen at either end. Every other character (comma, backslash, percent,
+# underscore, a blank) is a parse risk at the provider, so it is refused.
+_LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
+
+
 def _normalize_host(raw: str) -> str:
-    """Strip and lowercase a host name.
+    """Strip and lowercase a host name, and drop one trailing dot.
+
+    ``x.com.`` and ``x.com`` name the same host, so they must compare equal
+    for the dedupe and the credential subset check, as in ``inference_host``.
 
     Args:
         raw: The host as the caller wrote it.
 
     Returns:
-        The host without surrounding blanks, in lowercase.
+        The host without surrounding blanks or a trailing dot, in lowercase.
     """
-    return raw.strip().lower()
+    return raw.strip().lower().removesuffix(".")
 
 
 def _is_valid_host(host: str) -> bool:
     """Return True when a normalized host is a bare host name or IP address.
 
-    A leading ``*.`` label is a valid wildcard. A bare ``*`` and a host with a
-    scheme, path, port, userinfo or blanks are not valid, because the provider
-    could read them as "every host" or as a host that the caller did not mean.
+    A leading ``*.`` label is a valid wildcard when two or more labels follow
+    it, so ``*.com`` is refused. A bare ``*``, the unspecified addresses
+    ``0.0.0.0`` and ``::``, an IPv6 scope ID, an empty label and any character
+    outside letters, digits, hyphens and dots are not valid, because the
+    provider could read them as "every host" or as a host that the caller did
+    not mean. A name whose last label is all digits is refused, because some
+    parsers read ``1.2.3`` as an IP address.
 
     Args:
         host: The normalized host.
@@ -62,14 +76,19 @@ def _is_valid_host(host: str) -> bool:
     Returns:
         True when the host is valid.
     """
+    if "%" in host:
+        return False
     try:
-        ipaddress.ip_address(host)
+        address = ipaddress.ip_address(host)
     except ValueError:
         pass
     else:
-        return True
-    name = host.removeprefix("*.")
-    return bool(name) and not any(char in "*/:@?#" or char.isspace() for char in name)
+        return not address.is_unspecified
+    wildcard = host.startswith("*.")
+    labels = host.removeprefix("*.").split(".")
+    if len(host) > 253 or (wildcard and len(labels) < 2) or labels[-1].isdigit():
+        return False
+    return all(_LABEL.fullmatch(label) for label in labels)
 
 
 @dataclass(frozen=True)
@@ -105,8 +124,9 @@ class CredentialRule:
 
     host: str
     # Headers stay out of the hash because a mapping is not hashable; equal
-    # rules still hash equal, so the hash stays consistent with ``==``.
-    headers: Mapping[str, str] = field(hash=False)
+    # rules still hash equal, so the hash stays consistent with ``==``. They
+    # stay out of the repr so that a log line or traceback never holds a secret.
+    headers: Mapping[str, str] = field(hash=False, repr=False)
     match: RequestMatch | None = None
 
     def __post_init__(self) -> None:
@@ -200,19 +220,29 @@ class NetworkPlan:
 
 
 class PhaseNetwork:
-    """Switch a sandbox to the policy of each phase and back again."""
+    """Switch a sandbox to the policy of each phase and back again.
+
+    Phases nest in one task only. A phase from another task while a phase is
+    active is refused, because the two restores would race and could leave
+    the box with the wrong policy (for example open egress during scoring).
+    """
 
     def __init__(self, applier: PolicyApplier, plan: NetworkPlan, current: EgressPolicy) -> None:
-        """Keep the applier, the plan and the policy that the sandbox has now.
+        """Keep the applier, the plan and the policy to restore between phases.
 
         Args:
             applier: Applies policies to the sandbox.
             plan: The policy of each phase.
-            current: The policy that the sandbox applies now.
+            current: The policy that the sandbox must have outside every
+                phase. It is not trusted as applied until the provider
+                confirms it, so the first restore always sends it.
         """
         self._applier = applier
         self._plan = plan
-        self._current: EgressPolicy | None = current
+        self._baseline = current
+        self._current: EgressPolicy | None = None
+        self._active: list[EgressPolicy] = []
+        self._owner: asyncio.Task[object] | None = None
 
     @property
     def current(self) -> EgressPolicy | None:
@@ -221,13 +251,13 @@ class PhaseNetwork:
 
     @asynccontextmanager
     async def phase_policy(self, phase: Phase) -> AsyncGenerator[EgressPolicy, None]:
-        """Apply the policy of a phase, then restore the old policy.
+        """Apply the policy of a phase, then restore the policy from before it.
 
-        The old policy comes back on exit, also when the block raises or the
-        entry apply fails or is cancelled. When the old policy was unknown,
-        the confirmed phase policy stays. When the block raised and the
-        restore also fails, the block's exception reaches the caller with a
-        note about the restore.
+        The restore target is the policy of the enclosing phase, or the
+        baseline policy outside every phase. It comes back on exit, also when
+        the block raises or the entry apply fails or is cancelled. When the
+        block raised and the restore also fails, the block's exception
+        reaches the caller with a note about the restore.
 
         Args:
             phase: The phase to enter.
@@ -236,34 +266,60 @@ class PhaseNetwork:
             The policy of the phase.
 
         Raises:
-            NetworkPolicyError: The provider did not confirm a policy change.
+            NetworkPolicyError: The provider did not confirm a policy change,
+                or another task has a phase active.
         """
-        previous = self._current
+        task = asyncio.current_task()
+        if self._active and self._owner is not task:
+            raise NetworkPolicyError("Another task has a network phase active; phases must not overlap.")
+        previous = self._active[-1] if self._active else self._baseline
         policy = self._plan.for_phase(phase)
+        self._owner = task
+        self._active.append(policy)
         try:
-            await self._apply(policy)
-            yield policy
-        except BaseException as error:
             try:
-                await self._restore(previous)
-            except Exception as restore_error:
-                error.add_note(f"Restoring the network policy failed too: {restore_error!r}")
-            raise
-        await self._restore(previous)
+                await self._apply(policy)
+                yield policy
+            except BaseException as error:
+                try:
+                    await self._restore(previous)
+                except Exception as restore_error:
+                    error.add_note(f"Restoring the network policy failed too: {restore_error!r}")
+                raise
+            await self._restore(previous)
+        finally:
+            self._active.pop()
+            if not self._active:
+                self._owner = None
 
-    async def _restore(self, previous: EgressPolicy | None) -> None:
-        """Apply the policy from before a phase, shielded from cancellation.
+    async def _restore(self, previous: EgressPolicy) -> None:
+        """Apply the policy from before a phase, and finish it even when cancelled.
+
+        A cancel must not stop the restore half-way and leave the phase policy
+        on the box. It also must not return early while the restore still
+        runs: a later phase could then apply its policy first, and the late
+        restore would overwrite it. So a cancel waits for the restore to end,
+        then reaches the caller.
 
         Args:
-            previous: The policy from before the phase, or None when it was unknown.
+            previous: The policy from before the phase.
 
         Raises:
             NetworkPolicyError: The provider did not confirm the old policy.
+            asyncio.CancelledError: The task was cancelled during the restore.
         """
-        if previous is not None:
-            # A second cancel must not stop the restore half-way and leave the
-            # phase policy (for example open egress) on the box.
-            await asyncio.shield(self._apply(previous))
+        restore = asyncio.ensure_future(self._apply(previous))
+        cancelled: asyncio.CancelledError | None = None
+        while not restore.done():
+            try:
+                await asyncio.wait({restore})
+            except asyncio.CancelledError as error:
+                cancelled = error
+        if cancelled is not None:
+            if not restore.cancelled() and (restore_error := restore.exception()) is not None:
+                cancelled.add_note(f"Restoring the network policy failed too: {restore_error!r}")
+            raise cancelled
+        restore.result()
 
     async def _apply(self, policy: EgressPolicy) -> None:
         """Apply a policy and fail closed unless the provider confirms it.

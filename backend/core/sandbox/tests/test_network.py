@@ -92,12 +92,14 @@ async def test_each_phase_uses_its_own_policy() -> None:
 
 
 async def test_same_policy_is_not_sent_again() -> None:
-    """Skip the provider call when the phase policy is already applied."""
+    """Skip the provider call when the phase policy is already confirmed."""
     applier = FakeApplier()
     network = PhaseNetwork(applier, PLAN, current=DENY)
     async with network.phase_policy(Phase.SCORE):
         pass
-    assert applier.applied == []
+    async with network.phase_policy(Phase.SCORE):
+        pass
+    assert applier.applied == [DENY]
 
 
 async def test_unconfirmed_policy_fails_the_phase() -> None:
@@ -247,14 +249,104 @@ async def test_restore_is_shielded_from_a_second_cancel() -> None:
     task.cancel()
     await applier.waiting.wait()
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert network.current is None
-    applier.gate.set()
     for _ in range(5):
         await asyncio.sleep(0)
+    assert not task.done()
+    assert network.current is None
+    applier.gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
     assert network.current is DENY
     assert applier.applied == [RUN, DENY]
+
+
+async def test_late_restore_cannot_overwrite_a_later_phase() -> None:
+    """Keep a later phase's policy after a double cancel during a restore.
+
+    The old code let the cancelled task end while the shielded restore still
+    ran, so a later deny-all phase got open egress when the restore landed.
+    """
+    applier = GatedApplier(blocked_call=2)
+    network = PhaseNetwork(applier, NetworkPlan(setup=SETUP, run=RUN, score=DENY), current=OPEN)
+    inside = asyncio.Event()
+
+    async def enter() -> None:
+        """Enter the run phase and wait there until cancelled."""
+        async with network.phase_policy(Phase.RUN):
+            inside.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(enter())
+    await inside.wait()
+    task.cancel()
+    await applier.waiting.wait()
+    task.cancel()
+    with pytest.raises(NetworkPolicyError, match="overlap"):
+        async with network.phase_policy(Phase.SCORE):
+            pytest.fail("The phase must not start while the restore runs.")
+    applier.gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    async with network.phase_policy(Phase.SCORE):
+        assert network.current is DENY
+        assert applier.applied[-1] is DENY
+    assert applier.applied == [RUN, OPEN, DENY, OPEN]
+
+
+async def test_overlapping_phases_from_another_task_are_refused() -> None:
+    """Refuse a phase from a second task while a first task has one active."""
+    applier = FakeApplier()
+    network = PhaseNetwork(applier, PLAN, current=OPEN)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def first() -> None:
+        """Hold the run phase until released."""
+        async with network.phase_policy(Phase.RUN):
+            entered.set()
+            await release.wait()
+
+    task = asyncio.create_task(first())
+    await entered.wait()
+
+    async def second() -> None:
+        """Try to enter the score phase."""
+        async with network.phase_policy(Phase.SCORE):
+            pytest.fail("The overlapping phase must not start.")
+
+    with pytest.raises(NetworkPolicyError, match="overlap"):
+        await asyncio.create_task(second())
+    assert network.current is RUN
+    release.set()
+    await task
+    assert network.current is OPEN
+    assert applier.applied == [RUN, OPEN]
+    async with network.phase_policy(Phase.SCORE):
+        assert network.current is DENY
+
+
+async def test_first_policy_is_not_trusted_until_confirmed() -> None:
+    """Send the phase policy even when it equals the policy given at start."""
+    applier = FakeApplier()
+    network = PhaseNetwork(applier, PLAN, current=DENY)
+    assert network.current is None
+    async with network.phase_policy(Phase.SCORE):
+        assert network.current is DENY
+    assert applier.applied == [DENY]
+
+
+async def test_unknown_state_restores_the_baseline_not_the_phase_policy() -> None:
+    """Restore the baseline after a phase that started from an unknown state."""
+    applier = ScriptedApplier(2)
+    network = PhaseNetwork(applier, NetworkPlan(setup=OPEN, run=OPEN, score=DENY), current=DENY)
+    with pytest.raises(NetworkPolicyError):
+        async with network.phase_policy(Phase.SETUP):
+            pass
+    assert network.current is None
+    async with network.phase_policy(Phase.RUN):
+        assert network.current is OPEN
+    assert network.current is DENY
+    assert applier.applied == [OPEN, DENY, OPEN, DENY]
 
 
 async def test_failed_restore_keeps_the_block_exception() -> None:
@@ -334,10 +426,37 @@ def test_contradictory_policy_fails(kwargs: dict) -> None:
 
 @pytest.mark.parametrize(
     "host",
-    ["*", "https://x.com", "x.com/p", "x.com:443", "u:p@x.com", "*.", "a.*.com", "x .com", ""],
+    [
+        "*",
+        "https://x.com",
+        "x.com/p",
+        "x.com:443",
+        "u:p@x.com",
+        "*.",
+        "a.*.com",
+        "x .com",
+        "",
+        "*.com",
+        "*.com.",
+        "0.0.0.0",
+        "::",
+        "a.com,b.com",
+        ".x.com",
+        "x..com",
+        "x.com..",
+        "x\\y.com",
+        "%41.com",
+        "fe80::1%eth0",
+        "-x.com",
+        "x-.com",
+        "a_b.com",
+        f"{'a' * 64}.com",
+        "1.2.3",
+        "例え.jp",
+    ],
 )
 def test_policy_rejects_host_that_is_not_bare(host: str) -> None:
-    """Reject a bare wildcard and a host with a scheme, path, port or userinfo (F2).
+    """Reject wildcards, unspecified addresses, bad labels and URL parts (F2).
 
     Args:
         host: The invalid host.
@@ -348,7 +467,9 @@ def test_policy_rejects_host_that_is_not_bare(host: str) -> None:
         CredentialRule(host=host, headers={})
 
 
-@pytest.mark.parametrize("host", ["*.example.com", "10.0.0.1", "::1", "localhost"])
+@pytest.mark.parametrize(
+    "host", ["*.example.com", "10.0.0.1", "::1", "localhost", "xn--r8jz45g.jp", f"{'a' * 63}.com", "a-b.co"]
+)
 def test_policy_accepts_wildcard_label_and_ip(host: str) -> None:
     """Accept a leading wildcard label, an IP address and a plain name.
 
@@ -356,6 +477,26 @@ def test_policy_accepts_wildcard_label_and_ip(host: str) -> None:
         host: The valid host.
     """
     assert EgressPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=(host,)).allow_hosts == (host,)
+
+
+def test_trailing_dot_names_the_same_host() -> None:
+    """Drop one trailing dot everywhere, so ``x.com.`` equals ``x.com``."""
+    rule = CredentialRule(host="GW.example.com.", headers={})
+    policy = EgressPolicy(
+        mode=NetworkMode.ALLOWLIST, allow_hosts=(GATEWAY, f"{GATEWAY}.", "*.x.com."), credential_rules=(rule,)
+    )
+    assert rule.host == GATEWAY
+    assert policy.allow_hosts == (GATEWAY, "*.x.com")
+    assert merge_allowlists(policy, [f"{GATEWAY}."]).notices == (AllowlistNotice(GATEWAY, NoticeKind.DUPLICATE),)
+
+
+def test_credential_rule_repr_hides_the_headers() -> None:
+    """Keep header values out of the repr of a rule and of its policy."""
+    rule = CredentialRule(host=GATEWAY, headers={"Authorization": "Bearer s3cr3t-value"})
+    policy = EgressPolicy(mode=NetworkMode.OPEN, credential_rules=(rule,))
+    assert "s3cr3t-value" not in repr(rule)
+    assert "s3cr3t-value" not in repr(policy)
+    assert GATEWAY in repr(rule)
 
 
 def test_policy_normalizes_and_dedupes_hosts() -> None:
