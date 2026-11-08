@@ -79,7 +79,7 @@ Reference facts for coding agents. The always-on rules are in `AGENTS.md`.
 │       │   ├── login/            Sign-in and account recovery UI
 │       │   └── privacy/ terms/   Public legal pages
 │       ├── features/             Product feature slices
-│       │   ├── submit/           DSPy/Anything wizard, drafts, substeps,
+│       │   ├── submit/           Submit wizard, drafts, substeps,
 │       │   │                    preflight, budget UI, and workflow canvas
 │       │   ├── optimizations/    Results, logs, compare, export, and serve UI
 │       │   ├── dashboard/        Job list, analytics, and bulk actions

@@ -9,7 +9,7 @@ Toda execução otimiza um repositório. Você pode começar de duas formas:
 | Usar um repositório        | O Skynet altera os arquivos nos caminhos que você permite, em um repositório do GitHub que você conecta. |
 | Criar um repositório novo  | Você fornece uma tarefa e dados. O Skynet cria um novo repositório do GitHub na sua conta e escreve uma primeira solução. |
 
-O código no repositório pode ser qualquer coisa: um pipeline de prompts, um harness de agente, um script ou uma biblioteca. Ele pode usar qualquer biblioteca, por exemplo DSPy.
+O código no repositório pode ser qualquer coisa: um pipeline de prompts, um harness de agente, um script ou uma biblioteca. Ele pode usar qualquer biblioteca.
 
 Toda execução usa o mesmo contrato. O seu avaliador define `score(repo_path, case)`. Ele retorna uma pontuação e um feedback escrito. O otimizador lê o feedback para melhorar a próxima versão.
 

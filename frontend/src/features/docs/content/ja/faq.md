@@ -8,7 +8,7 @@ Skynet は、あなた自身のデータとスコアラーに対してリポジ�
 
 ### Skynet は何を最適化できますか？
 
-Skynet は Optimize Anything です。すべての実行はリポジトリを最適化します。すでにお持ちの GitHub リポジトリを使うか、タスクとデータから Skynet に新しいリポジトリを作成させます。コードはどのライブラリでも使えます。たとえば DSPy も使えます。
+Skynet は Optimize Anything です。すべての実行はリポジトリを最適化します。すでにお持ちの GitHub リポジトリを使うか、タスクとデータから Skynet に新しいリポジトリを作成させます。コードはどのライブラリでも使えます。
 
 すべてのエンジンがリポジトリで動作します。GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler、ShinkaEvolve です。
 

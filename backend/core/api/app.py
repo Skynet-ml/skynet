@@ -520,7 +520,7 @@ _OPENAPI_TAGS = [
     {
         "name": "Optimizations",
         "description": (
-            "Submit, list, inspect, and manage optimization runs for prompts, code, text, DSPy programs, and repositories."
+            "Submit, list, inspect, and manage optimization runs. Every run optimizes the code in a repository."
         ),
     },
     {"name": "Inference", "description": "Run the optimized artifact of a finished run."},
@@ -933,7 +933,7 @@ def create_app(
         redoc_url=None,
         description=(
             f"HTTP API for **{APP_NAME}**. Submit optimization runs for "
-            "prompts, code, text, DSPy programs, and repositories, poll "
+            "the code in a repository, poll "
             "their status, read the results, and run the optimized "
             "artifact. Send an API token "
             "from Settings > API as a Bearer token. Guides: "
