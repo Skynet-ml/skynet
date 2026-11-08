@@ -36,6 +36,7 @@ from .. import (
     autosaddler_runner,
     best_of_n,
     gepa_engine,
+    harness,
     harness_bridge,
     native_engines,
     native_runner,
@@ -2130,6 +2131,29 @@ def test_a_missing_or_user_owned_requirements_file_stops_codex_before_it_starts(
     assert len(session.requirements) == 1
     assert len(session.calls) == 1
     assert session.closed
+
+
+@pytest.mark.parametrize("contained", [True, False], ids=["outer-box", "docker-or-vercel"])
+def test_a_host_cli_codex_proposer_skips_the_codex_requirements_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contained: bool
+) -> None:
+    """A host_cli proposer runs the host-agent shim, so no box checks or writes the file."""
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    runtime = FakeRuntime(session)
+    runtime.contained = contained
+    ctx = _context(tmp_path, runtime)
+    monkeypatch.setattr(harness, "settings", harness.settings.model_copy(update={"local_mode": True}))
+    real_launch = harness.host_cli_launch
+    # The parent mints the host token only for a protected run; this unit run is unprotected.
+    monkeypatch.setattr(
+        harness, "host_cli_launch", lambda model, gateway, cli, _token: real_launch(model, gateway, cli, "t")
+    )
+    ctx.native_options = replace(ctx.native_options, proposer=BlackboxProposer(harness="codex", host_cli="codex"))
+
+    run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    assert session.requirements == []
 
 
 def test_a_pi_proposer_skips_the_codex_requirements_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

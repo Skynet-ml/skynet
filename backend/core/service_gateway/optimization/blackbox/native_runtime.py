@@ -1201,7 +1201,9 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
         if not installed.ok or installed.timed_out:
             detail = (installed.stderr or installed.stdout)[-2000:]
             raise ServiceError(f"Native optimizer runtime setup failed: {detail}")
-        if not editor and proposer.harness == BLACKBOX_HARNESS_CODEX:
+        # A host_cli proposer runs the host-agent shim, not Codex in this box, so it
+        # needs no requirements file (the parent's _starts_codex skips it too).
+        if not editor and proposer.harness == BLACKBOX_HARNESS_CODEX and proposer.host_cli is None:
             _require_codex_requirements(runtime, session)
         env = {
             "ANTHROPIC_BASE_URL": (relay or options.gateway.url).removesuffix("/v1"),
