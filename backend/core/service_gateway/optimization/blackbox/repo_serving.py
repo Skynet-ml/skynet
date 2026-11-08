@@ -29,7 +29,7 @@ from ....worker.repo_staging import hidden_repo_paths
 from . import runner
 from .harness import ENV_MODEL
 from .repo_constraints import CONSTRAINTS_FILE, ConstraintsError, read_constraints
-from .repo_tree import REPO_SNAPSHOT_KEY, apply_patch, linked_hidden_paths, strip_archive, unpack_tree
+from .repo_tree import REPO_SNAPSHOT_KEY, apply_patch, drop_paths, linked_hidden_paths, strip_archive, unpack_tree
 from .sandbox_scorer import scorer_gateway
 
 SERVE_FILE = "serve.py"
@@ -138,7 +138,8 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
         owner: The run's owner, whose connection reads a private repository.
 
     Yields:
-        The payload with the stripped packed tree under ``REPO_SNAPSHOT_KEY``.
+        The payload with the stripped packed tree under ``REPO_SNAPSHOT_KEY``,
+        and the patch without its sections for hidden paths.
 
     Raises:
         RepoFetchError: When the repository cannot be fetched at its commit.
@@ -163,7 +164,9 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
                 " Serving refuses it, because the link would show the scoring files to the guest."
             )
         archive = strip_archive(snapshot.archive, hidden, workdir / "serve-tree.tgz")
-        yield {**payload, REPO_SNAPSHOT_KEY: {"archive": str(archive), "commit": snapshot.commit}}
+        # A best version from an older run can still edit a now-hidden file, which the stripped tree lacks.
+        patch = drop_paths(str(payload.get("patch") or ""), hidden)
+        yield {**payload, "patch": patch, REPO_SNAPSHOT_KEY: {"archive": str(archive), "commit": snapshot.commit}}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

@@ -288,12 +288,13 @@ def test_the_serving_archive_has_no_scoring_side_path(tmp_path: Path, monkeypatc
         assert path not in served
 
 
-def _stage(monkeypatch: pytest.MonkeyPatch, files: dict[str, str]) -> Any:
+def _stage(monkeypatch: pytest.MonkeyPatch, files: dict[str, str], patch: str = "") -> Any:
     """Point the serving fetch at a real packed tree of ``files``.
 
     Args:
         monkeypatch: Replaces the GitHub token and fetch.
         files: The commit's tree.
+        patch: The stored best version to serve.
 
     Returns:
         The ``staged_snapshot`` context for a finished run at that commit.
@@ -305,7 +306,9 @@ def _stage(monkeypatch: pytest.MonkeyPatch, files: dict[str, str]) -> Any:
 
     monkeypatch.setattr(repo_serving, "github_token", lambda engine, owner: None)
     monkeypatch.setattr(repo_serving, "fetch_snapshot", fake_fetch)
-    return staged_snapshot(serve_payload(_job(), patch="", inputs={}, optimization_id="opt-1"), engine=None, owner=None)
+    return staged_snapshot(
+        serve_payload(_job(), patch=patch, inputs={}, optimization_id="opt-1"), engine=None, owner=None
+    )
 
 
 def test_a_replay_stored_before_the_strip_keeps_its_request_fingerprint() -> None:
@@ -334,6 +337,49 @@ def test_a_commit_whose_optimize_toml_no_longer_validates_fails_clearly(
 
     with pytest.raises(ConstraintsError, match=r"optimize\.toml"), _stage(monkeypatch, files):
         pytest.fail("the snapshot must not be yielded")
+
+
+def test_a_finished_run_with_a_legacy_inline_illegal_list_refuses_to_serve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run pinned while ``[proposer] illegal`` took inline rules now fails closed, because its hidden list is unknown."""
+    files = {
+        "serve.py": _SERVE,
+        "optimize.toml": '[metric]\nfiles = ["eval/scorer.py"]\n\n[proposer]\nillegal = ["Never read eval/"]\n',
+        "eval/scorer.py": f"# {_LEAK}\n",
+    }
+
+    with (
+        pytest.raises(ConstraintsError, match=r"\[proposer\] illegal must be the path of a markdown rule file"),
+        _stage(monkeypatch, files),
+    ):
+        pytest.fail("the snapshot must not be yielded")
+
+
+def test_a_best_patch_that_edits_a_hidden_file_serves_only_its_visible_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An older best version edits the metric too; serving drops that part and applies the rest."""
+    serve = "from src.app import X\n\ndef serve(input):\n    return {'x': X}\n"
+    files = {
+        "serve.py": serve,
+        "src/app.py": "X = 1\n",
+        "optimize.toml": '[metric]\nfiles = ["eval/scorer.py"]\n',
+        "eval/scorer.py": "def score(repo_path, case):\n    return 0.0\n",
+    }
+    patch = _patch(tmp_path, files, {"src/app.py": "X = 2\n", "eval/scorer.py": f"# {_LEAK}\n"})
+    assert "eval/scorer.py" in patch
+
+    with _stage(monkeypatch, files, patch) as staged:
+        assert "eval/scorer.py" not in staged["patch"]
+        assert "src/app.py" in staged["patch"]
+        guest = tmp_path / "guest"
+        guest.mkdir()
+        chunks = []
+        for index, chunk in enumerate(archive_chunks(Path(staged[REPO_SNAPSHOT_KEY]["archive"]))):
+            (guest / f"chunk.{index}").write_text(chunk)
+            chunks.append(str(guest / f"chunk.{index}"))
+        result = run_repo_serve(_guest_payload(chunks, staged["patch"], {}), {"optimization_id": "opt-1"})
+
+    assert result["outputs"] == {"x": 2}
 
 
 _FOLDER_TOML = """[metric]
