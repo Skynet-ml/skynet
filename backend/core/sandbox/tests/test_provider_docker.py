@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import subprocess
 import time
 import uuid
@@ -292,6 +293,14 @@ async def test_tags_cannot_replace_the_sweep_labels(fake_docker: _FakeDocker) ->
     assert not any(label.startswith("skynet.role=") for label in labels)
 
 
+async def test_a_job_label_tag_without_a_job_is_dropped(fake_docker: _FakeDocker) -> None:
+    """Put a box in no job when only a raw job label tag names one."""
+    await DockerEnvironment(_spec(tags={"skynet.job": "other"})).start()
+    (run,) = fake_docker.calls
+    labels = {run[index + 1] for index, item in enumerate(run) if item == "--label"}
+    assert not any(label.startswith("skynet.job=") for label in labels)
+
+
 async def test_ignore_mode_sets_no_limits(fake_docker: _FakeDocker) -> None:
     """Pass no CPU or memory limit when the resource mode is IGNORE."""
     await DockerEnvironment(_spec(resources=ResourceRequest(cpus=3, mode=ResourceMode.IGNORE))).start()
@@ -330,6 +339,29 @@ async def test_failed_proxy_start_removes_the_network(fake_docker: _FakeDocker) 
     with pytest.raises(docker_provider.SandboxInfraError, match="proxy failed"):
         await env.start()
     assert [call[:2] for call in fake_docker.calls[-2:]] == [["rm", "-f"], ["network", "rm"]]
+
+
+async def test_failed_proxy_restart_can_be_retried(fake_docker: _FakeDocker) -> None:
+    """Keep the network and remove the failed proxy, so a retry of the allowlist works."""
+    fake_docker.answers["logs"] = _CliResult(0, docker_provider.READY_MARKER.encode(), b"")
+    env = DockerEnvironment(_spec(network_disabled=False, allowed_hosts=("a.example.com",)))
+    await env.start()
+    network = f"{env.container_name}-net"
+    proxy = f"{env.container_name}-egress"
+    fake_docker.answers["inspect"] = _CliResult(0, json.dumps({network: {}}).encode(), b"")
+    fake_docker.answers["run -d --rm --init --name"] = _CliResult(125, b"", b"proxy failed")
+    fake_docker.calls.clear()
+    with pytest.raises(docker_provider.SandboxInfraError, match="proxy failed"):
+        await env.set_network_policy(NetworkPolicy(allowed_hosts=("b.example.com",)))
+    assert fake_docker.calls[-1] == ["rm", "-f", proxy]
+    assert ["network", "rm", network] not in fake_docker.calls
+    del fake_docker.answers["run -d --rm --init --name"]
+    fake_docker.calls.clear()
+    await env.set_network_policy(NetworkPolicy(allowed_hosts=("b.example.com",)))
+    assert env.network_policy == NetworkPolicy(allowed_hosts=("b.example.com",))
+    assert not [call for call in fake_docker.calls if call[:2] == ["network", "create"]]
+    proxy_run = next(call for call in fake_docker.calls if call[:2] == ["run", "-d"])
+    assert proxy_run[-1] == "b.example.com"
 
 
 async def test_stop_before_start_calls_no_docker(fake_docker: _FakeDocker) -> None:
@@ -497,6 +529,36 @@ async def test_cancelled_exec_kills_the_command_in_the_box(sudo: bool) -> None:
         remaining = await env.exec("ps -eo args")
     assert "sleep 411" not in remaining.stdout
     assert "sleep 412" not in remaining.stdout
+
+
+@needs_docker
+async def test_cancel_before_the_env_reaches_the_box_runs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never start a command whose exec was cancelled before its env stream arrived."""
+    feed = docker_provider._feed
+
+    async def slow_feed(writer: asyncio.StreamWriter, data: bytes) -> None:
+        """Hold the env stream back, as a slow ``docker exec`` attach does.
+
+        Args:
+            writer: The stdin pipe.
+            data: The bytes to write.
+        """
+        await asyncio.sleep(3)
+        await feed(writer, data)
+
+    async with DockerEnvironment(_spec()) as env:
+        monkeypatch.setattr(docker_provider, "_feed", slow_feed)
+        command = asyncio.ensure_future(env.exec("touch /workspace/ran; sleep 413"))
+        await asyncio.sleep(0.5)
+        command.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await command
+        monkeypatch.setattr(docker_provider, "_feed", feed)
+        await asyncio.sleep(3)
+        ran = await env.exec("test -e /workspace/ran && echo ran || echo none")
+        remaining = await env.exec("ps -eo args")
+    assert ran.stdout.strip() == "none"
+    assert "sleep 413" not in remaining.stdout
 
 
 @needs_proxy_image

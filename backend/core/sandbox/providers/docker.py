@@ -86,18 +86,28 @@ _ENV_LOADER = 'pairs=(); while IFS= read -r -d "" pair; do pairs+=("$pair"); don
 # client does not stop the command in the box. Job control (``set -m``) gives
 # the group without ``setsid``, which some images lack; ``set +m`` then stops
 # the job notices on stderr. The timer leaves a marker file, so a command
-# that exits 124 or 137 by itself never reads as a timeout.
+# that exits 124 or 137 by itself never reads as a timeout; the marker counts
+# only when the command died of SIGKILL, so a command that ends at its limit
+# is not a timeout either. A cancel can come before the env stream reaches
+# the box, and the loader then starts the wrapper late with no env: the kill
+# leaves a cancel marker, and the wrapper checks it before and after it
+# writes the group id, so either the wrapper or the kill sees the other.
 _EXEC_WRAPPER = (
-    'state=$1 limit=$2; shift 2; timer=; set -m; "$@" & child=$!; echo "$child" > "$state.pid"; '
+    "state=$1 limit=$2; shift 2; timer=; "
+    'if [ -e "$state.cancel" ]; then rm -f -- "$state.cancel"; exit 137; fi; '
+    'set -m; "$@" & child=$!; echo "$child" > "$state.pid"; '
+    'if [ -e "$state.cancel" ]; then kill -KILL -- "-$child" 2>/dev/null; fi; '
     'if [ -n "$limit" ]; then '
     '(sleep "$limit"; : > "$state.timeout"; kill -KILL -- "-$child") >/dev/null 2>&1 & timer=$!; fi; '
     'set +m; wait "$child"; code=$?; '
-    'if [ -n "$timer" ]; then kill -KILL -- "-$timer" 2>/dev/null; fi; rm -f -- "$state.pid"; '
-    f'if [ -e "$state.timeout" ]; then exit {_TIMEOUT_EXIT_CODE}; fi; exit "$code"'
+    'if [ -n "$timer" ]; then kill -KILL -- "-$timer" 2>/dev/null; fi; rm -f -- "$state.pid" "$state.cancel"; '
+    f'if [ -e "$state.timeout" ] && [ "$code" = 137 ]; then exit {_TIMEOUT_EXIT_CODE}; fi; '
+    'rm -f -- "$state.timeout"; exit "$code"'
 )
-# A cancel can come before the wrapper writes the group id, so the kill
-# waits for it a short time.
+# The cancel marker goes first; then the kill waits a short time for the
+# group id, which a wrapper that already started writes at once.
 _KILL_GROUP_SCRIPT = (
+    ': > "$1.cancel"; '
     'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1.pid" ] && break; sleep 0.1; done; '
     'pgid=$(cat -- "$1.pid" 2>/dev/null); rm -f -- "$1.pid" "$1.timeout"; '
     'case $pgid in ""|*[!0-9]*|0|1) exit 0;; esac; kill -KILL -- "-$pgid" 2>/dev/null; exit 0'
@@ -377,8 +387,9 @@ class DockerEnvironment(SandboxEnvironment):
         self._started_at = 0.0
         owner = spec.tags.get(JOB_TAG)
         # A tag must not replace the labels that the sweeps select on, or
-        # mark a box as a proxy that the job sweep does not count.
-        tags = {key: value for key, value in spec.tags.items() if key != ROLE_LABEL}
+        # mark a box as a proxy that the job sweep does not count. The job
+        # label comes only from ``JOB_TAG``, so a box without one is in no job.
+        tags = {key: value for key, value in spec.tags.items() if key not in (ROLE_LABEL, DOCKER_JOB_LABEL)}
         self._labels = {**tags, **SANDBOX_LABELS, **({DOCKER_JOB_LABEL: owner} if owner else {})}
 
     @property
@@ -680,13 +691,22 @@ class DockerEnvironment(SandboxEnvironment):
             return
         if self._egress_up:
             # The new proxy keeps the old name on the same network, so the
-            # proxy variables in the box stay valid.
+            # proxy variables in the box stay valid. The network and the box's
+            # place on it stay when the proxy fails, so the box is offline
+            # until a retry, which takes this path again.
             await _remove(self._docker_bin, ["rm", "-f", egress.proxy], b"No such container")
-            self._egress_up = False
-            await self._start_proxy(policy.allowed_hosts)
-            self._egress_up = True
+            try:
+                await self._start_proxy(policy.allowed_hosts)
+            except BaseException:
+                # A proxy that started but did not report ready must not
+                # serve the new hosts after the call failed.
+                await _remove(self._docker_bin, ["rm", "-f", egress.proxy], b"No such container")
+                raise
         else:
             await self._open_egress(policy.allowed_hosts)
+        # A failed connect leaves the network up, so a retry takes the proxy
+        # restart path and must connect the box there too.
+        if egress.network not in await self._networks():
             # A box started with --network none must leave "none" before it
             # can join another network; a box that left every network has no
             # "none" to leave, so this result does not matter.
