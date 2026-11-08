@@ -29,6 +29,7 @@ from ....billing.usage_tags import CALLER_PROPOSER, KIND_MUTATION, USAGE_TAGS_HE
 from ....config import Settings, app_env, settings, with_legacy_env
 from ....exceptions import ServiceError
 from ....models.blackbox import BLACKBOX_HARNESS_CODEX, BLACKBOX_HARNESS_PI, BlackboxProposer, BlackboxTarget
+from ....worker.scoped_relay import run_recorder
 from ..budget_stop import BudgetReached
 from . import harness_bridge, native_runner, repo_tree, sandbox_log
 from .agent_eval import gateway_from_settings
@@ -719,6 +720,10 @@ class _EvaluatorMailbox:
             discovered_at_evals=int(event["total_evals"]),
             iteration=None,
         )
+        recorder = run_recorder(self.owner)
+        if recorder is not None:
+            # A version with a crashed case leaves final selection (SKY-350), so the record marks it failed.
+            recorder.set_candidate_state(str(candidate_id), "failed" if shown is None else "done")
 
     def _forward_feedback(self, request: dict[str, Any], score: Any, info: Any) -> None:
         """Send the scorer's notes on one evaluation to the candidate tree drawer.

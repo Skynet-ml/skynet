@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 from types import SimpleNamespace
 from typing import Any
 
@@ -173,6 +174,31 @@ def test_recorder_store_failure_never_fails_the_call(caplog: pytest.LogCaptureFi
     recorder.record(recorder.start(), kind="host", target="api.example", status="ok", secrets=["key"])
     assert "Could not record a host call" in caplog.text
     assert "database is down" not in caplog.text
+
+
+def test_candidate_state_store_failure_never_fails_the_run(caplog: pytest.LogCaptureFixture) -> None:
+    """Log a failed state write without its text, and return normally."""
+
+    class _NoStates(_BrokenSink):
+        """Fail every state write too."""
+
+        def set_candidate_state(self, *_args: object) -> None:
+            """Fail the write."""
+            raise RuntimeError("database is down")
+
+    scoped_relay.CallRecorder(_NoStates(), "job-1", "", "").set_candidate_state("0", "done")
+    assert "Could not set a candidate state for run job-1" in caplog.text
+    assert "database is down" not in caplog.text
+
+
+def test_run_recorder_lives_only_as_long_as_its_gateway_holds_it() -> None:
+    """Find a run's recorder by job id while it is alive, and never outside a job."""
+    recorder = run_call_recorder(_gateway("run", object()), "job-9")
+    assert scoped_relay.run_recorder("job-9") is recorder
+    assert scoped_relay.run_recorder(None) is None
+    del recorder
+    gc.collect()
+    assert scoped_relay.run_recorder("job-9") is None
 
 
 def _gateway(phase: str, engine: object) -> Any:

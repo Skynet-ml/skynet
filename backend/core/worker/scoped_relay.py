@@ -10,6 +10,7 @@ import base64
 import binascii
 import logging
 import time
+import weakref
 from collections.abc import Collection
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -46,6 +47,17 @@ class RunCallSink(Protocol):
 
         Returns:
             The call's sequence number.
+        """
+        ...
+
+    def set_candidate_state(self, optimization_id: str, candidate_id: str, role: str, state: str) -> None:
+        """Insert or update one candidate's role and lifecycle state.
+
+        Args:
+            optimization_id: Owning job id.
+            candidate_id: The candidate within the run.
+            role: The candidate's role, or "" to keep the stored one.
+            state: ``running``, ``done`` or ``failed``.
         """
         ...
 
@@ -155,6 +167,44 @@ class CallRecorder:
         except Exception:
             # The record must never break the run; the exception text could hold a body, so it is not logged.
             logger.warning("Could not record a %s call for run %s.", kind, self.optimization_id)
+
+    def set_candidate_state(self, candidate_id: str, state: str) -> None:
+        """Mark one candidate of the run ``done`` or ``failed``; a store failure is only logged.
+
+        Args:
+            candidate_id: The candidate within the run.
+            state: ``running``, ``done`` or ``failed``.
+        """
+        try:
+            self.sink.set_candidate_state(self.optimization_id, candidate_id, self.role, state)
+        except Exception:
+            logger.warning("Could not set a candidate state for run %s.", self.optimization_id)
+
+
+# The native engine's mailbox knows only its job id, not the gateway; an entry
+# lives as long as the gateway that holds its recorder.
+_RUN_RECORDERS: weakref.WeakValueDictionary[str, CallRecorder] = weakref.WeakValueDictionary()
+
+
+def register_run_recorder(recorder: CallRecorder) -> None:
+    """Make a run's recorder reachable by its job id.
+
+    Args:
+        recorder: The run's recorder; the caller keeps it alive.
+    """
+    _RUN_RECORDERS[recorder.optimization_id] = recorder
+
+
+def run_recorder(optimization_id: str | None) -> CallRecorder | None:
+    """Return the live recorder of one run.
+
+    Args:
+        optimization_id: The job id, or None outside a job.
+
+    Returns:
+        The recorder, or None when the run records no calls.
+    """
+    return _RUN_RECORDERS.get(optimization_id) if optimization_id else None
 
 
 def _secret_forms(secret: str) -> set[str]:

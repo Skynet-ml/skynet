@@ -31,6 +31,7 @@ from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxProposer, BlackboxTarget
 from core.service_gateway.language_models import total_tokens_from_history, usage_by_model_from_history
 from core.service_gateway.optimization.cost_ceiling import CostCeilingExceededError
+from core.worker.scoped_relay import CallRecorder, register_run_recorder
 
 from .. import (
     autosaddler_runner,
@@ -1594,6 +1595,83 @@ def test_mailbox_shows_no_score_for_a_version_with_a_crashed_case() -> None:
     [(event, candidate)] = sink
     assert event == PROGRESS_CANDIDATE
     assert (candidate["score"], candidate["per_example"]) == (None, [])
+
+
+class _StateSink:
+    """Keep every candidate state the run record receives."""
+
+    def __init__(self) -> None:
+        """Start with no states."""
+        self.states: list[tuple[str, str, str, str]] = []
+
+    def record_call(self, *_args: object) -> int:
+        """Accept a call record; these tests read only states."""
+        return 0
+
+    def set_candidate_state(self, optimization_id: str, candidate_id: str, role: str, state: str) -> None:
+        """Keep one candidate state.
+
+        Args:
+            optimization_id: Owning job id.
+            candidate_id: The candidate within the run.
+            role: The candidate's role.
+            state: The lifecycle state.
+        """
+        self.states.append((optimization_id, candidate_id, role, state))
+
+
+def _crash_on_case_two(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
+    """Raise on case 2, else score 1.0.
+
+    Args:
+        candidate: Candidate text.
+        case: The case.
+
+    Returns:
+        A full score and no side information.
+
+    Raises:
+        RuntimeError: On case 2.
+    """
+    if case == {"id": "2"}:
+        raise RuntimeError("scorer bug")
+    return 1.0, {}
+
+
+def _recorded_state(server: EvalServer) -> list[tuple[str, str, str, str]]:
+    """Send one scored version through a job's mailbox and return the run record's states.
+
+    Args:
+        server: The evaluator that scored the version.
+
+    Returns:
+        Every candidate state the run record received.
+    """
+    sink = _StateSink()
+    recorder = CallRecorder(sink, "job-1", "", "")
+    register_run_recorder(recorder)
+    session = FakeSession()
+    session.log_owner = "job-1"  # type: ignore[attr-defined]
+    mailbox = native_runtime._EvaluatorMailbox(session, server, "nonce", progress_callback=lambda *_: None)
+    mailbox.on_output(
+        "stdout",
+        'APP_NATIVE_PROGRESS nonce {"candidate_id": 0, "candidate": "seed", "score": 0.75, "total_evals": 2, '
+        '"per_example": [["0", 1.0], ["1", 0.5]]}\n',
+    )
+    assert mailbox.error is None
+    return sink.states
+
+
+def test_mailbox_marks_a_scored_version_done_in_the_run_record() -> None:
+    """A version that the evaluator scored ends ``done`` under its real candidate id."""
+    assert _recorded_state(EvalServer(lambda *_: (1.0, {}), max_evals=3)) == [("job-1", "0", "", "done")]
+
+
+def test_mailbox_marks_a_version_with_a_crashed_case_failed_in_the_run_record() -> None:
+    """A version with a crashed case leaves selection, so the run record marks it ``failed``."""
+    server = EvalServer(_crash_on_case_two, max_evals=3)
+    server.evaluate("seed", {"id": "2"})
+    assert _recorded_state(server) == [("job-1", "0", "", "failed")]
 
 
 def test_mailbox_relays_the_lineage_an_engine_reports() -> None:
