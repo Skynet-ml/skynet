@@ -1686,7 +1686,7 @@ def instructions_brief(environment: RepoEnvironment, hidden_paths: Collection[st
         the runtime does not enforce them.
     """
     hidden = {posixpath.normpath(path) for path in hidden_paths}
-    protected = [path for path in environment.protected_paths if posixpath.normpath(path) not in hidden]
+    protected = [path for path in environment.protected_paths if not _inside(posixpath.normpath(path), hidden)]
     lines = [
         "## Repository rules",
         "",

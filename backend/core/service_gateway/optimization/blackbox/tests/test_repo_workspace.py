@@ -428,9 +428,9 @@ def test_a_source_only_version_whose_code_rewrites_the_labels_is_caught(tmp_path
         space.stamp_before_run()
         space.session().run(f"cd {WORK_DIR} && printf 'a,0\\n' > eval/labels.csv && touch eval/extra.csv")
         assert space.protected_changes() == (
-            "'eval/extra.csv' is protected by the repository's optimize.toml ([paths] protected),"
+            "'eval/extra.csv' is protected by the repository rules ([paths] protected),"
             " and the version's code changed it while it ran.",
-            "'eval/labels.csv' is protected by the repository's optimize.toml ([paths] protected),"
+            "'eval/labels.csv' is protected by the repository rules ([paths] protected),"
             " and the version's code changed it while it ran.",
         )
 

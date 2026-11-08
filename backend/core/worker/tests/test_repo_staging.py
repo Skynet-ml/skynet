@@ -7,7 +7,6 @@ import io
 import json
 import subprocess
 import tarfile
-import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -1903,11 +1902,11 @@ def test_the_brief_carries_the_visible_rules_and_names_no_hidden_path(monkeypatc
     assert "Pick the place the sender means." in brief
 
 
-def test_a_hidden_path_shared_with_a_visible_role_stays_visible() -> None:
+def test_a_hidden_path_shared_with_a_visible_role_stays_visible(tmp_path: Path) -> None:
     """One .mcp.json for [run] and [metric] is the candidate's file too, so hiding it would break the run."""
     constraints = repo_staging.read_constraints(
         _tree(
-            Path(tempfile.mkdtemp()),
+            tmp_path,
             {
                 "optimize.toml": '[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:main"\nmcp = ".mcp.json"'
                 '\n\n[metric]\nmcp = ".mcp.json"\n',
@@ -1918,6 +1917,51 @@ def test_a_hidden_path_shared_with_a_visible_role_stays_visible() -> None:
     )
 
     assert repo_staging.hidden_repo_paths(constraints) == ("optimize.toml", ".optimize/exploits")
+
+
+def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path) -> None:
+    """The agent's own .mcp.json stays in its tree, also when [metric] names the same file."""
+    constraints = repo_staging.read_constraints(
+        _tree(
+            tmp_path,
+            {
+                "optimize.toml": '[paths]\neditable = ["src"]\n\n[proposer]\nmcp = ".mcp.json"'
+                '\n\n[metric]\nmcp = ".mcp.json"\n',
+                ".mcp.json": '{"mcpServers": {}}\n',
+                "src/app.py": "def main(case):\n    return case\n",
+            },
+        )
+    )
+
+    assert repo_staging.hidden_repo_paths(constraints) == ("optimize.toml", ".optimize/exploits")
+
+
+@pytest.mark.parametrize(
+    ("toml", "inside"),
+    [
+        (
+            '[paths]\neditable = ["src"]\nprotected = ["eval/labels.json"]\n\n[metric]\nfiles = ["eval"]\n',
+            "eval/labels.json",
+        ),
+        ('[paths]\neditable = ["src"]\nprotected = [".optimize/exploits/cheat.py"]\n', ".optimize/exploits/cheat.py"),
+    ],
+    ids=["metric-folder", "exploits-folder"],
+)
+def test_the_brief_names_no_protected_path_inside_a_hidden_folder(
+    monkeypatch: pytest.MonkeyPatch, toml: str, inside: str
+) -> None:
+    """A protected file under a hidden folder is hidden too, so the brief must not name it (E62)."""
+    files = {
+        "optimize.toml": toml,
+        "src/app.py": "def main(case):\n    return case\n",
+        "eval/labels.json": "{}\n",
+        ".optimize/exploits/cheat.py": "cheat\n",
+    }
+    staged_payload, staged = _stage_with(files, monkeypatch)
+    staged.cleanup()
+
+    assert inside not in staged_payload["background"]
+    assert "Protected, every change" not in staged_payload["background"]
 
 
 @pytest.mark.parametrize("path", _EVERY_HIDDEN_PATH)

@@ -181,6 +181,7 @@ def hidden_repo_paths(constraints: RepoConstraints | None) -> tuple[str, ...]:
     visible = {
         constraints.instructions_file,
         constraints.proposer.illegal_file,
+        constraints.proposer.mcp,
         constraints.run_role.illegal_file,
         constraints.run_role.mcp,
         *(stage.illegal_file for stage in constraints.targets.values()),
@@ -214,7 +215,7 @@ def stage_repository(
             asks for more than the run approved, or a resumed run's rules
             changed since they were first recorded, or when the request
             uploads cases and the repository defines its own in ``[data] cases``.
-        RepoGateError: When the agent's tree still shows a metric file or the cases file.
+        RepoGateError: When the agent's tree still shows a hidden path from ``hidden_repo_paths``.
     """
     result = copy.deepcopy(payload)
     repo = result["target"]["repo"]
@@ -714,7 +715,7 @@ def _scored_candidate(candidate: Any, hidden_paths: tuple[str, ...]) -> Any:
 
     Args:
         candidate: A patch, a mapping of patches, or anything else.
-        hidden_paths: Metric files and the exploit folder.
+        hidden_paths: The hidden list from ``hidden_repo_paths``.
 
     Returns:
         The candidate with every patch reduced to the scored change.
@@ -730,11 +731,12 @@ def drop_hidden_edits(result: dict[str, Any], hidden_paths: tuple[str, ...]) -> 
     """Replace every version a finished result records with the change the scorer scored.
 
     Serving, download and publishing all read these fields, so a version's
-    edits to a metric file or the exploit folder never leave the run (SKY-353).
+    edit to a hidden path, ``optimize.toml`` included, never leaves the run
+    (SKY-353, E62).
 
     Args:
         result: Finished black-box result, updated in place.
-        hidden_paths: Metric files and the exploit folder.
+        hidden_paths: The hidden list from ``hidden_repo_paths``.
     """
     if not hidden_paths:
         return

@@ -74,7 +74,7 @@ _NOTES = {
         "Check the run's intent in the instructions in your brief. Your recent work seems to move away from it:"
         " {reason}"
     ),
-    "breaks_rule": ("Check the rules in your brief. You are probably about to break one of them: {reason}"),
+    "breaks_rule": "Check the rules in your brief. You are probably about to break one of them: {reason}",
 }
 
 Ask = Callable[[str], "str | None"]
