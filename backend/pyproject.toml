@@ -155,6 +155,16 @@ runloop = [
     # The 3.x floor is the tested line; the provider passes allow_runloop_mirrors.
     "runloop-api-client>=3.0.0,<4",
 ]
+kernel = [
+    # Kernel browser VM sandbox provider (SKY-479). Imported lazily by
+    # core.sandbox.providers.kernel; the default legacy backend never needs it.
+    "kernel>=0.123.0",
+]
+mosaic = [
+    # Mosaic microVM sandbox provider (SKY-476). Imported lazily by
+    # core.sandbox.providers.mosaic; the default legacy backend never needs it.
+    "mosaic-sandbox>=0.15.1,<0.16",
+]
 
 [tool.uv]
 # dspy 3.3.1's metadata hard-pins gepa[dspy]==0.1.4. That PyPI release ships neither
