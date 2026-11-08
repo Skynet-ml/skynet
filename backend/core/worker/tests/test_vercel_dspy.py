@@ -311,3 +311,45 @@ def test_repository_tree_is_uploaded_as_chunks_and_never_as_a_parent_path(
     assert len(snapshot["chunks"]) == 3
     assert b"".join(base64.b64decode(session.files[path]) for path in snapshot["chunks"]) == b"0123456789"
     assert str(archive) not in session.files[request_path]
+
+
+@pytest.mark.parametrize(
+    ("proposer_hosts", "offline"),
+    [(["files.pythonhosted.org", "pypi.org", "registry.npmjs.org"], False), ([], True)],
+)
+def test_the_outer_box_carries_the_staged_proposer_hosts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, proposer_hosts: list[str], offline: bool
+) -> None:
+    """Open the protected box with the proposer's granted hosts, and keep it offline when it has none (E57)."""
+    session = FakeSession()
+    specs = []
+
+    class Runtime:
+        """Capture the requested network profile."""
+
+        def __init__(self, url: str, token: str) -> None:
+            """Accept the descriptor."""
+
+        def open(self, spec: Any) -> FakeSession:
+            """Record the spec and return the fake session."""
+            specs.append(spec)
+            return session
+
+    monkeypatch.setattr(vercel_dspy, "RemoteSandboxRuntime", Runtime)
+    archive = tmp_path / "tree.tgz"
+    archive.write_bytes(b"tree")
+    payload = {
+        "_budget_gateway_descriptor": {
+            "url": "http://127.0.0.1:9876",
+            "control_token": "control",
+            "image": "backend@sha256:" + "a" * 64,
+            "lifetime_seconds": 600,
+        },
+        "_repo_snapshot": {"archive": str(archive), "commit": "c" * 40, "proposer_hosts": proposer_hosts},
+    }
+
+    vercel_dspy.run_vercel_dspy(payload, "job-hosts", queue.Queue(), "spawn")
+
+    [spec] = specs
+    assert tuple(spec.allowed_hosts) == tuple(proposer_hosts)
+    assert spec.network_disabled is offline
