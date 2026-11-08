@@ -54,6 +54,7 @@ DOCKER_CAPABILITIES = EnvironmentCapabilities(
 
 DEFAULT_DOCKER_BIN = "docker"
 WORKSPACE_DIR = "/workspace"
+EXEC_STATE_DIR = "/run/skynet-exec"
 DOCKER_JOB_LABEL = "skynet.job"
 # The legacy runtime uses the same label, so one idle-network sweep and one
 # job sweep cover the boxes of both runtimes while callers move over.
@@ -70,12 +71,20 @@ _TMPFS_MOUNTS = (
     f"{WORKSPACE_DIR}:rw,exec,nosuid,mode=1777,size=4g",
     "/tmp:rw,exec,nosuid,mode=1777,size=1g",
     "/etc/codex:rw,noexec,nosuid,mode=0755,size=1m",
+    # Exec state lives apart from /tmp, so a workload that fills /tmp cannot
+    # stop the wrapper from recording its process group. Mode 1733 lets a
+    # wrapper that runs as any user create its files, but no one else can
+    # list the directory, and the sticky bit stops other users from removing
+    # them. A workload that runs as the wrapper's own user can still find and
+    # change them; no file mode can stop that.
+    f"{EXEC_STATE_DIR}:rw,noexec,nosuid,mode=1733,size=1m",
 )
 _PIDS_LIMIT = 1024
 _CLI_TIMEOUT_SECONDS = 60.0
 _KILL_GRACE_SECONDS = 15
 _GROUP_KILL_SECONDS = 10.0
 _TIMEOUT_EXIT_CODE = 124
+_NO_GROUP_EXIT_CODE = 125
 _READ_CHUNK_BYTES = 65536
 _SHELL = ("bash", "--noprofile", "--norc", "-c")
 # Reads NUL-terminated NAME=value pairs from stdin, so secrets never appear
@@ -94,10 +103,15 @@ _ENV_LOADER = 'pairs=(); while IFS= read -r -d "" pair; do pairs+=("$pair"); don
 # the box, and the loader then starts the wrapper late with no env: the kill
 # leaves a cancel marker, and the wrapper checks it before and after it
 # writes the group id, so either the wrapper or the kill sees the other.
+# When the group id cannot be written (a full state directory), no cancel or
+# deadline could find the group, so the wrapper kills it at once and leaves
+# an empty marker file, which needs no data blocks.
 _EXEC_WRAPPER = (
     "state=$1 limit=$2; shift 2; timer=; "
     'if [ -e "$state.cancel" ]; then rm -f -- "$state.cancel"; exit 137; fi; '
-    'exec 3>&2 2>/dev/null; set -m; "$@" 2>&3 3>&- & child=$!; echo "$child" > "$state.pid"; '
+    'exec 3>&2 2>/dev/null; set -m; "$@" 2>&3 3>&- & child=$!; '
+    'if ! echo "$child" > "$state.pid"; then kill -KILL -- "-$child"; wait "$child"; '
+    f'rm -f -- "$state.pid" "$state.cancel"; : > "$state.nogroup"; exit {_NO_GROUP_EXIT_CODE}; fi; '
     'if [ -e "$state.cancel" ]; then kill -KILL -- "-$child" 2>/dev/null; fi; '
     'if [ -n "$limit" ]; then '
     '(sleep "$limit"; : > "$state.timeout"; kill -KILL -- "-$child") >/dev/null 2>&1 3>&- & timer=$!; fi; '
@@ -114,7 +128,7 @@ _KILL_GROUP_SCRIPT = (
     'pgid=$(cat -- "$1.pid" 2>/dev/null); rm -f -- "$1.pid" "$1.timeout"; '
     'case $pgid in ""|*[!0-9]*|0|1) exit 0;; esac; kill -KILL -- "-$pgid" 2>/dev/null; exit 0'
 )
-_TIMEOUT_MARKER_SCRIPT = 'test -e "$1.timeout" && rm -f -- "$1.timeout"'
+_MARKER_SCRIPT = 'test -e "$1" && rm -f -- "$1"'
 _MISSING_FILE_EXIT = 3
 _PACK_FILE_SCRIPT = (
     f'test -f "$1" || exit {_MISSING_FILE_EXIT}; '
@@ -359,8 +373,8 @@ class DockerEnvironment(SandboxEnvironment):
     """Run one sandbox as a hardened container on the local Docker daemon.
 
     The root filesystem is read-only, every capability is dropped, and only
-    ``/workspace``, ``/tmp`` and ``/etc/codex`` are writable. Development
-    only: the factory never allows it in production.
+    ``/workspace``, ``/tmp``, ``/etc/codex`` and the exec state directory
+    are writable. Development only: the factory never allows it in production.
     """
 
     capabilities = DOCKER_CAPABILITIES
@@ -454,8 +468,10 @@ class DockerEnvironment(SandboxEnvironment):
             command: The shell command, run by ``bash --noprofile --norc -c``.
             cwd: The working directory; the default is ``/workspace``.
             env: Extra environment variables for this command.
-            timeout_sec: Kill the command's process group after this long and
-                return ``timed_out=True``; ``None`` sets no limit.
+            timeout_sec: After this long, kill the command's process group and
+                return ``timed_out=True``; ``None`` sets no limit. A child that
+                moves to its own process group or session is not killed; it
+                ends when the box stops.
             on_output: Receives ``(stream, text)`` chunks while the command runs.
             sudo: Run the command as the container's root user.
 
@@ -463,13 +479,14 @@ class DockerEnvironment(SandboxEnvironment):
             The exit code, the captured output and whether the timeout fired.
 
         Raises:
-            SandboxInfraError: The command ran past its kill deadline or Docker is missing.
+            SandboxInfraError: The command ran past its kill deadline, the box
+                could not record the command's process group, or Docker is missing.
                 A timeout, a cancel or an error kills the command's whole
                 process group in the box first.
         """
         name = self._require_running()
         # The state path is unique, so concurrent commands never share it.
-        state = f"/tmp/.skynet-exec-{uuid.uuid4().hex}"
+        state = f"{EXEC_STATE_DIR}/{uuid.uuid4().hex}"
         limit = ""
         deadline: float | None = None
         if timeout_sec is not None:
@@ -511,7 +528,13 @@ class DockerEnvironment(SandboxEnvironment):
         except BaseException:
             await self._stop_command(process, name, user, state)
             raise
-        timed_out = bool(limit) and exit_code == _TIMEOUT_EXIT_CODE and await self._timeout_fired(name, user, state)
+        if exit_code == _NO_GROUP_EXIT_CODE and await self._take_marker(name, user, f"{state}.nogroup"):
+            raise SandboxInfraError(
+                f"The box could not record the command's process group, so the command was killed: {command[:200]}"
+            )
+        timed_out = (
+            bool(limit) and exit_code == _TIMEOUT_EXIT_CODE and await self._take_marker(name, user, f"{state}.timeout")
+        )
         return ExecResult(
             exit_code=exit_code,
             stdout="".join(captured["stdout"]),
@@ -543,19 +566,19 @@ class DockerEnvironment(SandboxEnvironment):
         finally:
             await _kill(process)
 
-    async def _timeout_fired(self, name: str, user: list[str], state: str) -> bool:
-        """Read and remove the timeout marker of a command.
+    async def _take_marker(self, name: str, user: list[str], marker: str) -> bool:
+        """Read and remove one marker file that the exec wrapper left.
 
         Args:
             name: The box's container name.
             user: The ``-u`` arguments the command ran with.
-            state: The command's state path in the box.
+            marker: The marker's path in the box.
 
         Returns:
-            True when the wrapper's timer killed the command.
+            True when the marker was there.
         """
         result = await _docker(
-            self._docker_bin, ["exec", *user, name, *_SHELL, _TIMEOUT_MARKER_SCRIPT, "skynet-timeout", state]
+            self._docker_bin, ["exec", *user, name, *_SHELL, _MARKER_SCRIPT, "skynet-marker", marker]
         )
         return result.returncode == 0
 

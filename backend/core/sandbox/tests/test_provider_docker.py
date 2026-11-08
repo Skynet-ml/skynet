@@ -21,9 +21,16 @@ import pytest
 
 from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
+from core.sandbox.errors import SandboxInfraError
 from core.sandbox.factory import PROVIDERS
 from core.sandbox.providers import docker as docker_provider
-from core.sandbox.providers.docker import DockerEnvironment, _CliResult, _env_stream, _sandbox_path
+from core.sandbox.providers.docker import (
+    EXEC_STATE_DIR,
+    DockerEnvironment,
+    _CliResult,
+    _env_stream,
+    _sandbox_path,
+)
 from core.sandbox.resources import ResourceMode, ResourceRequest, SandboxSpec
 from core.sandbox.tests.test_environment import SandboxEnvironmentContract
 
@@ -453,9 +460,9 @@ async def test_exec_reports_a_timeout() -> None:
 
 
 @needs_docker
-@pytest.mark.parametrize("code", [124, 137])
+@pytest.mark.parametrize("code", [124, 125, 137])
 async def test_exit_codes_of_a_timeout_do_not_read_as_a_timeout(code: int) -> None:
-    """Report a command that exits 124 or 137 by itself as a normal exit."""
+    """Report a command that exits with a wrapper exit code by itself as a normal exit."""
     async with DockerEnvironment(_spec()) as env:
         result = await env.exec(f"exit {code}", timeout_sec=30)
     assert result.exit_code == code
@@ -548,6 +555,57 @@ async def test_cancelled_exec_kills_the_command_in_the_box(sudo: bool) -> None:
         remaining = await env.exec("ps -eo args")
     assert "sleep 411" not in remaining.stdout
     assert "sleep 412" not in remaining.stdout
+
+
+@needs_docker
+async def test_cancel_kills_the_command_when_tmp_is_full() -> None:
+    """Find and kill the command's process group after the workload fills /tmp."""
+    async with DockerEnvironment(_spec()) as env:
+        # The fill goes around the wrapper, which would free a page when it ends.
+        script = "head -c 1100M /dev/zero > /tmp/fill; df --output=avail /tmp | tail -n 1"
+        filled = _cli("exec", str(env.container_name), "sh", "-c", script)
+        assert filled.stdout.strip() == "0", filled.stderr
+        command = asyncio.ensure_future(env.exec("sleep 414"))
+        await asyncio.sleep(1.5)
+        command.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await command
+        remaining = await env.exec("ps -eo args")
+    assert "sleep 414" not in remaining.stdout
+
+
+@needs_docker
+async def test_unrecorded_process_group_kills_the_command() -> None:
+    """Kill the command and raise when the box cannot record its process group."""
+    async with DockerEnvironment(_spec()) as env:
+        name = str(env.container_name)
+        # The fill goes around the wrapper: a wrapped command frees the page
+        # of its own group-id file when it ends, and the next one reuses it.
+        _cli("exec", name, "sh", "-c", f"head -c 2M /dev/zero > {EXEC_STATE_DIR}/fill")
+        with pytest.raises(SandboxInfraError, match="process group"):
+            await env.exec("sleep 415 & sleep 416; wait", timeout_sec=60)
+        remaining = _cli("exec", name, "ps", "-eo", "args")
+    assert remaining.returncode == 0, remaining.stderr
+    assert "sleep 415" not in remaining.stdout
+    assert "sleep 416" not in remaining.stdout
+
+
+@needs_docker
+async def test_exec_state_directory_hides_and_keeps_root_files() -> None:
+    """Let a non-root user write exec state, but not list it or remove root files."""
+    async with DockerEnvironment(_spec()) as env:
+        await env.exec(f": > {EXEC_STATE_DIR}/root-file")
+        name = str(env.container_name)
+        mode = _cli("exec", name, "stat", "-c", "%a %U", EXEC_STATE_DIR)
+        listed = _cli("exec", "-u", "1000", name, "ls", EXEC_STATE_DIR)
+        written = _cli("exec", "-u", "1000", name, "touch", f"{EXEC_STATE_DIR}/user-file")
+        removed = _cli("exec", "-u", "1000", name, "rm", "-f", f"{EXEC_STATE_DIR}/root-file")
+        kept = await env.exec(f"test -e {EXEC_STATE_DIR}/root-file")
+    assert mode.stdout.strip() == "1733 root"
+    assert listed.returncode != 0
+    assert written.returncode == 0, written.stderr
+    assert removed.returncode != 0
+    assert kept.exit_code == 0
 
 
 @needs_docker
