@@ -12,6 +12,7 @@ written instead of being skipped.
 from __future__ import annotations
 
 import copy
+import errno
 import fnmatch
 import io
 import os
@@ -38,6 +39,13 @@ DEFAULT_EXCLUDE: frozenset[str] = frozenset(
     }
 )
 
+# Python 3.11.0-3.11.3 has no FilterError; an empty tuple catches nothing.
+_FILTER_ERRORS: tuple[type[Exception], ...] = (tarfile.FilterError,) if hasattr(tarfile, "FilterError") else ()
+
+# A link chain past PATH_MAX fails with these on patched Pythons; other OS errors,
+# such as a full disk, are not about the archive and propagate unchanged.
+_UNSAFE_ERRNOS = frozenset({errno.ENAMETOOLONG, errno.ELOOP})
+
 
 class UnsafeArchiveError(ValueError):
     """Raised when an archive member would land outside the destination or is a device file."""
@@ -47,7 +55,8 @@ def pack(paths: Iterable[str | os.PathLike[str]], exclude: Iterable[str] = ()) -
     """Pack files and directories into an uncompressed tar archive.
 
     Each path goes into the archive under its own base name; directories are
-    added recursively. A member is left out when any part of its archive path
+    added recursively. A path such as ``.`` or ``sub/..`` takes the name of
+    the directory it resolves to. A member is left out when any part of its archive path
     matches a name or glob in ``DEFAULT_EXCLUDE`` or ``exclude``. Patterns match
     one path part at a time, so a pattern with a ``/`` (such as ``src/venv``)
     never matches; use the bare name instead.
@@ -58,6 +67,9 @@ def pack(paths: Iterable[str | os.PathLike[str]], exclude: Iterable[str] = ()) -
 
     Returns:
         The tar archive bytes.
+
+    Raises:
+        ValueError: A path has no base name, such as the filesystem root.
     """
     patterns = DEFAULT_EXCLUDE | set(exclude)
 
@@ -79,7 +91,11 @@ def pack(paths: Iterable[str | os.PathLike[str]], exclude: Iterable[str] = ()) -
     with tarfile.open(fileobj=buffer, mode="w") as tar:
         for path in paths:
             source = Path(path)
-            tar.add(source, arcname=source.name, filter=skip_excluded)
+            # ``..`` and ``.`` have no usable lexical name; a symlink keeps its own name.
+            name = source.name if source.name not in ("", "..") else source.resolve().name
+            if not name:
+                raise ValueError(f"path has no base name to pack: {str(path)!r}")
+            tar.add(source, arcname=name, filter=skip_excluded)
     return buffer.getvalue()
 
 
@@ -89,46 +105,73 @@ def unpack(data: bytes, dest: str | os.PathLike[str]) -> None:
     Every member is checked before anything is written, so an unsafe archive
     leaves ``dest`` untouched. A member whose path or link target goes through
     a link in the same archive is refused, because only the lexical check is
-    safe against symlink chains longer than ``PATH_MAX``.
+    safe against symlink chains longer than ``PATH_MAX``. A hardlink must name
+    an earlier regular file in the same archive.
+
+    Only uncompressed tar is accepted, as ``pack`` writes it, so the bytes
+    written are bounded by the size of ``data``.
 
     Args:
-        data: Tar archive bytes, plain or compressed.
+        data: Uncompressed tar archive bytes.
         dest: Directory to extract into; it is created when missing.
 
     Raises:
         UnsafeArchiveError: A member has an absolute path, resolves outside
             ``dest``, links outside ``dest``, goes through a link in the
-            archive, or is a device file or FIFO.
+            archive, hardlinks to anything but an earlier regular file, or is
+            a device file or FIFO.
+        tarfile.ReadError: ``data`` is not an uncompressed tar archive.
+        OSError: Writing to ``dest`` fails for a reason unrelated to the archive.
     """
     root = Path(dest)
     root.mkdir(parents=True, exist_ok=True)
     root = root.resolve()
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as tar:
         members = tar.getmembers()
         # A hardlink to a symlink member extracts as a second symlink, so both count.
         links = {os.path.normpath(m.name) for m in members if m.issym() or m.islnk()}
+        files: set[str] = set()
         for member in members:
             _check_member(member, root)
             _check_no_link_parent(member, links)
-        if hasattr(tarfile, "data_filter"):
-            try:
-                tar.extractall(root, filter="data")
-            except (tarfile.FilterError, OSError, KeyError) as exc:
-                # Patched Pythons raise a plain OSError when a link chain passes
-                # PATH_MAX, and a KeyError when a filtered hardlink target is missing.
-                raise UnsafeArchiveError(str(exc)) from exc
-            return
-        # Python 3.11.0-3.11.3 has no extraction filters. Re-check each member
-        # right before it is written, because links extracted earlier change
-        # what later paths resolve to.
-        for member in members:
-            _check_member(member, root)
+            _check_hardlink_target(member, files, links)
             if member.isreg():
-                tar.extract(_safe_file(member), root)
+                files.add(os.path.normpath(member.name))
+        try:
+            if hasattr(tarfile, "data_filter"):
+                tar.extractall(root, filter="data")
             else:
-                # Directory modes are left at the default so a read-only
-                # directory cannot block the members written into it later.
-                tar.extract(member, root, set_attrs=False)
+                _extract_without_filter(tar, members, root)
+        except _FILTER_ERRORS as exc:
+            raise UnsafeArchiveError(str(exc)) from exc
+        except OSError as exc:
+            if exc.errno not in _UNSAFE_ERRNOS:
+                raise
+            raise UnsafeArchiveError(str(exc)) from exc
+
+
+def _extract_without_filter(tar: tarfile.TarFile, members: list[tarfile.TarInfo], root: Path) -> None:
+    """Extract members one by one on Python 3.11.0-3.11.3, which has no extraction filters.
+
+    Each member is re-checked right before it is written, because links
+    extracted earlier change what later paths resolve to.
+
+    Args:
+        tar: The open archive.
+        members: The archive members, already checked.
+        root: The resolved destination directory.
+
+    Raises:
+        UnsafeArchiveError: A member resolves outside ``root`` at write time.
+    """
+    for member in members:
+        _check_member(member, root)
+        if member.isreg():
+            tar.extract(_safe_file(member), root)
+        else:
+            # Directory modes are left at the default so a read-only
+            # directory cannot block the members written into it later.
+            tar.extract(member, root, set_attrs=False)
 
 
 def _safe_file(member: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -174,6 +217,28 @@ def _check_member(member: tarfile.TarInfo, root: Path) -> None:
         _require_inside(target.parent / member.linkname, root, name)
     elif member.islnk():
         _require_inside(root / member.linkname, root, name)
+
+
+def _check_hardlink_target(member: tarfile.TarInfo, files: set[str], links: set[str]) -> None:
+    """Refuse a hardlink unless it names an earlier regular file that no link replaces.
+
+    Extraction looks up a hardlink target among the earlier members only, so a
+    missing target fails after earlier files are written. Checking here keeps
+    a refused archive from writing anything.
+
+    Args:
+        member: The archive member to check.
+        files: Normalized names of the regular file members before ``member``.
+        links: Normalized names of every symlink and hardlink member.
+
+    Raises:
+        UnsafeArchiveError: The hardlink target is not an earlier regular file.
+    """
+    if not member.islnk():
+        return
+    target = os.path.normpath(member.linkname)
+    if target not in files or target in links:
+        raise UnsafeArchiveError(f"hardlink target is not an earlier regular file in archive: {member.name!r}")
 
 
 def _check_no_link_parent(member: tarfile.TarInfo, links: set[str]) -> None:

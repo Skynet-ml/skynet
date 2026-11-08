@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import gzip
 import io
 import os
 import stat
@@ -88,6 +90,35 @@ def test_pack_leaves_out_default_and_caller_exclusions(repo: Path) -> None:
     assert "repo/secrets.env" not in names
 
 
+@pytest.mark.parametrize("relative", [".", "pkg/.."], ids=["dot", "trailing-dotdot"])
+def test_pack_names_dot_paths_after_the_resolved_directory(
+    relative: str, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``.`` and ``sub/..`` pack under the resolved directory name, and the archive unpacks."""
+    monkeypatch.chdir(repo)
+    data = pack([relative])
+
+    with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+        names = tar.getnames()
+    unpack(data, tmp_path / "out")
+
+    assert "repo/pkg/main.py" in names
+    assert all(name == "repo" or name.startswith("repo/") for name in names)
+    assert (tmp_path / "out" / "repo" / "pkg" / "main.py").is_file()
+
+
+def test_pack_refuses_path_without_base_name() -> None:
+    """The filesystem root has no name to put in the archive."""
+    with pytest.raises(ValueError, match="no base name"):
+        pack(["/"])
+
+
+def test_unpack_refuses_compressed_archive(tmp_path: Path) -> None:
+    """Only uncompressed tar is read, so a small archive cannot expand without limit."""
+    with pytest.raises(tarfile.ReadError):
+        unpack(gzip.compress(_archive(_member("ok.txt"))), tmp_path / "out")
+
+
 def test_pack_takes_single_files(repo: Path, tmp_path: Path) -> None:
     """A file path goes into the archive under its base name."""
     dest = tmp_path / "out"
@@ -134,6 +165,8 @@ def _outside(tmp_path: Path, dest: Path) -> list[Path]:
         _member("out", tarfile.SYMTYPE, "../../etc"),
         _member("abs", tarfile.SYMTYPE, "/etc/passwd"),
         _member("hard", tarfile.LNKTYPE, "../x"),
+        _member("hard", tarfile.LNKTYPE, "missing"),
+        _member("hard", tarfile.LNKTYPE, "hard"),
         _member("tty", tarfile.CHRTYPE),
         _member("disk", tarfile.BLKTYPE),
         _member("pipe", tarfile.FIFOTYPE),
@@ -145,6 +178,8 @@ def _outside(tmp_path: Path, dest: Path) -> list[Path]:
         "symlink-out",
         "symlink-absolute",
         "hardlink-out",
+        "hardlink-missing",
+        "hardlink-self",
         "chr",
         "blk",
         "fifo",
@@ -256,3 +291,97 @@ def test_unpack_masks_file_modes(mode: int, expected: int, tmp_path: Path, extra
     unpack(_archive(script), dest)
 
     assert stat.S_IMODE((dest / "s.sh").stat().st_mode) == expected
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize(
+    "members",
+    [
+        [_member("d", tarfile.DIRTYPE), _member("hard", tarfile.LNKTYPE, "d")],
+        [_member("hard", tarfile.LNKTYPE, "later.txt"), _member("later.txt")],
+        [_member("sym", tarfile.SYMTYPE, "ok.txt"), _member("hard", tarfile.LNKTYPE, "sym")],
+    ],
+    ids=["to-directory", "to-later-file", "to-symlink"],
+)
+def test_unpack_refuses_hardlink_to_non_earlier_file(
+    members: list[tarfile.TarInfo], tmp_path: Path, extract_path: str
+) -> None:
+    """A hardlink to anything but an earlier regular file fails before any member is written."""
+    dest = tmp_path / "out"
+
+    with pytest.raises(UnsafeArchiveError, match="hardlink target"):
+        unpack(_archive(_member("ok.txt"), *members), dest)
+
+    assert list(dest.iterdir()) == []
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_unpack_extracts_hardlink_to_earlier_file(tmp_path: Path, extract_path: str) -> None:
+    """A hardlink to an earlier regular file, written with a ``./`` prefix, extracts."""
+    body = b"shared\n"
+    first = _member("ok.txt")
+    first.size = len(body)
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        tar.addfile(first, io.BytesIO(body))
+        tar.addfile(_member("hard", tarfile.LNKTYPE, "./ok.txt"))
+    dest = tmp_path / "out"
+
+    unpack(buffer.getvalue(), dest)
+
+    assert (dest / "hard").read_bytes() == body
+
+
+def _failing_open(code: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every file that ``tarfile`` opens for writing fail with ``code``.
+
+    Args:
+        code: The ``errno`` value for the raised ``OSError``.
+        monkeypatch: The fixture that restores ``tarfile`` afterwards.
+    """
+    real_open = tarfile.bltn_open
+
+    def fail_on_write(path: str, mode: str = "r", *args: object, **kwargs: object) -> object:
+        """Raise ``OSError(code)`` for write modes and open other files normally.
+
+        Args:
+            path: The file to open.
+            mode: The open mode.
+            args: Other positional arguments for ``open``.
+            kwargs: Keyword arguments for ``open``.
+
+        Returns:
+            The open file, for read modes.
+
+        Raises:
+            OSError: ``mode`` writes.
+        """
+        if "w" in mode:
+            raise OSError(code, os.strerror(code))
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(tarfile, "bltn_open", fail_on_write)
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_unpack_passes_through_disk_errors(tmp_path: Path, extract_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full disk is reported as the ``OSError`` it is, not as an unsafe archive."""
+    _failing_open(errno.ENOSPC, monkeypatch)
+
+    with pytest.raises(OSError) as raised:
+        unpack(_archive(_member("ok.txt")), tmp_path / "out")
+
+    assert raised.type is OSError
+    assert raised.value.errno == errno.ENOSPC
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize("code", [errno.ENAMETOOLONG, errno.ELOOP], ids=["ENAMETOOLONG", "ELOOP"])
+def test_unpack_maps_link_chain_errors_to_unsafe(
+    code: int, tmp_path: Path, extract_path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The errors that a too-long link chain causes become ``UnsafeArchiveError`` on both paths."""
+    _failing_open(code, monkeypatch)
+
+    with pytest.raises(UnsafeArchiveError):
+        unpack(_archive(_member("ok.txt")), tmp_path / "out")
