@@ -178,18 +178,6 @@ def report_cases(splits: CaseSplits) -> list[UnifiedCase]:
     return splits.test or splits.val or splits.train
 
 
-def report_matches_selection(splits: CaseSplits) -> bool:
-    """Return whether reporting reuses the selection cases, so one scoring pass serves both.
-
-    Args:
-        splits: The run's splits.
-
-    Returns:
-        True when the report and selection splits are the same cases.
-    """
-    return selection_cases(splits) == report_cases(splits)
-
-
 def contract_samples(splits: CaseSplits, k: int) -> list[UnifiedCase]:
     """Pick up to ``k`` cases for the contract check, never from the test split.
 
