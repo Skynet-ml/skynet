@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import tarfile
 from pathlib import Path
 from typing import Any
 
@@ -187,10 +188,9 @@ def test_staged_snapshot_fetches_with_the_owner_token_and_cleans_up(
     calls: dict[str, Any] = {}
 
     def fake_fetch(repository: str, commit: str, token: str | None, workdir: Path) -> Any:
-        """Record the fetch and write a fake archive."""
+        """Record the fetch and pack a small tree."""
         calls.update(repository=repository, commit=commit, token=token, workdir=workdir)
-        archive = workdir / "tree.tgz"
-        archive.write_bytes(b"tgz")
+        archive = _archive(workdir, {"serve.py": _SERVE})
         return type("Snapshot", (), {"archive": archive, "commit": commit})()
 
     monkeypatch.setattr(repo_serving, "github_token", lambda engine, owner: f"token-for-{owner}")
@@ -205,3 +205,70 @@ def test_staged_snapshot_fetches_with_the_owner_token_and_cleans_up(
     assert calls["token"] == "token-for-alice"
     assert calls["commit"] == "a" * 40
     assert not calls["workdir"].exists()
+
+
+_HIDDEN_TOML = """instructions = "docs/intent.md"
+
+[paths]
+editable = ["src"]
+
+[run]
+entry = "src/app.py:main"
+
+[metric]
+files = ["eval/scorer.py"]
+exploits = "eval/attacks"
+reference = "eval/reference.json"
+illegal = "eval/metric-rules.md"
+mcp = "eval/mcp.json"
+
+[data]
+cases = "data/cases.jsonl"
+"""
+_SCORING_SIDE = {
+    "optimize.toml": _HIDDEN_TOML,
+    "eval/scorer.py": "def score(repo_path, case):\n    return 1.0\n",
+    "eval/attacks/cheat/why.md": "cheat\n",
+    "eval/reference.json": "{}\n",
+    "eval/metric-rules.md": "- Penalize answers with no postcode.\n",
+    "eval/mcp.json": '{"mcpServers": {}}\n',
+    "data/cases.jsonl": '{"input": {"question": "q"}, "expected": "Q"}\n',
+}
+_SERVING_SIDE = {
+    "serve.py": _SERVE,
+    "docs/intent.md": "Answer the question.\n",
+    "src/app.py": "def main(case):\n    return case\n",
+}
+
+
+def _members(archive: Path) -> set[str]:
+    """List the regular files in a packed tree.
+
+    Args:
+        archive: Packed tree.
+
+    Returns:
+        Each file's repository-relative path.
+    """
+    with tarfile.open(archive, "r:gz") as packed:
+        return {member.name.removeprefix("./") for member in packed.getmembers() if member.isfile()}
+
+
+def test_the_serving_archive_has_no_scoring_side_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The serving guest runs repository code, so it gets the stripped tree, like the candidate (E62)."""
+
+    def fake_fetch(repository: str, commit: str, token: str | None, workdir: Path) -> Any:
+        """Pack a tree with every scoring-side key set."""
+        archive = _archive(workdir, {**_SCORING_SIDE, **_SERVING_SIDE})
+        return type("Snapshot", (), {"archive": archive, "commit": commit})()
+
+    monkeypatch.setattr(repo_serving, "github_token", lambda engine, owner: None)
+    monkeypatch.setattr(repo_serving, "fetch_snapshot", fake_fetch)
+    payload = serve_payload(_job(), patch="", inputs={}, optimization_id="opt-1")
+
+    with staged_snapshot(payload, engine=None, owner=None) as staged:
+        served = _members(Path(staged[REPO_SNAPSHOT_KEY]["archive"]))
+
+    assert served == set(_SERVING_SIDE)
+    for path in _SCORING_SIDE:
+        assert path not in served

@@ -25,9 +25,11 @@ from ....config import settings
 from ....connectors.github_repo import RepoFetchError, fetch_snapshot, github_token
 from ....constants import TOKEN_SOURCE_MANAGED
 from ....models.common import ModelConfig
+from ....worker.repo_staging import hidden_repo_paths
 from . import runner
 from .harness import ENV_MODEL
-from .repo_tree import REPO_SNAPSHOT_KEY, apply_patch, unpack_tree
+from .repo_constraints import read_constraints
+from .repo_tree import REPO_SNAPSHOT_KEY, apply_patch, strip_archive, unpack_tree
 from .sandbox_scorer import scorer_gateway
 
 SERVE_FILE = "serve.py"
@@ -125,7 +127,10 @@ def serve_payload(
 
 @contextmanager
 def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) -> Iterator[dict[str, Any]]:
-    """Fetch the pinned tree in the parent and attach it for the sandbox upload.
+    """Fetch the pinned tree in the parent and attach it, without the scoring side, for the sandbox upload.
+
+    The serving guest runs repository code, so it gets the same stripped tree
+    as the agent and the candidate (E62): one hidden list for every box.
 
     Args:
         payload: Resolved interaction payload from :func:`serve_payload`.
@@ -133,10 +138,11 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
         owner: The run's owner, whose connection reads a private repository.
 
     Yields:
-        The payload with the packed tree under ``REPO_SNAPSHOT_KEY``.
+        The payload with the stripped packed tree under ``REPO_SNAPSHOT_KEY``.
 
     Raises:
         RepoFetchError: When the repository cannot be fetched at its commit.
+        ConstraintsError: When the commit's ``optimize.toml`` is invalid, so the hidden list is unknown.
     """
     token = None
     if engine is not None and owner:
@@ -148,7 +154,9 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
     try:
         repo = payload["repo"]
         snapshot = fetch_snapshot(repo["repository"], repo["commit"], token, workdir)
-        yield {**payload, REPO_SNAPSHOT_KEY: {"archive": str(snapshot.archive), "commit": snapshot.commit}}
+        hidden = hidden_repo_paths(read_constraints(snapshot.archive))
+        archive = strip_archive(snapshot.archive, hidden, workdir / "serve-tree.tgz")
+        yield {**payload, REPO_SNAPSHOT_KEY: {"archive": str(archive), "commit": snapshot.commit}}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

@@ -29,6 +29,7 @@ from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_
 from core.constants import PROGRESS_CANDIDATE, PROGRESS_CASE_SCORED
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxProposer, BlackboxTarget
+from core.models.unified import UnifiedCase
 from core.service_gateway.language_models import total_tokens_from_history, usage_by_model_from_history
 from core.service_gateway.optimization.cost_ceiling import CostCeilingExceededError
 
@@ -101,7 +102,8 @@ class FakeSession:
             return CommandResult(exit_code=0)
         payload = json.loads(self.files["native_input.json"])
         request_id = "a" * 32
-        request = {"id": request_id, "candidate": self.candidate, "example": {"id": "case"}}
+        example = (payload["task"]["train_set"] or [None])[0]
+        request = {"id": request_id, "candidate": self.candidate, "example": example}
         line = f"APP_NATIVE_RPC {payload['nonce']} {json.dumps(request)}\n"
         sink = kwargs["on_output"]
         sink("stdout", "unrelated upstream log\n" + line[:17])
@@ -1267,7 +1269,7 @@ def test_autosaddler_transport_scores_named_parts_without_the_gepa_archive(
     task = Task({"system": "seed", "user": "ask"}, cases=[{"id": "a"}, {"id": "b"}])
     result = run_native_engine("autosaddler", task, EvalServer(score, max_evals=3), _context(tmp_path, runtime))
 
-    assert calls == [({"system": "better", "user": "ask"}, {"id": "case"})]
+    assert calls == [({"system": "better", "user": "ask"}, {"id": "a"})]
     assert result.best_candidate == {"system": "better", "user": "ask"}
     assert result.metadata["upstream_source"] == native_runtime.AUTOSADDLER_SOURCE
     assert result.metadata["upstream_revision"] == native_runtime.AUTOSADDLER_REVISION
@@ -1320,7 +1322,7 @@ def test_autosaddler_transport_runs_with_zero_one_or_many_cases(
     assert result.best_candidate == "better"
     sent = json.loads(session.files["native_input.json"])["task"]
     assert sent["seed_candidate"] == (task.seed_candidate or "")
-    assert sent["train_set"] == (task.cases or None)
+    assert sent["train_set"] == ([{"id": index} for index in range(len(task.cases))] or None)
     assert "val_set" not in sent
 
 
@@ -1657,8 +1659,10 @@ def test_each_evaluation_runs_in_a_scope_of_the_candidate_and_case_the_child_nam
         seen.append(sandbox_log._scope.get())
         return 1.0, {}
 
-    mailbox = native_runtime._EvaluatorMailbox(FakeSession(), EvalServer(evaluator, max_evals=3), "nonce")
-    request = {"candidate": "seed", "example": {"q": 1}, "candidate_id": 4, "case": "2"}
+    mailbox = native_runtime._EvaluatorMailbox(
+        FakeSession(), EvalServer(evaluator, max_evals=3), "nonce", cases=[{"input": {"q": 1}}]
+    )
+    request = {"candidate": "seed", "example": {"id": 0}, "candidate_id": 4, "case": "2"}
     mailbox.on_output(
         "stdout",
         f"APP_NATIVE_RPC nonce {json.dumps({**request, 'id': '0' * 32})}\n"
@@ -1666,6 +1670,63 @@ def test_each_evaluation_runs_in_a_scope_of_the_candidate_and_case_the_child_nam
     )
     assert mailbox.error is None
     assert seen == [{"candidate": "4", "case": "2"}, {}]
+
+
+_DATA_CASES = [{"input": {"q": "a"}, "expected": "A"}, {"input": {"q": "b"}}]
+_UPLOADED_CASES = [UnifiedCase(input={"q": "a"}, expected="A"), UnifiedCase(input={"q": "b"})]
+
+
+@pytest.mark.parametrize("cases", [_DATA_CASES, _UPLOADED_CASES], ids=["data-cases", "uploaded-cases"])
+def test_the_guest_train_set_has_no_expected_but_the_parent_scores_the_full_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cases: list[Any]
+) -> None:
+    """The guest holds each case's id and input only; the parent metric gets the case with ``expected`` (E61).
+
+    Args:
+        tmp_path: Workspace.
+        monkeypatch: Skips packing the GEPA archive.
+        cases: ``[data] cases`` rows (plain dicts) or uploaded cases (models).
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", MagicMock(side_effect=AssertionError("unused")))
+    session = FakeSession()
+    scored: list[Any] = []
+
+    def score(candidate: Any, example: Any) -> tuple[float, dict[str, Any]]:
+        """Record the case the parent scored."""
+        scored.append(example)
+        return 0.5, {}
+
+    run_native_engine(
+        "autosaddler",
+        Task("seed", cases=cases),
+        EvalServer(score, max_evals=3),
+        _context(tmp_path, FakeRuntime(session)),
+    )
+
+    sent = json.loads(session.files["native_input.json"])["task"]["train_set"]
+    assert sent == [{"id": 0, "input": {"q": "a"}}, {"id": 1, "input": {"q": "b"}}]
+    assert all("expected" not in case for case in sent)
+    assert '"A"' not in session.files["native_input.json"]
+    assert scored == [{"input": {"q": "a"}, "expected": "A"}]
+
+
+@pytest.mark.parametrize("example", [{"id": 2}, {"id": "0"}, {"id": True}, {"input": {"q": "a"}}, "0"])
+def test_the_parent_refuses_an_example_that_names_no_known_case(example: Any) -> None:
+    """A guest cannot make the parent score a case it invents; the run stops instead.
+
+    Args:
+        example: A guest example with an unknown, mistyped or missing id.
+    """
+    scorer = MagicMock(return_value=(1.0, {}))
+    mailbox = native_runtime._EvaluatorMailbox(
+        FakeSession(), EvalServer(scorer, max_evals=3), "nonce", cases=_DATA_CASES
+    )
+    request = {"id": "0" * 32, "candidate": "seed", "example": example}
+
+    mailbox.on_output("stdout", f"APP_NATIVE_RPC nonce {json.dumps(request)}\n")
+
+    assert isinstance(mailbox.error, ServiceError)
+    scorer.assert_not_called()
 
 
 def test_the_child_names_the_candidate_and_case_of_each_request(tmp_path: Path) -> None:

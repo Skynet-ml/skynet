@@ -14,6 +14,7 @@ import tarfile
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from importlib.metadata import distribution
 from pathlib import Path
@@ -557,6 +558,7 @@ class _EvaluatorMailbox:
         progress_callback: Any = None,
         check_budget: Any = None,
         str_mode: bool = True,
+        cases: Sequence[Any] = (),
     ) -> None:
         """Bind the transport to one parent evaluator.
 
@@ -567,8 +569,10 @@ class _EvaluatorMailbox:
             progress_callback: Optional job trajectory sink.
             check_budget: Direct cumulative-spend guard, including on reader threads.
             str_mode: Whether the task admits only text candidates rather than named parts.
+            cases: The full train cases, by position; the guest names a case only by its id.
         """
         self.str_mode = str_mode
+        self.cases = [_plain_case(case) for case in cases]
         self.session = session
         self.server = server
         self.nonce = nonce
@@ -770,7 +774,7 @@ class _EvaluatorMailbox:
                     with sandbox_log.event_scope(
                         candidate=_label(request.get("candidate_id")), case=_label(request.get("case"))
                     ):
-                        score, info = self.server.evaluate(candidate, request.get("example"))
+                        score, info = self.server.evaluate(candidate, self._full_case(request.get("example")))
                     if self.check_budget is not None:
                         self.check_budget()
                     self._forward_feedback(request, score, info)
@@ -787,6 +791,25 @@ class _EvaluatorMailbox:
                 self._responses[request_id] = json.dumps({"error": "The parent evaluator returned invalid feedback."})
         self.session.write_files({f"rpc/{request_id}.json": self._responses[request_id]})
 
+    def _full_case(self, example: Any) -> Any:
+        """Restore the full train case that a guest example names.
+
+        Args:
+            example: The guest's example: ``None``, or a dict with the case's position as ``id``.
+
+        Returns:
+            ``None`` for no example, else the full case with ``expected``.
+
+        Raises:
+            ServiceError: When the example names no known case.
+        """
+        if example is None:
+            return None
+        index = example.get("id") if isinstance(example, dict) else None
+        if type(index) is not int or not 0 <= index < len(self.cases):
+            raise ServiceError("Native evaluator request names an unknown case.")
+        return self.cases[index]
+
 
 def _plain_case(case: Any) -> Any:
     """Turn one train case into plain JSON data for the native box.
@@ -799,6 +822,26 @@ def _plain_case(case: Any) -> Any:
     """
     dump = getattr(case, "model_dump", None)
     return dump(mode="json") if callable(dump) else case
+
+
+def _guest_case(index: int, case: Any) -> dict[str, Any]:
+    """Build the view of one train case that a guest may hold.
+
+    The guest runs proposer and candidate code, so it gets only the case's
+    position and its input. Only the parent's metric side gets ``expected``
+    (E42, E61).
+
+    Args:
+        index: The case's position in the task's cases.
+        case: A task case: a dict, or a model such as ``UnifiedCase``.
+
+    Returns:
+        ``{"id": index, "input": ...}``, without ``input`` when the case has none.
+    """
+    plain = _plain_case(case)
+    if isinstance(plain, dict) and "input" in plain:
+        return {"id": index, "input": plain["input"]}
+    return {"id": index}
 
 
 def native_task_payload(engine_id: str, task: Task) -> dict[str, Any]:
@@ -821,7 +864,7 @@ def native_task_payload(engine_id: str, task: Task) -> dict[str, Any]:
         "background": task.background or "",
         # The guest builds an upstream task, whose train and val sets
         # form one pool; the cases go in once, as its train set.
-        "train_set": [_plain_case(case) for case in task.cases] or None,
+        "train_set": [_guest_case(index, case) for index, case in enumerate(task.cases)] or None,
     }
     if set(document) != NATIVE_TASK_FIELDS:
         raise ServiceError("The native optimizer task carries fields it must not.")
@@ -1095,6 +1138,7 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
         getattr(ctx, "progress_callback", None),
         getattr(ctx, "check_budget", None),
         str_mode=task.str_mode,
+        cases=task.cases,
     )
     try:
         payload = {
