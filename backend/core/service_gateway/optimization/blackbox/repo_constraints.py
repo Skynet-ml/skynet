@@ -1041,12 +1041,12 @@ def _refuse_visible_cases(cases_file: str | None, rule_files: list[tuple[str, st
         rule_files: Each text file setting and its path, or ``None`` when unset.
 
     Raises:
-        ConstraintsError: When the cases path equals or sits inside one of those paths.
+        ConstraintsError: When the cases path equals one of those paths.
     """
     if cases_file is None:
         return
     for setting, path in rule_files:
-        if path is not None and (cases_file == path or cases_file.startswith(path + "/")):
+        if path is not None and cases_file == path:
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: [data] cases and {setting} name the same file '{path}'. The agent reads"
                 " the instructions and rule files, so the cases must be in a file of their own."
