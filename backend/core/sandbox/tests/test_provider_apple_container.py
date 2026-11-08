@@ -40,7 +40,7 @@ STATE_ENV = "SKYNET_FAKE_CONTAINER_STATE"
 
 FAKE_CONTAINER = textwrap.dedent(
     """
-    import json, os, sys
+    import json, os, sys, time
     from pathlib import Path
 
     state = Path(os.environ["SKYNET_FAKE_CONTAINER_STATE"])
@@ -65,8 +65,26 @@ FAKE_CONTAINER = textwrap.dedent(
     if verb == "system" and args[1:2] == ["status"]:
         fail("status_fail")
         print("apiserver is running")
+    elif verb == "image" and args[1:2] == ["pull"]:
+        fail("pull_error")
+        print(args[-1])
     elif verb == "run":
         fail("run_error")
+        late = state / "run_late"
+        if late.exists():
+            # Model the client and API server split: the client hangs until
+            # it is killed, and the server creates the container later.
+            if os.fork():
+                time.sleep(30)
+                sys.exit(0)
+            os.setsid()
+            devnull = os.open(os.devnull, os.O_RDWR)
+            for fd in (0, 1, 2):
+                os.dup2(devnull, fd)
+            delay = late.read_text()
+            if delay == "never":
+                sys.exit(0)
+            time.sleep(float(delay))
         name = args[args.index("--name") + 1]
         labels = {}
         for index, arg in enumerate(args):
@@ -431,6 +449,85 @@ async def test_a_stopped_service_is_fatal(container_state: Path, stderr: str) ->
         async with AppleContainerEnvironment(_spec()):
             pass
     assert _verbs(container_state).count("run") == 1
+
+
+async def test_start_pulls_the_image_with_a_long_deadline_before_run(
+    container_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pull the image first, under the long pull deadline, so the run deadline covers only the boot."""
+    deadlines: dict[str, float] = {}
+    real_cli = apple_provider._cli
+
+    async def spy(container_bin: str, args: list[str], **kwargs: Any) -> Any:
+        """Record the deadline of each verb, then run the fake CLI."""
+        deadlines.setdefault(args[0], kwargs.get("cli_seconds", apple_provider._CLI_TIMEOUT_SECONDS))
+        return await real_cli(container_bin, args, **kwargs)
+
+    monkeypatch.setattr(apple_provider, "_cli", spy)
+    async with AppleContainerEnvironment(_spec()):
+        pass
+    calls = _calls(container_state)
+    assert calls[0] == ["image", "pull", "--progress", "none", IMAGE]
+    assert calls[1][0] == "run"
+    assert deadlines["image"] == apple_provider._PULL_TIMEOUT_SECONDS
+    assert deadlines["run"] == apple_provider._CLI_TIMEOUT_SECONDS
+
+
+async def test_a_failed_pull_raises_before_any_run(container_state: Path) -> None:
+    """Raise SandboxInfraError for a failed pull and create no container."""
+    (container_state / "pull_error").write_text("Error: failed to pull image: manifest unknown\n")
+    with pytest.raises(SandboxInfraError, match="could not pull the image"):
+        async with AppleContainerEnvironment(_spec()):
+            pass
+    assert _verbs(container_state) == ["image"]
+
+
+async def test_a_container_that_a_killed_run_creates_late_is_removed(
+    container_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remove the container that the server creates after the run client was killed at its deadline."""
+    (container_state / "run_late").write_text("1.5")
+    real_cli = apple_provider._cli
+
+    async def short_run(container_bin: str, args: list[str], **kwargs: Any) -> Any:
+        """Give ``run`` a 0.5 s deadline and leave every other call alone."""
+        if args[0] == "run":
+            kwargs["cli_seconds"] = 0.5
+        return await real_cli(container_bin, args, **kwargs)
+
+    monkeypatch.setattr(apple_provider, "_cli", short_run)
+    monkeypatch.setattr(AppleContainerEnvironment, "late_run_seconds", 10.0)
+    monkeypatch.setattr(apple_provider, "_LATE_POLL_SECONDS", 0.1)
+    with pytest.raises(SandboxInfraError, match="did not finish"):
+        async with AppleContainerEnvironment(_spec()):
+            pass
+    verbs = _verbs(container_state)
+    assert "list" in verbs[verbs.index("run") :]
+    assert list((container_state / "containers").glob("*.json")) == []
+
+
+async def test_a_killed_run_gives_up_when_no_container_appears(
+    container_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stop the late-container search after ``late_run_seconds`` when the server creates nothing."""
+    (container_state / "run_late").write_text("never")
+    real_cli = apple_provider._cli
+
+    async def short_run(container_bin: str, args: list[str], **kwargs: Any) -> Any:
+        """Give ``run`` a 0.5 s deadline and leave every other call alone."""
+        if args[0] == "run":
+            kwargs["cli_seconds"] = 0.5
+        return await real_cli(container_bin, args, **kwargs)
+
+    monkeypatch.setattr(apple_provider, "_cli", short_run)
+    monkeypatch.setattr(AppleContainerEnvironment, "late_run_seconds", 0.3)
+    monkeypatch.setattr(apple_provider, "_LATE_POLL_SECONDS", 0.1)
+    started = time.monotonic()
+    with pytest.raises(SandboxInfraError, match="did not finish"):
+        async with AppleContainerEnvironment(_spec()):
+            pass
+    assert time.monotonic() - started < 5
+    assert _verbs(container_state).count("list") >= 2
 
 
 async def test_other_run_failures_are_infra_errors_without_a_retry(container_state: Path) -> None:

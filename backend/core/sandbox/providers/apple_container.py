@@ -64,6 +64,9 @@ SANDBOX_LABELS: Mapping[str, str] = {"skynet": "sandbox"}
 # exits when the lifetime ($0) ends, so a leaked container stops by itself.
 _IDLE_SCRIPT = "trap 'exit 0' TERM; sleep \"$0\" & wait $!"
 _CLI_TIMEOUT_SECONDS = 60.0
+# A first pull of a large image can take many minutes; ``run`` then only boots.
+_PULL_TIMEOUT_SECONDS = 1800.0
+_LATE_POLL_SECONDS = 0.5
 _STATUS_TIMEOUT_SECONDS = 10.0
 _STOP_GRACE_SECONDS = 10
 _KILL_GRACE_SECONDS = 15
@@ -117,6 +120,10 @@ _LABEL_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 # system service is not running, which no retry fixes.
 _SERVICE_MARKERS = ("container system start", "xpc", "apiserver", "connection invalid")
 _NOT_FOUND_MARKERS = ("not found", "notfound", "no such")
+
+
+class _CliDeadlineError(SandboxInfraError):
+    """Signal that a ``container`` call ran past its deadline and was killed."""
 
 
 @dataclass(frozen=True)
@@ -176,7 +183,8 @@ async def _cli(
         The exit code and the captured output.
 
     Raises:
-        SandboxInfraError: The CLI is missing or did not finish in time.
+        SandboxInfraError: The CLI is missing.
+        _CliDeadlineError: The CLI did not finish in time and was killed.
     """
     try:
         process = await asyncio.create_subprocess_exec(
@@ -207,7 +215,7 @@ async def _cli(
             await communication
         if cancelled is not None:
             raise cancelled
-        raise SandboxInfraError(f"container {args[0] if args else ''} did not finish in {cli_seconds:.0f}s.")
+        raise _CliDeadlineError(f"container {args[0] if args else ''} did not finish in {cli_seconds:.0f}s.")
     if cancelled is not None:
         raise cancelled
     stdout, stderr = communication.result()
@@ -387,7 +395,8 @@ def _listed_containers(stdout: bytes) -> list[tuple[str, Mapping[str, Any]]]:
         if not isinstance(item, dict):
             continue
         # A snapshot keeps its id and labels under "configuration".
-        config = item.get("configuration") if isinstance(item.get("configuration"), dict) else item
+        raw = item.get("configuration")
+        config = raw if isinstance(raw, dict) else item
         name = config.get("id")
         labels = config.get("labels")
         if isinstance(name, str) and name and isinstance(labels, dict):
@@ -407,6 +416,7 @@ class AppleContainerEnvironment(SandboxEnvironment):
     default_container_bin: ClassVar[str] = DEFAULT_CONTAINER_BIN
     ready_seconds: ClassVar[float] = 120.0
     poll_seconds: ClassVar[float] = 0.5
+    late_run_seconds: ClassVar[float] = 15.0
 
     def __init__(self, spec: SandboxSpec, *, image: str | None = None, container_bin: str | None = None) -> None:
         """Check the spec and choose the image.
@@ -493,14 +503,23 @@ class AppleContainerEnvironment(SandboxEnvironment):
         Raises:
             RuntimeError: The sandbox was already started.
             SandboxFatalError: The container system service is not running.
-            SandboxInfraError: The CLI refused the container.
+            SandboxInfraError: The CLI could not pull the image or refused the container.
             StartTimeoutError: No command ran within ``ready_seconds``.
         """
         if self._name is not None:
             raise RuntimeError("The Apple container sandbox was already started.")
+        pulled = await _cli(
+            self._bin, ["image", "pull", "--progress", "none", str(self._image)], cli_seconds=_PULL_TIMEOUT_SECONDS
+        )
+        if pulled.returncode != 0:
+            raise _service_error(f"The container CLI could not pull the image {self._image}", pulled)
         name = _container_name(self.spec.name)
         self._name = name
-        result = await _cli(self._bin, self._run_args(name))
+        try:
+            result = await _cli(self._bin, self._run_args(name))
+        except _CliDeadlineError:
+            await self._remove_late_container(name)
+            raise
         if result.returncode != 0:
             raise _service_error(f"The container CLI refused the sandbox {name}", result)
         loop = asyncio.get_running_loop()
@@ -514,6 +533,34 @@ class AppleContainerEnvironment(SandboxEnvironment):
             if loop.time() >= deadline:
                 raise StartTimeoutError(self.ready_seconds)
             await asyncio.sleep(self.poll_seconds)
+
+    async def _remove_late_container(self, name: str) -> None:
+        """Wait a short time for a container that a killed ``run`` client can still create, and remove it.
+
+        The API server, not the client, creates the container, so it can
+        appear after the stop by name in ``stop`` already ran. A failure is
+        logged; the idle process still exits when the lifetime ends.
+
+        Args:
+            name: The container name.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.late_run_seconds
+        while True:
+            try:
+                listed = await _cli(
+                    self._bin, ["list", "--all", "--format", "json"], cli_seconds=_STATUS_TIMEOUT_SECONDS
+                )
+                names = {item for item, _ in _listed_containers(listed.stdout)} if listed.returncode == 0 else set()
+            except (SandboxInfraError, ValueError, TypeError) as error:
+                logger.warning("Could not list the Apple container sandboxes after a killed run of %s: %s", name, error)
+                names = set()
+            if name in names:
+                await _remove_container(self._bin, name)
+                return
+            if loop.time() >= deadline:
+                return
+            await asyncio.sleep(_LATE_POLL_SECONDS)
 
     def _exec_args(self, name: str, *argv: str, stdin: bool = False, root: bool = False) -> list[str]:
         """Build the ``container exec`` arguments for one command in the container.
