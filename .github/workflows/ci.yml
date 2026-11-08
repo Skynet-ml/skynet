@@ -155,6 +155,53 @@ jobs:
           print(f"six dispatched shards cover all {len(collected)} collected tests with no overlap")
           PY
 
+  # The core shards install only the dev extra, so provider tests that import
+  # an optional SDK skip there. This job installs the provider extras and runs
+  # the sandbox tests with them. The tests use fake clients only: no secrets,
+  # no provider network calls. uv declares prime and e2b as conflicting extras,
+  # so prime gets its own variant.
+  backend-sandbox-providers:
+    name: backend · sandbox provider extras (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: main
+            extras: --extra langsmith --extra e2b --extra daytona --extra modal --extra runloop --extra kernel --extra mosaic --extra sail --extra sbx --extra smol
+            installed: langsmith|e2b|daytona|modal|runloop|kernel|mosaic|sail|sbx|smol
+          - variant: prime
+            extras: --extra prime
+            installed: prime
+    steps:
+      - uses: actions/checkout@v4
+      # Same uv and Python as the Dagger backend image (uv 0.9.13, Python 3.12).
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.9.13"
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install the backend with the provider extras
+        working-directory: backend
+        run: uv sync --frozen --extra dev ${{ matrix.extras }}
+      - name: Sandbox and provider tests
+        working-directory: backend
+        env:
+          INSTALLED: ${{ matrix.installed }}
+        run: |
+          set -o pipefail
+          uv run --no-sync pytest core/sandbox/tests/ -q -rs -n auto | tee pytest.log
+          # A skip for a missing SDK of an extra this variant installed means
+          # the extra no longer covers the test's import.
+          if grep -E '^SKIPPED' pytest.log | grep -E 'extra is not installed|could not import' | grep -E "$INSTALLED"; then
+            echo "::error::provider tests skipped for an extra that this job installed"
+            exit 1
+          fi
+
   # Everything above installs through uv. The Dockerfile's other path
   # (PKG_MANAGER=pip) installs the compiled requirements.txt with --no-deps,
   # which means pip never re-resolves and never notices a package the file
