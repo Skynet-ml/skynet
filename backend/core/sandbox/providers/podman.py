@@ -181,6 +181,9 @@ class PodmanEnvironment(DockerEnvironment):
 
         Returns:
             True only when ``podman info`` answers ``true``.
+
+        Raises:
+            SandboxInfraError: The Podman CLI could not start or did not finish in time.
         """
         result: _CliResult = await docker_provider._docker(
             self._docker_bin, ["info", "--format", "{{.Host.Security.Rootless}}"]
@@ -194,15 +197,15 @@ class PodmanEnvironment(DockerEnvironment):
             hosts: The hosts that the proxy allows.
 
         Raises:
-            SandboxInfraError: The engine is rootful, or Podman cannot create
-                the network or start the proxy.
+            SandboxFatalError: The engine is rootful, so a retry cannot help.
+            SandboxInfraError: Podman cannot create the network or start the proxy.
         """
         egress = self._require_egress()
         # A rootful internal network gives the box a gateway address on the
         # host, and through it the host's own services. Podman has no option
         # to take that address away, so only rootless Podman gets an allowlist.
         if not await self._rootless():
-            raise SandboxInfraError("The Podman sandbox allows hosts only on rootless Podman.")
+            raise SandboxFatalError("The Podman sandbox allows hosts only on rootless Podman.")
         created = await docker_provider._docker(
             self._docker_bin, ["network", "create", "--internal", *_label_args(self._labels), egress.network]
         )

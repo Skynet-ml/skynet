@@ -226,6 +226,34 @@ async def test_stop_finishes_the_removal_when_it_is_cancelled(monkeypatch: pytes
     assert not root.exists()
 
 
+async def test_stop_finishes_the_removal_after_two_cancels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove the directory before a stop that is cancelled twice passes the cancel on."""
+    real_rmtree = local.shutil.rmtree
+
+    def _slow_rmtree(path: Path) -> None:
+        """Remove the tree after a delay, so both cancels land mid-removal.
+
+        Args:
+            path: The directory to remove.
+        """
+        time.sleep(0.3)
+        real_rmtree(path)
+
+    box = LocalEnvironment(_SPEC)
+    await box.start()
+    root = box.path
+    assert root is not None
+    monkeypatch.setattr(local.shutil, "rmtree", _slow_rmtree)
+    task = asyncio.create_task(box.stop())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not root.exists()
+
+
 async def test_stop_kills_running_commands() -> None:
     """End a running command when another task stops the box."""
     box = LocalEnvironment(_SPEC)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import stat
 import sys
@@ -28,9 +29,11 @@ from core.sandbox.factory import PROVIDERS, ProductionNotAllowedError, create_en
 from core.sandbox.providers import apple_container as apple_provider
 from core.sandbox.providers.apple_container import (
     AppleContainerEnvironment,
+    _cli,
     _container_name,
     _job_label,
     _listed_containers,
+    _run_to_end,
 )
 from core.sandbox.resources import ResourceMode, ResourceRequest, SandboxSpec
 from core.sandbox.tests.test_environment import SandboxEnvironmentContract
@@ -742,3 +745,49 @@ def test_job_labels_are_plain_tokens() -> None:
     assert len(hashed) == 63
     assert _job_label("x" * 64) != _job_label("x" * 65)
     assert _job_label("job/with spaces") == hashed
+
+
+async def test_run_to_end_logs_a_cleanup_error_that_a_cancel_replaces(caplog: pytest.LogCaptureFixture) -> None:
+    """Log the cleanup error and raise the cancel when both happen."""
+
+    async def _failing_cleanup() -> None:
+        """Fail after a short wait, so the cancel lands first.
+
+        Raises:
+            OSError: Always.
+        """
+        await asyncio.sleep(0.1)
+        raise OSError("cleanup failed")
+
+    task = asyncio.create_task(_run_to_end(_failing_cleanup()))
+    await asyncio.sleep(0.02)
+    task.cancel()
+    with caplog.at_level(logging.WARNING, logger=apple_provider.__name__), pytest.raises(asyncio.CancelledError):
+        await task
+    assert "cleanup failed during a cancel: OSError" in caplog.text
+
+
+async def test_cli_raises_the_first_of_two_cancels() -> None:
+    """Wait for the CLI through two cancels, then raise the first cancel."""
+    seen: list[tuple[object, ...]] = []
+
+    async def _call() -> None:
+        """Run a short CLI and record the cancel that it raises.
+
+        Raises:
+            asyncio.CancelledError: The cancel from ``_cli``.
+        """
+        try:
+            await _cli(sys.executable, ["-c", "import time; time.sleep(0.4)"])
+        except asyncio.CancelledError as error:
+            seen.append(error.args)
+            raise
+
+    task = asyncio.create_task(_call())
+    await asyncio.sleep(0.1)
+    task.cancel("first")
+    await asyncio.sleep(0.05)
+    task.cancel("second")
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert seen == [("first",)]

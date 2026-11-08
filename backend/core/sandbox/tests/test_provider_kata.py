@@ -754,6 +754,41 @@ def test_preflight_refuses_a_daemon_without_the_runtime(
         KataEnvironment.preflight()
 
 
+@pytest.mark.parametrize(
+    ("runtime", "stdout"),
+    [
+        ("kata-qemu", b'{"kata-qemu":{"path":"/opt/kata/bin/containerd-shim-kata-qemu-v2"}}'),
+        ("vm", b'{"vm":{"runtimeType":"io.containerd.kata.v2"}}'),
+        ("vm", b'{"vm":{"path":"/usr/bin/kata-runtime"}}'),
+    ],
+)
+def test_preflight_accepts_a_kata_runtime_under_any_name(
+    kata_host: Path, monkeypatch: pytest.MonkeyPatch, runtime: str, stdout: bytes
+) -> None:
+    """Accept a runtime whose name, path or runtime type names Kata."""
+    del kata_host
+    _plan_runtimes(monkeypatch, _info(0, stdout))
+    KataEnvironment.preflight(runtime=runtime)
+
+
+@pytest.mark.parametrize(
+    ("runtime", "stdout"),
+    [
+        ("runc", b'{"runc":{"path":"runc"}}'),
+        ("vm", b'{"vm":{"path":"/usr/bin/crun"}}'),
+        ("vm", b'{"vm":null}'),
+    ],
+)
+def test_preflight_refuses_a_runtime_that_is_not_kata(
+    kata_host: Path, monkeypatch: pytest.MonkeyPatch, runtime: str, stdout: bytes
+) -> None:
+    """Raise a fatal error when the named runtime would boot no Kata VM."""
+    del kata_host
+    _plan_runtimes(monkeypatch, _info(0, stdout))
+    with pytest.raises(SandboxFatalError, match="is not a Kata runtime"):
+        KataEnvironment.preflight(runtime=runtime)
+
+
 def test_preflight_runs_docker_info_with_a_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ask ``docker info`` for the runtimes as JSON, with a timeout."""
     seen: dict[str, Any] = {}

@@ -96,6 +96,23 @@ def _docker_runtimes(docker_bin: str) -> subprocess.CompletedProcess[bytes]:
     )
 
 
+def _is_kata_runtime(name: str, entry: object) -> bool:
+    """Tell whether a ``docker info`` runtime entry runs Kata.
+
+    Args:
+        name: The runtime name.
+        entry: The runtime entry from ``docker info``, with ``path`` or
+            ``runtimeType`` when the daemon sends them.
+
+    Returns:
+        True when the name, the path or the runtime type names Kata.
+    """
+    words = [name]
+    if isinstance(entry, dict):
+        words += [str(entry.get("path") or ""), str(entry.get("runtimeType") or "")]
+    return any("kata" in word.lower() for word in words)
+
+
 class KataEnvironment(DockerEnvironment):
     """Run one sandbox as a hardened container in a Kata virtual machine.
 
@@ -141,7 +158,8 @@ class KataEnvironment(DockerEnvironment):
         Raises:
             SandboxFatalError: The host is not Linux, KVM is missing, the CLI
                 is missing, ``docker info`` failed or did not finish in time,
-                or the daemon has no runtime with this name.
+                or the daemon has no runtime with this name, or the runtime
+                with this name is not a Kata runtime.
         """
         if _host_system() != "Linux":
             raise SandboxFatalError("The Kata sandbox runs only on a Linux host.")
@@ -167,6 +185,10 @@ class KataEnvironment(DockerEnvironment):
         if not isinstance(runtimes, dict) or runtime not in runtimes:
             found = ", ".join(sorted(runtimes)) if isinstance(runtimes, dict) else ""
             raise SandboxFatalError(f"The Docker daemon has no {runtime!r} runtime. It has: {found or 'none'}.")
+        # A runtime name can point at runc, which boots no VM, so the box would
+        # run without the isolation this provider promises.
+        if not _is_kata_runtime(runtime, runtimes[runtime]):
+            raise SandboxFatalError(f"The Docker runtime {runtime!r} is not a Kata runtime.")
 
     async def start(self) -> None:
         """Start the box in its VM, and remove it again when the start fails.

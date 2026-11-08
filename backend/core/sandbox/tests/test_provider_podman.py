@@ -488,10 +488,10 @@ async def test_an_offline_box_runs_with_no_network(fake_podman: _FakePodman) -> 
 
 
 async def test_a_rootful_engine_refuses_an_allowlist(fake_podman: _FakePodman) -> None:
-    """Refuse an allowlist on rootful Podman before any network or container exists."""
+    """Refuse an allowlist on rootful Podman as fatal, before any network or container exists."""
     fake_podman.rootless = False
     env = PodmanEnvironment(_spec(network_disabled=False, allowed_hosts=("example.org",)))
-    with pytest.raises(SandboxInfraError, match="rootless"):
+    with pytest.raises(SandboxFatalError, match="rootless"):
         await env.start()
     await env.stop()
     assert not any(call[:2] in (["network", "create"], ["run", "-d"]) for call in fake_podman.calls)
