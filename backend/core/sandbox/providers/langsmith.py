@@ -12,8 +12,9 @@ Adapted from Harbor 0.25.0 (Apache-2.0), langsmith.py. Changes:
 - No profile or header auth and no URL helpers: the SDK reads the API key
   and derives the endpoint itself. ``LANGSMITH_SANDBOX_API_URL`` can
   override the endpoint.
-- Every SDK error maps to a Skynet error group, and a timeout raises the
-  phase timeout error.
+- Every SDK error, and every raw HTTPX transport error that the SDK does
+  not wrap, maps to a Skynet error group, and a timeout raises the phase
+  timeout error.
 - The spec network mode maps to the sandbox proxy access list. A policy
   cannot change after start.
 
@@ -38,6 +39,7 @@ from ..environment import JOB_TAG, ExecResult, OutputSink, SandboxEnvironment
 from ..errors import (
     RunTimeoutError,
     SandboxFatalError,
+    SandboxInfraError,
     SandboxRejectedError,
     SandboxTransientError,
     StartTimeoutError,
@@ -47,6 +49,7 @@ from ..telemetry import current_output_sink
 from ..timeouts import Phase, PhaseTimeouts
 
 try:
+    from langsmith._httpx import httpx as _sdk_httpx
     from langsmith.sandbox import (
         AsyncSandboxClient,
         CommandTimeoutError,
@@ -64,6 +67,7 @@ try:
     )
     from langsmith.utils import LangSmithError
 except ImportError:
+    _sdk_httpx = None
     AsyncSandboxClient = None
     CommandTimeoutError = None
     DataplaneNotConfiguredError = None
@@ -193,6 +197,8 @@ class LangSmithEnvironment(SandboxEnvironment):
         Raises:
             StartTimeoutError: The sandbox was not ready in time, by the local
                 deadline or the server. It is deleted first.
+            SandboxInfraError: A ``stop()`` ran during the create. The new
+                sandbox is deleted first.
             SandboxFatalError: The API key or the account setup is not valid.
             SandboxTransientError: The quota is full, no capacity is free, or
                 the server or the connection failed.
@@ -204,48 +210,46 @@ class LangSmithEnvironment(SandboxEnvironment):
         self._name = _k8s_name("skynet", f"{self.spec.name or 'box'}-{uuid.uuid4().hex[:8]}")
         # The client exists before the create call, so stop() can delete by
         # name a sandbox that the server made before the create failed.
-        self._client = AsyncSandboxClient(
-            api_endpoint=self._api_url,
-            api_key=self._api_key,
-            timeout=self._request_timeout,
-            max_retries=0,
-        )
+        client = self._client = self._new_client()
         try:
             async with asyncio.timeout(self._startup_timeout) as deadline:
                 with _mapped_errors(start_timeout=self._startup_timeout):
-                    box = await self._client.create_sandbox(**self._create_kwargs())
+                    box = await client.create_sandbox(**self._create_kwargs())
         except TimeoutError:
-            await self.stop()
+            await self._stop_failed_start(client)
             if not deadline.expired():
                 raise
             raise StartTimeoutError(self._startup_timeout) from None
         except BaseException:
-            await self.stop()
+            await self._stop_failed_start(client)
             raise
+        if self._client is not client:
+            await self._stop_failed_start(client)
+            raise SandboxInfraError("The LangSmith sandbox stopped during start.")
         self._box = box
         type(self)._running.add(self)
 
     async def stop(self) -> None:
         """Delete the sandbox and close the client.
 
-        A cancel during the delete waits for the delete to finish, then
-        passes the cancel on, so the sandbox never outlives ``stop``.
+        A cancel during the delete, also a repeated one, waits for the delete
+        to finish, then passes one cancel on, so the sandbox never outlives
+        ``stop``.
+
+        Raises:
+            asyncio.CancelledError: The task was cancelled during the delete.
         """
         client = self._client
         if client is None:
             if self._stop_task is not None:
-                await asyncio.shield(self._stop_task)
+                await _wait_through_cancels(self._stop_task)
             return
         name = self._name
         self._client = None
         self._box = None
         type(self)._running.discard(self)
         self._stop_task = asyncio.ensure_future(_teardown(client, name))
-        try:
-            await asyncio.shield(self._stop_task)
-        except asyncio.CancelledError:
-            await self._stop_task
-            raise
+        await _wait_through_cancels(self._stop_task)
 
     async def exec(
         self,
@@ -384,6 +388,36 @@ class LangSmithEnvironment(SandboxEnvironment):
             stopped += 1
         return stopped
 
+    def _new_client(self) -> Any:
+        """Build an SDK client with the SDK HTTP retries off.
+
+        Returns:
+            The SDK ``AsyncSandboxClient``.
+        """
+        return AsyncSandboxClient(
+            api_endpoint=self._api_url,
+            api_key=self._api_key,
+            timeout=self._request_timeout,
+            max_retries=0,
+        )
+
+    async def _stop_failed_start(self, client: Any) -> None:
+        """Delete the sandbox of a start that failed or that a ``stop()`` ended.
+
+        Args:
+            client: The client of this start.
+
+        Raises:
+            asyncio.CancelledError: The task was cancelled during the delete.
+        """
+        if self._client is client:
+            await self.stop()
+            return
+        # A stop() ran during the create. Its delete came before the server
+        # made the sandbox, and it closed this client, so delete by name
+        # again with a new client.
+        await _wait_through_cancels(asyncio.ensure_future(_teardown(self._new_client(), self._name)))
+
     def _require_running(self) -> Any:
         """Return the SDK sandbox, or raise when the sandbox is stopped.
 
@@ -443,7 +477,7 @@ def _proxy_config(spec: SandboxSpec) -> dict[str, Any] | None:
 
 @contextlib.contextmanager
 def _mapped_errors(*, start_timeout: float | None = None) -> Iterator[None]:
-    """Map every LangSmith SDK error to a Skynet error group.
+    """Map every LangSmith SDK error, and every raw HTTPX transport error, to a Skynet error group.
 
     ``CommandTimeoutError`` passes through, so that ``exec`` raises the run
     timeout. The except order matters: the SDK errors share base classes.
@@ -453,7 +487,7 @@ def _mapped_errors(*, start_timeout: float | None = None) -> Iterator[None]:
 
     Raises:
         StartTimeoutError: The server said that the sandbox was not ready in
-            time, during ``start``.
+            time, or an HTTP request timed out, during ``start``.
         SandboxFatalError: The API key or the account setup is not valid, or
             the sandbox is gone.
         SandboxTransientError: The quota is full, no capacity is free, or the
@@ -491,6 +525,12 @@ def _mapped_errors(*, start_timeout: float | None = None) -> Iterator[None]:
         if status is not None and (status >= 500 or status in (408, 429)):
             raise SandboxTransientError(f"LangSmith sandbox call failed: HTTP {status}.") from exc
         raise SandboxRejectedError(f"LangSmith refused the sandbox call: {type(exc).__name__}.") from exc
+    except _sdk_httpx.TransportError as exc:
+        # The SDK wraps only connect and pool errors; a read timeout or a
+        # broken response reaches the caller as a raw HTTPX error.
+        if start_timeout is not None and isinstance(exc, _sdk_httpx.TimeoutException):
+            raise StartTimeoutError(start_timeout) from exc
+        raise SandboxTransientError(f"LangSmith sandbox connection failed: {type(exc).__name__}.") from exc
 
 
 def _http_status(exc: BaseException) -> int | None:
@@ -525,6 +565,25 @@ async def _teardown(client: Any, name: str | None) -> None:
     finally:
         with contextlib.suppress(Exception):
             await asyncio.wait_for(client.aclose(), _DELETE_TIMEOUT_SECONDS)
+
+
+async def _wait_through_cancels(task: asyncio.Future[None]) -> None:
+    """Wait until a task ends, also through repeated cancels, then pass one cancel on.
+
+    Args:
+        task: The task to wait for; a cancel of the caller never reaches it.
+
+    Raises:
+        asyncio.CancelledError: The caller was cancelled during the wait.
+    """
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError as error:
+            cancelled = error
+    if cancelled is not None:
+        raise cancelled
 
 
 async def _kill(handle: Any) -> None:

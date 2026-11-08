@@ -7,6 +7,7 @@ replaced with an in-memory fake that records the calls.
 from __future__ import annotations
 
 import asyncio
+import json
 import shlex
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from core.sandbox import SandboxSpec, factory
 from core.sandbox.errors import (
     RunTimeoutError,
     SandboxFatalError,
+    SandboxInfraError,
     SandboxRejectedError,
     SandboxTransientError,
     StartTimeoutError,
@@ -27,6 +29,17 @@ from core.sandbox.providers import langsmith
 from core.sandbox.providers.langsmith import LangSmithEnvironment
 from core.sandbox.resources import ResourceMode, ResourceRequest
 from core.sandbox.tests.test_environment import SandboxEnvironmentContract
+
+try:
+    from langsmith import sandbox as sdk
+    from langsmith._httpx import httpx as sdk_httpx
+    from langsmith.sandbox._transport import AsyncRetryTransport
+    from langsmith.utils import LangSmithError as SDKLangSmithError
+except ImportError:
+    sdk = None
+    sdk_httpx = None
+    AsyncRetryTransport = None
+    SDKLangSmithError = None
 
 _SPEC = SandboxSpec(lifetime_seconds=60, resources=ResourceRequest(cpus=1))
 
@@ -264,6 +277,10 @@ class FakeServer:
         self.create_error: BaseException | None = None
         self.create_hangs = False
         self.create_then_fail = False
+        self.create_started = asyncio.Event()
+        self.create_gate: asyncio.Event | None = None
+        self.delete_started = asyncio.Event()
+        self.delete_gate: asyncio.Event | None = None
 
 
 class FakeClient:
@@ -278,6 +295,9 @@ class FakeClient:
     async def create_sandbox(self, **kwargs: Any) -> FakeBox:
         """Record the create call and return a new box."""
         self.server.creates.append(kwargs)
+        self.server.create_started.set()
+        if self.server.create_gate is not None:
+            await self.server.create_gate.wait()
         if self.server.create_hangs:
             await asyncio.Event().wait()
         if self.server.create_error is not None:
@@ -291,6 +311,9 @@ class FakeClient:
     async def delete_sandbox(self, name: str) -> None:
         """Delete one box, or raise the not-found error."""
         self.server.deletes.append(name)
+        self.server.delete_started.set()
+        if self.server.delete_gate is not None:
+            await self.server.delete_gate.wait()
         if self.server.boxes.pop(name, None) is None:
             raise FakeNotFoundError(name)
 
@@ -427,6 +450,70 @@ async def test_stop_tolerates_a_sandbox_that_is_already_gone(server: FakeServer)
     server.boxes.clear()
     await env.stop()
     assert server.closed == 1
+
+
+async def test_stop_during_create_stops_the_new_box(server: FakeServer) -> None:
+    """End the start with an infra error and delete the box when a stop runs during the create."""
+    server.create_gate = asyncio.Event()
+    env = LangSmithEnvironment(_SPEC)
+    task = asyncio.create_task(env.start())
+    await asyncio.wait_for(server.create_started.wait(), 5)
+    await asyncio.wait_for(env.stop(), 5)
+    server.create_gate.set()
+    with pytest.raises(SandboxInfraError, match="stopped during start"):
+        await task
+    assert server.boxes == {}
+    assert server.deletes == [env.name, env.name]
+    assert server.closed == 2
+    assert env not in LangSmithEnvironment._running
+    await env.stop()
+    with pytest.raises(RuntimeError):
+        await env.exec("true")
+
+
+async def test_stop_during_a_failing_create_deletes_the_partial_box(server: FakeServer) -> None:
+    """Delete a box that a failing create made after a stop ran, and keep the create error."""
+    server.create_gate = asyncio.Event()
+    server.create_then_fail = True
+    env = LangSmithEnvironment(_SPEC)
+    task = asyncio.create_task(env.start())
+    await asyncio.wait_for(server.create_started.wait(), 5)
+    await asyncio.wait_for(env.stop(), 5)
+    server.create_gate.set()
+    with pytest.raises(SandboxTransientError):
+        await task
+    assert server.boxes == {}
+    assert server.closed == 2
+
+
+async def test_repeated_cancel_during_stop_finishes_the_delete(server: FakeServer) -> None:
+    """Finish the delete through two cancels, pass one cancel on, and keep later stops quiet."""
+    env = LangSmithEnvironment(_SPEC)
+    await env.start()
+    server.delete_gate = asyncio.Event()
+    task = asyncio.create_task(env.stop())
+    await asyncio.wait_for(server.delete_started.wait(), 5)
+    for _ in range(2):
+        task.cancel()
+        await asyncio.sleep(0)
+    assert not task.done()
+    server.delete_gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert server.boxes == {}
+    assert server.closed == 1
+    await env.stop()
+
+
+async def test_stop_ignores_a_cancelled_teardown(server: FakeServer) -> None:
+    """Return from a later stop when the earlier teardown task was cancelled."""
+    env = LangSmithEnvironment(_SPEC)
+    await env.start()
+    await env.stop()
+    cancelled = asyncio.get_running_loop().create_future()
+    cancelled.cancel()
+    env._stop_task = cancelled
+    await env.stop()
 
 
 async def test_failed_start_deletes_the_partial_sandbox(server: FakeServer) -> None:
@@ -646,3 +733,123 @@ def test_factory_refuses_the_provider_in_production(monkeypatch: pytest.MonkeyPa
         factory.create_environment("langsmith", _SPEC)
     with pytest.raises(ProductionNotAllowedError):
         factory.preflight("langsmith")
+
+
+_BOX_ID = "11111111-1111-1111-1111-111111111111"
+
+
+@pytest.fixture
+def transport_failures(server: FakeServer, monkeypatch: pytest.MonkeyPatch) -> dict[str, BaseException | None]:
+    """Run the provider on the real SDK over an HTTPX mock transport, with no network.
+
+    Args:
+        server: The fake SDK names, which this fixture replaces again.
+        monkeypatch: Restores the provider module after the test.
+
+    Returns:
+        Maps ``"create"`` and ``"read"`` to the transport error that the call raises, or ``None``.
+    """
+    if sdk is None:
+        pytest.skip("The langsmith extra is not installed.")
+    failures: dict[str, BaseException | None] = {"create": None, "read": None}
+
+    def handler(request: Any) -> Any:
+        """Answer the sandbox API calls, or raise the configured transport error.
+
+        Args:
+            request: The HTTPX request.
+
+        Returns:
+            The HTTPX response.
+        """
+        if request.method == "POST" and request.url.path.endswith("/boxes"):
+            if failures["create"] is not None:
+                raise failures["create"]
+            body = json.loads(request.content)
+            return sdk_httpx.Response(
+                200,
+                json={
+                    "name": body["name"],
+                    "id": _BOX_ID,
+                    "status": "ready",
+                    "dataplane_url": "https://dp.invalid/box",
+                },
+            )
+        if request.method == "DELETE":
+            return sdk_httpx.Response(204)
+        if request.method == "GET" and request.url.path.endswith("/download"):
+            if failures["read"] is not None:
+                raise failures["read"]
+            return sdk_httpx.Response(200, content=b"hi")
+        return sdk_httpx.Response(200, json={})
+
+    class MockClient(sdk.AsyncSandboxClient):
+        """Use the real SDK client with a mock transport behind the SDK retry transport."""
+
+        def __init__(self, **kwargs: Any) -> None:
+            """Build the real client, then swap its HTTP client.
+
+            Args:
+                **kwargs: The client options.
+            """
+            super().__init__(**kwargs)
+            self._http = sdk_httpx.AsyncClient(
+                transport=AsyncRetryTransport(max_retries=0, transport=sdk_httpx.MockTransport(handler)),
+                timeout=kwargs.get("timeout", 10),
+            )
+
+    monkeypatch.setattr(langsmith, "AsyncSandboxClient", MockClient)
+    monkeypatch.setattr(langsmith, "LangSmithError", SDKLangSmithError)
+    for name in (
+        "CommandTimeoutError",
+        "DataplaneNotConfiguredError",
+        "QuotaExceededError",
+        "ResourceCreationError",
+        "ResourceNotFoundError",
+        "ResourceTimeoutError",
+        "SandboxAPIError",
+        "SandboxAuthenticationError",
+        "SandboxConnectionError",
+        "SandboxNotReadyError",
+        "SandboxOperationError",
+        "ValidationError",
+    ):
+        monkeypatch.setattr(langsmith, name, getattr(sdk, name))
+    return failures
+
+
+def _make_sdk_env() -> LangSmithEnvironment:
+    """Build a provider with a fake key and an endpoint that the mock transport serves.
+
+    Returns:
+        The stopped provider.
+    """
+    return LangSmithEnvironment(_SPEC, api_key="test-not-a-key", api_url="https://api.invalid/v2/sandboxes")
+
+
+async def test_raw_read_timeout_during_start_is_a_start_timeout(
+    transport_failures: dict[str, BaseException | None],
+) -> None:
+    """Map an HTTPX read timeout of the create call, which the SDK does not wrap, to StartTimeoutError."""
+    request = sdk_httpx.Request("POST", "https://api.invalid/v2/sandboxes/boxes")
+    transport_failures["create"] = sdk_httpx.ReadTimeout("read timed out", request=request)
+    env = _make_sdk_env()
+    with pytest.raises(StartTimeoutError) as caught:
+        await env.start()
+    assert isinstance(caught.value.__cause__, sdk_httpx.ReadTimeout)
+    assert caught.value.seconds == env._startup_timeout
+
+
+@pytest.mark.parametrize("error_cls", ["ReadTimeout", "RemoteProtocolError"])
+async def test_raw_transport_error_after_start_is_transient(
+    transport_failures: dict[str, BaseException | None], error_cls: str
+) -> None:
+    """Map an HTTPX read timeout or protocol error of a file read, which the SDK does not wrap, to transient."""
+    async with _make_sdk_env() as env:
+        request = sdk_httpx.Request("GET", "https://dp.invalid/box/download")
+        transport_failures["read"] = getattr(sdk_httpx, error_cls)("failed", request=request)
+        with pytest.raises(SandboxTransientError) as caught:
+            await env.download_file("/tmp/x")
+        assert isinstance(caught.value.__cause__, getattr(sdk_httpx, error_cls))
+        transport_failures["read"] = None
+        assert await env.download_file("/tmp/x") == "hi"
