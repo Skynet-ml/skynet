@@ -222,17 +222,16 @@ def claude_hidden_rules(workdir: Path, hidden_paths: Sequence[str], full: bool) 
     return rules
 
 
-def install_codex_guard(turn: Path, workdir: Path, codex_home: Path, hidden_paths: Sequence[str]) -> list[str]:
-    """Send every codex tool call of one turn through the hidden-path guard.
+def _guard_hook(turn: Path, workdir: Path, hidden_paths: Sequence[str]) -> tuple[dict[str, Any], list[str]]:
+    """Write the turn's guard policy and build the hook that checks each tool call against it.
 
     Args:
         turn: The turn's folder.
         workdir: The copied workspace.
-        codex_home: The turn's ``CODEX_HOME``.
         hidden_paths: Repository-relative hidden files and folders.
 
     Returns:
-        The folders the guard's interpreter must read under ``confine``.
+        The PreToolUse command hook, and the folders its interpreter must read under ``confine``.
     """
     guard_dir = turn / harness_bridge.GUARD_DIR
     guard_dir.mkdir()
@@ -249,8 +248,48 @@ def install_codex_guard(turn: Path, workdir: Path, codex_home: Path, hidden_path
     python = os.path.realpath(sys.executable)
     command = [python, "-I", str(bridge), "guard", "hook", str(policy_file), digest]
     hook = {"type": "command", "command": shlex.join(command), "timeout": 10}
+    return hook, list(dict.fromkeys([os.path.realpath(sys.base_prefix), str(Path(python).parent)]))
+
+
+def install_codex_guard(turn: Path, workdir: Path, codex_home: Path, hidden_paths: Sequence[str]) -> list[str]:
+    """Send every codex tool call of one turn through the hidden-path guard.
+
+    Args:
+        turn: The turn's folder.
+        workdir: The copied workspace.
+        codex_home: The turn's ``CODEX_HOME``.
+        hidden_paths: Repository-relative hidden files and folders.
+
+    Returns:
+        The folders the guard's interpreter must read under ``confine``.
+    """
+    hook, roots = _guard_hook(turn, workdir, hidden_paths)
     (codex_home / "hooks.json").write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [hook]}]}}), encoding="utf-8")
-    return list(dict.fromkeys([os.path.realpath(sys.base_prefix), str(Path(python).parent)]))
+    return roots
+
+
+def install_claude_guard(turn: Path, workdir: Path, hidden_paths: Sequence[str]) -> tuple[str, ...]:
+    """Send every Claude Bash call of one turn through the hidden-path guard.
+
+    A deny rule matches a Bash command only by text, so ``cd eval && cat
+    cases.jsonl`` or ``cat eval/./cases.jsonl`` pass it; the guard resolves
+    the path. ``--setting-sources ""`` loads no settings file, but Claude
+    still reads the hooks of a ``--settings`` file.
+
+    Args:
+        turn: The turn's folder.
+        workdir: The copied workspace.
+        hidden_paths: Repository-relative hidden files and folders.
+
+    Returns:
+        The CLI arguments that load the hook.
+    """
+    hook, _ = _guard_hook(turn, workdir, hidden_paths)
+    settings_file = turn / harness_bridge.GUARD_DIR / "settings.json"
+    settings_file.write_text(
+        json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}]}}), encoding="utf-8"
+    )
+    return ("--settings", str(settings_file))
 
 
 def host_refusals(
@@ -1313,6 +1352,9 @@ def run_host_agent(
                 guard_roots = install_codex_guard(turn, workdir, Path(env["CODEX_HOME"]), hidden_paths)
                 # Codex skips a new hooks.json hook until it is trusted.
                 isolation_args = (*isolation_args, "--dangerously-bypass-hook-trust")
+            elif hidden_paths and cli == "claude" and permission == "full_access":
+                # Only full_access turns have Bash, and they run without confine().
+                isolation_args = (*isolation_args, *install_claude_guard(turn, workdir, hidden_paths))
             binary = _command(cli_binary(cli, settings), env)
             model = str(body.get("model") or "")
             argv = host_cli_argv(

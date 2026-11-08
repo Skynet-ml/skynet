@@ -600,6 +600,27 @@ def test_guard_cli_answers_codex_hooks_and_js_checks_and_logs_only_tool_and_kind
     assert (Path(env["OPENCODE_CONFIG_DIR"]) / "plugin" / "app-guard.js").exists()
 
 
+def test_read_refusals_skips_lines_the_agent_broke(tmp_path: Path) -> None:
+    """Skip a line that is not JSON, a non-object, and an entry without a string tool and kind."""
+    log = tmp_path / harness_bridge.GUARD_DIR / "refusals.jsonl"
+    log.parent.mkdir()
+    lines = [
+        json.dumps({"tool": "Bash", "kind": "scoring", "path": "metric.py"}),
+        "not json {",
+        "5",
+        json.dumps(["Read", "config"]),
+        json.dumps({"tool": "Read"}),
+        json.dumps({"tool": 3, "kind": "config"}),
+        json.dumps({"tool": "Read", "kind": "config"}),
+    ]
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    assert harness_bridge.read_refusals(tmp_path) == [
+        {"tool": "Bash", "kind": "scoring"},
+        {"tool": "Read", "kind": "config"},
+    ]
+
+
 _NODE = shutil.which("node")
 
 

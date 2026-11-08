@@ -1660,6 +1660,73 @@ def test_installed_claude_refuses_hidden_paths_in_any_case_and_through_home(
     assert host_agent.host_refusals("claude", completed.stdout, turn, workspace, ["optimize.toml"]) == expected
 
 
+@pytest.mark.skipif(_CLAUDE is None, reason="claude is not installed")
+@pytest.mark.skipif(sys.platform != "darwin", reason="the host agent runs on macOS")
+@pytest.mark.parametrize(
+    ("command", "denied"),
+    [
+        ("cd eval && cat cases.jsonl", True),
+        ("cat ./eval//cases.jsonl", True),
+        ("cat eval/./cases.jsonl", True),
+        ("cd eval && python3 -c \"print(open('cases.jsonl').read())\"", True),
+        ("python3 -c \"print(open('eval/./cases.jsonl').read())\"", True),
+        ("cat notes.txt", False),
+    ],
+)
+def test_installed_claude_bash_guard_refuses_nested_hidden_paths(tmp_path: Path, command: str, denied: bool) -> None:
+    """Run the real Claude CLI with the turn's Bash guard hook and a fake model that runs one command.
+
+    A Bash deny rule matches only the command text, and Claude applies its
+    Read rules only to the paths it parses from a command, so a script that
+    opens a nested hidden file passes both. The guard hook resolves the path
+    and refuses each form.
+
+    Args:
+        command: The shell command the fake model runs.
+        denied: Whether the guard must refuse the command.
+    """
+    turn = tmp_path / "turn"
+    home, workspace = turn / "home", turn / "workspace"
+    home.mkdir(parents=True)
+    (workspace / "eval").mkdir(parents=True)
+    (workspace / "eval" / "cases.jsonl").write_text("HIDDEN_SENTINEL\n", encoding="utf-8")
+    (workspace / "notes.txt").write_text("VISIBLE_SENTINEL\n", encoding="utf-8")
+    hidden = ["eval/cases.jsonl"]
+    results: list[dict] = []
+    server = _fake_anthropic({"name": "Bash", "input": {"command": command}}, results)
+    guard_args = host_agent.install_claude_guard(turn, workspace, hidden)
+    argv = host_cli_argv(
+        "claude",
+        "full_access",
+        str(_CLAUDE),
+        workspace,
+        "claude-sonnet-4-5",
+        (*CLAUDE_ARGS, *guard_args),
+        None,
+        host_agent.claude_hidden_rules(workspace, hidden, full=True),
+    )
+    env = {name: value for name, value in os.environ.items() if not name.startswith(("ANTHROPIC_", "CLAUDE"))}
+    env.update(
+        HOME=str(home),
+        ANTHROPIC_BASE_URL=f"http://127.0.0.1:{server.server_port}",
+        ANTHROPIC_API_KEY="test-placeholder",
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
+    )
+    try:
+        completed = subprocess.run(
+            argv, input="go", cwd=workspace, env=env, capture_output=True, text=True, timeout=120, check=False
+        )
+    finally:
+        server.shutdown()
+
+    assert len(results) == 1, completed.stderr
+    content = json.dumps(results[0])
+    assert "HIDDEN_SENTINEL" not in content
+    assert ("VISIBLE_SENTINEL" in content) is (not denied)
+    expected = [{"tool": "Bash", "kind": "scoring"}] if denied else []
+    assert host_agent.host_refusals("claude", completed.stdout, turn, workspace, hidden) == expected
+
+
 def test_codex_turns_install_a_guard_hook_that_refuses_hidden_paths(tmp_path: Path) -> None:
     """Write the Codex hooks file, refuse a hidden read through it, and read back only tool and kind."""
     turn = tmp_path / "turn"
@@ -1721,3 +1788,40 @@ def test_codex_turns_trust_the_guard_hook_only_when_paths_are_hidden(
     assert document["refusals"] == []
     argv = json.loads((tmp_path / "record.json").read_text())["argv"]
     assert ("--dangerously-bypass-hook-trust" in argv) == bool(hidden)
+
+
+@pytest.mark.parametrize(
+    ("permission", "hidden", "guarded"),
+    [
+        ("full_access", ("optimize.toml",), True),
+        ("full_access", (), False),
+        ("workspace_only", ("optimize.toml",), False),
+    ],
+)
+def test_claude_turns_load_the_bash_guard_hook_only_with_bash_and_hidden_paths(
+    local: Settings,
+    guest: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    permission: str,
+    hidden: tuple[str, ...],
+    guarded: bool,
+) -> None:
+    """Pass the guard's settings file to a full_access Claude turn with hidden paths, and to no other turn.
+
+    Args:
+        permission: The turn's permission mode.
+        hidden: The run's hidden paths.
+        guarded: Whether the turn must load the guard hook.
+    """
+    monkeypatch.setenv("FAKE_CLI_NAME", "claude")
+    body = {"model": "", "prompt": "x", "workspace_tar_b64": _workspace_tar(guest)}
+
+    document = run_host_agent(body, local, cli="claude", permission=permission, hidden_paths=hidden)
+
+    assert document["status"] == "ok", document
+    argv = json.loads((tmp_path / "record.json").read_text())["argv"]
+    assert ("--settings" in argv) is guarded
+    if guarded:
+        settings_path = argv[argv.index("--settings") + 1]
+        assert settings_path.endswith("/guard/settings.json")

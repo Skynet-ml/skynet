@@ -422,6 +422,20 @@ def test_a_hidden_path_is_refused_on_open_and_on_edit_and_the_refusal_is_reporte
     assert refusals == [{"tool": "open", "kind": kind}, {"tool": "edit", "kind": kind}]
 
 
+@pytest.mark.parametrize("path", ["./optimize.toml", "src/../optimize.toml", ".//optimize.toml", "/optimize.toml"])
+def test_another_form_of_a_hidden_path_is_refused_and_reported(tmp_path: Path, path: str) -> None:
+    """Refuse and report an open or an edit of a hidden path written in a form that normalizes to it."""
+    bundle, refusals = _hidden_bundle(tmp_path)
+
+    _, _, message = bundle.apply({}, f"<OPEN>{path}</OPEN>")
+    assert harness_bridge.GUARD_REFUSAL in str(message)
+    assert "Not available" not in str(message)
+
+    files, applied, error = bundle.apply({}, f'<FILE path="{path}">x</FILE>')
+    assert (files, applied, error) == (None, 0, harness_bridge.GUARD_REFUSAL)
+    assert refusals == [{"tool": "open", "kind": "config"}, {"tool": "edit", "kind": "config"}]
+
+
 def test_hidden_paths_stay_out_of_the_file_list_and_other_files_still_open(tmp_path: Path) -> None:
     """Leave hidden paths out of the editable files the prompt lists, and keep other files open."""
     bundle, refusals = _hidden_bundle(tmp_path)

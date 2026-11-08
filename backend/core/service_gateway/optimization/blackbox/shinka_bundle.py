@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import posixpath
 import random
 import re
 import subprocess
@@ -173,9 +174,28 @@ def parse_response(text: str) -> tuple[list[tuple[str, str]], list[str]]:
     Returns:
         ``(path, body)`` per FILE block in answer order, and the requested paths.
     """
-    edits = [(path.strip().removeprefix("./"), body) for path, body in _FILE_BLOCK.findall(text)]
-    opens = [path.strip() for path in _OPEN_REQUEST.findall(text) if path.strip()]
+    edits = [(_clean_path(path), body) for path, body in _FILE_BLOCK.findall(text)]
+    opens = [path for path in map(_clean_path, _OPEN_REQUEST.findall(text)) if path]
     return edits, list(dict.fromkeys(opens))
+
+
+def _clean_path(path: str) -> str:
+    """Normalize a path the model named, so ``./x``, ``a/../x`` and ``.//x`` all name ``x``.
+
+    The hidden-path and editable-path rules compare exact names, so each form
+    of one file must reach them as the same name.
+
+    Args:
+        path: The path as the model wrote it.
+
+    Returns:
+        The repository-relative path, or ``""`` for an empty path.
+    """
+    path = path.strip()
+    if not path:
+        return ""
+    path = posixpath.normpath(path).lstrip("/")
+    return "" if path == "." else path
 
 
 def apply_file_edit(body: str, current: str | None) -> tuple[str, int]:

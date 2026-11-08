@@ -835,16 +835,28 @@ def install_guard(
 def read_refusals(session_dir: Path) -> list[dict[str, str]]:
     """Read the refusals one session logged.
 
+    The agent can write the log, so a line that is not a JSON object with a
+    string ``tool`` and ``kind`` is skipped; it must not break the session's
+    result or settlement.
+
     Args:
         session_dir: Private directory of the session.
 
     Returns:
-        One ``{"tool", "kind"}`` entry per refusal.
+        One ``{"tool", "kind"}`` entry per well-formed refusal line.
     """
     log = session_dir / GUARD_DIR / "refusals.jsonl"
     if not log.exists():
         return []
-    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    refusals = []
+    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and isinstance(entry.get("tool"), str) and isinstance(entry.get("kind"), str):
+            refusals.append({"tool": entry["tool"], "kind": entry["kind"]})
+    return refusals
 
 
 def refusal_record(refusal: dict[str, Any]) -> dict[str, Any]:
