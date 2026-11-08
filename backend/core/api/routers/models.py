@@ -36,7 +36,8 @@ from ...config import settings
 from ...local.cli_catalog import SUBSCRIPTION_MODEL_PREFIX
 from ...local.cli_probe import probe_clis
 from ...service_gateway.optimization.blackbox.runner import DEFAULT_MAX_TOKENS
-from ...service_gateway.optimization.blackbox.sandbox import COVERAGE_SLICE_SECONDS, SandboxSpec
+from ...service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
+from ...service_gateway.optimization.blackbox.sandbox_runtime import COVERAGE_SLICE_SECONDS
 from ..artificial_analysis import with_artificial_analysis_links
 from ..auth import AuthenticatedUser, get_authenticated_user
 from ..interview_model import with_interview_default

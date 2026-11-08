@@ -54,7 +54,7 @@ from ..service_gateway.optimization.blackbox.hardening import Candidate, Hardeni
 from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
 from ..service_gateway.optimization.blackbox.repo_tree import apply_patch
 from ..service_gateway.optimization.blackbox.repo_workspace import RepoWorkspace
-from ..service_gateway.optimization.blackbox.sandbox import SandboxSpec
+from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
 from .hardening_job import HardeningWorkspace, run_hardening_job
 from .repo_staging import _judge_limits, _reply_text, _repo_model_gateway
 

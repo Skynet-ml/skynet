@@ -83,7 +83,7 @@ from ..service_gateway.optimization.blackbox.rule_judge import (
     describe_model_call,
     run_log_emitter,
 )
-from ..service_gateway.optimization.blackbox.sandbox import SandboxSpec
+from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
 from ..service_gateway.optimization.blackbox.sandbox_scorer import ScorerGateway, scorer_gateway
 from .repo_gate import RepoGateError, check_hidden, sandbox_place
 
