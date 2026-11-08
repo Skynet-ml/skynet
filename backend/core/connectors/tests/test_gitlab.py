@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from ...api.errors import DomainError
+from ...i18n import t_locale
 from .. import gitlab, transport
 from ..github_publish import HardeningSummary, RepoPublishError
 from ..github_repo import RepoFetchError
@@ -274,3 +275,56 @@ def test_oauth_app_uses_gitlab_endpoints() -> None:
     assert app.authorize_url == "https://gitlab.com/oauth/authorize"
     assert app.token_url == "https://gitlab.com/oauth/token"
     assert "api" in app.scopes.split()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://GitLab.com:443/team/sub/bot.git", "team/sub/bot"),
+        ("https://www.gitlab.com/team/bot/-/tree/main/src", "team/bot"),
+        ("git@gitlab.com:team/bot.git", "team/bot"),
+        ("  team/bot.git ", "team/bot"),
+    ],
+)
+def test_repo_path_reads_a_pasted_url(value: str, expected: str) -> None:
+    """A port, a trailing ``.git``, upper-case host letters and page paths do not change the project."""
+    assert gitlab.repo_path(value, gitlab.WEB_URL, gitlab.PROVIDER) == expected
+
+
+def test_project_url_accepts_a_clone_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A clone URL resolves to the same encoded project id as its path."""
+    seen = _serve(monkeypatch, lambda _r: httpx.Response(200, json={"default_branch": "dev"}))
+    assert gitlab._default_branch("glpat", "https://GITLAB.com:443/group/sub/app.git") == "dev"
+    assert seen[0].url.raw_path.decode() == "/api/v4/projects/group%2Fsub%2Fapp"
+
+
+def test_list_repositories_finds_a_project_from_its_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pasted web URL finds the project, like its path does."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        """Return an empty member list or the direct lookup."""
+        if request.url.path == "/api/v4/projects":
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, json=_project("other/bot", visibility="public"))
+
+    _serve(monkeypatch, answer)
+    found = gitlab.list_repositories(_secret(), "https://gitlab.com/other/bot.git")
+    assert [r["full_name"] for r in found] == ["other/bot"]
+
+
+@pytest.mark.parametrize("value", ["https://gitlab.example.com/team/bot", "git@gitlab.example.com:team/bot.git"])
+def test_self_managed_gitlab_host_is_refused_by_name(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    """A self-managed GitLab URL gets a refusal that names its host and gitlab.com, before any request."""
+    seen = _serve(monkeypatch, lambda _r: httpx.Response(200, json={}))
+    with pytest.raises(DomainError) as caught:
+        gitlab._project_url(value)
+    assert caught.value.code == "connectors.other_repo_host"
+    assert caught.value.status_code == 400
+    message = t_locale("en", caught.value.code, **caught.value.params)
+    assert message.startswith("gitlab.example.com is not gitlab.com.")
+    assert "Use the repository's gitlab.com address" in message
+    assert "gitlab.example.com" in t_locale("he", caught.value.code, **caught.value.params)
+    assert caught.value.params == {"provider": "GitLab", "host": "gitlab.example.com", "expected": "gitlab.com"}
+    with pytest.raises(DomainError):
+        gitlab.list_repositories(_secret(), value)
+    assert len(seen) == 1

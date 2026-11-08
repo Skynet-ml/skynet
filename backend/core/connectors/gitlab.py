@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import re
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from ..api.errors import DomainError
 from ..config import settings
@@ -37,6 +37,48 @@ TREE_PAGE_LIMIT = 50
 # GitLab projects can sit in nested subgroups: ``group/sub/project``.
 REPO_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,255}(/[A-Za-z0-9_.-]{1,255}){1,20}$")
 DRAFT_PREFIX = "Draft: "
+# ``git@host:path`` clone addresses, which ``urlsplit`` does not parse.
+SCP_URL = re.compile(r"^[\w.-]+@([^:/\s]+):(.+)$")
+
+
+def repo_path(value: str, web_url: str, provider: str, segments: int | None = None) -> str:
+    """Turn a pasted web or clone URL into the host's repository path.
+
+    The host name is compared without case and without its port. A trailing
+    ``.git`` is dropped, and so is any page after the repository in a URL
+    (``/-/tree/...`` on GitLab, ``/src/...`` on Bitbucket).
+
+    Args:
+        value: What the user or an agent gave: a path or a URL.
+        web_url: The host's web address, for example ``https://gitlab.com``.
+        provider: Connector name for the refusal.
+        segments: Keep at most this many URL path segments; ``None`` keeps all.
+
+    Returns:
+        The repository path, for example ``group/sub/project``.
+
+    Raises:
+        DomainError: 400 ``other_repo_host`` when the URL names another host,
+            such as a self-managed GitLab server.
+    """
+    text = value.strip()
+    scp = SCP_URL.match(text)
+    if scp or "://" in text:
+        if scp:
+            host_name, path = scp.group(1), scp.group(2)
+        else:
+            parts = urlsplit(text)
+            host_name, path = parts.hostname or "", parts.path
+        host_name = host_name.lower().rstrip(".")
+        expected = urlsplit(web_url).hostname or ""
+        if host_name not in (expected, f"www.{expected}"):
+            raise DomainError(
+                "connectors.other_repo_host", status=400, provider=label(provider), host=host_name, expected=expected
+            )
+        text = path.strip("/").split("/-/")[0]
+        if segments is not None:
+            text = "/".join(text.split("/")[:segments])
+    return text.removesuffix(".git")
 
 
 def oauth_app() -> OAuthApp:
@@ -173,9 +215,9 @@ def _project_url(full_name: str) -> str:
         The URL.
 
     Raises:
-        DomainError: 400 when the value is not a project path.
+        DomainError: 400 when the value is not a project path or names another host.
     """
-    value = full_name.strip()
+    value = repo_path(full_name, WEB_URL, PROVIDER)
     if not REPO_NAME.match(value):
         raise DomainError("connectors.invalid_ref", status=400)
     return f"{API_URL}/projects/{quote(value, safe='')}"
@@ -253,7 +295,8 @@ def list_repositories(secret: ConnectorSecret, search: str) -> list[dict[str, An
         headers=_headers(token),
         params={"membership": "true", "order_by": "last_activity_at", "per_page": REPO_LIMIT},
     )
-    words = search_words(search)
+    needle = repo_path(search, WEB_URL, PROVIDER)
+    words = search_words(needle)
     repos = [
         summary
         for summary in (
@@ -263,7 +306,6 @@ def list_repositories(secret: ConnectorSecret, search: str) -> list[dict[str, An
         )
         if matches_search(summary, words)
     ]
-    needle = search.strip()
     if REPO_NAME.match(needle) and not any(r["full_name"].lower() == needle.lower() for r in repos):
         try:
             found = get_json(_project_url(needle), provider=PROVIDER, headers=_headers(token))

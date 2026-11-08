@@ -326,6 +326,7 @@
     "connectors.file_unsupported": "לא ניתן לקרוא את הקובץ כטבלה. פורמטים נתמכים: CSV, TSV, JSON, JSONL ו-Parquet.",
     "connectors.import_too_large": "הקובץ גדול מדי לייבוא (המגבלה היא {max_mb} MB).",
     "connectors.invalid_ref": "המיקום הזה אינו תקין. בחרו קובץ מהרשימה.",
+    "connectors.other_repo_host": "{host} הוא לא {expected}. Skynet מתחבר רק ל-gitlab.com ול-Bitbucket Cloud, לא לשרתים בניהול עצמי. השתמשו בכתובת של המאגר ב-{expected}, או העבירו את המאגר ל-{expected}.",
     "connectors.picker_unavailable": "בחירת קבצים מ-Google לא מוגדרת בפריסה הזו.",
     "connectors.picker_needs_oauth": "בחירת קבצים דורשת חשבון {provider} שחובר דרך התחברות עם Google.",
     "connectors.unknown_provider": "מחבר לא מוכר: {provider}.",

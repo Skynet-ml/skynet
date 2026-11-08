@@ -270,3 +270,27 @@ def test_list_commits_names_the_branch_in_the_query(monkeypatch: pytest.MonkeyPa
     ]
     assert seen[0].url.path == "/2.0/repositories/team/bot/commits"
     assert seen[0].url.params["include"] == "feature/x"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://user@BITBUCKET.org:443/team/bot.git", "team/bot"),
+        ("https://bitbucket.org/team/bot/src/main/app.py", "team/bot"),
+        ("git@bitbucket.org:team/bot.git", "team/bot"),
+        ("team/bot.git", "team/bot"),
+    ],
+)
+def test_repo_path_reads_a_pasted_url(value: str, expected: str) -> None:
+    """A port, a user, a trailing ``.git``, upper-case host letters and page paths do not change the repository."""
+    assert bitbucket.repo_path(value, bitbucket.WEB_URL, bitbucket.PROVIDER, segments=2) == expected
+    assert bitbucket._repo_url(value) == REPO
+
+
+def test_other_host_is_refused_by_name() -> None:
+    """A URL on another host (for example Bitbucket Data Center) is refused and names the host."""
+    with pytest.raises(DomainError) as caught:
+        bitbucket._repo_url("https://bitbucket.example.com/scm/team/bot.git")
+    assert caught.value.code == "connectors.other_repo_host"
+    assert caught.value.params["host"] == "bitbucket.example.com"
+    assert caught.value.params["expected"] == "bitbucket.org"

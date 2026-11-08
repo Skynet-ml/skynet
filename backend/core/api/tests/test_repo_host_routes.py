@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
 from urllib.parse import unquote
@@ -10,6 +11,8 @@ from urllib.parse import unquote
 import httpx
 import pytest
 
+from ...config import settings
+from ...connectors.vault import ConnectorVault
 from .test_connectors_router import (
     _make_client,
     _response,
@@ -140,3 +143,75 @@ def test_host_picker_refuses_other_providers() -> None:
     client, _ = _make_client()
     response = client.get("/connectors/notion/repos")
     assert response.status_code == 422
+
+
+def _link(store: Any, provider: str, expires_in: timedelta, refresh_token: str | None = "rt") -> ConnectorVault:
+    """Store an OAuth grant for alice on ``provider``.
+
+    Args:
+        store: The test store from ``_make_client``.
+        provider: Connector name.
+        expires_in: Time until the access token expires; negative for a stale token.
+        refresh_token: The stored refresh token, or ``None``.
+
+    Returns:
+        The vault that holds the grant.
+    """
+    vault = ConnectorVault(store.engine)
+    vault.save(
+        "alice",
+        provider,
+        access_token="old",
+        auth_method="oauth",
+        account_label="alice",
+        refresh_token=refresh_token,
+        expires_at=datetime.now(UTC) + expires_in,
+    )
+    return vault
+
+
+@pytest.mark.usefixtures("vault_key")
+@pytest.mark.parametrize(("provider", "name"), [("github", "GitHub"), ("bitbucket", "Bitbucket")])
+def test_revoked_token_gives_the_github_error_shape(provider: str, name: str) -> None:
+    """A revoked Bitbucket token answers exactly like a revoked GitHub token: 409 ``connectors.rejected``."""
+    client, store = _make_client()
+    _link(store, provider, timedelta(hours=1))
+    with patch("core.connectors.transport.CLIENT.request", return_value=_response(401, {"message": "revoked"})):
+        response = client.get(f"/connectors/{provider}/repos")
+    assert response.status_code == 409, response.text
+    body = response.json()
+    assert (body["code"], body["params"]) == ("connectors.rejected", {"provider": name})
+
+
+@pytest.mark.usefixtures("vault_key")
+@pytest.mark.parametrize("provider", ["github", "bitbucket"])
+@pytest.mark.parametrize("refresh_token", ["rt", None])
+def test_expired_grant_gives_the_github_error_shape(
+    monkeypatch: pytest.MonkeyPatch, provider: str, refresh_token: str | None
+) -> None:
+    """An expired Bitbucket grant whose refresh fails, or with no refresh token, answers like GitHub's."""
+    monkeypatch.setattr(settings, f"{provider}_oauth_client_id", "client")
+    client, store = _make_client()
+    vault = _link(store, provider, -timedelta(minutes=1), refresh_token)
+    with (
+        patch("core.connectors.oauth.httpx.post", return_value=_response(400, {"error": "invalid_grant"})),
+        patch("core.connectors.transport.CLIENT.request") as never,
+    ):
+        response = client.get(f"/connectors/{provider}/repos")
+    never.assert_not_called()
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "connectors.expired"
+    assert vault.get("alice", provider).status == "invalid"
+
+
+@pytest.mark.usefixtures("vault_key")
+def test_self_managed_gitlab_url_is_refused_on_the_route() -> None:
+    """A self-managed GitLab URL answers 400 with a message that names the host and gitlab.com."""
+    client, _ = _make_client()
+    with patch("core.connectors.transport.CLIENT.request", side_effect=_gitlab_api):
+        client.put("/connectors/gitlab/credentials", json={"fields": {"token": "glpat-x"}})
+        response = client.get("/connectors/gitlab/branches", params={"repo": "https://gitlab.example.com/team/bot"})
+    assert response.status_code == 400, response.text
+    body = response.json()
+    assert body["code"] == "connectors.other_repo_host"
+    assert body["params"] == {"provider": "GitLab", "host": "gitlab.example.com", "expected": "gitlab.com"}
