@@ -183,8 +183,11 @@ class LocalEnvironment(SandboxEnvironment):
         except asyncio.CancelledError:
             # A cancelled spawn makes asyncio kill only the shell pid, so a
             # child that the shell already forked would outlive exec and stop().
-            # Let the spawn finish, then kill the whole new group.
-            await asyncio.wait({spawn})
+            # Let the spawn finish, then kill the whole new group. A second
+            # cancel must not end the wait early, or nobody kills the group.
+            while not spawn.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait({spawn})
             if not spawn.cancelled() and spawn.exception() is None:
                 await asyncio.shield(_end_process(spawn.result()))
             raise
@@ -199,9 +202,14 @@ class LocalEnvironment(SandboxEnvironment):
         stderr: list[str] = []
         finished = False
         try:
-            exit_code = await asyncio.wait_for(_collect(process, stdout, stderr, on_output), limit)
+            async with asyncio.timeout(limit) as deadline:
+                exit_code = await _collect(process, stdout, stderr, on_output)
             finished = True
         except TimeoutError:
+            # The output sink can raise its own TimeoutError; only an expired
+            # deadline is a run timeout.
+            if not deadline.expired():
+                raise
             raise RunTimeoutError(limit) from None
         finally:
             # A timeout, a cancel or an output-sink error must not leave the

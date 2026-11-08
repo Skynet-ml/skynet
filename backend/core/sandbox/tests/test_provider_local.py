@@ -333,6 +333,59 @@ async def test_cancel_during_spawn_kills_the_new_process_group(monkeypatch: pyte
         await box.stop()
 
 
+async def test_second_cancel_during_spawn_still_kills_the_new_process_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kill the new group when a second cancel lands while exec waits for the cancelled spawn."""
+    real_connect = asyncio.base_subprocess.BaseSubprocessTransport._connect_pipes
+
+    async def _slow_connect(self: asyncio.base_subprocess.BaseSubprocessTransport, waiter: asyncio.Future) -> None:
+        """Connect the pipes after a delay, so both cancels land inside the spawn.
+
+        Args:
+            self: The subprocess transport.
+            waiter: The future that the spawn waits on.
+        """
+        await asyncio.sleep(0.5)
+        await real_connect(self, waiter)
+
+    monkeypatch.setattr(asyncio.base_subprocess.BaseSubprocessTransport, "_connect_pipes", _slow_connect)
+    box = LocalEnvironment(_SPEC)
+    await box.start()
+    child = None
+    try:
+        task = asyncio.create_task(box.exec("sleep 60 </dev/null >/dev/null 2>&1 & echo $! > child.pid; wait"))
+        child = await _read_pid(box, "child.pid")
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await _wait_until_gone(child, 3)
+    finally:
+        await box.stop()
+        if child is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child, signal.SIGKILL)
+
+
+async def test_sink_timeout_error_is_not_a_run_timeout() -> None:
+    """Pass on a TimeoutError from the output sink instead of reporting a run timeout."""
+
+    def _sink(stream: str, text: str) -> None:
+        """Raise the built-in TimeoutError on the first chunk.
+
+        Args:
+            stream: The stream name.
+            text: The decoded chunk.
+        """
+        raise TimeoutError("sink timed out")
+
+    async with LocalEnvironment(_SPEC) as box:
+        for limit in (None, 30.0):
+            with pytest.raises(TimeoutError, match="sink timed out") as caught:
+                await box.exec("echo hi; sleep 0.1", timeout_sec=limit, on_output=_sink)
+            assert not isinstance(caught.value, RunTimeoutError)
+
+
 async def test_on_output_receives_both_streams() -> None:
     """Send stdout and stderr chunks to the sink, tagged by stream."""
     chunks: list[tuple[str, str]] = []
