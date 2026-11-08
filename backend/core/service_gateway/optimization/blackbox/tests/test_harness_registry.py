@@ -37,7 +37,7 @@ _OVERRIDES: dict[str, dict[str, str]] = {
     "plain": {},
     "override": {"install_command": "my-install {model}", "run_command": "my-run {gateway_url}"},
 }
-_BUILT_INS = ("pi", "codex", "opencode", "prime", "cline")
+_BUILT_INS = ("pi", "codex", "opencode", "prime", "fx", "cline")
 # The golden digests predate the registry, so they cover only these harnesses.
 _PRE_REGISTRY = ("pi", "codex", "opencode", "prime")
 # sha256 of every launch payload, captured from staging 0e1dd97d5 before the
@@ -258,6 +258,7 @@ def test_registry_keeps_the_catalog_order() -> None:
         "codex": ("codex", "0.153.0"),
         "opencode": ("opencode", "1.18.27"),
         "prime": ("prime-agent", "0.9.7"),
+        "fx": ("fx", "0.0.16"),
         "cline": ("cline", "3.0.74"),
     }
 
