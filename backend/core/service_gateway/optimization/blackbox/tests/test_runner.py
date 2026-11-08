@@ -8,6 +8,8 @@ import io
 import json
 import subprocess
 import sys
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -736,6 +738,48 @@ def test_stage_client_yields_each_streamed_part_and_removes_its_file(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_stage_client_tells_the_parent_to_stop_a_stream_it_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing the answers before the end part sends a stop frame with the stream's id; a whole answer sends none."""
+    frames: list[dict[str, Any]] = []
+
+    class Relay(io.StringIO):
+        """Record each frame, and answer a request frame with a stream that has not ended."""
+
+        def write(self, text: str) -> int:
+            """Record one frame and write its first answer files.
+
+            Args:
+                text: One frame, on its own line.
+
+            Returns:
+                The number of characters taken.
+            """
+            frame = json.loads(text.strip().removeprefix("PFX:"))
+            frames.append(frame)
+            if "stop" not in frame:
+                more = frame["mcp"] == "events"
+                (tmp_path / f"{frame['id']}.json").write_text(json.dumps({"status": 200, "more": more}))
+                (tmp_path / f"{frame['id']}.1.json").write_text(json.dumps({"body": "YQ==", "more": True}))
+            return len(text)
+
+    monkeypatch.setattr(sys, "__stdout__", Relay())
+    client = runner.StageClient({"prefix": "PFX:", "response_dir": str(tmp_path), "names": []})
+    answers = client.answers({"mcp": "events"})
+    assert next(answers)["more"] is True
+    assert next(answers) == {"body": "YQ==", "more": True}
+    answers.close()
+    whole = client.answers({"mcp": "search"})
+    assert next(whole) == {"status": 200, "more": False}
+    whole.close()
+    request, stop, plain = frames
+    assert stop["stop"] == request["id"]
+    assert len(stop["id"]) == 32
+    assert stop["id"] != request["id"]
+    assert "stop" not in plain
+
+
 def test_stage_call_with_an_unknown_name_sends_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An unknown stage name fails at once with the run's stage names, and no frame leaves the box."""
     sent: list[dict[str, Any]] = []
@@ -909,6 +953,43 @@ def test_mcp_proxy_passes_an_event_stream_on_part_by_part() -> None:
         assert response.headers["Content-Type"] == "text/event-stream"
         assert response.headers["Content-Length"] is None
         assert response.read() == b"data: one\n\ndata: two\n\n"
+
+
+def test_mcp_proxy_closes_the_answers_when_the_client_leaves() -> None:
+    """A client that leaves an endless event stream makes the proxy close its answers, so the parent stops the stream."""
+    closed = threading.Event()
+
+    class Client:
+        """Answer with an event stream that never ends."""
+
+        def answers(self, message: dict[str, Any]) -> Iterator[dict[str, Any]]:
+            """Yield the head, then parts until the proxy closes the generator.
+
+            Args:
+                message: The request the proxy sends.
+
+            Yields:
+                The streamed answer, then its parts.
+            """
+            part = base64.b64encode(b"data: " + b"x" * 65536 + b"\n\n").decode()
+            try:
+                yield {"status": 200, "headers": [["Content-Type", "text/event-stream"]], "body": "", "more": True}
+                while True:
+                    time.sleep(0.01)
+                    yield {"body": part, "more": True}
+            except GeneratorExit:
+                closed.set()
+                raise
+
+    url = urllib.parse.urlsplit(runner.start_service_proxy(Client(), [], ["search"])["SKYNET_MCP_SEARCH_URL"])  # type: ignore[arg-type]
+    connection = http.client.HTTPConnection(url.hostname, url.port, timeout=10)
+    connection.request("GET", url.path)
+    response = connection.getresponse()
+    assert response.status == 200
+    response.read(10)
+    response.close()
+    connection.close()
+    assert closed.wait(10)
 
 
 def test_mcp_proxy_relays_each_server_and_names_the_role_mcp_file() -> None:

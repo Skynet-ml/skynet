@@ -1882,6 +1882,7 @@ def _mcp_relay(
     services: Mapping[str, ServiceSpec] | None = None,
     secret: str = "judge-secret-value",
     recorder: CallRecorder | None = None,
+    max_concurrency: int = 2,
 ) -> _StageRelay:
     """Build a relay with no stage boxes that forwards to the role's MCP servers.
 
@@ -1892,6 +1893,7 @@ def _mcp_relay(
         services: The run's services, which the role also lists.
         secret: The value of ``JUDGE_KEY``.
         recorder: Writes each relayed call into the run record.
+        max_concurrency: The size of the service and MCP call pool.
 
     Returns:
         The relay.
@@ -1900,7 +1902,7 @@ def _mcp_relay(
         {},
         {},
         response_dir="calls/000001/stages",
-        max_concurrency=2,
+        max_concurrency=max_concurrency,
         env={},
         workspace=workspace,  # type: ignore[arg-type]
         services=services,
@@ -2040,6 +2042,70 @@ def test_an_mcp_answer_over_4_mib_is_refused(echo: _Echo, endpoint: str, streame
     assert answers[0]["status"] == 200
     assert answers[-1] == {"more": False, "error": "MCP server 'search' answered with more than 4 MiB."}
     assert sum(len(base64.b64decode(answer.get("body") or "")) for answer in answers) <= 4 * 1024 * 1024
+
+
+def _open_stream(relay: _StageRelay, workspace: _Workspace) -> None:
+    """Send one MCP GET frame and wait until its answer and first part arrive, while the echo holds its last event.
+
+    Args:
+        relay: The relay.
+        workspace: Records the answers.
+    """
+    frame = {"id": "e" * 32, "mcp": "search", "path": "", "method": "GET", "headers": [], "body": ""}
+    relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    deadline = time.monotonic() + 10
+    while len(workspace.writes) < 2:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+
+def test_an_open_mcp_event_stream_leaves_the_call_pool_free(echo: _Echo) -> None:
+    """With one call worker, an MCP POST gets its answer while a GET event stream stays open."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port, "events"), max_concurrency=1)
+    _open_stream(relay, workspace)
+    frame = {
+        "id": "f" * 32,
+        "mcp": "search",
+        "path": "echo",
+        "method": "POST",
+        "headers": [],
+        "body": base64.b64encode(b"{}").decode(),
+    }
+    relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    answer_path = f"calls/000001/stages/{'f' * 32}.json"
+    deadline = time.monotonic() + 10
+    while answer_path not in [path for path, _ in workspace.writes]:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert not echo.release.is_set()
+    echo.release.set()
+    while json.loads(workspace.writes[-1][1]).get("more") is not False:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    relay.close()
+    answer = json.loads(dict(workspace.writes)[answer_path])
+    assert answer["status"] == 200
+    assert json.loads(base64.b64decode(answer["body"])) == {"seen": "[REDACTED]"}
+
+
+def test_an_mcp_event_stream_stops_when_the_box_side_leaves(echo: _Echo) -> None:
+    """A stop frame from the box ends the parent's stream at its next event, with no more parts and no end part."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port, "events"))
+    _open_stream(relay, workspace)
+    time.sleep(0.2)
+    written = len(workspace.writes)
+    relay.output("stdout", relay._prefix + json.dumps({"id": "a" * 32, "stop": "e" * 32}) + "\n")
+    echo.release.set()
+    deadline = time.monotonic() + 10
+    while relay._open_streams:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    relay.close()
+    assert len(workspace.writes) == written
+    assert all(json.loads(text).get("more") is not False for _, text in workspace.writes)
+    assert not relay._abandoned
 
 
 @pytest.mark.parametrize("path", ["//evil.example.test/x", "http://evil.example.test/x", "@evil.example.test/x"])

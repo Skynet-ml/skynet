@@ -256,12 +256,36 @@ class StageClient:
 
         An MCP event stream's answer has ``"more": true``; its parts follow in
         ``<id>.1.json``, ``<id>.2.json`` and on, until a part has ``"more": false``.
+        Closing the generator before that part tells the parent to stop the stream.
 
         Args:
             message: The request, without its id.
 
         Yields:
             The parent's answer, then each part.
+        """
+        identity = self._send(message)
+        response = self._wait(self._responses / f"{identity}.json")
+        part = 0
+        try:
+            yield response
+            while response.get("more"):
+                part += 1
+                response = self._wait(self._responses / f"{identity}.{part}.json")
+                yield response
+        except GeneratorExit:
+            if response.get("more"):
+                self._send({"stop": identity})
+            raise
+
+    def _send(self, message: dict[str, Any]) -> str:
+        """Write one framed message to the parent's relay.
+
+        Args:
+            message: The message, without its id.
+
+        Returns:
+            The message's new id.
         """
         identity = os.urandom(16).hex()
         frame = self._prefix + json.dumps({"id": identity, **message})
@@ -271,13 +295,7 @@ class StageClient:
             # The leading newline ends any partial line the scorer printed before this call.
             stream.write("\n" + frame + "\n")
             stream.flush()
-        response = self._wait(self._responses / f"{identity}.json")
-        yield response
-        part = 0
-        while response.get("more"):
-            part += 1
-            response = self._wait(self._responses / f"{identity}.{part}.json")
-            yield response
+        return identity
 
     def _wait(self, path: Path) -> dict[str, Any]:
         """Wait for the parent to write one answer file, then read and remove it.
@@ -422,7 +440,8 @@ def start_service_proxy(
                     self.wfile.write(base64.b64decode(str(part.get("body") or "")))
                     self.wfile.flush()
             except OSError:
-                # The client left; the parent's later parts stay unread in the answer folder.
+                # The client left: closing the answers tells the parent to stop the stream.
+                answers.close()
                 return
 
         # http.server dispatches on these exact names.

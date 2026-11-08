@@ -410,44 +410,16 @@ def _either_case(hex_digits: str) -> bytes:
     return "".join(f"[{d}{d.upper()}]" if d.isalpha() else d for d in hex_digits).encode()
 
 
-def json_escape_pattern(fragment: str) -> tuple[bytes, int, int] | None:
-    """Return a regex for every JSON string form in which a server may echo a fragment.
+def echo_pattern(fragment: str) -> tuple[bytes, int, int] | None:
+    """Return a regex for every JSON-escaped and percent-encoded form in which a server may echo a fragment.
 
     A JSON encoder may write any character as ``\\uXXXX`` with lower- or
-    upper-case hex (.NET writes ``+`` as ``\\u002B``) and ``/`` as ``\\/``,
-    and it may mix forms in one string. A list of literal forms cannot hold
-    every mix, so each character gets its own set of choices.
-
-    Args:
-        fragment: One secret fragment.
-
-    Returns:
-        The regex source and the lengths of its shortest and longest match,
-        or None for a fragment shorter than ``_MIN_ENCODED_FRAGMENT``.
-    """
-    if len(fragment) < _MIN_ENCODED_FRAGMENT:
-        return None
-    parts: list[bytes] = []
-    longest = 0
-    for char in fragment:
-        literal, escaped = char.encode(), json.dumps(char)[1:-1].encode()
-        choices = {re.escape(literal), re.escape(escaped)}
-        if char == "/":
-            choices.add(re.escape(b"\\/"))
-        units = char.encode("utf-16-be")
-        choices.add(b"".join(re.escape(b"\\u") + _either_case(units[i : i + 2].hex()) for i in range(0, len(units), 2)))
-        parts.append(b"(?:" + b"|".join(sorted(choices)) + b")")
-        longest += max(len(literal), len(escaped), 3 * len(units))
-    return b"".join(parts), len(fragment.encode()), longest
-
-
-def percent_pattern(fragment: str) -> tuple[bytes, int, int] | None:
-    """Return a regex for every percent-encoded form in which a server may echo a fragment.
-
+    upper-case hex (.NET writes ``+`` as ``\\u002B``) and ``/`` as ``\\/``.
     A URL encoder may escape any byte, also an unreserved one such as ``a``
     (``%61``), in lower- or upper-case hex, and may write a space as ``+``.
-    It may mix forms in one string, so each character gets its own set of
-    choices, as in :func:`json_escape_pattern`.
+    One echo may mix all of these forms, such as ``ab\\/cd%2B``, and a list
+    of literal forms cannot hold every mix, so each character gets one set
+    of choices that holds every form.
 
     Args:
         fragment: One secret fragment, or one of its base64 forms.
@@ -459,13 +431,23 @@ def percent_pattern(fragment: str) -> tuple[bytes, int, int] | None:
     if len(fragment) < _MIN_ENCODED_FRAGMENT:
         return None
     parts: list[bytes] = []
+    longest = 0
     for char in fragment:
-        literal = char.encode()
-        choices = {re.escape(literal), b"".join(b"%" + _either_case(f"{byte:02x}") for byte in literal)}
+        literal, escaped = char.encode(), json.dumps(char)[1:-1].encode()
+        units = char.encode("utf-16-be")
+        choices = {
+            re.escape(literal),
+            re.escape(escaped),
+            b"".join(re.escape(b"\\u") + _either_case(units[i : i + 2].hex()) for i in range(0, len(units), 2)),
+            b"".join(b"%" + _either_case(f"{byte:02x}") for byte in literal),
+        }
+        if char == "/":
+            choices.add(re.escape(b"\\/"))
         if char == " ":
             choices.add(re.escape(b"+"))
         parts.append(b"(?:" + b"|".join(sorted(choices)) + b")")
-    return b"".join(parts), len(fragment.encode()), 3 * len(fragment.encode())
+        longest += max(len(escaped), 3 * len(units), 3 * len(literal))
+    return b"".join(parts), len(fragment.encode()), longest
 
 
 class AnswerMask:
@@ -700,7 +682,11 @@ def _recorded(chunks: Iterator[bytes], record: Callable[..., None]) -> Generator
         for chunk in chunks:
             seen.append(chunk)
             yield chunk
-    except BaseException as error:  # a closed stream raises GeneratorExit here, and it is still recorded
+    except GeneratorExit:
+        # The consumer closed the stream, such as an MCP client that ends its event stream: a normal end.
+        record(None, b"".join(seen))
+        raise
+    except BaseException as error:  # a worker stop or cancel must still leave the call in the record
         record(error)
         raise
     record(None, b"".join(seen))
@@ -764,10 +750,9 @@ def _relay(
     base = set(fragments)
     fragments |= {form for fragment in fragments for form in escaped_forms(fragment)}
     state.secrets |= set(values.values()) | fragments
-    # An encoder may also percent-encode a value or its base64 form, with any escape case, so hide those forms too.
-    patterns = [
-        found for fragment in base for build in (json_escape_pattern, percent_pattern) if (found := build(fragment))
-    ]
+    # An encoder may also percent-encode a value or its base64 form, with any escape case, and may
+    # mix percent and JSON escapes in one echo, so one pattern for each fragment holds every mix.
+    patterns = [found for fragment in base if (found := echo_pattern(fragment))]
     mask = AnswerMask(fragments, patterns)
     managed = any(bindings.get(name) == MANAGED_BINDING for name in names)
     if managed and not _same_endpoint(url, CONNECTORS[host]):

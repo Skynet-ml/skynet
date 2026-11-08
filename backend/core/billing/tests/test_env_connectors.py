@@ -744,6 +744,23 @@ def test_relay_removes_a_mixed_case_over_encoded_or_percent_encoded_base64_echo(
     assert json.loads(answer)["echo"] == ["[REDACTED]"] * len(forms)
 
 
+def test_relay_removes_an_echo_that_mixes_percent_and_json_escapes() -> None:
+    """Hide an echo that percent-encodes some characters and JSON-escapes others, in any case."""
+    secret = "ab/cd+ef/gh?ij=kl mn"
+    # Concatenated by hand: json.dumps would escape these backslashes a second time.
+    forms = [
+        r"ab\/cd%2Bef\/gh%3Fij%3Dkl%20mn",
+        r"ab%2fcd\u002Bef\/gh%3fij\u003dkl+mn",
+        r"\u0061b\/cd%2bef%2Fgh\u003Fij=kl\u0020mn",
+        r"ab\/cd+ef%2f%67h?ij\u003Dkl+mn",
+    ]
+    body = b'{"echo": ["' + '", "'.join(forms).encode() + b'"]}'
+    answer = _judge_relay(secret, lambda *_args: body)
+    assert isinstance(answer, bytes)
+    assert all(form not in answer.decode() for form in forms)
+    assert json.loads(answer)["echo"] == ["[REDACTED]"] * len(forms)
+
+
 def test_relay_keeps_percent_text_that_only_resembles_the_secret() -> None:
     """Keep percent text that decodes to something else, so the per-character match does not widen."""
     filled = "judge+key/part"
@@ -1081,8 +1098,8 @@ def test_relay_records_a_streamed_call_when_its_stream_ends(calls: PostgresRunCa
     _assert_no_secret([record], secret)
 
 
-def test_relay_records_a_stream_that_fails_or_is_closed(calls: PostgresRunCallStore) -> None:
-    """Store a stream that breaks after the send, or that the caller closes, as failed (E28)."""
+def test_relay_records_a_failed_stream_as_failed_and_a_closed_stream_as_ok(calls: PostgresRunCallStore) -> None:
+    """Store a stream that breaks after the send as failed, and one the caller closes as a normal end (E28)."""
     secret = "judge-stream-key-value"
 
     def broken(*_args: object) -> Iterator[bytes]:
@@ -1092,10 +1109,13 @@ def test_relay_records_a_stream_that_fails_or_is_closed(calls: PostgresRunCallSt
 
     with pytest.raises(OSError):
         b"".join(_judge_relay(secret, broken, recorder=_recorder(calls)))
-    endless = _judge_relay(secret, lambda *_args: iter([b"data: {}\n\n"] * 3), recorder=_recorder(calls))
+    echo = f'data: {{"echo": "{secret}"}}\n\n'.encode()
+    endless = _judge_relay(secret, lambda *_args: iter([echo] * 3), recorder=_recorder(calls))
     assert not isinstance(endless, bytes)
     next(endless)
     endless.close()
     first, second = _stored(calls)
     assert (first["status"], first["failure_reason"]) == ("failed", "OSError: connection reset")
-    assert (second["status"], second["failure_reason"]) == ("failed", "GeneratorExit: ")
+    assert (second["status"], second["failure_reason"]) == ("ok", None)
+    assert "[REDACTED]" in second["response"]
+    _assert_no_secret([second], secret)

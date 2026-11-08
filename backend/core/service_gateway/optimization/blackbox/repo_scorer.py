@@ -110,6 +110,9 @@ _STAGE_ERROR_CHARS = 500
 _SERVICE_TIMEOUT_SECONDS = 120.0
 # The answer is written into the scorer box, base64-encoded.
 _SERVICE_BODY_BYTES = 4 * 1024 * 1024
+# An MCP event stream can stay open for the whole run, so streams get their own threads, apart
+# from the call pool; this caps how many one relay keeps open at a time.
+_MCP_STREAMS = 4
 # The answer's headers travel to relay_request with its body, so the
 # redaction covers both; httpx header lines never hold this separator.
 _HEAD_END = b"\r\n\r\n"
@@ -848,7 +851,8 @@ class _StageRelay:
 
     Calls to one stage run in parallel, each in its own process and folder,
     up to ``max_concurrency`` at a time (E34). Service requests run in their
-    own pool with the same limit.
+    own pool with the same limit. An MCP event stream passes on in its own
+    thread, up to ``_MCP_STREAMS`` at a time, so it never holds that pool.
     """
 
     def __init__(
@@ -933,6 +937,11 @@ class _StageRelay:
             else None
         )
         self._service_pool = ThreadPoolExecutor(max_workers=max_concurrency, thread_name_prefix="stage-service")
+        self._stream_pool = ThreadPoolExecutor(max_workers=_MCP_STREAMS, thread_name_prefix="stage-mcp-stream")
+        self._streams_lock = threading.Lock()
+        self._open_streams: set[str] = set()
+        # The streams whose box-side reader left; each stops at its next event.
+        self._abandoned: set[str] = set()
         self._pending = ""
         self._seen: set[str] = set()
         self._lock = threading.Lock()
@@ -995,7 +1004,7 @@ class _StageRelay:
                 try:
                     frame = json.loads(line[start + len(self._prefix) :])
                     identity = frame["id"]
-                    kind = next((key for key in ("service", "mcp") if key in frame), "stage")
+                    kind = next((key for key in ("service", "mcp", "stop") if key in frame), "stage")
                     name = frame[kind]
                 except (ValueError, KeyError, TypeError):
                     continue
@@ -1007,6 +1016,11 @@ class _StageRelay:
                 ):
                     continue
                 self._seen.add(identity)
+                if kind == "stop":
+                    with self._streams_lock:
+                        if isinstance(name, str) and name in self._open_streams:
+                            self._abandoned.add(name)
+                    continue
                 if kind != "stage":
                     refusal = self._refusal(name) if kind == "service" else self._mcp_refusal(name)
                     if refusal is None:
@@ -1091,17 +1105,44 @@ class _StageRelay:
                 logger.warning("MCP server %s request failed in the parent: %s", name, type(error).__name__)
                 response = {"status": 502, "error": f"{label} could not be reached."}
         stream = response.pop("stream", None)
-        if not self._answer(identity, response) or stream is None:
-            if stream is not None:
+        if stream is not None:
+            with self._streams_lock:
+                opened = len(self._open_streams) < _MCP_STREAMS
+                if opened:
+                    self._open_streams.add(identity)
+            if not opened:
                 stream.close()
+                stream = None
+                response = {"status": 503, "error": f"{label} has {_MCP_STREAMS} event streams open already."}
+        if stream is None:
+            self._answer(identity, response)
             return
-        self._stream_parts(name, identity, stream)
+        try:
+            if self._answer(identity, response):
+                self._stream_pool.submit(self._stream_parts, name, identity, stream)
+                return
+        except RuntimeError:
+            pass  # The relay closed between the answer and the submit.
+        self._end_stream(identity, stream)
+
+    def _end_stream(self, identity: str, stream: Generator[bytes, None, None]) -> None:
+        """Close an MCP event stream and free its place.
+
+        Args:
+            identity: The request's id.
+            stream: The masked body.
+        """
+        stream.close()
+        with self._streams_lock:
+            self._open_streams.discard(identity)
+            self._abandoned.discard(identity)
 
     def _stream_parts(self, name: str, identity: str, stream: Generator[bytes, None, None]) -> None:
         """Write each masked part of an MCP event stream as its own answer, then an end part.
 
         Part ``n`` goes to ``<identity>.<n>.json`` with ``"more": true``; the
         last part has ``"more": false``, and an ``error`` when the stream broke.
+        The stream stops with no last part when the box's reader left.
 
         Args:
             name: The MCP server.
@@ -1113,7 +1154,7 @@ class _StageRelay:
         try:
             for chunk in stream:
                 part += 1
-                if not self._answer(
+                if identity in self._abandoned or not self._answer(
                     f"{identity}.{part}", {"body": base64.b64encode(chunk).decode("ascii"), "more": True}
                 ):
                     return
@@ -1124,7 +1165,7 @@ class _StageRelay:
             logger.warning("MCP server %s stream failed in the parent: %s", name, type(error).__name__)
             ending["error"] = f"MCP server {name!r} stream broke."
         finally:
-            stream.close()
+            self._end_stream(identity, stream)
         self._answer(f"{identity}.{part + 1}", ending)
 
     def _service(self, name: str, identity: str, frame: Mapping[str, Any]) -> None:
@@ -1423,7 +1464,7 @@ class _StageRelay:
         """Stop queued calls, keep late answers out of the scorer box, and close every stage box."""
         with self._answer_lock:
             self._closed = True
-        for pool in (*self._pools.values(), self._refusals, self._service_pool):
+        for pool in (*self._pools.values(), self._refusals, self._service_pool, self._stream_pool):
             pool.shutdown(wait=False, cancel_futures=True)
         for box in self._boxes.values():
             with contextlib.suppress(Exception):
