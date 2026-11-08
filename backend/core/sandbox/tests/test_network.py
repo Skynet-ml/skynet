@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 
 import pytest
 
@@ -325,6 +326,39 @@ async def test_overlapping_phases_from_another_task_are_refused() -> None:
         assert network.current is DENY
 
 
+async def test_out_of_order_exit_fails_closed() -> None:
+    """Fail closed when phases held in two generators close in entry order."""
+    applier = FakeApplier()
+    network = PhaseNetwork(applier, NetworkPlan(setup=OPEN, run=RUN, score=DENY), current=DENY)
+
+    async def hold(phase: Phase) -> AsyncGenerator[None, None]:
+        """Keep a phase active until the generator closes.
+
+        Args:
+            phase: The phase to hold.
+
+        Yields:
+            Nothing, once the phase is active.
+        """
+        async with network.phase_policy(phase):
+            yield
+
+    outer = hold(Phase.SETUP)
+    await anext(outer)
+    inner = hold(Phase.RUN)
+    await anext(inner)
+    with pytest.raises(NetworkPolicyError, match="reverse order"):
+        await outer.aclose()
+    assert network.current is not None
+    assert network.current.mode is NetworkMode.DENY_ALL
+    await inner.aclose()
+    assert network.current == DENY
+    assert OPEN not in applier.applied[2:]
+    async with network.phase_policy(Phase.RUN):
+        assert network.current is RUN
+    assert network.current == DENY
+
+
 async def test_first_policy_is_not_trusted_until_confirmed() -> None:
     """Send the phase policy even when it equals the policy given at start."""
     applier = FakeApplier()
@@ -440,6 +474,7 @@ def test_contradictory_policy_fails(kwargs: dict) -> None:
         "*.com.",
         "0.0.0.0",
         "::",
+        "::ffff:0.0.0.0",
         "a.com,b.com",
         ".x.com",
         "x..com",

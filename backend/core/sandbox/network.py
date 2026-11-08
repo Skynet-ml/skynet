@@ -64,7 +64,7 @@ def _is_valid_host(host: str) -> bool:
 
     A leading ``*.`` label is a valid wildcard when two or more labels follow
     it, so ``*.com`` is refused. A bare ``*``, the unspecified addresses
-    ``0.0.0.0`` and ``::``, an IPv6 scope ID, an empty label and any character
+    ``0.0.0.0``, ``::`` and ``::ffff:0.0.0.0``, an IPv6 scope ID, an empty label and any character
     outside letters, digits, hyphens and dots are not valid, because the
     provider could read them as "every host" or as a host that the caller did
     not mean. A name whose last label is all digits is refused, because some
@@ -83,7 +83,8 @@ def _is_valid_host(host: str) -> bool:
     except ValueError:
         pass
     else:
-        return not address.is_unspecified
+        mapped = getattr(address, "ipv4_mapped", None)
+        return not (address.is_unspecified or (mapped is not None and mapped.is_unspecified))
     wildcard = host.startswith("*.")
     labels = host.removeprefix("*.").split(".")
     if len(host) > 253 or (wildcard and len(labels) < 2) or labels[-1].isdigit():
@@ -222,7 +223,9 @@ class NetworkPlan:
 class PhaseNetwork:
     """Switch a sandbox to the policy of each phase and back again.
 
-    Phases nest in one task only. A phase from another task while a phase is
+    Phases nest in one task only, and exit in reverse order of entry. A
+    phase that exits before a later phase sets the box to deny-all and
+    raises. A phase from another task while a phase is
     active is refused, because the two restores would race and could leave
     the box with the wrong policy (for example open egress during scoring).
     """
@@ -241,7 +244,7 @@ class PhaseNetwork:
         self._plan = plan
         self._baseline = current
         self._current: EgressPolicy | None = None
-        self._active: list[EgressPolicy] = []
+        self._active: list[tuple[object, EgressPolicy]] = []
         self._owner: asyncio.Task[object] | None = None
 
     @property
@@ -257,7 +260,8 @@ class PhaseNetwork:
         baseline policy outside every phase. It comes back on exit, also when
         the block raises or the entry apply fails or is cancelled. When the
         block raised and the restore also fails, the block's exception
-        reaches the caller with a note about the restore.
+        reaches the caller with a note about the restore. A phase that exits
+        while a later phase is still active applies deny-all instead.
 
         Args:
             phase: The phase to enter.
@@ -267,30 +271,81 @@ class PhaseNetwork:
 
         Raises:
             NetworkPolicyError: The provider did not confirm a policy change,
-                or another task has a phase active.
+                another task has a phase active, or the phase exited before
+                a later phase.
         """
         task = asyncio.current_task()
         if self._active and self._owner is not task:
             raise NetworkPolicyError("Another task has a network phase active; phases must not overlap.")
-        previous = self._active[-1] if self._active else self._baseline
+        token = object()
         policy = self._plan.for_phase(phase)
         self._owner = task
-        self._active.append(policy)
+        self._active.append((token, policy))
         try:
             try:
                 await self._apply(policy)
                 yield policy
             except BaseException as error:
+                if self._active[-1][0] is not token:
+                    await self._exit_out_of_order(phase, token, error)
                 try:
-                    await self._restore(previous)
+                    await self._restore(self._previous())
                 except Exception as restore_error:
                     error.add_note(f"Restoring the network policy failed too: {restore_error!r}")
                 raise
-            await self._restore(previous)
+            if self._active[-1][0] is not token:
+                await self._exit_out_of_order(phase, token, None)
+            await self._restore(self._previous())
         finally:
-            self._active.pop()
+            self._active = [entry for entry in self._active if entry[0] is not token]
             if not self._active:
                 self._owner = None
+
+    def _previous(self) -> EgressPolicy:
+        """Return the restore target of the top phase.
+
+        It is the policy of the phase below the top one, or the baseline. It
+        is read at exit, not at entry, so that after an out-of-order exit the
+        remaining phases restore what is below them now, not a policy of a
+        phase that already ended.
+
+        Returns:
+            The policy to restore when the top phase exits.
+        """
+        return self._active[-2][1] if len(self._active) > 1 else self._baseline
+
+    async def _exit_out_of_order(self, phase: Phase, token: object, error: BaseException | None) -> None:
+        """Fail closed when a phase exits while a later phase is still active.
+
+        The restore target of this phase is now wrong for the box, and the
+        later phase still expects its own policy. No restore is correct, so
+        the box goes to deny-all until the remaining phases exit.
+
+        Args:
+            phase: The phase that exits.
+            token: The stack entry of that phase.
+            error: The exception that the phase block raised, if any.
+
+        Raises:
+            NetworkPolicyError: Always, unless a cancel or an interpreter exit
+                is in flight; that exception keeps going with a note.
+        """
+        self._active = [entry for entry in self._active if entry[0] is not token]
+        failure = NetworkPolicyError(
+            f"The {phase.value} network phase exited before a later phase; "
+            "phases must exit in reverse order. The sandbox is set to deny-all."
+        )
+        try:
+            await self._restore(EgressPolicy(mode=NetworkMode.DENY_ALL))
+        except Exception as restore_error:
+            failure.add_note(f"Applying deny-all failed too: {restore_error!r}")
+        # A cancel or an interpreter exit must not turn into a normal error,
+        # or the caller would swallow it. GeneratorExit is replaced, because
+        # aclose() would hide it and the out-of-order exit would go unseen.
+        if error is not None and not isinstance(error, (Exception, GeneratorExit)):
+            error.add_note(str(failure))
+            raise error
+        raise failure from error
 
     async def _restore(self, previous: EgressPolicy) -> None:
         """Apply the policy from before a phase, and finish it even when cancelled.
