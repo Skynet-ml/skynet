@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import io
 import json
 import subprocess
+import tarfile
 import time
 import uuid
 from collections.abc import Iterator, Sequence
@@ -387,6 +389,53 @@ async def test_calls_before_start_raise(fake_docker: _FakeDocker) -> None:
     with pytest.raises(RuntimeError):
         await env.download_file("a")
     assert fake_docker.calls == []
+
+
+def _box_archive(kind: str) -> bytes:
+    """Build the tar stream that a hostile box could send for ``out.txt``.
+
+    Args:
+        kind: ``directory`` sends ``out.txt`` as a directory, ``symlink`` as a
+            link to another member, and ``missing`` sends only another file.
+
+    Returns:
+        The uncompressed tar bytes.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        other = tarfile.TarInfo("other.txt")
+        other.size = 1
+        archive.addfile(other, io.BytesIO(b"x"))
+        if kind == "directory":
+            info = tarfile.TarInfo("out.txt")
+            info.type = tarfile.DIRTYPE
+            info.mode = 0o755
+            archive.addfile(info)
+        elif kind == "symlink":
+            info = tarfile.TarInfo("out.txt")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "other.txt"
+            archive.addfile(info)
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink", "missing"])
+async def test_download_refuses_an_archive_without_the_regular_file(fake_docker: _FakeDocker, kind: str) -> None:
+    """Raise SandboxInfraError when the box sends no regular file under the asked name."""
+    env = DockerEnvironment(_spec())
+    await env.start()
+    fake_docker.answers["exec"] = _CliResult(0, _box_archive(kind), b"")
+    with pytest.raises(SandboxInfraError, match="no regular file"):
+        await env.download_file("out.txt")
+
+
+async def test_download_refuses_a_stream_that_is_not_a_tar(fake_docker: _FakeDocker) -> None:
+    """Raise SandboxInfraError when the box sends bytes that are not a tar archive."""
+    env = DockerEnvironment(_spec())
+    await env.start()
+    fake_docker.answers["exec"] = _CliResult(0, b"not a tar archive", b"")
+    with pytest.raises(SandboxInfraError, match="no readable archive"):
+        await env.download_file("out.txt")
 
 
 async def test_stop_job_sandboxes_counts_only_boxes(fake_docker: _FakeDocker) -> None:

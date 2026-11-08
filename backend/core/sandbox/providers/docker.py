@@ -622,7 +622,8 @@ class DockerEnvironment(SandboxEnvironment):
             The file content, or ``None`` when the file does not exist.
 
         Raises:
-            SandboxInfraError: The box could not be read.
+            SandboxInfraError: The box could not be read, or its archive is not
+                readable or holds no regular file under the expected name.
             UnsafeArchiveError: The box sent an archive with an unsafe member.
         """
         name = self._require_running()
@@ -635,8 +636,14 @@ class DockerEnvironment(SandboxEnvironment):
         with tempfile.TemporaryDirectory(prefix="skynet-docker-") as scratch:
             # The archive comes from the box, so the unpack checks every
             # member before it writes anything.
-            unpack(result.stdout, scratch)
-            data = (Path(scratch) / posixpath.basename(target)).read_bytes()
+            try:
+                unpack(result.stdout, scratch)
+            except tarfile.ReadError as error:
+                raise SandboxInfraError(f"The Docker sandbox sent no readable archive for {path!r}: {error}") from error
+            member = Path(scratch) / posixpath.basename(target)
+            if member.is_symlink() or not member.is_file():
+                raise SandboxInfraError(f"The Docker sandbox sent no regular file for {path!r}")
+            data = member.read_bytes()
         return data.decode("utf-8", errors="replace")
 
     @classmethod
