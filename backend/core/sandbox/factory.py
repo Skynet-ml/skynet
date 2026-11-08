@@ -141,7 +141,8 @@ def _import_provider_module(name: str, entry: ProviderEntry) -> Any:
         The imported module.
 
     Raises:
-        ProviderUnavailableError: The module or one of its dependencies is missing.
+        ProviderUnavailableError: The module or one of its dependencies is
+            missing, or an import in them fails.
     """
     try:
         return importlib.import_module(entry.module)
@@ -154,3 +155,7 @@ def _import_provider_module(name: str, entry: ProviderEntry) -> Any:
                 f"Sandbox provider {name!r} needs the package {missing!r}: install the `{entry.extra}` extra."
             ) from exc
         raise ProviderUnavailableError(f"Sandbox provider {name!r} needs the package {missing!r}.") from exc
+    except ImportError as exc:
+        # The module exists but a name in it or its dependencies does not, for
+        # example an SDK of the wrong version.
+        raise ProviderUnavailableError(f"Sandbox provider {name!r} could not be imported: {exc}") from exc

@@ -109,6 +109,17 @@ def test_missing_dependency_without_extra_names_the_package(monkeypatch: pytest.
     assert "extra" not in str(caught.value)
 
 
+def test_failed_name_import_is_unavailable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Wrap an ImportError that is not a missing module, such as an SDK of the wrong version."""
+    (tmp_path / "sky411_wrong_sdk.py").write_text("from os import sky411_name_that_does_not_exist  # noqa: F401\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _register(monkeypatch, "wrongsdk", ProviderEntry("sky411_wrong_sdk", "Environment", "wrongsdk", False))
+    with pytest.raises(ProviderUnavailableError, match="could not be imported") as caught:
+        factory.create_environment("wrongsdk", _SPEC)
+    assert "sky411_name_that_does_not_exist" in str(caught.value)
+    assert type(caught.value.__cause__) is ImportError
+
+
 def test_registered_provider_without_module_is_not_in_this_build() -> None:
     """Say that a registered provider is not in this build until its module exists."""
     with pytest.raises(ProviderUnavailableError, match="not in this build"):

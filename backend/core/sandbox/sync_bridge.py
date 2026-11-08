@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import atexit
 import concurrent.futures
+import logging
 import os
 import threading
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, TypeVar
 
@@ -22,7 +24,15 @@ from anyio.from_thread import BlockingPortal
 
 from .environment import ExecResult, OutputSink, SandboxEnvironment
 
+logger = logging.getLogger(__name__)
+
 T = TypeVar("T")
+
+# Bounds the stop call that releases a sandbox. It runs shielded, so a cancel
+# cannot cut it short, and a stop that hangs must still let the caller go.
+_STOP_TIMEOUT_SECONDS = 30.0
+# Bounds shutdown, which atexit runs: a blocked loop thread must not hang exit.
+_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 _lock = threading.Lock()
 _portal: BlockingPortal | None = None
@@ -93,19 +103,34 @@ def run(func: Callable[..., Awaitable[T]], *args: Any) -> T:
 
 
 def shutdown() -> None:
-    """Stop the process portal and wait for its thread. A later call starts a new one."""
+    """Stop the process portal and wait a bounded time for its thread.
+
+    Running tasks are cancelled. A sandbox stop that runs shielded can keep
+    the thread alive past the bound; then shutdown logs a warning and
+    returns. A later call starts a new portal.
+    """
     global _portal, _thread
     with _lock:
         portal, thread = _portal, _thread
         _portal = _thread = None
     if portal is None or thread is None or not thread.is_alive():
         return
-    portal.call(portal.stop, True)
-    thread.join(timeout=5)
+    deadline = time.monotonic() + _SHUTDOWN_TIMEOUT_SECONDS
+    # ``start_task_soon`` and ``call`` both wait without a timeout for the loop
+    # to accept the task, so a blocked loop would block this thread forever.
+    stopper = threading.Thread(target=_request_stop, args=(portal,), name="sandbox-sync-bridge-stop", daemon=True)
+    stopper.start()
+    stopper.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+    thread.join(timeout=max(0.0, deadline - time.monotonic()))
+    if thread.is_alive():
+        logger.warning("The sandbox sync bridge did not stop within %s seconds.", _SHUTDOWN_TIMEOUT_SECONDS)
 
 
 def open_session(environment: SandboxEnvironment) -> SyncSession:
     """Start an environment and wrap it in a sync session.
+
+    The start runs ``start`` directly, not ``__aenter__``: when the start
+    fails or is cancelled, the cleanup stop runs shielded and bounded.
 
     Args:
         environment: A stopped environment, for example from ``create_environment``.
@@ -113,7 +138,7 @@ def open_session(environment: SandboxEnvironment) -> SyncSession:
     Returns:
         The session. Call ``close`` to stop the sandbox.
     """
-    run(environment.__aenter__)
+    run(_start_environment, environment)
     return SyncSession(environment)
 
 
@@ -182,8 +207,58 @@ class SyncSession:
         return run(self.environment.download_file, path)
 
     def close(self) -> None:
-        """Stop the sandbox."""
-        run(self.environment.stop)
+        """Stop the sandbox. The stop runs shielded, so an interrupt does not cut it short.
+
+        Raises:
+            TimeoutError: The stop did not end within the stop timeout.
+        """
+        run(_stop_environment, self.environment)
+
+
+async def _start_environment(environment: SandboxEnvironment) -> None:
+    """Start the sandbox; stop it again when the start fails or is cancelled.
+
+    anyio cancels a cancelled task again at every await, so a plain cleanup
+    ``stop`` would be cancelled too and leave a billable sandbox running.
+
+    Args:
+        environment: The stopped environment.
+    """
+    try:
+        await environment.start()
+    except BaseException:
+        # A stop failure must not hide the start error that the caller needs.
+        try:
+            await _stop_environment(environment)
+        except Exception:
+            logger.exception("The sandbox did not stop after its start failed.")
+        raise
+
+
+async def _stop_environment(environment: SandboxEnvironment) -> None:
+    """Stop the sandbox inside a shielded scope with a deadline.
+
+    Args:
+        environment: The environment to stop.
+
+    Raises:
+        TimeoutError: The stop did not end within the stop timeout.
+    """
+    with anyio.fail_after(_STOP_TIMEOUT_SECONDS, shield=True):
+        await environment.stop()
+
+
+def _request_stop(portal: BlockingPortal) -> None:
+    """Ask the portal to stop and cancel its tasks, and wait until it stops.
+
+    Args:
+        portal: The portal to stop.
+    """
+    try:
+        portal.call(portal.stop, True)
+    except Exception:
+        # The loop can end between the liveness check and this call.
+        logger.debug("The sandbox sync bridge was already stopped.", exc_info=True)
 
 
 def _serve_portal(ready: concurrent.futures.Future[BlockingPortal]) -> None:

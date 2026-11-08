@@ -1,10 +1,13 @@
-"""Tests for the sync bridge: one portal for each process, and pass-through of results, errors and cancel."""
+"""Tests for the sync bridge: one portal for each process, pass-through of results, errors and cancel, and safe stops."""
 
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
+import logging
 import threading
+import time
 
 import anyio
 import anyio.lowlevel
@@ -13,6 +16,40 @@ import pytest
 from core.sandbox import SandboxSpec, sync_bridge
 from core.sandbox.errors import SandboxTransientError
 from core.sandbox.tests.fake_provider import InMemorySandbox
+
+_SPEC = SandboxSpec(lifetime_seconds=60)
+
+
+class SlowSandbox(InMemorySandbox):
+    """Start and stop with delays, like a remote provider that bills while the box exists."""
+
+    def __init__(self, spec: SandboxSpec, *, start_seconds: float = 60, stop_seconds: float = 0.05) -> None:
+        """Create a stopped slow fake sandbox.
+
+        Args:
+            spec: The sandbox to open.
+            start_seconds: How long ``start`` waits after the box exists.
+            stop_seconds: How long ``stop`` waits before the box is gone.
+        """
+        super().__init__(spec)
+        self.start_seconds = start_seconds
+        self.stop_seconds = stop_seconds
+        self.started = threading.Event()
+        self.stop_entered = threading.Event()
+        self.stop_finished = threading.Event()
+
+    async def start(self) -> None:
+        """Create the box, then wait like a slow readiness check."""
+        await super().start()
+        self.started.set()
+        await anyio.sleep(self.start_seconds)
+
+    async def stop(self) -> None:
+        """Wait one round trip, then remove the box."""
+        self.stop_entered.set()
+        await anyio.sleep(self.stop_seconds)
+        await super().stop()
+        self.stop_finished.set()
 
 
 async def _add(left: int, right: int) -> int:
@@ -172,3 +209,101 @@ def test_sync_session_errors_pass_through() -> None:
     session.close()
     with pytest.raises(RuntimeError, match="not running"):
         session.run("true")
+
+
+def test_cancel_during_start_still_stops_the_sandbox() -> None:
+    """Finish the cleanup stop when the caller cancels the future of a slow start."""
+    environment = SlowSandbox(_SPEC)
+    future = sync_bridge.submit(sync_bridge._start_environment, environment)
+    assert environment.started.wait(5)
+    assert future.cancel()
+    assert environment.stop_finished.wait(5)
+    assert not environment.running
+
+
+def test_shutdown_during_open_session_still_stops_the_sandbox() -> None:
+    """Finish the cleanup stop when shutdown cancels a slow start."""
+    environment = SlowSandbox(_SPEC)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        opening = pool.submit(sync_bridge.open_session, environment)
+        assert environment.started.wait(5)
+        sync_bridge.shutdown()
+        with pytest.raises(concurrent.futures.CancelledError):
+            opening.result(timeout=5)
+    assert environment.stop_finished.is_set()
+    assert not environment.running
+
+
+def test_shutdown_during_close_still_stops_the_sandbox() -> None:
+    """Finish the stop of a close that shutdown interrupts."""
+    environment = SlowSandbox(_SPEC, start_seconds=0, stop_seconds=0.2)
+    session = sync_bridge.open_session(environment)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        closing = pool.submit(session.close)
+        assert environment.stop_entered.wait(5)
+        sync_bridge.shutdown()
+        with contextlib.suppress(concurrent.futures.CancelledError):
+            closing.result(timeout=5)
+    assert environment.stop_finished.is_set()
+    assert not environment.running
+
+
+def test_hung_cleanup_stop_is_bounded(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """Give up on a cleanup stop that hangs, log it and let shutdown end.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        caplog: The pytest log capture fixture.
+    """
+    monkeypatch.setattr(sync_bridge, "_STOP_TIMEOUT_SECONDS", 0.2)
+    environment = SlowSandbox(_SPEC, stop_seconds=60)
+    with caplog.at_level(logging.ERROR, logger=sync_bridge.__name__):
+        future = sync_bridge.submit(sync_bridge._start_environment, environment)
+        assert environment.started.wait(5)
+        began = time.monotonic()
+        sync_bridge.shutdown()
+        assert time.monotonic() - began < 3
+    assert future.cancelled()
+    assert not environment.stop_finished.is_set()
+    assert "did not stop after its start failed" in caplog.text
+
+
+def test_close_with_a_hung_stop_raises_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raise TimeoutError from close when the stop does not end in time.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(sync_bridge, "_STOP_TIMEOUT_SECONDS", 0.2)
+    environment = SlowSandbox(_SPEC, start_seconds=0, stop_seconds=60)
+    session = sync_bridge.open_session(environment)
+    with pytest.raises(TimeoutError):
+        session.close()
+
+
+def test_shutdown_is_bounded_when_the_loop_is_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Return from shutdown in bounded time while sync code blocks the loop thread.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(sync_bridge, "_SHUTDOWN_TIMEOUT_SECONDS", 0.5)
+    blocking = threading.Event()
+    release = threading.Event()
+
+    async def _block_loop() -> None:
+        """Block the event-loop thread with a sync wait."""
+        blocking.set()
+        release.wait(10)
+
+    sync_bridge.submit(_block_loop)
+    assert blocking.wait(5)
+    thread = sync_bridge._thread
+    assert thread is not None
+    began = time.monotonic()
+    sync_bridge.shutdown()
+    assert time.monotonic() - began < 3
+    assert thread.is_alive()
+    release.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
