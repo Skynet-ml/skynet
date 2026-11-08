@@ -88,6 +88,10 @@ dependencies = [
     # Browser web push (VAPID) for the Chrome notification channel
     # (core.notifications.channels.ChromeChannel).
     "pywebpush>=2.0",
+    # core.sandbox retry backoff and phase timeouts (SKY-408). Both came in
+    # only through dspy and httpx; a direct pin keeps them if those move.
+    "tenacity>=9.1",
+    "anyio==4.14.2",
 ]
 
 [project.optional-dependencies]
