@@ -8,21 +8,38 @@ in its own schema that it drops after.
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
 import threading
 import time
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from core.billing.usage_tags import usage_scope
 from core.config import app_env
-from core.storage.models import Base, JobModel, RunCallModel, RunCandidateModel
-from core.storage.run_call_store import BODY_CAP_BYTES, SECRET_MASK, PostgresRunCallStore, cut_body, strip_secrets
+from core.constants import PROGRESS_CANDIDATE, PROGRESS_REJECTED
+from core.service_gateway.optimization.blackbox.feedback import emit_candidate
+from core.storage.base import JobStore
+from core.storage.models import Base, JobModel, ProgressEventModel, RunCallModel, RunCandidateModel
+from core.storage.remote import RemoteDBJobStore
+from core.storage.run_call_store import (
+    BODY_CAP_BYTES,
+    PROGRAM_EVENT_KEY,
+    SECRET_MASK,
+    PostgresRunCallStore,
+    cut_body,
+    strip_secrets,
+)
+from core.worker.engine import BackgroundWorker
+from core.worker.scoped_relay import CallRecorder
+from core.worker.subprocess_runner import _emit_progress_event
 
 SECRET = 'sk-test-"abc\\def'
 TEST_DB_URL = app_env("APP_TEST_DB_URL")
@@ -220,6 +237,210 @@ def test_set_candidate_state_creates_a_candidate_and_rejects_an_unknown_state(st
         store.set_candidate_state("job-1", "cand-9", "solver", "paused")
 
 
+def test_a_new_call_keeps_a_done_candidate_done_and_a_failed_one_failed(store: PostgresRunCallStore) -> None:
+    """A re-evaluation call is recorded, but a finished candidate keeps its state."""
+    store.record_call("job-1", _call(candidate_id="cand-1"), [])
+    store.record_call("job-1", _call(candidate_id="cand-2"), [])
+    assert store.finish_candidate("job-1", "cand-1", "done")
+    assert store.finish_candidate("job-1", "cand-2", "failed")
+
+    store.record_call("job-1", _call(candidate_id="cand-1"), [])
+    store.record_call("job-1", _call(candidate_id="cand-2"), [])
+
+    assert store.get_candidate("job-1", "cand-1")["state"] == "done"
+    assert store.get_candidate("job-1", "cand-2")["state"] == "failed"
+    assert len(store.list_calls("job-1", "cand-1")) == 2
+
+
+def test_finish_candidate_changes_only_a_recorded_candidate(store: PostgresRunCallStore) -> None:
+    """A version with no recorded calls adds no row; a running state is not a finished state."""
+    assert not store.finish_candidate("job-1", "cand-9", "done")
+    assert store.get_candidate("job-1", "cand-9") is None
+    with pytest.raises(ValueError):
+        store.finish_candidate("job-1", "cand-9", "running")
+
+
+def _emit_scored_versions(events: Any) -> None:
+    """Report two scored versions from a child process, as the native engine's mailbox does.
+
+    Args:
+        events: The queue the worker drains.
+    """
+
+    def progress(message: str, metrics: dict[str, Any]) -> None:
+        """Send one progress event to the worker.
+
+        Args:
+            message: Event name.
+            metrics: Event payload.
+        """
+        _emit_progress_event(events, message, metrics)
+
+    for candidate_id, score in (("1", 0.5), ("2", None), ("3", 0.9)):
+        emit_candidate(
+            progress,
+            candidate_id=candidate_id,
+            parent_id=None,
+            generation=0,
+            score=score,
+            per_example=[],
+            candidate={"prompt": "p"},
+            discovered_at_evals=1,
+            iteration=None,
+        )
+
+
+def _job_store(store: PostgresRunCallStore) -> RemoteDBJobStore:
+    """Build the worker's job store over the run-call store's engine.
+
+    The full constructor opens its own PostgreSQL engine from a URL, so the
+    tests set only the two fields that progress writes read.
+
+    Args:
+        store: The run-call store whose engine also holds the job rows.
+
+    Returns:
+        A job store that writes progress and candidate states to that engine.
+    """
+    jobs = object.__new__(RemoteDBJobStore)
+    jobs._session_factory = sessionmaker(bind=store._engine)
+    jobs._run_calls = store
+    return jobs
+
+
+def _drain_child_versions(store: PostgresRunCallStore) -> None:
+    """Score versions in a spawned child process and drain its events in this worker process.
+
+    Args:
+        store: The run-call store; job ``job-1`` must exist with execution generation 1.
+    """
+    store.record_call("job-1", _call(candidate_id="1"), [])
+    store.record_call("job-1", _call(candidate_id="2"), [])
+    jobs = _job_store(store)
+    context = mp.get_context("spawn")
+    events = context.Queue()
+    child = context.Process(target=_emit_scored_versions, args=(events,))
+    child.start()
+    child.join(60)
+    assert child.exitcode == 0
+    worker = BackgroundWorker(job_store=cast(JobStore, jobs), num_workers=1, poll_interval=1.0)
+
+    worker._drain_subprocess_events("job-1", events, generation=1)
+
+    assert store.get_candidate("job-1", "1")["state"] == "done"
+    assert store.get_candidate("job-1", "2")["state"] == "failed"
+    assert store.get_candidate("job-1", "3") is None
+
+
+def test_the_worker_marks_versions_a_child_process_scored(store: PostgresRunCallStore) -> None:
+    """Candidate events from the engine's process set done or failed in the worker, where the store is."""
+    with Session(store._engine) as session:
+        session.add(JobModel(optimization_id="job-1", status="running", execution_generation=1))
+        session.commit()
+    _drain_child_versions(store)
+
+
+def test_candidate_ids_that_differ_from_the_call_tags_change_no_row(store: PostgresRunCallStore) -> None:
+    """An engine whose versions do not match the call tags marks no recorded candidate, and adds no row."""
+    with Session(store._engine) as session:
+        session.add(JobModel(optimization_id="job-1", status="running"))
+        session.commit()
+    store.record_call("job-1", _call(candidate_id="1"), [])
+    store.record_call("job-1", _call(candidate_id="2"), [])
+    store.record_call("job-2", _call(candidate_id="a"), [])
+    jobs = _job_store(store)
+
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, {"candidate_id": "a", "score": 0.5})
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, {"candidate_id": "b", "score": None})
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, {"candidate_id": "", "score": 0.5})
+    jobs.record_progress("job-1", PROGRESS_REJECTED, {"candidate_id": "1", "score": 0.5})
+
+    assert store.get_candidate("job-1", "1")["state"] == "running"
+    assert store.get_candidate("job-1", "2")["state"] == "running"
+    assert store.get_candidate("job-1", "a") is None
+    assert store.get_candidate("job-1", "b") is None
+    assert store.get_candidate("job-2", "a")["state"] == "running"
+
+
+def test_two_auto_lanes_with_the_same_candidate_id_stay_apart(store: PostgresRunCallStore) -> None:
+    """Calls and events carry the Auto lane, so one lane's candidate "3" never marks another lane's."""
+    with Session(store._engine) as session:
+        session.add(JobModel(optimization_id="job-1", status="running"))
+        session.commit()
+    recorder = CallRecorder(store, "job-1", "", "")
+    for lane in ("explore-gepa", "explore-best_of_n"):
+        with usage_scope(candidate="3", lane=lane):
+            recorder.record(recorder.start(), kind="model", target="m", status="ok")
+    jobs = _job_store(store)
+
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, {"candidate_id": "3", "score": 0.5, "lane": "explore-gepa"})
+
+    assert store.get_candidate("job-1", "explore-gepa:3")["state"] == "done"
+    assert store.get_candidate("job-1", "explore-best_of_n:3")["state"] == "running"
+    assert store.get_candidate("job-1", "3") is None
+
+
+def test_dspy_seed_zero_does_not_mark_iteration_zero(store: PostgresRunCallStore) -> None:
+    """A DSPy program event keys on its accepting iteration, so the seed program "0" leaves iteration 0 alone."""
+    with Session(store._engine) as session:
+        session.add(JobModel(optimization_id="job-1", status="running"))
+        session.commit()
+    store.record_call("job-1", _call(candidate_id="0"), [])
+    store.record_call("job-1", _call(candidate_id="1"), [])
+    jobs = _job_store(store)
+
+    seed = {"candidate_id": "0", "iteration": None, "score": 0.4, PROGRAM_EVENT_KEY: True}
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, seed)
+    assert store.get_candidate("job-1", "0")["state"] == "running"
+
+    accepted = {"candidate_id": "1", "iteration": 0, "score": 0.6, PROGRAM_EVENT_KEY: True}
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, accepted)
+    assert store.get_candidate("job-1", "0")["state"] == "done"
+    assert store.get_candidate("job-1", "1")["state"] == "running"
+
+    rejected = {"iteration": 1, "score": 0.2, PROGRAM_EVENT_KEY: True}
+    jobs.record_progress("job-1", PROGRESS_REJECTED, rejected)
+    assert store.get_candidate("job-1", "1")["state"] == "done"
+
+
+def test_a_candidate_id_with_a_colon_reads_back_as_one_key(store: PostgresRunCallStore) -> None:
+    """Treat ``<lane>:<candidate>`` as one opaque key, so a ``":"`` inside the candidate id is safe."""
+    with Session(store._engine) as session:
+        session.add(JobModel(optimization_id="job-1", status="running"))
+        session.commit()
+    recorder = CallRecorder(store, "job-1", "", "")
+    with usage_scope(candidate="a:b", lane="explore-gepa"):
+        recorder.record(recorder.start(), kind="model", target="m", status="ok")
+    jobs = _job_store(store)
+
+    assert [c["candidate_id"] for c in store.list_calls("job-1", "explore-gepa:a:b")] == ["explore-gepa:a:b"]
+    assert store.list_calls("job-1", "a:b") == []
+
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, {"candidate_id": "a:b", "score": 0.5, "lane": "explore-gepa"})
+
+    assert store.get_candidate("job-1", "explore-gepa:a:b")["state"] == "done"
+
+
+def test_an_untagged_candidate_and_a_lane_candidate_with_the_same_id_stay_apart(store: PostgresRunCallStore) -> None:
+    """An untagged candidate "3" and a lane's candidate "3" get separate keys, and each event marks only its own."""
+    with Session(store._engine) as session:
+        session.add(JobModel(optimization_id="job-1", status="running"))
+        session.commit()
+    recorder = CallRecorder(store, "job-1", "", "")
+    with usage_scope(candidate="3"):
+        recorder.record(recorder.start(), kind="model", target="m", status="ok")
+    with usage_scope(candidate="3", lane="explore-gepa"):
+        recorder.record(recorder.start(), kind="model", target="m", status="ok")
+    jobs = _job_store(store)
+
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, {"candidate_id": "3", "score": 0.5})
+    assert store.get_candidate("job-1", "3")["state"] == "done"
+    assert store.get_candidate("job-1", "explore-gepa:3")["state"] == "running"
+
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, {"candidate_id": "3", "score": 0.1, "lane": "explore-gepa"})
+    assert store.get_candidate("job-1", "explore-gepa:3")["state"] == "done"
+
+
 @pytest.fixture
 def postgres() -> Iterator[Engine]:
     """Return an engine on a fresh schema of the test database, with one job row."""
@@ -230,7 +451,13 @@ def postgres() -> Iterator[Engine]:
     engine = create_engine(TEST_DB_URL, connect_args={"options": f"-csearch_path={schema}"}, pool_size=20)
     try:
         Base.metadata.create_all(
-            engine, tables=[JobModel.__table__, RunCallModel.__table__, RunCandidateModel.__table__]
+            engine,
+            tables=[
+                JobModel.__table__,
+                ProgressEventModel.__table__,
+                RunCallModel.__table__,
+                RunCandidateModel.__table__,
+            ],
         )
         with Session(engine) as session:
             session.add(JobModel(optimization_id="job-1"))
@@ -292,3 +519,15 @@ def test_a_poll_during_parallel_writes_never_skips_a_call(postgres: Engine) -> N
     assert sorted(seqs) == list(range(1, writes + 1))
     assert seen == list(range(1, writes + 1))
     assert store.get_candidate("job-1", "cand-1")["call_count"] == writes
+
+
+@needs_postgres
+def test_the_worker_marks_child_versions_on_postgresql(postgres: Engine) -> None:
+    """Run the cross-process drain on PostgreSQL, the production database."""
+    with Session(postgres) as session:
+        job = session.get(JobModel, "job-1")
+        assert job is not None
+        job.status = "running"
+        job.execution_generation = 1
+        session.commit()
+    _drain_child_versions(PostgresRunCallStore(postgres))

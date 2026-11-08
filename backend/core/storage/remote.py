@@ -33,7 +33,9 @@ from ..constants import (
     PAYLOAD_OVERVIEW_OPTIMIZATION_TYPE,
     PAYLOAD_OVERVIEW_OPTIMIZER_NAME,
     PAYLOAD_OVERVIEW_TOTAL_PAIRS,
+    PROGRESS_CANDIDATE,
     PROGRESS_LANE_STARTED,
+    PROGRESS_REJECTED,
     STRUCTURAL_PROGRESS_EVENTS,
     TQDM_KEY_PREFIX,
     WORKER_RESTART_CAUSE,
@@ -67,7 +69,7 @@ from .models import (
     UserQuotaOverrideModel,
     UserStorageQuotaOverrideModel,
 )
-from .run_call_store import PostgresRunCallStore
+from .run_call_store import PROGRAM_EVENT_KEY, PostgresRunCallStore, event_candidate_key
 from .schema_lock import schema_bootstrap_lock
 from .usage import (
     StorageItem,
@@ -1470,17 +1472,6 @@ class RemoteDBJobStore:
             The new call's ``seq``, which is also its cursor.
         """
         return self._run_calls.record_call(optimization_id, call, secrets)
-
-    def set_run_candidate_state(self, optimization_id: str, candidate_id: str, role: str, state: str) -> None:
-        """Insert or update one candidate's role and lifecycle state.
-
-        Args:
-            optimization_id: Owning job id.
-            candidate_id: The candidate within the run.
-            role: The candidate's role or stage.
-            state: ``running``, ``done`` or ``failed``.
-        """
-        self._run_calls.set_candidate_state(optimization_id, candidate_id, role, state)
 
     def list_run_calls(
         self, optimization_id: str, candidate_id: str, *, since: int = 0, limit: int = 100
@@ -3052,9 +3043,10 @@ class RemoteDBJobStore:
             )
             target.latest_metrics = {**(target.latest_metrics or {}), **metrics}
             session.commit()
-            return True
         finally:
             session.close()
+        self._finish_scored_candidate(source_optimization_id, message, metrics)
+        return True
 
     def record_progress(self, optimization_id: str, message: str | None, metrics: dict[str, Any]) -> None:
         """Record a progress event and refresh the job's latest metrics.
@@ -3087,6 +3079,33 @@ class RemoteDBJobStore:
                 optimization_id,
                 self._latest_metrics_with_sticky_tqdm(optimization_id, metrics),
             )
+        self._finish_scored_candidate(optimization_id, message, metrics)
+
+    def _finish_scored_candidate(self, optimization_id: str, message: str | None, metrics: dict[str, Any]) -> None:
+        """Mark a scored version ``done``, or ``failed`` for a crashed case, in the run record.
+
+        The worker writes this state: the engine that scores the version runs
+        in another process, which cannot reach the run's call recorder.
+
+        Args:
+            optimization_id: Job that recorded the version's calls.
+            message: Event name; ``candidate`` events and GEPA program
+                ``rejected`` events change a state.
+            metrics: The event's payload, with ``candidate_id`` and ``score``.
+        """
+        metrics = metrics or {}
+        program_rejection = message == PROGRESS_REJECTED and metrics.get(PROGRAM_EVENT_KEY)
+        if message != PROGRESS_CANDIDATE and not program_rejection:
+            return
+        key = event_candidate_key(metrics)
+        if key is None:
+            return
+        # A version with a crashed case leaves final selection (SKY-350), so its score is None.
+        state = "done" if program_rejection or metrics.get("score") is not None else "failed"
+        try:
+            self._run_calls.finish_candidate(optimization_id, key, state)
+        except SQLAlchemyError:
+            logger.warning("Failed to set a candidate state for %s", optimization_id, exc_info=True)
 
     def _insert_progress_event(
         self,
