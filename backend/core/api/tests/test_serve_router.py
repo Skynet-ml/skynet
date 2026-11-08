@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import tarfile
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -286,10 +288,11 @@ def repo_serve(
     state["fetches"] = []
 
     def fake_fetch(repository: str, commit: str, token: str | None, workdir: Path) -> Any:
-        """Record one fetch and write a placeholder archive."""
+        """Record one fetch and write an empty packed tree."""
         state["fetches"].append({"repository": repository, "commit": commit, "token": token})
         archive = workdir / "tree.tgz"
-        archive.write_bytes(b"tgz")
+        with tarfile.open(archive, "w:gz"):
+            pass
         return SimpleNamespace(archive=archive, commit=commit)
 
     monkeypatch.setattr(repo_serving, "github_token", lambda engine, owner: f"token-of-{owner}")
@@ -373,6 +376,41 @@ def test_repo_serve_reports_a_sandbox_failure(
 
     assert response.status_code == 502
     assert response.json()["code"] == "serve.protected_interaction_failed"
+
+
+def test_repo_serve_refuses_a_run_whose_optimize_toml_uses_a_removed_form(
+    repo_serve: tuple[TestClient, _Harness, dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run pinned to an old ``optimize.toml`` form gets a clear 502 and opens no sandbox.
+
+    Args:
+        repo_serve: Client, ledger harness and captured sandbox calls.
+        monkeypatch: Replaces the GitHub fetch.
+    """
+    client, _harness, state = repo_serve
+    legacy = b'[metric]\nfiles = ["eval/scorer.py"]\n\n[proposer]\nillegal = ["Never read eval/"]\n'
+
+    def legacy_fetch(_repository: str, commit: str, _token: str | None, workdir: Path) -> Any:
+        """Pack a commit pinned while ``[proposer] illegal`` still took inline rules."""
+        archive = workdir / "tree.tgz"
+        with tarfile.open(archive, "w:gz") as tree:
+            member = tarfile.TarInfo("optimize.toml")
+            member.size = len(legacy)
+            tree.addfile(member, io.BytesIO(legacy))
+        return SimpleNamespace(archive=archive, commit=commit)
+
+    monkeypatch.setattr(repo_serving, "fetch_snapshot", legacy_fetch)
+
+    response = client.post(
+        "/serve/repo-run",
+        json={"inputs": {"question": "hello"}, "max_cost_cents": 10},
+        headers={"Idempotency-Key": "repo-legacy"},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "serve.protected_interaction_failed"
+    assert "[proposer] illegal must be the path of a markdown rule file" in response.text
+    assert state["calls"] == []
 
 
 @pytest.mark.parametrize(
