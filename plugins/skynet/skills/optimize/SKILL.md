@@ -68,14 +68,19 @@ change their plan. Then call `next_tool`.
    the user asks for their own key (`byok`) or CLI (`subscription`). Set
    `scorer_model` only when the scorer calls an LLM.
 7. **Set the engine.** Offer the available engines from the
-   `repo_draft_start` answer. Use the engine that the user names. If the
-   user has no preference, use `auto` when it is in the list and available.
-   Call `repo_draft_set_engine`.
+   `repo_draft_start` answer: only those with `available: true`. A
+   repository run uses exactly one engine, and `auto` is not available for
+   it. Use the engine that the user names. If the user has no preference,
+   show the available engines and ask the user to pick one. Call
+   `repo_draft_set_engine`.
 8. **Set the budget** (optional). Call `repo_draft_set_budget` only when the
    user wants a different search length. The default is 200 scorer runs.
    This is not a money limit.
 9. **Review the draft.** Call `repo_draft_review`. If `ready` is false, fix
-   each issue with the step that `next_tool` names, then review again. If
+   each issue with the step tool that the issue is about, then review again.
+   Do not rely on `next_tool` here: when every step is set, it is
+   `repo_draft_review`. The price fields come only when the draft has no
+   blocking issues. If
    `unpriced_models` is not empty, tell the user that those models have no
    price and ask which model to use instead.
 10. **Get the user's agreement to a limit.** Show
@@ -96,11 +101,15 @@ change their plan. Then call `next_tool`.
     - If a call times out or the result is unclear, call `list_runs` first.
       If no run exists, call `repo_draft_submit` again with the same
       arguments and the same key, never a new key.
-    - If Skynet returns an error with a `code` (for example
-      `draft.not_ready` or `budget.below_minimum`), do not retry unchanged.
-      Show the `code` and `detail`, fix the draft, review it again, get the
-      user's agreement to a limit again, and submit with a new
-      `idempotency_key`. A reused key keeps the first limit.
+    - If Skynet returns an error with a `code`, do not retry unchanged.
+      `draft.not_ready` comes with `issues`: fix them. `budget.below_minimum`
+      comes with `detail` and `min_max_cost_cents`. Show the `code` and the
+      reason, fix the draft, review it again, get the user's agreement to a
+      limit again, and submit with a new `idempotency_key`.
+    - `budget.conflict` means that the key is already used with a different
+      limit. A reused key keeps the first limit. If the error has an
+      `optimization_id`, follow that run with `get_run`. Otherwise submit
+      with a new key.
     - Keep the `optimization_id` from the result.
 12. **Follow the run** with `get_run`. Poll about once a minute. Stop when
     `terminal` is true, or when `run.status` is `paused`. A paused run waits
@@ -148,7 +157,8 @@ A ticket classifier in `acme/support-bot`, in `classifier/`:
 - A tool error with a `code` and `detail` comes from Skynet. Show the
   detail to the user. Do not retry a refused run with a higher limit
   without the user's agreement.
-- A draft expires after 7 days without changes. If a step says the
+- A draft expires after 7 days without changes. Each account keeps at most
+  20 drafts, and `repo_draft_start` deletes the oldest. If a step says the
   `draft_id` is unknown or expired, start a new draft.
 - `status: in_progress` from `repo_draft_submit` is a wait, not a refusal
   or an error. Follow step 11 of "Workflow": retry with the same key, for at
