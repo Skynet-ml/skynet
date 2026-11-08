@@ -66,6 +66,9 @@ class LocalEnvironment(SandboxEnvironment):
         super().__init__(spec)
         self._default_timeout = timeouts.seconds(Phase.RUN) if timeouts is not None else None
         self._root: Path | None = None
+        # Every process group that a command started and that can still have
+        # members. A finished command keeps its group here while a background
+        # child lives, so stop() can kill that child too.
         self._groups: set[int] = set()
 
     @property
@@ -105,8 +108,15 @@ class LocalEnvironment(SandboxEnvironment):
             return
         self._root = None
         type(self)._running.discard(self)
+        # PID reuse: the kernel does not reuse a pid while a group with that id
+        # has members, so a group that still has members is ours. The risk is a
+        # group that emptied after its last check and whose id a new, unrelated
+        # session leader took before this kill. That needs a full wrap of the
+        # pid space in that gap. Portable code cannot prove group ownership, so
+        # we accept that small risk to never leave box processes on the host.
         for pgid in list(self._groups):
             _kill_group(pgid)
+        self._groups.clear()
         cleanup = asyncio.ensure_future(asyncio.to_thread(_remove_tree, root))
         try:
             await asyncio.shield(cleanup)
@@ -139,7 +149,8 @@ class LocalEnvironment(SandboxEnvironment):
             The exit code and the captured output.
 
         Raises:
-            RuntimeError: The sandbox is not running.
+            RuntimeError: The sandbox is not running, or it stopped while the
+                command started. The command is killed first.
             SandboxRejectedError: ``sudo`` is set.
             ValueError: ``cwd`` leaves the temp directory.
             RunTimeoutError: The command ran past the time limit. Its whole
@@ -161,6 +172,12 @@ class LocalEnvironment(SandboxEnvironment):
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
         )
+        # A stop() that ran during the spawn did not see this group, so the
+        # command would run on in a removed directory. A restart gives a new root.
+        if self._root is not root:
+            _kill_group(process.pid)
+            await asyncio.shield(process.wait())
+            raise RuntimeError("The local sandbox is not running.")
         # With start_new_session the shell leads a new group whose id is its pid.
         self._groups.add(process.pid)
         stdout: list[str] = []
@@ -177,7 +194,8 @@ class LocalEnvironment(SandboxEnvironment):
             if not finished:
                 _kill_group(process.pid)
                 await asyncio.shield(process.wait())
-            self._groups.discard(process.pid)
+            if not _group_exists(process.pid):
+                self._groups.discard(process.pid)
         return ExecResult(exit_code=exit_code, stdout="".join(stdout), stderr="".join(stderr))
 
     async def upload_files(self, files: Mapping[str, str]) -> None:
@@ -348,6 +366,24 @@ def _kill_group(pgid: int) -> None:
     """
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(pgid, signal.SIGKILL)
+
+
+def _group_exists(pgid: int) -> bool:
+    """Say whether a process group still has at least one member.
+
+    Args:
+        pgid: The group id.
+
+    Returns:
+        True while a process in the group exists.
+    """
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _make_box_dir() -> Path:

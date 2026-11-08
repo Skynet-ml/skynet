@@ -235,6 +235,54 @@ async def test_stop_kills_running_commands() -> None:
     assert await _wait_until_gone(child)
 
 
+async def test_stop_kills_a_background_child_of_a_finished_exec() -> None:
+    """Kill a detached child that outlives its finished command when the box stops."""
+    box = LocalEnvironment(_SPEC)
+    await box.start()
+    result = await box.exec("sleep 60 >/dev/null 2>&1 & echo $!", timeout_sec=10)
+    assert result.ok
+    child = int(result.stdout)
+    assert _alive(child)
+    await box.stop()
+    assert await _wait_until_gone(child)
+
+
+async def test_finished_exec_without_children_releases_its_group() -> None:
+    """Forget the group of a command that left nothing behind, so stop never kills a reused id."""
+    async with LocalEnvironment(_SPEC) as box:
+        assert (await box.exec("true")).ok
+        assert box._groups == set()
+
+
+async def test_stop_during_spawn_kills_the_new_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kill a command whose spawn overlaps a stop, and raise the not-running error."""
+    box = LocalEnvironment(_SPEC)
+    await box.start()
+    real_spawn = asyncio.create_subprocess_exec
+    spawned: list[int] = []
+
+    async def _spawn_then_stop(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        """Start the command, then stop the box before exec sees the process.
+
+        Args:
+            *args: The positional spawn arguments.
+            **kwargs: The keyword spawn arguments.
+
+        Returns:
+            The started process.
+        """
+        process = await real_spawn(*args, **kwargs)
+        spawned.append(process.pid)
+        await box.stop()
+        return process
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", _spawn_then_stop)
+    with pytest.raises(RuntimeError, match="not running"):
+        await asyncio.wait_for(box.exec("sleep 60"), 10)
+    assert await _wait_until_gone(spawned[0])
+    assert box._groups == set()
+
+
 async def test_on_output_receives_both_streams() -> None:
     """Send stdout and stderr chunks to the sink, tagged by stream."""
     chunks: list[tuple[str, str]] = []
