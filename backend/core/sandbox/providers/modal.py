@@ -180,8 +180,10 @@ class ModalEnvironment(SandboxEnvironment):
     async def stop(self) -> None:
         """Terminate the Modal sandbox and wait for it to end.
 
-        A cancel during the terminate, also a repeat cancel, waits for the
-        terminate to finish, then passes the cancel on.
+        A cancel during the terminate waits for the terminate for at most
+        ``_CANCEL_GRACE_SEC``, also through repeat cancels, then passes the
+        cancel on. A terminate that is still open after the grace time goes
+        on in the background, so the caller's stop timeout stays bounded.
 
         Raises:
             asyncio.CancelledError: The task was cancelled during the terminate.
@@ -192,14 +194,18 @@ class ModalEnvironment(SandboxEnvironment):
         self._sandbox = None
         self._termination_requested = True
         terminate = asyncio.ensure_future(_terminate(sandbox))
-        cancelled = await _wait_through_cancels(terminate)
-        if cancelled is not None:
+        try:
+            await asyncio.shield(terminate)
+        except asyncio.CancelledError:
+            await _wait_through_cancels(terminate, _CANCEL_GRACE_SEC)
+            if not terminate.done():
+                _keep_late_terminate(terminate)
+                raise
             if not terminate.cancelled() and terminate.exception() is not None:
                 logger.exception(
                     "Could not stop a modal sandbox during a cancelled stop.", exc_info=terminate.exception()
                 )
-            raise cancelled
-        terminate.result()
+            raise
 
     async def exec(
         self,
@@ -512,9 +518,7 @@ async def _terminate(sandbox: Any) -> None:
     await sandbox.wait.aio(raise_on_termination=False)
 
 
-async def _wait_through_cancels(
-    task: asyncio.Future[Any], grace_sec: float | None = None
-) -> asyncio.CancelledError | None:
+async def _wait_through_cancels(task: asyncio.Future[Any], grace_sec: float) -> None:
     """Wait until the task ends or the grace time passes, and absorb each cancel meanwhile.
 
     The task itself is never cancelled, because Modal may already have done
@@ -522,23 +526,19 @@ async def _wait_through_cancels(
 
     Args:
         task: The task to wait for.
-        grace_sec: The longest wait in seconds, or ``None`` for no limit.
-
-    Returns:
-        The last cancel that arrived during the wait, or ``None``.
+        grace_sec: The longest wait in seconds.
     """
     loop = asyncio.get_running_loop()
-    deadline = None if grace_sec is None else loop.time() + grace_sec
-    cancelled: asyncio.CancelledError | None = None
+    deadline = loop.time() + grace_sec
     while not task.done():
-        remaining = None if deadline is None else deadline - loop.time()
-        if remaining is not None and remaining <= 0:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
             break
         try:
             await asyncio.wait({task}, timeout=remaining)
-        except asyncio.CancelledError as error:
-            cancelled = error
-    return cancelled
+        except asyncio.CancelledError:
+            # The caller re-raises its own cancel after this wait.
+            continue
 
 
 def _terminate_late_sandbox(create: asyncio.Future[Any]) -> None:
@@ -578,9 +578,7 @@ def _finish_late_terminate(terminate: asyncio.Future[None]) -> None:
     """
     _LATE_TERMINATES.discard(terminate)
     if not terminate.cancelled() and terminate.exception() is not None:
-        logger.error(
-            "Could not stop a modal sandbox that arrived after a cancelled start.", exc_info=terminate.exception()
-        )
+        logger.error("Could not stop a modal sandbox after a cancelled start or stop.", exc_info=terminate.exception())
 
 
 async def _collect(stream: AsyncIterator[str], name: str, sink: OutputSink | None) -> str:

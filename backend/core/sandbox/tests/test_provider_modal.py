@@ -702,7 +702,7 @@ async def test_late_terminate_failure_is_logged_not_raised(
         fake_modal.create_gate.set()
         for _ in range(5):
             await asyncio.sleep(0)
-    assert "arrived after a cancelled start" in caplog.text
+    assert "after a cancelled start or stop" in caplog.text
     assert "terminate lost" in caplog.text
     assert not modal_provider._LATE_TERMINATES
 
@@ -808,6 +808,40 @@ async def test_cancel_during_stop_still_terminates(fake_modal: FakeModal) -> Non
     with pytest.raises(asyncio.CancelledError):
         await task
     assert box.terminated
+
+
+async def test_stop_timeout_ends_stop_while_the_terminate_hangs(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pass a caller timeout on after the grace time while the terminate hangs, then finish it in the background."""
+    monkeypatch.setattr(modal_provider, "_CANCEL_GRACE_SEC", 0.05)
+    env = ModalEnvironment(_SPEC)
+    await env.start()
+    box = _box(fake_modal)
+    gate = asyncio.Event()
+    terminate = box._terminate
+
+    async def hung_terminate() -> None:
+        """Wait for the gate, then terminate."""
+        await gate.wait()
+        await terminate()
+
+    box.terminate = _aio(hung_terminate)
+
+    async def stop_under_a_limit() -> None:
+        """Stop the sandbox under a short caller timeout."""
+        async with asyncio.timeout(0.05):
+            await env.stop()
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(stop_under_a_limit(), 2)
+    assert not box.terminated
+    assert len(modal_provider._LATE_TERMINATES) == 1
+    gate.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert box.terminated
+    assert not modal_provider._LATE_TERMINATES
 
 
 async def test_stop_job_sandboxes_continues_after_a_failure(
