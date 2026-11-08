@@ -1536,7 +1536,7 @@ def test_proposer_accepts_any_offered_harness_and_rejects_unlaunchable_ones() ->
     custom = _payload(proposer={"harness": "custom", "run_command": "my-agent {prompt_file}"})
     assert custom.proposer.run_command == "my-agent {prompt_file}"
     with pytest.raises(ValueError, match="harness"):
-        _payload(proposer={"harness": "aider"})
+        _payload(proposer={"harness": "no_such_harness"})
     with pytest.raises(ValueError, match="run_command"):
         _payload(proposer={"harness": "custom"})
 
