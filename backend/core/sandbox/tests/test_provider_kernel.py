@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import itertools
+import json
 import shlex
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, ClassVar
 
 import httpx
@@ -141,6 +143,8 @@ class FakeState:
     spawns: ClassVar[list[dict[str, Any]]] = []
     deleted: ClassVar[list[str]] = []
     closed: ClassVar[int] = 0
+    # The real list pages by offset; a small page shows any skip.
+    page_size: ClassVar[int] = 3
     _ids: ClassVar[Any] = itertools.count(1)
 
     @classmethod
@@ -268,14 +272,23 @@ class FakeBrowsersFs:
         """
         FakeState.browsers[session_id].files[path] = contents
 
-    async def read_file(self, session_id: str, *, path: str) -> FakeBinary:
-        """Return one file.
+    def __init__(self) -> None:
+        """Expose only the streamed read, like the provider uses it."""
+        self.with_streaming_response = FakeStreamingFs()
+
+
+class FakeStreamingFs:
+    """Act as ``client.browsers.fs.with_streaming_response``."""
+
+    @contextlib.asynccontextmanager
+    async def read_file(self, session_id: str, *, path: str) -> AsyncIterator[FakeBinary]:
+        """Open one file as a streamed response.
 
         Args:
             session_id: The browser id.
             path: The path.
 
-        Returns:
+        Yields:
             The binary response.
 
         Raises:
@@ -284,7 +297,7 @@ class FakeBrowsersFs:
         files = FakeState.browsers[session_id].files
         if path not in files:
             raise _status_error(kernel.NotFoundError, 404)
-        return FakeBinary(files[path])
+        yield FakeBinary(files[path])
 
 
 class FakeBrowsers:
@@ -318,7 +331,9 @@ class FakeBrowsers:
         return FakeState.new_browser(options)
 
     async def list(self, *, tags: Mapping[str, str]) -> AsyncIterator[FakeBrowser]:
-        """List the browsers whose tags match.
+        """List the browsers whose tags match, one offset page at a time.
+
+        Each page reads the live state, like the real offset pagination.
 
         Args:
             tags: The tags to match.
@@ -326,9 +341,19 @@ class FakeBrowsers:
         Yields:
             Each match.
         """
-        for browser in list(FakeState.browsers.values()):
-            if all(browser.tags.get(key) == value for key, value in tags.items()):
+        offset = 0
+        while True:
+            matches = [
+                browser
+                for browser in FakeState.browsers.values()
+                if all(browser.tags.get(key) == value for key, value in tags.items())
+            ]
+            page = matches[offset : offset + FakeState.page_size]
+            for browser in page:
                 yield browser
+            if len(page) < FakeState.page_size:
+                return
+            offset += FakeState.page_size
 
     async def delete_by_id(self, session_id: str) -> None:
         """Delete one browser.
@@ -556,12 +581,12 @@ async def test_exec_sends_the_connection_env_and_no_api_key() -> None:
 
 
 async def test_exec_without_timeout_sends_no_limit() -> None:
-    """Leave out the command and HTTP limits when the caller sets none."""
+    """Leave out the command limit and turn off the SDK HTTP timeout when the caller sets none."""
     async with kernel.KernelEnvironment(_spec()) as env:
         await env.exec("true")
     call = FakeState.execs[-1]
     assert "timeout_sec" not in call
-    assert "timeout" not in call
+    assert call["timeout"] is None
 
 
 async def test_exec_decodes_bad_utf8_with_replacement() -> None:
@@ -723,3 +748,184 @@ async def test_container_mode_failed_install_stops_the_browser() -> None:
     with pytest.raises(SandboxInfraError, match="install"):
         await kernel.KernelEnvironment(_spec(image="img")).start()
     assert FakeState.browsers == {}
+
+
+async def test_job_sweep_deletes_browsers_on_every_page() -> None:
+    """Delete every tagged browser, also past the first list page."""
+    for index in range(7):
+        FakeState.new_browser({"name": f"job-{index}", "tags": {JOB_TAG: "job-7"}})
+    FakeState.new_browser({"name": "other", "tags": {JOB_TAG: "job-8"}})
+    assert await kernel.KernelEnvironment.stop_job_sandboxes("job-7") == 7
+    assert [b.name for b in FakeState.browsers.values()] == ["other"]
+
+
+async def test_stop_sweep_deletes_box_browsers_on_every_page() -> None:
+    """Delete every leaked browser with the box tag, also past the first list page."""
+    env = kernel.KernelEnvironment(_spec(name="box-p"))
+    await env.start()
+    for _ in range(5):
+        FakeState.new_browser({"name": "box-p", "tags": {kernel.BOX_TAG: "box-p"}})
+    await env.stop()
+    assert FakeState.browsers == {}
+    assert len(FakeState.deleted) == 6
+
+
+class _GateBucket:
+    """Block each acquire until the gate opens."""
+
+    def __init__(self) -> None:
+        """Start with the gate open."""
+        self.gate = asyncio.Event()
+        self.gate.set()
+
+    async def acquire(self) -> None:
+        """Wait for the gate."""
+        await self.gate.wait()
+
+
+class _GatePacing:
+    """Hold gated read and create buckets."""
+
+    def __init__(self) -> None:
+        """Create the buckets."""
+        self.reads = _GateBucket()
+        self.creates = _GateBucket()
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda env: env.exec("true"),
+        lambda env: env.upload_files({"/tmp/a.txt": "x"}),
+        lambda env: env.download_file("/tmp/a.txt"),
+    ],
+    ids=["exec", "upload", "download"],
+)
+async def test_stop_during_read_wait_raises_infra_error(operation: Callable[[Any], Awaitable[Any]]) -> None:
+    """Raise SandboxInfraError when a stop ends the browser while a call waits for the read bucket."""
+    pacing = _GatePacing()
+    env = kernel.KernelEnvironment(_spec(), pacing=pacing)  # type: ignore[arg-type]
+    await env.start()
+    pacing.reads.gate.clear()
+    task = asyncio.ensure_future(operation(env))
+    await asyncio.sleep(0)
+    await env.stop()
+    pacing.reads.gate.set()
+    with pytest.raises(SandboxInfraError, match="not running"):
+        await task
+
+
+class _MockKernel:
+    """Serve a small Kernel API over ``httpx.MockTransport`` for the real SDK."""
+
+    def __init__(self, file_bytes: bytes = b"") -> None:
+        """Start with no browsers.
+
+        Args:
+            file_bytes: The content of the file ``/big``.
+        """
+        self.file_bytes = file_bytes
+        self.consumed = 0
+        self.timeouts: dict[str, Any] = {}
+        self.browsers: list[str] = []
+
+    def client_cls(self, **options: Any) -> Any:
+        """Create a real SDK client on the mock transport.
+
+        Args:
+            **options: The provider's client options.
+
+        Returns:
+            The SDK client.
+        """
+        return kernel.AsyncKernel(
+            api_key="test",
+            max_retries=options["max_retries"],
+            base_url="https://kernel.example.invalid",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(self.handle)),
+        )
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        """Answer one SDK request.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The response.
+        """
+        path = request.url.path
+        self.timeouts[f"{request.method} {path}"] = request.extensions.get("timeout")
+        browser = {
+            "session_id": "ses-real",
+            "cdp_ws_url": "wss://cdp.example.invalid",
+            "created_at": "2026-01-01T00:00:00Z",
+            "headless": False,
+            "stealth": False,
+            "timeout_seconds": 300,
+        }
+        if request.method == "POST" and path == "/browsers":
+            self.browsers.append("ses-real")
+            return httpx.Response(200, json=browser)
+        if request.method == "GET" and path == "/browsers":
+            return httpx.Response(200, json=[{**browser, "session_id": sid} for sid in self.browsers])
+        if request.method == "DELETE" and path.startswith("/browsers/"):
+            self.browsers.remove(path.rsplit("/", 1)[1])
+            return httpx.Response(204)
+        if path.endswith("/process/exec"):
+            return httpx.Response(200, json={"exit_code": 0, "stdout_b64": "", "stderr_b64": ""})
+        if path.endswith("/fs/read_file") and request.url.params.get("path") == "/big":
+            return httpx.Response(
+                200, stream=_CountingStream(self), headers={"content-type": "application/octet-stream"}
+            )
+        return httpx.Response(404, content=json.dumps({"code": "not_found", "message": "missing"}))
+
+
+class _CountingStream(httpx.AsyncByteStream):
+    """Stream the mock file in 64 KiB chunks and count the bytes sent."""
+
+    def __init__(self, server: _MockKernel) -> None:
+        """Keep the server.
+
+        Args:
+            server: The mock server.
+        """
+        self.server = server
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        """Yield the file in chunks.
+
+        Yields:
+            One chunk.
+        """
+        data = self.server.file_bytes
+        for start in range(0, len(data), 65536):
+            chunk = data[start : start + 65536]
+            self.server.consumed += len(chunk)
+            yield chunk
+
+
+async def test_real_sdk_download_stops_reading_at_the_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop the streamed body at the limit, and return None for a missing file, with the real SDK."""
+    server = _MockKernel(file_bytes=b"a" * (16 * 1024 * 1024))
+    monkeypatch.setattr(kernel.KernelEnvironment, "client_cls", server.client_cls)
+    monkeypatch.setattr(kernel, "MAX_DOWNLOAD_BYTES", 1024 * 1024)
+    async with kernel.KernelEnvironment(_spec()) as env:
+        with pytest.raises(SandboxInfraError, match="limit"):
+            await env.download_file("/big")
+        assert await env.download_file("/missing") is None
+    assert server.consumed <= 4 * 1024 * 1024
+    assert server.browsers == []
+
+
+async def test_real_sdk_exec_without_timeout_has_no_read_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Send a no-limit exec with no HTTP read timeout, and a limited exec with the margin, with the real SDK."""
+    server = _MockKernel()
+    monkeypatch.setattr(kernel.KernelEnvironment, "client_cls", server.client_cls)
+    async with kernel.KernelEnvironment(_spec()) as env:
+        await env.exec("sleep 600")
+        unlimited = server.timeouts["POST /browsers/ses-real/process/exec"]
+        await env.exec("sleep 1", timeout_sec=5)
+        limited = server.timeouts["POST /browsers/ses-real/process/exec"]
+    assert unlimited["read"] is None
+    assert limited["read"] == 5 + kernel.EXEC_HTTP_MARGIN

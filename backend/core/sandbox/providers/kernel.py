@@ -453,23 +453,35 @@ class KernelEnvironment(SandboxEnvironment):
             with contextlib.suppress(Exception):
                 await client.close()
 
-    def _require_browser(self) -> Any:
-        """Return the running browser.
+    def _require_browser(self) -> tuple[Any, Any]:
+        """Return the client and the running browser.
 
         Returns:
-            The SDK browser of the create call.
+            The SDK client and the SDK browser of the create call.
 
         Raises:
             SandboxInfraError: The browser is not running.
         """
         if self._browser is None or self._client is None or self._stop_task is not None:
             raise SandboxInfraError("The Kernel sandbox is not running.")
-        return self._browser
+        return self._client, self._browser
 
     async def _pace_read(self) -> None:
         """Wait for the read bucket of the provider, when there is one."""
         if self._pacing is not None:
             await self._pacing.reads.acquire()
+
+    async def _ready(self) -> tuple[Any, Any]:
+        """Wait for the read bucket, then return the client and the running browser.
+
+        Returns:
+            The SDK client and the SDK browser.
+
+        Raises:
+            SandboxInfraError: A ``stop()`` ended the browser during the wait.
+        """
+        await self._pace_read()
+        return self._require_browser()
 
     def _connection_env(self) -> dict[str, str]:
         """Return the browser connection variables that Harbor puts into every command.
@@ -513,7 +525,7 @@ class KernelEnvironment(SandboxEnvironment):
         Raises:
             SandboxInfraError: The browser is not running or the API call failed.
         """
-        browser = self._require_browser()
+        self._require_browser()
         options: dict[str, Any] = {"command": "bash", "args": ["-lc", command], "as_root": sudo}
         if cwd is not None:
             options["cwd"] = cwd
@@ -523,11 +535,13 @@ class KernelEnvironment(SandboxEnvironment):
         if timeout_sec is not None:
             options["timeout_sec"] = max(1, math.ceil(timeout_sec))
             http_timeout = timeout_sec + EXEC_HTTP_MARGIN
-            options["timeout"] = http_timeout
-        await self._pace_read()
+        # Without an explicit value the SDK applies its 60 s default, which
+        # would cut a command that has no limit.
+        options["timeout"] = http_timeout
+        client, browser = await self._ready()
         try:
             async with asyncio.timeout(http_timeout) as deadline:
-                response = await self._client.browsers.process.exec(browser.session_id, **options)
+                response = await client.browsers.process.exec(browser.session_id, **options)
         except TimeoutError:
             if not deadline.expired():
                 raise
@@ -606,14 +620,17 @@ class KernelEnvironment(SandboxEnvironment):
         Raises:
             SandboxInfraError: The browser is not running or a write failed.
         """
-        browser = self._require_browser()
+        self._require_browser()
         for path, text in files.items():
             parent = posixpath.dirname(path) or "/"
             target = f"/tmp/skynet-transfer-{uuid.uuid4().hex}" if self._container else path
             if not self._container:
                 await self._check_file(await self._host_exec(f"mkdir -p {shlex.quote(parent)}"), path)
-            await self._pace_read()
-            await self._client.browsers.fs.write_file(browser.session_id, text.encode("utf-8"), path=target)
+            client, browser = await self._ready()
+            try:
+                await client.browsers.fs.write_file(browser.session_id, text.encode("utf-8"), path=target)
+            except Exception as error:
+                raise SandboxInfraError(f"The Kernel upload of {path} failed: {type(error).__name__}") from error
             if self._container:
                 name = shlex.quote(self.name)
                 script = (
@@ -646,9 +663,9 @@ class KernelEnvironment(SandboxEnvironment):
             The content, or ``None`` when the file does not exist.
 
         Raises:
-            SandboxInfraError: The browser is not running or the file is above 1 GiB.
+            SandboxInfraError: The browser is not running, the read failed or the file is above 1 GiB.
         """
-        browser = self._require_browser()
+        self._require_browser()
         source = path
         if self._container:
             source = f"/tmp/skynet-transfer-{uuid.uuid4().hex}"
@@ -657,18 +674,24 @@ class KernelEnvironment(SandboxEnvironment):
             )
             if not copied.ok:
                 return None
-        await self._pace_read()
+        data = bytearray()
         try:
-            response = await self._client.browsers.fs.read_file(browser.session_id, path=source)
-            data = bytearray()
-            async for chunk in response.iter_bytes(chunk_size=1024 * 1024):
-                data.extend(chunk)
-                if len(data) > MAX_DOWNLOAD_BYTES:
-                    raise SandboxInfraError(f"The Kernel download of {path} is above the 1 GiB limit.")
+            client, browser = await self._ready()
+            # The streamed call reads the body in chunks, so the limit holds
+            # before the whole file is in memory.
+            async with client.browsers.fs.with_streaming_response.read_file(
+                browser.session_id, path=source
+            ) as response:
+                async for chunk in response.iter_bytes(chunk_size=1024 * 1024):
+                    data.extend(chunk)
+                    if len(data) > MAX_DOWNLOAD_BYTES:
+                        raise SandboxInfraError(f"The Kernel download of {path} is above the 1 GiB limit.")
+        except SandboxInfraError:
+            raise
         except Exception as error:
             if NotFoundError is not None and isinstance(error, NotFoundError):
                 return None
-            raise
+            raise SandboxInfraError(f"The Kernel download of {path} failed: {type(error).__name__}") from error
         finally:
             if self._container:
                 with contextlib.suppress(Exception):
@@ -689,16 +712,19 @@ async def _delete_tagged(client: Any, tags: Mapping[str, str], *, skip: str | No
     Returns:
         The number of browsers that Kernel deleted.
     """
+    # The list pages by offset, so a delete during the listing would move
+    # later browsers into pages that the listing already passed.
+    session_ids = [item.session_id async for item in client.browsers.list(tags=dict(tags))]
     deleted = 0
-    async for item in client.browsers.list(tags=dict(tags)):
-        if item.session_id == skip:
+    for session_id in session_ids:
+        if session_id == skip:
             continue
         try:
-            await client.browsers.delete_by_id(item.session_id)
+            await client.browsers.delete_by_id(session_id)
         except Exception as error:
             if NotFoundError is not None and isinstance(error, NotFoundError):
                 continue
-            logger.warning("Kernel browser %s did not stop: %s", item.session_id, type(error).__name__)
+            logger.warning("Kernel browser %s did not stop: %s", session_id, type(error).__name__)
             continue
         deleted += 1
     return deleted
