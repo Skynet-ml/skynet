@@ -12,7 +12,7 @@ The model holds no provider types; providers implement ``PolicyApplier``.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncGenerator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
@@ -158,7 +158,7 @@ class PhaseNetwork:
         return self._current
 
     @asynccontextmanager
-    async def phase_policy(self, phase: Phase) -> AsyncIterator[EgressPolicy]:
+    async def phase_policy(self, phase: Phase) -> AsyncGenerator[EgressPolicy, None]:
         """Apply the policy of a phase, then restore the old policy.
 
         The old policy comes back on exit, also when the block raises.
