@@ -65,7 +65,8 @@ from ....billing.model_gateway import _tool_target
 from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import BudgetRuntime, UsagePendingError
 from ....billing.signals import BudgetReached
-from ....billing.usage_tags import current_tags
+from ....billing.usage_tags import LANE_KEY, current_tags
+from ....storage.run_call_store import call_candidate_key
 from . import runner, sandbox_log
 from .harness import ENV_API_KEY, ENV_MODEL
 from .protocol import STATUS_KEY
@@ -895,8 +896,14 @@ class _StageRelay:
         self._budget = budget
         # The relay's calls run on pool threads, which do not inherit the usage-scope
         # contextvar, so the candidate is read here, in the scorer thread that holds it.
+        tags = current_tags()
+        candidate = tags.get("candidate")
         self._recorder = (
-            recorder.bind(role=role, candidate_id=recorder.candidate_id or current_tags().get("candidate"))
+            recorder.bind(
+                role=role,
+                candidate_id=recorder.candidate_id
+                or (call_candidate_key(candidate, tags.get(LANE_KEY)) if candidate else None),
+            )
             if recorder is not None
             else None
         )

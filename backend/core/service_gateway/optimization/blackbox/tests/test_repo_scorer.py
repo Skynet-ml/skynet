@@ -14,22 +14,30 @@ import time
 import traceback
 import urllib.parse
 from collections.abc import Iterator, Mapping
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+from pydantic import SecretStr
 
 from core.billing.budgets import BudgetError, BudgetInsufficientError
+from core.billing.model_gateway import ModelGateway
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
+from core.billing.tests.test_env_connectors import MAPS_KEY, _operations, _runtime
+from core.billing.tests.test_model_gateway_transport import gateway  # noqa: F401 - pytest fixture
 from core.billing.usage_tags import usage_scope
+from core.config import settings
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
 from core.worker.scoped_relay import CallRecorder
 
 from .. import repo_scorer, runner
+from ..remote_evaluator import RemoteEvaluatorClient
 from ..repo_constraints import McpServer, RoleEnvironment, ServiceSpec, TargetStage
 from ..repo_scorer import (
     _STAGE_LAYOUT_SECONDS,
@@ -1356,6 +1364,7 @@ def _service_scorer(
     roles: Mapping[str, tuple[str, ...]],
     run_entry: str | None = None,
     code: str = SERVICE_SCORER,
+    recorder: CallRecorder | None = None,
 ) -> RepoScorer:
     """Open a scorer whose run declares one url service with a key.
 
@@ -1365,6 +1374,7 @@ def _service_scorer(
         roles: The services each role lists.
         run_entry: The ``[run]`` entry, if any.
         code: The metric's source.
+        recorder: Writes each relayed call into the run record, if given.
 
     Returns:
         The scorer.
@@ -1387,6 +1397,7 @@ def _service_scorer(
         run_entry=run_entry,
         secret_hosts={"JUDGE_KEY": "judge.example.test"},
         secret_allowed_hosts={"JUDGE_KEY": ("judge.example.test",)},
+        recorder=recorder,
     )
 
 
@@ -2040,6 +2051,39 @@ def test_a_relayed_call_on_a_pool_thread_keeps_the_scorer_threads_candidate(
     assert call["candidate_id"] == expected
 
 
+@pytest.mark.parametrize(("scope", "expected"), [({"candidate": "7", "lane": "gepa"}, "gepa:7"), ({}, "run")])
+def test_a_scored_versions_relayed_call_is_recorded_under_the_guests_candidate(
+    tmp_path: Path,
+    upstream: _Upstream,
+    gateway: ModelGateway,  # noqa: F811 - the imported pytest fixture
+    monkeypatch: pytest.MonkeyPatch,
+    scope: dict[str, str],
+    expected: str,
+) -> None:
+    """The guest's usage tags cross the real evaluator relay, so the metric's service call gets its candidate (E28).
+
+    The parent scope is never set by hand: the gateway's server thread opens it from the tags header.
+    """
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    sink = _CallSink()
+    scorer = _service_scorer(
+        tmp_path,
+        upstream.port,
+        {"run": (), "metric": ("judge-api",)},
+        recorder=CallRecorder(sink, "opt-1", "", ""),
+    )
+    try:
+        client = RemoteEvaluatorClient(gateway.bind_evaluator(scorer), timeout_seconds=60)
+        with usage_scope(**scope):
+            result = client("", None)
+    finally:
+        scorer.close()
+
+    assert result["score"] == pytest.approx(0.7)
+    [(_, call, _)] = sink.calls
+    assert (call["kind"], call["role"], call["candidate_id"]) == ("host", "metric", expected)
+
+
 class _BrokenSink:
     """Fail every write the way a lost database connection does, with the call in the error text."""
 
@@ -2200,6 +2244,55 @@ def test_a_budget_stop_in_a_relayed_call_answers_the_box_at_once_and_stops_the_c
     assert relay.control == {"code": code, "message": str(error)}
     with pytest.raises(UsagePendingError if code == "usage_pending" else type(error)):
         repo_scorer._raise_control({"control": relay.control})
+
+
+def test_a_managed_mcp_call_through_the_real_relay_is_metered_against_the_run_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Skynet-key Maps call from a role's MCP file settles its catalog price in the run budget and hides the key.
+
+    Only the network is a stand-in: the relay, the meter and the budget ledger are the real ones.
+    """
+    monkeypatch.setattr(settings, "usage_markup", 1.0)
+    monkeypatch.setattr(settings, "google_maps_api_key", SecretStr(MAPS_KEY))
+    sent: list[httpx.Request] = []
+
+    def maps(request: httpx.Request) -> httpx.Response:
+        """Answer like the Maps server, echoing the key header back."""
+        sent.append(request)
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "echo": request.headers["x-goog-api-key"]})
+
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "203.0.113.7")
+    monkeypatch.setattr(repo_scorer, "_PinnedTransport", lambda origin, pinned: httpx.MockTransport(maps))
+    server = McpServer(name="maps", url="https://mapstools.googleapis.com/mcp", headers={"X-Goog-Api-Key": "${MAPS}"})
+    workspace = _Workspace()
+    ledger = _runtime(tmp_path, 20)
+    runtime = next(ledger)
+    relay = _StageRelay(
+        {},
+        {},
+        response_dir="calls/000001/stages",
+        max_concurrency=2,
+        env={},
+        workspace=workspace,  # type: ignore[arg-type]
+        role="run",
+        mcp=RoleEnvironment(mcp=".mcp.json", mcp_servers=(server,)),
+        bindings={"MAPS": "managed"},
+        secret_hosts={"MAPS": "mapstools.googleapis.com"},
+        budget=runtime,
+    )
+    body = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "search_places", "arguments": {}}}
+    ).encode()
+    answer = _mcp_answer(relay, workspace, "maps", body=body)
+
+    assert answer["status"] == 200
+    assert MAPS_KEY not in base64.b64decode(answer["body"]).decode()
+    [request] = sent
+    assert request.headers["x-goog-api-key"] == MAPS_KEY
+    assert [(operation.cost_kind, operation.role) for operation in _operations(runtime)] == [("tool", "maps")]
+    assert runtime.service.get(runtime.budget_id, "alice").setup_spent_cents == Decimal("1.4")
+    ledger.close()
 
 
 def test_the_scorer_gives_each_role_only_the_servers_of_its_own_mcp_file(tmp_path: Path) -> None:
