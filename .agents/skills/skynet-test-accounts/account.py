@@ -131,6 +131,19 @@ def read_secret(name):
     )
 
 
+def secret_gone(err):
+    """Return whether a failed AWS call means that the secret no longer exists.
+
+    Args:
+        err: The failed ``aws`` call.
+
+    Returns:
+        True for a missing secret, or one that a delete removed a moment ago.
+    """
+    # For a short time after a force delete, AWS answers "marked for deletion" instead of not found.
+    return "ResourceNotFoundException" in err.stderr or "marked for deletion" in err.stderr
+
+
 def inbox_auth():
     """Return the Resend authorization header line."""
     return "Authorization: Bearer " + read_secret("skynet/staging/app")["SMTP_PASSWORD"]
@@ -340,7 +353,13 @@ def delete(ident):
     Args:
         ident: Account id that ``create`` printed.
     """
-    value = read_secret(PREFIX + ident)
+    try:
+        value = read_secret(PREFIX + ident)
+    except subprocess.CalledProcessError as err:
+        if not secret_gone(err):
+            raise
+        print("account: no secret for this id; the account is already deleted or forgotten. Nothing to do.")
+        return
     api = value["api"]
     with tempfile.TemporaryDirectory() as tmp:
         # Sign in first: the secret can say pending for a verified account (create or delete died after confirm).
@@ -350,8 +369,9 @@ def delete(ident):
             token = sign_in(value, tmp)
         if not token:
             sys.exit(
-                "account: sign-in failed after the email confirmation; the secret stays."
-                f" If the preview database is gone, run python3 account.py forget {ident}. Otherwise report the id."
+                "account: sign-in failed; the secret stays. If an earlier delete printed"
+                " 'account delete: HTTP 200', or the preview database is gone, the account is gone:"
+                f" run python3 account.py forget {ident}. Otherwise report the id."
             )
         header = Path(tmp) / "auth"
         header.touch(mode=0o600)
@@ -370,7 +390,13 @@ def forget(ident):
     Args:
         ident: Account id.
     """
-    run([*AWS, "secretsmanager", "delete-secret", "--secret-id", PREFIX + ident, "--force-delete-without-recovery"])
+    try:
+        run([*AWS, "secretsmanager", "delete-secret", "--secret-id", PREFIX + ident, "--force-delete-without-recovery"])
+    except subprocess.CalledProcessError as err:
+        if not secret_gone(err):
+            raise
+        print("account: no secret for this id. Nothing to do.")
+        return
     print("secret removed; no account delete ran")
 
 

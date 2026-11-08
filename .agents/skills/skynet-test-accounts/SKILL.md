@@ -126,7 +126,9 @@ to the orchestrator.
 
 "No new email code arrived" does not prove that the account is gone. A
 verified account gets no new code. Use `forget` only when `create` printed
-no `register: HTTP 2xx` line, or the preview database is gone.
+no `register: HTTP 2xx` line, or the preview database is gone. If an
+earlier `delete` printed `account delete: HTTP 200` but kept the secret,
+run `forget`. A `delete` of an id with no secret changes nothing and exits 0.
 
 - `account.py list` prints the id, target, status and creation date of every
   check account that still has a secret. The orchestrator runs it after each
