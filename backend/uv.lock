@@ -4381,6 +4381,24 @@ wheels = [
 ]
 
 [[package]]
+name = "runloop-api-client"
+version = "3.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx", extra = ["http2"] },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+    { name = "uuid-utils" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e6/9c/0899efd387582894eac566124d771073945e1360afb16fba333315e09b0a/runloop_api_client-3.0.0.tar.gz", hash = "sha256:d932fe468473550c8dd1709d80d9e5ced0decb461fd688b259ea67a390ff2a91", size = 597140, upload-time = "2026-10-23T20:28:15.263Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/41/cd/bfea2a85f106b3378274f36c49f89b0af3fdf3ea26dcf7ed9e0366ffdaeb/runloop_api_client-3.0.0-py3-none-any.whl", hash = "sha256:45c1995be7c6d659d5d6504d38b3c76203e2c65de97d4c84d49ac3912a6afdbe", size = 320284, upload-time = "2026-10-23T20:28:13.703Z" },
+]
+
+[[package]]
 name = "s3transfer"
 version = "0.19.2"
 source = { registry = "https://pypi.org/simple" }
@@ -4663,6 +4681,9 @@ render = [
     { name = "pyrender" },
     { name = "trimesh" },
 ]
+runloop = [
+    { name = "runloop-api-client" },
+]
 training = [
     { name = "httpx" },
     { name = "transformers" },
@@ -4710,6 +4731,7 @@ requires-dist = [
     { name = "redis", specifier = ">=5,<6" },
     { name = "requests", specifier = ">=2.31" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11" },
+    { name = "runloop-api-client", marker = "extra == 'runloop'", specifier = ">=3.0.0,<4" },
     { name = "scalar-fastapi", specifier = ">=1.8" },
     { name = "scipy", specifier = ">=1.15.3" },
     { name = "sentry-sdk", specifier = ">=2.67,<3" },
@@ -4723,7 +4745,7 @@ requires-dist = [
     { name = "webauthn", specifier = ">=2.5,<3" },
     { name = "xlrd", specifier = ">=2" },
 ]
-provides-extras = ["dev", "load", "training", "render", "langsmith", "e2b"]
+provides-extras = ["dev", "load", "training", "render", "langsmith", "e2b", "runloop"]
 
 [[package]]
 name = "sniffio"
