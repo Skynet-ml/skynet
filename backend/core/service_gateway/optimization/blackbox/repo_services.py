@@ -70,7 +70,7 @@ def plan_role(role: RoleEnvironment) -> RolePlan:
     )
 
 
-def plan_roles(constraints: RepoConstraints) -> dict[str, object]:
+def plan_roles(constraints: RepoConstraints, *, proposer_hosts: tuple[str, ...]) -> dict[str, object]:
     """Describe every role's plan as JSON for the run's environment record.
 
     A target's box is offline except for the relay, whatever its ``network``
@@ -78,13 +78,15 @@ def plan_roles(constraints: RepoConstraints) -> dict[str, object]:
 
     Args:
         constraints: The repository's parsed ``optimize.toml``.
+        proposer_hosts: The hosts the proposer's box reaches besides the
+            relay, after the registry default applies (E57).
 
     Returns:
         ``{"proposer": plan, "targets": {name: plan}}``.
     """
     targets = {name: replace(plan_role(stage), allowed_hosts=()) for name, stage in constraints.targets.items()}
     return {
-        "proposer": plan_role(constraints.proposer).record(),
+        "proposer": replace(plan_role(constraints.proposer), allowed_hosts=proposer_hosts).record(),
         "targets": {name: plan.record() for name, plan in targets.items()},
     }
 

@@ -172,6 +172,10 @@ class SandboxControl(Protocol):
         """Return a runtime for the parent's own boxes, never reachable by the guest."""
         ...
 
+    def allow_guest_hosts(self, allowed_hosts: tuple[str, ...]) -> None:
+        """Set the most a guest-opened box may reach besides the relay."""
+        ...
+
     def close(self) -> None:
         """Stop every owned sandbox and settle its confirmed usage."""
         ...
@@ -710,6 +714,22 @@ class ModelGateway:
         if self._descriptor is None:
             raise ValueError("This gateway has no sandbox broker to open a parent box with.")
         self._descriptor[PARENT_HOSTS_KEY] = sorted(set(allowed_hosts))
+
+    def allow_guest_hosts(self, allowed_hosts: tuple[str, ...]) -> None:
+        """Let the guest's boxes reach ``allowed_hosts``, such as the proposer's registries.
+
+        The guest asks for these hosts when it opens a box; the broker refuses
+        any host outside this grant, so the guest can never widen it.
+
+        Args:
+            allowed_hosts: Named hosts; empty keeps every guest box offline.
+
+        Raises:
+            ValueError: When no sandbox broker is bound yet.
+        """
+        if self._sandbox is None:
+            raise ValueError("This gateway has no sandbox broker to grant hosts on.")
+        self._sandbox.allow_guest_hosts(tuple(sorted(set(allowed_hosts))))
 
     def parent_sandbox_runtime(self) -> Any:
         """Return the runtime the parent opens its own scoring box with.

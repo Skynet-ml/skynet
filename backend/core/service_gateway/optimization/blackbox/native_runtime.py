@@ -171,8 +171,9 @@ class NativeOptions:
     budget_route: dict[str, str] | None = field(default=None, repr=False)
     sandbox_runtime: SandboxRuntime | None = None
     # A repository run's packed tree: ``chunks`` (files on this machine),
-    # ``editable_paths``, ``readonly_paths`` and ``constrained`` (a
-    # constraints file governs the run).
+    # ``editable_paths``, ``readonly_paths``, ``constrained`` (a
+    # constraints file governs the run) and ``proposer_hosts`` (what the
+    # proposer box may reach besides the relay).
     repo: dict[str, Any] | None = None
     # ShinkaEvolve's evolution settings, and its optimization models in bandit
     # order: each ``{"model", "url", "token"}`` names one scoped gateway route.
@@ -1068,11 +1069,21 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
     # Runs carry no wall-clock cap of their own: the budget and evaluation
     # limits end them, and only the sandbox's platform lifetime bounds the box.
     lifetime = settings.vercel_sandbox_max_lifetime_seconds
+    network: dict[str, Any] = {}
+    if options.repo is not None:
+        # A repository's proposer reaches only its registries and listed hosts
+        # (E57). A box that calls the gateway directly needs its host too; a
+        # protected box reaches the model through the parent's mailbox.
+        hosts = set(options.repo.get("proposer_hosts") or ())
+        if runtime.injects_headers and gateway_host:
+            hosts.add(gateway_host)
+        network = {"allowed_hosts": tuple(sorted(hosts)), "network_disabled": not hosts}
     spec = SandboxSpec(
         lifetime_seconds=lifetime,
         env={"PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1"},
         name=unique_sandbox_name(f"app-{engine_id}"),
         inject_headers=headers,
+        **network,
     )
     session = runtime.open(spec)
     final_result: Result | None = None

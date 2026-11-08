@@ -94,6 +94,7 @@ from ..service_gateway.optimization.blackbox.docker_sandbox import (
     docker_runtime_from_settings,
     remove_idle_sandbox_networks,
 )
+from ..service_gateway.optimization.blackbox.repo_tree import REPO_SNAPSHOT_KEY
 from ..service_gateway.optimization.blackbox.sandbox import sandbox_runtime_from_settings
 from ..service_gateway.optimization.blackbox.service import validate_blackbox_payload
 from ..service_gateway.optimization.trajectory import GEPA_STATE_FILENAME
@@ -1065,6 +1066,11 @@ class BackgroundWorker:
                             )
                             if gate_failures:
                                 raise RepoGateError(gate_failures)
+                            # The broker was bound before staging read optimize.toml, so the
+                            # proposer's hosts are granted only now; with none it stays offline.
+                            budget_gateway.allow_guest_hosts(
+                                tuple(payload_dict[REPO_SNAPSHOT_KEY].get("proposer_hosts") or ())
+                            )
                             inferred_setup = infer_repo_setup(payload_dict, staged_repository, budget_gateway)
                             if inferred_setup is not None:
                                 self._record_setup_command(optimization_id, inferred_setup)
