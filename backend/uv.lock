@@ -5215,6 +5215,9 @@ runloop = [
 sail = [
     { name = "sail" },
 ]
+sbx = [
+    { name = "python-multipart" },
+]
 training = [
     { name = "httpx" },
     { name = "transformers" },
@@ -5262,6 +5265,7 @@ requires-dist = [
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.5" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "python-json-logger", specifier = ">=2.0" },
+    { name = "python-multipart", marker = "extra == 'sbx'", specifier = ">=0.0.31" },
     { name = "pywebpush", specifier = ">=2.0" },
     { name = "redis", specifier = ">=5,<6" },
     { name = "requests", specifier = ">=2.31" },
@@ -5281,7 +5285,7 @@ requires-dist = [
     { name = "webauthn", specifier = ">=2.5,<3" },
     { name = "xlrd", specifier = ">=2" },
 ]
-provides-extras = ["dev", "load", "training", "render", "langsmith", "e2b", "daytona", "modal", "runloop", "kernel", "mosaic", "sail"]
+provides-extras = ["dev", "load", "training", "render", "langsmith", "e2b", "daytona", "modal", "runloop", "kernel", "mosaic", "sail", "sbx"]
 
 [[package]]
 name = "sniffio"
