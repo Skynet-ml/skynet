@@ -37,7 +37,7 @@ from collections.abc import AsyncIterator, Awaitable, Iterator, Mapping
 from pathlib import PurePosixPath
 from typing import Any
 
-from ..capabilities import EnvironmentCapabilities, NetworkMode, network_mode
+from ..capabilities import EnvironmentCapabilities, NetworkMode, SandboxSpecError, network_mode
 from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, SandboxEnvironment
 from ..errors import (
     RunTimeoutError,
@@ -61,6 +61,7 @@ try:
         SandboxFileNotFoundError,
         SandboxNotRunningError,
         UnauthorizedError,
+        UploadTimeoutError,
     )
 except ImportError:
     APIError = None
@@ -72,6 +73,7 @@ except ImportError:
     SandboxFileNotFoundError = None
     SandboxNotRunningError = None
     UnauthorizedError = None
+    UploadTimeoutError = None
 
 logger = logging.getLogger(__name__)
 
@@ -137,8 +139,8 @@ def _mapped(action: str) -> Iterator[None]:
 
     Raises:
         SandboxFatalError: The API key is wrong, or the account cannot pay.
-        SandboxTransientError: A connection error, an API timeout, a rate
-            limit or a 5xx answer.
+        SandboxTransientError: A connection error, an API or upload timeout,
+            a rate limit or a 5xx answer.
         SandboxRejectedError: Prime rejected the request as invalid.
         SandboxInfraError: The sandbox stopped, or any other SDK error.
     """
@@ -146,7 +148,7 @@ def _mapped(action: str) -> Iterator[None]:
         yield
     except _classes(UnauthorizedError, PaymentRequiredError) as error:
         raise SandboxFatalError(f"Prime refused the request to {action}: {type(error).__name__}.") from error
-    except _classes(APITimeoutError) as error:
+    except _classes(APITimeoutError, UploadTimeoutError) as error:
         raise SandboxTransientError(f"Prime could not {action}: {type(error).__name__}.") from error
     except _classes(APIError) as error:
         status = _status(error)
@@ -293,6 +295,7 @@ class PrimeEnvironment(SandboxEnvironment):
         Any failure or cancel deletes the sandbox before the error goes on.
 
         Raises:
+            SandboxSpecError: The SDK rejected the create request fields.
             StartTimeoutError: The sandbox did not run within the start timeout.
             SandboxInfraError: A stop ended the start, or the sandbox already
                 started once.
@@ -323,15 +326,19 @@ class PrimeEnvironment(SandboxEnvironment):
         """Create the sandbox, keep its id and wait until it runs.
 
         Raises:
+            SandboxSpecError: The SDK rejected the create request fields.
             StartTimeoutError: The sandbox did not run within the start timeout.
         """
         client = self._client
         limit = self._start_limit
+        request = self._create_request()
         try:
             async with asyncio.timeout(limit) as deadline:
+                # Set only now: a request that the SDK refuses never reaches
+                # Prime, so the stop has no lost sandbox to look for.
                 self._create_dispatched = True
                 with _mapped("create the sandbox"):
-                    sandbox = await client.create(CreateSandboxRequest(**self._create_fields))
+                    sandbox = await client.create(request)
                     # The id is kept here, not in start(), so a stop that
                     # cancels the start right after the create still sees it.
                     self._sandbox_id = sandbox.id
@@ -340,6 +347,24 @@ class PrimeEnvironment(SandboxEnvironment):
             if not deadline.expired():
                 raise
             raise StartTimeoutError(limit) from None
+
+    def _create_request(self) -> Any:
+        """Build the SDK create request from the prepared fields.
+
+        Returns:
+            A ``CreateSandboxRequest``.
+
+        Raises:
+            SandboxSpecError: The SDK rejected a field, for example an
+                allowlist host with a port, a scheme or a wildcard.
+        """
+        try:
+            return CreateSandboxRequest(**self._create_fields)
+        except ValueError:
+            pass
+        # Raised outside the except block, so neither the cause nor the
+        # context keeps the SDK error, whose text holds the secret values.
+        raise SandboxSpecError("Prime cannot open this spec: the SDK rejected the create request fields.")
 
     def _running(self) -> tuple[Any, str]:
         """Return the client and the sandbox id of the running sandbox.
@@ -419,6 +444,7 @@ class PrimeEnvironment(SandboxEnvironment):
         Raises:
             SandboxInfraError: The sandbox is not running, or the parent
                 directories could not be made.
+            SandboxTransientError: An upload ran past the SDK upload timeout.
         """
         client, sandbox_id = self._running()
         parents = sorted({str(PurePosixPath(path).parent) for path in files} - {".", "/"})
@@ -457,6 +483,7 @@ class PrimeEnvironment(SandboxEnvironment):
             policy: The checked policy.
 
         Raises:
+            SandboxSpecError: The SDK rejected a host of the policy.
             SandboxInfraError: The sandbox is not running, or Prime did not
                 apply the rules within ``NETWORK_APPLY_TIMEOUT``.
         """
@@ -468,7 +495,11 @@ class PrimeEnvironment(SandboxEnvironment):
         else:
             rules = {"allow": ["*"]}
         with _mapped("change the network policy"):
-            status = await client.set_network(sandbox_id, **rules)
+            try:
+                status = await client.set_network(sandbox_id, **rules)
+            except ValueError:
+                # The SDK checks the hosts before it sends the request.
+                raise SandboxSpecError("Prime cannot apply this network policy: the SDK rejected a host.") from None
             try:
                 async with asyncio.timeout(NETWORK_APPLY_TIMEOUT):
                     while not status.applied:

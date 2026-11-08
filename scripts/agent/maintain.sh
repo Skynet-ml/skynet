@@ -45,19 +45,31 @@ esac
 
 echo "--> pip-audit (backend, from uv.lock)"
 reqs="$(mktemp)"
-if (cd backend && uv export --frozen --all-extras --no-hashes --no-emit-project -q >"$reqs") &&
-   pip_out="$(uvx --quiet pip-audit -r "$reqs" --no-deps --disable-pip --progress-spinner off 2>&1)"; then
+pip_out=""
+pip_failed=0
+# pyproject.toml declares the `prime` and `e2b` extras as a uv conflict, so
+# one `--all-extras` export fails. Audit every other extra, then `prime`.
+for extras in "--all-extras --no-extra prime" "--extra prime"; do
+  out=""
+  # shellcheck disable=SC2086  # $extras holds several flags on purpose.
+  if ! (cd backend && uv export --frozen $extras --no-hashes --no-emit-project -q >"$reqs") ||
+     ! out="$(uvx --quiet pip-audit -r "$reqs" --no-deps --disable-pip --progress-spinner off 2>&1)"; then
+    pip_failed=1
+    pip_out+="${out:-export failed ($extras)}"$'\n'
+  fi
+done
+rm -f "$reqs"
+if [ "$pip_failed" -eq 0 ]; then
   record OK "pip-audit" "no known vulnerabilities"
 else
-  vulns="$(printf '%s\n' "${pip_out:-}" | grep -cE '^[A-Za-z0-9_.-]+ +[0-9][^ ]* +(GHSA|PYSEC|CVE)-' || true)"
+  vulns="$(printf '%s' "$pip_out" | grep -E '^[A-Za-z0-9_.-]+ +[0-9][^ ]* +(GHSA|PYSEC|CVE)-' | sort -u | grep -c . || true)"
   if [ "${vulns:-0}" -gt 0 ]; then
     record WARN "pip-audit" "$vulns advisories — see list below"
-    printf '%s\n' "$pip_out" | grep -E '(GHSA|PYSEC|CVE)-' | sed 's/^/    /'
+    printf '%s' "$pip_out" | grep -E '(GHSA|PYSEC|CVE)-' | sort -u | sed 's/^/    /'
   else
-    record WARN "pip-audit" "could not run: $(printf '%s' "${pip_out:-export failed}" | tail -1)"
+    record WARN "pip-audit" "could not run: $(printf '%s' "$pip_out" | grep . | tail -1)"
   fi
 fi
-rm -f "$reqs"
 
 echo "--> Dependabot alerts (GitHub)"
 repo="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)"

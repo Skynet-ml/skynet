@@ -19,6 +19,7 @@ import pytest
 
 from core.config import settings
 from core.sandbox import factory
+from core.sandbox.capabilities import SandboxSpecError
 from core.sandbox.environment import JOB_TAG, NetworkPolicy
 from core.sandbox.errors import (
     RunTimeoutError,
@@ -64,6 +65,10 @@ class FakeCommandTimeoutError(RuntimeError):
     """Stand in for ``CommandTimeoutError``."""
 
 
+class FakeUploadTimeoutError(RuntimeError):
+    """Stand in for ``UploadTimeoutError``."""
+
+
 class FakeCreateRequest(dict):
     """Stand in for ``CreateSandboxRequest``: keep the fields as a dict."""
 
@@ -103,6 +108,8 @@ class FakeCloud:
     wait_hangs: bool = False
     exec_hangs: bool = False
     exec_error: BaseException | None = None
+    upload_error: BaseException | None = None
+    network_error: BaseException | None = None
     list_hangs: bool = False
     list_ignores_labels: bool = False
     page_size: int = 100
@@ -230,6 +237,8 @@ class FakeClient:
         Raises:
             FakeAPIError: The parent directory does not exist.
         """
+        if CLOUD.upload_error is not None:
+            raise CLOUD.upload_error
         box = CLOUD.boxes[sandbox_id]
         assert filename == PurePosixPath(path).name
         if str(PurePosixPath(path).parent) not in box.dirs:
@@ -267,6 +276,8 @@ class FakeClient:
         Returns:
             An object like ``EgressPolicyStatus``.
         """
+        if CLOUD.network_error is not None:
+            raise CLOUD.network_error
         CLOUD.network_calls.append({"id": sandbox_id, "allow": allow, "deny": deny})
         return SimpleNamespace(applied=CLOUD.apply_after == 0)
 
@@ -353,6 +364,7 @@ def fake_sdk(monkeypatch: pytest.MonkeyPatch) -> FakeCloud:
         "SandboxFileNotFoundError": FakeFileNotFoundError,
         "SandboxNotRunningError": FakeSandboxNotRunningError,
         "CommandTimeoutError": FakeCommandTimeoutError,
+        "UploadTimeoutError": FakeUploadTimeoutError,
     }
     for name, value in fakes.items():
         monkeypatch.setattr(prime, name, value)
@@ -771,3 +783,69 @@ async def test_stop_job_sandboxes_counts_only_successful_deletes(
     assert await PrimeEnvironment.stop_job_sandboxes("job-7") == 1
     for env in envs:
         await env.stop()
+
+
+_SECRET = "sk-secret-value-for-tests-123"
+
+
+def _assert_no_secret(error: BaseException) -> None:
+    """Check that no text of the error, its cause or its context holds the secret.
+
+    Args:
+        error: The raised error.
+    """
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert _SECRET not in str(error)
+    assert _SECRET not in repr(error)
+
+
+async def test_a_create_request_the_sdk_rejects_is_a_spec_error_without_secrets(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise a spec error that shows no secret and send no create (review finding B)."""
+
+    def reject(**fields: Any) -> None:
+        """Fail like pydantic, with the input values in the message."""
+        raise ValueError(f"1 validation error for CreateSandboxRequest: input={fields!r}")
+
+    monkeypatch.setattr(prime, "CreateSandboxRequest", reject)
+    with pytest.raises(SandboxSpecError) as caught:
+        await PrimeEnvironment(_spec(env={"OPENAI_API_KEY": _SECRET})).start()
+    _assert_no_secret(caught.value)
+    assert "create" not in fake_sdk.calls
+    assert fake_sdk.list_calls == []
+    assert fake_sdk.calls[-1] == "aclose"
+
+
+@pytest.mark.parametrize("host", ["api.example.com:8443", "https://api.example.com", "*"])
+async def test_the_real_sdk_model_rejection_hides_the_secrets(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    """Map the real pydantic rejection of an allowlist host to a clean spec error."""
+    sdk = pytest.importorskip("prime_sandboxes")
+    monkeypatch.setattr(prime, "CreateSandboxRequest", sdk.CreateSandboxRequest)
+    with pytest.raises(SandboxSpecError) as caught:
+        await PrimeEnvironment(_spec(env={"OPENAI_API_KEY": _SECRET}, allowed_hosts=(host,))).start()
+    _assert_no_secret(caught.value)
+    assert "create" not in fake_sdk.calls
+
+
+async def test_a_policy_host_the_sdk_rejects_is_a_spec_error(fake_sdk: FakeCloud) -> None:
+    """Map the SDK ValueError for a policy host to a spec error (review finding C)."""
+    async with PrimeEnvironment(_spec()) as env:
+        fake_sdk.network_error = ValueError("'*' must be the only destination")
+        with pytest.raises(SandboxSpecError) as caught:
+            await env.set_network_policy(NetworkPolicy(allowed_hosts=("*", "a.example")))
+        assert caught.value.__cause__ is None
+        assert env.network_policy is None
+
+
+async def test_an_upload_timeout_is_transient(fake_sdk: FakeCloud) -> None:
+    """Map the SDK upload timeout to a transient error and keep the cause (review finding D)."""
+    async with PrimeEnvironment(_spec()) as env:
+        error = FakeUploadTimeoutError("upload timed out")
+        fake_sdk.upload_error = error
+        with pytest.raises(SandboxTransientError) as caught:
+            await env.upload_files({"/tmp/a.txt": "x"})
+    assert caught.value.__cause__ is error
