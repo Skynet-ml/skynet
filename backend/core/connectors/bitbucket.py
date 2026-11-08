@@ -19,7 +19,7 @@ from .base import Credential, Entry, range_header
 from .github import REPO_NAME, clean_file_path
 from .github_publish import HardeningSummary, PublishedChange, RepoPublishError, hardening_line
 from .github_repo import COMMIT_LIMIT, RepoFetchError, commit_summary
-from .gitlab import display_file, matches_search, repo_path, search_words
+from .gitlab import display_file, has_dot_segment, matches_search, repo_path, search_words
 from .oauth import OAuthApp
 from .oauth import oauth_available as _oauth_available
 from .transport import download, get_json, label, request
@@ -176,7 +176,9 @@ def _repo_url(full_name: str) -> str:
         DomainError: 400 when the value is not ``workspace/slug`` or names another host.
     """
     value = repo_path(full_name, WEB_URL, PROVIDER, segments=2)
-    if not REPO_NAME.match(value):
+    # The path goes into the API URL unencoded, so a ".." segment would send
+    # the user's token to another Bitbucket API endpoint.
+    if not REPO_NAME.match(value) or has_dot_segment(value):
         raise DomainError("connectors.invalid_ref", status=400)
     return f"{API_URL}/repositories/{value}"
 
@@ -247,17 +249,21 @@ def list_repositories(secret: ConnectorSecret, search: str) -> list[dict[str, An
         Repository summaries, see :func:`_repo_summary`.
     """
     token = secret.access_token
+    needle = repo_path(search, WEB_URL, PROVIDER, segments=2)
     found, _ = _pages(
         f"{API_URL}/repositories", token, {"role": "member", "sort": "-updated_on", "pagelen": REPO_LIMIT}, 1
     )
-    needle = repo_path(search, WEB_URL, PROVIDER, segments=2)
     words = search_words(needle)
     repos = [
         summary
         for summary in (_repo_summary(r) for r in found if isinstance(r.get("full_name"), str))
         if matches_search(summary, words)
     ]
-    if REPO_NAME.match(needle) and not any(r["full_name"].lower() == needle.lower() for r in repos):
+    if (
+        REPO_NAME.match(needle)
+        and not has_dot_segment(needle)
+        and not any(r["full_name"].lower() == needle.lower() for r in repos)
+    ):
         try:
             direct = get_json(_repo_url(needle), provider=PROVIDER, headers=_headers(token))
         except DomainError as exc:

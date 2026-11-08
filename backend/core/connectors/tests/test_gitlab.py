@@ -322,7 +322,7 @@ def test_list_repositories_finds_a_project_from_its_url(monkeypatch: pytest.Monk
 
 @pytest.mark.parametrize("value", ["https://gitlab.example.com/team/bot", "git@gitlab.example.com:team/bot.git"])
 def test_self_managed_gitlab_host_is_refused_by_name(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
-    """A self-managed GitLab URL gets a refusal that names its host and gitlab.com, before any request."""
+    """A self-managed GitLab URL gets a refusal that names its host and gitlab.com, before any request with the token."""
     seen = _serve(monkeypatch, lambda _r: httpx.Response(200, json={}))
     with pytest.raises(DomainError) as caught:
         gitlab._project_url(value)
@@ -335,7 +335,7 @@ def test_self_managed_gitlab_host_is_refused_by_name(monkeypatch: pytest.MonkeyP
     assert caught.value.params == {"provider": "GitLab", "host": "gitlab.example.com", "expected": "gitlab.com"}
     with pytest.raises(DomainError):
         gitlab.list_repositories(_secret(), value)
-    assert len(seen) == 1
+    assert seen == []
 
 
 @pytest.mark.parametrize(
@@ -347,6 +347,9 @@ def test_self_managed_gitlab_host_is_refused_by_name(monkeypatch: pytest.MonkeyP
         "https://[::1/team/bot",
         "https://gitlab.com/team/my%20bot",
         "",
+        "team/../bot",
+        "https://gitlab.com/team/%2e%2e/admin",
+        "team/./bot",
     ],
 )
 def test_project_url_refuses_an_unusable_url_with_400(value: str) -> None:
@@ -354,3 +357,11 @@ def test_project_url_refuses_an_unusable_url_with_400(value: str) -> None:
     with pytest.raises(DomainError) as caught:
         gitlab._project_url(value)
     assert (caught.value.code, caught.value.status_code) == ("connectors.invalid_ref", 400)
+
+
+@pytest.mark.parametrize("search", [".", "team/..", "../bot"])
+def test_dot_search_lists_without_a_direct_lookup(monkeypatch: pytest.MonkeyPatch, search: str) -> None:
+    """A search with a ``.`` or ``..`` segment filters the list and skips the direct project lookup."""
+    seen = _serve(monkeypatch, lambda _r: httpx.Response(200, json=[]))
+    assert gitlab.list_repositories(_secret(), search) == []
+    assert [r.url.path for r in seen] == ["/api/v4/projects"]

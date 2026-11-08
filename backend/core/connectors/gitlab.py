@@ -88,6 +88,18 @@ def repo_path(value: str, web_url: str, provider: str, segments: int | None = No
     return text.strip("/").removesuffix(".git")
 
 
+def has_dot_segment(path: str) -> bool:
+    """Tell whether a repository path has a ``.`` or ``..`` segment.
+
+    Args:
+        path: The repository path.
+
+    Returns:
+        ``True`` when a segment is ``.`` or ``..``.
+    """
+    return any(part in (".", "..") for part in path.split("/"))
+
+
 def oauth_app() -> OAuthApp:
     """Describe the gitlab.com OAuth application from settings.
 
@@ -225,7 +237,7 @@ def _project_url(full_name: str) -> str:
         DomainError: 400 when the value is not a project path or names another host.
     """
     value = repo_path(full_name, WEB_URL, PROVIDER)
-    if not REPO_NAME.match(value):
+    if not REPO_NAME.match(value) or has_dot_segment(value):
         raise DomainError("connectors.invalid_ref", status=400)
     return f"{API_URL}/projects/{quote(value, safe='')}"
 
@@ -296,13 +308,13 @@ def list_repositories(secret: ConnectorSecret, search: str) -> list[dict[str, An
         Repository summaries, see :func:`_repo_summary`.
     """
     token = secret.access_token
+    needle = repo_path(search, WEB_URL, PROVIDER)
     body = get_json(
         f"{API_URL}/projects",
         provider=PROVIDER,
         headers=_headers(token),
         params={"membership": "true", "order_by": "last_activity_at", "per_page": REPO_LIMIT},
     )
-    needle = repo_path(search, WEB_URL, PROVIDER)
     words = search_words(needle)
     repos = [
         summary
@@ -313,7 +325,11 @@ def list_repositories(secret: ConnectorSecret, search: str) -> list[dict[str, An
         )
         if matches_search(summary, words)
     ]
-    if REPO_NAME.match(needle) and not any(r["full_name"].lower() == needle.lower() for r in repos):
+    if (
+        REPO_NAME.match(needle)
+        and not has_dot_segment(needle)
+        and not any(r["full_name"].lower() == needle.lower() for r in repos)
+    ):
         try:
             found = get_json(_project_url(needle), provider=PROVIDER, headers=_headers(token))
         except DomainError as exc:

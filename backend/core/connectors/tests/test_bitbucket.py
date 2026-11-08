@@ -291,18 +291,40 @@ def test_repo_path_reads_a_pasted_url(value: str, expected: str) -> None:
     assert bitbucket._repo_url(value) == REPO
 
 
-def test_other_host_is_refused_by_name() -> None:
-    """A URL on another host (for example Bitbucket Data Center) is refused and names the host."""
+def test_other_host_is_refused_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A URL on another host (for example Bitbucket Data Center) is refused by name, before any request."""
+    seen = _serve(monkeypatch, lambda _r: httpx.Response(200, json={"values": []}))
     with pytest.raises(DomainError) as caught:
         bitbucket._repo_url("https://bitbucket.example.com/scm/team/bot.git")
     assert caught.value.code == "connectors.other_repo_host"
     assert caught.value.params["host"] == "bitbucket.example.com"
     assert caught.value.params["expected"] == "bitbucket.org"
+    with pytest.raises(DomainError):
+        bitbucket.list_repositories(_secret(), "https://bitbucket.example.com/team/bot")
+    assert seen == []
 
 
-@pytest.mark.parametrize("value", ["https://bitbucket.org/", "https://bitbucket.org/team", "https://[::1/team/bot"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://bitbucket.org/",
+        "https://bitbucket.org/team",
+        "https://[::1/team/bot",
+        "../bot",
+        "team/..",
+        "https://bitbucket.org/team/../other/bot",
+    ],
+)
 def test_repo_url_refuses_an_unusable_url_with_400(value: str) -> None:
     """A URL without a workspace and repository, or a broken URL, is a 400 ``invalid_ref``."""
     with pytest.raises(DomainError) as caught:
         bitbucket._repo_url(value)
     assert (caught.value.code, caught.value.status_code) == ("connectors.invalid_ref", 400)
+
+
+@pytest.mark.parametrize("search", [".", "team/..", "../bot"])
+def test_dot_search_lists_without_a_direct_lookup(monkeypatch: pytest.MonkeyPatch, search: str) -> None:
+    """A search with a ``.`` or ``..`` segment filters the list and skips the direct repository lookup."""
+    seen = _serve(monkeypatch, lambda _r: httpx.Response(200, json={"values": []}))
+    assert bitbucket.list_repositories(_secret(), search) == []
+    assert [r.url.path for r in seen] == ["/2.0/repositories"]
