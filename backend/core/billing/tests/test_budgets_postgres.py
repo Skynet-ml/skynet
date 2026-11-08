@@ -13,9 +13,10 @@ from uuid import uuid4
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import Engine, create_engine, func, select, text
+from sqlalchemy import Engine, create_engine, event, func, select, text
 from sqlalchemy.orm import Session
 
+from core.billing.budget_amounts import CENT_SCALE
 from core.billing.budgets import BudgetConflictError, BudgetInFlightError, BudgetService
 from core.config import app_env, settings
 from core.storage.models import (
@@ -303,3 +304,114 @@ def test_restart_waiver_cuts_at_the_checkpoint_time(database: Engine) -> None:
     assert waived.billed_cents == 2
     with Session(database) as session:
         assert session.get(BillingCustomerModel, "alice").balance_cents == 48
+
+
+def _lease(service: BudgetService, budget_id: str, key: str = "pool", slices: int = 4):
+    """Reserve one fixture pool lease through the production database transaction."""
+    return service.reserve_lease(
+        budget_id,
+        "alice",
+        lease_key=key,
+        slices=slices,
+        generation=0,
+        phase="setup",
+        cost_kind="sandbox",
+        request_fingerprint="fixture",
+        price_snapshot={"version": "fixture-v1"},
+        max_cents=10,
+        role="runtime",
+    )
+
+
+def _budget_units(database: Engine, budget_id: str) -> tuple[int, int]:
+    """Read the reserved and settled units of one budget."""
+    with Session(database) as session:
+        budget = session.get(ExecutionBudgetModel, budget_id)
+        return budget.reserved_units, budget.settled_units
+
+
+def test_lease_makes_one_budget_write_and_settles_each_box_once(database: Engine) -> None:
+    """Reserve N slices with one budget write, settle each box once, and return the rest in one write."""
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany) -> None:
+        """Keep every SQL statement the ledger sends."""
+        statements.append(statement)
+
+    event.listen(database, "before_cursor_execute", record)
+    try:
+        slices = _lease(service, budget.id)
+        lease_statements = list(statements)
+        statements.clear()
+        assert _lease(service, budget.id) == slices
+        replay_statements = list(statements)
+        statements.clear()
+        costs = ["1.5", "2.5", "3"]
+        for operation, cost in zip(slices, costs, strict=False):
+            service.mark_dispatched(operation.id, "alice")
+            for _ in range(2):
+                service.settle(
+                    operation.id, "alice", evidence_key=f"stop:{operation.id}", actual_cents=cost, evidence={"box": 1}
+                )
+        statements.clear()
+        service.release_slices(budget.id, "alice", [operation.id for operation in slices])
+        release_statements = list(statements)
+    finally:
+        event.remove(database, "before_cursor_execute", record)
+
+    def budget_updates(sent: list[str]) -> int:
+        """Count the writes to the budget row."""
+        return sum(statement.lstrip().upper().startswith("UPDATE EXECUTION_BUDGETS") for statement in sent)
+
+    assert len(slices) == 4
+    assert budget_updates(lease_statements) == 1
+    assert budget_updates(replay_statements) == 0
+    assert budget_updates(release_statements) == 1
+    reserved, settled = _budget_units(database, budget.id)
+    assert reserved == 0
+    assert settled == 7 * CENT_SCALE
+    with Session(database) as session:
+        states = session.scalars(
+            select(ExecutionOperationModel.state).order_by(ExecutionOperationModel.operation_key)
+        ).all()
+        assert states == ["settled", "settled", "settled", "released"]
+        assert session.scalar(select(func.count()).select_from(ExecutionUsageEvidenceModel)) == 3
+        assert session.get(BillingCustomerModel, "alice").balance_cents == 43
+
+
+def test_crashed_lease_returns_its_untaken_slices_on_fence(database: Engine) -> None:
+    """Release the slices a crashed lease never handed out, and keep the settled box."""
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    slices = _lease(service, budget.id)
+    service.mark_dispatched(slices[0].id, "alice")
+    service.settle(slices[0].id, "alice", evidence_key="stop", actual_cents=2, evidence={"box": 0})
+    assert _budget_units(database, budget.id)[0] == 30 * CENT_SCALE
+    service.fence_generation(budget.id, "alice", expected_generation=0)
+    assert _budget_units(database, budget.id) == (0, 2 * CENT_SCALE)
+    with Session(database) as session:
+        states = session.scalars(
+            select(ExecutionOperationModel.state).order_by(ExecutionOperationModel.operation_key)
+        ).all()
+        assert states == ["settled", "released", "released", "released"]
+
+
+def test_parallel_duplicate_lease_reserves_once(database: Engine) -> None:
+    """Serialize two concurrent leases with one key into one reservation."""
+    service = BudgetService(engine=database)
+    budget = service.create("alice", 50, idempotency_key="draft")
+    barrier = Barrier(2)
+
+    def run(_: int) -> tuple[str, ...]:
+        """Race the same lease identity through admission."""
+        barrier.wait(timeout=5)
+        return tuple(operation.id for operation in _lease(service, budget.id))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(run, range(2)))
+    assert outcomes[0] == outcomes[1]
+    assert _budget_units(database, budget.id)[0] == 40 * CENT_SCALE
+    with pytest.raises(BudgetConflictError):
+        _lease(service, budget.id, slices=3)
