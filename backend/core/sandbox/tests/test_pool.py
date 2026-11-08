@@ -1010,3 +1010,88 @@ async def test_hung_stop_ends_after_the_stop_timeout(
     with pytest.raises(asyncio.CancelledError):
         async with asyncio.timeout(DEADLINE):
             await run
+
+
+async def test_errors_reach_the_caller_with_their_cause() -> None:
+    """Keep the cause of a callback error and of the pool's own fatal error."""
+
+    async def chained(_outcome: BoxOutcome[int, object]) -> None:
+        """Raise a ValueError caused by a KeyError.
+
+        Args:
+            _outcome: The outcome of one box.
+
+        Raises:
+            ValueError: Always, from a KeyError.
+        """
+        try:
+            raise KeyError("root")
+        except KeyError as root:
+            raise ValueError("callback failed") from root
+
+    with pytest.raises(ValueError, match="callback failed") as caught:
+        async with asyncio.timeout(DEADLINE):
+            await SandboxPool({"fake": 1}).run(_numbers(1), _work(_Tracker()), chained)
+    assert isinstance(caught.value.__cause__, KeyError)
+
+    async def stray_cancel() -> AsyncIterator[int]:
+        """Yield one number, then await a cancelled inner task.
+
+        Yields:
+            The number 0.
+        """
+        yield 0
+        inner = asyncio.create_task(asyncio.sleep(10))
+        await asyncio.sleep(0)
+        inner.cancel()
+        await inner
+
+    with pytest.raises(SandboxFatalError, match="candidate iterator") as caught_fatal:
+        async with asyncio.timeout(DEADLINE):
+            await SandboxPool({"fake": 2}).run(stray_cancel(), _work(_Tracker()), _Outcomes())
+    assert isinstance(caught_fatal.value.__cause__, asyncio.CancelledError)
+
+
+async def test_cancel_during_anext_with_a_failing_aclose_stays_a_cancel(caplog: pytest.LogCaptureFixture) -> None:
+    """Keep the caller's cancel when aclose fails during it, and log the aclose error."""
+    waiting = asyncio.Event()
+
+    class _WaitThenCloseFails:
+        """Wait forever for the next candidate, and fail in ``aclose``."""
+
+        def __aiter__(self) -> _WaitThenCloseFails:
+            """Return the iterator itself.
+
+            Returns:
+                The iterator.
+            """
+            return self
+
+        async def __anext__(self) -> int:
+            """Note the wait, then wait forever.
+
+            Returns:
+                Never returns.
+            """
+            waiting.set()
+            await asyncio.Event().wait()
+            return 0
+
+        async def aclose(self) -> None:
+            """Fail with a RuntimeError.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            raise RuntimeError("close failed")
+
+    run = asyncio.create_task(SandboxPool({"fake": 1}).run(_WaitThenCloseFails(), _work(_Tracker()), _Outcomes()))
+    async with asyncio.timeout(DEADLINE):
+        await waiting.wait()
+    with caplog.at_level(logging.ERROR, logger="core.sandbox.pool"):
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            async with asyncio.timeout(DEADLINE):
+                await run
+    assert run.cancelled()
+    assert any("aclose failed during a cancel" in record.getMessage() for record in caplog.records)

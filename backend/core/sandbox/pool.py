@@ -257,8 +257,15 @@ class SandboxPool:
             try:
                 try:
                     await read(iterator)
-                except BaseException:
-                    await close(iterator)
+                except BaseException as exc:
+                    try:
+                        await close(iterator)
+                    except Exception:
+                        if not isinstance(exc, asyncio.CancelledError):
+                            raise
+                        # An aclose error must not replace the caller's cancel,
+                        # or the caller sees an error and not a cancelled run.
+                        logger.exception("The candidate iterator's aclose failed during a cancel")
                     raise
                 try:
                     await close(iterator)
@@ -292,6 +299,7 @@ class SandboxPool:
                         f"on_outcome raised a cancel that nobody asked for on box {box_key}"
                     ) from cancel
 
+        error: BaseException | None = None
         try:
             async with asyncio.TaskGroup() as group:
                 group.create_task(produce())
@@ -300,7 +308,11 @@ class SandboxPool:
         except BaseExceptionGroup as errors:
             # Callers expect the error itself, not a group. Boxes catch their
             # own errors, so the group holds the producer or callback error.
-            raise errors.exceptions[0] from None
+            error = errors.exceptions[0]
+        if error is not None:
+            # Raised outside the except block, so the error keeps its own
+            # __cause__ and __context__ and does not get the group as context.
+            raise error
         if close_error is not None:
             raise close_error
 
