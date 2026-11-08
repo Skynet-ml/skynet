@@ -45,6 +45,7 @@ PROVIDERS: dict[str, ProviderEntry] = {
     "modal": ProviderEntry("core.sandbox.providers.modal", "ModalEnvironment", "modal", False),
     "runloop": ProviderEntry("core.sandbox.providers.runloop", "RunloopEnvironment", "runloop", False),
     "podman": ProviderEntry("core.sandbox.providers.podman", "PodmanEnvironment", None, False),
+    "kata": ProviderEntry("core.sandbox.providers.kata", "KataEnvironment", None, False),
     "singularity": ProviderEntry("core.sandbox.providers.singularity", "SingularityEnvironment", None, False),
     "openshift": ProviderEntry("core.sandbox.providers.openshift", "OpenshiftEnvironment", None, False),
 }
