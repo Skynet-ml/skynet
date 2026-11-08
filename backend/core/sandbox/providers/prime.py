@@ -91,7 +91,11 @@ _NO_LIMIT_SECONDS = 24 * 60 * 60
 _UNBOUNDED_WAIT = 10**6
 _ENDED_STATUSES = frozenset({"ERROR", "TERMINATED", "TIMEOUT"})
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_HTTP_STATUS = re.compile(r"^HTTP (\d{3})")
+_HTTP_STATUS = re.compile(r"\bHTTP (\d{3})\b")
+# The SDK gateway upload and read calls say "failed" or "timed out" for a
+# connection error or a timeout that carries no HTTP status.
+_NO_STATUS_TRANSIENT = re.compile(r"\b(?:failed|timed out)\b")
+_FATAL_STATUSES = frozenset({401, 402})
 _REJECTED_STATUSES = frozenset({400, 404, 409, 422})
 
 PRIME_CAPABILITIES = EnvironmentCapabilities(
@@ -122,8 +126,9 @@ def _status(error: BaseException) -> int | None:
     Returns:
         The status code, or ``None`` when the message has none.
     """
-    # The SDK puts the status only in the message: "HTTP <code>: <detail>".
-    match = _HTTP_STATUS.match(str(error))
+    # The SDK puts the status only in the message, after a prefix for the
+    # gateway calls: "Upload failed: HTTP <code> <method> <url>: <detail>".
+    match = _HTTP_STATUS.search(str(error))
     return int(match.group(1)) if match else None
 
 
@@ -138,9 +143,10 @@ def _mapped(action: str) -> Iterator[None]:
         Nothing.
 
     Raises:
-        SandboxFatalError: The API key is wrong, or the account cannot pay.
-        SandboxTransientError: A connection error, an API or upload timeout,
-            a rate limit or a 5xx answer.
+        SandboxFatalError: The API key is wrong, or the account cannot pay
+            (also HTTP 401 or 402 from a gateway call).
+        SandboxTransientError: A connection error, an API, upload or read
+            timeout, a rate limit or a 5xx answer.
         SandboxRejectedError: Prime rejected the request as invalid.
         SandboxInfraError: The sandbox stopped, or any other SDK error.
     """
@@ -153,7 +159,9 @@ def _mapped(action: str) -> Iterator[None]:
     except _classes(APIError) as error:
         status = _status(error)
         name = type(error).__name__
-        if (status is None and str(error).startswith("Request failed")) or status == 429:
+        if status in _FATAL_STATUSES:
+            raise SandboxFatalError(f"Prime refused the request to {action}: HTTP {status}.") from error
+        if (status is None and _NO_STATUS_TRANSIENT.search(str(error))) or status == 429:
             raise SandboxTransientError(f"Prime could not {action}: {name}.") from error
         if status is not None and status >= 500:
             raise SandboxTransientError(f"Prime could not {action}: HTTP {status}.") from error
