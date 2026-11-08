@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import venv
@@ -14,8 +16,9 @@ import pytest
 from core.exceptions import ServiceError
 from core.models.blackbox import BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
 
+from .. import repo_tree
 from ..harness import GatewayConfig, build_launch, pinned_harness_check
-from ..harness_bridge import parse_pi_output
+from ..harness_bridge import parse_pi_output, workspace_files
 from ..harnesses import REGISTRY
 from ..harnesses.base import _version_check
 from ..harnesses.deerflow import (
@@ -76,6 +79,7 @@ class DeerFlowClient:
             "recursion_limit": recursion_limit,
             "config": json.loads(config),
             "keys": {name: os.environ.get(name) for name in ("OPENAI_API_KEY", "EXA_API_KEY")},
+            "roots": [os.environ["DEER_FLOW_PROJECT_ROOT"], os.environ.get("DEER_FLOW_HOME")],
         }
         Path(os.environ["FAKE_DEERFLOW_RECORD"]).write_text(json.dumps(record))
         yield SimpleNamespace(type="values", data={"title": "x"})
@@ -122,8 +126,8 @@ def test_launch_runs_the_runner_on_the_gateway_only() -> None:
     launch = build_launch(_target(), _GATEWAY)
     assert launch.parse_output is parse_pi_output
     assert launch.run_command == (
-        'DEER_FLOW_PROJECT_ROOT="$PWD/.app/deerflow/project" DEER_FLOW_HOME="$PWD/.app/deerflow/home" '
-        f'"$HOME/.app/deerflow/venv/bin/python" {RUNNER_FILE}'
+        'export DEERFLOW_DATA_DIR="$(mktemp -d)" && DEER_FLOW_PROJECT_ROOT="$DEERFLOW_DATA_DIR/project" '
+        f'DEER_FLOW_HOME="$DEERFLOW_DATA_DIR/home" "$HOME/.app/deerflow/venv/bin/python" {RUNNER_FILE}'
     )
     assert set(launch.files) == {CONFIG_FILE, RUNNER_FILE}
     config = json.loads(launch.files[CONFIG_FILE])
@@ -280,6 +284,67 @@ def test_runner_drives_the_client_and_prints_one_pi_event(tmp_path: Path) -> Non
     assert seen["config"]["models"][0]["base_url"] == _GATEWAY.url
     mount = {"host_path": str(workspace.resolve()), "container_path": str(workspace.resolve()), "read_only": False}
     assert seen["config"]["sandbox"]["mounts"] == [mount]
+
+
+def test_run_command_keeps_deerflow_state_out_of_the_version_patch(tmp_path: Path) -> None:
+    """Write DeerFlow's config and state outside the checkout, so a run adds no patch line.
+
+    Args:
+        tmp_path: Shipped tree, checkout and fake package root.
+    """
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("print('hi')\n")
+    archive = tmp_path / "tree.tgz"
+    subprocess.run(["tar", "-czf", str(archive), "-C", str(source), "."], check=True)
+    chunks = []
+    for index, chunk in enumerate(repo_tree.archive_chunks(archive)):
+        chunks.append(tmp_path / f"tree.{index}.b64")
+        chunks[-1].write_text(chunk)
+    checkout = repo_tree.unpack_tree(chunks, tmp_path / "repo-checkout")
+    launch = build_launch(_target(), _GATEWAY)
+    repo_tree.exclude_paths(checkout, workspace_files({"files": launch.files}))
+    for name, text in launch.files.items():
+        (checkout / name).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / name).write_text(text)
+    fakes = tmp_path / "fakes"
+    for name, text in _FAKE_DEERFLOW.items():
+        (fakes / name).parent.mkdir(parents=True, exist_ok=True)
+        (fakes / name).write_text(text)
+    prompt = tmp_path / "PROMPT.md"
+    prompt.write_text("Fix it.\n")
+    record = tmp_path / "record.json"
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            launch.run_command.replace('"$HOME/.app/deerflow/venv/bin/python"', shlex.quote(sys.executable)),
+        ],
+        cwd=checkout,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONPATH": str(fakes),
+            **launch.env,
+            "APP_PROMPT_FILE": str(prompt),
+            "FAKE_DEERFLOW_RECORD": str(record),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    seen = json.loads(record.read_text())
+    roots = [Path(root) for root in seen["roots"]]
+    data_dir = roots[0].parent
+    try:
+        assert seen["config"]["models"][0]["base_url"] == _GATEWAY.url
+        assert roots == [data_dir / "project", data_dir / "home"]
+        assert (roots[0] / "config.yaml").is_file()
+        assert not data_dir.resolve().is_relative_to(checkout.resolve())
+        assert repo_tree.version_patch(checkout) == ""
+    finally:
+        shutil.rmtree(data_dir, ignore_errors=True)
 
 
 def test_runner_refuses_a_config_with_another_model_route(tmp_path: Path) -> None:

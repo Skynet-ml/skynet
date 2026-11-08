@@ -34,6 +34,13 @@ STATE_DIR = ".app/deerflow"
 CONFIG_FILE = f"{STATE_DIR}/config.json"
 RUNNER_FILE = f"{STATE_DIR}/run_agent.py"
 _RUNNER = f'"{_VENV_PYTHON}" {RUNNER_FILE}'
+# DeerFlow writes config.yaml, threads and checkpoints under these roots. They
+# live outside the workspace, so none of it enters a version patch.
+_DATA_DIR = "DEERFLOW_DATA_DIR"
+_RUN_COMMAND = (
+    f'export {_DATA_DIR}="$(mktemp -d)" && '
+    f'DEER_FLOW_PROJECT_ROOT="${_DATA_DIR}/project" DEER_FLOW_HOME="${_DATA_DIR}/home" {_RUNNER}'
+)
 # The probe needs no workspace file, so the protected bootstrap can run it
 # before any launch file exists. ``python -c`` ignores the ``--version`` arg.
 _VERSION_PROBE = (
@@ -331,9 +338,7 @@ def _deerflow_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: st
             CONFIG_FILE: _deerflow_config(model, gateway_url),
             RUNNER_FILE: _runner_script(gateway_url),
         },
-        run_command=(
-            f'DEER_FLOW_PROJECT_ROOT="$PWD/{STATE_DIR}/project" DEER_FLOW_HOME="$PWD/{STATE_DIR}/home" {_RUNNER}'
-        ),
+        run_command=_RUN_COMMAND,
         env=env,
         parse_output=parse_pi_output,
     )
