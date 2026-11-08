@@ -297,10 +297,12 @@ def test_heartbeat_keeps_live_owner_and_stops_cleanly_after_finish(
         Returns:
             The real renew result.
         """
+        started = time.monotonic()
         renewed = renew(identity, claim_token=claim_token)
         if renewed and time.monotonic() > claim_lease_ends:
             renewed_past_claim_lease.set()
-        if renewed and time.monotonic() > finished_at:
+        # A renewal that started before finish returned can commit while the row is still running.
+        if renewed and started > finished_at:
             renewed_after_finish.set()
         return renewed
 
