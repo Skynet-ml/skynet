@@ -26,12 +26,12 @@ from core.sandbox import (
     SandboxSpecError,
     factory,
 )
-from core.sandbox.errors import RunTimeoutError, SandboxFatalError, SandboxInfraError
+from core.sandbox.errors import RunTimeoutError, SandboxFatalError, SandboxInfraError, StartTimeoutError
 from core.sandbox.factory import ProductionNotAllowedError
 from core.sandbox.providers import modal as modal_provider
 from core.sandbox.providers.modal import ModalEnvironment, egress_kwargs, resource_kwargs
 from core.sandbox.tests.test_environment import SandboxEnvironmentContract
-from core.sandbox.timeouts import PhaseTimeouts
+from core.sandbox.timeouts import Phase, PhaseTimeouts
 
 _SPEC = SandboxSpec(lifetime_seconds=60)
 
@@ -585,6 +585,166 @@ async def test_repeat_cancel_during_start_still_terminates_the_new_sandbox(fake_
     assert _box(fake_modal).terminated
     with pytest.raises(RuntimeError):
         await env.exec("true")
+
+
+async def test_cancel_during_a_hung_create_passes_on_after_the_grace_time(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pass a cancel on after the grace time, also through a repeat cancel, and stop the late sandbox."""
+    monkeypatch.setattr(modal_provider, "_CANCEL_GRACE_SEC", 0.05)
+    fake_modal.create_gate = asyncio.Event()
+    env = ModalEnvironment(_SPEC)
+    task = asyncio.create_task(env.start())
+    await fake_modal.create_entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    assert fake_modal.boxes == []
+    fake_modal.create_gate.set()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert fake_modal.create_calls == 1
+    assert _box(fake_modal).terminated
+    assert not modal_provider._LATE_TERMINATES
+    with pytest.raises(RuntimeError):
+        await env.exec("true")
+
+
+async def test_start_timeout_ends_start_while_the_create_hangs(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise the start timeout soon after its limit while Modal's create hangs, then stop the late sandbox."""
+    monkeypatch.setattr(modal_provider, "_CANCEL_GRACE_SEC", 0.05)
+    fake_modal.create_gate = asyncio.Event()
+    env = ModalEnvironment(_SPEC)
+    timeouts = PhaseTimeouts(start=0.05, setup=1, run=1, score=1)
+
+    async def start_under_the_limit() -> None:
+        """Start the sandbox under the start phase limit."""
+        async with timeouts.limit(Phase.START):
+            await env.start()
+
+    with pytest.raises(StartTimeoutError):
+        await asyncio.wait_for(start_under_the_limit(), 2)
+    fake_modal.create_gate.set()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert _box(fake_modal).terminated
+
+
+async def test_late_terminate_failure_is_logged_not_raised(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log a failed terminate of a late sandbox, and raise nothing from the callback."""
+    monkeypatch.setattr(modal_provider, "_CANCEL_GRACE_SEC", 0.01)
+
+    async def failing_terminate(sandbox: Any) -> None:
+        """Fail like a lost Modal connection.
+
+        Args:
+            sandbox: The Modal sandbox.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("terminate lost")
+
+    monkeypatch.setattr(modal_provider, "_terminate", failing_terminate)
+    fake_modal.create_gate = asyncio.Event()
+    env = ModalEnvironment(_SPEC)
+    task = asyncio.create_task(env.start())
+    await fake_modal.create_entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with caplog.at_level(logging.ERROR):
+        fake_modal.create_gate.set()
+        for _ in range(5):
+            await asyncio.sleep(0)
+    assert "arrived after a cancelled start" in caplog.text
+    assert "terminate lost" in caplog.text
+    assert not modal_provider._LATE_TERMINATES
+
+
+async def test_repeat_cancel_during_stop_still_terminates(fake_modal: FakeModal) -> None:
+    """Finish the terminate through a second cancel of stop, then pass the cancel on."""
+    env = ModalEnvironment(_SPEC)
+    await env.start()
+    box = _box(fake_modal)
+    gate = asyncio.Event()
+    terminate = box._terminate
+
+    async def slow_terminate() -> None:
+        """Wait for the gate, then terminate."""
+        await gate.wait()
+        await terminate()
+
+    box.terminate = _aio(slow_terminate)
+    task = asyncio.create_task(env.stop())
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert box.terminated
+
+
+async def test_sink_error_cancels_the_other_stream_reader(fake_modal: FakeModal) -> None:
+    """Pass a sink error on unchanged and cancel the reader of the other stream."""
+    env = ModalEnvironment(_SPEC)
+    await env.start()
+    box = _box(fake_modal)
+    reader_cancelled = asyncio.Event()
+
+    async def hanging_stream() -> AsyncIterator[str]:
+        """Yield nothing until cancelled, and record the cancel."""
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            reader_cancelled.set()
+            raise
+        yield ""
+
+    async def wait() -> int:
+        """Return exit 0."""
+        return 0
+
+    async def fake_exec(*args: str, **kwargs: Any) -> Any:
+        """Return a process with one stdout chunk and a stderr that hangs.
+
+        Args:
+            *args: The command arguments.
+            **kwargs: The exec options.
+
+        Returns:
+            A fake process.
+        """
+        return SimpleNamespace(stdout=FakeStream(["boom"]), stderr=hanging_stream(), wait=_aio(wait))
+
+    box.exec = _aio(fake_exec)
+
+    def sink(stream: str, text: str) -> None:
+        """Fail on stdout.
+
+        Args:
+            stream: The stream name.
+            text: The chunk.
+
+        Raises:
+            ValueError: The chunk comes from stdout.
+        """
+        if stream == "stdout":
+            raise ValueError("sink failed")
+
+    with pytest.raises(ValueError, match="sink failed"):
+        await env.exec("echo hi", on_output=sink)
+    assert reader_cancelled.is_set()
 
 
 async def test_cancel_during_stop_still_terminates(fake_modal: FakeModal) -> None:
