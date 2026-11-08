@@ -95,7 +95,7 @@ import {
   preflightMayAdvance,
   preflightPendingMessageKey,
 } from "../lib/preflight-outcome";
-import { gateReasons, secretHostIssues } from "../lib/gate-reasons";
+import { applySecretHostIssues, gateReasons, secretHostIssues } from "../lib/gate-reasons";
 import { finishedHardeningJobId, repoRunRequest } from "../lib/repo-run";
 import {
   currentRunFailure,
@@ -735,13 +735,8 @@ export function WizardV2Provider({
       // A secret refused for a host also shows the fix on its own row.
       const hostIssues = secretHostIssues(err, knownErrorCodeMessage);
       const repo = state.task.repo;
-      if (repo?.secrets && Object.keys(hostIssues).length > 0) {
-        patchTask({
-          repo: {
-            ...repo,
-            secrets: repo.secrets.map((secret) => ({ ...secret, hostIssue: hostIssues[secret.name.trim()] })),
-          },
-        });
+      if (repo?.secrets) {
+        patchTask({ repo: { ...repo, secrets: applySecretHostIssues(repo.secrets, hostIssues) } });
       }
       toast.error(
         reasons.length > 0 ? reasons.join(" ") : userErrorMessage(err, msg("submit.submit_failed")),

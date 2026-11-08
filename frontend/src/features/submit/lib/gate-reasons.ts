@@ -18,14 +18,18 @@ export function gateReasons(err: unknown, translate: Translate): string[] {
 }
 
 /** The setup check keys that refuse a secret for a host it may not go to. */
-const SECRET_HOST_KEYS = new Set(["repo_gate.secret_host_unlisted", "repo_gate.secret_host_not_allowed"]);
+const SECRET_HOST_KEYS = new Set([
+  "repo_gate.secret_host_unlisted",
+  "repo_gate.secret_host_not_allowed",
+]);
 
 /**
  * The fix messages for secrets the setup check refused for a host, keyed by
  * the secret's name, so the form can show each one on its secret's row.
  */
 export function secretHostIssues(err: unknown, translate: Translate): Record<string, string> {
-  const issues: Record<string, string> = {};
+  // No prototype, so a secret named `__proto__` or `toString` is a plain key.
+  const issues: Record<string, string> = Object.create(null);
   for (const { key, params } of gateFailures(err)) {
     const secret = params?.secret;
     if (!SECRET_HOST_KEYS.has(key) || typeof secret !== "string") continue;
@@ -33,6 +37,20 @@ export function secretHostIssues(err: unknown, translate: Translate): Record<str
     if (text) issues[secret] = issues[secret] ? `${issues[secret]} ${text}` : text;
   }
   return issues;
+}
+
+/**
+ * Set each secret row's host fix from one refused submit, and clear it on
+ * every row the refusal does not name, so a fixed row loses its old message.
+ */
+export function applySecretHostIssues<T extends { name: string; hostIssue?: string }>(
+  secrets: T[],
+  issues: Record<string, string>,
+): T[] {
+  return secrets.map((secret) => {
+    const name = secret.name.trim();
+    return { ...secret, hostIssue: Object.hasOwn(issues, name) ? issues[name] : undefined };
+  });
 }
 
 /** The well-formed `{ key, params }` entries of a refused setup check. */
