@@ -29,6 +29,7 @@ anyio==4.14.2
     # via
     #   dspy
     #   httpx
+    #   httpx2
     #   mcp
     #   openai
     #   py-key-value-aio
@@ -144,7 +145,9 @@ griffelib==2.0.2
 h11==0.16.0
     # via
     #   httpcore
+    #   httpcore2
     #   uvicorn
+    #   wsproto
 h2==4.4.1
     # via httpx
 hf-xet==1.4.3 ; platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
@@ -155,6 +158,8 @@ http-ece==1.2.1
     # via pywebpush
 httpcore==1.0.9
     # via httpx
+httpcore2==2.16.0 ; sys_platform != 'emscripten'
+    # via httpx2
 httpx==0.28.1
     # via
     #   fastmcp-slim
@@ -162,20 +167,25 @@ httpx==0.28.1
     #   litellm
     #   mcp
     #   openai
+httpx-sse==0.4.3
+    # via mcp
+httpx2==2.16.0
+    # via
     #   vercel-internal-core
     #   vercel-oidc
     #   vercel-sandbox
-httpx-sse==0.4.3
-    # via mcp
+httpx2-jsfetch==1.0 ; python_full_version >= '3.12' and sys_platform == 'emscripten'
+    # via httpx2
 huggingface-hub==1.10.2
     # via tokenizers
 hyperframe==6.1.0
     # via h2
-idna==3.15
+idna==3.20
     # via
     #   anyio
     #   email-validator
     #   httpx
+    #   httpx2
     #   requests
     #   yarl
 importlib-metadata==8.5.0
@@ -431,6 +441,10 @@ tqdm==4.67.3
     #   dspy
     #   huggingface-hub
     #   openai
+truststore==0.10.5 ; sys_platform != 'emscripten'
+    # via
+    #   httpcore2
+    #   httpx2
 typer==0.23.1
     # via huggingface-hub
 typing-extensions==4.15.0
@@ -442,6 +456,7 @@ typing-extensions==4.15.0
     #   exceptiongroup
     #   fastapi
     #   fastmcp-slim
+    #   httpx2
     #   huggingface-hub
     #   mcp
     #   openai
@@ -455,6 +470,7 @@ typing-extensions==4.15.0
     #   starlette
     #   stripe
     #   typing-inspection
+    #   vercel-internal-core
 typing-inspection==0.4.2
     # via
     #   fastapi
@@ -473,13 +489,13 @@ uvicorn==0.44.0
     #   fastmcp-slim
     #   mcp
     #   skynet
-vercel-headers==0.7.1
+vercel-headers==0.7.2
     # via vercel-oidc
-vercel-internal-core==0.1.2
+vercel-internal-core==0.2.2
     # via vercel-sandbox
-vercel-oidc==0.8.0
+vercel-oidc==0.11.0
     # via vercel-sandbox
-vercel-sandbox==0.4.0
+vercel-sandbox==0.10.0
     # via skynet
 watchfiles==1.1.1
     # via fastmcp-slim
@@ -487,6 +503,8 @@ webauthn==2.8.0
     # via skynet
 websockets==16.0
     # via fastmcp-slim
+wsproto==1.3.2
+    # via httpx2
 xlrd==2.0.2
     # via skynet
 yarl==1.25.1
