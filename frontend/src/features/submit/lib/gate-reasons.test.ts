@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { applySecretHostIssues, gateReasons, secretHostIssues } from "./gate-reasons.ts";
+import {
+  applySecretHostIssues,
+  gateReasons,
+  secretHostIssues,
+  withSecretHostIssues,
+} from "./gate-reasons.ts";
 
 const CATALOG: Record<string, string> = {
   "repo_gate.unknown_connector":
@@ -84,11 +89,14 @@ test("a secret refused for a host gets its fix message under its own name", () =
     ]),
     translate,
   );
-  assert.deepEqual({ ...issues }, {
-    API_KEY:
-      "API_KEY has no allowed hosts but goes to a.example.com. API_KEY may go only to b.example.com but goes to c.example.com.",
-    TOKEN: "TOKEN has no allowed hosts but goes to d.example.com.",
-  });
+  assert.deepEqual(
+    { ...issues },
+    {
+      API_KEY:
+        "API_KEY has no allowed hosts but goes to a.example.com. API_KEY may go only to b.example.com but goes to c.example.com.",
+      TOKEN: "TOKEN has no allowed hosts but goes to d.example.com.",
+    },
+  );
   assert.deepEqual({ ...secretHostIssues(new Error("boom"), translate) }, {});
 });
 
@@ -169,4 +177,41 @@ test("each refused submit sets or clears every row, so a fixed row loses its old
     rows.map((row) => row.hostIssue),
     [undefined, undefined],
   );
+});
+
+test("a refused submit keeps a repository change the setup agent made during the submit", () => {
+  const atClick = {
+    objective: "Answer support tickets",
+    repo: {
+      repository: "acme/support-bot",
+      branch: "main",
+      commit: "",
+      secrets: [{ name: "API_KEY", allowedHosts: "", hostIssue: undefined as string | undefined }],
+    },
+  };
+  const afterAgent = {
+    ...atClick,
+    repo: { ...atClick.repo, branch: "agent-fix", commit: "abc1234" },
+  };
+  const issues = secretHostIssues(
+    refused([
+      {
+        key: "repo_gate.secret_host_unlisted",
+        params: { secret: "API_KEY", host: "api.example.com" },
+      },
+    ]),
+    translate,
+  );
+
+  const next = withSecretHostIssues(afterAgent, issues);
+  assert.equal(next.repo?.branch, "agent-fix");
+  assert.equal(next.repo?.commit, "abc1234");
+  assert.equal(
+    next.repo?.secrets[0].hostIssue,
+    "API_KEY has no allowed hosts but goes to api.example.com.",
+  );
+  assert.equal(afterAgent.repo.secrets[0].hostIssue, undefined);
+
+  const agentPickedProgram = { ...atClick, repo: null };
+  assert.equal(withSecretHostIssues(agentPickedProgram, issues), agentPickedProgram);
 });

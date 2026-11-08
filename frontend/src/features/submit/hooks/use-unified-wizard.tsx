@@ -95,7 +95,7 @@ import {
   preflightMayAdvance,
   preflightPendingMessageKey,
 } from "../lib/preflight-outcome";
-import { applySecretHostIssues, gateReasons, secretHostIssues } from "../lib/gate-reasons";
+import { gateReasons, secretHostIssues, withSecretHostIssues } from "../lib/gate-reasons";
 import { finishedHardeningJobId, repoRunRequest } from "../lib/repo-run";
 import {
   currentRunFailure,
@@ -225,7 +225,9 @@ type Action =
   | { type: "file"; path: string; text: string | null }
   | { type: "go"; step: WizardStepId }
   | { type: "level"; level: ExperienceLevel; optimizerBlocked: boolean }
-  | { type: "defaultModels"; models: Record<ModelRole, ModelConfig | null> };
+  | { type: "defaultModels"; models: Record<ModelRole, ModelConfig | null> }
+  // Applied to the state it reduces, not a copy from the submit click.
+  | { type: "secretHostIssues"; issues: Record<string, string> };
 
 const stepIndex = (step: WizardStepId) => WIZARD_V2_STEPS.indexOf(step);
 
@@ -249,6 +251,10 @@ function reducer(state: WizardV2State, action: Action): WizardV2State {
   if (action.type === "defaultModels") {
     const optimizer = withDefaultModels(state.optimizer, action.models);
     return optimizer === state.optimizer ? state : { ...state, optimizer };
+  }
+  if (action.type === "secretHostIssues") {
+    const task = withSecretHostIssues(state.task, action.issues);
+    return task === state.task ? state : { ...state, task };
   }
   if (action.slice === "optimizer") {
     return { ...state, optimizer: withOptimizerPatch(state.optimizer, action.patch) };
@@ -733,11 +739,7 @@ export function WizardV2Provider({
       const reasons = gateReasons(err, knownErrorCodeMessage);
       if (reasons.length > 0) console.error(err);
       // A secret refused for a host also shows the fix on its own row.
-      const hostIssues = secretHostIssues(err, knownErrorCodeMessage);
-      const repo = state.task.repo;
-      if (repo?.secrets) {
-        patchTask({ repo: { ...repo, secrets: applySecretHostIssues(repo.secrets, hostIssues) } });
-      }
+      dispatch({ type: "secretHostIssues", issues: secretHostIssues(err, knownErrorCodeMessage) });
       toast.error(
         reasons.length > 0 ? reasons.join(" ") : userErrorMessage(err, msg("submit.submit_failed")),
       );

@@ -53,6 +53,19 @@ export function applySecretHostIssues<T extends { name: string; hostIssue?: stri
   });
 }
 
+/**
+ * Put one refused submit's host fixes on the secret rows of the task as it is
+ * now. The setup agent can change the repository while the submit runs, so
+ * only the row messages change and every other field keeps its current value.
+ */
+export function withSecretHostIssues<
+  T extends { repo: { secrets?: Array<{ name: string; hostIssue?: string }> } | null },
+>(task: T, issues: Record<string, string>): T {
+  const repo = task.repo;
+  if (!repo?.secrets) return task;
+  return { ...task, repo: { ...repo, secrets: applySecretHostIssues(repo.secrets, issues) } };
+}
+
 /** The well-formed `{ key, params }` entries of a refused setup check. */
 function gateFailures(err: unknown): Array<{ key: string; params?: Record<string, unknown> }> {
   if (typeof err !== "object" || err === null) return [];
