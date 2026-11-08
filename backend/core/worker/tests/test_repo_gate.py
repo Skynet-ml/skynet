@@ -90,7 +90,7 @@ def test_an_unenforceable_proposer_mcp_key_fails_on_local_docker(tmp_path: Path)
 
 def test_the_cloud_names_its_own_sandbox(tmp_path: Path) -> None:
     """The message says which sandbox cannot enforce the key."""
-    archive = _archive(tmp_path, {CONSTRAINTS_FILE: b"[proposer]\nnetwork = []\n"})
+    archive = _archive(tmp_path, {CONSTRAINTS_FILE: b'[metric]\nreference = "eval/reference.json"\n'})
 
     [failure] = check_repository(archive, (), place="cloud")
 
@@ -128,8 +128,6 @@ def test_a_missing_secret_name_fails(tmp_path: Path) -> None:
     ("raw", "key"),
     [
         (b'[proposer]\nmcp = ".mcp.json"\n', "[proposer] mcp"),
-        (b"[proposer]\nnetwork = []\n", "[proposer] network"),
-        (b'[proposer]\nnetwork = ["pypi.org"]\n', "[proposer] network"),
         (b'[services.maps]\nurl = "https://api.example.com"\n[proposer]\nservices = ["maps"]\n', "[proposer] services"),
         (b'[target.planner]\nentry = "agents/planner.py:plan"\n', "[target.planner]"),
         (b'[target.planner]\nentry = "agents/planner.py:plan"\nmcp = "eval/.mcp.json"\n', "[target.planner]"),
@@ -162,7 +160,7 @@ def test_every_unenforced_key_fails_in_every_place(tmp_path: Path, raw: bytes, k
 
 def test_every_failure_has_a_hebrew_message(tmp_path: Path) -> None:
     """Each failure renders in Hebrew with its own parameters, so the setup check shows it in the user's language."""
-    raw = b'[proposer]\nnetwork = []\n[services.maps]\nurl = "https://api.example.com"\nheaders = { Authorization = "${GOOGLE_MAPS_API_KEY}" }\n'
+    raw = b'[metric]\nreference = "eval/reference.json"\n[services.maps]\nurl = "https://api.example.com"\nheaders = { Authorization = "${GOOGLE_MAPS_API_KEY}" }\n'
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place="local")
 
     assert {failure.code for failure in failures} == {
@@ -180,29 +178,32 @@ def test_every_failure_has_a_hebrew_message(tmp_path: Path) -> None:
 
 def test_the_error_carries_every_failure_and_the_first_code(tmp_path: Path) -> None:
     """The worker's error lists every reason and keeps the first one's code for a client that shows one message."""
-    raw = b'[proposer]\nnetwork = []\n[metric]\nreference = "eval/reference.json"\n'
+    raw = b'[proposer]\nservices = []\n[metric]\nreference = "eval/reference.json"\n'
     failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place="local")
 
     error = RepoGateError(failures)
 
     assert error.failures == failures
     assert error.code == I18nKey.REPO_GATE_UNENFORCED_LOCAL
-    assert error.params == {"key": "[proposer] network"}
-    assert "[proposer] network" in str(error)
+    assert error.params == {"key": "[proposer] services"}
+    assert "[proposer] services" in str(error)
     assert "[metric] reference" in str(error)
 
 
 @pytest.mark.parametrize("place", ["local", "cloud"])
-def test_proposer_allowed_hosts_fail_with_their_own_message(tmp_path: Path, place: str) -> None:
-    """The proposer gets no allowed hosts yet, so the failure has its own code and names the hosts (SKY-354)."""
-    raw = b'[proposer]\nnetwork = ["pypi.org", "files.pythonhosted.org"]\n'
-    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place)  # type: ignore[arg-type]
+def test_a_proposer_network_list_passes_the_gate(tmp_path: Path, place: str) -> None:
+    """The broker grants the listed hosts to the proposer's box, so the gate lets the run start (SKY-384)."""
+    raw = b'[proposer]\nnetwork = ["docs.python.org"]\n'
 
-    assert [(failure.key, failure.code) for failure in failures] == [
-        ("[proposer] network", I18nKey.REPO_GATE_PROPOSER_HOSTS_UNSUPPORTED)
-    ]
-    assert failures[0].params == {"hosts": "pypi.org, files.pythonhosted.org"}
-    assert "pypi.org, files.pythonhosted.org" in failures[0].reason
+    assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("place", ["local", "cloud"])
+def test_an_empty_proposer_network_passes_the_gate(tmp_path: Path, place: str) -> None:
+    """``network = []`` keeps the proposer on the relay only, which every place enforces (SKY-384)."""
+    raw = b"[proposer]\nnetwork = []\n"
+
+    assert check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place) == []  # type: ignore[arg-type]
 
 
 def _mcp_archive(tmp_path: Path, server: str) -> Path:
@@ -311,22 +312,6 @@ def test_a_stdio_mcp_server_fails_the_setup_check(tmp_path: Path) -> None:
 
     with pytest.raises(ConstraintsError, match=r"Only http servers are supported now"):
         check_repository(archive, ("GOOGLE_MAPS_KEY",), place="cloud", bindings={"GOOGLE_MAPS_KEY": "managed"})
-
-
-@pytest.mark.parametrize("place", ["local", "cloud"])
-def test_the_specific_checks_do_not_depend_on_enforced(
-    tmp_path: Path, place: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """When a later issue enforces these keys, proposer hosts still stop the run."""
-    enforced = {name: kinds | {"services", "proposer.network"} for name, kinds in repo_gate.ENFORCED.items()}
-    monkeypatch.setattr(repo_gate, "ENFORCED", enforced)
-    raw = b'[proposer]\nnetwork = ["api.example.com"]\n[services.maps]\nurl = "https://api.example.com"\n'
-
-    failures = check_repository(_archive(tmp_path, {CONSTRAINTS_FILE: raw}), (), place=place)  # type: ignore[arg-type]
-
-    assert [(failure.key, failure.code) for failure in failures] == [
-        ("[proposer] network", I18nKey.REPO_GATE_PROPOSER_HOSTS_UNSUPPORTED),
-    ]
 
 
 def test_the_new_messages_exist_in_hebrew() -> None:

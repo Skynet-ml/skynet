@@ -727,13 +727,9 @@ class ModelGateway:
         Raises:
             ValueError: When no sandbox broker is bound yet.
         """
-        if self._sandbox is None or self._descriptor is None:
+        if self._sandbox is None:
             raise ValueError("This gateway has no sandbox broker to grant hosts on.")
         self._sandbox.allow_guest_hosts(tuple(sorted(set(allowed_hosts))))
-        if allowed_hosts:
-            self._descriptor["allowed_hosts"] = sorted(set(allowed_hosts))
-        else:
-            self._descriptor.pop("allowed_hosts", None)
 
     def parent_sandbox_runtime(self) -> Any:
         """Return the runtime the parent opens its own scoring box with.
