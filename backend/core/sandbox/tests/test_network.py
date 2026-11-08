@@ -394,6 +394,28 @@ async def test_failed_restore_keeps_the_block_exception() -> None:
     assert network.current is None
 
 
+async def test_generator_close_with_failed_restore_raises() -> None:
+    """Raise when aclose() ends a phase and the restore fails, as aclose() hides GeneratorExit."""
+    applier = ScriptedApplier(2)
+    network = PhaseNetwork(applier, PLAN, current=DENY)
+
+    async def hold() -> AsyncGenerator[None, None]:
+        """Keep the setup phase active until the generator closes.
+
+        Yields:
+            Nothing, once the phase is active.
+        """
+        async with network.phase_policy(Phase.SETUP):
+            yield
+
+    held = hold()
+    await anext(held)
+    with pytest.raises(NetworkPolicyError, match="setup phase failed") as caught:
+        await held.aclose()
+    assert isinstance(caught.value.__cause__, GeneratorExit)
+    assert network.current is None
+
+
 async def test_other_reported_policy_fails_the_phase() -> None:
     """Fail closed when the provider reports a policy that differs."""
 
@@ -487,6 +509,9 @@ def test_contradictory_policy_fails(kwargs: dict) -> None:
         "a_b.com",
         f"{'a' * 64}.com",
         "1.2.3",
+        "0x7f000001",
+        "1.0x2",
+        "x.0XAB",
         "例え.jp",
     ],
 )
@@ -512,6 +537,13 @@ def test_policy_accepts_wildcard_label_and_ip(host: str) -> None:
         host: The valid host.
     """
     assert EgressPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=(host,)).allow_hosts == (host,)
+
+
+def test_policy_coerces_a_string_mode() -> None:
+    """Check a plain string mode like the enum, so deny-all with hosts is refused."""
+    with pytest.raises(SandboxSpecError):
+        EgressPolicy(mode="deny_all", allow_hosts=("pypi.org",))  # type: ignore[arg-type]
+    assert EgressPolicy(mode="open").mode is NetworkMode.OPEN  # type: ignore[arg-type]
 
 
 def test_trailing_dot_names_the_same_host() -> None:

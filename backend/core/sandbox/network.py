@@ -42,6 +42,8 @@ class NetworkPolicyError(RuntimeError):
 # hyphen at either end. Every other character (comma, backslash, percent,
 # underscore, a blank) is a parse risk at the provider, so it is refused.
 _LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
+# A last label that inet_aton-style parsers read as a number: decimal, or hex.
+_NUMERIC_LABEL = re.compile(r"[0-9]+|0x[0-9a-f]*", re.IGNORECASE)
 
 
 def _normalize_host(raw: str) -> str:
@@ -67,8 +69,9 @@ def _is_valid_host(host: str) -> bool:
     ``0.0.0.0``, ``::`` and ``::ffff:0.0.0.0``, an IPv6 scope ID, an empty label and any character
     outside letters, digits, hyphens and dots are not valid, because the
     provider could read them as "every host" or as a host that the caller did
-    not mean. A name whose last label is all digits is refused, because some
-    parsers read ``1.2.3`` as an IP address.
+    not mean. A name whose last label is all digits or a ``0x`` hex number is
+    refused, because some parsers read ``1.2.3`` or ``0x7f000001`` as an IP
+    address.
 
     Args:
         host: The normalized host.
@@ -87,7 +90,7 @@ def _is_valid_host(host: str) -> bool:
         return not (address.is_unspecified or (mapped is not None and mapped.is_unspecified))
     wildcard = host.startswith("*.")
     labels = host.removeprefix("*.").split(".")
-    if len(host) > 253 or (wildcard and len(labels) < 2) or labels[-1].isdigit():
+    if len(host) > 253 or (wildcard and len(labels) < 2) or _NUMERIC_LABEL.fullmatch(labels[-1]):
         return False
     return all(_LABEL.fullmatch(label) for label in labels)
 
@@ -161,7 +164,10 @@ class EgressPolicy:
         Raises:
             SandboxSpecError: A host is not a bare host name, or the hosts or
                 credential rules do not fit the mode.
+            ValueError: The mode is not a ``NetworkMode`` value.
         """
+        # A plain string such as "deny_all" must meet the same mode checks.
+        object.__setattr__(self, "mode", NetworkMode(self.mode))
         hosts = tuple(dict.fromkeys(_normalize_host(host) for host in self.allow_hosts))
         for host in hosts:
             if not _is_valid_host(host):
@@ -225,7 +231,8 @@ class PhaseNetwork:
 
     Phases nest in one task only, and exit in reverse order of entry. A
     phase that exits before a later phase sets the box to deny-all and
-    raises. A phase from another task while a phase is
+    raises; a later phase that exits after that restores the policy of the
+    phase still active below it. A phase from another task while a phase is
     active is refused, because the two restores would race and could leave
     the box with the wrong policy (for example open egress during scoring).
     """
@@ -272,7 +279,8 @@ class PhaseNetwork:
         Raises:
             NetworkPolicyError: The provider did not confirm a policy change,
                 another task has a phase active, or the phase exited before
-                a later phase.
+                a later phase. A generator close whose restore fails raises
+                this in place of ``GeneratorExit``.
         """
         task = asyncio.current_task()
         if self._active and self._owner is not task:
@@ -291,6 +299,13 @@ class PhaseNetwork:
                 try:
                     await self._restore(self._previous())
                 except Exception as restore_error:
+                    # aclose() swallows GeneratorExit, so a failed restore
+                    # would leave the box with the phase policy unseen.
+                    if isinstance(error, GeneratorExit):
+                        failure = NetworkPolicyError(
+                            f"Restoring the network policy after the {phase.value} phase failed: {restore_error!r}"
+                        )
+                        raise failure from error
                     error.add_note(f"Restoring the network policy failed too: {restore_error!r}")
                 raise
             if self._active[-1][0] is not token:
@@ -319,7 +334,8 @@ class PhaseNetwork:
 
         The restore target of this phase is now wrong for the box, and the
         later phase still expects its own policy. No restore is correct, so
-        the box goes to deny-all until the remaining phases exit.
+        the box goes to deny-all. A later phase that exits after this restores
+        the policy of the phase still active below it, or the baseline.
 
         Args:
             phase: The phase that exits.
