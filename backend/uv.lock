@@ -2401,6 +2401,15 @@ wheels = [
 ]
 
 [[package]]
+name = "mosaic-sandbox"
+version = "0.15.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/da/73/ab1baf849adad239f3ec5660489706bdfb0efb3d14ec7178ab8f03d77086/mosaic_sandbox-0.15.1.tar.gz", hash = "sha256:a4cc30a426770ade48eb019f1d0d89f0d89688813e2b5e291893bd707f2ab0d6", size = 346357, upload-time = "2026-11-07T18:38:00.249Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/df/4c/ac6597dc4d62b439e3e12f843fc1f8ab184ca32cc1027ebc8627e5df788a/mosaic_sandbox-0.15.1-py3-none-any.whl", hash = "sha256:5fecc58d87d19b504fa5037884de2d9f392d0a3ee132c58a4fcb0d1b70912ee6", size = 224135, upload-time = "2026-11-07T18:37:58.488Z" },
+]
+
+[[package]]
 name = "mpmath"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -4634,6 +4643,9 @@ e2b = [
 load = [
     { name = "locust" },
 ]
+mosaic = [
+    { name = "mosaic-sandbox" },
+]
 render = [
     { name = "build123d" },
     { name = "networkx" },
@@ -4666,6 +4678,7 @@ requires-dist = [
     { name = "ldap3", specifier = ">=2.9" },
     { name = "litellm", specifier = ">=1.88.6" },
     { name = "locust", marker = "extra == 'load'", specifier = ">=2.0" },
+    { name = "mosaic-sandbox", marker = "extra == 'mosaic'", specifier = ">=0.15.1,<0.16" },
     { name = "networkx", marker = "extra == 'render'", specifier = ">=3" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "pgvector", specifier = ">=0.3" },
@@ -4704,7 +4717,7 @@ requires-dist = [
     { name = "webauthn", specifier = ">=2.5,<3" },
     { name = "xlrd", specifier = ">=2" },
 ]
-provides-extras = ["dev", "load", "training", "render", "e2b", "runloop"]
+provides-extras = ["dev", "load", "training", "render", "e2b", "runloop", "mosaic"]
 
 [[package]]
 name = "sniffio"

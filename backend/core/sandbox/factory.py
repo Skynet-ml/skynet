@@ -44,6 +44,7 @@ PROVIDERS: dict[str, ProviderEntry] = {
     "daytona": ProviderEntry("core.sandbox.providers.daytona", "DaytonaEnvironment", "daytona", False),
     "modal": ProviderEntry("core.sandbox.providers.modal", "ModalEnvironment", "modal", False),
     "runloop": ProviderEntry("core.sandbox.providers.runloop", "RunloopEnvironment", "runloop", False),
+    "mosaic": ProviderEntry("core.sandbox.providers.mosaic", "MosaicEnvironment", "mosaic", False),
     "apple_container": ProviderEntry(
         "core.sandbox.providers.apple_container", "AppleContainerEnvironment", None, False
     ),
