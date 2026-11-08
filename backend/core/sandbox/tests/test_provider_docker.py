@@ -463,6 +463,25 @@ async def test_exit_codes_of_a_timeout_do_not_read_as_a_timeout(code: int) -> No
 
 
 @needs_docker
+async def test_timed_exec_keeps_only_the_command_stderr() -> None:
+    """Return only the command's own stderr when the timeout does not fire."""
+    async with DockerEnvironment(_spec()) as env:
+        result = await env.exec("echo out; echo err >&2", timeout_sec=30)
+        quiet = await env.exec("true", timeout_sec=30)
+    assert (result.exit_code, result.stdout, result.stderr) == (0, "out\n", "err\n")
+    assert quiet.stderr == ""
+
+
+@needs_docker
+async def test_fired_timeout_adds_no_job_notice_to_stderr() -> None:
+    """Return only the command's own stderr when the timeout kills it."""
+    async with DockerEnvironment(_spec()) as env:
+        result = await env.exec("echo err >&2; sleep 30", timeout_sec=1)
+    assert result.timed_out
+    assert result.stderr == "err\n"
+
+
+@needs_docker
 async def test_timeout_kills_the_whole_process_group() -> None:
     """Kill the children of a command that the timeout stops."""
     async with DockerEnvironment(_spec()) as env:

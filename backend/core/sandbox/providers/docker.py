@@ -84,8 +84,10 @@ _ENV_LOADER = 'pairs=(); while IFS= read -r -d "" pair; do pairs+=("$pair"); don
 # Runs the command as its own process group, so a timeout or a cancel can
 # kill every process that the command started. Killing the ``docker exec``
 # client does not stop the command in the box. Job control (``set -m``) gives
-# the group without ``setsid``, which some images lack; ``set +m`` then stops
-# the job notices on stderr. The timer leaves a marker file, so a command
+# the group without ``setsid``, which some images lack. Bash still prints a
+# job notice ("Killed ...") on its own stderr when it reaps a killed job, so
+# the wrapper keeps the real stderr on fd 3 for the command alone and sends
+# its own stderr to /dev/null. The timer leaves a marker file, so a command
 # that exits 124 or 137 by itself never reads as a timeout; the marker counts
 # only when the command died of SIGKILL, so a command that ends at its limit
 # is not a timeout either. A cancel can come before the env stream reaches
@@ -95,10 +97,10 @@ _ENV_LOADER = 'pairs=(); while IFS= read -r -d "" pair; do pairs+=("$pair"); don
 _EXEC_WRAPPER = (
     "state=$1 limit=$2; shift 2; timer=; "
     'if [ -e "$state.cancel" ]; then rm -f -- "$state.cancel"; exit 137; fi; '
-    'set -m; "$@" & child=$!; echo "$child" > "$state.pid"; '
+    'exec 3>&2 2>/dev/null; set -m; "$@" 2>&3 3>&- & child=$!; echo "$child" > "$state.pid"; '
     'if [ -e "$state.cancel" ]; then kill -KILL -- "-$child" 2>/dev/null; fi; '
     'if [ -n "$limit" ]; then '
-    '(sleep "$limit"; : > "$state.timeout"; kill -KILL -- "-$child") >/dev/null 2>&1 & timer=$!; fi; '
+    '(sleep "$limit"; : > "$state.timeout"; kill -KILL -- "-$child") >/dev/null 2>&1 3>&- & timer=$!; fi; '
     'set +m; wait "$child"; code=$?; '
     'if [ -n "$timer" ]; then kill -KILL -- "-$timer" 2>/dev/null; fi; rm -f -- "$state.pid" "$state.cancel"; '
     f'if [ -e "$state.timeout" ] && [ "$code" = 137 ]; then exit {_TIMEOUT_EXIT_CODE}; fi; '
