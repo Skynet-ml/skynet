@@ -109,6 +109,9 @@ class FakeCloud:
     create_delay: float = 0.0
     list_error: BaseException | None = None
     list_delay: float = 0.0
+    page_size: int | None = None
+    page_limits: list[int | None] = field(default_factory=list)
+    users: list[str | None] = field(default_factory=list)
     destroy_fails: set[str] = field(default_factory=set)
     exec_hangs: bool = False
     exit_code_in_info: bool = False
@@ -210,28 +213,39 @@ class FakeSandbox:
         return FakeSyncSandbox(box)
 
     @classmethod
-    def list(cls, *, metadata: dict[str, str]) -> list[SimpleNamespace]:
-        """Return the boxes whose metadata holds every given pair.
+    def list_page(
+        cls, *, metadata: dict[str, str], limit: int | None = None, cursor: str | None = None
+    ) -> tuple[list[SimpleNamespace], str | None]:
+        """Return one page of the boxes whose metadata holds every given pair.
+
+        Ended boxes count against the page, as on the server.
 
         Args:
             metadata: The metadata filter.
+            limit: The page size the caller asks for.
+            cursor: The offset of this page, or ``None`` for the first page.
 
         Returns:
-            Sandbox summaries.
+            Sandbox summaries and the cursor of the next page, or ``None``.
 
         Raises:
             BaseException: The cloud's list error.
         """
         CLOUD.calls.append("list")
+        CLOUD.page_limits.append(limit)
         if CLOUD.list_delay:
             time.sleep(CLOUD.list_delay)
         if CLOUD.list_error is not None:
             raise CLOUD.list_error
-        return [
+        matches = [
             SimpleNamespace(id=box.id, state=box.state, metadata=dict(box.params["metadata"]))
             for box in list(CLOUD.boxes.values())
             if metadata.items() <= box.params["metadata"].items()
         ]
+        size = min(n for n in (limit, CLOUD.page_size, len(matches) or 1) if n is not None)
+        start = int(cursor or 0)
+        end = start + size
+        return matches[start:end], str(end) if end < len(matches) else None
 
     @classmethod
     def connect(cls, sandbox_id: str) -> FakeSyncSandbox:
@@ -310,16 +324,18 @@ class FakeAsyncSandbox:
         self.process = SimpleNamespace(start=self._start)
         self.files = SimpleNamespace(write=self._write, read_bytes=self._read_bytes)
 
-    async def _start(self, command: str) -> FakeProcess:
+    async def _start(self, command: str, *, user: str | None = None) -> FakeProcess:
         """Run the command in the shell model.
 
         Args:
             command: The wrapper line.
+            user: The user to run as, or ``None`` for the sandbox default.
 
         Returns:
             The process handle.
         """
         CLOUD.calls.append(f"exec:{command}")
+        CLOUD.users.append(user)
         return FakeProcess(f"proc-{next(CLOUD.ids)}", CLOUD.run(self._box, command))
 
     async def _write(self, path: str, content: str, *, create_parents: bool = False) -> None:
@@ -725,7 +741,7 @@ async def test_stop_job_sandboxes_skips_ended_boxes(fake_sdk: FakeCloud) -> None
 async def test_stop_job_sandboxes_skips_other_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     """Skip a listed box whose job tag does not match, even when the list returns it."""
     stray = SimpleNamespace(id="sbx-stray", state="running", metadata={JOB_TAG: "other"})
-    monkeypatch.setattr(FakeSandbox, "list", classmethod(lambda cls, *, metadata: [stray]))
+    monkeypatch.setattr(FakeSandbox, "list_page", classmethod(lambda cls, **_: ([stray], None)))
     assert await MosaicEnvironment.stop_job_sandboxes("job-3") == 0
 
 
@@ -753,3 +769,84 @@ async def test_stop_job_sandboxes_raises_a_list_error(fake_sdk: FakeCloud) -> No
     fake_sdk.list_error = FakeAuthenticationError("401", status=401)
     with pytest.raises(SandboxFatalError):
         await MosaicEnvironment.stop_job_sandboxes("job-6")
+
+
+async def test_sudo_runs_the_command_as_root(fake_sdk: FakeCloud) -> None:
+    """Ask Mosaic for the root user with sudo, and for no user without it."""
+    async with MosaicEnvironment(_spec()) as env:
+        await env.exec("true", sudo=True)
+        await env.exec("true")
+    assert fake_sdk.users == ["root", None]
+
+
+async def test_stop_job_sandboxes_reads_every_page(fake_sdk: FakeCloud) -> None:
+    """Destroy the job boxes of every list page, when ended boxes fill the first page."""
+    fake_sdk.page_size = 2
+    for index in range(2):
+        fake_sdk.boxes[f"old-{index}"] = BoxState(
+            id=f"old-{index}", params={"metadata": {JOB_TAG: "job-p"}}, state="destroyed"
+        )
+    for index in range(3):
+        fake_sdk.boxes[f"live-{index}"] = BoxState(id=f"live-{index}", params={"metadata": {JOB_TAG: "job-p"}})
+    assert await MosaicEnvironment.stop_job_sandboxes("job-p") == 3
+    assert all(box.state == "destroyed" for box in fake_sdk.boxes.values())
+    assert fake_sdk.calls.count("list") == 3
+    assert set(fake_sdk.page_limits) == {mosaic.LIST_PAGE_SIZE}
+
+
+async def test_the_orphan_lookup_reads_every_page(fake_sdk: FakeCloud) -> None:
+    """Find the lost box by its tag when it is not on the first list page."""
+    fake_sdk.page_size = 1
+    fake_sdk.create_error = FakeMosaicError("lost", code="transport")
+    fake_sdk.create_error_after_box = True
+    env = MosaicEnvironment(_spec())
+    for index in range(2):
+        fake_sdk.boxes[f"old-{index}"] = BoxState(
+            id=f"old-{index}", params={"metadata": {BOX_TAG: env._box_tag}}, state="destroyed"
+        )
+    with pytest.raises(SandboxTransientError):
+        await env.start()
+    assert [box.state for box in fake_sdk.boxes.values()] == ["destroyed"] * 3
+    assert fake_sdk.calls.count("list") == 3
+
+
+async def _wait_for_the_background_cleanup() -> None:
+    """Wait until no background cleanup of the provider runs."""
+    for _ in range(300):
+        if not mosaic._BACKGROUND_CLEANUPS:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("The background cleanup did not end.")
+
+
+async def test_a_create_slower_than_the_stop_limit_is_destroyed_later(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Destroy the box of a stop-during-start create that returns after the stop limit."""
+    monkeypatch.setattr(mosaic, "STOP_TIMEOUT", 0.1)
+    fake_sdk.create_delay = 0.4
+    env = MosaicEnvironment(_spec())
+    start = asyncio.ensure_future(env.start())
+    await asyncio.sleep(0.02)
+    await env.stop()
+    with pytest.raises(SandboxInfraError, match="during its start"):
+        await start
+    (box,) = fake_sdk.boxes.values()
+    assert box.state == "running"
+    assert len(mosaic._BACKGROUND_CLEANUPS) == 1
+    await _wait_for_the_background_cleanup()
+    assert box.state == "destroyed"
+
+
+async def test_a_start_timeout_slower_than_the_stop_limit_is_destroyed_later(
+    fake_sdk: FakeCloud, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Destroy the box of a timed-out create that returns after the stop limit."""
+    monkeypatch.setattr(mosaic, "STOP_TIMEOUT", 0.1)
+    fake_sdk.create_delay = 0.4
+    with pytest.raises(StartTimeoutError):
+        await MosaicEnvironment(_spec(), timeouts=_timeouts(start=0.02)).start()
+    (box,) = fake_sdk.boxes.values()
+    assert box.state == "running"
+    await _wait_for_the_background_cleanup()
+    assert box.state == "destroyed"

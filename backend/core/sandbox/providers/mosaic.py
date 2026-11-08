@@ -13,10 +13,13 @@ process poll loop, the file calls and the lost-create cleanup come from
 - The start and run phase timeouts bound the create and each command. A
   command that runs past its limit or whose ``exec`` is cancelled is killed.
 - Each sandbox carries a box tag in its metadata. A stop during the create,
-  or after a create that timed out, waits a bounded time for the create
-  thread and destroys its box, or finds the box by that tag, so a lost
-  create does not leak a box.
-- ``stop_job_sandboxes`` finds the sandboxes of a job by their metadata.
+  or after a create that timed out, destroys the create's box, or finds the
+  box by that tag, so a lost create does not leak a box. The stop waits a
+  bounded time; a create thread that runs longer gets its box destroyed in
+  the background when it returns.
+- ``stop_job_sandboxes`` finds the sandboxes of a job by their metadata and
+  reads every page of the list.
+- A ``sudo`` command runs as the ``root`` user.
 - Harbor's snapshot builds, volumes, secrets, SSH, pause, the ``/workspace``
   transfer staging and directory transfer are left out.
 """
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 import math
 import re
@@ -84,11 +88,16 @@ BOX_TAG = "skynet_box"
 STOP_TIMEOUT = 60.0
 KILL_TIMEOUT = 30.0
 POLL_INTERVAL = 0.1
+LIST_PAGE_SIZE = 500
 _TRANSIENT_CODES = frozenset({"transport", "client_timeout"})
 _ENDED_STATES = frozenset({"destroyed", "destroying", "deleted"})
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 MOSAIC_CAPABILITIES = EnvironmentCapabilities(name="mosaic", network_modes=frozenset(NetworkMode))
+
+# The event loop keeps only weak references to tasks, so a background
+# cleanup that nobody awaits must stay here until it ends.
+_BACKGROUND_CLEANUPS: set[asyncio.Future[None]] = set()
 
 
 def _classes(*classes: type[BaseException] | None) -> tuple[type[BaseException], ...]:
@@ -168,6 +177,42 @@ async def _bounded(awaitable: Awaitable[Any], action: str) -> bool:
         logger.warning("Mosaic could not %s: %s", action, type(error).__name__)
         return False
     return True
+
+
+def _cleanup_done(action: str, task: asyncio.Future[None]) -> None:
+    """Forget a background cleanup and log its failure.
+
+    Args:
+        action: What the cleanup does, for the log.
+        task: The finished cleanup task.
+    """
+    _BACKGROUND_CLEANUPS.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("Mosaic could not %s: %s", action, type(task.exception()).__name__)
+
+
+async def _list_all(metadata: Mapping[str, str]) -> list[Any]:
+    """List every sandbox with this metadata, page by page.
+
+    Args:
+        metadata: The metadata filter.
+
+    Returns:
+        The sandbox summaries of all pages.
+
+    Raises:
+        SandboxError: A list call failed; see ``_mapped``.
+    """
+    found: list[Any] = []
+    cursor: str | None = None
+    while True:
+        with _mapped("list the sandboxes"):
+            page, cursor = await asyncio.to_thread(
+                Sandbox.list_page, metadata=dict(metadata), limit=LIST_PAGE_SIZE, cursor=cursor
+            )
+        found.extend(page)
+        if cursor is None:
+            return found
 
 
 def _create_params(spec: SandboxSpec, box_tag: str) -> dict[str, Any]:
@@ -323,8 +368,8 @@ class MosaicEnvironment(SandboxEnvironment):
             env: Extra environment variables for this command.
             timeout_sec: The time limit; ``None`` uses the run phase timeout.
             on_output: Receives ``(stream, text)`` pairs while the command runs.
-            sudo: Has no effect: the provider runs commands as the sandbox
-                default user.
+            sudo: Run the command as the ``root`` user instead of the
+                sandbox default user.
 
         Returns:
             The exit code and the captured output.
@@ -340,7 +385,7 @@ class MosaicEnvironment(SandboxEnvironment):
             raise SandboxInfraError("The Mosaic sandbox is not running.")
         wrapped = self._wrap(command, cwd, {**self.spec.env, **(env or {})})
         with _mapped("start the command"):
-            handle = await box.process.start(wrapped)
+            handle = await box.process.start(wrapped, **({"user": "root"} if sudo else {}))
         limit = timeout_sec if timeout_sec is not None else self._default_timeout
         stdout: list[str] = []
         stderr: list[str] = []
@@ -479,7 +524,15 @@ class MosaicEnvironment(SandboxEnvironment):
         if box is not None:
             await _bounded(box.destroy(), "destroy the sandbox")
         elif self._create_dispatched:
-            await _bounded(self._destroy_orphan(call), "destroy the lost sandbox")
+            action = "destroy the lost sandbox"
+            cleanup = asyncio.ensure_future(self._destroy_orphan(call))
+            _BACKGROUND_CLEANUPS.add(cleanup)
+            cleanup.add_done_callback(functools.partial(_cleanup_done, action))
+            # The create thread cannot be cancelled and can outlive the stop
+            # limit, so the cleanup goes on in the background after the wait.
+            done, _pending = await asyncio.wait({cleanup}, timeout=STOP_TIMEOUT)
+            if not done:
+                logger.warning("Mosaic did not %s in time; it goes on in the background.", action)
 
     async def _destroy_orphan(self, call: asyncio.Future[Any] | None) -> None:
         """Destroy the box of a create that ended before the provider kept it.
@@ -497,9 +550,7 @@ class MosaicEnvironment(SandboxEnvironment):
             return
         # The create failed or still runs; the server may still have made the
         # box, so look for it by its tag.
-        with _mapped("list the sandboxes"):
-            found = await asyncio.to_thread(Sandbox.list, metadata={BOX_TAG: self._box_tag})
-        for summary in found:
+        for summary in await _list_all({BOX_TAG: self._box_tag}):
             if summary.state not in _ENDED_STATES:
                 with _mapped("destroy the lost sandbox"):
                     await asyncio.to_thread(_destroy_by_id, summary.id)
@@ -522,8 +573,7 @@ class MosaicEnvironment(SandboxEnvironment):
         found: list[Any] = []
         try:
             async with asyncio.timeout(STOP_TIMEOUT):
-                with _mapped("list the sandboxes"):
-                    found = await asyncio.to_thread(Sandbox.list, metadata={JOB_TAG: job_id})
+                found = await _list_all({JOB_TAG: job_id})
         except TimeoutError:
             logger.warning("Mosaic did not list the sandboxes of job %s in time.", job_id)
         stopped = 0
