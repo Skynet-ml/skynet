@@ -159,7 +159,7 @@ def test_open_launch_installs_the_pin_and_sends_model_calls_only_to_the_gateway(
     assert _GATEWAY.url not in launch.run_command
     assert _GATEWAY.api_key not in launch.run_command
     assert (
-        'CODE_PUPPY_API_KEY="$APP_API_KEY" code-puppy --yolo true --disable-ask-user-question '
+        'CODE_PUPPY_API_KEY="$APP_API_KEY" code-puppy --disable-ask-user-question '
         '--usage-file "$_cp_dir/usage.json" --model app --prompt "$_cp_prompt" < /dev/null'
     ) in launch.run_command
     assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
@@ -186,7 +186,9 @@ def test_reasoning_effort_goes_to_the_config_only_when_code_puppy_knows_it(
 
     assert result.returncode == 0, result.stderr
     cfg = calls.split("CFG_BEGIN\n", 1)[1].split("CFG_END\n", 1)[0]
-    assert cfg.startswith("[puppy]\npuppy_name = Puppy\nowner_name = User\nauto_save_session = false\n")
+    assert cfg.startswith(
+        "[puppy]\npuppy_name = Puppy\nowner_name = User\nauto_save_session = false\nyolo_mode = true\n"
+    )
     if line is None:
         assert "reasoning_effort" not in cfg
     else:
@@ -213,7 +215,7 @@ def test_protected_run_points_code_puppy_at_the_relay_and_returns_its_answer(tmp
     (run,) = [line for line in calls.splitlines() if line.startswith("ARGS")]
     (usage_arg,) = [arg for arg in run.split("] [") if arg.endswith("/usage.json")]
     assert run == (
-        f"ARGS [--yolo] [true] [--disable-ask-user-question] [--usage-file] [{usage_arg}] [--model] [app] "
+        f"ARGS [--disable-ask-user-question] [--usage-file] [{usage_arg}] [--model] [app] "
         "[--prompt] [Fix `solution.py` and say $(echo done).]"
     )
     assert "CODE_PUPPY_API_KEY=gateway-token" in calls

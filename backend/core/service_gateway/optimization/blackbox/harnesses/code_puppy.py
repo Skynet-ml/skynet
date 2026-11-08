@@ -3,10 +3,12 @@
 Adapted from Harbor 0.25.0 (Apache-2.0), agents/installed/code_puppy.py: the
 install through ``uv tool install``, the seeded ``puppy.cfg`` that skips the
 first-run prompts, the ``extra_models.json`` custom OpenAI endpoint that reads
-its key from ``CODE_PUPPY_API_KEY``, the ``--yolo true --prompt`` headless run, the guard
+its key from ``CODE_PUPPY_API_KEY``, the ``--prompt`` headless run, the guard
 for a prompt that starts with ``!`` or ``/``, and the usage-file check that
 turns a swallowed model error into a failed run. Skynet pins the release and
-always routes the custom endpoint to the model gateway.
+always routes the custom endpoint to the model gateway. Harbor passes
+``--yolo true``, but the pinned CLI has no such argument and exits on it, so
+``puppy.cfg`` sets ``yolo_mode = true`` instead.
 """
 
 from __future__ import annotations
@@ -100,6 +102,8 @@ def _puppy_cfg(reasoning_effort: str | None) -> str:
         "puppy_name = Puppy",
         "owner_name = User",
         "auto_save_session = false",
+        # 0.0.967 has no --yolo argument (Harbor 0.25.0 passes one); this key skips shell-command approval.
+        "yolo_mode = true",
     ]
     if reasoning_effort in _CODE_PUPPY_EFFORTS:
         lines.append(f"model_settings_{PROVIDER}_reasoning_effort = {reasoning_effort}")
@@ -150,7 +154,7 @@ def _code_puppy_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: 
         f'cp {CODE_PUPPY_MODELS_FILE} "$XDG_DATA_HOME/code_puppy/extra_models.json" && '
         f"printf '%s' {shlex.quote(_puppy_cfg(reasoning_effort))} > \"$XDG_CONFIG_HOME/code_puppy/puppy.cfg\" || exit 1; "
         f"{_FRAMED_PROMPT}"
-        f'{_CUSTOM_API_KEY_ENV}="${ENV_API_KEY}" code-puppy --yolo true --disable-ask-user-question '
+        f'{_CUSTOM_API_KEY_ENV}="${ENV_API_KEY}" code-puppy --disable-ask-user-question '
         f'--usage-file {_USAGE_FILE} --model {PROVIDER} --prompt "$_cp_prompt" < /dev/null; '
         "_cp_status=$?; "
         f"if [ ! -s {_USAGE_FILE} ]; then "
