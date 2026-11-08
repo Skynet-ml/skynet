@@ -11,6 +11,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -873,7 +874,9 @@ def slow(value):
 """
 
 
-def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 30) -> dict[str, Any]:
+def _candidate(
+    tmp_path: Path, entry: Any, value: Any = None, timeout: float = 30, token: str | None = None
+) -> dict[str, Any]:
     """Run the ``[run]`` supervisor once in a fresh folder, as the scorer box does.
 
     Args:
@@ -881,6 +884,9 @@ def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 3
         entry: The ``[run]`` entry.
         value: The case input.
         timeout: The run timeout.
+        token: The run's marker. Each call gets its own by default, because
+            ``stop_candidates`` kills every process with the marker, and
+            parallel tests that shared one killed each other's candidates.
 
     Returns:
         The supervisor's output document.
@@ -888,7 +894,13 @@ def _candidate(tmp_path: Path, entry: Any, value: Any = None, timeout: float = 3
     (tmp_path / "cand.py").write_text(_CANDIDATE_CODE, encoding="utf-8")
     call_dir = tmp_path / "call"
     call_dir.mkdir(exist_ok=True)
-    payload = {"entry": entry, "input": value, "timeout": timeout, "token": "tok-test", "stages": None}
+    payload = {
+        "entry": entry,
+        "input": value,
+        "timeout": timeout,
+        "token": token or f"tok-{uuid.uuid4().hex}",
+        "stages": None,
+    }
     (call_dir / runner.INPUT_FILE).write_text(json.dumps(payload), encoding="utf-8")
     subprocess.run(
         [sys.executable, runner.__file__, runner.CANDIDATE_FLAG, str(call_dir)],
@@ -943,9 +955,10 @@ def test_run_failures_have_no_output(tmp_path: Path, entry: Any, error: str) -> 
 
 def test_the_supervisor_stops_every_process_the_candidate_left(tmp_path: Path) -> None:
     """A background process in its own session still stops before the metric files go in."""
-    ran = _candidate(tmp_path, "cand.py:leaves_a_sleeper", 7)
+    token = f"tok-{uuid.uuid4().hex}"
+    ran = _candidate(tmp_path, "cand.py:leaves_a_sleeper", 7, token=token)
     assert ran == {"output": 7, "error": None, "stopped": True}
-    assert _marked(runner.candidate_processes("tok-test"), "tok-test") == set()
+    assert _marked(runner.candidate_processes(token), token) == set()
 
 
 def _marked(pids: set[int], token: str) -> set[int]:

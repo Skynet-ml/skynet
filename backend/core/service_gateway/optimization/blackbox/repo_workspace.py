@@ -803,7 +803,7 @@ class RepoWorkspace:
         return (
             *reasons,
             *(
-                f"'{path}' is protected by the repository's optimize.toml ([paths] protected),"
+                f"'{path}' is protected by the repository rules ([paths] protected),"
                 " and the version's code changed it while it ran."
                 for path in changed
                 if path not in hidden

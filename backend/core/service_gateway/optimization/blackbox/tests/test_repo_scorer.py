@@ -488,7 +488,7 @@ def test_a_blocked_version_gets_only_the_fixed_message(tmp_path: Path) -> None:
             {
                 "kind": EVENT_BLOCK,
                 "rule": "optimize.toml [paths]",
-                "reason": "'eval/labels.csv' is protected by the repository's optimize.toml ([paths] protected).",
+                "reason": "'eval/labels.csv' is protected by the repository rules ([paths] protected).",
             }
         ]
     finally:
@@ -538,7 +538,7 @@ def test_a_watch_note_reaches_the_agent_in_its_next_scoring_reply(tmp_path: Path
         version = _patch(tmp_path / "v1", archive, {"src/app.py": "x = 4\n"})
         warned = json.loads(scorer.dispatch({"candidate": version}).body)
         assert warned["feedback"] == (
-            "Check the rule file that optimize.toml names. You are probably about to break one of its rules:"
+            "Check the rules in your brief. You are probably about to break one of them:"
             " It reads expected answers.\n\nvalue read"
         )
         assert warned["score"] == pytest.approx(0.4)
@@ -1020,7 +1020,7 @@ def test_concurrent_calls_to_one_stage_run_in_parallel(tmp_path: Path) -> None:
         "from skynet import call\n"
         "def score(repo_path, case=None):\n"
         "    with ThreadPoolExecutor(4) as pool:\n"
-        "        values = list(pool.map(lambda value: call('slow', value), [0.6] * 4))\n"
+        "        values = list(pool.map(lambda value: call('slow', value), [1.5] * 4))\n"
         "    return sum(values), 'ok'\n"
     )
     stages = {"slow": TargetStage(entry="src/stages.py:slow", timeout=30)}
@@ -1028,8 +1028,10 @@ def test_concurrent_calls_to_one_stage_run_in_parallel(tmp_path: Path) -> None:
     scorer, _ = _stage_scorer(tmp_path, code, runtime, stages, max_concurrency=4)
     try:
         started = time.monotonic()
-        assert scorer.score("")["score"] == pytest.approx(2.4)
-        assert time.monotonic() - started < 2.0
+        assert scorer.score("")["score"] == pytest.approx(6.0)
+        # One call after another takes at least 6 s. The wide margin keeps a
+        # loaded test host, where each process start is slow, from failing it.
+        assert time.monotonic() - started < 4.5
     finally:
         scorer.close()
 

@@ -45,11 +45,12 @@ import hashlib
 import ipaddress
 import json
 import math
+import posixpath
 import re
 import socket
 import tarfile
 import tomllib
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -1054,6 +1055,57 @@ def _refuse_visible_cases(cases_file: str | None, rule_files: list[tuple[str, st
             )
 
 
+def _scoring_paths(metric: MetricSpec, cases_file: str | None) -> tuple[str, ...]:
+    """Return the hidden paths that can hold other files: the scorer's side of the tree (E62).
+
+    Args:
+        metric: The validated ``[metric]`` section.
+        cases_file: The ``[data] cases`` path, or ``None``.
+
+    Returns:
+        The ``[metric]`` files, exploit folder and reference, and the cases file.
+    """
+    return tuple(path for path in (*metric.files, metric.exploits, metric.reference, cases_file) if path is not None)
+
+
+def _refuse_hidden_visible_files(
+    scoring: Sequence[str],
+    visible: list[tuple[str, str | None]],
+    run_entry: str | tuple[str, ...] | None,
+    metric_only: Sequence[str],
+) -> None:
+    """Refuse a visible file or the ``[run]`` entry inside the scorer's side (D43, E62).
+
+    The agent's tree leaves out every path inside a hidden one, so such a
+    rule file would be stripped and the brief would name a hidden path.
+
+    Args:
+        scoring: ``optimize.toml`` and the paths from ``_scoring_paths``.
+        visible: Each visible file setting and its path, or ``None`` when unset.
+        run_entry: The ``[run]`` entry, or ``None``.
+        metric_only: The ``[metric] illegal`` and ``mcp`` files that no visible setting names.
+
+    Raises:
+        ConstraintsError: When one of those paths equals or lies inside a scoring path.
+    """
+    for setting, path in visible:
+        if path is not None and _inside(path, scoring):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: {setting} '{path}' is inside the hidden scoring files ({CONSTRAINTS_FILE},"
+                " [metric] or [data] cases), but the agent must read it. Move it out of the hidden paths."
+            )
+    if run_entry is None:
+        return
+    parts = (run_entry.rpartition(":")[0],) if isinstance(run_entry, str) else run_entry
+    for part in parts:
+        if _inside(posixpath.normpath(part.strip()), (*scoring, *metric_only)):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: [run] entry names '{part}', which is inside the hidden scoring files"
+                f" ({CONSTRAINTS_FILE} or [metric] or [data] cases). The candidate's box does not hold them; name a"
+                " visible file."
+            )
+
+
 def parse_constraints(raw: bytes) -> RepoConstraints:
     """Validate the bytes of a constraints file.
 
@@ -1148,6 +1200,18 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
     ]
     rule_files += [(f"[target.{name}] illegal", stage.illegal_file) for name, stage in targets.items()]
     _refuse_visible_cases(cases_file, rule_files)
+    metric = _metric(metric_section)
+    visible = [item for item in rule_files if item[0] != "[metric] illegal"]
+    visible += [("[proposer] mcp", proposer["mcp"]), ("[run] mcp", run_role["mcp"])]
+    visible += [(f"[target.{name}] mcp", stage.mcp) for name, stage in targets.items()]
+    visible_paths = {path for _, path in visible}
+    metric_only = [path for path in (metric_role["illegal_file"], metric_role["mcp"]) if path not in visible_paths]
+    _refuse_hidden_visible_files(
+        (CONSTRAINTS_FILE, *_scoring_paths(metric, cases_file)),
+        visible,
+        run_entry,
+        [path for path in metric_only if path is not None],
+    )
     return RepoConstraints(
         sha256=hashlib.sha256(raw).hexdigest(),
         editable_paths=editable,
@@ -1161,7 +1225,7 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         proposer=RoleEnvironment(**proposer),
         targets=targets,
         services=services,
-        metric=_metric(metric_section),
+        metric=metric,
         cases_file=cases_file,
     )
 
@@ -1600,6 +1664,43 @@ def _inside(path: str, roots: Iterable[str]) -> bool:
     return any(root == "." or path == root or path.startswith(root.rstrip("/") + "/") for root in roots)
 
 
+def scorer_only_paths(constraints: RepoConstraints) -> tuple[str, ...]:
+    """Return every repository path that only the parent's scorer may read (E61, E62).
+
+    A path that a visible role also names, such as one ``.mcp.json`` for
+    ``[run]`` and ``[metric]``, stays visible, because hiding it would break
+    that role. ``optimize.toml`` is always hidden: it names every hidden path.
+
+    Args:
+        constraints: The repository's validated constraints.
+
+    Returns:
+        ``optimize.toml``, the ``[metric]`` files, exploit folder, reference,
+        rule file and ``mcp`` file, and the ``[data] cases`` file, without
+        the keys the file does not set.
+    """
+    metric = constraints.metric
+    hidden = (
+        *metric.files,
+        metric.exploits,
+        metric.reference,
+        constraints.cases_file,
+        constraints.metric_role.illegal_file,
+        constraints.metric_role.mcp,
+    )
+    visible = {
+        constraints.instructions_file,
+        constraints.proposer.illegal_file,
+        constraints.proposer.mcp,
+        constraints.run_role.illegal_file,
+        constraints.run_role.mcp,
+        *(stage.illegal_file for stage in constraints.targets.values()),
+        *(stage.mcp for stage in constraints.targets.values()),
+    }
+    shown = (path for path in hidden if path is not None and path not in visible)
+    return tuple(dict.fromkeys((CONSTRAINTS_FILE, *shown)))
+
+
 def effective_environment(
     constraints: RepoConstraints | None,
     *,
@@ -1621,7 +1722,8 @@ def effective_environment(
 
     Raises:
         ConstraintsError: When the file proposes an editable path outside the approved ones,
-            or when the protected paths (always including the file itself) cover every editable path.
+            an editable path lies inside a path from ``scorer_only_paths``, or the protected paths
+            (always including the file itself) cover every editable path.
     """
     if constraints is None:
         editable = tuple(approved_editable)
@@ -1653,6 +1755,14 @@ def effective_environment(
             f"{CONSTRAINTS_FILE} protects every editable path ({', '.join(editable)}), so no version could"
             " change anything. Protect less, or make a path outside [paths] protected editable."
         )
+    # The brief names every editable path, so one inside a scorer-only path would name a hidden path.
+    hidden = scorer_only_paths(constraints)
+    hidden_editable = [path for path in editable if _inside(path, hidden)]
+    if hidden_editable:
+        raise ConstraintsError(
+            f"'{hidden_editable[0]}' is editable, but only the scorer reads it: it is {CONSTRAINTS_FILE} or inside"
+            " the hidden scoring files ([metric] or [data] cases). Make only paths outside them editable."
+        )
     notes: list[str] = []
     setup = approved_setup
     if (approved_setup or "").strip():
@@ -1669,24 +1779,42 @@ def effective_environment(
     )
 
 
-def instructions_brief(environment: RepoEnvironment) -> str:
+def instructions_brief(environment: RepoEnvironment, hidden_paths: Collection[str]) -> str:
     """Write the repository's rules as text the optimization agent reads.
+
+    The agent never sees ``optimize.toml`` or the scorer's files, so this
+    brief is its only copy of the rules, and it names no hidden path (E61).
 
     Args:
         environment: The effective rules.
+        hidden_paths: The paths only the parent's scorer reads.
 
     Returns:
-        Markdown naming the protected paths, every numbered plain-language
-        rule, and the file's instructions, marked as guidance where the
-        runtime does not enforce them.
+        Markdown naming the editable and the visible protected paths, the
+        ``[run]`` entry and timeout, every numbered plain-language rule, the
+        ``[run]`` rules and the file's instructions, marked as guidance where
+        the runtime does not enforce them.
     """
+    hidden = {posixpath.normpath(path) for path in hidden_paths}
+    protected = [path for path in environment.protected_paths if not _inside(posixpath.normpath(path), hidden)]
     lines = [
-        f"## Repository rules ({CONSTRAINTS_FILE})",
+        "## Repository rules",
         "",
-        "Protected, every change to them is rejected before scoring: "
-        + ", ".join(f"`{path}`" for path in environment.protected_paths)
-        + ".",
+        "Editable, change only these paths: " + ", ".join(f"`{path}`" for path in environment.editable_paths) + ".",
     ]
+    if protected:
+        lines.append(
+            "Protected, every change to them is rejected before scoring: "
+            + ", ".join(f"`{path}`" for path in protected)
+            + "."
+        )
+    lines.append("Some repository files are hidden from you. Only the scorer reads them, and you cannot change them.")
+    file = environment.constraints
+    if file is not None and file.run_entry is not None:
+        entry = file.run_entry if isinstance(file.run_entry, str) else " ".join(file.run_entry)
+        lines.append(
+            f"Each version runs through `{entry}`, with a limit of {file.run_timeout:g} seconds each time it runs."
+        )
     if environment.rules:
         lines += [
             "",
@@ -1696,7 +1824,9 @@ def instructions_brief(environment: RepoEnvironment) -> str:
             "",
         ]
         lines += [f"- {label}: {rule}" for label, rule in numbered_rules(environment.rules)]
-    file = environment.constraints
+    if file is not None and file.run_role.illegal:
+        lines += ["", "Rules for the code that each version runs:", ""]
+        lines += [f"- {rule}" for rule in file.run_role.illegal]
     if file is not None and file.intent:
         lines += ["", f"Guidance from `{file.instructions_file}` (not enforced; the scorer decides):", "", file.intent]
     return "\n".join(lines)
