@@ -108,7 +108,7 @@ class TokenBucket:
     example a process-wide bucket that sync code uses through ``asyncio.run``.
     All loops share the token count. An ``asyncio.Lock`` is bound to one loop,
     so the bucket keeps one lock and makes a new one when the running loop
-    changes. It keeps no lock or loop from an earlier loop. The bucket is not
+    changes. It keeps only the lock of the most recent loop. The bucket is not
     thread-safe: do not use it from loops that run at the same time in
     different threads.
     """
@@ -283,9 +283,14 @@ async def capacity_wait(
         The number of capacity waits so far, ``first_wait`` included.
 
     Raises:
-        ValueError: ``wait_max`` or ``multiplier`` is not a finite number > 0.
+        ValueError: ``wait_max`` or ``multiplier`` is not a finite number > 0,
+            or ``first_wait`` is not an int >= 0.
     """
     _check_capacity_window(wait_max, multiplier)
+    # A negative count gives a window below one multiplier, down to a zero
+    # delay, which turns the wait into a hot loop.
+    if isinstance(first_wait, bool) or not isinstance(first_wait, int) or first_wait < 0:
+        raise ValueError(f"first_wait must be an int >= 0, got {first_wait!r}")
     clock = clock or SYSTEM_CLOCK
     waits = first_wait
     while await at_capacity():

@@ -285,6 +285,16 @@ async def test_capacity_wait_rejects_a_window_before_polling(kwargs: dict[str, f
     assert recorder.events == []
 
 
+@pytest.mark.parametrize("first_wait", [-1, -100, True, 1.5])
+async def test_capacity_wait_rejects_a_bad_first_wait_before_polling(first_wait: object) -> None:
+    """Refuse a negative or non-int ``first_wait``, which gives a zero delay."""
+    clock = FakeClock()
+    recorder = Recorder([True] * 5, clock)
+    with pytest.raises(ValueError):
+        await capacity_wait(recorder.at_capacity, first_wait=first_wait, clock=clock)  # type: ignore[arg-type]
+    assert recorder.events == []
+
+
 @pytest.mark.parametrize("kwargs", _BAD_WINDOWS)
 async def test_create_with_capacity_rejects_a_window_before_reserving(
     kwargs: dict[str, float],
