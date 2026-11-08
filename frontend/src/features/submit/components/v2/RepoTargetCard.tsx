@@ -420,7 +420,9 @@ export function RepoTargetCard({
 
       <RepoSecretsField secrets={repo.secrets ?? []} onChange={(secrets) => patch({ secrets })} t={t} />
 
-      {issue && (
+      {/* Gilad asked to drop the repository hint (SKY-401); the picker already
+          says what to type, and the key still blocks Continue. */}
+      {issue && issue !== "submit.v2.repo.issue.repository" && (
         <p role="status" className="text-xs text-muted-foreground">
           {t(issue)}
         </p>
