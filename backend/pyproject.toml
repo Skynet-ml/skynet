@@ -18,6 +18,7 @@ include = ["core*"]
 "core.i18n_locales" = ["*.json"]
 "core.local" = ["assets/*.webp"]
 "core.service_gateway.optimization.blackbox" = ["shinka_requirements.txt"]
+"core.sandbox.providers" = ["singularity_bootstrap.sh"]
 
 [project]
 name = "skynet"
