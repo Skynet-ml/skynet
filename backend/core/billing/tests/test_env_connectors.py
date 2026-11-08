@@ -587,14 +587,16 @@ def test_relay_removes_echoes_with_mixed_case_unicode_escapes() -> None:
 
 
 def test_relay_removes_echoes_with_any_unicode_escape_of_any_character() -> None:
-    """Hide a base64-like secret that an encoder echoes with \\u escapes of ``/``, ``+`` and ``=``, in either case."""
-    secret = "user/key+part/two+end=="
+    """Hide a secret that an encoder echoes with \\u escapes of ``/``, ``+``, ``=``, ``'`` and a backtick, in either case."""
+    secret = "user/key+part's/two`end+=="
     full = "".join(f"\\u{ord(char):04X}" for char in secret)
     forms = [
         secret.replace("/", "\\u002f"),
         secret.replace("/", "\\u002F").replace("+", "\\u002b"),
         secret.replace("/", "\\/").replace("+", "\\u002B"),
         secret.replace("+", "\\u002B").replace("=", "\\u003D"),
+        secret.replace("+", "\\u002B").replace("'", "\\u0027").replace("`", "\\u0060"),
+        secret.replace("+", "\\u002B").replace("'", "\\u0027").replace("`", "\\u0060").replace("/", "\\/"),
         full,
         full.lower(),
     ]
@@ -609,7 +611,7 @@ def test_relay_removes_echoes_with_any_unicode_escape_of_any_character() -> None
         send=lambda *_args: ('{"echo": ["' + '", "'.join(forms) + '"]}').encode(),
     ).decode()
     assert all(form not in answer for form in forms)
-    assert json.loads(answer)["echo"] == ["[REDACTED]"] * 6
+    assert json.loads(answer)["echo"] == ["[REDACTED]"] * 8
 
 
 def test_relay_removes_a_base64_or_percent_encoded_echo_of_the_secret() -> None:
