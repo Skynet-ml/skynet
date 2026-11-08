@@ -46,7 +46,14 @@ from ..environment import JOB_TAG, ExecResult, NetworkPolicy, OutputSink, Sandbo
 from ..errors import SandboxFatalError, SandboxInfraError, StartTimeoutError
 from ..pacing import SYSTEM_CLOCK, Clock, ProviderAtCapacityError, ProviderPacing, create_with_capacity
 from ..resources import ResourceMode, SandboxSpec
-from ..snapshots import SNAPSHOT_TIMEOUT, BuiltSnapshot, SnapshotRefusedError, refuse_secrets, snapshot_expiration
+from ..snapshots import (
+    SNAPSHOT_TIMEOUT,
+    BuiltSnapshot,
+    SnapshotRefusedError,
+    refuse_secrets,
+    snapshot_expiration,
+    snapshot_hold_retention,
+)
 from ..telemetry import BoxTimings, current_output_sink
 
 try:
@@ -162,6 +169,18 @@ def _is_session_stopped(error: BaseException) -> bool:
     if SandboxApiError is None or not isinstance(error, SandboxApiError):
         return False
     return error.status_code == 410 or error.code == "sandbox_stopped"
+
+
+def _is_not_found(error: BaseException) -> bool:
+    """Tell whether an SDK error says that the resource does not exist.
+
+    Args:
+        error: The SDK error.
+
+    Returns:
+        True for a 404 answer.
+    """
+    return SandboxApiError is not None and isinstance(error, SandboxApiError) and error.status_code == 404
 
 
 def box_name(operation_key: str | None, budget: Any | None = None) -> str:
@@ -611,8 +630,10 @@ class VercelEnvironment(SandboxEnvironment):
                 box = await asyncio.wait_for(self._client.get_sandbox(name=self.name), STOP_TIMEOUT)
             except Exception as lookup_error:
                 logger.warning("Sandbox %s lookup failed: %s", self.name, type(lookup_error).__name__)
-        # The snapshot already stopped the session; the builder box stays so
-        # other pods can find the snapshot by its name until the run deletes it.
+        # The snapshot already stopped the session, so do not stop or destroy
+        # the builder here. Other pods look the snapshot up by its source
+        # sandbox name. Vercel docs do not say if the builder record stays
+        # after a snapshot of a persistent=False box; that is unverified.
         if box is not None and not self._snapshotted:
             try:
                 await asyncio.wait_for(box.stop(), STOP_TIMEOUT)
@@ -965,10 +986,14 @@ class VercelEnvironment(SandboxEnvironment):
         if self._secret_exposed:
             raise SnapshotRefusedError("A box that ran a command with env values cannot become a snapshot.")
         session = self._require_session()
-        expiration = snapshot_expiration(run_deadline, now or datetime.now(run_deadline.tzinfo))
+        now = now or datetime.now(run_deadline.tzinfo)
+        expiration = snapshot_expiration(run_deadline, now)
         reservation = None
         if self._budget is not None:
-            request = {"session_id": session.id, "retention_ms": math.ceil(expiration.total_seconds() * 1000)}
+            # The expiry slides from the last use, so the hold covers a last use
+            # at the deadline plus the expiry, not only the expiry.
+            retention = snapshot_hold_retention(run_deadline, now)
+            request = {"session_id": session.id, "retention_ms": math.ceil(retention.total_seconds() * 1000)}
             reservation = await asyncio.to_thread(
                 self._snapshot_usage_factory,
                 self._budget,
@@ -1069,7 +1094,12 @@ class VercelEnvironment(SandboxEnvironment):
                 box = await asyncio.wait_for(client.get_sandbox(name=built.builder_name), STOP_TIMEOUT)
                 await asyncio.wait_for(box.destroy(), STOP_TIMEOUT)
             except Exception as error:
-                logger.warning("Snapshot builder %s was not removed: %s", built.builder_name, type(error).__name__)
+                # The snapshot is already deleted and settled, and a
+                # persistent=False builder may have no record after the snapshot.
+                if _is_not_found(error):
+                    logger.info("Snapshot builder %s has no record to remove.", built.builder_name)
+                else:
+                    logger.warning("Snapshot builder %s was not removed: %s", built.builder_name, type(error).__name__)
         finally:
             if owned:
                 with contextlib.suppress(Exception):

@@ -638,7 +638,9 @@ def quote_vercel_snapshot(request: Mapping[str, Any]) -> OperationQuote:
 
     Args:
         request: The snapshot parameters with ``session_id`` and ``retention_ms``,
-            the Vercel expiry of the snapshot.
+            the longest time the snapshot can be stored. Vercel counts the
+            expiry from the last use, so this is the latest last use plus
+            the expiry.
 
     Returns:
         Coverage for the size cap stored for the whole retention.

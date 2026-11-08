@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -33,6 +34,7 @@ from core.sandbox.snapshots import (
     refuse_secrets,
     snapshot_cache_key,
     snapshot_expiration,
+    snapshot_hold_retention,
 )
 from core.sandbox.tests.test_provider_vercel import FakeBox, FakeClient, FakeClock, FakeSession, make_env
 from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel
@@ -116,6 +118,15 @@ def test_expiry_is_the_deadline_plus_one_day() -> None:
     """Check the expiry, and its one-day floor after a passed deadline."""
     assert snapshot_expiration(DEADLINE, NOW) == timedelta(days=3)
     assert snapshot_expiration(DEADLINE, DEADLINE + timedelta(days=5)) == timedelta(days=1)
+
+
+def test_hold_covers_a_last_use_at_the_deadline_plus_the_expiry() -> None:
+    """Check that the hold covers the sliding expiry after the latest last use."""
+    retention = snapshot_hold_retention(DEADLINE, NOW)
+    assert retention == timedelta(days=5)
+    assert NOW + retention == DEADLINE + snapshot_expiration(DEADLINE, NOW)
+    late = DEADLINE + timedelta(days=5)
+    assert snapshot_hold_retention(DEADLINE, late) == timedelta(days=1)
 
 
 class Provider:
@@ -455,7 +466,8 @@ async def test_setup_box_becomes_a_snapshot_with_the_run_expiry() -> None:
     assert expirations == [timedelta(days=3)]
     assert built.snapshot_id == "snap-1"
     assert built.builder_name == env.name
-    assert built.reservation.request == {"session_id": "session-1", "retention_ms": 3 * 86_400_000}
+    # Two days to the deadline, then three days of expiry after a last use there.
+    assert built.reservation.request == {"session_id": "session-1", "retention_ms": 5 * 86_400_000}
     assert built.reservation.operation_key == "op-1:snapshot"
     assert log.index("snapshot-reserve") < log.index("snapshot-bind:snap-1")
     with pytest.raises(SandboxInfraError):
@@ -713,6 +725,40 @@ async def test_deleted_snapshot_is_metered_as_sandbox_cost(database: Engine) -> 
     budget = runtime.service.get(runtime.budget_id, "alice")
     assert budget.reserved_cents == 0
     assert budget.billed_cents > 0
+
+
+async def test_missing_builder_record_is_normal_after_the_delete(
+    database: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Check that a 404 for the builder still settles the snapshot and logs no warning."""
+    runtime = _runtime(database)
+    reservation = VercelSnapshotReservation(
+        runtime, {"session_id": "session-1", "retention_ms": 3 * 86_400_000}, operation_key="op-1:snapshot"
+    )
+    reservation.bind("snap-1")
+    log: list[str] = []
+    handle = FakeSnapshotHandle("snap-1", 10_000_000_000)
+    client = SnapshotClient(log, handle)
+
+    async def get_sandbox(*, name: str) -> Any:
+        """Answer like Vercel for a sandbox with no record.
+
+        Args:
+            name: Unused.
+
+        Raises:
+            SandboxApiError: Always, with a 404 answer.
+        """
+        raise SandboxApiError(httpx.Response(404), "not found", data={"error": {"code": "not_found"}})
+
+    client.get_sandbox = get_sandbox
+    built = BuiltSnapshot(snapshot_id="snap-1", builder_name="builder", reservation=reservation)
+    with caplog.at_level(logging.INFO, logger="core.sandbox.providers.vercel"):
+        await VercelEnvironment.delete_snapshot(built, client=client)
+    assert handle.status == "deleted"
+    assert _operation(database).state == "settled"
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert any("no record" in record.getMessage() for record in caplog.records)
 
 
 def test_undeleted_snapshot_stays_pending(database: Engine) -> None:

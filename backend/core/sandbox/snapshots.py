@@ -3,8 +3,9 @@
 The run builds its setup box once, takes a Vercel snapshot after setup and
 before any secret enters the box, and starts each trial box from that
 snapshot. The snapshot lives only for the run: the user pays for its storage
-as sandbox cost, its Vercel expiry is the run deadline plus one day, and the
-run deletes it at its end.
+as sandbox cost, and the run deletes it at its end. Vercel counts the expiry
+from the snapshot's last use, so the storage hold covers a last use at the
+run deadline plus that expiry.
 
 Adapted from Harbor 0.25.0 (harbor-framework/harbor), Apache-2.0,
 ``src/harbor/environments/vercel/snapshots.py``. Changes:
@@ -167,6 +168,9 @@ def refuse_secrets(spec: SandboxSpec) -> None:
 def snapshot_expiration(run_deadline: datetime, now: datetime) -> timedelta:
     """Return the Vercel expiry of a run snapshot.
 
+    Vercel counts this expiry from the snapshot's last use, so it is not the
+    full storage time; see :func:`snapshot_hold_retention`.
+
     Args:
         run_deadline: The latest time the run can end.
         now: The current time.
@@ -175,6 +179,25 @@ def snapshot_expiration(run_deadline: datetime, now: datetime) -> timedelta:
         The time from now to the deadline plus one day, at least one day.
     """
     return max(run_deadline + EXPIRY_GRACE - now, MINIMUM_EXPIRY)
+
+
+def snapshot_hold_retention(run_deadline: datetime, now: datetime) -> timedelta:
+    """Return the longest time a run snapshot can be stored.
+
+    Vercel docs say the expiry counts from the snapshot's last use, not from
+    its creation. A trial box can use the snapshot up to the run deadline, so
+    a snapshot that the run fails to delete can live until the deadline plus
+    the expiry.
+
+    Args:
+        run_deadline: The latest time the run can end.
+        now: The current time.
+
+    Returns:
+        The time from now to the deadline, never below zero, plus the expiry
+        from :func:`snapshot_expiration`.
+    """
+    return max(run_deadline - now, timedelta(0)) + snapshot_expiration(run_deadline, now)
 
 
 @dataclass(frozen=True)
