@@ -170,3 +170,32 @@ test("only a setup with an answer, data or a later step is worth offering back",
   assert.equal(setupWorthKeeping({ ...fresh, meta: { ...fresh.meta, name: "Replies" } }), true);
   assert.equal(setupWorthKeeping({ ...fresh, furthestStep: WIZARD_V2_STEPS[1] }), true);
 });
+
+test("a saved setup keeps its repository secrets without their values", () => {
+  const state = initialWizardV2State("guided");
+  state.task = {
+    ...state.task,
+    repo: {
+      repository: "example/site",
+      branch: "",
+      commit: "",
+      editablePaths: ["."],
+      setupCommand: "",
+      secrets: [
+        {
+          name: "API_KEY",
+          value: "do-not-store",
+          allowedHosts: "api.example.com",
+          hostIssue: "API_KEY has no allowed hosts.",
+        },
+      ],
+    },
+  };
+  const raw = encodeWizardSession("a@x.io", state);
+  assert.equal(raw.includes("do-not-store"), false);
+  const restored = decodeWizardSession(raw, "a@x.io", STEPS);
+  assert.deepEqual(restored?.task.repo?.secrets, [
+    { name: "API_KEY", value: "", allowedHosts: "api.example.com" },
+  ]);
+  assert.equal(state.task.repo?.secrets?.[0].value, "do-not-store");
+});

@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from core.api.errors import DomainError
 from core.api.preflight_execution import _verify_model_routes
+from core.billing import mcp_oauth_client
 from core.billing import model_gateway as gateway_module
 from core.billing.budgets import BudgetInsufficientError, BudgetService
 from core.billing.byok_upstreams import UPSTREAMS
@@ -1113,6 +1114,9 @@ def test_no_catalog_entry_reaches_connector_routes(
     gateway: ModelGateway, monkeypatch: pytest.MonkeyPatch, entry: str
 ) -> None:
     """Fill the connector routes key only from an OAuth connection, never from a catalog host or name (E49)."""
+    # Another test in the same worker can leave a fake engine bound here, and a
+    # bound engine turns every unknown name into a mock URL (SKY-397).
+    monkeypatch.setattr(mcp_oauth_client, "_engine", None)
     for connector in CONNECTORS.values():
         monkeypatch.setattr(settings, connector.key_setting, SecretStr(f"{connector.name}-parent-secret"))
     forged = {entry: {"url": "https://forged.example/mcp", "token": "forged"}}

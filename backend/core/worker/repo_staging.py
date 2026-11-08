@@ -83,6 +83,7 @@ CANDIDATE_BRANCHES_DETAIL = "candidate_branches"
 # so a created repository does not fill with branches nobody reads.
 MAX_CANDIDATE_BRANCHES = 10
 ENVIRONMENT_KEY = "environment"
+UPLOADED_CASES_REFUSED = "This repo defines its cases in optimize.toml. Remove the uploaded cases."
 # Rules the run is held to; a resumed run must arrive at exactly these again.
 _ENFORCED_FIELDS = ("commit", "editable_paths", "protected_paths", "readonly_paths", "services", "rules")
 # Environments recorded before a field existed hold its empty value.
@@ -114,9 +115,12 @@ class StagedRepository:
     hidden_paths: tuple[str, ...] = ()
     targets: Mapping[str, TargetStage] = field(default_factory=dict)
     services: Mapping[str, ServiceSpec] = field(default_factory=dict)
-    # The services each role lists, by role name. Only [metric] is staged: the relay answers
-    # every caller as the metric until it can tell a [run] caller apart (E37, SKY-375).
+    # The services each role lists, by role name: [run] for the version's entry,
+    # [metric] for the scorer. Each runs in its own process with its own relay (E37).
     service_roles: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # The [run] entry, which runs before the metric with the metric files out of the tree (E38).
+    run_entry: str | tuple[str, ...] | None = None
+    run_timeout: float = 60.0
     agent_archive: Path | None = None
     exploits_path: str = EXPLOITS_DIR
 
@@ -182,8 +186,9 @@ def stage_repository(
     Raises:
         ConstraintsError: When the repository's ``optimize.toml`` is invalid,
             asks for more than the run approved, or a resumed run's rules
-            changed since they were first recorded.
-        RepoGateError: When the agent's tree still shows a metric file.
+            changed since they were first recorded, or when the request
+            uploads cases and the repository defines its own in ``[data] cases``.
+        RepoGateError: When the agent's tree still shows a metric file or the cases file.
     """
     result = copy.deepcopy(payload)
     repo = result["target"]["repo"]
@@ -221,7 +226,12 @@ def stage_repository(
         # parent's scorer box keeps the full tree, so it scores with the base
         # commit's metric (SKY-353).
         metric = environment.constraints.metric if environment.constraints is not None else MetricSpec()
-        hidden = (*metric.files, metric.exploits)
+        cases_file = environment.constraints.cases_file if environment.constraints is not None else None
+        # Two sources would leave it unclear which cases the run scores on (E58).
+        if cases_file is not None and result.get("cases"):
+            raise ConstraintsError(UPLOADED_CASES_REFUSED)
+        # The cases file holds every case's expected answer, so the agent and the candidate never see it (E61).
+        hidden = (*metric.files, metric.exploits, *((cases_file,) if cases_file is not None else ()))
         agent_archive = strip_archive(snapshot.archive, hidden, workdir / "agent-tree.tgz")
         leaks = check_hidden(
             snapshot.archive,
@@ -244,6 +254,8 @@ def stage_repository(
             part for part in ((result.get("background") or "").strip(), instructions_brief(environment)) if part
         )
     repo["secrets"] = []
+    if cases_file is not None:
+        result["cases"] = list(environment.constraints.cases)
     result[REPO_SNAPSHOT_KEY] = {
         "archive": str(agent_archive),
         "commit": commit,
@@ -265,9 +277,12 @@ def stage_repository(
         services=environment.constraints.services if environment.constraints is not None else {},
         service_roles={
             "metric": environment.constraints.metric_role.services,
+            "run": environment.constraints.run_role.services,
         }
         if environment.constraints is not None
         else {},
+        run_entry=environment.constraints.run_entry if environment.constraints is not None else None,
+        run_timeout=environment.constraints.run_timeout if environment.constraints is not None else 60.0,
         agent_archive=agent_archive,
         exploits_path=metric.exploits,
     )
@@ -582,6 +597,8 @@ def bind_repo_scorer(
         max_concurrency=int(payload.get("max_concurrency") or 1),
         services=staged.services,
         service_roles=staged.service_roles,
+        run_entry=staged.run_entry,
+        run_timeout=staged.run_timeout,
     )
     environment = target["repo"].get(ENVIRONMENT_KEY)
     if isinstance(environment, dict):

@@ -16,7 +16,7 @@ registerHooks({
   },
 });
 
-const { initialWizardV2State, emptyRepoDraft } = await import("./wizard-v2.ts");
+const { initialWizardV2State, emptyRepoDraft, parseAllowedHosts, repoIssue } = await import("./wizard-v2.ts");
 const { stepPages } = await import("./wizard-pages.ts");
 const { computeStepIssue } = await import("./step-issue.ts");
 const { finishedHardeningJobId, repoRunRequest } = await import("./repo-run.ts");
@@ -262,4 +262,86 @@ test("a hosted run sends no hardening job id", async () => {
   };
   assert.equal(await finishedHardeningJobId("hosted", "draft-1", read), null);
   assert.equal(reads, 0);
+});
+
+test("a repository run sends each secret with its allowed hosts as a list", () => {
+  const state = repoState();
+  state.task.repo = {
+    ...state.task.repo!,
+    secrets: [
+      { name: " API_KEY ", value: "v1", allowedHosts: "API.example.com., *.example.com api.example.com" },
+      { name: "OTHER", value: "v2", allowedHosts: "" },
+    ],
+  };
+  assert.equal(computeStepIssue(state, "task", null), null);
+  const request = repoRunRequest(state, options);
+  assert.ok(request);
+  assert.deepEqual((request.target as { repo: { secrets?: unknown } }).repo.secrets, [
+    { name: "API_KEY", value: "v1", allowed_hosts: ["api.example.com", "*.example.com"] },
+    { name: "OTHER", value: "v2", allowed_hosts: [] },
+  ]);
+});
+
+test("a repository run with no secrets sends no secrets key", () => {
+  const state = repoState();
+  state.task.repo = { ...state.task.repo!, secrets: [] };
+  const request = repoRunRequest(state, options);
+  assert.ok(request);
+  assert.equal("secrets" in (request.target as { repo: object }).repo, false);
+});
+
+test("the task step names what a repository secret still lacks", () => {
+  const state = repoState();
+  const withSecrets = (secrets: { name: string; value: string; allowedHosts: string }[]) => {
+    state.task.repo = { ...state.task.repo!, secrets };
+    return computeStepIssue(state, "task", null);
+  };
+  const ok = { name: "API_KEY", value: "v", allowedHosts: "api.example.com" };
+  assert.equal(withSecrets([ok]), null);
+  assert.equal(withSecrets([{ ...ok, name: "1KEY" }]), "submit.v2.repo.issue.secret_name");
+  assert.equal(withSecrets([{ ...ok, name: "" }]), "submit.v2.repo.issue.secret_name");
+  assert.equal(withSecrets([{ ...ok, value: "" }]), "submit.v2.repo.issue.secret_value");
+  assert.equal(withSecrets([{ ...ok, allowedHosts: "*.com" }]), "submit.v2.repo.issue.secret_hosts");
+  assert.equal(withSecrets([{ ...ok, allowedHosts: "localhost" }]), "submit.v2.repo.issue.secret_hosts");
+  assert.equal(withSecrets([{ ...ok, allowedHosts: "https://api.example.com" }]), "submit.v2.repo.issue.secret_hosts");
+  const hosts = (n: number) => Array.from({ length: n }, (_, i) => `h${i}.example.com`).join(",");
+  assert.equal(withSecrets([{ ...ok, allowedHosts: hosts(20) }]), null);
+  assert.equal(withSecrets([{ ...ok, allowedHosts: hosts(21) }]), "submit.v2.repo.issue.secret_hosts");
+  assert.equal(withSecrets([ok, { ...ok, name: " API_KEY" }]), "submit.v2.repo.issue.secret_duplicate");
+});
+
+test("a secret value may have up to 16384 characters, counted as the server counts them", () => {
+  const state = repoState();
+  const withValue = (value: string) => {
+    state.task.repo = { ...state.task.repo!, secrets: [{ name: "API_KEY", value, allowedHosts: "" }] };
+    return computeStepIssue(state, "task", null);
+  };
+  assert.equal(withValue("x".repeat(16384)), null);
+  assert.equal(withValue("😀".repeat(16384)), null);
+  assert.equal(withValue("x".repeat(16385)), "submit.v2.repo.issue.secret_value_long");
+});
+
+test("a run may have up to 100 secrets", () => {
+  const state = repoState();
+  const withCount = (n: number) => {
+    state.task.repo = {
+      ...state.task.repo!,
+      secrets: Array.from({ length: n }, (_, i) => ({ name: `KEY_${i}`, value: "v", allowedHosts: "" })),
+    };
+    return computeStepIssue(state, "task", null);
+  };
+  assert.equal(withCount(100), null);
+  assert.equal(withCount(101), "submit.v2.repo.issue.secret_count");
+});
+
+test("a draft with a blank secret value still gives the metric step its repository", () => {
+  const state = repoState();
+  // A reload or a restored draft blanks every secret value.
+  state.task.repo = { ...state.task.repo!, secrets: [{ name: "API_KEY", value: "", allowedHosts: "" }] };
+  assert.equal(repoIssue(state.task.repo), null);
+  assert.equal(computeStepIssue(state, "task", null), "submit.v2.repo.issue.secret_value");
+});
+
+test("allowed hosts lose every trailing dot, as the server's rstrip does", () => {
+  assert.deepEqual(parseAllowedHosts("api.example.com.., *.Example.COM."), ["api.example.com", "*.example.com"]);
 });

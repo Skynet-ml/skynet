@@ -41,7 +41,8 @@ from core.service_gateway.optimization.blackbox.rule_judge import (
     WATCH_EVERY_ACTIONS,
     WITHHELD_STEP,
 )
-from core.service_gateway.optimization.blackbox.sandbox import CommandResult, SandboxSpec
+from core.service_gateway.optimization.blackbox.sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
+from core.service_gateway.optimization.blackbox.service import legacy_case_splits
 from core.storage.models import Base, PackageRegistryPreferenceModel
 from core.worker import repo_staging
 
@@ -388,10 +389,12 @@ class _Box:
         return None
 
     def run(self, command: str, **options: Any) -> CommandResult:
-        """Record the command, answering the reachability check as the box would."""
+        """Record the command, answering the reachability check and the prepared-tree digest as the box would."""
         self.commands.append((command, self.online))
         if "/dev/tcp/" in command:
             return CommandResult(exit_code=1) if self.online else CommandResult(exit_code=0, stdout=_PROBE_OK)
+        if "hashlib.sha256" in command:
+            return CommandResult(exit_code=0, stdout="0" * 64)
         return CommandResult(exit_code=0)
 
     def disable_network(self) -> None:
@@ -1548,19 +1551,38 @@ def test_staging_keeps_the_services_each_role_lists(monkeypatch: pytest.MonkeyPa
     _, staged = _stage_with(files, monkeypatch)
     try:
         assert staged.services["judge"].url == "https://judge.example.com/v1"
-        assert staged.service_roles == {"metric": ("judge",)}
+        assert staged.service_roles == {"metric": ("judge",), "run": ()}
+    finally:
+        staged.cleanup()
+
+
+def test_staging_keeps_the_run_entry_and_its_services(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The [run] entry, its timeout and the services it lists reach the staged run (E38)."""
+    files = {
+        **_FILES,
+        "optimize.toml": _CONSTRAINTS
+        + '\n[services.judge]\nurl = "https://judge.example.com/v1"\nheaders = { X-Key = "${JUDGE_KEY}" }\n'
+        + '\n[run]\nentry = "src/geocode/app.py:main"\ntimeout = 12\nservices = ["judge"]\n',
+    }
+    _, staged = _stage_with(files, monkeypatch)
+    try:
+        assert staged.run_entry == "src/geocode/app.py:main"
+        assert staged.run_timeout == 12.0
+        assert staged.service_roles == {"metric": (), "run": ("judge",)}
     finally:
         staged.cleanup()
 
 
 def test_binding_hands_the_services_to_the_scorer(tmp_path: Path) -> None:
-    """The scorer gets the url services and the metric's list; their keys leave the scorer box's env."""
+    """The scorer gets the url services, each role's list and the ``[run]`` entry; the parent keeps the keys."""
     payload, staged = _binding(tmp_path, None)
     staged = dataclasses.replace(
         staged,
         secrets={**staged.secrets, "JUDGE_KEY": "judge-secret-value"},
         services={"judge": ServiceSpec(secrets=("JUDGE_KEY",), url="https://judge.example.com/v1")},
-        service_roles={"metric": ("judge",)},
+        service_roles={"metric": ("judge",), "run": ("judge",)},
+        run_entry="src/app.py:main",
+        run_timeout=12.0,
     )
     gateway = _Gateway()
 
@@ -1568,8 +1590,11 @@ def test_binding_hands_the_services_to_the_scorer(tmp_path: Path) -> None:
 
     scorer = gateway.evaluator
     assert list(scorer._services) == ["judge"]
-    assert scorer._service_roles["metric"] == ("judge",)
-    assert "JUDGE_KEY" not in scorer._box_secrets
+    assert scorer._service_roles == {"metric": ("judge",), "run": ("judge",)}
+    assert scorer._run_entry == "src/app.py:main"
+    assert scorer._run_timeout == 12.0
+    # The parent keeps the key for the relay; the scorer tests check that no box env holds it.
+    assert scorer._workspace.secrets["JUDGE_KEY"] == "judge-secret-value"
     staged.close_scorers()
 
 
@@ -1830,3 +1855,151 @@ def test_publishing_refuses_a_version_that_changes_the_configured_suite(
     outcome = _publish(_result(0.5, 0.8, best=edit), staged)
 
     assert outcome == {"error": "The best version breaks the editing rules: 'src/attacks/x.py' may not be changed."}
+
+
+_CASES_JSONL = "".join(json.dumps({"input": f"place {n}", "expected": n}) + "\n" for n in range(20))
+_CASES_TREE = {
+    **_METRIC_TREE,
+    "optimize.toml": _METRIC_TREE["optimize.toml"] + '\n[data]\ncases = "data/cases.jsonl"\n',
+    "data/cases.jsonl": _CASES_JSONL,
+}
+
+
+def test_the_cases_file_is_hidden_from_the_agent_and_the_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cases file holds every expected answer, so only the parent's scorer keeps it (E61)."""
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch)
+    try:
+        assert "data/cases.jsonl" not in _names(Path(staged_payload["_repo_snapshot"]["archive"]))
+        assert "data/cases.jsonl" in _names(staged.snapshot.archive)
+        # hidden_paths is also the list the candidate box drops (SKY-375), so the candidate never sees it.
+        assert staged.hidden_paths == ("eval/scorer.py", ".optimize/exploits", "data/cases.jsonl")
+    finally:
+        staged.cleanup()
+
+
+def test_staging_loads_the_cases_from_the_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The file is the run's only case source; its cases replace the payload's empty list (E58)."""
+    staged_payload, staged = _stage_with(_CASES_TREE, monkeypatch)
+    try:
+        assert staged_payload["cases"] == [{"input": f"place {n}", "expected": n} for n in range(20)]
+    finally:
+        staged.cleanup()
+
+
+def test_the_same_cases_file_and_seed_give_the_same_split(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The run shuffles the file's cases with its seed and splits them 70/15/15 (E59)."""
+    first, staged = _stage_with(_CASES_TREE, monkeypatch)
+    staged.cleanup()
+    second, staged = _stage_with(_CASES_TREE, monkeypatch)
+    staged.cleanup()
+    splits = legacy_case_splits(first["cases"], 7)
+    again = legacy_case_splits(second["cases"], 7)
+    assert (splits.train, splits.val, splits.test) == (again.train, again.val, again.test)
+    assert (len(splits.train), len(splits.val), len(splits.test)) == (14, 3, 3)
+
+
+def test_uploaded_cases_and_a_cases_file_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two case sources would leave it unclear which cases the run scores on (E58)."""
+    payload = {**_payload("c" * 40), "cases": [{"input": "x"}]}
+    with pytest.raises(ConstraintsError, match="Remove the uploaded cases"):
+        _stage_with(_CASES_TREE, monkeypatch, payload)
+
+
+def test_uploaded_cases_without_a_cases_file_stay_as_they_are(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A repository with no [data] keeps the run's uploaded cases."""
+    payload = {**_payload("c" * 40), "cases": [{"input": "x"}]}
+    staged_payload, staged = _stage_with(_METRIC_TREE, monkeypatch, payload)
+    try:
+        assert staged_payload["cases"] == [{"input": "x"}]
+    finally:
+        staged.cleanup()
+
+
+def test_staging_stops_when_the_cases_file_stays_visible(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the strip misses the cases file, the gate names it."""
+    monkeypatch.setattr(repo_staging, "strip_archive", lambda archive, hidden, destination: archive)
+    with pytest.raises(repo_staging.RepoGateError, match=r"data/cases\.jsonl"):
+        _stage_with(_CASES_TREE, monkeypatch)
+
+
+class _LocalGateway(_Gateway):
+    """Open real local boxes, so the candidate and the metric actually run."""
+
+    def parent_sandbox_runtime(self) -> Any:
+        """Return a runtime that runs each box as a local process."""
+        return LocalSubprocessRuntime()
+
+
+_SEEING_CANDIDATE = """
+import os
+
+def run(value):
+    return {"value": value, "sees_cases": os.path.exists("data/cases.jsonl")}
+"""
+_OUTPUT_METRIC = """
+import json
+
+def score(repo_path, case, output=None):
+    return 1.0, json.dumps({"case": case, "output": output}, sort_keys=True)
+"""
+
+
+def _local_scorer(files: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> tuple[Any, dict[str, Any], Any]:
+    """Stage ``files`` and bind a scorer that runs in local boxes.
+
+    Args:
+        files: Root-relative path to text in the fetched tree.
+        monkeypatch: Pytest monkeypatch.
+
+    Returns:
+        The scorer, the staged payload and the staged repository.
+    """
+    staged_payload, staged = _stage_with(files, monkeypatch)
+    staged_payload["scorer"] = {"kind": "python", "metric_code": _OUTPUT_METRIC, "timeout_seconds": 60}
+    staged_payload["_budget_gateway_descriptor"] = {
+        "url": "http://127.0.0.1:1/v1",
+        "control_token": "control-token",
+        "image": "img",
+        "lifetime_seconds": 120,
+    }
+    gateway = _LocalGateway()
+    repo_staging.bind_repo_scorer(staged_payload, staged, gateway, owner_id="job-1")
+    return gateway.evaluator, staged_payload, staged
+
+
+_RUN_TREE = {
+    "optimize.toml": '[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:run"\n',
+    "src/app.py": _SEEING_CANDIDATE,
+}
+
+
+def test_the_candidate_gets_only_the_input_and_never_the_cases_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The candidate box drops the cases file, the entry gets the input, and the metric gets the whole case (E61)."""
+    files = {
+        **_RUN_TREE,
+        "optimize.toml": _RUN_TREE["optimize.toml"] + '\n[data]\ncases = "data/cases.jsonl"\n',
+        "data/cases.jsonl": _CASES_JSONL,
+    }
+    scorer, staged_payload, staged = _local_scorer(files, monkeypatch)
+    try:
+        result = scorer.score("", staged_payload["cases"][3])
+    finally:
+        staged.close_scorers()
+        staged.cleanup()
+    assert json.loads(result["feedback"]) == {
+        "case": {"input": "place 3", "expected": 3},
+        "output": {"value": "place 3", "sees_cases": False},
+    }
+
+
+def test_without_cases_the_entry_runs_once_with_no_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no [data], the run scores the single case-less pass, and the entry gets ``None`` (E40)."""
+    scorer, staged_payload, staged = _local_scorer(_RUN_TREE, monkeypatch)
+    try:
+        # The engines score ``cases or [None]``, so a run with no cases sends no case.
+        assert not staged_payload.get("cases")
+        result = scorer.score("", None)
+    finally:
+        staged.close_scorers()
+        staged.cleanup()
+    assert json.loads(result["feedback"]) == {"case": None, "output": {"value": None, "sees_cases": False}}

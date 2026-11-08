@@ -562,6 +562,8 @@ export interface BlackboxRepoSecret {
   name: string;
   value?: string | null;
   saved_secret_id?: string | null;
+  /** The hosts the secret may go to: an exact host or `*.suffix`. Empty means no host. */
+  allowed_hosts?: string[];
 }
 
 /** A GitHub repository optimized as a whole; each version is a patch against `commit`. */

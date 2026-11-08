@@ -22,7 +22,10 @@ and ``headers`` that name secrets only as ``${NAME}`` placeholders),
 ``[metric]`` (the files and exploit folder hidden from the agent) and
 ``[run]`` (the entry that starts the candidate for each case, and its
 timeout; with no ``[run]``, nothing runs and the metric judges only the tree
-and the patch). ``[run]`` and ``[metric]`` also take the role keys mcp,
+and the patch), and ``[data] cases`` (the path of a JSONL file that holds
+the run's cases, one ``{"input": ..., "expected": ...}`` object for each
+line; it is hidden from the agent and the candidate like the metric
+files). ``[run]`` and ``[metric]`` also take the role keys mcp,
 services and illegal; they share one box, so network and vcpus fail. Every
 role's mcp is the path of a standard ``.mcp.json`` file in the repository,
 read from the same snapshot and checked here; a role's ``tools`` key fails
@@ -57,6 +60,10 @@ _MAX_FILE_BYTES = 64 * 1024
 _MAX_PATHS = 200
 _MAX_INTENT_CHARS = 4_000
 _MAX_RULE_FILE_BYTES = 32 * 1024
+_MAX_CASES_FILE_BYTES = 20 * 1024 * 1024
+# The same limit as the cases list of a run request.
+_MAX_CASES = 200_000
+_CASE_KEYS = frozenset({"input", "expected"})
 _MAX_COMMAND_CHARS = 300
 _MAX_RULES = 50
 _MAX_RULE_CHARS = 500
@@ -76,6 +83,7 @@ _SECTIONS: dict[str, frozenset[str]] = {
     "proposer": _ROLE_KEYS,
     "metric": frozenset({"files", "exploits", "reference", "mcp", "services", "illegal"}),
     "run": frozenset({"entry", "timeout", "mcp", "services", "illegal"}),
+    "data": frozenset({"cases"}),
 }
 # Every role names its MCP servers in a .mcp.json file, not catalog tool names (E46).
 _ROLE_SECTIONS = frozenset({"proposer", "run", "metric"})
@@ -246,6 +254,10 @@ class RepoConstraints:
     targets: Mapping[str, TargetStage] = field(default_factory=dict)
     services: Mapping[str, ServiceSpec] = field(default_factory=dict)
     metric: MetricSpec = MetricSpec()
+    # [data] cases: the only source of a repository run's cases (E58). parse_constraints
+    # keeps the path; read_constraints fills cases from the file in the snapshot.
+    cases_file: str | None = None
+    cases: tuple[dict[str, Any], ...] = ()
 
     @property
     def rule_files(self) -> tuple[str, ...]:
@@ -996,6 +1008,52 @@ def _metric(section: Mapping[str, Any]) -> MetricSpec:
     return MetricSpec(files=files, exploits=exploits, reference=reference)
 
 
+def _cases_file(section: Mapping[str, Any] | None) -> str | None:
+    """Read the ``[data]`` section: the path of the run's JSONL cases file (E58).
+
+    Args:
+        section: The parsed ``[data]`` table, or ``None`` when the file has none.
+
+    Returns:
+        The repository path of the cases file, or ``None`` when there is no ``[data]``.
+
+    Raises:
+        ConstraintsError: When ``[data]`` has no ``cases`` path, or the value is not a path to one file.
+    """
+    if section is None:
+        return None
+    if "cases" not in section:
+        raise ConstraintsError(
+            f'{CONSTRAINTS_FILE}: [data] must set cases = "<path>" to a JSONL file of cases, or be removed.'
+        )
+    if not isinstance(section["cases"], str):
+        raise ConstraintsError(f"{CONSTRAINTS_FILE}: [data] cases must be the path of one JSONL file.")
+    return _one_file(section["cases"], "[data] cases")
+
+
+def _refuse_visible_cases(cases_file: str | None, rule_files: list[tuple[str, str | None]]) -> None:
+    """Refuse a cases file that is also the instructions or a rule file (E61).
+
+    The brief quotes those files to the agent, so a shared path would show it
+    every ``expected`` answer.
+
+    Args:
+        cases_file: The ``[data] cases`` path, or ``None``.
+        rule_files: Each text file setting and its path, or ``None`` when unset.
+
+    Raises:
+        ConstraintsError: When the cases path equals one of those paths.
+    """
+    if cases_file is None:
+        return
+    for setting, path in rule_files:
+        if path is not None and cases_file == path:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: [data] cases and {setting} name the same file '{path}'. The agent reads"
+                " the instructions and rule files, so the cases must be in a file of their own."
+            )
+
+
 def parse_constraints(raw: bytes) -> RepoConstraints:
     """Validate the bytes of a constraints file.
 
@@ -1049,6 +1107,12 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
                 " share one box, so neither can set its own network or vcpus. Remove the setting."
             )
         unknown = sorted(set(section) - _SECTIONS[name])
+        # The split comes from the run seed (E59), so a split key would be ignored, not obeyed.
+        if name == "data" and "split" in unknown:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: [data] split is not supported. The run shuffles the cases with its seed"
+                " and splits them 70/15/15. Remove the setting."
+            )
         if unknown:
             raise ConstraintsError(f"{CONSTRAINTS_FILE}: [{name}] {unknown[0]} is not a supported setting.")
     paths = document.get("paths", {})
@@ -1071,6 +1135,19 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
     metric_section = document.get("metric", {})
     metric_role = _role(metric_section, "[metric]", services)
     _check_secret_receivers(services, {})
+    instructions_file = None if instructions is None else _one_file(instructions, "instructions")
+    cases_file = _cases_file(document.get("data"))
+    rule_files = [("instructions", instructions_file)]
+    rule_files += [
+        (label, role["illegal_file"])
+        for label, role in (
+            ("[proposer] illegal", proposer),
+            ("[run] illegal", run_role),
+            ("[metric] illegal", metric_role),
+        )
+    ]
+    rule_files += [(f"[target.{name}] illegal", stage.illegal_file) for name, stage in targets.items()]
+    _refuse_visible_cases(cases_file, rule_files)
     return RepoConstraints(
         sha256=hashlib.sha256(raw).hexdigest(),
         editable_paths=editable,
@@ -1080,11 +1157,12 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
         run_timeout=run_timeout,
         run_role=RoleEnvironment(**run_role),
         metric_role=RoleEnvironment(**metric_role),
-        instructions_file=None if instructions is None else _one_file(instructions, "instructions"),
+        instructions_file=instructions_file,
         proposer=RoleEnvironment(**proposer),
         targets=targets,
         services=services,
         metric=_metric(metric_section),
+        cases_file=cases_file,
     )
 
 
@@ -1100,16 +1178,78 @@ def read_constraints(archive: Path) -> RepoConstraints | None:
     Raises:
         ConstraintsError: When the file is not a regular file or is invalid, when
             a named MCP file is missing or not a valid ``mcpServers`` file, when
-            one secret goes to two hosts, or when a named instructions or rule
+            one secret goes to two hosts, when a named instructions or rule
             file is missing, not a regular text file, too large, empty, or not
-            a list of top-level bullets.
+            a list of top-level bullets, or when the ``[data] cases`` file is
+            missing, too large, empty, or has a line that is not one case.
     """
     raw = read_constraints_file(archive)
     if raw is None:
         return None
     constraints = _load_mcp_files(parse_constraints(raw), archive)
     _check_secret_receivers(constraints.services, constraints.mcp_roles)
-    return _load_rule_files(constraints, archive)
+    return _load_cases(_load_rule_files(constraints, archive), archive)
+
+
+def _load_cases(constraints: RepoConstraints, archive: Path) -> RepoConstraints:
+    """Fill the run's cases from the ``[data] cases`` JSONL file (E58).
+
+    Args:
+        constraints: The parsed proposal.
+        archive: Packed tree from :func:`fetch_snapshot`, the same snapshot the toml came from.
+
+    Returns:
+        The proposal with ``cases`` filled, unchanged when there is no ``[data]``.
+
+    Raises:
+        ConstraintsError: When the file is missing, is a link or folder, is too
+            large, is not UTF-8, holds no case or too many, or has a line that
+            is not a JSON object with ``input`` and an optional ``expected``.
+    """
+    path = constraints.cases_file
+    if path is None:
+        return constraints
+    setting = "[data] cases"
+    with tarfile.open(archive, "r:gz") as packed:
+        member = next((m for m in packed.getmembers() if str(PurePosixPath(m.name)) == path), None)
+        if member is None:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: {setting} names '{path}', but the repository has no such file."
+            )
+        if not member.isfile():
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: {setting} names '{path}', which must be a regular file, not a link or folder."
+            )
+        if member.size > _MAX_CASES_FILE_BYTES:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: {setting} names '{path}', which is larger than"
+                f" {_MAX_CASES_FILE_BYTES // (1024 * 1024)} MiB."
+            )
+        handle = packed.extractfile(member)
+        data = handle.read() if handle is not None else b""
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {setting} names '{path}', which is not UTF-8 text.") from exc
+    cases: list[dict[str, Any]] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            case = json.loads(line)
+        except ValueError:
+            case = None
+        if not isinstance(case, dict) or "input" not in case or set(case) - _CASE_KEYS:
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: line {number} of '{path}' ({setting}) is not a case. Write each case on"
+                ' one line as a JSON object {"input": ..., "expected": ...}; "expected" is optional.'
+            )
+        cases.append(case)
+        if len(cases) > _MAX_CASES:
+            raise ConstraintsError(f"{CONSTRAINTS_FILE}: '{path}' ({setting}) holds more than {_MAX_CASES} cases.")
+    if not cases:
+        raise ConstraintsError(f"{CONSTRAINTS_FILE}: {setting} names '{path}', which holds no cases.")
+    return replace(constraints, cases=tuple(cases))
 
 
 def _rule_file_settings(constraints: RepoConstraints) -> list[tuple[str, str]]:

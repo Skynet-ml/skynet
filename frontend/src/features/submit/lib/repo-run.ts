@@ -11,7 +11,7 @@ import type { BlackboxEngineId, BlackboxRunRequest, BlackboxScorer, ModelConfig 
 import type { HardeningJob, HardeningStatus } from "@/shared/types/hardening";
 import { prepareModelConfig } from "./model-config";
 import { runModels, scanMetricDeclarations, scanMetricModel, storedMetricModel } from "./run-floor";
-import type { WizardV2State } from "./wizard-v2";
+import { parseAllowedHosts, type WizardV2State } from "./wizard-v2";
 
 export interface RepoRunOptions {
   username: string;
@@ -144,6 +144,7 @@ export function repoRunRequest(
   const engine = optimizer.choice as BlackboxEngineId;
   const shinka = !auto && engine === "shinka_evolve";
   const editablePaths = repo.editablePaths.map((path) => path.trim()).filter(Boolean);
+  const secrets = repo.secrets ?? [];
   return {
     name: meta.name.trim() || undefined,
     description: meta.description.trim() || undefined,
@@ -176,6 +177,13 @@ export function repoRunRequest(
         commit: repo.commit.trim() || null,
         editable_paths: editablePaths,
         ...(repo.createdBySkynet ? { created_by_skynet: true } : {}),
+        ...(secrets.length > 0 && {
+          secrets: secrets.map((secret) => ({
+            name: secret.name.trim(),
+            value: secret.value,
+            allowed_hosts: parseAllowedHosts(secret.allowedHosts),
+          })),
+        }),
       },
       setup_command: repo.setupCommand.trim() || null,
     },

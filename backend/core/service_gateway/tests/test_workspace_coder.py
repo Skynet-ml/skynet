@@ -387,3 +387,13 @@ def test_coder_prompt_writes_the_rules_into_files_and_their_paths_into_the_toml(
     assert 'set ``illegal = "docs/rules.md"`` in ``[proposer]``' in prompt
     assert "[instructions]" not in prompt
     assert "[rules]" not in prompt
+
+
+def test_coder_prompt_writes_the_cases_into_a_jsonl_file_named_in_data() -> None:
+    """Cases the metric needs go in a hidden JSONL file named by [data] cases; with no cases, no [data] (E58, E40)."""
+    prompt = " ".join(workspace_coder.CODER_PROMPT.split())
+
+    assert 'one ``{"input": ..., "expected": ...}`` object on each line' in prompt
+    assert 'set ``cases = "data/cases.jsonl"`` in ``[data]``' in prompt
+    assert "hides the file from the agent and the candidate" in prompt
+    assert "write no ``[data]`` section" in prompt
