@@ -10,7 +10,10 @@ of them waiting, so memory is O(C) and not O(N); and retries come from the
 SBX-2 retry policy, which never retries by default (SKY-406 D3, D10).
 
 No engine uses the pool yet. SKY-406 phase 2 moves the engines one by one.
-Limits hold inside one process; cross-pod limits come in SBX-23.
+The pool's own limits hold inside one process. A provider can also get a
+shared ``SlotLimiter`` (SBX-23, SKY-431): a box then takes a shared slot
+after its local permit and before its start, and gives it back after its
+stop, so many pods together stay under the provider's limit.
 
 Durable trials (SBX-22, SKY-420) are opt-in: a run that gets a
 ``DurableTrials`` claims each candidate's row in a ``TrialStore`` before its
@@ -30,7 +33,7 @@ from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, M
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 from tenacity import AsyncRetrying, RetryCallState
 
@@ -39,6 +42,10 @@ from .errors import SandboxFatalError
 from .hooks import PHASE_ENDED, PHASE_STARTED, BoxEvent, BoxEventInfo, BoxHooks
 from .retry import DEFAULT_RETRY_POLICY, RetryPolicy, attempt_key, run_with_retry
 from .timeouts import Phase, PhaseTimeouts
+
+if TYPE_CHECKING:
+    # Type-only, so the pool does not import the Redis client at runtime.
+    from .limits import SlotLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +221,10 @@ class SandboxPool:
     holds its provider permit from its start to its stop, also while it
     waits for a phase permit, so a started box that waits for a phase
     still counts against its provider limit.
+
+    A provider with a shared limiter also holds a shared slot from just
+    before its box start to just after its box stop. The box takes its local
+    permit first, so a wait for a shared slot holds no shared capacity.
     """
 
     def __init__(
@@ -224,6 +235,7 @@ class SandboxPool:
         hooks: BoxHooks | None = None,
         retry_policy: RetryPolicy = DEFAULT_RETRY_POLICY,
         timeouts: PhaseTimeouts | None = None,
+        shared_limits: Mapping[str, SlotLimiter] | None = None,
     ) -> None:
         """Create the provider and phase semaphores.
 
@@ -235,11 +247,15 @@ class SandboxPool:
             hooks: The hooks that receive each box event.
             retry_policy: The retry policy for one box. The default never retries.
             timeouts: The phase timeouts, or None for no timeouts.
+            shared_limits: Limiters that share a provider's box limit with
+                other processes, keyed by the provider's capability name.
+                A provider with no limiter has only its local limit.
 
         Raises:
             TypeError: A limit is not an int.
-            ValueError: A limit is below 1, no provider has a limit, or a
-                phase limit names a phase other than setup, run or score.
+            ValueError: A limit is below 1, no provider has a limit, a
+                phase limit names a phase other than setup, run or score, or
+                a shared limit names a provider with no local limit.
         """
         if not provider_limits:
             raise ValueError("provider_limits must name at least one provider")
@@ -253,6 +269,10 @@ class SandboxPool:
             if phase not in POOL_PHASES:
                 raise ValueError(f"phase limits apply to setup, run and score, not {phase}")
             self._phase_slots[phase] = asyncio.Semaphore(_check_limit(f"limit of {phase}", limit))
+        self._shared_slots = dict(shared_limits or {})
+        unknown = sorted(set(self._shared_slots) - set(self._provider_slots))
+        if unknown:
+            raise ValueError(f"shared limits name providers with no local limit: {unknown}")
         self.hooks = hooks if hooks is not None else BoxHooks()
         self.retry_policy = retry_policy
         self.timeouts = timeouts
@@ -651,7 +671,9 @@ class SandboxPool:
             slot = self._provider_slots.get(provider)
             if slot is None:
                 raise ValueError(f"the pool has no box limit for provider {provider!r}")
-            async with slot:
+            async with slot, self._shared_slot(provider, box_id):
+                # The slot wait is outside the start timeout and is not an
+                # attempt of its own, and it reserves no budget (SKY-406 D3).
                 try:
                     async with self._timeout(Phase.START):
                         await env.start()
@@ -710,6 +732,19 @@ class SandboxPool:
                     return await step(env, candidate)
             finally:
                 await self.hooks.emit(BoxEventInfo(PHASE_ENDED[phase], box_id, phase=phase))
+
+    def _shared_slot(self, provider: str, box_id: str) -> AbstractAsyncContextManager[None]:
+        """Return the provider's shared slot, or no slot when it has no shared limiter.
+
+        Args:
+            provider: The box's provider name.
+            box_id: The attempt's operation key, for the holder name.
+
+        Returns:
+            An async context manager that holds one shared slot.
+        """
+        limiter = self._shared_slots.get(provider)
+        return limiter.hold(box_id) if limiter is not None else contextlib.nullcontext()
 
     def _timeout(self, phase: Phase) -> AbstractAsyncContextManager[None]:
         """Return the phase timeout, or no timeout when the pool has none.
