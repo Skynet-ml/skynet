@@ -53,6 +53,7 @@ from ..service_gateway.optimization.blackbox.repo_constraints import (
     effective_environment,
     instructions_brief,
     read_constraints,
+    scorer_only_paths,
 )
 from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
 from ..service_gateway.optimization.blackbox.repo_services import plan_roles
@@ -178,32 +179,12 @@ def hidden_repo_paths(constraints: RepoConstraints | None) -> tuple[str, ...]:
         constraints: The repository's validated constraints, or ``None`` without a file.
 
     Returns:
-        ``optimize.toml``, the ``[metric]`` files, exploit folder, reference,
-        rule file and ``mcp`` file, and the ``[data] cases`` file, without
-        the keys the file does not set.
+        The paths from ``scorer_only_paths``, or only the default exploit
+        folder when the repository has no constraints file.
     """
     if constraints is None:
         return (MetricSpec().exploits,)
-    metric = constraints.metric
-    hidden = (
-        CONSTRAINTS_FILE,
-        *metric.files,
-        metric.exploits,
-        metric.reference,
-        constraints.cases_file,
-        constraints.metric_role.illegal_file,
-        constraints.metric_role.mcp,
-    )
-    visible = {
-        constraints.instructions_file,
-        constraints.proposer.illegal_file,
-        constraints.proposer.mcp,
-        constraints.run_role.illegal_file,
-        constraints.run_role.mcp,
-        *(stage.illegal_file for stage in constraints.targets.values()),
-        *(stage.mcp for stage in constraints.targets.values()),
-    }
-    return tuple(dict.fromkeys(path for path in hidden if path is not None and path not in visible))
+    return scorer_only_paths(constraints)
 
 
 def stage_repository(

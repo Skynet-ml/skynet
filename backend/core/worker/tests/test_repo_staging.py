@@ -2034,7 +2034,7 @@ def test_the_brief_names_no_protected_path_inside_a_hidden_folder(
     [
         (
             '[paths]\neditable = ["src", "eval"]\n\n[metric]\nfiles = ["eval"]\n',
-            r"'eval' is editable, but it is inside the hidden",
+            r"'eval' is editable, but only the scorer reads it",
         ),
         (
             '[proposer]\nillegal = "eval/rules.md"\n\n[metric]\nfiles = ["eval"]\n',

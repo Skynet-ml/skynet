@@ -1652,6 +1652,43 @@ def _inside(path: str, roots: Iterable[str]) -> bool:
     return any(root == "." or path == root or path.startswith(root.rstrip("/") + "/") for root in roots)
 
 
+def scorer_only_paths(constraints: RepoConstraints) -> tuple[str, ...]:
+    """Return every repository path that only the parent's scorer may read (E61, E62).
+
+    A path that a visible role also names, such as one ``.mcp.json`` for
+    ``[run]`` and ``[metric]``, stays visible, because hiding it would break
+    that role.
+
+    Args:
+        constraints: The repository's validated constraints.
+
+    Returns:
+        ``optimize.toml``, the ``[metric]`` files, exploit folder, reference,
+        rule file and ``mcp`` file, and the ``[data] cases`` file, without
+        the keys the file does not set.
+    """
+    metric = constraints.metric
+    hidden = (
+        CONSTRAINTS_FILE,
+        *metric.files,
+        metric.exploits,
+        metric.reference,
+        constraints.cases_file,
+        constraints.metric_role.illegal_file,
+        constraints.metric_role.mcp,
+    )
+    visible = {
+        constraints.instructions_file,
+        constraints.proposer.illegal_file,
+        constraints.proposer.mcp,
+        constraints.run_role.illegal_file,
+        constraints.run_role.mcp,
+        *(stage.illegal_file for stage in constraints.targets.values()),
+        *(stage.mcp for stage in constraints.targets.values()),
+    }
+    return tuple(dict.fromkeys(path for path in hidden if path is not None and path not in visible))
+
+
 def effective_environment(
     constraints: RepoConstraints | None,
     *,
@@ -1673,7 +1710,7 @@ def effective_environment(
 
     Raises:
         ConstraintsError: When the file proposes an editable path outside the approved ones,
-            an editable path lies inside the hidden scoring files, or the protected paths
+            an editable path lies inside a path from ``scorer_only_paths``, or the protected paths
             (always including the file itself) cover every editable path.
     """
     if constraints is None:
@@ -1696,14 +1733,6 @@ def effective_environment(
                 f" paths ({approved}). A repository file can only narrow them; widen them in the run's settings."
             )
         editable = constraints.editable_paths
-    # The brief names every editable path, so one inside the scorer's side would name a hidden path.
-    scoring = _scoring_paths(constraints.metric, constraints.cases_file)
-    hidden_editable = [path for path in editable if _inside(path, scoring)]
-    if hidden_editable:
-        raise ConstraintsError(
-            f"'{hidden_editable[0]}' is editable, but it is inside the hidden scoring files of {CONSTRAINTS_FILE}"
-            " ([metric] or [data] cases). Make only paths outside them editable."
-        )
     protected = tuple(
         dict.fromkeys((CONSTRAINTS_FILE, *constraints.rule_files, *constraints.mcp_files, *constraints.protected_paths))
     )
@@ -1713,6 +1742,14 @@ def effective_environment(
         raise ConstraintsError(
             f"{CONSTRAINTS_FILE} protects every editable path ({', '.join(editable)}), so no version could"
             " change anything. Protect less, or make a path outside [paths] protected editable."
+        )
+    # The brief names every editable path, so one inside a scorer-only path would name a hidden path.
+    hidden = scorer_only_paths(constraints)
+    hidden_editable = [path for path in editable if _inside(path, hidden)]
+    if hidden_editable:
+        raise ConstraintsError(
+            f"'{hidden_editable[0]}' is editable, but only the scorer reads it: it is {CONSTRAINTS_FILE} or inside"
+            " the hidden scoring files ([metric] or [data] cases). Make only paths outside them editable."
         )
     notes: list[str] = []
     setup = approved_setup

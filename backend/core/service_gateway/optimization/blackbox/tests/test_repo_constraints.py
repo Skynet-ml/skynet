@@ -1351,15 +1351,37 @@ def test_a_visible_mcp_file_shared_with_the_metric_is_still_allowed() -> None:
         ('[metric]\nfiles = ["eval"]\n', "eval/labels.json"),
         ('[data]\ncases = "data/cases.jsonl"\n', "data/cases.jsonl"),
         ("", ".optimize/exploits"),
+        ('[metric]\nillegal = "docs/metric_rules.md"\n', "docs/metric_rules.md"),
+        ("", "optimize.toml"),
+        ('[metric]\nmcp = "eval/.mcp.json"\n', "eval/.mcp.json"),
     ],
-    ids=["metric-folder", "inside-metric-folder", "cases", "exploits"],
+    ids=[
+        "metric-folder",
+        "inside-metric-folder",
+        "cases",
+        "exploits",
+        "metric-rule-file",
+        "constraints-file",
+        "metric-mcp",
+    ],
 )
 def test_an_editable_path_inside_the_hidden_scoring_files_is_refused(toml: str, editable: str) -> None:
     """The brief names every editable path, so none can be a hidden path or lie inside one (E62)."""
     constraints = parse_constraints(toml.encode())
 
-    with pytest.raises(ConstraintsError, match=rf"'{re.escape(editable)}' is editable, but it is inside the hidden"):
+    with pytest.raises(ConstraintsError, match=rf"'{re.escape(editable)}' is editable, but only the scorer reads it"):
         effective_environment(constraints, approved_editable=["src", editable], approved_setup=None)
+
+
+def test_an_editable_mcp_file_shared_with_a_visible_role_is_allowed() -> None:
+    """A ``[metric] mcp`` file that ``[run]`` also names stays visible, so it may be editable."""
+    constraints = parse_constraints(
+        b'[run]\nentry = "src/app.py:main"\nmcp = ".mcp.json"\n\n[metric]\nmcp = ".mcp.json"\n'
+    )
+
+    environment = effective_environment(constraints, approved_editable=["src", ".mcp.json"], approved_setup=None)
+
+    assert environment.editable_paths == ("src", ".mcp.json")
 
 
 @pytest.mark.parametrize("section", ["proposer", "run", "metric", "target.lint"])
