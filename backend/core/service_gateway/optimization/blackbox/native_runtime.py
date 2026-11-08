@@ -831,9 +831,9 @@ def _guest_case(index: int, case: Any) -> dict[str, Any]:
 
     The guest runs proposer and candidate code, so it gets only the case's
     position and its input. Only the parent's metric side gets ``expected``
-    (E42, E61). A dict with no ``input`` key is its own input, as
-    ``case_document`` reads it. The guest gets that dict whole, but without an
-    ``expected`` key, which ``case_document`` keeps in the parent's input.
+    (E42, E61, E62). The input is the one ``case_document`` gives the parent's
+    candidate: a dict with no ``input`` key is its own input without its
+    ``expected`` key, and an empty ``input`` such as ``None`` is ``{}``.
 
     Args:
         index: The case's position in the task's cases.
@@ -846,7 +846,7 @@ def _guest_case(index: int, case: Any) -> dict[str, Any]:
     if not isinstance(plain, dict):
         return {"id": index}
     if "input" in plain:
-        return {"id": index, "input": plain["input"]}
+        return {"id": index, "input": plain["input"] or {}}
     return {"id": index, "input": {key: value for key, value in plain.items() if key != "expected"}}
 
 

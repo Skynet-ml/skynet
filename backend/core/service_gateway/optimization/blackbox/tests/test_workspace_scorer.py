@@ -14,7 +14,7 @@ from core.service_gateway.optimization.unified.metric_model import resolve_metri
 from ..harness import GatewayConfig
 from ..protocol import METRIC_ERROR, ScorerAbortError
 from ..sandbox import LocalSubprocessRuntime, SandboxSession, SandboxSpec
-from ..workspace_scorer import HARNESS_FILE, build_workspace_scorer
+from ..workspace_scorer import HARNESS_FILE, build_workspace_scorer, case_document
 from .mocks import FakeGateway
 
 PROGRAM = "import dspy\nprogram = dspy.Predict('q -> answer')\n"
@@ -90,6 +90,49 @@ def test_scores_a_case_and_never_writes_the_metric_to_disk() -> None:
 
     assert (score, side_info["feedback"]) == (1.0, "compared")
     assert leaked == []
+
+
+def test_the_candidate_never_gets_expected_from_a_bare_case() -> None:
+    """A case with no ``input`` key reaches the candidate without its ``expected`` key; the metric still gets it."""
+    run_code = PROGRAM + "def run(artifact, input):\n    return dspy.Prediction(answer=','.join(sorted(input)))\n"
+    metric_code = (
+        "def score(input, output, expected=None):\n    return 1.0, {'feedback': output.answer + '|' + str(expected)}\n"
+    )
+    with FakeGateway(reply="unused") as gw:
+        scorer = build_workspace_scorer(
+            _payload(run_code=run_code, metric_code=metric_code),
+            GatewayConfig(url=gw.url, api_key="k"),
+            protected=False,
+            runtime=_RecordingRuntime(),
+        )
+        try:
+            _, side_info = scorer("p", {"q": "2+2?", "expected": "4"})
+        finally:
+            scorer.close()
+
+    assert side_info["feedback"] == "q|4"
+
+
+@pytest.mark.parametrize(
+    ("case", "document"),
+    [
+        ({"q": "2+2?", "expected": "4"}, {"input": {"q": "2+2?"}, "expected": "4"}),
+        ({"q": "2+2?"}, {"input": {"q": "2+2?"}, "expected": None}),
+        ({"input": None, "expected": "4"}, {"input": {}, "expected": "4"}),
+        (
+            {"input": {"q": "2+2?", "expected": "nested"}},
+            {"input": {"q": "2+2?", "expected": "nested"}, "expected": None},
+        ),
+    ],
+)
+def test_case_document_keeps_expected_out_of_the_input(case: dict[str, Any], document: dict[str, Any]) -> None:
+    """Only a top-level ``expected`` is a case's answer; a nested one is part of the input by design.
+
+    Args:
+        case: The case the engine passes.
+        document: The form the harness reads.
+    """
+    assert case_document(case) == document
 
 
 def test_one_box_serves_every_call() -> None:

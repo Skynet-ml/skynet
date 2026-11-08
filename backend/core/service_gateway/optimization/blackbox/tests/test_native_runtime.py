@@ -1359,6 +1359,28 @@ def test_a_bare_case_reaches_the_guest_whole_without_expected() -> None:
     assert case_document(task.cases[0])["input"] == sent[0]["input"]
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        {"question": "2+2?", "expected": "4"},
+        {"question": "2+2?"},
+        {"input": None, "expected": "4"},
+        {"input": {"question": "2+2?"}, "expected": "4"},
+    ],
+)
+def test_the_guest_gets_the_parent_input_and_no_expected_key(case: dict[str, Any]) -> None:
+    """The guest's input equals the input the parent's candidate gets, and no guest case has ``expected``.
+
+    Args:
+        case: A train case.
+    """
+    [sent] = native_task_payload("autosaddler", Task("seed", cases=[case]))["train_set"]
+
+    assert sent == {"id": 0, "input": case_document(case)["input"]}
+    assert "expected" not in sent
+    assert "expected" not in sent["input"]
+
+
 @pytest.mark.parametrize("engine_id", ["autoresearch", "meta_harness"])
 def test_real_native_runner_drives_upstream_through_a_pi_proposer(tmp_path: Path, engine_id: str) -> None:
     """Run the unchanged upstream engines against a non-Claude harness through the ``claude`` shim."""
