@@ -263,3 +263,49 @@ test("a hosted run sends no hardening job id", async () => {
   assert.equal(await finishedHardeningJobId("hosted", "draft-1", read), null);
   assert.equal(reads, 0);
 });
+
+test("a repository run sends each secret with its allowed hosts as a list", () => {
+  const state = repoState();
+  state.task.repo = {
+    ...state.task.repo!,
+    secrets: [
+      { name: " API_KEY ", value: "v1", allowedHosts: "API.example.com., *.example.com api.example.com" },
+      { name: "OTHER", value: "v2", allowedHosts: "" },
+    ],
+  };
+  assert.equal(computeStepIssue(state, "task", null), null);
+  const request = repoRunRequest(state, options);
+  assert.ok(request);
+  assert.deepEqual((request.target as { repo: { secrets?: unknown } }).repo.secrets, [
+    { name: "API_KEY", value: "v1", allowed_hosts: ["api.example.com", "*.example.com"] },
+    { name: "OTHER", value: "v2", allowed_hosts: [] },
+  ]);
+});
+
+test("a repository run with no secrets sends no secrets key", () => {
+  const state = repoState();
+  state.task.repo = { ...state.task.repo!, secrets: [] };
+  const request = repoRunRequest(state, options);
+  assert.ok(request);
+  assert.equal("secrets" in (request.target as { repo: object }).repo, false);
+});
+
+test("the task step names what a repository secret still lacks", () => {
+  const state = repoState();
+  const withSecrets = (secrets: { name: string; value: string; allowedHosts: string }[]) => {
+    state.task.repo = { ...state.task.repo!, secrets };
+    return computeStepIssue(state, "task", null);
+  };
+  const ok = { name: "API_KEY", value: "v", allowedHosts: "api.example.com" };
+  assert.equal(withSecrets([ok]), null);
+  assert.equal(withSecrets([{ ...ok, name: "1KEY" }]), "submit.v2.repo.issue.secret_name");
+  assert.equal(withSecrets([{ ...ok, name: "" }]), "submit.v2.repo.issue.secret_name");
+  assert.equal(withSecrets([{ ...ok, value: "" }]), "submit.v2.repo.issue.secret_value");
+  assert.equal(withSecrets([{ ...ok, allowedHosts: "*.com" }]), "submit.v2.repo.issue.secret_hosts");
+  assert.equal(withSecrets([{ ...ok, allowedHosts: "localhost" }]), "submit.v2.repo.issue.secret_hosts");
+  assert.equal(withSecrets([{ ...ok, allowedHosts: "https://api.example.com" }]), "submit.v2.repo.issue.secret_hosts");
+  const hosts = (n: number) => Array.from({ length: n }, (_, i) => `h${i}.example.com`).join(",");
+  assert.equal(withSecrets([{ ...ok, allowedHosts: hosts(20) }]), null);
+  assert.equal(withSecrets([{ ...ok, allowedHosts: hosts(21) }]), "submit.v2.repo.issue.secret_hosts");
+  assert.equal(withSecrets([ok, { ...ok, name: " API_KEY" }]), "submit.v2.repo.issue.secret_duplicate");
+});

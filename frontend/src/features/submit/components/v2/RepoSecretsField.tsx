@@ -1,0 +1,99 @@
+"use client";
+
+import { Plus, Trash } from "@/shared/ui/icons";
+import { Button } from "@/shared/ui/primitives/button";
+import { Input } from "@/shared/ui/primitives/input";
+import { Label } from "@/shared/ui/primitives/label";
+import { TOUCH_FIELD } from "@/shared/ui/touch";
+
+import { emptyRepoSecret, type RepoSecretDraft } from "../../lib/wizard-v2";
+
+/**
+ * The secrets a repository run sends, one row each: the environment variable
+ * name, its value for this run, and the hosts it may go to (SKY-381 E52).
+ */
+export function RepoSecretsField({
+  secrets,
+  onChange,
+  t,
+}: {
+  secrets: RepoSecretDraft[];
+  onChange: (secrets: RepoSecretDraft[]) => void;
+  t: (key: string) => string;
+}) {
+  const patch = (index: number, next: Partial<RepoSecretDraft>) =>
+    onChange(secrets.map((secret, i) => (i === index ? { ...secret, ...next } : secret)));
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-1.5">
+        <span className="text-sm font-medium text-foreground">{t("submit.v2.repo.secrets_label")}</span>
+        <p className="text-xs text-muted-foreground">{t("submit.v2.repo.secrets_hint")}</p>
+      </div>
+      {secrets.map((secret, index) => (
+        <div key={index} className="flex flex-col gap-3 rounded-xl border border-border p-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor={`v2-repo-secret-name-${index}`}>{t("submit.v2.repo.secret.name_label")}</Label>
+              <Input
+                id={`v2-repo-secret-name-${index}`}
+                value={secret.name}
+                onChange={(e) => patch(index, { name: e.target.value })}
+                placeholder="API_KEY"
+                autoComplete="off"
+                spellCheck={false}
+                dir="ltr"
+                className={`${TOUCH_FIELD} font-mono`}
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor={`v2-repo-secret-value-${index}`}>{t("submit.v2.repo.secret.value_label")}</Label>
+              <Input
+                id={`v2-repo-secret-value-${index}`}
+                type="password"
+                value={secret.value}
+                onChange={(e) => patch(index, { value: e.target.value })}
+                autoComplete="new-password"
+                spellCheck={false}
+                dir="ltr"
+                className={`${TOUCH_FIELD} font-mono`}
+              />
+            </div>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor={`v2-repo-secret-hosts-${index}`}>{t("submit.v2.repo.secret.hosts_label")}</Label>
+            <p className="text-xs text-muted-foreground">{t("submit.v2.repo.secret.hosts_hint")}</p>
+            <Input
+              id={`v2-repo-secret-hosts-${index}`}
+              value={secret.allowedHosts}
+              onChange={(e) => patch(index, { allowedHosts: e.target.value })}
+              placeholder="api.example.com, *.example.com"
+              autoComplete="off"
+              spellCheck={false}
+              dir="ltr"
+              className={`${TOUCH_FIELD} font-mono`}
+            />
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => onChange(secrets.filter((_, i) => i !== index))}
+            className="min-h-11 gap-2 self-start"
+          >
+            <Trash className="size-4" aria-hidden="true" />
+            {t("submit.v2.repo.secret.remove")}
+          </Button>
+        </div>
+      ))}
+      <Button
+        type="button"
+        variant="outline"
+        onClick={() => onChange([...secrets, emptyRepoSecret()])}
+        className="min-h-11 gap-2 self-start"
+      >
+        <Plus className="size-4" aria-hidden="true" />
+        {t("submit.v2.repo.secret.add")}
+      </Button>
+    </div>
+  );
+}

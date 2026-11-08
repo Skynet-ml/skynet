@@ -20,6 +20,7 @@ import { userErrorMessage } from "@/shared/lib/user-error";
 import type { RepoDraft } from "../../lib/wizard-v2";
 import { v2Msg } from "./ArtifactConfirmCard";
 import { RepoPicker } from "./RepoPicker";
+import { RepoSecretsField } from "./RepoSecretsField";
 
 /** GitHub's repository-name rule, the same one the create route checks. */
 const REPO_NAME = /^[A-Za-z0-9._-]{1,100}$/;
@@ -313,6 +314,8 @@ export function RepoTargetCard({
           className={`${TOUCH_FIELD} font-mono`}
         />
       </div>
+
+      <RepoSecretsField secrets={repo.secrets ?? []} onChange={(secrets) => patch({ secrets })} t={t} />
 
       {issue && (
         <p role="status" className="text-xs text-muted-foreground">

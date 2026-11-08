@@ -24,7 +24,8 @@ export const WIZARD_VIEW_KEYS = [WIZARD_SCREEN_KEY, WIZARD_SCHEDULE_KEY, WIZARD_
 const SLICES = ["task", "inputs", "optimizer", "workspace", "meta"] as const;
 
 /**
- * Serialize a setup for the tab's session storage.
+ * Serialize a setup for the tab's session storage, without the values of
+ * its repository secrets.
  *
  * Args:
  *   account: Who the setup belongs to.
@@ -34,7 +35,15 @@ const SLICES = ["task", "inputs", "optimizer", "workspace", "meta"] as const;
  *   The stored text.
  */
 export function encodeWizardSession(account: string, state: WizardV2State): string {
-  return JSON.stringify({ account, state });
+  const repo = state.task.repo;
+  // A secret value never goes to storage; after a reload the user types it again.
+  const kept = repo?.secrets?.length
+    ? {
+        ...state,
+        task: { ...state.task, repo: { ...repo, secrets: repo.secrets.map((secret) => ({ ...secret, value: "" })) } },
+      }
+    : state;
+  return JSON.stringify({ account, state: kept });
 }
 
 /**
