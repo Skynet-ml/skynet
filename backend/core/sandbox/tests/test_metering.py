@@ -283,6 +283,32 @@ def test_lease_exit_keeps_the_block_error(database: Engine, monkeypatch: pytest.
         pass
 
 
+def test_failed_close_can_be_retried(database: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check that a close whose release failed keeps takes closed and returns the slices on retry."""
+    runtime = _runtime(database)
+    lease = PoolLease(runtime, VercelUsage(), CREATE, lease_key="pool-k", boxes=2)
+    release = runtime.service.release_slices
+    calls: list[int] = []
+
+    def flaky(*args: object, **kwargs: object) -> object:
+        """Fail the first release like a lost database connection."""
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("release failed")
+        return release(*args, **kwargs)
+
+    monkeypatch.setattr(runtime.service, "release_slices", flaky)
+    with pytest.raises(RuntimeError):
+        lease.close()
+    with pytest.raises(LeaseExhaustedError):
+        lease.take()
+    assert _reserved_units(runtime) > 0
+    lease.close()
+    assert _reserved_units(runtime) == 0
+    lease.close()
+    assert len(calls) == 2
+
+
 def test_lease_that_does_not_fit_reserves_nothing(database: Engine) -> None:
     """Check that admission refuses the whole lease, not a part of it."""
     runtime = _runtime(database, limit=1)

@@ -44,7 +44,7 @@ from .service import StripeBillingService, account_committed_cents, free_grant_c
 _ACTIVE_STATES = ("reserved", "dispatched", "pending")
 _DISPATCHED_STATES = ("dispatched", "pending")
 # One lease row lock covers every slice insert, so a bound keeps a single
-# transaction short and the slice keys inside the 128-character column.
+# transaction short.
 MAX_LEASE_SLICES = 256
 # A context variable, not a service field: concurrent calls on one service each see only their own settles.
 _SETTLED_CENTS: ContextVar[dict[str, Decimal] | None] = ContextVar("settled_cents", default=None)

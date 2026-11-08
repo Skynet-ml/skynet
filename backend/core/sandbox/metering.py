@@ -169,6 +169,7 @@ class PoolLease:
         self._slices = self._reserve(lease_key, boxes)
         self._next = 0
         self._closed = False
+        self._released = False
 
     def _reserve(self, lease_key: str, boxes: int) -> list[OperationSnapshot]:
         """Reserve the lease, waiting for in-flight work like a single reservation does.
@@ -268,15 +269,20 @@ class PoolLease:
 
         A taken slice whose box failed before dispatch goes back too. A box
         that took its slice but has not dispatched yet then fails its claim
-        before any provider call, so it never runs unfunded.
+        before any provider call, so it never runs unfunded. If the release
+        fails, takes still fail and a later close tries the release again.
         """
         with self._lock:
-            if self._closed:
+            if self._released:
                 return
             self._closed = True
+        # Two closes may both release; release_slices skips slices that are
+        # no longer reserved, so the second release changes nothing.
         self.runtime.service.release_slices(
             self.runtime.budget_id, self.runtime.username, [operation.id for operation in self._slices]
         )
+        with self._lock:
+            self._released = True
 
     def __enter__(self) -> PoolLease:
         """Return the lease for a ``with`` block.
