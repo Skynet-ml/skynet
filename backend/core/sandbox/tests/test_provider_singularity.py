@@ -324,6 +324,71 @@ async def test_start_runs_the_container_with_isolation_flags_and_no_token_on_arg
     assert all(token not in arg for call in _calls(fake_state) for arg in call)
 
 
+async def test_the_client_uses_the_port_that_the_server_wrote(fake_state: Path) -> None:
+    """Connect to the port from the server's port file; pass no port on argv."""
+    async with SingularityEnvironment(_spec()) as env:
+        assert env._client is not None
+        assert env._staging is not None
+        written = int((env._staging / "port").read_text())
+        assert env._client.base_url.port == written
+    exec_call = next(call for call in _calls(fake_state) if call[0] == "exec")
+    assert "--port" not in exec_call
+    assert exec_call[exec_call.index("--port-file") + 1] == "/staging/port"
+
+
+async def test_no_request_or_token_goes_out_before_the_port_file(tmp_path: Path) -> None:
+    """Send nothing to a listener on any port until the server writes its port file."""
+    seen: list[tuple[str, int | None, str | None]] = []
+
+    def imposter(request: httpx.Request) -> httpx.Response:
+        """Accept every request, like a process that took a free port.
+
+        Args:
+            request: The request.
+
+        Returns:
+            A 200 answer.
+        """
+        seen.append((request.url.path, request.url.port, request.headers.get(TOKEN_HEADER)))
+        return httpx.Response(200, json={"ok": True})
+
+    class StillBooting:
+        """Stand in for a container process that has not exited."""
+
+        returncode = None
+
+    env = SingularityEnvironment(_spec(), singularity_bin="/bin/true", transport=httpx.MockTransport(imposter))
+    env.poll_seconds = 0.02
+    env.ready_seconds = 0.2
+    env._process = StillBooting()  # type: ignore[assignment]
+    with pytest.raises(StartTimeoutError):
+        await env._wait_ready(tmp_path, "SECRET-TOKEN")
+    assert seen == []
+    assert env._client is None
+    (tmp_path / "port").write_text("43210")
+    env.ready_seconds = 5.0
+    await env._wait_ready(tmp_path, "SECRET-TOKEN")
+    assert seen == [("/health", 43210, "SECRET-TOKEN")]
+    assert env._client is not None
+    await env._client.aclose()
+
+
+async def test_a_missing_server_file_raises_fatal_and_leaves_nothing(
+    fake_state: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Map an OSError from staging the server files to SandboxFatalError, with no container."""
+    empty = tmp_path / "no-package-data"
+    empty.mkdir()
+    monkeypatch.setattr(singularity_provider, "_HERE", empty)
+    env = SingularityEnvironment(_spec())
+    with pytest.raises(SandboxFatalError, match="could not be staged"):
+        await env.start()
+    assert _verbs(fake_state) == []
+    assert env not in singularity_provider._LIVE
+    assert env._staging is not None
+    assert not env._staging.exists()
+
+
 async def test_fakeroot_can_be_turned_off(fake_state: Path) -> None:
     """Leave out ``--fakeroot`` when the caller asks."""
     async with SingularityEnvironment(_spec(), fakeroot=False):

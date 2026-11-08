@@ -20,6 +20,8 @@ Adapted from Harbor 0.25.0 (Apache-2.0), singularity/singularity.py. Changes:
   group in the container.
 - The server stops itself after the spec lifetime, so a crashed worker does
   not leave the container running for ever.
+- The server picks its own port and writes it to a file in the staging
+  directory. The client sends the token only after it reads that file.
 
 The container shares the host network (``--containall`` makes no network
 namespace), so egress is open and the sandbox can reach services on the host
@@ -37,7 +39,6 @@ import os
 import secrets
 import shutil
 import signal
-import socket
 import subprocess
 import tempfile
 import uuid
@@ -65,6 +66,7 @@ TOKEN_HEADER = "X-Skynet-Token"
 _HERE = Path(__file__).resolve().parent
 _SERVER_FILE = "singularity_server.py"
 _BOOTSTRAP_FILE = "singularity_bootstrap.sh"
+_PORT_FILE = "port"
 _GUEST_STAGING = "/staging"
 _FALLBACK_BIN = "singularity"
 _VERSION_TIMEOUT_SECONDS = 10.0
@@ -163,18 +165,20 @@ def _kill_group(pgid: int, sig: signal.Signals) -> None:
         os.killpg(pgid, sig)
 
 
-def _free_port() -> int:
-    """Return a TCP port on 127.0.0.1 that is free now.
+def _read_port(path: Path) -> int | None:
+    """Return the port that the server wrote, or None while the file is missing.
 
-    Another process can take the port before the server binds it; the server
-    then exits and the start fails once.
+    Args:
+        path: The port file in the staging directory.
 
     Returns:
-        The port number.
+        The port number, or None when the file is missing or not a port.
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
+    try:
+        port = int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return port if 0 < port < 65536 else None
 
 
 def _find_bin(preferred: str) -> str:
@@ -294,12 +298,15 @@ class SingularityEnvironment(SandboxEnvironment):
                 or exited early.
             StartTimeoutError: The server did not answer in ``ready_seconds``.
         """
-        shutil.copy2(_HERE / _SERVER_FILE, staging / _SERVER_FILE)
-        shutil.copy2(_HERE / _BOOTSTRAP_FILE, staging / _BOOTSTRAP_FILE)
+        try:
+            shutil.copy2(_HERE / _SERVER_FILE, staging / _SERVER_FILE)
+            shutil.copy2(_HERE / _BOOTSTRAP_FILE, staging / _BOOTSTRAP_FILE)
+        except OSError as error:
+            # A missing server file is a broken install, so a retry cannot help.
+            raise SandboxFatalError(f"The Singularity server files could not be staged: {error}") from error
         sif = await self._resolve_image()
-        port = _free_port()
         token = secrets.token_urlsafe(32)
-        argv = self._argv(staging, sif, port)
+        argv = self._argv(staging, sif)
         env = {**os.environ, f"{self._env_prefix()}{TOKEN_ENV}": token}
         log = await asyncio.to_thread((staging / "server.log").open, "wb")
         with log:
@@ -327,20 +334,14 @@ class SingularityEnvironment(SandboxEnvironment):
                 raise
             except OSError as error:
                 raise SandboxInfraError(f"The Singularity CLI {self._bin!r} could not start: {error}") from error
-        self._client = httpx.AsyncClient(
-            base_url=f"http://127.0.0.1:{port}",
-            headers={TOKEN_HEADER: token},
-            transport=self._transport,
-        )
-        await self._wait_ready(staging)
+        await self._wait_ready(staging, token)
 
-    def _argv(self, staging: Path, sif: str, port: int) -> list[str]:
+    def _argv(self, staging: Path, sif: str) -> list[str]:
         """Return the CLI command that starts the container and its server.
 
         Args:
             staging: The host directory with the server files.
             sif: The image file.
-            port: The server port on 127.0.0.1.
 
         Returns:
             The argument list.
@@ -362,8 +363,8 @@ class SingularityEnvironment(SandboxEnvironment):
             "bash",
             f"{_GUEST_STAGING}/{_BOOTSTRAP_FILE}",
             self._workdir,
-            "--port",
-            str(port),
+            "--port-file",
+            f"{_GUEST_STAGING}/{_PORT_FILE}",
             "--lifetime-seconds",
             str(self.spec.lifetime_seconds),
         ]
@@ -409,18 +410,21 @@ class SingularityEnvironment(SandboxEnvironment):
             partial.unlink(missing_ok=True)
         return str(target)
 
-    async def _wait_ready(self, staging: Path) -> None:
-        """Poll the server's ``/health`` until it answers.
+    async def _wait_ready(self, staging: Path, token: str) -> None:
+        """Wait for the server's port file, then poll its ``/health`` until it answers.
+
+        The server binds port 0 and writes the port only after the bind, so
+        the token goes only to a port that the server already holds.
 
         Args:
-            staging: The host directory with the server log.
+            staging: The host directory with the port file and the server log.
+            token: The token that every request carries.
 
         Raises:
             SandboxInfraError: The container exited first.
             StartTimeoutError: The server did not answer in ``ready_seconds``.
         """
         assert self._process is not None
-        assert self._client is not None
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.ready_seconds
         while True:
@@ -429,10 +433,19 @@ class SingularityEnvironment(SandboxEnvironment):
                     f"The Singularity container exited with code {self._process.returncode} before it was ready: "
                     f"{self._log_tail(staging)}"
                 )
-            with contextlib.suppress(httpx.TransportError):
-                response = await self._client.get("/health", timeout=_HEALTH_TIMEOUT_SECONDS)
-                if response.status_code == 200:
-                    return
+            if self._client is None:
+                port = await asyncio.to_thread(_read_port, staging / _PORT_FILE)
+                if port is not None:
+                    self._client = httpx.AsyncClient(
+                        base_url=f"http://127.0.0.1:{port}",
+                        headers={TOKEN_HEADER: token},
+                        transport=self._transport,
+                    )
+            if self._client is not None:
+                with contextlib.suppress(httpx.TransportError):
+                    response = await self._client.get("/health", timeout=_HEALTH_TIMEOUT_SECONDS)
+                    if response.status_code == 200:
+                        return
             if loop.time() >= deadline:
                 raise StartTimeoutError(self.ready_seconds)
             await asyncio.sleep(self.poll_seconds)

@@ -13,6 +13,8 @@ Adapted from Harbor 0.25.0 (Apache-2.0), singularity/server.py. Changes:
   is needed for file transfer.
 - The server shuts itself down after ``--lifetime-seconds``, so a worker that
   crashes does not leave the sandbox running for ever.
+- The server binds port 0 and writes the port it got to ``--port-file``,
+  so no other process can take the port between the pick and the bind.
 
 The provider copies this file into the sandbox. It must run on the
 ``python3`` of any common image, so it uses no third-party package.
@@ -48,7 +50,7 @@ class CommandServer(ThreadingHTTPServer):
         """Bind the loopback port and set up the command table.
 
         Args:
-            port: The TCP port on 127.0.0.1.
+            port: The TCP port on 127.0.0.1; 0 lets the system pick a free one.
             workdir: The directory that relative paths and commands start in.
             token: The token that every request must send.
         """
@@ -277,7 +279,7 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     """Parse the arguments and serve until ``/shutdown`` or the lifetime ends."""
     parser = argparse.ArgumentParser(description="Skynet sandbox command server")
-    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--port-file", required=True)
     parser.add_argument("--workdir", required=True)
     parser.add_argument("--lifetime-seconds", type=float, default=None)
     args = parser.parse_args()
@@ -286,7 +288,13 @@ def main() -> None:
         raise SystemExit(f"{TOKEN_ENV} is not set.")
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)
-    server = CommandServer(args.port, workdir, token)
+    server = CommandServer(0, workdir, token)
+    # The port goes out only after the bind, so no other process can hold it
+    # when the client sends its token. The rename shows a whole port number.
+    port_file = Path(args.port_file)
+    partial = port_file.with_name(f"{port_file.name}.partial")
+    partial.write_text(str(server.server_address[1]), encoding="utf-8")
+    partial.replace(port_file)
     # The default SIGTERM action skips the ``finally`` below, which would
     # leave running commands behind in their own sessions.
     signal.signal(signal.SIGTERM, lambda signum, frame: server.stop_soon())
