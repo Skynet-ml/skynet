@@ -39,7 +39,9 @@ from typing import Any
 
 import httpx
 
+from core.billing.budgets import BudgetError
 from core.billing.operation_pricing import json_fingerprint
+from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
 from core.billing.vercel_usage import SANDBOX_NETWORK_BYTES_CAP, VercelSnapshotReservation, VercelUsageReservation
 from core.config import settings
@@ -187,6 +189,24 @@ def _is_not_found(error: BaseException) -> bool:
     return SandboxApiError is not None and isinstance(error, SandboxApiError) and error.status_code == 404
 
 
+def _settle_failure(error: Exception) -> Exception:
+    """Return the usage error that a failed settle raises from ``stop()``.
+
+    Args:
+        error: The settle failure.
+
+    Returns:
+        A usage error unchanged. Any other failure becomes a
+        ``UsagePendingError``, because the reservation stays pending and its
+        own text can hold database details.
+    """
+    if isinstance(error, UsagePendingError | BudgetError):
+        return error
+    pending = UsagePendingError("Sandbox usage is not yet settled; the reservation remains active.")
+    pending.__cause__ = error
+    return pending
+
+
 async def _close_client(client: Any) -> None:
     """Close a snapshot SDK client, bounded so a hung close cannot hold the caller.
 
@@ -319,6 +339,7 @@ class VercelEnvironment(SandboxEnvironment):
         self._billing_call: asyncio.Future[Any] | None = None
         self._starting: asyncio.Future[None] | None = None
         self._stop_task: asyncio.Future[None] | None = None
+        self._settle_error: Exception | None = None
         self._halted = False
         self._funded_until: float | None = None
         self.snapshot_id = snapshot_id
@@ -644,10 +665,21 @@ class VercelEnvironment(SandboxEnvironment):
         return await asyncio.shield(self._billing_call)
 
     async def stop(self) -> None:
-        """Stop the box once and settle its reservation. Safe to call again."""
+        """Stop the box once and settle its reservation. Safe to call again.
+
+        Raises:
+            UsagePendingError: The settle failed, so the reservation stays pending.
+            BudgetError: Trusted usage violates the reserved bounds.
+        """
         if self._stop_task is None:
             self._stop_task = asyncio.ensure_future(self._timed_teardown())
         await asyncio.shield(self._stop_task)
+        # Like the legacy close, only one stop caller gets a settle failure,
+        # so a second close returns quietly. A stop that timed out before this
+        # line leaves the error for the close retry.
+        settle_error, self._settle_error = self._settle_error, None
+        if settle_error is not None:
+            raise settle_error
 
     async def _timed_teardown(self) -> None:
         """Run the teardown inside the stop phase."""
@@ -700,6 +732,8 @@ class VercelEnvironment(SandboxEnvironment):
                     await asyncio.to_thread(usage.fail, error or SandboxInfraError("The sandbox was never created."))
             except Exception as billing_error:
                 logger.warning("Sandbox %s usage stays pending: %s", self.name, type(billing_error).__name__)
+                if box is not None:
+                    self._settle_error = _settle_failure(billing_error)
         if self._client is not None:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(self._client.aclose(), STOP_TIMEOUT)
