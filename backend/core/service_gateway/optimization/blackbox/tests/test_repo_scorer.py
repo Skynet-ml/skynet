@@ -22,6 +22,7 @@ from core.billing.budgets import BudgetError, BudgetInsufficientError
 from core.billing.operation_pricing import UnpricedOperationError
 from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
+from core.billing.usage_tags import usage_scope
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
@@ -1857,6 +1858,7 @@ class _CallSink:
     def __init__(self) -> None:
         """Start with no calls."""
         self.calls: list[tuple[str, dict[str, Any], list[str]]] = []
+        self.threads: list[str] = []
 
     def record_call(self, optimization_id: str, call: dict[str, Any], secrets: list[str]) -> int:
         """Keep one call.
@@ -1870,6 +1872,7 @@ class _CallSink:
             The call's sequence number.
         """
         self.calls.append((optimization_id, call, secrets))
+        self.threads.append(threading.current_thread().name)
         return len(self.calls)
 
 
@@ -1899,6 +1902,60 @@ def test_a_relayed_call_is_recorded_under_its_role_and_kind_with_the_key_marked_
     assert (call["candidate_id"], call["role"], call["kind"]) == ("cand-1", "run" if kind == "mcp" else "metric", kind)
     assert (call["target"], call["status"]) == ("judge.example.test", "ok")
     assert "judge-secret-value" in secrets
+
+
+@pytest.mark.parametrize(("scope", "expected"), [({"candidate": "cand-x"}, "cand-x"), ({}, "run")])
+def test_a_relayed_call_on_a_pool_thread_keeps_the_scorer_threads_candidate(
+    echo: _Echo, scope: dict[str, str], expected: str
+) -> None:
+    """The candidate comes from the thread that built the relay, not from the pool thread; none gives the run bucket."""
+    sink = _CallSink()
+    workspace = _Workspace()
+    with usage_scope(**scope):
+        relay = _mcp_relay(workspace, "metric", _mcp_role(echo.port), recorder=CallRecorder(sink, "opt-1", "", ""))
+    with usage_scope(candidate="other-candidate"):
+        answer = _mcp_answer(relay, workspace, "search")
+
+    assert answer["status"] == 200
+    [(_, call, _)] = sink.calls
+    assert sink.threads[0].startswith("stage-service")
+    assert call["candidate_id"] == expected
+
+
+class _BrokenSink:
+    """Fail every write the way a lost database connection does, with the call in the error text."""
+
+    def record_call(self, optimization_id: str, call: dict[str, Any], secrets: list[str]) -> int:
+        """Raise an error whose text holds the call and its secret forms.
+
+        Args:
+            optimization_id: The run.
+            call: The call fields.
+            secrets: The secret forms the store removes.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError(f"database is gone: {call!r} {secrets!r}")
+
+
+def test_a_recorder_failure_keeps_the_relayed_call_and_logs_no_secret(
+    echo: _Echo, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A store error during a relayed MCP call still returns the answer, and no log line holds the key or a header."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port), recorder=CallRecorder(_BrokenSink(), "opt-1", "", ""))
+    # INFO is the lowest level the services log at; httpcore's DEBUG traces print raw upstream headers.
+    with caplog.at_level(logging.INFO):
+        answer = _mcp_answer(relay, workspace, "search")
+
+    assert answer["status"] == 200
+    assert "judge-secret-value" not in json.dumps(answer)
+    assert any("Could not record a mcp call" in record.getMessage() for record in caplog.records)
+    logged = "\n".join(record.getMessage() + str(record.exc_info or "") for record in caplog.records)
+    assert "judge-secret-value" not in logged
+    assert "Authorization" not in logged
+    assert "database is gone" not in logged
 
 
 def test_an_mcp_redirect_comes_back_to_the_box_and_is_never_followed(echo: _Echo) -> None:

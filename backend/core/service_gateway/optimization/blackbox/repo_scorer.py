@@ -64,6 +64,7 @@ from ....billing.model_dispatch import ModelHTTPResult
 from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import BudgetRuntime, UsagePendingError
 from ....billing.signals import BudgetReached
+from ....billing.usage_tags import current_tags
 from . import runner, sandbox_log
 from .harness import ENV_API_KEY, ENV_MODEL
 from .protocol import STATUS_KEY
@@ -875,7 +876,13 @@ class _StageRelay:
         self._secret_hosts = dict(secret_hosts or {})
         self._allowed_hosts = dict(allowed_hosts or {})
         self._budget = budget
-        self._recorder = recorder.bind(role=role) if recorder is not None else None
+        # The relay's calls run on pool threads, which do not inherit the usage-scope
+        # contextvar, so the candidate is read here, in the scorer thread that holds it.
+        self._recorder = (
+            recorder.bind(role=role, candidate_id=recorder.candidate_id or current_tags().get("candidate"))
+            if recorder is not None
+            else None
+        )
         self._service_pool = ThreadPoolExecutor(max_workers=max_concurrency, thread_name_prefix="stage-service")
         self._pending = ""
         self._seen: set[str] = set()
