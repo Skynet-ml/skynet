@@ -38,6 +38,7 @@ from .models import (
     JobModel,
     LogEntryModel,
     ProgressEventModel,
+    RunCallModel,
     SetupDraftModel,
     TaggingSessionModel,
 )
@@ -167,6 +168,26 @@ def _log_entry_bytes(dialect_name: str):
     return _byte_size(LogEntryModel.message, dialect_name) + _byte_size(LogEntryModel.fields, dialect_name)
 
 
+def _run_call_bytes(dialect_name: str):
+    """Return a SQL expression for one run-call row's footprint: its stored bodies, target and failure text.
+
+    The stored bodies are the cut ones, so this sizes what the row holds, not
+    the ``request_bytes``/``response_bytes`` of the original call.
+
+    Args:
+        dialect_name: ``engine.dialect.name``, see :func:`_byte_size`.
+
+    Returns:
+        A SQLAlchemy expression yielding the row's byte count.
+    """
+    return (
+        _byte_size(RunCallModel.request, dialect_name)
+        + _byte_size(RunCallModel.response, dialect_name)
+        + _byte_size(RunCallModel.target, dialect_name)
+        + _byte_size(RunCallModel.failure_reason, dialect_name)
+    )
+
+
 def _tagging_session_bytes(dialect_name: str):
     """Return a SQL expression for one labeling session's footprint: its rows, labels and AI-assist state.
 
@@ -246,6 +267,11 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
                 BlackboxAgentRunModel.optimization_id.in_(user_job_ids)
             )
         )
+        run_calls = scalar(
+            select(func.coalesce(func.sum(_run_call_bytes(dialect)), 0)).where(
+                RunCallModel.optimization_id.in_(user_job_ids)
+            )
+        )
         agent_chats = scalar(
             select(
                 func.coalesce(
@@ -317,6 +343,7 @@ def compute_user_storage(engine: Engine, username: str) -> StorageUsage:
         + checkpoints
         + grid_pairs
         + agent_runs
+        + run_calls
         + optimization_embeddings,
         "datasets": datasets,
         "tagging_sessions": tagging_sessions,
@@ -529,6 +556,11 @@ def compute_user_storage_category_items(
                 .where(BlackboxAgentRunModel.optimization_id == JobModel.optimization_id)
                 .scalar_subquery()
             )
+            run_call_bytes = (
+                select(func.coalesce(func.sum(_run_call_bytes(dialect)), 0))
+                .where(RunCallModel.optimization_id == JobModel.optimization_id)
+                .scalar_subquery()
+            )
             footprint = (
                 JobModel.stored_bytes
                 + logs_bytes
@@ -536,6 +568,7 @@ def compute_user_storage_category_items(
                 + checkpoint_bytes
                 + grid_pair_bytes
                 + agent_run_bytes
+                + run_call_bytes
                 + embedding_bytes
             ).label("footprint")
             optimization_rows = session.execute(
