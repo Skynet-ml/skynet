@@ -440,6 +440,7 @@ def relay_request(
     runtime: BudgetRuntime | None = None,
     recorder: CallRecorder | None = None,
     kind: str = "host",
+    target: str = "",
 ) -> bytes:
     """Send one ``[services]`` or MCP http request with its secrets filled in (E49-E53).
 
@@ -467,6 +468,8 @@ def relay_request(
             filled header value goes to the store as a secret.
         kind: The record kind: ``host`` for a ``[services]`` call, ``mcp``
             for a role ``.mcp.json`` call.
+        target: The record target, such as ``server@host/tool``; the url's
+            host when empty.
 
     Returns:
         The answer body without any filled secret value.
@@ -479,10 +482,11 @@ def relay_request(
     """
     state = _RelayState(set(user_secrets.values()))
     started = recorder.start() if recorder is not None else None
-    try:
-        target = (urlsplit(url).hostname or "").rstrip(".").lower()
-    except ValueError:  # a malformed url such as "http://[::1/x" is refused by _relay, and still recorded
-        target = ""
+    if not target:
+        try:
+            target = (urlsplit(url).hostname or "").rstrip(".").lower()
+        except ValueError:  # a malformed url such as "http://[::1/x" is refused by _relay, and still recorded
+            target = ""
     try:
         answer = _relay(url, headers, body, user_secrets, bindings, secret_hosts, allowed_hosts, send, runtime, state)
     except BaseException as error:  # a worker stop or cancel must still leave the call in the record

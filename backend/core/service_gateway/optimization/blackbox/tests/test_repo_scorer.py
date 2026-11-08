@@ -1670,6 +1670,11 @@ class _Echo:
                 self.end_headers()
                 self.wfile.write(payload)
 
+            def do_POST(self) -> None:
+                """Read the body, then answer as for a GET."""
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.do_GET()
+
             def log_message(self, format: str, *args: Any) -> None:
                 """Keep the test output quiet."""
 
@@ -1739,12 +1744,16 @@ _REDIRECT_TARGETS = pytest.mark.parametrize(
 def test_a_redirect_comes_back_to_the_box_and_is_never_followed(echo: _Echo, location: str) -> None:
     """The relay returns the 302 as it is, to the allowed host or another one, so the key goes nowhere else (E53)."""
     echo.location = location.format(port=echo.port)
+    sink = _CallSink()
     workspace = _Workspace()
-    answer = _service_answer(_echo_relay(workspace, echo.port), workspace, "judge", path="redirect", method="GET")
+    relay = _echo_relay(workspace, echo.port, recorder=CallRecorder(sink, "opt-1", "cand-1", ""))
+    answer = _service_answer(relay, workspace, "judge", path="redirect", method="GET")
 
     assert answer["status"] == 302
     assert ["Location", echo.location] in answer["headers"]
     assert echo.paths == ["/redirect"]
+    [(_, call, _)] = sink.calls
+    assert (call["kind"], call["target"], call["status"]) == ("host", "judge.example.test", "ok")
 
 
 def test_a_key_split_across_two_streamed_chunks_comes_back_redacted(echo: _Echo) -> None:
@@ -1760,20 +1769,27 @@ def test_a_key_split_across_two_streamed_chunks_comes_back_redacted(echo: _Echo)
 @pytest.mark.parametrize(
     ("path", "encode"),
     [
+        ("echo", lambda token: token),
         ("base64", lambda token: base64.b64encode(token.encode()).decode()),
         ("percent", lambda token: urllib.parse.quote(token, safe="")),
     ],
 )
 def test_a_re_encoded_key_echo_is_redacted(echo: _Echo, path: str, encode: Any) -> None:
-    """A key echoed base64-encoded or percent-encoded does not reach the box (E56)."""
+    """A key echoed raw, base64-encoded or percent-encoded reaches neither the box nor the run record (E56, E28)."""
     secret = "judge/secret+value=1"
+    sink = _CallSink()
     workspace = _Workspace()
-    relay = _echo_relay(workspace, echo.port, secret=secret)
+    relay = _echo_relay(workspace, echo.port, secret=secret, recorder=CallRecorder(sink, "opt-1", "cand-1", ""))
     answer = _service_answer(relay, workspace, "judge", path=path, method="GET")
 
     assert answer["status"] == 200
     assert encode(secret) not in json.dumps(answer)
     assert json.loads(base64.b64decode(answer["body"])) == {"seen": "[REDACTED]"}
+    [(_, call, secrets)] = sink.calls
+    assert call["status"] == "ok"
+    assert encode(secret) not in json.dumps(call, default=str)
+    # The store masks each listed form in every field it writes; a base64 form is listed without its padding.
+    assert encode(secret).rstrip("=") in secrets
 
 
 @pytest.mark.parametrize(
@@ -1799,16 +1815,26 @@ def test_a_secret_outside_its_host_or_the_allowed_hosts_is_refused(
 
 
 def test_a_metric_that_does_not_list_the_service_gets_the_fix_in_the_error(echo: _Echo) -> None:
-    """The metric's refusal names the exact line to add (E55)."""
+    """The metric's refusal names the exact line to add, and the run records the refused call (E55, E28)."""
+    sink = _CallSink()
     workspace = _Workspace()
     spec = ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://judge.example.test:{echo.port}/")
-    relay = _service_relay(workspace, role="metric", allowed=(), services={"judge-api": spec})
+    relay = _service_relay(
+        workspace,
+        role="metric",
+        allowed=(),
+        services={"judge-api": spec},
+        recorder=CallRecorder(sink, "opt-1", "cand-1", ""),
+    )
 
     answer = _service_answer(relay, workspace, "judge-api")
 
     assert answer["status"] == 403
     assert answer["error"].endswith('Add it: [metric] services = ["judge-api"]')
     assert echo.paths == []
+    [(_, call, _)] = sink.calls
+    assert (call["candidate_id"], call["role"], call["kind"]) == ("cand-1", "metric", "host")
+    assert (call["target"], call["status"], call["failure_reason"]) == ("judge-api", "refused", answer["error"])
 
 
 def _mcp_relay(
@@ -1851,7 +1877,9 @@ def _mcp_relay(
     )
 
 
-def _mcp_answer(relay: _StageRelay, workspace: _Workspace, name: str, path: str = "") -> dict[str, Any]:
+def _mcp_answer(
+    relay: _StageRelay, workspace: _Workspace, name: str, path: str = "", body: bytes = b""
+) -> dict[str, Any]:
     """Send one MCP frame through the relay and wait for its answer.
 
     Args:
@@ -1859,11 +1887,19 @@ def _mcp_answer(relay: _StageRelay, workspace: _Workspace, name: str, path: str 
         workspace: Records the answers.
         name: The server the frame names.
         path: The request path under the server's url.
+        body: A JSON-RPC body to POST; empty sends a GET with no body.
 
     Returns:
         The answer the box gets.
     """
-    frame = {"id": "e" * 32, "mcp": name, "path": path, "method": "GET", "headers": [], "body": ""}
+    frame = {
+        "id": "e" * 32,
+        "mcp": name,
+        "path": path,
+        "method": "POST" if body else "GET",
+        "headers": [],
+        "body": base64.b64encode(body).decode(),
+    }
     relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
     deadline = time.monotonic() + 10
     while not workspace.writes and time.monotonic() < deadline:
@@ -1955,8 +1991,35 @@ def test_a_relayed_call_is_recorded_under_its_role_and_kind_with_the_key_marked_
     [(optimization_id, call, secrets)] = sink.calls
     assert optimization_id == "opt-1"
     assert (call["candidate_id"], call["role"], call["kind"]) == ("cand-1", "run" if kind == "mcp" else "metric", kind)
-    assert (call["target"], call["status"]) == ("judge.example.test", "ok")
+    target = f"search@judge.example.test:{echo.port}/" if kind == "mcp" else "judge.example.test"
+    assert (call["target"], call["status"]) == (target, "ok")
     assert "judge-secret-value" in secrets
+
+
+def test_two_mcp_servers_on_one_host_each_get_their_own_record_target(echo: _Echo) -> None:
+    """Each record names its server and tool, so two servers on one host never share a target (E28, E49)."""
+    sink = _CallSink()
+    recorder = CallRecorder(sink, "opt-1", "cand-1", "")
+    servers = tuple(
+        McpServer(
+            name=name,
+            url=f"http://judge.example.test:{echo.port}/{name}",
+            headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        )
+        for name in ("search", "docs")
+    )
+    role = RoleEnvironment(mcp=".mcp.json", mcp_servers=servers)
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "lookup"}}).encode()
+    for name in ("search", "docs"):
+        workspace = _Workspace()
+        answer = _mcp_answer(_mcp_relay(workspace, "run", role, recorder=recorder), workspace, name, body=body)
+        assert answer["status"] == 200
+
+    assert [call["target"] for _, call, _ in sink.calls] == [
+        f"search@judge.example.test:{echo.port}/lookup",
+        f"docs@judge.example.test:{echo.port}/lookup",
+    ]
+    assert echo.paths == ["/search", "/docs"]
 
 
 @pytest.mark.parametrize(("scope", "expected"), [({"candidate": "cand-x"}, "cand-x"), ({}, "run")])
@@ -2017,12 +2080,18 @@ def test_a_recorder_failure_keeps_the_relayed_call_and_logs_no_secret(
 def test_an_mcp_redirect_comes_back_to_the_box_and_is_never_followed(echo: _Echo, location: str) -> None:
     """The relay returns an MCP server's 302 as it is, to the allowed host or another one (E53)."""
     echo.location = location.format(port=echo.port)
+    sink = _CallSink()
     workspace = _Workspace()
-    answer = _mcp_answer(_mcp_relay(workspace, "metric", _mcp_role(echo.port, "redirect")), workspace, "search")
+    recorder = CallRecorder(sink, "opt-1", "cand-1", "")
+    relay = _mcp_relay(workspace, "metric", _mcp_role(echo.port, "redirect"), recorder=recorder)
+    answer = _mcp_answer(relay, workspace, "search")
 
     assert answer["status"] == 302
     assert ["Location", echo.location] in answer["headers"]
     assert echo.paths == ["/redirect"]
+    [(_, call, _)] = sink.calls
+    assert (call["role"], call["kind"], call["status"]) == ("metric", "mcp", "ok")
+    assert call["target"] == f"search@judge.example.test:{echo.port}/"
 
 
 @pytest.mark.parametrize(

@@ -61,6 +61,7 @@ from ....billing.budgets import BudgetError, BudgetInsufficientError
 from ....billing.env_connectors import relay_request
 from ....billing.mcp_broker import _pinned_address, _PinnedTransport
 from ....billing.model_dispatch import ModelHTTPResult
+from ....billing.model_gateway import _tool_target
 from ....billing.operation_pricing import UnpricedOperationError
 from ....billing.runtime import BudgetRuntime, UsagePendingError
 from ....billing.signals import BudgetReached
@@ -800,6 +801,22 @@ def _control_answer(error: BaseException) -> dict[str, Any] | None:
     }
 
 
+def _json_object(body: bytes) -> dict[str, Any]:
+    """Read an MCP request body as one JSON-RPC object, for its run-call target.
+
+    Args:
+        body: The guest's request body.
+
+    Returns:
+        The object, or ``{}`` for a batch, an empty body or text that is not JSON.
+    """
+    try:
+        message = json.loads(body)
+    except ValueError:
+        return {}
+    return message if isinstance(message, dict) else {}
+
+
 class _StageRelay:
     """Answer one scorer call's ``call(name, input)``, service and MCP frames.
 
@@ -964,13 +981,30 @@ class _StageRelay:
                         handler = self._service if kind == "service" else self._mcp_call
                         self._service_pool.submit(handler, name, identity, frame)
                     else:
-                        self._refusals.submit(self._answer, identity, refusal)
+                        self._refusals.submit(
+                            self._refuse, "host" if kind == "service" else "mcp", name, identity, refusal
+                        )
                     continue
                 pool = self._pools.get(name) if isinstance(name, str) else None
                 if pool is None:
                     self._refusals.submit(self._answer, identity, {"error": f"Unknown stage {name!r}."})
                 else:
                     pool.submit(self._call, name, identity, frame.get("input"))
+
+    def _refuse(self, kind: str, name: Any, identity: str, refusal: Mapping[str, Any]) -> None:
+        """Record a service or MCP call the role may not make, then answer the guest with the refusal.
+
+        Args:
+            kind: ``host`` for a service, ``mcp`` for an MCP server, for the run record.
+            name: The service or server the frame names; the record's target.
+            identity: The request's id, also its answer name.
+            refusal: The 403 or 404 answer, whose error names the fix.
+        """
+        if self._recorder is not None:
+            self._recorder.record(
+                self._recorder.start(), kind=kind, target=str(name), status="refused", failure_reason=refusal["error"]
+            )
+        self._answer(identity, refusal)
 
     def _refusal(self, name: Any) -> dict[str, Any] | None:
         """Check that the calling role may reach a service through the relay.
@@ -1017,7 +1051,7 @@ class _StageRelay:
         label = f"MCP server {name!r}"
         try:
             url, headers = mcp_endpoint(f"[{self._role}]", self._mcp, name)
-            response = self._request(url, headers, label, frame, kind="mcp")
+            response = self._request(url, headers, label, frame, kind="mcp", server=name)
         except (BudgetReached, Exception) as error:
             response = self._stopped(error)
             if response is None:
@@ -1062,7 +1096,14 @@ class _StageRelay:
         return response
 
     def _request(
-        self, origin: str, declared: Mapping[str, str], label: str, frame: Mapping[str, Any], *, kind: str = "host"
+        self,
+        origin: str,
+        declared: Mapping[str, str],
+        label: str,
+        frame: Mapping[str, Any],
+        *,
+        kind: str = "host",
+        server: str = "",
     ) -> dict[str, Any]:
         """Call a service's or MCP server's url through :func:`relay_request`, so its secrets stay in the parent.
 
@@ -1078,6 +1119,8 @@ class _StageRelay:
             label: ``Service '<name>'`` or ``MCP server '<name>'``, for the errors.
             frame: The guest's ``path``, ``method``, ``headers`` and ``body``.
             kind: ``host`` for a service, ``mcp`` for an MCP server, for the run record.
+            server: The MCP server's name, so its record target is
+                ``server@host/tool``; ``""`` for a service.
 
         Returns:
             ``{"status", "headers", "body"}`` with a base64 body, or
@@ -1108,6 +1151,7 @@ class _StageRelay:
             and pair[0].lower() not in overrides
         ]
         body = base64.b64decode(frame.get("body") or "", validate=True)
+        record_target = _tool_target(server, origin, _json_object(body)) if server else ""
         status: list[int] = []
 
         def send(address: str, filled: dict[str, str], content: bytes) -> bytes:
@@ -1167,6 +1211,7 @@ class _StageRelay:
                 runtime=self._budget,
                 recorder=self._recorder,
                 kind=kind,
+                target=record_target,
             )
         except _AnswerTooLargeError:
             return {"status": 502, "error": f"{label} answered with more than 4 MiB."}
