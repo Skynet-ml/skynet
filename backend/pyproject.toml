@@ -165,6 +165,22 @@ mosaic = [
     # core.sandbox.providers.mosaic; the default legacy backend never needs it.
     "mosaic-sandbox>=0.15.1,<0.16",
 ]
+prime = [
+    # Prime Intellect sandbox provider (SKY-475). Imported lazily by
+    # core.sandbox.providers.prime; the default legacy backend never needs it.
+    # The 0.5 line has the async set_network and wait_for_creation calls that the provider uses.
+    "prime-sandboxes>=0.5.8,<0.6",
+]
+sail = [
+    # Sail sandbox provider (SKY-478). Imported lazily by
+    # core.sandbox.providers.sail; the default legacy backend never needs it.
+    "sail>=0.13.0",
+]
+sbx = [
+    # Docker sbx Cloud provider (SKY-482): parses the multipart file downloads.
+    # The factory refuses this provider in production.
+    "python-multipart>=0.0.31",
+]
 
 [tool.uv]
 # dspy 3.3.1's metadata hard-pins gepa[dspy]==0.1.4. That PyPI release ships neither
@@ -179,6 +195,12 @@ mosaic = [
 # once a dspy release relaxes the pin.
 override-dependencies = [
     "gepa[dspy] @ git+https://github.com/gepa-ai/gepa@0632cdb5dcc052e690eab439e1b4a7e3e9cfe407",
+]
+# prime-sandboxes 0.5.x pins connectrpc<0.12, and current e2b needs a newer
+# connectrpc. Without this, one universal lock downgrades e2b for every install.
+# The two provider extras resolve separately and cannot be installed together.
+conflicts = [
+    [{ extra = "prime" }, { extra = "e2b" }],
 ]
 
 [tool.ruff]

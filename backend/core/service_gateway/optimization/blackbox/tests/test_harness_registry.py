@@ -37,9 +37,9 @@ _OVERRIDES: dict[str, dict[str, str]] = {
     "plain": {},
     "override": {"install_command": "my-install {model}", "run_command": "my-run {gateway_url}"},
 }
-_BUILT_INS = ("pi", "codex", "opencode", "prime", "antigravity_sdk", "cline")
 # The golden digests predate the registry, so they cover only these harnesses.
 _PRE_REGISTRY = ("pi", "codex", "opencode", "prime")
+_BUILT_INS = (*_PRE_REGISTRY, "aider", "antigravity_sdk", "cline")
 # sha256 of every launch payload, captured from staging 0e1dd97d5 before the
 # catalog moved into the registry. A changed digest means a changed launch.
 _GOLDEN = {
@@ -258,6 +258,7 @@ def test_registry_keeps_the_catalog_order() -> None:
         "codex": ("codex", "0.153.0"),
         "opencode": ("opencode", "1.18.27"),
         "prime": ("prime-agent", "0.9.7"),
+        "aider": ("aider", "0.86.2"),
         "antigravity_sdk": (
             "uv run --quiet --offline --no-project --python '>=3.12,<3.15' --with google-antigravity==0.1.20"
             " --with cryptography==46.0.7 --with fastapi==0.136.3 python -c"
