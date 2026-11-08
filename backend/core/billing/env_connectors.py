@@ -386,10 +386,13 @@ def escaped_forms(fragment: str) -> set[str]:
         lower- and upper-case hex in the ``\\u`` escapes.
     """
     escaped = json.dumps(fragment)[1:-1]
-    html_safe = escaped.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
-    # .NET System.Text.Json writes upper-case hex (\u003C), Python and Go write lower-case.
-    upper = html_safe.replace("\\u003c", "\\u003C").replace("\\u003e", "\\u003E")
-    forms = {escaped, html_safe, upper}
+    # .NET System.Text.Json writes upper-case hex (\u003C), Python and Go write lower-case;
+    # each case pair for < and > is listed, so an echo that mixes them is also hidden.
+    forms = {escaped} | {
+        escaped.replace("&", "\\u0026").replace("<", lt).replace(">", gt)
+        for lt in ("\\u003c", "\\u003C")
+        for gt in ("\\u003e", "\\u003E")
+    }
     return forms | {form.replace("/", "\\/") for form in forms}
 
 

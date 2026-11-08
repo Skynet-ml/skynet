@@ -563,6 +563,29 @@ def test_relay_removes_a_json_escaped_echo_of_the_secret() -> None:
     assert json.loads(answer)["echo"] == ["[REDACTED]"] * 4
 
 
+def test_relay_removes_echoes_with_mixed_case_unicode_escapes() -> None:
+    """Hide the secret when one answer holds lower-, upper- and mixed-case \\u escapes of it."""
+    secret = "user/key&part<1>"
+    escaped = json.dumps(secret)[1:-1].replace("&", "\\u0026")
+    forms = [
+        escaped.replace("<", "\\u003c").replace(">", "\\u003E"),
+        escaped.replace("<", "\\u003C").replace(">", "\\u003e"),
+        escaped.replace("<", "\\u003C").replace(">", "\\u003E").replace("/", "\\/"),
+    ]
+    answer = relay_request(
+        url="https://api.judge.example/v1",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        body=b"{}",
+        user_secrets={"JUDGE_KEY": secret},
+        bindings={},
+        secret_hosts={"JUDGE_KEY": "api.judge.example"},
+        allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+        send=lambda *_args: ('{"echo": ["' + '", "'.join(forms) + '"]}').encode(),
+    ).decode()
+    assert all(form not in answer for form in forms)
+    assert json.loads(answer)["echo"] == ["[REDACTED]"] * 3
+
+
 def test_relay_removes_a_base64_or_percent_encoded_echo_of_the_secret() -> None:
     """Hide a base64 echo, with or without padding, and a percent or ``quote_plus`` echo with either escape case."""
     secret = "key>>>???~~ /x"
