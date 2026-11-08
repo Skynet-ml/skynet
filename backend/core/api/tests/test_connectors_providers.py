@@ -78,7 +78,7 @@ def _fresh_connector_caches() -> Iterator[None]:
 
 @pytest.fixture
 def generic_oauth_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hide the Google, Microsoft, GitHub, Notion and Supabase OAuth buttons unless a test opts in."""
+    """Hide the Google, Microsoft, GitHub, GitLab, Bitbucket, Notion and Supabase OAuth buttons unless a test opts in."""
     for name in ("google_oauth_client_id", "google_oauth_client_secret", "github_oauth_client_id"):
         monkeypatch.setattr(settings, name, None)
     monkeypatch.setattr(settings, "github_oauth_client_secret", None)
@@ -94,6 +94,9 @@ def generic_oauth_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "supabase_oauth_client_id", None)
     monkeypatch.setattr(settings, "supabase_oauth_client_secret", None)
     monkeypatch.setattr(settings, "supabase_oauth_redirect_uri", None)
+    for host in ("gitlab", "bitbucket"):
+        for field in ("client_id", "client_secret", "redirect_uri"):
+            monkeypatch.setattr(settings, f"{host}_oauth_{field}", None)
 
 
 class _StreamCtx:
@@ -230,6 +233,8 @@ def test_status_lists_every_provider(vault_key: str, generic_oauth_off: None) ->
         "google_drive",
         "onedrive",
         "github",
+        "gitlab",
+        "bitbucket",
         "s3",
         "gcs",
         "azure_blob",
@@ -384,6 +389,9 @@ def _github_picker_api(method: str, url: str, **kwargs: Any) -> httpx.Response:
         page = kwargs["params"]["page"]
         names = [f"b{(page - 1) * 100 + i}" for i in range(100)] if page < 4 else []
         return _response(200, [{"name": name} for name in names])
+    if path == "/repos/octo/app/commits":
+        commit = {"sha": "d" * 40, "commit": {"message": "Tune\n\nbody", "committer": {"date": "2026-11-02T00:00:00Z"}}}
+        return _response(200, [commit])
     if path == "/repos/octo/app/git/trees/feature%2Fx":
         return _response(
             200,
@@ -477,6 +485,17 @@ def test_github_picker_branches_are_paginated_and_capped() -> None:
 
 
 @pytest.mark.usefixtures("vault_key", "generic_oauth_off")
+def test_github_picker_commits_list_recent_commits() -> None:
+    """Recent commits of a branch come back with a one-line title."""
+    client, _ = _make_client()
+    with patch("core.connectors.transport.CLIENT.request", side_effect=_github_picker_api):
+        client.put("/connectors/github/credentials", json={"fields": {"token": "ghp_secret"}})
+        response = client.get("/connectors/github/commits", params={"repo": "octo/app", "branch": "dev"})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"commits": [{"sha": "d" * 40, "title": "Tune", "date": "2026-11-02T00:00:00Z"}]}
+
+
+@pytest.mark.usefixtures("vault_key", "generic_oauth_off")
 def test_github_picker_tree_lists_files_and_folders() -> None:
     """The tree keeps files and folders, skips submodules, and reports truncation."""
     client, _ = _make_client()
@@ -536,6 +555,7 @@ def test_github_picker_needs_a_linked_account() -> None:
         ("/connectors/github/repos", {}),
         ("/connectors/github/branches", {"repo": "octo/app"}),
         ("/connectors/github/tree", {"repo": "octo/app"}),
+        ("/connectors/github/commits", {"repo": "octo/app"}),
         ("/connectors/github/file", {"repo": "octo/app", "path": "README.md"}),
     ):
         response = client.get(path, params=params)
@@ -635,6 +655,8 @@ _OAUTH_APP_SETTINGS = {
     "onedrive": "microsoft",
     "azure_blob": "microsoft",
     "github": "github",
+    "gitlab": "gitlab",
+    "bitbucket": "bitbucket",
     "notion": "notion",
     "supabase": "supabase",
 }

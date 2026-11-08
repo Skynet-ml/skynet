@@ -8,9 +8,19 @@ import tarfile
 import zipfile
 from pathlib import Path
 
+import httpx
 import pytest
 
-from ..github_repo import GITHUB_HOST, RepoFetchError, fetch_snapshot, git_auth_env, patched_repo_zip
+from .. import transport
+from ..github_repo import (
+    GITHUB_HOST,
+    RepoFetchError,
+    commit_summary,
+    fetch_snapshot,
+    git_auth_env,
+    list_commits,
+    patched_repo_zip,
+)
 
 _GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
 
@@ -110,3 +120,28 @@ def test_patched_zip_refuses_a_patch_that_does_not_apply(tmp_path: Path) -> None
 
     with pytest.raises(RepoFetchError):
         patched_repo_zip("acme/app", pinned, patch, None, tmp_path / "work", remote=f"file://{app}")
+
+
+def test_list_commits_reads_the_branch_and_trims_titles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GitHub commits keep the first message line and the committer date."""
+    sha = "d" * 40
+    body = [{"sha": sha, "commit": {"message": "Add cases\n\nbody", "committer": {"date": "2026-11-03T09:00:00Z"}}}]
+    seen: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        """Record the request and return one page of commits."""
+        seen.append(request)
+        return httpx.Response(200, json=body)
+
+    monkeypatch.setattr(transport, "CLIENT", httpx.Client(transport=httpx.MockTransport(answer)))
+    assert list_commits("tok", "acme/app", "dev") == [
+        {"sha": sha, "title": "Add cases", "date": "2026-11-03T09:00:00Z"}
+    ]
+    assert seen[0].url.path == "/repos/acme/app/commits"
+    assert seen[0].url.params["sha"] == "dev"
+
+
+def test_commit_summary_drops_a_commit_without_an_id() -> None:
+    """A commit with no id is skipped, and a long title is cut."""
+    assert commit_summary(None, "msg", None) is None
+    assert len(commit_summary("e" * 40, "x" * 500, None)["title"]) == 120

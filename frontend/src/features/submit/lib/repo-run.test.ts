@@ -73,6 +73,22 @@ test("a repository Skynet created is flagged in the run request", () => {
   assert.equal(repoRunRequest(repoState(), options)?.target.repo?.created_by_skynet, undefined);
 });
 
+test("a GitLab subgroup path is valid and submits with its host", () => {
+  const state = repoState();
+  state.task.repo = { ...state.task.repo!, provider: "gitlab", repository: "team/sub/site" };
+  assert.equal(repoIssue(state.task.repo), null);
+  const request = repoRunRequest(state, options);
+  assert.ok(request);
+  assert.equal(request.target.repo?.provider, "gitlab");
+  assert.equal(request.target.repo?.repository, "team/sub/site");
+});
+
+test("a subgroup path is not a GitHub or Bitbucket repository", () => {
+  const repo = { ...repoState().task.repo!, repository: "team/sub/site" };
+  assert.notEqual(repoIssue(repo), null);
+  assert.notEqual(repoIssue({ ...repo, provider: "bitbucket" }), null);
+});
+
 test("Auto on a repository sends the auto strategy", () => {
   const state = repoState();
   state.optimizer.choice = "auto";

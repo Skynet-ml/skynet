@@ -129,6 +129,7 @@
     "connectors.import_too_large": "ファイルサイズが大きすぎるためインポートできません(上限は{max_mb} MBです)。",
     "connectors.invalid_credentials": "認証情報が拒否されました。内容を確認してもう一度お試しください。",
     "connectors.invalid_ref": "この場所は無効です。リストからファイルを選択してください。",
+    "connectors.other_repo_host": "{host} は {expected} ではありません。Skynet が接続できるのは gitlab.com と Bitbucket Cloud だけで、セルフマネージドのサーバーには接続できません。リポジトリの {expected} のアドレスを使うか、リポジトリを {expected} に移してください。",
     "connectors.not_connected": "先に{provider}アカウントを接続してください。",
     "connectors.not_found": "{provider}でその項目が見つからないか、アカウントにアクセス権がありません。",
     "connectors.oauth_failed": "{provider}のサインインが完了しませんでした。もう一度お試しください。",

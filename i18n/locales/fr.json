@@ -129,6 +129,7 @@
     "connectors.import_too_large": "Ce fichier est trop volumineux pour être importé (la limite est de {max_mb} Mo).",
     "connectors.invalid_credentials": "Ces identifiants ont été refusés. Vérifiez-les et réessayez.",
     "connectors.invalid_ref": "Cet emplacement n'est pas valide. Choisissez un fichier dans la liste.",
+    "connectors.other_repo_host": "{host} n'est pas {expected}. Skynet se connecte uniquement à gitlab.com et à Bitbucket Cloud, pas aux serveurs autogérés. Utilisez l'adresse du dépôt sur {expected}, ou déplacez le dépôt vers {expected}.",
     "connectors.not_connected": "Connectez d'abord votre compte {provider}.",
     "connectors.not_found": "Cet élément est introuvable sur {provider}, ou votre compte n'y a pas accès.",
     "connectors.oauth_failed": "La connexion avec {provider} n'a pas abouti. Réessayez.",

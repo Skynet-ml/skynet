@@ -29,6 +29,7 @@ import {
   type UnifiedRunRequest,
 } from "@/shared/types/unified-run";
 import type { TokenSourceMode } from "@/features/billing";
+import type { RepoHost } from "@/shared/lib/api";
 import type { RunFloor } from "./run-floor";
 
 export type WizardStepId = "task" | "inputs" | "optimizer" | "metric";
@@ -42,11 +43,13 @@ export const DEFAULT_UNIFIED_SPLIT: Readonly<SplitFractions> = {
 export const DEFAULT_METRIC_TIMEOUT_SECONDS = 60;
 
 /**
- * A GitHub repository the run optimizes in place of an artifact. Empty
+ * A GitHub, GitLab or Bitbucket repository the run optimizes in place of an artifact. Empty
  * branch and commit mean the default branch's head; an empty setup command
  * is inferred by the server's setup check.
  */
 export interface RepoDraft {
+  /** The host that holds the repository; a draft saved before other hosts existed is GitHub. */
+  provider?: RepoHost;
   repository: string;
   branch: string;
   commit: string;
@@ -243,7 +246,6 @@ const hasModel = (config: ModelConfig | null): boolean => Boolean(config?.name.t
  * move on. There is no separate confirm: Continue is the confirmation.
  */
 export function taskIssue(task: TaskSlice): string | null {
-  if (!task.objective.trim()) return "submit.v2.task.issue.objective";
   if (task.repo) return repoIssue(task.repo) ?? secretsIssue(task.repo.secrets ?? []);
   if (!task.artifactKind) return "submit.v2.task.issue.kind";
   const v = task.startingVersion;
@@ -254,6 +256,13 @@ export function taskIssue(task: TaskSlice): string | null {
 }
 
 export const REPO_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+// The server's REPO_PATH_PATTERN: a GitLab project can sit in nested subgroups.
+const GITLAB_PATH_PATTERN = /^[A-Za-z0-9_.-]{1,255}(\/[A-Za-z0-9_.-]{1,255}){1,20}$/;
+
+/** True when ``repository`` is a full path the host accepts: ``owner/name``, or GitLab's ``group/sub/name``. */
+export function isRepoPath(repository: string, host: RepoHost = "github"): boolean {
+  return (host === "gitlab" ? GITLAB_PATH_PATTERN : REPO_NAME_PATTERN).test(repository);
+}
 const COMMIT_SHA = /^[0-9a-f]{40}$/i;
 // The server's REPO_SECRET_NAME_PATTERN and REPO_SECRET_HOST_PATTERN
 // (backend/core/models/blackbox.py); keep them in step.
@@ -293,7 +302,7 @@ function secretIssue(secret: RepoSecretDraft): string | null {
  * browser and hardening need only the repository fields.
  */
 export function repoIssue(repo: RepoDraft): string | null {
-  if (!REPO_NAME_PATTERN.test(repo.repository.trim())) return "submit.v2.repo.issue.repository";
+  if (!isRepoPath(repo.repository.trim(), repo.provider)) return "submit.v2.repo.issue.repository";
   if (repo.commit.trim() && !COMMIT_SHA.test(repo.commit.trim()))
     return "submit.v2.repo.issue.commit";
   if (!repo.editablePaths.some((path) => path.trim())) return "submit.v2.repo.issue.paths";

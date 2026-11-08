@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from ...connectors import github
+from ...connectors import github, repo_hosts
 from .kickoff import fits_kickoff_budget, measured_bytes
 
 logger = logging.getLogger(__name__)
@@ -173,7 +173,7 @@ def compact_tree(entries: list[dict[str, Any]], editable_paths: list[str]) -> st
 class RepoBrowser:
     """The repository a black-box job optimizes, browsable by the agent's tools.
 
-    Built once per request from the caller's token and the GitHub tree; the
+    Built once per request from the caller's token and the host's tree; the
     tool methods emit ``tool_start`` / ``tool_end`` so the chat shows what
     the agent opened.
     """
@@ -187,18 +187,21 @@ class RepoBrowser:
         editable_paths: list[str],
         entries: list[dict[str, Any]],
         truncated: bool,
+        provider: str = github.PROVIDER,
     ) -> None:
         """Hold the repository, its tree and the caller's token.
 
         Args:
-            token: The caller's GitHub token.
-            repository: ``owner/name``.
+            token: The caller's token for the repository host.
+            repository: The repository path, ``owner/name`` or a GitLab group path.
             branch: Branch name; empty for the default branch.
             editable_paths: Paths the optimizer may change.
-            entries: The tree from GitHub.
-            truncated: Whether GitHub cut the tree short.
+            entries: The tree from the host.
+            truncated: Whether the host cut the tree short.
+            provider: The repository host.
         """
         self.repository = repository
+        self.provider = provider
         self.branch = branch
         self.editable_paths = editable_paths
         self._token = token
@@ -211,6 +214,20 @@ class RepoBrowser:
         self._key_files: list[tuple[str, str]] = []
         # What the agent opened, in order, so its result can name the files.
         self.files_read: list[str] = []
+
+    def _read_text(self, path: str, limit: int) -> tuple[str, bool]:
+        """Read one text file from the repository host.
+
+        Args:
+            path: File path inside the repository.
+            limit: Most bytes to return.
+
+        Returns:
+            The text and whether it was cut at ``limit``.
+        """
+        if self.provider == github.PROVIDER:
+            return github.read_text_file(self._token, self.repository, self.branch, path, limit)
+        return repo_hosts.host(self.provider).read_text_file(self._token, self.repository, self.branch, path, limit)
 
     def bind(self, emit: Callable[[dict], None]) -> None:
         """Route tool events to this turn's stream and reset the per-turn read count.
@@ -278,7 +295,7 @@ class RepoBrowser:
         """
         for path in self._key_file_paths():
             try:
-                text, truncated = github.read_text_file(self._token, self.repository, self.branch, path, KEY_FILE_BYTES)
+                text, truncated = self._read_text(path, KEY_FILE_BYTES)
             except Exception as exc:  # an unreadable file leaves the opening look without it
                 logger.info("Key file %s unreadable in %s: %s", path, self.repository, exc)
                 continue
@@ -358,7 +375,7 @@ class RepoBrowser:
             """Fetch the file."""
             if clean not in self._files:
                 return f"No file named {clean!r} in the repository. Check the tree for the exact path."
-            text, truncated = github.read_text_file(self._token, self.repository, self.branch, clean, FILE_BYTES)
+            text, truncated = self._read_text(clean, FILE_BYTES)
             lines = text.splitlines()
             cut = truncated or len(lines) > FILE_LINES
             body = "\n".join(f"{i + 1:>4} {line}" for i, line in enumerate(lines[:FILE_LINES]))

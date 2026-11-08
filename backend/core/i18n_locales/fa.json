@@ -129,6 +129,7 @@
     "connectors.import_too_large": "این فایل برای وارد کردن خیلی بزرگ است (حداکثر مجاز {max_mb} مگابایت است).",
     "connectors.invalid_credentials": "این اطلاعات ورود رد شد. آن‌ها را بررسی کنید و دوباره امتحان کنید.",
     "connectors.invalid_ref": "این مسیر معتبر نیست. یک فایل از فهرست انتخاب کنید.",
+    "connectors.other_repo_host": "{host} همان {expected} نیست. Skynet فقط به gitlab.com و Bitbucket Cloud وصل می‌شود، نه به سرورهای خودمدیریت. از نشانی مخزن در {expected} استفاده کنید یا مخزن را به {expected} منتقل کنید.",
     "connectors.not_connected": "ابتدا حساب {provider} خود را متصل کنید.",
     "connectors.not_found": "این مورد در {provider} پیدا نشد یا حساب شما به آن دسترسی ندارد.",
     "connectors.oauth_failed": "ورود با {provider} کامل نشد. دوباره امتحان کنید.",

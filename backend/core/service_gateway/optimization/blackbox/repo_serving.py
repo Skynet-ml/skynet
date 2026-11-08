@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from ....config import settings
+from ....connectors import repo_hosts
 from ....connectors.github_repo import RepoFetchError, fetch_snapshot, github_token
 from ....constants import TOKEN_SOURCE_MANAGED
 from ....models.common import ModelConfig
@@ -110,7 +111,11 @@ def serve_payload(
     stored = job_data["payload"]
     repo = stored["target"]["repo"]
     payload: dict[str, Any] = {
-        "repo": {"repository": repo["repository"], "commit": repo["commit"]},
+        "repo": {
+            "repository": repo["repository"],
+            "commit": repo["commit"],
+            **repo_hosts.git_kwargs(repo_hosts.provider_of(repo)),
+        },
         "patch": patch,
         "inputs": inputs,
         "token_source": stored.get("token_source") or TOKEN_SOURCE_MANAGED,
@@ -146,16 +151,20 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
         ConstraintsError: When the commit's ``optimize.toml`` is invalid, so the hidden list is unknown,
             or a hidden path is, holds or lies inside a link, so the strip cannot remove it.
     """
+    repo = payload["repo"]
+    provider = repo_hosts.provider_of(repo)
     token = None
     if engine is not None and owner:
         try:
-            token = github_token(engine, owner)
+            if provider == repo_hosts.DEFAULT_PROVIDER:
+                token = github_token(engine, owner)
+            else:
+                token = repo_hosts.host_token(engine, owner, provider)
         except RepoFetchError:
             token = None
     workdir = Path(tempfile.mkdtemp(prefix="repo-serve-"))
     try:
-        repo = payload["repo"]
-        snapshot = fetch_snapshot(repo["repository"], repo["commit"], token, workdir)
+        snapshot = fetch_snapshot(repo["repository"], repo["commit"], token, workdir, **repo_hosts.git_kwargs(provider))
         hidden = hidden_repo_paths(read_constraints(snapshot.archive))
         # Run start refuses these links since SKY-387; a run started before that can still reach serving.
         if linked := linked_hidden_paths(snapshot.archive, hidden):

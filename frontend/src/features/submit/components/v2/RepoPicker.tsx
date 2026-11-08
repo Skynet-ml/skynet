@@ -7,15 +7,88 @@ import { Button } from "@/shared/ui/primitives/button";
 import { SearchField } from "@/shared/ui/search-field";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { InlineErrorRow } from "@/shared/ui/inline-error-row";
-import { listGithubRepositories, type GithubRepository } from "@/shared/lib/api";
+import { Bitbucket, GitLab } from "@/shared/ui/brand-marks";
+import { listGithubRepositories, REPO_HOST_NAMES, type GithubRepository, type RepoHost } from "@/shared/lib/api";
 import { formatRelativeTime } from "@/shared/lib/formatters";
 import { msg } from "@/shared/lib/messages";
+import { userErrorMessage } from "@/shared/lib/user-error";
 import { cn } from "@/shared/lib/utils";
 
-import { REPO_NAME_PATTERN } from "../../lib/wizard-v2";
+import { isRepoPath } from "../../lib/wizard-v2";
 
-// Long enough that typing a whole owner/name asks GitHub once, not per key.
+// Long enough that typing a whole owner/name asks the host once, not per key.
 const LOOKUP_DELAY_MS = 400;
+// A pasted web URL or ``git@host:path`` clone address. The server turns it into
+// a path, or answers ``other_repo_host`` for a self-managed server.
+const SCP_URL = /^[\w.-]+@([^:/\s]+):(.+)$/;
+const CLOUD_HOSTS: Record<RepoHost, string> = { github: "github.com", gitlab: "gitlab.com", bitbucket: "bitbucket.org" };
+// Page words that older GitLab URLs put after the project without ``/-/``.
+const LEGACY_PAGES = new Set(["tree", "blob", "commits", "merge_requests"]);
+
+/**
+ * True when ``text`` is a GitLab or Bitbucket URL on another server than the
+ * cloud host, as the server's ``repo_path`` compares it. Such a URL must not
+ * match a listed repository of the same path; the server names the host.
+ */
+export function isOtherHostUrl(text: string, host: RepoHost): boolean {
+  if (host === "github") return false;
+  let name: string;
+  const scp = SCP_URL.exec(text);
+  if (scp) name = scp[1] ?? "";
+  else if (text.includes("://")) {
+    try {
+      name = new URL(text).hostname;
+    } catch {
+      return false;
+    }
+  } else return false;
+  name = name.toLowerCase().replace(/\.$/, "");
+  return name !== CLOUD_HOSTS[host] && name !== `www.${CLOUD_HOSTS[host]}`;
+}
+
+/**
+ * The repository path in a pasted GitLab or Bitbucket URL, lower case, as the
+ * server's ``repo_path`` reads it; null when ``text`` is not a URL.
+ */
+export function pastedRepoPath(text: string, host: RepoHost): string | null {
+  if (host === "github") return null;
+  let path: string;
+  const scp = SCP_URL.exec(text);
+  if (scp) path = scp[2] ?? "";
+  else if (text.includes("://")) {
+    try {
+      path = decodeURIComponent(new URL(text).pathname);
+    } catch {
+      return null;
+    }
+  } else return null;
+  let parts = (path.split("/-/")[0] ?? "").replace(/^\/+|\/+$/g, "").split("/");
+  if (host === "bitbucket") parts = parts.slice(0, 2);
+  else {
+    // A project has a group and a name, so only a third or later segment starts a page.
+    const page = parts.findIndex((part, index) => index >= 2 && LEGACY_PAGES.has(part));
+    if (page !== -1) parts = parts.slice(0, page);
+  }
+  return parts.join("/").replace(/^\/+|\/+$/g, "").replace(/\.git$/, "").toLowerCase();
+}
+
+/** The host's logo: GitHub's icon, or the GitLab or Bitbucket mark at ``size`` pixels. */
+export function HostMark({ host, size, className }: { host: RepoHost; size: number; className?: string }) {
+  if (host === "github") return <GithubLogo className={className} aria-hidden="true" />;
+  const Mark = host === "gitlab" ? GitLab.Mark : Bitbucket.Mark;
+  return (
+    <span className={cn("inline-flex items-center justify-center", className)} aria-hidden="true">
+      <Mark size={size} />
+    </span>
+  );
+}
+
+/** The reason a typed repository lookup failed, read from the API error's code and params. */
+export function RepoLookupError({ error }: { error: unknown }) {
+  // userErrorMessage logs the raw error, so it runs once per error, not per render.
+  const message = useMemo(() => userErrorMessage(error), [error]);
+  return <InlineErrorRow message={message} />;
+}
 
 function VisibilityBadge({ repo }: { repo: GithubRepository }) {
   const Icon = repo.private ? Lock : Globe;
@@ -90,28 +163,32 @@ export function RepoRowsSkeleton() {
 
 /**
  * The linked account's repositories as a searchable list. Typing a full
- * ``owner/name`` the list lacks asks GitHub for it, so a public repository
+ * ``owner/name`` the list lacks asks the host for it, so a public repository
  * outside the account can still be chosen.
  */
 export function RepoPicker({
   value,
   onPick,
+  host = "github",
 }: {
   value: string;
   onPick: (repo: GithubRepository) => void;
+  host?: RepoHost;
 }) {
   const [repos, setRepos] = useState<GithubRepository[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [search, setSearch] = useState("");
   const [offer, setOffer] = useState<GithubRepository | null>(null);
+  const [lookupError, setLookupError] = useState<unknown>(null);
   // A chosen repository folds the list away until the user asks to change it.
-  const [browsing, setBrowsing] = useState(() => !REPO_NAME_PATTERN.test(value.trim()));
+  const [browsing, setBrowsing] = useState(() => !isRepoPath(value.trim(), host));
 
   useEffect(() => {
     let cancelled = false;
     setFailed(false);
-    listGithubRepositories("")
+    setRepos(null);
+    listGithubRepositories("", host)
       .then((res) => {
         if (!cancelled) setRepos(res.repositories);
       })
@@ -121,42 +198,46 @@ export function RepoPicker({
     return () => {
       cancelled = true;
     };
-  }, [attempt]);
+  }, [attempt, host]);
 
-  const needle = search.trim().toLowerCase();
+  const otherHost = isOtherHostUrl(search.trim(), host);
+  const pasted = pastedRepoPath(search.trim(), host);
+  const target = pasted ?? search.trim().toLowerCase();
   const matches = useMemo(
-    () => (repos ?? []).filter((repo) => repo.full_name.toLowerCase().includes(needle)),
-    [repos, needle],
+    () => (otherHost ? [] : (repos ?? []).filter((repo) => repo.full_name.toLowerCase().includes(target))),
+    [repos, target, otherHost],
   );
-  const listed = matches.some((repo) => repo.full_name.toLowerCase() === needle);
-  const lookup = repos !== null && REPO_NAME_PATTERN.test(search.trim()) && !listed;
+  const listed = matches.some((repo) => repo.full_name.toLowerCase() === target);
+  const lookup = repos !== null && !listed && (pasted !== null || isRepoPath(search.trim(), host));
 
   useEffect(() => {
     setOffer(null);
+    setLookupError(null);
     if (!lookup) return;
     let cancelled = false;
     const timer = window.setTimeout(() => {
-      listGithubRepositories(search.trim())
+      listGithubRepositories(search.trim(), host)
         .then((res) => {
-          const found = res.repositories.find((repo) => repo.full_name.toLowerCase() === needle);
+          const found = res.repositories.find((repo) => repo.full_name.toLowerCase() === target);
           if (!cancelled) setOffer(found ?? null);
         })
-        .catch(() => {
-          // The list still works; only the typed repository goes unoffered.
+        .catch((err: unknown) => {
+          // The list still works; the row tells why the typed repository is not offered.
+          if (!cancelled) setLookupError(err);
         });
     }, LOOKUP_DELAY_MS);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [lookup, search, needle]);
+  }, [lookup, search, target, host]);
 
   const current = (repos ?? []).find((repo) => repo.full_name === value.trim()) ?? null;
 
   if (!browsing && value.trim()) {
     return (
       <div className="flex items-start gap-3 rounded-xl border border-border bg-background p-3">
-        <GithubLogo className="mt-0.5 size-5 shrink-0 text-[#3D2E22]" aria-hidden="true" />
+        <HostMark host={host} size={20} className="mt-0.5 size-5 shrink-0 text-[#3D2E22]" />
         {current ? (
           <RepoSummary repo={current} />
         ) : (
@@ -212,10 +293,12 @@ export function RepoPicker({
         />
       ) : repos === null ? (
         <RepoRowsSkeleton />
+      ) : lookupError !== null && rows.length === 0 ? (
+        <RepoLookupError error={lookupError} />
       ) : rows.length === 0 ? (
         <p className="rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
           {lookup
-            ? msg("submit.blackbox.repo.repos_lookup")
+            ? msg("submit.blackbox.repo.repos_lookup", { provider: REPO_HOST_NAMES[host] })
             : msg("submit.blackbox.repo.repos_empty")}
         </p>
       ) : (
@@ -238,10 +321,7 @@ export function RepoPicker({
                       : "border-border bg-background hover:border-[#C8A882] hover:bg-muted/30",
                   )}
                 >
-                  <GithubLogo
-                    className="mt-0.5 size-4 shrink-0 text-muted-foreground"
-                    aria-hidden="true"
-                  />
+                  <HostMark host={host} size={16} className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
                   <RepoSummary repo={repo} />
                 </button>
               </li>

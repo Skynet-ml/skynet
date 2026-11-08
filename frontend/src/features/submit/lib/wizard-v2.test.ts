@@ -332,7 +332,6 @@ test("before the task and inputs exist the Optimizer step has one placeholder sc
 test("the task step clears once nothing is missing, with no separate confirm", () => {
   const empty = initialWizardV2State().task;
   assert.equal("confirmed" in empty, false);
-  assert.equal(taskIssue(empty), "submit.v2.task.issue.objective");
   const withObjective = { ...empty, objective: "Summarize tickets" };
   assert.equal(empty.artifactKind, "dspy_program");
   assert.equal(taskIssue({ ...withObjective, artifactKind: null }), "submit.v2.task.issue.kind");

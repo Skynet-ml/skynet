@@ -1,7 +1,8 @@
-"""Fetch a GitHub repository at one commit and pack its tree for a sandboxed run.
+"""Fetch a hosted repository at one commit and pack its tree for a sandboxed run.
 
 Runs only in the trusted parent: sandboxes have no network, so the parent
-clones with the user's GitHub connection and ships the tree in as text. The
+clones with the user's GitHub, GitLab or Bitbucket connection and ships the
+tree in as text. The
 token travels through git's environment config, never its argument list, so
 it stays out of process listings and error messages.
 """
@@ -20,14 +21,23 @@ from typing import Any
 from urllib.parse import quote
 
 from ..api.errors import DomainError
-from .github import API_URL, PROVIDER, _headers, oauth_app
+from .github import API_URL, PROVIDER, _headers, _repo_url, _split_repo, oauth_app
 from .oauth import current_oauth_token
 from .transport import get_json
 from .vault import ConnectorVault
 
 GITHUB_HOST = "https://github.com"
+# Clone origin and the basic-auth user name each host documents for a token over HTTPS.
+GIT_HOSTS = {
+    "github": (GITHUB_HOST, "x-access-token"),
+    "gitlab": ("https://gitlab.com", "oauth2"),
+    "bitbucket": ("https://bitbucket.org", "x-token-auth"),
+}
 # Compressed tree ceiling: the tree crosses into each sandbox as base64 text.
 MAX_ARCHIVE_BYTES = 200 * 1024 * 1024
+# The commit picker shows only recent work; an older commit is rarely the start of a run.
+COMMIT_LIMIT = 20
+COMMIT_TITLE_MAX = 120
 _GIT_TIMEOUT_SECONDS = 900.0
 
 
@@ -90,19 +100,85 @@ def resolve_commit(token: str, repository: str, branch: str | None) -> str:
         raise RepoFetchError(f"GitHub could not find {repository} at '{branch or 'its default branch'}'.") from error
 
 
-def git_auth_env(token: str | None, host: str = GITHUB_HOST) -> dict[str, str]:
+def commit_summary(sha: Any, message: Any, date: Any) -> dict[str, Any] | None:
+    """Shape one commit for the commit picker.
+
+    Args:
+        sha: The commit id from the host.
+        message: The full commit message.
+        date: The commit time as an ISO 8601 string.
+
+    Returns:
+        ``{"sha", "title", "date"}`` with the message's first line, or
+        ``None`` when the host sent no usable id.
+    """
+    if not isinstance(sha, str) or not sha:
+        return None
+    title = message.strip().split("\n", 1)[0].strip() if isinstance(message, str) else ""
+    return {"sha": sha, "title": title[:COMMIT_TITLE_MAX], "date": date if isinstance(date, str) else None}
+
+
+def list_commits(token: str | None, repository: str, branch: str) -> list[dict[str, Any]]:
+    """List the newest commits of a GitHub branch, newest first.
+
+    Args:
+        token: GitHub token with read access to the repository.
+        repository: ``owner/name``.
+        branch: Branch name; empty for the default branch.
+
+    Returns:
+        Up to :data:`COMMIT_LIMIT` summaries, see :func:`commit_summary`.
+    """
+    owner, name = _split_repo(repository)
+    params: dict[str, Any] = {"per_page": COMMIT_LIMIT}
+    if branch.strip():
+        params["sha"] = branch.strip()
+    body = get_json(f"{_repo_url(owner, name)}/commits", provider=PROVIDER, headers=_headers(token), params=params)
+    commits = []
+    for item in body if isinstance(body, list) else []:
+        detail = item.get("commit") if isinstance(item, dict) else None
+        detail = detail if isinstance(detail, dict) else {}
+        committer = detail.get("committer") if isinstance(detail.get("committer"), dict) else {}
+        summary = commit_summary(
+            item.get("sha") if isinstance(item, dict) else None, detail.get("message"), committer.get("date")
+        )
+        if summary:
+            commits.append(summary)
+    return commits[:COMMIT_LIMIT]
+
+
+def git_host(provider: str) -> tuple[str, str]:
+    """Look up the clone origin and git user name of a repository host.
+
+    Args:
+        provider: ``github``, ``gitlab`` or ``bitbucket``.
+
+    Returns:
+        ``(origin, user)``.
+
+    Raises:
+        RepoFetchError: When the provider is not a repository host.
+    """
+    try:
+        return GIT_HOSTS[provider]
+    except KeyError as error:
+        raise RepoFetchError(f"'{provider}' is not a supported repository host.") from error
+
+
+def git_auth_env(token: str | None, host: str = GITHUB_HOST, user: str = "x-access-token") -> dict[str, str]:
     """Build the environment that authenticates git and Git LFS against ``host``.
 
     Args:
-        token: GitHub token; ``None`` for a public or local remote.
+        token: Host token; ``None`` for a public or local remote.
         host: Origin the header is scoped to, so other remotes never see it.
+        user: Basic-auth user name the host expects with a token.
 
     Returns:
         Environment entries to add to every git command.
     """
     environment = {"GIT_TERMINAL_PROMPT": "0", "GIT_LFS_SKIP_SMUDGE": "1"}
     if token:
-        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        basic = base64.b64encode(f"{user}:{token}".encode()).decode()
         environment.update(
             {
                 "GIT_CONFIG_COUNT": "1",
@@ -203,15 +279,17 @@ def fetch_snapshot(
     workdir: Path,
     *,
     remote: str | None = None,
+    provider: str = "github",
 ) -> RepoSnapshot:
     """Clone ``repository`` at ``commit`` with submodules and LFS content, then pack the tree.
 
     Args:
         repository: ``owner/name``.
         commit: The pinned 40-character commit id.
-        token: GitHub token; ``None`` for a public or local remote.
+        token: Host token; ``None`` for a public or local remote.
         workdir: Empty parent-owned folder the clone and archive go in.
         remote: Clone URL override, used by tests with a local repository.
+        provider: Repository host, see :data:`GIT_HOSTS`.
 
     Returns:
         The packed snapshot.
@@ -220,11 +298,12 @@ def fetch_snapshot(
         RepoFetchError: When the clone fails, LFS content cannot be fetched,
             or the packed tree is larger than the limit.
     """
-    environment = git_auth_env(token)
+    origin, user = git_host(provider)
+    environment = git_auth_env(token, origin, user)
     checkout = workdir / "checkout"
     checkout.mkdir(parents=True)
     _git(["init", "--quiet"], checkout, environment)
-    _git(["remote", "add", "origin", remote or f"{GITHUB_HOST}/{repository}.git"], checkout, environment)
+    _git(["remote", "add", "origin", remote or f"{origin}/{repository}.git"], checkout, environment)
     _git(["fetch", "--quiet", "--depth", "1", "origin", commit], checkout, environment)
     _git(["-c", "advice.detachedHead=false", "checkout", "--quiet", "FETCH_HEAD"], checkout, environment)
     _git(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"], checkout, environment)
@@ -254,6 +333,7 @@ def patched_repo_zip(
     workdir: Path,
     *,
     remote: str | None = None,
+    provider: str = "github",
 ) -> Path:
     """Clone ``repository`` at ``commit``, apply ``patch`` and zip the resulting tree.
 
@@ -264,9 +344,10 @@ def patched_repo_zip(
         repository: ``owner/name``.
         commit: The pinned commit id.
         patch: A unified diff against ``commit``; empty for the commit as is.
-        token: GitHub token; ``None`` for a public or local remote.
+        token: Host token; ``None`` for a public or local remote.
         workdir: Empty folder the clone and zip go in.
         remote: Clone URL override, used by tests with a local repository.
+        provider: Repository host, see :data:`GIT_HOSTS`.
 
     Returns:
         The zip, its entries under one ``<name>/`` folder.
@@ -275,11 +356,12 @@ def patched_repo_zip(
         RepoFetchError: When the clone fails, the patch does not apply, or the
             zip is larger than the limit.
     """
-    environment = git_auth_env(token)
+    origin, user = git_host(provider)
+    environment = git_auth_env(token, origin, user)
     checkout = workdir / "checkout"
     checkout.mkdir(parents=True)
     _git(["init", "--quiet"], checkout, environment)
-    _git(["remote", "add", "origin", remote or f"{GITHUB_HOST}/{repository}.git"], checkout, environment)
+    _git(["remote", "add", "origin", remote or f"{origin}/{repository}.git"], checkout, environment)
     _git(["fetch", "--quiet", "--depth", "1", "origin", commit], checkout, environment)
     _git(["-c", "advice.detachedHead=false", "checkout", "--quiet", "FETCH_HEAD"], checkout, environment)
     if patch.strip():

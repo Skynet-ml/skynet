@@ -34,6 +34,7 @@ from ..billing.protected_credentials import (
 from ..billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, proposer_hosts
 from ..brand import APP_NAME
 from ..config import settings
+from ..connectors import repo_hosts
 from ..connectors.github_publish import (
     BEST_BRANCH,
     HardeningSummary,
@@ -245,11 +246,18 @@ def stage_repository(
         vault=ProtectedCredentialVault(engine=engine),
         saved=SavedSecretStore(engine),
     )
-    token = github_token(engine, username)
-    commit = repo.get("commit") or resolve_commit(token, repo["repository"], repo.get("branch"))
+    provider = repo_hosts.provider_of(repo)
+    if provider == repo_hosts.DEFAULT_PROVIDER:
+        token = github_token(engine, username)
+        commit = repo.get("commit") or resolve_commit(token, repo["repository"], repo.get("branch"))
+    else:
+        token = repo_hosts.host_token(engine, username, provider)
+        commit = repo.get("commit") or repo_hosts.resolve_commit(
+            provider, token, repo["repository"], repo.get("branch")
+        )
     workdir = Path(tempfile.mkdtemp(prefix="app-repo-"))
     try:
-        snapshot = fetch_snapshot(repo["repository"], commit, token, workdir)
+        snapshot = fetch_snapshot(repo["repository"], commit, token, workdir, **repo_hosts.git_kwargs(provider))
         environment = effective_environment(
             read_constraints(snapshot.archive),
             approved_editable=repo["editable_paths"],
@@ -947,7 +955,9 @@ def publish_improvement(
         run_url = f"{app_url.rstrip('/')}/optimizations/{optimization_id}"
         suite, hardening = _hardening_suite(staged, engine, username, payload.get("hardening_job_id"), repo)
         try:
-            token = github_token(engine, username)
+            provider = repo_hosts.provider_of(repo)
+            github_host = provider == repo_hosts.DEFAULT_PROVIDER
+            token = github_token(engine, username) if github_host else repo_hosts.host_token(engine, username, provider)
             push_version(
                 repo["repository"],
                 repo["commit"],
@@ -955,16 +965,19 @@ def publish_improvement(
                 branch,
                 f"Apply the best version from {APP_NAME} run {optimization_id[:12]}",
                 token,
+                **repo_hosts.git_kwargs(provider),
             )
-            change = open_pull_request(
-                token,
-                repo["repository"],
-                head=branch,
-                base_branch=repo.get("branch"),
-                title=f"{APP_NAME}: optimized version from run {optimization_id[:12]}",
-                body=_description(result, patch, run_url),
-                hardening=hardening,
-            )
+            change_fields = {
+                "head": branch,
+                "base_branch": repo.get("branch"),
+                "title": f"{APP_NAME}: optimized version from run {optimization_id[:12]}",
+                "body": _description(result, patch, run_url),
+                "hardening": hardening,
+            }
+            if github_host:
+                change = open_pull_request(token, repo["repository"], **change_fields)
+            else:
+                change = repo_hosts.open_change(provider, token, repo["repository"], **change_fields)
             outcome = {"url": change.url, "number": change.number, "branch": change.branch, "draft": change.draft}
         except (RepoFetchError, RepoPublishError) as error:
             outcome = {"error": str(error)}

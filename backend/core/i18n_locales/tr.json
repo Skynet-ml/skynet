@@ -129,6 +129,7 @@
     "connectors.import_too_large": "Bu dosya içe aktarılamayacak kadar büyük (sınır {max_mb} MB).",
     "connectors.invalid_credentials": "Bu kimlik bilgileri reddedildi. Kontrol edip tekrar deneyin.",
     "connectors.invalid_ref": "Bu konum geçerli değil. Listeden bir dosya seçin.",
+    "connectors.other_repo_host": "{host}, {expected} değil. Skynet yalnızca gitlab.com ve Bitbucket Cloud'a bağlanır, kendi yönettiğiniz sunuculara bağlanmaz. Deponun {expected} adresini kullanın veya depoyu {expected} üzerine taşıyın.",
     "connectors.not_connected": "Önce {provider} hesabınızı bağlayın.",
     "connectors.not_found": "Bu öğe {provider} üzerinde bulunamadı veya hesabınızın erişimi yok.",
     "connectors.oauth_failed": "{provider} ile oturum açma tamamlanamadı. Tekrar deneyin.",

@@ -26,7 +26,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from ...config import settings
-from ...connectors import github, registry
+from ...connectors import github, github_repo, registry, repo_hosts
 from ...connectors import huggingface as hf
 from ...connectors import oauth as generic_oauth
 from ...connectors.github_create_repo import RepoCreateError, create_repository_with_files
@@ -49,6 +49,9 @@ GITHUB_SCORER_MAX_CHARS = 200_000
 GITHUB_CASES_MAX_ITEMS = 10_000
 # The cases file goes into one git commit from memory; this keeps the push small.
 GITHUB_CASES_MAX_BYTES = 5 * 1024 * 1024
+# GitLab paths may hold subgroups, so they can be longer than GitHub's ``owner/name``.
+REPO_PATH_MAX = 1024
+OtherRepoHost = Literal["gitlab", "bitbucket"]
 
 # Some providers resolve a folder's web link with its own API call (OneDrive),
 # so it runs beside the listing instead of after it.
@@ -214,6 +217,20 @@ class GithubBranchesResponse(BaseModel):
 
     default_branch: str | None = None
     branches: list[str]
+
+
+class RepoCommit(BaseModel):
+    """One recent commit of a repository branch."""
+
+    sha: str
+    title: str = ""
+    date: str | None = None
+
+
+class RepoCommitsResponse(BaseModel):
+    """A branch's newest commits, newest first."""
+
+    commits: list[RepoCommit]
 
 
 class GithubTreeEntry(BaseModel):
@@ -662,6 +679,8 @@ def create_connectors_router(*, job_store) -> APIRouter:
                 "github": settings.github_oauth_redirect_uri,
                 "notion": settings.notion_oauth_redirect_uri,
                 "supabase": settings.supabase_oauth_redirect_uri,
+                "gitlab": settings.gitlab_oauth_redirect_uri,
+                "bitbucket": settings.bitbucket_oauth_redirect_uri,
             }.get(provider)
         return configured or str(request.url_for("connector_oauth_callback", provider=provider))
 
@@ -778,6 +797,30 @@ def create_connectors_router(*, job_store) -> APIRouter:
         return GithubBranchesResponse(**github.list_branches(_secret(user.username, github.PROVIDER), repo))
 
     @router.get(
+        "/connectors/github/commits",
+        response_model=RepoCommitsResponse,
+        summary="List a GitHub branch's newest commits",
+    )
+    def list_github_commits(
+        user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
+        repo: str = Query(min_length=3, max_length=201),
+        branch: str = Query(default="", max_length=255),
+    ) -> RepoCommitsResponse:
+        """List a branch's newest commits, for pinning the commit a run starts from.
+
+        Args:
+            user: Authenticated caller.
+            repo: The repository as ``owner/name``.
+            branch: Branch name; empty for the default branch.
+
+        Returns:
+            Up to 20 commits, newest first.
+        """
+        secret = _secret(user.username, github.PROVIDER)
+        commits = github_repo.list_commits(secret.access_token, repo, branch)
+        return RepoCommitsResponse(commits=[RepoCommit(**c) for c in commits])
+
+    @router.get(
         "/connectors/github/tree",
         response_model=GithubTreeResponse,
         summary="List every file and folder of a GitHub repository at a branch",
@@ -827,6 +870,138 @@ def create_connectors_router(*, job_store) -> APIRouter:
         """
         secret = _secret(user.username, github.PROVIDER)
         return GithubFileResponse(**github.read_repo_file(secret.access_token, repo, ref, path, GITHUB_FILE_MAX_BYTES))
+
+    # Declared after the GitHub routes, so ``/connectors/github/...`` keeps its own handlers.
+    @router.get(
+        "/connectors/{provider}/repos",
+        response_model=GithubRepositoriesResponse,
+        summary="List the caller's GitLab or Bitbucket repositories for the repository picker",
+        tags=["agent"],
+    )
+    def list_host_repositories(
+        provider: OtherRepoHost,
+        user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
+        search: str = Query(default="", max_length=200),
+    ) -> GithubRepositoriesResponse:
+        """List repositories the linked GitLab or Bitbucket account can see, most recently updated first.
+
+        Args:
+            provider: ``gitlab`` or ``bitbucket``.
+            user: Authenticated caller.
+            search: Optional path filter; a full path also offers that public repository.
+
+        Returns:
+            The repositories in the same shape as the GitHub list.
+        """
+        module = repo_hosts.host(provider)
+        repos = module.list_repositories(_secret(user.username, provider), search)
+        return GithubRepositoriesResponse(repositories=[GithubRepository(**r) for r in repos])
+
+    @router.get(
+        "/connectors/{provider}/branches",
+        response_model=GithubBranchesResponse,
+        summary="List a GitLab or Bitbucket repository's branches",
+    )
+    def list_host_branches(
+        provider: OtherRepoHost,
+        user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
+        repo: str = Query(min_length=3, max_length=REPO_PATH_MAX),
+    ) -> GithubBranchesResponse:
+        """List a repository's branch names with its default branch.
+
+        Args:
+            provider: ``gitlab`` or ``bitbucket``.
+            user: Authenticated caller.
+            repo: The repository path; GitLab paths may include subgroups.
+
+        Returns:
+            The default branch and up to 300 branch names.
+        """
+        module = repo_hosts.host(provider)
+        return GithubBranchesResponse(**module.list_branches(_secret(user.username, provider), repo))
+
+    @router.get(
+        "/connectors/{provider}/commits",
+        response_model=RepoCommitsResponse,
+        summary="List a GitLab or Bitbucket branch's newest commits",
+    )
+    def list_host_commits(
+        provider: OtherRepoHost,
+        user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
+        repo: str = Query(min_length=3, max_length=REPO_PATH_MAX),
+        branch: str = Query(default="", max_length=255),
+    ) -> RepoCommitsResponse:
+        """List a branch's newest commits, for pinning the commit a run starts from.
+
+        Args:
+            provider: ``gitlab`` or ``bitbucket``.
+            user: Authenticated caller.
+            repo: The repository path; GitLab paths may include subgroups.
+            branch: Branch name; empty for the default branch.
+
+        Returns:
+            Up to 20 commits, newest first.
+        """
+        module = repo_hosts.host(provider)
+        commits = module.list_commits(_secret(user.username, provider), repo, branch)
+        return RepoCommitsResponse(commits=[RepoCommit(**c) for c in commits])
+
+    @router.get(
+        "/connectors/{provider}/tree",
+        response_model=GithubTreeResponse,
+        summary="List every file and folder of a GitLab or Bitbucket repository at a branch",
+    )
+    def host_repository_tree(
+        provider: OtherRepoHost,
+        user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
+        repo: str = Query(min_length=3, max_length=REPO_PATH_MAX),
+        branch: str = Query(default="", max_length=255),
+    ) -> GithubTreeResponse:
+        """List a repository's whole tree, for choosing the paths an agent may edit.
+
+        Args:
+            provider: ``gitlab`` or ``bitbucket``.
+            user: Authenticated caller.
+            repo: The repository path.
+            branch: Branch name or commit id; empty for the default branch.
+
+        Returns:
+            Every file and folder path, and whether the listing stopped early.
+        """
+        module = repo_hosts.host(provider)
+        return GithubTreeResponse(**module.repository_tree(_secret(user.username, provider), repo, branch))
+
+    @router.get(
+        "/connectors/{provider}/file",
+        response_model=GithubFileResponse,
+        summary="Read one file of a GitLab or Bitbucket repository at a branch or commit",
+    )
+    def host_repository_file(
+        provider: OtherRepoHost,
+        user: Annotated[AuthenticatedUser, Depends(get_authenticated_user)],
+        repo: str = Query(min_length=3, max_length=REPO_PATH_MAX),
+        path: str = Query(min_length=1, max_length=github.FILE_PATH_MAX),
+        ref: str = Query(default="", max_length=255),
+    ) -> GithubFileResponse:
+        """Read one repository file for the read-only code view.
+
+        Args:
+            provider: ``gitlab`` or ``bitbucket``.
+            user: Authenticated caller.
+            repo: The repository path.
+            path: File path inside the repository.
+            ref: Branch name or commit id; empty for the default branch.
+
+        Returns:
+            The file's text, or flags for a binary, oversized or missing file.
+
+        Raises:
+            DomainError: 400 ``connectors.invalid_ref`` for a path that leaves
+                the repository or points into ``.git``.
+        """
+        module = repo_hosts.host(provider)
+        secret = _secret(user.username, provider)
+        return GithubFileResponse(**module.read_repo_file(secret.access_token, repo, ref, path, GITHUB_FILE_MAX_BYTES))
 
     @router.put(
         "/connectors/{provider}/credentials",

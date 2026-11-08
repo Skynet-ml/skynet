@@ -326,6 +326,7 @@
     "connectors.file_unsupported": "That file can't be read as a table. Supported formats: CSV, TSV, JSON, JSONL and Parquet.",
     "connectors.import_too_large": "That file is too large to import (the limit is {max_mb} MB).",
     "connectors.invalid_ref": "That location isn't valid. Pick a file from the list.",
+    "connectors.other_repo_host": "{host} is not {expected}. Skynet connects gitlab.com and Bitbucket Cloud only, not self-managed servers. Use the repository's {expected} address, or move the repository to {expected}.",
     "connectors.picker_unavailable": "Choosing files from Google isn't set up on this deployment.",
     "connectors.picker_needs_oauth": "Choosing files needs a {provider} account linked with Google sign-in.",
     "connectors.unknown_provider": "Unknown connector: {provider}.",

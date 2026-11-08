@@ -129,6 +129,7 @@
     "connectors.import_too_large": "呢個檔案太大，冇辦法匯入（上限係 {max_mb} MB）。",
     "connectors.invalid_credentials": "呢啲登入資料唔啱，請檢查吓再試多次。",
     "connectors.invalid_ref": "呢個位置無效，請喺清單入面揀一個檔案。",
+    "connectors.other_repo_host": "{host} 唔係 {expected}。Skynet 只會連接 gitlab.com 同 Bitbucket Cloud，唔會連接自行管理嘅伺服器。請用儲存庫喺 {expected} 嘅地址，或者將儲存庫搬去 {expected}。",
     "connectors.not_connected": "請先連接你嘅 {provider} 帳戶。",
     "connectors.not_found": "喺 {provider} 度搵唔到呢個項目，又或者你嘅帳戶冇權限存取。",
     "connectors.oauth_failed": "{provider} 登入未完成，請再試多次。",

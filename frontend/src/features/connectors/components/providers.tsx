@@ -14,7 +14,9 @@ import {
 } from "@lobehub/icons";
 import {
   BigQuery,
+  Bitbucket,
   Braintrust,
+  GitLab,
   GoogleDrive,
   GoogleSheets,
   Kaggle,
@@ -87,7 +89,16 @@ export const PROVIDER_GROUPS: Array<{
   { category: "hubs", providers: ["huggingface", "kaggle"] },
   {
     category: "files",
-    providers: ["google_drive", "onedrive", "github", "s3", "gcs", "azure_blob"],
+    providers: [
+      "google_drive",
+      "onedrive",
+      "github",
+      "gitlab",
+      "bitbucket",
+      "s3",
+      "gcs",
+      "azure_blob",
+    ],
   },
   { category: "docs", providers: ["google_sheets", "notion"] },
   {
@@ -100,10 +111,19 @@ export const PROVIDER_GROUPS: Array<{
 /** Every provider, in display order. */
 export const ALL_PROVIDERS: ConnectorProvider[] = PROVIDER_GROUPS.flatMap((g) => g.providers);
 
+// GitLab and Bitbucket hold repositories to optimize, not data files, so the import menu skips them.
+const REPO_ONLY_PROVIDERS: ReadonlySet<ConnectorProvider> = new Set(["gitlab", "bitbucket"]);
+
 /** Providers that browse through the generic import dialog (Hugging Face has its own). */
 export const BROWSE_PROVIDERS: ConnectorProvider[] = ALL_PROVIDERS.filter(
-  (id) => id !== "huggingface",
+  (id) => id !== "huggingface" && !REPO_ONLY_PROVIDERS.has(id),
 );
+
+/** The sections of the import menu: every provider that has data files to import. */
+export const IMPORT_GROUPS = PROVIDER_GROUPS.map((group) => ({
+  ...group,
+  providers: group.providers.filter((id) => !REPO_ONLY_PROVIDERS.has(id)),
+}));
 
 /** Translated heading of one section. */
 export function categoryLabel(category: ProviderCategory): string {
@@ -209,6 +229,44 @@ export function providerMeta(id: ConnectorProvider): ProviderMeta {
         credentialsHelp: msg("connectors.github.credentials_help"),
         helpUrl: "https://github.com/settings/tokens",
         helpUrlLabel: "github.com/settings/tokens",
+        fields: [
+          {
+            key: "token",
+            label: msg("connectors.field.token"),
+            placeholder: msg("connectors.field.token_placeholder"),
+            secret: true,
+            required: true,
+          },
+        ],
+      };
+    case "gitlab":
+      return {
+        ...generic(id, "files", msg("connectors.gitlab.name")),
+        blurb: msg("connectors.gitlab.blurb"),
+        Avatar: GitLab.Avatar,
+        Mark: GitLab.Mark,
+        oauthButton: msg("connectors.gitlab.oauth_button"),
+        credentialsHelp: msg("connectors.gitlab.credentials_help"),
+        helpUrl: "https://gitlab.com/-/user_settings/personal_access_tokens",
+        helpUrlLabel: "gitlab.com/-/user_settings/personal_access_tokens",
+        fields: [
+          {
+            key: "token",
+            label: msg("connectors.field.token"),
+            placeholder: msg("connectors.field.token_placeholder"),
+            secret: true,
+            required: true,
+          },
+        ],
+      };
+    case "bitbucket":
+      return {
+        ...generic(id, "files", msg("connectors.bitbucket.name")),
+        blurb: msg("connectors.bitbucket.blurb"),
+        Avatar: Bitbucket.Avatar,
+        Mark: Bitbucket.Mark,
+        oauthButton: msg("connectors.bitbucket.oauth_button"),
+        credentialsHelp: msg("connectors.bitbucket.credentials_help"),
         fields: [
           {
             key: "token",

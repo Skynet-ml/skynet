@@ -129,6 +129,7 @@
     "connectors.import_too_large": "هذا الملف كبير جدًا ليتم استيراده (الحد الأقصى هو {max_mb} ميغابايت).",
     "connectors.invalid_credentials": "تم رفض بيانات الاعتماد هذه. تحقق منها وحاول مرة أخرى.",
     "connectors.invalid_ref": "هذا المسار غير صالح. اختر ملفًا من القائمة.",
+    "connectors.other_repo_host": "{host} ليس {expected}. يتصل Skynet بـ gitlab.com وBitbucket Cloud فقط، وليس بالخوادم المُدارة ذاتيًا. استخدم عنوان المستودع على {expected}، أو انقل المستودع إلى {expected}.",
     "connectors.not_connected": "اربط حساب {provider} أولاً.",
     "connectors.not_found": "لم يتم العثور على هذا العنصر في {provider}، أو لا يملك حسابك إذن الوصول إليه.",
     "connectors.oauth_failed": "لم تكتمل عملية تسجيل الدخول عبر {provider}. حاول مرة أخرى.",

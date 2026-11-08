@@ -19,6 +19,8 @@ PROVIDER_LABELS = {
     "huggingface": "Hugging Face",
     "google_sheets": "Google Sheets",
     "github": "GitHub",
+    "gitlab": "GitLab",
+    "bitbucket": "Bitbucket",
     "s3": "Amazon S3",
     "gcs": "Google Cloud Storage",
     "azure_blob": "Azure Blob Storage",

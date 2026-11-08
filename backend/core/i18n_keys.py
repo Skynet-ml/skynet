@@ -97,6 +97,7 @@ class I18nKey(StrEnum):
     CONNECTORS_OAUTH_FAILED = 'connectors.oauth_failed'
     CONNECTORS_OAUTH_NOT_CONFIGURED = 'connectors.oauth_not_configured'
     CONNECTORS_OAUTH_STATE_INVALID = 'connectors.oauth_state_invalid'
+    CONNECTORS_OTHER_REPO_HOST = 'connectors.other_repo_host'
     CONNECTORS_PICKER_NEEDS_OAUTH = 'connectors.picker_needs_oauth'
     CONNECTORS_PICKER_UNAVAILABLE = 'connectors.picker_unavailable'
     CONNECTORS_PROVIDER_ERROR = 'connectors.provider_error'

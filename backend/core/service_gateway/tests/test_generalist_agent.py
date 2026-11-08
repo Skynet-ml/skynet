@@ -434,6 +434,7 @@ def test_artifact_screen_offers_listing_and_creating_repositories() -> None:
     assert screen_tools(allowed, WizardState(wizard_screen="artifact")) == {
         "update_wizard_state",
         "list_github_repositories_connectors_github_repos_get",
+        "list_host_repositories_connectors",
         "create_github_repository_connectors_github_repos_post",
     }
 

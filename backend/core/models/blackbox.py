@@ -133,6 +133,8 @@ class BlackboxBudget(BaseModel):
 
 REPO_SECRET_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"
 REPO_NAME_PATTERN = r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$"
+# GitLab nests projects in subgroups (``group/sub/project``); GitHub and Bitbucket use two parts.
+REPO_PATH_PATTERN = r"^[A-Za-z0-9_.-]{1,255}(/[A-Za-z0-9_.-]{1,255}){1,20}$"
 REPO_COMMIT_PATTERN = r"^[0-9a-f]{40}$"
 # An exact host, or ``*.`` and a suffix of two or more labels: ``*.com``
 # would let a secret go to any host of a top-level domain.
@@ -204,8 +206,8 @@ class BlackboxRepoSecret(BaseModel):
 # run: its finished run pushes every version to its own branch and moves
 # ``skynet/best`` to the winner, instead of opening a pull request.
 class BlackboxRepoSource(BaseModel):
-    provider: Literal["github"] = "github"
-    repository: str = Field(pattern=REPO_NAME_PATTERN)
+    provider: Literal["github", "gitlab", "bitbucket"] = "github"
+    repository: str = Field(pattern=REPO_PATH_PATTERN, max_length=1024)
     branch: str | None = Field(default=None, min_length=1, max_length=255)
     commit: str | None = Field(default=None, pattern=REPO_COMMIT_PATTERN)
     editable_paths: list[str] = Field(min_length=1, max_length=200)
@@ -226,8 +228,13 @@ class BlackboxRepoSource(BaseModel):
 
         Raises:
             ValueError: When a path is absolute, empty, or walks out with ``..``,
-                when two secrets share a name, or when a binding name is invalid.
+                when two secrets share a name, when a binding name is invalid,
+                or when the repository path does not fit its host.
         """
+        if self.provider != "gitlab" and not re.fullmatch(REPO_NAME_PATTERN, self.repository):
+            raise ValueError("The repository must be written as 'owner/name'.")
+        if self.created_by_skynet and self.provider != "github":
+            raise ValueError("Skynet creates new repositories only on GitHub.")
         cleaned: list[str] = []
         for raw in self.editable_paths:
             path = raw.strip().replace("\\", "/")
