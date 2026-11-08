@@ -4933,6 +4933,22 @@ wheels = [
 ]
 
 [[package]]
+name = "sail"
+version = "0.17.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cloudpickle" },
+    { name = "protobuf" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e4/92/cc69de8f4a1d9dd5b6121825ef753a5ed40ad8a892fc9dec3e2f1b7190a7/sail-0.17.2-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:cea39148d409f1d36860bb8fa44ea90dc4a79b2a15154bb4ed7c3faa13459dbe", size = 16564618, upload-time = "2026-10-29T17:14:35.146Z" },
+    { url = "https://files.pythonhosted.org/packages/7b/8a/1b76cd1972c3f5c8bb279d1b4620a3fe47a45fa248e6132bce38059b7e8f/sail-0.17.2-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:9f6a320b6177bf0cb074e920abd45b2339e42390883ec82a060f9fda9e3290c1", size = 15780974, upload-time = "2026-10-29T17:14:38.086Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/4c/d9a4fd77d26a905f7eb616e62f872af3a27f5351c422f1fcea40ac8077cd/sail-0.17.2-cp39-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:a59baed157d0cf3dc8c9d9c51c844c246290a10ded6fb86cf8cd2fcf3174a7cc", size = 17768261, upload-time = "2026-10-29T17:14:40.93Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/b0/4047875ffcaeac4f73b4a167716f24c89ff73e6a65ca9a30c758b0c62087/sail-0.17.2-cp39-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:662a5b48ebd9b16e8fe52c01c70e1bb584e0859bc36b89597665a8834ff97545", size = 17481178, upload-time = "2026-10-29T17:14:43.239Z" },
+    { url = "https://files.pythonhosted.org/packages/67/f4/0e6323cc809bd20308830d2e404077ec7b1ff7a65e5070eaf7d758f4e99c/sail-0.17.2-cp39-abi3-win_amd64.whl", hash = "sha256:0b880861234a5aadb4ca619cdd8b82f6756909781758e5ac8db492a42ac576c5", size = 14178923, upload-time = "2026-10-29T17:14:45.533Z" },
+]
+
+[[package]]
 name = "scalar-fastapi"
 version = "1.8.2"
 source = { registry = "https://pypi.org/simple" }
@@ -5196,6 +5212,9 @@ render = [
 runloop = [
     { name = "runloop-api-client" },
 ]
+sail = [
+    { name = "sail" },
+]
 training = [
     { name = "httpx" },
     { name = "transformers" },
@@ -5248,6 +5267,7 @@ requires-dist = [
     { name = "requests", specifier = ">=2.31" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11" },
     { name = "runloop-api-client", marker = "extra == 'runloop'", specifier = ">=3.0.0,<4" },
+    { name = "sail", marker = "extra == 'sail'", specifier = ">=0.13.0" },
     { name = "scalar-fastapi", specifier = ">=1.8" },
     { name = "scipy", specifier = ">=1.15.3" },
     { name = "sentry-sdk", specifier = ">=2.67,<3" },
@@ -5261,7 +5281,7 @@ requires-dist = [
     { name = "webauthn", specifier = ">=2.5,<3" },
     { name = "xlrd", specifier = ">=2" },
 ]
-provides-extras = ["dev", "load", "training", "render", "langsmith", "e2b", "daytona", "modal", "runloop", "kernel", "mosaic"]
+provides-extras = ["dev", "load", "training", "render", "langsmith", "e2b", "daytona", "modal", "runloop", "kernel", "mosaic", "sail"]
 
 [[package]]
 name = "sniffio"
