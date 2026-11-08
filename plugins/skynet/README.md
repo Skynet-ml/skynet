@@ -1,6 +1,6 @@
 # Skynet plugin
 
-Skynet improves a DSPy program against a metric that you write. This plugin
+Skynet improves your code against a metric that you write. This plugin
 connects Claude and Codex to your Skynet account. Your assistant can check a run spec before it runs, start a run with a
 spending limit that you approve, follow the run, show the result, list your
 runs and stop a run.

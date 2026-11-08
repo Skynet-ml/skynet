@@ -8,7 +8,7 @@ Skynet은 사용자의 데이터와 채점기를 기준으로 리포지토리를
 
 ### Skynet은 무엇을 최적화할 수 있나요?
 
-Skynet은 Optimize Anything입니다. 모든 실행은 리포지토리를 최적화합니다. 이미 가지고 있는 GitHub 리포지토리를 사용하거나, 작업과 데이터로 Skynet이 새 리포지토리를 만들게 하세요. 코드는 어떤 라이브러리든 사용할 수 있습니다. 예를 들어 DSPy도 사용할 수 있습니다.
+Skynet은 Optimize Anything입니다. 모든 실행은 리포지토리를 최적화합니다. 이미 가지고 있는 GitHub 리포지토리를 사용하거나, 작업과 데이터로 Skynet이 새 리포지토리를 만들게 하세요. 코드는 어떤 라이브러리든 사용할 수 있습니다.
 
 모든 엔진은 리포지토리에서 작동합니다: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler, ShinkaEvolve.
 

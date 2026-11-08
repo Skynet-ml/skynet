@@ -1,11 +1,11 @@
 ---
 name: optimize
-description: Optimize a DSPy program against a metric with Skynet. Use when the user asks to improve, tune or optimize a DSPy program or its instructions against test cases or a score, or asks to run a Skynet optimization. Builds the run spec, checks it with check_run, gets the user's agreement to a spending limit, starts the run with start_run, follows it with get_run and presents the result.
+description: Optimize code against a metric with Skynet. Use when the user asks to improve, tune or optimize code or its instructions against test cases or a score, or asks to run a Skynet optimization. Builds the run spec, checks it with check_run, gets the user's agreement to a spending limit, starts the run with start_run, follows it with get_run and presents the result.
 ---
 
 # Optimize with Skynet
 
-Skynet improves a DSPy program against a metric that the user owns. It needs
+Skynet improves code against a metric that the user owns. It needs
 the Skynet MCP server of this plugin. The first tool call asks the user to sign in to their Skynet account.
 
 The tools:
