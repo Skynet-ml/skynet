@@ -2,33 +2,35 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import os
+import shutil
 import stat
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
 
 from core.models.blackbox import BLACKBOX_HARNESS_CODE_PUPPY, BLACKBOX_HARNESSES, BLACKBOX_TARGET_AGENT, BlackboxTarget
 
+from .. import repo_tree
 from ..harness import GatewayConfig, build_launch, launch_payload, pinned_harness_check
-from ..harness_bridge import parse_output, parse_plain_output
+from ..harness_bridge import parse_output, parse_plain_output, workspace_files
 from ..harnesses import REGISTRY
-from ..harnesses.code_puppy import (
-    CODE_PUPPY_CONFIG_FILE,
-    CODE_PUPPY_MODELS_FILE,
-    CODE_PUPPY_USAGE_FILE,
-    CODE_PUPPY_VERSION,
-)
+from ..harnesses.code_puppy import CODE_PUPPY_MODELS_FILE, CODE_PUPPY_VERSION
 
 _GATEWAY = GatewayConfig(url="https://gw.example/v1", api_key="gateway-token")
 _RELAY = "http://127.0.0.1:3210/v1"
 _PROVIDER_KEYS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY")
 # Synthetic one-shot transcript in the shape of ``code-puppy --prompt`` plain output.
 _RECORDED_STDOUT = "\nI read solution.py and fixed the off-by-one error.\n\nThe answer is 42.\n\n"
-# Stand-in for Code Puppy: it records its call, checks the seeded config, and
-# writes the usage file unless FAKE_FAIL is set (like a swallowed model error).
+# Stand-in for Code Puppy: it records its call and seeded config, writes a
+# session and a cache under its XDG dirs like the real CLI, makes one code
+# change when the workspace has ``main.py``, and writes the usage file unless
+# FAKE_FAIL is set (like a swallowed model error).
 _FAKE_CODE_PUPPY = """#!/bin/sh
 {
   printf 'ARGS'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\\n'
@@ -39,9 +41,15 @@ _FAKE_CODE_PUPPY = """#!/bin/sh
   printf 'NO_VERSION_UPDATE=%s\\n' "$NO_VERSION_UPDATE"
   printf 'CFG=%s\\n' "$XDG_CONFIG_HOME/code_puppy/puppy.cfg"
   printf 'MODELS=%s\\n' "$XDG_DATA_HOME/code_puppy/extra_models.json"
+  printf 'MODEL_URL=%s\\n' "$(grep -o '"url": "[^"]*"' "$XDG_DATA_HOME/code_puppy/extra_models.json")"
+  printf 'CFG_BEGIN\\n'; cat "$XDG_CONFIG_HOME/code_puppy/puppy.cfg"; printf 'CFG_END\\n'
 } >> "$FAKE_LOG"
 [ -s "$XDG_CONFIG_HOME/code_puppy/puppy.cfg" ] || exit 3
 [ -s "$XDG_DATA_HOME/code_puppy/extra_models.json" ] || exit 4
+mkdir -p "$XDG_DATA_HOME/code_puppy/sessions" "$XDG_CACHE_HOME/code_puppy"
+printf 'USER: the prompt\\n' > "$XDG_DATA_HOME/code_puppy/sessions/s1.json"
+printf 'cache' > "$XDG_CACHE_HOME/code_puppy/c.bin"
+if [ -f main.py ]; then echo 'print(2)' > main.py; fi
 printf '%s' "$FAKE_ANSWER"
 if [ -z "$FAKE_FAIL" ]; then
   while [ "$#" -gt 0 ]; do
@@ -63,7 +71,13 @@ def _target() -> BlackboxTarget:
 
 
 def _run_with_fake_code_puppy(
-    tmp_path: Path, *, protected: bool, prompt: str = "Fix `solution.py` and say $(echo done).", fail: bool = False
+    tmp_path: Path,
+    *,
+    protected: bool,
+    prompt: str = "Fix `solution.py` and say $(echo done).",
+    fail: bool = False,
+    reasoning_effort: str | None = None,
+    workspace: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     """Run the built Code Puppy command in a scratch workspace against a fake ``code-puppy`` binary.
 
@@ -72,12 +86,17 @@ def _run_with_fake_code_puppy(
         protected: Build the protected launch, with the sandbox-local relay set.
         prompt: Task prompt written to the prompt file.
         fail: Make the fake skip the usage file, as Code Puppy does after a model error.
+        reasoning_effort: The user's effort for the model.
+        workspace: An existing checkout to run in; a fresh folder when ``None``.
 
     Returns:
         The finished process, the fake binary's call log, and the workspace.
     """
-    launch = build_launch(_target(), _GATEWAY, protected=protected)
-    workspace = tmp_path / "work"
+    launch = build_launch(_target(), _GATEWAY, protected=protected, reasoning_effort=reasoning_effort)
+    if workspace is None:
+        workspace = tmp_path / "work"
+    else:
+        repo_tree.exclude_paths(workspace, workspace_files(launch_payload(launch)))
     for name, content in launch.files.items():
         path = workspace / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -140,8 +159,8 @@ def test_open_launch_installs_the_pin_and_sends_model_calls_only_to_the_gateway(
     assert _GATEWAY.url not in launch.run_command
     assert _GATEWAY.api_key not in launch.run_command
     assert (
-        'CODE_PUPPY_API_KEY="$APP_API_KEY" code-puppy --disable-ask-user-question '
-        f'--usage-file {CODE_PUPPY_USAGE_FILE} --model app --prompt "$_cp_prompt" < /dev/null'
+        'CODE_PUPPY_API_KEY="$APP_API_KEY" code-puppy --yolo true --disable-ask-user-question '
+        '--usage-file "$_cp_dir/usage.json" --model app --prompt "$_cp_prompt" < /dev/null'
     ) in launch.run_command
     assert launch.env["APP_API_KEY"] == _GATEWAY.api_key
     assert {name: launch.env[name] for name in _PROVIDER_KEYS} == dict.fromkeys(_PROVIDER_KEYS, "")
@@ -163,20 +182,11 @@ def test_reasoning_effort_goes_to_the_config_only_when_code_puppy_knows_it(
     tmp_path: Path, effort: str | None, line: str | None
 ) -> None:
     """Write the user's effort to ``puppy.cfg`` for Code Puppy's effort names, and nothing otherwise."""
-    launch = build_launch(_target(), _GATEWAY, reasoning_effort=effort)
-    subprocess.run(
-        launch.run_command,
-        shell=True,
-        cwd=tmp_path,
-        env={"PATH": os.defpath},
-        capture_output=True,
-        timeout=10,
-        check=False,
-    )
-    cfg = (tmp_path / CODE_PUPPY_CONFIG_FILE).read_text()
-    assert cfg.startswith(
-        "[puppy]\npuppy_name = Puppy\nowner_name = User\nauto_save_session = false\nyolo_mode = true\n"
-    )
+    result, calls, _ = _run_with_fake_code_puppy(tmp_path, protected=False, reasoning_effort=effort)
+
+    assert result.returncode == 0, result.stderr
+    cfg = calls.split("CFG_BEGIN\n", 1)[1].split("CFG_END\n", 1)[0]
+    assert cfg.startswith("[puppy]\npuppy_name = Puppy\nowner_name = User\nauto_save_session = false\n")
     if line is None:
         assert "reasoning_effort" not in cfg
     else:
@@ -201,18 +211,20 @@ def test_protected_run_points_code_puppy_at_the_relay_and_returns_its_answer(tmp
 
     assert result.returncode == 0, result.stderr
     (run,) = [line for line in calls.splitlines() if line.startswith("ARGS")]
+    (usage_arg,) = [arg for arg in run.split("] [") if arg.endswith("/usage.json")]
     assert run == (
-        f"ARGS [--disable-ask-user-question] [--usage-file] [{CODE_PUPPY_USAGE_FILE}] [--model] [app] "
+        f"ARGS [--yolo] [true] [--disable-ask-user-question] [--usage-file] [{usage_arg}] [--model] [app] "
         "[--prompt] [Fix `solution.py` and say $(echo done).]"
     )
     assert "CODE_PUPPY_API_KEY=gateway-token" in calls
     for name in _PROVIDER_KEYS:
         assert f"{name}=\n" in calls
     assert "NO_VERSION_UPDATE=1" in calls
-    assert f"CFG={workspace}/{CODE_PUPPY_CONFIG_FILE}" in calls
-    assert f"MODELS={workspace}/{CODE_PUPPY_MODELS_FILE}" in calls
-    models = json.loads((workspace / CODE_PUPPY_MODELS_FILE).read_text())
-    assert models["app"]["custom_endpoint"]["url"] == _RELAY
+    for prefix in ("CFG=", "MODELS="):
+        (path,) = [line[len(prefix) :] for line in calls.splitlines() if line.startswith(prefix)]
+        assert not Path(path).resolve().is_relative_to(workspace.resolve())
+        assert not Path(path).exists(), "the run removes its temporary Code Puppy folder"
+    assert f'MODEL_URL="url": "{_RELAY}"' in calls
     assert parse_output("plain", result.stdout) == (
         "I read solution.py and fixed the off-by-one error.\n\nThe answer is 42.",
         {},
@@ -221,11 +233,10 @@ def test_protected_run_points_code_puppy_at_the_relay_and_returns_its_answer(tmp
 
 def test_open_run_keeps_the_gateway_url(tmp_path: Path) -> None:
     """Without a relay, leave the gateway URL the launch wrote in the model file."""
-    result, _, workspace = _run_with_fake_code_puppy(tmp_path, protected=False)
+    result, calls, _ = _run_with_fake_code_puppy(tmp_path, protected=False)
 
     assert result.returncode == 0, result.stderr
-    models = json.loads((workspace / CODE_PUPPY_MODELS_FILE).read_text())
-    assert models["app"]["custom_endpoint"]["url"] == _GATEWAY.url
+    assert f'MODEL_URL="url": "{_GATEWAY.url}"' in calls
 
 
 @pytest.mark.parametrize("prompt", ["/help me fix it", "  !rm -rf build"])
@@ -241,7 +252,7 @@ def test_run_fails_when_code_puppy_writes_no_usage_file(tmp_path: Path) -> None:
     result, _, _ = _run_with_fake_code_puppy(tmp_path, protected=False, fail=True)
 
     assert result.returncode == 1
-    assert f"{CODE_PUPPY_USAGE_FILE} was not written" in result.stderr
+    assert "its usage file was not written" in result.stderr
 
 
 def test_recorded_output_parses_to_the_answer_and_the_payload_names_the_plain_parser() -> None:
@@ -252,3 +263,40 @@ def test_recorded_output_parses_to_the_answer_and_the_payload_names_the_plain_pa
     )
     assert parse_plain_output("  \n") == (None, {})
     assert launch_payload(build_launch(_target(), _GATEWAY))["output_format"] == "plain"
+
+
+def _shipped_tree(tmp_path: Path) -> Path:
+    """Unpack a one-file shipped tree the way a repo-mode run does.
+
+    Args:
+        tmp_path: Test folder.
+
+    Returns:
+        The checkout.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tree:
+        data = b"print(1)\n"
+        info = tarfile.TarInfo("main.py")
+        info.size = len(data)
+        tree.addfile(info, io.BytesIO(data))
+    chunk = tmp_path / "chunk0"
+    chunk.write_text(base64.b64encode(buffer.getvalue()).decode("ascii"))
+    return repo_tree.unpack_tree([chunk], tmp_path / "repo")
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+@pytest.mark.parametrize("protected", [False, True])
+def test_version_patch_holds_only_the_code_change(tmp_path: Path, protected: bool) -> None:
+    """Code Puppy's config, sessions, caches, usage file and model file never join a repo-mode version patch."""
+    checkout = _shipped_tree(tmp_path)
+
+    result, _, _ = _run_with_fake_code_puppy(tmp_path, protected=protected, workspace=checkout)
+    assert result.returncode == 0, result.stderr
+    # The bridge writes and removes its own prompt file; only Code Puppy's files are under test.
+    shutil.rmtree(checkout / "task")
+
+    patch = repo_tree.version_patch(checkout)
+    assert [line for line in patch.splitlines() if line.startswith("diff --git")] == ["diff --git a/main.py b/main.py"]
+    assert "+print(2)" in patch
+    assert "the prompt" not in patch

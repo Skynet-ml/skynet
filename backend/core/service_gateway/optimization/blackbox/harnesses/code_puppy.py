@@ -3,7 +3,7 @@
 Adapted from Harbor 0.25.0 (Apache-2.0), agents/installed/code_puppy.py: the
 install through ``uv tool install``, the seeded ``puppy.cfg`` that skips the
 first-run prompts, the ``extra_models.json`` custom OpenAI endpoint that reads
-its key from ``CODE_PUPPY_API_KEY``, the ``--prompt`` headless run, the guard
+its key from ``CODE_PUPPY_API_KEY``, the ``--yolo true --prompt`` headless run, the guard
 for a prompt that starts with ``!`` or ``/``, and the usage-file check that
 turns a swallowed model error into a failed run. Skynet pins the release and
 always routes the custom endpoint to the model gateway.
@@ -25,16 +25,22 @@ CODE_PUPPY_VERSION = "0.0.967"
 # The pinned uv release installs the pinned package; Code Puppy needs Python < 3.15.
 CODE_PUPPY_UV_VERSION = "0.13.7"
 CODE_PUPPY_PYTHON = "3.13"
+# A protected run's relay rewrite expects the gateway URL in every launch file,
+# so the model file ships in the workspace (the bridge keeps launch files out of
+# the version patch). It holds no key.
+CODE_PUPPY_MODELS_FILE = ".app/code_puppy/extra_models.json"
 # Code Puppy reads ``$XDG_CONFIG_HOME/code_puppy/puppy.cfg`` and
-# ``$XDG_DATA_HOME/code_puppy/extra_models.json`` when those variables are set.
-# Both stay in the workspace and neither holds the key. Only the model file is
-# a launch file, because a protected run's relay rewrite expects the gateway
-# URL in every launch file; the run command writes ``puppy.cfg`` itself.
-_CONFIG_ROOT = ".app/code_puppy/config"
-_DATA_ROOT = ".app/code_puppy/data"
-CODE_PUPPY_CONFIG_FILE = f"{_CONFIG_ROOT}/code_puppy/puppy.cfg"
-CODE_PUPPY_MODELS_FILE = f"{_DATA_ROOT}/code_puppy/extra_models.json"
-CODE_PUPPY_USAGE_FILE = ".app/code_puppy/usage.json"
+# ``$XDG_DATA_HOME/code_puppy/extra_models.json``, and writes its sessions and
+# caches under the XDG dirs. A file it writes in the workspace joins the version
+# patch, which the parent scores and can open as a pull request, so the XDG
+# dirs and the usage file live in a temporary folder outside the workspace.
+_XDG_DIRS = {
+    "XDG_CONFIG_HOME": "config",
+    "XDG_DATA_HOME": "data",
+    "XDG_CACHE_HOME": "cache",
+    "XDG_STATE_HOME": "state",
+}
+_USAGE_FILE = '"$_cp_dir/usage.json"'
 # Code Puppy resolves a ``$NAME`` api_key of a custom endpoint from this variable.
 _CUSTOM_API_KEY_ENV = "CODE_PUPPY_API_KEY"
 # Code Puppy's effort names, written to puppy.cfg; anything else gets no setting.
@@ -94,7 +100,6 @@ def _puppy_cfg(reasoning_effort: str | None) -> str:
         "puppy_name = Puppy",
         "owner_name = User",
         "auto_save_session = false",
-        "yolo_mode = true",
     ]
     if reasoning_effort in _CODE_PUPPY_EFFORTS:
         lines.append(f"model_settings_{PROVIDER}_reasoning_effort = {reasoning_effort}")
@@ -135,18 +140,21 @@ def _code_puppy_launch(model: str, gateway: GatewayConfig, *, reasoning_effort: 
     Returns:
         The launch.
     """
+    xdg_exports = " ".join(f'{name}="$_cp_dir/{folder}"' for name, folder in _XDG_DIRS.items())
     run_command = (
         f"{_CODE_PUPPY_PATH}; "
-        f'export XDG_CONFIG_HOME="$PWD/{_CONFIG_ROOT}" XDG_DATA_HOME="$PWD/{_DATA_ROOT}"; '
-        'mkdir -p "$XDG_CONFIG_HOME/code_puppy" && '
-        f"printf '%s' {shlex.quote(_puppy_cfg(reasoning_effort))} > {CODE_PUPPY_CONFIG_FILE} || exit 1; "
-        f"rm -f {CODE_PUPPY_USAGE_FILE}; "
+        '_cp_dir="$(mktemp -d)" || exit 1; '
+        """trap 'rm -rf "$_cp_dir"' EXIT; """
+        f"export {xdg_exports}; "
+        'mkdir -p "$XDG_CONFIG_HOME/code_puppy" "$XDG_DATA_HOME/code_puppy" && '
+        f'cp {CODE_PUPPY_MODELS_FILE} "$XDG_DATA_HOME/code_puppy/extra_models.json" && '
+        f"printf '%s' {shlex.quote(_puppy_cfg(reasoning_effort))} > \"$XDG_CONFIG_HOME/code_puppy/puppy.cfg\" || exit 1; "
         f"{_FRAMED_PROMPT}"
-        f'{_CUSTOM_API_KEY_ENV}="${ENV_API_KEY}" code-puppy --disable-ask-user-question '
-        f'--usage-file {CODE_PUPPY_USAGE_FILE} --model {PROVIDER} --prompt "$_cp_prompt" < /dev/null; '
+        f'{_CUSTOM_API_KEY_ENV}="${ENV_API_KEY}" code-puppy --yolo true --disable-ask-user-question '
+        f'--usage-file {_USAGE_FILE} --model {PROVIDER} --prompt "$_cp_prompt" < /dev/null; '
         "_cp_status=$?; "
-        f"if [ ! -s {CODE_PUPPY_USAGE_FILE} ]; then "
-        f"echo 'code-puppy produced no result: {CODE_PUPPY_USAGE_FILE} was not written' >&2; exit 1; fi; "
+        f"if [ ! -s {_USAGE_FILE} ]; then "
+        "echo 'code-puppy produced no result: its usage file was not written' >&2; exit 1; fi; "
         "exit $_cp_status"
     )
     return HarnessLaunch(
