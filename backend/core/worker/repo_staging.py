@@ -206,6 +206,38 @@ def hidden_repo_paths(constraints: RepoConstraints | None) -> tuple[str, ...]:
     return scorer_only_paths(constraints)
 
 
+def hidden_path_labels(constraints: RepoConstraints | None) -> dict[str, str]:
+    """Name the ``optimize.toml`` setting that hides each scoring-side path (SKY-446).
+
+    A leak report then names the setting a user must fix, not always
+    ``[metric] files``. A path that two settings name keeps the first label.
+
+    Args:
+        constraints: The repository's validated constraints, or ``None`` without a file.
+
+    Returns:
+        Each hidden path from :func:`hidden_repo_paths`, mapped to its setting.
+    """
+    if constraints is None:
+        return {MetricSpec().exploits: "[metric] exploits"}
+    metric = constraints.metric
+    sources = [
+        (CONSTRAINTS_FILE, CONSTRAINTS_FILE),
+        *((path, "[metric] files") for path in metric.files),
+        (metric.exploits, "[metric] exploits"),
+        (metric.reference, "[metric] reference"),
+        (constraints.cases_file, "[data] cases"),
+        (constraints.metric_role.illegal_file, "[metric] illegal"),
+        (constraints.metric_role.mcp, "[metric] mcp"),
+    ]
+    labels: dict[str, str] = {}
+    for path, label in sources:
+        if path is not None:
+            labels.setdefault(path, label)
+    hidden = hidden_repo_paths(constraints)
+    return {path: label for path, label in labels.items() if path in hidden}
+
+
 def stage_repository(
     payload: dict[str, Any],
     *,
@@ -298,6 +330,7 @@ def stage_repository(
             hidden,
             place=sandbox_place(settings.local_mode),
             optional_paths=tuple(path for path in (metric.exploits, metric.reference) if path is not None),
+            labels=hidden_path_labels(environment.constraints),
         )
         if leaks:
             raise RepoGateError(leaks)

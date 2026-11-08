@@ -11,11 +11,13 @@ from pathlib import Path
 import pytest
 
 from .....constants import HARDENING_EXPLOITS_DIR
+from .. import repo_tree
 from ..repo_constraints import _DEFAULT_EXPLOITS
 from ..repo_tree import (
     EXPLOITS_DIR,
     apply_patch,
     archive_chunks,
+    case_insensitive,
     drop_paths,
     linked_hidden_paths,
     patch_paths,
@@ -356,6 +358,45 @@ def test_linked_hidden_paths_finds_each_link_that_would_leak(
 ) -> None:
     """The strip matches names, so a link at, above or inside a hidden path would leave its target visible."""
     assert linked_hidden_paths(_linked_tree(tmp_path / "tree.tgz", links), hidden) == linked
+
+
+def test_case_insensitive_reports_what_the_disk_does(tmp_path: Path) -> None:
+    """The probe agrees with a real lookup under another case, and leaves no file behind."""
+    (tmp_path / "probe.txt").write_text("x")
+    expected = (tmp_path / "PROBE.TXT").exists()
+
+    assert case_insensitive(tmp_path) is expected
+    assert [path.name for path in tmp_path.iterdir()] == ["probe.txt"]
+
+
+@pytest.mark.parametrize(("ignore_case", "kept"), [(True, set()), (False, {"Secret.txt", "Eval/score.py"})])
+def test_strip_archive_drops_case_variants_only_on_a_disk_that_ignores_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ignore_case: bool, kept: set[str]
+) -> None:
+    """On macOS, ``Secret.txt`` opens as ``secret.txt``, so the strip drops it there (SKY-446)."""
+    monkeypatch.setattr(repo_tree, "case_insensitive", lambda directory: ignore_case)
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        for name in ("Secret.txt", "Eval/score.py", "src/app.py"):
+            info = tarfile.TarInfo(name)
+            info.size = 1
+            packed.addfile(info, io.BytesIO(b"x"))
+
+    with tarfile.open(strip_archive(archive, ["secret.txt", "eval"], tmp_path / "agent.tgz")) as packed:
+        names = set(packed.getnames())
+
+    assert names == {"src/app.py", *kept}
+
+
+@pytest.mark.parametrize(("ignore_case", "linked"), [(True, ["scoring"]), (False, [])])
+def test_linked_hidden_paths_matches_case_variants_only_on_a_disk_that_ignores_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ignore_case: bool, linked: list[str]
+) -> None:
+    """A link named ``Scoring`` is the hidden ``scoring`` on a disk that ignores case."""
+    monkeypatch.setattr(repo_tree, "case_insensitive", lambda directory: ignore_case)
+    archive = _linked_tree(tmp_path / "tree.tgz", {"Scoring": (tarfile.SYMTYPE, "real")})
+
+    assert linked_hidden_paths(archive, ["scoring"]) == linked
 
 
 def test_drop_paths_removes_the_sections_that_touch_a_hidden_path() -> None:

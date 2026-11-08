@@ -12,7 +12,8 @@ import posixpath
 import re
 import subprocess
 import tarfile
-from collections.abc import Iterable, Iterator, Sequence
+import tempfile
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -296,13 +297,44 @@ def _member_path(name: str) -> str:
     return posixpath.normpath(name).lstrip("/") if name not in ("", ".", "./") else "."
 
 
+def case_insensitive(directory: Path) -> bool:
+    """Report whether the file system at ``directory`` finds a file under another case.
+
+    On such a disk, as on macOS in local mode, ``secret.txt`` opens
+    ``Secret.txt``, so a hidden path must match its case variants too.
+
+    Args:
+        directory: An existing folder on the disk to probe.
+
+    Returns:
+        Whether an upper-case name finds a probe file created in lower case.
+    """
+    with tempfile.NamedTemporaryFile(dir=directory, prefix="case-probe-") as probe:
+        return (directory / Path(probe.name).name.upper()).exists()
+
+
+def fold_case(ignore_case: bool) -> Callable[[str], str]:
+    """Return the function that makes two paths compare equal on the disk.
+
+    Args:
+        ignore_case: Whether the disk ignores case, from :func:`case_insensitive`.
+
+    Returns:
+        ``str.casefold`` when the disk ignores case, else a function that
+        returns the path unchanged.
+    """
+    return str.casefold if ignore_case else str
+
+
 def strip_archive(archive: Path, hidden_paths: Iterable[str], destination: Path) -> Path:
     """Pack a copy of a tree without the files the agent must never see.
 
     The metric files and the exploit folder stay in the trusted scorer's tree
     only, so the proposer cannot read the metric or the attacks on it (SKY-353).
     A hard link to a hidden file is dropped too, because it carries the file's
-    bytes under another name.
+    bytes under another name. On a disk that ignores case, a case variant of
+    a hidden path is dropped too, because the scorer reads it under the
+    hidden name (SKY-446).
 
     Args:
         archive: Packed full tree.
@@ -312,12 +344,13 @@ def strip_archive(archive: Path, hidden_paths: Iterable[str], destination: Path)
     Returns:
         ``destination``.
     """
-    hidden = [_member_path(path) for path in hidden_paths]
+    fold = fold_case(case_insensitive(destination.parent))
+    hidden = [fold(_member_path(path)) for path in hidden_paths]
     with tarfile.open(archive) as source, tarfile.open(destination, "w:gz") as target:
         for member in source:
-            if inside(_member_path(member.name), hidden):
+            if inside(fold(_member_path(member.name)), hidden):
                 continue
-            if member.islnk() and inside(_member_path(member.linkname), hidden):
+            if member.islnk() and inside(fold(_member_path(member.linkname)), hidden):
                 continue
             target.addfile(member, source.extractfile(member) if member.isreg() else None)
     return destination
@@ -330,7 +363,8 @@ def linked_hidden_paths(archive: Path, hidden_paths: Iterable[str]) -> list[str]
     below one, loses only the link, and its target with the scoring files
     stays. A symlink inside a hidden folder lets the scorer read a file
     outside it, possibly outside the tree. A hard link inside a hidden folder
-    to a file outside it leaves the same bytes under the visible name.
+    to a file outside it leaves the same bytes under the visible name. On a
+    disk that ignores case, names compare without case, as in the strip.
 
     Args:
         archive: Packed full tree.
@@ -339,18 +373,20 @@ def linked_hidden_paths(archive: Path, hidden_paths: Iterable[str]) -> list[str]
     Returns:
         Each hidden path that is, holds or lies below such a link, in order.
     """
+    fold = fold_case(case_insensitive(archive.parent))
     hidden = [_member_path(path) for path in hidden_paths]
+    folded = [fold(path) for path in hidden]
     symlinks: list[str] = []
     linked: set[str] = set()
     with tarfile.open(archive) as source:
         for member in source:
-            name = _member_path(member.name)
+            name = fold(_member_path(member.name))
             if member.issym():
                 symlinks.append(name)
-                linked.update(path for path in hidden if inside(name, [path]))
-            elif member.islnk() and not inside(_member_path(member.linkname), hidden):
-                linked.update(path for path in hidden if inside(name, [path]))
-    return [path for path in hidden if path in linked or inside(path, symlinks)]
+                linked.update(path for path in folded if inside(name, [path]))
+            elif member.islnk() and not inside(fold(_member_path(member.linkname)), folded):
+                linked.update(path for path in folded if inside(name, [path]))
+    return [path for path in hidden if fold(path) in linked or inside(fold(path), symlinks)]
 
 
 def drop_paths(patch: str, hidden_paths: Iterable[str]) -> str:

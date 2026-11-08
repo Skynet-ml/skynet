@@ -494,6 +494,54 @@ def test_a_metric_path_that_matches_no_file_fails(tmp_path: Path) -> None:
     assert check_hidden(original, agent, ["eval/metric.py", *exploits], place="local", optional_paths=exploits) == []
 
 
+def test_each_leak_names_the_setting_of_its_hidden_path(tmp_path: Path) -> None:
+    """A leaked ``optimize.toml`` or cases file names its own setting, not ``[metric] files`` (SKY-446)."""
+    files = {CONSTRAINTS_FILE: b"v\n", "data/cases.jsonl": b"{}\n", "eval/metric.py": b"m\n", "src/app.py": b"x\n"}
+    original = _archive(tmp_path, files)
+    (tmp_path / "agent").mkdir()
+    agent = _archive(tmp_path / "agent", files)
+    labels = {CONSTRAINTS_FILE: CONSTRAINTS_FILE, "data/cases.jsonl": "[data] cases"}
+
+    failures = check_hidden(
+        original, agent, [CONSTRAINTS_FILE, "data/cases.jsonl", "eval"], place="cloud", labels=labels
+    )
+
+    assert [(failure.key, failure.params["key"]) for failure in failures] == [
+        (CONSTRAINTS_FILE, f"{CONSTRAINTS_FILE}: {CONSTRAINTS_FILE}"),
+        ("[data] cases", "[data] cases: data/cases.jsonl"),
+        ("[metric] files", "[metric] files: eval/metric.py"),
+    ]
+
+
+def test_a_missing_hidden_path_names_its_setting(tmp_path: Path) -> None:
+    """A misspelled ``[data] cases`` path is reported under ``[data] cases``."""
+    original = _archive(tmp_path, {"src/app.py": b"x\n"})
+    (tmp_path / "agent").mkdir()
+    agent = _archive(tmp_path / "agent", {"src/app.py": b"x\n"})
+
+    [failure] = check_hidden(
+        original, agent, ["data/case.jsonl"], place="local", labels={"data/case.jsonl": "[data] cases"}
+    )
+
+    assert failure.params["key"] == "[data] cases: data/case.jsonl"
+
+
+@pytest.mark.parametrize(("ignore_case", "leaks"), [(True, 1), (False, 0)])
+def test_a_case_variant_counts_as_hidden_only_on_a_disk_that_ignores_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ignore_case: bool, leaks: int
+) -> None:
+    """On macOS, ``Secret.txt`` is the hidden ``secret.txt``, so the gate finds it in the agent's tree (SKY-446)."""
+    monkeypatch.setattr(repo_gate, "case_insensitive", lambda directory: ignore_case)
+    files = {"Secret.txt": b"s\n", "src/app.py": b"x\n"}
+    original = _archive(tmp_path, files)
+    (tmp_path / "agent").mkdir()
+    agent = _archive(tmp_path / "agent", files)
+
+    failures = check_hidden(original, agent, ["secret.txt"], place="local", optional_paths=["secret.txt"])
+
+    assert len(failures) == leaks
+
+
 _HOST_CODES = (I18nKey.REPO_GATE_SECRET_HOST_UNLISTED, I18nKey.REPO_GATE_SECRET_HOST_NOT_ALLOWED)
 
 
