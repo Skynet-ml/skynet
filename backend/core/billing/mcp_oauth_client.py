@@ -47,7 +47,6 @@ from ..config import settings
 from ..connectors.vault import vault_cipher
 from ..i18n_en import t_en
 from ..storage.models import McpServerConnectionModel
-from .env_connectors import CONNECTORS
 from .mcp_broker import _pinned_address, _PinnedTransport
 
 STATUS_PENDING = "pending"
@@ -121,6 +120,12 @@ def _db() -> Engine:
     return _engine
 
 
+# The catalog is keyed by host since SKY-381, and NAME_PATTERN refuses dots, so
+# no host can clash. The old short names stay reserved, so a saved connection
+# cannot take the name that older runs used for a Skynet-hosted connector.
+_RETIRED_CONNECTOR_NAMES = frozenset({"maps", "web_search", "browser"})
+
+
 def validate_name(name: str) -> str:
     """Check a connector name that a run payload lists in ``env_connectors``.
 
@@ -135,7 +140,7 @@ def validate_name(name: str) -> str:
     """
     if not isinstance(name, str) or not NAME_PATTERN.fullmatch(name):
         raise McpOAuthError("mcp_connection.invalid_name", 422)
-    if name in CONNECTORS:
+    if name in _RETIRED_CONNECTOR_NAMES:
         raise McpOAuthError("mcp_connection.name_reserved", 422, name=name)
     return name
 

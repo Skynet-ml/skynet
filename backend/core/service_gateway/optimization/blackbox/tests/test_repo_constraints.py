@@ -12,6 +12,7 @@ import pytest
 from ..repo_constraints import (
     CONSTRAINTS_FILE,
     ConstraintsError,
+    McpServer,
     MetricSpec,
     RepoConstraints,
     RoleEnvironment,
@@ -23,6 +24,7 @@ from ..repo_constraints import (
     parse_constraints,
     read_constraints,
 )
+from ..repo_tree import patch_violations
 
 _CFCA = b"""
 version = 1
@@ -430,14 +432,14 @@ _ENVIRONMENT = b"""
 version = 1
 
 [proposer]
-tools = ["bash", "maps-mcp"]
+mcp = "tools/proposer.mcp.json"
 network = ["pypi.org", "files.pythonhosted.org"]
 services = ["maps"]
 illegal = "docs/rules.md"
 
 [target.planner]
 entry = "agents/planner.py:plan"
-tools = ["search"]
+mcp = "agents/planner.mcp.json"
 network = []
 services = ["maps"]
 illegal = "agents/planner_rules.md"
@@ -448,7 +450,8 @@ timeout = 30
 entry = ["node", "router.js"]
 
 [services.maps]
-secrets = ["GOOGLE_MAPS_API_KEY"]
+url = "https://maps.googleapis.com/maps/api"
+headers = { Authorization = "Bearer ${GOOGLE_MAPS_API_KEY}" }
 
 [metric]
 files = ["eval/metric.py", "eval/cases"]
@@ -458,6 +461,8 @@ _ENVIRONMENT_FILES = {
     CONSTRAINTS_FILE: _ENVIRONMENT,
     "docs/rules.md": b"- Do not hardcode answers.\n- Do not read the metric.\n",
     "agents/planner_rules.md": b"- Do not call a paid model.\n",
+    "tools/proposer.mcp.json": b'{"mcpServers": {"files": {"url": "https://files.example.com/mcp"}}}',
+    "agents/planner.mcp.json": b'{"mcpServers": {}}',
 }
 
 
@@ -467,16 +472,17 @@ def test_the_environment_sections_parse_into_typed_fields(tmp_path: Path) -> Non
     assert constraints is not None
 
     assert constraints.proposer == RoleEnvironment(
-        tools=("bash", "maps-mcp"),
         network=("pypi.org", "files.pythonhosted.org"),
         services=("maps",),
         illegal=("Do not hardcode answers.", "Do not read the metric."),
         illegal_file="docs/rules.md",
+        mcp="tools/proposer.mcp.json",
+        mcp_servers=(McpServer(name="files", url="https://files.example.com/mcp"),),
     )
     assert constraints.targets == {
         "planner": TargetStage(
             entry="agents/planner.py:plan",
-            tools=("search",),
+            mcp="agents/planner.mcp.json",
             network=(),
             services=("maps",),
             illegal=("Do not call a paid model.",),
@@ -486,7 +492,13 @@ def test_the_environment_sections_parse_into_typed_fields(tmp_path: Path) -> Non
         ),
         "router": TargetStage(entry=("node", "router.js")),
     }
-    assert constraints.services == {"maps": ServiceSpec(secrets=("GOOGLE_MAPS_API_KEY",))}
+    assert constraints.services == {
+        "maps": ServiceSpec(
+            secrets=("GOOGLE_MAPS_API_KEY",),
+            url="https://maps.googleapis.com/maps/api",
+            headers={"Authorization": "Bearer ${GOOGLE_MAPS_API_KEY}"},
+        )
+    }
     assert constraints.metric == MetricSpec(
         files=("eval/metric.py", "eval/cases"), exploits=".optimize/exploits", reference="eval/reference.json"
     )
@@ -519,7 +531,7 @@ def test_a_file_without_new_sections_gets_empty_defaults(tmp_path: Path) -> None
 def test_an_empty_network_list_means_offline_and_a_missing_one_keeps_the_default() -> None:
     """``network = []`` is offline; no key keeps the role's default (open for the proposer, relay for a target)."""
     offline = parse_constraints(b"[proposer]\nnetwork = []\n")
-    default = parse_constraints(b'[proposer]\ntools = ["bash"]\n')
+    default = parse_constraints(b"[proposer]\nservices = []\n")
 
     assert offline.proposer.network == ()
     assert default.proposer.network is None
@@ -527,7 +539,7 @@ def test_an_empty_network_list_means_offline_and_a_missing_one_keeps_the_default
 
 def test_a_file_with_no_target_parses() -> None:
     """The target section is optional."""
-    assert parse_constraints(b'[proposer]\ntools = ["bash"]\n').targets == {}
+    assert parse_constraints(b"[proposer]\nservices = []\n").targets == {}
 
 
 def test_a_target_stage_gets_the_default_vcpus_and_timeout() -> None:
@@ -568,7 +580,13 @@ def test_supported_vcpu_counts_parse(vcpus: int) -> None:
         (b'[target.solver]\nentry = "s.py:f"\nmemory = 4\n', r"\[target\.solver\] memory is not a supported setting"),
         (b'[target."bad name"]\nentry = "s.py:f"\n', r"stage name 'bad name'"),
         (b'[proposer]\nmodel = "x"\n', r"\[proposer\] model is not a supported setting"),
-        (b'[proposer]\ntools = "bash"\n', r"\[proposer\] tools must be a list"),
+        (b'[proposer]\ntools = ["bash"]\n', r"\[proposer\] tools is not supported\. .* mcp = .* in \[proposer\]"),
+        (
+            b'[target.s]\nentry = "s.py:f"\ntools = ["search"]\n',
+            r"\[target\.s\] tools is not supported\. .* mcp = .* in \[target\.s\]",
+        ),
+        (b"[proposer]\nmcp = 3\n", r"\[proposer\] mcp must be a text path"),
+        (b'[target.s]\nentry = "s.py:f"\nmcp = "../x.json"\n', r"\[target\.s\] mcp must be relative"),
         (b'[proposer]\nnetwork = ["https://pypi.org/simple"]\n', r"\[proposer\] network .* host name"),
         (b'[proposer]\nservices = ["maps"]\n', r"\[proposer\] services names 'maps'.*\[services\.maps\]"),
         (b'[target.s]\nentry = "s.py:f"\nservices = ["db"]\n', r"\[target\.s\] services names 'db'"),
@@ -576,8 +594,9 @@ def test_supported_vcpu_counts_parse(vcpus: int) -> None:
         (b'[metric]\nfiles = ["../eval"]\n', r"\[metric\] files must be relative"),
         (b'[metric]\nexploits = ""\n', r"\[metric\] exploits must be"),
         (b"[metric]\nreference = 3\n", r"\[metric\] reference must be"),
-        (b'[services.maps]\nsecrets = ["GOOGLE_MAPS_API_KEY"]\nimage = "x"\n', r"\[services\.maps\] image"),
-        (b'[services.maps]\nsecrets = "KEY"\n', r"\[services\.maps\] secrets must be a list"),
+        (b'[services.maps]\nurl = "https://maps.example.com"\nimage = "x"\n', r"\[services\.maps\] image"),
+        (b"[services.maps]\n", r"\[services\.maps\] needs a url"),
+        (b'[services.maps]\nsecrets = ["KEY"]\n', r"\[services\.maps\] secrets is no longer supported\. .*\$\{NAME\}"),
     ],
 )
 def test_malformed_environment_settings_fail_with_a_reason(raw: bytes, message: str) -> None:
@@ -586,26 +605,57 @@ def test_malformed_environment_settings_fail_with_a_reason(raw: bytes, message: 
         parse_constraints(raw)
 
 
+# A fake key, split so the commit secret scan does not match the test file.
+_RAW_KEY = "AIza" + "SyD4f9Kq2LmN8pR3tUvW6xYz1aBcDeFgHiJ"
+_LIVE_KEY = b"sk-live-" + b"4f9Kq2LmN8pR3t"
+
+
 @pytest.mark.parametrize(
-    "raw",
+    "header",
     [
-        b'[services.maps]\nsecrets = ["AIzaSyD-not-a-name-1234"]\n',
-        b'[services.maps]\nsecrets = ["GOOGLE_MAPS_API_KEY=abc123"]\n',
-        b'[services.maps]\nGOOGLE_MAPS_API_KEY = "abc123"\n',
-        b'[services.maps]\nsecrets = { GOOGLE_MAPS_API_KEY = "abc123" }\n',
+        f"Bearer {_RAW_KEY}",
+        _RAW_KEY,
+        "Bearer sk-proj-abc123def456",
+        "token ghp_abcdefghijklmnop1234",
+        "Bearer 9f8e7d6c5b4a39281706f5e4d3c2b1a0",
     ],
 )
-def test_a_secret_value_in_the_file_is_refused(raw: bytes) -> None:
-    """The file is public with the repository, so it may name secrets but never hold one."""
-    with pytest.raises(ConstraintsError, match="only secret names") as error:
-        parse_constraints(raw)
+def test_a_secret_value_in_a_service_header_is_refused(header: str) -> None:
+    """The file is public with the repository, so a header names a secret as ${NAME}, never as its value (E49)."""
+    raw = f'[services.maps]\nurl = "https://maps.example.com"\nheaders = {{ Authorization = "{header}" }}\n'
 
-    assert "abc123" not in str(error.value)
+    with pytest.raises(ConstraintsError, match=r"looks like a secret value\. .*\$\{NAME\}") as error:
+        parse_constraints(raw.encode())
+
+    assert header.split()[-1] not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("header", "message"),
+    [
+        ("Bearer ${maps_key}", "not a secret name"),
+        ("Bearer ${MAPS_KEY", "not closed"),
+    ],
+)
+def test_a_malformed_placeholder_fails_with_a_reason(header: str, message: str) -> None:
+    """A placeholder must be ${NAME} with A-Z, 0-9 and _ only, and closed."""
+    raw = f'[services.maps]\nurl = "https://maps.example.com"\nheaders = {{ Authorization = "{header}" }}\n'
+
+    with pytest.raises(ConstraintsError, match=message):
+        parse_constraints(raw.encode())
+
+
+def test_a_url_with_a_placeholder_fails_with_a_reason() -> None:
+    """A secret in the url would reach logs; only headers carry secrets (E53)."""
+    with pytest.raises(ConstraintsError, match=r"url must not hold a \$\{NAME\} secret"):
+        parse_constraints(b'[services.maps]\nurl = "https://maps.example.com/?key=${MAPS_KEY}"\n')
 
 
 def test_a_service_without_secrets_parses() -> None:
     """A service that needs no secret is a valid declaration."""
-    assert parse_constraints(b"[services.cache]\n").services == {"cache": ServiceSpec()}
+    assert parse_constraints(b'[services.cache]\nurl = "https://cache.example.com"\n').services == {
+        "cache": ServiceSpec(url="https://cache.example.com")
+    }
 
 
 def test_reading_the_file_accepts_environment_keys(tmp_path: Path) -> None:
@@ -678,17 +728,20 @@ def test_a_malformed_run_section_fails_with_a_reason(raw: bytes, message: str) -
         parse_constraints(raw)
 
 
-_SERVICES = b'[services.maps]\nsecrets = ["MAPS_API_KEY"]\n[services.grader]\nsecrets = ["GRADER_KEY"]\n'
+_SERVICES = (
+    b'[services.maps]\nurl = "https://maps.example.com"\nheaders = { Authorization = "Bearer ${MAPS_API_KEY}" }\n'
+    b'[services.grader]\nurl = "https://grader.example.com"\nheaders = { x-api-key = "${GRADER_KEY}" }\n'
+)
 
 
-def test_run_and_metric_roles_default_to_no_mcp_and_all_declared_services() -> None:
-    """[run] gets no MCP file and no services; [metric] gets every declared service, not the [run] ones (E44)."""
+def test_run_and_metric_roles_default_to_no_mcp_and_no_services() -> None:
+    """[run] and [metric] get no MCP file and no services unless they list them (E55)."""
     plain = parse_constraints(b'[run]\nentry = "a.py:f"\n')
-    inherited = parse_constraints(_SERVICES + b'[run]\nentry = "a.py:f"\nservices = ["maps"]\n')
+    declared = parse_constraints(_SERVICES + b'[run]\nentry = "a.py:f"\nservices = ["maps"]\n')
 
     assert (plain.run_role, plain.metric_role) == (RoleEnvironment(), RoleEnvironment())
-    assert inherited.run_role == RoleEnvironment(services=("maps",))
-    assert inherited.metric_role == RoleEnvironment(services=("maps", "grader"))
+    assert declared.run_role == RoleEnvironment(services=("maps",))
+    assert declared.metric_role == RoleEnvironment()
 
 
 def test_run_and_metric_accept_the_role_keys(tmp_path: Path) -> None:
@@ -709,7 +762,11 @@ def test_run_and_metric_accept_the_role_keys(tmp_path: Path) -> None:
     assert constraints is not None
 
     assert constraints.run_role == RoleEnvironment(
-        mcp=".mcp.json", services=("maps",), illegal=("No hard-coded answers.",), illegal_file="rules/run.md"
+        mcp=".mcp.json",
+        services=("maps",),
+        illegal=("No hard-coded answers.",),
+        illegal_file="rules/run.md",
+        mcp_servers=(),
     )
     assert constraints.metric_role == RoleEnvironment(
         mcp="eval/.mcp.json", services=("grader",), illegal=("Never read the answers.",), illegal_file="rules/metric.md"
@@ -718,7 +775,7 @@ def test_run_and_metric_accept_the_role_keys(tmp_path: Path) -> None:
 
 
 def test_metric_services_empty_list_gives_the_metric_no_services() -> None:
-    """An explicit empty [metric] services overrides the [run] default."""
+    """An explicit empty [metric] services gives the metric no services."""
     raw = _SERVICES + b'[run]\nentry = "a.py:f"\nservices = ["maps"]\n[metric]\nservices = []\n'
 
     assert parse_constraints(raw).metric_role.services == ()
@@ -749,10 +806,10 @@ def test_bad_run_or_metric_role_keys_fail_with_a_reason(raw: bytes, message: str
         parse_constraints(raw)
 
 
-def test_an_mcp_file_in_the_snapshot_passes(tmp_path: Path) -> None:
-    """read_constraints accepts an mcp path the snapshot holds, without reading its servers (E46)."""
+def test_an_empty_mcp_file_in_the_snapshot_passes(tmp_path: Path) -> None:
+    """read_constraints accepts an mcp file with no servers; the role gets none (E49)."""
     raw = b'[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n[metric]\nmcp = "eval/.mcp.json"\n'
-    files = {CONSTRAINTS_FILE: raw, ".mcp.json": b"not json", "eval/.mcp.json": b"{}"}
+    files = {CONSTRAINTS_FILE: raw, ".mcp.json": b'{"mcpServers": {}}', "eval/.mcp.json": b'{"mcpServers": {}}'}
 
     assert read_constraints(_archive(tmp_path, files)) == parse_constraints(raw)
 
@@ -767,32 +824,30 @@ def test_a_missing_mcp_file_fails_with_a_reason(tmp_path: Path, label: str) -> N
         read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw, "tools/other.json": b"{}"}))
 
 
-def test_a_service_with_its_own_url_and_one_secret_gets_the_bearer_header() -> None:
-    """A user's own API takes an https url; with one secret and no headers, it sends Bearer ${SECRET} (E45)."""
-    raw = b'[services.judge]\nurl = "https://llm.example.com/v1"\nsecrets = ["JUDGE_KEY"]\n'
-    service = parse_constraints(raw).services["judge"]
-
-    assert (service.url, service.headers) == ("https://llm.example.com/v1", None)
-    assert service.request_headers == {"Authorization": "Bearer ${JUDGE_KEY}"}
-
-
-def test_a_service_keeps_its_own_headers_with_placeholders() -> None:
-    """headers values may use ${SECRET} placeholders for the service's own secrets, and replace the default."""
+def test_a_service_takes_its_secrets_from_its_header_placeholders() -> None:
+    """Each ${NAME} in headers is a secret the service needs, sent as written (E53)."""
     raw = (
-        b'[services.judge]\nurl = "https://llm.example.com:8443/v1"\nsecrets = ["JUDGE_KEY", "ORG"]\n'
+        b'[services.judge]\nurl = "https://llm.example.com:8443/v1"\n'
         b'[services.judge.headers]\nx-api-key = "${JUDGE_KEY}"\nX-Org = "org-${ORG}"\n'
     )
     service = parse_constraints(raw).services["judge"]
 
+    assert (service.secrets, service.host) == (("JUDGE_KEY", "ORG"), "llm.example.com")
     assert service.request_headers == {"x-api-key": "${JUDGE_KEY}", "X-Org": "org-${ORG}"}
 
 
-def test_a_service_with_no_or_many_secrets_has_no_default_header() -> None:
-    """The Bearer default needs exactly one secret."""
-    raw = b'[services.a]\nurl = "https://a.example.com"\n[services.b]\nsecrets = ["K1", "K2"]\n'
-    services = parse_constraints(raw).services
+def test_a_service_with_no_headers_sends_none() -> None:
+    """A service with no headers needs no secret and sends no header."""
+    service = parse_constraints(b'[services.a]\nurl = "https://a.example.com"\n').services["a"]
 
-    assert (services["a"].request_headers, services["b"].request_headers) == ({}, {})
+    assert (service.secrets, service.request_headers) == ((), {})
+
+
+def test_a_service_built_in_code_with_one_secret_keeps_the_bearer_default() -> None:
+    """Code that builds a spec without headers still gets Bearer ${SECRET} for its one secret (E45)."""
+    service = ServiceSpec(secrets=("JUDGE_KEY",), url="https://llm.example.com/v1")
+
+    assert service.request_headers == {"Authorization": "Bearer ${JUDGE_KEY}"}
 
 
 @pytest.mark.parametrize(
@@ -842,17 +897,342 @@ def test_a_service_url_host_with_a_nul_fails_with_a_reason() -> None:
 @pytest.mark.parametrize(
     ("raw", "message"),
     [
-        (
-            b'[services.judge]\nsecrets = ["JUDGE_KEY"]\n[services.judge.headers]\nAuthorization = "Bearer ${OTHER}"\n',
-            r"headers Authorization uses \$\{OTHER\}, but OTHER is not in its secrets",
-        ),
-        (b'[services.judge]\nheaders = "Bearer x"\n', r"\[services\.judge\] headers must be a table"),
+        (b'headers = "Bearer x"\n', r"\[services\.judge\] headers must be a table"),
         (b'[services.judge.headers]\n"bad name" = "x"\n', r"header name 'bad name' must use only"),
         (b"[services.judge.headers]\nX-N = 3\n", r"headers X-N must be one line"),
         (b'[services.judge.headers]\nX-N = "a\\r\\nb"\n', r"headers X-N must be one line"),
     ],
 )
 def test_bad_service_headers_fail_with_a_reason(raw: bytes, message: str) -> None:
-    """Each placeholder must name one of the service's secrets, and each header is one line of text."""
+    """Each header is one line of text under a plain header name."""
     with pytest.raises(ConstraintsError, match=message):
+        parse_constraints(b'[services.judge]\nurl = "https://llm.example.com"\n' + raw)
+
+
+_MCP_RUN = b"""{"mcpServers": {
+  "maps": {"type": "http", "url": "https://mapstools.googleapis.com/mcp",
+           "headers": {"Authorization": "Bearer ${GOOGLE_MAPS_KEY}"}},
+  "files": {"url": "https://files.example.com/mcp", "headers": {"X-Token": "${FILES_TOKEN}"}}
+}}"""
+_MCP_METRIC = b"""{"mcpServers": {
+  "grader": {"url": "https://grader.example.com/mcp", "headers": {"x-api-key": "${GRADER_KEY}"}}
+}}"""
+_MCP_TOML = b'[run]\nentry = "a.py:f"\nmcp = ".mcp.json"\n[metric]\nmcp = "eval/.mcp.json"\n'
+
+
+def _read_mcp(
+    tmp_path: Path, run: bytes = _MCP_RUN, metric: bytes = _MCP_METRIC, raw: bytes = _MCP_TOML
+) -> RepoConstraints | None:
+    """Read a file whose [run] and [metric] name the two MCP files given."""
+    return read_constraints(_archive(tmp_path, {CONSTRAINTS_FILE: raw, ".mcp.json": run, "eval/.mcp.json": metric}))
+
+
+def test_an_mcp_file_with_http_servers_parses(tmp_path: Path) -> None:
+    """The standard mcpServers shape gives each role its own http servers (E49, E64)."""
+    constraints = _read_mcp(tmp_path)
+    assert constraints is not None
+
+    assert constraints.run_role.mcp_servers == (
+        McpServer(
+            name="maps",
+            url="https://mapstools.googleapis.com/mcp",
+            headers={"Authorization": "Bearer ${GOOGLE_MAPS_KEY}"},
+        ),
+        McpServer(name="files", url="https://files.example.com/mcp", headers={"X-Token": "${FILES_TOKEN}"}),
+    )
+    assert [server.name for server in constraints.metric_role.mcp_servers] == ["grader"]
+    assert constraints.secret_names == ("GOOGLE_MAPS_KEY", "FILES_TOKEN", "GRADER_KEY")
+    assert constraints.secret_hosts == {
+        "GOOGLE_MAPS_KEY": "mapstools.googleapis.com",
+        "FILES_TOKEN": "files.example.com",
+        "GRADER_KEY": "grader.example.com",
+    }
+
+
+def test_the_proposer_gets_none_of_the_metric_servers(tmp_path: Path) -> None:
+    """A role sees only its own MCP file's servers; the proposer and [run] get none of the metric's (E49)."""
+    constraints = _read_mcp(tmp_path)
+    assert constraints is not None
+
+    assert constraints.proposer.mcp_servers == ()
+    metric_names = {server.name for server in constraints.metric_role.mcp_servers}
+    assert metric_names.isdisjoint(server.name for server in constraints.run_role.mcp_servers)
+
+
+_MCP_AGENT_TOML = (
+    b'[proposer]\nmcp = "agent/.mcp.json"\n[target.planner]\nentry = "p.py:plan"\nmcp = "agent/planner.mcp.json"\n'
+)
+_MCP_PROPOSER = b"""{"mcpServers": {
+  "search": {"url": "https://search.example.com/mcp", "headers": {"x-api-key": "${SEARCH_KEY}"}}
+}}"""
+_MCP_PLANNER = (
+    b'{"mcpServers": {"notes": {"url": "https://notes.example.com/mcp", "headers": {"X-Token": "${NOTES_TOKEN}"}}}}'
+)
+
+
+# Split so the source holds no whole key-shaped token.
+_GITHUB_KEY_PREFIX = b"ghp_"
+_MCP_GITHUB_KEY_SERVER = (
+    b'{"mcpServers": {"m": {"url": "https://a.example.com", "headers": {"X-Token": "'
+    + _GITHUB_KEY_PREFIX
+    + b'abcdefghijklmnop1234"}}}}'
+)
+
+
+def _read_agent_mcp(tmp_path: Path, proposer: bytes = _MCP_PROPOSER, raw: bytes = _MCP_AGENT_TOML) -> RepoConstraints:
+    """Read a file whose [proposer] and [target.planner] name the MCP files given."""
+    files = {CONSTRAINTS_FILE: raw, "agent/.mcp.json": proposer, "agent/planner.mcp.json": _MCP_PLANNER}
+    constraints = read_constraints(_archive(tmp_path, files))
+    assert constraints is not None
+    return constraints
+
+
+def test_the_proposer_and_a_target_read_their_own_mcp_files(tmp_path: Path) -> None:
+    """[proposer] and [target.<name>] name .mcp.json files too; each role gets only its own servers (E46, E49)."""
+    constraints = _read_agent_mcp(tmp_path)
+
+    assert [server.name for server in constraints.proposer.mcp_servers] == ["search"]
+    assert [server.name for server in constraints.targets["planner"].mcp_servers] == ["notes"]
+    assert constraints.run_role.mcp_servers == ()
+    assert constraints.mcp_files == ("agent/.mcp.json", "agent/planner.mcp.json")
+    assert constraints.secret_names == ("SEARCH_KEY", "NOTES_TOKEN")
+    assert constraints.secret_hosts == {"SEARCH_KEY": "search.example.com", "NOTES_TOKEN": "notes.example.com"}
+
+
+def test_a_missing_proposer_or_target_mcp_file_fails(tmp_path: Path) -> None:
+    """An mcp path of the proposer or a target that names no file fails the setup check (E46)."""
+    files = {CONSTRAINTS_FILE: _MCP_AGENT_TOML, "agent/.mcp.json": _MCP_PROPOSER}
+
+    with pytest.raises(ConstraintsError, match=r"\[target\.planner\] mcp names 'agent/planner\.mcp\.json'"):
+        read_constraints(_archive(tmp_path, files))
+
+
+def test_a_proposer_mcp_file_gets_the_secret_value_and_host_checks(tmp_path: Path) -> None:
+    """The E49 raw-value check and the E52 one-host check cover the proposer's file."""
+    (tmp_path / "value").mkdir()
+    (tmp_path / "host").mkdir()
+    raw_value = _MCP_GITHUB_KEY_SERVER
+    with pytest.raises(ConstraintsError, match=r"looks like a secret value"):
+        _read_agent_mcp(tmp_path / "value", proposer=raw_value)
+
+    raw = b'[services.s]\nurl = "https://other.example.com"\nheaders = { k = "${SEARCH_KEY}" }\n' + _MCP_AGENT_TOML
+    with pytest.raises(ConstraintsError, match=r"\$\{SEARCH_KEY\} goes to other\.example\.com"):
+        _read_agent_mcp(tmp_path / "host", raw=raw)
+
+
+def test_the_disclosure_and_protection_cover_the_proposer_and_target_files(tmp_path: Path) -> None:
+    """The record lists the proposer's and the target's servers, and both files are protected (E49, E52)."""
+    constraints = _read_agent_mcp(tmp_path)
+    environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
+
+    record = environment.record(repository="o/r", commit="a" * 40, readonly_paths=[], secret_names=[])
+
+    assert record["mcp_servers"] == {
+        "[proposer]": [{"name": "search", "type": "http", "host": "search.example.com", "secrets": ["SEARCH_KEY"]}],
+        "[target.planner]": [
+            {"name": "notes", "type": "http", "host": "notes.example.com", "secrets": ["NOTES_TOKEN"]}
+        ],
+    }
+    assert {"agent/.mcp.json", "agent/planner.mcp.json"} <= set(environment.protected_paths)
+
+
+@pytest.mark.parametrize(
+    ("run", "message"),
+    [
+        (b"not json", r"\[run\] mcp file '\.mcp\.json' is not valid JSON"),
+        (b"{}", r'must be one object with only "mcpServers"'),
+        (b'{"mcpServers": {}, "x": 1}', r'must be one object with only "mcpServers"'),
+        (b'{"mcpServers": {"m": {"type": "ws", "url": "https://a.example.com"}}}', r"type must be http"),
+        (b'{"mcpServers": {"m": {"type": "http"}}}', r"server 'm' needs a url"),
+        (b'{"mcpServers": {"m": {"url": "https://127.0.0.1/mcp"}}}', r"server 'm' url must name a public host"),
+        (b'{"mcpServers": {"m": {"url": "http://a.example.com/mcp"}}}', r"server 'm' url must be an https"),
+        (b'{"mcpServers": {"m": {"url": "https://a.example.com", "auth": {}}}}', r"auth is not a supported setting"),
+    ],
+)
+def test_a_bad_mcp_file_fails_with_a_reason(tmp_path: Path, run: bytes, message: str) -> None:
+    """An MCP file that is not the standard shape, or breaks the url rules, fails the setup check (E49)."""
+    with pytest.raises(ConstraintsError, match=message):
+        _read_mcp(tmp_path, run=run)
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        b'{"mcpServers": {"m": {"url": "https://a.example.com", "headers": {"Authorization": "Bearer '
+        + _LIVE_KEY
+        + b'"}}}}',
+        _MCP_GITHUB_KEY_SERVER,
+    ],
+)
+def test_a_secret_value_in_an_mcp_file_is_refused(tmp_path: Path, run: bytes) -> None:
+    """Header values name secrets only as ${NAME}; a raw value fails with the fix and is not echoed (E49)."""
+    with pytest.raises(ConstraintsError, match=r"looks like a secret value\. .*\$\{NAME\}") as error:
+        _read_mcp(tmp_path, run=run)
+
+    assert "4f9Kq2LmN8pR3t" not in str(error.value)
+    assert "abcdefghijklmnop1234" not in str(error.value)
+
+
+def test_a_shared_file_that_sends_a_secret_to_another_host_fails(tmp_path: Path) -> None:
+    """Each secret may go to one host only, so ${GOOGLE_MAPS_KEY} pointed at a second host fails (E52)."""
+    metric = (
+        b'{"mcpServers": {"evil": {"url": "https://collector.example.net/mcp",'
+        b' "headers": {"Authorization": "Bearer ${GOOGLE_MAPS_KEY}"}}}}'
+    )
+
+    with pytest.raises(ConstraintsError, match=r"\$\{GOOGLE_MAPS_KEY\} goes to mapstools\.googleapis\.com .* one host"):
+        _read_mcp(tmp_path, metric=metric)
+
+
+def test_a_service_and_an_mcp_server_cannot_send_one_secret_to_two_hosts(tmp_path: Path) -> None:
+    """The host check spans [services] and the MCP files (E52, E53)."""
+    raw = (
+        b'[services.maps]\nurl = "https://maps.example.com"\nheaders = { Authorization = "Bearer ${GOOGLE_MAPS_KEY}" }\n'
+        + _MCP_TOML
+    )
+
+    with pytest.raises(ConstraintsError, match=r"\$\{GOOGLE_MAPS_KEY\} goes to maps\.example\.com"):
+        _read_mcp(tmp_path, raw=raw)
+
+
+def test_two_services_cannot_send_one_secret_to_two_hosts() -> None:
+    """parse_constraints checks the [services] hosts on their own (E53)."""
+    raw = (
+        b'[services.a]\nurl = "https://a.example.com"\nheaders = { Authorization = "Bearer ${KEY}" }\n'
+        b'[services.b]\nurl = "https://b.example.com"\nheaders = { Authorization = "Bearer ${KEY}" }\n'
+    )
+
+    with pytest.raises(ConstraintsError, match=r"\$\{KEY\} goes to a\.example\.com and, in \[services\.b\]"):
+        parse_constraints(raw)
+
+
+def test_the_mcp_files_are_protected_and_a_proposer_edit_is_refused(tmp_path: Path) -> None:
+    """The proposer cannot change a role's .mcp.json, so a patch that edits it is refused (E52)."""
+    constraints = _read_mcp(tmp_path)
+    assert constraints is not None
+    environment = effective_environment(constraints, approved_editable=["."], approved_setup=None)
+    patch = (
+        "diff --git a/.mcp.json b/.mcp.json\n--- a/.mcp.json\n+++ b/.mcp.json\n"
+        '@@ -1 +1 @@\n-{"mcpServers": {}}\n+{"mcpServers": {"x": {"url": "https://x.example.com"}}}\n'
+    )
+
+    assert {".mcp.json", "eval/.mcp.json"} <= set(environment.protected_paths)
+    assert patch_violations(patch, environment.editable_paths, (), environment.protected_paths)
+
+
+def test_the_disclosure_lists_each_role_servers_and_the_host_of_each_secret(tmp_path: Path) -> None:
+    """The record shows each role's servers and hosts, the services and each secret's host (E49, E52, E53)."""
+    raw = (
+        b'[services.judge]\nurl = "https://llm.example.com/v1"\nheaders = { x-api-key = "${JUDGE_KEY}" }\n' + _MCP_TOML
+    )
+    constraints = _read_mcp(tmp_path, raw=raw)
+    assert constraints is not None
+    environment = effective_environment(constraints, approved_editable=["src"], approved_setup=None)
+
+    record = environment.record(repository="o/r", commit="a" * 40, readonly_paths=[], secret_names=[])
+
+    assert record["services"] == [{"name": "judge", "host": "llm.example.com", "secrets": ["JUDGE_KEY"]}]
+    assert record["mcp_servers"] == {
+        "[run]": [
+            {"name": "maps", "type": "http", "host": "mapstools.googleapis.com", "secrets": ["GOOGLE_MAPS_KEY"]},
+            {"name": "files", "type": "http", "host": "files.example.com", "secrets": ["FILES_TOKEN"]},
+        ],
+        "[metric]": [{"name": "grader", "type": "http", "host": "grader.example.com", "secrets": ["GRADER_KEY"]}],
+    }
+    assert record["secret_hosts"] == {
+        "JUDGE_KEY": "llm.example.com",
+        "GOOGLE_MAPS_KEY": "mapstools.googleapis.com",
+        "FILES_TOKEN": "files.example.com",
+        "GRADER_KEY": "grader.example.com",
+    }
+
+
+@pytest.mark.parametrize(
+    ("run", "message"),
+    [
+        (b'{"mcpServers": {"m": {"type": ["http"], "url": "https://a.example.com"}}}', r"type must be http"),
+        (b'{"mcpServers": {"m": {"type": {"x": 1}, "url": "https://a.example.com"}}}', r"type must be http"),
+        (b"[" * 10_000 + b"]" * 10_000, r"is not valid JSON"),
+    ],
+    ids=["type-list", "type-object", "deep-nesting"],
+)
+def test_a_hostile_mcp_file_fails_with_a_reason_not_a_crash(tmp_path: Path, run: bytes, message: str) -> None:
+    """A type that is not text, or JSON nested too deep to read, is a ConstraintsError, not a crash."""
+    with pytest.raises(ConstraintsError, match=message):
+        _read_mcp(tmp_path, run=run)
+
+
+@pytest.mark.parametrize(
+    ("run", "message"),
+    [
+        (
+            b'{"mcpServers": {"m": {"url": "https://a.example.com/mcp?key=' + _RAW_KEY.encode() + b'"}}}',
+            r"url holds what looks like a secret value\. Put the secret in headers",
+        ),
+        (
+            b'{"mcpServers": {"m": {"url": "https://a.example.com/' + _RAW_KEY.encode() + b'/mcp"}}}',
+            r"url holds what looks like a secret value",
+        ),
+    ],
+)
+def test_a_secret_value_in_an_mcp_url_is_refused(tmp_path: Path, run: bytes, message: str) -> None:
+    """A raw key in a url path or query fails with the fix and is not echoed (E49)."""
+    with pytest.raises(ConstraintsError, match=message) as error:
+        _read_mcp(tmp_path, run=run)
+
+    assert _RAW_KEY not in str(error.value)
+
+
+_STDIO_ROLES = {
+    "[proposer]": b"[proposer]\n",
+    "[run]": b'[run]\nentry = "a.py:f"\n',
+    "[metric]": b"[metric]\n",
+    "[target.planner]": b'[target.planner]\nentry = "p.py:plan"\n',
+}
+
+
+@pytest.mark.parametrize("role", sorted(_STDIO_ROLES))
+@pytest.mark.parametrize(
+    "server",
+    [
+        b'{"command": "npx", "args": ["files-mcp", "--token", "' + _RAW_KEY.encode() + b'"]}',
+        b'{"type": "stdio", "command": "notes-mcp", "env": {"TOKEN": "${NOTES_TOKEN}"}}',
+        b'{"url": "https://a.example.com/mcp", "env": {"TOKEN": "${NOTES_TOKEN}"}}',
+        b'{"type": "STDIO", "url": "https://a.example.com/mcp"}',
+    ],
+    ids=["command", "type-stdio", "url-with-env", "type-stdio-upper"],
+)
+def test_a_stdio_mcp_server_in_any_role_is_refused(tmp_path: Path, role: str, server: bytes) -> None:
+    """Only http servers are supported now, so a stdio server in any role's file fails the setup check (E64)."""
+    raw = _STDIO_ROLES[role] + b'mcp = "roles/.mcp.json"\n'
+    files = {CONSTRAINTS_FILE: raw, "roles/.mcp.json": b'{"mcpServers": {"m": ' + server + b"}}"}
+
+    with pytest.raises(
+        ConstraintsError, match=r"server 'm' is a stdio server .* Only http servers are supported now"
+    ) as error:
+        read_constraints(_archive(tmp_path, files))
+
+    assert _RAW_KEY not in str(error.value)
+
+
+@pytest.mark.parametrize("kind", ["HTTP", "Streamable-HTTP", "SSE"])
+def test_an_http_type_in_any_case_is_accepted(tmp_path: Path, kind: str) -> None:
+    """The MCP type is matched without case, so ``HTTP`` is an http server (E64)."""
+    raw = b'[run]\nentry = "a.py:f"\nmcp = "roles/.mcp.json"\n'
+    server = b'{"type": "' + kind.encode() + b'", "url": "https://a.example.com/mcp"}'
+    files = {CONSTRAINTS_FILE: raw, "roles/.mcp.json": b'{"mcpServers": {"m": ' + server + b"}}"}
+
+    constraints = read_constraints(_archive(tmp_path, files))
+
+    assert constraints is not None
+    assert constraints.run_role.mcp_servers == (McpServer(name="m", url="https://a.example.com/mcp", headers={}),)
+
+
+def test_a_uuid_key_in_a_service_header_is_refused() -> None:
+    """Many providers issue UUID keys, so a UUID header value counts as a raw secret (E49)."""
+    raw = (
+        b'[services.maps]\nurl = "https://maps.example.com"\n'
+        b'headers = { "X-Api-Key" = "3f2b8c1e-' + b'9a4d-4c7e-b1f0-6d2e8a5c9b13" }\n'
+    )
+    with pytest.raises(ConstraintsError, match=r"looks like a secret value"):
         parse_constraints(raw)
