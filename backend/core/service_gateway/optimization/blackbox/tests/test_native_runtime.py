@@ -29,6 +29,7 @@ from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_
 from core.constants import PROGRESS_CANDIDATE, PROGRESS_CASE_SCORED
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxProposer, BlackboxTarget
+from core.models.unified import UnifiedCase
 from core.service_gateway.language_models import total_tokens_from_history, usage_by_model_from_history
 from core.service_gateway.optimization.cost_ceiling import CostCeilingExceededError
 
@@ -36,6 +37,7 @@ from .. import (
     autosaddler_runner,
     best_of_n,
     gepa_engine,
+    harness,
     harness_bridge,
     native_engines,
     native_runner,
@@ -44,9 +46,23 @@ from .. import (
     sandbox_log,
 )
 from ..harness import GatewayConfig, build_launch, launch_payload
-from ..native_runtime import NativeOptions, _bootstrap_command, check_native_runtime, run_native_engine
+from ..native_runtime import (
+    NativeOptions,
+    _bootstrap_command,
+    check_native_runtime,
+    native_task_payload,
+    run_native_engine,
+)
 from ..protocol import EvalServer, Result, ScorerAbortError, Task
-from ..sandbox import CommandResult, SandboxSpec
+from ..sandbox import (
+    _CODEX_REQUIREMENTS_CHECK,
+    _CODEX_REQUIREMENTS_COMMAND,
+    _CODEX_REQUIREMENTS_READBACK,
+    CODEX_REQUIREMENTS_PATH,
+    CommandResult,
+    SandboxSpec,
+)
+from ..workspace_scorer import case_document
 
 
 class FakeSession:
@@ -66,6 +82,8 @@ class FakeSession:
         self.incomplete_usage = incomplete_usage
         self.no_incumbent = False
         self.candidate: Any = "better"
+        self.requirements: list[tuple[str, dict[str, Any]]] = []
+        self.readback = _CODEX_REQUIREMENTS_READBACK
 
     def write_files(self, files: dict[str, str]) -> None:
         """Persist files as an in-memory child filesystem.
@@ -96,12 +114,16 @@ class FakeSession:
         Returns:
             The scripted process outcome.
         """
+        if CODEX_REQUIREMENTS_PATH in command:
+            self.requirements.append((command, kwargs))
+            return CommandResult(exit_code=0, stdout=self.readback)
         self.calls.append((command, kwargs))
         if len(self.calls) == 1:
             return CommandResult(exit_code=0)
         payload = json.loads(self.files["native_input.json"])
         request_id = "a" * 32
-        request = {"id": request_id, "candidate": self.candidate, "example": {"id": "case"}}
+        example = (payload["task"]["train_set"] or [None])[0]
+        request = {"id": request_id, "candidate": self.candidate, "example": example}
         line = f"APP_NATIVE_RPC {payload['nonce']} {json.dumps(request)}\n"
         sink = kwargs["on_output"]
         sink("stdout", "unrelated upstream log\n" + line[:17])
@@ -1267,7 +1289,7 @@ def test_autosaddler_transport_scores_named_parts_without_the_gepa_archive(
     task = Task({"system": "seed", "user": "ask"}, cases=[{"id": "a"}, {"id": "b"}])
     result = run_native_engine("autosaddler", task, EvalServer(score, max_evals=3), _context(tmp_path, runtime))
 
-    assert calls == [({"system": "better", "user": "ask"}, {"id": "case"})]
+    assert calls == [({"system": "better", "user": "ask"}, {"id": "a"})]
     assert result.best_candidate == {"system": "better", "user": "ask"}
     assert result.metadata["upstream_source"] == native_runtime.AUTOSADDLER_SOURCE
     assert result.metadata["upstream_revision"] == native_runtime.AUTOSADDLER_REVISION
@@ -1320,8 +1342,21 @@ def test_autosaddler_transport_runs_with_zero_one_or_many_cases(
     assert result.best_candidate == "better"
     sent = json.loads(session.files["native_input.json"])["task"]
     assert sent["seed_candidate"] == (task.seed_candidate or "")
-    assert sent["train_set"] == (task.cases or None)
+    assert sent["train_set"] == ([{"id": index, "input": case} for index, case in enumerate(task.cases)] or None)
     assert "val_set" not in sent
+
+
+def test_a_bare_case_reaches_the_guest_whole_without_expected() -> None:
+    """A case with no ``input`` key is its own input in the parent, so the guest gets the same input."""
+    task = Task("seed", cases=[{"question": "2+2?", "answer": "4"}, {"question": "3+3?", "expected": "6"}])
+
+    sent = native_task_payload("autosaddler", task)["train_set"]
+
+    assert sent == [
+        {"id": 0, "input": {"question": "2+2?", "answer": "4"}},
+        {"id": 1, "input": {"question": "3+3?"}},
+    ]
+    assert case_document(task.cases[0])["input"] == sent[0]["input"]
 
 
 @pytest.mark.parametrize("engine_id", ["autoresearch", "meta_harness"])
@@ -1657,8 +1692,10 @@ def test_each_evaluation_runs_in_a_scope_of_the_candidate_and_case_the_child_nam
         seen.append(sandbox_log._scope.get())
         return 1.0, {}
 
-    mailbox = native_runtime._EvaluatorMailbox(FakeSession(), EvalServer(evaluator, max_evals=3), "nonce")
-    request = {"candidate": "seed", "example": {"q": 1}, "candidate_id": 4, "case": "2"}
+    mailbox = native_runtime._EvaluatorMailbox(
+        FakeSession(), EvalServer(evaluator, max_evals=3), "nonce", cases=[{"input": {"q": 1}}]
+    )
+    request = {"candidate": "seed", "example": {"id": 0}, "candidate_id": 4, "case": "2"}
     mailbox.on_output(
         "stdout",
         f"APP_NATIVE_RPC nonce {json.dumps({**request, 'id': '0' * 32})}\n"
@@ -1666,6 +1703,86 @@ def test_each_evaluation_runs_in_a_scope_of_the_candidate_and_case_the_child_nam
     )
     assert mailbox.error is None
     assert seen == [{"candidate": "4", "case": "2"}, {}]
+
+
+_EXPECTED = "EXPECTED_SENTINEL_9c41"
+_DATA_CASES = [{"input": {"q": "a"}, "expected": _EXPECTED}, {"input": {"q": "b"}}]
+_UPLOADED_CASES = [UnifiedCase(input={"q": "a"}, expected=_EXPECTED), UnifiedCase(input={"q": "b"})]
+
+
+@pytest.mark.parametrize("cases", [_DATA_CASES, _UPLOADED_CASES], ids=["data-cases", "uploaded-cases"])
+def test_the_guest_train_set_has_no_expected_but_the_parent_scores_the_full_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cases: list[Any]
+) -> None:
+    """The guest holds each case's id and input only; the parent metric gets the case with ``expected`` (E61).
+
+    Args:
+        tmp_path: Workspace.
+        monkeypatch: Skips packing the GEPA archive.
+        cases: ``[data] cases`` rows (plain dicts) or uploaded cases (models).
+    """
+    monkeypatch.setattr(native_runtime, "_source_archive", MagicMock(side_effect=AssertionError("unused")))
+    session = FakeSession()
+    scored: list[Any] = []
+
+    def score(candidate: Any, example: Any) -> tuple[float, dict[str, Any]]:
+        """Record the case the parent scored."""
+        scored.append(example)
+        return 0.5, {}
+
+    run_native_engine(
+        "autosaddler",
+        Task("seed", cases=cases),
+        EvalServer(score, max_evals=3),
+        _context(tmp_path, FakeRuntime(session)),
+    )
+
+    sent = json.loads(session.files["native_input.json"])["task"]["train_set"]
+    assert sent == [{"id": 0, "input": {"q": "a"}}, {"id": 1, "input": {"q": "b"}}]
+    assert all("expected" not in case for case in sent)
+    for path, text in session.files.items():
+        assert _EXPECTED not in text, path
+    assert scored == [{"input": {"q": "a"}, "expected": _EXPECTED}]
+
+
+@pytest.mark.parametrize("example", [{"id": 2}, {"id": "0"}, {"id": True}, {"input": {"q": "a"}}, "0"])
+def test_the_parent_refuses_an_example_that_names_no_known_case(example: Any) -> None:
+    """A guest cannot make the parent score a case it invents; the run stops instead.
+
+    Args:
+        example: A guest example with an unknown, mistyped or missing id.
+    """
+    scorer = MagicMock(return_value=(1.0, {}))
+    mailbox = native_runtime._EvaluatorMailbox(
+        FakeSession(), EvalServer(scorer, max_evals=3), "nonce", cases=_DATA_CASES
+    )
+    request = {"id": "0" * 32, "candidate": "seed", "example": example}
+
+    mailbox.on_output("stdout", f"APP_NATIVE_RPC nonce {json.dumps(request)}\n")
+
+    assert isinstance(mailbox.error, ServiceError)
+    scorer.assert_not_called()
+
+
+def test_the_parent_restores_cases_from_the_list_it_started_with() -> None:
+    """A case list that changes after the run starts cannot make an id restore another case."""
+    cases = [{"input": {"q": "a"}, "expected": "A"}, {"input": {"q": "b"}, "expected": "B"}]
+    scored: list[Any] = []
+
+    def score(candidate: Any, example: Any) -> tuple[float, dict[str, Any]]:
+        """Record the case the parent scored."""
+        scored.append(example)
+        return 1.0, {}
+
+    mailbox = native_runtime._EvaluatorMailbox(FakeSession(), EvalServer(score, max_evals=3), "nonce", cases=cases)
+    cases.reverse()
+    cases.append({"input": {"q": "c"}, "expected": "C"})
+    request = {"id": "0" * 32, "candidate": "seed", "example": {"id": 1}}
+
+    mailbox.on_output("stdout", f"APP_NATIVE_RPC nonce {json.dumps(request)}\n")
+
+    assert mailbox.error is None
+    assert scored == [{"input": {"q": "b"}, "expected": "B"}]
 
 
 def test_the_child_names_the_candidate_and_case_of_each_request(tmp_path: Path) -> None:
@@ -2041,3 +2158,115 @@ def test_unsupported_runtime_reason_names_the_cloud_sandbox_not_its_vendor() -> 
 
     assert reason == "Production optimizations run in the managed cloud sandbox."
     assert "vercel" not in reason.lower()
+
+
+class _OrderedSession(FakeSession):
+    """Record how many runner commands ran before the requirements step."""
+
+    def __init__(self, *, own_writer: bool = False) -> None:
+        """Optionally give the session its own requirements writer, as a remote child session has."""
+        super().__init__()
+        self.before: list[int] = []
+        self.writer_calls = 0
+        if own_writer:
+            self.write_codex_requirements = self._write
+
+    def _write(self) -> None:
+        """Stand in for the broker action of a remote child session."""
+        self.before.append(len(self.calls))
+        self.writer_calls += 1
+
+    def run(self, command: str, **kwargs: Any) -> CommandResult:
+        """Note the position of the requirements step, then run the scripted dialogue."""
+        if CODEX_REQUIREMENTS_PATH in command:
+            self.before.append(len(self.calls))
+        return super().run(command, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("contained", "own_writer", "expected"),
+    [
+        (True, False, [(_CODEX_REQUIREMENTS_CHECK, {"timeout_seconds": 60})]),
+        (False, False, [(_CODEX_REQUIREMENTS_COMMAND, {"timeout_seconds": 60, "sudo": True})]),
+        (False, True, []),
+    ],
+    ids=["outer-box-check-only", "docker-or-vercel-root-write", "remote-child-broker-action"],
+)
+def test_a_codex_proposer_gets_the_requirements_file_before_it_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contained: bool, own_writer: bool, expected: list[Any]
+) -> None:
+    """Each box kind puts the root-owned file in place after setup and before the Codex runner starts."""
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = _OrderedSession(own_writer=own_writer)
+    runtime = FakeRuntime(session)
+    runtime.contained = contained
+    ctx = _context(tmp_path, runtime)
+    ctx.native_options = replace(ctx.native_options, proposer=BlackboxProposer(harness="codex"))
+
+    run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    assert session.requirements == expected
+    assert session.writer_calls == (1 if own_writer else 0)
+    assert session.before == [1]
+    assert len(session.calls) == 2
+
+
+@pytest.mark.parametrize("contained", [True, False], ids=["outer-box", "docker-or-vercel"])
+@pytest.mark.parametrize(
+    "readback",
+    ["", _CODEX_REQUIREMENTS_READBACK.replace("root:root:644", "user:user:644")],
+    ids=["missing", "user-owned"],
+)
+def test_a_missing_or_user_owned_requirements_file_stops_codex_before_it_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contained: bool, readback: str
+) -> None:
+    """A bad read-back fails closed: the runner command never runs and the box closes."""
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    session.readback = readback
+    runtime = FakeRuntime(session)
+    runtime.contained = contained
+    ctx = _context(tmp_path, runtime)
+    ctx.native_options = replace(ctx.native_options, proposer=BlackboxProposer(harness="codex"))
+
+    with pytest.raises(ServiceError, match="Codex cannot start"):
+        run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    assert len(session.requirements) == 1
+    assert len(session.calls) == 1
+    assert session.closed
+
+
+@pytest.mark.parametrize("contained", [True, False], ids=["outer-box", "docker-or-vercel"])
+def test_a_host_cli_codex_proposer_skips_the_codex_requirements_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contained: bool
+) -> None:
+    """A host_cli proposer runs the host-agent shim, so no box checks or writes the file."""
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    runtime = FakeRuntime(session)
+    runtime.contained = contained
+    ctx = _context(tmp_path, runtime)
+    monkeypatch.setattr(harness, "settings", harness.settings.model_copy(update={"local_mode": True}))
+    real_launch = harness.host_cli_launch
+    # The parent mints the host token only for a protected run; this unit run is unprotected.
+    monkeypatch.setattr(
+        harness, "host_cli_launch", lambda model, gateway, cli, _token: real_launch(model, gateway, cli, "t")
+    )
+    ctx.native_options = replace(ctx.native_options, proposer=BlackboxProposer(harness="codex", host_cli="codex"))
+
+    run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    assert session.requirements == []
+
+
+def test_a_pi_proposer_skips_the_codex_requirements_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a Codex proposer needs the file, so a Pi run never asks for root."""
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    session = FakeSession()
+    ctx = _context(tmp_path, FakeRuntime(session))
+    ctx.native_options = replace(ctx.native_options, proposer=BlackboxProposer(harness="pi"))
+
+    run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
+
+    assert session.requirements == []

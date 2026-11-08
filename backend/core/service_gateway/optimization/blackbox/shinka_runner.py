@@ -282,6 +282,27 @@ def rule_blocker(mailbox: EvaluatorMailbox) -> Callable[[str], None]:
     return block
 
 
+def refusal_logger(mailbox: EvaluatorMailbox) -> Callable[[dict[str, str]], None]:
+    """Build the callback that sends a hidden-path refusal to the parent's run log.
+
+    Args:
+        mailbox: Parent connection.
+
+    Returns:
+        A function taking one ``{"tool", "kind"}`` refusal.
+    """
+
+    def refuse(refusal: dict[str, str]) -> None:
+        """Send one ``proposer.refusal`` run event.
+
+        Args:
+            refusal: The refused tool and the hidden path kind.
+        """
+        mailbox.emit(_LOG_PREFIX, harness_bridge.refusal_record(refusal))
+
+    return refuse
+
+
 def visible_examples(cases: Sequence[Any] | None) -> list[Any]:
     """Return the examples every version is scored on, one ``None`` when there are no cases.
 
@@ -927,7 +948,9 @@ class AgentEditor:
             ledger: Usage ledger the sessions' tokens are counted in.
             deadline: ``time.monotonic()`` value no session may run past.
             part_names: The starting version's part names, or ``None`` for a text version.
-            bundle: ``shinka_bundle.RepoBundle`` for a repository target.
+            bundle: ``shinka_bundle.RepoBundle`` for a repository target. Its
+                ``hidden_paths`` guard each session, and its ``on_refusal``
+                receives the session's refusals.
         """
         self.launches = {str(launch["key_env"]): dict(launch) for launch in config.get("launches") or ()}
         max_tool_calls = config.get("max_tool_calls")
@@ -1047,9 +1070,15 @@ class AgentEditor:
         workspace = self.workdir / "agent-edits" / scratch
         session_dir = self.workdir / "agent-sessions" / scratch
         self._prepare(parent_code, workspace)
+        hidden = list(self.bundle.hidden_paths) if self.bundle is not None else []
         try:
             outcome = harness_bridge.run_session(
-                {**launch, "instructions_file": None, "max_tool_calls": self.max_tool_calls},
+                {
+                    **launch,
+                    "instructions_file": None,
+                    "max_tool_calls": self.max_tool_calls,
+                    **({"hidden_paths": hidden} if hidden else {}),
+                },
                 workspace=workspace,
                 prompt=prompt,
                 model=str(launch["model"]),
@@ -1064,6 +1093,9 @@ class AgentEditor:
                     output_tokens=outcome.usage.get("output_tokens", 0),
                 ),
             )
+            if self.bundle is not None and self.bundle.on_refusal is not None:
+                for refusal in outcome.refusals:
+                    self.bundle.on_refusal(refusal)
             name, description = parse_agent_answer(outcome.text)
             report: dict[str, Any] = {
                 "cost": outcome.cost_usd,
@@ -1635,7 +1667,9 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     repo = payload.get("repo")
     mailbox = EvaluatorMailbox(payload["nonce"], timeout)
     bundle = (
-        shinka_bundle.RepoBundle.prepare(repo, seed, workdir / "repo-checkout", on_block=rule_blocker(mailbox))
+        shinka_bundle.RepoBundle.prepare(
+            repo, seed, workdir / "repo-checkout", on_block=rule_blocker(mailbox), on_refusal=refusal_logger(mailbox)
+        )
         if repo
         else None
     )

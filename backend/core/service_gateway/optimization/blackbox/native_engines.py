@@ -97,6 +97,28 @@ def log_event(
     )
 
 
+def log_refusals(refusals: Any, **fields: Any) -> None:
+    """Log each hidden-path refusal of a proposer session to the run log.
+
+    Only the tool and the path kind are logged, never the path or its content.
+
+    Args:
+        refusals: The ``refusals`` list of the session's result document.
+        **fields: Extra event fields, such as the session name.
+    """
+    for refusal in refusals or []:
+        tool, kind = str(refusal.get("tool") or ""), str(refusal.get("kind") or "")
+        log_event(
+            "proposer.refusal",
+            f"Refused a {tool} call on a hidden {kind} path; the session continues",
+            level=logging.WARNING,
+            source="proposer",
+            tool=tool,
+            kind=kind,
+            **fields,
+        )
+
+
 def blocked_patch(repo: dict[str, Any], patch: str) -> str | None:
     """Refuse a version that breaks the path rules of a run with a constraints file.
 
@@ -626,6 +648,7 @@ def run_proposer(
         killed=killed,
         budget_exhausted=outcome.budget_exhausted,
     )
+    log_refusals(document.get("refusals"), session=name)
     if outcome.is_error:
         # The runner's stderr reaches the job's run log; the CLI's own files die with the sandbox.
         print(

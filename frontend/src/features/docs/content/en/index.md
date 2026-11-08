@@ -9,7 +9,7 @@ Every run optimizes a repository. You can start in two ways:
 | Use a repository        | Skynet changes the files in the paths that you allow, in a GitHub repository that you connect. |
 | Create a new repository | You give a task and data. Skynet creates a new GitHub repository in your account and writes a first solution. |
 
-The code in the repository can be anything: a prompt pipeline, an agent harness, a script or a library. It can use any library, for example DSPy.
+The code in the repository can be anything: an application, a service, a script or a library. It can use any library.
 
 Every run uses the same contract. Your scorer defines `score(repo_path, case)`. It returns a score and written feedback. The optimizer reads the feedback to make the next version better.
 

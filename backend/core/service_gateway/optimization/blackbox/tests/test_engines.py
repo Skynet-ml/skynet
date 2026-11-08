@@ -19,7 +19,10 @@ from gepa.oa.config import OptimizeAnythingConfig
 from gepa.oa.engines.best_of_n import BestOfNEngine as UpstreamBestOfN
 from gepa.oa.eval_server import EvalServer as UpstreamEvalServer
 from gepa.oa.task import Task as UpstreamTask
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
+from core.billing.usage_tags import LANE_KEY, usage_scope
 from core.constants import PROGRESS_CANDIDATE, PROGRESS_MINIBATCH
 from core.exceptions import ServiceError
 from core.models.blackbox import (
@@ -33,6 +36,9 @@ from core.models.blackbox import (
     BlackboxStrategy,
 )
 from core.service_gateway.optimization.cost_ceiling import CostCeilingExceededError
+from core.storage.models import Base
+from core.storage.run_call_store import PostgresRunCallStore, event_candidate_key
+from core.worker.scoped_relay import CallRecorder
 
 from .. import auto
 from .. import gepa_engine as gepa_mod
@@ -43,7 +49,7 @@ from ..meta_harness import MetaHarnessEngine
 from ..protocol import UNSCORED, BudgetExhaustedError, EngineContext, EvalServer, Result, Task
 from ..registry import ENGINES, EngineCapabilities, available_engine_ids, get_engine
 from ..upstream import AUTO_ENGINES, GEPA_SOURCE
-from .mocks import FakeGateway, make_ctx, vowel_scorer
+from .mocks import FakeGateway, FakeReflectionLM, make_ctx, vowel_scorer
 
 _NATIVE_CAPS = EngineCapabilities(proposer_available=True)
 
@@ -779,6 +785,71 @@ def test_gepa_engine_real_run_improves_the_seed(tmp_path: Path) -> None:
     assert tree[0]["parents"] == [None]
     assert all(parent is None or 0 <= parent < index for index, node in enumerate(tree) for parent in node["parents"])
     assert any(node["candidate"] == result.best_candidate for node in tree)
+
+
+def test_gepa_engine_records_a_proposed_version_under_its_lane_and_iteration(tmp_path: Path) -> None:
+    """A GEPA version's scoring and reflection calls get their own row, which its candidate event ends ``done``."""
+    db = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(db)
+    store = PostgresRunCallStore(db)
+    recorder = CallRecorder(store, "job-1", "", "")
+    lm = FakeReflectionLM()
+
+    def recorded_scorer(candidate: Any, case: Any = None) -> tuple[float, dict[str, Any]]:
+        """Record one scoring call as the relay does, then score vowel density.
+
+        Args:
+            candidate: Candidate text.
+            case: The case.
+
+        Returns:
+            Vowel density and side information.
+        """
+        recorder.record(recorder.start(), kind="evaluator", target="score", status="ok")
+        return vowel_scorer(candidate, case)
+
+    def reflection(prompt: Any) -> str:
+        """Record one reflection call as the relay does, then propose a version.
+
+        Args:
+            prompt: The reflection prompt.
+
+        Returns:
+            The proposed text.
+        """
+        recorder.record(recorder.start(), kind="model", target="reflect", status="ok")
+        return str(lm(prompt)[0])
+
+    events: list[dict[str, Any]] = []
+
+    def progress(event: str, metrics: dict[str, Any]) -> None:
+        """Tag each candidate event with its lane, as Auto does, and finish its row as the worker does.
+
+        Args:
+            event: Event name.
+            metrics: Event payload.
+        """
+        if event != PROGRESS_CANDIDATE:
+            return
+        metrics = {**metrics, LANE_KEY: "explore-gepa"}
+        events.append(metrics)
+        key = event_candidate_key(metrics)
+        if key is not None:
+            store.finish_candidate("job-1", key, "done" if metrics.get("score") is not None else "failed")
+
+    task = Task(seed_candidate="hello world", objective="more vowels", cases=[{"i": 0}, {"i": 1}, {"i": 2}])
+    ctx = EngineContext(reflection_lm=reflection, run_dir=str(tmp_path), progress_callback=progress)
+
+    with usage_scope(lane="explore-gepa"):
+        GepaEngine().run(task, EvalServer(recorded_scorer, max_evals=12), ctx)
+
+    proposed = [metrics for metrics in events if metrics.get("iteration") is not None]
+    assert proposed
+    key = f"explore-gepa:{proposed[0]['iteration']}"
+    kinds = {call["kind"] for call in store.list_calls("job-1", key)}
+    assert kinds == {"evaluator", "model"}
+    assert store.get_candidate("job-1", key)["state"] == "done"
+    assert store.list_calls("job-1", "run")
 
 
 def test_gepa_engine_streams_candidates_while_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -476,7 +476,7 @@ def test_run_calls_report_running_from_candidate_and_run_state(store: _ExtendedF
     _seed_owned_run(store, "rc3")
     store.record_run_call("rc3", _run_call(), [])
     store.record_run_call("rc3", _run_call(candidate_id="cand-2"), [])
-    store.set_run_candidate_state("rc3", "cand-1", "solver", "done")
+    store._run_call_store().finish_candidate("rc3", "cand-1", "done")
     client = _client_as(store, _ALICE)
 
     assert client.get("/optimizations/rc3/candidates/cand-1/calls").json()["running"] is False
@@ -505,7 +505,7 @@ def test_run_candidates_list_role_state_count_and_cost(store: _ExtendedFakeJobSt
     store.record_run_call("rc5", _run_call(cost_usd=0.1), [])
     store.record_run_call("rc5", _run_call(cost_usd=0.2), [])
     store.record_run_call("rc5", _run_call(candidate_id="cand-2", role="judge", kind="evaluator", cost_usd=None), [])
-    store.set_run_candidate_state("rc5", "cand-2", "judge", "failed")
+    store._run_call_store().finish_candidate("rc5", "cand-2", "failed")
     client = _client_as(store, _ALICE)
 
     live = {c["candidate_id"]: c for c in client.get("/optimizations/rc5/candidates").json()["candidates"]}

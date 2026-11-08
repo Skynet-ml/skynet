@@ -8,7 +8,7 @@ Skynet 是一个根据你自己的数据和评分器优化仓库的平台。你�
 
 ### Skynet 能优化什么？
 
-Skynet 就是 Optimize Anything：每次运行都优化一个仓库。你可以使用已有的 GitHub 仓库，也可以让 Skynet 根据你的任务和数据创建一个新仓库。代码可以使用任何库，例如 DSPy。
+Skynet 就是 Optimize Anything：每次运行都优化一个仓库。你可以使用已有的 GitHub 仓库，也可以让 Skynet 根据你的任务和数据创建一个新仓库。代码可以使用任何库。
 
 每个引擎都处理仓库：GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler 和 ShinkaEvolve。
 

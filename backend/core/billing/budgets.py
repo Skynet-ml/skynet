@@ -12,6 +12,7 @@ import hashlib
 import json
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -42,6 +43,24 @@ from .service import StripeBillingService, account_committed_cents, free_grant_c
 
 _ACTIVE_STATES = ("reserved", "dispatched", "pending")
 _DISPATCHED_STATES = ("dispatched", "pending")
+# A context variable, not a service field: concurrent calls on one service each see only their own settles.
+_SETTLED_CENTS: ContextVar[dict[str, Decimal] | None] = ContextVar("settled_cents", default=None)
+
+
+@contextmanager
+def settled_charges() -> Iterator[dict[str, Decimal]]:
+    """Collect the charge each operation settles in this context, for the run-call record (E28).
+
+    Yields:
+        A map from operation id to its cumulative settled charge in cents;
+        it fills as operations settle inside the block.
+    """
+    charges: dict[str, Decimal] = {}
+    token = _SETTLED_CENTS.set(charges)
+    try:
+        yield charges
+    finally:
+        _SETTLED_CENTS.reset(token)
 
 
 class BudgetError(ValueError):
@@ -259,6 +278,15 @@ class BudgetService:
             engine: Application database engine, without any Stripe connection.
         """
         self._engine = engine
+
+    @property
+    def engine(self) -> Any:
+        """Return the application database engine that the ledger writes to.
+
+        Returns:
+            The SQLAlchemy engine this service was bound to.
+        """
+        return self._engine
 
     @contextmanager
     def _transaction(self, session: Session | None = None) -> Iterator[Session]:
@@ -1473,6 +1501,9 @@ class BudgetService:
                         wallet.updated_at = datetime.now(UTC)
                 operation.updated_at = budget.updated_at = datetime.now(UTC)
             snapshot = self._operation_snapshot(session, operation, budget, wallet)
+        charges = _SETTLED_CENTS.get()
+        if charges is not None and issue is None:
+            charges[operation_id] = snapshot.actual_cents
         if issue == "bound_exceeded":
             raise BudgetBoundExceededError(
                 "Reported usage exceeded its verified bound; evidence and coverage were retained."

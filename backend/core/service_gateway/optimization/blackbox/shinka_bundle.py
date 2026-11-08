@@ -10,13 +10,14 @@ file (SEARCH/REPLACE edits or full contents). Novelty is measured on the
 changes alone, and scoring materializes a bundle into the checkout and hands
 the parent the same ``git diff`` every other repository engine produces.
 
-Stdlib plus ``repo_tree``: it ships into the sandbox beside the runner.
+Stdlib plus ``repo_tree`` and ``harness_bridge``: they ship into the sandbox beside the runner.
 """
 
 from __future__ import annotations
 
 import difflib
 import json
+import posixpath
 import random
 import re
 import subprocess
@@ -26,8 +27,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from . import repo_tree
-except ImportError:  # In the sandbox the runner loads ``repo_tree`` as a top-level sibling first.
+    from . import harness_bridge, repo_tree
+except ImportError:  # In the sandbox the runner loads these as top-level siblings first.
+    import harness_bridge
     import repo_tree
 
 BUNDLE_HEAD = "<!-- APP-BUNDLE: the files this version changes, each after its APP-FILE line -->"
@@ -172,9 +174,28 @@ def parse_response(text: str) -> tuple[list[tuple[str, str]], list[str]]:
     Returns:
         ``(path, body)`` per FILE block in answer order, and the requested paths.
     """
-    edits = [(path.strip().removeprefix("./"), body) for path, body in _FILE_BLOCK.findall(text)]
-    opens = [path.strip() for path in _OPEN_REQUEST.findall(text) if path.strip()]
+    edits = [(_clean_path(path), body) for path, body in _FILE_BLOCK.findall(text)]
+    opens = [path for path in map(_clean_path, _OPEN_REQUEST.findall(text)) if path]
     return edits, list(dict.fromkeys(opens))
+
+
+def _clean_path(path: str) -> str:
+    """Normalize a path the model named, so ``./x``, ``a/../x`` and ``.//x`` all name ``x``.
+
+    The hidden-path and editable-path rules compare exact names, so each form
+    of one file must reach them as the same name.
+
+    Args:
+        path: The path as the model wrote it.
+
+    Returns:
+        The repository-relative path, or ``""`` for an empty path.
+    """
+    path = path.strip()
+    if not path:
+        return ""
+    path = posixpath.normpath(path).lstrip("/")
+    return "" if path == "." else path
 
 
 def apply_file_edit(body: str, current: str | None) -> tuple[str, int]:
@@ -340,6 +361,8 @@ class RepoBundle:
         editable_paths: Sequence[str],
         readonly_paths: Sequence[str],
         on_block: Callable[[str], None] | None = None,
+        hidden_paths: Sequence[str] = (),
+        on_refusal: Callable[[dict[str, str]], None] | None = None,
     ) -> None:
         """Bind to a checkout whose ``HEAD`` is the run's starting commit.
 
@@ -349,9 +372,14 @@ class RepoBundle:
             readonly_paths: Submodules and Git LFS files, which stay as fetched.
             on_block: Under a constraints file, receives each path-rule
                 refusal's reason, and the model reads only the illegal-action message.
+            hidden_paths: Scoring-side files and folders the model may not
+                open, list or edit.
+            on_refusal: Receives each hidden-path refusal as ``{"tool", "kind"}``.
         """
         self.checkout = checkout
         self.on_block = on_block
+        self.hidden_paths = [str(path).strip("/") for path in hidden_paths if str(path).strip("/")]
+        self.on_refusal = on_refusal
         self.editable_paths = [str(path) for path in editable_paths]
         self.readonly_paths = [str(path) for path in readonly_paths]
         self.start = self._git("rev-parse", "HEAD").strip()
@@ -366,6 +394,7 @@ class RepoBundle:
         seed_patch: Any,
         destination: Path,
         on_block: Callable[[str], None] | None = None,
+        on_refusal: Callable[[dict[str, str]], None] | None = None,
     ) -> RepoBundle:
         """Unpack the shipped tree and commit the seed version on top as the starting commit.
 
@@ -375,6 +404,7 @@ class RepoBundle:
             seed_patch: Starting version as a patch against the fetched commit, or empty.
             destination: Folder the checkout goes in.
             on_block: Receives each path-rule block's reason when ``repo`` is constrained.
+            on_refusal: Receives each refusal of a path in ``repo``'s ``hidden_paths``.
 
         Returns:
             The bundle rules bound to the new checkout.
@@ -389,6 +419,8 @@ class RepoBundle:
             repo["editable_paths"],
             repo.get("readonly_paths") or (),
             on_block=on_block if repo.get("constrained") else None,
+            hidden_paths=repo.get("hidden_paths") or (),
+            on_refusal=on_refusal,
         )
 
     def _git(self, *arguments: str) -> str:
@@ -419,6 +451,23 @@ class RepoBundle:
         if not _covers(self.editable_paths, path):
             return "it is outside the editable paths"
         return None
+
+    def hidden_refusal(self, path: str, tool: str) -> str | None:
+        """Refuse a hidden path, and report the tool and the path kind.
+
+        Args:
+            path: Repository-relative path the model named.
+            tool: ``open`` or ``edit``.
+
+        Returns:
+            The refusal text, or ``None`` when the path is not hidden.
+        """
+        normalized = path.strip().strip("/")
+        if not _covers_exact(self.hidden_paths, normalized):
+            return None
+        if self.on_refusal is not None:
+            self.on_refusal({"tool": tool, "kind": harness_bridge.hidden_kind(normalized)})
+        return harness_bridge.GUARD_REFUSAL
 
     def refusal(self, path: str, problem: str) -> str:
         """Word a path-rule refusal, and log it as a block under a constraints file.
@@ -453,7 +502,10 @@ class RepoBundle:
             self._paths = sorted(
                 path
                 for path, size in sized.items()
-                if size <= MAX_FILE_BYTES and (size == 0 or path in text) and self.rule_problem(path) is None
+                if size <= MAX_FILE_BYTES
+                and (size == 0 or path in text)
+                and self.rule_problem(path) is None
+                and not _covers_exact(self.hidden_paths, path)
             )
         return self._paths
 
@@ -556,6 +608,9 @@ class RepoBundle:
         updated = dict(files)
         applied = 0
         for path, body in edits:
+            hidden = self.hidden_refusal(path, "edit")
+            if hidden is not None:
+                return None, 0, hidden
             problem = self.rule_problem(path)
             if problem is not None:
                 return None, 0, self.refusal(path, problem)
@@ -588,6 +643,10 @@ class RepoBundle:
             "",
         ]
         for path in paths[:MAX_OPEN_FILES]:
+            hidden = self.hidden_refusal(path, "open")
+            if hidden is not None:
+                shown.append(f"## {path}\n{hidden}\n")
+                continue
             text = self.current(files, path)
             if text is None:
                 problem = self.rule_problem(path) or "it is missing, binary or too large to show"
@@ -793,6 +852,19 @@ def _covers(roots: Sequence[str], path: str) -> bool:
         Whether a root covers the path.
     """
     return any(root == "." or path == root or path.startswith(root.rstrip("/") + "/") for root in roots)
+
+
+def _covers_exact(roots: Sequence[str], path: str) -> bool:
+    """Report whether a path is one of ``roots`` or lies below one, with no whole-tree root.
+
+    Args:
+        roots: Repository-relative hidden files or folders.
+        path: Repository-relative path.
+
+    Returns:
+        Whether a root covers the path.
+    """
+    return any(path == root or path.startswith(root + "/") for root in roots)
 
 
 def _run_git(checkout: Path, *arguments: str) -> str:

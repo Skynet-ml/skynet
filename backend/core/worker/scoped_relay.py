@@ -1,18 +1,215 @@
-"""Build the parent-side dispatcher for sandbox-scoped relay capabilities."""
+"""Build the parent-side dispatcher for sandbox-scoped relay capabilities.
+
+:class:`CallRecorder` writes each relay call into the run record (E28), with
+every secret the call could carry removed by the store (E52 rule 3).
+"""
 
 from __future__ import annotations
 
-from typing import Any
-from urllib.parse import urlsplit
+import base64
+import binascii
+import logging
+import time
+from collections.abc import Collection
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from typing import Any, Protocol
+from urllib.parse import quote, quote_plus, urlsplit
 
 import httpx
 
-from ..billing.env_connectors import CONNECTOR_ROUTES_KEY
+from ..billing.env_connectors import CONNECTOR_ROUTES_KEY, escaped_forms
 from ..billing.host_agent import HOST_AGENT_PATH, HOST_AGENT_TOKEN_KEY
 from ..billing.model_dispatch import ModelHTTPResult
+from ..billing.usage_tags import LANE_KEY, current_tags
 from ..config import settings
 from ..models.blackbox import BLACKBOX_TARGET_REPO
 from ..service_gateway.optimization.blackbox.repo_scorer import SETUP_ALLOWANCE_SECONDS
+from ..storage.run_call_store import call_candidate_key
+
+logger = logging.getLogger(__name__)
+
+_MIN_DERIVED_FORM_CHARS = 8
+# Run calls that serve no candidate, such as proposer calls; the calls route needs a nonempty id.
+NO_CANDIDATE_ID = "run"
+
+
+class RunCallSink(Protocol):
+    """Take one relay call for the run record; ``PostgresRunCallStore`` is the real one."""
+
+    def record_call(self, optimization_id: str, call: dict[str, Any], secrets: list[str]) -> int:
+        """Write one call with its secrets removed.
+
+        Args:
+            optimization_id: Owning job id.
+            call: The call fields.
+            secrets: Every secret value the call could carry.
+
+        Returns:
+            The call's sequence number.
+        """
+        ...
+
+
+@dataclass(frozen=True)
+class CallStart:
+    """Mark when one relay call started, for its start time and its duration."""
+
+    at: datetime
+    clock: float
+
+    def elapsed_ms(self) -> int:
+        """Return the milliseconds since the call started.
+
+        Returns:
+            Whole milliseconds, never negative.
+        """
+        return max(0, round((time.monotonic() - self.clock) * 1000))
+
+
+@dataclass(frozen=True)
+class CallRecorder:
+    """Write each relay call of one run, candidate and role into the run record (E28)."""
+
+    sink: RunCallSink
+    optimization_id: str
+    candidate_id: str
+    role: str
+
+    @staticmethod
+    def start() -> CallStart:
+        """Mark the start of one call.
+
+        Returns:
+            The wall-clock start and a monotonic clock for its duration.
+        """
+        return CallStart(datetime.now(UTC), time.monotonic())
+
+    def bind(self, *, candidate_id: str | None = None, role: str | None = None) -> CallRecorder:
+        """Return a recorder for another candidate or role of the same run.
+
+        Args:
+            candidate_id: The candidate, or None to keep this one.
+            role: The role, or None to keep this one.
+
+        Returns:
+            The new recorder.
+        """
+        return replace(
+            self,
+            candidate_id=self.candidate_id if candidate_id is None else candidate_id,
+            role=self.role if role is None else role,
+        )
+
+    def record(
+        self,
+        started: CallStart,
+        *,
+        kind: str,
+        target: str,
+        status: str,
+        request: bytes | str = b"",
+        response: bytes | str = b"",
+        failure_reason: str | None = None,
+        cost_usd: float | None = None,
+        secrets: Collection[str] = (),
+        duration_ms: int | None = None,
+    ) -> None:
+        """Write one call; a store failure is logged and never fails the call itself.
+
+        The write is synchronous: the caller waits for the row write and for
+        the lock on the call's candidate row, which keeps ``seq`` in commit
+        order. A recorder with no candidate id writes under the candidate of
+        the parent's open usage scope, keyed by its Auto lane, else under
+        ``NO_CANDIDATE_ID``.
+
+        Args:
+            started: When the call started.
+            kind: ``model``, ``mcp``, ``stage``, ``evaluator`` or ``host``.
+            target: The route, tool or host the call went to.
+            status: ``ok``, ``failed`` or ``refused``, or the HTTP status code.
+            request: The request body the box sent.
+            response: The answer body.
+            failure_reason: Why the call failed or was refused.
+            cost_usd: What the call cost the run, when known.
+            secrets: Every secret value the call could carry. The store
+                removes their raw and JSON-escaped forms, and their base64,
+                percent-encoded and Basic-auth forms from :func:`_secret_forms`.
+            duration_ms: The duration another process measured, such as the
+                egress proxy; None measures it from ``started``.
+        """
+        tags = current_tags()
+        scoped = call_candidate_key(tags["candidate"], tags.get(LANE_KEY)) if tags.get("candidate") else ""
+        call = {
+            "candidate_id": self.candidate_id or scoped or NO_CANDIDATE_ID,
+            "role": self.role,
+            "kind": kind,
+            "target": target,
+            "started_at": started.at,
+            "duration_ms": started.elapsed_ms() if duration_ms is None else duration_ms,
+            "status": status,
+            "failure_reason": failure_reason,
+            "cost_usd": cost_usd,
+            "request": _text(request),
+            "response": _text(response),
+        }
+        try:
+            forms = {form for secret in secrets if secret for form in _secret_forms(secret)}
+            self.sink.record_call(self.optimization_id, call, sorted(forms))
+        except Exception:
+            # The record must never break the run; the exception text could hold a body, so it is not logged.
+            logger.warning("Could not record a %s call for run %s.", kind, self.optimization_id)
+
+
+def _secret_forms(secret: str) -> set[str]:
+    """List the forms of one secret that an echoing server can send back.
+
+    Besides the value itself, a server may echo it base64-encoded (standard
+    or URL-safe) or percent-encoded (as in a URL query or a form body), and a
+    Basic-auth token may come back decoded as ``user:password`` or as the
+    password alone. Padding is left off each base64 form, so the padded form
+    is masked too. Each form is also listed JSON-escaped with ``\\/`` (PHP)
+    and with ``\\u0026``-style HTML escapes (Go), because a base64 form holds
+    ``/`` and a decoded password may hold ``&``, ``<`` or ``>``.
+
+    Args:
+        secret: One nonempty secret value.
+
+    Returns:
+        The value and its derived forms, each with its escaped variants; at
+        most 40 strings.
+    """
+    raw = secret.encode()
+    derived = {encode(raw).decode().rstrip("=") for encode in (base64.b64encode, base64.urlsafe_b64encode)}
+    # A standard base64 key holds "+", "/" and "=", which a URL or form encoder changes.
+    derived |= {quote(secret), quote(secret, safe=""), quote_plus(secret)}
+    token = secret.partition(" ")[2] if secret[:6].lower() == "basic " else secret
+    derived.add(token)
+    try:
+        decoded = base64.b64decode(token, validate=True).decode()
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        decoded = ""
+    # Only a decoded "user:password" is a Basic credential; other base64 text is left alone.
+    _user, separator, password = decoded.partition(":")
+    credential: set[str] = set()
+    if separator and password and decoded.isprintable():
+        # A decoded Basic password is a real secret at any length, so it skips the length floor.
+        credential = {decoded, password}
+    # A short derived form, such as the base64 "MQ" of "1", would mask ordinary text.
+    forms = {secret} | credential | {form for form in derived if len(form) >= _MIN_DERIVED_FORM_CHARS}
+    return forms | {variant for form in forms for variant in escaped_forms(form)}
+
+
+def _text(body: bytes | str) -> str:
+    """Return a body as text for the record.
+
+    Args:
+        body: Raw bytes or text.
+
+    Returns:
+        The UTF-8 text, with any bad bytes replaced.
+    """
+    return body.decode("utf-8", "replace") if isinstance(body, bytes) else body
 
 
 def model_forwarder(payload: dict[str, Any]) -> Any:

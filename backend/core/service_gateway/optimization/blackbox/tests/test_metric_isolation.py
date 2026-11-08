@@ -51,12 +51,12 @@ def _task() -> Task:
 
 
 def test_native_task_payload_holds_only_the_train_fields() -> None:
-    """Ship seed, objective, background and train cases, never context or validation cases."""
+    """Ship seed, objective, background and train case inputs, never expected, context or validation cases."""
     task = _task()
     document = native_task_payload("meta_harness", task)
 
     assert set(document) == NATIVE_TASK_FIELDS
-    assert document["train_set"] == [{"input": {"q": "a"}, "expected": "A"}]
+    assert document["train_set"] == [{"id": 0, "input": {"q": "a"}}]
     text = json.dumps(document)
     assert SENTINEL not in text
     assert VAL_SENTINEL not in text

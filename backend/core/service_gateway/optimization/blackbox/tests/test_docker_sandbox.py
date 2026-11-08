@@ -21,10 +21,11 @@ from core.config import Settings
 from core.exceptions import ServiceError
 from core.i18n import t
 from core.worker import engine
+from core.worker.scoped_relay import NO_CANDIDATE_ID, CallRecorder
 from core.worker.vercel_dspy import _require_image_protocol
 
 from .. import docker_sandbox
-from ..docker_egress_proxy import READY_MARKER
+from ..docker_egress_proxy import CALL_EVENT, READY_MARKER
 from ..docker_sandbox import (
     DOCKER_JOB_LABEL,
     DockerSandboxRuntime,
@@ -35,11 +36,14 @@ from ..docker_sandbox import (
 from ..native_runtime import native_runtime_unavailable_reason
 from ..sandbox import (
     _RUNTIME_OVERRIDE,
+    CODEX_REQUIREMENTS_PATH,
     JOB_TAG,
     SandboxSpec,
+    check_codex_requirements,
     sandbox_runtime_from_settings,
     sandbox_unavailable_reason,
     scorer_runtime_from_settings,
+    write_codex_requirements,
 )
 from ..sandbox_broker import SandboxBroker
 
@@ -88,6 +92,7 @@ elif command == "inspect":
     print("null")
 elif command == "logs":
     print("{ready}")
+    sys.stdout.write(os.environ.get("FAKE_DOCKER_PROXY_LINES", ""))
 """
 
 
@@ -134,6 +139,7 @@ def fake_docker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, P
     log.touch()
     monkeypatch.setenv("FAKE_DOCKER_LOG", str(log))
     monkeypatch.delenv("FAKE_DOCKER_FAIL", raising=False)
+    monkeypatch.delenv("FAKE_DOCKER_PROXY_LINES", raising=False)
     return str(binary), log
 
 
@@ -181,7 +187,7 @@ def test_open_starts_an_offline_read_only_box_labelled_with_its_job(fake_docker:
     assert _flag_values(argv, "--cpus") == ["2"]
     assert _flag_values(argv, "--memory") == ["4096m"]
     assert _flag_values(argv, "--pids-limit") == ["1024"]
-    assert [mount.split(":")[0] for mount in _flag_values(argv, "--tmpfs")] == ["/workspace", "/tmp"]
+    assert [mount.split(":")[0] for mount in _flag_values(argv, "--tmpfs")] == ["/workspace", "/tmp", "/etc/codex"]
     assert _flag_values(argv, "-w") == ["/workspace"]
     assert _flag_values(argv, "-e") == ["HOME=/workspace", "TMPDIR=/tmp"]
     assert set(_flag_values(argv, "--label")) == {"skynet=blackbox", "skynet_job=job-7", f"{DOCKER_JOB_LABEL}=job-7"}
@@ -242,6 +248,142 @@ def test_closing_a_setup_box_removes_it_then_its_proxy_and_network(fake_docker: 
         ["rm", "-f", egress.proxy],
         ["network", "rm", egress.network],
     ]
+
+
+class _Sink:
+    """Keep each run-call record the recorder writes."""
+
+    def __init__(self) -> None:
+        """Start with no records."""
+        self.calls: list[tuple[str, dict[str, Any], list[str]]] = []
+
+    def record_call(self, optimization_id: str, call: dict[str, Any], secrets: list[str]) -> None:
+        """Keep one record.
+
+        Args:
+            optimization_id: The run.
+            call: The record fields.
+            secrets: The values the store must remove.
+        """
+        self.calls.append((optimization_id, call, secrets))
+
+
+def _proxy_line(**fields: Any) -> str:
+    """Build one egress proxy call line, as the proxy prints it.
+
+    Args:
+        **fields: Fields that replace the defaults.
+
+    Returns:
+        The JSON line with its newline.
+    """
+    line = {
+        "event": CALL_EVENT,
+        "host": "pypi.org",
+        "port": 443,
+        "status": "ok",
+        "code": 200,
+        "reason": None,
+        "bytes_sent": 517,
+        "bytes_received": 4096,
+        "started_at": "2026-11-07T10:00:00.250+00:00",
+        "duration_ms": 87,
+    }
+    return json.dumps({**line, **fields}) + "\n"
+
+
+def test_closing_a_run_box_records_each_proxy_request_before_the_proxy_goes(
+    fake_docker: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each proxy line becomes one host record; other output lines are skipped."""
+    binary, log = fake_docker
+    monkeypatch.setenv(
+        "FAKE_DOCKER_PROXY_LINES",
+        _proxy_line()
+        + "not json\n"
+        + json.dumps({"event": "other"})
+        + "\n"
+        + _proxy_line(
+            host="evil.example",
+            status="refused",
+            code=403,
+            reason="host is not allowed",
+            bytes_sent=0,
+            started_at="2026-11-07T10:00:01.000+00:00",
+        ),
+    )
+    sink = _Sink()
+    session = DockerSandboxRuntime(_IMAGE, docker_bin=binary, recorder=CallRecorder(sink, "job-7", "", "")).open(
+        SandboxSpec(lifetime_seconds=60, allowed_hosts=("pypi.org",))
+    )
+    assert isinstance(session, DockerSandboxSession)
+    egress = session.egress
+    assert egress is not None
+    log.write_text("")
+
+    session.close()
+    session.close()
+
+    assert _calls(log) == [
+        ["rm", "-f", session.container],
+        ["logs", egress.proxy],
+        ["rm", "-f", egress.proxy],
+        ["network", "rm", egress.network],
+    ]
+    (ok_id, ok, ok_secrets), (refused_id, refused, _) = sink.calls
+    assert (ok_id, refused_id, ok_secrets) == ("job-7", "job-7", [])
+    assert ok["kind"] == "host"
+    assert ok["target"] == "pypi.org"
+    assert (ok["status"], ok["failure_reason"], ok["duration_ms"]) == ("ok", None, 87)
+    assert ok["started_at"].isoformat() == "2026-11-07T10:00:00.250000+00:00"
+    assert json.loads(ok["request"]) == {"port": 443, "bytes_sent": 517}
+    assert json.loads(ok["response"]) == {"code": 200, "bytes_received": 4096}
+    assert (refused["target"], refused["status"]) == ("evil.example", "refused")
+    assert refused["failure_reason"] == "host is not allowed"
+    assert json.loads(refused["response"])["code"] == 403
+
+
+def test_proxy_requests_are_recorded_in_start_order(
+    fake_docker: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A long tunnel that ends last is still written before a later, shorter one."""
+    binary, _log = fake_docker
+    monkeypatch.setenv(
+        "FAKE_DOCKER_PROXY_LINES",
+        _proxy_line(host="short.example", started_at="2026-11-07T10:00:05.000+00:00")
+        + _proxy_line(host="long.example", started_at="2026-11-07T10:00:01.000+00:00", duration_ms=9000),
+    )
+    sink = _Sink()
+    session = DockerSandboxRuntime(_IMAGE, docker_bin=binary, recorder=CallRecorder(sink, "job-7", "", "")).open(
+        SandboxSpec(lifetime_seconds=60, allowed_hosts=("long.example", "short.example"))
+    )
+
+    session.close()
+
+    assert [call["target"] for _, call, _ in sink.calls] == ["long.example", "short.example"]
+    assert {call["candidate_id"] for _, call, _ in sink.calls} == {NO_CANDIDATE_ID}
+
+
+def test_unreadable_proxy_output_records_nothing_and_still_drops_the_proxy(
+    fake_docker: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed ``docker logs`` never blocks removing the proxy and network."""
+    binary, log = fake_docker
+    sink = _Sink()
+    session = DockerSandboxRuntime(_IMAGE, docker_bin=binary, recorder=CallRecorder(sink, "job-7", "", "")).open(
+        SandboxSpec(lifetime_seconds=60, allowed_hosts=("pypi.org",))
+    )
+    assert isinstance(session, DockerSandboxSession)
+    egress = session.egress
+    assert egress is not None
+    log.write_text("")
+    monkeypatch.setenv("FAKE_DOCKER_FAIL", "logs")
+
+    session.disable_network()
+
+    assert sink.calls == []
+    assert ["rm", "-f", egress.proxy] in _calls(log)
+    assert ["network", "rm", egress.network] in _calls(log)
 
 
 def test_switching_a_setup_box_offline_drops_its_proxy(fake_docker: tuple[str, Path]) -> None:
@@ -455,6 +597,20 @@ def test_session_commands_address_the_container(fake_docker: tuple[str, Path]) -
     assert read[:4] == ["exec", "-w", "/workspace", "box1"]
     assert read[-1] == "out/a.txt"
     assert remove == ["rm", "-f", "box1"]
+
+
+def test_a_root_command_runs_as_the_container_root_user_only_when_asked(fake_docker: tuple[str, Path]) -> None:
+    """Only a ``sudo`` command adds ``-u root`` to ``docker exec``; a plain one keeps the image user."""
+    binary, log = fake_docker
+    session = DockerSandboxSession(binary, "box1", env={}, owner=None)
+
+    session.run("id -u")
+    session.run("id -u", sudo=True)
+    session.close()
+
+    plain, root, _remove = _calls(log)
+    assert "-u" not in plain
+    assert root[:6] == ["exec", "-i", "-u", "root", "-w", "/workspace"]
 
 
 def test_a_planted_shell_profile_never_runs_and_the_env_still_reaches_the_command(
@@ -719,6 +875,23 @@ def test_live_box_has_no_network_and_a_read_only_root(live_session: DockerSandbo
     assert writes.ok, writes.stderr
     assert identity.stdout.splitlines()[0] == "/workspace"
     assert identity.stdout.split()[-1] == "0000000000000000"
+
+
+@pytest.mark.docker
+@_live
+def test_live_read_only_box_takes_the_root_owned_codex_requirements(live_session: DockerSandboxSession) -> None:
+    """Write the Codex requirements as root in a real read-only box; the box user cannot change them (SKY-389)."""
+    write_codex_requirements(live_session)
+    check_codex_requirements(live_session)
+    tamper = live_session.run(
+        f"echo x >> {CODEX_REQUIREMENTS_PATH} || rm -f {CODEX_REQUIREMENTS_PATH} || touch /etc/codex/other; "
+        f"test -f /etc/codex/other && exit 9; id -u",
+        timeout_seconds=30,
+    )
+
+    assert tamper.stdout.strip().splitlines()[-1] != "0"
+    assert tamper.exit_code != 9
+    check_codex_requirements(live_session)
 
 
 @pytest.mark.docker

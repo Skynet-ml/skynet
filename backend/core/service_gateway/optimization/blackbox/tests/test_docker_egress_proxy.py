@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import socket
 import threading
 from collections.abc import Iterator
@@ -271,3 +272,61 @@ def test_handle_closes_the_tunnel_when_its_return_pipe_cannot_start(monkeypatch:
         proxy.handle(theirs, frozenset({"pypi.org"}))
         ours.settimeout(5)
         assert ours.recv(1024) == b""
+
+
+def test_handle_logs_a_refused_request_with_its_host_and_no_path(capsys: pytest.CaptureFixture[str]) -> None:
+    """Print one JSON line for a refused request: the host and port, never the request line."""
+    ours, theirs = socket.socketpair()
+    with ours:
+        ours.sendall(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n")
+        proxy.handle(theirs, frozenset({"pypi.org"}))
+        plain, other = socket.socketpair()
+        with plain:
+            plain.sendall(b"GET http://pypi.org/secret-path?key=abc HTTP/1.1\r\n\r\n")
+            proxy.handle(other, frozenset({"pypi.org"}))
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [(line["event"], line["host"], line["port"], line["status"], line["code"]) for line in lines] == [
+        (proxy.CALL_EVENT, "example.com", 443, "refused", 403),
+        (proxy.CALL_EVENT, None, None, "refused", 403),
+    ]
+    assert lines[0]["bytes_sent"] == 0
+    assert lines[0]["started_at"].endswith("+00:00")
+    assert "secret-path" not in json.dumps(lines)
+
+
+def test_handle_logs_a_tunnel_with_its_byte_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Print one ok line for a tunnel, with the bytes each way and its duration."""
+    upstream = socket.create_server(("127.0.0.1", 0))
+    monkeypatch.setattr(proxy, "public_addresses", lambda host, port: [(socket.AF_INET, upstream.getsockname())])
+    logged: list[dict] = []
+    monkeypatch.setattr(proxy, "log_call", logged.append)
+
+    def echo() -> None:
+        """Answer the tunnel with ten bytes, then close it."""
+        connection, _ = upstream.accept()
+        with connection:
+            connection.recv(1024)
+            connection.sendall(b"0123456789")
+
+    threading.Thread(target=echo, daemon=True).start()
+    ours, theirs = socket.socketpair()
+    with upstream, ours:
+        ours.sendall(b"CONNECT pypi.org:443 HTTP/1.1\r\n\r\nhello")
+        proxy.handle(theirs, frozenset({"pypi.org"}))
+    [line] = logged
+    assert (line["host"], line["status"], line["code"], line["reason"]) == ("pypi.org", "ok", 200, None)
+    assert (line["bytes_sent"], line["bytes_received"]) == (5, 10)
+    assert line["duration_ms"] >= 0
+
+
+def test_handle_logs_a_bad_gateway_as_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Print a failed line with a reason when no checked address answers."""
+    monkeypatch.setattr(proxy, "public_addresses", lambda host, port: [(socket.AF_INET, ("127.0.0.1", 1))])
+    logged: list[dict] = []
+    monkeypatch.setattr(proxy, "log_call", logged.append)
+    ours, theirs = socket.socketpair()
+    with ours:
+        ours.sendall(b"CONNECT pypi.org:443 HTTP/1.1\r\n\r\n")
+        proxy.handle(theirs, frozenset({"pypi.org"}))
+    [line] = logged
+    assert (line["status"], line["code"], line["reason"]) == ("failed", 502, "no checked address answered")

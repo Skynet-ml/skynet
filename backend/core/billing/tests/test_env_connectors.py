@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import socket
@@ -11,12 +12,14 @@ from collections.abc import Callable, Iterator
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, quote_plus, urlsplit
 
+import httpx
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 from core.billing import env_connectors
 from core.billing.budgets import BudgetFencedError, BudgetInsufficientError, BudgetService
@@ -33,6 +36,8 @@ from core.billing.runtime import BudgetRuntime
 from core.billing.signals import BudgetReached
 from core.config import settings
 from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
+from core.storage.run_call_store import PostgresRunCallStore
+from core.worker.scoped_relay import CallRecorder
 
 MAPS_KEY = "maps-parent-only-key"
 FIRECRAWL_KEY = "fc-parent-only-key"
@@ -569,3 +574,255 @@ def test_relay_refuses_a_shared_file_that_sends_a_user_key_to_another_host() -> 
             allowed_hosts={"GOOGLE_MAPS_KEY": [MAPS]},
             send=lambda *_args: pytest.fail("The relay must not send."),
         )
+
+
+@pytest.fixture
+def calls() -> PostgresRunCallStore:
+    """Return a run record store over a fresh in-memory SQLite schema."""
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    return PostgresRunCallStore(engine)
+
+
+def _recorder(calls: PostgresRunCallStore) -> CallRecorder:
+    """Return a recorder for one candidate's judge role.
+
+    Args:
+        calls: The run record store.
+
+    Returns:
+        The recorder.
+    """
+    return CallRecorder(calls, "job-1", "cand-1", "judge")
+
+
+def _stored(calls: PostgresRunCallStore) -> list[dict]:
+    """Return the stored calls of the recorder's candidate.
+
+    Args:
+        calls: The run record store.
+
+    Returns:
+        The call records, oldest first.
+    """
+    return calls.list_calls("job-1", "cand-1")
+
+
+def _assert_no_secret(records: list[dict], *secrets: str) -> None:
+    """Check that no secret is in any stored field, raw or JSON-escaped.
+
+    Args:
+        records: The stored call records.
+        *secrets: The secret values.
+    """
+    text = json.dumps(records) + repr(records)
+    for secret in secrets:
+        for form in (secret, json.dumps(secret)[1:-1]):
+            assert form not in text
+
+
+def test_relay_records_an_echoed_call_with_no_secret(
+    calls: PostgresRunCallStore, echo: Callable[[str, dict[str, str], bytes], bytes]
+) -> None:
+    """Store the echoed call with each user secret removed, even one the box put in the body (E52 rule 3)."""
+    secret = 'user-"judge"-key\\123'
+    other = "other-user-key-456"
+    body = json.dumps({"query": "weather", "leak": other}).encode()
+    relay_request(
+        url="https://api.judge.example/v1",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        body=body,
+        user_secrets={"JUDGE_KEY": secret, "OTHER_KEY": other},
+        bindings={},
+        secret_hosts={"JUDGE_KEY": "api.judge.example"},
+        allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+        send=echo,
+        recorder=_recorder(calls),
+    )
+    [record] = _stored(calls)
+    assert (record["kind"], record["target"], record["status"], record["role"]) == (
+        "host",
+        "api.judge.example",
+        "ok",
+        "judge",
+    )
+    assert record["failure_reason"] is None
+    assert record["cost_usd"] is None
+    assert record["duration_ms"] >= 0
+    assert "weather" in record["request"]
+    assert "Authorization" in record["response"]
+    _assert_no_secret([record], secret, other)
+
+
+def test_relay_records_a_failed_send_with_its_reason(calls: PostgresRunCallStore) -> None:
+    """Store a send failure as failed, with its reason and with the secret removed."""
+    secret = "user-judge-key-789"
+
+    def send(_url: str, headers: dict[str, str], _body: bytes) -> bytes:
+        """Fail the way a client does when it prints the request headers."""
+        raise OSError(f"connection reset after sending {headers}")
+
+    with pytest.raises(OSError):
+        relay_request(
+            url="https://api.judge.example/v1",
+            headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+            body=b"{}",
+            user_secrets={"JUDGE_KEY": secret},
+            bindings={},
+            secret_hosts={"JUDGE_KEY": "api.judge.example"},
+            allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+            send=send,
+            recorder=_recorder(calls),
+        )
+    [record] = _stored(calls)
+    assert record["status"] == "failed"
+    assert record["failure_reason"].startswith("OSError: connection reset")
+    _assert_no_secret([record], secret)
+
+
+def test_relay_records_a_malformed_url_as_refused(calls: PostgresRunCallStore) -> None:
+    """Store a refused call with an empty target when the url cannot be parsed, then raise."""
+    with pytest.raises(ValueError):
+        relay_request(
+            url="https://[::1/v1",
+            headers={},
+            body=b"{}",
+            user_secrets={},
+            bindings={},
+            secret_hosts={},
+            allowed_hosts={},
+            send=lambda *_args: b"{}",
+            recorder=_recorder(calls),
+        )
+    [record] = _stored(calls)
+    assert (record["status"], record["target"]) == ("refused", "")
+    assert record["failure_reason"].startswith("ValueError")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [httpx.ReadTimeout("read timed out"), KeyboardInterrupt(), SystemExit(1)],
+    ids=["timeout", "interrupt", "exit"],
+)
+def test_relay_records_a_timed_out_or_stopped_send(calls: PostgresRunCallStore, error: BaseException) -> None:
+    """Store a timeout or a worker stop during the send as failed, then raise it again."""
+
+    def send(*_args: object) -> bytes:
+        """Stop the call while it waits for the answer."""
+        raise error
+
+    with pytest.raises(type(error)):
+        relay_request(
+            url="https://api.judge.example/v1",
+            headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+            body=b"{}",
+            user_secrets={"JUDGE_KEY": "user-judge-key-321"},
+            bindings={},
+            secret_hosts={"JUDGE_KEY": "api.judge.example"},
+            allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+            send=send,
+            recorder=_recorder(calls),
+        )
+    [record] = _stored(calls)
+    assert record["status"] == "failed"
+    assert record["failure_reason"].startswith(type(error).__name__)
+    _assert_no_secret([record], "user-judge-key-321")
+
+
+def test_relay_records_no_encoded_form_of_a_secret_the_server_echoes(calls: PostgresRunCallStore) -> None:
+    """Mask a key the server echoes base64-, JSON- or percent-encoded, or as a decoded Basic credential."""
+    key = 'user-"judge"/key?~~>123'
+    basic = base64.b64encode(b"svc-user:basic-pass-456").decode()
+    # A standard base64 key, as Azure and AWS issue them, changes in a URL query.
+    azure = "Zm9v+YmFy/YmF6PQ=="
+
+    def send(_url: str, _headers: dict[str, str], _body: bytes) -> bytes:
+        """Echo each encoded form of the filled secrets."""
+        echo = {
+            "b64": base64.b64encode(key.encode()).decode(),
+            "b64url": base64.urlsafe_b64encode(key.encode()).decode().rstrip("="),
+            "escaped": json.dumps(key),
+            "basic_token": basic,
+            "basic_decoded": "svc-user:basic-pass-456",
+            "basic_password": "basic-pass-456",
+            "quoted": quote(key),
+            "quoted_all": quote(key, safe=""),
+            "query": f"https://api.judge.example/v1?key={quote_plus(azure)}",
+        }
+        return json.dumps(echo).encode()
+
+    relay_request(
+        url="https://api.judge.example/v1",
+        headers={"X-Key": "${JUDGE_KEY}", "Authorization": "Basic ${BASIC_TOKEN}", "X-Azure": "${AZURE_KEY}"},
+        body=b"{}",
+        user_secrets={"JUDGE_KEY": key, "BASIC_TOKEN": basic, "AZURE_KEY": azure},
+        bindings={},
+        secret_hosts=dict.fromkeys(("JUDGE_KEY", "BASIC_TOKEN", "AZURE_KEY"), "api.judge.example"),
+        allowed_hosts={name: ["api.judge.example"] for name in ("JUDGE_KEY", "BASIC_TOKEN", "AZURE_KEY")},
+        send=send,
+        recorder=_recorder(calls),
+    )
+    [record] = _stored(calls)
+    _assert_no_secret(
+        [record],
+        key,
+        base64.b64encode(key.encode()).decode().rstrip("="),
+        base64.urlsafe_b64encode(key.encode()).decode().rstrip("="),
+        basic,
+        "basic-pass-456",
+        quote(key),
+        quote(key, safe=""),
+        quote_plus(azure),
+    )
+    assert record["response"].count("[REDACTED]") == 9
+
+
+def test_relay_records_a_refused_call_with_its_reason(calls: PostgresRunCallStore) -> None:
+    """Store a call to a host the run does not allow as refused, and never send it."""
+
+    def send(*_args: object) -> bytes:
+        """Fail the test when the refused call goes out."""
+        raise AssertionError("refused call was sent")
+
+    with pytest.raises(ValueError, match="may not go to"):
+        relay_request(
+            url="https://evil.example/v1",
+            headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+            body=b"{}",
+            user_secrets={"JUDGE_KEY": "user-judge-key-000"},
+            bindings={},
+            secret_hosts={"JUDGE_KEY": "api.judge.example"},
+            allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+            send=send,
+            recorder=_recorder(calls),
+            kind="mcp",
+        )
+    [record] = _stored(calls)
+    assert (record["kind"], record["target"], record["status"]) == ("mcp", "evil.example", "refused")
+    assert "may not go to evil.example" in record["failure_reason"]
+    _assert_no_secret([record], "user-judge-key-000")
+
+
+def test_relay_records_the_managed_tool_price_and_hides_the_key(
+    runtime: BudgetRuntime, calls: PostgresRunCallStore, echo: Callable[[str, dict[str, str], bytes], bytes]
+) -> None:
+    """Store a managed tools/call with the price the run paid and without Skynet's key."""
+    body = json.dumps({"method": "tools/call", "params": {"name": "search_places", "arguments": {}}}).encode()
+    relay_request(
+        url="https://mapstools.googleapis.com/mcp",
+        headers={"X-Goog-Api-Key": "${GOOGLE_MAPS_KEY}"},
+        body=body,
+        user_secrets={},
+        bindings={"GOOGLE_MAPS_KEY": "managed"},
+        secret_hosts={"GOOGLE_MAPS_KEY": MAPS},
+        allowed_hosts={},
+        send=echo,
+        runtime=runtime,
+        recorder=_recorder(calls),
+        kind="mcp",
+    )
+    [record] = _stored(calls)
+    assert record["status"] == "ok"
+    assert record["cost_usd"] == pytest.approx(0.014)
+    assert runtime.service.get(runtime.budget_id, "alice").setup_spent_cents == Decimal("1.4")
+    _assert_no_secret([record], MAPS_KEY)

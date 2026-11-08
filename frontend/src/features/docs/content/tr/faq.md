@@ -8,7 +8,7 @@ Skynet, depoları kendi verilerinize ve puanlayıcınıza göre optimize eden bi
 
 ### Skynet neyi optimize edebilir?
 
-Skynet, Optimize Anything'dir: her çalıştırma bir depoyu optimize eder. Elinizde olan bir GitHub deposunu kullanın veya Skynet'in görevinizden ve verinizden yeni bir depo oluşturmasına izin verin. Kod herhangi bir kütüphaneyi kullanabilir, örneğin DSPy.
+Skynet, Optimize Anything'dir: her çalıştırma bir depoyu optimize eder. Elinizde olan bir GitHub deposunu kullanın veya Skynet'in görevinizden ve verinizden yeni bir depo oluşturmasına izin verin. Kod herhangi bir kütüphaneyi kullanabilir.
 
 Her motor depolar üzerinde çalışır: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler ve ShinkaEvolve.
 

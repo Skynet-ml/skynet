@@ -85,6 +85,7 @@ class SandboxSession(Protocol):
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
         on_output: OutputSink | None = None,
+        sudo: bool = False,
     ) -> CommandResult:
         """Run ``command`` through ``bash --noprofile --norc -c`` in the working directory and wait for it.
 
@@ -93,6 +94,7 @@ class SandboxSession(Protocol):
             env: Extra environment for this command.
             timeout_seconds: Kill the command after this long.
             on_output: Receives each new piece of output while the command runs.
+            sudo: Run as root. Only the control plane may ask for it.
 
         Returns:
             Exit code, captured output and whether the timeout fired.

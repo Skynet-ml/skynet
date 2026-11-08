@@ -11,8 +11,9 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import urlsplit
 
 import httpx
@@ -22,7 +23,8 @@ from ..config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS, app_env
 from ..exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION, InfrastructureInterruptionError
 from ..i18n_en import t_en
 from ..local.cli_catalog import CliProvider, parse_subscription_model_id
-from .budgets import BudgetError, BudgetInsufficientError
+from ..storage.run_call_store import call_candidate_key
+from .budgets import BudgetError, BudgetInsufficientError, settled_charges
 from .byok_upstreams import (
     OPENROUTER,
     ProviderUpstream,
@@ -32,7 +34,7 @@ from .byok_upstreams import (
     validate_custom_base,
 )
 from .cli_dispatch import CliDispatcher
-from .credential_safety import scrub_model_config
+from .credential_safety import credential_fragments, scrub_model_config
 from .data_policy import data_policy_for
 from .dependency_lock import verify_dependency_lock
 from .env_connectors import CONNECTOR_ROUTES_KEY, CONNECTORS_KEY
@@ -56,7 +58,11 @@ from .protected_credentials import (
 from .remote_evaluator import RemoteEvaluatorBroker, RemoteEvaluatorTransportError
 from .runtime import BudgetRuntime, ProviderFailedError, UsagePendingError
 from .signals import BudgetReached
-from .usage_tags import USAGE_TAGS_HEADERS
+from .usage_tags import LANE_KEY, USAGE_TAGS_HEADERS, header_tags
+
+if TYPE_CHECKING:
+    # Type-only: the worker relay imports billing modules, so a runtime import could cycle.
+    from ..worker.scoped_relay import CallRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +92,48 @@ _TRANSIENT_SANDBOX_ERROR_TYPES = frozenset(
         "SandboxTimeoutError",
     }
 )
+
+
+def _tool_target(server: str, url: str, body: Mapping[str, Any]) -> str:
+    """Name the server and the tool a JSON-RPC tool request calls, for its run-call target.
+
+    Two servers can expose a tool of the same name, even on one host, so the
+    server label and host come first (E49 item 4). Only the host and port are
+    kept: a server path or query can hold a key.
+
+    Args:
+        server: The connector name, or ``roster`` for the run's tool roster.
+        url: The MCP endpoint the broker sends to.
+        body: The MCP JSON-RPC request.
+
+    Returns:
+        ``server@host/tool`` for ``tools/call``, otherwise ``server@host/method``.
+    """
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+    params = body.get("params")
+    if body.get("method") == "tools/call" and isinstance(params, Mapping) and params.get("name"):
+        return f"{server}@{host}/{params['name']}"
+    return f"{server}@{host}/{body.get('method') or ''}"
+
+
+def _call_cost(route: OpenRouterDispatcher | CliDispatcher | None, charges: Mapping[str, Decimal]) -> float | None:
+    """Return what one model call cost the run, in dollars, for its run-call record (E28).
+
+    Args:
+        route: The model route, or None for a tool or evaluator call.
+        charges: The charge each operation of the call settled, in cents.
+
+    Returns:
+        The settled total, or None for a tool or evaluator call, a BYOK call
+        (the provider bills the user's own key) and a call that settled nothing.
+    """
+    # A tool or evaluator call settles the nested model calls it makes, which have records of their own.
+    if route is None or not charges or route.policy.kind == "byok_model":
+        return None
+    return float(sum(charges.values(), Decimal(0)) / 100)
 
 
 def _unbound_capability(path: str, capabilities: Mapping[str, Any]) -> bool:
@@ -255,6 +303,9 @@ class ModelGateway:
         # Set once the job's event queue exists, so an economy batch's polling
         # keeps the stall watchdog from mistaking a long wait for a hang.
         self.heartbeat: Callable[[], None] | None = None
+        # Set by the run's sandbox bind; setup work keeps it None and writes no run calls (E28).
+        self.recorder: CallRecorder | None = None
+        self._route_keys: dict[str, str] = {}
         gateway = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -366,21 +417,31 @@ class ModelGateway:
                     response = (
                         gateway._packages.dispatch(body)
                         if is_packages
-                        else gateway._evaluator.dispatch(body)
+                        else gateway._recorded(
+                            token, None, body, lambda: gateway._evaluator.dispatch(body), headers=self.headers
+                        )
                         if is_evaluator
-                        else tools.dispatch(body)
+                        else gateway._recorded(
+                            token, None, body, lambda: tools.dispatch(body), tools=tools, headers=self.headers
+                        )
                         if tools is not None
-                        else route.dispatch(
-                            self.path.removeprefix("/v1"),
+                        else gateway._recorded(
+                            token or self.headers.get("x-api-key", ""),
+                            route,
                             body,
-                            operation_key=_model_attempt_key(
-                                {name.lower(): value for name, value in self.headers.items()}
+                            lambda: route.dispatch(
+                                self.path.removeprefix("/v1"),
+                                body,
+                                operation_key=_model_attempt_key(
+                                    {name.lower(): value for name, value in self.headers.items()}
+                                ),
+                                protocol_headers={
+                                    name: value
+                                    for name, value in self.headers.items()
+                                    if name.lower() in {"anthropic-version", "anthropic-beta"} | USAGE_TAGS_HEADERS
+                                },
                             ),
-                            protocol_headers={
-                                name: value
-                                for name, value in self.headers.items()
-                                if name.lower() in {"anthropic-version", "anthropic-beta"} | USAGE_TAGS_HEADERS
-                            },
+                            headers=self.headers,
                         )
                     )
                     self._reply(response)
@@ -567,6 +628,7 @@ class ModelGateway:
         )
         if parent_only:
             self._parent_only.add(token)
+        self._route_keys[token] = api_key
         return {"url": self.url, "token": token, "model": model, "role": role}
 
     def register_subscription(self, model: str, cli: CliProvider, role: str) -> dict[str, str]:
@@ -787,17 +849,23 @@ class ModelGateway:
         if is_evaluator:
             if path != "/v1/_evaluator":
                 raise ValueError("The evaluator capability cannot dispatch models, tools, or sandbox commands.")
-            return self._evaluator.dispatch(body)
+            return self._recorded(token, None, body, lambda: self._evaluator.dispatch(body), headers=headers)
         if is_tools:
             if path != "/v1/_mcp":
                 raise ValueError("The tool capability cannot dispatch models or sandbox commands.")
-            return tools.dispatch(body)
+            return self._recorded(token, None, body, lambda: tools.dispatch(body), tools=tools, headers=headers)
         try:
-            response = route.dispatch(
-                path.removeprefix("/v1"),
+            response = self._recorded(
+                token,
+                route,
                 body,
-                operation_key=_model_attempt_key(headers),
-                protocol_headers=headers,
+                lambda: route.dispatch(
+                    path.removeprefix("/v1"),
+                    body,
+                    operation_key=_model_attempt_key(headers),
+                    protocol_headers=headers,
+                ),
+                headers=headers,
             )
         except BudgetInsufficientError as error:
             self.budget_refusal = error
@@ -857,6 +925,99 @@ class ModelGateway:
                 observer(body)
             except Exception:  # isolation boundary: an observer must never fail the model call it watched
                 logger.warning("A model-call observer failed.", exc_info=True)
+
+    def _recorded(
+        self,
+        token: str,
+        route: OpenRouterDispatcher | CliDispatcher | None,
+        body: Mapping[str, Any],
+        dispatch: Callable[[], ModelHTTPResult],
+        *,
+        tools: McpToolsBroker | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> ModelHTTPResult:
+        """Run one model, tool or evaluator call and write it as a run call.
+
+        The call is written under the candidate its usage tags name: the
+        request's tags header from a box, or the parent's open usage scope for
+        an in-process call. A call that serves no candidate, such as a
+        proposer call, goes to the recorder fallback, ``NO_CANDIDATE_ID``.
+
+        Args:
+            token: The scoped token the caller sent; it is a secret for the record.
+            route: The model route, or None for a tool or evaluator call.
+            body: The request body.
+            dispatch: Serves the call.
+            tools: The tool broker the call goes to, whose bound header and
+                URL query values are secrets for the record.
+            headers: The request headers, read only for the usage tags.
+
+        Returns:
+            The call's answer, unchanged.
+        """
+        recorder = self.recorder
+        if recorder is None:
+            return dispatch()
+        tags = header_tags(headers)
+        candidate = tags.get("candidate")
+        if candidate:
+            recorder = recorder.bind(candidate_id=call_candidate_key(candidate, tags.get(LANE_KEY)))
+        secret_values = [token, self._route_keys.get(token, "")]
+        if route is not None:
+            kind, target, recorder = "model", route.model, recorder.bind(role=route.role)
+        elif tools is not None:
+            server = next((name for name, value in self._connector_tokens.items() if value == token), "roster")
+            kind, target = "mcp", _tool_target(server, tools.url, body)
+            # A bound header is often "Bearer <key>", and a tool may echo the bare key.
+            for value in (tools.headers or {}).values():
+                secret_values += credential_fragments(value)
+            secret_values += credential_fragments(None, endpoint=tools.url)
+            # A tool that echoes its request line shows the query values still percent-encoded.
+            secret_values += [part.partition("=")[2] for part in urlsplit(tools.url).query.split("&")]
+        else:
+            kind, target = "evaluator", "evaluator"
+        request = json.dumps(dict(body), default=str)
+        started = recorder.start()
+        with settled_charges() as charges:
+            try:
+                response = dispatch()
+            except (BudgetReached, BudgetInsufficientError) as error:
+                recorder.record(
+                    started,
+                    kind=kind,
+                    target=target,
+                    status="refused",
+                    request=request,
+                    failure_reason=type(error).__name__,
+                    cost_usd=_call_cost(route, charges),
+                    secrets=secret_values,
+                )
+                raise
+            except BaseException as error:  # a worker stop or cancel must still leave the call in the record
+                recorder.record(
+                    started,
+                    kind=kind,
+                    target=target,
+                    status="failed",
+                    request=request,
+                    failure_reason=f"{type(error).__name__}: {error}",
+                    cost_usd=_call_cost(route, charges),
+                    secrets=secret_values,
+                )
+                raise
+        ok = 200 <= response.status < 300
+        recorder.record(
+            started,
+            kind=kind,
+            target=target,
+            status="ok" if ok else str(response.status),
+            request=request,
+            response=response.body,
+            failure_reason=None if ok else f"HTTP {response.status}",
+            cost_usd=_call_cost(route, charges),
+            secrets=secret_values,
+        )
+        return response
 
     def _tool_broker(self, token: str) -> McpToolsBroker | None:
         """Find the tool roster a scoped token opens.

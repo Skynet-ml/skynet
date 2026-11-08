@@ -15,7 +15,7 @@ export const TERMS_OF_SERVICE: LegalDocument = {
   title: "Terms of Service",
   intro:
     `These Terms of Service ("Terms") govern your access to and use of ${C.serviceName}, ` +
-    `the prompt-optimization service available at ${C.websiteLabel} (the "Service"), operated by ` +
+    `the code-optimization service available at ${C.websiteLabel} (the "Service"), operated by ` +
     `${C.legalEntity} ("${C.serviceName}", "we", "us", or "our"). By creating an account or using ` +
     `the Service, you agree to these Terms. If you do not agree, do not use the Service.`,
   sections: [

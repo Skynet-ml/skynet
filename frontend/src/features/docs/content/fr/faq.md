@@ -8,7 +8,7 @@ Skynet est une plateforme qui optimise des dépôts selon vos propres données e
 
 ### Que peut optimiser Skynet ?
 
-Skynet, c'est Optimize Anything : chaque exécution optimise un dépôt. Utilisez un dépôt GitHub que vous avez déjà, ou laissez Skynet en créer un nouveau à partir de votre tâche et de vos données. Le code peut utiliser n'importe quelle bibliothèque, par exemple DSPy.
+Skynet, c'est Optimize Anything : chaque exécution optimise un dépôt. Utilisez un dépôt GitHub que vous avez déjà, ou laissez Skynet en créer un nouveau à partir de votre tâche et de vos données. Le code peut utiliser n'importe quelle bibliothèque.
 
 Tous les moteurs travaillent sur des dépôts : GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler et ShinkaEvolve.
 

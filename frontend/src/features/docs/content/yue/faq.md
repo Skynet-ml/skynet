@@ -8,7 +8,7 @@ Skynet 係一個按你自己嘅數據同評分器去最佳化倉庫嘅平台。�
 
 ### Skynet 可以最佳化啲乜？
 
-Skynet 就係 Optimize Anything：每次運行都係最佳化一個倉庫。你可以用你已經有嘅 GitHub 倉庫，或者叫 Skynet 根據你嘅任務同數據建立一個新倉庫。程式碼可以用任何函式庫，例如 DSPy。
+Skynet 就係 Optimize Anything：每次運行都係最佳化一個倉庫。你可以用你已經有嘅 GitHub 倉庫，或者叫 Skynet 根據你嘅任務同數據建立一個新倉庫。程式碼可以用任何函式庫。
 
 每個引擎都處理倉庫：GEPA、Best-of-N、Meta-Harness、AutoResearch、AutoSaddler 同 ShinkaEvolve。
 

@@ -29,16 +29,22 @@ import tarfile
 import threading
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ....billing.runtime import BudgetRuntime
 from ....config import Settings
 from ....exceptions import ServiceError
 from ....i18n import t
 from . import sandbox_contract
-from .docker_egress_proxy import READY_MARKER
+from .docker_egress_proxy import CALL_EVENT, READY_MARKER
 from .sandbox_log import logged_command
+
+if TYPE_CHECKING:
+    # The worker relay imports this package, so a runtime import would cycle.
+    from ....worker.scoped_relay import CallRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +56,9 @@ WORKSPACE_DIR = "/workspace"
 _TMPFS_MOUNTS = (
     f"{WORKSPACE_DIR}:rw,exec,nosuid,mode=1777,size=4g",
     "/tmp:rw,exec,nosuid,mode=1777,size=1g",
+    # Root-owned and 0755, so only a ``sudo`` command can write the Codex
+    # requirements file here; the box's own user cannot change it (SKY-389).
+    "/etc/codex:rw,noexec,nosuid,mode=0755,size=1m",
 )
 _PIDS_LIMIT = 1024
 _CLI_TIMEOUT_SECONDS = 60.0
@@ -186,6 +195,51 @@ def _remove_egress(docker_bin: str, egress: _Egress) -> None:
             logger.warning("could not remove local sandbox egress %s: %s", args[-1], _stderr_line(result))
 
 
+def _record_proxy_line(recorder: CallRecorder, line: str) -> None:
+    """Write one egress proxy JSON line into the run record; other lines are skipped.
+
+    Args:
+        recorder: The run's call recorder.
+        line: One line of the proxy's output.
+    """
+    try:
+        call = json.loads(line)
+        started_at = datetime.fromisoformat(call["started_at"])
+        duration_ms = int(call["duration_ms"])
+    except (ValueError, TypeError, KeyError):
+        return
+    if not isinstance(call, dict) or call.get("event") != CALL_EVENT:
+        return
+    # The proxy sees only host and port inside the TLS tunnel, so the record
+    # keeps the byte counts and the proxy's answer code, never a body.
+    recorder.record(
+        replace(recorder.start(), at=started_at),
+        kind="host",
+        target=str(call.get("host") or ""),
+        status=str(call.get("status") or "failed"),
+        request=json.dumps({"port": call.get("port"), "bytes_sent": call.get("bytes_sent")}),
+        response=json.dumps({"code": call.get("code"), "bytes_received": call.get("bytes_received")}),
+        failure_reason=call.get("reason") or None,
+        duration_ms=duration_ms,
+    )
+
+
+def _proxy_line_start(line: str) -> str:
+    """Return the start time of one proxy JSON line, for sorting; other lines give an empty string.
+
+    Args:
+        line: One line of the proxy's output.
+
+    Returns:
+        The line's UTC ``started_at`` text, which sorts in time order.
+    """
+    try:
+        call = json.loads(line)
+    except ValueError:
+        return ""
+    return str(call.get("started_at") or "") if isinstance(call, dict) else ""
+
+
 def _label_args(labels: Mapping[str, str]) -> list[str]:
     """Turn labels into Docker ``--label`` arguments.
 
@@ -241,6 +295,7 @@ class DockerSandboxSession:
         env: Mapping[str, str],
         owner: str | None,
         egress: _Egress | None = None,
+        recorder: CallRecorder | None = None,
     ) -> None:
         """Wrap a started container.
 
@@ -250,21 +305,47 @@ class DockerSandboxSession:
             env: The box's environment. Every command gets it, and its values are redacted from logged output.
             owner: Job the box belongs to, which its logged output is routed to.
             egress: The proxy sidecar and internal network of an allowlisted setup box.
+            recorder: Writes each proxy request into the run record, or None outside a run.
         """
         self._docker_bin = docker_bin
         self.container = container
         self._env = dict(env)
         self.log_owner = owner
         self.egress = egress
+        self._recorder = recorder
         self._closed = False
         self._lock = threading.Lock()
 
     def _drop_egress(self) -> None:
-        """Remove the box's proxy sidecar and network once; later calls do nothing."""
+        """Record the proxy's requests, then remove its sidecar and network once; later calls do nothing."""
         with self._lock:
             egress, self.egress = self.egress, None
-        if egress is not None:
-            _remove_egress(self._docker_bin, egress)
+        if egress is None:
+            return
+        if self._recorder is not None:
+            self._record_egress(egress)
+        _remove_egress(self._docker_bin, egress)
+
+    def _record_egress(self, egress: _Egress) -> None:
+        """Write each request line the proxy printed into the run record. Never raises.
+
+        Args:
+            egress: The sidecar whose output to read before it is removed.
+        """
+        assert self._recorder is not None
+        try:
+            result = _docker(self._docker_bin, ["logs", egress.proxy])
+        except ServiceError as error:
+            logger.warning("could not read local sandbox egress calls of %s: %s", egress.proxy, error)
+            return
+        if result.returncode != 0:
+            logger.warning("could not read local sandbox egress calls of %s: %s", egress.proxy, _stderr_line(result))
+            return
+        # The proxy prints a line when a tunnel ends, so a long tunnel comes
+        # after shorter ones that started later; write them in start order.
+        lines = result.stdout.decode("utf-8", errors="replace").splitlines()
+        for line in sorted(lines, key=_proxy_line_start):
+            _record_proxy_line(self._recorder, line)
 
     def write_files(self, files: Mapping[str, str]) -> None:
         """Write text files at paths relative to the working directory, creating parents.
@@ -306,6 +387,7 @@ class DockerSandboxSession:
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
         on_output: sandbox_contract.OutputSink | None = None,
+        sudo: bool = False,
     ) -> sandbox_contract.CommandResult:
         """Run ``command`` through ``bash --noprofile --norc -c`` in the working directory and stream its output.
 
@@ -314,6 +396,7 @@ class DockerSandboxSession:
             env: Extra environment for this command.
             timeout_seconds: Kill the command after this long.
             on_output: Receives each line of output as it is written.
+            sudo: Run as the container's root user.
 
         Returns:
             Exit code, captured output and whether the timeout fired.
@@ -330,7 +413,8 @@ class DockerSandboxSession:
             deadline = seconds + sandbox_contract.KILL_GRACE_SECONDS
         stream = _env_stream({**self._env, **(env or {})})
         loader = [*_SHELL, _ENV_LOADER, "skynet-env"]
-        argv = [self._docker_bin, "exec", "-i", "-w", WORKSPACE_DIR, self.container, *loader, *inner]
+        user = ["-u", "root"] if sudo else []
+        argv = [self._docker_bin, "exec", "-i", *user, "-w", WORKSPACE_DIR, self.container, *loader, *inner]
         try:
             process = subprocess.Popen(
                 argv,
@@ -451,7 +535,14 @@ class DockerSandboxRuntime:
 
     injects_headers = False
 
-    def __init__(self, image: str, *, docker_bin: str = "docker", budget: BudgetRuntime | None = None) -> None:
+    def __init__(
+        self,
+        image: str,
+        *,
+        docker_bin: str = "docker",
+        budget: BudgetRuntime | None = None,
+        recorder: CallRecorder | None = None,
+    ) -> None:
         """Bind the runtime to a locally built image.
 
         Args:
@@ -459,8 +550,11 @@ class DockerSandboxRuntime:
             docker_bin: Docker CLI path; OrbStack works through the same CLI.
             budget: The run's budget when the runtime serves a protected run. It
                 only marks the runtime protected: local boxes are never charged.
+            recorder: Writes each egress proxy request of the run's boxes into
+                the run record, or None outside a run.
         """
         self._image = image
+        self._recorder = recorder
         self._docker_bin = docker_bin
         self.protected = budget is not None
         # The broker prices a Vercel box before it opens any; local boxes are free.
@@ -501,7 +595,9 @@ class DockerSandboxRuntime:
             if egress is not None:
                 _remove_egress(self._docker_bin, egress)
             raise
-        return DockerSandboxSession(self._docker_bin, container, env=spec.env, owner=owner, egress=egress)
+        return DockerSandboxSession(
+            self._docker_bin, container, env=spec.env, owner=owner, egress=egress, recorder=self._recorder
+        )
 
     def _run_box(
         self,

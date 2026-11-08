@@ -17,7 +17,7 @@ from gepa.oa.ensemble import optimize_best_of
 from gepa.oa.eval_server import EvalServer as UpstreamEvalServer
 from gepa.oa.task import Task as UpstreamTask
 
-from ....billing.usage_tags import usage_scope
+from ....billing.usage_tags import LANE_KEY, usage_scope
 from ....constants import PROGRESS_LANE_COMPLETED, PROGRESS_LANE_HANDOFF, PROGRESS_LANE_STARTED
 from ....exceptions import ServiceError
 from ....models.blackbox import BlackboxStrategy
@@ -218,12 +218,15 @@ class _LaneEngine:
         def progress(event: str, metrics: dict[str, Any]) -> None:
             """Keep candidate identifiers distinct across parallel engines.
 
+            The lane tag matches the tag on the lane's calls, so the run record
+            keys this lane's candidates apart from another lane's same ids.
+
             Args:
                 event: Upstream/platform event name.
                 metrics: Event payload.
             """
             if callback is not None:
-                callback(event, {**metrics, "lane_index": lane_index})
+                callback(event, {**metrics, "lane_index": lane_index, LANE_KEY: lane_tag(self.phase, self.name)})
 
         context = replace(self.ctx, run_dir=str(Path(self.ctx.run_dir) / lane_id), progress_callback=progress)
         server = EvalServer(upstream.evaluate, max_evals=upstream.budget.remaining or 0)
@@ -465,7 +468,9 @@ def run_strategy(
             metrics: Event payload.
         """
         if progress_callback is not None:
-            progress_callback(event, {**metrics, "lane_index": continuation_index})
+            progress_callback(
+                event, {**metrics, "lane_index": continuation_index, LANE_KEY: lane_tag("continue", "gepa")}
+            )
 
     continuation_ctx = replace(
         ctx,

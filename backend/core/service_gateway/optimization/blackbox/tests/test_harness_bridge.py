@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+import http.server
 import json
 import os
+import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from .. import harness_bridge
+from .. import harness, harness_bridge
 from ..harness_bridge import (
     SessionOutcome,
     _cli_parser,
@@ -348,3 +354,860 @@ def test_codex_tool_call_counts_once_across_start_and_completion(tmp_path: Path)
     outcome = run_session(proposer, workspace=tmp_path / "w", prompt="x", model="m", session_dir=tmp_path / "s")
     assert outcome.tool_calls == 1
     assert outcome.tool_cap_reached is False
+
+
+# The worker's hidden list lands with SKY-386 and SKY-387; these tests use a fixed one.
+_HIDDEN = [
+    "optimize.toml",
+    "metric",
+    ".optimize/exploits",
+    "reference/answers.json",
+    "data/cases.jsonl",
+    "rules/illegal.md",
+    "tools/mcp_server.py",
+]
+_HIDDEN_FILES = ["optimize.toml", "metric/score.py", ".optimize/exploits/log.md", *_HIDDEN[3:]]
+# One shape per harness tool family: claude, codex, pi, opencode, prime and their shells.
+_TOOL_CALLS = [
+    ("Read", lambda path: {"file_path": path}),
+    ("Grep", lambda path: {"pattern": "def", "path": path}),
+    ("Glob", lambda path: {"pattern": path}),
+    ("LS", lambda path: {"path": path}),
+    ("Bash", lambda path: {"command": f"cat {path}"}),
+    ("exec_command", lambda path: {"cmd": f"bash -lc 'head -n 5 {path}'"}),
+    ("read", lambda path: {"path": path}),
+    ("ls", lambda path: {"path": path}),
+    ("grep", lambda path: {"pattern": "x", "path": path}),
+    ("find", lambda path: {"pattern": "*", "path": path}),
+    ("bash", lambda path: {"command": f"python -c \"print(open('{path}').read())\""}),
+    ("list", lambda path: {"dirPath": path}),
+    ("apply_patch", lambda path: {"input": f"*** Begin Patch\n*** Update File: {path}\n*** End Patch"}),
+    ("ipython", lambda path: {"code": f'print(open("{path}").read())'}),
+]
+
+
+def _policy(tmp_path: Path) -> dict:
+    """Build a guard policy over the fixed hidden list."""
+    workspace = tmp_path / "work"
+    workspace.mkdir(exist_ok=True)
+    return harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "refusals.jsonl")
+
+
+@pytest.mark.parametrize("path", _HIDDEN_FILES)
+@pytest.mark.parametrize(("tool", "shape"), _TOOL_CALLS, ids=[tool for tool, _ in _TOOL_CALLS])
+def test_guard_refuses_every_hidden_path_by_exact_name_in_every_tool(tmp_path: Path, tool, shape, path) -> None:
+    """Refuse a read, grep, glob, list or shell call on each hidden path, with the right kind."""
+    policy = _policy(tmp_path)
+    expected = "config" if path == "optimize.toml" else "scoring"
+    assert harness_bridge.guard_check(policy, tool, shape(path)) == expected
+    absolute = f"{policy['workspace']}/{path}"
+    assert harness_bridge.guard_check(policy, tool, shape(absolute)) == expected
+
+
+@pytest.mark.parametrize(
+    ("tool", "tool_input"),
+    [
+        ("Glob", {"pattern": "**/*"}),
+        ("Bash", {"command": "ls -R ."}),
+        ("Grep", {"pattern": "optimize.toml", "path": "src"}),
+        ("Read", {"file_path": "src/optimize.toml.md"}),
+        ("Read", {"file_path": "metrics/score.py"}),
+        ("Read", {"file_path": "../work-other/optimize.toml"}),
+    ],
+)
+def test_guard_lets_other_paths_and_broad_patterns_run(tmp_path: Path, tool: str, tool_input: dict) -> None:
+    """Match exact hidden names only, so broad globs and look-alike names still work."""
+    assert harness_bridge.guard_check(_policy(tmp_path), tool, tool_input) is None
+
+
+def test_guard_policy_holds_no_hidden_names(tmp_path: Path) -> None:
+    """Keep the hidden names out of the policy file the agent's workspace can read."""
+    text = json.dumps(_policy(tmp_path))
+    for path in _HIDDEN:
+        assert path not in text
+
+
+@pytest.mark.parametrize(
+    ("tool", "tool_input"),
+    [
+        ("Read", {"file_path": "alias/optimize.toml"}),
+        ("Bash", {"command": "cd src && cat ../optimize.toml"}),
+        ("Bash", {"command": "cd src; cd deep && cat ../../metric/score.py"}),
+        ("exec_command", {"cmd": "cat ../optimize.toml", "workdir": "src"}),
+        ("Bash", {"command": 'cat "$(pwd)/optimize.toml"'}),
+        ("Bash", {"command": "cat $(pwd)/optimize.toml"}),
+        ("Bash", {"command": "cat `pwd`/data/cases.jsonl"}),
+        ("Read", {"file_path": "${PWD}/optimize.toml"}),
+    ],
+    ids=[
+        "symlink-alias",
+        "cd-parent",
+        "cd-chain",
+        "codex-workdir",
+        "quoted-pwd",
+        "bare-pwd",
+        "backquote-pwd",
+        "brace-pwd",
+    ],
+)
+def test_guard_resolves_aliases_working_directories_and_pwd(tmp_path: Path, tool: str, tool_input: dict) -> None:
+    """Refuse a hidden path that a symbolic link, a cd, a workdir or a pwd form names."""
+    policy = _policy(tmp_path)
+    (Path(policy["workspace"]) / "alias").symlink_to(".")
+    assert harness_bridge.guard_check(policy, tool, tool_input) is not None
+
+
+def test_guard_folds_case_only_when_the_policy_says_so(tmp_path: Path) -> None:
+    """Refuse OPTIMIZE.TOML on a case-folding policy, and only there."""
+    workspace = tmp_path / "work"
+    call = {"file_path": "OPTIMIZE.TOML"}
+    folded = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", fold_case=True)
+    exact = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log")
+    assert harness_bridge.guard_check(folded, "Read", call) == "config"
+    assert harness_bridge.guard_check(folded, "Read", {"file_path": "Metric/Score.py"}) == "scoring"
+    assert harness_bridge.guard_check(exact, "Read", call) is None
+
+
+@pytest.mark.parametrize(
+    ("tool", "tool_input"),
+    [
+        ("Bash", {"command": "cat ~/shinka-run/repo/optimize.toml"}),
+        ("Bash", {"command": "cat $HOME/shinka-run/repo/optimize.toml"}),
+        ("Bash", {"command": "cat ${HOME}/shinka-run/repo/metric/score.py"}),
+        ("Bash", {"command": "cd ~/shinka-run/repo && cat optimize.toml"}),
+        ("Bash", {"command": "cd ~ && cat shinka-run/repo/data/cases.jsonl"}),
+        ("Read", {"file_path": "~/shinka-run/repo/optimize.toml"}),
+        ("exec_command", {"cmd": "cat optimize.toml", "workdir": "~/shinka-run/repo"}),
+    ],
+    ids=["tilde", "home", "brace-home", "cd-tilde", "cd-bare-tilde", "read-tilde", "codex-workdir-tilde"],
+)
+def test_guard_expands_the_home_folder_forms(tmp_path: Path, tool: str, tool_input: dict) -> None:
+    """Refuse a hidden path that ``~``, ``$HOME`` or ``${HOME}`` names, as in a ShinkaEvolve session."""
+    home = tmp_path / "home"
+    workspace = home / "shinka-run" / "repo"
+    workspace.mkdir(parents=True)
+    policy = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", home=home)
+    assert policy["home"] == str(home)
+    assert harness_bridge.guard_check(policy, tool, tool_input) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["cat x~/shinka-run/repo/optimize.toml", "cat ~/optimize.toml"],
+)
+def test_guard_expands_a_tilde_only_at_the_start_of_a_word(tmp_path: Path, command: str) -> None:
+    """Leave a tilde inside a word, and a home path outside the workspace, alone."""
+    home = tmp_path / "home"
+    workspace = home / "shinka-run" / "repo"
+    workspace.mkdir(parents=True)
+    policy = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", home=home)
+    assert harness_bridge.guard_check(policy, "Bash", {"command": command}) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat ~+/optimize.toml",
+        "cd metric && cat ~-/optimize.toml",
+        "cat $(pwd -P)/optimize.toml",
+        "cat $(pwd -L)/optimize.toml",
+        "cat ${PWD:-x}/optimize.toml",
+        "cat ${HOME:-x}/shinka-run/repo/optimize.toml",
+        "cat ${HOME%/}/shinka-run/repo/optimize.toml",
+        "cd metric; cat $OLDPWD/optimize.toml",
+        "cat ~agent/shinka-run/repo/optimize.toml",
+        "cat $HOMEDIR/shinka-run/repo/optimize.toml",
+        "cat `pwd -P`/metric/score.py",
+        'cat "$(dirname x)"/data/cases.jsonl',
+    ],
+)
+def test_guard_refuses_a_hidden_name_after_an_unresolved_expansion(tmp_path: Path, command: str) -> None:
+    """Refuse a hidden name after any shell expansion the guard cannot resolve to a known folder."""
+    home = tmp_path / "home"
+    workspace = home / "shinka-run" / "repo"
+    workspace.mkdir(parents=True)
+    policy = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", home=home)
+    assert harness_bridge.guard_check(policy, "Bash", {"command": command}) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd src && python $(pwd -P)/solve.py --out ${OUT:-out}/result.json",
+        "echo $PATH ~+ ~- `date` && cat src/optimize.toml.md",
+        "cat ${HOME:-x}/notes/metrics.md",
+    ],
+)
+def test_guard_lets_an_expansion_without_a_hidden_name_run(tmp_path: Path, command: str) -> None:
+    """Let a normal command run when no hidden name follows its shell expansions."""
+    home = tmp_path / "home"
+    workspace = home / "shinka-run" / "repo"
+    workspace.mkdir(parents=True)
+    policy = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", home=home)
+    assert harness_bridge.guard_check(policy, "Bash", {"command": command}) is None
+
+
+def test_guard_policy_home_defaults_to_this_process_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Record this process's home folder when the caller names none, so the digest covers it."""
+    monkeypatch.setenv("HOME", str(tmp_path / "agent-home"))
+    assert _policy(tmp_path)["home"] == str(tmp_path / "agent-home")
+
+
+def test_guard_folds_the_case_of_the_workspace_root(tmp_path: Path) -> None:
+    """Refuse an absolute hidden path whose root folder has another case, on a case-folding policy."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    folded = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", fold_case=True)
+    first, rest = str(workspace).lstrip("/").split("/", 1)
+    call = {"file_path": f"/{first.upper()}/{rest}/optimize.toml"}
+    assert harness_bridge.guard_check(folded, "Read", call) == "config"
+    assert harness_bridge.guard_check(_policy(tmp_path), "Read", call) is None
+
+
+def _digest(policy_file: Path) -> str:
+    """Hash the policy file as the guard checks it."""
+    return hashlib.sha256(policy_file.read_bytes()).hexdigest()
+
+
+def _guard(mode: str, policy_file: Path, request: dict) -> dict:
+    """Run the guard CLI once and parse its answer."""
+    completed = subprocess.run(
+        harness_bridge.guard_command(mode, policy_file, _digest(policy_file)),
+        input=json.dumps(request),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(completed.stdout or "{}")
+
+
+def test_guard_cli_answers_codex_hooks_and_js_checks_and_logs_only_tool_and_kind(tmp_path: Path) -> None:
+    """Deny in the Codex hook shape, answer the JS check shape, and log no path or content."""
+    session = tmp_path / "session"
+    env = harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
+    policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
+    denied = _guard("hook", policy_file, {"tool_name": "exec_command", "tool_input": {"cmd": "cat optimize.toml"}})
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert denied["hookSpecificOutput"]["permissionDecisionReason"] == harness_bridge.GUARD_REFUSAL
+    assert _guard("hook", policy_file, {"tool_name": "exec_command", "tool_input": {"cmd": "ls src"}}) == {}
+    checked = _guard("check", policy_file, {"tool": "read", "input": {"path": "data/cases.jsonl"}})
+    assert checked == {"reason": harness_bridge.GUARD_REFUSAL}
+    assert _guard("check", policy_file, {"tool": "read", "input": {"path": "src/app.py"}}) == {"reason": None}
+    assert harness_bridge.read_refusals(session) == [
+        {"tool": "exec_command", "kind": "config"},
+        {"tool": "read", "kind": "scoring"},
+    ]
+    hooks = json.loads(Path(env["APP_GUARD_CODEX"]).read_text())
+    assert "guard hook" in hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert Path(env["APP_GUARD_PI"]).exists()
+    assert (Path(env["OPENCODE_CONFIG_DIR"]) / "plugin" / "app-guard.js").exists()
+
+
+def test_read_refusals_skips_lines_the_agent_broke(tmp_path: Path) -> None:
+    """Skip a line that is not JSON, too deep to parse, a non-object, or without a string tool and kind."""
+    log = tmp_path / harness_bridge.GUARD_DIR / "refusals.jsonl"
+    log.parent.mkdir()
+    lines = [
+        json.dumps({"tool": "Bash", "kind": "scoring", "path": "metric.py"}),
+        "not json {",
+        "5",
+        json.dumps(["Read", "config"]),
+        json.dumps({"tool": "Read"}),
+        json.dumps({"tool": 3, "kind": "config"}),
+        "[" * 5000,
+        json.dumps({"tool": "Read", "kind": "config"}),
+    ]
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    assert harness_bridge.read_refusals(tmp_path) == [
+        {"tool": "Bash", "kind": "scoring"},
+        {"tool": "Read", "kind": "config"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd . && cd . && cd . && cd . && cd data && cat cases.jsonl",
+        "cd {work} && cd {work} && cd {work} && cd {work} && cd {work}/data && cat cases.jsonl",
+        "pushd . && pushd . && pushd . && pushd . && pushd data && cat cases.jsonl",
+    ],
+    ids=["five-cd", "absolute-cd", "pushd"],
+)
+def test_guard_refuses_more_directory_changes_than_it_can_follow(tmp_path: Path, command: str) -> None:
+    """Refuse a call with more cd or pushd steps than the guard follows, in the check and the CLI."""
+    session = tmp_path / "session"
+    harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
+    policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
+    command = command.format(work=tmp_path / "work")
+    with pytest.raises(ValueError, match="directory changes"):
+        harness_bridge.guard_check(json.loads(policy_file.read_text()), "Bash", {"command": command})
+    denied = _guard("hook", policy_file, {"tool_name": "Bash", "tool_input": {"command": command}})
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd -- data && cat cases.jsonl",
+        "cd -P data && cat cases.jsonl",
+        "cd -L data && cat cases.jsonl",
+        "pushd -- data && cat cases.jsonl",
+        "env -C data cat cases.jsonl",
+        "env --chdir=data cat cases.jsonl",
+        "env -Cdata cat cases.jsonl",
+        "git -C data show HEAD:cases.jsonl",
+    ],
+)
+def test_guard_follows_folder_options(tmp_path: Path, command: str) -> None:
+    """Refuse a hidden name behind a ``cd`` option or a folder option such as ``env -C``."""
+    assert harness_bridge.guard_check(_policy(tmp_path), "Bash", {"command": command}) == "scoring"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep -C 3 foo notes.txt",
+        "cd - && cat notes.txt",
+        "cd -P src && cat notes.txt",
+        "git -C a status && git -C b status && git -C c status",
+        "git -C sub status && git -C sub diff && git -C sub log",
+        " && ".join(["grep -C 3 foo f.py"] * 5),
+    ],
+)
+def test_guard_allows_ordinary_option_forms(tmp_path: Path, command: str) -> None:
+    """Allow a context count after ``grep -C`` and a ``cd`` option before an ordinary folder."""
+    assert harness_bridge.guard_check(_policy(tmp_path), "Bash", {"command": command}) is None
+
+
+@pytest.mark.parametrize(
+    "command", ["cd; cat shinka-run/repo/optimize.toml", "cd && cat shinka-run/repo/optimize.toml"]
+)
+def test_guard_follows_a_bare_cd_to_the_home_folder(tmp_path: Path, command: str) -> None:
+    """Refuse a hidden path after a ``cd`` with no folder, which goes to the home folder."""
+    home = tmp_path / "home"
+    workspace = home / "shinka-run" / "repo"
+    workspace.mkdir(parents=True)
+    policy = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", home=home)
+    assert harness_bridge.guard_check(policy, "Bash", {"command": command}) == "config"
+    assert harness_bridge.guard_check(policy, "Bash", {"command": "cd; cat notes/optimize.md"}) is None
+
+
+def test_guard_checks_a_call_in_the_folder_the_hook_event_names(tmp_path: Path) -> None:
+    """Refuse a hidden name relative to the event's ``cwd``, as after an earlier ``cd data`` call."""
+    session = tmp_path / "session"
+    harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
+    policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
+    policy = json.loads(policy_file.read_text())
+    call = {"command": "cat cases.jsonl"}
+    assert harness_bridge.guard_check(policy, "Bash", call) is None
+    assert harness_bridge.guard_check(policy, "Bash", call, "data") == "scoring"
+    assert harness_bridge.guard_check(policy, "Bash", call, str(tmp_path / "work" / "data")) == "scoring"
+    assert harness_bridge.guard_check(policy, "Bash", {"command": "cat score.py"}, "data") is None
+    event = {"tool_name": "Bash", "tool_input": call, "cwd": str(tmp_path / "work" / "data")}
+    assert _guard("hook", policy_file, event)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def _link_tree(workspace: Path, max_target: int) -> list[str]:
+    """Make about 2,000 links whose targets are long runs of parts that are not links.
+
+    Each top link points at mid links, and each mid link at leaf links, so one
+    candidate makes the resolver walk every target. A cap on links alone let
+    this call run for 30 s.
+
+    Args:
+        workspace: The folder that gets the links.
+        max_target: The longest link target the system allows.
+
+    Returns:
+        The names of the top links.
+    """
+
+    def filler(tag: str, budget: int) -> str:
+        """Return a target of ``budget`` characters that ends where it starts."""
+        count = max(0, (budget - len(tag) - 4) // 5)
+        return tag + "/" + "a/" * count + "../" * (count + 1)
+
+    leaves = []
+    for mid in range(44):
+        names = []
+        for leaf in range(44):
+            name = f"L{mid}_{leaf}"
+            (workspace / name).symlink_to(filler(f"q{mid}_{leaf}", max_target))
+            names.append(name)
+        target = "/".join(names) + "/"
+        (workspace / f"M{mid}").symlink_to(target + filler(f"r{mid}", max_target - len(target)))
+        leaves.append(f"M{mid}")
+    target = "/".join(leaves) + "/"
+    (workspace / "T0").symlink_to(target + filler("s0", max_target - len(target)))
+    return ["T0"]
+
+
+def test_guard_denies_a_link_tree_of_long_targets_inside_the_hook_timeout(tmp_path: Path) -> None:
+    """Deny a call whose links point at long paths, well before the 10 s hook timeout."""
+    session = tmp_path / "session"
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    harness_bridge.install_guard(session, workspace, _HIDDEN)
+    policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
+    max_target = 1023 if sys.platform == "darwin" else 4095
+    command = "cat " + " ".join(_link_tree(workspace, max_target))
+    started = time.monotonic()
+    denied = _guard("hook", policy_file, {"tool_name": "Bash", "tool_input": {"command": command}})
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    # The guard stops at its 5 s deadline or its step cap; CLI start-up adds the rest.
+    assert time.monotonic() - started < 8
+
+
+def test_guard_refuses_long_symbolic_link_chains_fast(tmp_path: Path) -> None:
+    """Refuse a call whose candidates go through a long link chain, before the hook timeout.
+
+    ``os.path.realpath`` follows the whole chain for each candidate, so this
+    call kept the guard busy for more than 15 s before the link cap.
+    """
+    session = tmp_path / "session"
+    harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
+    policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
+    workspace = tmp_path / "work"
+    workspace.mkdir(exist_ok=True)
+    for index in range(900):
+        (workspace / f"c{index}").symlink_to(f"c{index + 1}")
+    for index in range(3000):
+        (workspace / f"e{index}").symlink_to("c0")
+    command = "cat " + " ".join(f"e{index}" for index in range(3000)) + " optimize.toml"
+    with pytest.raises(ValueError, match="symbolic links"):
+        harness_bridge.guard_check(json.loads(policy_file.read_text()), "Bash", {"command": command})
+    started = time.monotonic()
+    denied = _guard("hook", policy_file, {"tool_name": "Bash", "tool_input": {"command": command}})
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert time.monotonic() - started < 3
+
+
+def test_guard_refuses_a_symbolic_link_loop(tmp_path: Path) -> None:
+    """Refuse a path behind a link loop, which the system cannot open either."""
+    policy = _policy(tmp_path)
+    workspace = tmp_path / "work"
+    (workspace / "loop1").symlink_to("loop2")
+    (workspace / "loop2").symlink_to("loop1")
+    with pytest.raises(ValueError, match="symbolic links"):
+        harness_bridge.guard_check(policy, "Bash", {"command": "cat loop1"})
+
+
+def test_guard_follows_a_short_link_chain_to_a_hidden_file(tmp_path: Path) -> None:
+    """Resolve a hidden file behind a chain of links, as ``os.path.realpath`` does."""
+    policy = _policy(tmp_path)
+    workspace = tmp_path / "work"
+    (workspace / "link2").symlink_to("optimize.toml")
+    (workspace / "sub").mkdir()
+    (workspace / "sub" / "link1").symlink_to("../link2")
+    (workspace / "link0").symlink_to("sub/link1")
+    assert harness_bridge.guard_check(policy, "Read", {"file_path": "link0"}) == "config"
+
+
+def test_guard_still_follows_four_directory_changes(tmp_path: Path) -> None:
+    """Resolve a hidden path behind the largest number of cd steps the guard follows."""
+    command = "cd . && cd . && cd . && cd data && cat cases.jsonl"
+    assert harness_bridge.guard_check(_policy(tmp_path), "Bash", {"command": command}) == "scoring"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo " + "w " * 40_000,
+        "cd a && cd b && cd c && " + " ".join(f"w{i}" for i in range(2_000)),
+        "cat $X/" + "/".join(["a"] * 40),
+    ],
+    ids=["too-long", "too-many-checks", "too-deep-after-expansion"],
+)
+def test_guard_refuses_a_call_above_its_cost_caps_fast(tmp_path: Path, command: str) -> None:
+    """Refuse a call the guard cannot check well inside the hook timeout, and answer fast."""
+    session = tmp_path / "session"
+    harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
+    policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
+    with pytest.raises(ValueError):
+        harness_bridge.guard_check(json.loads(policy_file.read_text()), "Bash", {"command": command})
+    started = time.monotonic()
+    denied = _guard("hook", policy_file, {"tool_name": "Bash", "tool_input": {"command": command}})
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    # The hook timeout is 10 s; the CLI start-up is most of this time.
+    assert time.monotonic() - started < 3
+
+
+_NODE = shutil.which("node")
+
+
+@pytest.mark.skipif(_NODE is None, reason="node is not installed")
+def test_pi_extension_and_opencode_plugin_refuse_hidden_paths(tmp_path: Path) -> None:
+    """Block a hidden read in the Pi extension and throw in the OpenCode plugin; let others run."""
+    session = tmp_path / "session"
+    env = harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
+    pi_module = tmp_path / "pi-guard.mjs"
+    pi_module.write_text(Path(env["APP_GUARD_PI"]).read_text())
+    plugin = Path(env["OPENCODE_CONFIG_DIR"]) / "plugin" / "app-guard.js"
+    plugin_module = tmp_path / "app-guard.mjs"
+    plugin_module.write_text(plugin.read_text())
+    script = f"""
+const pi = (await import({json.dumps(pi_module.as_uri())})).default;
+let handler;
+pi({{ on: (name, fn) => {{ handler = fn; }} }});
+const blocked = await handler({{ toolName: "read", input: {{ path: "metric/score.py" }} }});
+const allowed = await handler({{ toolName: "read", input: {{ path: "src/app.py" }} }});
+const {{ AppGuard }} = await import({json.dumps(plugin_module.as_uri())});
+const hooks = await AppGuard({{}});
+let thrown = null;
+try {{ await hooks["tool.execute.before"]({{ tool: "read" }}, {{ args: {{ filePath: "optimize.toml" }} }}); }}
+catch (error) {{ thrown = error.message; }}
+await hooks["tool.execute.before"]({{ tool: "read" }}, {{ args: {{ filePath: "src/app.py" }} }});
+console.log(JSON.stringify({{ blocked, allowed: allowed ?? null, thrown }}));
+"""
+    completed = subprocess.run([_NODE, "--input-type=module", "-e", script], capture_output=True, text=True, check=True)
+    result = json.loads(completed.stdout)
+    assert result["blocked"] == {"block": True, "reason": harness_bridge.GUARD_REFUSAL}
+    assert result["allowed"] is None
+    assert result["thrown"] == harness_bridge.GUARD_REFUSAL
+
+
+@pytest.mark.parametrize("mode", ["hook", "check"])
+@pytest.mark.parametrize("broken", ["missing", "corrupt", "no-hashes", "emptied", "signed-empty", "surrogate"])
+def test_guard_cli_refuses_when_it_cannot_answer(tmp_path: Path, mode: str, broken: str) -> None:
+    """Refuse the call when the policy is gone, changed or broken, or the input cannot be hashed."""
+    session = tmp_path / "session"
+    harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
+    policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
+    digest = _digest(policy_file)
+    hook_input: dict = {"cmd": "cat src/app.py"}
+    check_input: dict = {"path": "src/app.py"}
+    if broken == "missing":
+        policy_file.unlink()
+    elif broken == "corrupt":
+        policy_file.write_text("{not json")
+    elif broken == "no-hashes":
+        policy_file.write_text(json.dumps({"workspace": str(tmp_path / "work")}))
+    elif broken == "emptied":
+        # The agent can write the session folder and swap in a policy that allows everything.
+        policy = json.loads(policy_file.read_text())
+        policy_file.write_text(json.dumps({**policy, "hashes": {}}))
+    elif broken == "signed-empty":
+        policy = json.loads(policy_file.read_text())
+        digest = harness_bridge.write_guard_policy(policy_file, {**policy, "hashes": {}})
+    else:
+        # The lone surrogate comes first, so a strict UTF-8 hash would crash before the hidden name.
+        hook_input = {"cmd": "cat src/\ud800.py optimize.toml"}
+        check_input = {"file_path": "optimize.toml", "path": "src/\ud800.py"}
+    if mode == "hook":
+        raw = json.dumps({"tool_name": "exec_command", "tool_input": hook_input})
+    else:
+        raw = json.dumps({"tool": "read", "input": check_input})
+    completed = subprocess.run(
+        harness_bridge.guard_command(mode, policy_file, digest), input=raw, capture_output=True, text=True, check=True
+    )
+    answer = json.loads(completed.stdout)
+    if mode == "hook":
+        assert answer["hookSpecificOutput"]["permissionDecision"] == "deny"
+    else:
+        assert answer == {"reason": harness_bridge.GUARD_REFUSAL}
+
+
+@pytest.mark.skipif(_NODE is None, reason="node is not installed")
+def test_pi_extension_refuses_when_the_guard_cannot_run(tmp_path: Path) -> None:
+    """Block every call when the guard process fails, instead of letting it run."""
+    session = tmp_path / "session"
+    env = harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
+    (session / harness_bridge.GUARD_DIR / "policy.json").unlink()
+    broken = (
+        Path(env["APP_GUARD_PI"]).read_text().replace(json.dumps(sys.executable), json.dumps("/nonexistent/python"))
+    )
+    pi_module = tmp_path / "pi-guard.mjs"
+    pi_module.write_text(broken)
+    script = f"""
+const pi = (await import({json.dumps(pi_module.as_uri())})).default;
+let handler;
+pi({{ on: (name, fn) => {{ handler = fn; }} }});
+console.log(JSON.stringify(await handler({{ toolName: "read", input: {{ path: "src/app.py" }} }})));
+"""
+    completed = subprocess.run([_NODE, "--input-type=module", "-e", script], capture_output=True, text=True, check=True)
+    assert json.loads(completed.stdout) == {"block": True, "reason": harness_bridge.GUARD_REFUSAL}
+
+
+def test_run_session_reports_refusals_and_keeps_running(tmp_path: Path) -> None:
+    """Install the guard for a session with hidden paths, report each refusal, and finish the session."""
+    command = (
+        'printf \'{"tool":"read","input":{"path":".optimize/exploits"}}\' | '
+        '"$APP_GUARD_PYTHON" "$APP_GUARD_BRIDGE" guard check "$APP_GUARD_POLICY" "$APP_GUARD_DIGEST"; echo done'
+    )
+    session = tmp_path / "session"
+    guard_dir = session / harness_bridge.GUARD_DIR
+    expected = harness_bridge.guard_policy(tmp_path / "work", _HIDDEN, guard_dir / "refusals.jsonl")
+    digest = hashlib.sha256(json.dumps(expected).encode()).hexdigest()
+    python, bridge, _, _, policy, _ = harness_bridge.guard_command("check", guard_dir / "policy.json", digest)
+    proposer = {
+        **_PLAIN,
+        "run_command": command,
+        "env": {
+            "APP_GUARD_PYTHON": python,
+            "APP_GUARD_BRIDGE": bridge,
+            "APP_GUARD_POLICY": policy,
+            "APP_GUARD_DIGEST": digest,
+        },
+        "hidden_paths": _HIDDEN,
+    }
+    outcome = run_session(proposer, workspace=tmp_path / "work", prompt="go", model="m1", session_dir=session)
+    assert outcome.returncode == 0
+    assert outcome.text.endswith("done")
+    assert outcome.refusals == [{"tool": "read", "kind": "scoring"}]
+    assert result_document("sid", "m1", outcome)["refusals"] == outcome.refusals
+    record = harness_bridge.refusal_record(outcome.refusals[0])
+    assert record["event"] == "proposer.refusal"
+    assert record["fields"] == {"tool": "read", "kind": "scoring"}
+    assert ".optimize" not in json.dumps(record)
+
+
+def test_run_session_guards_the_agent_home_folder(tmp_path: Path) -> None:
+    """Bind the guard to the HOME the agent runs with, so ``~`` resolves as in the agent's shell."""
+    agent_home = tmp_path / "agent-home"
+    session = tmp_path / "session"
+    proposer = {**_PLAIN, "run_command": "echo done", "env": {"HOME": str(agent_home)}, "hidden_paths": _HIDDEN}
+    run_session(proposer, workspace=tmp_path / "work", prompt="go", model="m1", session_dir=session)
+    policy = json.loads((session / harness_bridge.GUARD_DIR / "policy.json").read_text())
+    assert policy["home"] == str(agent_home)
+
+
+def test_run_session_reports_host_agent_refusals(tmp_path: Path) -> None:
+    """Take a host CLI turn's refusals from the shim's summary line, with no guard in the session."""
+    line = json.dumps(
+        {"type": "host_agent.result", "text": "ok", "usage": {}, "refusals": [{"tool": "Read", "kind": "config"}]}
+    )
+    proposer = {**_PLAIN, "output_format": "host_agent", "run_command": f"printf '%s\\n' '{line}'"}
+    outcome = run_session(proposer, workspace=tmp_path / "work", prompt="go", model="m1", session_dir=tmp_path / "s")
+    assert outcome.returncode == 0
+    assert outcome.text == "ok"
+    assert outcome.refusals == [{"tool": "Read", "kind": "config"}]
+
+
+def test_run_session_without_hidden_paths_installs_no_guard(tmp_path: Path) -> None:
+    """Leave sessions with no hidden list unchanged."""
+    session = tmp_path / "session"
+    outcome = run_session(_PLAIN, workspace=tmp_path / "work", prompt="go", model="m1", session_dir=session)
+    assert outcome.refusals == []
+    assert not (session / harness_bridge.GUARD_DIR).exists()
+
+
+@pytest.mark.parametrize(
+    "launch",
+    [
+        lambda gateway: harness._pi_launch("m1", gateway),
+        lambda gateway: harness._prime_agent_launch("m1", gateway),
+        lambda gateway: harness.pi_editor_launch("m1", gateway),
+    ],
+    ids=["pi", "prime", "pi-editor"],
+)
+def test_pi_family_launches_load_the_guard_extension_only_when_installed(launch, tmp_path: Path) -> None:
+    """Add ``-e <guard>`` to Pi-family commands when the guard is set, and nothing when it is not."""
+    command = launch(harness.GatewayConfig(url="https://gw.example/v1", api_key="k")).run_command
+    assert harness._GUARD_PI_ARG in command
+    expand = f"printf '%s|' {harness._GUARD_PI_ARG}"
+    with_guard = subprocess.run(
+        ["bash", "-c", expand], env={"APP_GUARD_PI": "/g/pi.ts"}, capture_output=True, text=True, check=True
+    )
+    without = subprocess.run(["bash", "-c", expand], env={}, capture_output=True, text=True, check=True)
+    assert with_guard.stdout == "-e|/g/pi.ts|"
+    assert without.stdout == "|"
+
+
+def test_codex_launch_installs_the_guard_hooks_before_it_starts(tmp_path: Path) -> None:
+    """Copy the guard hooks into the session's Codex home only when the guard is set."""
+    command = harness._codex_launch("m1", harness.GatewayConfig(url="https://gw.example/v1", api_key="k")).run_command
+    assert command.startswith(harness._GUARD_CODEX_COPY)
+    (tmp_path / ".app" / "codex").mkdir(parents=True)
+    (tmp_path / "hooks.json").write_text("{}")
+    subprocess.run(["bash", "-c", harness._GUARD_CODEX_COPY], cwd=tmp_path, env={}, check=True)
+    assert not (tmp_path / ".app" / "codex" / "hooks.json").exists()
+    env = {"APP_GUARD_CODEX": str(tmp_path / "hooks.json")}
+    subprocess.run(["bash", "-c", harness._GUARD_CODEX_COPY], cwd=tmp_path, env=env, check=True)
+    assert (tmp_path / ".app" / "codex" / "hooks.json").read_text() == "{}"
+
+
+# APP_TEST_CODEX can point at the pinned install (npm i @openai/codex@<CODEX_VERSION>).
+_CODEX = os.environ.get("APP_TEST_CODEX") or shutil.which("codex")
+
+
+class _FakeResponses(http.server.BaseHTTPRequestHandler):
+    """Answer the Responses API: one ``cat optimize.toml`` call, then a final message."""
+
+    tool_outputs: list[str] = []
+
+    def log_message(self, *args: object) -> None:
+        """Keep the test output quiet."""
+
+    def do_POST(self) -> None:
+        """Stream one model turn as server-sent events."""
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        outputs = [item["output"] for item in body.get("input", []) if item.get("type") == "function_call_output"]
+        _FakeResponses.tool_outputs.extend(outputs)
+        if outputs:
+            item = {
+                "type": "message",
+                "id": "m1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "done"}],
+            }
+        else:
+            arguments = json.dumps({"cmd": "cat optimize.toml"})
+            item = {
+                "type": "function_call",
+                "id": "f1",
+                "call_id": "c1",
+                "name": "exec_command",
+                "arguments": arguments,
+            }
+        usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        events = [
+            {"type": "response.created", "response": {"id": "r1"}},
+            {"type": "response.output_item.done", "item": item},
+            {"type": "response.completed", "response": {"id": "r1", "usage": usage}},
+        ]
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.end_headers()
+        for event in events:
+            self.wfile.write(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode())
+
+
+@pytest.mark.skipif(_CODEX is None, reason="codex is not installed")
+def test_installed_codex_runs_the_guard_hook_and_refuses_a_hidden_read(tmp_path: Path) -> None:
+    """Drive the real Codex against a fake model: its shell read of optimize.toml is refused and logged."""
+    assert _CODEX is not None
+    _FakeResponses.tool_outputs = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeResponses)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    (workspace / "optimize.toml").write_text("secret = 1\n")
+    gateway = harness.GatewayConfig(url=f"http://127.0.0.1:{server.server_address[1]}/v1", api_key="k")
+    proposer = {
+        **harness.launch_payload(harness._codex_launch("fake-model", gateway)),
+        "hidden_paths": ["optimize.toml"],
+    }
+    path = f"{Path(_CODEX).parent}{os.pathsep}{os.environ.get('PATH', '')}"
+    try:
+        outcome = run_session(
+            proposer,
+            workspace=workspace,
+            prompt="Read the config.",
+            model="fake-model",
+            session_dir=tmp_path / "session",
+            timeout_seconds=120,
+            extra_env={"PATH": path},
+            api_key="k",
+        )
+    finally:
+        server.shutdown()
+    assert outcome.returncode == 0, outcome.stderr
+    assert outcome.refusals == [{"tool": "Bash", "kind": "config"}]
+    assert len(_FakeResponses.tool_outputs) == 1
+    assert harness_bridge.GUARD_REFUSAL in _FakeResponses.tool_outputs[0]
+    assert "secret" not in _FakeResponses.tool_outputs[0]
+
+
+class _FakeChat(http.server.BaseHTTPRequestHandler):
+    """Answer Chat Completions: one call of ``tool``, then a final message."""
+
+    tool: tuple[str, dict[str, Any]] = ("read", {})
+    tool_outputs: list[str] = []
+
+    def log_message(self, *args: object) -> None:
+        """Keep the test output quiet."""
+
+    def do_POST(self) -> None:
+        """Stream one model turn as server-sent events."""
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        outputs = [message["content"] for message in body.get("messages", []) if message.get("role") == "tool"]
+        _FakeChat.tool_outputs = outputs
+        if outputs or not body.get("tools"):
+            delta: dict[str, Any] = {"role": "assistant", "content": "done"}
+            finish = "stop"
+        else:
+            name, arguments = _FakeChat.tool
+            call = {
+                "index": 0,
+                "id": "c1",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }
+            delta = {"role": "assistant", "content": None, "tool_calls": [call]}
+            finish = "tool_calls"
+        usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        chunks = [
+            {
+                "id": "x",
+                "object": "chat.completion.chunk",
+                "model": "fake-model",
+                "choices": [{"index": 0, "delta": delta}],
+            },
+            {
+                "id": "x",
+                "object": "chat.completion.chunk",
+                "model": "fake-model",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
+                "usage": usage,
+            },
+        ]
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.end_headers()
+        for chunk in chunks:
+            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+        self.wfile.write(b"data: [DONE]\n\n")
+
+
+# Each harness's own read tool and arguments. Prime Agent has only ``ipython``.
+_CHAT_HARNESSES = [
+    ("opencode", harness._opencode_launch, "read", "filePath"),
+    ("pi", harness._pi_launch, "read", "path"),
+    ("prime-agent", harness._prime_agent_launch, "ipython", "code"),
+]
+
+
+@pytest.mark.parametrize(("binary", "launch", "tool", "key"), _CHAT_HARNESSES, ids=[row[0] for row in _CHAT_HARNESSES])
+@pytest.mark.parametrize("target", ["optimize.toml", "notes.txt"])
+def test_installed_chat_harness_loads_the_guard_and_refuses_only_hidden_reads(
+    tmp_path: Path, binary: str, launch: Any, tool: str, key: str, target: str
+) -> None:
+    """Drive the real OpenCode, Pi and Prime Agent against a fake model: only the hidden read is refused."""
+    executable = shutil.which(binary)
+    if executable is None:
+        pytest.skip(f"{binary} is not installed")
+    value = f'print(open("{target}").read())' if key == "code" else target
+    _FakeChat.tool = (tool, {key: value})
+    _FakeChat.tool_outputs = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeChat)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    (workspace / "optimize.toml").write_text("secret = 1\n")
+    (workspace / "notes.txt").write_text("hello\n")
+    (tmp_path / "home").mkdir()
+    gateway = harness.GatewayConfig(url=f"http://127.0.0.1:{server.server_address[1]}/v1", api_key="k")
+    proposer = {**harness.launch_payload(launch("fake-model", gateway)), "hidden_paths": ["optimize.toml"]}
+    path = f"{Path(executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"
+    try:
+        outcome = run_session(
+            proposer,
+            workspace=workspace,
+            prompt="Read the file.",
+            model="fake-model",
+            session_dir=tmp_path / "session",
+            timeout_seconds=120,
+            extra_env={"PATH": path, "HOME": str(tmp_path / "home")},
+            api_key="k",
+        )
+    finally:
+        server.shutdown()
+    assert outcome.returncode == 0, outcome.stderr
+    assert len(_FakeChat.tool_outputs) == 1
+    if target == "optimize.toml":
+        assert outcome.refusals == [{"tool": tool, "kind": "config"}]
+        assert _FakeChat.tool_outputs[0] == harness_bridge.GUARD_REFUSAL
+    else:
+        assert outcome.refusals == []
+        assert "hello" in _FakeChat.tool_outputs[0]

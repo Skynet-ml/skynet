@@ -19,7 +19,7 @@ export const PRIVACY_POLICY: LegalDocument = {
   intro:
     `This Privacy Policy explains how ${C.legalEntity} ("${C.serviceName}", "we", "us", or "our") ` +
     `collects, uses, and shares personal information when you use ${C.serviceName}, the ` +
-    `prompt-optimization service at ${C.websiteLabel} (the "Service"). It also describes the ` +
+    `code-optimization service at ${C.websiteLabel} (the "Service"). It also describes the ` +
     `choices and rights you have. For the purposes of the GDPR, we are the controller of the ` +
     `personal information described here, except where we act as a processor for content you submit.`,
   sections: [
@@ -62,8 +62,9 @@ export const PRIVACY_POLICY: LegalDocument = {
         {
           kind: "paragraph",
           text:
-            "The core function of the Service is to optimize prompts against large language models. " +
-            "To do this, we send the prompts and dataset content involved in your jobs to third-party " +
+            "The core function of the Service is to optimize the code in your repositories, and it uses " +
+            "large language models to do this. We send the repository code, prompts and dataset content " +
+            "involved in your jobs to third-party " +
             "LLM providers, reached through OpenRouter and, where configured, a self-hosted gateway. " +
             "Those providers process the content to return completions, which we use to produce your " +
             "results.",
