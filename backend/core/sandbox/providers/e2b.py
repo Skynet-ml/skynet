@@ -86,6 +86,7 @@ BOX_TAG = "skynet_box"
 CREATE_TIMEOUT = 120.0
 STOP_TIMEOUT = 60.0
 DISPATCH_ATTEMPTS = 3
+DISPATCH_BACKOFF = 1.0
 EXEC_REATTACH_ATTEMPTS = 5
 REATTACH_DELAY = 1.0
 # The E2B Hobby plan allows at most one hour for each timeout value, so a
@@ -388,6 +389,10 @@ class E2BEnvironment(SandboxEnvironment):
 
     async def stop(self) -> None:
         """Stop the box once. Safe to call again."""
+        if self._stop_task is None and self._starting is None and self._box is None:
+            # A stop before any start does nothing. A stop task set here would
+            # make the stop after a later start return without a kill.
+            return
         if self._stop_task is None:
             self._stop_task = asyncio.ensure_future(self._timed_teardown())
         await asyncio.shield(self._stop_task)
@@ -562,6 +567,9 @@ class E2BEnvironment(SandboxEnvironment):
     async def _dispatch(self, box: Any, command: str, **options: Any) -> Any:
         """Start the command in the background, resending only a refused dispatch.
 
+        A rate limit answer waits ``DISPATCH_BACKOFF`` seconds, doubled after
+        each attempt, before the next dispatch.
+
         Args:
             box: The SDK sandbox.
             command: The shell command.
@@ -583,6 +591,8 @@ class E2BEnvironment(SandboxEnvironment):
                 if attempt == DISPATCH_ATTEMPTS or not _is_dispatch_retryable(error):
                     raise SandboxInfraError(f"The E2B command did not start: {type(error).__name__}") from error
                 logger.info("E2B sandbox %s dispatch retry %d: %s", self.name, attempt, type(error).__name__)
+                if RateLimitException is not None and isinstance(error, RateLimitException):
+                    await self._clock.sleep(DISPATCH_BACKOFF * 2 ** (attempt - 1))
         raise AssertionError("unreachable")
 
     async def _wait(

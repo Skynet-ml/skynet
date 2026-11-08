@@ -617,12 +617,39 @@ async def test_dispatch_does_not_retry_a_read_timeout() -> None:
 
 async def test_dispatch_stops_after_the_attempt_limit() -> None:
     """Raise an infra error after DISPATCH_ATTEMPTS refused dispatches."""
-    async with e2b.E2BEnvironment(_spec()) as env:
+    async with e2b.E2BEnvironment(_spec(), clock=FakeClock()) as env:
         box = _the_box()
         box.commands.run_errors = [e2b.RateLimitException("429") for _ in range(e2b.DISPATCH_ATTEMPTS)]
         with pytest.raises(SandboxInfraError):
             await env.exec("true")
     assert len(box.commands.runs) == e2b.DISPATCH_ATTEMPTS
+
+
+async def test_dispatch_backs_off_after_a_rate_limit() -> None:
+    """Wait a growing delay on the clock between rate-limited dispatches."""
+    clock = FakeClock()
+    async with e2b.E2BEnvironment(_spec(), clock=clock) as env:
+        box = _the_box()
+        box.commands.run_errors = [e2b.RateLimitException("429"), e2b.RateLimitException("429")]
+        clock.sleeps.clear()
+        result = await env.exec("echo late")
+    assert result.stdout == "late\n"
+    assert len(box.commands.runs) == 3
+    assert clock.sleeps == [e2b.DISPATCH_BACKOFF, 2 * e2b.DISPATCH_BACKOFF]
+
+
+async def test_dispatch_does_not_back_off_after_a_refused_connection() -> None:
+    """Resend a refused dispatch at once."""
+    clock = FakeClock()
+    async with e2b.E2BEnvironment(_spec(), clock=clock) as env:
+        box = _the_box()
+        refused = e2b.SandboxException("unreachable")
+        refused.__cause__ = ConnectionRefusedError()
+        box.commands.run_errors = [refused]
+        clock.sleeps.clear()
+        await env.exec("true")
+    assert len(box.commands.runs) == 2
+    assert clock.sleeps == []
 
 
 async def test_wait_reattaches_by_pid_after_a_cut_connection() -> None:
@@ -775,6 +802,19 @@ async def test_stop_during_start_ends_the_start() -> None:
     with pytest.raises(SandboxInfraError):
         await starting
     assert FakeBox.boxes == {}
+
+
+async def test_stop_before_start_does_not_block_a_later_stop() -> None:
+    """Kill the box and end the renew loop on stop, start, stop."""
+    env = e2b.E2BEnvironment(_spec(lifetime_seconds=3 * 3600), clock=FakeClock())
+    await env.stop()
+    await env.start()
+    renewer = env._renewer
+    assert renewer is not None
+    assert len(FakeBox.boxes) == 1
+    await env.stop()
+    assert FakeBox.boxes == {}
+    assert renewer.done()
 
 
 async def test_exec_after_stop_raises() -> None:
