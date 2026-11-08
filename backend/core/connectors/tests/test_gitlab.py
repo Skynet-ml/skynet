@@ -310,18 +310,31 @@ def test_project_url_accepts_a_clone_url(monkeypatch: pytest.MonkeyPatch) -> Non
     assert seen[0].url.raw_path.decode() == "/api/v4/projects/group%2Fsub%2Fapp"
 
 
-def test_list_repositories_finds_a_project_from_its_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A pasted web URL finds the project, like its path does."""
+@pytest.mark.parametrize(
+    ("search", "full_name"),
+    [
+        ("https://gitlab.com/other/bot.git", "other/bot"),
+        ("https://gitlab.com/other/bot/", "other/bot"),
+        ("https://gitlab.com/other/bot.git/", "other/bot"),
+        ("other/bot.git", "other/bot"),
+        ("https://gitlab.com/group/sub/bot.git/", "group/sub/bot"),
+    ],
+)
+def test_list_repositories_finds_a_project_from_its_url(
+    monkeypatch: pytest.MonkeyPatch, search: str, full_name: str
+) -> None:
+    """A pasted URL with a trailing ``.git`` or slash finds the project, like its path does."""
 
     def answer(request: httpx.Request) -> httpx.Response:
         """Return an empty member list or the direct lookup."""
         if request.url.path == "/api/v4/projects":
             return httpx.Response(200, json=[])
-        return httpx.Response(200, json=_project("other/bot", visibility="public"))
+        return httpx.Response(200, json=_project(full_name, visibility="public"))
 
-    _serve(monkeypatch, answer)
-    found = gitlab.list_repositories(_secret(), "https://gitlab.com/other/bot.git")
-    assert [r["full_name"] for r in found] == ["other/bot"]
+    seen = _serve(monkeypatch, answer)
+    found = gitlab.list_repositories(_secret(), search)
+    assert [r["full_name"] for r in found] == [full_name]
+    assert seen[-1].url.raw_path.decode() == "/api/v4/projects/" + full_name.replace("/", "%2F")
 
 
 @pytest.mark.parametrize("value", ["https://gitlab.example.com/team/bot", "git@gitlab.example.com:team/bot.git"])
