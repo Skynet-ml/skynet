@@ -14,6 +14,7 @@ the run record (E28), with every secret it could carry removed (E52 rule 3).
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import uuid
@@ -21,7 +22,7 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 from ..config import settings
 from .credential_safety import credential_fragments, redact_secret_bytes
@@ -385,6 +386,23 @@ def escaped_forms(fragment: str) -> set[str]:
     return {escaped, escaped.replace("/", "\\/"), html_safe, html_safe.replace("/", "\\/")}
 
 
+def encoded_forms(fragment: str) -> set[str]:
+    """Return the re-encoded forms in which a server may echo a secret fragment.
+
+    Args:
+        fragment: One secret fragment.
+
+    Returns:
+        The standard and URL-safe base64 forms, each with and without ``=``
+        padding, and the percent-encoded form.
+    """
+    raw = fragment.encode()
+    forms = {quote(fragment, safe="")}
+    for encoded in (base64.b64encode(raw).decode(), base64.urlsafe_b64encode(raw).decode()):
+        forms |= {encoded, encoded.rstrip("=")}
+    return forms
+
+
 def host_allowed(host: str, allowed: Collection[str]) -> bool:
     """Tell whether a run lets a secret go to ``host`` (E52).
 
@@ -538,6 +556,9 @@ def _relay(
     fragments |= {
         fragment for key, value in filled.items() if value != headers[key] for fragment in credential_fragments(value)
     }
+    # A server can echo a value base64- or percent-encoded, so hide those forms too. Only a value
+    # encoded on its own is caught: inside a longer base64 text its form depends on the byte offset.
+    fragments |= {form for fragment in fragments for form in encoded_forms(fragment)}
     # A server can echo a value JSON-escaped (Go writes & as \u0026, PHP writes / as \/), so hide those forms too.
     fragments |= {form for fragment in fragments for form in escaped_forms(fragment)}
     state.secrets |= set(values.values()) | fragments

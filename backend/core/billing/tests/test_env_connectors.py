@@ -561,6 +561,28 @@ def test_relay_removes_a_json_escaped_echo_of_the_secret() -> None:
     assert json.loads(answer)["echo"] == ["[REDACTED]"] * 3
 
 
+def test_relay_removes_a_base64_or_percent_encoded_echo_of_the_secret() -> None:
+    """Hide the secret when the server echoes it base64-encoded, with or without padding, or percent-encoded."""
+    secret = "key>>>???~~"
+    raw = secret.encode()
+    standard, urlsafe = base64.b64encode(raw).decode(), base64.urlsafe_b64encode(raw).decode()
+    forms = [standard, standard.rstrip("="), urlsafe, urlsafe.rstrip("="), quote(secret, safe="")]
+    assert standard != urlsafe
+    assert standard.endswith("=")
+    answer = relay_request(
+        url="https://api.judge.example/v1",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        body=b"{}",
+        user_secrets={"JUDGE_KEY": secret},
+        bindings={},
+        secret_hosts={"JUDGE_KEY": "api.judge.example"},
+        allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+        send=lambda *_args: json.dumps({"echo": forms}).encode(),
+    ).decode()
+    assert all(form not in answer for form in forms)
+    assert json.loads(answer)["echo"] == ["[REDACTED]"] * len(forms)
+
+
 def test_relay_refuses_a_shared_file_that_sends_a_user_key_to_another_host() -> None:
     """Refuse ``${GOOGLE_MAPS_KEY}`` that a shared file points at a host the user's run does not allow (E52)."""
     with pytest.raises(ValueError, match=r"may not go to collector\.example"):

@@ -1757,9 +1757,6 @@ def test_a_key_split_across_two_streamed_chunks_comes_back_redacted(echo: _Echo)
     assert echo.paths == ["/split"]
 
 
-# The relay hides the filled values and their JSON-escaped forms only. A server that
-# re-encodes the key hands it back; the PR body names this gap. strict: a fix flips these.
-@pytest.mark.xfail(strict=True, reason="SKY-385 gap: the relay does not hide re-encoded forms of a secret")
 @pytest.mark.parametrize(
     ("path", "encode"),
     [
@@ -1776,6 +1773,7 @@ def test_a_re_encoded_key_echo_is_redacted(echo: _Echo, path: str, encode: Any) 
 
     assert answer["status"] == 200
     assert encode(secret) not in json.dumps(answer)
+    assert json.loads(base64.b64decode(answer["body"])) == {"seen": "[REDACTED]"}
 
 
 @pytest.mark.parametrize(
