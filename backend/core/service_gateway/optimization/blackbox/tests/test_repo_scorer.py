@@ -25,6 +25,7 @@ from core.billing.signals import BudgetReached
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
+from core.worker.scoped_relay import CallRecorder
 
 from .. import repo_scorer, runner
 from ..repo_constraints import McpServer, RoleEnvironment, ServiceSpec, TargetStage
@@ -1499,6 +1500,7 @@ def _service_relay(
     host: str = "judge.example.test",
     allowed_hosts: tuple[str, ...] | None = None,
     secret: str = "judge-secret-value",
+    recorder: CallRecorder | None = None,
 ) -> _StageRelay:
     """Build a relay with no stage boxes that forwards to the given services.
 
@@ -1510,6 +1512,7 @@ def _service_relay(
         host: The host ``JUDGE_KEY`` belongs to.
         allowed_hosts: The run's allowed hosts for ``JUDGE_KEY``; ``None`` allows ``host``.
         secret: The value of ``JUDGE_KEY``.
+        recorder: Writes each relayed call into the run record.
 
     Returns:
         The relay.
@@ -1527,6 +1530,7 @@ def _service_relay(
         secrets={"JUDGE_KEY": secret},
         secret_hosts={"JUDGE_KEY": host},
         allowed_hosts={"JUDGE_KEY": (host,) if allowed_hosts is None else allowed_hosts},
+        recorder=recorder,
     )
 
 
@@ -1758,6 +1762,7 @@ def _mcp_relay(
     *,
     services: Mapping[str, ServiceSpec] | None = None,
     secret: str = "judge-secret-value",
+    recorder: CallRecorder | None = None,
 ) -> _StageRelay:
     """Build a relay with no stage boxes that forwards to the role's MCP servers.
 
@@ -1767,6 +1772,7 @@ def _mcp_relay(
         mcp: The role with the servers of its own MCP file.
         services: The run's services, which the role also lists.
         secret: The value of ``JUDGE_KEY``.
+        recorder: Writes each relayed call into the run record.
 
     Returns:
         The relay.
@@ -1785,6 +1791,7 @@ def _mcp_relay(
         secrets={"JUDGE_KEY": secret},
         secret_hosts={"JUDGE_KEY": "judge.example.test"},
         allowed_hosts={"JUDGE_KEY": ("judge.example.test",)},
+        recorder=recorder,
     )
 
 
@@ -1842,6 +1849,56 @@ def test_an_mcp_server_gets_the_key_and_the_box_gets_only_the_redacted_form(echo
     assert ["X-Echo", "[REDACTED]"] in answer["headers"]
     assert "judge-secret-value" not in json.dumps(answer)
     assert echo.paths == ["/echo"]
+
+
+class _CallSink:
+    """Keep each run call the relay records, with the secret forms the store must remove."""
+
+    def __init__(self) -> None:
+        """Start with no calls."""
+        self.calls: list[tuple[str, dict[str, Any], list[str]]] = []
+
+    def record_call(self, optimization_id: str, call: dict[str, Any], secrets: list[str]) -> int:
+        """Keep one call.
+
+        Args:
+            optimization_id: The run.
+            call: The call fields.
+            secrets: The secret forms the store removes.
+
+        Returns:
+            The call's sequence number.
+        """
+        self.calls.append((optimization_id, call, secrets))
+        return len(self.calls)
+
+
+@pytest.mark.parametrize("kind", ["host", "mcp"])
+def test_a_relayed_call_is_recorded_under_its_role_and_kind_with_the_key_marked_secret(echo: _Echo, kind: str) -> None:
+    """Each service and MCP call writes one run call for its role, and the store gets the key to remove (E28)."""
+    sink = _CallSink()
+    recorder = CallRecorder(sink, "opt-1", "cand-1", "")
+    workspace = _Workspace()
+    if kind == "mcp":
+        relay = _mcp_relay(workspace, "run", _mcp_role(echo.port), recorder=recorder)
+        answer = _mcp_answer(relay, workspace, "search")
+    else:
+        spec = ServiceSpec(
+            secrets=("JUDGE_KEY",),
+            url=f"http://judge.example.test:{echo.port}/",
+            headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        )
+        relay = _service_relay(
+            workspace, role="metric", allowed=("judge",), services={"judge": spec}, recorder=recorder
+        )
+        answer = _service_answer(relay, workspace, "judge", path="echo", method="GET")
+
+    assert answer["status"] == 200
+    [(optimization_id, call, secrets)] = sink.calls
+    assert optimization_id == "opt-1"
+    assert (call["candidate_id"], call["role"], call["kind"]) == ("cand-1", "run" if kind == "mcp" else "metric", kind)
+    assert (call["target"], call["status"]) == ("judge.example.test", "ok")
+    assert "judge-secret-value" in secrets
 
 
 def test_an_mcp_redirect_comes_back_to_the_box_and_is_never_followed(echo: _Echo) -> None:

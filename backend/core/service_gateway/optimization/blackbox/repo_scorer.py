@@ -53,7 +53,7 @@ import uuid
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -75,6 +75,9 @@ from .rule_judge import RuleJudge
 from .sandbox import SandboxSession
 from .sandbox_contract import SandboxRuntime
 from .sandbox_scorer import RUNNER_SOURCE, ScorerGateway, _raise_control
+
+if TYPE_CHECKING:
+    from ....worker.scoped_relay import CallRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +206,7 @@ class RepoScorer:
         secret_hosts: Mapping[str, str] | None = None,
         secret_allowed_hosts: Mapping[str, tuple[str, ...]] | None = None,
         budget: BudgetRuntime | None = None,
+        recorder: CallRecorder | None = None,
     ) -> None:
         """Bind the user's scorer code to a repository workspace.
 
@@ -243,6 +247,8 @@ class RepoScorer:
             secret_allowed_hosts: Each user secret's ``allowed_hosts`` from
                 the run.
             budget: The run budget, which meters a call with a Skynet key.
+            recorder: Writes each relayed service and MCP call into the run
+                record; ``None`` records nothing.
 
         Raises:
             ValueError: When stages are given without a runtime or a tree.
@@ -262,6 +268,7 @@ class RepoScorer:
         self._secret_hosts = dict(secret_hosts or {})
         self._secret_allowed_hosts = dict(secret_allowed_hosts or {})
         self._budget = budget
+        self._recorder = recorder
         self._run_entry = run_entry
         self._run_timeout = run_timeout
         self._workspace = workspace
@@ -651,6 +658,7 @@ class RepoScorer:
             secret_hosts=self._secret_hosts,
             allowed_hosts=self._secret_allowed_hosts,
             budget=self._budget,
+            recorder=self._recorder,
         )
 
     def _mcp_role(self, role: str) -> RoleEnvironment:
@@ -817,6 +825,7 @@ class _StageRelay:
         secret_hosts: Mapping[str, str] | None = None,
         allowed_hosts: Mapping[str, tuple[str, ...]] | None = None,
         budget: BudgetRuntime | None = None,
+        recorder: CallRecorder | None = None,
     ) -> None:
         """Bind the open stage boxes to the scorer box that waits for their answers.
 
@@ -841,6 +850,8 @@ class _StageRelay:
             secret_hosts: The one host each secret may go to.
             allowed_hosts: Each user secret's ``allowed_hosts`` from the run.
             budget: The run budget, which meters a call with a Skynet key.
+            recorder: Writes each relayed call into the run record under
+                ``role``; ``None`` records nothing.
         """
         self._boxes = dict(boxes)
         self._stages = stages
@@ -864,6 +875,7 @@ class _StageRelay:
         self._secret_hosts = dict(secret_hosts or {})
         self._allowed_hosts = dict(allowed_hosts or {})
         self._budget = budget
+        self._recorder = recorder.bind(role=role) if recorder is not None else None
         self._service_pool = ThreadPoolExecutor(max_workers=max_concurrency, thread_name_prefix="stage-service")
         self._pending = ""
         self._seen: set[str] = set()
@@ -998,7 +1010,7 @@ class _StageRelay:
         label = f"MCP server {name!r}"
         try:
             url, headers = mcp_endpoint(f"[{self._role}]", self._mcp, name)
-            response = self._request(url, headers, label, frame)
+            response = self._request(url, headers, label, frame, kind="mcp")
         except (BudgetReached, Exception) as error:
             response = self._stopped(error)
             if response is None:
@@ -1043,7 +1055,7 @@ class _StageRelay:
         return response
 
     def _request(
-        self, origin: str, declared: Mapping[str, str], label: str, frame: Mapping[str, Any]
+        self, origin: str, declared: Mapping[str, str], label: str, frame: Mapping[str, Any], *, kind: str = "host"
     ) -> dict[str, Any]:
         """Call a service's or MCP server's url through :func:`relay_request`, so its secrets stay in the parent.
 
@@ -1058,6 +1070,7 @@ class _StageRelay:
             declared: The declared headers, with ``${SECRET}`` placeholders.
             label: ``Service '<name>'`` or ``MCP server '<name>'``, for the errors.
             frame: The guest's ``path``, ``method``, ``headers`` and ``body``.
+            kind: ``host`` for a service, ``mcp`` for an MCP server, for the run record.
 
         Returns:
             ``{"status", "headers", "body"}`` with a base64 body, or
@@ -1135,8 +1148,6 @@ class _StageRelay:
                 transport.close()
 
         try:
-            # SKY-364 (#1006) adds relay_request(recorder=...). When it merges, pass
-            # a recorder bound to this run and candidate here; until then no call is recorded.
             answer = relay_request(
                 url=url,
                 headers=declared,
@@ -1147,6 +1158,8 @@ class _StageRelay:
                 allowed_hosts=self._allowed_hosts,
                 send=send,
                 runtime=self._budget,
+                recorder=self._recorder,
+                kind=kind,
             )
         except _AnswerTooLargeError:
             return {"status": 502, "error": f"{label} answered with more than 4 MiB."}

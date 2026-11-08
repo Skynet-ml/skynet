@@ -705,6 +705,7 @@ def bind_repo_scorer(
         secret_hosts=staged.secret_hosts,
         secret_allowed_hosts=staged.secret_allowed_hosts,
         budget=getattr(gateway, "runtime", None),
+        recorder=getattr(gateway, "recorder", None),
     )
     environment = target["repo"].get(ENVIRONMENT_KEY)
     if isinstance(environment, dict):
