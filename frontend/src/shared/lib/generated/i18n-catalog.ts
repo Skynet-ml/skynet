@@ -153,7 +153,7 @@ export const I18N_MESSAGES = {
   "connectors.oauth_failed": "ההתחברות ל-{provider} לא הושלמה. נסו שוב.",
   "connectors.oauth_not_configured": "התחברות דרך {provider} לא מוגדרת בפריסה הזו. הדביקו פרטי גישה במקום.",
   "connectors.oauth_state_invalid": "קישור ההתחברות אינו תקין או שפג תוקפו. התחילו מחדש.",
-  "connectors.other_repo_host": "{host} הוא לא {expected}. Skynet מתחבר רק ל-gitlab.com ול-Bitbucket Cloud, לא לשרתים בניהול עצמי. השתמשו בכתובת של המאגר ב-{expected}, או העבירו את המאגר ל-{expected}.",
+  "connectors.other_repo_host": "הכתובת {host} לא שייכת ל-{expected}. אנחנו מתחברים רק ל-gitlab.com ול-Bitbucket Cloud, ולא לשרתים בניהול עצמי. השתמשו בכתובת של המאגר ב-{expected}, או העבירו את המאגר ל-{expected}.",
   "connectors.picker_needs_oauth": "בחירת קבצים דורשת חשבון {provider} שחובר דרך התחברות עם Google.",
   "connectors.picker_unavailable": "בחירת קבצים מ-Google לא מוגדרת בפריסה הזו.",
   "connectors.provider_error": "{provider} החזיר שגיאה לא צפויה (HTTP {status_code}). נסו שוב בעוד רגע.",

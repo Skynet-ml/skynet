@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import re
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from ..api.errors import DomainError
 from ..config import settings
@@ -45,8 +45,9 @@ def repo_path(value: str, web_url: str, provider: str, segments: int | None = No
     """Turn a pasted web or clone URL into the host's repository path.
 
     The host name is compared without case and without its port. A trailing
-    ``.git`` is dropped, and so is any page after the repository in a URL
-    (``/-/tree/...`` on GitLab, ``/src/...`` on Bitbucket).
+    ``.git`` and outer slashes are dropped, and so is any page, query or
+    fragment after the repository in a URL (``/-/tree/...`` on GitLab,
+    ``/src/...`` on Bitbucket). Percent-encoded URL paths are decoded.
 
     Args:
         value: What the user or an agent gave: a path or a URL.
@@ -59,7 +60,8 @@ def repo_path(value: str, web_url: str, provider: str, segments: int | None = No
 
     Raises:
         DomainError: 400 ``other_repo_host`` when the URL names another host,
-            such as a self-managed GitLab server.
+            such as a self-managed GitLab server; 400 ``invalid_ref`` when the
+            URL cannot be parsed or has no host.
     """
     text = value.strip()
     scp = SCP_URL.match(text)
@@ -67,18 +69,23 @@ def repo_path(value: str, web_url: str, provider: str, segments: int | None = No
         if scp:
             host_name, path = scp.group(1), scp.group(2)
         else:
-            parts = urlsplit(text)
-            host_name, path = parts.hostname or "", parts.path
+            try:
+                parts = urlsplit(text)
+                host_name, path = parts.hostname or "", unquote(parts.path)
+            except ValueError as exc:
+                raise DomainError("connectors.invalid_ref", status=400) from exc
         host_name = host_name.lower().rstrip(".")
+        if not host_name:
+            raise DomainError("connectors.invalid_ref", status=400)
         expected = urlsplit(web_url).hostname or ""
         if host_name not in (expected, f"www.{expected}"):
             raise DomainError(
                 "connectors.other_repo_host", status=400, provider=label(provider), host=host_name, expected=expected
             )
-        text = path.strip("/").split("/-/")[0]
+        text = path.split("/-/")[0]
         if segments is not None:
-            text = "/".join(text.split("/")[:segments])
-    return text.removesuffix(".git")
+            text = "/".join(text.strip("/").split("/")[:segments])
+    return text.strip("/").removesuffix(".git")
 
 
 def oauth_app() -> OAuthApp:

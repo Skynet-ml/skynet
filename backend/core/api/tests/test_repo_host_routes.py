@@ -215,3 +215,15 @@ def test_self_managed_gitlab_url_is_refused_on_the_route() -> None:
     body = response.json()
     assert body["code"] == "connectors.other_repo_host"
     assert body["params"] == {"provider": "GitLab", "host": "gitlab.example.com", "expected": "gitlab.com"}
+
+
+@pytest.mark.usefixtures("vault_key")
+@pytest.mark.parametrize("search", ["https://[::1/team/bot", "https://"])
+def test_broken_url_search_is_a_400_not_a_500(search: str) -> None:
+    """A broken URL in the picker search answers 400 ``invalid_ref``."""
+    client, _ = _make_client()
+    with patch("core.connectors.transport.CLIENT.request", side_effect=_gitlab_api):
+        client.put("/connectors/gitlab/credentials", json={"fields": {"token": "glpat-x"}})
+        response = client.get("/connectors/gitlab/repos", params={"search": search})
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "connectors.invalid_ref"

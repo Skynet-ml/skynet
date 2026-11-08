@@ -279,6 +279,10 @@ def test_list_commits_names_the_branch_in_the_query(monkeypatch: pytest.MonkeyPa
         ("https://bitbucket.org/team/bot/src/main/app.py", "team/bot"),
         ("git@bitbucket.org:team/bot.git", "team/bot"),
         ("team/bot.git", "team/bot"),
+        ("https://bitbucket.org/team/bot/src/main/dir", "team/bot"),
+        ("ssh://git@bitbucket.org/team/bot.git", "team/bot"),
+        ("https://bitbucket.org/team/bot?at=main#readme", "team/bot"),
+        ("team/bot/", "team/bot"),
     ],
 )
 def test_repo_path_reads_a_pasted_url(value: str, expected: str) -> None:
@@ -294,3 +298,11 @@ def test_other_host_is_refused_by_name() -> None:
     assert caught.value.code == "connectors.other_repo_host"
     assert caught.value.params["host"] == "bitbucket.example.com"
     assert caught.value.params["expected"] == "bitbucket.org"
+
+
+@pytest.mark.parametrize("value", ["https://bitbucket.org/", "https://bitbucket.org/team", "https://[::1/team/bot"])
+def test_repo_url_refuses_an_unusable_url_with_400(value: str) -> None:
+    """A URL without a workspace and repository, or a broken URL, is a 400 ``invalid_ref``."""
+    with pytest.raises(DomainError) as caught:
+        bitbucket._repo_url(value)
+    assert (caught.value.code, caught.value.status_code) == ("connectors.invalid_ref", 400)

@@ -284,6 +284,14 @@ def test_oauth_app_uses_gitlab_endpoints() -> None:
         ("https://www.gitlab.com/team/bot/-/tree/main/src", "team/bot"),
         ("git@gitlab.com:team/bot.git", "team/bot"),
         ("  team/bot.git ", "team/bot"),
+        ("ssh://git@gitlab.com:22/group/sub/repo.git", "group/sub/repo"),
+        ("group/sub/sub2/repo", "group/sub/sub2/repo"),
+        ("https://gitlab.com/group/sub/sub2/repo", "group/sub/sub2/repo"),
+        ("https://gitlab.com/team/bot?tab=readme", "team/bot"),
+        ("https://gitlab.com/team/bot#readme", "team/bot"),
+        ("https://gitlab.com/team/bot/", "team/bot"),
+        ("team/bot/", "team/bot"),
+        ("https://gitlab.com/team/my%2Dbot", "team/my-bot"),
     ],
 )
 def test_repo_path_reads_a_pasted_url(value: str, expected: str) -> None:
@@ -328,3 +336,21 @@ def test_self_managed_gitlab_host_is_refused_by_name(monkeypatch: pytest.MonkeyP
     with pytest.raises(DomainError):
         gitlab.list_repositories(_secret(), value)
     assert len(seen) == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://gitlab.com/",
+        "https://gitlab.com",
+        "https://",
+        "https://[::1/team/bot",
+        "https://gitlab.com/team/my%20bot",
+        "",
+    ],
+)
+def test_project_url_refuses_an_unusable_url_with_400(value: str) -> None:
+    """An empty, host-less, broken or invalid-character URL is a 400 ``invalid_ref``, never a crash."""
+    with pytest.raises(DomainError) as caught:
+        gitlab._project_url(value)
+    assert (caught.value.code, caught.value.status_code) == ("connectors.invalid_ref", 400)
