@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from core.billing.operation_pricing import json_fingerprint
+from core.worker import repo_staging
 
 from .. import repo_serving
 from ..repo_constraints import ConstraintsError
@@ -24,7 +25,7 @@ from ..repo_serving import (
     serve_payload,
     staged_snapshot,
 )
-from ..repo_tree import REPO_SNAPSHOT_KEY, archive_chunks, unpack_tree, version_patch
+from ..repo_tree import REPO_SNAPSHOT_KEY, archive_chunks, strip_archive, unpack_tree, version_patch
 
 _PRE_STRIP_FINGERPRINT = "50df08bd377bfae0c59352e2cabcf4ae64996e51f9f5d7c1a256471c96aea2b6"
 _SERVE = "def serve(input):\n    return {'answer': input['question'].upper()}\n"
@@ -421,3 +422,168 @@ def test_no_scoring_file_reaches_the_served_tar_metadata_or_logs(
         assert path not in logs
     assert _LEAK not in metadata
     assert _LEAK not in logs
+
+
+_RULES = "- Never read the scoring folder.\n"
+
+
+def test_a_metric_rule_file_inside_a_hidden_folder_is_dropped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scorer's own rule file is scoring side, so the serving tree leaves it out with its folder."""
+    files = {
+        "optimize.toml": '[metric]\nfiles = ["scoring"]\nillegal = "scoring/rules.md"\n',
+        "scoring/score.py": "def score(repo_path, case):\n    return 1.0\n",
+        "scoring/rules.md": _RULES,
+        "serve.py": _SERVE,
+    }
+
+    with _stage(monkeypatch, files) as staged:
+        served = _members(Path(staged[REPO_SNAPSHOT_KEY]["archive"]))
+
+    assert served == {"serve.py"}
+
+
+@pytest.mark.parametrize(
+    ("setting", "toml"),
+    [
+        ("instructions", 'instructions = "scoring/rules.md"\n'),
+        ("[proposer] illegal", '[proposer]\nillegal = "scoring/rules.md"\n'),
+        ("[run] illegal", '[run]\nentry = "serve.py:serve"\nillegal = "scoring/rules.md"\n'),
+    ],
+)
+def test_a_visible_rule_file_inside_a_hidden_folder_refuses_to_serve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, setting: str, toml: str
+) -> None:
+    """Refuse the commit instead of serving a tree whose visible rule file the strip would drop (E62).
+
+    Args:
+        tmp_path: Scratch folder.
+        monkeypatch: Replaces the fetch.
+        setting: The visible rule setting under test.
+        toml: The commit's constraints file, with ``scoring`` hidden by ``[metric]``.
+    """
+    files = {
+        "optimize.toml": toml + '\n[metric]\nfiles = ["scoring"]\n',
+        "scoring/score.py": "def score(repo_path, case):\n    return 1.0\n",
+        "scoring/rules.md": _RULES,
+        "serve.py": _SERVE,
+    }
+
+    with pytest.raises(ConstraintsError, match="inside the hidden scoring files"), _stage(monkeypatch, files):
+        pytest.fail("the snapshot must not be yielded")
+
+
+def test_serving_strips_by_the_one_hidden_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serving calls the staging hidden list itself, so it holds no copy of the rule (C3)."""
+    assert repo_serving.hidden_repo_paths is repo_staging.hidden_repo_paths
+    seen: list[tuple[str, ...]] = []
+
+    def spy(archive: Path, hidden_paths: tuple[str, ...], destination: Path) -> Path:
+        """Record the list the strip gets, then strip for real."""
+        seen.append(tuple(hidden_paths))
+        return strip_archive(archive, hidden_paths, destination)
+
+    monkeypatch.setattr(repo_serving, "strip_archive", spy)
+    monkeypatch.setattr(repo_serving, "hidden_repo_paths", lambda constraints: ("src",))
+    files = {"serve.py": _SERVE, "src/app.py": "X = 1\n", ".optimize/exploits/cheat.md": "cheat\n"}
+
+    with _stage(monkeypatch, files) as staged:
+        served = _members(Path(staged[REPO_SNAPSHOT_KEY]["archive"]))
+
+    assert seen == [("src",)]
+    assert served == {"serve.py", ".optimize/exploits/cheat.md"}
+
+
+def _stage_tree(monkeypatch: pytest.MonkeyPatch, files: dict[str, str], links: dict[str, str]) -> Any:
+    """Point the serving fetch at a packed tree that also holds symlinks.
+
+    Args:
+        monkeypatch: Replaces the GitHub token and fetch.
+        files: Relative path to text.
+        links: Relative link path to its relative target.
+
+    Returns:
+        The ``staged_snapshot`` context for a finished run at that commit.
+    """
+
+    def fake_fetch(repository: str, commit: str, token: str | None, workdir: Path) -> Any:
+        """Write the files and links, then pack them as the commit's snapshot."""
+        source = workdir / "source"
+        for name, target in links.items():
+            (source / name).parent.mkdir(parents=True, exist_ok=True)
+            (source / name).symlink_to(target)
+        return type("Snapshot", (), {"archive": _archive(workdir, files), "commit": commit})()
+
+    monkeypatch.setattr(repo_serving, "github_token", lambda engine, owner: None)
+    monkeypatch.setattr(repo_serving, "fetch_snapshot", fake_fetch)
+    return staged_snapshot(serve_payload(_job(), patch="", inputs={}, optimization_id="opt-1"), engine=None, owner=None)
+
+
+def test_a_hidden_path_with_a_trailing_slash_is_still_dropped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``scoring/`` names the same folder as ``scoring``."""
+    files = {
+        "optimize.toml": '[metric]\nfiles = ["scoring/"]\n',
+        "scoring/score.py": f"# {_LEAK}\n",
+        "serve.py": _SERVE,
+    }
+
+    with _stage(monkeypatch, files) as staged:
+        served = _members(Path(staged[REPO_SNAPSHOT_KEY]["archive"]))
+
+    assert served == {"serve.py"}
+
+
+def test_a_hidden_path_with_a_dot_slash_prefix_refuses_to_serve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``./`` path is refused when the file is read, so no unmatched hidden path reaches the strip."""
+    files = {"optimize.toml": '[metric]\nfiles = ["./scoring"]\n', "scoring/score.py": "x = 1\n", "serve.py": _SERVE}
+
+    with pytest.raises(ConstraintsError, match="must be relative"), _stage(monkeypatch, files):
+        pytest.fail("the snapshot must not be yielded")
+
+
+def test_hidden_paths_match_case_exactly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Paths compare case by case, like git and the Linux sandbox, so ``Scoring`` does not hide ``scoring``."""
+    files = {"optimize.toml": '[metric]\nfiles = ["Scoring"]\n', "scoring/score.py": "x = 1\n", "serve.py": _SERVE}
+
+    with _stage(monkeypatch, files) as staged:
+        served = _members(Path(staged[REPO_SNAPSHOT_KEY]["archive"]))
+
+    assert served == {"serve.py", "scoring/score.py"}
+
+
+def test_a_symlink_into_a_hidden_folder_carries_no_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A link stays in the served tree, but its target does not, so the guest reads nothing through it."""
+    files = {"optimize.toml": '[metric]\nfiles = ["scoring"]\n', "scoring/score.py": f"# {_LEAK}\n", "serve.py": _SERVE}
+    links = {"peek.py": "scoring/score.py", "peekdir": "scoring"}
+
+    with _stage_tree(monkeypatch, files, links) as staged:
+        archive = Path(staged[REPO_SNAPSHOT_KEY]["archive"])
+        raw = gzip.decompress(archive.read_bytes())
+        guest = tmp_path / "guest"
+        guest.mkdir()
+        chunks = []
+        for index, chunk in enumerate(archive_chunks(archive)):
+            (guest / f"chunk.{index}").write_text(chunk)
+            chunks.append(str(guest / f"chunk.{index}"))
+        tree = unpack_tree(chunks, guest / "tree")
+
+    assert _LEAK.encode() not in raw
+    assert (tree / "peek.py").is_symlink()
+    assert not (tree / "peek.py").exists()
+    assert not (tree / "peekdir").exists()
+    assert not (tree / "scoring").exists()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Known gap: the strip matches names, so a hidden path that is a symlink drops only the link, not its target.",
+)
+def test_a_hidden_path_that_is_a_symlink_also_hides_its_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scorer reads ``scoring`` through the link, so its target holds the metric too."""
+    files = {"optimize.toml": '[metric]\nfiles = ["scoring"]\n', "real/score.py": f"# {_LEAK}\n", "serve.py": _SERVE}
+
+    with _stage_tree(monkeypatch, files, {"scoring": "real"}) as staged:
+        raw = gzip.decompress(Path(staged[REPO_SNAPSHOT_KEY]["archive"]).read_bytes())
+
+    assert _LEAK.encode() not in raw
