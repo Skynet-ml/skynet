@@ -234,8 +234,9 @@ class SnapshotCache:
         self._entries: dict[str, BuiltSnapshot] = {}
         self._last_used: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = {}
-        # Keys found through ``lookup``: another pod built them and deletes them.
-        self._borrowed: set[str] = set()
+        # Snapshots this pod built, by snapshot id. Only ``close`` deletes them,
+        # because pods that borrowed one cannot tell the owner they still use it.
+        self._owned: dict[str, BuiltSnapshot] = {}
         self._closed = False
 
     def expiration(self, now: datetime | None = None) -> timedelta:
@@ -274,7 +275,8 @@ class SnapshotCache:
             The snapshot for trial boxes.
 
         Raises:
-            SandboxFatalError: The run already ended.
+            SandboxFatalError: The run already ended, or it ended during the
+                build; that late snapshot is deleted first.
             SnapshotLockTimeoutError: Another pod held the lock too long.
         """
         self._require_open()
@@ -291,46 +293,83 @@ class SnapshotCache:
                 name = self.builder_name(cache_key)
                 found = await self._lookup(name) if self._lookup is not None else None
                 built = found if found is not None else await build(name)
-                if found is not None:
-                    self._borrowed.add(cache_key)
-                else:
-                    self._borrowed.discard(cache_key)
+                if self._closed:
+                    if found is None:
+                        await self._discard_late_build(built)
+                    self._require_open()
+                if found is None:
+                    self._owned[built.snapshot_id] = built
                 self._entries[cache_key] = built
                 self._last_used[cache_key] = self._clock.monotonic()
                 return built
 
     async def evict_idle(self, idle_for: float) -> list[str]:
-        """Delete the snapshots that no trial used for a time.
+        """Drop the cache entries that no trial on this pod used for a time.
 
-        A snapshot that another pod built only leaves this cache; its owner
-        deletes it.
+        Eviction never deletes at the provider, for owned and borrowed
+        snapshots alike: this pod's idle time says nothing about trials on
+        other pods. The snapshot stays live until :meth:`close` or its Vercel
+        expiry, and its storage hold stays open until then. The next
+        :meth:`get_or_build` of a dropped key looks the snapshot up again, or
+        builds a new one when no lookup is set.
 
         Args:
-            idle_for: The idle time, in seconds, after which a snapshot goes.
+            idle_for: The idle time, in seconds, after which an entry goes.
 
         Returns:
             The cache keys that left the cache.
         """
         cutoff = self._clock.monotonic() - idle_for
-        stale = [key for key, used in self._last_used.items() if used <= cutoff]
-        return [key for key in stale if await self._drop(key, cutoff=cutoff)]
+        dropped: list[str] = []
+        for key in [key for key, used in self._last_used.items() if used <= cutoff]:
+            async with self._locks.setdefault(key, asyncio.Lock()):
+                used = self._last_used.get(key)
+                if key in self._entries and used is not None and used <= cutoff:
+                    del self._entries[key]
+                    del self._last_used[key]
+                    dropped.append(key)
+        return dropped
 
     async def close(self) -> None:
-        """Delete every snapshot of the run and refuse new builds.
+        """Delete every snapshot that this pod built and refuse new builds.
 
-        Only the pod that built a snapshot deletes it. Each delete runs even when an earlier one fails; the first failure is
-        raised after all of them.
+        Call it only when the whole run ends on every pod: a borrower pod
+        loses its snapshot here. Each delete settles its storage hold. A build
+        that is still running when the cache closes deletes its own snapshot
+        when it ends. Each delete runs even when an earlier one fails; a
+        failed one stays for the next close, and the first failure is raised
+        after all of them.
         """
         self._closed = True
+        self._entries.clear()
+        self._last_used.clear()
         failure: BaseException | None = None
-        for key in list(self._entries):
+        for snapshot_id, built in list(self._owned.items()):
             try:
-                await self._drop(key)
+                await self._delete(built)
             except Exception as error:
                 logger.warning("Run %s could not delete a setup snapshot: %s", self.run_id, error)
                 failure = failure or error
+            else:
+                self._owned.pop(snapshot_id, None)
         if failure is not None:
             raise failure
+
+    async def _discard_late_build(self, built: BuiltSnapshot) -> None:
+        """Delete a snapshot whose build ended after the run ended.
+
+        Args:
+            built: The new snapshot, which no trial may use.
+
+        Raises:
+            SandboxFatalError: The delete failed; the hold stays pending until
+                the snapshot expires.
+        """
+        try:
+            await self._delete(built)
+        except Exception as error:
+            logger.warning("Run %s could not delete a late setup snapshot: %s", self.run_id, error)
+            raise SandboxFatalError("The run ended; its late setup snapshot was not deleted.") from error
 
     def _require_open(self) -> None:
         """Refuse work after the run ended.
@@ -354,38 +393,6 @@ class SnapshotCache:
         if built is not None:
             self._last_used[cache_key] = self._clock.monotonic()
         return built
-
-    async def _drop(self, cache_key: str, *, cutoff: float | None = None) -> bool:
-        """Forget one snapshot, and delete it when this pod built it.
-
-        The key lock keeps a caller from getting a snapshot during its delete.
-        The entry comes back when the delete fails, so the run-end close tries
-        again.
-
-        Args:
-            cache_key: The setup cache key.
-            cutoff: Keep the snapshot when a trial used it after this time.
-
-        Returns:
-            Whether the snapshot left the cache.
-        """
-        async with self._locks.setdefault(cache_key, asyncio.Lock()):
-            used = self._last_used.get(cache_key)
-            if cache_key not in self._entries or (cutoff is not None and used is not None and used > cutoff):
-                return False
-            built = self._entries.pop(cache_key)
-            self._last_used.pop(cache_key, None)
-            if cache_key in self._borrowed:
-                self._borrowed.discard(cache_key)
-                return True
-            try:
-                await self._delete(built)
-            except BaseException:
-                self._entries[cache_key] = built
-                if used is not None:
-                    self._last_used[cache_key] = used
-                raise
-            return True
 
     @contextlib.asynccontextmanager
     async def _cross_pod_lock(self, cache_key: str) -> AsyncIterator[None]:

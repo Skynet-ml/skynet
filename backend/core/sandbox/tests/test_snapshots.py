@@ -226,17 +226,35 @@ async def test_failed_delete_is_kept_for_the_next_close() -> None:
     assert provider.deletes == ["snap-1"]
 
 
-async def test_idle_snapshot_is_evicted() -> None:
-    """Check that only a snapshot idle past the limit is deleted."""
+async def test_idle_entry_leaves_the_cache_without_a_provider_delete() -> None:
+    """Check that eviction drops only the idle entry and close still deletes it."""
     provider = Provider()
     clock = FakeClock()
-    cache = SnapshotCache("run-1", DEADLINE, delete=provider.delete, clock=clock)
+    cache = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup, clock=clock)
     await cache.get_or_build(_key(), provider.build)
     clock.now = 100.0
     await cache.get_or_build(_key(install_command="uv sync"), provider.build)
     clock.now = 150.0
     assert await cache.evict_idle(120.0) == [_key()]
-    assert provider.deletes == ["snap-1"]
+    assert provider.deletes == []
+    assert (await cache.get_or_build(_key(), provider.build)).snapshot_id == "snap-1"
+    assert len(provider.builds) == 2
+    await cache.close()
+    assert sorted(provider.deletes) == ["snap-1", "snap-2"]
+
+
+async def test_evicted_entry_without_lookup_is_rebuilt_and_both_are_deleted_at_close() -> None:
+    """Check that a rebuilt key keeps the first snapshot for the run-end delete."""
+    provider = Provider()
+    clock = FakeClock()
+    cache = SnapshotCache("run-1", DEADLINE, delete=provider.delete, clock=clock)
+    await cache.get_or_build(_key(), provider.build)
+    clock.now = 1_000.0
+    assert await cache.evict_idle(600.0) == [_key()]
+    assert (await cache.get_or_build(_key(), provider.build)).snapshot_id == "snap-2"
+    assert provider.deletes == []
+    await cache.close()
+    assert sorted(provider.deletes) == ["snap-1", "snap-2"]
 
 
 async def test_borrowed_snapshot_is_only_dropped_from_the_cache() -> None:
@@ -257,55 +275,59 @@ async def test_borrowed_snapshot_is_only_dropped_from_the_cache() -> None:
     assert len(provider.builds) == 1
 
 
-async def test_caller_never_gets_a_snapshot_during_its_eviction() -> None:
-    """Check that a caller waits for an eviction and then builds a new snapshot."""
+async def test_owner_eviction_keeps_a_snapshot_that_a_borrower_still_uses() -> None:
+    """Check that the owner's idle time never deletes a snapshot in use on another pod."""
     provider = Provider()
-
-    async def slow_delete(built: BuiltSnapshot) -> None:
-        """Delete after a delay, like the Vercel delete calls.
-
-        Args:
-            built: The snapshot to delete.
-        """
-        await asyncio.sleep(0.1)
-        await provider.delete(built)
-
-    clock = FakeClock()
-    cache = SnapshotCache("run-1", DEADLINE, delete=slow_delete, lookup=provider.lookup, clock=clock)
-    await cache.get_or_build(_key(), provider.build)
-    clock.now = 1_000.0
-    eviction = asyncio.create_task(cache.evict_idle(600.0))
-    await asyncio.sleep(0.01)
-    hit = await cache.get_or_build(_key(), provider.build)
-    assert await eviction == [_key()]
-    assert hit.snapshot_id not in provider.deletes
-    assert len(provider.builds) == 2
+    owner_clock, borrower_clock = FakeClock(), FakeClock()
+    owner = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup, clock=owner_clock)
+    borrower = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup, clock=borrower_clock)
+    built = await owner.get_or_build(_key(), provider.build)
+    await borrower.get_or_build(_key(), provider.build)
+    owner_clock.now = borrower_clock.now = 1_000.0
+    await borrower.get_or_build(_key(), provider.build)
+    assert await owner.evict_idle(600.0) == [_key()]
+    assert provider.deletes == []
+    assert provider.live[built.builder_name].snapshot_id == built.snapshot_id
+    await owner.close()
+    assert provider.deletes == [built.snapshot_id]
 
 
-async def test_failed_eviction_keeps_the_snapshot_for_the_next_close() -> None:
-    """Check that a failed eviction delete puts the entry back."""
+async def test_build_that_ends_after_close_is_deleted_and_refused() -> None:
+    """Check that a snapshot built while the run closed is deleted, not returned."""
     provider = Provider()
-    calls: list[str] = []
-
-    async def flaky_delete(built: BuiltSnapshot) -> None:
-        """Fail the first delete, then delete.
-
-        Args:
-            built: The snapshot to delete.
-        """
-        calls.append(built.snapshot_id)
-        if len(calls) == 1:
-            raise RuntimeError("provider error")
-        await provider.delete(built)
-
-    clock = FakeClock()
-    cache = SnapshotCache("run-1", DEADLINE, delete=flaky_delete, clock=clock)
-    await cache.get_or_build(_key(), provider.build)
-    clock.now = 1_000.0
-    with pytest.raises(RuntimeError):
-        await cache.evict_idle(600.0)
+    cache = SnapshotCache("run-1", DEADLINE, delete=provider.delete, lookup=provider.lookup)
+    build = asyncio.create_task(cache.get_or_build(_key(), provider.build))
+    await asyncio.sleep(0.05)
+    assert provider.builds
+    assert not provider.live
+    await cache.close()
+    with pytest.raises(SandboxFatalError):
+        await build
+    assert provider.deletes == ["snap-1"]
+    assert provider.live == {}
     await cache.close()
     assert provider.deletes == ["snap-1"]
+
+
+async def test_late_build_whose_delete_fails_is_still_refused() -> None:
+    """Check that a failed late delete raises the run-ended error."""
+    provider = Provider()
+
+    async def failing_delete(built: BuiltSnapshot) -> None:
+        """Fail every delete.
+
+        Args:
+            built: The snapshot to delete.
+        """
+        raise RuntimeError("provider error")
+
+    cache = SnapshotCache("run-1", DEADLINE, delete=failing_delete)
+    build = asyncio.create_task(cache.get_or_build(_key(), provider.build))
+    await asyncio.sleep(0.05)
+    await cache.close()
+    with pytest.raises(SandboxFatalError) as raised:
+        await build
+    assert isinstance(raised.value.__cause__, RuntimeError)
 
 
 def _api_error(code: str) -> SandboxApiError:
