@@ -6,12 +6,18 @@ Usage (AWS profile ``skynet`` must be signed in):
     eval "$(python3 account.py env <id>)"                        # then source login.sh
     python3 account.py delete <id>
     python3 account.py list                                      # leftover accounts
+    python3 account.py forget <id>                               # secret only
 
-``create`` signs up through the normal register -> email code -> confirm path.
-The code comes from the Resend receiving inbox. The account lives in the
-Secrets Manager secret ``skynet/staging/check-account/<id>`` only until
-``delete``, which calls ``POST /account/delete`` and then removes the secret.
-No command prints a password, token or email code.
+``create`` writes the Secrets Manager secret
+``skynet/staging/check-account/<id>`` with status ``pending`` first. Then it
+signs up through the normal register -> email code -> confirm path, with the
+code from the Resend receiving inbox, and sets the status to ``ready``. So a
+failed or killed ``create`` still leaves a secret that ``list`` shows.
+``delete`` finishes the email confirmation of a ``pending`` account, signs in,
+calls ``POST /account/delete`` and then removes the secret. ``forget`` removes
+only the secret, for an account that does not exist.
+Only ``env`` prints the password; run it only inside ``eval``. No command
+prints a token or an email code.
 """
 
 import argparse
@@ -124,22 +130,41 @@ def read_secret(name):
     )
 
 
-def email_code(email):
+def inbox_auth():
+    """Return the Resend authorization header line."""
+    return "Authorization: Bearer " + read_secret("skynet/staging/app")["SMTP_PASSWORD"]
+
+
+def mail_ids(email, auth):
+    """Return the ids of the received emails sent to ``email``.
+
+    Args:
+        email: Recipient address.
+        auth: Resend authorization header line.
+
+    Returns:
+        A list of email ids, newest first.
+    """
+    _, text = curl("https://api.resend.com/emails/receiving?limit=100", stdin_header=auth)
+    return [m["id"] for m in json.loads(text).get("data", []) if email in json.dumps(m.get("to", ""))]
+
+
+def email_code(email, seen=()):
     """Wait for the confirmation code sent to ``email`` in the Resend inbox.
 
     Args:
         email: Address that the sign-up sent the code to.
+        seen: Email ids to skip, so that an old code is not used again.
 
     Returns:
         The six-digit code, or ``None`` after about two minutes.
     """
-    auth = "Authorization: Bearer " + read_secret("skynet/staging/app")["SMTP_PASSWORD"]
+    auth = inbox_auth()
     for _ in range(30):
         time.sleep(4)
-        _, text = curl("https://api.resend.com/emails/receiving?limit=100", stdin_header=auth)
-        for mail in json.loads(text).get("data", []):
-            if email in json.dumps(mail.get("to", "")):
-                _, text = curl(f"https://api.resend.com/emails/receiving/{mail['id']}", stdin_header=auth)
+        for mail_id in mail_ids(email, auth):
+            if mail_id not in seen:
+                _, text = curl(f"https://api.resend.com/emails/receiving/{mail_id}", stdin_header=auth)
                 msg = json.loads(text)
                 found = re.search(
                     r"\b(\d{6})\b",
@@ -152,8 +177,55 @@ def email_code(email):
     return None
 
 
+def write_secret(ident, value, *, new=False):
+    """Store ``value`` in the account's secret and tag it with its target and status.
+
+    The value goes through a private temporary file, never through argv.
+
+    Args:
+        ident: Account id.
+        value: Secret value (dict with ``target`` and ``status``).
+        new: Create the secret instead of putting a new version.
+    """
+    with tempfile.NamedTemporaryFile("w", suffix=".json") as tmp:
+        Path(tmp.name).chmod(0o600)
+        json.dump(value, tmp)
+        tmp.flush()
+        tags = [f"Key=target,Value={value['target']}", f"Key=status,Value={value['status']}"]
+        if new:
+            desc = f"Check account for {value['label']} on {value['target']}; delete after the check"
+            run(
+                [
+                    *AWS,
+                    "secretsmanager",
+                    "create-secret",
+                    "--name",
+                    PREFIX + ident,
+                    "--description",
+                    desc,
+                    "--secret-string",
+                    f"file://{tmp.name}",
+                    "--tags",
+                    *tags,
+                ]
+            )
+            return
+        run(
+            [
+                *AWS,
+                "secretsmanager",
+                "put-secret-value",
+                "--secret-id",
+                PREFIX + ident,
+                "--secret-string",
+                f"file://{tmp.name}",
+            ]
+        )
+        run([*AWS, "secretsmanager", "tag-resource", "--secret-id", PREFIX + ident, "--tags", *tags])
+
+
 def create(target, label):
-    """Sign up, verify and store a fresh account, then print its id.
+    """Store a pending account secret, sign up and verify, then mark it ready and print its id.
 
     Args:
         target: ``staging`` or ``pr-<n>``.
@@ -163,36 +235,24 @@ def create(target, label):
     ident = f"{target}-{re.sub(r'[^a-z0-9]+', '-', label.lower()).strip('-')}-{secrets.token_hex(3)}"
     email = f"{ident}@{INBOX}"
     password = secrets.token_urlsafe(18) + "A1!"
+    value = {"email": email, "password": password, "target": target, "app": app, "api": api, "label": label}
+    # The secret exists before the account does, so no failure or kill can leave an account that list cannot see.
+    write_secret(ident, {**value, "status": "pending"}, new=True)
+    print(f"id={ident} status=pending")
+    stop = f"account: create stopped; the secret stays pending. Run: python3 account.py delete {ident}"
     status, _ = curl(f"{app}/api/register", body={"email": email, "password": password})
     print("register: HTTP", status)
     if status >= 300:
-        sys.exit(1)
+        sys.exit(stop)
     code = email_code(email)
     if not code:
-        sys.exit("account: no email code arrived; the unverified account stays, report the id " + ident)
+        sys.exit(stop)
     status, _ = curl(f"{app}/api/email-verify/confirm", body={"email": email, "code": code})
     print("confirm: HTTP", status)
     if status >= 300:
-        sys.exit(1)
-    value = {"email": email, "password": password, "target": target, "app": app, "api": api, "label": label}
-    with tempfile.NamedTemporaryFile("w", suffix=".json") as tmp:
-        Path(tmp.name).chmod(0o600)
-        json.dump(value, tmp)
-        tmp.flush()
-        run(
-            [
-                *AWS,
-                "secretsmanager",
-                "create-secret",
-                "--name",
-                PREFIX + ident,
-                "--description",
-                f"Check account for {label} on {target}; delete after the check",
-                "--secret-string",
-                f"file://{tmp.name}",
-            ]
-        )
-    print(f"id={ident}")
+        sys.exit(stop)
+    write_secret(ident, {**value, "status": "ready"})
+    print(f"id={ident} status=ready")
 
 
 def env(ident):
@@ -212,6 +272,38 @@ def env(ident):
     print("export " + " ".join(f"{k}={json.dumps(v)}" for k, v in exports.items()))
 
 
+def verify_pending(ident, value):
+    """Finish the email confirmation of a pending account, so that it can sign in.
+
+    An unverified account cannot sign in, and so cannot delete itself.
+
+    Args:
+        ident: Account id.
+        value: Secret value of the account.
+    """
+    email, app = value["email"], value["app"]
+    seen = set(mail_ids(email, inbox_auth()))
+    if seen:
+        status, _ = curl(f"{app}/api/email-verify/confirm", body={"email": email, "code": email_code(email)})
+        print("confirm with the sign-up code: HTTP", status)
+        if status < 300:
+            return
+    # The resend route answers 200 but sends nothing within 60 s of the last code.
+    time.sleep(61)
+    status, _ = curl(f"{app}/api/email-verify/request", body={"email": email})
+    print("code request: HTTP", status)
+    code = email_code(email, seen)
+    if not code:
+        sys.exit(
+            "account: no new email code arrived. If register never succeeded, no account exists:"
+            f" run python3 account.py forget {ident}. Otherwise report the id."
+        )
+    status, _ = curl(f"{app}/api/email-verify/confirm", body={"email": email, "code": code})
+    print("confirm: HTTP", status)
+    if status >= 300:
+        sys.exit("account: confirm failed; the secret stays, report the id " + ident)
+
+
 def delete(ident):
     """Delete the account through the app, then remove its secret.
 
@@ -220,6 +312,8 @@ def delete(ident):
     """
     value = read_secret(PREFIX + ident)
     app, api = value["app"], value["api"]
+    if value.get("status") != "ready":
+        verify_pending(ident, value)
     with tempfile.TemporaryDirectory() as tmp:
         jar = str(Path(tmp) / "jar")
         _, text = curl(f"{app}/api/auth/csrf", jar=jar)
@@ -233,7 +327,10 @@ def delete(ident):
         _, text = curl(f"{app}/api/auth/session", jar=jar)
         token = (json.loads(text) or {}).get("backendAccessToken", "")
         if not token:
-            sys.exit("account: sign-in failed; the account and its secret stay, report the id " + ident)
+            sys.exit(
+                "account: sign-in failed; the secret stays. If the account is already gone"
+                f" (preview dropped), run python3 account.py forget {ident}. Otherwise report the id."
+            )
         header = Path(tmp) / "auth"
         header.touch(mode=0o600)
         header.write_text(f"authorization: Bearer {token}\n")
@@ -245,8 +342,18 @@ def delete(ident):
     print("secret removed")
 
 
+def forget(ident):
+    """Remove only the secret of an account that no longer exists in the app.
+
+    Args:
+        ident: Account id.
+    """
+    run([*AWS, "secretsmanager", "delete-secret", "--secret-id", PREFIX + ident, "--force-delete-without-recovery"])
+    print("secret removed; no account delete ran")
+
+
 def list_left():
-    """Print the id and creation date of every check account that still exists."""
+    """Print the id, target, status and creation date of every check account secret."""
     out = json.loads(
         run(
             [
@@ -256,14 +363,15 @@ def list_left():
                 "--filters",
                 f"Key=name,Values={PREFIX}",
                 "--query",
-                "SecretList[].[Name,CreatedDate]",
+                "SecretList[].[Name,CreatedDate,Tags]",
                 "--output",
                 "json",
             ]
         )
     )
-    for name, created in out:
-        print(name.removeprefix(PREFIX), created)
+    for name, created, tags in out:
+        tag = {t["Key"]: t["Value"] for t in tags or []}
+        print(name.removeprefix(PREFIX), tag.get("target", "?"), tag.get("status", "?"), created)
     print(f"{len(out)} check accounts")
 
 
@@ -274,7 +382,7 @@ def main():
     make = sub.add_parser("create")
     make.add_argument("--target", required=True)
     make.add_argument("--label", required=True)
-    for name in ("env", "delete"):
+    for name in ("env", "delete", "forget"):
         sub.add_parser(name).add_argument("id")
     sub.add_parser("list")
     args = parser.parse_args()
@@ -284,6 +392,8 @@ def main():
         env(args.id)
     elif args.cmd == "delete":
         delete(args.id)
+    elif args.cmd == "forget":
+        forget(args.id)
     else:
         list_left()
 

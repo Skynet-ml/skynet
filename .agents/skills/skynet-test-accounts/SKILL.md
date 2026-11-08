@@ -67,12 +67,15 @@ many agents, and its access can get lost.
 python3 .agents/skills/skynet-test-accounts/account.py create --target pr-<n> --label SKY-123
 ```
 
-`account.py` signs up through the normal app flow: `POST /api/register`,
-then it reads the 6-digit code from the owned Resend receiving inbox, then
-`POST /api/email-verify/confirm`. It stores the email, password, app and
-API in the secret `skynet/staging/check-account/<id>` (account
-669242775630, region `us-east-2`, profile `skynet`). It prints only HTTP
-status codes and the line `id=<id>`. Keep the id for the delete step.
+`account.py` first writes the secret `skynet/staging/check-account/<id>`
+(account 669242775630, region `us-east-2`, profile `skynet`) with the email,
+password, app, API and status `pending`. Then it signs up through the normal
+app flow: `POST /api/register`, then it reads the 6-digit code from the owned
+Resend receiving inbox, then `POST /api/email-verify/confirm`. Then it sets
+the status to `ready`. It prints only HTTP status codes and the lines
+`id=<id> status=pending` and `id=<id> status=ready`. Keep the id for the
+delete step. If `create` fails or stops after the first line, the secret
+stays `pending`: run the delete step for that id.
 
 - Sign in with `login.sh`. `account.py env` prints the exports for it; use
   it only inside `eval`, never print its output:
@@ -110,15 +113,22 @@ exact status.
 python3 .agents/skills/skynet-test-accounts/account.py delete <id>
 ```
 
-It signs in, calls `POST $API/account/delete` with the password, and then
-force-deletes the secret. Expect `account delete: HTTP 200` and
-`secret removed`. If it fails, it keeps the secret. Report the account id
-to the orchestrator; never delete the secret by hand while the account
-still exists.
+If the status is `pending`, it first confirms the email, because an
+unverified account cannot sign in. It uses the sign-up code in the inbox.
+If that code fails, it waits out the 60-second resend cooldown and asks
+for a new code. Then it signs in,
+calls `POST $API/account/delete` with the password, and force-deletes the
+secret. Expect `account delete: HTTP 200` and `secret removed`. If it fails,
+it keeps the secret. Report the account id to the orchestrator.
 
-- `account.py list` prints every check account that still has a secret.
-  The orchestrator runs it after each batch and deletes the leftovers.
-  A deleted secret can still show for about a minute.
+- `account.py list` prints the id, target, status and creation date of every
+  check account that still has a secret. The orchestrator runs it after each
+  batch and deletes the leftovers. A deleted secret can still show for about
+  a minute.
+- `account.py forget <id>` removes only the secret. Use it only when the
+  account does not exist in the app: `register` never succeeded, or the
+  preview database is gone (PR closed or 48 hours idle). The `delete` error
+  says when to use it. Never use `forget` while the account still exists.
 - On a preview, the whole database is also dropped when the PR closes, or
   after 48 hours with no push. This is a backstop, not the delete step.
 - **Do not ask Gilad to create an account.** Never borrow a personal
