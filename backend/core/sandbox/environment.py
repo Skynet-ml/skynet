@@ -103,6 +103,9 @@ class SandboxEnvironment(ABC):
         self._network_policy: NetworkPolicy | None = NetworkPolicy(
             disabled=spec.network_disabled, allowed_hosts=tuple(spec.allowed_hosts)
         )
+        # Serializes the check-apply-cache sequence. Without it, concurrent
+        # calls can leave a cache that differs from the provider state.
+        self._policy_lock = asyncio.Lock()
 
     @abstractmethod
     async def start(self) -> None:
@@ -196,20 +199,21 @@ class SandboxEnvironment(ABC):
         # An empty allowlist means open egress, which reaches every injection host.
         if policy.allowed_hosts and not set(self.spec.inject_headers) <= set(policy.allowed_hosts):
             raise SandboxSpecError("The policy must keep every host that receives injected headers.")
-        if policy == self._network_policy:
-            return
-        caps = self.capabilities
-        if not caps.dynamic_network_policy:
-            raise SandboxSpecError(f"The {caps.name} sandbox cannot change its network policy after start.")
-        mode = network_mode(disabled=policy.disabled, allowed_hosts=policy.allowed_hosts)
-        if mode not in caps.network_modes:
-            raise SandboxSpecError(f"The {caps.name} sandbox does not support the {mode.value} network mode.")
-        # The provider can change the policy before a cancel or an error
-        # reaches us, so a failed apply must not leave a cache that skips the
-        # next call. Otherwise a later disable_network() is a silent no-op.
-        self._network_policy = None
-        await self._apply_network_policy(policy)
-        self._network_policy = policy
+        async with self._policy_lock:
+            if policy == self._network_policy:
+                return
+            caps = self.capabilities
+            if not caps.dynamic_network_policy:
+                raise SandboxSpecError(f"The {caps.name} sandbox cannot change its network policy after start.")
+            mode = network_mode(disabled=policy.disabled, allowed_hosts=policy.allowed_hosts)
+            if mode not in caps.network_modes:
+                raise SandboxSpecError(f"The {caps.name} sandbox does not support the {mode.value} network mode.")
+            # The provider can change the policy before a cancel or an error
+            # reaches us, so a failed apply must not leave a cache that skips the
+            # next call. Otherwise a later disable_network() is a silent no-op.
+            self._network_policy = None
+            await self._apply_network_policy(policy)
+            self._network_policy = policy
 
     async def disable_network(self) -> None:
         """Block all egress from the running sandbox."""

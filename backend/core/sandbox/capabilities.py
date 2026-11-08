@@ -88,16 +88,19 @@ def validate_spec(spec: SandboxSpec, caps: EnvironmentCapabilities) -> None:
 
 
 def resolve_resources(request: ResourceRequest, caps: EnvironmentCapabilities) -> ResourceRequest:
-    """Fill the memory size that the provider derives from the vCPU count.
+    """Set the memory size that the provider derives from the vCPU count.
 
     Args:
         request: A request that passed ``validate_spec``.
         caps: The capabilities of the target provider.
 
     Returns:
-        The request with ``memory_mb`` set when the provider ties memory to vCPUs.
+        The request with ``memory_mb`` set to the provider size when the
+        provider ties memory to vCPUs.
     """
-    if request.mode is ResourceMode.IGNORE or caps.memory_mb_per_vcpu is None or request.memory_mb is not None:
+    # The provider gives every vCPU a fixed memory size and bills for it, so a
+    # smaller requested size must not reach cost quotes.
+    if request.mode is ResourceMode.IGNORE or caps.memory_mb_per_vcpu is None:
         return request
     return replace(request, memory_mb=request.cpus * caps.memory_mb_per_vcpu)
 

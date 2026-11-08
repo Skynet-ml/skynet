@@ -290,8 +290,16 @@ def test_rejects_unsupported_network_features() -> None:
 def test_resolve_resources_derives_vercel_memory() -> None:
     """Set memory to 2048 MB per vCPU when the request leaves it unset."""
     assert resolve_resources(ResourceRequest(cpus=4), VERCEL_CAPABILITIES).memory_mb == 8192
-    assert resolve_resources(ResourceRequest(cpus=4, memory_mb=1024), VERCEL_CAPABILITIES).memory_mb == 1024
     assert resolve_resources(ResourceRequest(cpus=4), EnvironmentCapabilities(name="plain")).memory_mb is None
+
+
+def test_resolve_resources_raises_a_smaller_vercel_memory_to_the_vcpu_size() -> None:
+    """Replace a requested memory below 2048 MB per vCPU with the size Vercel bills."""
+    request = ResourceRequest(cpus=4, memory_mb=1024)
+    validate_spec(SandboxSpec(lifetime_seconds=60, resources=request), VERCEL_CAPABILITIES)
+    assert resolve_resources(request, VERCEL_CAPABILITIES).memory_mb == 8192
+    plain = EnvironmentCapabilities(name="plain")
+    assert resolve_resources(request, plain).memory_mb == 1024
 
 
 def test_provider_rejects_an_invalid_spec_at_construction() -> None:
@@ -544,6 +552,27 @@ async def test_disable_network_applies_after_a_failed_apply() -> None:
         assert env.network_policy is None
         await env.disable_network()
         assert env.applied_policies == [NetworkPolicy(), NetworkPolicy(disabled=True)]
+        assert env.network_policy == NetworkPolicy(disabled=True)
+
+
+async def test_concurrent_policy_changes_keep_the_cache_in_step_with_the_provider() -> None:
+    """Keep the cache on the last applied policy when calls overlap."""
+
+    class SlowDisable(InMemorySandbox):
+        async def _apply_network_policy(self, policy: NetworkPolicy) -> None:
+            """Record the policy as the provider does, then confirm deny-all late.
+
+            Args:
+                policy: The checked policy.
+            """
+            self.applied_policies.append(policy)
+            await asyncio.sleep(0.05 if policy.disabled else 0.01)
+
+    async with SlowDisable(_spec()) as env:
+        await asyncio.gather(env.disable_network(), env.set_network_policy(NetworkPolicy()))
+        assert env.network_policy == env.applied_policies[-1]
+        await env.disable_network()
+        assert env.applied_policies[-1] == NetworkPolicy(disabled=True)
         assert env.network_policy == NetworkPolicy(disabled=True)
 
 
