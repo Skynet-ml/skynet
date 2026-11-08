@@ -614,6 +614,31 @@ def test_relay_removes_echoes_with_any_unicode_escape_of_any_character() -> None
     assert json.loads(answer)["echo"] == ["[REDACTED]"] * 8
 
 
+def test_relay_keeps_text_that_only_resembles_the_secret() -> None:
+    """Keep near-miss text unchanged, so regex characters in a secret cannot widen the escape match."""
+    secret = "key.part+(two)*end?"
+    near = [
+        secret.replace(".", "X"),
+        secret.replace("+", ""),
+        secret.replace("(", ""),
+        secret.upper(),
+        "\\u006Bey.part",
+        "unrelated \\u002B text",
+    ]
+    answer = json.dumps({"near": near, "hit": secret}).encode()
+    redacted = relay_request(
+        url="https://api.judge.example/v1",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        body=b"{}",
+        user_secrets={"JUDGE_KEY": secret},
+        bindings={},
+        secret_hosts={"JUDGE_KEY": "api.judge.example"},
+        allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+        send=lambda *_args: answer,
+    )
+    assert json.loads(redacted) == {"near": near, "hit": "[REDACTED]"}
+
+
 def test_relay_removes_a_base64_or_percent_encoded_echo_of_the_secret() -> None:
     """Hide a base64 echo, with or without padding, and a percent or ``quote_plus`` echo with either escape case."""
     secret = "key>>>???~~ /x"
