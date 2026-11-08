@@ -14,10 +14,17 @@ structured record a sandbox sent, attributed and capped by the host. Inside an
 :func:`event_scope`, the ``log()`` events a scorer writes to stderr are relayed
 the same way, pinned to the scope's source, candidate and case. A multi-line
 message, such as a stack trace or a printed error object, becomes one row.
+
+:class:`BoxJobRecord` follows the box events of a sandbox pool: it writes
+the live box counts by phase to the job's progress record at a bounded
+rate, logs the box events into the run log, one line each for the first
+boxes and throttled summary lines after them, and at the end writes the
+seconds the boxes spent in each phase.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import contextvars
 import functools
@@ -25,12 +32,14 @@ import json
 import logging
 import re
 import threading
+import time
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 
 from .... import run_log
 from ....billing.usage_tags import usage_scope
+from ....sandbox.hooks import TERMINAL_EVENTS, BoxEvent, BoxEventInfo, BoxHooks, BoxTimings, LiveCounts
 from . import check_terminal
 from .runner import EVENT_PREFIX
 
@@ -451,3 +460,191 @@ def _mirrored(
             on_output(stream, text)
 
     return sink
+
+
+SANDBOX_BOXES_EVENT = "sandbox_boxes"
+SANDBOX_BOX_TIMINGS_EVENT = "sandbox_box_timings"
+# One progress write per second keeps the job record's write rate flat however many boxes run.
+_BOX_WRITE_INTERVAL_SECONDS = 1.0
+# Past this many boxes, one line per box event would flood the run log, so only summaries follow.
+_BOX_DETAIL_LIMIT = 20
+_ERROR_CHARS = 200
+
+ProgressWriter = Callable[[str, dict[str, Any]], None]
+
+
+class BoxJobRecord:
+    """Write the box counts, events and phase times of one job's sandbox pool.
+
+    The hooks never fail a box: :class:`BoxHooks` logs a hook that raises.
+    The count write is throttled. A write that the throttle skips schedules
+    one trailing write at the end of the interval, so the counts lag the boxes
+    by at most one interval. :meth:`flush` cancels it and writes the final state.
+    """
+
+    def __init__(
+        self,
+        hooks: BoxHooks,
+        *,
+        owner: str | None,
+        progress: ProgressWriter,
+        clock: Callable[[], float] = time.monotonic,
+        interval: float = _BOX_WRITE_INTERVAL_SECONDS,
+        detail_limit: int = _BOX_DETAIL_LIMIT,
+        secrets: Iterable[str] = (),
+    ) -> None:
+        """Add the counting, timing, writing and logging hooks to ``hooks``.
+
+        Args:
+            hooks: The hooks of the pool that runs the job's boxes.
+            owner: Job the boxes belong to, set on every log record as ``sandbox_owner``.
+            progress: The job's progress sink: an event name and a metric snapshot.
+            clock: Gives the time in seconds. Tests pass a fake clock.
+            interval: The fewest seconds between two count writes, and between two summary lines.
+            detail_limit: The number of first boxes that get one log line for each event.
+            secrets: Values the boxes can see; each is redacted from the logged box errors.
+        """
+        self._owner = owner
+        self._progress = progress
+        self._clock = clock
+        self._interval = interval
+        self._detail_limit = detail_limit
+        self._extra = run_log.event_extra(source="sandbox", sandbox_owner=owner)
+        self._scrub = Scrubber(secrets)
+        self.counts = LiveCounts()
+        self.timings = BoxTimings(clock)
+        self.started = 0
+        self.ended = 0
+        self.failed = 0
+        self.cancelled = 0
+        self._detailed: set[str] = set()
+        self._last_write: float | None = None
+        self._last_summary: float | None = None
+        self._trailing: asyncio.TimerHandle | None = None
+        self._flushed = False
+        hooks.add(self.counts)
+        hooks.add(self.timings)
+        hooks.add(self._tally)
+        hooks.add(self._write_counts)
+        hooks.add(self._log_event)
+
+    def metrics(self) -> dict[str, Any]:
+        """Return the live counts as a progress metric snapshot.
+
+        Returns:
+            The boxes in each state, the live boxes, and the ended, failed and cancelled boxes.
+        """
+        return {
+            "sandbox_boxes": {str(state): count for state, count in self.counts.snapshot().items()},
+            "sandbox_boxes_active": self.counts.active,
+            "sandbox_boxes_ended": self.ended,
+            "sandbox_boxes_failed": self.failed,
+            "sandbox_boxes_cancelled": self.cancelled,
+        }
+
+    async def _tally(self, info: BoxEventInfo) -> None:
+        """Count the started, ended, failed and cancelled boxes.
+
+        Args:
+            info: The box event.
+        """
+        if info.event is BoxEvent.STARTED:
+            self.started += 1
+            if self.started <= self._detail_limit:
+                self._detailed.add(info.box_id)
+        elif info.event is BoxEvent.CANCELLED:
+            self.cancelled += 1
+        elif info.event is BoxEvent.ENDED:
+            self.ended += 1
+            if info.error is not None:
+                self.failed += 1
+
+    async def _write_counts(self, info: BoxEventInfo) -> None:
+        """Write the live counts to the job's progress record, at most once per interval.
+
+        Args:
+            info: The box event.
+        """
+        now = self._clock()
+        if self._last_write is not None and now - self._last_write < self._interval:
+            if self._trailing is None and not self._flushed:
+                delay = self._interval - (now - self._last_write)
+                self._trailing = asyncio.get_running_loop().call_later(delay, self._write_trailing)
+            return
+        # Set before the write, so a writer that keeps failing is throttled too.
+        self._last_write = now
+        self._progress(SANDBOX_BOXES_EVENT, self.metrics())
+
+    def _write_trailing(self) -> None:
+        """Write the latest counts that the throttle skipped.
+
+        It runs as a loop callback, so a failing write is logged here instead of by the hooks.
+        """
+        self._trailing = None
+        if self._flushed:
+            return
+        self._last_write = self._clock()
+        try:
+            self._progress(SANDBOX_BOXES_EVENT, self.metrics())
+        except Exception:
+            logger.exception("Could not write the sandbox box counts for job %s", self._owner)
+
+    async def _log_event(self, info: BoxEventInfo) -> None:
+        """Log one line for an event of a first box, else a throttled summary line.
+
+        Args:
+            info: The box event.
+        """
+        if info.box_id in self._detailed:
+            if info.event in TERMINAL_EVENTS:
+                self._detailed.discard(info.box_id)
+            if info.error is not None:
+                logger.warning("[sandbox] box %s failed: %s", info.box_id, self._error(info.error), extra=self._extra)
+            else:
+                logger.debug("[sandbox] box %s %s", info.box_id, info.event, extra=self._extra)
+            return
+        now = self._clock()
+        if self._last_summary is not None and now - self._last_summary < self._interval:
+            return
+        self._last_summary = now
+        logger.info("[sandbox] %s", self._summary(), extra=self._extra)
+
+    def flush(self) -> None:
+        """Write the final counts and phase seconds to the job record and log a summary.
+
+        Call it once after the pool's run, also after an error. A failing
+        write is logged, so the job keeps its own outcome.
+        """
+        self._flushed = True
+        if self._trailing is not None:
+            self._trailing.cancel()
+            self._trailing = None
+        seconds = {str(phase): round(total, 3) for phase, total in self.timings.totals().items()}
+        metrics = {**self.metrics(), "sandbox_phase_seconds": seconds, "sandbox_boxes_timed": self.timings.boxes}
+        try:
+            self._progress(SANDBOX_BOX_TIMINGS_EVENT, metrics)
+        except Exception:
+            logger.exception("Could not write the sandbox box timings for job %s", self._owner)
+        spent = ", ".join(f"{phase} {total:.1f}s" for phase, total in seconds.items())
+        logger.info("[sandbox] %s; box seconds: %s", self._summary(), spent, extra=self._extra)
+
+    def _summary(self) -> str:
+        """Describe the live boxes in each state and the boxes that ended.
+
+        Returns:
+            One line, for example ``boxes: 212 run, 18 score; 40 ended, 2 failed, 0 cancelled``.
+        """
+        live = ", ".join(f"{count} {state}" for state, count in self.counts.snapshot().items() if count) or "none live"
+        return f"boxes: {live}; {self.ended} ended, {self.failed} failed, {self.cancelled} cancelled"
+
+    def _error(self, error: BaseException) -> str:
+        """Describe a box error in one short, safe line.
+
+        Args:
+            error: The error of the box.
+
+        Returns:
+            The error type and the start of its message, without control sequences.
+        """
+        message = self._scrub.text(str(error).replace("\n", " "))[:_ERROR_CHARS]
+        return f"{type(error).__name__}: {message}" if message else type(error).__name__
