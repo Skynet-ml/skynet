@@ -490,10 +490,53 @@ def test_guard_expands_the_home_folder_forms(tmp_path: Path, tool: str, tool_inp
 
 @pytest.mark.parametrize(
     "command",
-    ["cat x~/shinka-run/repo/optimize.toml", "cat $HOMEDIR/shinka-run/repo/optimize.toml", "cat ~/optimize.toml"],
+    ["cat x~/shinka-run/repo/optimize.toml", "cat ~/optimize.toml"],
 )
 def test_guard_expands_a_tilde_only_at_the_start_of_a_word(tmp_path: Path, command: str) -> None:
-    """Leave a tilde inside a word, another variable, and a home path outside the workspace alone."""
+    """Leave a tilde inside a word, and a home path outside the workspace, alone."""
+    home = tmp_path / "home"
+    workspace = home / "shinka-run" / "repo"
+    workspace.mkdir(parents=True)
+    policy = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", home=home)
+    assert harness_bridge.guard_check(policy, "Bash", {"command": command}) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat ~+/optimize.toml",
+        "cd metric && cat ~-/optimize.toml",
+        "cat $(pwd -P)/optimize.toml",
+        "cat $(pwd -L)/optimize.toml",
+        "cat ${PWD:-x}/optimize.toml",
+        "cat ${HOME:-x}/shinka-run/repo/optimize.toml",
+        "cat ${HOME%/}/shinka-run/repo/optimize.toml",
+        "cd metric; cat $OLDPWD/optimize.toml",
+        "cat ~agent/shinka-run/repo/optimize.toml",
+        "cat $HOMEDIR/shinka-run/repo/optimize.toml",
+        "cat `pwd -P`/metric/score.py",
+        'cat "$(dirname x)"/data/cases.jsonl',
+    ],
+)
+def test_guard_refuses_a_hidden_name_after_an_unresolved_expansion(tmp_path: Path, command: str) -> None:
+    """Refuse a hidden name after any shell expansion the guard cannot resolve to a known folder."""
+    home = tmp_path / "home"
+    workspace = home / "shinka-run" / "repo"
+    workspace.mkdir(parents=True)
+    policy = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", home=home)
+    assert harness_bridge.guard_check(policy, "Bash", {"command": command}) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd src && python $(pwd -P)/solve.py --out ${OUT:-out}/result.json",
+        "echo $PATH ~+ ~- `date` && cat src/optimize.toml.md",
+        "cat ${HOME:-x}/notes/metrics.md",
+    ],
+)
+def test_guard_lets_an_expansion_without_a_hidden_name_run(tmp_path: Path, command: str) -> None:
+    """Let a normal command run when no hidden name follows its shell expansions."""
     home = tmp_path / "home"
     workspace = home / "shinka-run" / "repo"
     workspace.mkdir(parents=True)
@@ -594,7 +637,7 @@ console.log(JSON.stringify({{ blocked, allowed: allowed ?? null, thrown }}));
 @pytest.mark.parametrize("mode", ["hook", "check"])
 @pytest.mark.parametrize("broken", ["missing", "corrupt", "no-hashes", "emptied", "signed-empty", "surrogate"])
 def test_guard_cli_refuses_when_it_cannot_answer(tmp_path: Path, mode: str, broken: str) -> None:
-    """Refuse the call when the policy is gone, changed or broken, or the input cannot be hashed (D22)."""
+    """Refuse the call when the policy is gone, changed or broken, or the input cannot be hashed."""
     session = tmp_path / "session"
     harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
     policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
@@ -634,7 +677,7 @@ def test_guard_cli_refuses_when_it_cannot_answer(tmp_path: Path, mode: str, brok
 
 @pytest.mark.skipif(_NODE is None, reason="node is not installed")
 def test_pi_extension_refuses_when_the_guard_cannot_run(tmp_path: Path) -> None:
-    """Block every call when the guard process fails, instead of letting it run (D22)."""
+    """Block every call when the guard process fails, instead of letting it run."""
     session = tmp_path / "session"
     env = harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
     (session / harness_bridge.GUARD_DIR / "policy.json").unlink()

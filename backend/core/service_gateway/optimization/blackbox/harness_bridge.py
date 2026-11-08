@@ -386,6 +386,9 @@ _GUARD_WORD_RE = re.compile(r"[\w.~/@+-]+")
 _GUARD_PWD_RE = re.compile(r"\$\{PWD\}|\$PWD\b|\$\(\s*pwd\s*\)|`\s*pwd\s*`")
 # A tilde names the home folder only at the start of a word, as in the shell.
 _GUARD_HOME_RE = re.compile(r"\$\{HOME\}|\$HOME\b|(?<![^\s;|&()<>=:'\"`])~(?=/|$|[\s;|&()<>'\"`])")
+# A run of path text that follows one of these characters starts after a shell
+# expansion the guard cannot resolve, such as ``${PWD:-x}`` or ``$(pwd -P)``.
+_GUARD_DYNAMIC_PREFIX = frozenset("$)}`")
 _GUARD_SHELL_DEPTH = 3
 _GUARD_MAX_BASES = 4
 # One check function shared by the Pi extension and the OpenCode plugin. It
@@ -508,6 +511,40 @@ def _expand_dirs(text: str, root: str, home: str) -> str:
     return _GUARD_HOME_RE.sub(lambda _: home, text) if home else text
 
 
+def _dynamic_match(text: str, hashes: dict[str, str], fold: bool) -> str | None:
+    """Return the kind of a hidden name that follows a shell expansion the guard cannot resolve.
+
+    The guard resolves ``~/``, ``$HOME``, ``${HOME}``, ``$PWD`` and ``$(pwd)``
+    before this check. Any other expansion (another variable, a command
+    substitution, ``~+``, ``~-`` or ``~user``) can name any folder. So a hidden
+    name after one is refused, whatever folder the expansion names. The shell
+    has too many such forms to resolve each one.
+
+    Args:
+        text: One string from a tool call, with the known folders expanded.
+        hashes: Policy hashes mapped to their kind.
+        fold: Whether to compare paths without case.
+
+    Returns:
+        The hidden kind, or ``None``.
+    """
+    for match in _GUARD_WORD_RE.finditer(text):
+        run = match.group()
+        # Quotes join words in a shell, so ``"$(cmd)"/x`` is one path.
+        before = text[: match.start()].rstrip("'\"")
+        after_expansion = bool(before) and before[-1] in _GUARD_DYNAMIC_PREFIX
+        if not after_expansion and not (run.startswith("~") and not run.startswith("~/")):
+            continue
+        parts = [part for part in run.split("/") if part not in ("", ".")]
+        for start in range(len(parts)):
+            for end in range(start + 1, len(parts) + 1):
+                key = "/".join(parts[start:end])
+                kind = hashes.get(_path_hash(key.casefold() if fold else key))
+                if kind:
+                    return kind
+    return None
+
+
 def _hidden_match(text: str, roots: list[str], bases: list[str], hashes: dict[str, str], fold: bool) -> str | None:
     """Return the kind of the hidden path one candidate names, if any.
 
@@ -571,7 +608,9 @@ def _shell_words(command: str, bases: list[str], depth: int = 0) -> Iterator[str
             yield from _shell_words(word, bases, depth + 1)
 
 
-def _guard_candidates(tool: str, tool_input: Any, root: str, home: str, bases: list[str]) -> Iterator[str]:
+def _guard_candidates(
+    tool: str, tool_input: Any, root: str, home: str, bases: list[str], texts: list[str]
+) -> Iterator[str]:
     """Yield the path-like strings of one tool call.
 
     Args:
@@ -580,6 +619,7 @@ def _guard_candidates(tool: str, tool_input: Any, root: str, home: str, bases: l
         root: The workspace path, for ``$PWD`` and its other forms.
         home: The agent's home folder, for ``~`` and ``$HOME``.
         bases: Receives the working directories the call names.
+        texts: Receives each expanded command, path and directory string.
 
     Yields:
         Candidate path strings.
@@ -597,6 +637,11 @@ def _guard_candidates(tool: str, tool_input: Any, root: str, home: str, bases: l
         if not isinstance(value, str):
             continue
         value = _expand_dirs(value, root, home)
+        is_grep_pattern = name == "pattern" and "grep" in tool.lower()
+        if not is_grep_pattern and (
+            name in _GUARD_COMMAND_KEYS | _GUARD_BASE_KEYS | _GUARD_PATH_KEYS or "path" in name or "file" in name
+        ):
+            texts.append(value)
         if "*** Begin Patch" in value:
             yield from _GUARD_PATCH_RE.findall(value)
         if name in _GUARD_COMMAND_KEYS:
@@ -606,7 +651,7 @@ def _guard_candidates(tool: str, tool_input: Any, root: str, home: str, bases: l
             yield value
         elif "path" in name or "file" in name or name in _GUARD_PATH_KEYS:
             # A grep pattern is a regex over file contents, not a path.
-            if name == "pattern" and "grep" in tool.lower():
+            if is_grep_pattern:
                 continue
             yield value
 
@@ -632,14 +677,19 @@ def guard_check(policy: dict[str, Any], tool: str, tool_input: Any) -> str | Non
     workspace = str(policy.get("workspace") or Path.cwd())
     roots = list(dict.fromkeys([workspace, os.path.realpath(workspace)]))
     named: list[str] = []
+    texts: list[str] = []
     home = str(policy.get("home") or "")
-    candidates = list(_guard_candidates(tool, tool_input, roots[0], home, named))
+    candidates = list(_guard_candidates(tool, tool_input, roots[0], home, named, texts))
+    fold = bool(policy.get("fold_case"))
+    for text in texts:
+        kind = _dynamic_match(text, hashes, fold)
+        if kind:
+            return kind
     # A later cd is relative to an earlier one, so each one extends every known directory.
     bases = list(roots)
     for directory in named[:_GUARD_MAX_BASES]:
         bases += [os.path.normpath(Path(base, directory)) for base in bases]
         bases = list(dict.fromkeys(bases))
-    fold = bool(policy.get("fold_case"))
     for candidate in candidates:
         kind = _hidden_match(candidate, roots, bases, hashes, fold)
         if kind:
@@ -654,8 +704,7 @@ def guard_main(argv: list[str]) -> int:
     ``check`` reads ``{"tool", "input"}`` and prints ``{"reason"}``, with a
     ``null`` reason to let the call run. Each refusal appends only the tool
     and the path kind to the policy log. A guard that cannot answer (a
-    missing, changed or broken policy, unreadable input) refuses the call
-    (D22).
+    missing, changed or broken policy, unreadable input) refuses the call.
 
     Args:
         argv: ``[mode, policy_file, digest]``, where ``digest`` is the
