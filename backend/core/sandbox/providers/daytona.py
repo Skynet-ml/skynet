@@ -172,10 +172,11 @@ class DaytonaEnvironment(SandboxEnvironment):
         except asyncio.CancelledError:
             # A cancel must not lose a box that Daytona already made: wait for
             # the create to end, also through more cancels, and keep the box,
-            # so stop() can delete it.
+            # so stop() can delete it. asyncio.wait does not raise the create
+            # error, so a failed create still passes the cancel on.
             while not create.done():
                 with contextlib.suppress(asyncio.CancelledError):
-                    await asyncio.shield(create)
+                    await asyncio.wait({create})
             if not create.cancelled() and create.exception() is None:
                 self._sandbox = create.result()
             raise
@@ -197,7 +198,7 @@ class DaytonaEnvironment(SandboxEnvironment):
         except asyncio.CancelledError:
             while not cleanup.done():
                 with contextlib.suppress(asyncio.CancelledError):
-                    await asyncio.shield(cleanup)
+                    await asyncio.wait({cleanup})
             if not cleanup.cancelled() and cleanup.exception() is not None:
                 logger.warning("The Daytona delete failed during a cancelled stop.", exc_info=cleanup.exception())
             raise

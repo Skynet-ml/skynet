@@ -565,6 +565,38 @@ async def test_second_cancel_during_stop_still_deletes_the_box(fake_sdk: type[Fa
     assert fake_sdk.clients[0].closed
 
 
+async def test_cancel_then_create_fails_keeps_the_cancel(fake_sdk: type[FakeClient]) -> None:
+    """Raise CancelledError, not the create error, so asyncio.timeout gives TimeoutError."""
+    fake_sdk.create_delay = 0.05
+    fake_sdk.create_error = FakeDaytonaError("create 500")
+    env = DaytonaEnvironment(_SPEC)
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.01):
+            await env.start()
+    assert fake_sdk.boxes == []
+    await env.stop()
+    assert fake_sdk.clients[0].closed
+
+
+async def test_cancel_then_delete_fails_logs_and_keeps_the_cancel(
+    fake_sdk: type[FakeClient], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log the failed delete and raise CancelledError, not the delete error."""
+    env = DaytonaEnvironment(_SPEC)
+    await env.start()
+    (box,) = fake_sdk.boxes
+    box.delete_delay = 0.05
+    box.fail_delete = FakeDaytonaError("delete 500")
+    task = asyncio.create_task(env.stop())
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with caplog.at_level("WARNING", logger=daytona.__name__), pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
+    assert "The Daytona delete failed during a cancelled stop." in caplog.text
+    assert fake_sdk.clients[0].closed
+
+
 async def test_stop_ignores_a_box_that_is_already_gone(fake_sdk: type[FakeClient]) -> None:
     """Treat a not-found delete as done and still close the client."""
     env = DaytonaEnvironment(_SPEC)
