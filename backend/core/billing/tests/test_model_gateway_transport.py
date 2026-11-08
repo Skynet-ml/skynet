@@ -53,7 +53,8 @@ from core.service_gateway.optimization.blackbox.remote_sandbox import RemoteSand
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult, LocalSubprocessRuntime, SandboxSpec
 from core.service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
 from core.storage.models import Base, BillingCustomerModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
-from core.worker.scoped_relay import model_forwarder
+from core.storage.run_call_store import PostgresRunCallStore
+from core.worker.scoped_relay import CallRecorder, model_forwarder
 
 IMAGE = "fixture@sha256:" + "a" * 64
 CATALOG = {
@@ -1618,3 +1619,177 @@ def test_a_role_observer_sees_each_answered_model_call_of_that_role_only(gateway
     assert response.status_code == 200
     assert mailbox.status == 200
     assert [call["messages"][0]["content"] for call in seen] == ["step one", "step two"]
+
+
+# A quote makes the JSON-escaped form differ from the raw one (E52 rule 3).
+_UPSTREAM_KEY = 'upstream-"secret'
+
+
+def _record_calls(gateway: ModelGateway) -> PostgresRunCallStore:
+    """Bind the gateway to a run-call recorder on its own ledger database.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+
+    Returns:
+        The store the gateway now writes run calls into.
+    """
+    store = PostgresRunCallStore(gateway.runtime.service.engine)
+    gateway.recorder = CallRecorder(store, "job-1", "cand-1", "")
+    return store
+
+
+def test_each_model_call_writes_one_run_call_that_holds_no_secret(gateway: ModelGateway) -> None:
+    """Record HTTP and mailbox model calls while an echo provider sends both secrets back.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+
+    def echo(request: httpx.Request) -> httpx.Response:
+        """Answer with the upstream credential and the guest body, like a careless echo server.
+
+        Args:
+            request: The provider request.
+
+        Returns:
+            The catalog for a GET, otherwise the echo.
+        """
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": CATALOG})
+        return httpx.Response(
+            200,
+            json={
+                "id": "fixture-generation",
+                "usage": {"cost": "0.001"},
+                "echo": {"authorization": request.headers["authorization"], "body": request.content.decode()},
+                "choices": [{"message": {"content": "OK"}}],
+            },
+        )
+
+    gateway._client.close()
+    gateway._client = httpx.Client(transport=httpx.MockTransport(echo))
+    store = _record_calls(gateway)
+    route = gateway.register(
+        model="fixture/text", api_key=_UPSTREAM_KEY, role="optimization", policy=ChargePolicy("managed_model")
+    )
+    body = {"model": "fixture/text", "max_tokens": 16, "messages": [{"role": "user", "content": route["token"]}]}
+
+    reply = httpx.post(
+        f"{gateway.url}/chat/completions",
+        headers={"Authorization": f"Bearer {route['token']}"},
+        json=body,
+        trust_env=False,
+    )
+    mailbox = gateway.dispatch_guest(route["token"], "/v1/chat/completions", body, {})
+
+    assert reply.status_code == mailbox.status == 200
+    assert _UPSTREAM_KEY in mailbox.body.decode().replace('\\"', '"')
+    calls = store.list_calls("job-1", "cand-1")
+    assert [(call["kind"], call["target"], call["role"], call["status"]) for call in calls] == [
+        ("model", "fixture/text", "optimization", "ok"),
+        ("model", "fixture/text", "optimization", "ok"),
+    ]
+    stored = json.dumps(calls)
+    for secret in (route["token"], _UPSTREAM_KEY, json.dumps(_UPSTREAM_KEY)[1:-1], "secret"):
+        assert secret not in stored
+    assert all("[REDACTED]" in call["request"] and "[REDACTED]" in call["response"] for call in calls)
+    assert all(call["duration_ms"] >= 0 and call["started_at"] for call in calls)
+
+
+def test_a_refused_and_a_failed_model_call_are_recorded_with_their_reason(gateway: ModelGateway) -> None:
+    """Write a budget refusal and a provider failure as run calls, and still raise them.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+
+    class _Route:
+        """Refuse the first call for budget, then fail the next one."""
+
+        model = "fixture/text"
+        role = "task"
+        errors: list[Exception] = [
+            BudgetInsufficientError("The next operation needs up to 135 cents."),
+            RuntimeError("provider closed the stream"),
+        ]
+
+        def dispatch(self, path: str, body: Any, **kwargs: Any) -> ModelHTTPResult:
+            """Raise the next error."""
+            raise self.errors.pop(0)
+
+    store = _record_calls(gateway)
+    gateway._routes["fixture-token"] = _Route()  # type: ignore[assignment]
+    try:
+        with pytest.raises(BudgetInsufficientError):
+            gateway.dispatch_guest("fixture-token", "/v1/chat/completions", {"model": "fixture/text"}, {})
+        with pytest.raises(RuntimeError):
+            gateway.dispatch_guest("fixture-token", "/v1/chat/completions", {"model": "fixture/text"}, {})
+    finally:
+        del gateway._routes["fixture-token"]
+
+    refused, failed = store.list_calls("job-1", "cand-1")
+    assert (refused["kind"], refused["role"], refused["status"]) == ("model", "task", "refused")
+    assert refused["failure_reason"] == "BudgetInsufficientError"
+    assert failed["status"] == "failed"
+    assert failed["failure_reason"] == "RuntimeError: provider closed the stream"
+    assert "fixture-token" not in json.dumps([refused, failed])
+
+
+def test_tool_and_evaluator_calls_are_recorded_without_their_bound_secrets(gateway: ModelGateway) -> None:
+    """Record a tool call by tool name and an evaluator call, with the bound header and URL key masked.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+
+    class _Tools:
+        """Echo the bound credentials back, like a careless MCP server."""
+
+        url = "https://tools.example/mcp?key=endpoint-secret"
+        headers = {"Authorization": "Bearer tool-secret"}
+
+        def dispatch(self, body: Any) -> ModelHTTPResult:
+            """Answer with the bound credentials."""
+            return ModelHTTPResult(200, "application/json", json.dumps({"echo": [self.url, self.headers]}).encode())
+
+    class _Evaluator:
+        """Fail like a scorer that crashed."""
+
+        def dispatch(self, body: Any) -> ModelHTTPResult:
+            """Answer with a server error."""
+            return ModelHTTPResult(500, "application/json", b'{"error": "scorer crashed"}')
+
+    store = _record_calls(gateway)
+    gateway._tools = _Tools()  # type: ignore[assignment]
+    evaluator = gateway.bind_evaluator(_Evaluator())
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "lookup", "arguments": {}}}
+
+    reply = httpx.post(
+        f"{gateway.url}/_mcp", headers={"Authorization": f"Bearer {gateway._tool_token}"}, json=call, trust_env=False
+    )
+    gateway.dispatch_guest(evaluator["token"], "/v1/_evaluator", {"candidate": "diff"}, {})
+
+    assert reply.status_code == 200
+    tool, scored = store.list_calls("job-1", "cand-1")
+    assert (tool["kind"], tool["target"], tool["status"]) == ("mcp", "lookup", "ok")
+    assert (scored["kind"], scored["status"], scored["failure_reason"]) == ("evaluator", "500", "HTTP 500")
+    stored = json.dumps([tool, scored])
+    for secret in ("tool-secret", "endpoint-secret", gateway._tool_token, evaluator["token"]):
+        assert secret not in stored
+
+
+def test_a_gateway_without_a_recorder_writes_no_run_call(gateway: ModelGateway) -> None:
+    """Setup work binds no recorder, so a model call leaves the run record empty.
+
+    Args:
+        gateway: Funded real HTTP gateway fixture.
+    """
+    store = PostgresRunCallStore(gateway.runtime.service.engine)
+    route = gateway.register(
+        model="fixture/text", api_key="upstream-secret", role="task", policy=ChargePolicy("managed_model")
+    )
+    body = {"model": "fixture/text", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
+
+    assert gateway.dispatch_guest(route["token"], "/v1/chat/completions", body, {}).status == 200
+    assert store.list_calls("job-1", "") == []

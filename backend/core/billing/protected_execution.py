@@ -192,13 +192,15 @@ def bind_protected_sandbox(
     lifetime = min(
         lifetime_seconds or configured_lifetime, configured_lifetime, VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
     )
+    recorder = run_call_recorder(gateway, owner_id)
+    gateway.recorder = recorder
     runtime: DockerSandboxRuntime | VercelSandboxRuntime
     if settings.local_mode:
         runtime = DockerSandboxRuntime(
             image,
             docker_bin=settings.docker_bin,
             budget=gateway.runtime,
-            recorder=run_call_recorder(gateway, owner_id),
+            recorder=recorder,
         )
     else:
         assert settings.vercel_token is not None
