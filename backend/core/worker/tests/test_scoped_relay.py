@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,7 +12,7 @@ import pytest
 from core.billing.budgets import BudgetService
 from core.billing.protected_execution import run_call_recorder
 from core.service_gateway.optimization.blackbox.repo_scorer import SETUP_ALLOWANCE_SECONDS
-from core.storage.run_call_store import PostgresRunCallStore
+from core.storage.run_call_store import PostgresRunCallStore, strip_secrets
 from core.worker import scoped_relay
 
 _ROUTE = {"url": "http://127.0.0.1:9000/v1", "token": "evaluator"}
@@ -242,6 +243,16 @@ def test_secret_forms_cover_php_and_go_escapes_of_each_derived_form() -> None:
     assert {"u:pass/word&x", "pass/word&x"} <= basic
     assert "pass\\/word&x" in basic
     assert {"pass/word\\u0026x", "u:pass\\/word\\u0026x"} <= basic
+
+
+def test_short_basic_password_is_still_masked() -> None:
+    """Mask a decoded Basic password that is shorter than the derived-form floor."""
+    token = "Basic " + base64.b64encode(b"admin:pa55wd").decode()
+    forms = scoped_relay._secret_forms(token)
+
+    assert {"admin:pa55wd", "pa55wd"} <= forms
+    assert len(forms) <= 40
+    assert "pa55wd" not in strip_secrets("echo pa55wd", sorted(forms))
 
 
 def test_short_secret_adds_no_derived_form() -> None:

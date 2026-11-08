@@ -187,10 +187,12 @@ def _secret_forms(secret: str) -> set[str]:
         decoded = ""
     # Only a decoded "user:password" is a Basic credential; other base64 text is left alone.
     _user, separator, password = decoded.partition(":")
+    credential: set[str] = set()
     if separator and password and decoded.isprintable():
-        derived |= {decoded, password}
+        # A decoded Basic password is a real secret at any length, so it skips the length floor.
+        credential = {decoded, password}
     # A short derived form, such as the base64 "MQ" of "1", would mask ordinary text.
-    forms = {secret} | {form for form in derived if len(form) >= _MIN_DERIVED_FORM_CHARS}
+    forms = {secret} | credential | {form for form in derived if len(form) >= _MIN_DERIVED_FORM_CHARS}
     return forms | {variant for form in forms for variant in escaped_forms(form)}
 
 
