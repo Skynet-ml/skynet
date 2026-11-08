@@ -24,6 +24,7 @@ seconds the boxes spent in each phase.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import contextvars
 import functools
@@ -476,8 +477,9 @@ class BoxJobRecord:
     """Write the box counts, events and phase times of one job's sandbox pool.
 
     The hooks never fail a box: :class:`BoxHooks` logs a hook that raises.
-    The count write is throttled and has no timer, so the counts can lag the
-    boxes by up to one interval until :meth:`flush` writes the final state.
+    The count write is throttled. A write that the throttle skips schedules
+    one trailing write at the end of the interval, so the counts lag the boxes
+    by at most one interval. :meth:`flush` cancels it and writes the final state.
     """
 
     def __init__(
@@ -489,6 +491,7 @@ class BoxJobRecord:
         clock: Callable[[], float] = time.monotonic,
         interval: float = _BOX_WRITE_INTERVAL_SECONDS,
         detail_limit: int = _BOX_DETAIL_LIMIT,
+        secrets: Iterable[str] = (),
     ) -> None:
         """Add the counting, timing, writing and logging hooks to ``hooks``.
 
@@ -499,6 +502,7 @@ class BoxJobRecord:
             clock: Gives the time in seconds. Tests pass a fake clock.
             interval: The fewest seconds between two count writes, and between two summary lines.
             detail_limit: The number of first boxes that get one log line for each event.
+            secrets: Values the boxes can see; each is redacted from the logged box errors.
         """
         self._owner = owner
         self._progress = progress
@@ -506,7 +510,7 @@ class BoxJobRecord:
         self._interval = interval
         self._detail_limit = detail_limit
         self._extra = run_log.event_extra(source="sandbox", sandbox_owner=owner)
-        self._scrub = Scrubber(())
+        self._scrub = Scrubber(secrets)
         self.counts = LiveCounts()
         self.timings = BoxTimings(clock)
         self.started = 0
@@ -516,6 +520,8 @@ class BoxJobRecord:
         self._detailed: set[str] = set()
         self._last_write: float | None = None
         self._last_summary: float | None = None
+        self._trailing: asyncio.TimerHandle | None = None
+        self._flushed = False
         hooks.add(self.counts)
         hooks.add(self.timings)
         hooks.add(self._tally)
@@ -561,10 +567,27 @@ class BoxJobRecord:
         """
         now = self._clock()
         if self._last_write is not None and now - self._last_write < self._interval:
+            if self._trailing is None and not self._flushed:
+                delay = self._interval - (now - self._last_write)
+                self._trailing = asyncio.get_running_loop().call_later(delay, self._write_trailing)
             return
         # Set before the write, so a writer that keeps failing is throttled too.
         self._last_write = now
         self._progress(SANDBOX_BOXES_EVENT, self.metrics())
+
+    def _write_trailing(self) -> None:
+        """Write the latest counts that the throttle skipped.
+
+        It runs as a loop callback, so a failing write is logged here instead of by the hooks.
+        """
+        self._trailing = None
+        if self._flushed:
+            return
+        self._last_write = self._clock()
+        try:
+            self._progress(SANDBOX_BOXES_EVENT, self.metrics())
+        except Exception:
+            logger.exception("Could not write the sandbox box counts for job %s", self._owner)
 
     async def _log_event(self, info: BoxEventInfo) -> None:
         """Log one line for an event of a first box, else a throttled summary line.
@@ -592,6 +615,10 @@ class BoxJobRecord:
         Call it once after the pool's run, also after an error. A failing
         write is logged, so the job keeps its own outcome.
         """
+        self._flushed = True
+        if self._trailing is not None:
+            self._trailing.cancel()
+            self._trailing = None
         seconds = {str(phase): round(total, 3) for phase, total in self.timings.totals().items()}
         metrics = {**self.metrics(), "sandbox_phase_seconds": seconds, "sandbox_boxes_timed": self.timings.boxes}
         try:

@@ -581,3 +581,57 @@ async def test_a_failed_box_logs_one_warning_with_its_error(captured: _Capture) 
     final = writes.named(sandbox_log.SANDBOX_BOX_TIMINGS_EVENT)[-1]
     assert (final["sandbox_boxes_ended"], final["sandbox_boxes_failed"]) == (1, 1)
     assert all(record.sandbox_owner == "job-1" for record in captured.records if hasattr(record, "sandbox_owner"))
+
+
+async def test_counts_after_a_burst_reach_the_record_one_interval_later() -> None:
+    """A burst of events and then silence still gives the true counts after one interval."""
+    clock, writes = _Clock(), _Writes()
+    hooks = BoxHooks()
+    record = sandbox_log.BoxJobRecord(hooks, owner="job-1", progress=writes, clock=clock, interval=0.05)
+    for index in range(5):
+        await hooks.emit(BoxEventInfo(BoxEvent.STARTED, f"box-{index}"))
+        await hooks.emit(BoxEventInfo(BoxEvent.ENVIRONMENT_STARTED, f"box-{index}"))
+        await hooks.emit(BoxEventInfo(BoxEvent.RUN_STARTED, f"box-{index}"))
+    assert len(writes.named(sandbox_log.SANDBOX_BOXES_EVENT)) == 1
+    await asyncio.sleep(0.15)
+    count_writes = writes.named(sandbox_log.SANDBOX_BOXES_EVENT)
+    assert len(count_writes) == 2
+    assert count_writes[-1]["sandbox_boxes"]["run"] == 5
+    record.flush()
+    await asyncio.sleep(0.1)
+    assert len(writes.named(sandbox_log.SANDBOX_BOXES_EVENT)) == 2
+
+
+async def test_flush_cancels_the_pending_trailing_write() -> None:
+    """A trailing write that is still pending at the flush never runs after it."""
+    clock, writes = _Clock(), _Writes()
+    hooks = BoxHooks()
+    record = sandbox_log.BoxJobRecord(hooks, owner="job-1", progress=writes, clock=clock, interval=0.05)
+    await hooks.emit(BoxEventInfo(BoxEvent.STARTED, "box-0"))
+    await hooks.emit(BoxEventInfo(BoxEvent.ENVIRONMENT_STARTED, "box-0"))
+    record.flush()
+    await asyncio.sleep(0.15)
+    await hooks.emit(BoxEventInfo(BoxEvent.RUN_STARTED, "box-0"))
+    await asyncio.sleep(0.15)
+    assert [name for name, _ in writes.items] == [
+        sandbox_log.SANDBOX_BOXES_EVENT,
+        sandbox_log.SANDBOX_BOX_TIMINGS_EVENT,
+    ]
+
+
+async def test_a_secret_in_a_box_error_never_reaches_the_log_or_the_record(captured: _Capture) -> None:
+    """A secret given to the record is redacted from the warning line of a failed box."""
+    clock, writes = _Clock(), _Writes()
+    hooks = BoxHooks()
+    record = sandbox_log.BoxJobRecord(
+        hooks, owner="job-1", progress=writes, clock=clock, secrets=["per-box-secret-789"]
+    )
+    await hooks.emit(BoxEventInfo(BoxEvent.STARTED, "box-0"))
+    await hooks.emit(
+        BoxEventInfo(BoxEvent.ENDED, "box-0", error=RuntimeError("setup failed: value per-box-secret-789"))
+    )
+    record.flush()
+    warnings = [m for m in captured.messages(logging.WARNING) if m.startswith("[sandbox] box ")]
+    assert warnings == ["[sandbox] box box-0 failed: RuntimeError: setup failed: value [redacted]"]
+    assert all("per-box-secret" not in message for message in captured.messages(logging.DEBUG))
+    assert "per-box-secret" not in json.dumps(writes.items)
