@@ -23,9 +23,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from core.config import app_env
+from core.constants import PROGRESS_CANDIDATE, PROGRESS_REJECTED
 from core.service_gateway.optimization.blackbox.feedback import emit_candidate
 from core.storage.base import JobStore
-from core.storage.models import Base, JobModel, RunCallModel, RunCandidateModel
+from core.storage.models import Base, JobModel, ProgressEventModel, RunCallModel, RunCandidateModel
 from core.storage.remote import RemoteDBJobStore
 from core.storage.run_call_store import BODY_CAP_BYTES, SECRET_MASK, PostgresRunCallStore, cut_body, strip_secrets
 from core.worker.engine import BackgroundWorker
@@ -279,16 +280,33 @@ def _emit_scored_versions(events: Any) -> None:
         )
 
 
-def test_the_worker_marks_versions_a_child_process_scored(store: PostgresRunCallStore) -> None:
-    """Candidate events from the engine's process set done or failed in the worker, where the store is."""
-    with Session(store._engine) as session:
-        session.add(JobModel(optimization_id="job-1", status="running", execution_generation=1))
-        session.commit()
-    store.record_call("job-1", _call(candidate_id="1"), [])
-    store.record_call("job-1", _call(candidate_id="2"), [])
+def _job_store(store: PostgresRunCallStore) -> RemoteDBJobStore:
+    """Build the worker's job store over the run-call store's engine.
+
+    The full constructor opens its own PostgreSQL engine from a URL, so the
+    tests set only the two fields that progress writes read.
+
+    Args:
+        store: The run-call store whose engine also holds the job rows.
+
+    Returns:
+        A job store that writes progress and candidate states to that engine.
+    """
     jobs = object.__new__(RemoteDBJobStore)
     jobs._session_factory = sessionmaker(bind=store._engine)
     jobs._run_calls = store
+    return jobs
+
+
+def _drain_child_versions(store: PostgresRunCallStore) -> None:
+    """Score versions in a spawned child process and drain its events in this worker process.
+
+    Args:
+        store: The run-call store; job ``job-1`` must exist with execution generation 1.
+    """
+    store.record_call("job-1", _call(candidate_id="1"), [])
+    store.record_call("job-1", _call(candidate_id="2"), [])
+    jobs = _job_store(store)
     context = mp.get_context("spawn")
     events = context.Queue()
     child = context.Process(target=_emit_scored_versions, args=(events,))
@@ -304,6 +322,36 @@ def test_the_worker_marks_versions_a_child_process_scored(store: PostgresRunCall
     assert store.get_candidate("job-1", "3") is None
 
 
+def test_the_worker_marks_versions_a_child_process_scored(store: PostgresRunCallStore) -> None:
+    """Candidate events from the engine's process set done or failed in the worker, where the store is."""
+    with Session(store._engine) as session:
+        session.add(JobModel(optimization_id="job-1", status="running", execution_generation=1))
+        session.commit()
+    _drain_child_versions(store)
+
+
+def test_candidate_ids_that_differ_from_the_call_tags_change_no_row(store: PostgresRunCallStore) -> None:
+    """An engine whose versions do not match the call tags marks no recorded candidate, and adds no row."""
+    with Session(store._engine) as session:
+        session.add(JobModel(optimization_id="job-1", status="running"))
+        session.commit()
+    store.record_call("job-1", _call(candidate_id="1"), [])
+    store.record_call("job-1", _call(candidate_id="2"), [])
+    store.record_call("job-2", _call(candidate_id="a"), [])
+    jobs = _job_store(store)
+
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, {"candidate_id": "a", "score": 0.5})
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, {"candidate_id": "b", "score": None})
+    jobs.record_progress("job-1", PROGRESS_CANDIDATE, {"candidate_id": "", "score": 0.5})
+    jobs.record_progress("job-1", PROGRESS_REJECTED, {"candidate_id": "1", "score": 0.5})
+
+    assert store.get_candidate("job-1", "1")["state"] == "running"
+    assert store.get_candidate("job-1", "2")["state"] == "running"
+    assert store.get_candidate("job-1", "a") is None
+    assert store.get_candidate("job-1", "b") is None
+    assert store.get_candidate("job-2", "a")["state"] == "running"
+
+
 @pytest.fixture
 def postgres() -> Iterator[Engine]:
     """Return an engine on a fresh schema of the test database, with one job row."""
@@ -314,7 +362,13 @@ def postgres() -> Iterator[Engine]:
     engine = create_engine(TEST_DB_URL, connect_args={"options": f"-csearch_path={schema}"}, pool_size=20)
     try:
         Base.metadata.create_all(
-            engine, tables=[JobModel.__table__, RunCallModel.__table__, RunCandidateModel.__table__]
+            engine,
+            tables=[
+                JobModel.__table__,
+                ProgressEventModel.__table__,
+                RunCallModel.__table__,
+                RunCandidateModel.__table__,
+            ],
         )
         with Session(engine) as session:
             session.add(JobModel(optimization_id="job-1"))
@@ -376,3 +430,15 @@ def test_a_poll_during_parallel_writes_never_skips_a_call(postgres: Engine) -> N
     assert sorted(seqs) == list(range(1, writes + 1))
     assert seen == list(range(1, writes + 1))
     assert store.get_candidate("job-1", "cand-1")["call_count"] == writes
+
+
+@needs_postgres
+def test_the_worker_marks_child_versions_on_postgresql(postgres: Engine) -> None:
+    """Run the cross-process drain on PostgreSQL, the production database."""
+    with Session(postgres) as session:
+        job = session.get(JobModel, "job-1")
+        assert job is not None
+        job.status = "running"
+        job.execution_generation = 1
+        session.commit()
+    _drain_child_versions(PostgresRunCallStore(postgres))
