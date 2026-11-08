@@ -50,6 +50,9 @@ if sys.argv[1] == "run":
 class _NoChargeBudget:
     """Budget stand-in that fails the test if a local box touches it."""
 
+    # Setup work builds no run-call recorder, so the bind reads only this phase.
+    phase = "setup"
+
     def __getattr__(self, name: str) -> Any:
         """Refuse every budget operation.
 

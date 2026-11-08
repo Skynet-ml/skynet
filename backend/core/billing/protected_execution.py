@@ -194,7 +194,12 @@ def bind_protected_sandbox(
     )
     runtime: DockerSandboxRuntime | VercelSandboxRuntime
     if settings.local_mode:
-        runtime = DockerSandboxRuntime(image, docker_bin=settings.docker_bin, budget=gateway.runtime)
+        runtime = DockerSandboxRuntime(
+            image,
+            docker_bin=settings.docker_bin,
+            budget=gateway.runtime,
+            recorder=run_call_recorder(gateway, owner_id),
+        )
     else:
         assert settings.vercel_token is not None
         runtime = VercelSandboxRuntime(
