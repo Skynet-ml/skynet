@@ -43,6 +43,9 @@ from .service import StripeBillingService, account_committed_cents, free_grant_c
 
 _ACTIVE_STATES = ("reserved", "dispatched", "pending")
 _DISPATCHED_STATES = ("dispatched", "pending")
+# One lease row lock covers every slice insert, so a bound keeps a single
+# transaction short.
+MAX_LEASE_SLICES = 256
 # A context variable, not a service field: concurrent calls on one service each see only their own settles.
 _SETTLED_CENTS: ContextVar[dict[str, Decimal] | None] = ContextVar("settled_cents", default=None)
 
@@ -268,6 +271,48 @@ def _admit(
         raise AccountFundsError("The account cannot fund the next operation.")
 
 
+def _admission(
+    request_fingerprint: str,
+    prices: Mapping[str, Any],
+    scope: int,
+    charge: int,
+    phase: str,
+    cost_kind: str,
+    role: str | None,
+    generation: int,
+) -> str:
+    """Hash the admitted terms of one physical attempt.
+
+    A lease slice uses the same hash as a single reservation, so a replayed
+    reservation of a slice key returns the slice instead of a conflict.
+
+    Args:
+        request_fingerprint: Digest of the exact resolved request.
+        prices: Versioned price snapshot.
+        scope: Combined scope units of the attempt.
+        charge: Wallet units of the attempt.
+        phase: Setup or run attribution.
+        cost_kind: Priced cost category.
+        role: Optional attribution role.
+        generation: Execution epoch.
+
+    Returns:
+        Digest that identifies the admitted work.
+    """
+    return _fingerprint(
+        {
+            "request": request_fingerprint,
+            "prices": dict(prices),
+            "scope": scope,
+            "wallet": charge,
+            "phase": phase,
+            "kind": cost_kind,
+            "role": role,
+            "generation": generation,
+        }
+    )
+
+
 class BudgetService:
     """Own budget admission, immutable usage evidence and exactly-once settlement."""
 
@@ -466,6 +511,7 @@ class BudgetService:
         operation: ExecutionOperationModel,
         budget: ExecutionBudgetModel,
         wallet: BillingCustomerModel,
+        budget_snapshot: BudgetSnapshot | None = None,
     ) -> OperationSnapshot:
         """Return one attempt without exposing provider credentials or request content.
 
@@ -474,6 +520,8 @@ class BudgetService:
             operation: Physical attempt whose state to expose.
             budget: Its spending envelope.
             wallet: Its locked prepaid account.
+            budget_snapshot: Totals already read in this transaction, so a lease
+                of many slices reads them once instead of once per slice.
 
         Returns:
             Attempt state and the shared authoritative totals.
@@ -494,7 +542,7 @@ class BudgetService:
             actual_cents=cents_from_units(operation.actual_units),
             actual_wallet_cents=cents_from_units(operation.actual_wallet_units),
             provider_request_id=operation.provider_request_id,
-            budget=self._snapshot(session, budget, wallet),
+            budget=budget_snapshot if budget_snapshot is not None else self._snapshot(session, budget, wallet),
         )
 
     def create(
@@ -793,18 +841,7 @@ class BudgetService:
         prices = dict(price_snapshot)
         if not prices or not prices.get("version"):
             raise ValueError("A versioned applicable price snapshot is required.")
-        admission = _fingerprint(
-            {
-                "request": request_fingerprint,
-                "prices": prices,
-                "scope": scope,
-                "wallet": charge,
-                "phase": phase,
-                "kind": cost_kind,
-                "role": role,
-                "generation": generation,
-            }
-        )
+        admission = _admission(request_fingerprint, prices, scope, charge, phase, cost_kind, role, generation)
         with self._transaction(session) as session:
             wallet, budget = self._locked(session, budget_id, username)
             if generation != budget.generation:
@@ -859,6 +896,141 @@ class BudgetService:
             budget.wallet_reserved_units += charge
             budget.updated_at = now
             return self._operation_snapshot(session, operation, budget, wallet)
+
+    def reserve_lease(
+        self,
+        budget_id: str,
+        username: str,
+        *,
+        lease_key: str,
+        slices: int,
+        generation: int,
+        phase: str,
+        cost_kind: str,
+        request_fingerprint: str,
+        price_snapshot: Mapping[str, Any],
+        max_cents: Decimal | str | int | float,
+        max_wallet_cents: Decimal | str | int | float | None = None,
+        role: str | None = None,
+    ) -> list[OperationSnapshot]:
+        """Admit equal slices for a pool lease with one lock pair and one budget write.
+
+        Each slice is an ordinary reserved operation with the key
+        ``{lease_key}:slice-{i}`` and attempt 0. A box dispatches and settles
+        its own slice, so no slice can carry a second charge. A crashed lease
+        leaves its untaken slices reserved, and ``fence_generation`` releases
+        them like any other undispatched reservation.
+
+        Args:
+            budget_id: Shared setup/run envelope.
+            username: Authenticated owner.
+            lease_key: Logical lease identity retained across retries.
+            slices: Number of boxes the lease may start.
+            generation: Current execution epoch.
+            phase: Setup or run attribution.
+            cost_kind: Priced cost category of every slice.
+            request_fingerprint: Digest of the request each box runs.
+            price_snapshot: Versioned prices and bound evidence.
+            max_cents: Maximum combined scope charge of one slice.
+            max_wallet_cents: Maximum wallet charge of one slice; defaults to the scope bound.
+            role: Optional attribution role.
+
+        Returns:
+            The slices in index order, newly reserved or replayed.
+
+        Raises:
+            ValueError: When the slice count, identifiers, phase, coverage or prices are invalid.
+            BudgetFencedError: When the execution generation is obsolete.
+            BudgetConflictError: When the lease key exists with different terms or slice count.
+            BudgetUnreconciledError: When previous-generation paid work is not reconciled.
+            BudgetInsufficientError: When the whole lease cannot fit the limit or the funds.
+            BudgetInFlightError: When settling covered work may make the lease fit.
+        """
+        if isinstance(slices, bool) or not isinstance(slices, int) or not 1 <= slices <= MAX_LEASE_SLICES:
+            raise ValueError(f"A lease needs between 1 and {MAX_LEASE_SLICES} slices.")
+        keys = [_identifier(f"{_identifier(lease_key)}:slice-{index}") for index in range(slices)]
+        request_fingerprint = _identifier(request_fingerprint)
+        cost_kind = _identifier(cost_kind, maximum=32)
+        if phase not in {"setup", "run"} or generation < 0:
+            raise ValueError("Invalid operation phase or generation.")
+        if role is not None:
+            _identifier(role, maximum=64)
+        scope = cent_units(max_cents)
+        charge = cent_units(max_cents if max_wallet_cents is None else max_wallet_cents)
+        if charge > scope:
+            raise ValueError("Wallet coverage cannot exceed the combined scope coverage.")
+        prices = dict(price_snapshot)
+        if not prices or not prices.get("version"):
+            raise ValueError("A versioned applicable price snapshot is required.")
+        admission = _admission(request_fingerprint, prices, scope, charge, phase, cost_kind, role, generation)
+        # Exact keys, not a prefix: a prefix also matches another lease whose
+        # key starts with this one, and SQLite LIKE ignores case. The extra
+        # key is the first slice past this count, so a larger lease with this
+        # key is found and refused as a partial match.
+        probe = [*keys, f"{lease_key}:slice-{slices}"]
+        with self._transaction() as session:
+            wallet, budget = self._locked(session, budget_id, username)
+            if generation != budget.generation:
+                raise BudgetFencedError("The execution generation is obsolete.")
+            existing = list(
+                session.scalars(
+                    select(ExecutionOperationModel).where(
+                        ExecutionOperationModel.budget_id == budget_id,
+                        ExecutionOperationModel.operation_key.in_(probe),
+                        ExecutionOperationModel.attempt == 0,
+                    )
+                )
+            )
+            if existing:
+                by_key = {operation.operation_key: operation for operation in existing}
+                if set(by_key) != set(keys) or any(op.admission_fingerprint != admission for op in existing):
+                    raise BudgetConflictError("Lease key was reused for different admitted work.")
+                shared = self._snapshot(session, budget, wallet)
+                return [self._operation_snapshot(session, by_key[key], budget, wallet, shared) for key in keys]
+            if budget.state not in {"open", "attached"}:
+                raise BudgetConflictError("This budget is not admitting new work.")
+            if (phase == "setup" and budget.job_id is not None) or (phase == "run" and budget.job_id is None):
+                raise BudgetConflictError("The operation phase does not match the budget's submission state.")
+            unresolved = session.scalar(
+                select(ExecutionOperationModel.id)
+                .where(
+                    ExecutionOperationModel.budget_id == budget_id,
+                    ExecutionOperationModel.generation < generation,
+                    ExecutionOperationModel.state.in_(_DISPATCHED_STATES),
+                )
+                .limit(1)
+            )
+            if unresolved is not None:
+                raise BudgetUnreconciledError("Previous-generation paid work must be reconciled before recovery.")
+            _admit(session, wallet, budget, username, scope * slices, charge * slices)
+            now = datetime.now(UTC)
+            operations = [
+                ExecutionOperationModel(
+                    id=str(uuid4()),
+                    budget_id=budget.id,
+                    operation_key=key,
+                    attempt=0,
+                    generation=generation,
+                    phase=phase,
+                    cost_kind=cost_kind,
+                    role=role,
+                    request_fingerprint=request_fingerprint,
+                    admission_fingerprint=admission,
+                    price_snapshot=prices,
+                    max_units=scope,
+                    max_wallet_units=charge,
+                    created_at=now,
+                    updated_at=now,
+                )
+                for key in keys
+            ]
+            session.add_all(operations)
+            budget.reserved_units += scope * slices
+            budget.wallet_reserved_units += charge * slices
+            budget.updated_at = now
+            session.flush()
+            shared = self._snapshot(session, budget, wallet)
+            return [self._operation_snapshot(session, operation, budget, wallet, shared) for operation in operations]
 
     def mark_dispatched(
         self, operation_id: str, username: str, provider_request_id: str | None = None
@@ -980,6 +1152,42 @@ class BudgetService:
             operation.state = "released"
             operation.updated_at = budget.updated_at = datetime.now(UTC)
             return self._operation_snapshot(session, operation, budget, wallet)
+
+    def release_slices(self, budget_id: str, username: str, operation_ids: Sequence[str]) -> BudgetSnapshot:
+        """Return the untaken slices of a lease with one lock pair and one budget write.
+
+        Slices that a box already dispatched, settled or released stay as they
+        are, so a slice taken during the close is never released under its box.
+
+        Args:
+            budget_id: Envelope that owns the slices.
+            username: Authenticated owner.
+            operation_ids: Slices the lease did not hand to a box.
+
+        Returns:
+            Budget totals after the release.
+        """
+        with self._transaction() as session:
+            wallet, budget = self._locked(session, budget_id, username)
+            now = datetime.now(UTC)
+            ids = list(operation_ids)
+            if ids:
+                for operation in session.scalars(
+                    select(ExecutionOperationModel)
+                    .where(
+                        ExecutionOperationModel.budget_id == budget_id,
+                        ExecutionOperationModel.id.in_(ids),
+                        ExecutionOperationModel.state == "reserved",
+                        ExecutionOperationModel.dispatched_at.is_(None),
+                    )
+                    .with_for_update()
+                ):
+                    budget.reserved_units -= operation.max_units
+                    budget.wallet_reserved_units -= operation.max_wallet_units
+                    operation.state = "released"
+                    operation.updated_at = now
+                    budget.updated_at = now
+            return self._snapshot(session, budget, wallet)
 
     def reject(
         self,

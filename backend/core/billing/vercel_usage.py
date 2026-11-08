@@ -13,7 +13,7 @@ import httpx
 
 from ..config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
 from .budget_amounts import cent_units
-from .budgets import BudgetError
+from .budgets import BudgetConflictError, BudgetError, OperationSnapshot
 from .operation_pricing import (
     ChargePolicy,
     OperationQuote,
@@ -424,24 +424,55 @@ def _refused_creation(error: BaseException) -> httpx.Response | None:
 class VercelUsageReservation:
     """Own coverage and raw control-plane evidence for one sandbox creation."""
 
-    def __init__(self, runtime: BudgetRuntime, request: Mapping[str, Any], *, operation_key: str) -> None:
+    def __init__(
+        self,
+        runtime: BudgetRuntime,
+        request: Mapping[str, Any],
+        *,
+        operation_key: str,
+        reserved: OperationSnapshot | None = None,
+    ) -> None:
         """Reserve and claim one physical sandbox creation before any network call.
 
         Args:
             runtime: Authenticated budget authority retained outside the guest.
             request: Final immutable resource and network parameters.
             operation_key: Stable logical identity for creation replay protection.
+            reserved: A pool lease slice already reserved for this box. The box
+                claims it instead of making its own reservation write.
+
+        Raises:
+            BudgetConflictError: When the lease slice was reserved for a different request.
         """
         self.runtime = runtime
         self.request = dict(request)
         self.vcpus = request["vcpus"]
         self.lifetime_ms = request["lifetime_ms"]
         self.quote = quote_vercel_sandbox(request)
-        self.operation = runtime.reserve(self.quote, operation_key=operation_key, cost_kind="sandbox", role="runtime")
+        if reserved is None:
+            self.operation = runtime.reserve(
+                self.quote, operation_key=operation_key, cost_kind="sandbox", role="runtime"
+            )
+        elif (
+            reserved.request_fingerprint != self.quote.request_fingerprint
+            or reserved.cost_kind != "sandbox"
+            or reserved.budget_id != runtime.budget_id
+        ):
+            raise BudgetConflictError("The lease slice was reserved for a different sandbox request.")
+        else:
+            self.operation = reserved
         if self.operation.state == "settled":
             raise OperationCompletedError("This sandbox operation already completed; retrieve its saved result.")
         runtime.pin(self.operation.id, cent_units(self.operation.max_cents))
-        claimed = runtime.service.mark_dispatched(self.operation.id, runtime.username)
+        try:
+            claimed = runtime.service.mark_dispatched(self.operation.id, runtime.username)
+        except BaseException:
+            # A refused claim means no sandbox exists for this operation, so a
+            # kept pin would count coverage this runtime no longer holds. An
+            # already-dispatched operation below keeps its pin: its sandbox
+            # may exist and still holds the coverage.
+            runtime.unpin(self.operation.id)
+            raise
         if not claimed.dispatch_claimed:
             raise UsagePendingError("This sandbox was already dispatched; reconcile its exact session.")
         self.session_id: str | None = None
@@ -619,6 +650,71 @@ class VercelUsageReservation:
             raise
 
 
+class VercelUsage:
+    """Meter Vercel sandboxes through the provider-neutral usage protocol."""
+
+    name = "vercel"
+
+    def quote(self, request: Mapping[str, Any]) -> OperationQuote:
+        """Price one sandbox before any provider resource exists.
+
+        Args:
+            request: Final create parameters.
+
+        Returns:
+            Coverage for the sandbox's whole funded lifetime.
+        """
+        return quote_vercel_sandbox(request)
+
+    def reserve(
+        self,
+        runtime: BudgetRuntime,
+        request: Mapping[str, Any],
+        *,
+        operation_key: str,
+        reserved: OperationSnapshot | None = None,
+    ) -> VercelUsageReservation:
+        """Reserve and claim one sandbox, or claim a lease slice already reserved for it.
+
+        Args:
+            runtime: Authenticated budget authority.
+            request: Final create parameters.
+            operation_key: Stable logical identity of the box.
+            reserved: Optional pool lease slice for this box.
+
+        Returns:
+            The claimed reservation that the box confirms, extends and settles.
+        """
+        return VercelUsageReservation(runtime, request, operation_key=operation_key, reserved=reserved)
+
+    def confirm(self, reservation: VercelUsageReservation, session: Any) -> None:
+        """Verify the created session matches its funded envelope.
+
+        Args:
+            reservation: The box's claimed reservation.
+            session: Provider session handle.
+        """
+        reservation.confirm_created(session)
+
+    def extend(self, reservation: VercelUsageReservation, lifetime_ms: int, *, deadline: float) -> None:
+        """Fund a longer session lifetime before the provider grants it.
+
+        Args:
+            reservation: The box's claimed reservation.
+            lifetime_ms: Total lifetime after the extension.
+            deadline: ``time.monotonic()`` instant after which waiting stops.
+        """
+        reservation.extend(lifetime_ms, deadline=deadline)
+
+    def settle(self, reservation: VercelUsageReservation) -> None:
+        """Settle the stopped session at its actual provider cost.
+
+        Args:
+            reservation: The box's claimed reservation.
+        """
+        reservation.settle()
+
+
 def _snapshot_usd(size_bytes: int, retained_ms: int, rate: Decimal) -> Decimal:
     """Price stored snapshot bytes for a retention time.
 
@@ -733,7 +829,15 @@ class VercelSnapshotReservation:
         if self.operation.state == "settled":
             raise OperationCompletedError("This snapshot operation already completed.")
         runtime.pin(self.operation.id, cent_units(self.operation.max_cents))
-        claimed = runtime.service.mark_dispatched(self.operation.id, runtime.username)
+        try:
+            claimed = runtime.service.mark_dispatched(self.operation.id, runtime.username)
+        except BaseException:
+            # A refused claim means no snapshot exists for this operation, so a
+            # kept pin would count coverage this runtime no longer holds. An
+            # already-dispatched operation below keeps its pin: its snapshot
+            # may exist and still holds the coverage.
+            runtime.unpin(self.operation.id)
+            raise
         if not claimed.dispatch_claimed:
             raise UsagePendingError("This snapshot was already dispatched; reconcile it by hand.")
         self.snapshot_id: str | None = None
