@@ -52,7 +52,7 @@ dependencies = [
     # Vercel Sandbox SDK: throwaway microVMs for black-box agent targets. The
     # leaf package, not the ``vercel`` umbrella — that one pins cbor2>=6, which
     # forces webauthn down a release, and pulls queue/cache/telemetry we never use.
-    "vercel-sandbox>=0.4.0",
+    "vercel-sandbox>=0.10.0,<0.11",
     "litellm>=1.88.6",
     "click>=8.3.3",
     "sqlalchemy>=2.0",
