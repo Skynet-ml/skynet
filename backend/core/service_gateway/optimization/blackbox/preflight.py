@@ -29,7 +29,8 @@ from ..unified.split import split_seed
 from .agent_eval import READINESS_LIFETIME_SECONDS, case_lifetime_seconds
 from .harness import GatewayConfig
 from .native_runtime import NativeOptions, check_native_runtime
-from .sandbox import SandboxRuntime, sandbox_runtime_context
+from .sandbox_contract import SandboxRuntime
+from .sandbox_runtime import sandbox_runtime_context
 from .sandbox_scorer import SandboxPythonScorer, scorer_gateway
 from .scorer import build_scorer
 from .service import JobSpec, _agent_scorer, uses_native_runtime, validate_blackbox_payload, validate_job

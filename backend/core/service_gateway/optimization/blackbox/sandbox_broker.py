@@ -13,14 +13,14 @@ from typing import Any, Protocol
 from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, quote_vercel_sandbox
 from ....config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
 from ....exceptions import ServiceError
-from .sandbox import (
+from .sandbox_contract import (
     CommandResult,
     OutputSink,
     SandboxRuntime,
     SandboxSession,
     SandboxSpec,
-    write_codex_requirements,
 )
+from .sandbox_runtime import write_codex_requirements
 
 _MAX_FILE_BYTES = 16 * 1024 * 1024
 

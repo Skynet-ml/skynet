@@ -32,7 +32,7 @@ from ..config import settings
 from ..constants import TOKEN_SOURCE_MANAGED
 from ..service_gateway.optimization.blackbox import package_setup
 from ..service_gateway.optimization.blackbox.remote_sandbox import RemoteSandboxRuntime
-from ..service_gateway.optimization.blackbox.sandbox import SandboxSpec
+from ..service_gateway.optimization.blackbox.sandbox_contract import SandboxSpec
 from ..service_gateway.optimization.blackbox.sandbox_scorer import _raise_control
 from ..storage.models import ExecutionBudgetModel, ExecutionOperationModel, ExecutionUsageEvidenceModel
 from ..storage.preflights import PreflightStore

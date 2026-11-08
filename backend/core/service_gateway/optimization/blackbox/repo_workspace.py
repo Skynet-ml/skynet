@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .repo_tree import MAX_PATCH_BYTES, archive_chunks, drop_paths, patch_violations
-from .sandbox import CommandResult, OutputSink, SandboxRuntime, SandboxSession, SandboxSpec
+from .sandbox_contract import CommandResult, OutputSink, SandboxRuntime, SandboxSession, SandboxSpec
 
 logger = logging.getLogger(__name__)
 
