@@ -47,6 +47,24 @@ _BYTES = re.compile(r"^(\d+(?:\.\d+)?)\s*([bkmg]?)b?$")
 _DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(us|ms|s|m|h)")
 _UNIT_BYTES = {"": 1, "b": 1, "k": 1024, "m": 1024**2, "g": 1024**3}
 _UNIT_SECONDS = {"us": 1e-6, "ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0}
+_NUMBER = re.compile(r"^\d+(?:\.\d+)?$")
+_INTEGER = re.compile(r"^\d+$")
+_TRUE = ("true", "True", "TRUE")
+_KEPT_TAGS = ("tag:yaml.org,2002:null", "tag:yaml.org,2002:merge")
+
+
+class _ComposeLoader(yaml.SafeLoader):
+    """Load YAML with every plain scalar as text, except null and the merge key."""
+
+
+# PyYAML resolves YAML 1.1 types: `yes` and `on` become booleans, `0123` an
+# octal int and `1.10` the float 1.1. Compose (YAML 1.2) keeps these as
+# written, so plain scalars stay text and only the fields that need a number
+# parse one.
+_ComposeLoader.yaml_implicit_resolvers = {
+    first: [(tag, regexp) for tag, regexp in resolvers if tag in _KEPT_TAGS]
+    for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
 
 
 class ComposeError(SandboxSpecError):
@@ -96,7 +114,7 @@ def parse_compose(text: str) -> tuple[ComposeService, ...]:
             command, or ``depends_on`` names an unknown service or a cycle.
     """
     try:
-        data = yaml.safe_load(text)
+        data = yaml.load(text, Loader=_ComposeLoader)
     except yaml.YAMLError as error:
         raise ComposeError(f"The compose file is not valid YAML: {error}") from error
     if not isinstance(data, Mapping) or not isinstance(data.get("services"), Mapping):
@@ -189,7 +207,8 @@ def _scalar(name: str, field: str, value: Any) -> str:
     """Turn one compose scalar into text.
 
     Only plain scalars pass, so YAML aliases cannot expand a nested list into
-    a huge string. A boolean becomes lowercase text, as compose writes it.
+    a huge string. The loader keeps plain scalars as text; a number or a
+    boolean comes only from an explicit tag, and a boolean becomes lowercase.
 
     Args:
         name: The service name, for the error.
@@ -202,7 +221,7 @@ def _scalar(name: str, field: str, value: Any) -> str:
     Raises:
         ComposeError: The value is not a string or a number.
     """
-    # bool is an int subclass, so it must come first or True becomes "True".
+    # bool is an int subclass, so it must come first or !!bool true becomes "True".
     if isinstance(value, bool):
         return "true" if value else "false"
     if not isinstance(value, str | int | float):
@@ -354,9 +373,12 @@ def _duration(name: str, value: Any, default: float) -> float:
     elif isinstance(value, str):
         text = value.strip()
         parts = _DURATION_PART.findall(text)
-        if not parts or "".join(number + unit for number, unit in parts) != text:
+        if _NUMBER.match(text):
+            seconds = float(text)
+        elif parts and "".join(number + unit for number, unit in parts) == text:
+            seconds = sum(float(number) * _UNIT_SECONDS[unit] for number, unit in parts)
+        else:
             raise ComposeError(f"The compose service {name} has an invalid duration {value!r}.")
-        seconds = sum(float(number) * _UNIT_SECONDS[unit] for number, unit in parts)
     else:
         raise ComposeError(f"The compose service {name} has an invalid duration {value!r}.")
     if not math.isfinite(seconds) or not 0 <= seconds <= MAX_HEALTHCHECK_DURATION:
@@ -372,7 +394,7 @@ def _retries(name: str, value: Any, default: int) -> int:
 
     Args:
         name: The service name, for the error.
-        value: The retry count, or ``None``.
+        value: The retry count as an integer or integer text, or ``None``.
         default: The value when the field is not set.
 
     Returns:
@@ -384,12 +406,18 @@ def _retries(name: str, value: Any, default: int) -> int:
     """
     if value is None:
         return default
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_HEALTHCHECK_RETRIES:
+    if isinstance(value, str) and _INTEGER.match(value.strip()):
+        retries = int(value)
+    elif isinstance(value, int) and not isinstance(value, bool):
+        retries = value
+    else:
+        retries = 0
+    if not 1 <= retries <= MAX_HEALTHCHECK_RETRIES:
         raise ComposeError(
             f"The compose service {name} has healthcheck retries {value!r}; "
             f"use an integer from 1 to {MAX_HEALTHCHECK_RETRIES}."
         )
-    return value
+    return retries
 
 
 def _healthcheck(name: str, value: Any) -> HealthcheckConfig | None:
@@ -407,7 +435,7 @@ def _healthcheck(name: str, value: Any) -> HealthcheckConfig | None:
             string or a known list form, or a timing value is invalid.
     """
     value = _mapping(name, "healthcheck", value)
-    if value.get("disable") or value.get("test") is None:
+    if value.get("disable") is True or value.get("disable") in _TRUE or value.get("test") is None:
         return None
     test = value["test"]
     if isinstance(test, list):

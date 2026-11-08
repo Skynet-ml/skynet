@@ -125,6 +125,27 @@ def test_yaml_booleans_become_lowercase_text() -> None:
     assert service.environment == (("DEBUG", "true"), ("QUIET", "false"), ("N", "1"))
 
 
+def test_yaml_1_1_scalars_stay_as_written() -> None:
+    """Check that values YAML 1.1 would turn into booleans or numbers stay as compose (YAML 1.2) writes them."""
+    (service,) = parse_compose(
+        "services:\n  cache:\n    command: [redis-server, --appendonly, yes]\n"
+        "    environment:\n      OFF: x\n      FEATURE: on\n      ZIP: 0123\n      VERSION: 1.10\n"
+    )
+    assert service.command == "redis-server --appendonly yes"
+    assert service.environment == (("OFF", "x"), ("FEATURE", "on"), ("ZIP", "0123"), ("VERSION", "1.10"))
+
+
+def test_healthcheck_reads_disable_and_plain_numbers_from_text() -> None:
+    """Check that disable, a unitless interval and retries still parse when plain scalars stay text."""
+    off, on = parse_compose(
+        "services:\n  off:\n    command: x\n    healthcheck: {test: x, disable: true}\n"
+        "  on:\n    command: y\n    healthcheck: {test: y, disable: false, interval: 5, retries: 3}\n"
+    )
+    assert off.healthcheck is None
+    assert on.healthcheck is not None
+    assert (on.healthcheck.interval_sec, on.healthcheck.retries) == (5.0, 3)
+
+
 @pytest.mark.parametrize(
     ("text", "message"),
     [
@@ -155,7 +176,7 @@ def test_yaml_booleans_become_lowercase_text() -> None:
         ("services:\n  a:\n    command: x\n    healthcheck: {test: x, retries: 0}\n", "from 1 to 100"),
         ("services:\n  a:\n    command: x\n    healthcheck: {test: x, interval: 24h}\n", "outside 0 to 600"),
         ("services:\n  a:\n    command: x\n    healthcheck: {test: x, timeout: [1]}\n", "invalid duration"),
-        ("services:\n  a:\n    command: x\n    working_dir: 5\n", "working_dir that is not a string"),
+        ("services:\n  a:\n    command: x\n    working_dir: [a]\n", "working_dir that is not a string"),
     ],
 )
 def test_parse_rejects_what_the_box_cannot_run(text: str, message: str) -> None:
