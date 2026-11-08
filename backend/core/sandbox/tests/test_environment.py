@@ -192,6 +192,24 @@ def test_rejects_non_positive_or_non_integer_vcpus(cpus: object) -> None:
         validate_spec(_spec(cpus=cpus), VERCEL_CAPABILITIES)
 
 
+@pytest.mark.parametrize(
+    ("resources", "message"),
+    [
+        ({"memory_mb": True}, "memory must be a whole"),
+        ({"memory_mb": 1024.0}, "memory must be a whole"),
+        ({"disk_mb": True}, "disk must be a whole"),
+        ({"disk_mb": 1024.5}, "disk must be a whole"),
+        ({"gpu": True}, "number of GPUs"),
+        ({"gpu": 1.0}, "number of GPUs"),
+        ({"gpu": -1}, "non-negative number of GPUs"),
+    ],
+)
+def test_rejects_bool_float_or_negative_sizes(resources: dict, message: str) -> None:
+    """Reject bool and float memory, disk and GPU sizes, and a negative GPU count."""
+    with pytest.raises(SandboxSpecError, match=message):
+        validate_spec(_spec(**resources), VERCEL_CAPABILITIES)
+
+
 def test_vercel_rejects_memory_above_2048_mb_per_vcpu() -> None:
     """Reject memory above 2048 MB for each vCPU."""
     validate_spec(_spec(cpus=2, memory_mb=4096), VERCEL_CAPABILITIES)
@@ -329,6 +347,50 @@ async def test_healthcheck_error_reports_the_last_stderr() -> None:
             await env.healthcheck(HealthcheckConfig(command="check", interval_sec=0, retries=2))
 
 
+async def test_healthcheck_counts_an_exec_error_as_a_failed_probe() -> None:
+    """Count an exec exception as one failed probe and report its text."""
+
+    class FlakyExec(InMemorySandbox):
+        async def exec(self, command: str, **kwargs) -> ExecResult:
+            """Raise a transport error on the first probe, then pass.
+
+            Args:
+                command: The shell command.
+                **kwargs: The exec options.
+
+            Returns:
+                A passing result after the first probe.
+
+            Raises:
+                ConnectionError: On the first probe.
+            """
+            self.commands.append(command)
+            if len(self.commands) == 1:
+                raise ConnectionError("link reset")
+            return ExecResult(0)
+
+    class BrokenExec(InMemorySandbox):
+        async def exec(self, command: str, **kwargs) -> ExecResult:
+            """Raise a transport error on every probe.
+
+            Args:
+                command: The shell command.
+                **kwargs: The exec options.
+
+            Raises:
+                ConnectionError: Always.
+            """
+            self.commands.append(command)
+            raise ConnectionError("link reset")
+
+    async with FlakyExec(_spec()) as env:
+        await env.healthcheck(HealthcheckConfig(command="check", interval_sec=0, retries=2))
+        assert env.commands == ["check", "check"]
+    async with BrokenExec(_spec()) as env:
+        with pytest.raises(HealthcheckError, match=r"2 times.*ConnectionError: link reset"):
+            await env.healthcheck(HealthcheckConfig(command="check", interval_sec=0, retries=2))
+
+
 async def test_context_manager_stops_when_start_fails() -> None:
     """Stop the sandbox when start raises inside ``async with``."""
 
@@ -351,6 +413,30 @@ async def test_context_manager_stops_when_start_fails() -> None:
             pass
     assert env.stopped
     assert not env.running
+
+
+async def test_context_manager_raises_the_start_error_when_stop_fails(caplog: pytest.LogCaptureFixture) -> None:
+    """Raise the start error, not the stop error, and log the stop error."""
+
+    class FailingStartAndStop(InMemorySandbox):
+        async def start(self) -> None:
+            """Fail after the sandbox is half started.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            await super().start()
+            raise RuntimeError("start boom")
+
+    env = FailingStartAndStop(_spec())
+    env.fail_stop = True
+    with pytest.raises(RuntimeError, match="start boom"):
+        async with env:
+            pass
+    assert "did not stop after its start failed" in caplog.text
+    assert "fake stop failure" in caplog.text
+    env.fail_stop = False
+    await env.stop()
 
 
 async def test_stop_job_sandboxes_continues_after_a_failure() -> None:

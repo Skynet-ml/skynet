@@ -109,30 +109,44 @@ def _validate_resources(request: ResourceRequest, caps: EnvironmentCapabilities)
     Raises:
         SandboxSpecError: A size is invalid or above a provider limit.
     """
+    if not _is_whole(request.gpu) or request.gpu < 0:
+        raise SandboxSpecError("The sandbox must use a whole, non-negative number of GPUs.")
     if request.gpu and not caps.gpus:
         raise SandboxSpecError(f"The {caps.name} sandbox does not support GPUs.")
     if request.mode is ResourceMode.IGNORE:
         return
     cpus = request.cpus
-    # bool is an int subclass; True must not pass as 1 vCPU.
-    if isinstance(cpus, bool) or not isinstance(cpus, int) or cpus < 1:
+    if not _is_whole(cpus) or cpus < 1:
         raise SandboxSpecError("The sandbox must use a whole, positive number of vCPUs.")
     if caps.max_vcpus is not None and cpus > caps.max_vcpus:
         raise SandboxSpecError(f"The {caps.name} sandbox allows at most {caps.max_vcpus} vCPUs.")
     if caps.even_vcpus and cpus > 1 and cpus % 2:
         raise SandboxSpecError("The sandbox must use 1 or an even number of vCPUs.")
     if request.memory_mb is not None:
-        if request.memory_mb <= 0:
-            raise SandboxSpecError("The sandbox memory must be a positive number of MB.")
+        if not _is_whole(request.memory_mb) or request.memory_mb <= 0:
+            raise SandboxSpecError("The sandbox memory must be a whole, positive number of MB.")
         if caps.memory_mb_per_vcpu is not None and request.memory_mb > cpus * caps.memory_mb_per_vcpu:
             raise SandboxSpecError(
                 f"The {caps.name} sandbox allows at most {caps.memory_mb_per_vcpu} MB of memory per vCPU."
             )
     if request.disk_mb is not None:
-        if request.disk_mb <= 0:
-            raise SandboxSpecError("The sandbox disk must be a positive number of MB.")
+        if not _is_whole(request.disk_mb) or request.disk_mb <= 0:
+            raise SandboxSpecError("The sandbox disk must be a whole, positive number of MB.")
         if caps.max_disk_mb is not None and request.disk_mb > caps.max_disk_mb:
             raise SandboxSpecError(f"The {caps.name} sandbox allows at most {caps.max_disk_mb} MB of disk.")
+
+
+def _is_whole(value: object) -> bool:
+    """Return True when the value is an int and not a bool.
+
+    Args:
+        value: The requested size.
+
+    Returns:
+        True for a plain integer.
+    """
+    # bool is an int subclass; True must not pass as a size of 1.
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _validate_network(spec: SandboxSpec, caps: EnvironmentCapabilities) -> None:

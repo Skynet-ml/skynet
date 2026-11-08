@@ -13,6 +13,7 @@ directory-transfer features are left out.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
@@ -22,6 +23,8 @@ from typing import ClassVar, TypeVar
 
 from .capabilities import EnvironmentCapabilities, SandboxSpecError, network_mode, validate_spec
 from .resources import SandboxSpec
+
+logger = logging.getLogger(__name__)
 
 JOB_TAG = "skynet_job"
 
@@ -228,17 +231,22 @@ class SandboxEnvironment(ABC):
         while True:
             # Docker semantics: a probe counts by the time it starts, not when it ends.
             probe_started = time.monotonic()
-            result = await self.exec(config.command, timeout_sec=config.timeout_sec)
-            if result.ok:
-                return
+            try:
+                result = await self.exec(config.command, timeout_sec=config.timeout_sec)
+            except Exception as error:
+                # A transport error is one failed probe, not the end of the poll.
+                last_failure = f"{type(error).__name__}: {error}"
+            else:
+                if result.ok:
+                    return
+                last_failure = f"exit code {result.exit_code}: {result.stderr.strip()}"
             if probe_started - started < config.start_period_sec:
                 await asyncio.sleep(config.start_interval_sec)
                 continue
             failures += 1
             if failures >= config.retries:
                 raise HealthcheckError(
-                    f"The sandbox healthcheck failed {failures} times in a row "
-                    f"(exit code {result.exit_code}): {result.stderr.strip()[:500]}"
+                    f"The sandbox healthcheck failed {failures} times in a row ({last_failure[:500]})"
                 )
             await asyncio.sleep(config.interval_sec)
 
@@ -251,7 +259,11 @@ class SandboxEnvironment(ABC):
         try:
             await self.start()
         except BaseException:
-            await self.stop()
+            # A stop failure must not hide the start error that the caller needs.
+            try:
+                await self.stop()
+            except Exception:
+                logger.exception("The sandbox did not stop after its start failed.")
             raise
         return self
 
