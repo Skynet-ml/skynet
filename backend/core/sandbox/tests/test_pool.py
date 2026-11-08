@@ -1,0 +1,580 @@
+"""Tests for the sandbox pool, the box hooks and the live counts."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import AsyncIterator
+
+import pytest
+
+from core.sandbox import ResourceRequest, SandboxEnvironment, SandboxSpec
+from core.sandbox.errors import SandboxTransientError
+from core.sandbox.hooks import BoxEvent, BoxEventInfo, BoxHooks, BoxState, LiveCounts
+from core.sandbox.pool import BoxOutcome, BoxWork, SandboxPool
+from core.sandbox.retry import RetryPolicy
+from core.sandbox.tests.fake_provider import InMemorySandbox
+from core.sandbox.timeouts import Phase
+
+# A deadline for the waits on the pool, so a bug fails the test fast and
+# does not hang the run.
+DEADLINE = 2.0
+
+
+class _Tracker:
+    """Count the boxes that live at once and the boxes that were made."""
+
+    def __init__(self) -> None:
+        """Start with no boxes."""
+        self.live = 0
+        self.peak = 0
+        self.created = 0
+        self.boxes: list[_TrackedSandbox] = []
+
+
+class _TrackedSandbox(InMemorySandbox):
+    """Act as the in-memory sandbox and report its start and stop to a tracker."""
+
+    def __init__(self, tracker: _Tracker) -> None:
+        """Create a stopped box that reports to the tracker.
+
+        Args:
+            tracker: The tracker that counts live boxes.
+        """
+        super().__init__(SandboxSpec(lifetime_seconds=60, resources=ResourceRequest(cpus=1)))
+        self.tracker = tracker
+        tracker.created += 1
+        tracker.boxes.append(self)
+
+    async def start(self) -> None:
+        """Start the box and count it as live."""
+        await super().start()
+        self.tracker.live += 1
+        self.tracker.peak = max(self.tracker.peak, self.tracker.live)
+
+    async def stop(self) -> None:
+        """Stop the box and stop counting it, once."""
+        was_running = self.running
+        await super().stop()
+        if was_running:
+            self.tracker.live -= 1
+
+
+class _Outcomes:
+    """Collect the box outcomes."""
+
+    def __init__(self) -> None:
+        """Start with no outcomes."""
+        self.items: list[BoxOutcome[int, object]] = []
+
+    async def __call__(self, outcome: BoxOutcome[int, object]) -> None:
+        """Store one outcome.
+
+        Args:
+            outcome: The outcome of one box.
+        """
+        self.items.append(outcome)
+
+
+async def _numbers(count: int) -> AsyncIterator[int]:
+    """Yield the numbers from 0 to count - 1.
+
+    Args:
+        count: How many numbers to yield.
+
+    Yields:
+        The next number.
+    """
+    for number in range(count):
+        yield number
+
+
+async def _settle() -> None:
+    """Let every ready task run until it blocks again."""
+    for _ in range(50):
+        await asyncio.sleep(0)
+
+
+def _work(tracker: _Tracker, **steps: object) -> BoxWork[int, object]:
+    """Build box work that makes tracked boxes, with a run step that returns the candidate.
+
+    Args:
+        tracker: The tracker of the boxes.
+        **steps: Steps that replace the default ``run`` or add ``setup`` and ``score``.
+
+    Returns:
+        The box work.
+    """
+
+    async def run(env: SandboxEnvironment, candidate: int) -> int:
+        """Yield to the loop once, then return the candidate.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Returns:
+            The candidate.
+        """
+        await asyncio.sleep(0)
+        return candidate
+
+    return BoxWork(create=lambda _candidate: _TrackedSandbox(tracker), **{"run": run, **steps})  # type: ignore[arg-type]
+
+
+async def test_at_most_the_provider_limit_runs_at_once() -> None:
+    """Run 1000 candidates with limit 5: at most 5 boxes live, and every box finishes."""
+    tracker = _Tracker()
+    outcomes = _Outcomes()
+    pool = SandboxPool({"fake": 5})
+    async with asyncio.timeout(DEADLINE * 5):
+        await pool.run(_numbers(1000), _work(tracker), outcomes, workers=20)
+    assert tracker.peak == 5
+    assert tracker.live == 0
+    assert sorted(outcome.result for outcome in outcomes.items) == list(range(1000))
+    assert all(outcome.ok for outcome in outcomes.items)
+
+
+async def test_phase_pools_bound_each_phase() -> None:
+    """Keep each phase at or below its own limit, and reach the limit.
+
+    The run step is the longest, so boxes queue for the run permit and the
+    run pool fills.
+    """
+    tracker = _Tracker()
+    counts = LiveCounts()
+    peaks: dict[BoxState, int] = dict.fromkeys(BoxState, 0)
+
+    async def record(info: BoxEventInfo) -> None:
+        """Update the counts, then record the peak of each state.
+
+        Args:
+            info: The box event.
+        """
+        await counts(info)
+        for state, count in counts.snapshot().items():
+            peaks[state] = max(peaks[state], count)
+
+    def step(turns: int) -> object:
+        """Build a step that yields to the loop a set number of times.
+
+        Args:
+            turns: How many times the step yields.
+
+        Returns:
+            The step.
+        """
+
+        async def phase(env: SandboxEnvironment, candidate: int) -> int:
+            """Yield to the loop, then return the candidate.
+
+            Args:
+                env: The box.
+                candidate: The candidate.
+
+            Returns:
+                The candidate.
+            """
+            for _ in range(turns):
+                await asyncio.sleep(0)
+            return candidate
+
+        return phase
+
+    hooks = BoxHooks()
+    hooks.add(record)
+    pool = SandboxPool({"fake": 8}, phase_limits={Phase.SETUP: 2, Phase.RUN: 3, Phase.SCORE: 1}, hooks=hooks)
+    outcomes = _Outcomes()
+    async with asyncio.timeout(DEADLINE):
+        await pool.run(_numbers(60), _work(tracker, setup=step(2), run=step(20), score=step(1)), outcomes)
+    assert len(outcomes.items) == 60
+    assert (peaks[BoxState.SETUP], peaks[BoxState.RUN], peaks[BoxState.SCORE]) == (2, 3, 1)
+    assert tracker.peak <= 8
+
+
+async def test_producer_holds_at_most_queue_size_candidates() -> None:
+    """Read only the candidates that the workers hold plus queue_size waiting ones."""
+    tracker = _Tracker()
+    gate = asyncio.Event()
+    read = 0
+
+    async def candidates() -> AsyncIterator[int]:
+        """Yield 100 numbers and count how many the pool read.
+
+        Yields:
+            The next number.
+        """
+        nonlocal read
+        for number in range(100):
+            read += 1
+            yield number
+
+    async def run(env: SandboxEnvironment, candidate: int) -> int:
+        """Wait for the gate, then return the candidate.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Returns:
+            The candidate.
+        """
+        await gate.wait()
+        return candidate
+
+    outcomes = _Outcomes()
+    pool = SandboxPool({"fake": 2})
+    task = asyncio.create_task(pool.run(candidates(), _work(tracker, run=run), outcomes, queue_size=5))
+    await _settle()
+    assert tracker.live == 2
+    assert read == 2 + 5
+    gate.set()
+    async with asyncio.timeout(DEADLINE):
+        await task
+    assert read == 100
+    assert len(outcomes.items) == 100
+
+
+async def test_cancel_stops_producer_and_boxes_and_releases_permits() -> None:
+    """Cancel the run: close the iterator, stop every box, then reuse every permit."""
+    tracker = _Tracker()
+    closed = asyncio.Event()
+
+    async def endless() -> AsyncIterator[int]:
+        """Yield numbers forever and note when the pool closes the iterator.
+
+        Yields:
+            The next number.
+        """
+        number = 0
+        try:
+            while True:
+                yield number
+                number += 1
+        finally:
+            closed.set()
+
+    async def hang(env: SandboxEnvironment, candidate: int) -> int:
+        """Wait forever.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Returns:
+            Nothing; the step never returns.
+        """
+        await asyncio.Event().wait()
+        return candidate
+
+    counts = LiveCounts()
+    cancelled: list[str] = []
+
+    async def note_cancel(info: BoxEventInfo) -> None:
+        """Record a cancelled box.
+
+        Args:
+            info: The box event.
+        """
+        cancelled.append(info.box_id)
+
+    hooks = BoxHooks()
+    hooks.add(counts)
+    hooks.add(note_cancel, BoxEvent.CANCELLED)
+    pool = SandboxPool({"fake": 3}, phase_limits={Phase.RUN: 3}, hooks=hooks)
+    task = asyncio.create_task(pool.run(endless(), _work(tracker, run=hang), _Outcomes()))
+    await _settle()
+    assert counts.snapshot()[BoxState.RUN] == 3
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert closed.is_set()
+    assert tracker.live == 0
+    assert len(cancelled) == 3
+    assert counts.active == 0
+
+    barrier = asyncio.Barrier(3)
+
+    async def meet(env: SandboxEnvironment, candidate: int) -> int:
+        """Wait until three boxes run at once, then return the candidate.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Returns:
+            The candidate.
+        """
+        await barrier.wait()
+        return candidate
+
+    outcomes = _Outcomes()
+    async with asyncio.timeout(DEADLINE):
+        await pool.run(_numbers(3), _work(tracker, run=meet), outcomes)
+    assert [outcome.ok for outcome in outcomes.items] == [True, True, True]
+
+
+async def test_hooks_fire_in_order_and_a_failing_hook_does_not_fail_the_box(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Send each event in order to every hook, log a failing hook, and keep the box result."""
+    events: list[BoxEvent] = []
+
+    async def broken(info: BoxEventInfo) -> None:
+        """Fail on every event.
+
+        Args:
+            info: The box event.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("hook failure")
+
+    async def record(info: BoxEventInfo) -> None:
+        """Record the event.
+
+        Args:
+            info: The box event.
+        """
+        events.append(info.event)
+
+    async def step(env: SandboxEnvironment, candidate: int) -> int:
+        """Return the candidate.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Returns:
+            The candidate.
+        """
+        return candidate
+
+    hooks = BoxHooks()
+    hooks.add(broken)
+    hooks.add(record)
+    outcomes = _Outcomes()
+    pool = SandboxPool({"fake": 1}, hooks=hooks)
+    with caplog.at_level(logging.ERROR, logger="core.sandbox.hooks"):
+        await pool.run(_numbers(1), _work(_Tracker(), setup=step, run=step, score=step), outcomes)
+    assert events == [
+        BoxEvent.STARTED,
+        BoxEvent.ENVIRONMENT_STARTED,
+        BoxEvent.SETUP_STARTED,
+        BoxEvent.SETUP_ENDED,
+        BoxEvent.RUN_STARTED,
+        BoxEvent.RUN_ENDED,
+        BoxEvent.SCORE_STARTED,
+        BoxEvent.SCORE_ENDED,
+        BoxEvent.ENDED,
+    ]
+    assert outcomes.items[0].ok
+    assert outcomes.items[0].result == 0
+    assert len([record for record in caplog.records if record.name == "core.sandbox.hooks"]) == 9
+
+
+async def test_hook_for_some_events_and_a_failing_box_ends_with_its_error() -> None:
+    """Send only the chosen events, and give ENDED the error of a failing box."""
+    seen: list[BoxEventInfo] = []
+
+    async def record(info: BoxEventInfo) -> None:
+        """Record the event.
+
+        Args:
+            info: The box event.
+        """
+        seen.append(info)
+
+    async def fail(env: SandboxEnvironment, candidate: int) -> int:
+        """Fail the run.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise ValueError("run failed")
+
+    tracker = _Tracker()
+    hooks = BoxHooks()
+    hooks.add(record, BoxEvent.RUN_ENDED, BoxEvent.ENDED)
+    outcomes = _Outcomes()
+    await SandboxPool({"fake": 2}, hooks=hooks).run(_numbers(1), _work(tracker, run=fail), outcomes)
+    assert [info.event for info in seen] == [BoxEvent.RUN_ENDED, BoxEvent.ENDED]
+    assert seen[0].phase is Phase.RUN
+    assert isinstance(seen[1].error, ValueError)
+    assert isinstance(outcomes.items[0].error, ValueError)
+    assert tracker.live == 0
+
+
+async def test_live_counts_match_the_boxes_in_each_phase() -> None:
+    """Count boxes waiting for a run permit, running and scoring, then none."""
+    tracker = _Tracker()
+    run_gate = asyncio.Event()
+    score_gate = asyncio.Event()
+
+    async def run(env: SandboxEnvironment, candidate: int) -> int:
+        """Wait for the run gate.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Returns:
+            The candidate.
+        """
+        await run_gate.wait()
+        return candidate
+
+    async def score(env: SandboxEnvironment, candidate: int) -> int:
+        """Wait for the score gate.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Returns:
+            The candidate.
+        """
+        await score_gate.wait()
+        return candidate
+
+    counts = LiveCounts()
+    hooks = BoxHooks()
+    hooks.add(counts)
+    pool = SandboxPool({"fake": 10}, phase_limits={Phase.RUN: 2}, hooks=hooks)
+    task = asyncio.create_task(pool.run(_numbers(6), _work(tracker, run=run, score=score), _Outcomes()))
+    await _settle()
+    snapshot = counts.snapshot()
+    assert (snapshot[BoxState.RUN], snapshot[BoxState.IDLE], snapshot[BoxState.SCORE]) == (2, 4, 0)
+    assert counts.active == tracker.live == 6
+    run_gate.set()
+    await _settle()
+    snapshot = counts.snapshot()
+    assert (snapshot[BoxState.RUN], snapshot[BoxState.IDLE], snapshot[BoxState.SCORE]) == (0, 0, 6)
+    score_gate.set()
+    async with asyncio.timeout(DEADLINE):
+        await task
+    assert counts.active == 0
+    assert set(counts.snapshot().values()) == {0}
+
+
+async def test_no_retry_by_default_and_retry_count_from_policy() -> None:
+    """Make one box for a transient error by default, and one more for each policy retry."""
+
+    async def flaky(env: SandboxEnvironment, candidate: int) -> int:
+        """Fail with a transient error.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Raises:
+            SandboxTransientError: Always.
+        """
+        raise SandboxTransientError("503")
+
+    tracker = _Tracker()
+    outcomes = _Outcomes()
+    await SandboxPool({"fake": 1}).run(_numbers(1), _work(tracker, run=flaky), outcomes, key=str)
+    assert tracker.created == 1
+    assert isinstance(outcomes.items[0].error, SandboxTransientError)
+
+    started: list[str] = []
+
+    async def record(info: BoxEventInfo) -> None:
+        """Record the attempt key.
+
+        Args:
+            info: The box event.
+        """
+        started.append(info.box_id)
+
+    hooks = BoxHooks()
+    hooks.add(record, BoxEvent.STARTED)
+    tracker = _Tracker()
+    policy = RetryPolicy(max_retries=1, wait_min=0, wait_max=0)
+    pool = SandboxPool({"fake": 1}, hooks=hooks, retry_policy=policy)
+    await pool.run(_numbers(1), _work(tracker, run=flaky), _Outcomes(), key=lambda n: f"cand-{n}")
+    assert tracker.created == 2
+    assert started == ["cand-0:attempt-1", "cand-0:attempt-2"]
+
+
+async def test_unknown_provider_and_stop_failure_are_box_outcomes(caplog: pytest.LogCaptureFixture) -> None:
+    """Fail a box whose provider has no limit, and keep the result when stop fails."""
+    tracker = _Tracker()
+    outcomes = _Outcomes()
+    await SandboxPool({"vercel": 1}).run(_numbers(1), _work(tracker), outcomes)
+    assert isinstance(outcomes.items[0].error, ValueError)
+    assert tracker.created == 1
+
+    def broken_stop(_candidate: int) -> SandboxEnvironment:
+        """Make a box whose stop fails.
+
+        Args:
+            _candidate: The candidate.
+
+        Returns:
+            The box.
+        """
+        box = _TrackedSandbox(tracker)
+        box.fail_stop = True
+        return box
+
+    outcomes = _Outcomes()
+    work = BoxWork(create=broken_stop, run=_work(tracker).run)
+    with caplog.at_level(logging.ERROR, logger="core.sandbox.pool"):
+        await SandboxPool({"fake": 1}).run(_numbers(1), work, outcomes)
+    assert outcomes.items[0].result == 0
+    assert any("did not stop" in record.getMessage() for record in caplog.records)
+
+
+async def test_iterator_error_stops_the_run_with_that_error() -> None:
+    """Raise the candidate iterator's own error, not an exception group."""
+
+    async def broken() -> AsyncIterator[int]:
+        """Yield one number, then fail.
+
+        Yields:
+            The number 0.
+
+        Raises:
+            KeyError: After the first number.
+        """
+        yield 0
+        raise KeyError("source")
+
+    outcomes = _Outcomes()
+    with pytest.raises(KeyError):
+        async with asyncio.timeout(DEADLINE):
+            await SandboxPool({"fake": 2}).run(broken(), _work(_Tracker()), outcomes)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"provider_limits": {}}, ValueError),
+        ({"provider_limits": {"fake": 0}}, ValueError),
+        ({"provider_limits": {"fake": True}}, TypeError),
+        ({"provider_limits": {"fake": 1}, "phase_limits": {Phase.START: 1}}, ValueError),
+        ({"provider_limits": {"fake": 1}, "phase_limits": {Phase.RUN: 1.5}}, TypeError),
+    ],
+)
+def test_invalid_limits_raise(kwargs: dict[str, object], error: type[Exception]) -> None:
+    """Reject empty, non-positive and non-int limits, and a start phase limit.
+
+    Args:
+        kwargs: The pool arguments.
+        error: The expected error class.
+    """
+    with pytest.raises(error):
+        SandboxPool(**kwargs)  # type: ignore[arg-type]
+
+
+async def test_invalid_queue_size_raises() -> None:
+    """Reject a queue size below 1 before reading any candidate."""
+    with pytest.raises(ValueError):
+        await SandboxPool({"fake": 1}).run(_numbers(1), _work(_Tracker()), _Outcomes(), queue_size=0)

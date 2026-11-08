@@ -1,0 +1,333 @@
+"""Sandbox pool: a box limit for each provider, phase pools and a bounded producer.
+
+Adapted from Harbor (harbor-framework/harbor), Apache-2.0: the global
+semaphore and the per-key pools follow ``TrialQueue`` in
+``harbor/orchestrators/queue.py``. Changes: the per-agent pools become pools
+for the setup, run and score phases; the provider permit is held from the
+box start to the box stop, and a phase permit only while the box is in that
+phase; candidates come from an async iterator with at most ``queue_size``
+of them waiting, so memory is O(C) and not O(N); and retries come from the
+SBX-2 retry policy, which never retries by default (SKY-406 D3, D10).
+
+No engine uses the pool yet. SKY-406 phase 2 moves the engines one by one.
+Limits hold inside one process; cross-pod limits come in SBX-23.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import functools
+import itertools
+import logging
+from collections.abc import AsyncIterable, Awaitable, Callable, Mapping
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
+from typing import Generic, TypeVar
+
+from .environment import SandboxEnvironment
+from .hooks import PHASE_ENDED, PHASE_STARTED, BoxEvent, BoxEventInfo, BoxHooks
+from .retry import DEFAULT_RETRY_POLICY, RetryPolicy, run_with_retry
+from .timeouts import Phase, PhaseTimeouts
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+R = TypeVar("R")
+
+POOL_PHASES = (Phase.SETUP, Phase.RUN, Phase.SCORE)
+
+_DONE = object()
+
+
+def _check_limit(name: str, value: object) -> int:
+    """Return a positive int or raise.
+
+    Args:
+        name: The limit name for the error message.
+        value: The value to check.
+
+    Returns:
+        The value.
+
+    Raises:
+        TypeError: The value is a bool or not an int.
+        ValueError: The value is below 1.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int")
+    if value < 1:
+        raise ValueError(f"{name} must be >= 1")
+    return value
+
+
+@dataclass(frozen=True)
+class BoxWork(Generic[T, R]):
+    """Say how to make the box of a candidate and what each phase does in it.
+
+    The result of a box is the return value of its last phase: ``score``
+    when it is set, else ``run``.
+    """
+
+    create: Callable[[T], SandboxEnvironment]
+    run: Callable[[SandboxEnvironment, T], Awaitable[R]]
+    setup: Callable[[SandboxEnvironment, T], Awaitable[object]] | None = None
+    score: Callable[[SandboxEnvironment, T], Awaitable[R]] | None = None
+
+
+@dataclass(frozen=True)
+class BoxOutcome(Generic[T, R]):
+    """Hold the result or the error of one candidate's box."""
+
+    key: str
+    candidate: T
+    result: R | None = None
+    error: Exception | None = None
+
+    @property
+    def ok(self) -> bool:
+        """Return True when the box finished without an error."""
+        return self.error is None
+
+
+class SandboxPool:
+    """Run candidates in boxes under a box limit for each provider and phase limits.
+
+    Make one pool for each process and share it, so that every engine
+    counts against the same limits.
+    """
+
+    def __init__(
+        self,
+        provider_limits: Mapping[str, int],
+        *,
+        phase_limits: Mapping[Phase, int] | None = None,
+        hooks: BoxHooks | None = None,
+        retry_policy: RetryPolicy = DEFAULT_RETRY_POLICY,
+        timeouts: PhaseTimeouts | None = None,
+    ) -> None:
+        """Create the provider and phase semaphores.
+
+        Args:
+            provider_limits: The most boxes that can live at once, keyed by
+                the provider's capability name.
+            phase_limits: The most boxes that can be in a phase at once. A
+                phase with no limit is bound only by the provider limit.
+            hooks: The hooks that receive each box event.
+            retry_policy: The retry policy for one box. The default never retries.
+            timeouts: The phase timeouts, or None for no timeouts.
+
+        Raises:
+            TypeError: A limit is not an int.
+            ValueError: A limit is below 1, no provider has a limit, or a
+                phase limit names a phase other than setup, run or score.
+        """
+        if not provider_limits:
+            raise ValueError("provider_limits must name at least one provider")
+        self._provider_slots = {
+            name: asyncio.Semaphore(_check_limit(f"limit of {name}", limit)) for name, limit in provider_limits.items()
+        }
+        self._max_provider_limit = max(provider_limits.values())
+        self._phase_slots: dict[Phase, asyncio.Semaphore] = {}
+        for phase, limit in (phase_limits or {}).items():
+            phase = Phase(phase)
+            if phase not in POOL_PHASES:
+                raise ValueError(f"phase limits apply to setup, run and score, not {phase}")
+            self._phase_slots[phase] = asyncio.Semaphore(_check_limit(f"limit of {phase}", limit))
+        self.hooks = hooks if hooks is not None else BoxHooks()
+        self.retry_policy = retry_policy
+        self.timeouts = timeouts
+        self._ids = itertools.count()
+
+    async def run(
+        self,
+        candidates: AsyncIterable[T],
+        work: BoxWork[T, R],
+        on_outcome: Callable[[BoxOutcome[T, R]], Awaitable[None]],
+        *,
+        workers: int | None = None,
+        queue_size: int | None = None,
+        key: Callable[[T], str] | None = None,
+    ) -> None:
+        """Run each candidate in its own box until the candidates run out.
+
+        A box that fails gives an outcome with the error; it does not stop
+        the other boxes. A cancel stops the producer and every box, and
+        releases every permit.
+
+        Args:
+            candidates: The candidates. The pool reads them only as queue space frees.
+            work: How to make a box and what each phase does.
+            on_outcome: Receives the outcome of each box as it finishes.
+            workers: The most candidates in progress at once. The default is
+                the highest provider limit.
+            queue_size: The most candidates read but not yet taken by a
+                worker. The default is ``workers``.
+            key: Gives the operation key of a candidate. The default is a
+                key that is unique in this pool.
+
+        Raises:
+            TypeError: ``workers`` or ``queue_size`` is not an int.
+            ValueError: ``workers`` or ``queue_size`` is below 1.
+            Exception: The first error of the candidate iterator or of
+                ``on_outcome``, after the other tasks stop.
+        """
+        workers = _check_limit("workers", self._max_provider_limit if workers is None else workers)
+        queue_size = _check_limit("queue_size", workers if queue_size is None else queue_size)
+        # The producer takes a slot before it reads a candidate and a worker
+        # gives it back when it takes one, so at most queue_size candidates
+        # wait. The queue itself is unbounded so the end markers never block.
+        slots = asyncio.Semaphore(queue_size)
+        queue: asyncio.Queue[object] = asyncio.Queue()
+
+        async def produce() -> None:
+            """Read candidates into the queue, then put one end marker for each worker."""
+            iterator = aiter(candidates)
+            try:
+                while True:
+                    await slots.acquire()
+                    try:
+                        candidate = await anext(iterator)
+                    except StopAsyncIteration:
+                        return
+                    queue.put_nowait((key(candidate) if key else f"box-{next(self._ids)}", candidate))
+            finally:
+                aclose = getattr(iterator, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+                for _ in range(workers):
+                    queue.put_nowait(_DONE)
+
+        async def consume() -> None:
+            """Take candidates from the queue and run their boxes until the end marker."""
+            while True:
+                item = await queue.get()
+                if item is _DONE:
+                    return
+                slots.release()
+                box_key, candidate = item  # type: ignore[misc]
+                await on_outcome(await self._box(box_key, candidate, work))
+
+        try:
+            async with asyncio.TaskGroup() as group:
+                group.create_task(produce())
+                for _ in range(workers):
+                    group.create_task(consume())
+        except BaseExceptionGroup as errors:
+            # Callers expect the error itself, not a group. Boxes catch their
+            # own errors, so the group holds the producer or callback error.
+            raise errors.exceptions[0] from None
+
+    async def _box(self, box_key: str, candidate: T, work: BoxWork[T, R]) -> BoxOutcome[T, R]:
+        """Run one candidate's box under the retry policy.
+
+        Args:
+            box_key: The candidate's operation key.
+            candidate: The candidate.
+            work: How to make the box and what each phase does.
+
+        Returns:
+            The outcome with the result, or with the error of the last attempt.
+        """
+        attempt = functools.partial(self._attempt, candidate=candidate, work=work)
+        try:
+            result = await run_with_retry(attempt, box_key, self.retry_policy)
+        except Exception as exc:
+            return BoxOutcome(box_key, candidate, error=exc)
+        return BoxOutcome(box_key, candidate, result=result)
+
+    async def _attempt(self, box_id: str, *, candidate: T, work: BoxWork[T, R]) -> R:
+        """Run one attempt: make and start a box, run its phases, then stop it.
+
+        Args:
+            box_id: The attempt's operation key.
+            candidate: The candidate.
+            work: How to make the box and what each phase does.
+
+        Returns:
+            The return value of the last phase.
+
+        Raises:
+            ValueError: The box's provider has no limit in this pool.
+            Exception: The error of the start or of a phase.
+        """
+        await self.hooks.emit(BoxEventInfo(BoxEvent.STARTED, box_id))
+        try:
+            env = work.create(candidate)
+            provider = env.capabilities.name
+            slot = self._provider_slots.get(provider)
+            if slot is None:
+                raise ValueError(f"the pool has no box limit for provider {provider!r}")
+            async with slot:
+                try:
+                    async with self._timeout(Phase.START):
+                        await env.start()
+                    await self.hooks.emit(BoxEventInfo(BoxEvent.ENVIRONMENT_STARTED, box_id))
+                    if work.setup is not None:
+                        await self._phase(Phase.SETUP, work.setup, env, candidate, box_id)
+                    result = await self._phase(Phase.RUN, work.run, env, candidate, box_id)
+                    if work.score is not None:
+                        result = await self._phase(Phase.SCORE, work.score, env, candidate, box_id)
+                finally:
+                    await self._stop(env, box_id)
+        except asyncio.CancelledError:
+            await self.hooks.emit(BoxEventInfo(BoxEvent.CANCELLED, box_id))
+            raise
+        except Exception as exc:
+            await self.hooks.emit(BoxEventInfo(BoxEvent.ENDED, box_id, error=exc))
+            raise
+        await self.hooks.emit(BoxEventInfo(BoxEvent.ENDED, box_id))
+        return result
+
+    async def _phase(
+        self,
+        phase: Phase,
+        step: Callable[[SandboxEnvironment, T], Awaitable[R]],
+        env: SandboxEnvironment,
+        candidate: T,
+        box_id: str,
+    ) -> R:
+        """Run one phase under its phase permit and timeout.
+
+        Args:
+            phase: The phase.
+            step: The phase's work.
+            env: The running box.
+            candidate: The candidate.
+            box_id: The attempt's operation key.
+
+        Returns:
+            The step's return value.
+        """
+        slot = self._phase_slots.get(phase)
+        permit: AbstractAsyncContextManager[object] = slot if slot is not None else contextlib.nullcontext()
+        async with permit:
+            await self.hooks.emit(BoxEventInfo(PHASE_STARTED[phase], box_id, phase=phase))
+            try:
+                async with self._timeout(phase):
+                    return await step(env, candidate)
+            finally:
+                await self.hooks.emit(BoxEventInfo(PHASE_ENDED[phase], box_id, phase=phase))
+
+    def _timeout(self, phase: Phase) -> AbstractAsyncContextManager[None]:
+        """Return the phase timeout, or no timeout when the pool has none.
+
+        Args:
+            phase: The phase.
+
+        Returns:
+            An async context manager that limits the body's time.
+        """
+        return self.timeouts.limit(phase) if self.timeouts is not None else contextlib.nullcontext()
+
+    async def _stop(self, env: SandboxEnvironment, box_id: str) -> None:
+        """Stop a box; log a stop that fails so that the box keeps its own outcome.
+
+        Args:
+            env: The box.
+            box_id: The attempt's operation key.
+        """
+        try:
+            await env.stop()
+        except Exception:
+            logger.exception("Sandbox box %s did not stop", box_id)
