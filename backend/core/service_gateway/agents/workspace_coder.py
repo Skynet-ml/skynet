@@ -80,10 +80,20 @@ you return.
   a command entry, a nonzero exit code is normal output, not a failure: the
   metric gets ``exit_code`` and decides what it means. For example, pytest
   exits 1 when some tests fail, so the metric reads the report and gives
-  partial credit. List in ``[metric] services`` the services only the metric
-  calls. When the candidate calls MCP servers, describe them in a standard
-  ``.mcp.json`` file and set ``mcp = "<path>"`` in ``[run]``, for example
-  ``mcp = ".mcp.json"``; give the file's contents in ``summary`` too. Give the
+  partial credit. Write each API that a role calls as ``[services.<name>]``
+  with a ``url`` and ``headers`` that hold each secret as ``${{NAME}}``, for
+  example ``url = "https://api.example.com/v1"`` and
+  ``headers = {{ Authorization = "Bearer ${{JUDGE_KEY}}" }}``. List in each
+  role's ``services`` every service the role calls, for example
+  ``services = ["judge"]`` in ``[metric]``. When the candidate calls MCP
+  servers, describe them in a standard ``.mcp.json`` file and set
+  ``mcp = "<path>"`` in ``[run]``, for example ``mcp = ".mcp.json"``; give the
+  file's contents in ``summary`` too. Only http servers with a ``url`` are
+  supported now, for example ``"maps": {{"url": "https://mapstools.googleapis.com/mcp"}}``.
+  Put placeholders such as ``${{MAPS_KEY}}`` only in ``headers``. Never write a secret value
+  into any file, even when the user pastes one; write the placeholder and tell
+  the user to add the secret to the run. Name every secret the run needs in
+  ``summary``, so the user can add it before the run. Give the
   whole ``[run]`` section in ``summary``, so the setup assistant shows it to
   the user. With no ``[run]``, nothing runs and the metric judges only the
   checkout.

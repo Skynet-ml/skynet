@@ -13,18 +13,18 @@ from __future__ import annotations
 import posixpath
 import tarfile
 import tomllib
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from ..billing.env_connectors import CONNECTORS
+from ..billing.env_connectors import CONNECTORS, MANAGED_BINDING, host_allowed, managed_key_host
 from ..exceptions import ServiceError
 from ..i18n_en import t_en
 from ..i18n_keys import I18nKey
 from ..service_gateway.optimization.blackbox.repo_constraints import (
     RepoConstraints,
-    parse_constraints,
+    read_constraints,
     read_constraints_file,
 )
 from ..service_gateway.optimization.blackbox.repo_tree import inside
@@ -81,36 +81,150 @@ def sandbox_place(local_mode: bool) -> Place:
     return "local" if local_mode else "cloud"
 
 
-def check_repository(archive: Path, secret_names: Collection[str], *, place: Place) -> list[GateFailure]:
+def check_repository(
+    archive: Path,
+    secret_names: Collection[str],
+    *,
+    place: Place,
+    bindings: Mapping[str, str] | None = None,
+    allowed_hosts: Mapping[str, Collection[str]] | None = None,
+) -> list[GateFailure]:
     """List every reason the repository's ``optimize.toml`` stops this run.
+
+    The role MCP files are read from the same snapshot as the toml (E49).
 
     Args:
         archive: The packed tree that ``stage_repository`` fetched.
         secret_names: Names of the secrets this run has; never values.
         place: Where the run's sandbox runs.
+        bindings: Each ``${NAME}``'s binding, ``user`` or ``managed`` (E50);
+            a name it does not hold binds to the user's secret.
+        allowed_hosts: Each user secret's ``allowed_hosts`` (E52); a name it
+            does not hold may go to no host.
 
     Returns:
         The failures, in file order. An empty list means the run may start.
+
+    Raises:
+        ConstraintsError: When the file or a role's MCP file is invalid.
     """
     raw = read_constraints_file(archive)
-    if raw is None:
+    constraints = read_constraints(archive) if raw is not None else None
+    if raw is None or constraints is None:
         return []
-    constraints = parse_constraints(raw)
     specific = _specific_failures(constraints, place)
     failures = [
         specific.get(key) or _failure(key, place, _UNENFORCED_CODE[place], key=key)
         for kind, key in _set_keys(raw, constraints.targets, constraints.services)
         if key in specific or kind not in ENFORCED[place]
     ]
-    for service, spec in constraints.services.items():
-        failures += [
-            _failure(
-                f"[services.{service}] secrets", place, I18nKey.REPO_GATE_MISSING_SECRET, service=service, secret=name
+    return failures + _secret_failures(constraints, secret_names, bindings or {}, allowed_hosts or {}, place)
+
+
+def _secret_failures(
+    constraints: RepoConstraints,
+    secret_names: Collection[str],
+    bindings: Mapping[str, str],
+    allowed_hosts: Mapping[str, Collection[str]],
+    place: Place,
+) -> list[GateFailure]:
+    """List each ``${NAME}`` that cannot be filled at run start (E50, E52, E53).
+
+    A user-bound name needs a secret in the run, and the host that receives
+    it must be on that secret's ``allowed_hosts``. A managed name needs a host
+    in the connector catalog for which Skynet holds a key. Every MCP server
+    is http now (E64), so every name has a host.
+
+    Args:
+        constraints: The file with each role's MCP servers filled.
+        secret_names: Names of the secrets this run has; never values.
+        bindings: Each name's binding; a missing name means ``user``.
+        allowed_hosts: Each user secret's allowed hosts; a missing name allows none.
+        place: Where the run's sandbox runs.
+
+    Returns:
+        One failure per name that cannot be filled, in file order.
+    """
+    uses: list[tuple[str, str, str, str | None]] = [
+        (name, f"[services.{service}]", service, None)
+        for service, spec in constraints.services.items()
+        for name in spec.secrets
+    ]
+    uses += [
+        (name, f"{label} mcp", server.name, role.mcp or "-")
+        for label, role in constraints.mcp_roles.items()
+        for server in role.mcp_servers
+        for name in server.secrets
+    ]
+    hosts = constraints.secret_hosts
+    failures: list[GateFailure] = []
+    seen: set[str] = set()
+    for name, setting, owner, mcp_path in uses:
+        if name in seen:
+            continue
+        seen.add(name)
+        if bindings.get(name) != MANAGED_BINDING:
+            if name in secret_names:
+                failure = _host_failure(name, hosts.get(name, ""), allowed_hosts.get(name, ()), setting, place)
+                if failure is not None:
+                    failures.append(failure)
+                continue
+            if mcp_path is None:
+                failure = _failure(
+                    f"{setting} secrets", place, I18nKey.REPO_GATE_MISSING_SECRET, service=owner, secret=name
+                )
+            else:
+                failure = _failure(
+                    f"{setting} secrets",
+                    place,
+                    I18nKey.REPO_GATE_MISSING_MCP_SECRET,
+                    server=owner,
+                    path=mcp_path,
+                    secret=name,
+                )
+            failures.append(failure)
+            continue
+        host = hosts.get(name, "")
+        if not managed_key_host(host):
+            known = ", ".join(key for key in CONNECTORS if managed_key_host(key))
+            failures.append(
+                _failure(
+                    f"{setting} secrets",
+                    place,
+                    I18nKey.REPO_GATE_MANAGED_SECRET_UNAVAILABLE,
+                    secret=name,
+                    host=host,
+                    known=known or "-",
+                )
             )
-            for name in spec.secrets
-            if name not in secret_names
-        ]
     return failures
+
+
+def _host_failure(name: str, host: str, allowed: Collection[str], setting: str, place: Place) -> GateFailure | None:
+    """Refuse a user secret that goes to a host its ``allowed_hosts`` does not list (E52).
+
+    Args:
+        name: The secret's name.
+        host: The one host that receives the secret.
+        allowed: The secret's allowed hosts.
+        setting: The ``optimize.toml`` setting that uses the secret.
+        place: Where the run's sandbox runs.
+
+    Returns:
+        The failure, or ``None`` when the host is allowed.
+    """
+    if host_allowed(host, allowed):
+        return None
+    if not allowed:
+        return _failure(f"{setting} secrets", place, I18nKey.REPO_GATE_SECRET_HOST_UNLISTED, secret=name, host=host)
+    return _failure(
+        f"{setting} secrets",
+        place,
+        I18nKey.REPO_GATE_SECRET_HOST_NOT_ALLOWED,
+        secret=name,
+        host=host,
+        allowed=", ".join(allowed),
+    )
 
 
 def check_hidden(
@@ -177,7 +291,7 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     """List the environment settings the file writes, as ``(kind, label)`` pairs.
 
     Presence is read from the file, not the parsed values: a written empty list
-    (``tools = []``) means "none", which differs from the default an absent key
+    (``services = []``) means "none", which differs from the default an absent key
     gives, and a written default (``exploits = ".optimize/exploits"``) still
     asks for a folder to be hidden. ``[proposer] illegal`` is not listed: the
     judges enforce it in every place. Every ``[run]`` key and the ``[metric]``
@@ -191,11 +305,11 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
         services: Names of the file's ``[services.<name>]`` declarations.
 
     Returns:
-        Each setting's kind, for example ``"proposer.tools"``, and its label, for example ``"[proposer] tools"``.
+        Each setting's kind, for example ``"proposer.mcp"``, and its label, for example ``"[proposer] mcp"``.
     """
     document: dict[str, Any] = tomllib.loads(raw.decode("utf-8"))
     proposer, metric, run = document.get("proposer", {}), document.get("metric", {}), document.get("run", {})
-    keys = [(f"proposer.{key}", f"[proposer] {key}") for key in ("tools", "network", "services") if key in proposer]
+    keys = [(f"proposer.{key}", f"[proposer] {key}") for key in ("mcp", "network", "services") if key in proposer]
     keys += [("target", f"[target.{name}]") for name in targets]
     keys += [("services", f"[services.{name}]") for name in services]
     keys += [(f"run.{key}", f"[run] {key}") for key in ("entry", "timeout", "mcp", "services", "illegal") if key in run]
@@ -207,7 +321,6 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
 def _specific_failures(constraints: RepoConstraints, place: Place) -> dict[str, GateFailure]:
     """Find the settings that fail for a reason of their own, whatever ``ENFORCED`` holds.
 
-    A ``[services.<name>]`` name must be a connector in the catalog (SKY-354).
     The proposer gets no allowed hosts until the protected broker can give a
     guest box an allowlist, so a non-empty ``[proposer] network`` fails even
     when the place enforces the key.
@@ -227,12 +340,6 @@ def _specific_failures(constraints: RepoConstraints, place: Place) -> dict[str, 
             I18nKey.REPO_GATE_PROPOSER_HOSTS_UNSUPPORTED,
             hosts=", ".join(constraints.proposer.network),
         )
-    for name in constraints.services:
-        if name not in CONNECTORS:
-            label = f"[services.{name}]"
-            found[label] = _failure(
-                label, place, I18nKey.REPO_GATE_UNKNOWN_CONNECTOR, service=name, known=", ".join(CONNECTORS)
-            )
     return found
 
 

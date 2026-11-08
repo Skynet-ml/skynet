@@ -530,6 +530,7 @@ def test_create_keeps_the_repository_target_and_budget() -> None:
             "saved_secret_id": "saved-1",
             "credential_ref": None,
             "credential_revision": None,
+            "allowed_hosts": [],
         }
     ]
     with Session(engine) as session:
