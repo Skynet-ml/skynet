@@ -35,7 +35,8 @@ The remote MCP server of a preview is at
 ## Keep them able to run an optimization
 
 The merger has to sign up and finish a real run in each `*-pr-<n>`
-environment. Five things broke that once; keep them true:
+environment. Use a fresh check account from the `skynet-test-accounts` skill,
+and delete it after the run. Five things broke that once; keep them true:
 
 - **The proxy knows the backend's key.** Previews share the `staging`
   `litellm`. If its database loses the virtual key in `LITELLM_PROXY_API_KEY`,
