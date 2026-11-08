@@ -88,6 +88,13 @@ dependencies = [
     # Browser web push (VAPID) for the Chrome notification channel
     # (core.notifications.channels.ChromeChannel).
     "pywebpush>=2.0",
+    # core.sandbox retry backoff (SKY-408). It came in only through dspy; a
+    # direct dependency keeps it if dspy drops it.
+    "tenacity>=9.1",
+    # No core.sandbox module imports anyio yet. It stays direct for a later
+    # sync bridge into the async sandbox interface, and it came in only
+    # through httpx.
+    "anyio>=4.14",
 ]
 
 [project.optional-dependencies]
