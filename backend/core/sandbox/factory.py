@@ -45,6 +45,7 @@ PROVIDERS: dict[str, ProviderEntry] = {
     "modal": ProviderEntry("core.sandbox.providers.modal", "ModalEnvironment", "modal", False),
     "runloop": ProviderEntry("core.sandbox.providers.runloop", "RunloopEnvironment", "runloop", False),
     "mosaic": ProviderEntry("core.sandbox.providers.mosaic", "MosaicEnvironment", "mosaic", False),
+    "sbx": ProviderEntry("core.sandbox.providers.sbx", "SbxEnvironment", "sbx", False),
     "langsmith": ProviderEntry("core.sandbox.providers.langsmith", "LangSmithEnvironment", "langsmith", False),
     "kernel": ProviderEntry("core.sandbox.providers.kernel", "KernelEnvironment", "kernel", False),
     "apple_container": ProviderEntry(
@@ -52,6 +53,7 @@ PROVIDERS: dict[str, ProviderEntry] = {
     ),
     "podman": ProviderEntry("core.sandbox.providers.podman", "PodmanEnvironment", None, False),
     "kata": ProviderEntry("core.sandbox.providers.kata", "KataEnvironment", None, False),
+    "sail": ProviderEntry("core.sandbox.providers.sail", "SailEnvironment", "sail", False),
     "singularity": ProviderEntry("core.sandbox.providers.singularity", "SingularityEnvironment", None, False),
     "openshift": ProviderEntry("core.sandbox.providers.openshift", "OpenshiftEnvironment", None, False),
 }
