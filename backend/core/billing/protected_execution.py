@@ -18,6 +18,8 @@ from ..service_gateway.optimization.blackbox.sandbox import (
     sandbox_unavailable_reason,
 )
 from ..service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
+from ..storage.run_call_store import PostgresRunCallStore
+from ..worker.scoped_relay import CallRecorder
 from .model_gateway import ModelGateway
 from .model_mailbox import ModelMailbox
 from .operation_pricing import UnpricedOperationError
@@ -128,6 +130,27 @@ def runtime_cost_profile(settings: Settings, workflow: str, runtime: str) -> dic
         "maximum_lifetime_seconds": lifetime,
         "vcpus": 2,
     }
+
+
+def run_call_recorder(gateway: ModelGateway, owner_id: str) -> CallRecorder | None:
+    """Return the recorder that stores each relay call of one optimization run.
+
+    Args:
+        gateway: Generation-fenced model and spend authority of the run.
+        owner_id: The job id; only the run phase uses the job id as owner.
+
+    Returns:
+        A recorder for the run with no candidate or role yet, or None for
+        setup and interaction phases, which have no run record.
+    """
+    if gateway.runtime.phase != "run":
+        return None
+    # The worker builds the gateway from the job store's engine, and engine.py
+    # passes no store here, so the run-call store reuses the ledger's engine.
+    engine = getattr(gateway.runtime.service, "_engine", None)
+    if engine is None:
+        return None
+    return CallRecorder(PostgresRunCallStore(engine), owner_id, "", "")
 
 
 def bind_protected_sandbox(

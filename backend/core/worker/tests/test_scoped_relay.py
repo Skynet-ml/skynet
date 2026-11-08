@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 
+from core.billing.protected_execution import run_call_recorder
 from core.service_gateway.optimization.blackbox.repo_scorer import SETUP_ALLOWANCE_SECONDS
+from core.storage.run_call_store import PostgresRunCallStore
 from core.worker import scoped_relay
 
 _ROUTE = {"url": "http://127.0.0.1:9000/v1", "token": "evaluator"}
@@ -159,3 +162,33 @@ def test_recorder_store_failure_never_fails_the_call(caplog: pytest.LogCaptureFi
     recorder.record(recorder.start(), kind="host", target="api.example", status="ok", secrets=["key"])
     assert "Could not record a host call" in caplog.text
     assert "database is down" not in caplog.text
+
+
+def _gateway(phase: str, engine: object | None) -> Any:
+    """Build a gateway stand-in with one budget phase and ledger engine.
+
+    Args:
+        phase: Budget attribution phase.
+        engine: Ledger engine, or None when the service has none.
+
+    Returns:
+        An object with the ``runtime.phase`` and ``runtime.service`` fields.
+    """
+    return SimpleNamespace(runtime=SimpleNamespace(phase=phase, service=SimpleNamespace(_engine=engine)))
+
+
+def test_run_phase_records_into_the_ledger_engine_for_the_job() -> None:
+    """Bind the run recorder to the job id and the ledger's engine."""
+    engine = object()
+    recorder = run_call_recorder(_gateway("run", engine), "job-7")
+
+    assert recorder is not None
+    assert isinstance(recorder.sink, PostgresRunCallStore)
+    assert recorder.sink._engine is engine
+    assert (recorder.optimization_id, recorder.candidate_id, recorder.role) == ("job-7", "", "")
+
+
+@pytest.mark.parametrize(("phase", "engine"), [("setup", object()), ("run", None)])
+def test_no_run_recorder_outside_a_run_or_without_an_engine(phase: str, engine: object | None) -> None:
+    """Return no recorder for setup work or a service with no engine."""
+    assert run_call_recorder(_gateway(phase, engine), "job-7") is None
