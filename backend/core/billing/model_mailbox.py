@@ -156,9 +156,11 @@ class ModelMailbox:
                             if on_output is not None:
                                 on_output(stream, line + "\n")
 
-            # A login shell reads ~/.bash_profile or ~/.profile, which a version can write (E38).
+            # A version can write ~/.bash_profile, ~/.profile or a .pth file in user
+            # site-packages under $HOME. A login shell runs the first two, and a
+            # python3 without -I runs the .pth (E38). The proxy needs only the stdlib.
             wrapped = (
-                f"python3 {shlex.quote(source_path)} {shlex.quote(config_path)}"
+                f"python3 -I {shlex.quote(source_path)} {shlex.quote(config_path)}"
                 f" bash --noprofile --norc -c {shlex.quote(command)}"
             )
             result = session.run(wrapped, env=env, timeout_seconds=timeout_seconds, on_output=output)

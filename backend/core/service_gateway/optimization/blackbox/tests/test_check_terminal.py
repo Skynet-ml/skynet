@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from core.billing.model_mailbox import ModelMailbox
 from core.service_gateway.optimization.blackbox import check_terminal
@@ -216,7 +222,7 @@ def test_model_mailbox_plumbing_never_reaches_the_transcript() -> None:
     """A mailbox-wrapped command shows the command it wraps, and its nonce frames are hidden."""
     nonce = "0123456789abcdef0123456789abcdef"
     wrapped = (
-        f"python3 .app-model-{nonce}/proxy.py .app-model-{nonce}/config.json "
+        f"python3 -I .app-model-{nonce}/proxy.py .app-model-{nonce}/config.json "
         "bash --noprofile --norc -c 'python3 app_workspace_harness.py --run'"
     )
     recorder = CheckTerminalRecorder()
@@ -257,3 +263,38 @@ def test_a_planted_shell_profile_never_runs_through_the_model_mailbox_wrapper() 
     finally:
         session.close()
     assert ".app-model-" not in _text(recorder)
+
+
+def test_a_planted_user_site_pth_never_runs_in_the_model_mailbox_wrapper(tmp_path: Path) -> None:
+    """The wrapper's python3 skips user site-packages, so a .pth that a version wrote there never runs (E38)."""
+    base = getattr(sys, "_base_executable", sys.executable)
+    probe = subprocess.run(
+        [base, "-c", "import site; print(site.ENABLE_USER_SITE)"], capture_output=True, text=True, check=False
+    )
+    if probe.stdout.strip() != "True":
+        pytest.skip("no interpreter with user site-packages on this host")
+    # The test venv turns user site-packages off; a box python3 has them on.
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "python3").symlink_to(base)
+    session = LocalSubprocessSession(SandboxSpec(lifetime_seconds=60))
+    try:
+        user_site = subprocess.run(
+            [base, "-c", "import site; print(site.getusersitepackages())"],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "HOME": str(session.path)},
+        ).stdout.strip()
+        assert user_site.startswith(str(session.path))
+        Path(user_site).mkdir(parents=True)
+        marker = session.path / "pth-ran"
+        (Path(user_site) / "plant.pth").write_text(f"import pathlib; pathlib.Path({str(marker)!r}).touch()\n")
+
+        path = os.pathsep.join([str(shim), "/usr/bin", "/bin"])
+        result = ModelMailbox(lambda *args: None).run(session, "printf ok", env={"PATH": path})
+
+        assert result.stdout == "ok"
+        assert not marker.exists()
+    finally:
+        session.close()
