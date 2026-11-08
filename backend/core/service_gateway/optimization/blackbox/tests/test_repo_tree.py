@@ -6,6 +6,7 @@ import base64
 import io
 import subprocess
 import tarfile
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -397,6 +398,38 @@ def test_linked_hidden_paths_matches_case_variants_only_on_a_disk_that_ignores_c
     archive = _linked_tree(tmp_path / "tree.tgz", {"Scoring": (tarfile.SYMTYPE, "real")})
 
     assert linked_hidden_paths(archive, ["scoring"]) == linked
+
+
+@pytest.mark.parametrize("ignore_case", [True, False])
+@pytest.mark.parametrize(("hidden_form", "file_form"), [("NFC", "NFD"), ("NFD", "NFC")])
+def test_strip_archive_drops_a_name_in_another_unicode_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ignore_case: bool, hidden_form: str, file_form: str
+) -> None:
+    """macOS opens ``café`` in NFC and NFD form as one file, so the strip drops both forms (SKY-446)."""
+    monkeypatch.setattr(repo_tree, "case_insensitive", lambda directory: ignore_case)
+    archive = tmp_path / "tree.tgz"
+    with tarfile.open(archive, "w:gz") as packed:
+        for name in (unicodedata.normalize(file_form, "eval/café.py"), "src/app.py"):
+            info = tarfile.TarInfo(name)
+            info.size = 1
+            packed.addfile(info, io.BytesIO(b"x"))
+
+    hidden = [unicodedata.normalize(hidden_form, "eval/café.py")]
+    with tarfile.open(strip_archive(archive, hidden, tmp_path / "agent.tgz")) as packed:
+        names = packed.getnames()
+
+    assert names == ["src/app.py"]
+
+
+@pytest.mark.parametrize(("hidden_form", "link_form"), [("NFC", "NFD"), ("NFD", "NFC")])
+def test_linked_hidden_paths_matches_a_link_in_another_unicode_form(
+    tmp_path: Path, hidden_form: str, link_form: str
+) -> None:
+    """A link named ``café`` in one form is the hidden ``café`` in the other form."""
+    archive = _linked_tree(tmp_path / "tree.tgz", {unicodedata.normalize(link_form, "café"): (tarfile.SYMTYPE, "real")})
+    hidden = unicodedata.normalize(hidden_form, "café")
+
+    assert linked_hidden_paths(archive, [hidden]) == [hidden]
 
 
 def test_drop_paths_removes_the_sections_that_touch_a_hidden_path() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import tarfile
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -11,9 +12,14 @@ import pytest
 from core.billing import env_connectors
 from core.i18n import t_locale
 from core.i18n_keys import I18nKey
-from core.service_gateway.optimization.blackbox.repo_constraints import CONSTRAINTS_FILE, ConstraintsError
+from core.service_gateway.optimization.blackbox.repo_constraints import (
+    CONSTRAINTS_FILE,
+    ConstraintsError,
+    parse_constraints,
+)
 from core.worker import repo_gate
 from core.worker.repo_gate import GateFailure, RepoGateError, check_hidden, check_repository, sandbox_place
+from core.worker.repo_staging import hidden_path_labels, hidden_repo_paths
 
 _CLEAN = b"""
 version = 1
@@ -519,11 +525,141 @@ def test_a_missing_hidden_path_names_its_setting(tmp_path: Path) -> None:
     (tmp_path / "agent").mkdir()
     agent = _archive(tmp_path / "agent", {"src/app.py": b"x\n"})
 
-    [failure] = check_hidden(
+    failures = check_hidden(
         original, agent, ["data/case.jsonl"], place="local", labels={"data/case.jsonl": "[data] cases"}
     )
 
-    assert failure.params["key"] == "[data] cases: data/case.jsonl"
+    assert [(failure.key, failure.params["key"]) for failure in failures] == [
+        ("[data] cases", "[data] cases: data/case.jsonl")
+    ]
+
+
+_LABELLED_TOML = b"""
+[metric]
+files = ["eval"]
+illegal = "rules/metric.md"
+reference = "ref"
+mcp = "tools/.mcp.json"
+
+[data]
+cases = "data/cases.jsonl"
+"""
+
+
+def test_hidden_path_labels_names_the_setting_of_every_hidden_path() -> None:
+    """Each scoring-side path maps to the ``optimize.toml`` setting that hides it (SKY-446)."""
+    constraints = parse_constraints(_LABELLED_TOML)
+
+    assert hidden_path_labels(constraints) == {
+        CONSTRAINTS_FILE: CONSTRAINTS_FILE,
+        "eval": "[metric] files",
+        ".optimize/exploits": "[metric] exploits",
+        "ref": "[metric] reference",
+        "data/cases.jsonl": "[data] cases",
+        "rules/metric.md": "[metric] illegal",
+        "tools/.mcp.json": "[metric] mcp",
+    }
+    assert hidden_path_labels(None) == {".optimize/exploits": "[metric] exploits"}
+
+
+def test_a_staged_leak_carries_the_label_from_hidden_path_labels(tmp_path: Path) -> None:
+    """The labels ``stage_repository`` passes name each leaked file's own setting."""
+    constraints = parse_constraints(_LABELLED_TOML)
+    files = {
+        CONSTRAINTS_FILE: _LABELLED_TOML,
+        "eval/score.py": b"s\n",
+        "tools/.mcp.json": b"{}",
+        "ref": b"r\n",
+        "data/cases.jsonl": b"{}\n",
+        "rules/metric.md": b"- m\n",
+        "src/app.py": b"x\n",
+    }
+    original = _archive(tmp_path, files)
+    (tmp_path / "agent").mkdir()
+    agent = _archive(tmp_path / "agent", files)
+
+    failures = check_hidden(
+        original,
+        agent,
+        hidden_repo_paths(constraints),
+        place="cloud",
+        optional_paths=[".optimize/exploits"],
+        labels=hidden_path_labels(constraints),
+    )
+
+    assert sorted(failure.params["key"] for failure in failures) == [
+        "[data] cases: data/cases.jsonl",
+        "[metric] files: eval/score.py",
+        "[metric] illegal: rules/metric.md",
+        "[metric] mcp: tools/.mcp.json",
+        "[metric] reference: ref",
+        f"{CONSTRAINTS_FILE}: {CONSTRAINTS_FILE}",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("visible", "hidden"),
+    [
+        (".mcp.json", ("optimize.toml", ".optimize/exploits")),
+        (".MCP.json", ("optimize.toml", ".optimize/exploits", ".mcp.json")),
+    ],
+    ids=["exact-case", "case-variant"],
+)
+def test_only_the_exact_case_of_a_visible_role_path_stays_visible(visible: str, hidden: tuple[str, ...]) -> None:
+    """A ``[run] mcp`` in another case does not exempt the ``[metric] mcp`` file, so it stays hidden (SKY-446)."""
+    constraints = parse_constraints(
+        f'[run]\nentry = "src/app.py:main"\nmcp = "{visible}"\n\n[metric]\nmcp = ".mcp.json"\n'.encode()
+    )
+
+    assert hidden_repo_paths(constraints) == hidden
+
+
+def test_a_case_variant_of_a_visible_role_path_is_hidden_on_a_disk_that_ignores_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On macOS, ``.MCP.json`` opens the hidden ``.mcp.json``, so the gate reports it under ``[metric] mcp``."""
+    monkeypatch.setattr(repo_gate, "case_insensitive", lambda directory: True)
+    constraints = parse_constraints(
+        b'[run]\nentry = "src/app.py:main"\nmcp = ".MCP.json"\n\n[metric]\nmcp = ".mcp.json"\n'
+    )
+    files = {".MCP.json": b"{}", "src/app.py": b"x\n"}
+    original = _archive(tmp_path, files)
+    (tmp_path / "agent").mkdir()
+    agent = _archive(tmp_path / "agent", files)
+
+    failures = check_hidden(
+        original,
+        agent,
+        hidden_repo_paths(constraints),
+        place="local",
+        optional_paths=[CONSTRAINTS_FILE, ".optimize/exploits"],
+        labels=hidden_path_labels(constraints),
+    )
+
+    assert [(failure.key, failure.params["key"]) for failure in failures] == [
+        ("[metric] mcp", "[metric] mcp: .mcp.json")
+    ]
+
+
+@pytest.mark.parametrize("ignore_case", [True, False])
+@pytest.mark.parametrize(("hidden_form", "file_form"), [("NFC", "NFD"), ("NFD", "NFC")])
+def test_a_name_in_another_unicode_form_counts_as_hidden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ignore_case: bool, hidden_form: str, file_form: str
+) -> None:
+    """macOS opens ``café`` in NFC and NFD form as one file, so both forms are the hidden path (SKY-446)."""
+    monkeypatch.setattr(repo_gate, "case_insensitive", lambda directory: ignore_case)
+    hidden = unicodedata.normalize(hidden_form, "eval/café.py")
+    leaked = unicodedata.normalize(file_form, "eval/café.py")
+    files = {leaked: b"s\n", "src/app.py": b"x\n"}
+    original = _archive(tmp_path, files)
+    (tmp_path / "agent").mkdir()
+    agent = _archive(tmp_path / "agent", files)
+
+    failures = check_hidden(original, agent, [hidden], place="local")
+
+    assert [failure.params["key"] for failure in failures] == [
+        f"[metric] files: {unicodedata.normalize('NFC', 'eval/café.py')}"
+    ]
 
 
 @pytest.mark.parametrize(("ignore_case", "leaks"), [(True, 1), (False, 0)])

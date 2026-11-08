@@ -13,6 +13,7 @@ import re
 import subprocess
 import tarfile
 import tempfile
+import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -316,14 +317,20 @@ def case_insensitive(directory: Path) -> bool:
 def fold_case(ignore_case: bool) -> Callable[[str], str]:
     """Return the function that makes two paths compare equal on the disk.
 
+    Every path is put in Unicode NFC form first, because macOS stores and
+    opens a name in NFC and NFD form as one file, so ``café`` in either
+    form is the same hidden path (SKY-446).
+
     Args:
         ignore_case: Whether the disk ignores case, from :func:`case_insensitive`.
 
     Returns:
-        ``str.casefold`` when the disk ignores case, else a function that
-        returns the path unchanged.
+        A function that returns the NFC form of a path, also case-folded
+        when the disk ignores case.
     """
-    return str.casefold if ignore_case else str
+    if ignore_case:
+        return lambda path: unicodedata.normalize("NFC", unicodedata.normalize("NFD", path).casefold())
+    return lambda path: unicodedata.normalize("NFC", path)
 
 
 def strip_archive(archive: Path, hidden_paths: Iterable[str], destination: Path) -> Path:
@@ -334,7 +341,8 @@ def strip_archive(archive: Path, hidden_paths: Iterable[str], destination: Path)
     A hard link to a hidden file is dropped too, because it carries the file's
     bytes under another name. On a disk that ignores case, a case variant of
     a hidden path is dropped too, because the scorer reads it under the
-    hidden name (SKY-446).
+    hidden name (SKY-446). A name in another Unicode form (NFC or NFD) is
+    dropped on every disk.
 
     Args:
         archive: Packed full tree.
