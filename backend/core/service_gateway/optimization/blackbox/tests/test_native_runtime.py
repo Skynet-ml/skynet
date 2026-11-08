@@ -1672,8 +1672,9 @@ def test_each_evaluation_runs_in_a_scope_of_the_candidate_and_case_the_child_nam
     assert seen == [{"candidate": "4", "case": "2"}, {}]
 
 
-_DATA_CASES = [{"input": {"q": "a"}, "expected": "A"}, {"input": {"q": "b"}}]
-_UPLOADED_CASES = [UnifiedCase(input={"q": "a"}, expected="A"), UnifiedCase(input={"q": "b"})]
+_EXPECTED = "EXPECTED_SENTINEL_9c41"
+_DATA_CASES = [{"input": {"q": "a"}, "expected": _EXPECTED}, {"input": {"q": "b"}}]
+_UPLOADED_CASES = [UnifiedCase(input={"q": "a"}, expected=_EXPECTED), UnifiedCase(input={"q": "b"})]
 
 
 @pytest.mark.parametrize("cases", [_DATA_CASES, _UPLOADED_CASES], ids=["data-cases", "uploaded-cases"])
@@ -1706,8 +1707,9 @@ def test_the_guest_train_set_has_no_expected_but_the_parent_scores_the_full_case
     sent = json.loads(session.files["native_input.json"])["task"]["train_set"]
     assert sent == [{"id": 0, "input": {"q": "a"}}, {"id": 1, "input": {"q": "b"}}]
     assert all("expected" not in case for case in sent)
-    assert '"A"' not in session.files["native_input.json"]
-    assert scored == [{"input": {"q": "a"}, "expected": "A"}]
+    for path, text in session.files.items():
+        assert _EXPECTED not in text, path
+    assert scored == [{"input": {"q": "a"}, "expected": _EXPECTED}]
 
 
 @pytest.mark.parametrize("example", [{"id": 2}, {"id": "0"}, {"id": True}, {"input": {"q": "a"}}, "0"])
@@ -1727,6 +1729,27 @@ def test_the_parent_refuses_an_example_that_names_no_known_case(example: Any) ->
 
     assert isinstance(mailbox.error, ServiceError)
     scorer.assert_not_called()
+
+
+def test_the_parent_restores_cases_from_the_list_it_started_with() -> None:
+    """A case list that changes after the run starts cannot make an id restore another case."""
+    cases = [{"input": {"q": "a"}, "expected": "A"}, {"input": {"q": "b"}, "expected": "B"}]
+    scored: list[Any] = []
+
+    def score(candidate: Any, example: Any) -> tuple[float, dict[str, Any]]:
+        """Record the case the parent scored."""
+        scored.append(example)
+        return 1.0, {}
+
+    mailbox = native_runtime._EvaluatorMailbox(FakeSession(), EvalServer(score, max_evals=3), "nonce", cases=cases)
+    cases.reverse()
+    cases.append({"input": {"q": "c"}, "expected": "C"})
+    request = {"id": "0" * 32, "candidate": "seed", "example": {"id": 1}}
+
+    mailbox.on_output("stdout", f"APP_NATIVE_RPC nonce {json.dumps(request)}\n")
+
+    assert mailbox.error is None
+    assert scored == [{"input": {"q": "b"}, "expected": "B"}]
 
 
 def test_the_child_names_the_candidate_and_case_of_each_request(tmp_path: Path) -> None:
