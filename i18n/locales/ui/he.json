@@ -3618,7 +3618,7 @@
   "submit.blackbox.repo.change": "החלפה",
   "submit.blackbox.repo.repos_failed": "לא הצלחנו לטעון את המאגרים שלכם.",
   "submit.blackbox.repo.repos_empty": "אין מאגרים תואמים.",
-  "submit.blackbox.repo.repos_lookup": "מחפשים את המאגר ב-GitHub…",
+  "submit.blackbox.repo.repos_lookup": "מחפשים את המאגר ב-{provider}…",
   "submit.blackbox.repo.retry": "נסו שוב",
   "submit.blackbox.repo.branch_tip": "האופטימיזציה מתחילה מה-commit האחרון בענף הזה.",
   "submit.blackbox.repo.branch_default": "ברירת מחדל",

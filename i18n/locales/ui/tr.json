@@ -475,7 +475,7 @@
   "submit.blackbox.repo.change": "Değiştir",
   "submit.blackbox.repo.repos_failed": "Depolarınız yüklenemedi.",
   "submit.blackbox.repo.repos_empty": "Eşleşen depo yok.",
-  "submit.blackbox.repo.repos_lookup": "Bu depo GitHub'da aranıyor…",
+  "submit.blackbox.repo.repos_lookup": "Bu depo {provider} üzerinde aranıyor…",
   "submit.blackbox.repo.retry": "Tekrar dene",
   "submit.blackbox.repo.branch_tip": "Çalıştırma bu dalın en son commit'inden başlar.",
   "submit.blackbox.repo.branch_default": "varsayılan",

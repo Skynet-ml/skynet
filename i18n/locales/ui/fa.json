@@ -475,7 +475,7 @@
   "submit.blackbox.repo.change": "تغییر",
   "submit.blackbox.repo.repos_failed": "بارگذاری مخزن‌های شما ممکن نشد.",
   "submit.blackbox.repo.repos_empty": "هیچ مخزنی مطابقت ندارد.",
-  "submit.blackbox.repo.repos_lookup": "در حال جست‌وجوی این مخزن در GitHub…",
+  "submit.blackbox.repo.repos_lookup": "در حال جست‌وجوی این مخزن در {provider}…",
   "submit.blackbox.repo.retry": "دوباره تلاش کنید",
   "submit.blackbox.repo.branch_tip": "اجرا از آخرین commit این شاخه شروع می‌شود.",
   "submit.blackbox.repo.branch_default": "پیش‌فرض",

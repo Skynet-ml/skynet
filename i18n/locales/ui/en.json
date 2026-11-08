@@ -3618,7 +3618,7 @@
   "submit.blackbox.repo.change": "Change",
   "submit.blackbox.repo.repos_failed": "Couldn't load your repositories.",
   "submit.blackbox.repo.repos_empty": "No repositories match.",
-  "submit.blackbox.repo.repos_lookup": "Looking for that repository on GitHub…",
+  "submit.blackbox.repo.repos_lookup": "Looking for that repository on {provider}…",
   "submit.blackbox.repo.retry": "Try again",
   "submit.blackbox.repo.branch_tip": "The optimization starts from the latest commit on this branch.",
   "submit.blackbox.repo.branch_default": "default",

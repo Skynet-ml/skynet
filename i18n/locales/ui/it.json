@@ -475,7 +475,7 @@
   "submit.blackbox.repo.change": "Cambia",
   "submit.blackbox.repo.repos_failed": "Impossibile caricare i tuoi repository.",
   "submit.blackbox.repo.repos_empty": "Nessun repository corrisponde.",
-  "submit.blackbox.repo.repos_lookup": "Ricerca del repository su GitHub…",
+  "submit.blackbox.repo.repos_lookup": "Ricerca del repository su {provider}…",
   "submit.blackbox.repo.retry": "Riprova",
   "submit.blackbox.repo.branch_tip": "L'esecuzione parte dall'ultimo commit di questo branch.",
   "submit.blackbox.repo.branch_default": "predefinito",

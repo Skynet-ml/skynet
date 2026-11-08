@@ -475,7 +475,7 @@
   "submit.blackbox.repo.change": "Changer",
   "submit.blackbox.repo.repos_failed": "Impossible de charger vos dépôts.",
   "submit.blackbox.repo.repos_empty": "Aucun dépôt ne correspond.",
-  "submit.blackbox.repo.repos_lookup": "Recherche de ce dépôt sur GitHub…",
+  "submit.blackbox.repo.repos_lookup": "Recherche de ce dépôt sur {provider}…",
   "submit.blackbox.repo.retry": "Réessayer",
   "submit.blackbox.repo.branch_tip": "L'exécution part du dernier commit de cette branche.",
   "submit.blackbox.repo.branch_default": "par défaut",

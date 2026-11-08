@@ -475,7 +475,7 @@
   "submit.blackbox.repo.change": "Ändern",
   "submit.blackbox.repo.repos_failed": "Ihre Repositories konnten nicht geladen werden.",
   "submit.blackbox.repo.repos_empty": "Keine passenden Repositories.",
-  "submit.blackbox.repo.repos_lookup": "Repository wird auf GitHub gesucht…",
+  "submit.blackbox.repo.repos_lookup": "Repository wird auf {provider} gesucht…",
   "submit.blackbox.repo.retry": "Erneut versuchen",
   "submit.blackbox.repo.branch_tip": "Der Lauf startet beim neuesten Commit dieses Branches.",
   "submit.blackbox.repo.branch_default": "Standard",

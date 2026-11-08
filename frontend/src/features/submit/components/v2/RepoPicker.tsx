@@ -8,7 +8,7 @@ import { SearchField } from "@/shared/ui/search-field";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { InlineErrorRow } from "@/shared/ui/inline-error-row";
 import { Bitbucket, GitLab } from "@/shared/ui/brand-marks";
-import { listGithubRepositories, type GithubRepository, type RepoHost } from "@/shared/lib/api";
+import { listGithubRepositories, REPO_HOST_NAMES, type GithubRepository, type RepoHost } from "@/shared/lib/api";
 import { formatRelativeTime } from "@/shared/lib/formatters";
 import { msg } from "@/shared/lib/messages";
 import { userErrorMessage } from "@/shared/lib/user-error";
@@ -18,6 +18,30 @@ import { isRepoPath } from "../../lib/wizard-v2";
 
 // Long enough that typing a whole owner/name asks the host once, not per key.
 const LOOKUP_DELAY_MS = 400;
+// A pasted web URL or ``git@host:path`` clone address. The server turns it into
+// a path, or answers ``other_repo_host`` for a self-managed server.
+const SCP_URL = /^[\w.-]+@[^:/\s]+:(.+)$/;
+
+/**
+ * The repository path in a pasted GitLab or Bitbucket URL, lower case, as the
+ * server's ``repo_path`` reads it; null when ``text`` is not a URL.
+ */
+export function pastedRepoPath(text: string, host: RepoHost): string | null {
+  if (host === "github") return null;
+  let path: string;
+  const scp = SCP_URL.exec(text);
+  if (scp) path = scp[1] ?? "";
+  else if (text.includes("://")) {
+    try {
+      path = decodeURIComponent(new URL(text).pathname);
+    } catch {
+      return null;
+    }
+  } else return null;
+  let parts = (path.split("/-/")[0] ?? "").replace(/^\/+|\/+$/g, "").split("/");
+  if (host === "bitbucket") parts = parts.slice(0, 2);
+  return parts.join("/").replace(/^\/+|\/+$/g, "").replace(/\.git$/, "").toLowerCase();
+}
 
 /** The host's logo: GitHub's icon, or the GitLab or Bitbucket mark at ``size`` pixels. */
 export function HostMark({ host, size, className }: { host: RepoHost; size: number; className?: string }) {
@@ -147,13 +171,14 @@ export function RepoPicker({
     };
   }, [attempt, host]);
 
-  const needle = search.trim().toLowerCase();
+  const pasted = pastedRepoPath(search.trim(), host);
+  const target = pasted ?? search.trim().toLowerCase();
   const matches = useMemo(
-    () => (repos ?? []).filter((repo) => repo.full_name.toLowerCase().includes(needle)),
-    [repos, needle],
+    () => (repos ?? []).filter((repo) => repo.full_name.toLowerCase().includes(target)),
+    [repos, target],
   );
-  const listed = matches.some((repo) => repo.full_name.toLowerCase() === needle);
-  const lookup = repos !== null && isRepoPath(search.trim(), host) && !listed;
+  const listed = matches.some((repo) => repo.full_name.toLowerCase() === target);
+  const lookup = repos !== null && !listed && (pasted !== null || isRepoPath(search.trim(), host));
 
   useEffect(() => {
     setOffer(null);
@@ -163,7 +188,7 @@ export function RepoPicker({
     const timer = window.setTimeout(() => {
       listGithubRepositories(search.trim(), host)
         .then((res) => {
-          const found = res.repositories.find((repo) => repo.full_name.toLowerCase() === needle);
+          const found = res.repositories.find((repo) => repo.full_name.toLowerCase() === target);
           if (!cancelled) setOffer(found ?? null);
         })
         .catch((err: unknown) => {
@@ -175,7 +200,7 @@ export function RepoPicker({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [lookup, search, needle, host]);
+  }, [lookup, search, target, host]);
 
   const current = (repos ?? []).find((repo) => repo.full_name === value.trim()) ?? null;
 
@@ -243,7 +268,7 @@ export function RepoPicker({
       ) : rows.length === 0 ? (
         <p className="rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
           {lookup
-            ? msg("submit.blackbox.repo.repos_lookup")
+            ? msg("submit.blackbox.repo.repos_lookup", { provider: REPO_HOST_NAMES[host] })
             : msg("submit.blackbox.repo.repos_empty")}
         </p>
       ) : (

@@ -475,7 +475,7 @@
   "submit.blackbox.repo.change": "تغيير",
   "submit.blackbox.repo.repos_failed": "تعذّر تحميل مستودعاتك.",
   "submit.blackbox.repo.repos_empty": "لا توجد مستودعات مطابقة.",
-  "submit.blackbox.repo.repos_lookup": "جارٍ البحث عن هذا المستودع في GitHub…",
+  "submit.blackbox.repo.repos_lookup": "جارٍ البحث عن هذا المستودع في {provider}…",
   "submit.blackbox.repo.retry": "حاول مجددًا",
   "submit.blackbox.repo.branch_tip": "يبدأ التشغيل من آخر التزام (commit) في هذا الفرع.",
   "submit.blackbox.repo.branch_default": "افتراضي",

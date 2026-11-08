@@ -475,7 +475,7 @@
   "submit.blackbox.repo.change": "Змінити",
   "submit.blackbox.repo.repos_failed": "Не вдалося завантажити ваші репозиторії.",
   "submit.blackbox.repo.repos_empty": "Немає відповідних репозиторіїв.",
-  "submit.blackbox.repo.repos_lookup": "Шукаємо цей репозиторій на GitHub…",
+  "submit.blackbox.repo.repos_lookup": "Шукаємо цей репозиторій на {provider}…",
   "submit.blackbox.repo.retry": "Спробувати ще",
   "submit.blackbox.repo.branch_tip": "Запуск починається з останнього коміту цієї гілки.",
   "submit.blackbox.repo.branch_default": "типова",

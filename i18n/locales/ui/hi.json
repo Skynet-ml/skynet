@@ -475,7 +475,7 @@
   "submit.blackbox.repo.change": "बदलें",
   "submit.blackbox.repo.repos_failed": "आपकी रिपॉज़िटरी लोड नहीं हो सकीं।",
   "submit.blackbox.repo.repos_empty": "कोई मेल खाती रिपॉज़िटरी नहीं।",
-  "submit.blackbox.repo.repos_lookup": "GitHub पर वह रिपॉज़िटरी खोजी जा रही है…",
+  "submit.blackbox.repo.repos_lookup": "{provider} पर वह रिपॉज़िटरी खोजी जा रही है…",
   "submit.blackbox.repo.retry": "फिर से कोशिश करें",
   "submit.blackbox.repo.branch_tip": "रन इस ब्रांच के नवीनतम commit से शुरू होता है।",
   "submit.blackbox.repo.branch_default": "डिफ़ॉल्ट",

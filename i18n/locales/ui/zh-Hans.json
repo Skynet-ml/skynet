@@ -475,7 +475,7 @@
   "submit.blackbox.repo.change": "更改",
   "submit.blackbox.repo.repos_failed": "无法加载你的仓库。",
   "submit.blackbox.repo.repos_empty": "没有匹配的仓库。",
-  "submit.blackbox.repo.repos_lookup": "正在 GitHub 上查找该仓库…",
+  "submit.blackbox.repo.repos_lookup": "正在 {provider} 上查找该仓库…",
   "submit.blackbox.repo.retry": "重试",
   "submit.blackbox.repo.branch_tip": "运行将从该分支的最新提交开始。",
   "submit.blackbox.repo.branch_default": "默认",

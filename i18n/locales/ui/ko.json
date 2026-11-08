@@ -475,7 +475,7 @@
   "submit.blackbox.repo.change": "변경",
   "submit.blackbox.repo.repos_failed": "저장소를 불러오지 못했습니다.",
   "submit.blackbox.repo.repos_empty": "일치하는 저장소가 없습니다.",
-  "submit.blackbox.repo.repos_lookup": "GitHub에서 저장소를 찾는 중…",
+  "submit.blackbox.repo.repos_lookup": "{provider}에서 저장소를 찾는 중…",
   "submit.blackbox.repo.retry": "다시 시도",
   "submit.blackbox.repo.branch_tip": "실행은 이 브랜치의 최신 커밋에서 시작합니다.",
   "submit.blackbox.repo.branch_default": "기본",

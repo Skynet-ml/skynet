@@ -475,7 +475,7 @@
   "submit.blackbox.repo.change": "変更",
   "submit.blackbox.repo.repos_failed": "リポジトリを読み込めませんでした。",
   "submit.blackbox.repo.repos_empty": "一致するリポジトリはありません。",
-  "submit.blackbox.repo.repos_lookup": "GitHub でリポジトリを検索しています…",
+  "submit.blackbox.repo.repos_lookup": "{provider} でリポジトリを検索しています…",
   "submit.blackbox.repo.retry": "再試行",
   "submit.blackbox.repo.branch_tip": "実行はこのブランチの最新コミットから始まります。",
   "submit.blackbox.repo.branch_default": "デフォルト",

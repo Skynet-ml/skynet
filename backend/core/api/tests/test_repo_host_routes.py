@@ -329,17 +329,39 @@ def _empty_repository(method: str, url: str, **kwargs: Any) -> httpx.Response:
     return _response(404, {"message": "404 Tree Not Found"})
 
 
+# Bitbucket's list_commits returns early with no main branch; GitLab asks the host, which answers 404.
 @pytest.mark.usefixtures("vault_key")
-@pytest.mark.parametrize("provider", ["gitlab", "bitbucket"])
-def test_repository_with_no_default_branch_is_not_a_500(provider: str) -> None:
-    """An empty repository lists no branches and a null default; its tree and commits answer below 500."""
+@pytest.mark.parametrize(
+    ("provider", "name", "commits_status", "commits_body"),
+    [
+        ("gitlab", "GitLab", 404, None),
+        ("bitbucket", "Bitbucket", 200, {"commits": []}),
+    ],
+)
+def test_repository_with_no_default_branch_is_not_a_500(
+    provider: str, name: str, commits_status: int, commits_body: dict[str, Any] | None
+) -> None:
+    """An empty repository lists no branches and a null default; its tree and commits give one fixed answer.
+
+    Args:
+        provider: The repository host.
+        name: The host's display name.
+        commits_status: The expected commits status.
+        commits_body: The expected commits body when it is not a not-found error.
+    """
     client, store = _make_client()
     _link(store, provider, timedelta(hours=1))
     with patch("core.connectors.transport.CLIENT.request", side_effect=_empty_repository):
         branches = client.get(f"/connectors/{provider}/branches", params={"repo": "team/empty"})
-        others = [client.get(f"/connectors/{provider}/{r}", params={"repo": "team/empty"}) for r in ("tree", "commits")]
+        tree = client.get(f"/connectors/{provider}/tree", params={"repo": "team/empty"})
+        commits = client.get(f"/connectors/{provider}/commits", params={"repo": "team/empty"})
     assert branches.status_code == 200, branches.text
     assert branches.json() == {"default_branch": None, "branches": []}
-    for response in others:
-        assert response.status_code < 500, response.text
-        assert response.status_code == 200 or response.json()["code"] == "connectors.not_found"
+    not_found = {"provider": name}
+    assert tree.status_code == 404, tree.text
+    assert (tree.json()["code"], tree.json()["params"]) == ("connectors.not_found", not_found)
+    assert commits.status_code == commits_status, commits.text
+    if commits_body is None:
+        assert (commits.json()["code"], commits.json()["params"]) == ("connectors.not_found", not_found)
+    else:
+        assert commits.json() == commits_body

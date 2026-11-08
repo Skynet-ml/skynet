@@ -475,7 +475,7 @@
   "submit.blackbox.repo.change": "Изменить",
   "submit.blackbox.repo.repos_failed": "Не удалось загрузить ваши репозитории.",
   "submit.blackbox.repo.repos_empty": "Нет подходящих репозиториев.",
-  "submit.blackbox.repo.repos_lookup": "Ищем этот репозиторий на GitHub…",
+  "submit.blackbox.repo.repos_lookup": "Ищем этот репозиторий на {provider}…",
   "submit.blackbox.repo.retry": "Повторить",
   "submit.blackbox.repo.branch_tip": "Запуск начинается с последнего коммита этой ветки.",
   "submit.blackbox.repo.branch_default": "по умолчанию",
