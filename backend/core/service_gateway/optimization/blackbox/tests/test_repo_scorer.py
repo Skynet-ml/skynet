@@ -1644,6 +1644,7 @@ class _Echo:
         """Start the server on a free port."""
         self.paths: list[str] = []
         self.location = "/leak"
+        self.release = threading.Event()
         echo = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -1669,6 +1670,31 @@ class _Echo:
                         self.wfile.write(part)
                         self.wfile.flush()
                         time.sleep(0.05)
+                    return
+                if self.path.endswith("/events") or self.path.endswith("/large"):
+                    # No Content-Length: an event stream ends when the connection closes.
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    if self.path.endswith("/large"):
+                        for _ in range(5):
+                            self.wfile.write(b"data: " + b"x" * (1024 * 1024) + b"\n\n")
+                        return
+                    half = len(token) // 2
+                    parts = (b'data: {"seen": "' + token[:half].encode(), token[half:].encode() + b'"}\n\n')
+                    for part in parts:
+                        self.wfile.write(part)
+                        self.wfile.flush()
+                        time.sleep(0.05)
+                    echo.release.wait(10)
+                    self.wfile.write(b"data: last\n\n")
+                    return
+                if self.path.endswith("/big"):
+                    payload = b"x" * (4 * 1024 * 1024 + 1)
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
                     return
                 if self.path.endswith("/base64"):
                     key = base64.b64encode(token.encode()).decode()
@@ -1952,6 +1978,84 @@ def test_an_mcp_server_gets_the_key_and_the_box_gets_only_the_redacted_form(echo
     assert ["X-Echo", "[REDACTED]"] in answer["headers"]
     assert "judge-secret-value" not in json.dumps(answer)
     assert echo.paths == ["/echo"]
+
+
+def _mcp_stream(relay: _StageRelay, workspace: _Workspace, echo: _Echo, first: int = 2) -> list[dict[str, Any]]:
+    """Send one MCP GET frame, wait for its first answers, release the echo's last event, then read to the end.
+
+    Args:
+        relay: The relay.
+        workspace: Records the answers.
+        echo: The upstream, which holds its last event until released.
+        first: How many answers must arrive before the release.
+
+    Returns:
+        The answer and each part, in the order they were written.
+    """
+    frame = {"id": "e" * 32, "mcp": "search", "path": "", "method": "GET", "headers": [], "body": ""}
+    relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    deadline = time.monotonic() + 10
+    while len(workspace.writes) < first and time.monotonic() < deadline:
+        time.sleep(0.01)
+    early = len(workspace.writes)
+    echo.release.set()
+    while not (workspace.writes and json.loads(workspace.writes[-1][1]).get("more") is False):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    relay.close()
+    assert early >= first
+    return [json.loads(text) for _, text in workspace.writes]
+
+
+def test_an_mcp_event_stream_passes_each_event_on_and_hides_a_key_cut_across_chunks(echo: _Echo) -> None:
+    """A GET event stream reaches the box event by event, before it ends, and the key split in two never shows."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port, "events"))
+
+    answers = _mcp_stream(relay, workspace, echo)
+
+    paths = [path for path, _ in workspace.writes]
+    assert paths == [f"calls/000001/stages/{'e' * 32}.json"] + [
+        f"calls/000001/stages/{'e' * 32}.{part}.json" for part in range(1, len(paths))
+    ]
+    assert answers[0]["status"] == 200
+    assert ["Content-Type", "text/event-stream"] in answers[0]["headers"]
+    assert all(answer["more"] for answer in answers[:-1])
+    assert answers[-1] == {"more": False}
+    body = b"".join(base64.b64decode(answer.get("body") or "") for answer in answers)
+    assert body == b'data: {"seen": "[REDACTED]"}\n\ndata: last\n\n'
+    assert "judge-secret-value" not in json.dumps(answers)
+
+
+@pytest.mark.parametrize(("endpoint", "streamed"), [("big", False), ("large", True)])
+def test_an_mcp_answer_over_4_mib_is_refused(echo: _Echo, endpoint: str, streamed: bool) -> None:
+    """The 4 MiB cap holds for an MCP answer, and for an event stream in all; the stream then ends with the error."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port, endpoint))
+    if not streamed:
+        answer = _mcp_answer(relay, workspace, "search")
+        assert answer == {"status": 502, "error": "MCP server 'search' answered with more than 4 MiB."}
+        return
+    answers = _mcp_stream(relay, workspace, echo, first=1)
+    assert answers[0]["status"] == 200
+    assert answers[-1] == {"more": False, "error": "MCP server 'search' answered with more than 4 MiB."}
+    assert sum(len(base64.b64decode(answer.get("body") or "")) for answer in answers) <= 4 * 1024 * 1024
+
+
+@pytest.mark.parametrize("path", ["//evil.example.test/x", "http://evil.example.test/x", "@evil.example.test/x"])
+def test_an_mcp_path_that_names_another_host_stays_on_the_declared_host(echo: _Echo, path: str) -> None:
+    """A guest path is joined under the declared url, so a path that names another host still goes to the judge.
+
+    The 400 "path outside its url" check in ``_request`` stays as a second guard; this join leaves no path that reaches it.
+    """
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port))
+
+    answer = _mcp_answer(relay, workspace, "search", path=path)
+
+    assert answer["status"] == 200
+    assert echo.paths == ["/echo/" + path.lstrip("/")]
+    assert "judge-secret-value" not in json.dumps(answer)
 
 
 class _CallSink:

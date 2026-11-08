@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -702,6 +703,39 @@ def test_stage_call_returns_the_output_and_raises_stage_errors(tmp_path: Path, m
     assert list(tmp_path.iterdir()) == []
 
 
+def test_stage_client_yields_each_streamed_part_and_removes_its_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An answer with ``"more": true`` is followed by ``<id>.1.json`` and on, until a part has ``"more": false``."""
+
+    class Relay(io.StringIO):
+        """Write the answer and both parts for each frame."""
+
+        def write(self, text: str) -> int:
+            """Write the streamed answer files for one frame.
+
+            Args:
+                text: One frame, on its own line.
+
+            Returns:
+                The number of characters taken.
+            """
+            identity = json.loads(text.strip().removeprefix("PFX:"))["id"]
+            (tmp_path / f"{identity}.json").write_text(json.dumps({"status": 200, "more": True}))
+            (tmp_path / f"{identity}.1.json").write_text(json.dumps({"body": "YQ==", "more": True}))
+            (tmp_path / f"{identity}.2.json").write_text(json.dumps({"more": False}))
+            return len(text)
+
+    monkeypatch.setattr(sys, "__stdout__", Relay())
+    client = runner.StageClient({"prefix": "PFX:", "response_dir": str(tmp_path), "names": []})
+    assert list(client.answers({"mcp": "search"})) == [
+        {"status": 200, "more": True},
+        {"body": "YQ==", "more": True},
+        {"more": False},
+    ]
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_stage_call_with_an_unknown_name_sends_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An unknown stage name fails at once with the run's stage names, and no frame leaves the box."""
     sent: list[dict[str, Any]] = []
@@ -771,19 +805,20 @@ def test_service_proxy_relays_each_request_through_the_parent() -> None:
             """Start with no messages."""
             self.sent: list[dict[str, Any]] = []
 
-        def exchange(self, message: dict[str, Any]) -> dict[str, Any]:
+        def answers(self, message: dict[str, Any]) -> Iterator[dict[str, Any]]:
             """Record the message and answer it.
 
             Args:
                 message: The request the proxy sends.
 
-            Returns:
+            Yields:
                 A service response, or a refusal for the second service.
             """
             self.sent.append(message)
             if message["service"] == "blocked one":
-                return {"status": 403, "error": "Service 'blocked one' is not listed for the [run] role."}
-            return {"status": 201, "headers": [["X-Upstream", "yes"]], "body": base64.b64encode(b"graded").decode()}
+                yield {"status": 403, "error": "Service 'blocked one' is not listed for the [run] role."}
+                return
+            yield {"status": 201, "headers": [["X-Upstream", "yes"]], "body": base64.b64encode(b"graded").decode()}
 
     client = Client()
     urls = runner.start_service_proxy(client, ["judge-api", "blocked one"])  # type: ignore[arg-type]
@@ -815,18 +850,18 @@ def test_service_proxy_decodes_a_chunked_body_and_sends_each_header_once() -> No
             """Start with no messages."""
             self.sent: list[dict[str, Any]] = []
 
-        def exchange(self, message: dict[str, Any]) -> dict[str, Any]:
+        def answers(self, message: dict[str, Any]) -> Iterator[dict[str, Any]]:
             """Record the message and answer it.
 
             Args:
                 message: The request the proxy sends.
 
-            Returns:
+            Yields:
                 A service response with its own Date and Server headers.
             """
             self.sent.append(message)
             headers = [["Date", "Mon, 02 Nov 2026 10:00:00 GMT"], ["Server", "judge"]]
-            return {"status": 200, "headers": headers, "body": base64.b64encode(b"ok").decode()}
+            yield {"status": 200, "headers": headers, "body": base64.b64encode(b"ok").decode()}
 
     client = Client()
     url = urllib.parse.urlsplit(runner.start_service_proxy(client, ["judge"])["SKYNET_SERVICE_JUDGE_URL"])  # type: ignore[arg-type]
@@ -847,6 +882,35 @@ def test_service_proxy_decodes_a_chunked_body_and_sends_each_header_once() -> No
     assert base64.b64decode(message["body"]) == b"hello chunked world"
 
 
+def test_mcp_proxy_passes_an_event_stream_on_part_by_part() -> None:
+    """A streamed MCP answer reaches the box as one body with no length, each part in order, and then the close."""
+
+    class Client:
+        """Answer with an event stream in two parts."""
+
+        def answers(self, message: dict[str, Any]) -> Iterator[dict[str, Any]]:
+            """Yield the head and each part the way the parent relay writes them.
+
+            Args:
+                message: The request the proxy sends.
+
+            Yields:
+                The streamed answer, then its parts.
+            """
+            headers = [["Content-Type", "text/event-stream"]]
+            yield {"status": 200, "headers": headers, "body": base64.b64encode(b"data: one\n\n").decode(), "more": True}
+            yield {"body": base64.b64encode(b"data: two\n\n").decode(), "more": True}
+            yield {"more": False}
+
+    url = runner.start_service_proxy(Client(), [], ["search"])["SKYNET_MCP_SEARCH_URL"]  # type: ignore[arg-type]
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(url) as response:
+        assert response.status == 200
+        assert response.headers["Content-Type"] == "text/event-stream"
+        assert response.headers["Content-Length"] is None
+        assert response.read() == b"data: one\n\ndata: two\n\n"
+
+
 def test_mcp_proxy_relays_each_server_and_names_the_role_mcp_file() -> None:
     """``/mcp/<name>`` becomes one ``mcp`` message, and the box's MCP variable names the role's own file (E49, E55)."""
 
@@ -857,17 +921,17 @@ def test_mcp_proxy_relays_each_server_and_names_the_role_mcp_file() -> None:
             """Start with no messages."""
             self.sent: list[dict[str, Any]] = []
 
-        def exchange(self, message: dict[str, Any]) -> dict[str, Any]:
+        def answers(self, message: dict[str, Any]) -> Iterator[dict[str, Any]]:
             """Record the message and answer it.
 
             Args:
                 message: The request the proxy sends.
 
-            Returns:
+            Yields:
                 An MCP server response.
             """
             self.sent.append(message)
-            return {
+            yield {
                 "status": 200,
                 "headers": [["Content-Type", "application/json"]],
                 "body": base64.b64encode(b"{}").decode(),

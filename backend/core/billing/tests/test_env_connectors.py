@@ -685,6 +685,120 @@ def test_relay_keeps_short_base64_text_for_a_three_character_secret() -> None:
     assert json.loads(answer) == {"echo": "[REDACTED]", "note": "azN5"}
 
 
+def _judge_relay(secret: str, send: Callable[..., bytes | Iterator[bytes]], **extra: object) -> bytes | Iterator[bytes]:
+    """Relay one call to the judge host with ``secret`` as its bearer key.
+
+    Args:
+        secret: The judge key.
+        send: Answers the filled request.
+        **extra: More ``relay_request`` arguments, such as ``recorder``.
+
+    Returns:
+        The relayed answer, whole or streamed.
+    """
+    return relay_request(
+        url="https://api.judge.example/v1",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        body=b"{}",
+        user_secrets={"JUDGE_KEY": secret},
+        bindings={},
+        secret_hosts={"JUDGE_KEY": "api.judge.example"},
+        allowed_hosts={"JUDGE_KEY": ["api.judge.example"]},
+        send=send,
+        **extra,
+    )
+
+
+def _mixed_percent(text: str) -> str:
+    """Percent-encode every byte of ``text``, with the escape case changing from byte to byte.
+
+    Args:
+        text: The text to encode.
+
+    Returns:
+        The encoded text, such as ``%6b%45%79``.
+    """
+    return "".join(f"%{byte:02x}" if index % 2 else f"%{byte:02X}" for index, byte in enumerate(text.encode()))
+
+
+def test_relay_removes_a_mixed_case_over_encoded_or_percent_encoded_base64_echo() -> None:
+    """Hide percent echoes that a list of exact forms misses: mixed-case escapes, escaped plain letters, and base64 (E56)."""
+    secret = "judge>key?part two=end"
+    raw = secret.encode()
+    standard, urlsafe = base64.b64encode(raw).decode(), base64.urlsafe_b64encode(raw).decode()
+    forms = [
+        quote(secret, safe="").replace("%3E", "%3e"),
+        _mixed_percent(secret),
+        secret.replace("j", "%6A").replace("e", "%65").replace(">", "%3e"),
+        quote_plus(secret, safe="").replace("%3F", "%3f"),
+        quote(standard, safe="").replace("%2B", "%2b").replace("%3D", "%3d"),
+        _mixed_percent(standard.rstrip("=")),
+        quote(urlsafe, safe=""),
+    ]
+    assert standard != urlsafe
+    assert "+" in standard
+    assert standard.endswith("=")
+    answer = _judge_relay(secret, lambda *_args: json.dumps({"echo": forms}).encode())
+    assert isinstance(answer, bytes)
+    assert all(form not in answer.decode() for form in forms)
+    assert json.loads(answer)["echo"] == ["[REDACTED]"] * len(forms)
+
+
+def test_relay_keeps_percent_text_that_only_resembles_the_secret() -> None:
+    """Keep percent text that decodes to something else, so the per-character match does not widen."""
+    filled = "judge+key/part"
+    near = [quote(filled.replace("k", "K"), safe=""), _mixed_percent(filled[:-1]) + "X", "%25" + filled[1:]]
+    answer = _judge_relay(filled, lambda *_args: json.dumps({"near": near}).encode())
+    assert json.loads(answer) == {"near": near}
+
+
+@pytest.mark.parametrize("size", [1, 2, 3, 7, 64])
+def test_a_streamed_answer_hides_a_key_cut_across_chunks(size: int) -> None:
+    """Hide the key and its encoded forms when the stream cuts them at any byte, and keep every other byte (E56)."""
+    secret = "judge-stream-key-value"
+    events = b"".join(
+        f"data: {json.dumps({'echo': form})}\n\n".encode()
+        for form in (secret, _mixed_percent(secret), base64.b64encode(secret.encode()).decode(), "plain text")
+    )
+
+    def send(*_args: object) -> Iterator[bytes]:
+        """Answer with the events in pieces of ``size`` bytes."""
+        return (events[start : start + size] for start in range(0, len(events), size))
+
+    answer = _judge_relay(secret, send)
+    assert not isinstance(answer, bytes)
+    streamed = b"".join(answer)
+    expected = b"".join(
+        f"data: {json.dumps({'echo': text})}\n\n".encode() for text in ["[REDACTED]"] * 3 + ["plain text"]
+    )
+    assert streamed == expected
+
+
+def test_a_streamed_answer_passes_each_event_on_before_the_next_arrives() -> None:
+    """Give the box a whole event as soon as it ends, so a long-lived stream does not wait for more data."""
+    secret = "judge-stream-key-value"
+    requested: list[int] = []
+
+    def send(*_args: object) -> Iterator[bytes]:
+        """Answer with two events, noting when the relay asks for each one."""
+        for number in (1, 2):
+            requested.append(number)
+            yield f'data: {{"n": {number}}}\n\n'.encode()
+
+    answer = _judge_relay(secret, send)
+    assert not isinstance(answer, bytes)
+    assert next(answer) == b'data: {"n": 1}\n\n'
+    assert requested == [1]
+    assert list(answer) == [b'data: {"n": 2}\n\n']
+
+
+def test_a_streamed_answer_holds_a_desktop_token_until_it_ends() -> None:
+    """Hide a desktop-link token that goes on into the next chunk, though no secret value names it."""
+    chunks = [b"data: skyl_at_first", b"half", b"secondhalf\n\n"]
+    answer = _judge_relay("judge-stream-key-value", lambda *_args: iter(chunks))
+    assert b"".join(answer) == b"data: [REDACTED]\n\n"
+
+
 def test_relay_refuses_a_shared_file_that_sends_a_user_key_to_another_host() -> None:
     """Refuse ``${GOOGLE_MAPS_KEY}`` that a shared file points at a host the user's run does not allow (E52)."""
     with pytest.raises(ValueError, match=r"may not go to collector\.example"):
@@ -950,3 +1064,38 @@ def test_relay_records_the_managed_tool_price_and_hides_the_key(
     assert record["cost_usd"] == pytest.approx(0.014)
     assert runtime.service.get(runtime.budget_id, "alice").setup_spent_cents == Decimal("1.4")
     _assert_no_secret([record], MAPS_KEY)
+
+
+def test_relay_records_a_streamed_call_when_its_stream_ends(calls: PostgresRunCallStore) -> None:
+    """Store a streamed call once it ends, with the redacted answer and no secret (E28)."""
+    secret = "judge-stream-key-value"
+    answer = _judge_relay(
+        secret, lambda *_args: iter([b'data: {"echo": "', secret.encode(), b'"}\n\n']), recorder=_recorder(calls)
+    )
+    assert not isinstance(answer, bytes)
+    assert _stored(calls) == []
+    assert b"".join(answer) == b'data: {"echo": "[REDACTED]"}\n\n'
+    [record] = _stored(calls)
+    assert record["status"] == "ok"
+    assert "[REDACTED]" in record["response"]
+    _assert_no_secret([record], secret)
+
+
+def test_relay_records_a_stream_that_fails_or_is_closed(calls: PostgresRunCallStore) -> None:
+    """Store a stream that breaks after the send, or that the caller closes, as failed (E28)."""
+    secret = "judge-stream-key-value"
+
+    def broken(*_args: object) -> Iterator[bytes]:
+        """Send one event, then fail."""
+        yield b"data: {}\n\n"
+        raise OSError("connection reset")
+
+    with pytest.raises(OSError):
+        b"".join(_judge_relay(secret, broken, recorder=_recorder(calls)))
+    endless = _judge_relay(secret, lambda *_args: iter([b"data: {}\n\n"] * 3), recorder=_recorder(calls))
+    assert not isinstance(endless, bytes)
+    next(endless)
+    endless.close()
+    first, second = _stored(calls)
+    assert (first["status"], first["failure_reason"]) == ("failed", "OSError: connection reset")
+    assert (second["status"], second["failure_reason"]) == ("failed", "GeneratorExit: ")
