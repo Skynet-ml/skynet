@@ -100,6 +100,71 @@ test("Stop puts two quick steers and queued input after the Hebrew draft, in ord
   assert.deepEqual(sent, []);
 });
 
+test("Stop returns a steer the server holds but the model did not read; the next send posts it once", async () => {
+  const { queue, sent } = setup();
+  const channel = fakeChannel();
+  queue.openTurn(channel);
+  queue.steer("unread");
+  await flush();
+  queue.hold();
+  queue.setBusy(false);
+  await flush();
+  const held = queue.takeHeld();
+  assert.equal(held, "unread");
+  queue.enqueue(held ?? "");
+  await flush();
+  queue.applied(["srv-1"]);
+  await flush();
+  assert.deepEqual(sent, ["unread"]);
+  assert.deepEqual(channel.posted, ["unread"]);
+  assert.equal(channel.withdrawCalls, 1);
+  assert.equal(queue.hasPending(), false);
+});
+
+test("a steer sent at the moment the turn ends is sent once, as the next turn", async () => {
+  const { queue, sent } = setup();
+  const channel = fakeChannel();
+  queue.openTurn(channel);
+  queue.steer("late");
+  queue.setBusy(false);
+  await flush();
+  assert.deepEqual(sent, ["late"]);
+  assert.equal(queue.hasPending(), false);
+  await flush();
+  assert.deepEqual(sent, ["late"]);
+});
+
+test("a steer sent at the moment of Stop comes back to the composer once", async () => {
+  const { queue, sent } = setup();
+  queue.openTurn(fakeChannel());
+  queue.steer("late");
+  queue.hold();
+  queue.setBusy(false);
+  await flush();
+  assert.equal(queue.takeHeld(), "late");
+  assert.equal(queue.takeHeld(), null);
+  assert.deepEqual(sent, []);
+});
+
+test("Stop: the composer takes held input before the turn ends; nothing is sent and the steers come back once", async () => {
+  // The composer's effect runs before the owner reports the turn as idle.
+  const { queue, sent } = setup();
+  queue.openTurn(fakeChannel());
+  queue.steer("one");
+  queue.steer("two");
+  await flush();
+  queue.hold();
+  assert.equal(queue.takeHeld(), null);
+  assert.equal(queue.getSnapshot().held, true);
+  queue.setBusy(false);
+  await flush();
+  assert.deepEqual(sent, []);
+  assert.equal(queue.takeHeld(), "one\n\ntwo");
+  assert.equal(queue.takeHeld(), null);
+  await flush();
+  assert.deepEqual(sent, []);
+});
+
 test("takeHeld returns nothing when no input is held", () => {
   const { queue, sent } = setup();
   assert.equal(queue.takeHeld(), null);

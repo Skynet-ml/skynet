@@ -127,7 +127,12 @@ export function Composer({
   React.useEffect(() => {
     if (!midTurn?.held) return;
     const text = midTurn.takeHeld();
-    if (text) onChange(appendToDraft(valueRef.current, text));
+    if (!text) return;
+    onChange(appendToDraft(valueRef.current, text));
+    // The draft changed without typing; grow the textarea so every returned message shows.
+    requestAnimationFrame(() => {
+      if (textareaRef.current) autoResizeTextarea(textareaRef.current);
+    });
   }, [midTurn, onChange]);
   const dictation = useDictation({
     language: locale,

@@ -438,7 +438,9 @@ export class SteerQueue {
    * unknown stay in the tray: the agent may already have read them.
    */
   takeHeld(): string | null {
-    if (!this.held || this.settling > 0 || this.withdrawals.size > 0) return null;
+    // Steers still in the open turn come back only after the turn ends and
+    // withdraws them; taking now would drop the hold and let them resend.
+    if (!this.held || this.settling > 0 || this.withdrawals.size > 0 || this.steering.length > 0) return null;
     const taken = this.queued.filter((item) => !item.uncertain);
     this.queued = this.queued.filter((item) => item.uncertain);
     this.held = false;
