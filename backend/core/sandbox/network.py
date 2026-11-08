@@ -12,10 +12,13 @@ The model holds no provider types; providers implement ``PolicyApplier``.
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -34,6 +37,41 @@ class NetworkPolicyError(RuntimeError):
     """Signal a policy change that the provider did not confirm."""
 
 
+def _normalize_host(raw: str) -> str:
+    """Strip and lowercase a host name.
+
+    Args:
+        raw: The host as the caller wrote it.
+
+    Returns:
+        The host without surrounding blanks, in lowercase.
+    """
+    return raw.strip().lower()
+
+
+def _is_valid_host(host: str) -> bool:
+    """Return True when a normalized host is a bare host name or IP address.
+
+    A leading ``*.`` label is a valid wildcard. A bare ``*`` and a host with a
+    scheme, path, port, userinfo or blanks are not valid, because the provider
+    could read them as "every host" or as a host that the caller did not mean.
+
+    Args:
+        host: The normalized host.
+
+    Returns:
+        True when the host is valid.
+    """
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        return True
+    name = host.removeprefix("*.")
+    return bool(name) and not any(char in "*/:@?#" or char.isspace() for char in name)
+
+
 @dataclass(frozen=True)
 class RequestMatch:
     """Limit a credential rule to some requests to its host.
@@ -42,14 +80,18 @@ class RequestMatch:
     """
 
     method: str | None = None
+    # A plain string prefix: the provider decides whether "/v1" also matches
+    # "/v1beta", so segment-boundary matching belongs to the provider.
     path_prefix: str | None = None
 
     def __post_init__(self) -> None:
-        """Reject a path prefix that is not an absolute path.
+        """Uppercase the method and reject a path prefix that is not absolute.
 
         Raises:
             SandboxSpecError: The path prefix does not start with ``/``.
         """
+        if self.method is not None:
+            object.__setattr__(self, "method", self.method.upper())
         if self.path_prefix is not None and not self.path_prefix.startswith("/"):
             raise SandboxSpecError("A credential rule path prefix must start with '/'.")
 
@@ -62,8 +104,22 @@ class CredentialRule:
     """
 
     host: str
-    headers: Mapping[str, str]
+    # Headers stay out of the hash because a mapping is not hashable; equal
+    # rules still hash equal, so the hash stays consistent with ``==``.
+    headers: Mapping[str, str] = field(hash=False)
     match: RequestMatch | None = None
+
+    def __post_init__(self) -> None:
+        """Normalize the host and freeze a copy of the headers.
+
+        Raises:
+            SandboxSpecError: The host is not a bare host name.
+        """
+        host = _normalize_host(self.host)
+        if not _is_valid_host(host):
+            raise SandboxSpecError(f"A credential rule needs a bare host name, not {self.host!r}.")
+        object.__setattr__(self, "host", host)
+        object.__setattr__(self, "headers", MappingProxyType(dict(self.headers)))
 
 
 @dataclass(frozen=True)
@@ -79,11 +135,17 @@ class EgressPolicy:
     credential_rules: tuple[CredentialRule, ...] = ()
 
     def __post_init__(self) -> None:
-        """Reject a contradictory policy.
+        """Normalize and dedupe the hosts, then reject a contradictory policy.
 
         Raises:
-            SandboxSpecError: The hosts or credential rules do not fit the mode.
+            SandboxSpecError: A host is not a bare host name, or the hosts or
+                credential rules do not fit the mode.
         """
+        hosts = tuple(dict.fromkeys(_normalize_host(host) for host in self.allow_hosts))
+        for host in hosts:
+            if not _is_valid_host(host):
+                raise SandboxSpecError(f"An allowlist needs bare host names, not {host!r}.")
+        object.__setattr__(self, "allow_hosts", hosts)
         if self.mode is NetworkMode.DENY_ALL and (self.allow_hosts or self.credential_rules):
             raise SandboxSpecError("A sandbox with no network cannot allow hosts or inject headers.")
         if self.mode is NetworkMode.OPEN and self.allow_hosts:
@@ -150,18 +212,22 @@ class PhaseNetwork:
         """
         self._applier = applier
         self._plan = plan
-        self._current = current
+        self._current: EgressPolicy | None = current
 
     @property
-    def current(self) -> EgressPolicy:
-        """Return the last policy that the provider confirmed."""
+    def current(self) -> EgressPolicy | None:
+        """Return the policy that the provider confirmed, or None when it is unknown."""
         return self._current
 
     @asynccontextmanager
     async def phase_policy(self, phase: Phase) -> AsyncGenerator[EgressPolicy, None]:
         """Apply the policy of a phase, then restore the old policy.
 
-        The old policy comes back on exit, also when the block raises.
+        The old policy comes back on exit, also when the block raises or the
+        entry apply fails or is cancelled. When the old policy was unknown,
+        the confirmed phase policy stays. When the block raised and the
+        restore also fails, the block's exception reaches the caller with a
+        note about the restore.
 
         Args:
             phase: The phase to enter.
@@ -174,11 +240,30 @@ class PhaseNetwork:
         """
         previous = self._current
         policy = self._plan.for_phase(phase)
-        await self._apply(policy)
         try:
+            await self._apply(policy)
             yield policy
-        finally:
-            await self._apply(previous)
+        except BaseException as error:
+            try:
+                await self._restore(previous)
+            except Exception as restore_error:
+                error.add_note(f"Restoring the network policy failed too: {restore_error!r}")
+            raise
+        await self._restore(previous)
+
+    async def _restore(self, previous: EgressPolicy | None) -> None:
+        """Apply the policy from before a phase, shielded from cancellation.
+
+        Args:
+            previous: The policy from before the phase, or None when it was unknown.
+
+        Raises:
+            NetworkPolicyError: The provider did not confirm the old policy.
+        """
+        if previous is not None:
+            # A second cancel must not stop the restore half-way and leave the
+            # phase policy (for example open egress) on the box.
+            await asyncio.shield(self._apply(previous))
 
     async def _apply(self, policy: EgressPolicy) -> None:
         """Apply a policy and fail closed unless the provider confirms it.
@@ -189,8 +274,11 @@ class PhaseNetwork:
         Raises:
             NetworkPolicyError: The provider reported no policy or another policy.
         """
-        if policy == self._current:
+        if self._current is not None and policy == self._current:
             return
+        # Until the provider confirms, the box may hold either policy, so a
+        # failed or cancelled call must leave the state unknown, never stale.
+        self._current = None
         confirmed = await self._applier.apply_policy(policy)
         if confirmed != policy:
             raise NetworkPolicyError(f"The sandbox did not confirm the {policy.mode.value} network policy.")
@@ -205,6 +293,7 @@ class NoticeKind(StrEnum):
     OPEN_EGRESS = "open_egress"
     NO_NETWORK = "no_network"
     EMPTY = "empty"
+    INVALID = "invalid"
 
 
 @dataclass(frozen=True)
@@ -238,6 +327,7 @@ def merge_allowlists(policy: EgressPolicy, *extra: Iterable[str]) -> AllowlistMe
 
     Open egress already reaches every host and no network must stay closed,
     so both modes drop every extra host. Hosts are stripped and lowercased.
+    A host that is not a bare host name (``*``, a URL, a port) is dropped.
 
     Args:
         policy: The policy to extend.
@@ -250,9 +340,11 @@ def merge_allowlists(policy: EgressPolicy, *extra: Iterable[str]) -> AllowlistMe
     notices: list[AllowlistNotice] = []
     for group in extra:
         for raw in group:
-            host = raw.strip().lower()
+            host = _normalize_host(raw)
             if not host:
                 kind = NoticeKind.EMPTY
+            elif not _is_valid_host(host):
+                kind = NoticeKind.INVALID
             elif policy.mode is NetworkMode.OPEN:
                 kind = NoticeKind.OPEN_EGRESS
             elif policy.mode is NetworkMode.DENY_ALL:
@@ -274,12 +366,14 @@ def inference_host(gateway_url: str) -> str:
         gateway_url: The model gateway base URL, for example ``https://gw.example.com/v1``.
 
     Returns:
-        The lowercased host name, without the port.
+        The lowercased host name, without the port or a trailing dot.
 
     Raises:
         ValueError: The URL has no host.
     """
     host = urlsplit(gateway_url.strip()).hostname
+    if host and host.endswith("."):
+        host = host[:-1]
     if not host:
         raise ValueError("The gateway URL has no host.")
     return host

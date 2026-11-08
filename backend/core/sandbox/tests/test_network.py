@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from core.sandbox import NetworkMode, SandboxSpecError
@@ -104,7 +106,166 @@ async def test_unconfirmed_policy_fails_the_phase() -> None:
     with pytest.raises(NetworkPolicyError):
         async with network.phase_policy(Phase.SCORE):
             pytest.fail("The phase must not start.")
+    assert network.current is None
+
+
+class ScriptedApplier(FakeApplier):
+    """Confirm each policy except on the call numbers in ``unconfirmed``."""
+
+    def __init__(self, *unconfirmed: int) -> None:
+        """Keep the 1-based call numbers that report no policy.
+
+        Args:
+            *unconfirmed: The call numbers that do not confirm.
+        """
+        super().__init__()
+        self.unconfirmed = set(unconfirmed)
+
+    async def apply_policy(self, policy: EgressPolicy) -> EgressPolicy | None:
+        """Record the policy and confirm it unless this call is unconfirmed.
+
+        Args:
+            policy: The policy to apply.
+
+        Returns:
+            The policy, or ``None`` for an unconfirmed call.
+        """
+        self.applied.append(policy)
+        return None if len(self.applied) in self.unconfirmed else policy
+
+
+async def test_unconfirmed_entry_restores_the_old_policy() -> None:
+    """Restore the old policy when the entry apply is not confirmed."""
+    applier = ScriptedApplier(1)
+    network = PhaseNetwork(applier, PLAN, current=OPEN)
+    with pytest.raises(NetworkPolicyError):
+        async with network.phase_policy(Phase.SCORE):
+            pytest.fail("The phase must not start.")
     assert network.current is OPEN
+    assert applier.applied == [DENY, OPEN]
+
+
+async def test_unknown_state_after_failed_restore_still_applies_next_policy() -> None:
+    """Send the next policy to the provider after a restore fails (F1).
+
+    The old code kept the old policy as current, so a later phase with that
+    policy skipped the provider and the box kept open egress.
+    """
+    applier = ScriptedApplier(2)
+    plan = NetworkPlan(setup=OPEN, run=OPEN, score=DENY)
+    network = PhaseNetwork(applier, plan, current=DENY)
+    with pytest.raises(NetworkPolicyError):
+        async with network.phase_policy(Phase.SETUP):
+            pass
+    assert network.current is None
+    async with network.phase_policy(Phase.SCORE) as policy:
+        assert policy is DENY
+        assert network.current is DENY
+        assert applier.applied == [OPEN, DENY, DENY]
+    assert network.current is DENY
+    assert applier.applied == [OPEN, DENY, DENY]
+
+
+async def test_unknown_state_after_failed_entry_and_restore_still_applies_next_policy() -> None:
+    """Send the next policy to the provider after entry and restore both fail (F1)."""
+    applier = ScriptedApplier(1, 2)
+    plan = NetworkPlan(setup=DENY, run=OPEN, score=DENY)
+    network = PhaseNetwork(applier, plan, current=DENY)
+    with pytest.raises(NetworkPolicyError):
+        async with network.phase_policy(Phase.RUN):
+            pytest.fail("The phase must not start.")
+    assert network.current is None
+    async with network.phase_policy(Phase.SCORE):
+        assert network.current is DENY
+    assert applier.applied == [OPEN, DENY, DENY]
+
+
+class GatedApplier(FakeApplier):
+    """Block one call number on a gate, and confirm every policy."""
+
+    def __init__(self, blocked_call: int) -> None:
+        """Keep the 1-based call number that waits for the gate.
+
+        Args:
+            blocked_call: The call that waits until ``gate`` is set.
+        """
+        super().__init__()
+        self.blocked_call = blocked_call
+        self.gate = asyncio.Event()
+        self.waiting = asyncio.Event()
+
+    async def apply_policy(self, policy: EgressPolicy) -> EgressPolicy | None:
+        """Record the policy, wait for the gate on the blocked call, and confirm.
+
+        Args:
+            policy: The policy to apply.
+
+        Returns:
+            The policy.
+        """
+        self.applied.append(policy)
+        if len(self.applied) == self.blocked_call:
+            self.waiting.set()
+            await self.gate.wait()
+        return policy
+
+
+async def test_cancel_during_entry_restores_the_old_policy() -> None:
+    """Restore the old policy when the task is cancelled during the entry apply (F1)."""
+    applier = GatedApplier(blocked_call=1)
+    network = PhaseNetwork(applier, PLAN, current=DENY)
+
+    async def enter() -> None:
+        """Enter the run phase."""
+        async with network.phase_policy(Phase.RUN):
+            pytest.fail("The phase must not start.")
+
+    task = asyncio.create_task(enter())
+    await applier.waiting.wait()
+    assert network.current is None
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert network.current is DENY
+    assert applier.applied == [RUN, DENY]
+
+
+async def test_restore_is_shielded_from_a_second_cancel() -> None:
+    """Finish the restore when a second cancel arrives during it (F4)."""
+    applier = GatedApplier(blocked_call=2)
+    network = PhaseNetwork(applier, PLAN, current=DENY)
+    inside = asyncio.Event()
+
+    async def enter() -> None:
+        """Enter the run phase and wait there until cancelled."""
+        async with network.phase_policy(Phase.RUN):
+            inside.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(enter())
+    await inside.wait()
+    task.cancel()
+    await applier.waiting.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert network.current is None
+    applier.gate.set()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert network.current is DENY
+    assert applier.applied == [RUN, DENY]
+
+
+async def test_failed_restore_keeps_the_block_exception() -> None:
+    """Raise the block's exception with a note when the restore also fails (F4)."""
+    applier = ScriptedApplier(2)
+    network = PhaseNetwork(applier, PLAN, current=OPEN)
+    with pytest.raises(KeyError) as caught:
+        async with network.phase_policy(Phase.RUN):
+            raise KeyError("boom")
+    assert any("Restoring the network policy failed" in note for note in caught.value.__notes__)
+    assert network.current is None
 
 
 async def test_other_reported_policy_fails_the_phase() -> None:
@@ -137,7 +298,7 @@ async def test_unconfirmed_restore_raises() -> None:
     with pytest.raises(NetworkPolicyError):
         async with network.phase_policy(Phase.RUN):
             applier.confirm = False
-    assert network.current is RUN
+    assert network.current is None
 
 
 def test_credential_rule_for_host_outside_allowlist_fails() -> None:
@@ -171,6 +332,57 @@ def test_contradictory_policy_fails(kwargs: dict) -> None:
         EgressPolicy(**kwargs)
 
 
+@pytest.mark.parametrize(
+    "host",
+    ["*", "https://x.com", "x.com/p", "x.com:443", "u:p@x.com", "*.", "a.*.com", "x .com", ""],
+)
+def test_policy_rejects_host_that_is_not_bare(host: str) -> None:
+    """Reject a bare wildcard and a host with a scheme, path, port or userinfo (F2).
+
+    Args:
+        host: The invalid host.
+    """
+    with pytest.raises(SandboxSpecError):
+        EgressPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=(host,))
+    with pytest.raises(SandboxSpecError):
+        CredentialRule(host=host, headers={})
+
+
+@pytest.mark.parametrize("host", ["*.example.com", "10.0.0.1", "::1", "localhost"])
+def test_policy_accepts_wildcard_label_and_ip(host: str) -> None:
+    """Accept a leading wildcard label, an IP address and a plain name.
+
+    Args:
+        host: The valid host.
+    """
+    assert EgressPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=(host,)).allow_hosts == (host,)
+
+
+def test_policy_normalizes_and_dedupes_hosts() -> None:
+    """Lowercase, strip and dedupe hosts before the credential subset check (F3)."""
+    rule = CredentialRule(host=" API.example.com ", headers={"X": "1"})
+    policy = EgressPolicy(
+        mode=NetworkMode.ALLOWLIST, allow_hosts=("api.example.com", "API.Example.com "), credential_rules=(rule,)
+    )
+    assert rule.host == "api.example.com"
+    assert policy.allow_hosts == ("api.example.com",)
+
+
+def test_credential_rule_headers_are_a_frozen_copy() -> None:
+    """Keep a frozen copy of the headers and allow hashing of policies (F5)."""
+    headers = {"Authorization": "Bearer one"}
+    rule = CredentialRule(host=GATEWAY, headers=headers)
+    headers["Authorization"] = "Bearer two"
+    assert rule.headers == {"Authorization": "Bearer one"}
+    with pytest.raises(TypeError):
+        rule.headers["Authorization"] = "Bearer three"  # type: ignore[index]
+    same = CredentialRule(host=GATEWAY, headers={"Authorization": "Bearer one"})
+    assert rule == same
+    assert hash(rule) == hash(same)
+    assert rule != CredentialRule(host=GATEWAY, headers={"Authorization": "Bearer two"})
+    assert {RUN: 1}[EgressPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=(GATEWAY,), credential_rules=(RULE,))] == 1
+
+
 def test_has_credentials() -> None:
     """Report credentials only when a credential rule is set."""
     assert RUN.has_credentials
@@ -183,6 +395,7 @@ def test_request_match_needs_absolute_path_prefix() -> None:
     """Accept a method and an absolute path prefix; reject a relative prefix."""
     rule = CredentialRule(host=GATEWAY, headers={"X": "1"}, match=RequestMatch(method="POST", path_prefix="/v1/"))
     assert rule.match == RequestMatch(method="POST", path_prefix="/v1/")
+    assert RequestMatch(method="get").method == "GET"
     with pytest.raises(SandboxSpecError):
         RequestMatch(path_prefix="v1/")
 
@@ -224,6 +437,27 @@ def test_merge_drops_empty_host() -> None:
     assert [notice.kind for notice in merged.notices] == [NoticeKind.EMPTY]
 
 
+def test_merge_drops_invalid_hosts() -> None:
+    """Drop a bare wildcard, a URL and a host with userinfo or a port (F2)."""
+    merged = merge_allowlists(SETUP, ["*", "https://x.com/p", "u:p@h:1", "*.ok.example.com"])
+    assert merged.hosts == ("pypi.org", GATEWAY, "*.ok.example.com")
+    assert [notice.kind for notice in merged.notices] == [
+        NoticeKind.INVALID,
+        NoticeKind.INVALID,
+        NoticeKind.INVALID,
+        NoticeKind.ADDED,
+    ]
+    assert all(notice.dropped for notice in merged.notices[:3])
+
+
+def test_merge_matches_hosts_without_case() -> None:
+    """Report a host that differs only in case as a duplicate (F3)."""
+    base = EgressPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("API.example.com",))
+    merged = merge_allowlists(base, ["api.example.com"])
+    assert merged.hosts == ("api.example.com",)
+    assert merged.notices == (AllowlistNotice("api.example.com", NoticeKind.DUPLICATE),)
+
+
 def test_merge_keeps_credential_rules() -> None:
     """Carry the credential rules into the merged policy."""
     merged = merge_allowlists(RUN, ["pypi.org"])
@@ -237,6 +471,8 @@ def test_merge_keeps_credential_rules() -> None:
         ("https://gw.example.com/v1", "gw.example.com"),
         ("http://LiteLLM.internal:4000", "litellm.internal"),
         (" https://gw.example.com ", "gw.example.com"),
+        ("https://GW.example.com.:443/v1", "gw.example.com"),
+        ("http://[::1]:4000/v1", "::1"),
     ],
 )
 def test_inference_host_reads_gateway_url(url: str, host: str) -> None:
