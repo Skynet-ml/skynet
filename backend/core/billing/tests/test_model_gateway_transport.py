@@ -1868,7 +1868,7 @@ def test_tool_and_evaluator_calls_are_recorded_without_their_bound_secrets(gatew
     tool, scored = store.list_calls("job-1", NO_CANDIDATE_ID)
     assert (tool["kind"], tool["target"], tool["status"], tool["cost_usd"]) == (
         "mcp",
-        "tools.example/lookup",
+        "roster@tools.example/lookup",
         "ok",
         None,
     )
@@ -1880,7 +1880,7 @@ def test_tool_and_evaluator_calls_are_recorded_without_their_bound_secrets(gatew
 
 
 def test_two_servers_with_the_same_tool_name_get_two_targets(gateway: ModelGateway) -> None:
-    """Name the server host in each tool call's target, so two ``lookup`` tools stay apart (E49 item 4).
+    """Name the server in each tool call's target, so two ``lookup`` tools stay apart, even on one host (E49 item 4).
 
     Args:
         gateway: Funded real HTTP gateway fixture.
@@ -1905,17 +1905,25 @@ def test_two_servers_with_the_same_tool_name_get_two_targets(gateway: ModelGatew
 
     store = _record_calls(gateway)
     gateway._tools = _Tools("https://tools.example/mcp")  # type: ignore[assignment]
-    gateway._connectors["connector-token"] = _Tools("https://docs.example:8443/v1/mcp/path-key")  # type: ignore[assignment]
+    for name, url in (
+        ("docs", "https://docs.example:8443/v1/mcp/path-key"),
+        ("alpha", "https://shared.example/a/mcp"),
+        ("beta", "https://shared.example/b/mcp"),
+    ):
+        gateway._connectors[f"{name}-token"] = _Tools(url)  # type: ignore[assignment]
+        gateway._connector_tokens[name] = f"{name}-token"
     call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "lookup", "arguments": {}}}
 
-    gateway.dispatch_guest(gateway._tool_token, "/v1/_mcp", call, {})
-    gateway.dispatch_guest("connector-token", "/v1/_mcp", call, {})
-    gateway.dispatch_guest("connector-token", "/v1/_mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, {})
+    for token in (gateway._tool_token, "docs-token", "alpha-token", "beta-token"):
+        gateway.dispatch_guest(token, "/v1/_mcp", call, {})
+    gateway.dispatch_guest("docs-token", "/v1/_mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, {})
 
     assert [call["target"] for call in store.list_calls("job-1", NO_CANDIDATE_ID)] == [
-        "tools.example/lookup",
-        "docs.example:8443/lookup",
-        "docs.example:8443/tools/list",
+        "roster@tools.example/lookup",
+        "docs@docs.example:8443/lookup",
+        "alpha@shared.example/lookup",
+        "beta@shared.example/lookup",
+        "docs@docs.example:8443/tools/list",
     ]
 
 

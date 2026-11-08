@@ -94,19 +94,20 @@ _TRANSIENT_SANDBOX_ERROR_TYPES = frozenset(
 )
 
 
-def _tool_target(url: str, body: Mapping[str, Any]) -> str:
+def _tool_target(server: str, url: str, body: Mapping[str, Any]) -> str:
     """Name the server and the tool a JSON-RPC tool request calls, for its run-call target.
 
-    Two servers can expose a tool of the same name, so the server host comes
-    first (E49 item 4). Only the host and port are kept: a server path or
-    query can hold a key.
+    Two servers can expose a tool of the same name, even on one host, so the
+    server label and host come first (E49 item 4). Only the host and port are
+    kept: a server path or query can hold a key.
 
     Args:
+        server: The connector name, or ``roster`` for the run's tool roster.
         url: The MCP endpoint the broker sends to.
         body: The MCP JSON-RPC request.
 
     Returns:
-        ``host/tool`` for ``tools/call``, otherwise ``host/method``.
+        ``server@host/tool`` for ``tools/call``, otherwise ``server@host/method``.
     """
     parts = urlsplit(url)
     host = parts.hostname or ""
@@ -114,8 +115,8 @@ def _tool_target(url: str, body: Mapping[str, Any]) -> str:
         host = f"{host}:{parts.port}"
     params = body.get("params")
     if body.get("method") == "tools/call" and isinstance(params, Mapping) and params.get("name"):
-        return f"{host}/{params['name']}"
-    return f"{host}/{body.get('method') or ''}"
+        return f"{server}@{host}/{params['name']}"
+    return f"{server}@{host}/{body.get('method') or ''}"
 
 
 def _call_cost(route: OpenRouterDispatcher | CliDispatcher | None, charges: Mapping[str, Decimal]) -> float | None:
@@ -965,7 +966,8 @@ class ModelGateway:
         if route is not None:
             kind, target, recorder = "model", route.model, recorder.bind(role=route.role)
         elif tools is not None:
-            kind, target = "mcp", _tool_target(tools.url, body)
+            server = next((name for name, value in self._connector_tokens.items() if value == token), "roster")
+            kind, target = "mcp", _tool_target(server, tools.url, body)
             # A bound header is often "Bearer <key>", and a tool may echo the bare key.
             for value in (tools.headers or {}).values():
                 secret_values += credential_fragments(value)
