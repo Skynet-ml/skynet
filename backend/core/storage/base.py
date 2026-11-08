@@ -488,3 +488,44 @@ class JobStore(Protocol):
             ``True`` when a row was deleted, ``False`` when none matched.
         """
         ...
+
+    def list_run_calls(
+        self, optimization_id: str, candidate_id: str, *, since: int = 0, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return a candidate's relay calls after the ``since`` cursor, oldest first.
+
+        Args:
+            optimization_id: Owning job id.
+            candidate_id: The candidate within the run.
+            since: The last call ``seq`` the caller holds; ``0`` for the start.
+            limit: The most calls to return.
+
+        Returns:
+            The call records, or an empty list when the candidate has none.
+        """
+        ...
+
+    def get_run_candidate(self, optimization_id: str, candidate_id: str) -> dict[str, Any] | None:
+        """Return one candidate's summary with role, state, call count and cost.
+
+        Args:
+            optimization_id: Owning job id.
+            candidate_id: The candidate within the run.
+
+        Returns:
+            The candidate summary, or ``None`` when the run has no such candidate.
+        """
+        ...
+
+    def list_run_candidates(self, optimization_id: str, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        """Return one page of a run's candidate summaries in start order.
+
+        Args:
+            optimization_id: Owning job id.
+            limit: The most candidates to return.
+            offset: The number of candidates to skip, in start order.
+
+        Returns:
+            One summary for each candidate on the page.
+        """
+        ...
