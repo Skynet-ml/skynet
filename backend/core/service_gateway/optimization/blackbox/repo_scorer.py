@@ -317,11 +317,13 @@ class RepoScorer:
             # controls. Version code runs in this box before the install only in
             # [run] above and in earlier calls' metric steps. Every box shell is
             # bash --noprofile --norc, and the runners and the model mailbox
-            # wrapper start python3 -I, so a planted profile or .pth never runs
-            # in a later step. stop_candidates kills
-            # the processes that keep the run's marker or stay its descendants; a
-            # process that drops both can still wait here. Separate boxes close
-            # this (SKY-387). No same-uid sweep: it would kill the supervisor.
+            # wrapper start python3 -I, so a profile or user-site .pth that a
+            # version plants does not run in a later step. A .pth or module in a
+            # writable venv or system site-packages still runs (SKY-387).
+            # stop_candidates kills the processes that keep the run's marker or
+            # stay its descendants; a process that drops both can still wait
+            # here. Separate boxes close this (SKY-387). No same-uid sweep: it
+            # would kill the supervisor.
             not_installed = self._workspace.install_metric_files()
             if not_installed:
                 raise RepoScoreError(not_installed)
