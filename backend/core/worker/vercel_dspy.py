@@ -147,9 +147,15 @@ def run_vercel_dspy(payload: dict[str, Any], artifact_id: str, event_queue: Any,
             guest_payload["_gepa_log_dir"] = "checkpoints"
         # The proposer runs as a contained subprocess of this box, so the box
         # itself carries the proposer's granted hosts (E57). A repository's
-        # setup, targets and metric run in parent-owned boxes, never here.
+        # setup, targets and metric run in parent-owned boxes, never here. A
+        # setup check never runs the proposer and gets no host grant, so its
+        # box stays offline.
         staged = guest_payload.get(REPO_SNAPSHOT_KEY)
-        hosts = tuple(staged.get("proposer_hosts") or ()) if isinstance(staged, dict) else ()
+        hosts = (
+            tuple(staged.get("proposer_hosts") or ())
+            if isinstance(staged, dict) and "_preflight" not in guest_payload
+            else ()
+        )
         session = runtime.open(
             SandboxSpec(
                 lifetime_seconds=lifetime,

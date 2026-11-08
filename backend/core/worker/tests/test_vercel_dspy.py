@@ -12,8 +12,12 @@ from typing import Any
 
 import pytest
 
+from core.billing.vercel_usage import proposer_hosts
 from core.exceptions import DETERMINISTIC_FAILURE, INFRASTRUCTURE_INTERRUPTION
+from core.service_gateway.optimization.blackbox import remote_sandbox
 from core.service_gateway.optimization.blackbox.sandbox import CommandResult
+from core.service_gateway.optimization.blackbox.sandbox_broker import SandboxBroker
+from core.service_gateway.optimization.blackbox.tests.test_sandbox_broker import IMAGE, FakeRuntime
 from core.worker import vercel_dspy
 from core.worker.isolated_runner import SANDBOX_PROTOCOL
 
@@ -353,3 +357,45 @@ def test_the_outer_box_carries_the_staged_proposer_hosts(
     [spec] = specs
     assert tuple(spec.allowed_hosts) == tuple(proposer_hosts)
     assert spec.network_disabled is offline
+
+
+@pytest.mark.parametrize(
+    ("preflight", "granted", "expected"),
+    [(True, False, ()), (False, True, tuple(sorted(proposer_hosts(None))))],
+)
+def test_a_real_broker_opens_the_setup_check_box_offline_and_the_run_box_with_its_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preflight: bool, granted: bool, expected: tuple[str, ...]
+) -> None:
+    """Open a setup check's box offline without a grant, and a run's box with its granted hosts."""
+    broker = SandboxBroker(FakeRuntime(), image=IMAGE, max_lifetime_seconds=600)
+    hosts = proposer_hosts(None)
+    if granted:
+        broker.allow_guest_hosts(hosts)
+
+    def handle(_self: Any, action: str, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        """Send each control call straight to the real broker."""
+        return broker.handle(action, payload)
+
+    monkeypatch.setattr(remote_sandbox.RemoteSandboxRuntime, "_request", handle)
+    archive = tmp_path / "tree.tgz"
+    archive.write_bytes(b"tree")
+    payload: dict[str, Any] = {
+        "_budget_gateway_descriptor": {
+            "url": "http://127.0.0.1:9",
+            "control_token": "control",
+            "image": IMAGE,
+            "lifetime_seconds": 300,
+        },
+        "_repo_snapshot": {"archive": str(archive), "commit": "c" * 40, "proposer_hosts": list(hosts)},
+    }
+    if preflight:
+        payload["_preflight"] = {"scope": "evaluation", "identity": "setup"}
+    events: queue.Queue[dict[str, Any]] = queue.Queue()
+
+    vercel_dspy.run_vercel_dspy(payload, "job-broker", events, "spawn")
+
+    [spec] = broker._runtime.specs
+    assert tuple(spec.allowed_hosts) == expected
+    assert spec.network_disabled is (not expected)
+    messages = [str(item) for item in events.queue]
+    assert not any("cannot open network access" in message for message in messages)
