@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from core.sandbox import ResourceRequest, SandboxEnvironment, SandboxSpec
-from core.sandbox.errors import SandboxTransientError
+from core.sandbox.errors import SandboxFatalError, SandboxTransientError
 from core.sandbox.hooks import BoxEvent, BoxEventInfo, BoxHooks, BoxState, LiveCounts
 from core.sandbox.pool import BoxOutcome, BoxWork, SandboxPool
 from core.sandbox.retry import RetryPolicy
@@ -551,6 +551,127 @@ async def test_iterator_error_stops_the_run_with_that_error() -> None:
     with pytest.raises(KeyError):
         async with asyncio.timeout(DEADLINE):
             await SandboxPool({"fake": 2}).run(broken(), _work(_Tracker()), outcomes)
+
+
+async def test_stray_cancel_in_a_phase_is_a_box_outcome() -> None:
+    """Turn a cancel that nobody asked for into a fatal outcome, so one worker does not hang."""
+    tracker = _Tracker()
+    events: list[BoxEventInfo] = []
+
+    async def note(info: BoxEventInfo) -> None:
+        """Record a box end or cancel.
+
+        Args:
+            info: The box event.
+        """
+        events.append(info)
+
+    async def stray_cancel(env: SandboxEnvironment, candidate: int) -> int:
+        """Await a cancelled inner task for candidate 0, else return the candidate.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Returns:
+            The candidate.
+        """
+        if candidate == 0:
+            inner = asyncio.create_task(asyncio.sleep(10))
+            await asyncio.sleep(0)
+            inner.cancel()
+            await inner
+        return candidate
+
+    hooks = BoxHooks()
+    hooks.add(note, BoxEvent.ENDED, BoxEvent.CANCELLED)
+    outcomes = _Outcomes()
+    pool = SandboxPool({"fake": 1}, phase_limits={Phase.RUN: 1}, hooks=hooks)
+    async with asyncio.timeout(DEADLINE):
+        await pool.run(_numbers(3), _work(tracker, run=stray_cancel), outcomes, workers=1)
+    assert [outcome.candidate for outcome in outcomes.items] == [0, 1, 2]
+    assert isinstance(outcomes.items[0].error, SandboxFatalError)
+    assert [outcome.result for outcome in outcomes.items[1:]] == [1, 2]
+    assert [info.event for info in events] == [BoxEvent.ENDED] * 3
+    assert tracker.live == 0
+
+
+async def test_on_outcome_error_reaches_the_caller_and_releases_permits() -> None:
+    """Raise the callback's own error, stop the other boxes, then reuse every permit."""
+    tracker = _Tracker()
+
+    async def slow_after_first(env: SandboxEnvironment, candidate: int) -> int:
+        """Return candidate 0 at once and wait forever for the others.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Returns:
+            The candidate.
+        """
+        if candidate != 0:
+            await asyncio.Event().wait()
+        return candidate
+
+    async def broken(_outcome: BoxOutcome[int, object]) -> None:
+        """Fail on the first outcome.
+
+        Args:
+            _outcome: The outcome of one box.
+
+        Raises:
+            KeyError: Always.
+        """
+        raise KeyError("callback")
+
+    pool = SandboxPool({"fake": 3}, phase_limits={Phase.RUN: 3})
+    with pytest.raises(KeyError):
+        async with asyncio.timeout(DEADLINE):
+            await pool.run(_numbers(3), _work(tracker, run=slow_after_first), broken)
+    assert tracker.live == 0
+
+    barrier = asyncio.Barrier(3)
+
+    async def meet(env: SandboxEnvironment, candidate: int) -> int:
+        """Wait until three boxes run at once, then return the candidate.
+
+        Args:
+            env: The box.
+            candidate: The candidate.
+
+        Returns:
+            The candidate.
+        """
+        await barrier.wait()
+        return candidate
+
+    outcomes = _Outcomes()
+    async with asyncio.timeout(DEADLINE):
+        await pool.run(_numbers(3), _work(tracker, run=meet), outcomes)
+    assert [outcome.ok for outcome in outcomes.items] == [True, True, True]
+
+
+def test_a_pool_refuses_a_second_event_loop() -> None:
+    """Run on the first loop, then raise a clear error on another loop before any box starts."""
+    tracker = _Tracker()
+    pool = SandboxPool({"fake": 1})
+
+    async def run_three() -> list[BoxOutcome[int, object]]:
+        """Run three candidates with three workers on the current loop.
+
+        Returns:
+            The outcomes.
+        """
+        outcomes = _Outcomes()
+        await pool.run(_numbers(3), _work(tracker), outcomes, workers=3)
+        return outcomes.items
+
+    assert all(outcome.ok for outcome in asyncio.run(run_three()))
+    created = tracker.created
+    with pytest.raises(RuntimeError, match="one event loop"):
+        asyncio.run(run_three())
+    assert tracker.created == created
 
 
 @pytest.mark.parametrize(

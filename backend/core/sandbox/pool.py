@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 from .environment import SandboxEnvironment
+from .errors import SandboxFatalError
 from .hooks import PHASE_ENDED, PHASE_STARTED, BoxEvent, BoxEventInfo, BoxHooks
 from .retry import DEFAULT_RETRY_POLICY, RetryPolicy, run_with_retry
 from .timeouts import Phase, PhaseTimeouts
@@ -93,8 +94,14 @@ class BoxOutcome(Generic[T, R]):
 class SandboxPool:
     """Run candidates in boxes under a box limit for each provider and phase limits.
 
-    Make one pool for each process and share it, so that every engine
-    counts against the same limits.
+    Make one pool for each event loop and share it, so that every engine
+    on that loop counts against the same limits. The semaphores bind to
+    the loop of the first run, so a run on another loop raises.
+
+    The default number of workers is the highest provider limit. A box
+    holds its provider permit from its start to its stop, also while it
+    waits for a phase permit, so a started box that waits for a phase
+    still counts against its provider limit.
     """
 
     def __init__(
@@ -138,6 +145,7 @@ class SandboxPool:
         self.retry_policy = retry_policy
         self.timeouts = timeouts
         self._ids = itertools.count()
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def run(
         self,
@@ -167,11 +175,17 @@ class SandboxPool:
                 key that is unique in this pool.
 
         Raises:
+            RuntimeError: The pool already ran on another event loop.
             TypeError: ``workers`` or ``queue_size`` is not an int.
             ValueError: ``workers`` or ``queue_size`` is below 1.
             Exception: The first error of the candidate iterator or of
                 ``on_outcome``, after the other tasks stop.
         """
+        loop = asyncio.get_running_loop()
+        if self._loop is None:
+            self._loop = loop
+        elif self._loop is not loop:
+            raise RuntimeError("a SandboxPool runs on one event loop only; make one pool for each event loop")
         workers = _check_limit("workers", self._max_provider_limit if workers is None else workers)
         queue_size = _check_limit("queue_size", workers if queue_size is None else queue_size)
         # The producer takes a slot before it reads a candidate and a worker
@@ -249,6 +263,8 @@ class SandboxPool:
 
         Raises:
             ValueError: The box's provider has no limit in this pool.
+            SandboxFatalError: The start or a phase raised a cancel that
+                nobody asked for, so the box gets an outcome.
             Exception: The error of the start or of a phase.
         """
         await self.hooks.emit(BoxEventInfo(BoxEvent.STARTED, box_id))
@@ -270,9 +286,18 @@ class SandboxPool:
                         result = await self._phase(Phase.SCORE, work.score, env, candidate, box_id)
                 finally:
                     await self._stop(env, box_id)
-        except asyncio.CancelledError:
-            await self.hooks.emit(BoxEventInfo(BoxEvent.CANCELLED, box_id))
-            raise
+        except asyncio.CancelledError as cancel:
+            task = asyncio.current_task()
+            if task is None or task.cancelling():
+                await self.hooks.emit(BoxEventInfo(BoxEvent.CANCELLED, box_id))
+                raise
+            # Provider code can raise a cancel that nobody asked for, e.g.
+            # when it awaits an inner task that was cancelled. The TaskGroup
+            # drops a cancelled worker without an error, so the outcome would
+            # be lost and the producer would wait forever for a queue slot.
+            error = SandboxFatalError(f"box {box_id} raised a cancel that nobody asked for")
+            await self.hooks.emit(BoxEventInfo(BoxEvent.ENDED, box_id, error=error))
+            raise error from cancel
         except Exception as exc:
             await self.hooks.emit(BoxEventInfo(BoxEvent.ENDED, box_id, error=exc))
             raise
