@@ -284,6 +284,21 @@ def test_staging_pins_the_commit_and_keeps_secrets_in_the_parent(
     assert not staged.workdir.exists()
 
 
+def test_staging_keeps_each_secrets_binding_and_hosts_for_the_relay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Staging reads the bindings and allowed hosts before it empties the secret list, and maps each secret to its host."""
+    payload = _payload("c" * 40)
+    payload["target"]["repo"]["secrets"][0]["allowed_hosts"] = ["api.example.com"]
+    payload["target"]["repo"]["secret_bindings"] = {"API_KEY": "user"}
+    toml = '[services.maps]\nurl = "https://api.example.com/v1"\nheaders = { Authorization = "Bearer ${API_KEY}" }\n'
+
+    _, staged = _stage_with({"optimize.toml": toml}, monkeypatch, payload)
+
+    assert staged.secret_bindings == {"API_KEY": "user"}
+    assert staged.secret_hosts == {"API_KEY": "api.example.com"}
+    assert staged.secret_allowed_hosts == {"API_KEY": ("api.example.com",)}
+    staged.cleanup()
+
+
 def test_failed_fetch_leaves_nothing_on_disk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Remove the scratch folder when the clone fails."""
     workdirs: list[Path] = []
@@ -520,6 +535,29 @@ def test_binding_hands_the_guest_a_route_and_closes_the_box(tmp_path: Path) -> N
     staged.close_scorers()
     assert staged.scorers == []
     assert box.closed
+
+
+def test_binding_gives_the_scorer_the_secret_hosts_and_the_run_budget(tmp_path: Path) -> None:
+    """The scorer's relay gets the bindings, both host maps, and the gateway's budget to meter a Skynet key."""
+    payload, bare = _binding(tmp_path, None)
+    staged = dataclasses.replace(
+        bare,
+        secret_bindings={"API_KEY": "user"},
+        secret_hosts={"API_KEY": "api.example.com"},
+        secret_allowed_hosts={"API_KEY": ("api.example.com",)},
+    )
+    gateway = _Gateway()
+    budget = object()
+    gateway.runtime = budget  # type: ignore[attr-defined]
+
+    repo_staging.bind_repo_scorer(payload, staged, gateway, owner_id="job-1")
+
+    scorer = gateway.evaluator
+    assert scorer._secret_bindings == {"API_KEY": "user"}
+    assert scorer._secret_hosts == {"API_KEY": "api.example.com"}
+    assert scorer._secret_allowed_hosts == {"API_KEY": ("api.example.com",)}
+    assert scorer._budget is budget
+    staged.close_scorers()
 
 
 def test_binding_gives_the_box_only_the_scorer_models_scoped_route(tmp_path: Path) -> None:

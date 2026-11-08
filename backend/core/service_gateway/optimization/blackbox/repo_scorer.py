@@ -30,11 +30,13 @@ way out (E27).
 
 The same relay carries the metric's requests to the run's ``[services.<name>]``
 that have a url (E45). The parent checks that the calling role lists the
-service, adds the service's headers with the secrets filled in, calls the
-url, and returns the response unchanged. The version's ``[run]`` entry
-reaches its own services the same way, checked against the ``[run]`` role.
-The scorer box never holds those secrets. Catalog connectors do not go
-through the relay.
+service (E55), fills the service's ``${NAME}`` headers with
+:func:`relay_request` (each secret only to its own host and the run's allowed
+hosts, a Skynet key metered, E49-E53), calls the url with no redirects, and
+removes every filled value from the answer's headers and body before the box
+gets it (E56). The version's ``[run]`` entry reaches its own services the same
+way, checked against the ``[run]`` role. The scorer box never holds those
+secrets. Catalog connectors do not go through the relay.
 """
 
 from __future__ import annotations
@@ -56,16 +58,17 @@ from typing import Any
 import httpx
 
 from ....billing.budgets import BudgetError, BudgetInsufficientError
+from ....billing.env_connectors import relay_request
 from ....billing.mcp_broker import _pinned_address, _PinnedTransport
 from ....billing.model_dispatch import ModelHTTPResult
 from ....billing.operation_pricing import UnpricedOperationError
-from ....billing.runtime import UsagePendingError
+from ....billing.runtime import BudgetRuntime, UsagePendingError
 from ....billing.signals import BudgetReached
 from . import runner, sandbox_log
 from .harness import ENV_API_KEY, ENV_MODEL
 from .protocol import STATUS_KEY
-from .repo_constraints import ServiceSpec, TargetStage
-from .repo_services import open_stage_boxes, stage_spec
+from .repo_constraints import RoleEnvironment, ServiceSpec, TargetStage
+from .repo_services import RoleRelayError, open_stage_boxes, service_endpoint, stage_spec
 from .repo_tree import archive_chunks, drop_paths
 from .repo_workspace import GIT, HIDDEN_CHANGED, REPO_DIR, WORK_DIR, RepoWorkspace, redact
 from .rule_judge import RuleJudge
@@ -101,7 +104,9 @@ _STAGE_ERROR_CHARS = 500
 _SERVICE_TIMEOUT_SECONDS = 120.0
 # The answer is written into the scorer box, base64-encoded.
 _SERVICE_BODY_BYTES = 4 * 1024 * 1024
-_SERVICE_PLACEHOLDER = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
+# The answer's headers travel to relay_request with its body, so the
+# redaction covers both; httpx header lines never hold this separator.
+_HEAD_END = b"\r\n\r\n"
 _HTTP_METHOD = re.compile(r"[A-Z]{1,16}")
 # Connection framing is the relay's own on each side; httpx decodes the body.
 _HOP_HEADERS = frozenset(
@@ -133,6 +138,14 @@ _FRAME_FILE = re.compile(r'File "([^"]*)"')
 
 class RepoScoreError(Exception):
     """A version could not be scored; the message is safe to show the agent."""
+
+
+class _AnswerTooLargeError(Exception):
+    """A service answered with more than the relay passes on."""
+
+
+class _UnreachableError(Exception):
+    """A service's host resolves to an address the relay must not reach."""
 
 
 def fold_case_scores(side_info: Mapping[str, Any]) -> dict[str, Any]:
@@ -185,6 +198,10 @@ class RepoScorer:
         service_roles: Mapping[str, tuple[str, ...]] | None = None,
         run_entry: str | tuple[str, ...] | None = None,
         run_timeout: float = 60.0,
+        secret_bindings: Mapping[str, str] | None = None,
+        secret_hosts: Mapping[str, str] | None = None,
+        secret_allowed_hosts: Mapping[str, tuple[str, ...]] | None = None,
+        budget: BudgetRuntime | None = None,
     ) -> None:
         """Bind the user's scorer code to a repository workspace.
 
@@ -216,6 +233,12 @@ class RepoScorer:
             run_entry: The ``[run]`` entry: ``path/file.py:function`` or a
                 command; ``None`` runs no version code before the metric.
             run_timeout: Longest one ``[run]`` call may run.
+            secret_bindings: ``user`` or ``managed`` for each secret name.
+            secret_hosts: The one host each secret may go to, from the
+                repository's ``optimize.toml``.
+            secret_allowed_hosts: Each user secret's ``allowed_hosts`` from
+                the run.
+            budget: The run budget, which meters a call with a Skynet key.
 
         Raises:
             ValueError: When stages are given without a runtime or a tree.
@@ -228,7 +251,12 @@ class RepoScorer:
         self._hidden = hidden_paths
         self._max_concurrency = max(1, max_concurrency)
         self._services = {name: spec for name, spec in (services or {}).items() if spec.url is not None}
+        self._declared = dict(services or {})
         self._service_roles = dict(service_roles or {})
+        self._secret_bindings = dict(secret_bindings or {})
+        self._secret_hosts = dict(secret_hosts or {})
+        self._secret_allowed_hosts = dict(secret_allowed_hosts or {})
+        self._budget = budget
         self._run_entry = run_entry
         self._run_timeout = run_timeout
         self._workspace = workspace
@@ -601,10 +629,14 @@ class RepoScorer:
             max_concurrency=self._max_concurrency,
             env=self._model_env(),
             workspace=self._workspace,
-            services=self._services,
+            services=self._declared,
             role=role,
             allowed=self._service_roles.get(role, ()),
             secrets=self._workspace.secrets,
+            bindings=self._secret_bindings,
+            secret_hosts=self._secret_hosts,
+            allowed_hosts=self._secret_allowed_hosts,
+            budget=self._budget,
         )
 
     def _lay_out(self, box: SandboxSession, patch: str) -> bool:
@@ -729,6 +761,10 @@ class _StageRelay:
         role: str = _METRIC_ROLE,
         allowed: tuple[str, ...] = (),
         secrets: Mapping[str, str] | None = None,
+        bindings: Mapping[str, str] | None = None,
+        secret_hosts: Mapping[str, str] | None = None,
+        allowed_hosts: Mapping[str, tuple[str, ...]] | None = None,
+        budget: BudgetRuntime | None = None,
     ) -> None:
         """Bind the open stage boxes to the scorer box that waits for their answers.
 
@@ -741,12 +777,16 @@ class _StageRelay:
                 through the parent's mailbox.
             workspace: The scorer box's workspace, which checks the
                 protected files and writes each answer into the scorer box.
-            services: The run's services with a url, by name.
+            services: The run's ``[services]`` tables, by name.
             role: The role that each service request is checked against:
                 ``run`` for the ``[run]`` entry, ``metric`` for the scorer (E37).
             allowed: The services that ``role`` lists.
             secrets: The run's secret values, filled into service headers
                 here in the parent.
+            bindings: ``user`` or ``managed`` for each secret name.
+            secret_hosts: The one host each secret may go to.
+            allowed_hosts: Each user secret's ``allowed_hosts`` from the run.
+            budget: The run budget, which meters a call with a Skynet key.
         """
         self._boxes = dict(boxes)
         self._stages = stages
@@ -760,11 +800,15 @@ class _StageRelay:
             for name in self._boxes
         }
         self._refusals = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stage-refusal")
-        self._services = {name: spec for name, spec in (services or {}).items() if spec.url is not None}
-        self._catalog = {name for name, spec in (services or {}).items() if spec.url is None}
+        self._declared = dict(services or {})
+        self._services = {name: spec for name, spec in self._declared.items() if spec.url is not None}
         self._role = role
-        self._allowed = frozenset(allowed)
+        self._allowed = tuple(allowed)
         self._secrets = dict(secrets or {})
+        self._bindings = dict(bindings or {})
+        self._secret_hosts = dict(secret_hosts or {})
+        self._allowed_hosts = dict(allowed_hosts or {})
+        self._budget = budget
         self._service_pool = ThreadPoolExecutor(max_workers=max_concurrency, thread_name_prefix="stage-service")
         self._pending = ""
         self._seen: set[str] = set()
@@ -853,15 +897,12 @@ class _StageRelay:
         Returns:
             The refusal answer, or ``None`` when the request may go out.
         """
-        if not isinstance(name, str) or (name not in self._services and name not in self._catalog):
+        if not isinstance(name, str) or name not in self._declared:
             return {"status": 404, "error": f"Unknown service {name!r}."}
-        if name not in self._allowed:
-            return {"status": 403, "error": f"Service {name!r} is not listed for the [{self._role}] role."}
-        if name in self._catalog:
-            return {
-                "status": 403,
-                "error": f"Service {name!r} has no url; only services with a url go through the relay.",
-            }
+        try:
+            service_endpoint(f"[{self._role}]", RoleEnvironment(services=self._allowed), self._declared, name)
+        except RoleRelayError as error:
+            return {"status": 403, "error": str(error)}
         return None
 
     def _service(self, name: str, identity: str, frame: Mapping[str, Any]) -> None:
@@ -880,11 +921,13 @@ class _StageRelay:
         self._answer(identity, response)
 
     def _request(self, spec: ServiceSpec, name: str, frame: Mapping[str, Any]) -> dict[str, Any]:
-        """Call a service's url with its headers and the run's secrets filled in.
+        """Call a service's url through :func:`relay_request`, so its secrets stay in the parent.
 
-        The host must resolve to public addresses only, and the connection
-        stays on that address and origin; redirects come back to the guest
-        unchanged.
+        ``relay_request`` fills the declared headers, refuses a secret outside
+        its host or the run's allowed hosts, meters a Skynet key, and removes
+        every filled value from the answer. The host must resolve to public
+        addresses only, the connection stays on that address and origin, and
+        redirects come back to the guest unchanged.
 
         Args:
             spec: The service's declaration.
@@ -896,8 +939,9 @@ class _StageRelay:
             ``{"status", "error"}`` when the request cannot go out.
 
         Raises:
-            ValueError: When the frame is malformed or the host resolves to a
-                private, loopback or link-local address.
+            binascii.Error: When the frame's body is not base64.
+            _UnreachableError: When the host resolves to a private, loopback or
+                link-local address.
             httpx.HTTPError: When the service cannot be reached.
         """
         method, path = frame.get("method"), frame.get("path", "")
@@ -907,8 +951,9 @@ class _StageRelay:
         origin, target = httpx.URL(str(spec.url)), httpx.URL(url)
         if (target.scheme, target.host, target.port) != (origin.scheme, origin.host, origin.port):
             return {"status": 400, "error": f"Service {name!r} got a path outside its url."}
-        overrides = {key.lower(): value for key, value in spec.request_headers.items()}
-        headers = [
+        declared = spec.request_headers
+        overrides = {key.lower() for key in declared}
+        guest = [
             (pair[0], pair[1])
             for pair in frame.get("headers") or ()
             if isinstance(pair, list | tuple)
@@ -917,41 +962,76 @@ class _StageRelay:
             and pair[0].lower() not in _HOP_HEADERS
             and pair[0].lower() not in overrides
         ]
-        for key, template in spec.request_headers.items():
-            missing = [secret for secret in _SERVICE_PLACEHOLDER.findall(template) if secret not in self._secrets]
-            if missing:
-                return {
-                    "status": 502,
-                    "error": f"Service {name!r} needs secret {missing[0]}, which the run does not have.",
-                }
-            headers.append((key, _SERVICE_PLACEHOLDER.sub(lambda match: self._secrets[match.group(1)], template)))
         body = base64.b64decode(frame.get("body") or "", validate=True)
-        transport = _PinnedTransport(
-            str(spec.url), _pinned_address(str(spec.url), False, label=f"service {name!r} url")
-        )
+        status: list[int] = []
+
+        def send(address: str, filled: dict[str, str], content: bytes) -> bytes:
+            """Send the filled request once and return its header lines and body together.
+
+            Args:
+                address: The service url with the guest's path.
+                filled: The declared headers with their secrets filled in.
+                content: The guest's body.
+
+            Returns:
+                The answer's header lines, a blank line, then its body.
+
+            Raises:
+                _UnreachableError: When the host resolves to a private, loopback
+                    or link-local address.
+                _AnswerTooLargeError: When the body passes 4 MiB.
+            """
+            try:
+                pinned = _pinned_address(str(spec.url), False, label=f"service {name!r} url")
+            except ValueError as error:
+                # Not a secret refusal: relay_request's ValueError means only that.
+                raise _UnreachableError(str(error)) from error
+            transport = _PinnedTransport(str(spec.url), pinned)
+            try:
+                with (
+                    httpx.Client(
+                        transport=transport, follow_redirects=False, trust_env=False, timeout=_SERVICE_TIMEOUT_SECONDS
+                    ) as client,
+                    client.stream(method, address, headers=[*guest, *filled.items()], content=content) as response,
+                ):
+                    answer = bytearray()
+                    for chunk in response.iter_bytes():
+                        answer.extend(chunk)
+                        if len(answer) > _SERVICE_BODY_BYTES:
+                            raise _AnswerTooLargeError
+                    status.append(response.status_code)
+                    head = b"".join(
+                        key + b": " + value + b"\r\n"
+                        for key, value in response.headers.raw
+                        if key.decode("latin-1").lower() not in _DECODED_HEADERS
+                    )
+                    return head + _HEAD_END[2:] + bytes(answer)
+            finally:
+                transport.close()
+
         try:
-            with (
-                httpx.Client(
-                    transport=transport, follow_redirects=False, trust_env=False, timeout=_SERVICE_TIMEOUT_SECONDS
-                ) as client,
-                client.stream(method, target, headers=headers, content=body) as response,
-            ):
-                content = bytearray()
-                for chunk in response.iter_bytes():
-                    content.extend(chunk)
-                    if len(content) > _SERVICE_BODY_BYTES:
-                        return {"status": 502, "error": f"Service {name!r} answered with more than 4 MiB."}
-                return {
-                    "status": response.status_code,
-                    "headers": [
-                        [key, value]
-                        for key, value in response.headers.multi_items()
-                        if key.lower() not in _DECODED_HEADERS
-                    ],
-                    "body": base64.b64encode(bytes(content)).decode("ascii"),
-                }
-        finally:
-            transport.close()
+            answer = relay_request(
+                url=url,
+                headers=declared,
+                body=body,
+                user_secrets=self._secrets,
+                bindings=self._bindings,
+                secret_hosts=self._secret_hosts,
+                allowed_hosts=self._allowed_hosts,
+                send=send,
+                runtime=self._budget,
+            )
+        except _AnswerTooLargeError:
+            return {"status": 502, "error": f"Service {name!r} answered with more than 4 MiB."}
+        except ValueError as error:
+            # relay_request names the secret and the host, never a value.
+            return {"status": 403, "error": f"Service {name!r} was refused: {error}"}
+        head, _, content = (b"\r\n" + answer).partition(_HEAD_END)
+        return {
+            "status": status[0],
+            "headers": [list(line.decode("latin-1").split(": ", 1)) for line in head.split(b"\r\n") if b": " in line],
+            "body": base64.b64encode(content).decode("ascii"),
+        }
 
     def _call(self, name: str, identity: str, value: Any) -> None:
         """Run one stage call in its box and write the answer for the scorer.

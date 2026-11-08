@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import http.server
 import json
 import logging
@@ -1366,6 +1367,8 @@ def _service_scorer(
         services={"judge-api": ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://judge.example.test:{port}/v1/")},
         service_roles=roles,
         run_entry=run_entry,
+        secret_hosts={"JUDGE_KEY": "judge.example.test"},
+        secret_allowed_hosts={"JUDGE_KEY": ("judge.example.test",)},
     )
 
 
@@ -1473,7 +1476,13 @@ def test_a_run_role_reaches_its_listed_service_through_the_relay(
 
 
 def _service_relay(
-    workspace: _Workspace, *, role: str, allowed: tuple[str, ...], services: Mapping[str, ServiceSpec]
+    workspace: _Workspace,
+    *,
+    role: str,
+    allowed: tuple[str, ...],
+    services: Mapping[str, ServiceSpec],
+    host: str = "judge.example.test",
+    allowed_hosts: tuple[str, ...] | None = None,
 ) -> _StageRelay:
     """Build a relay with no stage boxes that forwards to the given services.
 
@@ -1482,6 +1491,8 @@ def _service_relay(
         role: The calling role.
         allowed: The services that role lists.
         services: The run's services.
+        host: The host ``JUDGE_KEY`` belongs to.
+        allowed_hosts: The run's allowed hosts for ``JUDGE_KEY``; ``None`` allows ``host``.
 
     Returns:
         The relay.
@@ -1497,21 +1508,27 @@ def _service_relay(
         role=role,
         allowed=allowed,
         secrets={"JUDGE_KEY": "judge-secret-value"},
+        secret_hosts={"JUDGE_KEY": host},
+        allowed_hosts={"JUDGE_KEY": (host,) if allowed_hosts is None else allowed_hosts},
     )
 
 
-def _service_answer(relay: _StageRelay, workspace: _Workspace, name: str) -> dict[str, Any]:
+def _service_answer(
+    relay: _StageRelay, workspace: _Workspace, name: str, path: str = "grade", method: str = "POST"
+) -> dict[str, Any]:
     """Send one service frame through the relay and wait for its answer.
 
     Args:
         relay: The relay.
         workspace: Records the answers.
         name: The service the frame names.
+        path: The request path under the service url.
+        method: The request method.
 
     Returns:
         The answer the scorer box gets.
     """
-    frame = {"id": "d" * 32, "service": name, "path": "grade", "method": "POST", "headers": [], "body": ""}
+    frame = {"id": "d" * 32, "service": name, "path": path, "method": method, "headers": [], "body": ""}
     relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
     deadline = time.monotonic() + 10
     while not workspace.writes and time.monotonic() < deadline:
@@ -1529,7 +1546,7 @@ def test_a_role_that_does_not_list_the_service_is_refused(upstream: _Upstream) -
     assert relay.config("/work")["services"] == []
     answer = _service_answer(relay, workspace, "judge")
     assert answer["status"] == 403
-    assert answer["error"] == "Service 'judge' is not listed for the [run] role."
+    assert answer["error"] == ("Service 'judge' is not listed for the [run] role. Add it: [run] services = [\"judge\"]")
     assert upstream.requests == []
 
 
@@ -1555,11 +1572,142 @@ def test_a_service_whose_host_resolves_to_a_private_address_is_refused(upstream:
     """The relay resolves the host and refuses loopback, so a url cannot reach the parent's own network."""
     workspace = _Workspace()
     spec = ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://127.0.0.1:{upstream.port}/")
-    relay = _service_relay(workspace, role="metric", allowed=("judge",), services={"judge": spec})
+    relay = _service_relay(workspace, role="metric", allowed=("judge",), services={"judge": spec}, host="127.0.0.1")
     assert relay.config("/work")["services"] == ["judge"]
     answer = _service_answer(relay, workspace, "judge")
     assert answer == {"status": 502, "error": "Service 'judge' could not be reached."}
     assert upstream.requests == []
+
+
+class _Echo:
+    """Serve an upstream that echoes the Authorization header, or redirects, and record each path."""
+
+    def __init__(self) -> None:
+        """Start the server on a free port."""
+        self.paths: list[str] = []
+        echo = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            """Echo the key at ``/echo``, redirect at ``/redirect``, and answer anything else."""
+
+            def do_GET(self) -> None:
+                """Record the path and answer it."""
+                echo.paths.append(self.path)
+                if self.path.endswith("/redirect"):
+                    self.send_response(302)
+                    self.send_header("Location", "/leak")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                key = self.headers.get("Authorization", "")
+                payload = json.dumps({"seen": key}).encode()
+                self.send_response(200)
+                self.send_header("X-Echo", key)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                """Keep the test output quiet."""
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_address[1]
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        """Stop the server."""
+        self._server.shutdown()
+        self._server.server_close()
+
+
+@pytest.fixture
+def echo(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Echo]:
+    """Run an echoing upstream and resolve ``judge.example.test`` to it.
+
+    Yields:
+        The running upstream.
+    """
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    server = _Echo()
+    yield server
+    server.close()
+
+
+def _echo_relay(workspace: _Workspace, port: int, **hosts: Any) -> _StageRelay:
+    """Build a metric relay to the echo upstream with ``JUDGE_KEY`` in its Authorization header.
+
+    Args:
+        workspace: Records the answers.
+        port: The upstream's port.
+        **hosts: ``host`` and ``allowed_hosts`` overrides for ``_service_relay``.
+
+    Returns:
+        The relay.
+    """
+    spec = ServiceSpec(
+        secrets=("JUDGE_KEY",),
+        url=f"http://judge.example.test:{port}/",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+    )
+    return _service_relay(workspace, role="metric", allowed=("judge",), services={"judge": spec}, **hosts)
+
+
+def test_an_upstream_that_echoes_the_key_gives_the_box_only_the_redacted_form(echo: _Echo) -> None:
+    """The upstream gets the key, and the box gets ``[REDACTED]`` in both the body and the headers (E56)."""
+    workspace = _Workspace()
+    answer = _service_answer(_echo_relay(workspace, echo.port), workspace, "judge", path="echo", method="GET")
+
+    assert answer["status"] == 200
+    body = base64.b64decode(answer["body"]).decode()
+    assert json.loads(body) == {"seen": "[REDACTED]"}
+    assert ["X-Echo", "[REDACTED]"] in answer["headers"]
+    assert "judge-secret-value" not in json.dumps(answer)
+    assert echo.paths == ["/echo"]
+
+
+def test_a_redirect_comes_back_to_the_box_and_is_never_followed(echo: _Echo) -> None:
+    """The relay returns the 302 as it is, so the key never reaches the redirect target (E53)."""
+    workspace = _Workspace()
+    answer = _service_answer(_echo_relay(workspace, echo.port), workspace, "judge", path="redirect", method="GET")
+
+    assert answer["status"] == 302
+    assert ["Location", "/leak"] in answer["headers"]
+    assert echo.paths == ["/redirect"]
+
+
+@pytest.mark.parametrize(
+    ("hosts", "fragment"),
+    [
+        ({"host": "other.example.test"}, "JUDGE_KEY"),
+        ({"allowed_hosts": ()}, "JUDGE_KEY"),
+        ({"allowed_hosts": ("elsewhere.example.test",)}, "JUDGE_KEY"),
+    ],
+)
+def test_a_secret_outside_its_host_or_the_allowed_hosts_is_refused(
+    echo: _Echo, hosts: dict[str, Any], fragment: str
+) -> None:
+    """The relay sends nothing when the secret belongs to another host or the run does not allow the host (E50, E52)."""
+    workspace = _Workspace()
+    answer = _service_answer(_echo_relay(workspace, echo.port, **hosts), workspace, "judge", path="echo", method="GET")
+
+    assert answer["status"] == 403
+    assert answer["error"].startswith("Service 'judge' was refused: ")
+    assert fragment in answer["error"]
+    assert "judge-secret-value" not in answer["error"]
+    assert echo.paths == []
+
+
+def test_a_metric_that_does_not_list_the_service_gets_the_fix_in_the_error(echo: _Echo) -> None:
+    """The metric's refusal names the exact line to add (E55)."""
+    workspace = _Workspace()
+    spec = ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://judge.example.test:{echo.port}/")
+    relay = _service_relay(workspace, role="metric", allowed=(), services={"judge-api": spec})
+
+    answer = _service_answer(relay, workspace, "judge-api")
+
+    assert answer["status"] == 403
+    assert answer["error"].endswith('Add it: [metric] services = ["judge-api"]')
+    assert echo.paths == []
 
 
 _PROBE_CANDIDATE = """

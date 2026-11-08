@@ -24,7 +24,11 @@ from sqlalchemy.orm import Session
 from ..api.model_catalog import agent_model_id, catalog_snapshot, lowest_effort_from_low
 from ..billing.model_gateway import ROUTE_KEY
 from ..billing.operation_pricing import ChargePolicy
-from ..billing.protected_credentials import ProtectedCredentialVault, resolve_repo_secrets
+from ..billing.protected_credentials import (
+    ProtectedCredentialVault,
+    repo_secret_allowed_hosts,
+    resolve_repo_secrets,
+)
 from ..billing.vercel_usage import PACKAGE_REGISTRY_HOSTS
 from ..brand import APP_NAME
 from ..config import settings
@@ -122,6 +126,11 @@ class StagedRepository:
     run_timeout: float = 60.0
     agent_archive: Path | None = None
     exploits_path: str = EXPLOITS_DIR
+    # The relay fills a service's ${NAME} headers only for the secret's own
+    # host and the run's allowed hosts, and meters a Skynet key (E49-E53).
+    secret_bindings: Mapping[str, str] = field(default_factory=dict)
+    secret_hosts: Mapping[str, str] = field(default_factory=dict)
+    secret_allowed_hosts: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def close_scorers(self) -> None:
         """Close the parent's scoring boxes; the gateway still stops any that fail to close."""
@@ -177,6 +186,9 @@ def stage_repository(
     """
     result = copy.deepcopy(payload)
     repo = result["target"]["repo"]
+    # Resolving the secrets empties their list, so read the relay's inputs first.
+    secret_bindings = dict(repo.get("secret_bindings") or {})
+    secret_allowed_hosts = repo_secret_allowed_hosts(payload)
     secrets = resolve_repo_secrets(
         result,
         username=username,
@@ -265,6 +277,9 @@ def stage_repository(
         run_timeout=environment.constraints.run_timeout if environment.constraints is not None else 60.0,
         agent_archive=agent_archive,
         exploits_path=metric.exploits,
+        secret_bindings=secret_bindings,
+        secret_hosts=environment.constraints.secret_hosts if environment.constraints is not None else {},
+        secret_allowed_hosts=secret_allowed_hosts,
     )
 
 
@@ -579,6 +594,10 @@ def bind_repo_scorer(
         service_roles=staged.service_roles,
         run_entry=staged.run_entry,
         run_timeout=staged.run_timeout,
+        secret_bindings=staged.secret_bindings,
+        secret_hosts=staged.secret_hosts,
+        secret_allowed_hosts=staged.secret_allowed_hosts,
+        budget=getattr(gateway, "runtime", None),
     )
     environment = target["repo"].get(ENVIRONMENT_KEY)
     if isinstance(environment, dict):
