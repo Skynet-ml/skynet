@@ -347,8 +347,9 @@ def list_commits(secret: ConnectorSecret, full_name: str, branch: str) -> list[d
 def _commit(token: str | None, full_name: str, ref: str) -> str:
     """Resolve a branch, tag or commit to a commit hash.
 
-    Bitbucket's ``/src`` paths cannot hold a branch name with a slash, so
-    every read first pins the ref to a hash.
+    Bitbucket's ``/src`` and ``/commit/{revision}`` paths cannot hold a
+    branch name with a slash, even percent-encoded, so every read first pins
+    the ref to a hash through the ``include`` query of ``/commits``.
 
     Args:
         token: Bearer token.
@@ -357,6 +358,9 @@ def _commit(token: str | None, full_name: str, ref: str) -> str:
 
     Returns:
         The 40-character commit hash.
+
+    Raises:
+        DomainError: ``connectors.not_found`` when the ref names no commit.
     """
     value = ref.strip()
     if COMMIT_SHA.match(value):
@@ -365,9 +369,17 @@ def _commit(token: str | None, full_name: str, ref: str) -> str:
     if not value:
         raise DomainError("connectors.not_found", status=404, provider=label(PROVIDER))
     body = get_json(
-        f"{_repo_url(full_name)}/commit/{quote(value, safe='')}", provider=PROVIDER, headers=_headers(token)
+        f"{_repo_url(full_name)}/commits",
+        provider=PROVIDER,
+        headers=_headers(token),
+        params={"include": value, "pagelen": 1},
     )
-    return str(body["hash"])
+    values = body.get("values") if isinstance(body, dict) else None
+    head = values[0] if isinstance(values, list) and values and isinstance(values[0], dict) else {}
+    sha = head.get("hash")
+    if not isinstance(sha, str) or not COMMIT_SHA.match(sha):
+        raise DomainError("connectors.not_found", status=404, provider=label(PROVIDER))
+    return sha
 
 
 def repository_tree(secret: ConnectorSecret, full_name: str, branch: str) -> dict[str, Any]:

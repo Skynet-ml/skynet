@@ -296,6 +296,12 @@ def test_oauth_app_uses_gitlab_endpoints() -> None:
         ("https://gitlab.com/team/bot.git/?ref=main", "team/bot"),
         ("https://gitlab.com/a/b/c/d/repo", "a/b/c/d/repo"),
         ("https://gitlab.com/a/b/c/repo/-/tree/main?x=1", "a/b/c/repo"),
+        ("https://gitlab.com/g/p/tree/main", "g/p"),
+        ("https://gitlab.com/g/sub/p/blob/main/src/a.py", "g/sub/p"),
+        ("https://gitlab.com/g/p/commits/feature/x", "g/p"),
+        ("https://gitlab.com/g/p/merge_requests/3", "g/p"),
+        ("https://gitlab.com/tree/blob", "tree/blob"),
+        ("https://gitlab.com/g/tree/p", "g/tree/p"),
     ],
 )
 def test_repo_path_reads_a_pasted_url(value: str, expected: str) -> None:

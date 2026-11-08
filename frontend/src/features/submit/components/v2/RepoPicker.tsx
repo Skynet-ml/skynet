@@ -22,6 +22,8 @@ const LOOKUP_DELAY_MS = 400;
 // a path, or answers ``other_repo_host`` for a self-managed server.
 const SCP_URL = /^[\w.-]+@([^:/\s]+):(.+)$/;
 const CLOUD_HOSTS: Record<RepoHost, string> = { github: "github.com", gitlab: "gitlab.com", bitbucket: "bitbucket.org" };
+// Page words that older GitLab URLs put after the project without ``/-/``.
+const LEGACY_PAGES = new Set(["tree", "blob", "commits", "merge_requests"]);
 
 /**
  * True when ``text`` is a GitLab or Bitbucket URL on another server than the
@@ -62,6 +64,11 @@ export function pastedRepoPath(text: string, host: RepoHost): string | null {
   } else return null;
   let parts = (path.split("/-/")[0] ?? "").replace(/^\/+|\/+$/g, "").split("/");
   if (host === "bitbucket") parts = parts.slice(0, 2);
+  else {
+    // A project has a group and a name, so only a third or later segment starts a page.
+    const page = parts.findIndex((part, index) => index >= 2 && LEGACY_PAGES.has(part));
+    if (page !== -1) parts = parts.slice(0, page);
+  }
   return parts.join("/").replace(/^\/+|\/+$/g, "").replace(/\.git$/, "").toLowerCase();
 }
 

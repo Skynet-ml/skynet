@@ -68,8 +68,8 @@ def _repo_meta(request: httpx.Request) -> httpx.Response | None:
     url = str(request.url).split("?")[0]
     if url == REPO:
         return httpx.Response(200, json={"full_name": "team/bot", "mainbranch": {"name": "main"}})
-    if url.startswith(f"{REPO}/commit/"):
-        return httpx.Response(200, json={"hash": SHA})
+    if url == f"{REPO}/commits" and request.url.params.get("pagelen") == "1":
+        return httpx.Response(200, json={"values": [{"hash": SHA}]})
     return None
 
 
@@ -128,13 +128,52 @@ def test_list_branches_keeps_the_main_branch(monkeypatch: pytest.MonkeyPatch) ->
     assert bitbucket.list_branches(_secret(), "team/bot") == {"default_branch": "main", "branches": ["main", "dev"]}
 
 
-def test_commit_passes_a_hash_through_and_pins_a_branch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A full hash needs no request; a branch with a slash is encoded and pinned."""
-    seen = _serve(monkeypatch, lambda r: _repo_meta(r) or httpx.Response(500))
+def test_commit_passes_a_hash_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full hash needs no request."""
+    seen = _serve(monkeypatch, lambda r: httpx.Response(500))
     assert bitbucket._commit("bbtok", "team/bot", SHA) == SHA
     assert seen == []
-    assert bitbucket._commit("bbtok", "team/bot", "feat/x") == SHA
-    assert seen[0].url.raw_path.decode().endswith("/commit/feat%2Fx")
+
+
+# Bitbucket answers 404 for /commit/feature%2Fx and /commit/feature/x alike.
+@pytest.mark.parametrize("ref", ["feature/x", "v1.2.0", "release/2026/11"])
+def test_commit_pins_a_slashed_branch_or_tag_through_the_query(monkeypatch: pytest.MonkeyPatch, ref: str) -> None:
+    """A branch with slashes or a tag goes in the ``include`` query, never in the path.
+
+    Args:
+        monkeypatch: Pytest fixture.
+        ref: The branch or tag to pin.
+    """
+    seen = _serve(monkeypatch, lambda r: _repo_meta(r) or httpx.Response(500))
+    assert bitbucket._commit("bbtok", "team/bot", ref) == SHA
+    assert len(seen) == 1
+    assert seen[0].url.path == "/2.0/repositories/team/bot/commits"
+    assert dict(seen[0].url.params) == {"include": ref, "pagelen": "1"}
+
+
+def test_commit_of_an_unknown_ref_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty ``/commits`` answer gives ``connectors.not_found``, and resolve_commit a RepoFetchError."""
+    _serve(monkeypatch, lambda r: httpx.Response(200, json={"values": []}))
+    with pytest.raises(DomainError) as caught:
+        bitbucket._commit("bbtok", "team/bot", "gone/branch")
+    assert caught.value.code == "connectors.not_found"
+    with pytest.raises(RepoFetchError):
+        bitbucket.resolve_commit("bbtok", "team/bot", "gone/branch")
+
+
+def test_file_at_reads_a_slashed_branch_at_its_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``file_at`` on ``feature/x`` reads ``/src/{hash}/...``, not the branch name."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        """Return the commit, the file's metadata or its bytes."""
+        if request.url.params.get("format") == "meta":
+            return httpx.Response(200, json={"type": "commit_file", "size": 9})
+        return _repo_meta(request) or httpx.Response(200, content=b"print(1)\n")
+
+    seen = _serve(monkeypatch, answer)
+    assert bitbucket.file_at("bbtok", "team/bot", "feature/x", "app.py", 1000)["content"] == b"print(1)\n"
+    assert seen[-1].url.path == f"/2.0/repositories/team/bot/src/{SHA}/app.py"
+    assert all("feature" not in r.url.path for r in seen)
 
 
 def test_tree_entries_maps_files_and_folders(monkeypatch: pytest.MonkeyPatch) -> None:

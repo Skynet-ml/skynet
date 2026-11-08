@@ -68,6 +68,15 @@ void describe("pastedRepoPath", () => {
     assert.equal(pastedRepoPath("git@gitlab.com:group/bot.git", "gitlab"), "group/bot");
   });
 
+  void it("drops an older GitLab page path that has no /-/", () => {
+    assert.equal(pastedRepoPath("https://gitlab.com/g/p/tree/main", "gitlab"), "g/p");
+    assert.equal(pastedRepoPath("https://gitlab.com/g/sub/p/blob/main/src/a.py", "gitlab"), "g/sub/p");
+    assert.equal(pastedRepoPath("https://gitlab.com/g/p/commits/feature/x", "gitlab"), "g/p");
+    assert.equal(pastedRepoPath("https://gitlab.com/g/p/merge_requests/3", "gitlab"), "g/p");
+    assert.equal(pastedRepoPath("https://gitlab.com/tree/blob", "gitlab"), "tree/blob");
+    assert.equal(pastedRepoPath("https://gitlab.com/g/tree/p", "gitlab"), "g/tree/p");
+  });
+
   void it("keeps two Bitbucket segments and drops the page after them", () => {
     assert.equal(pastedRepoPath("https://bitbucket.org/Team/My.Repo/src/main/a.py", "bitbucket"), "team/my.repo");
   });

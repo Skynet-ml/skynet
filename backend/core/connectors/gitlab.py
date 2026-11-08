@@ -39,6 +39,8 @@ REPO_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,255}(/[A-Za-z0-9_.-]{1,255}){1,20}$")
 DRAFT_PREFIX = "Draft: "
 # ``git@host:path`` clone addresses, which ``urlsplit`` does not parse.
 SCP_URL = re.compile(r"^[\w.-]+@([^:/\s]+):(.+)$")
+# Page words that older GitLab URLs put after the project without ``/-/``.
+LEGACY_PAGES = frozenset({"tree", "blob", "commits", "merge_requests"})
 
 
 def repo_path(value: str, web_url: str, provider: str, segments: int | None = None) -> str:
@@ -46,8 +48,9 @@ def repo_path(value: str, web_url: str, provider: str, segments: int | None = No
 
     The host name is compared without case and without its port. A trailing
     ``.git`` and outer slashes are dropped, and so is any page, query or
-    fragment after the repository in a URL (``/-/tree/...`` on GitLab,
-    ``/src/...`` on Bitbucket). Percent-encoded URL paths are decoded.
+    fragment after the repository in a URL (``/-/tree/...`` or the older
+    ``/tree/...`` on GitLab, ``/src/...`` on Bitbucket). Percent-encoded URL
+    paths are decoded.
 
     Args:
         value: What the user or an agent gave: a path or a URL.
@@ -83,9 +86,29 @@ def repo_path(value: str, web_url: str, provider: str, segments: int | None = No
                 "connectors.other_repo_host", status=400, provider=label(provider), host=host_name, expected=expected
             )
         text = path.split("/-/")[0]
-        if segments is not None:
-            text = "/".join(text.strip("/").split("/")[:segments])
+        text = "/".join(text.strip("/").split("/")[:segments]) if segments is not None else _drop_legacy_page(text)
     return text.strip("/").removesuffix(".git")
+
+
+def _drop_legacy_page(path: str) -> str:
+    """Cut an old GitLab page path, such as ``/tree/main``, off a project URL path.
+
+    A project path has at least a group and a project, so only a third or
+    later segment can start a page. GitLab reserves ``tree``, ``blob`` and
+    ``commits`` as project names; a subgroup named ``merge_requests`` would
+    be cut too.
+
+    Args:
+        path: The URL path, after any ``/-/`` page is cut.
+
+    Returns:
+        The path up to the page word.
+    """
+    parts = path.strip("/").split("/")
+    for index, part in enumerate(parts):
+        if index >= 2 and part in LEGACY_PAGES:
+            return "/".join(parts[:index])
+    return path
 
 
 def has_dot_segment(path: str) -> bool:

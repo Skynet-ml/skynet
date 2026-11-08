@@ -80,8 +80,8 @@ def _bitbucket_api(method: str, url: str, **kwargs: Any) -> httpx.Response:
         return _response(200, {"full_name": "team/bot", "mainbranch": {"name": "main"}})
     if path == "/repositories/team/bot/refs/branches":
         return _response(200, {"values": [{"name": "main"}]})
-    if path == "/repositories/team/bot/commit/main":
-        return _response(200, {"hash": SHA})
+    if path == "/repositories/team/bot/commits" and kwargs.get("params", {}).get("include") == "main":
+        return _response(200, {"values": [{"hash": SHA}]})
     if path == f"/repositories/team/bot/src/{SHA}/":
         return _response(200, {"values": [{"path": "app.py", "type": "commit_file", "size": 3}]})
     raise AssertionError(f"unexpected call {method} {url}")
