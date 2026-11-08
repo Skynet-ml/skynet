@@ -141,6 +141,12 @@ runloop = [
     # The 3.x floor is the tested line; the provider passes allow_runloop_mirrors.
     "runloop-api-client>=3.0.0,<4",
 ]
+prime = [
+    # Prime Intellect sandbox provider (SKY-475). Imported lazily by
+    # core.sandbox.providers.prime; the default legacy backend never needs it.
+    # The 0.5 line has the async set_network and wait_for_creation calls that the provider uses.
+    "prime-sandboxes>=0.5.8,<0.6",
+]
 
 [tool.uv]
 # dspy 3.3.1's metadata hard-pins gepa[dspy]==0.1.4. That PyPI release ships neither
@@ -155,6 +161,12 @@ runloop = [
 # once a dspy release relaxes the pin.
 override-dependencies = [
     "gepa[dspy] @ git+https://github.com/gepa-ai/gepa@0632cdb5dcc052e690eab439e1b4a7e3e9cfe407",
+]
+# prime-sandboxes 0.5.x pins connectrpc<0.12, and current e2b needs a newer
+# connectrpc. Without this, one universal lock downgrades e2b for every install.
+# The two provider extras resolve separately and cannot be installed together.
+conflicts = [
+    [{ extra = "prime" }, { extra = "e2b" }],
 ]
 
 [tool.ruff]
