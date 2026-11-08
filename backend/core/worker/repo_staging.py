@@ -113,9 +113,12 @@ class StagedRepository:
     hidden_paths: tuple[str, ...] = ()
     targets: Mapping[str, TargetStage] = field(default_factory=dict)
     services: Mapping[str, ServiceSpec] = field(default_factory=dict)
-    # The services each role lists, by role name. Only [metric] is staged: the relay answers
-    # every caller as the metric until it can tell a [run] caller apart (E37, SKY-375).
+    # The services each role lists, by role name: [run] for the version's entry,
+    # [metric] for the scorer. Each runs in its own process with its own relay (E37).
     service_roles: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # The [run] entry, which runs before the metric with the metric files out of the tree (E38).
+    run_entry: str | tuple[str, ...] | None = None
+    run_timeout: float = 60.0
     agent_archive: Path | None = None
     exploits_path: str = EXPLOITS_DIR
 
@@ -245,9 +248,12 @@ def stage_repository(
         services=environment.constraints.services if environment.constraints is not None else {},
         service_roles={
             "metric": environment.constraints.metric_role.services,
+            "run": environment.constraints.run_role.services,
         }
         if environment.constraints is not None
         else {},
+        run_entry=environment.constraints.run_entry if environment.constraints is not None else None,
+        run_timeout=environment.constraints.run_timeout if environment.constraints is not None else 60.0,
         agent_archive=agent_archive,
         exploits_path=metric.exploits,
     )
@@ -562,6 +568,8 @@ def bind_repo_scorer(
         max_concurrency=int(payload.get("max_concurrency") or 1),
         services=staged.services,
         service_roles=staged.service_roles,
+        run_entry=staged.run_entry,
+        run_timeout=staged.run_timeout,
     )
     environment = target["repo"].get(ENVIRONMENT_KEY)
     if isinstance(environment, dict):

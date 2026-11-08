@@ -334,10 +334,12 @@ class _Box:
         return None
 
     def run(self, command: str, **options: Any) -> CommandResult:
-        """Record the command, answering the reachability check as the box would."""
+        """Record the command, answering the reachability check and the prepared-tree digest as the box would."""
         self.commands.append((command, self.online))
         if "/dev/tcp/" in command:
             return CommandResult(exit_code=1) if self.online else CommandResult(exit_code=0, stdout=_PROBE_OK)
+        if "hashlib.sha256" in command:
+            return CommandResult(exit_code=0, stdout="0" * 64)
         return CommandResult(exit_code=0)
 
     def disable_network(self) -> None:
@@ -1494,19 +1496,38 @@ def test_staging_keeps_the_services_each_role_lists(monkeypatch: pytest.MonkeyPa
     _, staged = _stage_with(files, monkeypatch)
     try:
         assert staged.services["judge"].url == "https://judge.example.com/v1"
-        assert staged.service_roles == {"metric": ("judge",)}
+        assert staged.service_roles == {"metric": ("judge",), "run": ()}
+    finally:
+        staged.cleanup()
+
+
+def test_staging_keeps_the_run_entry_and_its_services(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The [run] entry, its timeout and the services it lists reach the staged run (E38)."""
+    files = {
+        **_FILES,
+        "optimize.toml": _CONSTRAINTS
+        + '\n[services.judge]\nurl = "https://judge.example.com/v1"\nheaders = { X-Key = "${JUDGE_KEY}" }\n'
+        + '\n[run]\nentry = "src/geocode/app.py:main"\ntimeout = 12\nservices = ["judge"]\n',
+    }
+    _, staged = _stage_with(files, monkeypatch)
+    try:
+        assert staged.run_entry == "src/geocode/app.py:main"
+        assert staged.run_timeout == 12.0
+        assert staged.service_roles == {"metric": (), "run": ("judge",)}
     finally:
         staged.cleanup()
 
 
 def test_binding_hands_the_services_to_the_scorer(tmp_path: Path) -> None:
-    """The scorer gets the url services and the metric's list; their keys leave the scorer box's env."""
+    """The scorer gets the url services, each role's list and the ``[run]`` entry; the parent keeps the keys."""
     payload, staged = _binding(tmp_path, None)
     staged = dataclasses.replace(
         staged,
         secrets={**staged.secrets, "JUDGE_KEY": "judge-secret-value"},
         services={"judge": ServiceSpec(secrets=("JUDGE_KEY",), url="https://judge.example.com/v1")},
-        service_roles={"metric": ("judge",)},
+        service_roles={"metric": ("judge",), "run": ("judge",)},
+        run_entry="src/app.py:main",
+        run_timeout=12.0,
     )
     gateway = _Gateway()
 
@@ -1514,8 +1535,11 @@ def test_binding_hands_the_services_to_the_scorer(tmp_path: Path) -> None:
 
     scorer = gateway.evaluator
     assert list(scorer._services) == ["judge"]
-    assert scorer._service_roles["metric"] == ("judge",)
-    assert "JUDGE_KEY" not in scorer._box_secrets
+    assert scorer._service_roles == {"metric": ("judge",), "run": ("judge",)}
+    assert scorer._run_entry == "src/app.py:main"
+    assert scorer._run_timeout == 12.0
+    # The parent keeps the key for the relay; the scorer tests check that no box env holds it.
+    assert scorer._workspace.secrets["JUDGE_KEY"] == "judge-secret-value"
     staged.close_scorers()
 
 

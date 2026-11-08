@@ -36,21 +36,37 @@ requests go through the same relay, so the service's key stays with the
 parent. In a stage box,
 ``python3 app_runner.py --stage <call_dir> <path/file.py:function>`` runs
 one stage call and writes ``{"output": ...}`` or ``{"error": ...}``.
+
+A repository with a ``[run]`` entry runs the candidate first, before the
+metric files are in the tree (E38). ``python3 app_runner.py --candidate
+<call_dir>`` reads ``{"entry", "input", "timeout", "token", "stages"}``,
+starts the entry in its own session with only the case's input (E42),
+stops every process it left, and writes ``{"output", "error", "stopped"}``.
+A function entry (``path/file.py:function``) runs as ``--run <dir>
+<entry>`` and its output is its JSON return value; a command entry
+(``["pytest", "-q"]``) gets the input as JSON on stdin and its output is
+``{"exit_code", "stdout"}`` (E41). The metric call then gets that output as
+``score(repo_path, case, output)``, and may start no process of its own (E40).
 """
 
 from __future__ import annotations
 
 import base64
+import ctypes
 import http.server
 import importlib.util
 import inspect
 import io
 import json
 import os
+import signal
+import site
 import ssl
+import subprocess
 import sys
 import threading
 import time
+import traceback
 import types
 import urllib.error
 import urllib.parse
@@ -81,6 +97,28 @@ STAGE_ERROR_NAME = "StageError"
 STAGE_FLAG = "--stage"
 # The metric reaches each listed service at this variable's loopback address (E45).
 SERVICE_ENV_PREFIX = "SKYNET_SERVICE_"
+# ``app_runner.py --candidate <call_dir>`` runs the ``[run]`` entry and stops what it left (E38).
+CANDIDATE_FLAG = "--candidate"
+# ``app_runner.py --run <dir> <path/file.py:function>`` is the candidate process of a function entry.
+RUN_FLAG = "--run"
+# Every candidate process inherits this marker, so the supervisor finds the ones
+# that left its process group; a process that clears its environment is still
+# found on Linux, where the supervisor adopts every orphan.
+CANDIDATE_TOKEN_ENV = "APP_CANDIDATE_TOKEN"
+RUN_DIR = "run"
+MAX_RUN_STDOUT_BYTES = 1024 * 1024
+_STOP_ROUNDS = 100
+_PR_SET_CHILD_SUBREAPER = 36
+RERUN_REFUSED = (
+    "The metric started a process after the candidate ran. The metric must not run the candidate's code"
+    " again: run its tests through [run] entry in optimize.toml, and read their report in the metric"
+    " (its output argument)."
+)
+_PROCESS_EVENTS = frozenset(
+    {"subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork", "os.forkpty"}
+)
+# The macOS sweep starts ps after the metric call; only that thread may pass the refusal hook.
+_SWEEP = threading.local()
 _STAGE_POLL_SECONDS = 0.05
 # Frames one ``log()`` event on stderr; the host turns each into a run-log line.
 EVENT_PREFIX = "APP_SCORER_EVENT "
@@ -715,6 +753,24 @@ def load_scorer_from_code(code: str, *, helpers: dict[str, Any] | None = None) -
     raise ScorerError("scorer code must define a function named 'score(candidate, case=None)'.")
 
 
+def _takes_positional(fn: Callable[..., Any], count: int) -> bool:
+    """Return True when ``fn`` takes at least ``count`` positional arguments.
+
+    Args:
+        fn: The scorer callable.
+        count: How many positional arguments the call would pass.
+
+    Returns:
+        True when ``fn`` names that many positional parameters or takes ``*args``.
+    """
+    try:
+        params = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return True
+    positional = [p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL)]
+    return len(positional) >= count or any(p.kind == p.VAR_POSITIONAL for p in positional)
+
+
 def accepts_case(fn: Callable[..., Any]) -> bool:
     """Return True when ``fn`` takes a second positional argument for the case.
 
@@ -724,12 +780,26 @@ def accepts_case(fn: Callable[..., Any]) -> bool:
     Returns:
         True for ``fn(candidate, case)`` shapes, False for ``fn(candidate)``.
     """
+    return _takes_positional(fn, 2)
+
+
+def accepts_output(fn: Callable[..., Any], ran: bool) -> bool:
+    """Return True when ``fn`` takes a third positional argument for the candidate's output.
+
+    Args:
+        fn: The scorer callable.
+        ran: Whether a ``[run]`` entry ran, so there is an output to pass.
+
+    Returns:
+        True for ``fn(candidate, case, output)`` shapes; a ``*args`` scorer
+        gets the output only when a candidate ran, as it did before ``[run]``.
+    """
     try:
         params = list(inspect.signature(fn).parameters.values())
     except (TypeError, ValueError):
-        return True
-    positional = [p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL)]
-    return len(positional) >= 2 or any(p.kind == p.VAR_POSITIONAL for p in positional)
+        return ran
+    named = [p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    return len(named) >= 3 or (ran and any(p.kind == p.VAR_POSITIONAL for p in params))
 
 
 def _ssl_context() -> ssl.SSLContext:
@@ -1015,7 +1085,10 @@ def run_call(payload: dict[str, Any]) -> dict[str, Any]:
             }
         else:
             candidate, case = payload.get("candidate"), payload.get("case")
-            raw = fn(candidate, case) if accepts_case(fn) else fn(candidate)
+            if accepts_output(fn, "output" in payload):
+                raw = fn(candidate, case, payload.get("output"))
+            else:
+                raw = fn(candidate, case) if accepts_case(fn) else fn(candidate)
             score, side_info = normalize_score(raw)
             result["score"] = score
             result["side_info"] = json.loads(json.dumps(side_info, default=side_info_json_default))
@@ -1032,6 +1105,18 @@ def run_call(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _keep_user_site() -> None:
+    """Put user site-packages back at the end of ``sys.path`` under ``python3 -I``, without its ``.pth`` files."""
+    # Repo setup may pip install into user site-packages when the system folder is read-only.
+    # -I hides that folder from the metric; appended last, the stdlib and system packages
+    # still win, and no .pth file the version planted there runs (E38, E40).
+    if not sys.flags.isolated or sys.prefix != sys.base_prefix:
+        return
+    folder = site.getusersitepackages()
+    if Path(folder).is_dir() and folder not in sys.path:
+        sys.path.append(folder)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run one scorer call from ``<call_dir>/input.json`` into ``<call_dir>/output.json``.
 
@@ -1043,9 +1128,15 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         The process exit code: 0 whenever the output was written.
     """
+    _keep_user_site()
     args = list(sys.argv[1:] if argv is None else argv)
-    if len(args) == 3 and args[0] == STAGE_FLAG:
-        return run_stage(Path(args[1]), args[2])
+    if len(args) == 3 and args[0] in (STAGE_FLAG, RUN_FLAG):
+        return run_stage(Path(args[1]), args[2], trace=args[0] == RUN_FLAG)
+    if len(args) == 2 and args[0] == CANDIDATE_FLAG:
+        call_dir = Path(args[1])
+        payload = json.loads((call_dir / INPUT_FILE).read_text(encoding="utf-8"))
+        _write_output(call_dir, json.dumps(run_candidate(payload, call_dir)))
+        return 0
     if len(args) != 1:
         sys.stderr.write("usage: app_runner.py <call_dir>\n")
         return 2
@@ -1054,14 +1145,309 @@ def main(argv: list[str] | None = None) -> int:
     if "code" not in payload:
         code_path = Path(__file__).resolve().with_name(CODE_FILE)
         payload["code"] = code_path.read_text(encoding="utf-8") if code_path.is_file() else ""
+    refused = refuse_processes() if "output" in payload else None
+    # The metric call runs the version's code without a [run] entry, and a
+    # ctypes fork passes the audit hook. So no process it starts may outlive
+    # it to write into the prepared tree or a later checkout (E38).
+    token = os.urandom(16).hex()
+    os.environ[CANDIDATE_TOKEN_ENV] = token
+    _become_subreaper()
     result = run_call(payload)
-    partial = call_dir / (OUTPUT_FILE + ".part")
-    partial.write_text(json.dumps(result), encoding="utf-8")
-    partial.replace(call_dir / OUTPUT_FILE)
+    if refused:
+        # The metric may have caught the refusal; its score still does not count.
+        result.update(score=None, side_info={}, error=RERUN_REFUSED)
+    result["stopped"] = stop_candidates(token)
+    _write_output(call_dir, json.dumps(result))
     return 0
 
 
-def run_stage(call_dir: Path, entry: str) -> int:
+def _write_output(call_dir: Path, text: str) -> None:
+    """Write ``output.json`` in one step, so the parent never reads half of it.
+
+    Args:
+        call_dir: The call's folder.
+        text: The output document.
+    """
+    partial = call_dir / (OUTPUT_FILE + ".part")
+    partial.write_text(text, encoding="utf-8")
+    partial.replace(call_dir / OUTPUT_FILE)
+
+
+def refuse_processes() -> list[bool]:
+    """Refuse every process the metric starts from now on in this process (E40).
+
+    The metric files are in the tree once the candidate has stopped, so code
+    the metric starts again could read them. An audit hook stays for the
+    life of the process, so only the metric call's own process installs it.
+
+    Returns:
+        A list that gets an entry each time a process start was refused.
+    """
+    refused: list[bool] = []
+
+    def hook(event: str, args: tuple[Any, ...]) -> None:
+        """Abort a process start with the refusal message.
+
+        Args:
+            event: The audit event's name.
+            args: The event's arguments.
+
+        Raises:
+            ScorerError: When the event starts a process.
+        """
+        if event in _PROCESS_EVENTS and not getattr(_SWEEP, "active", False):
+            refused.append(True)
+            raise ScorerError(RERUN_REFUSED)
+
+    sys.addaudithook(hook)
+    return refused
+
+
+def run_candidate(payload: dict[str, Any], call_dir: Path) -> dict[str, Any]:
+    """Run the ``[run]`` entry on one case's input, then stop every process it started.
+
+    The metric files enter the tree only after this returns, so no process
+    the candidate left may outlive it: the supervisor kills the candidate's
+    process group, then every process that carries the run's marker or, on
+    Linux, that it adopted, until none is left.
+
+    Args:
+        payload: ``{"entry", "input", "timeout", "token", "stages"}``.
+        call_dir: The candidate call's folder.
+
+    Returns:
+        ``{"output", "error", "stopped"}``: the entry's output, why the run
+        failed, and whether every candidate process is gone.
+    """
+    entry, token = payload["entry"], str(payload["token"])
+    timeout = float(payload["timeout"])
+    _become_subreaper()
+    env = dict(os.environ)
+    stages = payload.get("stages")
+    if isinstance(stages, dict) and stages.get("services"):
+        env.update(start_service_proxy(StageClient(stages), [str(name) for name in stages["services"]]))
+    env[CANDIDATE_TOKEN_ENV] = token
+    run_dir = call_dir / RUN_DIR
+    run_dir.mkdir(parents=True, exist_ok=True)
+    body = json.dumps(payload.get("input"))
+    captured: list[bytes] = []
+    readers: list[threading.Thread] = []
+    try:
+        if isinstance(entry, str):
+            (run_dir / INPUT_FILE).write_text(body, encoding="utf-8")
+            argv = [sys.executable, str(Path(__file__).resolve()), RUN_FLAG, str(run_dir), entry]
+            # Its prints go to stderr: the parent reads relay frames on stdout.
+            child = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=2, start_new_session=True)
+        else:
+            child = subprocess.Popen(
+                [str(part) for part in entry],
+                env=env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=2,
+                start_new_session=True,
+            )
+            readers = [
+                threading.Thread(target=_feed, args=(child.stdin, body.encode("utf-8")), daemon=True),
+                threading.Thread(target=_capture, args=(child.stdout, captured), daemon=True),
+            ]
+            for reader in readers:
+                reader.start()
+    except OSError as exc:
+        return {"output": None, "error": f"The command could not start: {exc}", "stopped": stop_candidates(token)}
+    try:
+        code: int | None = child.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        code = None
+        with _quiet():
+            os.killpg(child.pid, signal.SIGKILL)
+        child.wait()
+    stopped = stop_candidates(token, child.pid)
+    for reader in readers:
+        reader.join(timeout=5)
+    result: dict[str, Any] = {"output": None, "error": None, "stopped": stopped}
+    if code is None:
+        result["error"] = f"timeout after {timeout:g} s"
+    elif code < 0:
+        result["error"] = f"killed by signal {_signal_name(-code)}"
+    elif isinstance(entry, str):
+        try:
+            answer = json.loads((run_dir / OUTPUT_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            answer = {"error": f"exited with code {code} before it returned"}
+        if "output" in answer:
+            result["output"] = answer["output"]
+        else:
+            result["error"] = str(answer.get("error") or "returned nothing")
+    else:
+        stdout = b"".join(captured)[:MAX_RUN_STDOUT_BYTES].decode("utf-8", errors="replace")
+        result["output"] = {"exit_code": code, "stdout": stdout}
+    return result
+
+
+def _feed(stream: Any, data: bytes) -> None:
+    """Write the case input to a command's stdin and close it, whether or not the command reads it.
+
+    Args:
+        stream: The command's stdin pipe.
+        data: The input as JSON bytes.
+    """
+    with _quiet():
+        stream.write(data)
+    with _quiet():
+        stream.close()
+
+
+def _capture(stream: Any, chunks: list[bytes]) -> None:
+    """Keep the first ``MAX_RUN_STDOUT_BYTES`` of a command's stdout and drain the rest.
+
+    Args:
+        stream: The command's stdout pipe.
+        chunks: Receives the kept bytes.
+    """
+    kept = 0
+    for block in iter(lambda: stream.read(1 << 16), b""):
+        if kept < MAX_RUN_STDOUT_BYTES:
+            chunks.append(block[: MAX_RUN_STDOUT_BYTES - kept])
+            kept += len(chunks[-1])
+
+
+class _quiet:  # noqa: N801
+    """Ignore an ``OSError`` from one step: a process or pipe that is already gone."""
+
+    def __enter__(self) -> None:
+        """Enter the block."""
+
+    def __exit__(self, kind: Any, value: Any, trace: Any) -> bool:
+        """Swallow ``OSError`` and ``ValueError`` (a closed pipe).
+
+        Args:
+            kind: The exception type, if any.
+            value: The exception, if any.
+            trace: Its traceback.
+
+        Returns:
+            Whether the exception is swallowed.
+        """
+        return kind is not None and issubclass(kind, (OSError, ValueError))
+
+
+def _signal_name(number: int) -> str:
+    """Name a signal for the run's feedback.
+
+    Args:
+        number: The signal number.
+
+    Returns:
+        ``SIGKILL`` and the like, or the number when it has no name.
+    """
+    try:
+        return signal.Signals(number).name
+    except ValueError:
+        return str(number)
+
+
+def _become_subreaper() -> None:
+    """Adopt every orphan of the candidate on Linux, so a double fork cannot hide a process."""
+    if not sys.platform.startswith("linux"):
+        return
+    with _quiet():
+        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+
+
+def stop_candidates(token: str, leader: int | None = None) -> bool:
+    """Kill every candidate process, then check that none is left.
+
+    Args:
+        token: The run's marker in each candidate process's environment.
+        leader: The candidate's first process, whose group goes first.
+
+    Returns:
+        Whether no candidate process is left.
+    """
+    if leader is not None:
+        with _quiet():
+            os.killpg(leader, signal.SIGKILL)
+    for _ in range(_STOP_ROUNDS):
+        _reap()
+        left = candidate_processes(token)
+        if not left:
+            return True
+        for pid in left:
+            with _quiet():
+                os.kill(pid, signal.SIGKILL)
+        time.sleep(0.02)
+    _reap()
+    return not candidate_processes(token)
+
+
+def _reap() -> None:
+    """Collect every child that has exited, the adopted ones included."""
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
+
+
+def candidate_processes(token: str) -> set[int]:
+    """Find the live processes that carry the run's marker or descend from this one.
+
+    Args:
+        token: The run's marker.
+
+    Returns:
+        Their process ids; exited processes that wait to be collected are left out.
+    """
+    marker = f"{CANDIDATE_TOKEN_ENV}={token}".encode()
+    me = os.getpid()
+    parents: dict[int, int] = {}
+    found: set[int] = set()
+    proc = Path("/proc")
+    if sys.platform.startswith("linux") and proc.is_dir():
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            try:
+                fields = (entry / "stat").read_text().rpartition(")")[2].split()
+                if fields[0] == "Z":
+                    continue
+                parents[pid] = int(fields[1])
+                if marker in (entry / "environ").read_bytes():
+                    found.add(pid)
+            except (OSError, IndexError, ValueError):
+                continue
+    else:
+        # macOS: no /proc, and orphans go to launchd, so only the marker finds them.
+        # The metric call puts the marker in os.environ, and ps must not find itself.
+        env = {key: value for key, value in os.environ.items() if key != CANDIDATE_TOKEN_ENV}
+        _SWEEP.active = True
+        try:
+            listing = subprocess.run(
+                ["ps", "-axwwE", "-o", "pid=,state=,command="], capture_output=True, check=False, env=env
+            ).stdout
+        finally:
+            _SWEEP.active = False
+        for line in listing.splitlines():
+            parts = line.split(None, 2)
+            if len(parts) == 3 and not parts[1].startswith(b"Z") and marker in parts[2]:
+                found.add(int(parts[0]))
+    children: dict[int, list[int]] = {}
+    for pid, parent in parents.items():
+        children.setdefault(parent, []).append(pid)
+    queue = list(children.get(me, ()))
+    while queue:
+        pid = queue.pop()
+        found.add(pid)
+        queue.extend(children.get(pid, ()))
+    found.discard(me)
+    return found
+
+
+def run_stage(call_dir: Path, entry: str, *, trace: bool = False) -> int:
     """Run one Python stage call: ``<call_dir>/input.json`` → ``function(input)`` → ``output.json``.
 
     The working directory is the candidate's tree, so ``entry`` and the
@@ -1070,6 +1456,8 @@ def run_stage(call_dir: Path, entry: str) -> int:
     Args:
         call_dir: The call's folder in the stage box.
         entry: ``path/file.py:function``, relative to the tree.
+        trace: Report a failure with its traceback, as a ``[run]`` entry
+            does for the proposer's feedback.
 
     Returns:
         The process exit code: 0 whenever the output was written.
@@ -1087,10 +1475,9 @@ def run_stage(call_dir: Path, entry: str) -> int:
         spec.loader.exec_module(module)
         text = json.dumps({"output": getattr(module, function)(payload)}, allow_nan=False)
     except BaseException as exc:  # user code is arbitrary: any failure is reported, not raised
-        text = json.dumps({"error": f"{type(exc).__name__}: {exc}"})
-    partial = call_dir / (OUTPUT_FILE + ".part")
-    partial.write_text(text, encoding="utf-8")
-    partial.replace(call_dir / OUTPUT_FILE)
+        error = traceback.format_exc().strip() if trace else f"{type(exc).__name__}: {exc}"
+        text = json.dumps({"error": error})
+    _write_output(call_dir, text)
     return 0
 
 

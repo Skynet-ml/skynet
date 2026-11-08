@@ -5,6 +5,16 @@ posts each version through the parent's evaluator capability, and the parent
 lays it out on a copy of the already set-up tree, then calls the user's
 ``score(repo_path)`` (or ``score(repo_path, case)``) on it.
 
+A repository with a ``[run]`` entry runs the version first, while the metric
+files are out of the tree (E38). The entry gets only the case's ``input``
+(E42). Every process it started stops before the metric files go in; the
+metric then runs in its own process as ``score(repo_path, case, output)``
+with the entry's output (E41). A run that times out, raises, returns no JSON,
+is killed by a signal or cannot start scores 0 with ``Run failed: ...`` as its
+feedback, and the metric is not called. A nonzero exit of a command entry is
+an output like any other. Neither process gets the run's secrets: only the
+model route reaches the box.
+
 A scorer returns a score with its feedback, like any scorer, and may return
 per-case results under ``cases``, a mapping of case name to
 ``{"score", "feedback"}``. The run's score stays the top-level number; each
@@ -21,8 +31,10 @@ way out (E27).
 The same relay carries the metric's requests to the run's ``[services.<name>]``
 that have a url (E45). The parent checks that the calling role lists the
 service, adds the service's headers with the secrets filled in, calls the
-url, and returns the response unchanged. The scorer box never holds those
-secrets. Catalog connectors do not go through the relay.
+url, and returns the response unchanged. The version's ``[run]`` entry
+reaches its own services the same way, checked against the ``[run]`` role.
+The scorer box never holds those secrets. Catalog connectors do not go
+through the relay.
 """
 
 from __future__ import annotations
@@ -55,7 +67,7 @@ from .protocol import STATUS_KEY
 from .repo_constraints import ServiceSpec, TargetStage
 from .repo_services import open_stage_boxes, stage_spec
 from .repo_tree import archive_chunks, drop_paths
-from .repo_workspace import HIDDEN_CHANGED, REPO_DIR, WORK_DIR, RepoWorkspace, redact
+from .repo_workspace import GIT, HIDDEN_CHANGED, REPO_DIR, WORK_DIR, RepoWorkspace, redact
 from .rule_judge import RuleJudge
 from .sandbox import SandboxSession
 from .sandbox_contract import SandboxRuntime
@@ -67,7 +79,13 @@ CASES_KEY = "cases"
 # The guest names no real endpoint: its requests reach only the parent relay.
 REPO_SCORER_URL = "https://scoped-evaluator.invalid/score"
 RUNNER_PATH = f"{REPO_DIR}/app_runner.py"
+_LINKED_BOX = "The version replaced a folder of the scoring box with a link, so it has no score."
 CALLS_DIR = f"{REPO_DIR}/calls"
+# The version's code can write next to the runner and into $HOME, so the
+# runner starts without its own folder, user site-packages or PYTHON* env on
+# its path: a planted json.py or .pth would run before any check (E38, E40).
+# -I drops PYTHONDONTWRITEBYTECODE and PYTHONUNBUFFERED, so -B and -u keep them.
+_ISOLATED = "-I -B -u"
 STAGE_DIR = ".app-stage"
 _STAGE_TREE = f"{STAGE_DIR}/tree"
 # Unpacking the tree and applying the version in a stage box; the box's hold
@@ -90,9 +108,15 @@ _HOP_HEADERS = frozenset(
     {"connection", "content-length", "host", "keep-alive", "proxy-authorization", "te", "transfer-encoding", "upgrade"}
 )
 _DECODED_HEADERS = frozenset({"content-encoding", "content-length", "connection", "keep-alive", "transfer-encoding"})
-# Every service frame is answered as [metric]: the version code shares the metric's
-# process, so the relay cannot yet tell a [run] caller apart (E37, SKY-375).
+# The version's [run] entry and the metric run in separate processes, each
+# with its own relay, so each service frame is checked against its own role (E37).
 _METRIC_ROLE = "metric"
+_RUN_ROLE = "run"
+# The candidate supervisor's own allowance on top of the [run] timeout: it
+# still has to kill what the entry left and write its output.
+_RUN_STOP_SECONDS = 60.0
+_RUN_FEEDBACK_CHARS = 2_000
+_RUN_FAILED = "Run failed: "
 # The proposer gets only these keys, so the scorer's other side information
 # (weights, formulas, metric source) never reveals the metric (SKY-353).
 _PROPOSER_KEYS = ("score", "feedback", STATUS_KEY, "scores")
@@ -104,6 +128,7 @@ _TRACEBACK = re.compile(
     r"|^(?P<margin>[ |]*?)  File \".*\n(?:(?P=margin)    .*\n)*",
     re.MULTILINE,
 )
+_FRAME_FILE = re.compile(r'File "([^"]*)"')
 
 
 class RepoScoreError(Exception):
@@ -158,12 +183,15 @@ class RepoScorer:
         max_concurrency: int = 1,
         services: Mapping[str, ServiceSpec] | None = None,
         service_roles: Mapping[str, tuple[str, ...]] | None = None,
+        run_entry: str | tuple[str, ...] | None = None,
+        run_timeout: float = 60.0,
     ) -> None:
         """Bind the user's scorer code to a repository workspace.
 
         Args:
             workspace: Parent-owned box holding the pristine tree.
-            code: Scorer source defining ``score(repo_path)`` or ``score(repo_path, case)``.
+            code: Scorer source defining ``score(repo_path)``, ``score(repo_path, case)``
+                or ``score(repo_path, case, output)``.
             timeout_seconds: Longest one scorer call may run, setup excluded.
             rule_judge: The repository's constraints-file enforcement, when it
                 has an ``optimize.toml``: path-rule refusals then get the fixed
@@ -183,8 +211,11 @@ class RepoScorer:
             max_concurrency: How many calls to one stage run at the same time.
             services: The run's ``[services.<name>]``; those with a url
                 go through the relay, and their secrets stay out of the box.
-            service_roles: The services each role lists, by role name. Only
-                ``metric`` is read: every caller shares its process (E37).
+            service_roles: The services each role lists, by role name;
+                ``run`` for the ``[run]`` entry and ``metric`` for the scorer.
+            run_entry: The ``[run]`` entry: ``path/file.py:function`` or a
+                command; ``None`` runs no version code before the metric.
+            run_timeout: Longest one ``[run]`` call may run.
 
         Raises:
             ValueError: When stages are given without a runtime or a tree.
@@ -198,15 +229,15 @@ class RepoScorer:
         self._max_concurrency = max(1, max_concurrency)
         self._services = {name: spec for name, spec in (services or {}).items() if spec.url is not None}
         self._service_roles = dict(service_roles or {})
-        relayed = {secret for spec in self._services.values() for secret in spec.secrets}
-        # The relay adds these keys in the parent; the version's code runs in the box and must never read them.
-        self._box_secrets = {name: value for name, value in workspace.secrets.items() if name not in relayed}
+        self._run_entry = run_entry
+        self._run_timeout = run_timeout
         self._workspace = workspace
         self._gateway = gateway
         self._code = code
         self._timeout_seconds = timeout_seconds
         self._rule_judge = rule_judge
         self._root: str | None = None
+        self._root_session: SandboxSession | None = None
         self._calls = 0
         self._lock = threading.Lock()
 
@@ -245,53 +276,79 @@ class RepoScorer:
             session = self._workspace.session()
             root = self._box_root(session)
             self._calls += 1
-            call_dir = f"{root}/{CALLS_DIR}/{self._calls:06d}"
-            document = {
+            call = f"{CALLS_DIR}/{self._calls:06d}"
+            call_dir = f"{root}/{call}"
+            # Importing a protected package would otherwise write __pycache__
+            # into it and fail the protected-path check. Skipping the bytecode
+            # beats ignoring __pycache__, where a version could plant a .pyc
+            # that the judge then loads. No run secret reaches the box (E38).
+            env = {**self._model_env(), "PYTHONDONTWRITEBYTECODE": "1"}
+            document: dict[str, Any] = {
                 "code": self._code,
                 "candidate": f"{root}/{checkout.path}",
                 "case": case,
                 "gateway": gateway.runner_payload() if gateway is not None else None,
             }
-            with self._stage_relay(patch, f"{CALLS_DIR}/{self._calls:06d}/stages") as relay:
+            if self._run_entry is not None:
+                ran = self._run_candidate(session, root, checkout.path, call, case, env, secrets)
+                if ran.get("error"):
+                    error = _scrub(_RUN_FAILED + redact(f"{ran['error']}", secrets), root, self._hidden)
+                    error = error[len(_RUN_FAILED) :]
+                    return {
+                        "score": 0.0,
+                        "feedback": _RUN_FAILED + error[-(_RUN_FEEDBACK_CHARS - len(_RUN_FAILED)) :],
+                    }
+                document["output"] = ran.get("output")
+                # The version's code could rewrite the runner, swap the calls
+                # folder for a link, leave files in this call's folder for the
+                # metric run to read, or plant a module next to the runner
+                # (E38, E40). Its processes are stopped now.
+                reset = session.run(
+                    f"if [ -L {CALLS_DIR} ] || [ ! -d {CALLS_DIR} ]; then exit 3; fi;"
+                    f" find {REPO_DIR} -mindepth 1 -maxdepth 1 ! -name work ! -name prepared ! -name calls"
+                    f" -exec rm -rf {{}} +; rm -rf {shlex.quote(call)}",
+                    timeout_seconds=30,
+                )
+                if not reset.ok:
+                    self._workspace.close()
+                    raise RepoScoreError(_LINKED_BOX)
+                session.write_files({RUNNER_PATH: RUNNER_SOURCE})
+            # Boundary (E38): the checkout and the reset run no code that a version
+            # controls. Version code runs in this box before the install only in
+            # [run] above and in earlier calls' metric steps. Every box shell is
+            # bash --noprofile --norc, and the runners and the model mailbox
+            # wrapper start python3 -I, so a profile or user-site .pth that a
+            # version plants does not run in a later step. A .pth or module in a
+            # writable venv or system site-packages still runs (SKY-398).
+            # stop_candidates kills the processes that keep the run's marker or
+            # stay its descendants; a process that drops both can still wait
+            # here. Separate boxes close this (SKY-398). No same-uid sweep: it
+            # would kill the supervisor.
+            not_installed = self._workspace.install_metric_files()
+            if not_installed:
+                raise RepoScoreError(not_installed)
+            with self._stage_relay(patch, f"{call}/stages") as relay:
                 if relay is not None:
                     document["stages"] = relay.config(root)
-                session.write_files({f"{CALLS_DIR}/{self._calls:06d}/{runner.INPUT_FILE}": json.dumps(document)})
+                session.write_files({f"{call}/{runner.INPUT_FILE}": json.dumps(document)})
                 unstamped = self._workspace.stamp_before_run()
                 if unstamped:
                     raise RepoScoreError(unstamped)
                 # A sink makes the session stream stderr live, which is where log() events travel.
                 with sandbox_log.event_scope(source="scorer"):
                     result = session.run(
-                        f"cd {shlex.quote(checkout.path)} && python3 {shlex.quote(f'{root}/{RUNNER_PATH}')}"
+                        f"cd {shlex.quote(checkout.path)} && python3 {_ISOLATED} {shlex.quote(f'{root}/{RUNNER_PATH}')}"
                         f" {shlex.quote(call_dir)}",
-                        # Importing a protected package would otherwise write
-                        # __pycache__ into it and fail the protected-path check.
-                        # Skipping the bytecode beats ignoring __pycache__, where a
-                        # version could plant a .pyc that the judge then loads.
-                        env={**self._box_secrets, **self._model_env(), "PYTHONDONTWRITEBYTECODE": "1"},
+                        env=env,
                         timeout_seconds=self._timeout_seconds,
                         on_output=relay.output if relay is not None else sandbox_log.ignore_output,
                     )
             if result.timed_out:
+                # The runner never stopped the metric's processes; only a new box does.
+                self._workspace.close()
                 raise RepoScoreError(f"The scorer exceeded its {self._timeout_seconds:g}s timeout.")
-            unchecked = relay is not None and relay.unchecked
-            # After a failed answer check the answer went in by a file write, which moves
-            # every ctime, so only the checks the answers passed can still name a change.
-            final = () if unchecked else self._workspace.protected_changes()
-            # Each stage answer checks again, so a lasting change would repeat once per answer.
-            changes = tuple(dict.fromkeys((*(relay.changes if relay is not None else ()), *final)))
-            # A hidden change is not a [paths] rule the agent knows, so it
-            # skips the rule judge and its "do not repeat it" message.
-            tampered = [change for change in changes if change != HIDDEN_CHANGED]
-            if tampered:
-                # The version's code names these files and can read the secrets.
-                reason = redact(" ".join(tampered), secrets)
-                raise RepoScoreError(judge.blocked([reason]) if judge is not None else reason)
-            if changes:
-                raise RepoScoreError(HIDDEN_CHANGED)
-            if unchecked:
-                raise RepoScoreError("A stage answer could not be checked or delivered, so the version has no score.")
-            text = session.read_file(f"{CALLS_DIR}/{self._calls:06d}/{runner.OUTPUT_FILE}")
+            self._check_changes(relay, secrets)
+            text = session.read_file(f"{call}/{runner.OUTPUT_FILE}")
         # The version's code runs next to the hidden metric and can print or
         # raise its contents, so the guest gets only a fixed message; the
         # details stay in the server log (SKY-353).
@@ -301,8 +358,14 @@ class RepoScorer:
                 result.exit_code,
                 redact((result.stderr or result.stdout)[-2_000:], secrets),
             )
+            self._workspace.close()
             raise RepoScoreError(f"The scorer did not finish (exit {result.exit_code}).")
         output = json.loads(redact(text, secrets))
+        stopped = output.get("stopped") is True
+        if not stopped:
+            # A process of the metric call could write into the prepared tree
+            # or the next checkout; a new box is the only sure stop (E38).
+            self._workspace.close()
         _raise_control(output)
         if output.get("error"):
             logger.warning("Repository scorer raised: %s", output["error"])
@@ -314,14 +377,118 @@ class RepoScorer:
         except (TypeError, ValueError):
             # The error text would echo the value, which the version's code controls.
             raise RepoScoreError("The scorer returned a score that is not a number.") from None
+        if not stopped:
+            raise RepoScoreError("The version's code left processes that could not be stopped, so it has no score.")
         side_info = fold_case_scores(output.get("side_info") or {})
         return {**side_info, "score": score}
 
+    def _run_candidate(
+        self,
+        session: SandboxSession,
+        root: str,
+        path: str,
+        call: str,
+        case: Any,
+        env: Mapping[str, str],
+        secrets: list[str],
+    ) -> dict[str, Any]:
+        """Run the ``[run]`` entry on the case's input while the metric files are out of the tree.
+
+        Every earlier call's folder goes first: each holds the metric source
+        and a full case. The supervisor reports whether it stopped every
+        process the entry started; when it cannot, the box is destroyed, so no
+        process of this version can read the next version's metric files.
+
+        Args:
+            session: The workspace's box.
+            root: The box's working directory.
+            path: The version's checkout, relative to the box.
+            call: This call's folder, relative to the box.
+            case: The case being scored; only its ``input`` reaches the entry.
+            env: The model route, the box's only environment from the parent.
+            secrets: Values to keep out of anything that leaves the box.
+
+        Returns:
+            ``{"output", "error"}`` from the supervisor.
+
+        Raises:
+            RepoScoreError: When the version changed a protected file, or not
+                every process it started could be shown to have stopped.
+        """
+        supervisor = f"{call}/candidate"
+        payload: dict[str, Any] = {
+            "entry": self._run_entry if isinstance(self._run_entry, str) else list(self._run_entry or ()),
+            "input": case.get("input") if isinstance(case, Mapping) else case,
+            "timeout": self._run_timeout,
+            "token": uuid.uuid4().hex,
+            "stages": None,
+        }
+        with self._service_relay(_RUN_ROLE, f"{supervisor}/stages") as relay:
+            if relay is not None:
+                payload["stages"] = relay.config(root)
+            session.write_files({f"{supervisor}/{runner.INPUT_FILE}": json.dumps(payload)})
+            unstamped = self._workspace.stamp_before_run()
+            if unstamped:
+                raise RepoScoreError(unstamped)
+            calls = shlex.quote(CALLS_DIR)
+            with sandbox_log.event_scope(source="run"):
+                result = session.run(
+                    f"find {calls} -mindepth 1 -maxdepth 1 ! -name {shlex.quote(call.rsplit('/', 1)[1])}"
+                    f" -exec rm -rf {{}} +; cd {shlex.quote(path)} && python3 {_ISOLATED} {shlex.quote(f'{root}/{RUNNER_PATH}')}"
+                    f" {runner.CANDIDATE_FLAG} {shlex.quote(f'{root}/{supervisor}')}",
+                    env=env,
+                    timeout_seconds=self._run_timeout + _RUN_STOP_SECONDS,
+                    on_output=relay.output if relay is not None else sandbox_log.ignore_output,
+                )
+        self._check_changes(relay, secrets)
+        text = session.read_file(f"{supervisor}/{runner.OUTPUT_FILE}")
+        try:
+            ran = json.loads(text) if text is not None else None
+        except ValueError:
+            ran = None
+        if not isinstance(ran, dict) or ran.get("stopped") is not True:
+            logger.warning(
+                "The [run] supervisor did not stop every process (exit %s): %s",
+                result.exit_code,
+                redact((result.stderr or result.stdout)[-2_000:], secrets),
+            )
+            # A process that outlived its supervisor could read the next
+            # version's metric files; a new box is the only sure stop.
+            self._workspace.close()
+            raise RepoScoreError("The version's code left processes that could not be stopped, so it has no score.")
+        return ran
+
+    def _check_changes(self, relay: _StageRelay | None, secrets: list[str]) -> None:
+        """Refuse the version when its code changed a protected or hidden file while it ran.
+
+        Args:
+            relay: The finished call's relay, whose answers checked the files too.
+            secrets: Values to keep out of the refusal.
+
+        Raises:
+            RepoScoreError: When a file changed, or a check could not run.
+        """
+        judge = self._rule_judge
+        unchecked = relay is not None and relay.unchecked
+        # After a failed answer check the answer went in by a file write, which moves
+        # every ctime, so only the checks the answers passed can still name a change.
+        final = () if unchecked else self._workspace.protected_changes()
+        # Each stage answer checks again, so a lasting change would repeat once per answer.
+        changes = tuple(dict.fromkeys((*(relay.changes if relay is not None else ()), *final)))
+        # A hidden change is not a [paths] rule the agent knows, so it
+        # skips the rule judge and its "do not repeat it" message.
+        tampered = [change for change in changes if change != HIDDEN_CHANGED]
+        if tampered:
+            # The version's code names these files and can read the secrets.
+            reason = redact(" ".join(tampered), secrets)
+            raise RepoScoreError(judge.blocked([reason]) if judge is not None else reason)
+        if changes:
+            raise RepoScoreError(HIDDEN_CHANGED)
+        if unchecked:
+            raise RepoScoreError("A stage answer could not be checked or delivered, so the version has no score.")
+
     def _model_env(self) -> dict[str, str]:
         """Return the env that points code in the box at the run's model route.
-
-        The route values come after the run secrets, so a secret named like
-        them cannot redirect the box to another key.
 
         Returns:
             ``APP_API_KEY`` and ``APP_MODEL``, or nothing without a route.
@@ -355,16 +522,9 @@ class RepoScorer:
             UsagePendingError: When earlier usage still needs reconciliation.
             UnpricedOperationError: When the parent cannot bound a stage box.
         """
-        relayed = [name for name in self._service_roles.get(_METRIC_ROLE, ()) if name in self._services]
-        if not self._stages and not relayed:
-            yield None
-            return
         if not self._stages:
-            relay = self._relay({}, response_dir)
-            try:
+            with self._service_relay(_METRIC_ROLE, response_dir) as relay:
                 yield relay
-            finally:
-                relay.close()
             return
         evaluation_id = uuid.uuid4().hex
         specs = {
@@ -401,12 +561,35 @@ class RepoScorer:
         finally:
             relay.close()
 
-    def _relay(self, boxes: Mapping[str, SandboxSession], response_dir: str) -> _StageRelay:
-        """Build the relay for one scorer call, calling as the ``[metric]`` role.
+    @contextlib.contextmanager
+    def _service_relay(self, role: str, response_dir: str) -> Iterator[_StageRelay | None]:
+        """Relay one call's service requests, checked against one role, with no stage boxes.
+
+        Args:
+            role: ``run`` for the ``[run]`` entry, ``metric`` for the scorer.
+            response_dir: The call's answer folder, relative to the box.
+
+        Yields:
+            The relay, or ``None`` when the role lists no service with a url.
+        """
+        if not any(name in self._services for name in self._service_roles.get(role, ())):
+            yield None
+            return
+        relay = self._relay({}, response_dir, role=role)
+        try:
+            yield relay
+        finally:
+            relay.close()
+
+    def _relay(
+        self, boxes: Mapping[str, SandboxSession], response_dir: str, *, role: str = _METRIC_ROLE
+    ) -> _StageRelay:
+        """Build the relay for one call, checking service requests against one role.
 
         Args:
             boxes: Each stage's open box, by stage name.
-            response_dir: The call's answer folder, relative to the scorer box.
+            response_dir: The call's answer folder, relative to the box.
+            role: The role whose services the caller may reach.
 
         Returns:
             The relay for this call.
@@ -419,8 +602,8 @@ class RepoScorer:
             env=self._model_env(),
             workspace=self._workspace,
             services=self._services,
-            role=_METRIC_ROLE,
-            allowed=self._service_roles.get(_METRIC_ROLE, ()),
+            role=role,
+            allowed=self._service_roles.get(role, ()),
             secrets=self._workspace.secrets,
         )
 
@@ -448,7 +631,7 @@ class RepoScorer:
         files = " ".join(shlex.quote(part) for part in parts)
         result = box.run(
             f"set -e; mkdir -p {_STAGE_TREE}; cat {files} | base64 -d | tar -xzf - -C {_STAGE_TREE}; rm -f {files};"
-            f" cd {_STAGE_TREE}; if [ -s ../version.patch ]; then git apply --binary --whitespace=nowarn ../version.patch; fi",
+            f" cd {_STAGE_TREE}; if [ -s ../version.patch ]; then {GIT} apply --binary --whitespace=nowarn ../version.patch; fi",
             timeout_seconds=_STAGE_LAYOUT_SECONDS,
         )
         if not result.ok:
@@ -489,7 +672,7 @@ class RepoScorer:
         except RepoScoreError as error:
             # Plain text: the guest's relay client quotes the body in its error.
             return ModelHTTPResult(422, "text/plain; charset=utf-8", _scrub(str(error), self._root).encode())
-        document = _for_proposer(document, self._root)
+        document = _for_proposer(document, self._root, self._hidden)
         notes = self._rule_judge.take_notes() if self._rule_judge is not None else []
         if notes:
             feedback = document.get("feedback")
@@ -497,7 +680,10 @@ class RepoScorer:
         return ModelHTTPResult(200, "application/json", json.dumps(document).encode())
 
     def _box_root(self, session: SandboxSession) -> str:
-        """Return the box's working directory, installing the runner on first use.
+        """Return the box's working directory, and write the runner into the box.
+
+        Each checkout clears the runner with everything else next to the
+        tree, and a failed version can end the box, so it goes in every time.
 
         Args:
             session: The workspace's open box.
@@ -508,13 +694,13 @@ class RepoScorer:
         Raises:
             RepoScoreError: When the box cannot report its directory.
         """
-        if self._root is None:
+        if self._root is None or self._root_session is not session:
             located = session.run("pwd", timeout_seconds=30)
             root = located.stdout.strip()
             if not located.ok or not root.startswith("/"):
                 raise RepoScoreError("The scoring box could not report its working directory.")
-            session.write_files({RUNNER_PATH: RUNNER_SOURCE})
-            self._root = root
+            self._root, self._root_session = root, session
+        session.write_files({RUNNER_PATH: RUNNER_SOURCE})
         return self._root
 
     def close(self) -> None:
@@ -556,8 +742,8 @@ class _StageRelay:
             workspace: The scorer box's workspace, which checks the
                 protected files and writes each answer into the scorer box.
             services: The run's services with a url, by name.
-            role: The role that each service request is checked against;
-                ``metric`` for now, since a [run] caller shares its process (E37).
+            role: The role that each service request is checked against:
+                ``run`` for the ``[run]`` entry, ``metric`` for the scorer (E37).
             allowed: The services that ``role`` lists.
             secrets: The run's secret values, filled into service headers
                 here in the parent.
@@ -871,17 +1057,26 @@ class _StageRelay:
                 box.close()
 
 
-def _scrub(text: str, root: str | None) -> str:
+def _scrub(text: str, root: str | None, hidden: tuple[str, ...] | list[str] = ()) -> str:
     """Remove traceback frames and the scorer box's absolute paths from text the proposer reads.
+
+    "Run failed" feedback keeps the frames in the version's own files, so the
+    proposer can find the line that broke (E41); every other frame goes.
 
     Args:
         text: An error or a feedback string from the scorer box.
         root: The box's working directory; ``None`` before it is known.
+        hidden: The metric files and exploit folder; their frames always go.
 
     Returns:
-        The text with repository-relative paths and without traceback frames.
+        The text with repository-relative paths and without the metric's frames.
     """
-    text = _TRACEBACK.sub("", text if text.endswith("\n") else f"{text}\n").rstrip("\n")
+    text = text if text.endswith("\n") else f"{text}\n"
+    if text.startswith(_RUN_FAILED):
+        text = _TRACEBACK.sub(lambda match: _repo_frame(match.group(0), root, hidden), text)
+    else:
+        text = _TRACEBACK.sub("", text)
+    text = text.rstrip("\n")
     if root:
         text = (
             text.replace(f"{root}/{WORK_DIR}/", "")
@@ -892,38 +1087,72 @@ def _scrub(text: str, root: str | None) -> str:
     return text
 
 
-def _for_proposer(document: Mapping[str, Any], root: str | None) -> dict[str, Any]:
+def _repo_frame(block: str, root: str | None, hidden: tuple[str, ...] | list[str]) -> str:
+    """Return one traceback frame if it is in a version file, else nothing.
+
+    Args:
+        block: A ``_TRACEBACK`` match: the header line, or one frame with its source lines.
+        root: The box's working directory; ``None`` before it is known.
+        hidden: The metric files and exploit folder.
+
+    Returns:
+        The block unchanged when it is the header or a frame in a visible
+        repository file, else ``""``.
+    """
+    found = _FRAME_FILE.search(block)
+    if found is None:
+        return block
+    path = found.group(1)
+    work = f"{root}/{WORK_DIR}/" if root else None
+    if work and path.startswith(work):
+        path = path[len(work) :]
+    # Frames in the runner, the standard library or packages say nothing
+    # about the version and name box paths; "<frozen ...>" frames are noise.
+    elif path.startswith(("/", "<")):
+        return ""
+    if any(path == entry.rstrip("/") or path.startswith(f"{entry.rstrip('/')}/") for entry in hidden):
+        return ""
+    return block
+
+
+def _for_proposer(
+    document: Mapping[str, Any], root: str | None, hidden: tuple[str, ...] | list[str] = ()
+) -> dict[str, Any]:
     """Keep only the score, the feedback and the named scores of a scoring result.
 
     Args:
         document: What :meth:`RepoScorer.score` returned.
         root: The box's working directory, scrubbed from the feedback.
+        hidden: The metric files and exploit folder, whose frames never reach the proposer.
 
     Returns:
         The reply the guest receives.
     """
     reply = {key: document[key] for key in _PROPOSER_KEYS if key in document}
     if isinstance(reply.get("feedback"), str):
-        reply["feedback"] = _scrub(reply["feedback"], root)
+        reply["feedback"] = _scrub(reply["feedback"], root, hidden)
     if isinstance(reply.get("scores"), Mapping):
         reply["scores"] = {
-            name: _named_score(entry, root) if isinstance(entry, Mapping) else entry
+            name: _named_score(entry, root, hidden) if isinstance(entry, Mapping) else entry
             for name, entry in reply["scores"].items()
         }
     return reply
 
 
-def _named_score(entry: Mapping[str, Any], root: str | None) -> dict[str, Any]:
+def _named_score(
+    entry: Mapping[str, Any], root: str | None, hidden: tuple[str, ...] | list[str] = ()
+) -> dict[str, Any]:
     """Keep only the score and the scrubbed feedback of one named score.
 
     Args:
         entry: One value of the result's ``scores`` mapping.
         root: The box's working directory, scrubbed from the feedback.
+        hidden: The metric files and exploit folder.
 
     Returns:
         The named score the guest receives.
     """
     kept = {key: entry[key] for key in ("score", "feedback") if key in entry}
     if isinstance(kept.get("feedback"), str):
-        kept["feedback"] = _scrub(kept["feedback"], root)
+        kept["feedback"] = _scrub(kept["feedback"], root, hidden)
     return kept
