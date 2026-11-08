@@ -540,13 +540,14 @@ def test_relay_refuses_a_managed_call_that_the_meter_cannot_read(
 
 
 def test_relay_removes_a_json_escaped_echo_of_the_secret() -> None:
-    """Hide the secret when the server echoes it with JSON escapes such as \\/ and \\u0026."""
+    """Hide the secret when the server echoes it with JSON escapes such as \\/, \\u0026 and \\u003C."""
     secret = "user/key&part<1>"
     escaped = json.dumps(secret)[1:-1]
     forms = [
         escaped,
         escaped.replace("/", "\\/"),
         escaped.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e").replace("/", "\\/"),
+        escaped.replace("&", "\\u0026").replace("<", "\\u003C").replace(">", "\\u003E"),
     ]
     answer = relay_request(
         url="https://api.judge.example/v1",
@@ -559,7 +560,7 @@ def test_relay_removes_a_json_escaped_echo_of_the_secret() -> None:
         send=lambda *_args: ('{"echo": ["' + '", "'.join(forms) + '"]}').encode(),
     ).decode()
     assert all(form not in answer for form in forms)
-    assert json.loads(answer)["echo"] == ["[REDACTED]"] * 3
+    assert json.loads(answer)["echo"] == ["[REDACTED]"] * 4
 
 
 def test_relay_removes_a_base64_or_percent_encoded_echo_of_the_secret() -> None:

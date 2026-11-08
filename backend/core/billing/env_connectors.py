@@ -382,11 +382,15 @@ def escaped_forms(fragment: str) -> set[str]:
         fragment: One secret fragment.
 
     Returns:
-        The JSON-escaped, ``\\/``-escaped and HTML-safe JSON forms.
+        The JSON-escaped, ``\\/``-escaped and HTML-safe JSON forms, with
+        lower- and upper-case hex in the ``\\u`` escapes.
     """
     escaped = json.dumps(fragment)[1:-1]
     html_safe = escaped.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
-    return {escaped, escaped.replace("/", "\\/"), html_safe, html_safe.replace("/", "\\/")}
+    # .NET System.Text.Json writes upper-case hex (\u003C), Python and Go write lower-case.
+    upper = html_safe.replace("\\u003c", "\\u003C").replace("\\u003e", "\\u003E")
+    forms = {escaped, html_safe, upper}
+    return forms | {form.replace("/", "\\/") for form in forms}
 
 
 def encoded_forms(fragment: str) -> set[str]:
