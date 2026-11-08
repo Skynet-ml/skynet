@@ -701,6 +701,21 @@ class DockerEnvironment(SandboxEnvironment):
             await _remove(docker_bin, ["network", "rm", network], b"not found")
         return stopped
 
+    @classmethod
+    async def remove_idle_networks(cls, *, docker_bin: str = DEFAULT_DOCKER_BIN) -> int:
+        """Remove every sandbox network that no container uses.
+
+        The worker reaches the provider through the factory, so the cleanup
+        is a classmethod next to the job sweep.
+
+        Args:
+            docker_bin: The Docker CLI path.
+
+        Returns:
+            The number of networks removed.
+        """
+        return await remove_idle_sandbox_networks(docker_bin)
+
     async def _apply_network_policy(self, policy: NetworkPolicy) -> None:
         """Switch the box to deny-all, or to a new allowlist behind the proxy.
 
