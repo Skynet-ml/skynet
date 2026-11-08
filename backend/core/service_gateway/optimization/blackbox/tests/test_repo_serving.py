@@ -382,6 +382,23 @@ def test_a_best_patch_that_edits_a_hidden_file_serves_only_its_visible_edit(
     assert result["outputs"] == {"x": 2}
 
 
+def test_a_best_patch_that_moves_a_hidden_file_out_serves_without_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rename from a hidden path would carry the metric into the served tree, so serving drops it."""
+    metric = "".join(f"# {_LEAK} {line}\n" for line in range(20))
+    files = {"serve.py": _SERVE, "optimize.toml": '[metric]\nfiles = ["eval"]\n', "eval/scorer.py": metric}
+    scratch = tmp_path / "patch"
+    scratch.mkdir()
+    checkout = unpack_tree(_chunks(scratch, files), scratch / "checkout")
+    (checkout / "eval" / "scorer.py").rename(checkout / "copied.py")
+    patch = version_patch(checkout)
+    assert "rename from eval/scorer.py" in patch
+
+    with _stage(monkeypatch, files, patch) as staged:
+        assert staged["patch"] == ""
+
+
 _FOLDER_TOML = """[metric]
 files = ["scoring"]
 exploits = "scoring/attacks"
