@@ -2317,7 +2317,7 @@ def test_uploaded_cases_without_a_cases_file_stay_as_they_are(monkeypatch: pytes
 def test_staging_stops_when_the_cases_file_stays_visible(monkeypatch: pytest.MonkeyPatch) -> None:
     """When the strip misses the cases file, the gate names it."""
     monkeypatch.setattr(repo_staging, "strip_archive", lambda archive, hidden, destination: archive)
-    with pytest.raises(repo_staging.RepoGateError, match=r"data/cases\.jsonl"):
+    with pytest.raises(repo_staging.RepoGateError, match=r"\[data\] cases: data/cases\.jsonl"):
         _stage_with(_CASES_TREE, monkeypatch)
 
 
