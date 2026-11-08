@@ -20,7 +20,29 @@ import { isRepoPath } from "../../lib/wizard-v2";
 const LOOKUP_DELAY_MS = 400;
 // A pasted web URL or ``git@host:path`` clone address. The server turns it into
 // a path, or answers ``other_repo_host`` for a self-managed server.
-const SCP_URL = /^[\w.-]+@[^:/\s]+:(.+)$/;
+const SCP_URL = /^[\w.-]+@([^:/\s]+):(.+)$/;
+const CLOUD_HOSTS: Record<RepoHost, string> = { github: "github.com", gitlab: "gitlab.com", bitbucket: "bitbucket.org" };
+
+/**
+ * True when ``text`` is a GitLab or Bitbucket URL on another server than the
+ * cloud host, as the server's ``repo_path`` compares it. Such a URL must not
+ * match a listed repository of the same path; the server names the host.
+ */
+export function isOtherHostUrl(text: string, host: RepoHost): boolean {
+  if (host === "github") return false;
+  let name: string;
+  const scp = SCP_URL.exec(text);
+  if (scp) name = scp[1] ?? "";
+  else if (text.includes("://")) {
+    try {
+      name = new URL(text).hostname;
+    } catch {
+      return false;
+    }
+  } else return false;
+  name = name.toLowerCase().replace(/\.$/, "");
+  return name !== CLOUD_HOSTS[host] && name !== `www.${CLOUD_HOSTS[host]}`;
+}
 
 /**
  * The repository path in a pasted GitLab or Bitbucket URL, lower case, as the
@@ -30,7 +52,7 @@ export function pastedRepoPath(text: string, host: RepoHost): string | null {
   if (host === "github") return null;
   let path: string;
   const scp = SCP_URL.exec(text);
-  if (scp) path = scp[1] ?? "";
+  if (scp) path = scp[2] ?? "";
   else if (text.includes("://")) {
     try {
       path = decodeURIComponent(new URL(text).pathname);
@@ -171,11 +193,12 @@ export function RepoPicker({
     };
   }, [attempt, host]);
 
+  const otherHost = isOtherHostUrl(search.trim(), host);
   const pasted = pastedRepoPath(search.trim(), host);
   const target = pasted ?? search.trim().toLowerCase();
   const matches = useMemo(
-    () => (repos ?? []).filter((repo) => repo.full_name.toLowerCase().includes(target)),
-    [repos, target],
+    () => (otherHost ? [] : (repos ?? []).filter((repo) => repo.full_name.toLowerCase().includes(target))),
+    [repos, target, otherHost],
   );
   const listed = matches.some((repo) => repo.full_name.toLowerCase() === target);
   const lookup = repos !== null && !listed && (pasted !== null || isRepoPath(search.trim(), host));

@@ -23,7 +23,7 @@ registerHooks({
 
 // The classic JSX transform the test loader applies reads a global React.
 (globalThis as { React?: typeof React }).React = React;
-const { RepoLookupError, RepoPicker, pastedRepoPath } = await import("./RepoPicker");
+const { RepoLookupError, RepoPicker, isOtherHostUrl, pastedRepoPath } = await import("./RepoPicker");
 
 const HEBREW = /[֐-׿]/;
 const otherHost = new ApiError("connectors.other_repo_host", {
@@ -75,6 +75,18 @@ void describe("pastedRepoPath", () => {
   void it("leaves plain paths and GitHub alone", () => {
     assert.equal(pastedRepoPath("group/bot", "gitlab"), null);
     assert.equal(pastedRepoPath("https://github.com/o/r", "github"), null);
+  });
+});
+
+void describe("isOtherHostUrl", () => {
+  void it("flags a self-managed server and accepts the cloud host with or without www", () => {
+    assert.equal(isOtherHostUrl("https://gitlab.example.com/group/bot", "gitlab"), true);
+    assert.equal(isOtherHostUrl("git@gitlab.example.com:group/bot.git", "gitlab"), true);
+    assert.equal(isOtherHostUrl("https://bitbucket.org/team/bot", "gitlab"), true);
+    assert.equal(isOtherHostUrl("https://GitLab.com:443/group/bot", "gitlab"), false);
+    assert.equal(isOtherHostUrl("https://www.bitbucket.org/team/bot", "bitbucket"), false);
+    assert.equal(isOtherHostUrl("group/bot", "gitlab"), false);
+    assert.equal(isOtherHostUrl("https://example.com/o/r", "github"), false);
   });
 });
 
@@ -202,6 +214,25 @@ void describe("RepoPicker in a DOM", () => {
         : { status: 200, body: { repositories: [] } };
     const text = await render("gitlab", "https://gitlab.example.com/team/bot");
     assert.match(text, /gitlab\.example\.com is not gitlab\.com/);
+    assert.doesNotMatch(text, /No repositories match/);
+  });
+
+  // The account lists group/bot on gitlab.com; the pasted URL names another server.
+  void it("does not offer a listed repository for a self-managed URL with the same path", async () => {
+    answer = (_path, search) =>
+      search
+        ? {
+            status: 400,
+            body: {
+              detail: "connectors.other_repo_host",
+              code: "connectors.other_repo_host",
+              params: { provider: "GitLab", host: "gitlab.example.com", expected: "gitlab.com" },
+            },
+          }
+        : { status: 200, body: { repositories: [BOT] } };
+    const text = await render("gitlab", "https://gitlab.example.com/group/bot");
+    assert.match(text, /gitlab\.example\.com is not gitlab\.com/);
+    assert.doesNotMatch(text, /group\/bot/);
     assert.doesNotMatch(text, /No repositories match/);
   });
 
