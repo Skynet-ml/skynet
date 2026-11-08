@@ -21,6 +21,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Protocol, TypeVar
+from weakref import WeakKeyDictionary
 
 from .errors import SandboxTransientError
 
@@ -103,6 +104,13 @@ class TokenBucket:
     Callers take tokens in arrival order. The waiting caller holds the lock
     while it sleeps, so the callers behind it wait in a queue and do not all
     wake at the same time.
+
+    One bucket can serve more than one event loop, for example a process-wide
+    bucket that sync code uses through ``asyncio.run``. All loops share the
+    token count. Each loop gets its own lock, because an ``asyncio.Lock`` is
+    bound to one loop, so the arrival-order queue holds only within a loop.
+    The bucket is not thread-safe: do not use it from loops that run at the
+    same time in different threads.
     """
 
     def __init__(self, rate: float, burst: float, clock: Clock | None = None) -> None:
@@ -124,7 +132,19 @@ class TokenBucket:
         self._clock = clock or SYSTEM_CLOCK
         self._tokens = self.burst
         self._updated = self._clock.monotonic()
-        self._lock = asyncio.Lock()
+        self._locks: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
+
+    def _lock(self) -> asyncio.Lock:
+        """Return the lock of the running event loop, and make it on first use.
+
+        Returns:
+            The lock that queues the callers on the running loop.
+        """
+        loop = asyncio.get_running_loop()
+        lock = self._locks.get(loop)
+        if lock is None:
+            lock = self._locks[loop] = asyncio.Lock()
+        return lock
 
     def _refill(self) -> None:
         """Add the tokens that the time since the last update earned."""
@@ -145,7 +165,7 @@ class TokenBucket:
         needed = _check_positive("tokens", tokens)
         if needed > self.burst:
             raise ValueError("tokens must be <= burst")
-        async with self._lock:
+        async with self._lock():
             self._refill()
             while self._tokens + _TOKEN_EPSILON < needed:
                 await self._clock.sleep((needed - self._tokens) / self.rate)
@@ -188,6 +208,24 @@ class ProviderPacing:
         )
 
 
+def _check_capacity_window(wait_max: float, multiplier: float) -> None:
+    """Reject a capacity window that gives no delay.
+
+    The capacity wait has no attempt limit, so a zero, negative or NaN delay
+    makes it poll the provider in a hot loop.
+
+    Args:
+        wait_max: The longest delay, in seconds.
+        multiplier: The first window, in seconds.
+
+    Raises:
+        TypeError: A value is a bool or not a number.
+        ValueError: A value is not a finite number > 0.
+    """
+    _check_positive("wait_max", wait_max)
+    _check_positive("multiplier", multiplier)
+
+
 def capacity_delay(
     wait_number: int,
     *,
@@ -205,7 +243,11 @@ def capacity_delay(
 
     Returns:
         A random delay between 0 and ``min(wait_max, multiplier * 2**wait_number)``.
+
+    Raises:
+        ValueError: ``wait_max`` or ``multiplier`` is not a finite number > 0.
     """
+    _check_capacity_window(wait_max, multiplier)
     # The exponent is capped so that a very long wait cannot overflow a float.
     window = min(wait_max, multiplier * 2.0 ** min(wait_number, 64))
     return (rng or _RNG).uniform(0.0, window)
@@ -235,7 +277,11 @@ async def capacity_wait(
 
     Returns:
         The number of capacity waits so far, ``first_wait`` included.
+
+    Raises:
+        ValueError: ``wait_max`` or ``multiplier`` is not a finite number > 0.
     """
+    _check_capacity_window(wait_max, multiplier)
     clock = clock or SYSTEM_CLOCK
     waits = first_wait
     while await at_capacity():
@@ -277,7 +323,11 @@ async def create_with_capacity(
 
     Returns:
         The result of the create call.
+
+    Raises:
+        ValueError: ``wait_max`` or ``multiplier`` is not a finite number > 0.
     """
+    _check_capacity_window(wait_max, multiplier)
     clock = clock or SYSTEM_CLOCK
     waits = 0
     while True:

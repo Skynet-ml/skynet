@@ -175,7 +175,7 @@ async def test_bucket_cancel_while_waiting_frees_the_queue() -> None:
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiter
-    assert not bucket._lock.locked()
+    assert not bucket._lock().locked()
 
 
 @pytest.mark.parametrize(
@@ -201,6 +201,21 @@ async def test_bucket_rejects_more_tokens_than_burst() -> None:
         await bucket.acquire(3)
 
 
+def test_bucket_works_from_a_second_event_loop() -> None:
+    """Share one bucket across ``asyncio.run`` calls with waiting callers."""
+    clock = FakeClock()
+    bucket = TokenBucket(rate=10, burst=1, clock=clock)
+
+    async def burst() -> None:
+        """Make five callers wait for the one-token bucket."""
+        await asyncio.gather(*(bucket.acquire() for _ in range(5)))
+
+    asyncio.run(burst())
+    asyncio.run(burst())
+    assert len(clock.sleeps) == 9
+    assert bucket._tokens < 1
+
+
 def test_provider_pacing_has_separate_buckets() -> None:
     """Give each provider one read bucket and one create bucket."""
     pacing = ProviderPacing.build(read_rate=100, read_burst=20, create_rate=2, create_burst=4)
@@ -217,6 +232,60 @@ def test_capacity_delay_is_jittered_and_capped_at_30_seconds() -> None:
         assert 0 <= delay <= min(CAPACITY_WAIT_MAX, 2.0**wait_number)
     assert CAPACITY_WAIT_MAX == 30.0
     assert capacity_delay(10_000, rng=random.Random(1)) <= 30.0
+
+
+_BAD_WINDOWS = [
+    {"wait_max": 0},
+    {"wait_max": -1},
+    {"wait_max": float("nan")},
+    {"wait_max": float("inf")},
+    {"multiplier": 0},
+    {"multiplier": -0.5},
+    {"multiplier": float("nan")},
+    {"multiplier": float("inf")},
+]
+
+
+@pytest.mark.parametrize("kwargs", _BAD_WINDOWS)
+def test_capacity_delay_rejects_a_window_with_no_delay(kwargs: dict[str, float]) -> None:
+    """Reject a ``wait_max`` or ``multiplier`` that gives a zero or NaN delay."""
+    with pytest.raises(ValueError):
+        capacity_delay(3, **kwargs)
+
+
+@pytest.mark.parametrize("kwargs", _BAD_WINDOWS)
+async def test_capacity_wait_rejects_a_window_before_polling(kwargs: dict[str, float]) -> None:
+    """Refuse a hot polling loop before the first capacity check."""
+    clock = FakeClock()
+    recorder = Recorder([True] * 5, clock)
+    with pytest.raises(ValueError):
+        await capacity_wait(recorder.at_capacity, clock=clock, **kwargs)
+    assert recorder.events == []
+
+
+@pytest.mark.parametrize("kwargs", _BAD_WINDOWS)
+async def test_create_with_capacity_rejects_a_window_before_reserving(
+    kwargs: dict[str, float],
+) -> None:
+    """Refuse a bad window before any check, reservation or create."""
+    clock = FakeClock()
+    recorder = Recorder([], clock)
+
+    async def create(reservation: str) -> str:
+        """Fail if the create runs.
+
+        Args:
+            reservation: The reservation id.
+
+        Raises:
+            AssertionError: Always, because the create must not run.
+        """
+        raise AssertionError("create must not run")
+
+    with pytest.raises(ValueError):
+        await create_with_capacity(create, recorder.reserve, at_capacity=recorder.at_capacity, clock=clock, **kwargs)
+    assert recorder.events == []
+    assert recorder.reserved == 0
 
 
 async def test_capacity_wait_has_no_attempt_limit() -> None:
