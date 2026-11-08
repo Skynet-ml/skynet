@@ -1,0 +1,469 @@
+"""Tests for the async Docker sandbox provider.
+
+The unit tests replace the Docker CLI call. The integration tests run real
+containers and skip when Docker or the local image is missing; they never
+pull an image. Every container and network that they create carries a label
+that is unique to this test process, and a module finalizer removes them.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import importlib
+import subprocess
+import time
+import uuid
+from collections.abc import Iterator, Sequence
+
+import pytest
+
+from core.sandbox.capabilities import SandboxSpecError
+from core.sandbox.environment import JOB_TAG, NetworkPolicy
+from core.sandbox.factory import PROVIDERS
+from core.sandbox.providers import docker as docker_provider
+from core.sandbox.providers.docker import DockerEnvironment, _CliResult, _env_stream, _sandbox_path
+from core.sandbox.resources import ResourceMode, ResourceRequest, SandboxSpec
+from core.sandbox.tests.test_environment import SandboxEnvironmentContract
+
+BASE_IMAGE = "ubuntu:24.04"
+PROXY_IMAGE_REPOSITORY = "skynet-local-sandbox"
+TEST_LABEL = "skynet.test.sky413"
+TEST_RUN = uuid.uuid4().hex
+TEST_TAGS = {TEST_LABEL: TEST_RUN}
+PROXY_PROBE = (
+    "import http.client, os, urllib.parse\n"
+    "proxy = urllib.parse.urlparse(os.environ['HTTPS_PROXY'])\n"
+    "connection = http.client.HTTPConnection(proxy.hostname, proxy.port, timeout=10)\n"
+    "connection.request('CONNECT', 'example.org:443')\n"
+    "print(connection.getresponse().status)\n"
+)
+DIRECT_PROBE = (
+    "import socket\n"
+    "try:\n"
+    "    socket.create_connection(('1.1.1.1', 443), timeout=3).close()\n"
+    "    print('open')\n"
+    "except OSError:\n"
+    "    print('blocked')\n"
+)
+
+
+def _cli(*args: str) -> subprocess.CompletedProcess[str]:
+    """Run the Docker CLI synchronously for test setup and checks.
+
+    Args:
+        *args: The CLI arguments.
+
+    Returns:
+        The finished process; a missing CLI gives exit code 127.
+    """
+    try:
+        return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return subprocess.CompletedProcess(args, 127, "", "")
+
+
+def _local_image(repository: str) -> str | None:
+    """Return the first local tag of an image repository, without a pull.
+
+    Args:
+        repository: The image repository, or ``repo:tag``.
+
+    Returns:
+        ``repo:tag``, or ``None`` when no such image is on this machine.
+    """
+    listed = _cli("images", repository, "--format", "{{.Repository}}:{{.Tag}}")
+    tags = [line for line in listed.stdout.split() if not line.endswith(":<none>")]
+    return tags[0] if listed.returncode == 0 and tags else None
+
+
+DOCKER_UP = _cli("info", "--format", "{{.ServerVersion}}").returncode == 0
+HAS_BASE_IMAGE = DOCKER_UP and _local_image(BASE_IMAGE) is not None
+PROXY_IMAGE = _local_image(PROXY_IMAGE_REPOSITORY) if DOCKER_UP else None
+needs_docker = pytest.mark.skipif(not HAS_BASE_IMAGE, reason=f"Docker or the local {BASE_IMAGE} image is missing.")
+needs_proxy_image = pytest.mark.skipif(
+    PROXY_IMAGE is None, reason=f"Docker or a local {PROXY_IMAGE_REPOSITORY} image with python3 is missing."
+)
+
+
+def _leftovers() -> tuple[list[str], list[str]]:
+    """List the containers and networks that carry this run's label.
+
+    Returns:
+        The container ids and the network ids.
+    """
+    selector = f"label={TEST_LABEL}={TEST_RUN}"
+    containers = _cli("ps", "-aq", "--filter", selector).stdout.split()
+    networks = _cli("network", "ls", "-q", "--filter", selector).stdout.split()
+    return containers, networks
+
+
+def _wait_for_no_leftovers(seconds: float = 10) -> tuple[list[str], list[str]]:
+    """Wait until no labelled container or network remains.
+
+    ``docker rm -f`` returns before ``--rm`` cleanup of a container ends, so
+    the check polls for a short time.
+
+    Args:
+        seconds: The time limit.
+
+    Returns:
+        The labelled containers and networks that remain at the end.
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = _leftovers()
+        if remaining == ([], []) or time.monotonic() >= deadline:
+            return remaining
+        time.sleep(0.2)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _remove_test_resources() -> Iterator[None]:
+    """Remove every labelled container and network after the module."""
+    yield
+    if not DOCKER_UP:
+        return
+    containers, networks = _leftovers()
+    if containers:
+        _cli("rm", "-f", *containers)
+    for network in networks:
+        _cli("network", "rm", network)
+
+
+def _spec(**overrides: object) -> SandboxSpec:
+    """Return a small offline spec with the test label.
+
+    Args:
+        **overrides: Spec fields to replace.
+
+    Returns:
+        The spec.
+    """
+    fields: dict[str, object] = {
+        "lifetime_seconds": 300,
+        "resources": ResourceRequest(cpus=1),
+        "image": BASE_IMAGE,
+        "network_disabled": True,
+    }
+    fields.update(overrides)
+    fields["tags"] = {**TEST_TAGS, **overrides.get("tags", {})}
+    return SandboxSpec(**fields)
+
+
+class _FakeDocker:
+    """Record Docker CLI calls and answer them from a script."""
+
+    def __init__(self, answers: dict[str, _CliResult] | None = None) -> None:
+        """Keep the scripted answers.
+
+        Args:
+            answers: Maps a space-joined argument prefix to its answer.
+        """
+        self.calls: list[list[str]] = []
+        self.answers = answers or {}
+
+    async def __call__(self, docker_bin: str, args: Sequence[str], *, stdin: bytes | None = None) -> _CliResult:
+        """Record one call and return the answer for the longest matching prefix.
+
+        Args:
+            docker_bin: The Docker CLI path.
+            args: The CLI arguments.
+            stdin: The stdin bytes.
+
+        Returns:
+            The scripted answer, or a success with no output.
+        """
+        del docker_bin, stdin
+        self.calls.append(list(args))
+        joined = " ".join(args)
+        matches = [prefix for prefix in self.answers if joined.startswith(prefix)]
+        if not matches:
+            return _CliResult(0, b"", b"")
+        return self.answers[max(matches, key=len)]
+
+
+@pytest.fixture
+def fake_docker(monkeypatch: pytest.MonkeyPatch) -> _FakeDocker:
+    """Replace the Docker CLI call with a recorder.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+
+    Returns:
+        The recorder.
+    """
+    fake = _FakeDocker({"run": _CliResult(0, b"container-id\n", b"")})
+    monkeypatch.setattr(docker_provider, "_docker", fake)
+    return fake
+
+
+def test_factory_keeps_docker_out_of_production() -> None:
+    """Register the provider for development only."""
+    entry = PROVIDERS["docker"]
+    assert entry.production_allowed is False
+    assert getattr(importlib.import_module(entry.module), entry.cls) is DockerEnvironment
+
+
+def test_ready_marker_matches_the_proxy() -> None:
+    """Wait for the same marker that the proxy prints."""
+    proxy = importlib.import_module("core.service_gateway.optimization.blackbox.docker_egress_proxy")
+    assert proxy.READY_MARKER == docker_provider.READY_MARKER
+
+
+def test_rejects_open_egress() -> None:
+    """Refuse a spec that neither disables the network nor lists hosts."""
+    with pytest.raises(SandboxSpecError):
+        DockerEnvironment(SandboxSpec(lifetime_seconds=60, image=BASE_IMAGE))
+
+
+def test_rejects_a_spec_without_an_image() -> None:
+    """Refuse a spec when neither the spec nor the provider names an image."""
+    with pytest.raises(SandboxSpecError, match="image"):
+        DockerEnvironment(SandboxSpec(lifetime_seconds=60, network_disabled=True))
+
+
+def test_rejects_header_injection() -> None:
+    """Refuse header injection, which the proxy cannot do."""
+    with pytest.raises(SandboxSpecError):
+        DockerEnvironment(
+            SandboxSpec(
+                lifetime_seconds=60,
+                image=BASE_IMAGE,
+                allowed_hosts=("api.example.com",),
+                inject_headers={"api.example.com": {"X-Key": "value"}},
+            )
+        )
+
+
+def test_env_stream_rejects_nul() -> None:
+    """Refuse an environment value that no process can receive."""
+    assert _env_stream({"A": "1"}) == b"A=1\0"
+    with pytest.raises(SandboxSpecError):
+        _env_stream({"A": "x\0y"})
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [("a.txt", "/workspace/a.txt"), ("sub/../b.txt", "/workspace/b.txt"), ("/tmp/x", "/tmp/x"), ("../etc", "/etc")],
+)
+def test_sandbox_path_resolves_relative_to_the_workspace(path: str, expected: str) -> None:
+    """Resolve relative paths against the workspace and keep absolute ones."""
+    assert _sandbox_path(path) == expected
+
+
+@pytest.mark.parametrize("path", ["", "/", "..", "a\0b"])
+def test_sandbox_path_rejects_empty_root_and_nul(path: str) -> None:
+    """Refuse a path that names nothing or the root."""
+    with pytest.raises(SandboxSpecError):
+        _sandbox_path(path)
+
+
+async def test_offline_start_runs_a_hardened_box(fake_docker: _FakeDocker) -> None:
+    """Start an offline box with no network, the limits and the labels."""
+    env = DockerEnvironment(_spec(name="My Box!", tags={JOB_TAG: "job-1"}))
+    await env.start()
+    (run,) = fake_docker.calls
+    assert run[:2] == ["run", "-d"]
+    assert run[run.index("--network") + 1] == "none"
+    assert run[run.index("--cpus") + 1] == "1"
+    assert run[run.index("--memory") + 1] == "2048m"
+    for flag in ("--read-only", "--init", "--rm"):
+        assert flag in run
+    assert run[run.index("--cap-drop") + 1] == "ALL"
+    labels = {run[index + 1] for index, item in enumerate(run) if item == "--label"}
+    assert {"skynet=blackbox", "skynet.job=job-1", "skynet_job=job-1", f"{TEST_LABEL}={TEST_RUN}"} <= labels
+    assert env.container_name is not None
+    assert env.container_name.startswith("my-box-")
+    assert run[-2:] == [BASE_IMAGE, "300"]
+
+
+async def test_ignore_mode_sets_no_limits(fake_docker: _FakeDocker) -> None:
+    """Pass no CPU or memory limit when the resource mode is IGNORE."""
+    await DockerEnvironment(_spec(resources=ResourceRequest(cpus=3, mode=ResourceMode.IGNORE))).start()
+    (run,) = fake_docker.calls
+    assert "--cpus" not in run
+    assert "--memory" not in run
+
+
+async def test_allowlist_start_opens_the_proxy_first(fake_docker: _FakeDocker) -> None:
+    """Create the internal network and the proxy before the box."""
+    fake_docker.answers["logs"] = _CliResult(0, docker_provider.READY_MARKER.encode(), b"")
+    env = DockerEnvironment(_spec(network_disabled=False, allowed_hosts=("b.example.com", "a.example.com")))
+    await env.start()
+    commands = [call[:2] for call in fake_docker.calls]
+    assert commands == [
+        ["network", "create"],
+        ["run", "-d"],
+        ["network", "connect"],
+        ["logs", f"{env.container_name}-egress"],
+        ["run", "-d"],
+    ]
+    assert "--internal" in fake_docker.calls[0]
+    proxy_run = fake_docker.calls[1]
+    assert proxy_run[proxy_run.index("--user") + 1] == "65534:65534"
+    assert proxy_run[-2:] == ["a.example.com", "b.example.com"]
+    box_run = fake_docker.calls[-1]
+    assert box_run[box_run.index("--network") + 1] == f"{env.container_name}-net"
+
+
+async def test_failed_proxy_start_removes_the_network(fake_docker: _FakeDocker) -> None:
+    """Remove the proxy and the network when the proxy does not start."""
+    fake_docker.answers["run -d --rm --init --name"] = _CliResult(125, b"", b"proxy failed")
+    env = DockerEnvironment(_spec(network_disabled=False, allowed_hosts=("a.example.com",)))
+    with pytest.raises(docker_provider.SandboxInfraError, match="proxy failed"):
+        await env.start()
+    assert [call[:2] for call in fake_docker.calls[-2:]] == [["rm", "-f"], ["network", "rm"]]
+
+
+async def test_stop_before_start_calls_no_docker(fake_docker: _FakeDocker) -> None:
+    """Make no CLI call when the box never started."""
+    await DockerEnvironment(_spec()).stop()
+    assert fake_docker.calls == []
+
+
+async def test_calls_before_start_raise(fake_docker: _FakeDocker) -> None:
+    """Refuse exec, upload and download before start."""
+    env = DockerEnvironment(_spec())
+    with pytest.raises(RuntimeError):
+        await env.exec("true")
+    with pytest.raises(RuntimeError):
+        await env.upload_files({"a": "b"})
+    with pytest.raises(RuntimeError):
+        await env.download_file("a")
+    assert fake_docker.calls == []
+
+
+async def test_stop_job_sandboxes_counts_only_boxes(fake_docker: _FakeDocker) -> None:
+    """Remove boxes and proxies, but count only the boxes."""
+    fake_docker.answers["ps"] = _CliResult(0, b"box1 \nproxy1 egress\nbox2 \n", b"")
+    fake_docker.answers["network ls"] = _CliResult(0, b"net1\n", b"")
+    assert await DockerEnvironment.stop_job_sandboxes("job-1") == 2
+    removed = [call[2] for call in fake_docker.calls if call[:2] == ["rm", "-f"]]
+    assert removed == ["box1", "proxy1", "box2"]
+    assert fake_docker.calls[-1] == ["network", "rm", "net1"]
+
+
+async def test_idle_network_sweep_keeps_young_and_used_networks(fake_docker: _FakeDocker) -> None:
+    """Remove only networks with no container that are old enough."""
+    now = int(time.time())
+    fake_docker.answers["network ls"] = _CliResult(0, b"old used young\n", b"")
+    fake_docker.answers["network inspect --format {{len .Containers}} {{.Created.Unix}} old"] = _CliResult(
+        0, f"0 {now - 3600}".encode(), b""
+    )
+    fake_docker.answers["network inspect --format {{len .Containers}} {{.Created.Unix}} used"] = _CliResult(
+        0, f"1 {now - 3600}".encode(), b""
+    )
+    fake_docker.answers["network inspect --format {{len .Containers}} {{.Created.Unix}} young"] = _CliResult(
+        0, f"0 {now}".encode(), b""
+    )
+    assert await docker_provider.remove_idle_sandbox_networks() == 1
+    assert [call for call in fake_docker.calls if call[:2] == ["network", "rm"]] == [["network", "rm", "old"]]
+
+
+@needs_docker
+class TestDockerSandboxContract(SandboxEnvironmentContract):
+    """Run the provider contract against real offline containers."""
+
+    provider_cls = DockerEnvironment
+
+    def make_spec(self, **overrides: object) -> SandboxSpec:
+        """Return an offline spec on the local base image with the test label.
+
+        Args:
+            **overrides: Spec fields to replace.
+
+        Returns:
+            The spec.
+        """
+        return _spec(**overrides)
+
+
+@needs_docker
+async def test_exec_reports_a_timeout() -> None:
+    """Mark a command that the timeout killed."""
+    async with DockerEnvironment(_spec()) as env:
+        result = await env.exec("sleep 30", timeout_sec=1)
+    assert result.timed_out
+
+
+@needs_docker
+async def test_relative_paths_land_in_the_workspace() -> None:
+    """Write a relative path under /workspace and read it back."""
+    async with DockerEnvironment(_spec()) as env:
+        await env.upload_files({"deep/a.txt": "one", "b.txt": "two"})
+        assert (await env.exec("cat /workspace/deep/a.txt /workspace/b.txt")).stdout == "onetwo"
+        assert await env.download_file("deep/a.txt") == "one"
+
+
+@needs_docker
+async def test_offline_box_has_no_network() -> None:
+    """Start an offline box with no route out."""
+    async with DockerEnvironment(_spec()) as env:
+        result = await env.exec("tail -n +2 /proc/net/route | wc -l")
+    assert result.stdout.strip() == "0"
+
+
+@needs_docker
+async def test_stop_after_a_cancel_removes_everything() -> None:
+    """Remove the box even when the task that stops it is cancelled."""
+    env = DockerEnvironment(_spec())
+    await env.start()
+    stopping = asyncio.ensure_future(env.stop())
+    await asyncio.sleep(0)
+    stopping.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    assert _wait_for_no_leftovers() == ([], [])
+
+
+@needs_docker
+async def test_cancelled_exec_leaves_the_box_running() -> None:
+    """Cancel a running command and keep the box usable."""
+    async with DockerEnvironment(_spec()) as env:
+        command = asyncio.ensure_future(env.exec("sleep 30"))
+        await asyncio.sleep(1)
+        command.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await command
+        assert (await env.exec("echo still")).stdout.strip() == "still"
+    assert _wait_for_no_leftovers() == ([], [])
+
+
+@needs_proxy_image
+async def test_proxy_refuses_a_host_that_is_not_listed() -> None:
+    """Answer 403 for a host outside the allowlist and block direct egress."""
+    spec = _spec(image=PROXY_IMAGE, network_disabled=False, allowed_hosts=("example.com",))
+    async with DockerEnvironment(spec) as env:
+        refused = await env.exec(f'python3 -c "{PROXY_PROBE}"')
+        direct = await env.exec(f'python3 -c "{DIRECT_PROBE}"')
+    assert refused.stdout.strip() == "403", refused.stderr
+    assert direct.stdout.strip() == "blocked", direct.stderr
+    assert _wait_for_no_leftovers() == ([], [])
+
+
+@needs_proxy_image
+async def test_network_policy_switches_off_and_back_on() -> None:
+    """Drop the proxy on disable, then bring back an allowlist through a new proxy."""
+    spec = _spec(image=PROXY_IMAGE, network_disabled=False, allowed_hosts=("example.com",))
+    async with DockerEnvironment(spec) as env:
+        name = env.container_name
+        await env.disable_network()
+        assert _cli("inspect", f"{name}-egress").returncode != 0
+        assert _cli("network", "inspect", f"{name}-net").returncode != 0
+        offline = await env.exec(f'python3 -c "{PROXY_PROBE}"')
+        assert offline.exit_code != 0
+        await env.set_network_policy(NetworkPolicy(allowed_hosts=("example.net",)))
+        assert (await env.exec(f'python3 -c "{PROXY_PROBE}"')).stdout.strip() == "403"
+        await env.set_network_policy(NetworkPolicy(allowed_hosts=("example.com", "example.net")))
+        assert (await env.exec(f'python3 -c "{PROXY_PROBE}"')).stdout.strip() == "403"
+    assert _wait_for_no_leftovers() == ([], [])
+
+
+@needs_proxy_image
+async def test_cancelled_start_leaves_nothing_behind() -> None:
+    """Remove the network, the proxy and the box when start is cancelled."""
+    spec = _spec(image=PROXY_IMAGE, network_disabled=False, allowed_hosts=("example.com",))
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.5), DockerEnvironment(spec):
+            await asyncio.sleep(60)
+    assert _wait_for_no_leftovers() == ([], [])
