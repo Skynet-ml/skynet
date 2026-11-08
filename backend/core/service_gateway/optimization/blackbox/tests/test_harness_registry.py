@@ -39,7 +39,7 @@ _OVERRIDES: dict[str, dict[str, str]] = {
 }
 _BUILT_INS = ("pi", "codex", "opencode", "prime", "cline")
 # The golden digests predate the registry, so they cover only these harnesses.
-_GOLDEN_HARNESSES = ("pi", "codex", "opencode", "prime")
+_PRE_REGISTRY = ("pi", "codex", "opencode", "prime")
 # sha256 of every launch payload, captured from staging 0e1dd97d5 before the
 # catalog moved into the registry. A changed digest means a changed launch.
 _GOLDEN = {
@@ -218,7 +218,7 @@ def _current_digests() -> dict[str, str]:
     """
     out: dict[str, str] = {}
     for h, (gname, gw), effort, protected, (oname, extra) in itertools.product(
-        _GOLDEN_HARNESSES, _GATEWAYS.items(), _EFFORTS, [False, True], _OVERRIDES.items()
+        _PRE_REGISTRY, _GATEWAYS.items(), _EFFORTS, [False, True], _OVERRIDES.items()
     ):
         target = BlackboxTarget(kind=BLACKBOX_TARGET_AGENT, harness=h, model="openrouter/acme/agent-1", **extra)
         payload = launch_payload(build_launch(target, gw, protected=protected, reasoning_effort=effort))

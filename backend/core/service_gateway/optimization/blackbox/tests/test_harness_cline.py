@@ -37,16 +37,13 @@ printf '%s' "$FAKE_ANSWER"
 """
 
 
-def _target(**overrides: object) -> BlackboxTarget:
-    """Build a Cline agent target with the given field overrides.
-
-    Args:
-        **overrides: Extra target fields.
+def _target() -> BlackboxTarget:
+    """Build a Cline agent target.
 
     Returns:
         The target.
     """
-    return BlackboxTarget(kind=BLACKBOX_TARGET_AGENT, harness=BLACKBOX_HARNESS_CLINE, model="target-model", **overrides)
+    return BlackboxTarget(kind=BLACKBOX_TARGET_AGENT, harness=BLACKBOX_HARNESS_CLINE, model="target-model")
 
 
 def _run_with_fake_cline(tmp_path: Path, *, protected: bool) -> tuple[str, str, Path]:
