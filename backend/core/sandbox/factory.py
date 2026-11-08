@@ -48,6 +48,7 @@ PROVIDERS: dict[str, ProviderEntry] = {
     "runloop": ProviderEntry("core.sandbox.providers.runloop", "RunloopEnvironment", "runloop", False),
     "langsmith": ProviderEntry("core.sandbox.providers.langsmith", "LangSmithEnvironment", "langsmith", False),
     "podman": ProviderEntry("core.sandbox.providers.podman", "PodmanEnvironment", None, False),
+    "kata": ProviderEntry("core.sandbox.providers.kata", "KataEnvironment", None, False),
     "openshift": ProviderEntry("core.sandbox.providers.openshift", "OpenshiftEnvironment", None, False),
 }
 
