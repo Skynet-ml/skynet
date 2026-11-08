@@ -145,11 +145,35 @@ daytona = [
     # SBX-25b: the dev-only Daytona sandbox provider (core.sandbox.providers.daytona).
     "daytona>=0.210.0",
 ]
+modal = [
+    # The dev-only Modal sandbox provider (core.sandbox.providers.modal).
+    "modal>=1.6",
+]
 runloop = [
     # Runloop devbox sandbox provider (SKY-456). Imported lazily by
     # core.sandbox.providers.runloop; the default legacy backend never needs it.
     # The 3.x floor is the tested line; the provider passes allow_runloop_mirrors.
     "runloop-api-client>=3.0.0,<4",
+]
+kernel = [
+    # Kernel browser VM sandbox provider (SKY-479). Imported lazily by
+    # core.sandbox.providers.kernel; the default legacy backend never needs it.
+    "kernel>=0.123.0",
+]
+mosaic = [
+    # Mosaic microVM sandbox provider (SKY-476). Imported lazily by
+    # core.sandbox.providers.mosaic; the default legacy backend never needs it.
+    "mosaic-sandbox>=0.15.1,<0.16",
+]
+sail = [
+    # Sail sandbox provider (SKY-478). Imported lazily by
+    # core.sandbox.providers.sail; the default legacy backend never needs it.
+    "sail>=0.13.0",
+]
+sbx = [
+    # Docker sbx Cloud provider (SKY-482): parses the multipart file downloads.
+    # The factory refuses this provider in production.
+    "python-multipart>=0.0.31",
 ]
 
 [tool.uv]
