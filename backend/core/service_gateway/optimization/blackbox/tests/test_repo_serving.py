@@ -575,15 +575,12 @@ def test_a_symlink_into_a_hidden_folder_carries_no_content(tmp_path: Path, monke
     assert not (tree / "scoring").exists()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Known gap: the strip matches names, so a hidden path that is a symlink drops only the link, not its target.",
-)
-def test_a_hidden_path_that_is_a_symlink_also_hides_its_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The scorer reads ``scoring`` through the link, so its target holds the metric too."""
+def test_a_hidden_path_that_is_a_symlink_refuses_to_serve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The strip would drop only the link and keep its target, so serving refuses an older run's commit."""
     files = {"optimize.toml": '[metric]\nfiles = ["scoring"]\n', "real/score.py": f"# {_LEAK}\n", "serve.py": _SERVE}
 
-    with _stage_tree(monkeypatch, files, {"scoring": "real"}) as staged:
-        raw = gzip.decompress(Path(staged[REPO_SNAPSHOT_KEY]["archive"]).read_bytes())
-
-    assert _LEAK.encode() not in raw
+    with (
+        pytest.raises(ConstraintsError, match=r"hidden scoring path 'scoring' is, holds or lies inside a link"),
+        _stage_tree(monkeypatch, files, {"scoring": "real"}),
+    ):
+        pass

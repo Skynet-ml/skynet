@@ -28,8 +28,8 @@ from ....models.common import ModelConfig
 from ....worker.repo_staging import hidden_repo_paths
 from . import runner
 from .harness import ENV_MODEL
-from .repo_constraints import read_constraints
-from .repo_tree import REPO_SNAPSHOT_KEY, apply_patch, strip_archive, unpack_tree
+from .repo_constraints import CONSTRAINTS_FILE, ConstraintsError, read_constraints
+from .repo_tree import REPO_SNAPSHOT_KEY, apply_patch, linked_hidden_paths, strip_archive, unpack_tree
 from .sandbox_scorer import scorer_gateway
 
 SERVE_FILE = "serve.py"
@@ -142,7 +142,8 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
 
     Raises:
         RepoFetchError: When the repository cannot be fetched at its commit.
-        ConstraintsError: When the commit's ``optimize.toml`` is invalid, so the hidden list is unknown.
+        ConstraintsError: When the commit's ``optimize.toml`` is invalid, so the hidden list is unknown,
+            or a hidden path is, holds or lies inside a link, so the strip cannot remove it.
     """
     token = None
     if engine is not None and owner:
@@ -155,6 +156,12 @@ def staged_snapshot(payload: dict[str, Any], *, engine: Any, owner: str | None) 
         repo = payload["repo"]
         snapshot = fetch_snapshot(repo["repository"], repo["commit"], token, workdir)
         hidden = hidden_repo_paths(read_constraints(snapshot.archive))
+        # Run start refuses these links since SKY-387; a run started before that can still reach serving.
+        if linked := linked_hidden_paths(snapshot.archive, hidden):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: the hidden scoring path '{linked[0]}' is, holds or lies inside a link."
+                " Serving refuses it, because the link would show the scoring files to the guest."
+            )
         archive = strip_archive(snapshot.archive, hidden, workdir / "serve-tree.tgz")
         yield {**payload, REPO_SNAPSHOT_KEY: {"archive": str(archive), "commit": snapshot.commit}}
     finally:
