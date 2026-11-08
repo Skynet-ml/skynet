@@ -397,6 +397,13 @@ _GUARD_MAX_BASES = 4
 _GUARD_MAX_TEXT = 64_000
 _GUARD_MAX_CHECKS = 8_000
 _GUARD_MAX_PARTS = 32
+# The agent can make links in the workspace, so link resolution is part of the
+# cost. Linux also refuses a path behind more than 40 links (ELOOP).
+_GUARD_MAX_LINKS = 2_000
+_GUARD_MAX_LINK_DEPTH = 40
+_GUARD_DEADLINE_SECONDS = 5.0
+# Options of these commands that name the folder the command works in.
+_GUARD_DIR_OPTIONS = frozenset({"-C", "--chdir", "--directory", "--cwd"})
 # One check function shared by the Pi extension and the OpenCode plugin. It
 # asks this module for the verdict, so the matching lives in one place.
 _GUARD_JS_CHECK = """import {{ execFileSync }} from "node:child_process";
@@ -554,7 +561,90 @@ def _dynamic_match(text: str, hashes: dict[str, str], fold: bool) -> str | None:
     return None
 
 
-def _hidden_match(text: str, roots: list[str], bases: list[str], hashes: dict[str, str], fold: bool) -> str | None:
+class _LinkResolver:
+    """Resolve symbolic links like ``os.path.realpath``, with a cap on the work.
+
+    ``os.path.realpath`` follows every link of a chain each time it is called.
+    The agent can make long chains, so a call with many candidates could keep
+    the guard past the hook timeout. This resolver keeps each link's result and
+    refuses when the call needs too many links.
+    """
+
+    def __init__(self) -> None:
+        """Start with no links read."""
+        self._paths: dict[str, str] = {}
+        self._links_left = _GUARD_MAX_LINKS
+
+    def resolve(self, path: str) -> str:
+        """Return the real form of an absolute path.
+
+        Args:
+            path: An absolute, normalized path.
+
+        Returns:
+            The path with every symbolic link resolved. A part that does not
+            exist stays as it is, as in ``os.path.realpath``.
+
+        Raises:
+            ValueError: When the path needs too many links, or a chain is
+                longer than the system allows.
+        """
+        return self._walk("/", path, 0)
+
+    def _walk(self, start: str, path: str, depth: int) -> str:
+        """Resolve each part of a path, from a real start folder.
+
+        Args:
+            start: The real folder a relative ``path`` starts in.
+            path: The path to resolve.
+            depth: How many links lead to this path.
+
+        Returns:
+            The resolved path.
+        """
+        resolved = "/" if path.startswith("/") else start
+        for part in path.split("/"):
+            if part in ("", "."):
+                continue
+            if part == "..":
+                resolved = str(Path(resolved).parent)
+                continue
+            resolved = self._follow(str(Path(resolved, part)), depth)
+        return resolved
+
+    def _follow(self, path: str, depth: int) -> str:
+        """Return the real form of one path whose parent is already real.
+
+        Args:
+            path: The path to resolve.
+            depth: How many links lead to this path.
+
+        Returns:
+            The link's resolved target, or ``path`` when it is not a link.
+
+        Raises:
+            ValueError: When the call needs too many links, or a chain is
+                longer than the system allows.
+        """
+        known = self._paths.get(path)
+        if known is not None:
+            return known
+        try:
+            target = str(Path(path).readlink())
+        except OSError:
+            self._paths[path] = path
+            return path
+        self._links_left -= 1
+        if self._links_left < 0 or depth >= _GUARD_MAX_LINK_DEPTH:
+            raise ValueError("too many symbolic links to check")
+        result = self._walk(str(Path(path).parent), target, depth + 1)
+        self._paths[path] = result
+        return result
+
+
+def _hidden_match(
+    text: str, roots: list[str], bases: list[str], hashes: dict[str, str], fold: bool, links: _LinkResolver
+) -> str | None:
     """Return the kind of the hidden path one candidate names, if any.
 
     Matching is exact: the candidate, or one of its parent directories, must
@@ -568,6 +658,7 @@ def _hidden_match(text: str, roots: list[str], bases: list[str], hashes: dict[st
         bases: Directories a relative candidate can be relative to.
         hashes: Policy hashes mapped to their kind.
         fold: Whether to compare paths without case.
+        links: The call's link resolver.
 
     Returns:
         The hidden kind, or ``None``.
@@ -577,7 +668,7 @@ def _hidden_match(text: str, roots: list[str], bases: list[str], hashes: dict[st
         return None
     for base in bases:
         path = os.path.normpath(Path(base, candidate))
-        for full in dict.fromkeys((path, os.path.realpath(path))):
+        for full in dict.fromkeys((path, links.resolve(path))):
             for root in roots:
                 # On a disk that ignores case, /USERS/... names the same file as /Users/....
                 relative = os.path.relpath(full.casefold(), root.casefold()) if fold else os.path.relpath(full, root)
@@ -596,7 +687,8 @@ def _shell_words(command: str, bases: list[str], depth: int = 0) -> Iterator[str
 
     Args:
         command: Shell command text.
-        bases: Receives the directory of each ``cd`` or ``pushd`` in the command.
+        bases: Receives the directory of each ``cd`` or ``pushd``, and of each
+            folder option such as ``env -C`` or ``git -C``, in the command.
         depth: Nesting level, for quoted scripts such as ``bash -lc '...'``.
 
     Yields:
@@ -608,9 +700,26 @@ def _shell_words(command: str, bases: list[str], depth: int = 0) -> Iterator[str
         words = list(lexer)
     except ValueError:
         words = command.split()
-    for previous, word in zip(["", *words], words, strict=False):
-        if previous in _GUARD_CD_WORDS:
+    after_cd = after_dir_option = False
+    for word in words:
+        is_operator = bool(word) and all(character in "();<>|&" for character in word)
+        # ``grep -C 3`` gives a count, not a folder.
+        if after_dir_option and not is_operator and not word.isdigit():
             bases.append(word)
+        after_dir_option = word in _GUARD_DIR_OPTIONS
+        option, _, value = word.partition("=")
+        if option in _GUARD_DIR_OPTIONS and value:
+            bases.append(value)
+        elif word.startswith("-C") and not word.startswith("--") and not word[2:].isdigit():
+            bases.append(word[2:])
+        # ``cd -P dir`` and ``cd -- dir`` work in ``dir``; a lone ``-`` is the old folder.
+        if after_cd and not is_operator and (word == "-" or not word.startswith("-")):
+            bases.append(word)
+            after_cd = False
+        elif is_operator:
+            after_cd = False
+        elif word in _GUARD_CD_WORDS:
+            after_cd = True
         yield word
         yield from _GUARD_WORD_RE.findall(word)
         if depth < _GUARD_SHELL_DEPTH and any(character.isspace() for character in word):
@@ -708,8 +817,13 @@ def guard_check(policy: dict[str, Any], tool: str, tool_input: Any) -> str | Non
     candidates = list(dict.fromkeys(candidates))
     if len(bases) * sum(1 + candidate.count("/") for candidate in candidates) > _GUARD_MAX_CHECKS:
         raise ValueError("tool call too large to check")
+    links = _LinkResolver()
+    # A backstop for a cost the caps above miss, such as a slow file system.
+    deadline = time.monotonic() + _GUARD_DEADLINE_SECONDS
     for candidate in candidates:
-        kind = _hidden_match(candidate, roots, bases, hashes, fold)
+        if time.monotonic() > deadline:
+            raise ValueError("tool call took too long to check")
+        kind = _hidden_match(candidate, roots, bases, hashes, fold, links)
         if kind:
             return kind
     return None

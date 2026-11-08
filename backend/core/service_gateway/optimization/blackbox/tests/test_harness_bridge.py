@@ -644,6 +644,75 @@ def test_guard_refuses_more_directory_changes_than_it_can_follow(tmp_path: Path,
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd -- data && cat cases.jsonl",
+        "cd -P data && cat cases.jsonl",
+        "cd -L data && cat cases.jsonl",
+        "pushd -- data && cat cases.jsonl",
+        "env -C data cat cases.jsonl",
+        "env --chdir=data cat cases.jsonl",
+        "env -Cdata cat cases.jsonl",
+        "git -C data show HEAD:cases.jsonl",
+    ],
+)
+def test_guard_follows_folder_options(tmp_path: Path, command: str) -> None:
+    """Refuse a hidden name behind a ``cd`` option or a folder option such as ``env -C``."""
+    assert harness_bridge.guard_check(_policy(tmp_path), "Bash", {"command": command}) == "scoring"
+
+
+@pytest.mark.parametrize("command", ["grep -C 3 foo notes.txt", "cd - && cat notes.txt", "cd -P src && cat notes.txt"])
+def test_guard_allows_ordinary_option_forms(tmp_path: Path, command: str) -> None:
+    """Allow a context count after ``grep -C`` and a ``cd`` option before an ordinary folder."""
+    assert harness_bridge.guard_check(_policy(tmp_path), "Bash", {"command": command}) is None
+
+
+def test_guard_refuses_long_symbolic_link_chains_fast(tmp_path: Path) -> None:
+    """Refuse a call whose candidates go through a long link chain, before the hook timeout.
+
+    ``os.path.realpath`` follows the whole chain for each candidate, so this
+    call kept the guard busy for more than 15 s before the link cap.
+    """
+    session = tmp_path / "session"
+    harness_bridge.install_guard(session, tmp_path / "work", _HIDDEN)
+    policy_file = session / harness_bridge.GUARD_DIR / "policy.json"
+    workspace = tmp_path / "work"
+    workspace.mkdir(exist_ok=True)
+    for index in range(900):
+        (workspace / f"c{index}").symlink_to(f"c{index + 1}")
+    for index in range(3000):
+        (workspace / f"e{index}").symlink_to("c0")
+    command = "cat " + " ".join(f"e{index}" for index in range(3000)) + " optimize.toml"
+    with pytest.raises(ValueError, match="symbolic links"):
+        harness_bridge.guard_check(json.loads(policy_file.read_text()), "Bash", {"command": command})
+    started = time.monotonic()
+    denied = _guard("hook", policy_file, {"tool_name": "Bash", "tool_input": {"command": command}})
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert time.monotonic() - started < 3
+
+
+def test_guard_refuses_a_symbolic_link_loop(tmp_path: Path) -> None:
+    """Refuse a path behind a link loop, which the system cannot open either."""
+    policy = _policy(tmp_path)
+    workspace = tmp_path / "work"
+    (workspace / "loop1").symlink_to("loop2")
+    (workspace / "loop2").symlink_to("loop1")
+    with pytest.raises(ValueError, match="symbolic links"):
+        harness_bridge.guard_check(policy, "Bash", {"command": "cat loop1"})
+
+
+def test_guard_follows_a_short_link_chain_to_a_hidden_file(tmp_path: Path) -> None:
+    """Resolve a hidden file behind a chain of links, as ``os.path.realpath`` does."""
+    policy = _policy(tmp_path)
+    workspace = tmp_path / "work"
+    (workspace / "link2").symlink_to("optimize.toml")
+    (workspace / "sub").mkdir()
+    (workspace / "sub" / "link1").symlink_to("../link2")
+    (workspace / "link0").symlink_to("sub/link1")
+    assert harness_bridge.guard_check(policy, "Read", {"file_path": "link0"}) == "config"
+
+
 def test_guard_still_follows_four_directory_changes(tmp_path: Path) -> None:
     """Resolve a hidden path behind the largest number of cd steps the guard follows."""
     command = "cd . && cd . && cd . && cd data && cat cases.jsonl"
