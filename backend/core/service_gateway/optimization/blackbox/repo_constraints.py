@@ -1069,7 +1069,10 @@ def _scoring_paths(metric: MetricSpec, cases_file: str | None) -> tuple[str, ...
 
 
 def _refuse_hidden_visible_files(
-    scoring: Sequence[str], visible: list[tuple[str, str | None]], run_entry: str | tuple[str, ...] | None
+    scoring: Sequence[str],
+    visible: list[tuple[str, str | None]],
+    run_entry: str | tuple[str, ...] | None,
+    metric_only: Sequence[str],
 ) -> None:
     """Refuse a visible file or the ``[run]`` entry inside the scorer's side (D43, E62).
 
@@ -1077,9 +1080,10 @@ def _refuse_hidden_visible_files(
     rule file would be stripped and the brief would name a hidden path.
 
     Args:
-        scoring: The paths from ``_scoring_paths``.
+        scoring: ``optimize.toml`` and the paths from ``_scoring_paths``.
         visible: Each visible file setting and its path, or ``None`` when unset.
         run_entry: The ``[run]`` entry, or ``None``.
+        metric_only: The ``[metric] illegal`` and ``mcp`` files that no visible setting names.
 
     Raises:
         ConstraintsError: When one of those paths equals or lies inside a scoring path.
@@ -1087,17 +1091,18 @@ def _refuse_hidden_visible_files(
     for setting, path in visible:
         if path is not None and _inside(path, scoring):
             raise ConstraintsError(
-                f"{CONSTRAINTS_FILE}: {setting} '{path}' is inside the hidden scoring files ([metric] or"
-                " [data] cases), but the agent must read it. Move it out of the hidden paths."
+                f"{CONSTRAINTS_FILE}: {setting} '{path}' is inside the hidden scoring files ({CONSTRAINTS_FILE},"
+                " [metric] or [data] cases), but the agent must read it. Move it out of the hidden paths."
             )
     if run_entry is None:
         return
     parts = (run_entry.rpartition(":")[0],) if isinstance(run_entry, str) else run_entry
     for part in parts:
-        if _inside(posixpath.normpath(part.strip()), scoring):
+        if _inside(posixpath.normpath(part.strip()), (*scoring, *metric_only)):
             raise ConstraintsError(
                 f"{CONSTRAINTS_FILE}: [run] entry names '{part}', which is inside the hidden scoring files"
-                " ([metric] or [data] cases). The candidate's box does not hold them; name a visible file."
+                f" ({CONSTRAINTS_FILE} or [metric] or [data] cases). The candidate's box does not hold them; name a"
+                " visible file."
             )
 
 
@@ -1199,7 +1204,14 @@ def parse_constraints(raw: bytes) -> RepoConstraints:
     visible = [item for item in rule_files if item[0] != "[metric] illegal"]
     visible += [("[proposer] mcp", proposer["mcp"]), ("[run] mcp", run_role["mcp"])]
     visible += [(f"[target.{name}] mcp", stage.mcp) for name, stage in targets.items()]
-    _refuse_hidden_visible_files(_scoring_paths(metric, cases_file), visible, run_entry)
+    visible_paths = {path for _, path in visible}
+    metric_only = [path for path in (metric_role["illegal_file"], metric_role["mcp"]) if path not in visible_paths]
+    _refuse_hidden_visible_files(
+        (CONSTRAINTS_FILE, *_scoring_paths(metric, cases_file)),
+        visible,
+        run_entry,
+        [path for path in metric_only if path is not None],
+    )
     return RepoConstraints(
         sha256=hashlib.sha256(raw).hexdigest(),
         editable_paths=editable,
@@ -1657,7 +1669,7 @@ def scorer_only_paths(constraints: RepoConstraints) -> tuple[str, ...]:
 
     A path that a visible role also names, such as one ``.mcp.json`` for
     ``[run]`` and ``[metric]``, stays visible, because hiding it would break
-    that role.
+    that role. ``optimize.toml`` is always hidden: it names every hidden path.
 
     Args:
         constraints: The repository's validated constraints.
@@ -1669,7 +1681,6 @@ def scorer_only_paths(constraints: RepoConstraints) -> tuple[str, ...]:
     """
     metric = constraints.metric
     hidden = (
-        CONSTRAINTS_FILE,
         *metric.files,
         metric.exploits,
         metric.reference,
@@ -1686,7 +1697,8 @@ def scorer_only_paths(constraints: RepoConstraints) -> tuple[str, ...]:
         *(stage.illegal_file for stage in constraints.targets.values()),
         *(stage.mcp for stage in constraints.targets.values()),
     }
-    return tuple(dict.fromkeys(path for path in hidden if path is not None and path not in visible))
+    shown = (path for path in hidden if path is not None and path not in visible)
+    return tuple(dict.fromkeys((CONSTRAINTS_FILE, *shown)))
 
 
 def effective_environment(

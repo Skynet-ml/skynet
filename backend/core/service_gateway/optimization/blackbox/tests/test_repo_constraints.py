@@ -24,6 +24,7 @@ from ..repo_constraints import (
     instructions_brief,
     parse_constraints,
     read_constraints,
+    scorer_only_paths,
 )
 from ..repo_tree import patch_violations
 
@@ -1335,6 +1336,51 @@ def test_a_run_entry_inside_the_hidden_scoring_files_is_refused(entry: str) -> N
 
     with pytest.raises(ConstraintsError, match=r"\[run\] entry names 'eval/run\.py'"):
         parse_constraints(raw)
+
+
+@pytest.mark.parametrize(
+    ("setting", "line"),
+    [
+        ("instructions", 'instructions = "optimize.toml"\n'),
+        ("[proposer] illegal", '[proposer]\nillegal = "optimize.toml"\n'),
+        ("[run] mcp", '[run]\nentry = "src/app.py:main"\nmcp = "optimize.toml"\n'),
+    ],
+)
+def test_a_visible_setting_that_names_the_constraints_file_is_refused(setting: str, line: str) -> None:
+    """``optimize.toml`` names every hidden path, so no visible role can read it (E62)."""
+    with pytest.raises(ConstraintsError, match=rf"{re.escape(setting)} 'optimize\.toml' is inside the hidden"):
+        parse_constraints(line.encode())
+
+
+def test_the_constraints_file_stays_hidden_when_a_visible_setting_names_it() -> None:
+    """Parsing refuses this case; the hidden list must still never drop ``optimize.toml`` (E62)."""
+    constraints = replace(parse_constraints(b""), instructions_file="optimize.toml")
+
+    assert scorer_only_paths(constraints) == ("optimize.toml", ".optimize/exploits")
+
+
+@pytest.mark.parametrize(
+    ("toml", "path"),
+    [
+        ("", "optimize.toml"),
+        ('[metric]\nillegal = "docs/metric_rules.md"\n', "docs/metric_rules.md"),
+        ('[metric]\nmcp = "eval/.mcp.json"\n', "eval/.mcp.json"),
+    ],
+    ids=["constraints-file", "metric-rule-file", "metric-mcp"],
+)
+def test_a_run_entry_that_names_a_scorer_only_file_is_refused(toml: str, path: str) -> None:
+    """The brief names the ``[run]`` entry, so it cannot name a file that only the scorer reads (E62)."""
+    raw = f'[run]\nentry = ["python", "{path}"]\n\n{toml}'.encode()
+
+    with pytest.raises(ConstraintsError, match=rf"\[run\] entry names '{re.escape(path)}'"):
+        parse_constraints(raw)
+
+
+def test_a_run_entry_that_names_a_shared_mcp_file_is_allowed() -> None:
+    """A ``[metric] mcp`` file that ``[run]`` also names stays visible, so the entry may name it."""
+    raw = b'[run]\nentry = ["cat", ".mcp.json"]\nmcp = ".mcp.json"\n\n[metric]\nmcp = ".mcp.json"\n'
+
+    assert parse_constraints(raw).run_entry == ("cat", ".mcp.json")
 
 
 def test_a_visible_mcp_file_shared_with_the_metric_is_still_allowed() -> None:
