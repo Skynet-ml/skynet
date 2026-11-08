@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.parse
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -1631,6 +1632,7 @@ class _Echo:
     def __init__(self) -> None:
         """Start the server on a free port."""
         self.paths: list[str] = []
+        self.location = "/leak"
         echo = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -1641,11 +1643,26 @@ class _Echo:
                 echo.paths.append(self.path)
                 if self.path.endswith("/redirect"):
                     self.send_response(302)
-                    self.send_header("Location", "/leak")
+                    self.send_header("Location", echo.location)
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
                 key = self.headers.get("Authorization", "")
+                token = key.partition(" ")[2]
+                if self.path.endswith("/split"):
+                    # No Content-Length: the body ends when the connection closes, so the two halves arrive apart.
+                    self.send_response(200)
+                    self.end_headers()
+                    half = len(token) // 2
+                    for part in (b'{"seen": "' + token[:half].encode(), token[half:].encode() + b'"}'):
+                        self.wfile.write(part)
+                        self.wfile.flush()
+                        time.sleep(0.05)
+                    return
+                if self.path.endswith("/base64"):
+                    key = base64.b64encode(token.encode()).decode()
+                elif self.path.endswith("/percent"):
+                    key = urllib.parse.quote(token, safe="")
                 payload = json.dumps({"seen": key}).encode()
                 self.send_response(200)
                 self.send_header("X-Echo", key)
@@ -1711,14 +1728,54 @@ def test_an_upstream_that_echoes_the_key_gives_the_box_only_the_redacted_form(ec
     assert echo.paths == ["/echo"]
 
 
-def test_a_redirect_comes_back_to_the_box_and_is_never_followed(echo: _Echo) -> None:
-    """The relay returns the 302 as it is, so the key never reaches the redirect target (E53)."""
+_REDIRECT_TARGETS = pytest.mark.parametrize(
+    "location",
+    ["/leak", "http://judge.example.test:{port}/leak", "http://elsewhere.example.test:{port}/leak"],
+    ids=["same-host-path", "allowed-host-url", "other-host-url"],
+)
+
+
+@_REDIRECT_TARGETS
+def test_a_redirect_comes_back_to_the_box_and_is_never_followed(echo: _Echo, location: str) -> None:
+    """The relay returns the 302 as it is, to the allowed host or another one, so the key goes nowhere else (E53)."""
+    echo.location = location.format(port=echo.port)
     workspace = _Workspace()
     answer = _service_answer(_echo_relay(workspace, echo.port), workspace, "judge", path="redirect", method="GET")
 
     assert answer["status"] == 302
-    assert ["Location", "/leak"] in answer["headers"]
+    assert ["Location", echo.location] in answer["headers"]
     assert echo.paths == ["/redirect"]
+
+
+def test_a_key_split_across_two_streamed_chunks_comes_back_redacted(echo: _Echo) -> None:
+    """The relay reads the whole answer before it redacts, so a key cut across two chunks is still hidden (E56)."""
+    workspace = _Workspace()
+    answer = _service_answer(_echo_relay(workspace, echo.port), workspace, "judge", path="split", method="GET")
+
+    assert answer["status"] == 200
+    assert json.loads(base64.b64decode(answer["body"])) == {"seen": "[REDACTED]"}
+    assert echo.paths == ["/split"]
+
+
+# The relay hides the filled values and their JSON-escaped forms only. A server that
+# re-encodes the key hands it back; the PR body names this gap. strict: a fix flips these.
+@pytest.mark.xfail(strict=True, reason="SKY-385 gap: the relay does not hide re-encoded forms of a secret")
+@pytest.mark.parametrize(
+    ("path", "encode"),
+    [
+        ("base64", lambda token: base64.b64encode(token.encode()).decode()),
+        ("percent", lambda token: urllib.parse.quote(token, safe="")),
+    ],
+)
+def test_a_re_encoded_key_echo_is_redacted(echo: _Echo, path: str, encode: Any) -> None:
+    """A key echoed base64-encoded or percent-encoded does not reach the box (E56)."""
+    secret = "judge/secret+value=1"
+    workspace = _Workspace()
+    relay = _echo_relay(workspace, echo.port, secret=secret)
+    answer = _service_answer(relay, workspace, "judge", path=path, method="GET")
+
+    assert answer["status"] == 200
+    assert encode(secret) not in json.dumps(answer)
 
 
 @pytest.mark.parametrize(
@@ -1958,13 +2015,15 @@ def test_a_recorder_failure_keeps_the_relayed_call_and_logs_no_secret(
     assert "database is gone" not in logged
 
 
-def test_an_mcp_redirect_comes_back_to_the_box_and_is_never_followed(echo: _Echo) -> None:
-    """The relay returns an MCP server's 302 as it is, so the key never reaches the redirect target (E53)."""
+@_REDIRECT_TARGETS
+def test_an_mcp_redirect_comes_back_to_the_box_and_is_never_followed(echo: _Echo, location: str) -> None:
+    """The relay returns an MCP server's 302 as it is, to the allowed host or another one (E53)."""
+    echo.location = location.format(port=echo.port)
     workspace = _Workspace()
     answer = _mcp_answer(_mcp_relay(workspace, "metric", _mcp_role(echo.port, "redirect")), workspace, "search")
 
     assert answer["status"] == 302
-    assert ["Location", "/leak"] in answer["headers"]
+    assert ["Location", echo.location] in answer["headers"]
     assert echo.paths == ["/redirect"]
 
 
