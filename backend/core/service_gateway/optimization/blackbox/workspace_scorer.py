@@ -24,14 +24,19 @@ run with :class:`ScorerAbortError`, since no candidate could ever be scored.
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
+import functools
 import logging
 import shlex
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar, TypeVar
 from urllib.parse import urlsplit
+
+import anyio
 
 from ....billing.budgets import BudgetError
 from ....billing.model_gateway import ROUTE_KEY
@@ -41,6 +46,9 @@ from ....exceptions import ServiceError
 from ....i18n import t
 from ....models.common import ModelConfig
 from ....models.unified import UnifiedCase, UnifiedRunRequest
+from ....sandbox import EnvironmentCapabilities, ExecResult, OutputSink, SandboxEnvironment, SandboxSpec, sync_bridge
+from ....sandbox.pool import BoxOutcome, BoxWork, SandboxPool
+from ....sandbox.timeouts import Phase
 from . import check_terminal, sandbox_log, workspace_harness
 from .harness import GatewayConfig
 from .native_runtime import sanitize_side_info
@@ -63,6 +71,317 @@ HARNESS_FILE = "app_workspace_harness.py"
 HARNESS_SOURCE = Path(workspace_harness.__file__).read_text(encoding="utf-8")
 _OPENROUTER_PREFIX = "openrouter/"
 SHAPE_MESSAGE_KEY = "contract.shape.blackbox"
+
+R = TypeVar("R")
+
+# No setting holds a box limit yet. One call fans out to at most eight
+# final-run cases or a contract check's few samples, so 16 lets two such
+# calls run at once. SBX-23 moves the limit to a setting shared across pods.
+POOL_BOX_LIMIT = 16
+POOL_PROVIDER = "blackbox-sync"
+# A slot box opens nothing, but the spec check needs a finite lifetime.
+_SLOT_LIFETIME_SECONDS = 24 * 3600.0
+
+_pool_state: tuple[asyncio.AbstractEventLoop, SandboxPool, anyio.CapacityLimiter] | None = None
+
+
+class _SkippedError(Exception):
+    """Mark a call that the pool read before an earlier call failed, so it never ran."""
+
+
+class _KeptError(Exception):
+    """Mark a call whose own error is already kept for the caller."""
+
+
+class _SlotBox(SandboxEnvironment):
+    """Hold one pool permit while a sync scorer call runs; it opens no sandbox.
+
+    The scorers still open their own sandboxes through the sync runtime, so
+    this box only counts the call against the process box limit.
+    """
+
+    capabilities: ClassVar[EnvironmentCapabilities] = EnvironmentCapabilities(name=POOL_PROVIDER)
+
+    async def start(self) -> None:
+        """Do nothing: the scorer call opens its own sandbox."""
+
+    async def stop(self) -> None:
+        """Do nothing: the scorer call closes its own sandbox."""
+
+    async def exec(
+        self,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_sec: float | None = None,
+        on_output: OutputSink | None = None,
+        sudo: bool = False,
+    ) -> ExecResult:
+        """Refuse: a slot box runs no commands.
+
+        Args:
+            command: The shell command.
+            cwd: The working directory.
+            env: Extra environment variables.
+            timeout_sec: The time limit.
+            on_output: Receives output chunks.
+            sudo: Run the command as root.
+
+        Raises:
+            NotImplementedError: Always.
+        """
+        raise NotImplementedError("a slot box runs no commands")
+
+    async def upload_files(self, files: Mapping[str, str]) -> None:
+        """Refuse: a slot box holds no files.
+
+        Args:
+            files: Maps each sandbox path to its text content.
+
+        Raises:
+            NotImplementedError: Always.
+        """
+        raise NotImplementedError("a slot box holds no files")
+
+    async def download_file(self, path: str) -> str | None:
+        """Refuse: a slot box holds no files.
+
+        Args:
+            path: The sandbox path.
+
+        Raises:
+            NotImplementedError: Always.
+        """
+        raise NotImplementedError("a slot box holds no files")
+
+    @classmethod
+    async def stop_job_sandboxes(cls, job_id: str) -> int:
+        """Stop nothing: slot boxes leave nothing running.
+
+        Args:
+            job_id: The job tag value.
+
+        Returns:
+            Zero.
+        """
+        return 0
+
+
+def run_on_pool(phase: Phase, calls: Sequence[Callable[[], R]], workers: int) -> list[R]:
+    """Run sync calls on the process sandbox pool, one box per call, and keep their order.
+
+    Every call counts against the one process limit ``POOL_BOX_LIMIT``. Each
+    call runs in its own thread with a copy of the caller's context, so run
+    and usage scopes reach it. After the first failure no further call
+    starts, and the failure of the earliest call is raised once the calls
+    in flight end. A failure can be any exception, also a ``BaseException``
+    such as ``BudgetReached``; it is raised in the caller's thread, not on
+    the shared portal loop. A cancel waits for the calls in flight, then
+    releases every permit. Do not call this from inside a pooled call: the
+    nested call can wait forever for a permit at the box limit.
+
+    Args:
+        phase: ``Phase.RUN`` for final-run cases, ``Phase.SCORE`` for scorer cases.
+        calls: The calls, each with no arguments.
+        workers: The most calls in flight at once for this fan-out.
+
+    Returns:
+        Each call's result, in the calls' order.
+
+    Raises:
+        ValueError: The phase is neither run nor score.
+        BaseException: The error of the earliest call that failed, unchanged.
+    """
+    if phase not in (Phase.RUN, Phase.SCORE):
+        raise ValueError(f"pooled calls run in the run or score phase, not {phase}")
+    if not calls:
+        return []
+    items = [(contextvars.copy_context(), call) for call in calls]
+    results, error = sync_bridge.run(_run_on_pool, phase, items, max(1, min(workers, len(items))))
+    if error is not None:
+        raise error
+    return results
+
+
+def _pool() -> tuple[SandboxPool, anyio.CapacityLimiter]:
+    """Return this event loop's pool and thread limiter, and make them on first use.
+
+    The pool binds to one loop; a new portal loop after ``sync_bridge.shutdown``
+    gets a new pool. Only the portal thread calls this, so no lock is needed.
+
+    Returns:
+        The pool and the limiter of its worker threads.
+    """
+    global _pool_state
+    loop = asyncio.get_running_loop()
+    if _pool_state is None or _pool_state[0] is not loop:
+        # An explicit limiter: anyio's default of 40 threads is shared with
+        # other work on the loop and must not cap the pool below its limit.
+        _pool_state = (
+            loop,
+            SandboxPool({POOL_PROVIDER: POOL_BOX_LIMIT}),
+            anyio.CapacityLimiter(POOL_BOX_LIMIT),
+        )
+    return _pool_state[1], _pool_state[2]
+
+
+async def _run_on_pool(
+    phase: Phase, items: list[tuple[contextvars.Context, Callable[[], R]]], workers: int
+) -> tuple[list[R], BaseException | None]:
+    """Run each call in a slot box on the pool and gather the results by position.
+
+    A call's error is returned, not raised: a ``BaseException`` that leaves
+    a portal task crashes the shared portal loop and every call on it.
+
+    Args:
+        phase: The pool phase the calls run in.
+        items: Each call with the caller's context copy it runs in.
+        workers: The most calls in flight at once.
+
+    Returns:
+        Each call's result in the items' order and no error, or no results
+        and the error of the earliest call that failed.
+    """
+    pool, limiter = _pool()
+    results: dict[int, R] = {}
+    errors: dict[int, BaseException] = {}
+
+    async def candidates() -> AsyncIterator[int]:
+        """Yield each call's position until a call fails.
+
+        Yields:
+            The next call's position.
+        """
+        for index in range(len(items)):
+            if errors:
+                return
+            yield index
+
+    async def call(env: SandboxEnvironment, index: int) -> R:
+        """Run one call in a thread, unless an earlier call already failed.
+
+        Args:
+            env: The call's slot box.
+            index: The call's position.
+
+        Returns:
+            The call's result.
+
+        Raises:
+            _SkippedError: An earlier call failed, so this one does not start.
+            _KeptError: The call failed; its error is kept in ``errors``.
+        """
+        if errors:
+            raise _SkippedError
+        context, func = items[index]
+        try:
+            return await _in_thread(context, func, limiter)
+        except anyio.get_cancelled_exc_class():
+            raise
+        except BaseException as exc:
+            # The pool handles only Exception, so BudgetReached or
+            # KeyboardInterrupt would escape its TaskGroup and crash the portal.
+            errors.setdefault(index, exc)
+            raise _KeptError from exc
+
+    async def no_run(env: SandboxEnvironment, index: int) -> None:
+        """Do nothing: a scorer case does all its work in the score phase.
+
+        Args:
+            env: The call's slot box.
+            index: The call's position.
+        """
+
+    async def collect(outcome: BoxOutcome[int, R]) -> None:
+        """Keep a box's result, or its error unless the box was skipped.
+
+        Args:
+            outcome: The box outcome.
+        """
+        if outcome.error is None:
+            results[outcome.candidate] = outcome.result  # type: ignore[assignment]
+        elif not isinstance(outcome.error, (_SkippedError, _KeptError)):
+            errors.setdefault(outcome.candidate, outcome.error)  # type: ignore[arg-type]
+
+    work: BoxWork[int, Any] = (
+        BoxWork(create=_slot_box, run=no_run, score=call)
+        if phase is Phase.SCORE
+        else BoxWork(create=_slot_box, run=call)
+    )
+    await pool.run(candidates(), work, collect, workers=workers)
+    if errors:
+        return [], errors[min(errors)]
+    return [results[index] for index in range(len(items))], None
+
+
+def _slot_box(index: int) -> SandboxEnvironment:
+    """Make the slot box of one pooled call.
+
+    Args:
+        index: The call's position.
+
+    Returns:
+        A new slot box.
+    """
+    return _SlotBox(SandboxSpec(lifetime_seconds=_SLOT_LIFETIME_SECONDS))
+
+
+async def _in_thread(context: contextvars.Context, func: Callable[[], R], limiter: anyio.CapacityLimiter) -> R:
+    """Run a sync call in a worker thread and wait for it even through a cancel.
+
+    A thread cannot be stopped, so a cancel waits for the call to end before
+    it goes on. The box permit is then held until the thread ends, and the
+    pool never has more than its limit of calls running.
+
+    Args:
+        context: The caller's context copy to run the call in.
+        func: The call.
+        limiter: Bounds the worker threads.
+
+    Returns:
+        The call's result.
+
+    Raises:
+        asyncio.CancelledError: The pool was cancelled while the call ran.
+        BaseException: The call's own error.
+    """
+    thread = asyncio.ensure_future(anyio.to_thread.run_sync(_call_in_context, context, func, limiter=limiter))
+    cancel: asyncio.CancelledError | None = None
+    while not thread.done():
+        try:
+            # wait() does not cancel the thread task when this task is cancelled.
+            await asyncio.wait({thread})
+        except asyncio.CancelledError as exc:
+            cancel = exc
+    if cancel is not None:
+        if not thread.cancelled():
+            # Read the call's error so asyncio does not log it as never retrieved.
+            thread.exception()
+        raise cancel
+    result, error = thread.result()
+    if error is not None:
+        raise error
+    return result  # type: ignore[return-value]
+
+
+def _call_in_context(context: contextvars.Context, func: Callable[[], R]) -> tuple[R | None, BaseException | None]:
+    """Run a sync call in a context and return its error instead of raising it.
+
+    An asyncio task that raises ``KeyboardInterrupt`` or ``SystemExit`` stops
+    its event loop, so the thread task must never raise one.
+
+    Args:
+        context: The caller's context copy to run the call in.
+        func: The call.
+
+    Returns:
+        The call's result and no error, or no result and the call's error.
+    """
+    try:
+        return context.run(func), None
+    except BaseException as exc:
+        return None, exc
 
 
 @dataclass(frozen=True)
@@ -359,15 +678,14 @@ class WorkspaceScorer(SandboxPythonScorer):
                 ]
             self._open()
         terminal = check_terminal.current_recorder()
-        if len(cases) == 1:
-            return [self._sample(candidate, cases[0], 0, 1, terminal)]
-        with ThreadPoolExecutor(max_workers=len(cases), thread_name_prefix="workspace-check") as pool:
-            return list(
-                pool.map(
-                    lambda indexed: self._sample(candidate, indexed[1], indexed[0], len(cases), terminal),
-                    enumerate(cases),
-                )
-            )
+        return run_on_pool(
+            Phase.SCORE,
+            [
+                functools.partial(self._sample, candidate, case, index, len(cases), terminal)
+                for index, case in enumerate(cases)
+            ],
+            len(cases),
+        )
 
     def _sample(
         self,
@@ -378,9 +696,6 @@ class WorkspaceScorer(SandboxPythonScorer):
         terminal: check_terminal.CheckTerminalRecorder | None,
     ) -> WorkspaceProbe:
         """Score one of ``run_many``'s cases, reporting it to the Check's live transcript.
-
-        The recorder is handed over explicitly: a pool thread does not inherit
-        the caller's context.
 
         Args:
             candidate: The version to score.

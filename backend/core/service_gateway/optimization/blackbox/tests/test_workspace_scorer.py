@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import contextvars
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from core.billing.signals import BudgetReached
 from core.models.unified import UnifiedRunRequest
+from core.sandbox import sync_bridge
+from core.sandbox.timeouts import Phase
 from core.service_gateway.language_models import usage_by_model_from_history
 from core.service_gateway.optimization.unified.metric_model import resolve_metric_model
 
+from .. import workspace_scorer as workspace_scorer_mod
 from ..harness import GatewayConfig
 from ..protocol import METRIC_ERROR, ScorerAbortError
 from ..sandbox import LocalSubprocessRuntime, SandboxSession, SandboxSpec
@@ -23,6 +30,7 @@ RUN_CODE = (
     "    return dspy.Prediction(answer=program.signature.instructions + ':' + input['q'])\n"
 )
 SECRET = "SECRET_METRIC_MARKER_93"
+CALLER_TAG: contextvars.ContextVar[str] = contextvars.ContextVar("caller_tag", default="unset")
 METRIC_CODE = (
     f"# {SECRET}\n"
     "def score(input, output, expected=None):\n"
@@ -332,3 +340,136 @@ def test_build_rejects_unrouted_models_when_protected() -> None:
             protected=True,
             runtime=LocalSubprocessRuntime(),
         )
+
+
+def _free_permits() -> int:
+    """Return how many box permits the process pool has free now."""
+
+    async def read() -> int:
+        """Read the free permits on the portal loop."""
+        pool, _ = workspace_scorer_mod._pool()
+        return pool._provider_slots[workspace_scorer_mod.POOL_PROVIDER]._value
+
+    return sync_bridge.run(read)
+
+
+@pytest.mark.parametrize("phase", [Phase.RUN, Phase.SCORE])
+def test_run_on_pool_keeps_the_call_order_and_the_callers_context(phase: Phase) -> None:
+    """Calls that end in reverse order still come back in the calls' order, each in the caller's context."""
+    token = CALLER_TAG.set("caller")
+    try:
+
+        def call(n: int) -> tuple[int, str]:
+            """Sleep less for later calls, so they end first."""
+            time.sleep(0.01 * (4 - n))
+            return n, CALLER_TAG.get()
+
+        results = workspace_scorer_mod.run_on_pool(phase, [lambda n=n: call(n) for n in range(4)], 4)
+    finally:
+        CALLER_TAG.reset(token)
+
+    assert results == [(n, "caller") for n in range(4)]
+
+
+def test_run_on_pool_raises_the_earliest_failure_and_starts_no_more_calls() -> None:
+    """A failed call stops the fan-out; its error reaches the caller unchanged."""
+    started: list[int] = []
+    lock = threading.Lock()
+
+    def call(n: int) -> int:
+        """Fail the first call; the others take long enough for the stop to land."""
+        with lock:
+            started.append(n)
+        if n == 0:
+            raise ValueError("boom")
+        time.sleep(0.2)
+        return n
+
+    with pytest.raises(ValueError, match="boom"):
+        workspace_scorer_mod.run_on_pool(Phase.SCORE, [lambda n=n: call(n) for n in range(6)], 2)
+
+    assert set(started) <= {0, 1, 2}
+
+
+def test_run_on_pool_cancel_releases_every_permit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancel holds the permits until the calls in flight end, then frees them all for later work."""
+    monkeypatch.setattr(workspace_scorer_mod, "POOL_BOX_LIMIT", 2)
+    monkeypatch.setattr(workspace_scorer_mod, "_pool_state", None)
+    release = threading.Event()
+    started = threading.Semaphore(0)
+
+    def call() -> int:
+        """Block until the test lets the call end."""
+        started.release()
+        release.wait(timeout=10)
+        return 1
+
+    items = [(contextvars.copy_context(), call) for _ in range(3)]
+    future = sync_bridge.submit(workspace_scorer_mod._run_on_pool, Phase.RUN, items, 3)
+    assert started.acquire(timeout=5)
+    assert started.acquire(timeout=5)
+    future.cancel()
+    time.sleep(0.05)
+    assert _free_permits() == 0
+    release.set()
+    deadline = time.monotonic() + 5
+    while _free_permits() != 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert _free_permits() == 2
+    assert not started.acquire(timeout=0.1)
+    assert workspace_scorer_mod.run_on_pool(Phase.RUN, [lambda: 7], 1) == [7]
+
+
+async def _portal_echo() -> str:
+    """Return a fixed value on the portal loop."""
+    return "ok"
+
+
+@pytest.mark.parametrize("stop", [BudgetReached, KeyboardInterrupt])
+@pytest.mark.parametrize("phase", [Phase.RUN, Phase.SCORE])
+def test_a_base_exception_in_a_call_reaches_the_caller_and_keeps_the_portal(
+    phase: Phase, stop: type[BaseException]
+) -> None:
+    """BudgetReached or KeyboardInterrupt in a call reaches the caller; the portal thread lives on."""
+    sync_bridge.run(_portal_echo)
+    portal_thread = sync_bridge._thread
+    assert portal_thread is not None
+
+    def call() -> int:
+        """Stop like a budget check or an interrupt in the call."""
+        raise stop("stop")
+
+    with pytest.raises(stop):
+        workspace_scorer_mod.run_on_pool(phase, [call, lambda: 1], 2)
+
+    time.sleep(0.1)
+    assert portal_thread.is_alive()
+    assert sync_bridge._thread is portal_thread
+    assert sync_bridge.run(_portal_echo) == "ok"
+    assert workspace_scorer_mod.run_on_pool(phase, [lambda: 7], 1) == [7]
+
+
+def test_the_earliest_failure_wins_over_a_later_budget_stop() -> None:
+    """A ValueError at index 0 that ends last still wins over BudgetReached at index 1."""
+    later = threading.Event()
+
+    def first() -> int:
+        """Fail only after the second call stopped on budget."""
+        later.wait(timeout=5)
+        time.sleep(0.05)
+        raise ValueError("first")
+
+    def second() -> int:
+        """Stop on budget at once."""
+        later.set()
+        raise BudgetReached("budget")
+
+    with pytest.raises(ValueError, match="first"):
+        workspace_scorer_mod.run_on_pool(Phase.RUN, [first, second], 2)
+
+
+def test_run_on_pool_refuses_a_phase_other_than_run_or_score() -> None:
+    """Pooled calls run only in the run or score phase."""
+    with pytest.raises(ValueError, match="run or score"):
+        workspace_scorer_mod.run_on_pool(Phase.SETUP, [lambda: 1], 1)
