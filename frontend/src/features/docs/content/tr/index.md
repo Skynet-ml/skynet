@@ -9,7 +9,7 @@ Her çalıştırma bir depoyu optimize eder. İki şekilde başlayabilirsiniz:
 | Bir depo kullan        | Skynet, bağladığınız bir GitHub deposunda, izin verdiğiniz yollardaki dosyaları değiştirir.          |
 | Yeni depo oluştur  | Bir görev ve veri verirsiniz. Skynet hesabınızda yeni bir GitHub deposu oluşturur ve ilk çözümü yazar. |
 
-Depodaki kod herhangi bir şey olabilir: bir istem hattı, bir ajan altyapısı, bir betik veya bir kütüphane. Herhangi bir kütüphaneyi kullanabilir, örneğin DSPy.
+Depodaki kod herhangi bir şey olabilir: bir istem hattı, bir ajan altyapısı, bir betik veya bir kütüphane. Herhangi bir kütüphaneyi kullanabilir.
 
 Her çalıştırma aynı sözleşmeyi kullanır. Puanlayıcınız `score(repo_path, case)` fonksiyonunu tanımlar. Bir puan ve yazılı geri bildirim döndürür. Optimize edici, bir sonraki sürümü daha iyi yapmak için bu geri bildirimi okur.
 

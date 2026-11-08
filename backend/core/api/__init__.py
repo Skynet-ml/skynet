@@ -1,4 +1,4 @@
-"""HTTP API layer for DSPy optimization service.
+"""HTTP API layer for the Skynet optimization service.
 
 Kept intentionally slim: leaf modules under this package import from each
 other freely, and an eager re-export of ``create_app`` here would force

@@ -43,21 +43,6 @@ test("R2 wrapped network failures retry withdrawal", async () => {
   assert.equal(queue.getSnapshot().queued[0]?.uncertain, false);
 });
 
-test("R2 Send now waits for settlement and sends the true head", async () => {
-  const withdrawal = deferred<{ ids: string[]; delivered: string[] }>();
-  const { queue, sent } = setup({ post: async () => "early", withdraw: () => withdrawal.promise });
-  queue.steer("earlier");
-  queue.enqueue("later");
-  await flush();
-  queue.pause();
-  queue.setBusy(false);
-  queue.sendNow();
-  assert.deepEqual(sent, []);
-  withdrawal.resolve({ ids: ["early"], delivered: [] });
-  await flush();
-  assert.deepEqual(sent, ["earlier"]);
-});
-
 test("R2 a started send reserves the busy gap before the owner effect", async () => {
   const { queue, sent } = setup();
   queue.enqueue("one");
@@ -130,30 +115,16 @@ test("R2 an unknown post outcome never becomes a certain automatic send", async 
   assert.deepEqual(sent, []);
 });
 
-test("R2 over-length joined input does not stop the running turn", () => {
-  const { queue } = setup();
-  queue.setMaxLength(5);
-  queue.setBusy(true);
-  queue.enqueue("one"); queue.enqueue("two");
-  let stops = 0;
-  queue.stopAndSendNow(() => { stops++; });
-  assert.equal(stops, 0);
-  assert.equal(queue.getSnapshot().paused, false);
-});
-
-test("R2 an uncertain-only tray cannot stop a turn or promote an item", async () => {
+test("R2 an uncertain-only tray cannot promote an item", async () => {
   const { queue } = setup({ post: async () => "id", withdraw: async () => { throw new Error("unknown"); } });
   queue.steer("uncertain"); await flush(); queue.pause(); queue.setBusy(false); await flush();
   queue.openTurn(channel());
   const id = queue.getSnapshot().queued[0]!.id;
-  let stops = 0;
-  queue.stopAndSendNow(() => { stops++; });
-  assert.equal(stops, 0);
   queue.promote(id);
   assert.equal(queue.getSnapshot().queued[0]?.id, id);
 });
 
-test("R2 promoting an uncertain message cannot bypass explicit Send now", async () => {
+test("R2 promoting an uncertain message cannot send it", async () => {
   const { queue } = setup({ post: async () => "id", withdraw: async () => { throw new Error("unknown"); } });
   queue.steer("uncertain"); await flush(); queue.pause(); queue.setBusy(false); await flush();
   queue.openTurn(channel());
@@ -170,15 +141,6 @@ test("R2 the initial queue limit applies before any owner effect", async () => {
   await flush();
   assert.deepEqual(sent, []);
   assert.equal(queue.getSnapshot().maxLength, 3);
-});
-
-test("R2 header Send now cannot resend an uncertain head", async () => {
-  const { queue, sent } = setup({ post: async () => "id", withdraw: async () => { throw new Error("unknown"); } });
-  queue.steer("uncertain"); await flush(); queue.pause(); queue.setBusy(false); await flush();
-  queue.enqueue("certain");
-  queue.sendNow();
-  assert.deepEqual(sent, ["certain"]);
-  assert.equal(queue.getSnapshot().queued[0]?.uncertain, true);
 });
 
 test("R2 deleting during a repost and turn end does not resurrect text", async () => {

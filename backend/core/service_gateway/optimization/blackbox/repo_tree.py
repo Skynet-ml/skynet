@@ -28,7 +28,7 @@ _GIT_IDENTITY = ["-c", "user.name=app", "-c", "user.email=app@localhost", "-c", 
 # text, both in the sandbox and in the parent, and logs the reason as a
 # ``rule.block`` run event instead. ``rule_judge`` and its tests use these.
 ILLEGAL_ACTION_MESSAGE = (
-    "Illegal action. Read optimize.toml and the rule files it names. You cannot do this action. Do not repeat it,"
+    "Illegal action. Read the repository rules in your brief. You cannot do this action. Do not repeat it,"
     " because it wastes time."
 )
 RULE_BLOCK_EVENT = "rule.block"
@@ -276,7 +276,7 @@ def patch_violations(
             # Generic text: the proposer must not learn where the hidden attacks live (SKY-353).
             problems.append(f"'{path}' may not be changed.")
         elif inside(path, protected):
-            problems.append(f"'{path}' is protected by the repository's optimize.toml ([paths] protected).")
+            problems.append(f"'{path}' is protected by the repository rules ([paths] protected).")
         elif inside(path, readonly):
             problems.append(f"'{path}' is a submodule or Git LFS file, which are read-only.")
         elif not inside(path, editable):
@@ -321,6 +321,36 @@ def strip_archive(archive: Path, hidden_paths: Iterable[str], destination: Path)
                 continue
             target.addfile(member, source.extractfile(member) if member.isreg() else None)
     return destination
+
+
+def linked_hidden_paths(archive: Path, hidden_paths: Iterable[str]) -> list[str]:
+    """Find the hidden paths that a link could carry into the agent's tree.
+
+    The strip matches member names. A hidden path that is a symlink, or lies
+    below one, loses only the link, and its target with the scoring files
+    stays. A symlink inside a hidden folder lets the scorer read a file
+    outside it, possibly outside the tree. A hard link inside a hidden folder
+    to a file outside it leaves the same bytes under the visible name.
+
+    Args:
+        archive: Packed full tree.
+        hidden_paths: Repository-relative files and folders the agent must not see.
+
+    Returns:
+        Each hidden path that is, holds or lies below such a link, in order.
+    """
+    hidden = [_member_path(path) for path in hidden_paths]
+    symlinks: list[str] = []
+    linked: set[str] = set()
+    with tarfile.open(archive) as source:
+        for member in source:
+            name = _member_path(member.name)
+            if member.issym():
+                symlinks.append(name)
+                linked.update(path for path in hidden if inside(name, [path]))
+            elif member.islnk() and not inside(_member_path(member.linkname), hidden):
+                linked.update(path for path in hidden if inside(name, [path]))
+    return [path for path in hidden if path in linked or inside(path, symlinks)]
 
 
 def drop_paths(patch: str, hidden_paths: Iterable[str]) -> str:

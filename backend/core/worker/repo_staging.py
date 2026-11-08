@@ -50,14 +50,17 @@ from ..models.hardening import HardeningJob, HardeningJobModel
 from ..service_gateway.optimization.blackbox import runner
 from ..service_gateway.optimization.blackbox.protocol import is_metric_error
 from ..service_gateway.optimization.blackbox.repo_constraints import (
+    CONSTRAINTS_FILE,
     ConstraintsError,
     MetricSpec,
+    RepoConstraints,
     RoleEnvironment,
     ServiceSpec,
     TargetStage,
     effective_environment,
     instructions_brief,
     read_constraints,
+    scorer_only_paths,
 )
 from ..service_gateway.optimization.blackbox.repo_scorer import RepoScorer
 from ..service_gateway.optimization.blackbox.repo_services import box_mcp_config, plan_roles
@@ -66,6 +69,7 @@ from ..service_gateway.optimization.blackbox.repo_tree import (
     EXPLOITS_DIR,
     REPO_SNAPSHOT_KEY,
     drop_paths,
+    linked_hidden_paths,
     patch_paths,
     patch_violations,
     strip_archive,
@@ -181,6 +185,26 @@ def saved_index_url(engine: Any, username: str) -> str:
         return package_registry_for(session, username).index_url
 
 
+def hidden_repo_paths(constraints: RepoConstraints | None) -> tuple[str, ...]:
+    """Return every repository path that only the parent's scorer may read (E61, E62).
+
+    The optimization agent's tree, the candidate's box, every tool and every
+    published version leave these out. A path that a visible role also names,
+    such as one ``.mcp.json`` for ``[run]`` and ``[metric]``, stays visible,
+    because hiding it would break that role.
+
+    Args:
+        constraints: The repository's validated constraints, or ``None`` without a file.
+
+    Returns:
+        The paths from ``scorer_only_paths``, or only the default exploit
+        folder when the repository has no constraints file.
+    """
+    if constraints is None:
+        return (MetricSpec().exploits,)
+    return scorer_only_paths(constraints)
+
+
 def stage_repository(
     payload: dict[str, Any],
     *,
@@ -205,8 +229,9 @@ def stage_repository(
         ConstraintsError: When the repository's ``optimize.toml`` is invalid,
             asks for more than the run approved, or a resumed run's rules
             changed since they were first recorded, or when the request
-            uploads cases and the repository defines its own in ``[data] cases``.
-        RepoGateError: When the agent's tree still shows a metric file or the cases file.
+            uploads cases and the repository defines its own in ``[data] cases``,
+            or when a hidden path is, holds or lies inside a link.
+        RepoGateError: When the agent's tree still shows a hidden path from ``hidden_repo_paths``.
     """
     result = copy.deepcopy(payload)
     repo = result["target"]["repo"]
@@ -251,15 +276,20 @@ def stage_repository(
         # Two sources would leave it unclear which cases the run scores on (E58).
         if cases_file is not None and result.get("cases"):
             raise ConstraintsError(UPLOADED_CASES_REFUSED)
-        # The cases file holds every case's expected answer, so the agent and the candidate never see it (E61).
-        hidden = (*metric.files, metric.exploits, *((cases_file,) if cases_file is not None else ()))
+        hidden = hidden_repo_paths(environment.constraints)
+        if linked := linked_hidden_paths(snapshot.archive, hidden):
+            raise ConstraintsError(
+                f"{CONSTRAINTS_FILE}: the hidden scoring path '{linked[0]}' is, holds or lies inside a link."
+                " Make the [metric] and [data] cases paths real files and folders, with no symlinks or hard links."
+            )
         agent_archive = strip_archive(snapshot.archive, hidden, workdir / "agent-tree.tgz")
+        # Nothing checks that [metric] reference names a file, so a missing one is not a leak.
         leaks = check_hidden(
             snapshot.archive,
             agent_archive,
             hidden,
             place=sandbox_place(settings.local_mode),
-            optional_paths=(metric.exploits,),
+            optional_paths=tuple(path for path in (metric.exploits, metric.reference) if path is not None),
         )
         if leaks:
             raise RepoGateError(leaks)
@@ -281,7 +311,7 @@ def stage_repository(
     result["target"]["setup_command"] = environment.setup_command
     if environment.constraints is not None:
         result["background"] = "\n\n".join(
-            part for part in ((result.get("background") or "").strip(), instructions_brief(environment)) if part
+            part for part in ((result.get("background") or "").strip(), instructions_brief(environment, hidden)) if part
         )
     repo["secrets"] = []
     if cases_file is not None:
@@ -769,7 +799,7 @@ def _scored_candidate(candidate: Any, hidden_paths: tuple[str, ...]) -> Any:
 
     Args:
         candidate: A patch, a mapping of patches, or anything else.
-        hidden_paths: Metric files and the exploit folder.
+        hidden_paths: The hidden list from ``hidden_repo_paths``.
 
     Returns:
         The candidate with every patch reduced to the scored change.
@@ -785,11 +815,12 @@ def drop_hidden_edits(result: dict[str, Any], hidden_paths: tuple[str, ...]) -> 
     """Replace every version a finished result records with the change the scorer scored.
 
     Serving, download and publishing all read these fields, so a version's
-    edits to a metric file or the exploit folder never leave the run (SKY-353).
+    edit to a hidden path, ``optimize.toml`` included, never leaves the run
+    (SKY-353, E62).
 
     Args:
         result: Finished black-box result, updated in place.
-        hidden_paths: Metric files and the exploit folder.
+        hidden_paths: The hidden list from ``hidden_repo_paths``.
     """
     if not hidden_paths:
         return

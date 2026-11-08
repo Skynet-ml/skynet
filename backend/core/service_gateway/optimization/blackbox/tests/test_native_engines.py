@@ -1007,3 +1007,19 @@ def test_a_budget_stop_is_not_a_cli_failure() -> None:
         native_engines.ProposerOutcome("s", 0.0, False, "done", budget_exhausted=False, killed=False, returncode=0),
     ):
         outcome.raise_if_failed("round1")
+
+
+def test_proposer_refusals_reach_the_run_log_as_tool_and_kind_only(caplog: pytest.LogCaptureFixture) -> None:
+    """Log each hidden-path refusal of a session as a warning run event, with no path."""
+    caplog.set_level(logging.INFO, logger=native_engines.run_log.name)
+
+    native_engines.log_refusals([{"tool": "Read", "kind": "config"}, {"tool": "bash", "kind": "scoring"}], session="s1")
+
+    events = [getattr(record, native_engines.RUN_LOG_ATTR, None) for record in caplog.records]
+    refusals = [event for event in events if event and event["event"] == "proposer.refusal"]
+    assert [event["fields"] for event in refusals] == [
+        {"tool": "Read", "kind": "config", "session": "s1"},
+        {"tool": "bash", "kind": "scoring", "session": "s1"},
+    ]
+    assert all(event["source"] == "proposer" for event in refusals)
+    assert {record.levelno for record in caplog.records} == {logging.WARNING}

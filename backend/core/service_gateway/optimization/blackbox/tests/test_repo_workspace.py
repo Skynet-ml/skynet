@@ -17,6 +17,7 @@ from core.billing.runtime import UsagePendingError
 from core.exceptions import ServiceError
 
 from .. import repo_workspace
+from ..repo_constraints import parse_constraints, scorer_only_paths
 from ..repo_tree import unpack_tree, version_patch
 from ..repo_workspace import (
     _PROBE_OK,
@@ -382,9 +383,7 @@ def test_protected_paths_win_over_editable_ones_before_the_box_opens(tmp_path: P
     try:
         rigged = space.checkout(_patch(tmp_path / "rigged", archive, {"src/judge.py": "ok = 'always'\n"}))
         assert rigged.path is None
-        assert rigged.problems == (
-            "'src/judge.py' is protected by the repository's optimize.toml ([paths] protected).",
-        )
+        assert rigged.problems == ("'src/judge.py' is protected by the repository rules ([paths] protected).",)
         assert runtime.boxes == []
         rules = space.checkout(_patch(tmp_path / "rules", archive, {"optimize.toml": "[paths]\neditable = ['.']\n"}))
         assert rules.path is None
@@ -430,9 +429,9 @@ def test_a_source_only_version_whose_code_rewrites_the_labels_is_caught(tmp_path
         space.stamp_before_run()
         space.session().run(f"cd {WORK_DIR} && printf 'a,0\\n' > eval/labels.csv && touch eval/extra.csv")
         assert space.protected_changes() == (
-            "'eval/extra.csv' is protected by the repository's optimize.toml ([paths] protected),"
+            "'eval/extra.csv' is protected by the repository rules ([paths] protected),"
             " and the version's code changed it while it ran.",
-            "'eval/labels.csv' is protected by the repository's optimize.toml ([paths] protected),"
+            "'eval/labels.csv' is protected by the repository rules ([paths] protected),"
             " and the version's code changed it while it ran.",
         )
 
@@ -563,6 +562,70 @@ def test_a_workspace_without_protected_paths_skips_the_check(
 
     assert space.protected_changes() == ()
     assert all("def digest(path)" not in command for command, _, _ in runtime.boxes[0].commands)
+
+
+_SCORING_TOML = (
+    '[paths]\neditable = ["src"]\n\n'
+    '[metric]\nfiles = ["eval/scorer.py"]\nreference = "eval/reference.json"\n'
+    'illegal = "docs/metric_rules.md"\nmcp = "eval/.mcp.json"\n\n'
+    '[data]\ncases = "data/cases.jsonl"\n'
+)
+_SCORING_SIDE = {
+    "optimize.toml": _SCORING_TOML,
+    "eval/scorer.py": "def score(): return 0.1\n",
+    "eval/reference.json": "{}\n",
+    "docs/metric_rules.md": "- No cheating.\n",
+    "eval/.mcp.json": "{}\n",
+    "data/cases.jsonl": '{"input": 1, "expected": 2}\n',
+    ".optimize/exploits/cheat.py": "cheat\n",
+}
+
+
+@pytest.mark.parametrize("cutoff", ["ok", "leaky"])
+def test_the_candidate_runs_offline_and_without_the_scoring_side_files(tmp_path: Path, cutoff: str) -> None:
+    """Setup gets the network, then the box goes offline and the hidden files go out before version code runs (E61)."""
+    hidden = scorer_only_paths(parse_constraints(_SCORING_TOML.encode()))
+    assert hidden == (
+        "optimize.toml",
+        "eval/scorer.py",
+        ".optimize/exploits",
+        "eval/reference.json",
+        "data/cases.jsonl",
+        "docs/metric_rules.md",
+        "eval/.mcp.json",
+    )
+    archive = _archive(tmp_path, {"src/app.py": "x = 1\n", **_SCORING_SIDE})
+    runtime = _Runtime(cutoff)
+    space = RepoWorkspace(
+        runtime=runtime,
+        spec=_ONLINE,
+        archive=archive,
+        editable_paths=["src"],
+        readonly_paths=[],
+        setup_command="true",
+        secrets={},
+        hidden_paths=hidden,
+    )
+    try:
+        version = _patch(tmp_path / "one", archive, {"src/app.py": "x = 2\n"})
+        if cutoff == "leaky":
+            with pytest.raises(NetworkCutoffError):
+                space.checkout(version)
+            assert all("version.patch" not in command for command, _, _ in runtime.boxes[0].commands)
+            return
+        space.checkout(version)
+        box = space.session()
+        candidate = box.run(f"cd {WORK_DIR} && cat {' '.join(_SCORING_SIDE)} 2>/dev/null; true")
+
+        commands = runtime.boxes[0].commands
+        probe = next(index for index, entry in enumerate(commands) if "/dev/tcp/" in entry[0])
+        assert not any(online for _, online, _ in commands[probe:])
+        assert all("version.patch" not in command for command, _, _ in commands[:probe])
+        assert candidate.stdout == ""
+        assert all(box.read_file(f"{WORK_DIR}/{name}") is None for name in _SCORING_SIDE)
+        assert box.read_file(f"{WORK_DIR}/src/app.py") == "x = 2\n"
+    finally:
+        space.close()
 
 
 def test_a_version_that_edits_a_metric_file_is_laid_out_with_the_base_metric(tmp_path: Path) -> None:

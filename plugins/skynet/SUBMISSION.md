@@ -59,14 +59,14 @@ directory.
 | Logo | `assets/logo.png`, 512 x 512 PNG, transparent background. Dark: `assets/logo-dark.png` |
 | Brand colors | `#B4521F` (light), `#E0935A` (dark) |
 | Category | OpenAI: `Developer Tools`. Claude: pick "Developer tools" or the nearest category in the portal list |
-| Short description (30 characters or fewer) | Optimize DSPy programs |
-| One-liner (200 characters or fewer) | Optimize DSPy programs against your own metric. Check a run spec before it runs, start it with a spending limit you approve, and get the best version with its score. |
+| Short description (30 characters or fewer) | Optimize your code |
+| One-liner (200 characters or fewer) | Optimize your code against your own metric. Check a run spec before it runs, start it with a spending limit you approve, and get the best version with its score. |
 
 Long description (OpenAI 4000 characters or fewer, Claude 2000 or fewer):
 
-> Skynet improves a DSPy program against a metric that you write. You give
-> the program in run.py, a few test cases and a score(input, output,
-> expected) function. Skynet runs DSPy optimizers such as GEPA in a sandbox,
+> Skynet improves your code against a metric that you write. You give
+> the code in run.py, a few test cases and a score(input, output,
+> expected) function. Skynet runs optimization engines such as GEPA in a sandbox,
 > scores each new version, and returns the best version with its score next
 > to the starting score. Repository runs start from the Skynet app.
 >
@@ -79,7 +79,7 @@ Long description (OpenAI 4000 characters or fewer, Claude 2000 or fewer):
 
 Example prompts:
 
-- Optimize this DSPy program with Skynet against my test cases.
+- Optimize this code with Skynet against my test cases.
 - Show my recent Skynet runs.
 - What is the status of my last Skynet run?
 
@@ -237,9 +237,9 @@ the Claude use cases too.
 Positive:
 
 1. "Check whether this Skynet run spec is valid and tell me what limit to
-   set: a DSPy program that classifies support tickets, with 6 labeled
+   set: code that classifies support tickets, with 6 labeled
    cases and an exact-match metric." Expect `check_run` only. No run starts.
-2. "Optimize the ticket classifier DSPy program with Skynet. I agree to a
+2. "Optimize the ticket classifier code with Skynet. I agree to a
    limit of 5 dollars." Expect `check_run`, then `start_run` with `max_cost_cents`
    500.
 3. "How is my last Skynet run doing? Show the result if it is done." Expect

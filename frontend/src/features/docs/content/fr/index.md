@@ -9,7 +9,7 @@ Chaque exécution optimise un dépôt. Vous pouvez commencer de deux façons :
 | Utiliser un dépôt       | Skynet modifie les fichiers des chemins que vous autorisez, dans un dépôt GitHub que vous connectez.      |
 | Créer un nouveau dépôt  | Vous fournissez une tâche et des données. Skynet crée un nouveau dépôt GitHub dans votre compte et rédige une première solution. |
 
-Le code du dépôt peut être de toute nature : un pipeline de prompts, un harnais d'agent, un script ou une bibliothèque. Il peut utiliser n'importe quelle bibliothèque, par exemple DSPy.
+Le code du dépôt peut être de toute nature : un pipeline de prompts, un harnais d'agent, un script ou une bibliothèque. Il peut utiliser n'importe quelle bibliothèque.
 
 Chaque exécution suit le même contrat. Votre évaluateur définit `score(repo_path, case)`. Il renvoie un score et un retour écrit. L'optimiseur lit ce retour pour améliorer la version suivante.
 

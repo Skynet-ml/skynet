@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from .. import repo_tree
+from .. import harness_bridge, repo_tree
 from ..shinka_bundle import (
     BUNDLE_HEAD,
     MAX_FILE_BYTES,
@@ -375,3 +375,74 @@ def test_crossover_prompts_compare_the_two_versions_file_by_file(bundle: RepoBun
     assert "### src/new.py in the current version\n## src/new.py\n```\n(absent)" in user
     assert "# Earlier versions" in user
     assert "+    return 2" in user
+
+
+# The worker's hidden list lands with SKY-386 and SKY-387; these tests use a fixed one.
+_HIDDEN = ["optimize.toml", "src/metric", ".optimize/exploits", "src/reference.json", "src/cases.jsonl"]
+_HIDDEN_FILES = [
+    "optimize.toml",
+    "src/metric/score.py",
+    ".optimize/exploits/log.md",
+    "src/reference.json",
+    "src/cases.jsonl",
+]
+
+
+def _hidden_bundle(tmp_path: Path) -> tuple[RepoBundle, list[dict[str, str]]]:
+    """Unpack the test repository plus scoring files, with a recorder for hidden-path refusals.
+
+    Args:
+        tmp_path: Scratch folder.
+
+    Returns:
+        The bundle rules and the list each refusal goes to.
+    """
+    refusals: list[dict[str, str]] = []
+    files = {**_FILES, **dict.fromkeys(_HIDDEN_FILES, "secret = 1\n")}
+    repo = {
+        "chunks": _chunks(tmp_path, files),
+        "editable_paths": ["src", ".optimize", "optimize.toml"],
+        "hidden_paths": _HIDDEN,
+    }
+    return RepoBundle.prepare(repo, "", tmp_path / "checkout", on_refusal=refusals.append), refusals
+
+
+@pytest.mark.parametrize("path", _HIDDEN_FILES)
+def test_a_hidden_path_is_refused_on_open_and_on_edit_and_the_refusal_is_reported(tmp_path: Path, path: str) -> None:
+    """Refuse an open or an edit of each hidden path by exact name, show no content, and report the tool and kind."""
+    bundle, refusals = _hidden_bundle(tmp_path)
+    kind = "config" if path == "optimize.toml" else "scoring"
+
+    _, _, message = bundle.apply({}, f"<OPEN>{path}</OPEN>")
+    assert harness_bridge.GUARD_REFUSAL in str(message)
+    assert "secret" not in str(message)
+
+    files, applied, error = bundle.apply({}, f'<FILE path="{path}">x</FILE>')
+    assert (files, applied, error) == (None, 0, harness_bridge.GUARD_REFUSAL)
+    assert refusals == [{"tool": "open", "kind": kind}, {"tool": "edit", "kind": kind}]
+
+
+@pytest.mark.parametrize("path", ["./optimize.toml", "src/../optimize.toml", ".//optimize.toml", "/optimize.toml"])
+def test_another_form_of_a_hidden_path_is_refused_and_reported(tmp_path: Path, path: str) -> None:
+    """Refuse and report an open or an edit of a hidden path written in a form that normalizes to it."""
+    bundle, refusals = _hidden_bundle(tmp_path)
+
+    _, _, message = bundle.apply({}, f"<OPEN>{path}</OPEN>")
+    assert harness_bridge.GUARD_REFUSAL in str(message)
+    assert "Not available" not in str(message)
+
+    files, applied, error = bundle.apply({}, f'<FILE path="{path}">x</FILE>')
+    assert (files, applied, error) == (None, 0, harness_bridge.GUARD_REFUSAL)
+    assert refusals == [{"tool": "open", "kind": "config"}, {"tool": "edit", "kind": "config"}]
+
+
+def test_hidden_paths_stay_out_of_the_file_list_and_other_files_still_open(tmp_path: Path) -> None:
+    """Leave hidden paths out of the editable files the prompt lists, and keep other files open."""
+    bundle, refusals = _hidden_bundle(tmp_path)
+
+    listed = bundle.paths()
+    assert "src/app.py" in listed
+    assert not set(_HIDDEN_FILES) & set(listed)
+    _, _, message = bundle.apply({}, "<OPEN>src/util.py</OPEN>")
+    assert "SCALE = 2" in str(message)
+    assert refusals == []

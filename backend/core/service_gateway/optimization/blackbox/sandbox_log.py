@@ -399,6 +399,7 @@ def logged_command(run: Callable[..., Any]) -> Callable[..., Any]:
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
         on_output: Callable[[str, str], None] | None = None,
+        sudo: bool = False,
     ) -> Any:
         """Run the command with its stderr logged, keeping the method's own contract."""
         session_env = getattr(self, "_env", None)
@@ -413,7 +414,7 @@ def logged_command(run: Callable[..., Any]) -> Callable[..., Any]:
             on_output = _mirrored(terminal, command_id, on_output)
         sink = record.tee(on_output)
         try:
-            result = run(self, command, env=env, timeout_seconds=timeout_seconds, on_output=sink)
+            result = run(self, command, env=env, timeout_seconds=timeout_seconds, on_output=sink, sudo=sudo)
         except BaseException as error:
             record.failed(error)
             if terminal is not None and command_id is not None:

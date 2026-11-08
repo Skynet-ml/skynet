@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import json
+import re
 import subprocess
 import tarfile
 import threading
@@ -52,6 +53,7 @@ from core.service_gateway.optimization.blackbox.sandbox import CommandResult, Lo
 from core.service_gateway.optimization.blackbox.service import legacy_case_splits
 from core.storage.models import Base, PackageRegistryPreferenceModel
 from core.worker import repo_staging
+from core.worker.repo_gate import check_hidden
 
 
 def _payload(commit: str | None) -> dict[str, Any]:
@@ -74,12 +76,14 @@ def _payload(commit: str | None) -> dict[str, Any]:
     return {"target": {"kind": "repo", "repo": repo}}
 
 
-def _tree(workdir: Path, files: dict[str, str]) -> Path:
+def _tree(workdir: Path, files: dict[str, str], links: dict[str, tuple[bytes, str]] | None = None) -> Path:
     """Pack files the way the parent ships a fetched tree.
 
     Args:
         workdir: Folder the archive goes in.
         files: Root-relative path to text.
+        links: Root-relative link path to its tar type (``SYMTYPE`` or
+            ``LNKTYPE``) and target, packed after the files.
 
     Returns:
         The archive.
@@ -91,11 +95,18 @@ def _tree(workdir: Path, files: dict[str, str]) -> Path:
             info = tarfile.TarInfo(name)
             info.size = len(data)
             packed.addfile(info, io.BytesIO(data))
+        for name, (kind, target) in (links or {}).items():
+            info = tarfile.TarInfo(name)
+            info.type, info.linkname = kind, target
+            packed.addfile(info)
     return archive
 
 
 def _stage_with(
-    files: dict[str, str], monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any] | None = None
+    files: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, Any] | None = None,
+    links: dict[str, tuple[bytes, str]] | None = None,
 ) -> tuple[dict[str, Any], repo_staging.StagedRepository]:
     """Stage the fixture payload over a tree holding ``files``.
 
@@ -103,6 +114,7 @@ def _stage_with(
         files: Root-relative path to text in the fetched tree.
         monkeypatch: Pytest monkeypatch.
         payload: Payload to stage; the fixture payload pinned to ``c * 40`` when omitted.
+        links: Links in the fetched tree, as ``_tree`` takes them.
 
     Returns:
         The staged payload and repository.
@@ -114,7 +126,7 @@ def _stage_with(
         repo_staging,
         "fetch_snapshot",
         lambda repository, pinned, token, workdir: RepoSnapshot(
-            commit=pinned, archive=_tree(workdir, files), readonly_paths=(), size_bytes=1
+            commit=pinned, archive=_tree(workdir, files, links), readonly_paths=(), size_bytes=1
         ),
     )
     return repo_staging.stage_repository(payload or _payload("c" * 40), username="alice", binding_id="b", engine=None)
@@ -1356,7 +1368,7 @@ def test_publishing_refuses_a_version_that_changes_a_protected_path(
     outcome = _publish(_result(0.5, 0.8), staged)
 
     assert outcome is not None
-    assert "protected by the repository's optimize.toml" in outcome["error"]
+    assert "protected by the repository rules" in outcome["error"]
 
 
 def test_publishing_failure_is_recorded_not_raised(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1562,9 +1574,9 @@ def test_the_agent_tree_has_no_metric_file_and_no_exploit_folder(monkeypatch: py
     try:
         agent = Path(staged_payload["_repo_snapshot"]["archive"])
         assert agent != staged.snapshot.archive
-        assert _names(agent) == {"optimize.toml", "src/app.py", "eval/data.csv"}
-        assert {"eval/scorer.py", ".optimize/exploits/cheat.py"} <= _names(staged.snapshot.archive)
-        assert staged.hidden_paths == ("eval/scorer.py", ".optimize/exploits")
+        assert _names(agent) == {"src/app.py", "eval/data.csv"}
+        assert {"optimize.toml", "eval/scorer.py", ".optimize/exploits/cheat.py"} <= _names(staged.snapshot.archive)
+        assert staged.hidden_paths == ("optimize.toml", "eval/scorer.py", ".optimize/exploits")
     finally:
         staged.cleanup()
 
@@ -1997,9 +2009,271 @@ def test_the_cases_file_is_hidden_from_the_agent_and_the_candidate(monkeypatch: 
         assert "data/cases.jsonl" not in _names(Path(staged_payload["_repo_snapshot"]["archive"]))
         assert "data/cases.jsonl" in _names(staged.snapshot.archive)
         # hidden_paths is also the list the candidate box drops (SKY-375), so the candidate never sees it.
-        assert staged.hidden_paths == ("eval/scorer.py", ".optimize/exploits", "data/cases.jsonl")
+        assert staged.hidden_paths == ("optimize.toml", "eval/scorer.py", ".optimize/exploits", "data/cases.jsonl")
     finally:
         staged.cleanup()
+
+
+_EVERY_HIDDEN_KEY = {
+    "optimize.toml": """instructions = "docs/intent.md"
+
+[paths]
+editable = ["src"]
+protected = ["src/judge.py"]
+
+[proposer]
+illegal = "docs/rules.md"
+
+[run]
+entry = "src/app.py:main"
+timeout = 30
+illegal = "docs/run-rules.md"
+
+[metric]
+files = ["eval/scorer.py"]
+exploits = "eval/attacks"
+reference = "eval/reference.json"
+illegal = "eval/metric-rules.md"
+mcp = "eval/mcp.json"
+
+[data]
+cases = "data/cases.jsonl"
+""",
+    "docs/intent.md": "Pick the place the sender means.\n",
+    "docs/rules.md": "- Do not hardcode answers.\n",
+    "docs/run-rules.md": "- Do not open the network.\n",
+    "src/app.py": "def main(case):\n    return case\n",
+    "src/judge.py": "x = 1\n",
+    "eval/scorer.py": "def score(): ...\n",
+    "eval/attacks/cheat.py": "cheat\n",
+    "eval/reference.json": "{}\n",
+    "eval/metric-rules.md": "- Penalize answers with no postcode.\n",
+    "eval/mcp.json": '{"mcpServers": {}}\n',
+    "data/cases.jsonl": _CASES_JSONL,
+}
+_EVERY_HIDDEN_PATH = (
+    "optimize.toml",
+    "eval/scorer.py",
+    "eval/attacks",
+    "eval/reference.json",
+    "data/cases.jsonl",
+    "eval/metric-rules.md",
+    "eval/mcp.json",
+)
+
+
+def test_every_scoring_side_path_is_hidden_and_the_rule_files_stay_visible(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One list hides every scoring-side key from the agent's tree and the candidate box (E62)."""
+    staged_payload, staged = _stage_with(_EVERY_HIDDEN_KEY, monkeypatch)
+    try:
+        agent = _names(Path(staged_payload["_repo_snapshot"]["archive"]))
+        assert staged.hidden_paths == _EVERY_HIDDEN_PATH
+        assert agent == {"docs/intent.md", "docs/rules.md", "docs/run-rules.md", "src/app.py", "src/judge.py"}
+    finally:
+        staged.cleanup()
+
+
+def test_the_brief_carries_the_visible_rules_and_names_no_hidden_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent reads its rules in the brief, never in optimize.toml, and learns no hidden name (E62)."""
+    staged_payload, staged = _stage_with(_EVERY_HIDDEN_KEY, monkeypatch)
+    staged.cleanup()
+    brief = staged_payload["background"]
+
+    for path in (*_EVERY_HIDDEN_PATH, "eval/", "metric-rules", "mcp.json"):
+        assert path not in brief
+    assert "Editable, change only these paths: `src`." in brief
+    assert (
+        "Protected, every change to them is rejected before scoring: "
+        "`docs/intent.md`, `docs/rules.md`, `docs/run-rules.md`, `src/judge.py`."
+    ) in brief
+    assert "`src/app.py:main`, with a limit of 30 seconds" in brief
+    assert "- Rule 1: Do not hardcode answers." in brief
+    assert "- Do not open the network." in brief
+    assert "Pick the place the sender means." in brief
+
+
+def test_a_hidden_path_shared_with_a_visible_role_stays_visible(tmp_path: Path) -> None:
+    """One .mcp.json for [run] and [metric] is the candidate's file too, so hiding it would break the run."""
+    constraints = repo_staging.read_constraints(
+        _tree(
+            tmp_path,
+            {
+                "optimize.toml": '[paths]\neditable = ["src"]\n\n[run]\nentry = "src/app.py:main"\nmcp = ".mcp.json"'
+                '\n\n[metric]\nmcp = ".mcp.json"\n',
+                ".mcp.json": '{"mcpServers": {}}\n',
+                "src/app.py": "def main(case):\n    return case\n",
+            },
+        )
+    )
+
+    assert repo_staging.hidden_repo_paths(constraints) == ("optimize.toml", ".optimize/exploits")
+
+
+def test_a_proposer_mcp_file_shared_with_the_metric_stays_visible(tmp_path: Path) -> None:
+    """The agent's own .mcp.json stays in its tree, also when [metric] names the same file."""
+    constraints = repo_staging.read_constraints(
+        _tree(
+            tmp_path,
+            {
+                "optimize.toml": '[paths]\neditable = ["src"]\n\n[proposer]\nmcp = ".mcp.json"'
+                '\n\n[metric]\nmcp = ".mcp.json"\n',
+                ".mcp.json": '{"mcpServers": {}}\n',
+                "src/app.py": "def main(case):\n    return case\n",
+            },
+        )
+    )
+
+    assert repo_staging.hidden_repo_paths(constraints) == ("optimize.toml", ".optimize/exploits")
+
+
+@pytest.mark.parametrize(
+    ("toml", "inside"),
+    [
+        (
+            '[paths]\neditable = ["src"]\nprotected = ["eval/labels.json"]\n\n[metric]\nfiles = ["eval"]\n',
+            "eval/labels.json",
+        ),
+        ('[paths]\neditable = ["src"]\nprotected = [".optimize/exploits/cheat.py"]\n', ".optimize/exploits/cheat.py"),
+    ],
+    ids=["metric-folder", "exploits-folder"],
+)
+def test_the_brief_names_no_protected_path_inside_a_hidden_folder(
+    monkeypatch: pytest.MonkeyPatch, toml: str, inside: str
+) -> None:
+    """A protected file under a hidden folder is hidden too, so the brief must not name it (E62)."""
+    files = {
+        "optimize.toml": toml,
+        "src/app.py": "def main(case):\n    return case\n",
+        "eval/labels.json": "{}\n",
+        ".optimize/exploits/cheat.py": "cheat\n",
+    }
+    staged_payload, staged = _stage_with(files, monkeypatch)
+    staged.cleanup()
+
+    assert inside not in staged_payload["background"]
+    assert "Protected, every change" not in staged_payload["background"]
+
+
+@pytest.mark.parametrize(
+    ("toml", "message"),
+    [
+        (
+            '[paths]\neditable = ["src", "eval"]\n\n[metric]\nfiles = ["eval"]\n',
+            r"'eval' is editable, but only the scorer reads it",
+        ),
+        (
+            '[proposer]\nillegal = "eval/rules.md"\n\n[metric]\nfiles = ["eval"]\n',
+            r"\[proposer\] illegal 'eval/rules\.md' is inside the hidden",
+        ),
+        ('[run]\nentry = "eval/run.py:main"\n\n[metric]\nfiles = ["eval"]\n', r"\[run\] entry names 'eval/run\.py'"),
+    ],
+    ids=["editable", "rule-file", "run-entry"],
+)
+def test_staging_refuses_a_brief_path_inside_the_hidden_scoring_files(
+    monkeypatch: pytest.MonkeyPatch, toml: str, message: str
+) -> None:
+    """The run stops before it starts when the brief would name a hidden path or a rule file would be stripped."""
+    files = {
+        "optimize.toml": toml,
+        "src/app.py": "def main(case):\n    return case\n",
+        "eval/rules.md": "- No cheating.\n",
+        "eval/run.py": "def main(case):\n    return case\n",
+    }
+    payload = _payload("c" * 40)
+    payload["target"]["repo"]["editable_paths"] = ["."]
+
+    with pytest.raises(ConstraintsError, match=message):
+        _stage_with(files, monkeypatch, payload)
+
+
+@pytest.mark.parametrize(
+    ("toml", "links", "linked"),
+    [
+        pytest.param('[metric]\nfiles = ["scoring"]\n', {"scoring": (tarfile.SYMTYPE, "real")}, "scoring", id="inside"),
+        pytest.param(
+            '[metric]\nfiles = ["scoring"]\n', {"scoring": (tarfile.SYMTYPE, "/etc")}, "scoring", id="outside-absolute"
+        ),
+        pytest.param(
+            '[metric]\nfiles = ["scoring"]\n',
+            {"scoring": (tarfile.SYMTYPE, "../../x")},
+            "scoring",
+            id="outside-relative",
+        ),
+        pytest.param(
+            '[metric]\nfiles = ["scoring/score.py"]\n',
+            {"scoring": (tarfile.SYMTYPE, "real")},
+            "scoring/score.py",
+            id="below-a-linked-folder",
+        ),
+        pytest.param(
+            '[metric]\nfiles = ["eval"]\n', {"eval/data": (tarfile.SYMTYPE, "../real")}, "eval", id="link-inside-folder"
+        ),
+        pytest.param(
+            '[metric]\nfiles = ["eval"]\n',
+            {"eval/copy.py": (tarfile.LNKTYPE, "real/score.py")},
+            "eval",
+            id="hard-link-out",
+        ),
+    ],
+)
+def test_staging_refuses_a_hidden_path_with_a_link(
+    monkeypatch: pytest.MonkeyPatch, toml: str, links: dict[str, tuple[bytes, str]], linked: str
+) -> None:
+    """The strip drops names, so a link would leave the scoring files in the agent's and candidate's trees."""
+    files = {"optimize.toml": toml, "real/score.py": "SECRET-METRIC\n", "src/app.py": "x = 1\n"}
+    if linked == "eval":
+        files["eval/score.py"] = "def metric(case, output):\n    return 1.0\n"
+
+    with pytest.raises(
+        ConstraintsError, match=f"hidden scoring path '{re.escape(linked)}' is, holds or lies inside a link"
+    ):
+        _stage_with(files, monkeypatch, links=links)
+
+
+def test_a_link_outside_the_hidden_paths_still_stages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only links that touch a hidden path are refused, and a hard link inside a hidden folder may point inside it."""
+    files = {
+        "optimize.toml": '[metric]\nfiles = ["eval"]\n',
+        "eval/score.py": "def metric(case, output):\n    return 1.0\n",
+        "src/app.py": "x = 1\n",
+    }
+    links = {"src/alias.py": (tarfile.SYMTYPE, "app.py"), "eval/copy.py": (tarfile.LNKTYPE, "eval/score.py")}
+
+    staged_payload, staged = _stage_with(files, monkeypatch, links=links)
+    try:
+        names = _names(Path(staged_payload["_repo_snapshot"]["archive"]))
+        assert "src/alias.py" in names
+        assert not [name for name in names if name.startswith("eval")]
+    finally:
+        staged.cleanup()
+
+
+@pytest.mark.parametrize("path", _EVERY_HIDDEN_PATH)
+def test_check_hidden_reports_a_leak_of_each_scoring_side_path(tmp_path: Path, path: str) -> None:
+    """An agent tree that still holds any one hidden file stops the run, whatever kind of file it is."""
+    original = _tree(tmp_path, _EVERY_HIDDEN_KEY)
+    leaked = {name: text for name, text in _EVERY_HIDDEN_KEY.items() if name == path or name.startswith(path + "/")}
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    agent = _tree(agent_dir, {"src/app.py": "x = 1\n", **leaked})
+
+    failures = check_hidden(original, agent, _EVERY_HIDDEN_PATH, place="cloud")
+
+    assert [failure.params["key"] for failure in failures] == [f"[metric] files: {next(iter(leaked))}"]
+
+
+def test_a_version_edit_to_optimize_toml_is_dropped_before_it_leaves_the_run() -> None:
+    """A version that rewrites its own rules keeps only the scored change (E62)."""
+    toml_edit = (
+        "diff --git a/optimize.toml b/optimize.toml\n--- a/optimize.toml\n+++ b/optimize.toml\n"
+        "@@ -1 +1 @@\n-version = 1\n+version = 2\n"
+    )
+    result = {"best_candidate": toml_edit + _EDIT, "versions": [{"candidate": toml_edit + _EDIT}]}
+
+    repo_staging.drop_hidden_edits(result, _EVERY_HIDDEN_PATH)
+
+    assert result["best_candidate"] == _EDIT
+    assert result["versions"][0]["candidate"] == _EDIT
 
 
 def test_staging_loads_the_cases_from_the_file(monkeypatch: pytest.MonkeyPatch) -> None:

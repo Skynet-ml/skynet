@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import tarfile
 from dataclasses import replace
 from pathlib import Path
@@ -23,6 +24,7 @@ from ..repo_constraints import (
     instructions_brief,
     parse_constraints,
     read_constraints,
+    scorer_only_paths,
 )
 from ..repo_tree import patch_violations
 
@@ -116,8 +118,11 @@ def test_the_file_narrows_paths_protects_files_and_proposes_setup(tmp_path: Path
     assert record["secret_names"] == ["GEO_KEY"]
     assert record["services"] == []
     assert record["instructions"] == {"path": "docs/intent.md", "intent": _INTENT.decode().strip()}
-    brief = instructions_brief(environment)
+    brief = instructions_brief(environment, (CONSTRAINTS_FILE, "bot/geocode/eval"))
     assert "`data/labels.csv`" in brief
+    assert CONSTRAINTS_FILE not in brief
+    assert "bot/geocode/eval" not in brief
+    assert "Some repository files are hidden from you." in brief
     assert "Guidance from `docs/intent.md` (not enforced" in brief
     assert "Keep the reply format unchanged." in brief
 
@@ -231,7 +236,7 @@ def test_plain_language_rules_are_numbered_recorded_and_put_in_the_brief(tmp_pat
     record = environment.record(repository="cfca/bot", commit="a" * 40, readonly_paths=[], secret_names=[])
     assert record["rules"] == list(environment.rules)
     assert record["instructions"] is None
-    brief = instructions_brief(environment)
+    brief = instructions_brief(environment, (CONSTRAINTS_FILE,))
     assert "Rule 1: Do not hardcode answers for dataset cases." in brief
     assert "Rule 2: Do not call an outside geocoding service." in brief
     assert "score of 0" not in brief
@@ -1292,6 +1297,137 @@ def test_a_cases_file_that_is_also_the_instructions_is_refused() -> None:
         ConstraintsError, match=r"\[data\] cases and instructions name the same file 'data/cases\.jsonl'"
     ):
         parse_constraints(raw)
+
+
+@pytest.mark.parametrize(
+    ("setting", "line"),
+    [
+        ("instructions", 'instructions = "eval/rules.md"\n'),
+        ("[proposer] illegal", '[proposer]\nillegal = "eval/rules.md"\n'),
+        ("[run] illegal", '[run]\nentry = "src/app.py:main"\nillegal = "eval/rules.md"\n'),
+        ("[target.lint] illegal", '[target.lint]\nentry = "src/app.py:main"\nillegal = "eval/rules.md"\n'),
+        ("[proposer] mcp", '[proposer]\nmcp = "eval/rules.md"\n'),
+        ("[run] mcp", '[run]\nentry = "src/app.py:main"\nmcp = "eval/rules.md"\n'),
+        ("[target.lint] mcp", '[target.lint]\nentry = "src/app.py:main"\nmcp = "eval/rules.md"\n'),
+    ],
+)
+def test_a_visible_file_inside_a_hidden_metric_folder_is_refused(setting: str, line: str) -> None:
+    """The agent's tree leaves out the metric folder, so a rule or mcp file there would be stripped (D43)."""
+    raw = f'{line}\n[metric]\nfiles = ["eval"]\n'.encode()
+
+    with pytest.raises(ConstraintsError, match=rf"{re.escape(setting)} 'eval/rules\.md' is inside the hidden"):
+        parse_constraints(raw)
+
+
+@pytest.mark.parametrize("metric", ['[metric]\nreference = "eval/rules.md"\n', ""], ids=["reference", "exploits"])
+def test_a_rule_file_on_another_scoring_path_is_refused(metric: str) -> None:
+    """The reference and the exploits folder are hidden too, so no rule file can be there (D43)."""
+    path = "eval/rules.md" if metric else ".optimize/exploits/rules.md"
+    raw = f'[proposer]\nillegal = "{path}"\n\n{metric}'.encode()
+
+    with pytest.raises(ConstraintsError, match="is inside the hidden"):
+        parse_constraints(raw)
+
+
+@pytest.mark.parametrize("entry", ['"eval/run.py:main"', '["python", "eval/run.py"]'], ids=["function", "command"])
+def test_a_run_entry_inside_the_hidden_scoring_files_is_refused(entry: str) -> None:
+    """The brief names the ``[run]`` entry, and the candidate's box does not hold a hidden file (E62)."""
+    raw = f'[run]\nentry = {entry}\n\n[metric]\nfiles = ["eval"]\n'.encode()
+
+    with pytest.raises(ConstraintsError, match=r"\[run\] entry names 'eval/run\.py'"):
+        parse_constraints(raw)
+
+
+@pytest.mark.parametrize(
+    ("setting", "line"),
+    [
+        ("instructions", 'instructions = "optimize.toml"\n'),
+        ("[proposer] illegal", '[proposer]\nillegal = "optimize.toml"\n'),
+        ("[run] mcp", '[run]\nentry = "src/app.py:main"\nmcp = "optimize.toml"\n'),
+    ],
+)
+def test_a_visible_setting_that_names_the_constraints_file_is_refused(setting: str, line: str) -> None:
+    """``optimize.toml`` names every hidden path, so no visible role can read it (E62)."""
+    with pytest.raises(ConstraintsError, match=rf"{re.escape(setting)} 'optimize\.toml' is inside the hidden"):
+        parse_constraints(line.encode())
+
+
+def test_the_constraints_file_stays_hidden_when_a_visible_setting_names_it() -> None:
+    """Parsing refuses this case; the hidden list must still never drop ``optimize.toml`` (E62)."""
+    constraints = replace(parse_constraints(b""), instructions_file="optimize.toml")
+
+    assert scorer_only_paths(constraints) == ("optimize.toml", ".optimize/exploits")
+
+
+@pytest.mark.parametrize(
+    ("toml", "path"),
+    [
+        ("", "optimize.toml"),
+        ('[metric]\nillegal = "docs/metric_rules.md"\n', "docs/metric_rules.md"),
+        ('[metric]\nmcp = "eval/.mcp.json"\n', "eval/.mcp.json"),
+    ],
+    ids=["constraints-file", "metric-rule-file", "metric-mcp"],
+)
+def test_a_run_entry_that_names_a_scorer_only_file_is_refused(toml: str, path: str) -> None:
+    """The brief names the ``[run]`` entry, so it cannot name a file that only the scorer reads (E62)."""
+    raw = f'[run]\nentry = ["python", "{path}"]\n\n{toml}'.encode()
+
+    with pytest.raises(ConstraintsError, match=rf"\[run\] entry names '{re.escape(path)}'"):
+        parse_constraints(raw)
+
+
+def test_a_run_entry_that_names_a_shared_mcp_file_is_allowed() -> None:
+    """A ``[metric] mcp`` file that ``[run]`` also names stays visible, so the entry may name it."""
+    raw = b'[run]\nentry = ["cat", ".mcp.json"]\nmcp = ".mcp.json"\n\n[metric]\nmcp = ".mcp.json"\n'
+
+    assert parse_constraints(raw).run_entry == ("cat", ".mcp.json")
+
+
+def test_a_visible_mcp_file_shared_with_the_metric_is_still_allowed() -> None:
+    """One ``.mcp.json`` for ``[proposer]`` and ``[metric]`` is not inside a hidden folder, so it stays valid."""
+    constraints = parse_constraints(b'[proposer]\nmcp = ".mcp.json"\n\n[metric]\nmcp = ".mcp.json"\n')
+
+    assert constraints.proposer.mcp == ".mcp.json"
+
+
+@pytest.mark.parametrize(
+    ("toml", "editable"),
+    [
+        ('[metric]\nfiles = ["eval"]\n', "eval"),
+        ('[metric]\nfiles = ["eval"]\n', "eval/labels.json"),
+        ('[data]\ncases = "data/cases.jsonl"\n', "data/cases.jsonl"),
+        ("", ".optimize/exploits"),
+        ('[metric]\nillegal = "docs/metric_rules.md"\n', "docs/metric_rules.md"),
+        ("", "optimize.toml"),
+        ('[metric]\nmcp = "eval/.mcp.json"\n', "eval/.mcp.json"),
+    ],
+    ids=[
+        "metric-folder",
+        "inside-metric-folder",
+        "cases",
+        "exploits",
+        "metric-rule-file",
+        "constraints-file",
+        "metric-mcp",
+    ],
+)
+def test_an_editable_path_inside_the_hidden_scoring_files_is_refused(toml: str, editable: str) -> None:
+    """The brief names every editable path, so none can be a hidden path or lie inside one (E62)."""
+    constraints = parse_constraints(toml.encode())
+
+    with pytest.raises(ConstraintsError, match=rf"'{re.escape(editable)}' is editable, but only the scorer reads it"):
+        effective_environment(constraints, approved_editable=["src", editable], approved_setup=None)
+
+
+def test_an_editable_mcp_file_shared_with_a_visible_role_is_allowed() -> None:
+    """A ``[metric] mcp`` file that ``[run]`` also names stays visible, so it may be editable."""
+    constraints = parse_constraints(
+        b'[run]\nentry = "src/app.py:main"\nmcp = ".mcp.json"\n\n[metric]\nmcp = ".mcp.json"\n'
+    )
+
+    environment = effective_environment(constraints, approved_editable=["src", ".mcp.json"], approved_setup=None)
+
+    assert environment.editable_paths == ("src", ".mcp.json")
 
 
 @pytest.mark.parametrize("section", ["proposer", "run", "metric", "target.lint"])

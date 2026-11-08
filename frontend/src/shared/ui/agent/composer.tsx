@@ -333,11 +333,10 @@ export function Composer({
         <PendingMessages
           queued={midTurn.queued}
           steering={midTurn.steering}
-          canPromote={midTurn.canSteer}
+          canPromote={midTurn.canSteer || (midTurn.paused && !streaming)}
           paused={midTurn.paused}
           streaming={Boolean(streaming)}
           sendNowReason={headLength > maxLength ? tooLong(headLength) : undefined}
-          onSendNow={midTurn.sendNow}
           onPromote={midTurn.promote}
           onEdit={(id) => void editPending(id)}
           onRemove={midTurn.remove}

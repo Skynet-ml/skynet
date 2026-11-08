@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -517,3 +518,34 @@ def test_a_development_aggregate_with_a_crashed_case_never_stops_or_leads() -> N
     with pytest.raises(autosaddler_runner.TargetReached):
         autosaddler_runner.AppEvaluator._report_development(evaluator, "c2", "text two", 0.8, scored)
     assert evaluator.best_development["best_candidate"] == "text two"
+
+
+def test_harness_sessions_send_each_refusal_to_the_run_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Pass each hidden-path refusal of a harness session to the run log as ``proposer.refusal``."""
+    outcome = autosaddler_runner.harness_bridge.SessionOutcome(
+        text=None,
+        stdout="",
+        stderr="",
+        returncode=0,
+        usage={},
+        cost_usd=0.0,
+        duration_seconds=1.0,
+        timed_out=True,
+        refusals=[{"tool": "read", "kind": "scoring"}],
+    )
+    monkeypatch.setattr(autosaddler_runner.harness_bridge, "run_session", lambda *args, **kwargs: outcome)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    logger = autosaddler_runner.refusal_logger(autosaddler_runner.EvaluatorMailbox("testnonce", 1.0))
+    transport = autosaddler_runner.HarnessTransport({}, "m1", logger)
+    session = SimpleNamespace(workspace=tmp_path, task_prompt="go", session_id="s1")
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(transport.run(session, 1.0))
+
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("APP_NATIVE_LOG testnonce ")]
+    assert len(lines) == 1
+    record = json.loads(lines[0].split(" ", 2)[2])
+    assert record["event"] == "proposer.refusal"
+    assert record["fields"] == {"tool": "read", "kind": "scoring"}

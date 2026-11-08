@@ -683,6 +683,84 @@ def test_rule_blocker_writes_a_rule_block_run_event(capsys: pytest.CaptureFixtur
     assert record["fields"] == {"rule": repo_tree.PATH_RULE, "reason": "Cannot change 'app.py'."}
 
 
+def test_refusal_logger_writes_a_proposer_refusal_run_event(capsys: pytest.CaptureFixture[str]) -> None:
+    """Frame a hidden-path refusal as a run-log line with the tool and kind only."""
+    shinka_runner.refusal_logger(shinka_runner.EvaluatorMailbox("testnonce", 1.0))({"tool": "read", "kind": "config"})
+
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("APP_NATIVE_LOG testnonce ")]
+    assert len(lines) == 1
+    record = json.loads(lines[0].split(" ", 2)[2])
+    assert record["event"] == "proposer.refusal"
+    assert record["level"] == "WARNING"
+    assert record["fields"] == {"tool": "read", "kind": "config"}
+    assert "optimize.toml" not in lines[0]
+
+
+def test_agent_editor_guards_sessions_and_logs_their_refusals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pass the bundle's hidden list to each session and send its refusals to the run log; the edit still lands.
+
+    Args:
+        tmp_path: Run folder.
+        monkeypatch: Replaces the harness session.
+    """
+    chunks, _ = _repo(tmp_path)
+    refusals: list[dict[str, str]] = []
+    bundle = shinka_bundle.RepoBundle.prepare(
+        {"chunks": chunks, "editable_paths": ["src"], "hidden_paths": ["optimize.toml", "eval/metric.py"]},
+        "",
+        tmp_path / "guarded-checkout",
+        on_refusal=refusals.append,
+    )
+    calls: list[dict[str, Any]] = []
+    fake = _fake_session(lambda workspace: (workspace / "src/util.py").write_text("SCALE = 7\n"), calls)
+
+    def refused(proposer: dict[str, Any], **kwargs: Any) -> Any:
+        """Run the fake session and report one refused read.
+
+        Args:
+            proposer: The launch.
+            **kwargs: Other run options.
+
+        Returns:
+            The finished session with a refusal.
+        """
+        outcome = fake(proposer, **kwargs)
+        outcome.refusals = [{"tool": "read", "kind": "config"}]
+        return outcome
+
+    monkeypatch.setattr(shinka_runner.harness_bridge, "run_session", refused)
+    runner, _, _ = _install_editor(tmp_path, bundle=bundle)
+    parent = SimpleNamespace(code=shinka_bundle.encode_bundle({}))
+
+    patch, _, success = asyncio.run(runner._run_patch_async(parent, [], [], 1))
+
+    assert calls[0]["proposer"]["hidden_paths"] == ["optimize.toml", "eval/metric.py"]
+    assert refusals == [{"tool": "read", "kind": "config"}]
+    assert success is True
+    assert patch is not None
+
+
+def test_agent_editor_adds_no_guard_without_a_hidden_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leave the launch unguarded when the run hides no path.
+
+    Args:
+        tmp_path: Run folder.
+        monkeypatch: Replaces the harness session.
+    """
+    _, bundle = _repo(tmp_path)
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        shinka_runner.harness_bridge,
+        "run_session",
+        _fake_session(lambda workspace: (workspace / "src/util.py").write_text("SCALE = 7\n"), calls),
+    )
+    runner, _, _ = _install_editor(tmp_path, bundle=bundle)
+
+    asyncio.run(runner._run_patch_async(SimpleNamespace(code=shinka_bundle.encode_bundle({})), [], [], 1))
+
+    assert "hidden_paths" not in calls[0]["proposer"]
+
+
 def test_config_turns_the_patch_mix_into_full_rewrites_for_the_agent_editor(tmp_path: Path) -> None:
     """Sample only full-rewrite prompts in agent mode, whatever patch mix the settings hold.
 

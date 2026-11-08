@@ -169,6 +169,14 @@ class RemoteSandboxSession:
         """
         self._runtime._request("write", {"sandbox_id": self._identity, "files": dict(files)})
 
+    def write_codex_requirements(self) -> None:
+        """Ask the parent to write the root-owned Codex requirements file in this box.
+
+        The request names only the box: the parent builds the root command
+        and the file's content from its own data.
+        """
+        self._runtime._request("codex_requirements", {"sandbox_id": self._identity})
+
     def read_file(self, path: str) -> str | None:
         """Read a guest file without exposing the parent's filesystem.
 
@@ -190,6 +198,7 @@ class RemoteSandboxSession:
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
         on_output: OutputSink | None = None,
+        sudo: bool = False,
     ) -> CommandResult:
         """Consume parent NDJSON output while allowing mailbox callbacks to use control RPC.
 
@@ -198,13 +207,16 @@ class RemoteSandboxSession:
             env: Optional guest environment.
             timeout_seconds: Command timeout within the sandbox lifetime.
             on_output: Callback for stdout/stderr chunks after parent model interception.
+            sudo: Refused; the child never sends a root command.
 
         Returns:
             The terminal command result received from the parent.
 
         Raises:
-            ServiceError: When the stream ends without a terminal result.
+            ServiceError: When ``sudo`` is set or the stream ends without a terminal result.
         """
+        if sudo:
+            raise ServiceError("A child cannot run sandbox commands as root.")
         request = {
             "action": "run",
             "payload": {

@@ -122,8 +122,8 @@ _STOP_ROUNDS = 100
 _PR_SET_CHILD_SUBREAPER = 36
 RERUN_REFUSED = (
     "The metric started a process after the candidate ran. The metric must not run the candidate's code"
-    " again: run its tests through [run] entry in optimize.toml, and read their report in the metric"
-    " (its output argument)."
+    " again: run its tests through the [run] entry, and read their report in the metric (its output"
+    " argument)."
 )
 _PROCESS_EVENTS = frozenset(
     {"subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork", "os.forkpty"}

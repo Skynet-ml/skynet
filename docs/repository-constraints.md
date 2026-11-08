@@ -63,8 +63,9 @@ holds one case on each line, as a JSON object:
   its argument, and a command entry gets it as JSON on stdin.
 - `expected` is optional. Only the metric gets it, in the whole case.
 - Blank lines are skipped. A UTF-8 byte-order mark at the start is allowed.
-- The file is hidden like the `[metric]` files. The optimization agent and
-  the candidate never see it. Only the parent's scorer reads it.
+- The file is hidden like the `[metric]` files (see "What is hidden"). The
+  optimization agent and the candidate never see it. Only the parent's
+  scorer reads it.
 - The run shuffles the cases with its seed and splits them 70/15/15 into
   train, validation and test. The same file and seed give the same split.
   `[data] split` is not supported.
@@ -74,17 +75,84 @@ holds one case on each line, as a JSON object:
   all, the candidate runs once with no input (`None`, or `null` on stdin),
   and the metric judges that one run.
 
+## What is hidden
+
+Only the parent's scorer reads the scoring side of the repository. Staging
+takes these paths out of the optimization agent's tree, and the candidate's
+box holds none of them while version code runs:
+
+- `optimize.toml` itself.
+- Every `[metric] files` path.
+- The `[metric] exploits` folder (default `.optimize/exploits`).
+- The `[metric] reference` file.
+- The `[data] cases` file.
+- The `[metric] illegal` file.
+- The `[metric] mcp` file.
+
+A key that the file does not set adds nothing to the list. A path that a
+visible role also names stays visible. For example, one `.mcp.json` for
+`[run] mcp` and `[metric] mcp` stays in the tree, because the candidate needs
+it. The `instructions` file, the `[proposer] illegal` file and the
+`[run] illegal` file always stay visible.
+
+`optimize.toml` is always hidden, also when a visible setting names it. The
+file is refused in these cases:
+
+- A visible setting names a hidden path or a path inside one. The visible
+  settings are the `instructions` file, an `illegal` file of `[proposer]`,
+  `[run]` or a `[target.<name>]`, and the `mcp` file of one of those roles.
+  The hidden paths here are `optimize.toml`, a `[metric] files` path, the
+  exploits folder, the reference and the cases file.
+- The `[run] entry` names a file that is in the hidden list or inside one
+  of its paths. This includes `optimize.toml`, the `[metric] illegal` file
+  and the `[metric] mcp` file.
+- An editable path is in the hidden list or inside one of its paths. This
+  also includes `optimize.toml`, the `[metric] illegal` file and the
+  `[metric] mcp` file.
+
+An `mcp` file that a visible role also names is not hidden, so the
+`[run] entry` and the editable paths may name it. The agent's tree leaves
+out everything inside a hidden path, and the brief names the entry and the
+editable paths. So these refusals keep every hidden path out of the tree's
+rule files and out of the brief.
+
+The file is also refused when a hidden path is a symlink, lies inside a
+symlinked folder, or holds a symlink or a hard link to a file outside it.
+The strip matches names, so a link would leave its target in the agent's
+tree.
+
+The run stops before any model is called when the agent's tree still holds
+a hidden file. A version's edit to a hidden path, `optimize.toml` included,
+is dropped from the result.
+
+The optimization agent never reads `optimize.toml`. It reads its brief,
+which holds:
+
+- The editable paths.
+- The protected paths that are not hidden.
+- The `[run] entry` and its timeout.
+- The `[proposer] illegal` rules, numbered, and the `[run] illegal` rules.
+- The `instructions` guidance.
+
+The brief names no hidden path. It says only that some files are hidden and
+that the agent cannot change them.
+
+Each version's candidate runs in a box with no network. Setup runs first
+with package-registry network only. Then the box goes offline, a probe
+confirms it, and only then does version code run. A box that stays online
+stops the run.
+
 ## What is enforced
 
 | Setting | Enforcement |
 | --- | --- |
 | `[paths] editable` | The parent checks every version before it is scored or published. A path outside the approved editable paths fails the setup check. |
-| `[paths] protected` | The parent rejects a version that changes a protected path, in its patch or while its code runs. A write that the code undoes before it exits also counts. The rejection names the path and the rule, with secret values hidden. `optimize.toml` itself is always protected. |
+| `[paths] protected` | The parent rejects a version that changes a protected path, in its patch or while its code runs. A write that the code undoes before it exits also counts. The rejection names the path and the rule, with secret values hidden. `optimize.toml` itself is always protected and hidden. |
 | `[proposer] network` | The proposer's box reaches the model relay and nothing else, except the hosts below. With no `network` key, it also reaches the package registries: the account's saved Python index (default `pypi.org` and `files.pythonhosted.org`) and `registry.npmjs.org`. A custom index replaces the PyPI hosts with the index's own host. `network = []` gives the relay only. `network = ["docs.python.org"]` gives the relay, the registries and that host. The run record shows the effective hosts under `roles`. |
 | `[setup] command` | Runs once on the starting commit, with package-registry network and no secrets. The box goes offline before any version runs. |
 | `instructions` | Not enforced. The agent reads the file in its brief. The scorer decides the score. |
 | `[proposer] illegal` | Enforced by judge models. See "Plain-language rules" below. |
-| Rule files | The `instructions` file and every `illegal` file (in `[proposer]`, `[run]`, `[metric]` and `[target.<name>]`) are protected like `optimize.toml`, so no version can change its own rules. |
+| Rule files | The `instructions` file and every `illegal` file (in `[proposer]`, `[run]`, `[metric]` and `[target.<name>]`) are protected, so no version can change its own rules. |
 
 ## What fails the setup check
 
@@ -193,8 +261,8 @@ agent's brief lists every rule at the start as "Rule 1", "Rule 2" and so on.
 Skynet enforces them in three places:
 
 1. **Blocked versions.** When the path rules refuse a version, the agent gets
-   this text and continues: "Illegal action. Read optimize.toml and the rule
-   files it names. You cannot do this action. Do not repeat it, because it
+   this text and continues: "Illegal action. Read the repository rules in
+   your brief. You cannot do this action. Do not repeat it, because it
    wastes time." This is
    the same for the parent's check and for the sandbox's early checks:
    AutoResearch `eval.sh`, Meta-Harness `save.sh` and its candidate check, the
@@ -203,9 +271,8 @@ Skynet enforces them in three places:
 2. **Judge during the run.** About every 15 agent actions, a fast judge model
    reads the recent actions and the current diff against the rules. When it
    sees work that goes toward a violation, the agent's next scoring reply
-   carries this note: "Check the rule file that optimize.toml names. You are
-   probably about to break one of its rules: <reason>." The agent may
-   continue.
+   carries this note: "Check the rules in your brief. You are probably about
+   to break one of them: <reason>." The agent may continue.
 3. **Judge on each version.** Before the scorer runs, a stronger judge reads
    the full diff of the version. When the diff breaks a rule, the version is
    an "illegal approach": it gets a score of 0 and the judge's reason as its

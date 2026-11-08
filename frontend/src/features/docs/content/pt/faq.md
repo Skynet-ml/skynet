@@ -8,7 +8,7 @@ O Skynet é uma plataforma que otimiza repositórios com seus próprios dados e 
 
 ### O que o Skynet pode otimizar?
 
-O Skynet é o Optimize Anything: toda execução otimiza um repositório. Use um repositório do GitHub que você já tem, ou deixe o Skynet criar um novo a partir da sua tarefa e dos seus dados. O código pode usar qualquer biblioteca, por exemplo DSPy.
+O Skynet é o Optimize Anything: toda execução otimiza um repositório. Use um repositório do GitHub que você já tem, ou deixe o Skynet criar um novo a partir da sua tarefa e dos seus dados. O código pode usar qualquer biblioteca.
 
 Todos os motores trabalham com repositórios: GEPA, Best-of-N, Meta-Harness, AutoResearch, AutoSaddler e ShinkaEvolve.
 
