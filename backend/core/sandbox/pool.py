@@ -178,7 +178,8 @@ class SandboxPool:
             RuntimeError: The pool already ran on another event loop.
             TypeError: ``workers`` or ``queue_size`` is not an int.
             ValueError: ``workers`` or ``queue_size`` is below 1.
-            SandboxFatalError: ``on_outcome`` raised a cancel that nobody asked for.
+            SandboxFatalError: The candidate iterator or ``on_outcome`` raised
+                a cancel that nobody asked for.
             Exception: The first error of the candidate iterator or of
                 ``on_outcome``, after the other tasks stop.
         """
@@ -206,6 +207,13 @@ class SandboxPool:
                     except StopAsyncIteration:
                         return
                     queue.put_nowait((key(candidate) if key else f"box-{next(self._ids)}", candidate))
+            except asyncio.CancelledError as cancel:
+                task = asyncio.current_task()
+                if task is None or task.cancelling():
+                    raise
+                # The TaskGroup drops a cancelled producer without an error,
+                # so run() would return as if the candidates ran out.
+                raise SandboxFatalError("the candidate iterator raised a cancel that nobody asked for") from cancel
             finally:
                 aclose = getattr(iterator, "aclose", None)
                 if aclose is not None:
@@ -362,11 +370,28 @@ class SandboxPool:
     async def _stop(self, env: SandboxEnvironment, box_id: str) -> None:
         """Stop a box; log a stop that fails so that the box keeps its own outcome.
 
+        A cancel that arrives during the stop waits until the stop finishes,
+        then goes on, so that a cancelled pool leaves no box running.
+
         Args:
             env: The box.
             box_id: The attempt's operation key.
+
+        Raises:
+            asyncio.CancelledError: The pool was cancelled during the stop.
         """
+        stop = asyncio.ensure_future(env.stop())
+        cancel: asyncio.CancelledError | None = None
+        while not stop.done():
+            try:
+                # wait() does not cancel the stop when this task is cancelled,
+                # and it raises only for a cancel of this task.
+                await asyncio.wait({stop})
+            except asyncio.CancelledError as exc:
+                cancel = exc
         try:
-            await env.stop()
+            stop.result()
         except Exception:
             logger.exception("Sandbox box %s did not stop", box_id)
+        if cancel is not None:
+            raise cancel
