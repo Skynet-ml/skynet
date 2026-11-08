@@ -693,6 +693,18 @@ async def test_policy_create_turns_the_mirrors_off(fake_sdk: FakeCloud) -> None:
     assert policy.egress.allowed_cidrs == []
 
 
+async def test_policy_with_reordered_or_upper_case_hosts_is_reused(fake_sdk: FakeCloud) -> None:
+    """Reuse a same-name policy whose hosts differ only in order or case."""
+    name = runloop._policy_name(["a.example", "b.example"])
+    egress = _egress(allowed_hostnames=["B.Example", "a.example"])
+    fake_sdk.policies.append(SimpleNamespace(id="np-same", name=name, egress=egress))
+    async with RunloopEnvironment(_spec(allowed_hosts=("a.example", "b.example"))):
+        pass
+    assert f"policy:{name}" not in fake_sdk.calls
+    assert [policy.id for policy in fake_sdk.policies] == ["np-same"]
+    assert fake_sdk.clients[0]["create"]["launch_parameters"]["network_policy_id"] == "np-same"
+
+
 @pytest.mark.parametrize("wider", _WIDER_EGRESS)
 async def test_policy_with_mirrors_or_cidrs_is_fatal(fake_sdk: FakeCloud, wider: dict[str, Any]) -> None:
     """Refuse a same-name policy that also allows the mirrors or CIDRs."""

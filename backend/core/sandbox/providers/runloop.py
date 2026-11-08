@@ -228,6 +228,8 @@ def _policy_matches(policy: Any, hosts: list[str]) -> bool:
     Returns:
         True when the policy allows these hosts and nothing else.
     """
+    # Hostnames are case-insensitive, and Runloop may return them in another order.
+    wanted = sorted(host.lower() for host in hosts)
     egress = getattr(policy, "egress", None)
     if egress is None:
         return False
@@ -238,7 +240,7 @@ def _policy_matches(policy: Any, hosts: list[str]) -> bool:
         and getattr(egress, "allow_mcp_gateway", False) is False
         and getattr(egress, "allow_runloop_mirrors", False) is False
         and not list(getattr(egress, "allowed_cidrs", None) or [])
-        and list(getattr(egress, "allowed_hostnames", None) or []) == hosts
+        and sorted(str(host).lower() for host in getattr(egress, "allowed_hostnames", None) or []) == wanted
     )
 
 
