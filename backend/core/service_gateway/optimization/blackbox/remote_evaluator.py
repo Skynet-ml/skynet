@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from ....billing.model_gateway import raise_gateway_stop
+from ....billing.usage_tags import current_tags, with_tags_header
 from ....config import app_env
 from ....exceptions import ServiceError
 
@@ -55,7 +56,8 @@ class RemoteEvaluatorClient:
             with httpx.Client(timeout=self._timeout, trust_env=False, follow_redirects=False) as client:
                 response = client.post(
                     base + "/_evaluator",
-                    headers={"Authorization": f"Bearer {self._route['token']}"},
+                    # The parent files the scorer's own calls under the candidate these tags name.
+                    headers=with_tags_header({"Authorization": f"Bearer {self._route['token']}"}, current_tags()),
                     json={"candidate": candidate, "case": case},
                 )
             if not response.is_success:

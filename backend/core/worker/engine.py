@@ -56,6 +56,7 @@ from ..billing.pricing import ModelUsage
 from ..billing.protected_credentials import (
     ProtectedCredentialVault,
     has_exposed_execution_credentials,
+    repo_secret_allowed_hosts,
     resolve_execution_credentials,
 )
 from ..billing.protected_execution import bind_protected_sandbox, protected_image
@@ -1045,6 +1046,9 @@ class BackgroundWorker:
                         payload_dict["max_cost_cents"] = budget_gateway.cost_ceiling_cents()
                     if optimization_type == OPTIMIZATION_TYPE_BLACKBOX and is_repo_payload(payload_dict):
                         with self._renewing_lease(worker_id):
+                            # Staging empties the secret list, so read the gate's inputs first.
+                            secret_bindings = dict(payload_dict["target"]["repo"].get("secret_bindings") or {})
+                            secret_allowed_hosts = repo_secret_allowed_hosts(payload_dict)
                             payload_dict, staged_repository = stage_repository(
                                 payload_dict,
                                 username=execution_payload.username,
@@ -1057,6 +1061,8 @@ class BackgroundWorker:
                                 staged_repository.snapshot.archive,
                                 staged_repository.secrets,
                                 place=sandbox_place(settings.local_mode),
+                                bindings=secret_bindings,
+                                allowed_hosts=secret_allowed_hosts,
                             )
                             if gate_failures:
                                 raise RepoGateError(gate_failures)

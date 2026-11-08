@@ -38,9 +38,11 @@ from core.billing.protected_credentials import (
 from core.billing.runtime import PaidResult, UsagePendingError
 from core.config import settings
 from core.i18n import t_locale
+from core.i18n_keys import I18nKey
 from core.models import BlackboxRunRequest
 from core.storage.models import Base, BillingCustomerModel, BillingProviderKeyModel
 from core.storage.preflights import PreflightStore, setup_seed
+from core.worker.repo_gate import GateFailure
 
 PAYLOAD = {
     "seed_candidate": "A real starting candidate",
@@ -592,7 +594,6 @@ def test_preflight_shows_every_gate_failure_before_any_paid_setup(
     assert body["status"] == "failed"
     assert [(check["key"], check["message_code"]) for check in body["checks"]] == [
         ("setup", "repo_gate.unenforced_cloud"),
-        ("setup", "repo_gate.unenforced_cloud"),
         ("setup", "repo_gate.missing_secret"),
     ]
     assert body["checks"][0]["message"] == t_locale("he", "repo_gate.unenforced_cloud", key="[proposer] services")
@@ -600,3 +601,37 @@ def test_preflight_shows_every_gate_failure_before_any_paid_setup(
     assert not calls
     assert body["budget"]["setup_spent_cents"] == "0"
     assert cleaned == ["scorers", "tree"]
+
+
+def test_a_payload_with_no_repository_reaches_the_gate_with_no_bindings(
+    setup_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The setup check reads secret bindings safely when the payload has no repository mapping (SKY-385)."""
+    client, _engine, calls = setup_client
+    staged = SimpleNamespace(
+        snapshot=SimpleNamespace(archive=tmp_path / "tree.tgz"),
+        secrets={},
+        close_scorers=lambda: None,
+        cleanup=lambda: None,
+    )
+    seen: list[dict[str, Any]] = []
+
+    def gate(archive: Path, secrets: dict, **kwargs: Any) -> list[GateFailure]:
+        """Keep the gate inputs and refuse, so no paid setup runs."""
+        seen.append(kwargs)
+        return [
+            GateFailure("secrets", "cloud", "Secret X is missing.", I18nKey.REPO_GATE_MISSING_SECRET, {"name": "X"})
+        ]
+
+    monkeypatch.setattr(wizard_preflight.settings, "local_mode", False)
+    monkeypatch.setattr(wizard_preflight, "is_repo_payload", lambda payload: True)
+    monkeypatch.setattr(wizard_preflight, "stage_repository", lambda payload, **kwargs: (payload, staged))
+    monkeypatch.setattr(wizard_preflight, "check_repository", gate)
+
+    response = client.post("/wizard/preflight", json=_request(_budget(client)))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [check.get("message_code") for check in body["checks"]] == ["repo_gate.missing_secret"]
+    assert [(kwargs["bindings"], kwargs["allowed_hosts"]) for kwargs in seen] == [({}, {})]
+    assert not calls

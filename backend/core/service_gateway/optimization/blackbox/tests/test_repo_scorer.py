@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import http.server
 import json
 import logging
@@ -11,19 +12,33 @@ import sys
 import threading
 import time
 import traceback
+import urllib.parse
 from collections.abc import Iterator, Mapping
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+from pydantic import SecretStr
 
+from core.billing.budgets import BudgetError, BudgetInsufficientError
+from core.billing.model_gateway import ModelGateway
+from core.billing.operation_pricing import UnpricedOperationError
+from core.billing.runtime import UsagePendingError
 from core.billing.signals import BudgetReached
+from core.billing.tests.test_env_connectors import MAPS_KEY, _operations, _runtime
+from core.billing.tests.test_model_gateway_transport import gateway  # noqa: F401 - pytest fixture
+from core.billing.usage_tags import usage_scope
+from core.config import settings
 from core.exceptions import ServiceError
 from core.models.blackbox import BlackboxRunRequest
 from core.models.tests.test_blackbox import _repo_request
+from core.worker.scoped_relay import CallRecorder
 
-from .. import repo_scorer
-from ..repo_constraints import ServiceSpec, TargetStage
+from .. import repo_scorer, runner
+from ..remote_evaluator import RemoteEvaluatorClient
+from ..repo_constraints import McpServer, RoleEnvironment, ServiceSpec, TargetStage
 from ..repo_scorer import (
     _STAGE_LAYOUT_SECONDS,
     SETUP_ALLOWANCE_SECONDS,
@@ -65,6 +80,16 @@ def score(repo_path, case=None):
         },
     }
 """
+
+
+@pytest.fixture(autouse=True)
+def _free_relay_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let each test's runner bind a free port, so parallel workers never share the fixed one.
+
+    Args:
+        monkeypatch: Restores the fixed port after the test.
+    """
+    monkeypatch.setattr(runner, "RELAY_PORT", 0)
 
 
 @pytest.fixture
@@ -1339,6 +1364,7 @@ def _service_scorer(
     roles: Mapping[str, tuple[str, ...]],
     run_entry: str | None = None,
     code: str = SERVICE_SCORER,
+    recorder: CallRecorder | None = None,
 ) -> RepoScorer:
     """Open a scorer whose run declares one url service with a key.
 
@@ -1348,6 +1374,7 @@ def _service_scorer(
         roles: The services each role lists.
         run_entry: The ``[run]`` entry, if any.
         code: The metric's source.
+        recorder: Writes each relayed call into the run record, if given.
 
     Returns:
         The scorer.
@@ -1368,6 +1395,9 @@ def _service_scorer(
         services={"judge-api": ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://judge.example.test:{port}/v1/")},
         service_roles=roles,
         run_entry=run_entry,
+        secret_hosts={"JUDGE_KEY": "judge.example.test"},
+        secret_allowed_hosts={"JUDGE_KEY": ("judge.example.test",)},
+        recorder=recorder,
     )
 
 
@@ -1475,7 +1505,15 @@ def test_a_run_role_reaches_its_listed_service_through_the_relay(
 
 
 def _service_relay(
-    workspace: _Workspace, *, role: str, allowed: tuple[str, ...], services: Mapping[str, ServiceSpec]
+    workspace: _Workspace,
+    *,
+    role: str,
+    allowed: tuple[str, ...],
+    services: Mapping[str, ServiceSpec],
+    host: str = "judge.example.test",
+    allowed_hosts: tuple[str, ...] | None = None,
+    secret: str = "judge-secret-value",
+    recorder: CallRecorder | None = None,
 ) -> _StageRelay:
     """Build a relay with no stage boxes that forwards to the given services.
 
@@ -1484,6 +1522,10 @@ def _service_relay(
         role: The calling role.
         allowed: The services that role lists.
         services: The run's services.
+        host: The host ``JUDGE_KEY`` belongs to.
+        allowed_hosts: The run's allowed hosts for ``JUDGE_KEY``; ``None`` allows ``host``.
+        secret: The value of ``JUDGE_KEY``.
+        recorder: Writes each relayed call into the run record.
 
     Returns:
         The relay.
@@ -1498,22 +1540,29 @@ def _service_relay(
         services=services,
         role=role,
         allowed=allowed,
-        secrets={"JUDGE_KEY": "judge-secret-value"},
+        secrets={"JUDGE_KEY": secret},
+        secret_hosts={"JUDGE_KEY": host},
+        allowed_hosts={"JUDGE_KEY": (host,) if allowed_hosts is None else allowed_hosts},
+        recorder=recorder,
     )
 
 
-def _service_answer(relay: _StageRelay, workspace: _Workspace, name: str) -> dict[str, Any]:
+def _service_answer(
+    relay: _StageRelay, workspace: _Workspace, name: str, path: str = "grade", method: str = "POST"
+) -> dict[str, Any]:
     """Send one service frame through the relay and wait for its answer.
 
     Args:
         relay: The relay.
         workspace: Records the answers.
         name: The service the frame names.
+        path: The request path under the service url.
+        method: The request method.
 
     Returns:
         The answer the scorer box gets.
     """
-    frame = {"id": "d" * 32, "service": name, "path": "grade", "method": "POST", "headers": [], "body": ""}
+    frame = {"id": "d" * 32, "service": name, "path": path, "method": method, "headers": [], "body": ""}
     relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
     deadline = time.monotonic() + 10
     while not workspace.writes and time.monotonic() < deadline:
@@ -1531,14 +1580,14 @@ def test_a_role_that_does_not_list_the_service_is_refused(upstream: _Upstream) -
     assert relay.config("/work")["services"] == []
     answer = _service_answer(relay, workspace, "judge")
     assert answer["status"] == 403
-    assert answer["error"] == "Service 'judge' is not listed for the [run] role."
+    assert answer["error"] == ("Service 'judge' is not listed for the [run] role. Add it: [run] services = [\"judge\"]")
     assert upstream.requests == []
 
 
 @pytest.mark.parametrize(
     ("name", "status", "message"),
     [
-        ("nope", 404, "Unknown service 'nope'."),
+        ("nope", 404, "Service 'nope' is not in optimize.toml. Add a [services.nope] table."),
         ("github", 403, "only services with a url go through the relay"),
     ],
 )
@@ -1553,15 +1602,737 @@ def test_unknown_services_and_catalog_connectors_are_refused(name: str, status: 
     assert message in answer["error"]
 
 
+@pytest.mark.parametrize(
+    ("name", "status", "message"),
+    [
+        ("judge", 403, "Service 'judge' is not listed for the [metric] role."),
+        ("Judge", 404, "Service 'Judge' is not in optimize.toml. Add a [services.Judge] table."),
+        ("JUDGE", 404, "Service 'JUDGE' is not in optimize.toml."),
+        ("judge/x", 404, "Service 'judge/x' is not in optimize.toml."),
+        ("../judge", 404, "Service '../judge' is not in optimize.toml."),
+        ("", 404, "is not in optimize.toml."),
+    ],
+)
+def test_a_name_that_only_looks_like_a_declared_service_is_unknown(
+    upstream: _Upstream, name: str, status: int, message: str
+) -> None:
+    """Service names match exactly, as TOML tables do: another case or a slash is a 404, never the declared service."""
+    workspace = _Workspace()
+    spec = ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://judge.example.test:{upstream.port}/")
+    relay = _service_relay(workspace, role="metric", allowed=(), services={"judge": spec})
+    answer = _service_answer(relay, workspace, name)
+    assert answer["status"] == status
+    assert message in answer["error"]
+    assert upstream.requests == []
+
+
 def test_a_service_whose_host_resolves_to_a_private_address_is_refused(upstream: _Upstream) -> None:
     """The relay resolves the host and refuses loopback, so a url cannot reach the parent's own network."""
     workspace = _Workspace()
     spec = ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://127.0.0.1:{upstream.port}/")
-    relay = _service_relay(workspace, role="metric", allowed=("judge",), services={"judge": spec})
+    relay = _service_relay(workspace, role="metric", allowed=("judge",), services={"judge": spec}, host="127.0.0.1")
     assert relay.config("/work")["services"] == ["judge"]
     answer = _service_answer(relay, workspace, "judge")
     assert answer == {"status": 502, "error": "Service 'judge' could not be reached."}
     assert upstream.requests == []
+
+
+class _Echo:
+    """Serve an upstream that echoes the Authorization header, or redirects, and record each path."""
+
+    def __init__(self) -> None:
+        """Start the server on a free port."""
+        self.paths: list[str] = []
+        self.location = "/leak"
+        echo = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            """Echo the key at ``/echo``, redirect at ``/redirect``, and answer anything else."""
+
+            def do_GET(self) -> None:
+                """Record the path and answer it."""
+                echo.paths.append(self.path)
+                if self.path.endswith("/redirect"):
+                    self.send_response(302)
+                    self.send_header("Location", echo.location)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                key = self.headers.get("Authorization", "")
+                token = key.partition(" ")[2]
+                if self.path.endswith("/split"):
+                    # No Content-Length: the body ends when the connection closes, so the two halves arrive apart.
+                    self.send_response(200)
+                    self.end_headers()
+                    half = len(token) // 2
+                    for part in (b'{"seen": "' + token[:half].encode(), token[half:].encode() + b'"}'):
+                        self.wfile.write(part)
+                        self.wfile.flush()
+                        time.sleep(0.05)
+                    return
+                if self.path.endswith("/base64"):
+                    key = base64.b64encode(token.encode()).decode()
+                elif self.path.endswith("/percent"):
+                    key = urllib.parse.quote(token, safe="")
+                payload = json.dumps({"seen": key}).encode()
+                self.send_response(200)
+                self.send_header("X-Echo", key)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_POST(self) -> None:
+                """Read the body, then answer as for a GET."""
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.do_GET()
+
+            def log_message(self, format: str, *args: Any) -> None:
+                """Keep the test output quiet."""
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_address[1]
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        """Stop the server."""
+        self._server.shutdown()
+        self._server.server_close()
+
+
+@pytest.fixture
+def echo(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Echo]:
+    """Run an echoing upstream and resolve ``judge.example.test`` to it.
+
+    Yields:
+        The running upstream.
+    """
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    server = _Echo()
+    yield server
+    server.close()
+
+
+def _echo_relay(workspace: _Workspace, port: int, **hosts: Any) -> _StageRelay:
+    """Build a metric relay to the echo upstream with ``JUDGE_KEY`` in its Authorization header.
+
+    Args:
+        workspace: Records the answers.
+        port: The upstream's port.
+        **hosts: ``host``, ``allowed_hosts`` and ``secret`` overrides for ``_service_relay``.
+
+    Returns:
+        The relay.
+    """
+    spec = ServiceSpec(
+        secrets=("JUDGE_KEY",),
+        url=f"http://judge.example.test:{port}/",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+    )
+    return _service_relay(workspace, role="metric", allowed=("judge",), services={"judge": spec}, **hosts)
+
+
+def test_an_upstream_that_echoes_the_key_gives_the_box_only_the_redacted_form(echo: _Echo) -> None:
+    """The upstream gets the key, and the box gets ``[REDACTED]`` in both the body and the headers (E56)."""
+    workspace = _Workspace()
+    answer = _service_answer(_echo_relay(workspace, echo.port), workspace, "judge", path="echo", method="GET")
+
+    assert answer["status"] == 200
+    body = base64.b64decode(answer["body"]).decode()
+    assert json.loads(body) == {"seen": "[REDACTED]"}
+    assert ["X-Echo", "[REDACTED]"] in answer["headers"]
+    assert "judge-secret-value" not in json.dumps(answer)
+    assert echo.paths == ["/echo"]
+
+
+_REDIRECT_TARGETS = pytest.mark.parametrize(
+    "location",
+    ["/leak", "http://judge.example.test:{port}/leak", "http://elsewhere.example.test:{port}/leak"],
+    ids=["same-host-path", "allowed-host-url", "other-host-url"],
+)
+
+
+@_REDIRECT_TARGETS
+def test_a_redirect_comes_back_to_the_box_and_is_never_followed(echo: _Echo, location: str) -> None:
+    """The relay returns the 302 as it is, to the allowed host or another one, so the key goes nowhere else (E53)."""
+    echo.location = location.format(port=echo.port)
+    sink = _CallSink()
+    workspace = _Workspace()
+    relay = _echo_relay(workspace, echo.port, recorder=CallRecorder(sink, "opt-1", "cand-1", ""))
+    answer = _service_answer(relay, workspace, "judge", path="redirect", method="GET")
+
+    assert answer["status"] == 302
+    assert ["Location", echo.location] in answer["headers"]
+    assert echo.paths == ["/redirect"]
+    [(_, call, _)] = sink.calls
+    assert (call["kind"], call["target"], call["status"]) == ("host", "judge.example.test", "ok")
+
+
+def test_a_key_split_across_two_streamed_chunks_comes_back_redacted(echo: _Echo) -> None:
+    """The relay reads the whole answer before it redacts, so a key cut across two chunks is still hidden (E56)."""
+    workspace = _Workspace()
+    answer = _service_answer(_echo_relay(workspace, echo.port), workspace, "judge", path="split", method="GET")
+
+    assert answer["status"] == 200
+    assert json.loads(base64.b64decode(answer["body"])) == {"seen": "[REDACTED]"}
+    assert echo.paths == ["/split"]
+
+
+@pytest.mark.parametrize(
+    ("path", "encode"),
+    [
+        ("echo", lambda token: token),
+        ("base64", lambda token: base64.b64encode(token.encode()).decode()),
+        ("percent", lambda token: urllib.parse.quote(token, safe="")),
+    ],
+)
+def test_a_re_encoded_key_echo_is_redacted(echo: _Echo, path: str, encode: Any) -> None:
+    """A key echoed raw, base64-encoded or percent-encoded reaches neither the box nor the run record (E56, E28)."""
+    secret = "judge/secret+value=1"
+    sink = _CallSink()
+    workspace = _Workspace()
+    relay = _echo_relay(workspace, echo.port, secret=secret, recorder=CallRecorder(sink, "opt-1", "cand-1", ""))
+    answer = _service_answer(relay, workspace, "judge", path=path, method="GET")
+
+    assert answer["status"] == 200
+    assert encode(secret) not in json.dumps(answer)
+    assert json.loads(base64.b64decode(answer["body"])) == {"seen": "[REDACTED]"}
+    [(_, call, secrets)] = sink.calls
+    assert call["status"] == "ok"
+    assert encode(secret) not in json.dumps(call, default=str)
+    # The store masks each listed form in every field it writes; a base64 form is listed without its padding.
+    assert encode(secret).rstrip("=") in secrets
+
+
+@pytest.mark.parametrize(
+    ("hosts", "fragment"),
+    [
+        ({"host": "other.example.test"}, "JUDGE_KEY"),
+        ({"allowed_hosts": ()}, "JUDGE_KEY"),
+        ({"allowed_hosts": ("elsewhere.example.test",)}, "JUDGE_KEY"),
+    ],
+)
+def test_a_secret_outside_its_host_or_the_allowed_hosts_is_refused(
+    echo: _Echo, hosts: dict[str, Any], fragment: str
+) -> None:
+    """The relay sends nothing when the secret belongs to another host or the run does not allow the host (E50, E52)."""
+    workspace = _Workspace()
+    answer = _service_answer(_echo_relay(workspace, echo.port, **hosts), workspace, "judge", path="echo", method="GET")
+
+    assert answer["status"] == 403
+    assert answer["error"].startswith("Service 'judge' was refused: ")
+    assert fragment in answer["error"]
+    assert "judge-secret-value" not in answer["error"]
+    assert echo.paths == []
+
+
+def test_a_metric_that_does_not_list_the_service_gets_the_fix_in_the_error(echo: _Echo) -> None:
+    """The metric's refusal names the exact line to add, and the run records the refused call (E55, E28)."""
+    sink = _CallSink()
+    workspace = _Workspace()
+    spec = ServiceSpec(secrets=("JUDGE_KEY",), url=f"http://judge.example.test:{echo.port}/")
+    relay = _service_relay(
+        workspace,
+        role="metric",
+        allowed=(),
+        services={"judge-api": spec},
+        recorder=CallRecorder(sink, "opt-1", "cand-1", ""),
+    )
+
+    answer = _service_answer(relay, workspace, "judge-api")
+
+    assert answer["status"] == 403
+    assert answer["error"].endswith('Add it: [metric] services = ["judge-api"]')
+    assert echo.paths == []
+    [(_, call, _)] = sink.calls
+    assert (call["candidate_id"], call["role"], call["kind"]) == ("cand-1", "metric", "host")
+    assert (call["target"], call["status"], call["failure_reason"]) == ("judge-api", "refused", answer["error"])
+
+
+def _mcp_relay(
+    workspace: _Workspace,
+    role: str,
+    mcp: RoleEnvironment,
+    *,
+    services: Mapping[str, ServiceSpec] | None = None,
+    secret: str = "judge-secret-value",
+    recorder: CallRecorder | None = None,
+) -> _StageRelay:
+    """Build a relay with no stage boxes that forwards to the role's MCP servers.
+
+    Args:
+        workspace: Records the answers.
+        role: The calling role.
+        mcp: The role with the servers of its own MCP file.
+        services: The run's services, which the role also lists.
+        secret: The value of ``JUDGE_KEY``.
+        recorder: Writes each relayed call into the run record.
+
+    Returns:
+        The relay.
+    """
+    return _StageRelay(
+        {},
+        {},
+        response_dir="calls/000001/stages",
+        max_concurrency=2,
+        env={},
+        workspace=workspace,  # type: ignore[arg-type]
+        services=services,
+        role=role,
+        allowed=tuple(services or ()),
+        mcp=mcp,
+        secrets={"JUDGE_KEY": secret},
+        secret_hosts={"JUDGE_KEY": "judge.example.test"},
+        allowed_hosts={"JUDGE_KEY": ("judge.example.test",)},
+        recorder=recorder,
+    )
+
+
+def _mcp_answer(
+    relay: _StageRelay, workspace: _Workspace, name: str, path: str = "", body: bytes = b""
+) -> dict[str, Any]:
+    """Send one MCP frame through the relay and wait for its answer.
+
+    Args:
+        relay: The relay.
+        workspace: Records the answers.
+        name: The server the frame names.
+        path: The request path under the server's url.
+        body: A JSON-RPC body to POST; empty sends a GET with no body.
+
+    Returns:
+        The answer the box gets.
+    """
+    frame = {
+        "id": "e" * 32,
+        "mcp": name,
+        "path": path,
+        "method": "POST" if body else "GET",
+        "headers": [],
+        "body": base64.b64encode(body).decode(),
+    }
+    relay.output("stdout", relay._prefix + json.dumps(frame) + "\n")
+    deadline = time.monotonic() + 10
+    while not workspace.writes and time.monotonic() < deadline:
+        time.sleep(0.01)
+    relay.close()
+    [(_, text)] = workspace.writes
+    return json.loads(text)
+
+
+def _mcp_role(port: int, endpoint: str = "echo") -> RoleEnvironment:
+    """Return a role whose MCP file holds one ``search`` server on the echo upstream.
+
+    Args:
+        port: The upstream's port.
+        endpoint: The server url's path.
+
+    Returns:
+        The role.
+    """
+    server = McpServer(
+        name="search",
+        url=f"http://judge.example.test:{port}/{endpoint}",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+    )
+    return RoleEnvironment(mcp=".mcp.json", mcp_servers=(server,))
+
+
+def test_an_mcp_server_gets_the_key_and_the_box_gets_only_the_redacted_form(echo: _Echo) -> None:
+    """An MCP call goes to the exact declared url with the key filled, and the echo comes back redacted (E49, E56)."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port))
+    assert relay.config("/work")["mcp"] == ["search"]
+    assert relay.config("/work")["mcp_file"] == ".mcp.json"
+
+    answer = _mcp_answer(relay, workspace, "search")
+
+    assert answer["status"] == 200
+    assert json.loads(base64.b64decode(answer["body"])) == {"seen": "[REDACTED]"}
+    assert ["X-Echo", "[REDACTED]"] in answer["headers"]
+    assert "judge-secret-value" not in json.dumps(answer)
+    assert echo.paths == ["/echo"]
+
+
+class _CallSink:
+    """Keep each run call the relay records, with the secret forms the store must remove."""
+
+    def __init__(self) -> None:
+        """Start with no calls."""
+        self.calls: list[tuple[str, dict[str, Any], list[str]]] = []
+        self.threads: list[str] = []
+
+    def record_call(self, optimization_id: str, call: dict[str, Any], secrets: list[str]) -> int:
+        """Keep one call.
+
+        Args:
+            optimization_id: The run.
+            call: The call fields.
+            secrets: The secret forms the store removes.
+
+        Returns:
+            The call's sequence number.
+        """
+        self.calls.append((optimization_id, call, secrets))
+        self.threads.append(threading.current_thread().name)
+        return len(self.calls)
+
+
+@pytest.mark.parametrize("kind", ["host", "mcp"])
+def test_a_relayed_call_is_recorded_under_its_role_and_kind_with_the_key_marked_secret(echo: _Echo, kind: str) -> None:
+    """Each service and MCP call writes one run call for its role, and the store gets the key to remove (E28)."""
+    sink = _CallSink()
+    recorder = CallRecorder(sink, "opt-1", "cand-1", "")
+    workspace = _Workspace()
+    if kind == "mcp":
+        relay = _mcp_relay(workspace, "run", _mcp_role(echo.port), recorder=recorder)
+        answer = _mcp_answer(relay, workspace, "search")
+    else:
+        spec = ServiceSpec(
+            secrets=("JUDGE_KEY",),
+            url=f"http://judge.example.test:{echo.port}/",
+            headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        )
+        relay = _service_relay(
+            workspace, role="metric", allowed=("judge",), services={"judge": spec}, recorder=recorder
+        )
+        answer = _service_answer(relay, workspace, "judge", path="echo", method="GET")
+
+    assert answer["status"] == 200
+    [(optimization_id, call, secrets)] = sink.calls
+    assert optimization_id == "opt-1"
+    assert (call["candidate_id"], call["role"], call["kind"]) == ("cand-1", "run" if kind == "mcp" else "metric", kind)
+    target = f"search@judge.example.test:{echo.port}/" if kind == "mcp" else "judge.example.test"
+    assert (call["target"], call["status"]) == (target, "ok")
+    assert "judge-secret-value" in secrets
+
+
+def test_two_mcp_servers_on_one_host_each_get_their_own_record_target(echo: _Echo) -> None:
+    """Each record names its server and tool, so two servers on one host never share a target (E28, E49)."""
+    sink = _CallSink()
+    recorder = CallRecorder(sink, "opt-1", "cand-1", "")
+    servers = tuple(
+        McpServer(
+            name=name,
+            url=f"http://judge.example.test:{echo.port}/{name}",
+            headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+        )
+        for name in ("search", "docs")
+    )
+    role = RoleEnvironment(mcp=".mcp.json", mcp_servers=servers)
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "lookup"}}).encode()
+    for name in ("search", "docs"):
+        workspace = _Workspace()
+        answer = _mcp_answer(_mcp_relay(workspace, "run", role, recorder=recorder), workspace, name, body=body)
+        assert answer["status"] == 200
+
+    assert [call["target"] for _, call, _ in sink.calls] == [
+        f"search@judge.example.test:{echo.port}/lookup",
+        f"docs@judge.example.test:{echo.port}/lookup",
+    ]
+    assert echo.paths == ["/search", "/docs"]
+
+
+@pytest.mark.parametrize(("scope", "expected"), [({"candidate": "cand-x"}, "cand-x"), ({}, "run")])
+def test_a_relayed_call_on_a_pool_thread_keeps_the_scorer_threads_candidate(
+    echo: _Echo, scope: dict[str, str], expected: str
+) -> None:
+    """The candidate comes from the thread that built the relay, not from the pool thread; none gives the run bucket."""
+    sink = _CallSink()
+    workspace = _Workspace()
+    with usage_scope(**scope):
+        relay = _mcp_relay(workspace, "metric", _mcp_role(echo.port), recorder=CallRecorder(sink, "opt-1", "", ""))
+    with usage_scope(candidate="other-candidate"):
+        answer = _mcp_answer(relay, workspace, "search")
+
+    assert answer["status"] == 200
+    [(_, call, _)] = sink.calls
+    assert sink.threads[0].startswith("stage-service")
+    assert call["candidate_id"] == expected
+
+
+@pytest.mark.parametrize(("scope", "expected"), [({"candidate": "7", "lane": "gepa"}, "gepa:7"), ({}, "run")])
+def test_a_scored_versions_relayed_call_is_recorded_under_the_guests_candidate(
+    tmp_path: Path,
+    upstream: _Upstream,
+    gateway: ModelGateway,  # noqa: F811 - the imported pytest fixture
+    monkeypatch: pytest.MonkeyPatch,
+    scope: dict[str, str],
+    expected: str,
+) -> None:
+    """The guest's usage tags cross the real evaluator relay, so the metric's service call gets its candidate (E28).
+
+    The parent scope is never set by hand: the gateway's server thread opens it from the tags header.
+    """
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "127.0.0.1")
+    sink = _CallSink()
+    scorer = _service_scorer(
+        tmp_path,
+        upstream.port,
+        {"run": (), "metric": ("judge-api",)},
+        recorder=CallRecorder(sink, "opt-1", "", ""),
+    )
+    try:
+        client = RemoteEvaluatorClient(gateway.bind_evaluator(scorer), timeout_seconds=60)
+        with usage_scope(**scope):
+            result = client("", None)
+    finally:
+        scorer.close()
+
+    assert result["score"] == pytest.approx(0.7)
+    [(_, call, _)] = sink.calls
+    assert (call["kind"], call["role"], call["candidate_id"]) == ("host", "metric", expected)
+
+
+class _BrokenSink:
+    """Fail every write the way a lost database connection does, with the call in the error text."""
+
+    def record_call(self, optimization_id: str, call: dict[str, Any], secrets: list[str]) -> int:
+        """Raise an error whose text holds the call and its secret forms.
+
+        Args:
+            optimization_id: The run.
+            call: The call fields.
+            secrets: The secret forms the store removes.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError(f"database is gone: {call!r} {secrets!r}")
+
+
+def test_a_recorder_failure_keeps_the_relayed_call_and_logs_no_secret(
+    echo: _Echo, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A store error during a relayed MCP call still returns the answer, and no log line holds the key or a header."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port), recorder=CallRecorder(_BrokenSink(), "opt-1", "", ""))
+    # INFO is the lowest level the services log at; httpcore's DEBUG traces print raw upstream headers.
+    with caplog.at_level(logging.INFO):
+        answer = _mcp_answer(relay, workspace, "search")
+
+    assert answer["status"] == 200
+    assert "judge-secret-value" not in json.dumps(answer)
+    assert any("Could not record a mcp call" in record.getMessage() for record in caplog.records)
+    logged = "\n".join(record.getMessage() + str(record.exc_info or "") for record in caplog.records)
+    assert "judge-secret-value" not in logged
+    assert "Authorization" not in logged
+    assert "database is gone" not in logged
+
+
+@_REDIRECT_TARGETS
+def test_an_mcp_redirect_comes_back_to_the_box_and_is_never_followed(echo: _Echo, location: str) -> None:
+    """The relay returns an MCP server's 302 as it is, to the allowed host or another one (E53)."""
+    echo.location = location.format(port=echo.port)
+    sink = _CallSink()
+    workspace = _Workspace()
+    recorder = CallRecorder(sink, "opt-1", "cand-1", "")
+    relay = _mcp_relay(workspace, "metric", _mcp_role(echo.port, "redirect"), recorder=recorder)
+    answer = _mcp_answer(relay, workspace, "search")
+
+    assert answer["status"] == 302
+    assert ["Location", echo.location] in answer["headers"]
+    assert echo.paths == ["/redirect"]
+    [(_, call, _)] = sink.calls
+    assert (call["role"], call["kind"], call["status"]) == ("metric", "mcp", "ok")
+    assert call["target"] == f"search@judge.example.test:{echo.port}/"
+
+
+@pytest.mark.parametrize(
+    ("mcp", "message"),
+    [
+        (RoleEnvironment(), 'Add it to a .mcp.json file and set [metric] mcp = ".mcp.json".'),
+        (
+            RoleEnvironment(mcp="eval/.mcp.json"),
+            "MCP server 'search' is not in eval/.mcp.json, the [metric] MCP file. Add it there.",
+        ),
+    ],
+)
+def test_a_role_reaches_only_the_servers_of_its_own_mcp_file(echo: _Echo, mcp: RoleEnvironment, message: str) -> None:
+    """[metric] cannot call a server that only the [run] file holds, and the refusal names the fix (E55)."""
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "metric", mcp)
+    assert relay.config("/work")["mcp"] == []
+
+    answer = _mcp_answer(relay, workspace, "search")
+
+    assert answer["status"] == 403
+    assert answer["error"].endswith(message)
+    assert echo.paths == []
+
+
+def test_an_mcp_name_and_a_service_name_never_cross(echo: _Echo) -> None:
+    """``/mcp/judge`` cannot reach the ``judge`` service, and ``/service/search`` cannot reach the MCP server (E55)."""
+    judge = ServiceSpec(
+        secrets=("JUDGE_KEY",),
+        url=f"http://judge.example.test:{echo.port}/",
+        headers={"Authorization": "Bearer ${JUDGE_KEY}"},
+    )
+    workspace = _Workspace()
+    mcp = _mcp_answer(_mcp_relay(workspace, "run", _mcp_role(echo.port), services={"judge": judge}), workspace, "judge")
+    workspace = _Workspace()
+    service = _service_answer(
+        _mcp_relay(workspace, "run", _mcp_role(echo.port), services={"judge": judge}), workspace, "search", path="echo"
+    )
+
+    assert mcp["status"] == 403
+    assert mcp["error"].endswith("MCP server 'judge' is not in .mcp.json, the [run] MCP file. Add it there.")
+    assert service == {
+        "status": 404,
+        "error": "Service 'search' is not in optimize.toml. Add a [services.search] table.",
+    }
+    assert echo.paths == []
+
+
+@pytest.mark.parametrize("kind", ["mcp", "service"])
+def test_a_secret_the_http_library_rejects_never_reaches_the_log(
+    echo: _Echo, kind: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A filled header that h11 refuses gives a plain 502, and the log holds the error type, not the value."""
+    workspace = _Workspace()
+    secret = "judge-secret-value\nX-Injected: 1"
+    with caplog.at_level(logging.WARNING, logger=repo_scorer.logger.name):
+        if kind == "mcp":
+            answer = _mcp_answer(_mcp_relay(workspace, "run", _mcp_role(echo.port), secret=secret), workspace, "search")
+        else:
+            relay = _echo_relay(workspace, echo.port, secret=secret)
+            answer = _service_answer(relay, workspace, "judge", path="echo", method="GET")
+
+    assert answer["status"] == 502
+    assert "judge-secret-value" not in json.dumps(answer)
+    assert "LocalProtocolError" in caplog.text
+    assert "judge-secret-value" not in caplog.text
+    assert echo.paths == []
+
+
+@pytest.mark.parametrize("kind", ["mcp", "service"])
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (BudgetReached("spent"), "budget_reached"),
+        (BudgetInsufficientError("short"), "budget_insufficient"),
+        (UnpricedOperationError("no price"), "unpriced_operation"),
+        (BudgetError("no cover"), "usage_pending"),
+        (UsagePendingError("pending"), "usage_pending"),
+    ],
+)
+def test_a_budget_stop_in_a_relayed_call_answers_the_box_at_once_and_stops_the_call(
+    echo: _Echo, monkeypatch: pytest.MonkeyPatch, kind: str, error: BaseException, code: str
+) -> None:
+    """A budget stop gets the stage call's control code within 1 s, never a 403 or a lost answer, and the parent keeps it."""
+
+    def stop(**_: Any) -> bytes:
+        """Raise the budget stop as the metered relay does.
+
+        Raises:
+            BaseException: The parametrized stop.
+        """
+        raise error
+
+    monkeypatch.setattr(repo_scorer, "relay_request", stop)
+    workspace = _Workspace()
+    relay = _mcp_relay(workspace, "run", _mcp_role(echo.port)) if kind == "mcp" else _echo_relay(workspace, echo.port)
+    started = time.monotonic()
+    if kind == "mcp":
+        answer = _mcp_answer(relay, workspace, "search")
+    else:
+        answer = _service_answer(relay, workspace, "judge", path="echo", method="GET")
+
+    assert time.monotonic() - started < 1
+    assert answer["status"] == 503
+    assert answer["control"] == {"code": code, "message": str(error)}
+    assert relay.control == {"code": code, "message": str(error)}
+    with pytest.raises(UsagePendingError if code == "usage_pending" else type(error)):
+        repo_scorer._raise_control({"control": relay.control})
+
+
+def test_a_managed_mcp_call_through_the_real_relay_is_metered_against_the_run_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Skynet-key Maps call from a role's MCP file settles its catalog price in the run budget and hides the key.
+
+    Only the network is a stand-in: the relay, the meter and the budget ledger are the real ones.
+    """
+    monkeypatch.setattr(settings, "usage_markup", 1.0)
+    monkeypatch.setattr(settings, "google_maps_api_key", SecretStr(MAPS_KEY))
+    sent: list[httpx.Request] = []
+
+    def maps(request: httpx.Request) -> httpx.Response:
+        """Answer like the Maps server, echoing the key header back."""
+        sent.append(request)
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "echo": request.headers["x-goog-api-key"]})
+
+    monkeypatch.setattr(repo_scorer, "_pinned_address", lambda url, allow_private, *, label: "203.0.113.7")
+    monkeypatch.setattr(repo_scorer, "_PinnedTransport", lambda origin, pinned: httpx.MockTransport(maps))
+    server = McpServer(name="maps", url="https://mapstools.googleapis.com/mcp", headers={"X-Goog-Api-Key": "${MAPS}"})
+    workspace = _Workspace()
+    ledger = _runtime(tmp_path, 20)
+    runtime = next(ledger)
+    relay = _StageRelay(
+        {},
+        {},
+        response_dir="calls/000001/stages",
+        max_concurrency=2,
+        env={},
+        workspace=workspace,  # type: ignore[arg-type]
+        role="run",
+        mcp=RoleEnvironment(mcp=".mcp.json", mcp_servers=(server,)),
+        bindings={"MAPS": "managed"},
+        secret_hosts={"MAPS": "mapstools.googleapis.com"},
+        budget=runtime,
+    )
+    body = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "search_places", "arguments": {}}}
+    ).encode()
+    answer = _mcp_answer(relay, workspace, "maps", body=body)
+
+    assert answer["status"] == 200
+    assert MAPS_KEY not in base64.b64decode(answer["body"]).decode()
+    [request] = sent
+    assert request.headers["x-goog-api-key"] == MAPS_KEY
+    assert [(operation.cost_kind, operation.role) for operation in _operations(runtime)] == [("tool", "maps")]
+    assert runtime.service.get(runtime.budget_id, "alice").setup_spent_cents == Decimal("1.4")
+    ledger.close()
+
+
+def test_the_scorer_gives_each_role_only_the_servers_of_its_own_mcp_file(tmp_path: Path) -> None:
+    """The [run] relay holds only the [run] file's servers, and the [metric] relay only the [metric] file's (E55)."""
+    run = RoleEnvironment(
+        mcp=".mcp.json", mcp_servers=(McpServer(name="search", url="https://search.example.test/mcp", headers={}),)
+    )
+    metric = RoleEnvironment(
+        mcp="eval/.mcp.json",
+        mcp_servers=(McpServer(name="grader", url="https://grader.example.test/mcp", headers={}),),
+    )
+    scorer = RepoScorer(
+        RepoWorkspace(
+            runtime=LocalSubprocessRuntime(),
+            spec=SandboxSpec(lifetime_seconds=120, network_disabled=True),
+            archive=_archive(tmp_path, {"src/app.py": "x = 1\n"}),
+            editable_paths=["src"],
+            readonly_paths=[],
+            setup_command=None,
+            secrets={},
+        ),
+        SERVICE_SCORER,
+        timeout_seconds=60,
+        mcp_roles={"run": run, "metric": metric},
+    )
+    seen = {}
+    for role, other in (("run", "grader"), ("metric", "search")):
+        with scorer._service_relay(role, "calls/000001/stages") as relay:
+            assert relay is not None
+            seen[role] = (relay.config("/work")["mcp"], relay._mcp_refusal(other))
+
+    assert seen["run"][0] == ["search"]
+    assert seen["metric"][0] == ["grader"]
+    assert seen["run"][1]["status"] == seen["metric"][1]["status"] == 403
+    assert seen["run"][1]["error"].endswith(
+        "MCP server 'grader' is not in .mcp.json, the [run] MCP file. Add it there."
+    )
+    assert seen["metric"][1]["error"].endswith(
+        "MCP server 'search' is not in eval/.mcp.json, the [metric] MCP file. Add it there."
+    )
 
 
 _PROBE_CANDIDATE = """

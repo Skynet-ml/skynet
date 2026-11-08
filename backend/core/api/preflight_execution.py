@@ -24,6 +24,7 @@ from ..billing.protected_credentials import (
     ProtectedCredentialVault,
     prepare_protected_credentials,
     protect_execution_credentials,
+    repo_secret_allowed_hosts,
     resolve_execution_credentials,
 )
 from ..billing.protected_execution import bind_protected_sandbox
@@ -704,6 +705,9 @@ def _perform_preflight(
         identity = f"{document['id']}-{attempt}"
         if request.workflow == "anything" and is_repo_payload(protected):
             report_preflight_phase("sandbox")
+            # Staging empties the secret list, so read the gate's inputs first.
+            secret_bindings = dict((protected["target"].get("repo") or {}).get("secret_bindings") or {})
+            secret_allowed_hosts = repo_secret_allowed_hosts(protected)
             protected, staged = stage_repository(
                 protected,
                 username=user.username,
@@ -711,7 +715,11 @@ def _perform_preflight(
                 engine=engine,
             )
             gate_failures = check_repository(
-                staged.snapshot.archive, staged.secrets, place=sandbox_place(settings.local_mode)
+                staged.snapshot.archive,
+                staged.secrets,
+                place=sandbox_place(settings.local_mode),
+                bindings=secret_bindings,
+                allowed_hosts=secret_allowed_hosts,
             )
             if gate_failures:
                 raise RepoGateError(gate_failures)

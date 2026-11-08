@@ -18,6 +18,8 @@ from typing import Any
 import pytest
 
 from .. import runner
+from ..repo_constraints import McpServer, RoleEnvironment
+from ..repo_services import box_mcp_config
 from ..runner import (
     GatewayClient,
     Image,
@@ -843,6 +845,65 @@ def test_service_proxy_decodes_a_chunked_body_and_sends_each_header_once() -> No
     connection.close()
     [message] = client.sent
     assert base64.b64decode(message["body"]) == b"hello chunked world"
+
+
+def test_mcp_proxy_relays_each_server_and_names_the_role_mcp_file() -> None:
+    """``/mcp/<name>`` becomes one ``mcp`` message, and the box's MCP variable names the role's own file (E49, E55)."""
+
+    class Client:
+        """Answer each message the way the parent relay does."""
+
+        def __init__(self) -> None:
+            """Start with no messages."""
+            self.sent: list[dict[str, Any]] = []
+
+        def exchange(self, message: dict[str, Any]) -> dict[str, Any]:
+            """Record the message and answer it.
+
+            Args:
+                message: The request the proxy sends.
+
+            Returns:
+                An MCP server response.
+            """
+            self.sent.append(message)
+            return {
+                "status": 200,
+                "headers": [["Content-Type", "application/json"]],
+                "body": base64.b64encode(b"{}").decode(),
+            }
+
+    client = Client()
+    env = runner.start_service_proxy(client, [], ["search tool"], mcp_file=".mcp.json")  # type: ignore[arg-type]
+    assert set(env) == {"SKYNET_MCP_SEARCH_TOOL_URL", runner.MCP_CONFIG_ENV}
+    url = env["SKYNET_MCP_SEARCH_TOOL_URL"]
+    assert url.startswith("http://127.0.0.1:")
+    assert url.endswith("/mcp/search%20tool")
+    assert env[runner.MCP_CONFIG_ENV] == str(Path(".mcp.json").resolve())
+    role = RoleEnvironment(mcp=".mcp.json", mcp_servers=(McpServer(name="search tool", url="https://x.test/mcp"),))
+    assert box_mcp_config(role, url.split("/mcp/")[0]) == {"mcpServers": {"search tool": {"type": "http", "url": url}}}
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(urllib.request.Request(url, data=b'{"jsonrpc":"2.0"}', method="POST")) as response:
+        assert response.status == 200
+        assert response.read() == b"{}"
+    [message] = client.sent
+    assert message["mcp"] == "search tool"
+    assert "service" not in message
+    assert message["path"] == ""
+    assert base64.b64decode(message["body"]) == b'{"jsonrpc":"2.0"}'
+
+    base = url.split("/mcp/")[0]
+    with pytest.raises(urllib.error.HTTPError) as unknown:
+        opener.open(base + "/other/search%20tool")
+    assert unknown.value.code == 404
+    assert len(client.sent) == 1
+
+
+def test_relay_env_starts_no_proxy_when_the_role_reaches_nothing() -> None:
+    """A role with no service and no MCP server gets no loopback variables."""
+    assert runner._relay_env(object(), {"services": [], "mcp": []}) == {}  # type: ignore[arg-type]
+    assert runner._relay_env(object(), {}) == {}  # type: ignore[arg-type]
 
 
 _CANDIDATE_CODE = """

@@ -27,7 +27,7 @@ file's absolute path, and replace the part after setup with what the PR must pro
 | `waitForPreview(pr, { sha })` | Polls the preview's `/health` (backend) and `/api/version` (frontend) until both serve `sha` (without `sha`: until both answer). Returns `{ backend, frontend }`. Throws after 20 minutes. |
 | `STAGING_URL` | `https://staging.skynetml.com`. Use it for checks after the merge. |
 | `deployedSha(page)` | Opens `/login` and reads the "Source code" link (`.../tree/<sha>`): the commit the frontend was built from. Compare it to the PR head before filming. |
-| `signup(page, { tag: "rec715" })` | Registers `rec715-<random>@example.com`, signs in, sets English, skips the intake. Works only on local dev with SMTP unset. Previews and staging send a real email code, so an `@example.com` account cannot sign in there: sign up or sign in with your own test account from its access file. New staging accounts start with $0 credit; only `-pr-N` previews give the signup grant. |
+| `signup(page, { tag: "rec715" })` | Registers `rec715-<random>@example.com`, signs in, sets English, skips the intake. Works only on local dev with SMTP unset. Previews and staging send a real email code, so an `@example.com` account cannot sign in there: create a fresh check account with `.agents/skills/skynet-test-accounts/account.py` and delete it after the clip. New staging accounts start with $0 credit; only `-pr-N` previews give the signup grant. |
 | `newManualTask(page, { prompt, csvPath })` | Wizard: Manual, objective, Prompt artifact, uploads the CSV (default `fixtures/tickets.csv`, 12 tickets). Ends on Inputs. |
 | `toMetricAndRun(page)` | Continues to Metric & run and waits for the inline IDE's explorer to list run.py. Returns boot ms. |
 | `ide(page)` / `ideToolbar(page)` | The IDE (inline section, or the full-screen dialog) / its header: the Check and Full screen icon buttons. Found through the `[data-ide-host]` workbench host. |
@@ -51,8 +51,11 @@ The page must be on the app before a helper runs: start with
 
 - Always run `waitForPreview` (with the PR head `sha`) and `deployedSha` first; a clip
   of the wrong commit is worthless. A preview updates a few minutes after each push.
-- Use a fresh `signup` per run. Other agents may test the same environment at the same
-  time with their own accounts; never reuse or touch theirs.
+- Use a fresh account per run: `signup` on local dev, or a check account from
+  `.agents/skills/skynet-test-accounts/account.py` on a preview or staging. Run
+  `account.py delete <id>` after the clip, also after a failure. Cancel the account's runs
+  first: the delete does not stop a running job or sandbox. Other agents may test the
+  same environment at the same time with their own accounts; never reuse or touch theirs.
 - Never buy credit or open checkout. A new preview account gets the preview credit;
   a new staging account has $0. If a flow needs more credit, stop and report.
 - Prefer role, label and placeholder selectors (as the helpers do); the wizard's

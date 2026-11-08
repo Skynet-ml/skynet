@@ -35,9 +35,15 @@ Place = Literal["local", "cloud"]
 # metric files and the exploit folder from the agent's tree in both places,
 # and ``check_hidden`` proves it (SKY-353). The issue that enforces another
 # setting adds its kind here, and the gate stops refusing it. The broker
-# grants the proposer's box its hosts and refuses any other (SKY-384).
-_ENFORCED_KINDS = frozenset({"metric.files", "metric.exploits", "proposer.network"})
-ENFORCED: dict[Place, frozenset[str]] = {"local": _ENFORCED_KINDS, "cloud": _ENFORCED_KINDS}
+# grants the proposer's box its hosts and refuses any other (SKY-384). The run
+# and metric boxes reach ``[services.<name>]`` and the servers of their own MCP
+# file only through the stage relay, which checks the role and fills each
+# secret by host (SKY-385).
+_METRIC_HIDING = frozenset({"metric.files", "metric.exploits"})
+_PROPOSER_NETWORK = frozenset({"proposer.network"})
+_STAGE_SERVICES = frozenset({"services", "run.services", "metric.services", "run.mcp", "metric.mcp"})
+_ENFORCED_EVERYWHERE = _METRIC_HIDING | _PROPOSER_NETWORK | _STAGE_SERVICES
+ENFORCED: dict[Place, frozenset[str]] = {"local": _ENFORCED_EVERYWHERE, "cloud": _ENFORCED_EVERYWHERE}
 
 _UNENFORCED_CODE: dict[Place, I18nKey] = {
     "local": I18nKey.REPO_GATE_UNENFORCED_LOCAL,
@@ -295,9 +301,9 @@ def _set_keys(raw: bytes, targets: Collection[str], services: Collection[str]) -
     gives, and a written default (``exploits = ".optimize/exploits"``) still
     asks for a folder to be hidden. ``[proposer] illegal`` is not listed: the
     judges enforce it in every place. Every ``[run]`` key and the ``[metric]``
-    role keys are listed: no sandbox runs the candidate entry or gives the
-    run and metric box its MCP servers, services and rules yet (SKY-375), so
-    a run that sets them stops here instead of failing later in the sandbox.
+    role keys are listed. ``ENFORCED`` decides which of them still stop the
+    run: a key whose runtime does not exist yet stops here instead of failing
+    later in the sandbox.
 
     Args:
         raw: The file's contents, already accepted by ``parse_constraints``.

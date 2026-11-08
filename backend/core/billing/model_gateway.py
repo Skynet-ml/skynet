@@ -58,7 +58,7 @@ from .protected_credentials import (
 from .remote_evaluator import RemoteEvaluatorBroker, RemoteEvaluatorTransportError
 from .runtime import BudgetRuntime, ProviderFailedError, UsagePendingError
 from .signals import BudgetReached
-from .usage_tags import LANE_KEY, USAGE_TAGS_HEADERS, header_tags
+from .usage_tags import LANE_KEY, USAGE_TAGS_HEADERS, header_tags, usage_scope
 
 if TYPE_CHECKING:
     # Type-only: the worker relay imports billing modules, so a runtime import could cycle.
@@ -418,7 +418,7 @@ class ModelGateway:
                         gateway._packages.dispatch(body)
                         if is_packages
                         else gateway._recorded(
-                            token, None, body, lambda: gateway._evaluator.dispatch(body), headers=self.headers
+                            token, None, body, lambda: gateway._evaluate(body, self.headers), headers=self.headers
                         )
                         if is_evaluator
                         else gateway._recorded(
@@ -849,7 +849,7 @@ class ModelGateway:
         if is_evaluator:
             if path != "/v1/_evaluator":
                 raise ValueError("The evaluator capability cannot dispatch models, tools, or sandbox commands.")
-            return self._recorded(token, None, body, lambda: self._evaluator.dispatch(body), headers=headers)
+            return self._recorded(token, None, body, lambda: self._evaluate(body, headers), headers=headers)
         if is_tools:
             if path != "/v1/_mcp":
                 raise ValueError("The tool capability cannot dispatch models or sandbox commands.")
@@ -925,6 +925,22 @@ class ModelGateway:
                 observer(body)
             except Exception:  # isolation boundary: an observer must never fail the model call it watched
                 logger.warning("A model-call observer failed.", exc_info=True)
+
+    def _evaluate(self, body: Mapping[str, Any], headers: Mapping[str, str]) -> ModelHTTPResult:
+        """Score one guest version under the candidate and lane its usage tags name.
+
+        The scorer's relayed service and MCP calls read the candidate from the
+        open usage scope, and the guest's tags header is the only place it is.
+
+        Args:
+            body: The guest's scoring request.
+            headers: The request headers, read only for the usage tags.
+
+        Returns:
+            The evaluator's answer, unchanged.
+        """
+        with usage_scope(**header_tags(headers)):
+            return self._evaluator.dispatch(body)
 
     def _recorded(
         self,

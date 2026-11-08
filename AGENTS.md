@@ -112,19 +112,25 @@ for LLM features, a LiteLLM proxy on `:4000` (`deploy/litellm/`,
 - Run acceptance checks on AWS staging (`https://staging.skynetml.com`, API
   `https://api-staging.skynetml.com`) or the PR's preview. Never test against
   production. Railway is deleted; never use it.
-- Use only the test account that setup gave you. If it is missing, report
-  the exact setup failure and record the coverage gap. Do not ask Gilad to
-  create one. Never sign up for a normal check. Never borrow a personal
+- **Test accounts are ephemeral.** Each signed-in check creates its own
+  fresh account and deletes it when the check ends, also after a failure.
+  No check uses a fixed, shared or long-lived account.
+- Create the account with `.agents/skills/skynet-test-accounts/account.py`.
+  It signs up through the normal register, email code and confirm flow. It
+  stores the account only for the check, in the AWS Secrets Manager secret
+  `skynet/staging/check-account/<id>` (account 669242775630, region
+  `us-east-2`, profile `skynet`). Its `delete` command deletes the account
+  in the app and then removes the secret.
+- Cancel or wait out the account's runs before you delete it. If the delete
+  fails, report the account id. Never leave a secret without a report.
+- If you cannot create an account, report the exact failure and record the
+  coverage gap. Do not ask Gilad to create one. Never borrow a personal
   session. Never print or commit passwords, tokens, cookies or email codes.
-- The staging test accounts `pool-1` to `pool-4` live in AWS Secrets
-  Manager: secret `skynet/staging/test-accounts`, account 669242775630,
-  region `us-east-2`, profile `skynet`. The secret is a JSON object keyed by
-  slot, with `email`, `password`, `app`, `api` and `status`. Read it only
-  inside your own script, and use only the slot that the orchestrator gave
-  you. Never print the value.
+- New staging accounts get no credit. Run paid checks on the PR preview,
+  which gives new accounts a test grant, or record the gap.
 - Never add funds, grant credits, change balances or change live billing
   configuration. Never deploy production.
-- Sign-in, sign-up exceptions, served-commit check: `skynet-test-accounts`.
+- Create, sign in, delete, served-commit check: `skynet-test-accounts`.
 
 ## Writing rule (MANDATORY)
 
