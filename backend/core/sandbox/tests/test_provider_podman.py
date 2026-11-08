@@ -498,6 +498,30 @@ async def test_a_rootful_engine_refuses_an_allowlist(fake_podman: _FakePodman) -
     assert not fake_podman.containers
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _CliResult(125, b"", b"Error: cannot connect to Podman"),
+        _CliResult(0, b"\n", b""),
+        _CliResult(0, b"<no value>\n", b""),
+    ],
+)
+async def test_a_failed_rootless_check_is_an_infra_error(fake_podman: _FakePodman, answer: _CliResult) -> None:
+    """Raise a retryable infra error, not the rootful refusal, when ``podman info`` gives no clear answer.
+
+    Args:
+        fake_podman: The fake engine.
+        answer: The result of ``podman info``.
+    """
+    fake_podman.answers["info --format"] = answer
+    env = PodmanEnvironment(_spec(network_disabled=False, allowed_hosts=("example.org",)))
+    with pytest.raises(SandboxInfraError, match="whether it runs rootless"):
+        await env.start()
+    await env.stop()
+    assert not any(call[:2] in (["network", "create"], ["run", "-d"]) for call in fake_podman.calls)
+    assert not fake_podman.containers
+
+
 async def test_a_rootless_allowlist_puts_the_proxy_on_both_networks(fake_podman: _FakePodman) -> None:
     """Create a plain internal network and start the proxy on it and on ``podman``."""
     env = PodmanEnvironment(_spec(network_disabled=False, allowed_hosts=("pypi.org", "example.org")))

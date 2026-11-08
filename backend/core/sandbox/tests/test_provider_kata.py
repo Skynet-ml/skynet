@@ -760,12 +760,15 @@ def test_preflight_refuses_a_daemon_without_the_runtime(
         ("kata-qemu", b'{"kata-qemu":{"path":"/opt/kata/bin/containerd-shim-kata-qemu-v2"}}'),
         ("vm", b'{"vm":{"runtimeType":"io.containerd.kata.v2"}}'),
         ("vm", b'{"vm":{"path":"/usr/bin/kata-runtime"}}'),
+        ("kata-fc", b'{"kata-fc":{"runtimeType":"io.containerd.kata-fc.v2"}}'),
+        ("kata", b'{"kata":{}}'),
+        ("kata", b'{"kata":{"path":""}}'),
     ],
 )
 def test_preflight_accepts_a_kata_runtime_under_any_name(
     kata_host: Path, monkeypatch: pytest.MonkeyPatch, runtime: str, stdout: bytes
 ) -> None:
-    """Accept a runtime whose name, path or runtime type names Kata."""
+    """Accept a runtime whose path or runtime type names Kata, or whose name does when both are missing."""
     del kata_host
     _plan_runtimes(monkeypatch, _info(0, stdout))
     KataEnvironment.preflight(runtime=runtime)
@@ -777,6 +780,8 @@ def test_preflight_accepts_a_kata_runtime_under_any_name(
         ("runc", b'{"runc":{"path":"runc"}}'),
         ("vm", b'{"vm":{"path":"/usr/bin/crun"}}'),
         ("vm", b'{"vm":null}'),
+        ("kata", b'{"kata":{"path":"/usr/bin/runc"}}'),
+        ("kata-qemu", b'{"kata-qemu":{"runtimeType":"io.containerd.runc.v2"}}'),
     ],
 )
 def test_preflight_refuses_a_runtime_that_is_not_kata(

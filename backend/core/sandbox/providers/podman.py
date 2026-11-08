@@ -180,15 +180,22 @@ class PodmanEnvironment(DockerEnvironment):
         """Ask the engine whether it runs rootless.
 
         Returns:
-            True only when ``podman info`` answers ``true``.
+            True when ``podman info`` answers ``true``, False when it answers ``false``.
 
         Raises:
-            SandboxInfraError: The Podman CLI could not start or did not finish in time.
+            SandboxInfraError: The Podman CLI could not start, did not finish
+                in time, failed, or gave another answer.
         """
         result: _CliResult = await docker_provider._docker(
             self._docker_bin, ["info", "--format", "{{.Host.Security.Rootless}}"]
         )
-        return result.returncode == 0 and result.stdout.strip().lower() == b"true"
+        answer = result.stdout.strip().lower()
+        if result.returncode == 0 and answer in (b"true", b"false"):
+            return answer == b"true"
+        # The engine passed preflight, so a failed check here is a short-lived
+        # engine fault, like the network create below. Only a clear "false"
+        # is the rootful case that a retry cannot fix.
+        raise SandboxInfraError(f"Could not ask Podman whether it runs rootless: {result.error_line}")
 
     async def _open_egress(self, hosts: Sequence[str]) -> None:
         """Create the box's internal network and start its proxy on it.
@@ -198,7 +205,8 @@ class PodmanEnvironment(DockerEnvironment):
 
         Raises:
             SandboxFatalError: The engine is rootful, so a retry cannot help.
-            SandboxInfraError: Podman cannot create the network or start the proxy.
+            SandboxInfraError: Podman cannot say whether it runs rootless,
+                create the network or start the proxy.
         """
         egress = self._require_egress()
         # A rootful internal network gives the box a gateway address on the

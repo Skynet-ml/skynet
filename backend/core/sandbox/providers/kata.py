@@ -105,12 +105,15 @@ def _is_kata_runtime(name: str, entry: object) -> bool:
             ``runtimeType`` when the daemon sends them.
 
     Returns:
-        True when the name, the path or the runtime type names Kata.
+        True when the path or the runtime type names Kata. The name decides
+        only when the entry has neither field.
     """
-    words = [name]
+    fields: list[str] = []
     if isinstance(entry, dict):
-        words += [str(entry.get("path") or ""), str(entry.get("runtimeType") or "")]
-    return any("kata" in word.lower() for word in words)
+        fields = [str(entry[key]) for key in ("path", "runtimeType") if entry.get(key)]
+    # A runtime called "kata" whose path is runc must not pass, so the
+    # fields win over the name whenever the daemon sends them.
+    return any("kata" in word.lower() for word in fields or [name])
 
 
 class KataEnvironment(DockerEnvironment):

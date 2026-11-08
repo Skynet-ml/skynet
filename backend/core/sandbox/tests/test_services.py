@@ -212,6 +212,7 @@ def test_unquoted_shell_operator_fails_the_parse(command: str, operator: str) ->
         ("echo `a b` $$(c 'd' e) z", ["echo", "`a b`", "$(c 'd' e)", "z"]),
         ("echo `a\\`b`", ["echo", "`a\\`b`"]),
         ('echo "q\\b" a\\>b', ["echo", "qb", "a>b"]),
+        ("echo \\$$(a) \\\\x$$(b)", ["echo", "$(a)", "\\x$(b)"]),
     ],
 )
 def test_quoted_shell_operator_is_a_literal_word(command: str, words: list[str]) -> None:
@@ -226,6 +227,9 @@ def test_quoted_shell_operator_is_a_literal_word(command: str, words: list[str])
         ("echo a(b", "unquoted '\\(' that does not open or close"),
         ("echo a)b", "unquoted '\\)' that does not open or close"),
         ("echo $$((1+2))", "unquoted '\\(' that does not open or close"),
+        ("echo \\\\$$(a)", "unquoted '\\(' that does not open or close"),
+        ("echo '\\'$$(a)", "unquoted '\\(' that does not open or close"),
+        ("echo $$(a)\\\\$$(b)", "unquoted '\\(' that does not open or close"),
         ("echo `a", "is not closed"),
         ("echo $$(a", "is not closed"),
         ("echo a\\", "is not closed"),
