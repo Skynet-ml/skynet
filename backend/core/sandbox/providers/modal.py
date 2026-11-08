@@ -135,8 +135,9 @@ class ModalEnvironment(SandboxEnvironment):
     async def start(self) -> None:
         """Create the Modal sandbox. Do nothing when the sandbox already runs.
 
-        A cancel during the create waits for the create to finish, terminates
-        the new sandbox, then passes the cancel on, so no sandbox leaks.
+        A cancel during the create waits for the create to finish, also
+        through repeat cancels, terminates the new sandbox, then passes the
+        cancel on, so no sandbox leaks.
         """
         if self._sandbox is not None:
             return
@@ -145,10 +146,18 @@ class ModalEnvironment(SandboxEnvironment):
         try:
             sandbox = await asyncio.shield(create)
         except asyncio.CancelledError:
-            try:
-                sandbox = await create
-            except Exception:
-                raise asyncio.CancelledError from None
+            # Each await is shielded, so a repeat cancel cannot cancel a create
+            # that Modal may already have done on its side.
+            while not create.done():
+                try:
+                    await asyncio.shield(create)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if create.cancelled() or create.exception() is not None:
+                raise
+            sandbox = create.result()
             try:
                 await asyncio.shield(_terminate(sandbox))
             except Exception:
@@ -211,12 +220,12 @@ class ModalEnvironment(SandboxEnvironment):
         try:
             async with asyncio.timeout(None if limit is None else limit + _TIMEOUT_GRACE_SEC) as deadline:
                 exit_code, stdout, stderr = await self._run(sandbox, command, cwd, env, limit, sink)
-        except TimeoutError as exc:
-            if limit is not None and (deadline.expired() or isinstance(exc, _EXEC_TIMEOUT_ERRORS)):
-                raise RunTimeoutError(limit) from None
-            await self._raise_if_out_of_memory(exc)
-            raise
         except Exception as exc:
+            # Modal's ExecTimeoutError derives from modal.exception.Error, not
+            # from the builtin TimeoutError, so it needs its own check.
+            timed_out = isinstance(exc, _EXEC_TIMEOUT_ERRORS) or (isinstance(exc, TimeoutError) and deadline.expired())
+            if limit is not None and timed_out:
+                raise RunTimeoutError(limit) from None
             await self._raise_if_out_of_memory(exc)
             raise
         if limit is not None and exit_code == _MODAL_TIMEOUT_EXIT_CODE:

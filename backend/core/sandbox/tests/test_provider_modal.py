@@ -36,7 +36,15 @@ from core.sandbox.timeouts import PhaseTimeouts
 _SPEC = SandboxSpec(lifetime_seconds=60)
 
 
-class FakeExecTimeoutError(TimeoutError):
+class FakeModalError(Exception):
+    """Stand in for ``modal.exception.Error``."""
+
+
+class FakeModalTimeoutError(FakeModalError):
+    """Stand in for ``modal.exception.TimeoutError``, which is not the builtin one."""
+
+
+class FakeExecTimeoutError(FakeModalTimeoutError):
     """Stand in for ``modal.exception.ExecTimeoutError``."""
 
 
@@ -555,6 +563,25 @@ async def test_cancel_during_start_terminates_the_new_sandbox(fake_modal: FakeMo
     fake_modal.create_gate.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert _box(fake_modal).terminated
+    with pytest.raises(RuntimeError):
+        await env.exec("true")
+
+
+async def test_repeat_cancel_during_start_still_terminates_the_new_sandbox(fake_modal: FakeModal) -> None:
+    """Keep waiting for the create through a second cancel, then terminate the sandbox it made."""
+    fake_modal.create_gate = asyncio.Event()
+    env = ModalEnvironment(_SPEC)
+    task = asyncio.create_task(env.start())
+    await fake_modal.create_entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    fake_modal.create_gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert fake_modal.create_calls == 1
     assert _box(fake_modal).terminated
     with pytest.raises(RuntimeError):
         await env.exec("true")
