@@ -32,6 +32,9 @@ SOURCE_EXCLUDE = [
     "**/.env.*",
     "!**/.env.example",
     "**/*.pem",
+    "**/*.key",
+    "**/id_rsa*",
+    "**/credentials*.json",
 ]
 
 
@@ -129,6 +132,13 @@ class SkynetCi:
         """
         return (
             self._backend()
+            # The GitHub runner is not root. Some isolation tests skip as root,
+            # because directory modes do not bind root.
+            .with_exec(["useradd", "--create-home", "--uid", "1001", "ci"])
+            .with_exec(["chown", "-R", "ci:ci", "/src"])
+            .with_user("ci")
+            .with_env_variable("HOME", "/home/ci")
+            .with_env_variable("UV_NO_SYNC", "1")
             .with_env_variable("SKYNET_TEST_SHARD", f"{shard}/{CORE_SHARD_COUNT}")
             .with_env_variable("SKYNET_TEST_DISPATCHED_OUT", f"dispatched-{shard}.txt")
             .with_exec(["uv", "run", "pytest", "core/", "-q", "-rs", "-n", "auto"])
@@ -266,6 +276,7 @@ class SkynetCi:
                 [
                     "bash",
                     "-c",
+                    "set -euo pipefail\n"
                     "unset APP_TEST_SHARD SKYNET_TEST_SHARD\n"
                     "uv run pytest core/ --collect-only -q\n"
                     "test -s collected.txt\n"
