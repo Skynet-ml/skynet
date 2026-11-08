@@ -15,7 +15,7 @@ from core.billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, PROPOSER_REGISTRY_
 from core.exceptions import InfrastructureInterruptionError, ServiceError
 
 from ..remote_sandbox import RemoteSandboxRuntime, RemoteSandboxSession
-from ..sandbox import CommandResult, SandboxSpec
+from ..sandbox import _CODEX_REQUIREMENTS_COMMAND, _CODEX_REQUIREMENTS_READBACK, CommandResult, SandboxSpec
 from ..sandbox_broker import SandboxBroker
 
 IMAGE = "vcr.example/skynet/optimizer@sha256:" + "a" * 64
@@ -29,6 +29,8 @@ class FakeSession:
         self.files: dict[str, str] = {}
         self.close_calls = 0
         self.fail_close = fail_close
+        self.root_commands: list[str] = []
+        self.readback = _CODEX_REQUIREMENTS_READBACK
 
     def write_files(self, files: dict[str, str]) -> None:
         """Store guest files without writing on the host."""
@@ -39,7 +41,10 @@ class FakeSession:
         return self.files.get(path)
 
     def run(self, command: str, **kwargs: Any) -> CommandResult:
-        """Emit deterministic output through the broker's output sink."""
+        """Emit deterministic output through the broker's output sink, and answer a root command with a read-back."""
+        if kwargs.get("sudo"):
+            self.root_commands.append(command)
+            return CommandResult(exit_code=0, stdout=self.readback)
         if kwargs.get("on_output"):
             kwargs["on_output"]("stdout", command)
         return CommandResult(exit_code=0, stdout=command)
@@ -315,3 +320,73 @@ def test_remote_rejects_missing_terminal_result_without_replaying() -> None:
         with pytest.raises(InfrastructureInterruptionError, match="before its final result"):
             RemoteSandboxSession(remote, "session", 60).run("candidate")
     assert len(requests) == 1
+
+
+def test_the_broker_refuses_a_root_command_from_the_child() -> None:
+    """A child's run payload never reaches the box as root, whatever value it sends."""
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120)
+    opened = broker.handle("open", _open_payload())
+    for value in (True, 1, "yes"):
+        with pytest.raises(ServiceError, match="cannot run as root"):
+            broker.run({**opened, "command": "id -u", "sudo": value})
+    assert runtime.sessions[0].root_commands == []
+    assert broker.run({**opened, "command": "id -u", "sudo": False}).ok
+
+
+def test_the_codex_requirements_action_uses_only_the_parent_command() -> None:
+    """Ignore every field but the box handle, so a child cannot choose the path, content or command."""
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120)
+    opened = broker.handle("open", _open_payload())
+    forged = {"path": "/etc/sudoers", "content": "evil", "command": "rm -rf /", "sudo": True}
+    assert broker.handle("codex_requirements", {**opened, **forged}) == {}
+    assert runtime.sessions[0].root_commands == [_CODEX_REQUIREMENTS_COMMAND]
+    other = SandboxBroker(FakeRuntime(), image=IMAGE, max_lifetime_seconds=120)
+    with pytest.raises(ServiceError, match="does not belong"):
+        other.handle("codex_requirements", opened)
+
+
+def test_a_bad_codex_requirements_read_back_fails_the_action() -> None:
+    """A missing or user-owned file reads back wrong, so the action raises and Codex never starts."""
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120)
+    opened = broker.handle("open", _open_payload())
+    for readback in ("", "user:user:644\nuser:user:644\n", _CODEX_REQUIREMENTS_READBACK.replace("false", "true")):
+        runtime.sessions[0].readback = readback
+        with pytest.raises(ServiceError, match="Codex cannot start"):
+            broker.handle("codex_requirements", opened)
+
+
+def test_the_remote_session_sends_only_the_action_and_its_box() -> None:
+    """The child asks for the fixed action by name and never sends a root command over the generic route."""
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120)
+    requests = []
+
+    def parent(request: httpx.Request) -> httpx.Response:
+        """Answer the JSON control actions with the real broker."""
+        body = json.loads(request.content)
+        requests.append(body)
+        return httpx.Response(200, json=broker.handle(body["action"], body["payload"]))
+
+    with httpx.Client(transport=httpx.MockTransport(parent)) as client:
+        remote = RemoteSandboxRuntime("http://127.0.0.1:9000", "opaque-control", client=client)
+        session = remote.open(SandboxSpec(lifetime_seconds=60))
+        session.write_codex_requirements()
+        with pytest.raises(ServiceError, match="cannot run sandbox commands as root"):
+            session.run("id -u", sudo=True)
+    [action] = [request for request in requests if request["action"] == "codex_requirements"]
+    assert set(action["payload"]) == {"sandbox_id"}
+    assert all(request["action"] != "run" for request in requests)
+    assert runtime.sessions[0].root_commands == [_CODEX_REQUIREMENTS_COMMAND]
+
+
+def test_a_parent_session_forwards_root_commands() -> None:
+    """The parent's own root setup command reaches the box as root, and a plain command does not."""
+    runtime = FakeRuntime()
+    broker = SandboxBroker(runtime, image=IMAGE, max_lifetime_seconds=120)
+    session = broker.parent_runtime(()).open(SandboxSpec(lifetime_seconds=60, operation_key="k"))
+    assert session.run("id -u", sudo=True).stdout == _CODEX_REQUIREMENTS_READBACK
+    assert session.run("true").stdout == "true"
+    assert runtime.sessions[0].root_commands == ["id -u"]

@@ -13,7 +13,14 @@ from typing import Any, Protocol
 from ....billing.vercel_usage import PACKAGE_REGISTRY_HOSTS, quote_vercel_sandbox
 from ....config import VERCEL_SANDBOX_LIFETIME_CEILING_SECONDS
 from ....exceptions import ServiceError
-from .sandbox import CommandResult, OutputSink, SandboxRuntime, SandboxSession, SandboxSpec
+from .sandbox import (
+    CommandResult,
+    OutputSink,
+    SandboxRuntime,
+    SandboxSession,
+    SandboxSpec,
+    write_codex_requirements,
+)
 
 _MAX_FILE_BYTES = 16 * 1024 * 1024
 
@@ -155,6 +162,7 @@ class ParentSandboxSession:
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
         on_output: OutputSink | None = None,
+        sudo: bool = False,
     ) -> CommandResult:
         """Run a command through the model mailbox when the run has one.
 
@@ -163,11 +171,15 @@ class ParentSandboxSession:
             env: Extra environment for this command.
             timeout_seconds: Kill the command after this long.
             on_output: Receives output as it streams.
+            sudo: Run as root; only the parent's own setup commands ask for it.
 
         Returns:
             The command's outcome.
         """
         options = {"env": env, "timeout_seconds": timeout_seconds, "on_output": on_output}
+        if sudo:
+            # A root setup command needs no model route, so it skips the mailbox.
+            return self._session.run(command, **options, sudo=True)
         if self._command_runner is not None:
             return self._command_runner(self._session, command, **options)
         return self._session.run(command, **options)
@@ -464,8 +476,9 @@ class SandboxBroker:
         """Perform one non-streaming action inside an owned guest sandbox.
 
         Args:
-            action: Open, write, read, or close.
+            action: Open, write, read, close, or codex_requirements.
             payload: JSON action parameters from the separately authenticated control route.
+                ``codex_requirements`` reads only the sandbox handle from it.
 
         Returns:
             JSON guest data, excluding credentials, provider metadata, and settlement state.
@@ -487,6 +500,9 @@ class SandboxBroker:
             if content is not None and len(content.encode()) > _MAX_FILE_BYTES:
                 raise ServiceError("Sandbox file exceeds the per-response limit.")
             return {"content": content}
+        if action == "codex_requirements":
+            write_codex_requirements(owned.session)
+            return {}
         if action == "close":
             with self._lock:
                 self._sessions.pop(payload["sandbox_id"], None)
@@ -505,6 +521,8 @@ class SandboxBroker:
             The final command outcome for the NDJSON terminal frame.
         """
         owned = self._owned(payload)
+        if payload.get("sudo", False) is not False:
+            raise ServiceError("Sandbox commands from the child cannot run as root.")
         command = payload.get("command")
         if not isinstance(command, str) or not command:
             raise ServiceError("Sandbox commands must be nonempty strings.")
