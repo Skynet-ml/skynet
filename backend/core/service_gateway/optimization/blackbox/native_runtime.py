@@ -77,6 +77,15 @@ _INJECTED_KEY_PLACEHOLDER = "app-managed"
 _MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
+# No setting holds a box limit yet, and SBX-23 moves the limit to a setting shared
+# across pods. Each native run holds one engine box for its whole life, so this
+# caps the native runs that hold a box at once in this process (SKY-426). It is
+# not the workspace pool's permit: a run's evaluations take pool permits while the
+# run holds this one, and one shared limit would deadlock them.
+NATIVE_BOX_LIMIT = 16
+_BOX_PERMITS = threading.BoundedSemaphore(NATIVE_BOX_LIMIT)
+# A run that waits for a permit checks for a cancel this often.
+_PERMIT_POLL_SECONDS = 1.0
 _RPC_PREFIX = "APP_NATIVE_RPC "
 _PROGRESS_PREFIX = "APP_NATIVE_PROGRESS "
 _LOG_PREFIX = "APP_NATIVE_LOG "
@@ -1065,6 +1074,26 @@ def _require_codex_requirements(runtime: SandboxRuntime, session: SandboxSession
         write_codex_requirements(session)
 
 
+def _take_box_permit(check_cancel: Any) -> threading.BoundedSemaphore:
+    """Wait for one engine box permit, and stop waiting when the run is cancelled.
+
+    Args:
+        check_cancel: The run's ``check_budget`` hook, which raises on a cancel or a
+            spent budget; ``None`` waits without a check.
+
+    Returns:
+        The semaphore that gave the permit; release the permit to it.
+    """
+    permits = _BOX_PERMITS
+    if permits.acquire(blocking=False):
+        return permits
+    logger.info("native engine: waiting for one of the %d engine box permits", NATIVE_BOX_LIMIT)
+    while not permits.acquire(timeout=_PERMIT_POLL_SECONDS):
+        if check_cancel is not None:
+            check_cancel()
+    return permits
+
+
 def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: EngineContext) -> Result:
     """Execute an unchanged upstream agent engine inside the managed sandbox.
 
@@ -1157,19 +1186,26 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
         inject_headers=headers,
         **network,
     )
-    session = runtime.open(spec)
+    # The job's shared scorer box takes no permit of its own: it counts inside this
+    # run's permit, so at a limit of 1 the run cannot wait on its own scorer.
+    permits = _take_box_permit(getattr(ctx, "check_budget", None))
+    try:
+        session = runtime.open(spec)
+    except BaseException:
+        permits.release()
+        raise
     final_result: Result | None = None
     opened = time.monotonic()
-    mailbox = _EvaluatorMailbox(
-        session,
-        server,
-        nonce,
-        getattr(ctx, "progress_callback", None),
-        getattr(ctx, "check_budget", None),
-        str_mode=task.str_mode,
-        cases=task.cases,
-    )
     try:
+        mailbox = _EvaluatorMailbox(
+            session,
+            server,
+            nonce,
+            getattr(ctx, "progress_callback", None),
+            getattr(ctx, "check_budget", None),
+            str_mode=task.str_mode,
+            cases=task.cases,
+        )
         payload = {
             "nonce": nonce,
             "source": upstream_revision,
@@ -1387,3 +1423,5 @@ def run_native_engine(engine_id: str, task: Task, server: EvalServer, ctx: Engin
                 final_result.metadata["runtime_usage_pending"] = True
             elif active_error is None:
                 raise
+        finally:
+            permits.release()

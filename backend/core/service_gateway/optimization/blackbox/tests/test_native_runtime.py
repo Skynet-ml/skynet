@@ -2292,3 +2292,236 @@ def test_a_pi_proposer_skips_the_codex_requirements_file(tmp_path: Path, monkeyp
     run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (1.0, {}), max_evals=2), ctx)
 
     assert session.requirements == []
+
+
+def _free_permits(permits: threading.BoundedSemaphore, limit: int) -> int:
+    """Count the engine box permits nobody holds, and leave the count unchanged.
+
+    Args:
+        permits: The patched engine box permits.
+        limit: The patched box limit.
+
+    Returns:
+        How many permits a new run can take now.
+    """
+    taken = 0
+    while taken < limit and permits.acquire(blocking=False):
+        taken += 1
+    for _ in range(taken):
+        permits.release()
+    return taken
+
+
+def _limit_boxes(monkeypatch: pytest.MonkeyPatch, limit: int) -> threading.BoundedSemaphore:
+    """Give the native engine a fresh box limit and a short cancel poll.
+
+    Args:
+        monkeypatch: Pytest fixture for replacing the module permits.
+        limit: How many native runs may hold a box at once.
+
+    Returns:
+        The new permits.
+    """
+    permits = threading.BoundedSemaphore(limit)
+    monkeypatch.setattr(native_runtime, "_BOX_PERMITS", permits)
+    monkeypatch.setattr(native_runtime, "_PERMIT_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(native_runtime, "_source_archive", lambda: "source")
+    return permits
+
+
+def test_native_runs_hold_at_most_the_box_limit_at_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a limit of 2, four parallel native runs never hold more than two boxes, and all finish.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the box limit and the source archive.
+    """
+    permits = _limit_boxes(monkeypatch, 2)
+    lock = threading.Lock()
+    live = [0]
+    peak = [0]
+    pair = threading.Barrier(2, timeout=10)
+
+    class CountedSession(FakeSession):
+        """Count the open boxes, and make two runs overlap during the install."""
+
+        def run(self, command: str, **kwargs: Any) -> CommandResult:
+            """Wait for a second open box during the install, then run the scripted dialogue."""
+            if not self.calls:
+                pair.wait()
+            return super().run(command, **kwargs)
+
+        def close(self) -> None:
+            """Count the box as closed."""
+            with lock:
+                live[0] -= 1
+            super().close()
+
+    class CountedRuntime(FakeRuntime):
+        """Count each box that opens."""
+
+        def open(self, spec: SandboxSpec) -> FakeSession:
+            """Count the box as open and record the peak."""
+            with lock:
+                live[0] += 1
+                peak[0] = max(peak[0], live[0])
+            return super().open(spec)
+
+    sessions = [CountedSession() for _ in range(4)]
+    results: list[Result] = []
+    errors: list[BaseException] = []
+
+    def one_run(index: int) -> None:
+        """Run one native engine in its own directory."""
+        run_dir = tmp_path / str(index)
+        run_dir.mkdir()
+        try:
+            results.append(
+                run_native_engine(
+                    "autoresearch",
+                    Task("seed"),
+                    EvalServer(lambda *_: (0.5, {}), max_evals=3),
+                    _context(run_dir, CountedRuntime(sessions[index])),
+                )
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=one_run, args=(index,)) for index in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert len(results) == 4
+    assert peak[0] == 2
+    assert live[0] == 0
+    assert all(session.closed for session in sessions)
+    assert _free_permits(permits, 2) == 2
+
+
+def test_native_run_and_its_evaluations_finish_at_a_box_limit_of_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At a limit of 1, a run scores through its evaluator while it holds the only permit.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the box limit and the source archive.
+    """
+    permits = _limit_boxes(monkeypatch, 1)
+    held_while_scoring: list[bool] = []
+
+    def score(*_: Any) -> tuple[float, dict[str, Any]]:
+        """Record that the run holds the only permit while it scores."""
+        held_while_scoring.append(_free_permits(permits, 1) == 0)
+        return 0.5, {}
+
+    session = FakeSession()
+    outcome: list[Result] = []
+    worker = threading.Thread(
+        target=lambda: outcome.append(
+            run_native_engine(
+                "autoresearch", Task("seed"), EvalServer(score, max_evals=3), _context(tmp_path, FakeRuntime(session))
+            )
+        )
+    )
+    worker.start()
+    worker.join(timeout=30)
+
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert held_while_scoring == [True]
+    assert session.closed
+    assert _free_permits(permits, 1) == 1
+
+
+def test_cancelled_native_run_closes_its_box_and_releases_the_permit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel that ends the child command closes the box and frees the permit.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the box limit and the source archive.
+    """
+    permits = _limit_boxes(monkeypatch, 1)
+
+    class CancelledError(Exception):
+        """Stand in for the run's cancel signal."""
+
+    class CancelledSession(FakeSession):
+        """Raise a cancel during the engine command."""
+
+        def run(self, command: str, **kwargs: Any) -> CommandResult:
+            """Pass the install, then raise the cancel."""
+            if self.calls:
+                raise CancelledError("cancelled")
+            return super().run(command, **kwargs)
+
+    session = CancelledSession()
+    with pytest.raises(CancelledError):
+        run_native_engine(
+            "autoresearch",
+            Task("seed"),
+            EvalServer(lambda *_: (0.5, {}), max_evals=3),
+            _context(tmp_path, FakeRuntime(session)),
+        )
+
+    assert session.closed
+    assert _free_permits(permits, 1) == 1
+
+
+def test_native_run_that_waits_for_a_permit_stops_on_cancel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run that waits for a permit checks for a cancel, opens no box, and takes no permit.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the box limit and the source archive.
+    """
+    permits = _limit_boxes(monkeypatch, 1)
+    assert permits.acquire(blocking=False)
+    checks: list[int] = []
+
+    def check_budget() -> None:
+        """Cancel the run on the second check."""
+        checks.append(1)
+        if len(checks) == 2:
+            raise CostCeilingExceededError("cancelled")
+
+    runtime = FakeRuntime(FakeSession())
+    ctx = _context(tmp_path, runtime)
+    ctx.check_budget = check_budget
+    with pytest.raises(CostCeilingExceededError):
+        run_native_engine("autoresearch", Task("seed"), EvalServer(lambda *_: (0.5, {}), max_evals=3), ctx)
+
+    assert len(checks) == 2
+    assert runtime.spec is None
+    assert _free_permits(permits, 1) == 0
+    permits.release()
+    assert _free_permits(permits, 1) == 1
+
+
+def test_failed_box_open_releases_the_permit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A box that fails to open gives its permit back.
+
+    Args:
+        tmp_path: Artifact destination.
+        monkeypatch: Pytest fixture for the box limit and the source archive.
+    """
+    permits = _limit_boxes(monkeypatch, 1)
+    runtime = MagicMock()
+    runtime.injects_headers = True
+    runtime.open.side_effect = ServiceError("no box")
+
+    with pytest.raises(ServiceError, match="no box"):
+        run_native_engine(
+            "autoresearch",
+            Task("seed"),
+            EvalServer(lambda *_: (0.5, {}), max_evals=3),
+            _context(tmp_path, runtime),
+        )
+
+    assert _free_permits(permits, 1) == 1
