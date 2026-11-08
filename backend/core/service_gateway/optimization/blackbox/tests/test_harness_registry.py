@@ -27,6 +27,8 @@ from ..harness import (
 )
 from ..harness_bridge import PARSERS
 from ..harnesses import REGISTRY, HarnessSpec, register
+from ..harnesses.deerflow import DEERFLOW_REF
+from ..harnesses.deerflow import SPEC as DEERFLOW_SPEC
 
 _GATEWAYS = {
     "gw": GatewayConfig(url="https://gw.example/v1", api_key="secret-key"),
@@ -37,7 +39,7 @@ _OVERRIDES: dict[str, dict[str, str]] = {
     "plain": {},
     "override": {"install_command": "my-install {model}", "run_command": "my-run {gateway_url}"},
 }
-_BUILT_INS = ("pi", "codex", "opencode", "prime", "cline")
+_BUILT_INS = ("pi", "codex", "opencode", "prime", "deerflow", "cline")
 # The golden digests predate the registry, so they cover only these harnesses.
 _PRE_REGISTRY = ("pi", "codex", "opencode", "prime")
 # sha256 of every launch payload, captured from staging 0e1dd97d5 before the
@@ -258,6 +260,7 @@ def test_registry_keeps_the_catalog_order() -> None:
         "codex": ("codex", "0.153.0"),
         "opencode": ("opencode", "1.18.27"),
         "prime": ("prime-agent", "0.9.7"),
+        "deerflow": (DEERFLOW_SPEC.binary, DEERFLOW_REF),
         "cline": ("cline", "3.0.74"),
     }
 
