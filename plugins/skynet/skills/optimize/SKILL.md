@@ -65,7 +65,9 @@ change their plan. Then call `next_tool`.
 6. **Set the models.** Call `repo_draft_set_models` with the
    `reflection_model` that the user names. It is the model of the coding
    agent that writes each version. Keep `token_source` at `managed` unless
-   the user asks for their own key (`byok`) or CLI (`subscription`). Set
+   the user asks for their own key (`byok`). Do not offer `subscription`:
+   this server refuses it, because a subscription model runs only in the
+   Mac app. Set
    `scorer_model` only when the scorer calls an LLM.
 7. **Set the engine.** Offer the available engines from the
    `repo_draft_start` answer: only those with `available: true`. A
@@ -79,8 +81,9 @@ change their plan. Then call `next_tool`.
 9. **Review the draft.** Call `repo_draft_review`. If `ready` is false, fix
    each issue with the step tool that the issue is about, then review again.
    Do not rely on `next_tool` here: when every step is set, it is
-   `repo_draft_review`. The price fields come only when the draft has no
-   blocking issues. If
+   `repo_draft_review`. The price fields are missing until every step is
+   done. They can come with blocking issues, so use them only when `ready`
+   is true. If
    `unpriced_models` is not empty, tell the user that those models have no
    price and ask which model to use instead.
 10. **Get the user's agreement to a limit.** Show
@@ -106,8 +109,8 @@ change their plan. Then call `next_tool`.
       comes with `detail` and `min_max_cost_cents`. Show the `code` and the
       reason, fix the draft, review it again, get the user's agreement to a
       limit again, and submit with a new `idempotency_key`.
-    - `budget.conflict` means that the key is already used with a different
-      limit. A reused key keeps the first limit. If the error has an
+    - `budget.conflict` means that the key already has a higher limit. A
+      reused key keeps the first limit. If the error has an
       `optimization_id`, follow that run with `get_run`. Otherwise submit
       with a new key.
     - Keep the `optimization_id` from the result.
