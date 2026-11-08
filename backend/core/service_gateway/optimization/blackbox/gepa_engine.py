@@ -7,10 +7,9 @@ eval server is the single scoring path, exactly like upstream ``gepa.oa``.
 
 from __future__ import annotations
 
-import contextvars
+import functools
 import logging
 import math
-import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -22,6 +21,7 @@ from gepa.gepa_launcher import EngineConfig, GEPAConfig, ReflectionConfig, Track
 from ....billing.usage_tags import usage_scope
 from ....constants import OPTIMIZER_NAME_GEPA, PROGRESS_CANDIDATE
 from ....exceptions import ServiceError
+from ....sandbox.timeouts import Phase
 from ..budget_stop import BudgetReached
 from ..trajectory import capture_proposal_prompts, current_proposal_iteration, trajectory_watch
 from .feedback import STR_CANDIDATE_KEY, emit_scorer_feedback, gepa_side_info
@@ -35,9 +35,11 @@ from .protocol import (
     Result,
     Task,
     engine_score,
+    fill_unscored,
     score_batch,
 )
 from .upstream import GEPA_SOURCE
+from .workspace_scorer import run_on_pool
 
 logger = logging.getLogger(__name__)
 
@@ -101,56 +103,6 @@ def _scored_progress(
         callback(event, metrics)
 
     return forward
-
-
-class _SkippedCallError(Exception):
-    """A queued call of a batch that did not start because an earlier call failed."""
-
-
-def _stop_after_first_failure(
-    score_one: Callable[[Candidate, Any], tuple[float | None, dict[str, Any]]],
-) -> Callable[[Candidate, Any], tuple[float | None, dict[str, Any]]]:
-    """Wrap a scorer so worker threads run it in the caller's context and stop after a failure.
-
-    A serial batch ends at its first error, such as a budget stop or a cancel.
-    The wrapper keeps that rule: after one call fails, no queued call starts,
-    and the calls in flight end in their own time. A queued call starts after
-    every earlier call, so the failure the batch raises is still the first one.
-
-    Args:
-        score_one: Scores one ``(candidate, case)`` pair.
-
-    Returns:
-        A scorer that is safe to call from worker threads.
-    """
-    # Worker threads start with an empty context, so the run, usage and
-    # proposal-iteration scopes would not reach the scorer without this copy.
-    parent = contextvars.copy_context()
-    failed = threading.Event()
-
-    def score_in_context(candidate: Candidate, example: Any = None) -> tuple[float | None, dict[str, Any]]:
-        """Score one pair in a private copy of the caller's context, unless a call already failed.
-
-        Args:
-            candidate: The version GEPA wants scored.
-            example: The case.
-
-        Returns:
-            What ``score_one`` returns.
-
-        Raises:
-            _SkippedCallError: An earlier call of the batch failed, so this one does not start.
-        """
-        if failed.is_set():
-            raise _SkippedCallError
-        try:
-            # One Context cannot be entered by two threads at once.
-            return parent.copy().run(score_one, candidate, example)
-        except BaseException:
-            failed.set()
-            raise
-
-    return score_in_context
 
 
 class GepaEngine:
@@ -263,10 +215,14 @@ class GepaEngine:
                 One ``(score, side_info)`` per pair, in order.
             """
             # Text targets keep the serial loop. Agent targets run each case in
-            # its own sandbox, so their batch runs ``ctx.concurrency`` wide.
+            # its own sandbox, so their batch runs ``ctx.concurrency`` wide on the
+            # process pool, which also holds every run under ``POOL_BOX_LIMIT``.
             if ctx.concurrency <= 1:
                 return score_batch(score_one, pairs, 1)
-            return score_batch(_stop_after_first_failure(score_one), pairs, ctx.concurrency)
+            calls = [functools.partial(score_one, candidate, example) for candidate, example in pairs]
+            results = run_on_pool(Phase.SCORE, calls, ctx.concurrency)
+            filled = fill_unscored([candidate for candidate, _ in pairs], [score for score, _ in results])
+            return [(score, info) for score, (_, info) in zip(filled, results, strict=True)]
 
         kwargs: dict[str, Any] = {
             "seed_candidate": task.seed_candidate,

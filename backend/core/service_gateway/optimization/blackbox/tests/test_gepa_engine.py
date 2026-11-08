@@ -16,6 +16,7 @@ from core.sandbox.errors import SandboxInfraError
 
 from ...budget_stop import BudgetReached
 from .. import gepa_engine as gepa_mod
+from .. import workspace_scorer as workspace_scorer_mod
 from ..agent_eval import SandboxAgentScorer
 from ..gepa_engine import GepaEngine
 from ..harness import GatewayConfig
@@ -175,6 +176,25 @@ def test_a_batch_larger_than_the_limit_never_goes_over_it(monkeypatch: pytest.Mo
     assert scorer.max_in_flight == 2
     assert scorer.calls == 6
     assert [score for score, _ in results] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+
+
+def test_the_process_pool_limit_caps_a_wider_concurrency(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A pool limit below the target concurrency holds the batch to the pool limit.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Run directory.
+    """
+    monkeypatch.setattr(workspace_scorer_mod, "POOL_BOX_LIMIT", 2)
+    monkeypatch.setattr(workspace_scorer_mod, "_pool_state", None)
+    scorer = _InFlightScorer(limit=4, wait_seconds=0.05)
+    server = EvalServer(scorer, max_evals=16)
+
+    results, _ = _run_batch(monkeypatch, tmp_path, server, _pairs(8), concurrency=4)
+
+    assert scorer.max_in_flight == 2
+    assert scorer.calls == 8
+    assert [score for score, _ in results] == [float(index) for index in range(8)]
 
 
 def test_concurrency_one_keeps_the_serial_loop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
