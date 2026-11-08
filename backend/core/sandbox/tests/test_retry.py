@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import pickle
 from types import SimpleNamespace
 
 import pytest
@@ -15,7 +17,9 @@ from core.sandbox.errors import (
     GROUP_RULES,
     ErrorGroup,
     Grading,
+    PhaseTimeoutError,
     RunTimeoutError,
+    SandboxError,
     SandboxFatalError,
     SandboxInfraError,
     SandboxRejectedError,
@@ -203,6 +207,75 @@ def test_include_cannot_retry_billing_errors_or_cancel() -> None:
     assert policy.should_retry(UnpricedOperationError("x")) is False
     assert policy.should_retry(asyncio.CancelledError()) is False
     assert policy.should_retry(RuntimeError("x")) is True
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(1), GeneratorExit()], ids=lambda e: type(e).__name__)
+async def test_include_cannot_retry_non_exception_errors(error: BaseException) -> None:
+    """Run a BaseException that is not an Exception once, even when include names BaseException.
+
+    Args:
+        error: The interrupt or exit error that the attempt raises.
+    """
+    policy = RetryPolicy(max_retries=2, include=(BaseException,), **FAST)
+    assert policy.should_retry(error) is False
+    recorder = _Recorder(error)
+    with pytest.raises(type(error)):
+        await run_with_retry(recorder, "op", policy)
+    assert recorder.keys == ["op:attempt-1"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        SandboxRejectedError("bad request"),
+        SandboxFatalError("auth"),
+        SandboxRunOutcomeError("exit 1"),
+        RunTimeoutError(1),
+        ScoreTimeoutError(1),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+async def test_include_cannot_open_no_retry_groups(error: SandboxError) -> None:
+    """Run an error of a no-retry group once, even when include names its class or a base class.
+
+    Args:
+        error: The error of a rejected, fatal or run-outcome group.
+    """
+    for include in ((SandboxError,), (type(error),), (BaseException,)):
+        policy = RetryPolicy(max_retries=2, include=include, **FAST)
+        recorder = _Recorder(error)
+        with pytest.raises(type(error)):
+            await run_with_retry(recorder, "op", policy)
+        assert recorder.keys == ["op:attempt-1"]
+
+
+def test_include_widens_only_retryable_and_unknown_errors() -> None:
+    """Retry retryable-group and unknown errors that include names, and let exclude narrow them."""
+    policy = RetryPolicy(max_retries=1, include=(SandboxError, KeyError))
+    assert policy.should_retry(SandboxTransientError("x")) is True
+    assert policy.should_retry(StartTimeoutError(1)) is True
+    assert policy.should_retry(KeyError("x")) is True
+    assert policy.should_retry(RuntimeError("x")) is False
+    narrowed = RetryPolicy(max_retries=1, include=(SandboxError,), exclude=(StartTimeoutError,))
+    assert narrowed.should_retry(StartTimeoutError(1)) is False
+    assert narrowed.should_retry(SetupTimeoutError(1)) is True
+
+
+@pytest.mark.parametrize(
+    "cls", [StartTimeoutError, SetupTimeoutError, RunTimeoutError, ScoreTimeoutError], ids=lambda c: c.__name__
+)
+def test_phase_timeout_errors_survive_pickle_and_copy(cls: type[PhaseTimeoutError]) -> None:
+    """Keep the class, timeout, message and group after pickle, copy and deepcopy.
+
+    Args:
+        cls: The phase timeout error class to round-trip.
+    """
+    error = cls(1.5)
+    for clone in (pickle.loads(pickle.dumps(error)), copy.copy(error), copy.deepcopy(error)):
+        assert type(clone) is cls
+        assert clone.seconds == 1.5
+        assert str(clone) == str(error)
+        assert clone.group is error.group
 
 
 def test_exclude_wins_over_the_group_rule() -> None:

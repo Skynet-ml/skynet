@@ -66,8 +66,11 @@ class RetryPolicy:
     """Say which errors retry, how often, and how long to wait between attempts.
 
     ``max_retries`` counts the retries after the first attempt. With
-    ``include`` empty, only the retryable error groups retry. With
-    ``include`` set, only those error classes retry. ``exclude`` always wins.
+    ``include`` empty, only the errors in a retryable group retry. With
+    ``include`` set, only the named classes retry, and only when their group
+    is retryable or unknown. ``include`` never opens the no-retry groups
+    (rejected, fatal, run outcome), budget errors, cancellation, or a
+    ``BaseException`` that is not an ``Exception``. ``exclude`` always narrows.
     """
 
     max_retries: int = 0
@@ -115,14 +118,21 @@ class RetryPolicy:
         """
         if self.max_retries == 0:
             return False
+        # KeyboardInterrupt, SystemExit and GeneratorExit must stop the loop.
+        if not isinstance(exc, Exception):
+            return False
         if is_billing_error(exc) or isinstance(exc, asyncio.CancelledError):
             return False
         if self.exclude and isinstance(exc, self.exclude):
             return False
+        group = classify(exc)
+        # A run-outcome retry repeats a paid agent run, so include cannot open
+        # a known no-retry group.
+        if group is not None and not GROUP_RULES[group].retryable:
+            return False
         if self.include:
             return isinstance(exc, self.include)
-        group = classify(exc)
-        return group is not None and GROUP_RULES[group].retryable
+        return group is not None
 
     def wait_strategy(self) -> wait_base:
         """Build the jittered exponential wait between attempts.

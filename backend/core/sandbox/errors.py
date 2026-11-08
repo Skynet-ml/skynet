@@ -108,6 +108,17 @@ class PhaseTimeoutError(SandboxError):
         super().__init__(f"{self.phase} phase timed out after {seconds:g} s")
         self.seconds = seconds
 
+    def __reduce__(self) -> tuple[type[PhaseTimeoutError], tuple[float]]:
+        """Rebuild the error from its timeout for pickle and copy.
+
+        The default reduce passes the formatted message back to ``__init__``
+        as ``seconds``, which fails.
+
+        Returns:
+            The error class and the ``seconds`` argument.
+        """
+        return (type(self), (self.seconds,))
+
 
 class StartTimeoutError(PhaseTimeoutError, SandboxInfraError):
     """Report that the sandbox did not start in time."""
