@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -19,6 +20,7 @@ import time
 import urllib.parse
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1489,6 +1491,173 @@ def test_claude_permission_denials_become_refusals_with_tool_and_kind(tmp_path: 
 
     assert refusals == [{"tool": "Read", "kind": "config"}, {"tool": "Grep", "kind": "scoring"}]
     assert host_agent.host_refusals("claude", stdout, tmp_path, workspace, ()) == []
+
+
+def test_claude_denials_in_another_case_or_through_home_become_refusals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Map a Claude denial whose path uses another root case, a ``~`` or ``$HOME`` form, to its kind.
+
+    The real Claude CLI refuses these forms too (see
+    ``test_installed_claude_refuses_hidden_paths_in_any_case_and_through_home``).
+    """
+    monkeypatch.setattr(host_agent, "_FOLD_CASE", True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    first, rest = os.path.realpath(workspace).lstrip("/").split("/", 1)
+    paths = [
+        f"/{first.upper()}/{rest}/optimize.toml",
+        f"{os.path.realpath(workspace)}/METRIC/score.py".upper(),
+        "~/../workspace/optimize.toml",
+    ]
+    denials = [{"tool_name": "Read", "tool_input": {"file_path": path}} for path in paths]
+    denials.append({"tool_name": "Bash", "tool_input": {"command": "cat $HOME/../workspace/data/cases.jsonl"}})
+    stdout = json.dumps({"type": "result", "permission_denials": denials})
+
+    refusals = host_agent.host_refusals("claude", stdout, tmp_path, workspace, _HIDDEN)
+
+    kinds = ["config", "scoring", "config", "scoring"]
+    assert refusals == [{"tool": tool, "kind": kind} for tool, kind in zip(["Read"] * 3 + ["Bash"], kinds, strict=True)]
+
+
+_CLAUDE = os.environ.get("APP_TEST_CLAUDE") or shutil.which("claude")
+
+
+def _fake_anthropic(tool_call: dict, results: list[dict]) -> ThreadingHTTPServer:
+    """Start a fake Messages API that asks for one tool call, then ends the turn.
+
+    Args:
+        tool_call: ``{"name", "input"}`` of the tool call to ask for.
+        results: Receives the tool result Claude sends back.
+
+    Returns:
+        The running server.
+    """
+
+    def stream(block: dict, stop: str) -> bytes:
+        """Encode one assistant message as a Messages API event stream.
+
+        Args:
+            block: The single content block.
+            stop: The stop reason.
+
+        Returns:
+            The event-stream body.
+        """
+        if block["type"] == "text":
+            start, delta = {"type": "text", "text": ""}, {"type": "text_delta", "text": block["text"]}
+        else:
+            start = {"type": "tool_use", "id": "toolu_1", "name": block["name"], "input": {}}
+            delta = {"type": "input_json_delta", "partial_json": json.dumps(block["input"])}
+        usage = {"input_tokens": 1, "output_tokens": 1}
+        message = {"id": "m1", "type": "message", "role": "assistant", "model": "m", "content": [], "usage": usage}
+        events = [
+            {"type": "message_start", "message": {**message, "stop_reason": None}},
+            {"type": "content_block_start", "index": 0, "content_block": start},
+            {"type": "content_block_delta", "index": 0, "delta": delta},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": stop}, "usage": {"output_tokens": 1}},
+            {"type": "message_stop"},
+        ]
+        return "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        """Answer the CLI's Messages API requests."""
+
+        def log_message(self, *_args: object) -> None:
+            """Keep the test output quiet."""
+
+        def do_POST(self) -> None:
+            """Ask for the tool call once, then end the turn after its result."""
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
+            if "count_tokens" in self.path:
+                data, kind = json.dumps({"input_tokens": 1}).encode(), "application/json"
+            else:
+                sent = [
+                    part
+                    for message in body.get("messages", [])
+                    if isinstance(message.get("content"), list)
+                    for part in message["content"]
+                    if part.get("type") == "tool_result"
+                ]
+                results.extend(sent[-1:])
+                if body.get("tools") and not sent:
+                    data = stream({"type": "tool_use", **tool_call}, "tool_use")
+                else:
+                    data = stream({"type": "text", "text": "done"}, "end_turn")
+                kind = "text/event-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.mark.skipif(_CLAUDE is None, reason="claude is not installed")
+@pytest.mark.skipif(sys.platform != "darwin", reason="the host agent runs on macOS")
+@pytest.mark.parametrize(
+    ("form", "denied"),
+    [("root-case", True), ("upper-case", True), ("home", True), ("other-file", False)],
+)
+def test_installed_claude_refuses_hidden_paths_in_any_case_and_through_home(
+    tmp_path: Path, form: str, denied: bool
+) -> None:
+    """Run the real Claude CLI with the turn's deny rules and a fake model that reads one path.
+
+    Claude matches the rules without case and expands ``~``, so another root
+    case, an upper-case path and a ``~`` path are refused. A file that is not
+    hidden still reads.
+
+    Args:
+        form: The form of the path the fake model reads.
+        denied: Whether Claude must refuse the read.
+    """
+    turn = tmp_path / "turn"
+    home, workspace = turn / "home", turn / "workspace"
+    home.mkdir(parents=True)
+    workspace.mkdir()
+    (workspace / "optimize.toml").write_text("HIDDEN_SENTINEL\n", encoding="utf-8")
+    (workspace / "notes.txt").write_text("VISIBLE_SENTINEL\n", encoding="utf-8")
+    real = os.path.realpath(workspace)
+    first, rest = real.lstrip("/").split("/", 1)
+    path = {
+        "root-case": f"/{first.upper()}/{rest}/optimize.toml",
+        "upper-case": f"{real}/optimize.toml".upper(),
+        "home": "~/../workspace/optimize.toml",
+        "other-file": f"/{first.upper()}/{rest}/notes.txt",
+    }[form]
+    results: list[dict] = []
+    server = _fake_anthropic({"name": "Read", "input": {"file_path": path}}, results)
+    rules = host_agent.claude_hidden_rules(workspace, ["optimize.toml"], full=True)
+    argv = host_cli_argv(
+        "claude", "full_access", str(_CLAUDE), workspace, "claude-sonnet-4-5", CLAUDE_ARGS, None, rules
+    )
+    env = {name: value for name, value in os.environ.items() if not name.startswith(("ANTHROPIC_", "CLAUDE"))}
+    env.update(
+        HOME=str(home),
+        ANTHROPIC_BASE_URL=f"http://127.0.0.1:{server.server_port}",
+        ANTHROPIC_API_KEY="test-placeholder",
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
+    )
+    try:
+        completed = subprocess.run(
+            argv, input="go", cwd=workspace, env=env, capture_output=True, text=True, timeout=120, check=False
+        )
+    finally:
+        server.shutdown()
+
+    document = json.loads(completed.stdout)
+    assert len(results) == 1, completed.stderr
+    content = json.dumps(results[0])
+    assert "HIDDEN_SENTINEL" not in content
+    assert bool(document.get("permission_denials")) is denied
+    assert ("VISIBLE_SENTINEL" in content) is (not denied)
+    expected = [{"tool": "Read", "kind": "config"}] if denied else []
+    assert host_agent.host_refusals("claude", completed.stdout, turn, workspace, ["optimize.toml"]) == expected
 
 
 def test_codex_turns_install_a_guard_hook_that_refuses_hidden_paths(tmp_path: Path) -> None:

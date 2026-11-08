@@ -384,6 +384,8 @@ _GUARD_CD_WORDS = frozenset({"cd", "pushd"})
 _GUARD_PATCH_RE = re.compile(r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$", re.MULTILINE)
 _GUARD_WORD_RE = re.compile(r"[\w.~/@+-]+")
 _GUARD_PWD_RE = re.compile(r"\$\{PWD\}|\$PWD\b|\$\(\s*pwd\s*\)|`\s*pwd\s*`")
+# A tilde names the home folder only at the start of a word, as in the shell.
+_GUARD_HOME_RE = re.compile(r"\$\{HOME\}|\$HOME\b|(?<![^\s;|&()<>=:'\"`])~(?=/|$|[\s;|&()<>'\"`])")
 _GUARD_SHELL_DEPTH = 3
 _GUARD_MAX_BASES = 4
 # One check function shared by the Pi extension and the OpenCode plugin. It
@@ -403,7 +405,7 @@ function appGuardReason(tool, input) {{
     if (!verdict || typeof verdict !== "object" || !("reason" in verdict)) return APP_GUARD_REFUSAL;
     return verdict.reason || null;
   }} catch {{
-    // Fail closed (D22): a guard that cannot answer refuses the call.
+    // Fail closed: a guard that cannot answer refuses the call.
     return APP_GUARD_REFUSAL;
   }}
 }}
@@ -453,7 +455,9 @@ def _path_hash(path: str) -> str:
     return hashlib.sha256(path.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
-def guard_policy(workspace: Path, hidden_paths: list[str], log: Path, fold_case: bool = False) -> dict[str, Any]:
+def guard_policy(
+    workspace: Path, hidden_paths: list[str], log: Path, fold_case: bool = False, home: Path | None = None
+) -> dict[str, Any]:
     """Build the refusal policy of one session.
 
     The policy holds hashes, not names, because the agent can read the file
@@ -465,10 +469,12 @@ def guard_policy(workspace: Path, hidden_paths: list[str], log: Path, fold_case:
         log: File each refusal is appended to.
         fold_case: Whether the workspace's file system ignores case, so that
             ``OPTIMIZE.TOML`` names the same file as ``optimize.toml``.
+        home: The agent's home folder, for ``~`` and ``$HOME``. The default
+            is this process's home folder.
 
     Returns:
-        The policy: workspace, path hashes mapped to their kind, case
-        folding, and log file.
+        The policy: workspace, home folder, path hashes mapped to their
+        kind, case folding, and log file.
     """
     hashes = {}
     for path in hidden_paths:
@@ -477,20 +483,29 @@ def guard_policy(workspace: Path, hidden_paths: list[str], log: Path, fold_case:
             continue
         key = normalized.replace(os.sep, "/")
         hashes[_path_hash(key.casefold() if fold_case else key)] = hidden_kind(normalized)
-    return {"workspace": str(workspace), "hashes": hashes, "fold_case": fold_case, "log": str(log)}
+    return {
+        "workspace": str(workspace),
+        "home": str(home if home is not None else Path.home()),
+        "hashes": hashes,
+        "fold_case": fold_case,
+        "log": str(log),
+    }
 
 
-def _expand_pwd(text: str, root: str) -> str:
-    """Replace the shell forms of the working directory with the workspace path.
+def _expand_dirs(text: str, root: str, home: str) -> str:
+    """Replace the shell forms of the working and home directories with their paths.
 
     Args:
         text: One string from a tool call.
         root: The workspace path.
+        home: The agent's home folder, or empty when it is not known.
 
     Returns:
-        The text with ``$PWD``, ``${PWD}``, ``$(pwd)`` and backquoted ``pwd`` replaced.
+        The text with ``$PWD``, ``${PWD}``, ``$(pwd)`` and backquoted ``pwd``
+        replaced, and ``$HOME``, ``${HOME}`` and a leading ``~`` replaced.
     """
-    return _GUARD_PWD_RE.sub(lambda _: root, text)
+    text = _GUARD_PWD_RE.sub(lambda _: root, text)
+    return _GUARD_HOME_RE.sub(lambda _: home, text) if home else text
 
 
 def _hidden_match(text: str, roots: list[str], bases: list[str], hashes: dict[str, str], fold: bool) -> str | None:
@@ -518,11 +533,10 @@ def _hidden_match(text: str, roots: list[str], bases: list[str], hashes: dict[st
         path = os.path.normpath(Path(base, candidate))
         for full in dict.fromkeys((path, os.path.realpath(path))):
             for root in roots:
-                relative = os.path.relpath(full, root)
+                # On a disk that ignores case, /USERS/... names the same file as /Users/....
+                relative = os.path.relpath(full.casefold(), root.casefold()) if fold else os.path.relpath(full, root)
                 if relative == "." or relative.startswith(".."):
                     continue
-                if fold:
-                    relative = relative.casefold()
                 parts = PurePosixPath(Path(relative).as_posix()).parts
                 for end in range(1, len(parts) + 1):
                     kind = hashes.get(_path_hash("/".join(parts[:end])))
@@ -557,13 +571,14 @@ def _shell_words(command: str, bases: list[str], depth: int = 0) -> Iterator[str
             yield from _shell_words(word, bases, depth + 1)
 
 
-def _guard_candidates(tool: str, tool_input: Any, root: str, bases: list[str]) -> Iterator[str]:
+def _guard_candidates(tool: str, tool_input: Any, root: str, home: str, bases: list[str]) -> Iterator[str]:
     """Yield the path-like strings of one tool call.
 
     Args:
         tool: The harness's tool name.
         tool_input: The tool's arguments.
         root: The workspace path, for ``$PWD`` and its other forms.
+        home: The agent's home folder, for ``~`` and ``$HOME``.
         bases: Receives the working directories the call names.
 
     Yields:
@@ -581,7 +596,7 @@ def _guard_candidates(tool: str, tool_input: Any, root: str, bases: list[str]) -
             continue
         if not isinstance(value, str):
             continue
-        value = _expand_pwd(value, root)
+        value = _expand_dirs(value, root, home)
         if "*** Begin Patch" in value:
             yield from _GUARD_PATCH_RE.findall(value)
         if name in _GUARD_COMMAND_KEYS:
@@ -617,7 +632,8 @@ def guard_check(policy: dict[str, Any], tool: str, tool_input: Any) -> str | Non
     workspace = str(policy.get("workspace") or Path.cwd())
     roots = list(dict.fromkeys([workspace, os.path.realpath(workspace)]))
     named: list[str] = []
-    candidates = list(_guard_candidates(tool, tool_input, roots[0], named))
+    home = str(policy.get("home") or "")
+    candidates = list(_guard_candidates(tool, tool_input, roots[0], home, named))
     # A later cd is relative to an earlier one, so each one extends every known directory.
     bases = list(roots)
     for directory in named[:_GUARD_MAX_BASES]:
@@ -727,13 +743,16 @@ def codex_hooks(policy_file: Path, digest: str) -> dict[str, Any]:
     return {"hooks": {"PreToolUse": [{"hooks": [hook]}]}}
 
 
-def install_guard(session_dir: Path, workspace: Path, hidden_paths: list[str]) -> dict[str, str]:
+def install_guard(
+    session_dir: Path, workspace: Path, hidden_paths: list[str], home: Path | None = None
+) -> dict[str, str]:
     """Write the refusal hooks of every harness for one session.
 
     Args:
         session_dir: Private directory of the session.
         workspace: Directory the agent works in.
         hidden_paths: Repository-relative hidden files and directories.
+        home: The agent's home folder; the default is this process's home folder.
 
     Returns:
         The environment that points each harness at its hook.
@@ -743,7 +762,7 @@ def install_guard(session_dir: Path, workspace: Path, hidden_paths: list[str]) -
     log = guard_dir / "refusals.jsonl"
     log.write_text("", encoding="utf-8")
     policy_file = guard_dir / "policy.json"
-    digest = write_guard_policy(policy_file, guard_policy(workspace, hidden_paths, log))
+    digest = write_guard_policy(policy_file, guard_policy(workspace, hidden_paths, log, home=home))
     python, bridge, _, _, policy, _ = guard_command("check", policy_file, digest)
     check = _GUARD_JS_CHECK.format(
         refusal=json.dumps(GUARD_REFUSAL),
@@ -953,7 +972,8 @@ def run_session(
     }
     hidden_paths = list(proposer.get("hidden_paths") or [])
     if hidden_paths:
-        env.update(install_guard(session_dir, workspace, hidden_paths))
+        home = Path(env["HOME"]) if env.get("HOME") else None
+        env.update(install_guard(session_dir, workspace, hidden_paths, home))
     for name, value in (
         ("MODEL", model),
         ("PROMPT_FILE", str(prompt_file)),

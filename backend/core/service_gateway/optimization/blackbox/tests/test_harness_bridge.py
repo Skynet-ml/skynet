@@ -465,6 +465,59 @@ def test_guard_folds_case_only_when_the_policy_says_so(tmp_path: Path) -> None:
     assert harness_bridge.guard_check(exact, "Read", call) is None
 
 
+@pytest.mark.parametrize(
+    ("tool", "tool_input"),
+    [
+        ("Bash", {"command": "cat ~/shinka-run/repo/optimize.toml"}),
+        ("Bash", {"command": "cat $HOME/shinka-run/repo/optimize.toml"}),
+        ("Bash", {"command": "cat ${HOME}/shinka-run/repo/metric/score.py"}),
+        ("Bash", {"command": "cd ~/shinka-run/repo && cat optimize.toml"}),
+        ("Bash", {"command": "cd ~ && cat shinka-run/repo/data/cases.jsonl"}),
+        ("Read", {"file_path": "~/shinka-run/repo/optimize.toml"}),
+        ("exec_command", {"cmd": "cat optimize.toml", "workdir": "~/shinka-run/repo"}),
+    ],
+    ids=["tilde", "home", "brace-home", "cd-tilde", "cd-bare-tilde", "read-tilde", "codex-workdir-tilde"],
+)
+def test_guard_expands_the_home_folder_forms(tmp_path: Path, tool: str, tool_input: dict) -> None:
+    """Refuse a hidden path that ``~``, ``$HOME`` or ``${HOME}`` names, as in a ShinkaEvolve session."""
+    home = tmp_path / "home"
+    workspace = home / "shinka-run" / "repo"
+    workspace.mkdir(parents=True)
+    policy = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", home=home)
+    assert policy["home"] == str(home)
+    assert harness_bridge.guard_check(policy, tool, tool_input) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["cat x~/shinka-run/repo/optimize.toml", "cat $HOMEDIR/shinka-run/repo/optimize.toml", "cat ~/optimize.toml"],
+)
+def test_guard_expands_a_tilde_only_at_the_start_of_a_word(tmp_path: Path, command: str) -> None:
+    """Leave a tilde inside a word, another variable, and a home path outside the workspace alone."""
+    home = tmp_path / "home"
+    workspace = home / "shinka-run" / "repo"
+    workspace.mkdir(parents=True)
+    policy = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", home=home)
+    assert harness_bridge.guard_check(policy, "Bash", {"command": command}) is None
+
+
+def test_guard_policy_home_defaults_to_this_process_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Record this process's home folder when the caller names none, so the digest covers it."""
+    monkeypatch.setenv("HOME", str(tmp_path / "agent-home"))
+    assert _policy(tmp_path)["home"] == str(tmp_path / "agent-home")
+
+
+def test_guard_folds_the_case_of_the_workspace_root(tmp_path: Path) -> None:
+    """Refuse an absolute hidden path whose root folder has another case, on a case-folding policy."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    folded = harness_bridge.guard_policy(workspace, _HIDDEN, tmp_path / "log", fold_case=True)
+    first, rest = str(workspace).lstrip("/").split("/", 1)
+    call = {"file_path": f"/{first.upper()}/{rest}/optimize.toml"}
+    assert harness_bridge.guard_check(folded, "Read", call) == "config"
+    assert harness_bridge.guard_check(_policy(tmp_path), "Read", call) is None
+
+
 def _digest(policy_file: Path) -> str:
     """Hash the policy file as the guard checks it."""
     return hashlib.sha256(policy_file.read_bytes()).hexdigest()
@@ -631,6 +684,16 @@ def test_run_session_reports_refusals_and_keeps_running(tmp_path: Path) -> None:
     assert record["event"] == "proposer.refusal"
     assert record["fields"] == {"tool": "read", "kind": "scoring"}
     assert ".optimize" not in json.dumps(record)
+
+
+def test_run_session_guards_the_agent_home_folder(tmp_path: Path) -> None:
+    """Bind the guard to the HOME the agent runs with, so ``~`` resolves as in the agent's shell."""
+    agent_home = tmp_path / "agent-home"
+    session = tmp_path / "session"
+    proposer = {**_PLAIN, "run_command": "echo done", "env": {"HOME": str(agent_home)}, "hidden_paths": _HIDDEN}
+    run_session(proposer, workspace=tmp_path / "work", prompt="go", model="m1", session_dir=session)
+    policy = json.loads((session / harness_bridge.GUARD_DIR / "policy.json").read_text())
+    assert policy["home"] == str(agent_home)
 
 
 def test_run_session_reports_host_agent_refusals(tmp_path: Path) -> None:

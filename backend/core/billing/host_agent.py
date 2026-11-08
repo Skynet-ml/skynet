@@ -193,8 +193,10 @@ _FOLD_CASE = sys.platform == "darwin"
 
 
 def claude_hidden_rules(workdir: Path, hidden_paths: Sequence[str], full: bool) -> list[str]:
-    """Build the Claude deny rules that refuse each hidden path by its exact name.
+    """Build the Claude deny rules that refuse each hidden path.
 
+    Each rule names one hidden path in full. Claude matches the rules
+    without case, so a different letter case of the path is also refused.
     A ``Read`` rule also covers Grep and Glob, and an ``Edit`` rule covers
     every file-editing tool. Only ``full_access`` turns have Bash.
 
@@ -242,7 +244,7 @@ def install_codex_guard(turn: Path, workdir: Path, codex_home: Path, hidden_path
     log.write_text("", encoding="utf-8")
     policy_file = guard_dir / "policy.json"
     digest = harness_bridge.write_guard_policy(
-        policy_file, harness_bridge.guard_policy(workdir, list(hidden_paths), log, _FOLD_CASE)
+        policy_file, harness_bridge.guard_policy(workdir, list(hidden_paths), log, _FOLD_CASE, turn / "home")
     )
     python = os.path.realpath(sys.executable)
     command = [python, "-I", str(bridge), "guard", "hook", str(policy_file), digest]
@@ -270,7 +272,7 @@ def host_refusals(
         return []
     if cli == "codex":
         return harness_bridge.read_refusals(turn)
-    policy = harness_bridge.guard_policy(workdir, list(hidden_paths), turn / "unused.jsonl", _FOLD_CASE)
+    policy = harness_bridge.guard_policy(workdir, list(hidden_paths), turn / "unused.jsonl", _FOLD_CASE, turn / "home")
     refusals = []
     for document in _json_documents(stdout):
         for denial in document.get("permission_denials") or ():
